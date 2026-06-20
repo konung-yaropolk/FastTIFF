@@ -22,9 +22,14 @@ struct LoadedStack {
     path: PathBuf,
     channel_settings: Vec<ChannelSettings>,
     frame_index: usize,
-    slice_index: usize,
-    last_uploaded: Option<(usize, usize)>,
+    last_uploaded: Option<usize>,
     luts_uploaded: bool,
+    /// Set once at load time when the file genuinely has channels, Z, and
+    /// time all present simultaneously — Z then stays permanently frozen
+    /// at its first slice (see `resolve_dimensions`). Kept around so the
+    /// warning note is still shown correctly after a manual channels/frames
+    /// swap via the dimension-order dropdown, which never touches Z.
+    triple_axis_warning: bool,
 }
 
 pub struct ViewerApp {
@@ -35,9 +40,9 @@ pub struct ViewerApp {
     channels_panel_expanded: bool,
     /// Bottom bar's height as of the last frame. Used to grow/shrink the
     /// native window by exactly the delta when this changes (panel
-    /// toggled, Z-slice row appears, a stack loads/unloads, ...) so the
-    /// image canvas above it keeps a constant size instead of being
-    /// squeezed or stretched by the bar's own size changes.
+    /// toggled, a stack loading/unloading, ...) so the image canvas above
+    /// it keeps a constant size instead of being squeezed or stretched by
+    /// the bar's own size changes.
     last_bottom_bar_height: Option<f32>,
 }
 
@@ -57,45 +62,24 @@ impl ViewerApp {
 
     fn open_file(&mut self, path: PathBuf) {
         match TiffStack::open(&path) {
-            Ok(tiff) => {
-                let channel_settings = (0..tiff.meta.channels.min(MAX_CHANNELS))
-                    .map(|c| {
-                        let disp = &tiff.meta.channel_display[c];
-                        let (min, max) = disp.range.map(|(lo, hi)| (lo as f32, hi as f32)).unwrap_or_else(|| {
-                            // No display range in metadata at all (not even
-                            // ImageDescription min=/max=) — fall back to the
-                            // actual min/max of channel c's first frame.
-                            first_frame_minmax(&tiff, c).unwrap_or((0.0, 65535.0))
-                        });
-                        ChannelSettings {
-                            min,
-                            max,
-                            enabled: true,
-                        }
-                    })
-                    .collect();
+            Ok(mut tiff) => {
+                let resolved = tiff_core::resolve_dimensions(tiff.meta.channels, tiff.meta.slices, tiff.meta.frames);
+                tiff.meta.channels = resolved.channels;
+                tiff.meta.slices = resolved.slices;
+                tiff.meta.frames = resolved.frames;
+                resize_channel_display(&mut tiff.meta, resolved.channels);
 
-                if tiff.meta.channels > MAX_CHANNELS {
-                    self.status = Some(format!(
-                        "Note: stack has {} channels; showing the first {MAX_CHANNELS}.",
-                        tiff.meta.channels
-                    ));
-                } else if !tiff.meta.ij_metadata_parsed && tiff.meta.channels > 1 {
-                    self.status = Some(
-                        "Note: couldn't parse per-channel LUTs/ranges from this file's IJMetadata block — using default colors and auto-contrast. Adjust manually below if needed.".to_string(),
-                    );
-                } else {
-                    self.status = None;
-                }
+                let channel_settings = build_channel_settings(&tiff);
+                self.status = compute_status(&tiff.meta, resolved.triple_axis_warning);
 
                 self.stack = Some(LoadedStack {
                     tiff,
                     path,
                     channel_settings,
                     frame_index: 0,
-                    slice_index: 0,
                     last_uploaded: None,
                     luts_uploaded: false,
+                    triple_axis_warning: resolved.triple_axis_warning,
                 });
             }
             Err(e) => {
@@ -104,15 +88,18 @@ impl ViewerApp {
         }
     }
 
-    /// Index into `tiff.frames` for (current frame, current slice, channel),
-    /// assuming ImageJ's default `xyczt` plane order (channel varies
-    /// fastest, then z, then t). This matches how ImageJ writes hyperstacks
-    /// unless the file was produced by something that explicitly reorders
-    /// planes — if scrubbing shows the wrong plane on a particular file,
-    /// this is the formula to revisit.
+    /// Index into `tiff.frames` for (current frame, channel). Z is never
+    /// separately navigable (see `resolve_dimensions`) — this always reads
+    /// the first Z-slice within each frame's stride, which is correct
+    /// whether `meta.slices` is 1 (the common case, Z folded away
+    /// entirely) or >1 (the rare channels+Z+time case, where Z stays
+    /// frozen at index 0 by construction). Assumes ImageJ's default
+    /// `xyczt` plane order (channel varies fastest, then z, then t) — if
+    /// scrubbing shows the wrong plane on a particular file, this is the
+    /// formula to revisit.
     fn ifd_index(loaded: &LoadedStack, channel: usize) -> usize {
         let meta = &loaded.tiff.meta;
-        (loaded.frame_index * meta.slices + loaded.slice_index) * meta.channels + channel
+        loaded.frame_index * meta.slices * meta.channels + channel
     }
 
     fn sync_gpu(&mut self, render_state: &egui_wgpu::RenderState) {
@@ -138,8 +125,7 @@ impl ViewerApp {
             loaded.luts_uploaded = true;
         }
 
-        let want = (loaded.frame_index, loaded.slice_index);
-        if loaded.last_uploaded != Some(want) {
+        if loaded.last_uploaded != Some(loaded.frame_index) {
             for c in 0..n_channels {
                 let ifd_idx = Self::ifd_index(loaded, c);
                 if let Some(frame_info) = loaded.tiff.frames.get(ifd_idx) {
@@ -159,7 +145,7 @@ impl ViewerApp {
                     }
                 }
             }
-            loaded.last_uploaded = Some(want);
+            loaded.last_uploaded = Some(loaded.frame_index);
         }
 
         let uniforms: Vec<ChannelUniform> = loaded
@@ -190,47 +176,73 @@ fn first_frame_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
     Some((lo as f32, hi as f32))
 }
 
-/// Re-interprets the same sequence of planes under a different
-/// channels/slices/frames assignment (see the dimension-order dropdown).
-/// The plane data itself is untouched — only which (frame, slice, channel)
-/// triple each plane is considered to belong to changes, via `ifd_index`.
-fn apply_dimension_override(loaded: &mut LoadedStack, channels: usize, slices: usize, frames: usize) {
-    let meta = &mut loaded.tiff.meta;
-    let old_channel_display = std::mem::take(&mut meta.channel_display);
-
-    meta.channels = channels;
-    meta.slices = slices;
-    meta.frames = frames;
-
-    // Keep existing per-channel LUT/range entries where the index still
-    // exists; synthesize defaults (matching what a fresh `open_file` would
-    // produce) for any new channel indices.
-    meta.channel_display = (0..channels)
+/// Resizes `meta.channel_display` to `new_channels` entries, keeping
+/// existing LUT/range entries where the index still exists and
+/// synthesizing defaults for any new ones.
+fn resize_channel_display(meta: &mut tiff_core::StackMeta, new_channels: usize) {
+    let old = std::mem::take(&mut meta.channel_display);
+    meta.channel_display = (0..new_channels)
         .map(|c| {
-            old_channel_display.get(c).cloned().unwrap_or_else(|| tiff_core::ChannelDisplay {
+            old.get(c).cloned().unwrap_or_else(|| tiff_core::ChannelDisplay {
                 lut: tiff_core::default_composite_lut(c),
                 range: None,
             })
         })
         .collect();
+}
 
-    // The UI-level per-channel settings (window/level, enabled) are
-    // recomputed from scratch rather than preserved: "channel 0" now refers
-    // to a different grouping of planes than it did before the override, so
-    // carrying over its old contrast values wouldn't mean anything.
-    loaded.channel_settings = (0..channels.min(MAX_CHANNELS))
+/// Builds the UI-level per-channel settings (window/level, enabled) from
+/// `tiff.meta`'s current channel count and display info.
+fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
+    (0..tiff.meta.channels.min(MAX_CHANNELS))
         .map(|c| {
-            let disp = &loaded.tiff.meta.channel_display[c];
-            let (min, max) = disp
-                .range
-                .map(|(lo, hi)| (lo as f32, hi as f32))
-                .unwrap_or_else(|| first_frame_minmax(&loaded.tiff, c).unwrap_or((0.0, 65535.0)));
+            let disp = &tiff.meta.channel_display[c];
+            let (min, max) = disp.range.map(|(lo, hi)| (lo as f32, hi as f32)).unwrap_or_else(|| {
+                // No display range in metadata at all (not even
+                // ImageDescription min=/max=) — fall back to the actual
+                // min/max of channel c's first frame.
+                first_frame_minmax(tiff, c).unwrap_or((0.0, 65535.0))
+            });
             ChannelSettings { min, max, enabled: true }
         })
-        .collect();
+        .collect()
+}
 
+/// The status note shown at the top of the window, derived from the
+/// stack's current (resolved) dimensions. Shared between the initial load
+/// and the manual dimension-order override so the two can't drift out of
+/// sync with each other.
+fn compute_status(meta: &tiff_core::StackMeta, triple_axis_warning: bool) -> Option<String> {
+    if triple_axis_warning {
+        Some(format!(
+            "Warning: this file has channels, Z-slices, and time frames all present at once \
+             ({} channel(s) × {} Z-slice(s) × {} frame(s)). Z isn't shown as a separate axis here \
+             — only the first Z-slice is used; scrubbing covers channels × time only.",
+            meta.channels, meta.slices, meta.frames
+        ))
+    } else if meta.channels > MAX_CHANNELS {
+        Some(format!(
+            "Note: stack has {} channels; showing the first {MAX_CHANNELS}.",
+            meta.channels
+        ))
+    } else if !meta.ij_metadata_parsed && meta.channels > 1 {
+        Some(
+            "Note: couldn't parse per-channel LUTs/ranges from this file's IJMetadata block — using default colors and auto-contrast. Adjust manually below if needed.".to_string(),
+        )
+    } else {
+        None
+    }
+}
+
+/// Applies a manual channels/frames swap from the dimension-order
+/// dropdown. Z (if any) is untouched — it stays whatever
+/// `resolve_dimensions` decided at load time.
+fn apply_dimension_override(loaded: &mut LoadedStack, channels: usize, frames: usize) {
+    loaded.tiff.meta.channels = channels;
+    loaded.tiff.meta.frames = frames;
+    resize_channel_display(&mut loaded.tiff.meta, channels);
+    loaded.channel_settings = build_channel_settings(&loaded.tiff);
     loaded.frame_index = 0;
-    loaded.slice_index = 0;
     loaded.last_uploaded = None;
     loaded.luts_uploaded = false;
 }
@@ -243,7 +255,7 @@ impl eframe::App for ViewerApp {
             self.open_file(path);
         }
 
-        egui::Panel::top("toolbar").show_inside(ui, |ui| {
+        egui::TopBottomPanel::top("toolbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open TIFF...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
@@ -262,12 +274,11 @@ impl eframe::App for ViewerApp {
                         .unwrap_or_default();
                     let meta = &loaded.tiff.meta;
                     ui.label(format!(
-                        "{name}  —  {}×{} px, {} frames, {} channel(s), {} slice(s)",
+                        "{name}  —  {}×{} px, {} frames, {} channel(s)",
                         loaded.tiff.frames.first().map(|f| f.width).unwrap_or(0),
                         loaded.tiff.frames.first().map(|f| f.height).unwrap_or(0),
                         meta.frames,
                         meta.channels,
-                        meta.slices,
                     ));
                 }
             });
@@ -284,23 +295,14 @@ impl eframe::App for ViewerApp {
         // field captures across nested closures.
         let panel_expanded = self.channels_panel_expanded;
         let mut toggle_requested = false;
-        let mut dimension_override: Option<(usize, usize, usize)> = None; // (channels, slices, frames)
+        let mut dimension_override: Option<(usize, usize)> = None; // (channels, frames)
 
-        let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
+        let scrub_bar_response = egui::TopBottomPanel::bottom("scrub_bar").show_inside(ui, |ui| {
             let Some(loaded) = &mut self.stack else {
                 ui.label("Open a TIFF stack to begin.");
                 return;
             };
             ui.add_space(4.0);
-
-            // Z-slice selector, only shown for true Z-stacks-over-time.
-            if loaded.tiff.meta.slices > 1 {
-                ui.horizontal(|ui| {
-                    ui.label("Z slice:");
-                    let max = loaded.tiff.meta.slices - 1;
-                    ui.add(egui::Slider::new(&mut loaded.slice_index, 0..=max));
-                });
-            }
 
             ui.horizontal(|ui| {
                 let max_frame = loaded.tiff.meta.frames.saturating_sub(1);
@@ -376,34 +378,27 @@ impl eframe::App for ViewerApp {
                 ui.horizontal(|ui| {
                     ui.label("Dimension order:");
                     let c = loaded.tiff.meta.channels;
-                    let z = loaded.tiff.meta.slices;
                     let f = loaded.tiff.meta.frames;
 
-                    // Every permutation of the three parsed values is, by
-                    // construction, still consistent with the file's actual
-                    // plane count (c*z*f is unchanged by reordering) — this
-                    // directly targets the common failure mode where the
-                    // file's metadata has two axes mislabeled/swapped,
-                    // without risking an invalid combination.
-                    let mut options = vec![(c, z, f), (c, f, z), (z, c, f), (z, f, c), (f, c, z), (f, z, c)];
+                    let mut options = vec![(c, f), (f, c)];
                     options.sort_unstable();
                     options.dedup();
 
                     egui::ComboBox::from_id_salt("dim_override")
-                        .selected_text(format!("c: {c}  z: {z}  f: {f}"))
+                        .selected_text(format!("c: {c}  f: {f}"))
                         .show_ui(ui, |ui| {
-                            for (oc, oz, of) in options {
-                                let label = format!("c: {oc}  z: {oz}  f: {of}");
-                                if ui.selectable_label((oc, oz, of) == (c, z, f), label).clicked() {
-                                    dimension_override = Some((oc, oz, of));
+                            for (oc, of) in options {
+                                let label = format!("c: {oc}  f: {of}");
+                                if ui.selectable_label((oc, of) == (c, f), label).clicked() {
+                                    dimension_override = Some((oc, of));
                                 }
                             }
                         });
                 });
                 ui.label(
                     RichText::new(
-                        "Use this if the file's metadata mislabels which axis is channels/slices/frames \
-                         — picking an option re-reads the stack with that interpretation.",
+                        "Channels are guessed automatically (4 or fewer = channels, more = time); \
+                         use this if that guess is wrong for this file.",
                     )
                     .small()
                     .weak(),
@@ -443,18 +438,19 @@ impl eframe::App for ViewerApp {
             self.channels_panel_expanded = !self.channels_panel_expanded;
         }
 
-        if let Some((c, z, f)) = dimension_override {
+        if let Some((c, f)) = dimension_override {
             if let Some(loaded) = &mut self.stack {
-                apply_dimension_override(loaded, c, z, f);
+                apply_dimension_override(loaded, c, f);
+                self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
             }
         }
 
         // Grow/shrink the window by exactly however much the bottom bar's
         // height just changed, so the rest of the layout (the image
         // canvas) keeps a constant size regardless of why the bar resized
-        // (the toggle above, a stack loading/unloading, the Z-slice row
-        // appearing). Skipped on the very first frame, since there's no
-        // prior height yet to diff against.
+        // (the toggle above, a stack loading/unloading). Skipped on the
+        // very first frame, since there's no prior height yet to diff
+        // against.
         let bottom_bar_height = scrub_bar_response.response.rect.height();
         if let Some(prev_height) = self.last_bottom_bar_height {
             let delta = bottom_bar_height - prev_height;
