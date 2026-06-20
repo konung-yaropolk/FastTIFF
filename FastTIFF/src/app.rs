@@ -33,6 +33,12 @@ pub struct ViewerApp {
     /// Channel buttons + contrast sliders are tucked under a "⌄"/"^"
     /// toggle to keep the bar minimal by default.
     channels_panel_expanded: bool,
+    /// Bottom bar's height as of the last frame. Used to grow/shrink the
+    /// native window by exactly the delta when this changes (panel
+    /// toggled, Z-slice row appears, a stack loads/unloads, ...) so the
+    /// image canvas above it keeps a constant size instead of being
+    /// squeezed or stretched by the bar's own size changes.
+    last_bottom_bar_height: Option<f32>,
 }
 
 impl ViewerApp {
@@ -41,6 +47,7 @@ impl ViewerApp {
             stack: None,
             status: None,
             channels_panel_expanded: false,
+            last_bottom_bar_height: None,
         };
         if let Some(path) = initial_path {
             app.open_file(path);
@@ -233,7 +240,7 @@ impl eframe::App for ViewerApp {
         let panel_expanded = self.channels_panel_expanded;
         let mut toggle_requested = false;
 
-        egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
+        let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
             let Some(loaded) = &mut self.stack else {
                 ui.label("Open a TIFF stack to begin.");
                 return;
@@ -340,6 +347,24 @@ impl eframe::App for ViewerApp {
             self.channels_panel_expanded = !self.channels_panel_expanded;
         }
 
+        // Grow/shrink the window by exactly however much the bottom bar's
+        // height just changed, so the rest of the layout (the image
+        // canvas) keeps a constant size regardless of why the bar resized
+        // (the toggle above, a stack loading/unloading, the Z-slice row
+        // appearing). Skipped on the very first frame, since there's no
+        // prior height yet to diff against.
+        let bottom_bar_height = scrub_bar_response.response.rect.height();
+        if let Some(prev_height) = self.last_bottom_bar_height {
+            let delta = bottom_bar_height - prev_height;
+            if delta.abs() > 0.5 {
+                if let Some(inner_rect) = ui.ctx().input(|i| i.viewport().inner_rect) {
+                    let new_size = egui::vec2(inner_rect.width(), (inner_rect.height() + delta).max(200.0));
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size));
+                }
+            }
+        }
+        self.last_bottom_bar_height = Some(bottom_bar_height);
+
         let mut scroll_step: i32 = 0;
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -371,6 +396,7 @@ impl eframe::App for ViewerApp {
             ui.horizontal(|ui| {
                 ui.add_space(padding_x);
                 let (rect, response) = ui.allocate_exact_size(fitted, egui::Sense::hover());
+                let response = response.on_hover_cursor(egui::CursorIcon::Crosshair);
                 ui.painter()
                     .add(egui_wgpu::Callback::new_paint_callback(rect, crate::render::callback::ImagePaintCallback));
 
