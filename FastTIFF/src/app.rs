@@ -30,6 +30,9 @@ struct LoadedStack {
 pub struct ViewerApp {
     stack: Option<LoadedStack>,
     status: Option<String>,
+    /// Channel buttons + contrast sliders are tucked under a "⌄"/"^"
+    /// toggle to keep the bar minimal by default.
+    channels_panel_expanded: bool,
 }
 
 impl ViewerApp {
@@ -37,6 +40,7 @@ impl ViewerApp {
         let mut app = Self {
             stack: None,
             status: None,
+            channels_panel_expanded: false,
         };
         if let Some(path) = initial_path {
             app.open_file(path);
@@ -187,7 +191,7 @@ impl eframe::App for ViewerApp {
             self.open_file(path);
         }
 
-        egui::TopBottomPanel::top("toolbar").show_inside(ui, |ui| {
+        egui::Panel::top("toolbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open TIFF...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
@@ -220,7 +224,16 @@ impl eframe::App for ViewerApp {
             }
         });
 
-        egui::TopBottomPanel::bottom("scrub_bar").show_inside(ui, |ui| {
+        // Read-only snapshot for use inside the panel closure below, plus a
+        // deferred-write flag set on click — same pattern as `scroll_step`
+        // further down, and for the same reason: keeps the mutation of
+        // `self.channels_panel_expanded` outside any closure that's also
+        // borrowing `self.stack`, so there's no ambiguity about disjoint
+        // field captures across nested closures.
+        let panel_expanded = self.channels_panel_expanded;
+        let mut toggle_requested = false;
+
+        egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
             let Some(loaded) = &mut self.stack else {
                 ui.label("Open a TIFF stack to begin.");
                 return;
@@ -238,6 +251,16 @@ impl eframe::App for ViewerApp {
 
             ui.horizontal(|ui| {
                 let max_frame = loaded.tiff.meta.frames.saturating_sub(1);
+
+                let toggle_label = if panel_expanded { "^" } else { "⌄" };
+                if ui
+                    .button(toggle_label)
+                    .on_hover_text("Show/hide channel & contrast settings")
+                    .clicked()
+                {
+                    toggle_requested = true;
+                }
+
                 if ui.button("|<").on_hover_text("First frame").clicked() {
                     loaded.frame_index = 0;
                 }
@@ -282,34 +305,40 @@ impl eframe::App for ViewerApp {
                 }
             });
 
-            if loaded.channel_settings.len() > 1 {
-                ui.separator();
-                ui.horizontal(|ui| {
-                    for (c, settings) in loaded.channel_settings.iter_mut().enumerate() {
-                        ui.vertical(|ui| {
-                            ui.checkbox(&mut settings.enabled, format!("Ch {}", c + 1));
-                            ui.add(
-                                egui::DragValue::new(&mut settings.min)
-                                    .prefix("min ")
-                                    .speed(10.0),
-                            );
-                            ui.add(
-                                egui::DragValue::new(&mut settings.max)
-                                    .prefix("max ")
-                                    .speed(10.0),
-                            );
-                        });
-                    }
-                });
-            } else if let Some(settings) = loaded.channel_settings.first_mut() {
-                ui.horizontal(|ui| {
-                    ui.label("Contrast:");
-                    ui.add(egui::DragValue::new(&mut settings.min).prefix("min ").speed(10.0));
-                    ui.add(egui::DragValue::new(&mut settings.max).prefix("max ").speed(10.0));
-                });
+            if panel_expanded {
+                if loaded.channel_settings.len() > 1 {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        for (c, settings) in loaded.channel_settings.iter_mut().enumerate() {
+                            ui.vertical(|ui| {
+                                ui.checkbox(&mut settings.enabled, format!("Ch {}", c + 1));
+                                ui.add(
+                                    egui::DragValue::new(&mut settings.min)
+                                        .prefix("min ")
+                                        .speed(10.0),
+                                );
+                                ui.add(
+                                    egui::DragValue::new(&mut settings.max)
+                                        .prefix("max ")
+                                        .speed(10.0),
+                                );
+                            });
+                        }
+                    });
+                } else if let Some(settings) = loaded.channel_settings.first_mut() {
+                    ui.horizontal(|ui| {
+                        ui.label("Contrast:");
+                        ui.add(egui::DragValue::new(&mut settings.min).prefix("min ").speed(10.0));
+                        ui.add(egui::DragValue::new(&mut settings.max).prefix("max ").speed(10.0));
+                    });
+                }
             }
             ui.add_space(4.0);
         });
+
+        if toggle_requested {
+            self.channels_panel_expanded = !self.channels_panel_expanded;
+        }
 
         let mut scroll_step: i32 = 0;
 

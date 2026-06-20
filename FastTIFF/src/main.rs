@@ -13,7 +13,7 @@ fn main() -> eframe::Result {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([512.0, 512.0])
+            .with_inner_size([320.0, 320.0])
             .with_title("FastTIFF"),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
