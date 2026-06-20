@@ -1,0 +1,25 @@
+[package]
+name = "FastTIFF"
+version = "0.1.0"
+edition = "2021"
+description = "Fast multi-frame TIFF stack viewer with ImageJ-compatible LUT/contrast rendering."
+
+[dependencies]
+tiff_core = { path = "../tiff_core" }
+eframe = { version = "0.34", default-features = true }
+egui = "0.34"
+egui_extras = "0.34"
+bytemuck = "1.25"
+anyhow = "1.0"
+rfd = "0.17"
+log = "0.4"
+env_logger = "0.11"
+
+# [build-dependencies]
+# winres = "0.1.12"
+#
+# [package.metadata.winres]
+# OriginalFilename = "FastTIFF"
+# LegalCopyright = "konung_yaropolk © 2026"
+# FileDescription = "FastTIFF - the lightning-fast tiff viewer"
+# ProductName = "FastTIFF"

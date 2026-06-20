@@ -1,0 +1,14 @@
+[package]
+name = "tiff_core"
+version = "0.1.0"
+edition = "2021"
+description = "Lazy, memory-mapped reader for multi-frame (ImageJ hyperstack) TIFF files: IFD indexing, ImageJ metadata/LUT parsing, and per-frame strip decoding."
+
+[dependencies]
+memmap2 = "0.9"
+weezl = "0.2"      # LZW decoder (compression = 5)
+flate2 = "1.1"     # Deflate/Zip decoder (compression = 8 / 32946)
+anyhow = "1.0"
+bytemuck = { version = "1.25", features = ["extern_crate_alloc"] }
+
+[dev-dependencies]

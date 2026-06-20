@@ -1,0 +1,304 @@
+//! Builds a tiny, real, byte-for-byte valid multi-IFD TIFF in memory —
+//! 3 frames, ImageDescription metadata, and a synthetic IJMetadata blob —
+//! then runs it through `TiffStack::open` and checks every value against
+//! what we put in. This is the test that actually exercises offset
+//! arithmetic, not just type-checking.
+
+use std::io::Write;
+use tiff_core::TiffStack;
+
+/// Minimal stand-in for `tempfile::tempdir()` — avoids pulling in a
+/// dev-dependency whose transitive deps require a newer toolchain than
+/// what's available in some environments. Each call gets a unique path
+/// under the OS temp dir; the file is left behind (harmless for tests).
+fn unique_temp_path(name: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("FastTIFF_test_{nanos}_{name}"))
+}
+
+
+const TAG_IMAGE_WIDTH: u16 = 256;
+const TAG_IMAGE_LENGTH: u16 = 257;
+const TAG_BITS_PER_SAMPLE: u16 = 258;
+const TAG_COMPRESSION: u16 = 259;
+const TAG_PHOTOMETRIC: u16 = 262;
+const TAG_IMAGE_DESCRIPTION: u16 = 270;
+const TAG_STRIP_OFFSETS: u16 = 273;
+const TAG_SAMPLES_PER_PIXEL: u16 = 277;
+const TAG_ROWS_PER_STRIP: u16 = 278;
+const TAG_STRIP_BYTE_COUNTS: u16 = 279;
+const TAG_IJ_METADATA_BYTE_COUNTS: u16 = 50838;
+const TAG_IJ_METADATA: u16 = 50839;
+
+type IfdEntrySpec = (u16, u16, u32, [u8; 4]); // tag, type, count, inline-or-offset value
+
+fn short_val(v: u16) -> [u8; 4] {
+    let mut b = [0u8; 4];
+    b[0..2].copy_from_slice(&v.to_le_bytes());
+    b
+}
+fn long_val(v: u32) -> [u8; 4] {
+    v.to_le_bytes()
+}
+
+/// Builds: header, N raw pixel planes, then (description, ij_counts,
+/// ij_metadata) "extra" blocks, then N IFDs chained together. Frame 0 gets
+/// the ImageDescription + IJMetadata tags; frames 1..N don't (matching how
+/// ImageJ writes hyperstacks — that metadata lives only on the first IFD).
+fn build_synthetic_tiff(
+    width: u32,
+    height: u32,
+    frame_pixels: &[Vec<u16>],
+    description: &str,
+    ij_metadata: Option<&[u8]>,
+    ij_byte_counts: Option<&[u32]>,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"II");
+    buf.extend_from_slice(&42u16.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // first-IFD offset patched later
+
+    // --- pixel planes ---
+    let mut strip_offsets = Vec::new();
+    for pixels in frame_pixels {
+        strip_offsets.push(buf.len() as u32);
+        for &p in pixels {
+            buf.extend_from_slice(&p.to_le_bytes());
+        }
+    }
+
+    // --- extra data (description / IJ metadata) ---
+    let desc_offset = buf.len() as u32;
+    buf.extend_from_slice(description.as_bytes());
+    buf.push(0); // null terminator
+    let desc_len = description.len() as u32 + 1;
+
+    let mut ij_counts_offset = 0u32;
+    let mut ij_counts_len = 0u32;
+    if let Some(counts) = ij_byte_counts {
+        ij_counts_offset = buf.len() as u32;
+        for c in counts {
+            buf.extend_from_slice(&c.to_le_bytes());
+        }
+        ij_counts_len = counts.len() as u32;
+    }
+
+    let mut ij_meta_offset = 0u32;
+    let mut ij_meta_len = 0u32;
+    if let Some(data) = ij_metadata {
+        ij_meta_offset = buf.len() as u32;
+        buf.write_all(data).unwrap();
+        ij_meta_len = data.len() as u32;
+    }
+
+    // --- IFDs ---
+    let n = frame_pixels.len();
+    let mut ifd_sizes = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut entries = 9; // base tags
+        if i == 0 {
+            entries += 1; // ImageDescription
+            if ij_metadata.is_some() {
+                entries += 2; // IJMetadataByteCounts + IJMetadata
+            }
+        }
+        ifd_sizes.push(2 + entries * 12 + 4);
+    }
+    let ifd_start: Vec<u32> = {
+        let mut starts = Vec::with_capacity(n);
+        let mut cursor = buf.len() as u32;
+        for &sz in &ifd_sizes {
+            starts.push(cursor);
+            cursor += sz as u32;
+        }
+        starts
+    };
+
+    // patch first-IFD offset in header
+    buf[4..8].copy_from_slice(&ifd_start[0].to_le_bytes());
+
+    for i in 0..n {
+        let mut entries: Vec<IfdEntrySpec> = vec![
+            (TAG_IMAGE_WIDTH, 4, 1, long_val(width)),
+            (TAG_IMAGE_LENGTH, 4, 1, long_val(height)),
+            (TAG_BITS_PER_SAMPLE, 3, 1, short_val(16)),
+            (TAG_COMPRESSION, 3, 1, short_val(1)),
+            (TAG_PHOTOMETRIC, 3, 1, short_val(1)),
+            (TAG_STRIP_OFFSETS, 4, 1, long_val(strip_offsets[i])),
+            (TAG_SAMPLES_PER_PIXEL, 3, 1, short_val(1)),
+            (TAG_ROWS_PER_STRIP, 4, 1, long_val(height)),
+            (
+                TAG_STRIP_BYTE_COUNTS,
+                4,
+                1,
+                long_val(width * height * 2),
+            ),
+        ];
+        if i == 0 {
+            entries.push((TAG_IMAGE_DESCRIPTION, 2, desc_len, long_val(desc_offset)));
+            if ij_metadata.is_some() {
+                entries.push((
+                    TAG_IJ_METADATA_BYTE_COUNTS,
+                    4,
+                    ij_counts_len,
+                    long_val(ij_counts_offset),
+                ));
+                entries.push((TAG_IJ_METADATA, 1, ij_meta_len, long_val(ij_meta_offset)));
+            }
+        }
+        // TIFF spec requires entries sorted by ascending tag.
+        entries.sort_by_key(|e| e.0);
+
+        buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, ftype, count, val) in &entries {
+            buf.extend_from_slice(&tag.to_le_bytes());
+            buf.extend_from_slice(&ftype.to_le_bytes());
+            buf.extend_from_slice(&count.to_le_bytes());
+            buf.extend_from_slice(val);
+        }
+        let next = if i + 1 < n { ifd_start[i + 1] } else { 0 };
+        buf.extend_from_slice(&next.to_le_bytes());
+    }
+
+    buf
+}
+
+/// Build a synthetic IJMetadata blob matching our best-effort assumed
+/// format: an 8-byte-record big-endian directory, then a `rang` block
+/// (2 channels x (min,max) f64 pairs), then 2 `luts` blocks (768 bytes each).
+fn build_ij_metadata_blob(ranges: &[(f64, f64)], luts: &[[[u8; 3]; 256]]) -> (Vec<u8>, Vec<u32>) {
+    let mut header = Vec::new();
+    let mut byte_counts = Vec::new();
+
+    let mut body = Vec::new();
+
+    // directory: one "rang" record covering all channels, one "luts" record per channel
+    header.extend_from_slice(b"rang");
+    header.extend_from_slice(&1u32.to_be_bytes());
+    header.extend_from_slice(b"luts");
+    header.extend_from_slice(&(luts.len() as u32).to_be_bytes());
+
+    byte_counts.push(header.len() as u32); // byte_counts[0] = header size
+
+    // rang block
+    let mut rang_block = Vec::new();
+    for &(lo, hi) in ranges {
+        rang_block.extend_from_slice(&lo.to_be_bytes());
+        rang_block.extend_from_slice(&hi.to_be_bytes());
+    }
+    byte_counts.push(rang_block.len() as u32);
+    body.extend_from_slice(&rang_block);
+
+    // luts blocks (planar R,G,B x256)
+    for lut in luts {
+        let mut block = vec![0u8; 768];
+        for i in 0..256 {
+            block[i] = lut[i][0];
+            block[256 + i] = lut[i][1];
+            block[512 + i] = lut[i][2];
+        }
+        byte_counts.push(block.len() as u32);
+        body.extend_from_slice(&block);
+    }
+
+    let mut full = header;
+    full.extend_from_slice(&body);
+    (full, byte_counts)
+}
+
+#[test]
+fn opens_multi_frame_stack_and_reads_correct_pixels() {
+    let width = 4;
+    let height = 3;
+    let frame0: Vec<u16> = (0..12).collect();
+    let frame1: Vec<u16> = (100..112).collect();
+    let frame2: Vec<u16> = (1000..1012).collect();
+
+    let bytes = build_synthetic_tiff(
+        width,
+        height,
+        &[frame0.clone(), frame1.clone(), frame2.clone()],
+        "ImageJ=1.54f\nimages=3\nchannels=1\nslices=1\nframes=3\nmode=grayscale\nmin=0.0\nmax=4095.0\nunit=micron\nfinterval=0.25\n",
+        None,
+        None,
+    );
+
+    let path = unique_temp_path("synthetic.tif");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let stack = TiffStack::open(&path).expect("should parse synthetic TIFF");
+
+    assert_eq!(stack.frames.len(), 3, "should walk all 3 IFDs in the chain");
+    assert_eq!(stack.meta.channels, 1);
+    assert_eq!(stack.meta.slices, 1);
+    assert_eq!(stack.meta.frames, 3);
+    assert_eq!(stack.meta.unit.as_deref(), Some("micron"));
+    assert_eq!(stack.meta.frame_interval_s, Some(0.25));
+    assert_eq!(stack.meta.channel_display[0].range, Some((0.0, 4095.0)));
+
+    for (i, expected) in [&frame0, &frame1, &frame2].into_iter().enumerate() {
+        let frame = &stack.frames[i];
+        assert_eq!(frame.width, width);
+        assert_eq!(frame.height, height);
+        let pixels = tiff_core::read_frame_u16(&stack.mmap, frame, stack.byte_order).unwrap();
+        assert_eq!(&*pixels, expected.as_slice(), "frame {i} pixel mismatch");
+    }
+}
+
+#[test]
+fn infers_frame_count_when_dimension_tags_absent() {
+    // A bare N-page TIFF with no ImageJ ImageDescription at all should
+    // still scrub correctly — frame count falls back to the IFD count.
+    let width = 2;
+    let height = 2;
+    let frames: Vec<Vec<u16>> = (0..5).map(|f| vec![f as u16; 4]).collect();
+    let bytes = build_synthetic_tiff(width, height, &frames, "", None, None);
+
+    let path = unique_temp_path("plain.tif");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let stack = TiffStack::open(&path).unwrap();
+    assert_eq!(stack.frames.len(), 5);
+    assert_eq!(stack.meta.frames, 5);
+    assert_eq!(stack.meta.channels, 1);
+}
+
+#[test]
+fn parses_ij_metadata_luts_and_ranges() {
+    let width = 2;
+    let height = 2;
+    let frame0 = vec![10u16, 20, 30, 40];
+
+    let mut red_lut = [[0u8; 3]; 256];
+    let mut green_lut = [[0u8; 3]; 256];
+    for i in 0..256 {
+        red_lut[i] = [i as u8, 0, 0];
+        green_lut[i] = [0, i as u8, 0];
+    }
+    let (ij_bytes, ij_counts) = build_ij_metadata_blob(
+        &[(50.0, 500.0), (60.0, 600.0)],
+        &[red_lut, green_lut],
+    );
+
+    let bytes = build_synthetic_tiff(
+        width,
+        height,
+        &[frame0.clone(), frame0.clone()],
+        "ImageJ=1.54f\nimages=2\nchannels=2\nslices=1\nframes=1\nmode=composite\n",
+        Some(&ij_bytes),
+        Some(&ij_counts),
+    );
+
+    let path = unique_temp_path("composite.tif");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let stack = TiffStack::open(&path).unwrap();
+    assert!(stack.meta.ij_metadata_parsed, "IJMetadata block should have parsed");
+    assert_eq!(stack.meta.channel_display[0].range, Some((50.0, 500.0)));
+    assert_eq!(stack.meta.channel_display[1].range, Some((60.0, 600.0)));
+    assert_eq!(stack.meta.channel_display[0].lut[128], [128, 0, 0]);
+    assert_eq!(stack.meta.channel_display[1].lut[200], [0, 200, 0]);
+}

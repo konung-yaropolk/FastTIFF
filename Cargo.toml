@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["tiff_core", "FastTIFF"]
+
+
+
+[profile.release]
+opt-level = 3
+lto = true         # Enable Link-Time Optimization
+codegen-units = 1  # Helps LTO optimize more effectively
+strip = true       # Automatically strip symbols from the binary.
+panic = 'unwind'   # 'abort' to kill process or 'unwind' for safe memory cleanup
+
+[profile.dev]
+# Keep IFD-walking / decode fast even in debug builds — these are the
+# hot paths during scrubbing and an unoptimized debug build is painfully
+# slow when stepping through a multi-GB stack frame by frame.
+# opt-level = 2
