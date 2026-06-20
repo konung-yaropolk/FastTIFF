@@ -198,3 +198,95 @@ fn undo_predictor(
     }
     Ok(std::mem::take(&mut data))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packbits_literal_run() {
+        // n=2 (literal run of 3 bytes) then n=-2 (repeat next byte 3 times)
+        let input = [2u8, 0xAA, 0xBB, 0xCC, (-2i8) as u8, 0xFF];
+        let out = packbits_decode(&input, 6);
+        assert_eq!(out, vec![0xAA, 0xBB, 0xCC, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn packbits_noop_byte_is_skipped() {
+        let input = [0u8, 0x42, (-128i8) as u8, 0u8, 0x99];
+        let out = packbits_decode(&input, 3);
+        // first record: literal run of 1 byte (0x42)
+        // second record: -128 is a documented no-op, skipped entirely
+        // third record: literal run of 1 byte (0x99)
+        assert_eq!(out, vec![0x42, 0x99]);
+    }
+
+    fn make_frame(width: u32, height: u32, predictor: u16) -> FrameInfo {
+        FrameInfo {
+            width,
+            height,
+            bits_per_sample: 16,
+            samples_per_pixel: 1,
+            sample_format: crate::index::SampleFormat::UnsignedInt,
+            compression: Compression::None,
+            predictor,
+            strip_offsets: vec![0],
+            strip_byte_counts: vec![(width * height * 2) as u64],
+            rows_per_strip: height,
+        }
+    }
+
+    #[test]
+    fn predictor_undo_le_roundtrip() {
+        // Two rows of 4 pixels each. Original values:
+        let original: [u16; 8] = [100, 105, 90, 200, 1000, 999, 999, 1005];
+        let frame = make_frame(4, 2, 2);
+
+        // Encode (horizontal differencing) to build the "compressed" input.
+        let mut differenced = [0u16; 8];
+        for row in 0..2 {
+            let base = row * 4;
+            differenced[base] = original[base];
+            for i in 1..4 {
+                differenced[base + i] = original[base + i].wrapping_sub(original[base + i - 1]);
+            }
+        }
+        let mut bytes = Vec::new();
+        for v in differenced {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+
+        let restored = undo_predictor(bytes, &frame, 2, ByteOrder::Little).unwrap();
+        let mut out = [0u16; 8];
+        for (i, chunk) in restored.chunks_exact(2).enumerate() {
+            out[i] = ByteOrder::Little.u16(chunk);
+        }
+        assert_eq!(out, original);
+    }
+
+    #[test]
+    fn predictor_undo_be_roundtrip() {
+        // Same as above but file byte order is big-endian — this is exactly
+        // the bug that was caught and fixed: undo must read/write in the
+        // file's declared order, not native order.
+        let original: [u16; 4] = [5000, 5010, 4990, 5200];
+        let frame = make_frame(4, 1, 2);
+
+        let mut differenced = [0u16; 4];
+        differenced[0] = original[0];
+        for i in 1..4 {
+            differenced[i] = original[i].wrapping_sub(original[i - 1]);
+        }
+        let mut bytes = Vec::new();
+        for v in differenced {
+            bytes.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let restored = undo_predictor(bytes, &frame, 2, ByteOrder::Big).unwrap();
+        let mut out = [0u16; 4];
+        for (i, chunk) in restored.chunks_exact(2).enumerate() {
+            out[i] = ByteOrder::Big.u16(chunk);
+        }
+        assert_eq!(out, original);
+    }
+}

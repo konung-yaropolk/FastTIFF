@@ -50,7 +50,7 @@ pub struct StackMeta {
     pub ij_metadata_parsed: bool,
 }
 
-fn grayscale_lut() -> [[u8; 3]; 256] {
+pub fn grayscale_lut() -> [[u8; 3]; 256] {
     let mut lut = [[0u8; 3]; 256];
     for (i, entry) in lut.iter_mut().enumerate() {
         *entry = [i as u8, i as u8, i as u8];
@@ -60,7 +60,7 @@ fn grayscale_lut() -> [[u8; 3]; 256] {
 
 /// Standard ImageJ composite-mode channel color cycle (channel LUTs assigned
 /// when a hyperstack is opened without explicit per-channel LUTs).
-fn default_composite_lut(channel_index: usize) -> [[u8; 3]; 256] {
+pub fn default_composite_lut(channel_index: usize) -> [[u8; 3]; 256] {
     let colors: [[u8; 3]; 7] = [
         [255, 0, 0],   // red
         [0, 255, 0],   // green

@@ -30,8 +30,8 @@ struct LoadedStack {
 pub struct ViewerApp {
     stack: Option<LoadedStack>,
     status: Option<String>,
-    /// Channel buttons + contrast sliders are tucked under a "⌄"/"^"
-    /// toggle to keep the bar minimal by default.
+    /// Channel buttons + contrast sliders are tucked under a small
+    /// triangle toggle to keep the bar minimal by default.
     channels_panel_expanded: bool,
     /// Bottom bar's height as of the last frame. Used to grow/shrink the
     /// native window by exactly the delta when this changes (panel
@@ -190,6 +190,51 @@ fn first_frame_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
     Some((lo as f32, hi as f32))
 }
 
+/// Re-interprets the same sequence of planes under a different
+/// channels/slices/frames assignment (see the dimension-order dropdown).
+/// The plane data itself is untouched — only which (frame, slice, channel)
+/// triple each plane is considered to belong to changes, via `ifd_index`.
+fn apply_dimension_override(loaded: &mut LoadedStack, channels: usize, slices: usize, frames: usize) {
+    let meta = &mut loaded.tiff.meta;
+    let old_channel_display = std::mem::take(&mut meta.channel_display);
+
+    meta.channels = channels;
+    meta.slices = slices;
+    meta.frames = frames;
+
+    // Keep existing per-channel LUT/range entries where the index still
+    // exists; synthesize defaults (matching what a fresh `open_file` would
+    // produce) for any new channel indices.
+    meta.channel_display = (0..channels)
+        .map(|c| {
+            old_channel_display.get(c).cloned().unwrap_or_else(|| tiff_core::ChannelDisplay {
+                lut: tiff_core::default_composite_lut(c),
+                range: None,
+            })
+        })
+        .collect();
+
+    // The UI-level per-channel settings (window/level, enabled) are
+    // recomputed from scratch rather than preserved: "channel 0" now refers
+    // to a different grouping of planes than it did before the override, so
+    // carrying over its old contrast values wouldn't mean anything.
+    loaded.channel_settings = (0..channels.min(MAX_CHANNELS))
+        .map(|c| {
+            let disp = &loaded.tiff.meta.channel_display[c];
+            let (min, max) = disp
+                .range
+                .map(|(lo, hi)| (lo as f32, hi as f32))
+                .unwrap_or_else(|| first_frame_minmax(&loaded.tiff, c).unwrap_or((0.0, 65535.0)));
+            ChannelSettings { min, max, enabled: true }
+        })
+        .collect();
+
+    loaded.frame_index = 0;
+    loaded.slice_index = 0;
+    loaded.last_uploaded = None;
+    loaded.luts_uploaded = false;
+}
+
 impl eframe::App for ViewerApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Drag-and-drop a file onto the window.
@@ -239,6 +284,7 @@ impl eframe::App for ViewerApp {
         // field captures across nested closures.
         let panel_expanded = self.channels_panel_expanded;
         let mut toggle_requested = false;
+        let mut dimension_override: Option<(usize, usize, usize)> = None; // (channels, slices, frames)
 
         let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
             let Some(loaded) = &mut self.stack else {
@@ -259,14 +305,27 @@ impl eframe::App for ViewerApp {
             ui.horizontal(|ui| {
                 let max_frame = loaded.tiff.meta.frames.saturating_sub(1);
 
-                let toggle_label = if panel_expanded { "^" } else { "⌄" };
-                if ui
-                    .button(toggle_label)
-                    .on_hover_text("Show/hide channel & contrast settings")
-                    .clicked()
-                {
+                // A blank square button with a small triangle painted on top
+                // — same technique egui's own CollapsingHeader arrow uses
+                // (see `egui::containers::collapsing_header::paint_default_icon`).
+                // This sidesteps font glyph coverage entirely: no character
+                // is drawn at all, just a filled polygon, so it renders
+                // identically regardless of what fonts are installed.
+                let toggle_size = egui::vec2(20.0, 20.0);
+                let toggle_response = ui
+                    .add_sized(toggle_size, egui::Button::new(""))
+                    .on_hover_text("Show/hide channel & contrast settings");
+                if toggle_response.clicked() {
                     toggle_requested = true;
                 }
+                let icon_color = ui.style().interact(&toggle_response).fg_stroke.color;
+                let r = toggle_response.rect.shrink(6.0);
+                let triangle = if panel_expanded {
+                    vec![r.left_bottom(), r.right_bottom(), r.center_top()] // pointing up
+                } else {
+                    vec![r.left_top(), r.right_top(), r.center_bottom()] // pointing down
+                };
+                ui.painter().add(egui::Shape::convex_polygon(triangle, icon_color, egui::Stroke::NONE));
 
                 if ui.button("|<").on_hover_text("First frame").clicked() {
                     loaded.frame_index = 0;
@@ -313,6 +372,43 @@ impl eframe::App for ViewerApp {
             });
 
             if panel_expanded {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Dimension order:");
+                    let c = loaded.tiff.meta.channels;
+                    let z = loaded.tiff.meta.slices;
+                    let f = loaded.tiff.meta.frames;
+
+                    // Every permutation of the three parsed values is, by
+                    // construction, still consistent with the file's actual
+                    // plane count (c*z*f is unchanged by reordering) — this
+                    // directly targets the common failure mode where the
+                    // file's metadata has two axes mislabeled/swapped,
+                    // without risking an invalid combination.
+                    let mut options = vec![(c, z, f), (c, f, z), (z, c, f), (z, f, c), (f, c, z), (f, z, c)];
+                    options.sort_unstable();
+                    options.dedup();
+
+                    egui::ComboBox::from_id_salt("dim_override")
+                        .selected_text(format!("c: {c}  z: {z}  f: {f}"))
+                        .show_ui(ui, |ui| {
+                            for (oc, oz, of) in options {
+                                let label = format!("c: {oc}  z: {oz}  f: {of}");
+                                if ui.selectable_label((oc, oz, of) == (c, z, f), label).clicked() {
+                                    dimension_override = Some((oc, oz, of));
+                                }
+                            }
+                        });
+                });
+                ui.label(
+                    RichText::new(
+                        "Use this if the file's metadata mislabels which axis is channels/slices/frames \
+                         — picking an option re-reads the stack with that interpretation.",
+                    )
+                    .small()
+                    .weak(),
+                );
+
                 if loaded.channel_settings.len() > 1 {
                     ui.separator();
                     ui.horizontal(|ui| {
@@ -345,6 +441,12 @@ impl eframe::App for ViewerApp {
 
         if toggle_requested {
             self.channels_panel_expanded = !self.channels_panel_expanded;
+        }
+
+        if let Some((c, z, f)) = dimension_override {
+            if let Some(loaded) = &mut self.stack {
+                apply_dimension_override(loaded, c, z, f);
+            }
         }
 
         // Grow/shrink the window by exactly however much the bottom bar's
