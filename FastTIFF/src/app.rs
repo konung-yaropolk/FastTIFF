@@ -30,6 +30,12 @@ struct LoadedStack {
     /// warning note is still shown correctly after a manual channels/frames
     /// swap via the dimension-order dropdown, which never touches Z.
     triple_axis_warning: bool,
+    /// The (channels, slices, frames) as originally parsed from the file's
+    /// own metadata, before `resolve_dimensions` reinterprets them. Kept so
+    /// that changing the channel-size cutoff can re-run the heuristic from
+    /// scratch rather than from an already-reinterpreted (or manually
+    /// swapped) state.
+    raw_dimensions: (usize, usize, usize),
 }
 
 pub struct ViewerApp {
@@ -44,6 +50,13 @@ pub struct ViewerApp {
     /// it keeps a constant size instead of being squeezed or stretched by
     /// the bar's own size changes.
     last_bottom_bar_height: Option<f32>,
+    /// A dimension this size or smaller is guessed to be channels; larger
+    /// is guessed to be time (see `tiff_core::resolve_dimensions`). User
+    /// adjustable since there's no size that's correct for every dataset —
+    /// a real acquisition can genuinely have more than a handful of
+    /// channels. Applies to whatever stack is currently loaded, and to any
+    /// loaded afterward.
+    channel_size_cutoff: usize,
 }
 
 impl ViewerApp {
@@ -53,6 +66,7 @@ impl ViewerApp {
             status: None,
             channels_panel_expanded: false,
             last_bottom_bar_height: None,
+            channel_size_cutoff: 4,
         };
         if let Some(path) = initial_path {
             app.open_file(path);
@@ -62,25 +76,24 @@ impl ViewerApp {
 
     fn open_file(&mut self, path: PathBuf) {
         match TiffStack::open(&path) {
-            Ok(mut tiff) => {
-                let resolved = tiff_core::resolve_dimensions(tiff.meta.channels, tiff.meta.slices, tiff.meta.frames);
-                tiff.meta.channels = resolved.channels;
-                tiff.meta.slices = resolved.slices;
-                tiff.meta.frames = resolved.frames;
-                resize_channel_display(&mut tiff.meta, resolved.channels);
-
-                let channel_settings = build_channel_settings(&tiff);
-                self.status = compute_status(&tiff.meta, resolved.triple_axis_warning);
-
-                self.stack = Some(LoadedStack {
+            Ok(tiff) => {
+                let raw_dimensions = (tiff.meta.channels, tiff.meta.slices, tiff.meta.frames);
+                let mut loaded = LoadedStack {
                     tiff,
                     path,
-                    channel_settings,
+                    channel_settings: Vec::new(),
                     frame_index: 0,
                     last_uploaded: None,
                     luts_uploaded: false,
-                    triple_axis_warning: resolved.triple_axis_warning,
-                });
+                    triple_axis_warning: false,
+                    raw_dimensions,
+                };
+                let (c, z, f) = raw_dimensions;
+                let resolved = tiff_core::resolve_dimensions(c, z, f, self.channel_size_cutoff);
+                apply_resolved_dimensions(&mut loaded, resolved);
+
+                self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
+                self.stack = Some(loaded);
             }
             Err(e) => {
                 self.status = Some(format!("Failed to open {}: {e:#}", path.display()));
@@ -234,17 +247,35 @@ fn compute_status(meta: &tiff_core::StackMeta, triple_axis_warning: bool) -> Opt
     }
 }
 
-/// Applies a manual channels/frames swap from the dimension-order
-/// dropdown. Z (if any) is untouched — it stays whatever
-/// `resolve_dimensions` decided at load time.
-fn apply_dimension_override(loaded: &mut LoadedStack, channels: usize, frames: usize) {
-    loaded.tiff.meta.channels = channels;
-    loaded.tiff.meta.frames = frames;
-    resize_channel_display(&mut loaded.tiff.meta, channels);
+/// Applies a (possibly newly resolved) channel/slice/frame interpretation
+/// to a stack: updates the metadata, rebuilds channel_display +
+/// channel_settings to match the new channel count, and resets the scrub
+/// position. The one place that does this, so the manual channels/frames
+/// swap and a cutoff change can't drift out of sync with each other (or
+/// with `open_file`) the way `self.status` previously did.
+fn apply_resolved_dimensions(loaded: &mut LoadedStack, resolved: tiff_core::ResolvedDimensions) {
+    loaded.tiff.meta.channels = resolved.channels;
+    loaded.tiff.meta.slices = resolved.slices;
+    loaded.tiff.meta.frames = resolved.frames;
+    loaded.triple_axis_warning = resolved.triple_axis_warning;
+    resize_channel_display(&mut loaded.tiff.meta, resolved.channels);
     loaded.channel_settings = build_channel_settings(&loaded.tiff);
     loaded.frame_index = 0;
     loaded.last_uploaded = None;
     loaded.luts_uploaded = false;
+}
+
+/// Applies a manual channels/frames swap from the dimension-order
+/// dropdown. Z (if any) and the triple-axis warning are carried over
+/// unchanged — the swap only concerns the channels/frames roles.
+fn apply_dimension_override(loaded: &mut LoadedStack, channels: usize, frames: usize) {
+    let resolved = tiff_core::ResolvedDimensions {
+        channels,
+        slices: loaded.tiff.meta.slices,
+        frames,
+        triple_axis_warning: loaded.triple_axis_warning,
+    };
+    apply_resolved_dimensions(loaded, resolved);
 }
 
 impl eframe::App for ViewerApp {
@@ -296,6 +327,8 @@ impl eframe::App for ViewerApp {
         let panel_expanded = self.channels_panel_expanded;
         let mut toggle_requested = false;
         let mut dimension_override: Option<(usize, usize)> = None; // (channels, frames)
+        let channel_size_cutoff = self.channel_size_cutoff;
+        let mut cutoff_override: Option<usize> = None;
 
         let scrub_bar_response = egui::TopBottomPanel::bottom("scrub_bar").show_inside(ui, |ui| {
             let Some(loaded) = &mut self.stack else {
@@ -376,6 +409,23 @@ impl eframe::App for ViewerApp {
             if panel_expanded {
                 ui.separator();
                 ui.horizontal(|ui| {
+                    ui.label("Channel size cutoff:");
+                    let mut cutoff = channel_size_cutoff;
+                    if ui.add(egui::DragValue::new(&mut cutoff).range(1..=64).speed(0.1)).changed() {
+                        cutoff_override = Some(cutoff);
+                    }
+                });
+                ui.label(
+                    RichText::new(
+                        "A dimension this size or smaller is guessed to be channels; larger is guessed \
+                         to be time. Raise this if a real multi-channel image is being misread as a \
+                         time series — the dropdown below can also fix it for this file specifically.",
+                    )
+                    .small()
+                    .weak(),
+                );
+
+                ui.horizontal(|ui| {
                     ui.label("Dimension order:");
                     let c = loaded.tiff.meta.channels;
                     let f = loaded.tiff.meta.frames;
@@ -395,14 +445,6 @@ impl eframe::App for ViewerApp {
                             }
                         });
                 });
-                ui.label(
-                    RichText::new(
-                        "Channels are guessed automatically (4 or fewer = channels, more = time); \
-                         use this if that guess is wrong for this file.",
-                    )
-                    .small()
-                    .weak(),
-                );
 
                 if loaded.channel_settings.len() > 1 {
                     ui.separator();
@@ -436,6 +478,16 @@ impl eframe::App for ViewerApp {
 
         if toggle_requested {
             self.channels_panel_expanded = !self.channels_panel_expanded;
+        }
+
+        if let Some(new_cutoff) = cutoff_override {
+            self.channel_size_cutoff = new_cutoff;
+            if let Some(loaded) = &mut self.stack {
+                let (c, z, f) = loaded.raw_dimensions;
+                let resolved = tiff_core::resolve_dimensions(c, z, f, new_cutoff);
+                apply_resolved_dimensions(loaded, resolved);
+                self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
+            }
         }
 
         if let Some((c, f)) = dimension_override {
