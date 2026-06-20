@@ -33,11 +33,15 @@ pub struct ViewerApp {
 }
 
 impl ViewerApp {
-    pub fn new() -> Self {
-        Self {
+    pub fn new(initial_path: Option<PathBuf>) -> Self {
+        let mut app = Self {
             stack: None,
             status: None,
+        };
+        if let Some(path) = initial_path {
+            app.open_file(path);
         }
+        app
     }
 
     fn open_file(&mut self, path: PathBuf) {
