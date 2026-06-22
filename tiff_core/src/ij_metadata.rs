@@ -58,18 +58,19 @@ pub struct ResolvedDimensions {
     pub triple_axis_warning: bool,
 }
 
+/// A dimension this size or smaller is assumed to be channels; anything
+/// larger is assumed to be time. Hardcoded rather than configurable: there's
+/// no size that's correct for every dataset, but a per-file manual
+/// channels/frames swap (exposed in the UI) covers the cases this misses,
+/// without the complexity of a global adjustable setting.
+const CHANNEL_SIZE_CUTOFF: usize = 4;
+
 /// Decides the *effective* (channels, slices, frames) to use, classifying
 /// by size rather than trusting the file's own axis labels: a dimension of
-/// `channel_size_cutoff` or fewer is assumed to be channels, anything
+/// `CHANNEL_SIZE_CUTOFF` or fewer is assumed to be channels, anything
 /// larger is assumed to be time — this holds even when the file's
 /// metadata claims the opposite (a "channels" value that's actually a
 /// mislabeled frame count, or vice versa), or is missing entirely.
-///
-/// `channel_size_cutoff` is caller-supplied rather than fixed because a
-/// real acquisition can genuinely have more than a handful of channels
-/// (spectral imaging, for instance) — there's no size threshold that's
-/// correct for every dataset, so the caller (the UI) exposes it as an
-/// adjustable setting instead of hardcoding a guess.
 ///
 /// Z is never its own navigable axis: it's always folded into "frames" —
 /// just another time-like step — *unless* the file genuinely has
@@ -81,7 +82,7 @@ pub struct ResolvedDimensions {
 /// `channels * slices * frames` on the output always equals `c * z * f` on
 /// the input — this never invents or drops planes, only reclassifies which
 /// axis they belong to.
-pub fn resolve_dimensions(c: usize, z: usize, f: usize, channel_size_cutoff: usize) -> ResolvedDimensions {
+pub fn resolve_dimensions(c: usize, z: usize, f: usize) -> ResolvedDimensions {
     if c > 1 && z > 1 && f > 1 {
         return ResolvedDimensions {
             channels: c,
@@ -92,12 +93,12 @@ pub fn resolve_dimensions(c: usize, z: usize, f: usize, channel_size_cutoff: usi
     }
 
     let time_only = (z * f).max(1); // Z always folds into time, unconditionally
-    let c_is_channel_sized = c > 1 && c <= channel_size_cutoff;
-    let time_is_channel_sized = time_only > 1 && time_only <= channel_size_cutoff;
+    let c_is_channel_sized = c > 1 && c <= CHANNEL_SIZE_CUTOFF;
+    let time_is_channel_sized = time_only > 1 && time_only <= CHANNEL_SIZE_CUTOFF;
 
     let (channels, frames) = if c_is_channel_sized {
         (c, time_only)
-    } else if c > channel_size_cutoff && time_is_channel_sized {
+    } else if c > CHANNEL_SIZE_CUTOFF && time_is_channel_sized {
         // Roles look swapped: what's labeled "channels" is too big to
         // really be channels, but the combined time axis is small enough
         // to plausibly be the real channel count.
@@ -120,11 +121,9 @@ pub fn resolve_dimensions(c: usize, z: usize, f: usize, channel_size_cutoff: usi
 mod dimension_tests {
     use super::*;
 
-    const DEFAULT_CUTOFF: usize = 4;
-
-    fn check(c: usize, z: usize, f: usize, cutoff: usize, expected: ResolvedDimensions, label: &str) {
-        let got = resolve_dimensions(c, z, f, cutoff);
-        assert_eq!(got, expected, "{label}: resolve_dimensions({c}, {z}, {f}, cutoff={cutoff})");
+    fn check(c: usize, z: usize, f: usize, expected: ResolvedDimensions, label: &str) {
+        let got = resolve_dimensions(c, z, f);
+        assert_eq!(got, expected, "{label}: resolve_dimensions({c}, {z}, {f})");
         // Invariant: reclassifying axes must never invent or drop planes.
         assert_eq!(
             got.channels * got.slices * got.frames,
@@ -140,7 +139,6 @@ mod dimension_tests {
             100,
             1,
             1,
-            DEFAULT_CUTOFF,
             ResolvedDimensions { channels: 1, slices: 1, frames: 100, triple_axis_warning: false },
             "mislabeled channels=100",
         );
@@ -148,7 +146,6 @@ mod dimension_tests {
             100,
             1,
             7,
-            DEFAULT_CUTOFF,
             ResolvedDimensions { channels: 1, slices: 1, frames: 700, triple_axis_warning: false },
             "mislabeled channels=100, real frames also present",
         );
@@ -160,7 +157,6 @@ mod dimension_tests {
             2,
             1,
             350,
-            DEFAULT_CUTOFF,
             ResolvedDimensions { channels: 2, slices: 1, frames: 350, triple_axis_warning: false },
             "normal 2-channel timelapse",
         );
@@ -168,7 +164,6 @@ mod dimension_tests {
             1,
             1,
             500,
-            DEFAULT_CUTOFF,
             ResolvedDimensions { channels: 1, slices: 1, frames: 500, triple_axis_warning: false },
             "normal single-channel timelapse",
         );
@@ -176,7 +171,6 @@ mod dimension_tests {
             1,
             1,
             1,
-            DEFAULT_CUTOFF,
             ResolvedDimensions { channels: 1, slices: 1, frames: 1, triple_axis_warning: false },
             "single image",
         );
@@ -188,7 +182,6 @@ mod dimension_tests {
             1,
             50,
             1,
-            DEFAULT_CUTOFF,
             ResolvedDimensions { channels: 1, slices: 1, frames: 50, triple_axis_warning: false },
             "pure z-stack becomes a 50-frame series",
         );
@@ -196,7 +189,6 @@ mod dimension_tests {
             2,
             3,
             1,
-            DEFAULT_CUTOFF,
             ResolvedDimensions { channels: 2, slices: 1, frames: 3, triple_axis_warning: false },
             "2-channel z-stack: z folds into frames",
         );
@@ -209,7 +201,6 @@ mod dimension_tests {
             500,
             1,
             2,
-            DEFAULT_CUTOFF,
             ResolvedDimensions { channels: 2, slices: 1, frames: 500, triple_axis_warning: false },
             "swapped roles recovered",
         );
@@ -221,7 +212,6 @@ mod dimension_tests {
             3,
             10,
             20,
-            DEFAULT_CUTOFF,
             ResolvedDimensions { channels: 3, slices: 10, frames: 20, triple_axis_warning: true },
             "channels + Z + time all present",
         );
@@ -233,60 +223,15 @@ mod dimension_tests {
             4,
             1,
             100,
-            DEFAULT_CUTOFF,
             ResolvedDimensions { channels: 4, slices: 1, frames: 100, triple_axis_warning: false },
-            "exactly at the default cutoff (4) counts as channel-sized",
+            "exactly at the cutoff (4) counts as channel-sized",
         );
         check(
             5,
             1,
             100,
-            DEFAULT_CUTOFF,
             ResolvedDimensions { channels: 1, slices: 1, frames: 500, triple_axis_warning: false },
-            "one past the default cutoff does not count as channel-sized",
-        );
-    }
-
-    #[test]
-    fn respects_custom_channel_size_cutoff() {
-        // A real 6-channel acquisition: the default cutoff of 4 misreads
-        // it as a 6-frame time series, but raising the cutoff to 8 (e.g.
-        // for spectral imaging with more channels than the default
-        // assumes) correctly recovers it as 6 channels.
-        check(
-            6,
-            1,
-            100,
-            4,
-            ResolvedDimensions { channels: 1, slices: 1, frames: 600, triple_axis_warning: false },
-            "6 channels misread at the default cutoff of 4",
-        );
-        check(
-            6,
-            1,
-            100,
-            8,
-            ResolvedDimensions { channels: 6, slices: 1, frames: 100, triple_axis_warning: false },
-            "6 channels correctly recognized at cutoff=8",
-        );
-        // Lowering the cutoff can also flip a value that used to qualify:
-        // 3 channels is channel-sized at the default cutoff of 4, but not
-        // once the cutoff is dropped to 2.
-        check(
-            3,
-            1,
-            100,
-            4,
-            ResolvedDimensions { channels: 3, slices: 1, frames: 100, triple_axis_warning: false },
-            "3 channels qualifies at the default cutoff",
-        );
-        check(
-            3,
-            1,
-            100,
-            2,
-            ResolvedDimensions { channels: 1, slices: 1, frames: 300, triple_axis_warning: false },
-            "3 channels no longer qualifies once cutoff is lowered to 2",
+            "one past the cutoff does not count as channel-sized",
         );
     }
 }
@@ -341,7 +286,20 @@ pub fn build_stack_meta(
     ij_metadata_counts: Option<&[u32]>,
     total_ifds: usize,
 ) -> StackMeta {
-    let kv = description.map(parse_description).unwrap_or_default();
+    // Only parse ImageDescription as ImageJ's key=value format if it
+    // actually carries ImageJ's own signature. A TIFF written by something
+    // else entirely (a different microscopy package, a generic image
+    // tool, ...) can have arbitrary free-form text here, and that text
+    // might coincidentally contain lines that look like "channels=" or
+    // "min=" — silently treating those as real values would be worse than
+    // not parsing anything. With no usable description, everything below
+    // falls back cleanly: dimensions come from `resolve_dimensions`'s
+    // size-based guess (see app.rs), and contrast falls back to the
+    // image's own min/max.
+    let kv = description
+        .filter(|d| d.contains("ImageJ="))
+        .map(parse_description)
+        .unwrap_or_default();
 
     let get_usize = |key: &str| kv.get(key).and_then(|s| s.parse::<usize>().ok());
     let get_f64 = |key: &str| kv.get(key).and_then(|s| s.parse::<f64>().ok());
@@ -383,9 +341,17 @@ pub fn build_stack_meta(
         let blocks = try_parse_ij_blocks(data, counts, ByteOrder::Big)
             .or_else(|| try_parse_ij_blocks(data, counts, ByteOrder::Little));
         if let Some(blocks) = blocks {
+            // Require an exact count match against the channel count this
+            // file's ImageDescription actually declares. A correctly-formed
+            // IJMetadata block has exactly one range-pair and one LUT per
+            // channel; anything else (a stale block left over from before
+            // the file was reduced to fewer channels, or a structurally
+            // "valid" but mislabeled parse — the directory format isn't
+            // officially documented, see module docs) means we can't trust
+            // which entry corresponds to which channel, so don't guess.
             if let Some(ranges) = &blocks.ranges {
-                for (c, disp) in channel_display.iter_mut().enumerate() {
-                    if let Some(&r) = ranges.get(c) {
+                if ranges.len() == channels {
+                    for (disp, &r) in channel_display.iter_mut().zip(ranges.iter()) {
                         if r.1 > r.0 && r.0.is_finite() && r.1.is_finite() {
                             disp.range = Some(r);
                             ij_metadata_parsed = true;
@@ -393,8 +359,8 @@ pub fn build_stack_meta(
                     }
                 }
             }
-            for (c, disp) in channel_display.iter_mut().enumerate() {
-                if let Some(lut) = blocks.luts.get(c) {
+            if blocks.luts.len() == channels {
+                for (disp, lut) in channel_display.iter_mut().zip(blocks.luts.iter()) {
                     disp.lut = *lut;
                     ij_metadata_parsed = true;
                 }
@@ -494,6 +460,14 @@ fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32], header_order: ByteOrder
     }
 
     if ranges.is_none() && luts.is_empty() {
+        return None;
+    }
+    if cursor != data.len() {
+        // A correct parse should land exactly on the end of the buffer.
+        // Landing short or overrunning means the directory was
+        // misinterpreted somewhere — possibly correctly counting total
+        // bytes by coincidence while misattributing which bytes belong to
+        // which block type. Don't trust a result we can't fully account for.
         return None;
     }
     Some(IjBlocks { ranges, luts })

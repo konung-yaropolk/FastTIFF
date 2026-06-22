@@ -10,11 +10,27 @@ use egui::{Color32, RichText};
 use std::path::PathBuf;
 use tiff_core::TiffStack;
 
+const ZOOM_STEP: f32 = 1.0;
+const MIN_ZOOM: f32 = 1.0;
+const MAX_ZOOM: f32 = 8.0;
+
 #[derive(Clone, Copy)]
 struct ChannelSettings {
     min: f32,
     max: f32,
     enabled: bool,
+    /// For 32-bit float channels only: the fixed range used to encode raw
+    /// float samples into the GPU's 16-bit texture space (see
+    /// `tiff_core::read_frame_u16`'s `float_range` parameter), established
+    /// once from the channel's first frame and then reused for every
+    /// subsequent frame so the texture encoding — and therefore contrast —
+    /// doesn't jump around as you scrub. `min`/`max` above are the
+    /// user-facing contrast window in the data's own float units (matching
+    /// how ImageJ shows float image contrast); they get remapped through
+    /// this fixed range into texture-space when building the GPU uniform
+    /// (see `sync_gpu`). `None` for integer-format channels, which don't
+    /// need this indirection — their texture already holds native values.
+    encoding_range: Option<(f32, f32)>,
 }
 
 struct LoadedStack {
@@ -30,12 +46,6 @@ struct LoadedStack {
     /// warning note is still shown correctly after a manual channels/frames
     /// swap via the dimension-order dropdown, which never touches Z.
     triple_axis_warning: bool,
-    /// The (channels, slices, frames) as originally parsed from the file's
-    /// own metadata, before `resolve_dimensions` reinterprets them. Kept so
-    /// that changing the channel-size cutoff can re-run the heuristic from
-    /// scratch rather than from an already-reinterpreted (or manually
-    /// swapped) state.
-    raw_dimensions: (usize, usize, usize),
 }
 
 pub struct ViewerApp {
@@ -44,19 +54,18 @@ pub struct ViewerApp {
     /// Channel buttons + contrast sliders are tucked under a small
     /// triangle toggle to keep the bar minimal by default.
     channels_panel_expanded: bool,
-    /// Bottom bar's height as of the last frame. Used to grow/shrink the
-    /// native window by exactly the delta when this changes (panel
-    /// toggled, a stack loading/unloading, ...) so the image canvas above
-    /// it keeps a constant size instead of being squeezed or stretched by
-    /// the bar's own size changes.
-    last_bottom_bar_height: Option<f32>,
-    /// A dimension this size or smaller is guessed to be channels; larger
-    /// is guessed to be time (see `tiff_core::resolve_dimensions`). User
-    /// adjustable since there's no size that's correct for every dataset —
-    /// a real acquisition can genuinely have more than a handful of
-    /// channels. Applies to whatever stack is currently loaded, and to any
-    /// loaded afterward.
-    channel_size_cutoff: usize,
+    /// Zoom factor: 1.0 = window sized to native image pixels.
+    /// Controls the desired *window size* only — the image always fits the
+    /// available canvas with aspect ratio preserved regardless of this
+    /// value (whether from zooming or from the user manually resizing).
+    /// Resets to 1.0 on every file load.
+    zoom: f32,
+    /// The (zoom, chrome_height) pair we last resized the window in response
+    /// to. Resizing is only sent when this actually changes — so the user can
+    /// freely resize the window manually without us fighting them back.
+    last_zoom_resize: Option<(f32, f32)>,
+    /// The window title last sent via `ViewportCommand::Title`.
+    last_title: Option<String>,
 }
 
 impl ViewerApp {
@@ -65,8 +74,9 @@ impl ViewerApp {
             stack: None,
             status: None,
             channels_panel_expanded: false,
-            last_bottom_bar_height: None,
-            channel_size_cutoff: 4,
+            zoom: 1.0,
+            last_zoom_resize: None,
+            last_title: None,
         };
         if let Some(path) = initial_path {
             app.open_file(path);
@@ -77,7 +87,6 @@ impl ViewerApp {
     fn open_file(&mut self, path: PathBuf) {
         match TiffStack::open(&path) {
             Ok(tiff) => {
-                let raw_dimensions = (tiff.meta.channels, tiff.meta.slices, tiff.meta.frames);
                 let mut loaded = LoadedStack {
                     tiff,
                     path,
@@ -86,14 +95,20 @@ impl ViewerApp {
                     last_uploaded: None,
                     luts_uploaded: false,
                     triple_axis_warning: false,
-                    raw_dimensions,
                 };
-                let (c, z, f) = raw_dimensions;
-                let resolved = tiff_core::resolve_dimensions(c, z, f, self.channel_size_cutoff);
+                let (c, z, f) = (
+                    loaded.tiff.meta.channels,
+                    loaded.tiff.meta.slices,
+                    loaded.tiff.meta.frames,
+                );
+                let resolved = tiff_core::resolve_dimensions(c, z, f);
                 apply_resolved_dimensions(&mut loaded, resolved);
 
                 self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
                 self.stack = Some(loaded);
+                // Reset to native 1:1 on every fresh load.
+                self.zoom = 1.0;
+                self.last_zoom_resize = None;
             }
             Err(e) => {
                 self.status = Some(format!("Failed to open {}: {e:#}", path.display()));
@@ -141,8 +156,9 @@ impl ViewerApp {
         if loaded.last_uploaded != Some(loaded.frame_index) {
             for c in 0..n_channels {
                 let ifd_idx = Self::ifd_index(loaded, c);
+                let encoding_range = loaded.channel_settings.get(c).and_then(|s| s.encoding_range);
                 if let Some(frame_info) = loaded.tiff.frames.get(ifd_idx) {
-                    match tiff_core::read_frame_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order) {
+                    match tiff_core::read_frame_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, encoding_range) {
                         Ok(pixels) => {
                             resources.upload_channel(
                                 &render_state.queue,
@@ -161,23 +177,37 @@ impl ViewerApp {
             loaded.last_uploaded = Some(loaded.frame_index);
         }
 
+        // For float channels the texture holds samples already rescaled
+        // through `encoding_range` into 0..65535, so the user's contrast
+        // window (in real float units) needs the same remap before it's a
+        // meaningful window/level pair for the shader. Integer channels
+        // pass their min/max straight through, unchanged.
         let uniforms: Vec<ChannelUniform> = loaded
             .channel_settings
             .iter()
-            .map(|s| ChannelUniform {
-                min: s.min,
-                max: s.max,
-                enabled: s.enabled,
+            .map(|s| {
+                let (min, max) = match s.encoding_range {
+                    Some((lo, hi)) => {
+                        let span = (hi - lo).max(f32::EPSILON);
+                        let to_texture_space = |v: f32| ((v - lo) / span * 65535.0).clamp(0.0, 65535.0);
+                        (to_texture_space(s.min), to_texture_space(s.max))
+                    }
+                    None => (s.min, s.max),
+                };
+                ChannelUniform { min, max, enabled: s.enabled }
             })
             .collect();
         resources.update_params(&render_state.queue, &uniforms, n_channels as u32);
     }
 }
 
+/// Actual pixel min/max of channel `c`'s first frame, for integer-format
+/// data. Used as the auto-contrast fallback when no display range came
+/// from the file's metadata.
 fn first_frame_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
     let idx = channel.min(tiff.frames.len().saturating_sub(1));
     let frame = tiff.frames.get(idx)?;
-    let pixels = tiff_core::read_frame_u16(&tiff.mmap, frame, tiff.byte_order).ok()?;
+    let pixels = tiff_core::read_frame_u16(&tiff.mmap, frame, tiff.byte_order, None).ok()?;
     let (mut lo, mut hi) = (u16::MAX, 0u16);
     for &p in pixels.iter() {
         lo = lo.min(p);
@@ -187,6 +217,15 @@ fn first_frame_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
         hi = lo.saturating_add(1);
     }
     Some((lo as f32, hi as f32))
+}
+
+/// Actual float min/max of channel `c`'s first frame, for 32-bit float
+/// data — matches ImageJ auto-ranging a float image to its own values
+/// rather than assuming a fixed integer-shaped scale.
+fn first_frame_float_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
+    let idx = channel.min(tiff.frames.len().saturating_sub(1));
+    let frame = tiff.frames.get(idx)?;
+    tiff_core::frame_float_minmax(&tiff.mmap, frame, tiff.byte_order).ok()?
 }
 
 /// Resizes `meta.channel_display` to `new_channels` entries, keeping
@@ -204,19 +243,34 @@ fn resize_channel_display(meta: &mut tiff_core::StackMeta, new_channels: usize) 
         .collect();
 }
 
-/// Builds the UI-level per-channel settings (window/level, enabled) from
-/// `tiff.meta`'s current channel count and display info.
+/// Builds the UI-level per-channel settings (window/level, enabled,
+/// float-encoding range) from `tiff.meta`'s current channel count and
+/// display info.
 fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
     (0..tiff.meta.channels.min(MAX_CHANNELS))
         .map(|c| {
             let disp = &tiff.meta.channel_display[c];
-            let (min, max) = disp.range.map(|(lo, hi)| (lo as f32, hi as f32)).unwrap_or_else(|| {
-                // No display range in metadata at all (not even
-                // ImageDescription min=/max=) — fall back to the actual
-                // min/max of channel c's first frame.
-                first_frame_minmax(tiff, c).unwrap_or((0.0, 65535.0))
-            });
-            ChannelSettings { min, max, enabled: true }
+            let is_float = tiff
+                .frames
+                .get(c)
+                .is_some_and(|f| f.sample_format == tiff_core::SampleFormat::Float && f.bits_per_sample == 32);
+
+            if is_float {
+                let (lo, hi) = disp
+                    .range
+                    .map(|(lo, hi)| (lo as f32, hi as f32))
+                    .or_else(|| first_frame_float_minmax(tiff, c))
+                    .unwrap_or((0.0, 1.0));
+                ChannelSettings { min: lo, max: hi, enabled: true, encoding_range: Some((lo, hi)) }
+            } else {
+                let (min, max) = disp.range.map(|(lo, hi)| (lo as f32, hi as f32)).unwrap_or_else(|| {
+                    // No display range in metadata at all (not even
+                    // ImageDescription min=/max=) — fall back to the actual
+                    // min/max of channel c's first frame.
+                    first_frame_minmax(tiff, c).unwrap_or((0.0, 65535.0))
+                });
+                ChannelSettings { min, max, enabled: true, encoding_range: None }
+            }
         })
         .collect()
 }
@@ -251,8 +305,8 @@ fn compute_status(meta: &tiff_core::StackMeta, triple_axis_warning: bool) -> Opt
 /// to a stack: updates the metadata, rebuilds channel_display +
 /// channel_settings to match the new channel count, and resets the scrub
 /// position. The one place that does this, so the manual channels/frames
-/// swap and a cutoff change can't drift out of sync with each other (or
-/// with `open_file`) the way `self.status` previously did.
+/// swap can't drift out of sync with `open_file` the way `self.status`
+/// previously did.
 fn apply_resolved_dimensions(loaded: &mut LoadedStack, resolved: tiff_core::ResolvedDimensions) {
     loaded.tiff.meta.channels = resolved.channels;
     loaded.tiff.meta.slices = resolved.slices;
@@ -286,7 +340,27 @@ impl eframe::App for ViewerApp {
             self.open_file(path);
         }
 
-        egui::TopBottomPanel::top("toolbar").show_inside(ui, |ui| {
+        // Collect zoom input before panels consume events.
+        // `zoom_delta()` is the correct API: egui routes Ctrl+scroll into
+        // `zoom_factor_delta` rather than `smooth_scroll_delta`, so checking
+        // smooth_delta while Ctrl is held would always be zero.
+        let mut zoom_step: i32 = ui.input(|i| {
+            let d = i.zoom_delta();
+            let from_scroll = if d > 1.05 { 1 } else if d < 0.95 { -1 } else { 0 };
+            let from_keys = if i.modifiers.ctrl
+                && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
+            {
+                1
+            } else if i.modifiers.ctrl && i.key_pressed(egui::Key::Minus) {
+                -1
+            } else {
+                0
+            };
+            // If both trigger in the same frame, clamp to ±1.
+            (from_scroll + from_keys).clamp(-1, 1)
+        });
+
+        let toolbar_response = egui::TopBottomPanel::top("toolbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open TIFF...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
@@ -297,38 +371,36 @@ impl eframe::App for ViewerApp {
                     }
                 }
                 if let Some(loaded) = &self.stack {
-                    ui.separator();
-                    let name = loaded
-                        .path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
                     let meta = &loaded.tiff.meta;
+                    ui.separator();
                     ui.label(format!(
-                        "{name}  —  {}×{} px, {} frames, {} channel(s)",
+                        "{}×{} px, {} channel(s)",
                         loaded.tiff.frames.first().map(|f| f.width).unwrap_or(0),
                         loaded.tiff.frames.first().map(|f| f.height).unwrap_or(0),
-                        meta.frames,
                         meta.channels,
                     ));
+
+                    ui.separator();
+                    let frame_digits = meta.frames.to_string().len();
+                    ui.label(
+                        RichText::new(format!("Frame {:>frame_digits$} / {}", loaded.frame_index + 1, meta.frames))
+                            .monospace(),
+                    );
+                    if let Some(interval) = meta.frame_interval_s {
+                        let max_time = meta.frames.saturating_sub(1) as f64 * interval;
+                        let time_width = format!("{max_time:.3}").len();
+                        let current_time = loaded.frame_index as f64 * interval;
+                        ui.label(RichText::new(format!("t = {current_time:>time_width$.3}s")).monospace());
+                    }
                 }
             });
-            if let Some(status) = &self.status {
-                ui.label(RichText::new(status).color(Color32::from_rgb(230, 170, 60)));
-            }
         });
 
-        // Read-only snapshot for use inside the panel closure below, plus a
-        // deferred-write flag set on click — same pattern as `scroll_step`
-        // further down, and for the same reason: keeps the mutation of
-        // `self.channels_panel_expanded` outside any closure that's also
-        // borrowing `self.stack`, so there's no ambiguity about disjoint
-        // field captures across nested closures.
         let panel_expanded = self.channels_panel_expanded;
         let mut toggle_requested = false;
-        let mut dimension_override: Option<(usize, usize)> = None; // (channels, frames)
-        let channel_size_cutoff = self.channel_size_cutoff;
-        let mut cutoff_override: Option<usize> = None;
+        let mut dimension_override: Option<(usize, usize)> = None;
+        let mut scroll_step: i32 = 0;
+        let current_status = self.status.clone();
 
         let scrub_bar_response = egui::TopBottomPanel::bottom("scrub_bar").show_inside(ui, |ui| {
             let Some(loaded) = &mut self.stack else {
@@ -339,13 +411,8 @@ impl eframe::App for ViewerApp {
 
             ui.horizontal(|ui| {
                 let max_frame = loaded.tiff.meta.frames.saturating_sub(1);
+                let has_multiple_frames = loaded.tiff.meta.frames > 1;
 
-                // A blank square button with a small triangle painted on top
-                // — same technique egui's own CollapsingHeader arrow uses
-                // (see `egui::containers::collapsing_header::paint_default_icon`).
-                // This sidesteps font glyph coverage entirely: no character
-                // is drawn at all, just a filled polygon, so it renders
-                // identically regardless of what fonts are installed.
                 let toggle_size = egui::vec2(20.0, 20.0);
                 let toggle_response = ui
                     .add_sized(toggle_size, egui::Button::new(""))
@@ -356,47 +423,39 @@ impl eframe::App for ViewerApp {
                 let icon_color = ui.style().interact(&toggle_response).fg_stroke.color;
                 let r = toggle_response.rect.shrink(6.0);
                 let triangle = if panel_expanded {
-                    vec![r.left_bottom(), r.right_bottom(), r.center_top()] // pointing up
+                    vec![r.left_bottom(), r.right_bottom(), r.center_top()]
                 } else {
-                    vec![r.left_top(), r.right_top(), r.center_bottom()] // pointing down
+                    vec![r.left_top(), r.right_top(), r.center_bottom()]
                 };
                 ui.painter().add(egui::Shape::convex_polygon(triangle, icon_color, egui::Stroke::NONE));
 
-                if ui.button("|<").on_hover_text("First frame").clicked() {
-                    loaded.frame_index = 0;
-                }
-                if ui.button("<").on_hover_text("Previous frame (←)").clicked() {
-                    loaded.frame_index = loaded.frame_index.saturating_sub(1);
-                }
-
-                // Next/last buttons + frame counter are anchored to the
-                // right edge of the window; the scrollbar fills whatever
-                // horizontal space remains between them and the prev/first
-                // buttons above. Widgets here are added right-to-left, so
-                // in reverse of their final left-to-right visual order.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(interval) = loaded.tiff.meta.frame_interval_s {
-                        ui.label(format!("t = {:.3}s", loaded.frame_index as f64 * interval));
+                ui.add_enabled_ui(has_multiple_frames, |ui| {
+                    if ui.button("|<").on_hover_text("First frame").clicked() {
+                        loaded.frame_index = 0;
                     }
-                    ui.label(format!("{} / {}", loaded.frame_index + 1, loaded.tiff.meta.frames));
-                    if ui.button(">|").on_hover_text("Last frame").clicked() {
-                        loaded.frame_index = max_frame;
-                    }
-                    if ui.button(">").on_hover_text("Next frame (→)").clicked() {
-                        loaded.frame_index = (loaded.frame_index + 1).min(max_frame);
+                    if ui.button("<").on_hover_text("Previous frame (←)").clicked() {
+                        loaded.frame_index = loaded.frame_index.saturating_sub(1);
                     }
 
-                    let remaining = ui.available_width();
-                    ui.spacing_mut().slider_width = remaining.max(40.0);
-                    ui.add(
-                        egui::Slider::new(&mut loaded.frame_index, 0..=max_frame)
-                            .show_value(false)
-                            .trailing_fill(true),
-                    ); // the horizontal scrubber: drag, or click-to-jump
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(">|").on_hover_text("Last frame").clicked() {
+                            loaded.frame_index = max_frame;
+                        }
+                        if ui.button(">").on_hover_text("Next frame (→)").clicked() {
+                            loaded.frame_index = (loaded.frame_index + 1).min(max_frame);
+                        }
+
+                        let remaining = ui.available_width();
+                        ui.spacing_mut().slider_width = remaining.max(40.0);
+                        ui.add(
+                            egui::Slider::new(&mut loaded.frame_index, 0..=max_frame)
+                                .show_value(false)
+                                .trailing_fill(true),
+                        );
+                    });
                 });
             });
 
-            // Keyboard scrubbing.
             ui.input(|i| {
                 if i.key_pressed(egui::Key::ArrowRight) {
                     loaded.frame_index = (loaded.frame_index + 1).min(loaded.tiff.meta.frames.saturating_sub(1));
@@ -409,31 +468,12 @@ impl eframe::App for ViewerApp {
             if panel_expanded {
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label("Channel size cutoff:");
-                    let mut cutoff = channel_size_cutoff;
-                    if ui.add(egui::DragValue::new(&mut cutoff).range(1..=64).speed(0.1)).changed() {
-                        cutoff_override = Some(cutoff);
-                    }
-                });
-                ui.label(
-                    RichText::new(
-                        "A dimension this size or smaller is guessed to be channels; larger is guessed \
-                         to be time. Raise this if a real multi-channel image is being misread as a \
-                         time series — the dropdown below can also fix it for this file specifically.",
-                    )
-                    .small()
-                    .weak(),
-                );
-
-                ui.horizontal(|ui| {
                     ui.label("Dimension order:");
                     let c = loaded.tiff.meta.channels;
                     let f = loaded.tiff.meta.frames;
-
                     let mut options = vec![(c, f), (f, c)];
                     options.sort_unstable();
                     options.dedup();
-
                     egui::ComboBox::from_id_salt("dim_override")
                         .selected_text(format!("c: {c}  f: {f}"))
                         .show_ui(ui, |ui| {
@@ -445,49 +485,51 @@ impl eframe::App for ViewerApp {
                             }
                         });
                 });
+                ui.label(
+                    RichText::new(
+                        "Channels are guessed automatically (4 or fewer = channels, more = time); \
+                         use this if that guess is wrong for this file.",
+                    )
+                    .small()
+                    .weak(),
+                );
 
                 if loaded.channel_settings.len() > 1 {
                     ui.separator();
                     ui.horizontal(|ui| {
                         for (c, settings) in loaded.channel_settings.iter_mut().enumerate() {
+                            let speed = settings
+                                .encoding_range
+                                .map(|(lo, hi)| (((hi - lo) as f64) / 1000.0).max(0.0001))
+                                .unwrap_or(10.0);
                             ui.vertical(|ui| {
                                 ui.checkbox(&mut settings.enabled, format!("Ch {}", c + 1));
-                                ui.add(
-                                    egui::DragValue::new(&mut settings.min)
-                                        .prefix("min ")
-                                        .speed(10.0),
-                                );
-                                ui.add(
-                                    egui::DragValue::new(&mut settings.max)
-                                        .prefix("max ")
-                                        .speed(10.0),
-                                );
+                                ui.add(egui::DragValue::new(&mut settings.min).prefix("min ").speed(speed));
+                                ui.add(egui::DragValue::new(&mut settings.max).prefix("max ").speed(speed));
                             });
                         }
                     });
                 } else if let Some(settings) = loaded.channel_settings.first_mut() {
+                    let speed = settings
+                        .encoding_range
+                        .map(|(lo, hi)| (((hi - lo) as f64) / 1000.0).max(0.0001))
+                        .unwrap_or(10.0);
                     ui.horizontal(|ui| {
                         ui.label("Contrast:");
-                        ui.add(egui::DragValue::new(&mut settings.min).prefix("min ").speed(10.0));
-                        ui.add(egui::DragValue::new(&mut settings.max).prefix("max ").speed(10.0));
+                        ui.add(egui::DragValue::new(&mut settings.min).prefix("min ").speed(speed));
+                        ui.add(egui::DragValue::new(&mut settings.max).prefix("max ").speed(speed));
                     });
                 }
+            }
+            if let Some(status) = &current_status {
+                ui.separator();
+                ui.label(RichText::new(status).color(Color32::from_rgb(230, 170, 60)).small());
             }
             ui.add_space(4.0);
         });
 
         if toggle_requested {
             self.channels_panel_expanded = !self.channels_panel_expanded;
-        }
-
-        if let Some(new_cutoff) = cutoff_override {
-            self.channel_size_cutoff = new_cutoff;
-            if let Some(loaded) = &mut self.stack {
-                let (c, z, f) = loaded.raw_dimensions;
-                let resolved = tiff_core::resolve_dimensions(c, z, f, new_cutoff);
-                apply_resolved_dimensions(loaded, resolved);
-                self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
-            }
         }
 
         if let Some((c, f)) = dimension_override {
@@ -497,26 +539,10 @@ impl eframe::App for ViewerApp {
             }
         }
 
-        // Grow/shrink the window by exactly however much the bottom bar's
-        // height just changed, so the rest of the layout (the image
-        // canvas) keeps a constant size regardless of why the bar resized
-        // (the toggle above, a stack loading/unloading). Skipped on the
-        // very first frame, since there's no prior height yet to diff
-        // against.
-        let bottom_bar_height = scrub_bar_response.response.rect.height();
-        if let Some(prev_height) = self.last_bottom_bar_height {
-            let delta = bottom_bar_height - prev_height;
-            if delta.abs() > 0.5 {
-                if let Some(inner_rect) = ui.ctx().input(|i| i.viewport().inner_rect) {
-                    let new_size = egui::vec2(inner_rect.width(), (inner_rect.height() + delta).max(200.0));
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size));
-                }
-            }
-        }
-        self.last_bottom_bar_height = Some(bottom_bar_height);
-
-        let mut scroll_step: i32 = 0;
-
+        // Central panel: image always fills the available space with correct
+        // aspect ratio. No overflow, no panning. The user can resize the
+        // window freely — the image adapts. Zoom only controls the *window
+        // size* (handled below), not the rendering here.
         egui::CentralPanel::default().show_inside(ui, |ui| {
             let Some(loaded) = &self.stack else {
                 ui.centered_and_justified(|ui| {
@@ -533,38 +559,34 @@ impl eframe::App for ViewerApp {
 
             let available = ui.available_size();
             let aspect = w as f32 / h as f32;
-            let mut fitted = available;
-            if available.x / available.y.max(1.0) > aspect {
-                fitted.x = available.y * aspect;
+            // Fit the image inside the available area, preserving aspect.
+            let fitted = if available.x / available.y.max(1.0) > aspect {
+                egui::vec2(available.y * aspect, available.y)
             } else {
-                fitted.y = available.x / aspect.max(0.0001);
-            }
-            let padding_x = ((available.x - fitted.x).max(0.0)) * 0.5;
-            let padding_y = ((available.y - fitted.y).max(0.0)) * 0.5;
+                egui::vec2(available.x, available.x / aspect.max(0.0001))
+            };
+            let padding = (available - fitted) * 0.5;
 
-            ui.add_space(padding_y);
-            ui.horizontal(|ui| {
-                ui.add_space(padding_x);
-                let (rect, response) = ui.allocate_exact_size(fitted, egui::Sense::hover());
-                let response = response.on_hover_cursor(egui::CursorIcon::Crosshair);
-                ui.painter()
-                    .add(egui_wgpu::Callback::new_paint_callback(rect, crate::render::callback::ImagePaintCallback));
+            let (panel_rect, response) = ui.allocate_exact_size(available, egui::Sense::hover());
+            let response = response.on_hover_cursor(egui::CursorIcon::Crosshair);
 
-                // Scroll wheel over the image scrubs frames — the fast path
-                // for "speed through a huge movie" rather than dragging the
-                // bottom slider pixel by pixel. We only *record* the intent
-                // here; self.stack is borrowed immutably as `loaded` for
-                // this whole closure, so the actual mutation happens after
-                // this panel block returns.
-                if response.hovered() {
-                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                    if scroll < 0.0 {
-                        scroll_step = 1;
-                    } else if scroll > 0.0 {
-                        scroll_step = -1;
-                    }
+            let image_rect = egui::Rect::from_min_size(panel_rect.min + padding, fitted);
+            ui.painter().with_clip_rect(panel_rect).add(egui_wgpu::Callback::new_paint_callback(
+                image_rect,
+                crate::render::callback::ImagePaintCallback,
+            ));
+
+            // Plain scroll (no Ctrl) scrubs frames when hovering the image.
+            // Ctrl+scroll is consumed by egui's zoom_delta() above, so
+            // smooth_scroll_delta here is always zero when Ctrl is held.
+            if response.hovered() {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll < 0.0 {
+                    scroll_step = 1;
+                } else if scroll > 0.0 {
+                    scroll_step = -1;
                 }
-            });
+            }
         });
 
         if scroll_step != 0 {
@@ -578,12 +600,47 @@ impl eframe::App for ViewerApp {
             }
         }
 
+        if zoom_step != 0 {
+            self.zoom = (self.zoom + zoom_step as f32 * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
+        }
+
+        // Resize the window to match the zoom level, but only when the zoom
+        // or chrome height actually changes — so the user can freely resize
+        // the window manually without us fighting them back every frame.
+        // The image will then fill that new window (handled above), which is
+        // exactly the "manual resize fits image" behaviour the user wants.
+        let toolbar_height = toolbar_response.response.rect.height();
+        let bottom_bar_height = scrub_bar_response.response.rect.height();
+        let chrome_height = toolbar_height + bottom_bar_height;
+        if let Some(loaded) = &self.stack {
+            if let Some(first) = loaded.tiff.frames.first() {
+                let key = (self.zoom, chrome_height);
+                if self.last_zoom_resize != Some(key) {
+                    let w = (first.width as f32 * self.zoom).max(200.0);
+                    let h = (first.height as f32 * self.zoom + chrome_height).max(200.0);
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+                    self.last_zoom_resize = Some(key);
+                }
+            }
+        }
+
+        // Window title: loaded filename, or the app name when nothing is open.
+        let desired_title = match &self.stack {
+            Some(loaded) => {
+                let name = loaded.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                format!("{name} — FastTIFF")
+            }
+            None => "FastTIFF".to_string(),
+        };
+        if self.last_title.as_deref() != Some(desired_title.as_str()) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(desired_title.clone()));
+            self.last_title = Some(desired_title);
+        }
+
         if let Some(render_state) = frame.wgpu_render_state().cloned() {
             self.sync_gpu(&render_state);
         }
 
-        // Keep redrawing while a stack is open so drag/scroll scrubbing
-        // feels immediate rather than waiting for the next input event.
         if self.stack.is_some() {
             ui.ctx().request_repaint();
         }

@@ -243,7 +243,7 @@ fn opens_multi_frame_stack_and_reads_correct_pixels() {
         let frame = &stack.frames[i];
         assert_eq!(frame.width, width);
         assert_eq!(frame.height, height);
-        let pixels = tiff_core::read_frame_u16(&stack.mmap, frame, stack.byte_order).unwrap();
+        let pixels = tiff_core::read_frame_u16(&stack.mmap, frame, stack.byte_order, None).unwrap();
         assert_eq!(&*pixels, expected.as_slice(), "frame {i} pixel mismatch");
     }
 }
@@ -264,6 +264,33 @@ fn infers_frame_count_when_dimension_tags_absent() {
     assert_eq!(stack.frames.len(), 5);
     assert_eq!(stack.meta.frames, 5);
     assert_eq!(stack.meta.channels, 1);
+}
+
+#[test]
+fn ignores_non_imagej_description_text() {
+    // Some other software's free-form ImageDescription that happens to
+    // contain text shaped like "key=value" — including a line that would,
+    // if taken at face value, falsely claim 999 channels. Since it lacks
+    // ImageJ's own "ImageJ=" signature, none of it should be trusted; the
+    // frame count must still fall back to the real IFD count, exactly as
+    // if there were no description at all.
+    let width = 2;
+    let height = 2;
+    let frames: Vec<Vec<u16>> = (0..6).map(|f| vec![f as u16; 4]).collect();
+    let description = "Acquired with SomeOtherScope v3.2\nchannels=999\nmin=12345\nexposure=100ms";
+    let bytes = build_synthetic_tiff(width, height, &frames, description, None, None);
+
+    let path = unique_temp_path("non_imagej.tif");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let stack = TiffStack::open(&path).unwrap();
+    assert_eq!(stack.frames.len(), 6);
+    assert_eq!(stack.meta.channels, 1, "should not have picked up the fake channels=999");
+    assert_eq!(stack.meta.frames, 6, "should fall back to the real IFD count");
+    assert_eq!(
+        stack.meta.channel_display[0].range, None,
+        "should not have picked up the fake min=12345 with no matching max="
+    );
 }
 
 #[test]
@@ -301,4 +328,50 @@ fn parses_ij_metadata_luts_and_ranges() {
     assert_eq!(stack.meta.channel_display[1].range, Some((60.0, 600.0)));
     assert_eq!(stack.meta.channel_display[0].lut[128], [128, 0, 0]);
     assert_eq!(stack.meta.channel_display[1].lut[200], [0, 200, 0]);
+}
+
+#[test]
+fn rejects_stale_lut_block_with_mismatched_channel_count() {
+    // The actual reported bug: a genuinely single-channel grayscale file
+    // (channels=1 in ImageDescription) whose binary IJMetadata block still
+    // contains LUT/range entries for 2 channels — e.g. left over from
+    // before the file was reduced from a 2-channel acquisition down to 1.
+    // Applying the first of those stale entries to channel 0 would silently
+    // replace its correct grayscale LUT with red. The count mismatch
+    // (2 LUTs found, but only 1 channel) must be detected and the whole
+    // binary block ignored, falling back to the default grayscale LUT.
+    let width = 2;
+    let height = 2;
+    let frame0 = vec![10u16, 20, 30, 40];
+
+    let mut stale_red_lut = [[0u8; 3]; 256];
+    let mut stale_green_lut = [[0u8; 3]; 256];
+    for i in 0..256 {
+        stale_red_lut[i] = [i as u8, 0, 0];
+        stale_green_lut[i] = [0, i as u8, 0];
+    }
+    let (ij_bytes, ij_counts) =
+        build_ij_metadata_blob(&[(50.0, 500.0), (60.0, 600.0)], &[stale_red_lut, stale_green_lut]);
+
+    let bytes = build_synthetic_tiff(
+        width,
+        height,
+        &[frame0.clone()],
+        "ImageJ=1.54f\nimages=1\nchannels=1\nslices=1\nframes=1\nmode=grayscale\n",
+        Some(&ij_bytes),
+        Some(&ij_counts),
+    );
+
+    let path = unique_temp_path("stale_lut.tif");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let stack = TiffStack::open(&path).unwrap();
+    assert_eq!(stack.meta.channels, 1);
+    assert!(
+        !stack.meta.ij_metadata_parsed,
+        "mismatched-count LUT/range block should have been rejected entirely"
+    );
+    // Default grayscale LUT: identity ramp, not the stale red.
+    assert_eq!(stack.meta.channel_display[0].lut[128], [128, 128, 128]);
+    assert_eq!(stack.meta.channel_display[0].range, None);
 }

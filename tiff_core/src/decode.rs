@@ -2,21 +2,30 @@
 //! strips, native byte order, single strip per frame (ImageJ's default when
 //! saving raw stacks) — does zero decoding work at all: it's a direct
 //! reinterpret-cast of the memory-mapped file bytes. Everything else
-//! (LZW/Deflate/PackBits, multi-strip, predictor, byte-swap, 8-bit upcast)
-//! falls back to an owned `Vec<u16>`.
+//! (LZW/Deflate/PackBits, multi-strip, predictor, byte-swap, 8-bit upcast,
+//! 32-bit float) falls back to an owned `Vec<u16>`.
 
 use crate::ifd::ByteOrder;
-use crate::index::{Compression, FrameInfo};
+use crate::index::{Compression, FrameInfo, SampleFormat};
 use anyhow::{anyhow, bail, Result};
 use std::borrow::Cow;
 
-/// Decoded pixel data for one plane, always exposed as 16-bit samples
-/// (8-bit sources are upcast: `v -> (v << 8) | v`, which maps 0..255
-/// evenly onto 0..65535 and keeps the GPU window/level math uniform).
+/// Decoded pixel data for one plane, always exposed as 16-bit samples:
+/// - 8-bit sources are upcast (`v -> (v << 8) | v`, mapping 0..255 evenly
+///   onto 0..65535) so the GPU window/level math stays uniform.
+/// - 32-bit float sources are linearly rescaled into 0..65535 using
+///   `float_range` (the channel's display range, in the float data's own
+///   units — matching how ImageJ treats float images: contrast is defined
+///   over the data's actual value range, not assumed to already be
+///   16-bit-integer-shaped). Pass `None` to auto-range from this frame's
+///   own min/max (e.g. for an initial probe before a stable per-channel
+///   range has been established — see `frame_float_minmax`). Ignored for
+///   non-float sources.
 pub fn read_frame_u16<'a>(
     mmap: &'a [u8],
     frame: &FrameInfo,
     file_order: ByteOrder,
+    float_range: Option<(f32, f32)>,
 ) -> Result<Cow<'a, [u16]>> {
     let n_samples = frame.width as usize * frame.height as usize * frame.samples_per_pixel as usize;
 
@@ -40,63 +49,130 @@ pub fn read_frame_u16<'a>(
         // Misaligned (rare) — fall through to the owned path.
     }
 
-    // --- General path: assemble strips, decompress, undo predictor, upcast/byteswap ---
-    let raw_bytes = assemble_strip_bytes(mmap, frame)?;
+    // --- General path ---
+    let native_bytes = decode_native_bytes(mmap, frame, file_order)?;
+
+    let mut out = vec![0u16; n_samples];
+    match frame.bits_per_sample {
+        16 => {
+            for (i, chunk) in native_bytes.chunks_exact(2).enumerate().take(n_samples) {
+                out[i] = file_order.u16(chunk);
+            }
+        }
+        8 => {
+            for (i, &b) in native_bytes.iter().enumerate().take(n_samples) {
+                out[i] = ((b as u16) << 8) | b as u16;
+            }
+        }
+        32 => {
+            let floats = bytes_to_f32(&native_bytes, file_order, n_samples);
+            let (lo, hi) = float_range.unwrap_or_else(|| minmax_f32(&floats));
+            let span = (hi - lo).max(f32::EPSILON);
+            for (i, &v) in floats.iter().enumerate() {
+                let t = ((v - lo) / span).clamp(0.0, 1.0);
+                out[i] = (t * 65535.0).round() as u16;
+            }
+        }
+        _ => unreachable!(), // decode_native_bytes already rejects anything else
+    }
+
+    Ok(Cow::Owned(out))
+}
+
+/// The actual min/max of a 32-bit float frame's raw values — used to
+/// establish a channel's initial display range, the same way ImageJ
+/// auto-ranges a float image to its own data instead of assuming a fixed
+/// scale. `None` for non-float frames.
+pub fn frame_float_minmax(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Option<(f32, f32)>> {
+    if frame.sample_format != SampleFormat::Float || frame.bits_per_sample != 32 {
+        return Ok(None);
+    }
+    let native_bytes = decode_native_bytes(mmap, frame, file_order)?;
+    let n_samples = frame.width as usize * frame.height as usize * frame.samples_per_pixel as usize;
+    Ok(Some(minmax_f32(&bytes_to_f32(&native_bytes, file_order, n_samples))))
+}
+
+fn bytes_to_f32(bytes: &[u8], file_order: ByteOrder, n_samples: usize) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .take(n_samples)
+        .map(|chunk| {
+            let arr: [u8; 4] = chunk.try_into().unwrap();
+            match file_order {
+                ByteOrder::Little => f32::from_le_bytes(arr),
+                ByteOrder::Big => f32::from_be_bytes(arr),
+            }
+        })
+        .collect()
+}
+
+fn minmax_f32(values: &[f32]) -> (f32, f32) {
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for &v in values {
+        if v.is_finite() {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    if !lo.is_finite() || !hi.is_finite() || hi <= lo {
+        (0.0, 1.0) // empty / all-NaN / constant data -- avoid a zero-width window downstream
+    } else {
+        (lo, hi)
+    }
+}
+
+/// Assembles a frame's full pixel data in native sample units (still
+/// subject to byte-order interpretation, and with TIFF Predictor=2 already
+/// undone). Decompresses **each strip independently** before concatenating.
+///
+/// TIFF strips are independently-compressed units — each one has its own
+/// LZW dictionary / zlib stream, started fresh. Concatenating *compressed*
+/// bytes across strips and decompressing once (what an earlier version of
+/// this function did) feeds the decoder strip 2's stream header as if it
+/// were a continuation of strip 1's stream, which is invalid input; the
+/// decoder stops there, silently truncating the result to roughly strip
+/// 1's worth of data. For a typical 2-strip image that's exactly "only the
+/// top half is shown" — this is what that bug looked like in practice.
+fn decode_native_bytes(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Vec<u8>> {
     let sample_bytes = match frame.bits_per_sample {
         16 => 2,
         8 => 1,
         32 => 4,
         other => bail!("unsupported bits_per_sample: {other}"),
     };
+    let row_bytes = frame.width as usize * frame.samples_per_pixel as usize * sample_bytes;
+    let total_rows = frame.height as usize;
+    let rows_per_strip = (frame.rows_per_strip as usize).max(1);
 
-    let decompressed = decompress(&raw_bytes, frame.compression, n_samples * sample_bytes)?;
-    let unpredicted = undo_predictor(decompressed, frame, sample_bytes, file_order)?;
-
-    let mut out = vec![0u16; n_samples];
-    match frame.bits_per_sample {
-        16 => {
-            for (i, chunk) in unpredicted.chunks_exact(2).enumerate().take(n_samples) {
-                out[i] = file_order.u16(chunk);
-            }
-        }
-        8 => {
-            for (i, &b) in unpredicted.iter().enumerate().take(n_samples) {
-                out[i] = ((b as u16) << 8) | b as u16;
-            }
-        }
-        32 => {
-            // 32-bit float data, common for processed/ratiometric stacks.
-            // Window/level on the GPU expects integer-ish sample units, so
-            // we rescale into u16 space using the frame's own min/max here
-            // as a simple normalization; true float display range should
-            // come from ImageDescription min=/max= when present (handled
-            // by the caller, which still treats this as "raw sample units"
-            // scaled the same way).
-            for (i, chunk) in unpredicted.chunks_exact(4).enumerate().take(n_samples) {
-                let arr: [u8; 4] = chunk.try_into().unwrap();
-                let f = match file_order {
-                    ByteOrder::Little => f32::from_le_bytes(arr),
-                    ByteOrder::Big => f32::from_be_bytes(arr),
-                };
-                out[i] = f.clamp(0.0, 65535.0) as u16;
-            }
-        }
-        _ => unreachable!(),
-    }
-
-    Ok(Cow::Owned(out))
-}
-
-fn assemble_strip_bytes(mmap: &[u8], frame: &FrameInfo) -> Result<Vec<u8>> {
-    let total: u64 = frame.strip_byte_counts.iter().sum();
-    let mut out = Vec::with_capacity(total as usize);
+    let mut native = Vec::with_capacity(total_rows * row_bytes);
+    let mut rows_done = 0usize;
     for (&offset, &len) in frame.strip_offsets.iter().zip(frame.strip_byte_counts.iter()) {
-        let slice = mmap
+        let raw_strip = mmap
             .get(offset as usize..(offset + len) as usize)
             .ok_or_else(|| anyhow!("strip at offset {offset} (len {len}) out of file bounds"))?;
-        out.extend_from_slice(slice);
+        // The last strip may legitimately have fewer rows than
+        // `rows_per_strip` if the image height doesn't divide evenly.
+        let rows_this_strip = rows_per_strip.min(total_rows.saturating_sub(rows_done));
+        let expected_len = rows_this_strip * row_bytes;
+        native.extend_from_slice(&decompress(raw_strip, frame.compression, expected_len)?);
+        rows_done += rows_this_strip;
     }
-    Ok(out)
+
+    if native.len() < total_rows * row_bytes {
+        bail!(
+            "decoded {} bytes but expected {} for a {}x{} frame ({} bytes/sample) — \
+             strip data is shorter than the declared image size",
+            native.len(),
+            total_rows * row_bytes,
+            frame.width,
+            frame.height,
+            sample_bytes
+        );
+    }
+
+    let unpredicted = undo_predictor(native, frame, sample_bytes, file_order)?;
+    Ok(unpredicted)
 }
 
 fn decompress(raw: &[u8], compression: Compression, expected_len: usize) -> Result<Vec<u8>> {
@@ -155,7 +231,11 @@ fn packbits_decode(input: &[u8], expected_len: usize) -> Vec<u8> {
 /// Undo TIFF Predictor=2 (horizontal differencing). Operates per scanline,
 /// per sample (so RGB/multi-sample data differences each channel
 /// independently), matching the TIFF6 spec. Reads/writes in `file_order`
-/// since this runs before the final byte-order normalization pass.
+/// since this runs before the final byte-order normalization pass. Strip
+/// boundaries are always a whole number of rows, so running this once on
+/// the full concatenated buffer (rather than per-strip before
+/// concatenating) gives the same result, since differencing resets at
+/// every row regardless of which strip it came from.
 fn undo_predictor(
     mut data: Vec<u8>,
     frame: &FrameInfo,
@@ -288,5 +368,142 @@ mod tests {
             out[i] = ByteOrder::Big.u16(chunk);
         }
         assert_eq!(out, original);
+    }
+
+    #[test]
+    fn minmax_f32_handles_normal_nan_and_constant_data() {
+        assert_eq!(minmax_f32(&[1.5, -2.0, 3.25, f32::NAN]), (-2.0, 3.25));
+        assert_eq!(minmax_f32(&[]), (0.0, 1.0));
+        assert_eq!(minmax_f32(&[f32::NAN, f32::NAN]), (0.0, 1.0));
+        assert_eq!(minmax_f32(&[4.0, 4.0, 4.0]), (0.0, 1.0)); // constant -- no usable span
+    }
+
+    fn float_frame(width: u32, height: u32) -> FrameInfo {
+        FrameInfo {
+            width,
+            height,
+            bits_per_sample: 32,
+            samples_per_pixel: 1,
+            sample_format: SampleFormat::Float,
+            compression: Compression::None,
+            predictor: 1,
+            strip_offsets: vec![0],
+            strip_byte_counts: vec![(width * height * 4) as u64],
+            rows_per_strip: height,
+        }
+    }
+
+    #[test]
+    fn float_data_rescales_like_imagej_auto_contrast() {
+        // Not 0..65535-shaped at all -- a realistic ratiometric range.
+        let values: [f32; 4] = [-0.5, 0.0, 1.0, 2.5];
+        let mut file = Vec::new();
+        for v in values {
+            file.extend_from_slice(&v.to_le_bytes());
+        }
+        let frame = float_frame(2, 2);
+
+        // float_range = None -> auto-ranges to this frame's own min/max,
+        // same as ImageJ auto-contrasting a float image to its own data.
+        let pixels = read_frame_u16(&file, &frame, ByteOrder::Little, None).unwrap();
+        assert_eq!(pixels[0], 0, "min value should map to 0");
+        assert_eq!(pixels[3], 65535, "max value should map to 65535");
+        // 0.0 is 1/6 of the way from -0.5 to 2.5.
+        let expected_mid = (65535.0_f64 * (1.0 / 6.0)).round() as u16;
+        assert!(
+            pixels[1].abs_diff(expected_mid) <= 1,
+            "got {}, expected close to {expected_mid}",
+            pixels[1]
+        );
+    }
+
+    #[test]
+    fn float_data_respects_an_explicit_range() {
+        // A fixed display range, e.g. one established from the first frame
+        // and reused for every subsequent frame in the same channel so
+        // contrast doesn't jump around as you scrub.
+        let values: [f32; 2] = [0.0, 10.0];
+        let mut file = Vec::new();
+        for v in values {
+            file.extend_from_slice(&v.to_le_bytes());
+        }
+        let frame = float_frame(2, 1);
+
+        let pixels = read_frame_u16(&file, &frame, ByteOrder::Little, Some((0.0, 100.0))).unwrap();
+        assert_eq!(pixels[0], 0);
+        // 10.0 out of a 0..100 range is exactly 10%.
+        let expected = (65535.0_f64 * 0.10).round() as u16;
+        assert!(pixels[1].abs_diff(expected) <= 1);
+    }
+
+    #[test]
+    fn frame_float_minmax_matches_actual_data() {
+        let values: [f32; 3] = [-3.0, 0.5, 7.0];
+        let mut file = Vec::new();
+        for v in values {
+            file.extend_from_slice(&v.to_le_bytes());
+        }
+        let frame = float_frame(3, 1);
+        let range = frame_float_minmax(&file, &frame, ByteOrder::Little).unwrap();
+        assert_eq!(range, Some((-3.0, 7.0)));
+    }
+
+    #[test]
+    fn frame_float_minmax_is_none_for_integer_frames() {
+        let frame = make_frame(2, 2, 1);
+        let file = vec![0u8; 8];
+        assert_eq!(frame_float_minmax(&file, &frame, ByteOrder::Little).unwrap(), None);
+    }
+
+    /// The actual bug: two strips, each independently LZW-compressed (a
+    /// fresh `Encoder` per strip, exactly like a real multi-strip TIFF
+    /// writer would produce). Concatenating the *compressed* bytes and
+    /// decompressing once — the old behavior — silently stops at roughly
+    /// strip 1's data. This proves the per-strip fix actually decodes both.
+    #[test]
+    fn multi_strip_lzw_decodes_past_the_first_strip() {
+        let width = 4usize;
+        let height = 4usize; // two 2-row strips
+        let rows_per_strip = 2usize;
+
+        let top: Vec<u16> = (0..(width * rows_per_strip) as u16).collect(); // 0..8
+        let bottom: Vec<u16> = (100..100 + (width * rows_per_strip) as u16).collect(); // 100..108
+
+        let encode_strip = |pixels: &[u16]| -> Vec<u8> {
+            let mut raw_bytes = Vec::new();
+            for &v in pixels {
+                raw_bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            weezl::encode::Encoder::new(weezl::BitOrder::Msb, 8)
+                .encode(&raw_bytes)
+                .expect("LZW encode failed in test setup")
+        };
+
+        let top_compressed = encode_strip(&top);
+        let bottom_compressed = encode_strip(&bottom);
+
+        // Lay the two compressed strips out in a fake "file" buffer.
+        let mut fake_file = Vec::new();
+        fake_file.extend_from_slice(&top_compressed);
+        let bottom_offset = fake_file.len() as u64;
+        fake_file.extend_from_slice(&bottom_compressed);
+
+        let frame = FrameInfo {
+            width: width as u32,
+            height: height as u32,
+            bits_per_sample: 16,
+            samples_per_pixel: 1,
+            sample_format: SampleFormat::UnsignedInt,
+            compression: Compression::Lzw,
+            predictor: 1,
+            strip_offsets: vec![0, bottom_offset],
+            strip_byte_counts: vec![top_compressed.len() as u64, bottom_compressed.len() as u64],
+            rows_per_strip: rows_per_strip as u32,
+        };
+
+        let pixels = read_frame_u16(&fake_file, &frame, ByteOrder::Little, None).expect("decode failed");
+        let mut expected = top.clone();
+        expected.extend_from_slice(&bottom);
+        assert_eq!(&*pixels, expected.as_slice(), "bottom strip's pixels are missing or wrong");
     }
 }
