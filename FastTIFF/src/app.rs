@@ -10,8 +10,8 @@ use egui::{Color32, RichText};
 use std::path::PathBuf;
 use tiff_core::TiffStack;
 
-const ZOOM_STEP: f32 = 1.0;
-const MIN_ZOOM: f32 = 1.0;
+const ZOOM_STEP: f32 = 0.1;
+const MIN_ZOOM: f32 = 0.2;
 const MAX_ZOOM: f32 = 8.0;
 
 #[derive(Clone, Copy)]
@@ -60,10 +60,9 @@ pub struct ViewerApp {
     /// value (whether from zooming or from the user manually resizing).
     /// Resets to 1.0 on every file load.
     zoom: f32,
-    /// The (zoom, chrome_height) pair we last resized the window in response
-    /// to. Resizing is only sent when this actually changes — so the user can
-    /// freely resize the window manually without us fighting them back.
-    last_zoom_resize: Option<(f32, f32)>,
+    /// The last window width we computed height for, to avoid sending a resize
+    /// command every frame when nothing has changed.
+    last_enforced_w: Option<f32>,
     /// The window title last sent via `ViewportCommand::Title`.
     last_title: Option<String>,
 }
@@ -75,7 +74,7 @@ impl ViewerApp {
             status: None,
             channels_panel_expanded: false,
             zoom: 1.0,
-            last_zoom_resize: None,
+            last_enforced_w: None,
             last_title: None,
         };
         if let Some(path) = initial_path {
@@ -108,7 +107,7 @@ impl ViewerApp {
                 self.stack = Some(loaded);
                 // Reset to native 1:1 on every fresh load.
                 self.zoom = 1.0;
-                self.last_zoom_resize = None;
+                self.last_enforced_w = None;
             }
             Err(e) => {
                 self.status = Some(format!("Failed to open {}: {e:#}", path.display()));
@@ -344,7 +343,7 @@ impl eframe::App for ViewerApp {
         // `zoom_delta()` is the correct API: egui routes Ctrl+scroll into
         // `zoom_factor_delta` rather than `smooth_scroll_delta`, so checking
         // smooth_delta while Ctrl is held would always be zero.
-        let mut zoom_step: i32 = ui.input(|i| {
+        let zoom_step: i32 = ui.input(|i| {
             let d = i.zoom_delta();
             let from_scroll = if d > 1.05 { 1 } else if d < 0.95 { -1 } else { 0 };
             let from_keys = if i.modifiers.ctrl
@@ -360,7 +359,7 @@ impl eframe::App for ViewerApp {
             (from_scroll + from_keys).clamp(-1, 1)
         });
 
-        let toolbar_response = egui::TopBottomPanel::top("toolbar").show_inside(ui, |ui| {
+        let toolbar_response = egui::Panel::top("toolbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open TIFF...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
@@ -402,7 +401,7 @@ impl eframe::App for ViewerApp {
         let mut scroll_step: i32 = 0;
         let current_status = self.status.clone();
 
-        let scrub_bar_response = egui::TopBottomPanel::bottom("scrub_bar").show_inside(ui, |ui| {
+        let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
             let Some(loaded) = &mut self.stack else {
                 ui.label("Open a TIFF stack to begin.");
                 return;
@@ -604,22 +603,31 @@ impl eframe::App for ViewerApp {
             self.zoom = (self.zoom + zoom_step as f32 * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
         }
 
-        // Resize the window to match the zoom level, but only when the zoom
-        // or chrome height actually changes — so the user can freely resize
-        // the window manually without us fighting them back every frame.
-        // The image will then fill that new window (handled above), which is
-        // exactly the "manual resize fits image" behaviour the user wants.
+        // Enforce aspect ratio every frame: height always follows width so the
+        // window can only be resized proportionally (as if dragging diagonally).
+        // Zoom overrides the width directly; manual resizing the width is fine
+        // and height will snap to match. Sending InnerSize is skipped when the
+        // current width hasn't changed to avoid a resize command every frame.
         let toolbar_height = toolbar_response.response.rect.height();
         let bottom_bar_height = scrub_bar_response.response.rect.height();
         let chrome_height = toolbar_height + bottom_bar_height;
         if let Some(loaded) = &self.stack {
             if let Some(first) = loaded.tiff.frames.first() {
-                let key = (self.zoom, chrome_height);
-                if self.last_zoom_resize != Some(key) {
-                    let w = (first.width as f32 * self.zoom).max(200.0);
-                    let h = (first.height as f32 * self.zoom + chrome_height).max(200.0);
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
-                    self.last_zoom_resize = Some(key);
+                let img_w = first.width as f32;
+                let img_h = first.height as f32;
+                let aspect = img_w / img_h.max(1.0);
+
+                let screen_w = ui.ctx().content_rect().width();
+                let target_w = if zoom_step != 0 {
+                    (img_w * self.zoom).max(200.0)
+                } else {
+                    screen_w.max(200.0)
+                };
+                let target_h = (target_w / aspect + chrome_height).max(200.0);
+
+                if self.last_enforced_w != Some(target_w) || zoom_step != 0 {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(target_w, target_h)));
+                    self.last_enforced_w = Some(target_w);
                 }
             }
         }
