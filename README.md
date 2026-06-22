@@ -9,7 +9,7 @@ Open a stack via the "Open TIFF..." button or by dragging a `.tif`/`.tiff`
 file onto the window. Scrub with the bottom slider, the mouse wheel while
 hovering over the image, or the left/right arrow keys.
 
-Download from the release page:
+Downloads here:
 https://github.com/konung-yaropolk/FastTIFF/releases
 
 <img width="1137" height="923" alt="Untitled" src="https://github.com/user-attachments/assets/e3fe4619-bd53-4b68-bf7f-019231cf20a6" />
