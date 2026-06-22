@@ -2,7 +2,7 @@
 name = "FastTIFF"
 version = "0.1.6"
 edition = "2021"
-description = "Fast multi-frame TIFF stack viewer with ImageJ-compatible LUT/contrast rendering."
+description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering."
 
 [dependencies]
 tiff_core = { path = "../tiff_core" }
@@ -23,5 +23,5 @@ winres = "0.1.12"
 [package.metadata.winres]
 OriginalFilename = "FastTIFF"
 LegalCopyright = "konung_yaropolk © 2026"
-FileDescription = "A fast multi-frame TIFF stack viewer for huge ImageJ hyperstacks"
-ProductName = "FastTIFF"
+FileDescription = "Fast TIFF Viewer"
+ProductName = "Fast TIFF Viewer"

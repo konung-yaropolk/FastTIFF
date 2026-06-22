@@ -1,4 +1,4 @@
-# FastTIFF
+# FastTIFF - a lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering
 
 A fast multi-frame TIFF stack viewer for huge ImageJ hyperstacks: a horizontal
 scrubber instead of ImageJ's slice slider, GPU-side LUT/contrast rendering,
@@ -76,20 +76,24 @@ ROIs, measurements, image processing, saving/exporting, zoom/pan. All
 straightforward to add later on top of this structure if you want them —
 the render pipeline already separates "decode" from "display" cleanly.
 
-## Deprecated: the binary IJMetadata block (tags 50838/50839)
+## The binary IJMetadata block (tags 50838/50839): supplementary fallback
 
 ImageJ's `ImageDescription` text block (channels/slices/frames/min/max) is
-well documented and the parser for it is solid. The binary `IJMetadata` /
-`IJMetadataByteCounts` tags (which carry per-channel custom LUTs and
-display ranges for composite stacks) are **not officially documented**, and
-in practice two otherwise-identical files could render differently purely
-because of inconsistencies in this block.
+well documented and the parser for it is solid and authoritative. The binary
+`IJMetadata` / `IJMetadataByteCounts` tags (which carry per-channel custom
+LUTs and display ranges for composite stacks) are **not officially
+documented**, so they're read only as a **supplementary fallback**: they fill
+in display info `ImageDescription` didn't provide — a per-channel display
+range when there's no `min=`/`max=`, and per-channel composite LUTs (which the
+text block never carries).
 
-These tags are therefore **no longer read**. All display metadata comes
-from `ImageDescription` alone: composite-channel colors use a standard
-cycling palette, and contrast uses `min=`/`max=` from the description (or
-auto-contrast from the data when that's absent). The former best-effort
-binary parser was removed — see git history if it ever needs reviving.
+They **never override** a value tag 270 already specified, so two files with
+the same `ImageDescription` can't render differently in any axis that text
+controls. The parser is defensive: it requires an exact per-channel count
+match before trusting the block (a mismatched block is treated as stale and
+ignored), and it leaves grayscale-mode stacks grayscale rather than tinting
+them. If composite colors still look off on a real file, this block is the
+thing to look at.
 
 ## Known caveat: plane ordering assumption
 

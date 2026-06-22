@@ -7,15 +7,18 @@
 //!
 //! 2. `IJMetadata` / `IJMetadataByteCounts` (tags 50839 / 50838): a binary
 //!    blob containing per-channel LUTs, display ranges, slice labels, ROIs,
-//!    etc. **This format is not officially documented by ImageJ**, and reading
-//!    it caused otherwise-identical files to render differently depending on
-//!    inconsistencies in this block. It is therefore **no longer read** — all
-//!    display metadata now comes from the `ImageDescription` text above.
-//!    Composite-channel colors fall back to a standard cycling palette and
-//!    contrast falls back to the file's `min=`/`max=` (or the data's own
-//!    min/max). The former best-effort binary parser was removed; see git
-//!    history if it ever needs to be revived.
+//!    etc. **This format is not officially documented by ImageJ** — the parser
+//!    below is reconstructed from known open-source readers and is best-effort.
+//!    It is read only as a **supplementary fallback**: it fills in display
+//!    information the `ImageDescription` text didn't provide (a per-channel
+//!    display range when there's no `min=`/`max=`, and per-channel composite
+//!    LUTs, which `ImageDescription` never carries). It never overrides a value
+//!    that tag 270 already specified — so it can't make two files with the same
+//!    `ImageDescription` render differently in any axis that text controls.
+//!    Every step is defensive and requires an exact channel-count match before
+//!    trusting the block, falling back to defaults on any inconsistency.
 
+use crate::ifd::ByteOrder;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -310,7 +313,12 @@ fn parse_description(desc: &str) -> HashMap<String, String> {
     map
 }
 
-pub fn build_stack_meta(description: Option<&str>, total_ifds: usize) -> StackMeta {
+pub fn build_stack_meta(
+    description: Option<&str>,
+    ij_metadata: Option<&[u8]>,
+    ij_metadata_counts: Option<&[u32]>,
+    total_ifds: usize,
+) -> StackMeta {
     // Only parse ImageDescription as ImageJ's key=value format if it
     // actually carries ImageJ's own signature. A TIFF written by something
     // else entirely (a different microscopy package, a generic image
@@ -367,12 +375,47 @@ pub fn build_stack_meta(description: Option<&str>, total_ifds: usize) -> StackMe
 
     let fps = get_f64("fps").filter(|f| *f > 0.0);
 
-    let channel_display: Vec<ChannelDisplay> = (0..channels)
+    let mut channel_display: Vec<ChannelDisplay> = (0..channels)
         .map(|c| ChannelDisplay {
             lut: default_lut_for(mode, c),
             range: global_range,
         })
         .collect();
+
+    // Supplement (never override) the above from the binary IJMetadata block,
+    // filling only what ImageDescription didn't provide. A correctly-formed
+    // block has exactly one range-pair and one LUT per channel; we require that
+    // exact count match before trusting it (a mismatched block is stale — e.g.
+    // left over from before the file was reduced to fewer channels — so it's
+    // ignored entirely rather than misattributed).
+    if let (Some(data), Some(counts)) = (ij_metadata, ij_metadata_counts) {
+        let blocks = try_parse_ij_blocks(data, counts, ByteOrder::Big)
+            .or_else(|| try_parse_ij_blocks(data, counts, ByteOrder::Little));
+        if let Some(blocks) = blocks {
+            // Display range: only as a fallback when ImageDescription gave no
+            // `min=`/`max=` window at all.
+            if global_range.is_none() {
+                if let Some(ranges) = &blocks.ranges {
+                    if ranges.len() == channels {
+                        for (disp, &r) in channel_display.iter_mut().zip(ranges.iter()) {
+                            if r.1 > r.0 && r.0.is_finite() && r.1.is_finite() {
+                                disp.range = Some(r);
+                            }
+                        }
+                    }
+                }
+            }
+            // Per-channel LUTs: ImageDescription only carries `mode=`, never the
+            // actual colors, so a count-matched LUT block is the genuine source
+            // of custom composite colors. Skip it for grayscale mode, where the
+            // color isn't "missing" — the file explicitly asked for grayscale.
+            if mode != DisplayMode::Grayscale && blocks.luts.len() == channels {
+                for (disp, lut) in channel_display.iter_mut().zip(blocks.luts.iter()) {
+                    disp.lut = *lut;
+                }
+            }
+        }
+    }
 
     StackMeta {
         channels,
@@ -385,4 +428,97 @@ pub fn build_stack_meta(description: Option<&str>, total_ifds: usize) -> StackMe
         calibration,
         fps,
     }
+}
+
+struct IjBlocks {
+    ranges: Option<Vec<(f64, f64)>>,
+    luts: Vec<[[u8; 3]; 256]>,
+}
+
+/// Best-effort parse of the IJMetadata directory format. Returns `None` on
+/// any structural inconsistency rather than guessing — callers fall back to
+/// defaults in that case. See module docs for the honesty caveat here.
+fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32], header_order: ByteOrder) -> Option<IjBlocks> {
+    if byte_counts.is_empty() {
+        return None;
+    }
+    let header_len = *byte_counts.first()? as usize;
+    let header = data.get(..header_len)?;
+
+    // Header is a sequence of 8-byte records: 4-byte ASCII type code + a
+    // 4-byte count. The on-disk endianness of this internal directory isn't
+    // officially documented; we try big-endian first (consistent with this
+    // block being written by Java's DataOutputStream) and fall back to
+    // little-endian if that doesn't produce a structurally consistent plan.
+    if header_len % 8 != 0 {
+        return None;
+    }
+    let mut plan: Vec<([u8; 4], usize)> = Vec::new();
+    for chunk in header.chunks_exact(8) {
+        let mut code = [0u8; 4];
+        code.copy_from_slice(&chunk[0..4]);
+        if !code.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
+            return None; // doesn't look like a real type code; bail out
+        }
+        let count = header_order.u32(&chunk[4..8]) as usize;
+        plan.push((code, count));
+    }
+
+    let expanded: usize = plan.iter().map(|(_, n)| n).sum();
+    if byte_counts.len() != 1 + expanded {
+        return None; // doesn't match our assumed layout
+    }
+
+    let mut cursor = header_len;
+    let mut block_idx = 1; // byte_counts[0] was the header itself
+    let mut ranges: Option<Vec<(f64, f64)>> = None;
+    let mut luts: Vec<[[u8; 3]; 256]> = Vec::new();
+
+    for (code, n) in plan {
+        for _ in 0..n {
+            let len = *byte_counts.get(block_idx)? as usize;
+            let block = data.get(cursor..cursor + len)?;
+            cursor += len;
+            block_idx += 1;
+
+            match &code {
+                b"rang" => {
+                    // n channel pairs of f64 (min, max), same endianness as the directory.
+                    let mut parsed = Vec::new();
+                    for pair in block.chunks_exact(16) {
+                        let lo = header_order.f64_from(&pair[0..8]);
+                        let hi = header_order.f64_from(&pair[8..16]);
+                        parsed.push((lo, hi));
+                    }
+                    if !parsed.is_empty() {
+                        ranges = Some(parsed);
+                    }
+                }
+                b"luts" => {
+                    // 768 bytes: 256 R, then 256 G, then 256 B (planar, not interleaved).
+                    if block.len() == 768 {
+                        let mut lut = [[0u8; 3]; 256];
+                        for i in 0..256 {
+                            lut[i] = [block[i], block[256 + i], block[512 + i]];
+                        }
+                        luts.push(lut);
+                    }
+                }
+                _ => { /* info / labl / roi / over / plot: not needed for rendering */ }
+            }
+        }
+    }
+
+    if ranges.is_none() && luts.is_empty() {
+        return None;
+    }
+    if cursor != data.len() {
+        // A correct parse should land exactly on the end of the buffer.
+        // Landing short or overrunning means the directory was
+        // misinterpreted somewhere — possibly correctly counting total
+        // bytes by coincidence while misattributing which bytes belong to
+        // which block type. Don't trust a result we can't fully account for.
+        return None;
+    }
+    Some(IjBlocks { ranges, luts })
 }

@@ -13,6 +13,30 @@ use tiff_core::TiffStack;
 const ZOOM_STEP: f32 = 0.1;
 const MIN_ZOOM: f32 = 0.2;
 const MAX_ZOOM: f32 = 8.0;
+/// Granularity of the initial fit-to-screen zoom: the opening scale is always
+/// a multiple of this (1.0, 0.8, 0.6, …), never an awkward fraction.
+const FIT_ZOOM_STEP: f32 = 0.2;
+
+/// The opening zoom for a freshly loaded image: 1.0 (100%, one window pixel per
+/// image pixel) when it fits the monitor, otherwise the largest `FIT_ZOOM_STEP`
+/// multiple at which the image plus chrome still fits the monitor's work area.
+/// Returns `None` when the monitor size isn't reported yet (caller should keep
+/// waiting rather than guess) so a huge image never briefly opens oversized.
+fn initial_fit_zoom(ctx: &egui::Context, img_w: f32, img_h: f32, chrome_h: f32) -> Option<f32> {
+    let monitor = ctx.input(|i| i.viewport().monitor_size)?;
+    // Leave headroom for the title bar, taskbar, and window borders.
+    let avail_w = (monitor.x * 0.95).max(1.0);
+    let avail_h = (monitor.y * 0.90).max(1.0);
+    let mut z = 1.0_f32;
+    while z > FIT_ZOOM_STEP {
+        if img_w * z <= avail_w && img_h * z + chrome_h <= avail_h {
+            break;
+        }
+        z -= FIT_ZOOM_STEP;
+    }
+    // Snap off the float error from repeated subtraction; clamp to [0.2, 1.0].
+    Some(((z / FIT_ZOOM_STEP).round() * FIT_ZOOM_STEP).clamp(MIN_ZOOM, 1.0))
+}
 
 #[derive(Clone, Copy)]
 struct ChannelSettings {
@@ -64,18 +88,21 @@ pub struct ViewerApp {
     /// Channel buttons + contrast sliders are tucked under a small
     /// triangle toggle to keep the bar minimal by default.
     channels_panel_expanded: bool,
-    /// Zoom factor: 1.0 = window sized to native image pixels.
-    /// Controls the desired *window size* only — the image always fits the
-    /// available canvas with aspect ratio preserved regardless of this
-    /// value (whether from zooming or from the user manually resizing).
-    /// Resets to 1.0 on every file load.
+    /// Zoom factor used the last time we sized the window: 1.0 = one window
+    /// pixel per image pixel. The window is only ever resized in response to an
+    /// explicit event (opening a file, or a zoom in/out) — never every frame —
+    /// so the user can freely resize or maximize the window. Between those
+    /// events the image just scales to fit the window with its aspect ratio
+    /// locked (letterboxed), handled entirely in the central panel.
     zoom: f32,
-    /// The last `(window_width, chrome_height)` we resized for, to avoid
-    /// sending a resize command every frame when nothing has changed. Tracking
-    /// chrome height too means expanding/collapsing the bottom panel grows or
-    /// shrinks the window by that panel's height — keeping the image area
-    /// (and everything above it) put instead of squeezing it.
-    last_enforced: Option<(f32, f32)>,
+    /// Set when a file is opened: the next frame computes an initial fit-to-
+    /// screen zoom (largest 0.2 step ≤ 1.0 that fits the monitor) and sizes the
+    /// window once. Deferred to `ui()` because the chrome height and monitor
+    /// size aren't known yet at open time.
+    pending_initial_fit: bool,
+    /// Set when something (initial fit or a zoom step) wants the window resized
+    /// to match `zoom` on this frame. Applied once, then cleared.
+    resize_to_zoom: bool,
     /// The window title last sent via `ViewportCommand::Title`.
     last_title: Option<String>,
     /// Whether the stack is auto-advancing (looped playback).
@@ -99,7 +126,8 @@ impl ViewerApp {
             status: None,
             channels_panel_expanded: false,
             zoom: 1.0,
-            last_enforced: None,
+            pending_initial_fit: false,
+            resize_to_zoom: false,
             last_title: None,
             playing: false,
             last_play_time: None,
@@ -139,9 +167,11 @@ impl ViewerApp {
 
                 self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
                 self.stack = Some(loaded);
-                // Reset to native 1:1 on every fresh load.
+                // Start at 1:1; the next frame computes a fit-to-screen zoom
+                // (≤ 1.0, in 0.2 steps) and sizes the window once.
                 self.zoom = 1.0;
-                self.last_enforced = None;
+                self.pending_initial_fit = true;
+                self.resize_to_zoom = false;
                 self.playing = false;
                 self.last_play_time = None;
                 self.play_accumulator = 0.0;
@@ -277,18 +307,25 @@ fn first_frame_float_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f3
     tiff_core::frame_float_minmax(&tiff.mmap, frame, tiff.byte_order).ok()?
 }
 
-/// Resizes `meta.channel_display` to `new_channels` entries. The display
-/// range is preserved per-channel where the index still exists, but the LUT
-/// is always regenerated from the stack's `mode` — so collapsing a
-/// mislabeled `channels=N` stack down to a single grayscale channel (see
-/// `resolve_dimensions`) doesn't leave channel 0 wearing a stale composite
-/// (e.g. red) LUT.
+/// Resizes `meta.channel_display` to `new_channels` entries, preserving the
+/// per-channel display range. When the channel count is *unchanged* (the usual
+/// case after `resolve_dimensions`), the existing LUTs are kept — including any
+/// custom per-channel colors supplied by the IJMetadata block. When the count
+/// *changes* (a mislabeled `channels=N` collapsing to a single channel, or a
+/// manual channels/frames swap), the old LUTs no longer correspond to the new
+/// channels, so they're regenerated from `mode` — which also avoids leaving a
+/// collapsed grayscale stack wearing a stale composite (e.g. red) LUT.
 fn resize_channel_display(meta: &mut tiff_core::StackMeta, new_channels: usize) {
     let old = std::mem::take(&mut meta.channel_display);
     let mode = meta.mode;
+    let keep_luts = new_channels == old.len();
     meta.channel_display = (0..new_channels)
         .map(|c| tiff_core::ChannelDisplay {
-            lut: tiff_core::default_lut_for(mode, c),
+            lut: if keep_luts {
+                old[c].lut
+            } else {
+                tiff_core::default_lut_for(mode, c)
+            },
             range: old.get(c).and_then(|d| d.range),
         })
         .collect();
@@ -875,19 +912,17 @@ impl eframe::App for ViewerApp {
             }
         }
 
+        // A zoom in/out requests a one-shot window resize to the new scale.
         if zoom_step != 0 {
             self.zoom = (self.zoom + zoom_step as f32 * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
+            self.resize_to_zoom = true;
         }
 
-        // Enforce aspect ratio every frame: height always follows width so the
-        // window can only be resized proportionally (as if dragging diagonally),
-        // plus whatever chrome (toolbar + bottom panel) currently needs. Zoom
-        // overrides the width directly; manual resizing the width is fine and
-        // height will snap to match. Sending InnerSize is skipped when neither
-        // the width nor the chrome height changed, to avoid a resize command
-        // every frame. Because the chrome height is added on top of a constant
-        // image height, expanding the bottom panel makes the window taller by
-        // exactly the panel's height rather than eating into the image.
+        // Window sizing happens ONLY in response to explicit events — a freshly
+        // opened file, or a zoom change — never every frame. That's what lets
+        // the window be freely resized and maximized without shaking or being
+        // snapped back: between these events the central panel above simply
+        // letterboxes the image to fit the current window, aspect ratio locked.
         let toolbar_height = toolbar_response.response.rect.height();
         let bottom_bar_height = scrub_bar_response.response.rect.height();
         let chrome_height = toolbar_height + bottom_bar_height;
@@ -895,24 +930,27 @@ impl eframe::App for ViewerApp {
             if let Some(first) = loaded.tiff.frames.first() {
                 let img_w = first.width as f32;
                 let img_h = first.height as f32;
-                let aspect = img_w / img_h.max(1.0);
 
-                let screen_w = ui.ctx().content_rect().width();
-                let target_w = if zoom_step != 0 {
-                    (img_w * self.zoom).max(200.0)
-                } else {
-                    screen_w.max(200.0)
-                };
-                // Round to whole pixels so floating-point jitter in content_rect
-                // doesn't cause an endless resize→repaint→resize feedback loop.
-                let target_w_px = target_w.round();
-                let chrome_px = chrome_height.round();
-                let target_h_px = (target_w_px / aspect + chrome_px).max(200.0);
+                // On open: pick the largest 0.2-step zoom ≤ 1.0 at which the
+                // image + chrome still fits the monitor (a huge image opens
+                // scaled down, a normal one at 100%). Deferred to here because
+                // the chrome height and monitor size aren't known at open time.
+                if self.pending_initial_fit {
+                    if let Some(z) = initial_fit_zoom(ui.ctx(), img_w, img_h, chrome_height) {
+                        self.zoom = z;
+                        self.pending_initial_fit = false;
+                        self.resize_to_zoom = true;
+                    } else {
+                        // Monitor size not known yet — try again next frame.
+                        ui.ctx().request_repaint();
+                    }
+                }
 
-                let key = (target_w_px, chrome_px);
-                if self.last_enforced != Some(key) {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(target_w_px, target_h_px)));
-                    self.last_enforced = Some(key);
+                if self.resize_to_zoom {
+                    let w = (img_w * self.zoom).round().max(200.0);
+                    let h = (img_h * self.zoom + chrome_height).round().max(200.0);
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+                    self.resize_to_zoom = false;
                 }
             }
         }

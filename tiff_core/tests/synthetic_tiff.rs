@@ -295,13 +295,12 @@ fn ignores_non_imagej_description_text() {
 }
 
 #[test]
-fn ignores_ij_metadata_block() {
-    // The binary IJMetadata block (tags 50838/50839) is deprecated and no
-    // longer read — even when present, the per-channel LUTs and ranges it
-    // carries must be ignored in favor of the documented ImageDescription.
-    // Here the description declares 2 composite channels but no min=/max=, so
-    // both channels fall back to default composite colors and auto-contrast
-    // (range None), NOT the red/green LUTs and 50..500 ranges in the blob.
+fn supplements_missing_range_and_luts_from_ij_metadata() {
+    // The IJMetadata block (tags 50838/50839) is a supplementary fallback: it
+    // fills in display info ImageDescription didn't provide. Here the
+    // description declares 2 composite channels but no min=/max= and (as
+    // always) no explicit LUTs, so the per-channel ranges and the custom white
+    // LUTs from the binary block should both be picked up.
     let width = 2;
     let height = 2;
     let frame0 = vec![10u16, 20, 30, 40];
@@ -327,12 +326,42 @@ fn ignores_ij_metadata_block() {
     std::fs::write(&path, &bytes).unwrap();
 
     let stack = TiffStack::open(&path).unwrap();
-    // No min=/max= in the description, and the binary ranges are ignored.
-    assert_eq!(stack.meta.channel_display[0].range, None);
-    assert_eq!(stack.meta.channel_display[1].range, None);
-    // The blob's constant-white LUTs must not have been applied.
-    assert_ne!(stack.meta.channel_display[0].lut[128], [255, 255, 255]);
-    assert_ne!(stack.meta.channel_display[1].lut[200], [255, 255, 255]);
+    // ImageDescription had no min=/max=, so the binary ranges fill in.
+    assert_eq!(stack.meta.channel_display[0].range, Some((50.0, 500.0)));
+    assert_eq!(stack.meta.channel_display[1].range, Some((60.0, 600.0)));
+    // ImageDescription carries no LUTs, so the custom white LUTs are applied.
+    assert_eq!(stack.meta.channel_display[0].lut[128], [255, 255, 255]);
+    assert_eq!(stack.meta.channel_display[1].lut[200], [255, 255, 255]);
+}
+
+#[test]
+fn ij_metadata_does_not_override_an_explicit_range() {
+    // When ImageDescription *does* specify min=/max=, the binary block must not
+    // override it — IJMetadata only fills genuinely-missing values.
+    let width = 2;
+    let height = 2;
+    let frame0 = vec![10u16, 20, 30, 40];
+
+    let white_lut = [[255u8; 3]; 256];
+    let (ij_bytes, ij_counts) =
+        build_ij_metadata_blob(&[(50.0, 500.0), (60.0, 600.0)], &[white_lut, white_lut]);
+
+    let bytes = build_synthetic_tiff(
+        width,
+        height,
+        &[frame0.clone(), frame0.clone()],
+        "ImageJ=1.54f\nimages=2\nchannels=2\nslices=1\nframes=1\nmode=composite\nmin=100.0\nmax=200.0\n",
+        Some(&ij_bytes),
+        Some(&ij_counts),
+    );
+
+    let path = unique_temp_path("composite_explicit_range.tif");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let stack = TiffStack::open(&path).unwrap();
+    // The explicit 270 window wins over the block's 50..500 / 60..600.
+    assert_eq!(stack.meta.channel_display[0].range, Some((100.0, 200.0)));
+    assert_eq!(stack.meta.channel_display[1].range, Some((100.0, 200.0)));
 }
 
 #[test]

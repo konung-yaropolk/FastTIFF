@@ -27,11 +27,11 @@ const TAG_PREDICTOR: u16 = 317;
 const TAG_PLANAR_CONFIG: u16 = 284;
 const TAG_SAMPLE_FORMAT: u16 = 339;
 // Tags 50838/50839 (IJMetadataByteCounts / IJMetadata) carry ImageJ's binary
-// per-channel LUT/range block. That format is undocumented and best-effort to
-// parse — and in practice two otherwise-identical files could render
-// differently purely because of inconsistencies in this block. It is no longer
-// read; display metadata comes solely from the documented ImageDescription
-// (tag 270, the `ImageJ=...` key=value text).
+// per-channel LUT/range block. The format is undocumented and best-effort to
+// parse, so it's used only as a supplementary fallback for display info the
+// `ImageDescription` (tag 270) didn't provide — see `ij_metadata`.
+const TAG_IJ_METADATA_BYTE_COUNTS: u16 = 50838;
+const TAG_IJ_METADATA: u16 = 50839;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SampleFormat {
@@ -100,6 +100,8 @@ impl TiffStack {
 
         let mut frames = Vec::new();
         let mut description: Option<String> = None;
+        let mut ij_metadata_bytes: Option<Vec<u8>> = None;
+        let mut ij_metadata_counts: Option<Vec<u32>> = None;
 
         let mut offset = first_ifd as usize;
         let mut visited = HashSet::new();
@@ -118,6 +120,12 @@ impl TiffStack {
                         TAG_IMAGE_DESCRIPTION => {
                             description = e.as_ascii(&mmap, order).ok();
                         }
+                        TAG_IJ_METADATA => {
+                            ij_metadata_bytes = e.owned_bytes(&mmap, order).ok();
+                        }
+                        TAG_IJ_METADATA_BYTE_COUNTS => {
+                            ij_metadata_counts = e.as_u32_array(&mmap, order).ok();
+                        }
                         _ => {}
                     }
                 }
@@ -132,7 +140,12 @@ impl TiffStack {
             bail!("TIFF has no image directories");
         }
 
-        let meta = ij_metadata::build_stack_meta(description.as_deref(), frames.len());
+        let meta = ij_metadata::build_stack_meta(
+            description.as_deref(),
+            ij_metadata_bytes.as_deref(),
+            ij_metadata_counts.as_deref(),
+            frames.len(),
+        );
 
         Ok(TiffStack {
             mmap,
