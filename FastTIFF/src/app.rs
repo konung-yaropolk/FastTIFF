@@ -623,11 +623,15 @@ impl eframe::App for ViewerApp {
                 } else {
                     screen_w.max(200.0)
                 };
-                let target_h = (target_w / aspect + chrome_height).max(200.0);
+                // Round to whole pixels so floating-point jitter in content_rect
+                // doesn't cause an endless resize→repaint→resize feedback loop.
+                let target_w_px = target_w.round();
+                let target_h_px = (target_w_px / aspect + chrome_height).round().max(200.0);
 
-                if self.last_enforced_w != Some(target_w) || zoom_step != 0 {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(target_w, target_h)));
-                    self.last_enforced_w = Some(target_w);
+                let last_px = self.last_enforced_w.map(|v| v.round());
+                if last_px != Some(target_w_px) {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(target_w_px, target_h_px)));
+                    self.last_enforced_w = Some(target_w_px);
                 }
             }
         }
@@ -649,8 +653,5 @@ impl eframe::App for ViewerApp {
             self.sync_gpu(&render_state);
         }
 
-        if self.stack.is_some() {
-            ui.ctx().request_repaint();
-        }
     }
 }
