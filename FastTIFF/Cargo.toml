@@ -1,6 +1,6 @@
 [package]
 name = "FastTIFF"
-version = "0.1.2"
+version = "0.1.6"
 edition = "2021"
 description = "Fast multi-frame TIFF stack viewer with ImageJ-compatible LUT/contrast rendering."
 
@@ -15,11 +15,13 @@ rfd = "0.17"
 log = "0.4"
 env_logger = "0.11"
 
-# [build-dependencies]
-# winres = "0.1.12"
-#
-# [package.metadata.winres]
-# OriginalFilename = "FastTIFF"
-# LegalCopyright = "konung_yaropolk © 2026"
-# FileDescription = "FastTIFF - the lightning-fast tiff viewer"
-# ProductName = "FastTIFF"
+# Only needed on Windows, where build.rs embeds the icon + version metadata
+# as a Win32 resource. Gated so non-Windows builds don't pull winres in.
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1.12"
+
+[package.metadata.winres]
+OriginalFilename = "FastTIFF"
+LegalCopyright = "konung_yaropolk © 2026"
+FileDescription = "A fast multi-frame TIFF stack viewer for huge ImageJ hyperstacks"
+ProductName = "FastTIFF"

@@ -203,11 +203,11 @@ pub fn read_header(file: &[u8]) -> Result<(ByteOrder, u32)> {
     let order = match &file[0..2] {
         b"II" => ByteOrder::Little,
         b"MM" => ByteOrder::Big,
-        other => bail!("not a TIFF: bad byte-order mark {:?}", other),
+        _other => bail!("not a TIFF"),
     };
     let magic = order.u16(&file[2..4]);
     if magic != 42 {
-        bail!("not a classic TIFF: magic number is {} (expected 42). BigTIFF (magic 43) is not supported.", magic);
+        bail!("not a classic TIFF. BigTIFF is not supported.");
     }
     let first_ifd = order.u32(&file[4..8]);
     Ok((order, first_ifd))

@@ -30,6 +30,7 @@ const TAG_STRIP_OFFSETS: u16 = 273;
 const TAG_SAMPLES_PER_PIXEL: u16 = 277;
 const TAG_ROWS_PER_STRIP: u16 = 278;
 const TAG_STRIP_BYTE_COUNTS: u16 = 279;
+const TAG_PLANAR_CONFIG: u16 = 284;
 const TAG_IJ_METADATA_BYTE_COUNTS: u16 = 50838;
 const TAG_IJ_METADATA: u16 = 50839;
 
@@ -374,4 +375,73 @@ fn rejects_stale_lut_block_with_mismatched_channel_count() {
     // Default grayscale LUT: identity ramp, not the stale red.
     assert_eq!(stack.meta.channel_display[0].lut[128], [128, 128, 128]);
     assert_eq!(stack.meta.channel_display[0].range, None);
+}
+
+/// Builds a minimal single-IFD chunky RGB8 TIFF (photometric=2, spp=3).
+fn build_rgb8_tiff(width: u32, height: u32, pixels: &[(u8, u8, u8)]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"II");
+    buf.extend_from_slice(&42u16.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // first-IFD offset, patched below
+
+    let strip_offset = buf.len() as u32;
+    for &(r, g, b) in pixels {
+        buf.extend_from_slice(&[r, g, b]);
+    }
+    let strip_len = (pixels.len() * 3) as u32;
+
+    // BitsPerSample is a 3-element array (8,8,8) — too big for the 4-byte
+    // inline value field, so it lives at its own offset.
+    let bits_offset = buf.len() as u32;
+    for _ in 0..3 {
+        buf.extend_from_slice(&8u16.to_le_bytes());
+    }
+
+    let ifd_offset = buf.len() as u32;
+    buf[4..8].copy_from_slice(&ifd_offset.to_le_bytes());
+
+    let mut entries: Vec<IfdEntrySpec> = vec![
+        (TAG_IMAGE_WIDTH, 4, 1, long_val(width)),
+        (TAG_IMAGE_LENGTH, 4, 1, long_val(height)),
+        (TAG_BITS_PER_SAMPLE, 3, 3, long_val(bits_offset)),
+        (TAG_COMPRESSION, 3, 1, short_val(1)),
+        (TAG_PHOTOMETRIC, 3, 1, short_val(2)), // RGB
+        (TAG_STRIP_OFFSETS, 4, 1, long_val(strip_offset)),
+        (TAG_SAMPLES_PER_PIXEL, 3, 1, short_val(3)),
+        (TAG_ROWS_PER_STRIP, 4, 1, long_val(height)),
+        (TAG_STRIP_BYTE_COUNTS, 4, 1, long_val(strip_len)),
+        (TAG_PLANAR_CONFIG, 3, 1, short_val(1)), // chunky
+    ];
+    entries.sort_by_key(|e| e.0);
+
+    buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for (tag, ftype, count, val) in &entries {
+        buf.extend_from_slice(&tag.to_le_bytes());
+        buf.extend_from_slice(&ftype.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        buf.extend_from_slice(val);
+    }
+    buf.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+    buf
+}
+
+#[test]
+fn opens_rgb8_tiff_and_deinterleaves_planes() {
+    let pixels = [(10u8, 20, 30), (40, 50, 60), (70, 80, 90), (100, 110, 120)];
+    let bytes = build_rgb8_tiff(2, 2, &pixels);
+    let path = unique_temp_path("rgb8.tif");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let stack = TiffStack::open(&path).expect("should parse RGB8 TIFF");
+    let frame = &stack.frames[0];
+    assert_eq!(frame.samples_per_pixel, 3);
+    assert_eq!(frame.photometric, 2);
+    assert_eq!(frame.bits_per_sample, 8);
+    assert!(frame.is_rgb(), "frame should be detected as chunky RGB");
+
+    let up = |b: u8| ((b as u16) << 8) | b as u16;
+    let red = tiff_core::read_plane_u16(&stack.mmap, frame, stack.byte_order, None, 0).unwrap();
+    let blue = tiff_core::read_plane_u16(&stack.mmap, frame, stack.byte_order, None, 2).unwrap();
+    assert_eq!(red, vec![up(10), up(40), up(70), up(100)]);
+    assert_eq!(blue, vec![up(30), up(60), up(90), up(120)]);
 }

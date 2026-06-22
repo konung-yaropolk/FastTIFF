@@ -1,0 +1,44 @@
+name: Release
+
+# Runs when you publish a GitHub Release. It tests the workspace, builds the
+# optimized Windows .exe (with the embedded icon + version metadata from
+# build.rs / winres), and attaches the binary to the release that triggered it.
+on:
+  release:
+    types: [published]
+
+# Needed so the workflow can upload the built .exe back onto the release.
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Release-mode tests so the optimized build below reuses these artifacts.
+      - name: Run tests
+        run: cargo test --workspace --release
+
+      - name: Build release exe
+        run: cargo build --release -p FastTIFF
+
+      # # Give the asset a versioned name
+      # - name: Stage artifact
+      #   shell: bash
+      #   run: cp target/release/FastTIFF.exe "FastTIFF-${{ github.event.release.tag_name }}.exe"
+
+      - name: Attach exe to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: FastTIFF.exe
+          # to give versioned name:
+          # files: FastTIFF-${{ github.event.release.tag_name }}.exe 

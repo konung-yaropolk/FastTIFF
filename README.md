@@ -53,13 +53,20 @@ hovering over the image, or the left/right arrow keys.
 
 ## What v1 covers
 
-- Multi-frame grayscale and multi-channel composite TIFFs, 8/16/32-bit.
+- Multi-frame grayscale, multi-channel composite, and chunky RGB TIFFs in
+  8-bit, 16-bit, and 32-bit (integer or float) — 32-bit and float data is
+  auto-ranged into the display, RGB is deinterleaved into R/G/B planes.
 - ImageJ `ImageDescription` parsing (channels/slices/frames, mode,
-  min/max, unit, frame interval) — solid, well-documented format.
+  min/max, unit, frame interval, linear calibration `c0`/`c1`, `fps`) —
+  solid, well-documented format.
 - Composite-channel colors from a standard cycling palette; contrast from
   `min=`/`max=` in `ImageDescription` (or auto-contrast from the data).
-- Horizontal frame scrubber + mouse-wheel scrubbing + arrow keys.
-- Per-channel enable/disable + manual contrast (min/max) override.
+- Signed-integer images offset into ImageJ's unsigned display space, so a
+  signed file and the equivalent unsigned+calibration file render the same.
+- Horizontal frame scrubber + mouse-wheel scrubbing + arrow keys, plus a
+  play button for looped playback (uses `fps=` from metadata, else 30 fps).
+- Per-channel enable/disable + a two-handle contrast range slider; the
+  values shown are calibrated (`c0 + c1·raw`) when the file has calibration.
 - Z-slice selector when `slices > 1` (the scrubber itself always drives
   the time/frame axis).
 

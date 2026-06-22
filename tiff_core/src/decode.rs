@@ -34,6 +34,7 @@ pub fn read_frame_u16<'a>(
     // below (see the `16 =>` arm), so they can't be a zero-copy reinterpret.
     if frame.compression == Compression::None
         && frame.bits_per_sample == 16
+        && frame.samples_per_pixel == 1
         && frame.sample_format != SampleFormat::SignedInt
         && file_order == ByteOrder::host()
         && frame.strip_offsets.len() == 1
@@ -52,70 +53,95 @@ pub fn read_frame_u16<'a>(
         // Misaligned (rare) — fall through to the owned path.
     }
 
-    // --- General path ---
-    let native_bytes = decode_native_bytes(mmap, frame, file_order)?;
+    // --- General path: decode plane 0 (the whole image for single-sample
+    // frames). Multi-sample (RGB) frames are deinterleaved per-plane by
+    // `read_plane_u16`, which callers use directly. ---
+    Ok(Cow::Owned(read_plane_u16(mmap, frame, file_order, float_range, 0)?))
+}
 
-    // ImageJ stores signed-integer images by offsetting into unsigned space
-    // for display (a signed `v` is shown/windowed as `v + 2^(bits-1)`), and it
-    // writes the display window (`min=`/`max=`) in that same offset space. To
-    // match — so a signed-int16 file and the equivalent unsigned+calibration
-    // file render identically — flip the sign bit, which is exactly that
-    // offset modulo the sample range (XOR 0x8000 == +32768 for 16-bit).
+/// Decode a single sample plane (`plane`, `< samples_per_pixel`) of a frame
+/// into `width * height` u16 values, deinterleaving chunky multi-sample data
+/// such as RGB. For single-sample frames `plane` is 0 and this returns the
+/// whole image. Handling per bit depth:
+/// - 8-bit is upcast (`v -> (v << 8) | v`) onto 0..65535.
+/// - signed integers are offset into ImageJ's unsigned display space (sign-bit
+///   flip), so signed and unsigned+calibration files render the same.
+/// - 32-bit samples (int *or* float) are linearly rescaled into 0..65535 using
+///   `float_range` (or this plane's own min/max when `None`).
+pub fn read_plane_u16(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+    float_range: Option<(f32, f32)>,
+    plane: usize,
+) -> Result<Vec<u16>> {
+    let spp = (frame.samples_per_pixel as usize).max(1);
+    let plane = plane.min(spp - 1);
+    let n_pixels = frame.width as usize * frame.height as usize;
+    let native = decode_native_bytes(mmap, frame, file_order)?;
     let signed = frame.sample_format == SampleFormat::SignedInt;
-    let mut out = vec![0u16; n_samples];
+    let mut out = vec![0u16; n_pixels];
+
     match frame.bits_per_sample {
         16 => {
-            for (i, chunk) in native_bytes.chunks_exact(2).enumerate().take(n_samples) {
-                let v = file_order.u16(chunk);
-                out[i] = if signed { v ^ 0x8000 } else { v };
+            for (i, o) in out.iter_mut().enumerate() {
+                let off = (i * spp + plane) * 2;
+                let v = file_order.u16(&native[off..off + 2]);
+                *o = if signed { v ^ 0x8000 } else { v };
             }
         }
         8 => {
-            for (i, &b) in native_bytes.iter().enumerate().take(n_samples) {
+            for (i, o) in out.iter_mut().enumerate() {
+                let b = native[i * spp + plane];
                 let b = if signed { b ^ 0x80 } else { b };
-                out[i] = ((b as u16) << 8) | b as u16;
+                *o = ((b as u16) << 8) | b as u16;
             }
         }
         32 => {
-            let floats = bytes_to_f32(&native_bytes, file_order, n_samples);
+            let floats: Vec<f32> = (0..n_pixels)
+                .map(|i| sample_f32(&native[(i * spp + plane) * 4..], file_order, frame.sample_format))
+                .collect();
             let (lo, hi) = float_range.unwrap_or_else(|| minmax_f32(&floats));
             let span = (hi - lo).max(f32::EPSILON);
-            for (i, &v) in floats.iter().enumerate() {
+            for (o, &v) in out.iter_mut().zip(floats.iter()) {
                 let t = ((v - lo) / span).clamp(0.0, 1.0);
-                out[i] = (t * 65535.0).round() as u16;
+                *o = (t * 65535.0).round() as u16;
             }
         }
-        _ => unreachable!(), // decode_native_bytes already rejects anything else
+        other => bail!("unsupported bits_per_sample: {other}"),
     }
-
-    Ok(Cow::Owned(out))
+    Ok(out)
 }
 
-/// The actual min/max of a 32-bit float frame's raw values — used to
+/// The actual min/max of a 32-bit frame's raw values (int or float) — used to
 /// establish a channel's initial display range, the same way ImageJ
-/// auto-ranges a float image to its own data instead of assuming a fixed
-/// scale. `None` for non-float frames.
+/// auto-ranges a 32-bit image to its own data instead of assuming a fixed
+/// scale. `None` for non-32-bit frames (8/16-bit use their native integer
+/// min/max instead).
 pub fn frame_float_minmax(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Option<(f32, f32)>> {
-    if frame.sample_format != SampleFormat::Float || frame.bits_per_sample != 32 {
+    if frame.bits_per_sample != 32 {
         return Ok(None);
     }
-    let native_bytes = decode_native_bytes(mmap, frame, file_order)?;
+    let native = decode_native_bytes(mmap, frame, file_order)?;
     let n_samples = frame.width as usize * frame.height as usize * frame.samples_per_pixel as usize;
-    Ok(Some(minmax_f32(&bytes_to_f32(&native_bytes, file_order, n_samples))))
+    let floats: Vec<f32> = (0..n_samples)
+        .map(|i| sample_f32(&native[i * 4..], file_order, frame.sample_format))
+        .collect();
+    Ok(Some(minmax_f32(&floats)))
 }
 
-fn bytes_to_f32(bytes: &[u8], file_order: ByteOrder, n_samples: usize) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .take(n_samples)
-        .map(|chunk| {
-            let arr: [u8; 4] = chunk.try_into().unwrap();
-            match file_order {
-                ByteOrder::Little => f32::from_le_bytes(arr),
-                ByteOrder::Big => f32::from_be_bytes(arr),
-            }
-        })
-        .collect()
+/// Reads one 32-bit sample as `f32`, interpreting the 4 bytes per the frame's
+/// sample format (IEEE float, signed, or unsigned integer) and byte order.
+fn sample_f32(chunk: &[u8], file_order: ByteOrder, format: SampleFormat) -> f32 {
+    let arr: [u8; 4] = chunk[..4].try_into().unwrap();
+    match (format, file_order) {
+        (SampleFormat::Float, ByteOrder::Little) => f32::from_le_bytes(arr),
+        (SampleFormat::Float, ByteOrder::Big) => f32::from_be_bytes(arr),
+        (SampleFormat::SignedInt, ByteOrder::Little) => i32::from_le_bytes(arr) as f32,
+        (SampleFormat::SignedInt, ByteOrder::Big) => i32::from_be_bytes(arr) as f32,
+        (SampleFormat::UnsignedInt, ByteOrder::Little) => u32::from_le_bytes(arr) as f32,
+        (SampleFormat::UnsignedInt, ByteOrder::Big) => u32::from_be_bytes(arr) as f32,
+    }
 }
 
 fn minmax_f32(values: &[f32]) -> (f32, f32) {
@@ -322,6 +348,8 @@ mod tests {
             sample_format: crate::index::SampleFormat::UnsignedInt,
             compression: Compression::None,
             predictor,
+            photometric: 1,
+            planar_config: 1,
             strip_offsets: vec![0],
             strip_byte_counts: vec![(width * height * 2) as u64],
             rows_per_strip: height,
@@ -399,6 +427,8 @@ mod tests {
             sample_format: SampleFormat::Float,
             compression: Compression::None,
             predictor: 1,
+            photometric: 1,
+            planar_config: 1,
             strip_offsets: vec![0],
             strip_byte_counts: vec![(width * height * 4) as u64],
             rows_per_strip: height,
@@ -446,6 +476,43 @@ mod tests {
         // 10.0 out of a 0..100 range is exactly 10%.
         let expected = (65535.0_f64 * 0.10).round() as u16;
         assert!(pixels[1].abs_diff(expected) <= 1);
+    }
+
+    #[test]
+    fn rgb8_deinterleaves_into_color_planes() {
+        // Two pixels, chunky RGB8: pixel0 = (10,20,30), pixel1 = (40,50,60).
+        let mut frame = make_frame(2, 1, 1);
+        frame.bits_per_sample = 8;
+        frame.samples_per_pixel = 3;
+        frame.photometric = 2;
+        frame.strip_byte_counts = vec![6];
+        let file: Vec<u8> = vec![10, 20, 30, 40, 50, 60];
+
+        let up = |b: u8| ((b as u16) << 8) | b as u16;
+        let red = read_plane_u16(&file, &frame, ByteOrder::Little, None, 0).unwrap();
+        let green = read_plane_u16(&file, &frame, ByteOrder::Little, None, 1).unwrap();
+        let blue = read_plane_u16(&file, &frame, ByteOrder::Little, None, 2).unwrap();
+        assert_eq!(red, vec![up(10), up(40)]);
+        assert_eq!(green, vec![up(20), up(50)]);
+        assert_eq!(blue, vec![up(30), up(60)]);
+    }
+
+    #[test]
+    fn unsigned_int32_rescales_into_texture_range() {
+        // 32-bit unsigned integers must be rescaled (not reinterpreted as
+        // float). With an explicit range the mapping is linear into 0..65535.
+        let mut frame = make_frame(2, 1, 1);
+        frame.bits_per_sample = 32;
+        frame.sample_format = SampleFormat::UnsignedInt;
+        frame.strip_byte_counts = vec![8];
+        let values: [u32; 2] = [0, 1000];
+        let mut file = Vec::new();
+        for v in values {
+            file.extend_from_slice(&v.to_le_bytes());
+        }
+        let pixels = read_plane_u16(&file, &frame, ByteOrder::Little, Some((0.0, 1000.0)), 0).unwrap();
+        assert_eq!(pixels[0], 0);
+        assert_eq!(pixels[1], 65535);
     }
 
     #[test]
@@ -525,6 +592,8 @@ mod tests {
             sample_format: SampleFormat::UnsignedInt,
             compression: Compression::Lzw,
             predictor: 1,
+            photometric: 1,
+            planar_config: 1,
             strip_offsets: vec![0, bottom_offset],
             strip_byte_counts: vec![top_compressed.len() as u64, bottom_compressed.len() as u64],
             rows_per_strip: rows_per_strip as u32,

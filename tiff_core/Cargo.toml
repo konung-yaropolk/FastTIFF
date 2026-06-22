@@ -1,6 +1,6 @@
 [package]
 name = "tiff_core"
-version = "0.1.2"
+version = "0.1.6"
 edition = "2021"
 description = "Lazy, memory-mapped reader for multi-frame (ImageJ hyperstack) TIFF files: IFD indexing, ImageJ metadata/LUT parsing, and per-frame strip decoding."
 

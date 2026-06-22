@@ -45,6 +45,27 @@ pub struct StackMeta {
     pub unit: Option<String>,
     pub frame_interval_s: Option<f64>,
     pub channel_display: Vec<ChannelDisplay>,
+    /// Linear pixel calibration `(c0, c1)` from ImageJ's `c0=`/`c1=` (with a
+    /// straight-line `cf=0`, or no `cf=`): a raw sample `r` represents the
+    /// real value `c0 + c1 * r`. `None` when the file carries no usable linear
+    /// calibration, in which case raw sample values are shown directly.
+    /// Non-linear calibration functions (`cf` > 0) are not supported and are
+    /// treated as uncalibrated.
+    pub calibration: Option<(f64, f64)>,
+    /// Playback rate in frames/second from ImageJ's `fps=`. `None` when the
+    /// file doesn't specify one — the viewer falls back to a default.
+    pub fps: Option<f64>,
+}
+
+impl StackMeta {
+    /// Maps a raw sample value to its calibrated real value (`c0 + c1 * raw`),
+    /// or returns it unchanged when the file has no linear calibration.
+    pub fn calibrate(&self, raw: f64) -> f64 {
+        match self.calibration {
+            Some((c0, c1)) => c0 + c1 * raw,
+            None => raw,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,6 +355,18 @@ pub fn build_stack_meta(description: Option<&str>, total_ifds: usize) -> StackMe
         _ => None,
     };
 
+    // Linear calibration only: `cf=0` is ImageJ's straight-line function. A
+    // missing `cf=` (older files that just wrote c0/c1) is treated as linear
+    // too; any other `cf` is a non-linear function we don't model, so we skip
+    // calibration entirely rather than apply the wrong transform.
+    let cf_linear = kv.get("cf").map(|s| s.trim() == "0").unwrap_or(true);
+    let calibration = match (get_f64("c0"), get_f64("c1")) {
+        (Some(c0), Some(c1)) if cf_linear && c1 != 0.0 => Some((c0, c1)),
+        _ => None,
+    };
+
+    let fps = get_f64("fps").filter(|f| *f > 0.0);
+
     let channel_display: Vec<ChannelDisplay> = (0..channels)
         .map(|c| ChannelDisplay {
             lut: default_lut_for(mode, c),
@@ -349,5 +382,7 @@ pub fn build_stack_meta(description: Option<&str>, total_ifds: usize) -> StackMe
         unit: kv.get("unit").cloned(),
         frame_interval_s: get_f64("finterval"),
         channel_display,
+        calibration,
+        fps,
     }
 }

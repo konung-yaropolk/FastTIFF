@@ -19,6 +19,11 @@ struct ChannelSettings {
     min: f32,
     max: f32,
     enabled: bool,
+    /// The full track range `(lo, hi)` the contrast range-slider spans, in raw
+    /// sample units. Derived from the channel's data range (and widened to
+    /// include any metadata window) at load time so the two handles always sit
+    /// somewhere on the track.
+    bounds: (f32, f32),
     /// For 32-bit float channels only: the fixed range used to encode raw
     /// float samples into the GPU's 16-bit texture space (see
     /// `tiff_core::read_frame_u16`'s `float_range` parameter), established
@@ -46,6 +51,11 @@ struct LoadedStack {
     /// warning note is still shown correctly after a manual channels/frames
     /// swap via the dimension-order dropdown, which never touches Z.
     triple_axis_warning: bool,
+    /// True when each IFD is a chunky RGB image: the "channels" are then the
+    /// red/green/blue sample planes of a *single* IFD per frame (deinterleaved
+    /// on upload), not separate IFDs. Flips how `ifd_index`/`sync_gpu` map a
+    /// display channel to file data.
+    rgb: bool,
 }
 
 pub struct ViewerApp {
@@ -60,12 +70,27 @@ pub struct ViewerApp {
     /// value (whether from zooming or from the user manually resizing).
     /// Resets to 1.0 on every file load.
     zoom: f32,
-    /// The last window width we computed height for, to avoid sending a resize
-    /// command every frame when nothing has changed.
-    last_enforced_w: Option<f32>,
+    /// The last `(window_width, chrome_height)` we resized for, to avoid
+    /// sending a resize command every frame when nothing has changed. Tracking
+    /// chrome height too means expanding/collapsing the bottom panel grows or
+    /// shrinks the window by that panel's height — keeping the image area
+    /// (and everything above it) put instead of squeezing it.
+    last_enforced: Option<(f32, f32)>,
     /// The window title last sent via `ViewportCommand::Title`.
     last_title: Option<String>,
+    /// Whether the stack is auto-advancing (looped playback).
+    playing: bool,
+    /// `egui` input time (seconds) at the previous frame while playing, used
+    /// to advance by real elapsed time regardless of render rate. `None` when
+    /// not playing.
+    last_play_time: Option<f64>,
+    /// Fractional-frame carry so a non-integer frames-per-render-tick advance
+    /// doesn't lose or gain time over a long playback.
+    play_accumulator: f64,
 }
+
+/// Playback rate used when the file's metadata doesn't specify `fps=`.
+const DEFAULT_FPS: f64 = 30.0;
 
 impl ViewerApp {
     pub fn new(initial_path: Option<PathBuf>) -> Self {
@@ -74,8 +99,11 @@ impl ViewerApp {
             status: None,
             channels_panel_expanded: false,
             zoom: 1.0,
-            last_enforced_w: None,
+            last_enforced: None,
             last_title: None,
+            playing: false,
+            last_play_time: None,
+            play_accumulator: 0.0,
         };
         if let Some(path) = initial_path {
             app.open_file(path);
@@ -94,6 +122,7 @@ impl ViewerApp {
                     last_uploaded: None,
                     luts_uploaded: false,
                     triple_axis_warning: false,
+                    rgb: false,
                 };
                 let (c, z, f) = (
                     loaded.tiff.meta.channels,
@@ -102,15 +131,23 @@ impl ViewerApp {
                 );
                 let resolved = tiff_core::resolve_dimensions(c, z, f);
                 apply_resolved_dimensions(&mut loaded, resolved);
+                // Chunky RGB overrides the channel layout: the sample planes of
+                // each IFD become red/green/blue display channels.
+                if loaded.tiff.frames.first().is_some_and(|f| f.is_rgb()) {
+                    setup_rgb(&mut loaded);
+                }
 
                 self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
                 self.stack = Some(loaded);
                 // Reset to native 1:1 on every fresh load.
                 self.zoom = 1.0;
-                self.last_enforced_w = None;
+                self.last_enforced = None;
+                self.playing = false;
+                self.last_play_time = None;
+                self.play_accumulator = 0.0;
             }
             Err(e) => {
-                self.status = Some(format!("Failed to open {}: {e:#}", path.display()));
+                self.status = Some(format!("Failed to open file: {e:#}"));
             }
         }
     }
@@ -154,10 +191,23 @@ impl ViewerApp {
 
         if loaded.last_uploaded != Some(loaded.frame_index) {
             for c in 0..n_channels {
-                let ifd_idx = Self::ifd_index(loaded, c);
+                // RGB: every display channel is a sample plane of the *same*
+                // IFD (one full-color image per frame). Otherwise each channel
+                // is its own IFD (the hyperstack plane layout).
+                let (ifd_idx, plane) = if loaded.rgb {
+                    (loaded.frame_index * loaded.tiff.meta.slices, c)
+                } else {
+                    (Self::ifd_index(loaded, c), 0)
+                };
                 let encoding_range = loaded.channel_settings.get(c).and_then(|s| s.encoding_range);
                 if let Some(frame_info) = loaded.tiff.frames.get(ifd_idx) {
-                    match tiff_core::read_frame_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, encoding_range) {
+                    let decoded = if loaded.rgb {
+                        tiff_core::read_plane_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, encoding_range, plane)
+                            .map(std::borrow::Cow::Owned)
+                    } else {
+                        tiff_core::read_frame_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, encoding_range)
+                    };
+                    match decoded {
                         Ok(pixels) => {
                             resources.upload_channel(
                                 &render_state.queue,
@@ -244,6 +294,103 @@ fn resize_channel_display(meta: &mut tiff_core::StackMeta, new_channels: usize) 
         .collect();
 }
 
+/// The contrast range-slider's track bounds: the channel's data min/max
+/// (when known) unioned with the current display `window`, so both handles
+/// always land on the track and the user has a little headroom to widen the
+/// window past the metadata defaults. Falls back to the window alone when the
+/// data range is unknown, and pads a degenerate (zero-width) range so the
+/// slider stays usable.
+fn slider_bounds(window: (f32, f32), data: Option<(f32, f32)>) -> (f32, f32) {
+    let (mut lo, mut hi) = window;
+    if let Some((dlo, dhi)) = data {
+        lo = lo.min(dlo);
+        hi = hi.max(dhi);
+    }
+    if !(hi > lo) {
+        let pad = lo.abs().max(1.0);
+        lo -= pad;
+        hi += pad;
+    }
+    (lo, hi)
+}
+
+/// Formats a raw sample value for display, applying the stack's linear
+/// calibration (`c0 + c1 * raw`) when present so the user sees real values;
+/// otherwise shows the raw value. Picks a coarse/fine precision by magnitude.
+fn format_calibrated(calibration: Option<(f64, f64)>, raw: f32) -> String {
+    let v = match calibration {
+        Some((c0, c1)) => c0 + c1 * raw as f64,
+        None => raw as f64,
+    };
+    if v.abs() >= 100.0 || v.fract().abs() < 1e-6 {
+        format!("{v:.0}")
+    } else {
+        format!("{v:.2}")
+    }
+}
+
+/// A two-handle horizontal range slider editing `(min, max)` within the
+/// inclusive track `[lo, hi]` (all in raw sample units). The handles can't
+/// cross. `salt` disambiguates the interaction ids when several sliders share
+/// a parent (e.g. one per channel).
+fn range_slider(ui: &mut egui::Ui, salt: u64, min: &mut f32, max: &mut f32, lo: f32, hi: f32, width: f32) {
+    let height = 18.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let span = (hi - lo).max(f32::EPSILON);
+    let x_of = |v: f32| rect.left() + ((v - lo) / span).clamp(0.0, 1.0) * rect.width();
+    let v_of = |x: f32| lo + ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) * span;
+    let track_y = rect.center().y;
+    let visuals = ui.visuals().clone();
+
+    // Track + the selected span between the two handles.
+    let track = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), track_y - 2.0),
+        egui::pos2(rect.right(), track_y + 2.0),
+    );
+    ui.painter().rect_filled(track, 2.0, visuals.widgets.inactive.bg_fill);
+    let sel = egui::Rect::from_min_max(
+        egui::pos2(x_of(*min), track_y - 2.0),
+        egui::pos2(x_of(*max), track_y + 2.0),
+    );
+    ui.painter().rect_filled(sel, 2.0, visuals.selection.bg_fill);
+
+    let radius = 6.0;
+    // min handle.
+    {
+        let id = ui.id().with((salt, "range_min"));
+        let hit = egui::Rect::from_center_size(egui::pos2(x_of(*min), track_y), egui::vec2(radius * 2.5, height));
+        let resp = ui.interact(hit, id, egui::Sense::drag());
+        if resp.dragged() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                *min = v_of(p.x).min(*max);
+            }
+        }
+        let col = handle_color(&visuals, resp.dragged() || resp.hovered());
+        ui.painter().circle_filled(egui::pos2(x_of(*min), track_y), radius, col);
+    }
+    // max handle.
+    {
+        let id = ui.id().with((salt, "range_max"));
+        let hit = egui::Rect::from_center_size(egui::pos2(x_of(*max), track_y), egui::vec2(radius * 2.5, height));
+        let resp = ui.interact(hit, id, egui::Sense::drag());
+        if resp.dragged() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                *max = v_of(p.x).max(*min);
+            }
+        }
+        let col = handle_color(&visuals, resp.dragged() || resp.hovered());
+        ui.painter().circle_filled(egui::pos2(x_of(*max), track_y), radius, col);
+    }
+}
+
+fn handle_color(visuals: &egui::Visuals, active: bool) -> Color32 {
+    if active {
+        visuals.widgets.active.fg_stroke.color
+    } else {
+        visuals.widgets.inactive.fg_stroke.color
+    }
+}
+
 /// Builds the UI-level per-channel settings (window/level, enabled,
 /// float-encoding range) from `tiff.meta`'s current channel count and
 /// display info.
@@ -257,20 +404,26 @@ fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
                 .is_some_and(|f| f.sample_format == tiff_core::SampleFormat::Float && f.bits_per_sample == 32);
 
             if is_float {
+                let data = first_frame_float_minmax(tiff, c);
                 let (lo, hi) = disp
                     .range
                     .map(|(lo, hi)| (lo as f32, hi as f32))
-                    .or_else(|| first_frame_float_minmax(tiff, c))
+                    .or(data)
                     .unwrap_or((0.0, 1.0));
-                ChannelSettings { min: lo, max: hi, enabled: true, encoding_range: Some((lo, hi)) }
+                let bounds = slider_bounds((lo, hi), data);
+                ChannelSettings { min: lo, max: hi, enabled: true, encoding_range: Some((lo, hi)), bounds }
             } else {
-                let (min, max) = disp.range.map(|(lo, hi)| (lo as f32, hi as f32)).unwrap_or_else(|| {
+                let data = first_frame_minmax(tiff, c);
+                let (min, max) = disp
+                    .range
+                    .map(|(lo, hi)| (lo as f32, hi as f32))
                     // No display range in metadata at all (not even
                     // ImageDescription min=/max=) — fall back to the actual
                     // min/max of channel c's first frame.
-                    first_frame_minmax(tiff, c).unwrap_or((0.0, 65535.0))
-                });
-                ChannelSettings { min, max, enabled: true, encoding_range: None }
+                    .or(data)
+                    .unwrap_or((0.0, 65535.0));
+                let bounds = slider_bounds((min, max), data);
+                ChannelSettings { min, max, enabled: true, encoding_range: None, bounds }
             }
         })
         .collect()
@@ -311,6 +464,37 @@ fn apply_resolved_dimensions(loaded: &mut LoadedStack, resolved: tiff_core::Reso
     loaded.triple_axis_warning = resolved.triple_axis_warning;
     resize_channel_display(&mut loaded.tiff.meta, resolved.channels);
     loaded.channel_settings = build_channel_settings(&loaded.tiff);
+    loaded.frame_index = 0;
+    loaded.last_uploaded = None;
+    loaded.luts_uploaded = false;
+}
+
+/// Reconfigures a freshly-loaded chunky-RGB stack: the first `min(spp, 3)`
+/// sample planes become red/green/blue display channels with identity
+/// full-range windows (so true colors show without any contrast tweaking).
+/// Additively blending the three color ramps in the composite shader
+/// reconstructs the original RGB pixel. Frame navigation still walks IFDs (one
+/// full-color image per IFD) — see `LoadedStack::rgb`.
+fn setup_rgb(loaded: &mut LoadedStack) {
+    let spp = loaded.tiff.frames.first().map(|f| f.samples_per_pixel as usize).unwrap_or(3);
+    let planes = spp.min(3).min(MAX_CHANNELS); // RGB only; ignore any alpha/extra samples
+    loaded.rgb = true;
+    loaded.tiff.meta.mode = tiff_core::DisplayMode::Color;
+    loaded.tiff.meta.channel_display = (0..planes)
+        .map(|c| tiff_core::ChannelDisplay {
+            lut: tiff_core::default_composite_lut(c), // 0 = red, 1 = green, 2 = blue
+            range: None,
+        })
+        .collect();
+    loaded.channel_settings = (0..planes)
+        .map(|_| ChannelSettings {
+            min: 0.0,
+            max: 65535.0,
+            enabled: true,
+            bounds: (0.0, 65535.0),
+            encoding_range: None,
+        })
+        .collect();
     loaded.frame_index = 0;
     loaded.last_uploaded = None;
     loaded.luts_uploaded = false;
@@ -370,11 +554,18 @@ impl eframe::App for ViewerApp {
                 if let Some(loaded) = &self.stack {
                     let meta = &loaded.tiff.meta;
                     ui.separator();
+                    let channels_desc = if loaded.rgb {
+                        "RGB".to_string()
+                    } else {
+                        format!("{} channel(s)", meta.channels)
+                    };
+                    let bits = loaded.tiff.frames.first().map(|f| f.bits_per_sample).unwrap_or(0);
                     ui.label(format!(
-                        "{}×{} px, {} channel(s)",
+                        "{}×{} px, {}-bit, {}",
                         loaded.tiff.frames.first().map(|f| f.width).unwrap_or(0),
                         loaded.tiff.frames.first().map(|f| f.height).unwrap_or(0),
-                        meta.channels,
+                        bits,
+                        channels_desc,
                     ));
 
                     ui.separator();
@@ -394,7 +585,9 @@ impl eframe::App for ViewerApp {
         });
 
         let panel_expanded = self.channels_panel_expanded;
+        let is_playing = self.playing;
         let mut toggle_requested = false;
+        let mut play_toggle_requested = false;
         let mut dimension_override: Option<(usize, usize)> = None;
         let mut scroll_step: i32 = 0;
         let current_status = self.status.clone();
@@ -425,6 +618,30 @@ impl eframe::App for ViewerApp {
                     vec![r.left_top(), r.right_top(), r.center_bottom()]
                 };
                 ui.painter().add(egui::Shape::convex_polygon(triangle, icon_color, egui::Stroke::NONE));
+
+                // Play/pause looped movie. Painted (triangle / two bars) rather
+                // than using glyphs, since the default font may not carry the
+                // ▶/⏸ characters.
+                ui.add_enabled_ui(has_multiple_frames, |ui| {
+                    let play_resp = ui
+                        .add_sized(egui::vec2(22.0, 20.0), egui::Button::new(""))
+                        .on_hover_text("Play/pause looped movie");
+                    if play_resp.clicked() {
+                        play_toggle_requested = true;
+                    }
+                    let color = ui.style().interact(&play_resp).fg_stroke.color;
+                    let r = play_resp.rect.shrink(5.0);
+                    if is_playing {
+                        let bar = r.width() * 0.32;
+                        let left = egui::Rect::from_min_max(r.left_top(), egui::pos2(r.left() + bar, r.bottom()));
+                        let right = egui::Rect::from_min_max(egui::pos2(r.right() - bar, r.top()), r.right_bottom());
+                        ui.painter().rect_filled(left, 0.0, color);
+                        ui.painter().rect_filled(right, 0.0, color);
+                    } else {
+                        let tri = vec![r.left_top(), r.left_bottom(), egui::pos2(r.right(), r.center().y)];
+                        ui.painter().add(egui::Shape::convex_polygon(tri, color, egui::Stroke::NONE));
+                    }
+                });
 
                 ui.add_enabled_ui(has_multiple_frames, |ui| {
                     if ui.button("|<").on_hover_text("First frame").clicked() {
@@ -463,59 +680,84 @@ impl eframe::App for ViewerApp {
             });
 
             if panel_expanded {
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Dimension order:");
-                    let c = loaded.tiff.meta.channels;
-                    let f = loaded.tiff.meta.frames;
-                    let mut options = vec![(c, f), (f, c)];
-                    options.sort_unstable();
-                    options.dedup();
-                    egui::ComboBox::from_id_salt("dim_override")
-                        .selected_text(format!("c: {c}  f: {f}"))
-                        .show_ui(ui, |ui| {
-                            for (oc, of) in options {
-                                let label = format!("c: {oc}  f: {of}");
-                                if ui.selectable_label((oc, of) == (c, f), label).clicked() {
-                                    dimension_override = Some((oc, of));
-                                }
-                            }
-                        });
-                });
-                ui.label(
-                    RichText::new(
-                        "Channels are guessed automatically (4 or fewer = channels, more = time); \
-                         use this if that guess is wrong for this file.",
-                    )
-                    .small()
-                    .weak(),
-                );
-
-                if loaded.channel_settings.len() > 1 {
+                // The channels-vs-time guess (and its override) is meaningless
+                // for RGB, where the "channels" are fixed color planes.
+                if !loaded.rgb {
                     ui.separator();
                     ui.horizontal(|ui| {
-                        for (c, settings) in loaded.channel_settings.iter_mut().enumerate() {
-                            let speed = settings
-                                .encoding_range
-                                .map(|(lo, hi)| (((hi - lo) as f64) / 1000.0).max(0.0001))
-                                .unwrap_or(10.0);
-                            ui.vertical(|ui| {
-                                ui.checkbox(&mut settings.enabled, format!("Ch {}", c + 1));
-                                ui.add(egui::DragValue::new(&mut settings.min).prefix("min ").speed(speed));
-                                ui.add(egui::DragValue::new(&mut settings.max).prefix("max ").speed(speed));
+                        ui.label("Dimension order:");
+                        let c = loaded.tiff.meta.channels;
+                        let f = loaded.tiff.meta.frames;
+                        let mut options = vec![(c, f), (f, c)];
+                        options.sort_unstable();
+                        options.dedup();
+                        egui::ComboBox::from_id_salt("dim_override")
+                            .selected_text(format!("c: {c}  f: {f}"))
+                            .show_ui(ui, |ui| {
+                                for (oc, of) in options {
+                                    let label = format!("c: {oc}  f: {of}");
+                                    if ui.selectable_label((oc, of) == (c, f), label).clicked() {
+                                        dimension_override = Some((oc, of));
+                                    }
+                                }
                             });
-                        }
                     });
+                    ui.label(
+                        RichText::new(
+                            "Channels are guessed automatically (4 or fewer = channels, more = time); \
+                             use this if that guess is wrong for this file.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                }
+
+                let calibration = loaded.tiff.meta.calibration;
+                let rgb = loaded.rgb;
+                if loaded.channel_settings.len() > 1 {
+                    ui.separator();
+                    // One row per channel — checkbox in line with its slider —
+                    // stacked vertically.
+                    for (c, settings) in loaded.channel_settings.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            let label = if rgb {
+                                ["R", "G", "B", "A"].get(c).copied().unwrap_or("Ch").to_string()
+                            } else {
+                                format!("Ch {}", c + 1)
+                            };
+                            // Fixed-width checkbox so every slider starts at the
+                            // same x regardless of label length.
+                            ui.add_sized(egui::vec2(48.0, 18.0), egui::Checkbox::new(&mut settings.enabled, label));
+                            let value = format!(
+                                "{} – {}",
+                                format_calibrated(calibration, settings.min),
+                                format_calibrated(calibration, settings.max),
+                            );
+                            // Reserve room for the value text on the right; the
+                            // slider fills what's left of the row.
+                            let slider_w = (ui.available_width() - 120.0).max(80.0);
+                            let (lo, hi) = settings.bounds;
+                            range_slider(ui, c as u64, &mut settings.min, &mut settings.max, lo, hi, slider_w);
+                            ui.label(RichText::new(value).small());
+                        });
+                    }
                 } else if let Some(settings) = loaded.channel_settings.first_mut() {
-                    let speed = settings
-                        .encoding_range
-                        .map(|(lo, hi)| (((hi - lo) as f64) / 1000.0).max(0.0001))
-                        .unwrap_or(10.0);
                     ui.horizontal(|ui| {
                         ui.label("Contrast:");
-                        ui.add(egui::DragValue::new(&mut settings.min).prefix("min ").speed(speed));
-                        ui.add(egui::DragValue::new(&mut settings.max).prefix("max ").speed(speed));
+                        let (lo, hi) = settings.bounds;
+                        let width = ui.available_width().max(120.0);
+                        range_slider(ui, 0, &mut settings.min, &mut settings.max, lo, hi, width);
                     });
+                    ui.label(
+                        RichText::new(format!(
+                            "{} – {}{}",
+                            format_calibrated(calibration, settings.min),
+                            format_calibrated(calibration, settings.max),
+                            calibration.map(|_| " (calibrated)").unwrap_or(""),
+                        ))
+                        .small()
+                        .weak(),
+                    );
                 }
             }
             if let Some(status) = &current_status {
@@ -527,6 +769,42 @@ impl eframe::App for ViewerApp {
 
         if toggle_requested {
             self.channels_panel_expanded = !self.channels_panel_expanded;
+        }
+
+        if play_toggle_requested {
+            self.playing = !self.playing;
+            // Start each play/pause from a clean clock so the first tick after
+            // resuming doesn't jump by however long we were paused.
+            self.last_play_time = None;
+            self.play_accumulator = 0.0;
+        }
+
+        // Looped playback: advance by real elapsed time so the movie runs at
+        // the file's `fps` (or the default) regardless of render cadence, and
+        // request continuous repaints while it's running.
+        if self.playing {
+            if let Some(loaded) = &mut self.stack {
+                let n = loaded.tiff.meta.frames.max(1);
+                if n > 1 {
+                    let fps = loaded.tiff.meta.fps.unwrap_or(DEFAULT_FPS).max(0.1);
+                    let now = ui.input(|i| i.time);
+                    if let Some(last) = self.last_play_time {
+                        self.play_accumulator += (now - last) * fps;
+                        if self.play_accumulator >= 1.0 {
+                            let steps = self.play_accumulator.floor() as usize;
+                            self.play_accumulator -= steps as f64;
+                            loaded.frame_index = (loaded.frame_index + steps) % n;
+                        }
+                    }
+                    self.last_play_time = Some(now);
+                    ui.ctx().request_repaint();
+                } else {
+                    self.playing = false;
+                }
+            }
+        } else {
+            self.last_play_time = None;
+            self.play_accumulator = 0.0;
         }
 
         if let Some((c, f)) = dimension_override {
@@ -602,10 +880,14 @@ impl eframe::App for ViewerApp {
         }
 
         // Enforce aspect ratio every frame: height always follows width so the
-        // window can only be resized proportionally (as if dragging diagonally).
-        // Zoom overrides the width directly; manual resizing the width is fine
-        // and height will snap to match. Sending InnerSize is skipped when the
-        // current width hasn't changed to avoid a resize command every frame.
+        // window can only be resized proportionally (as if dragging diagonally),
+        // plus whatever chrome (toolbar + bottom panel) currently needs. Zoom
+        // overrides the width directly; manual resizing the width is fine and
+        // height will snap to match. Sending InnerSize is skipped when neither
+        // the width nor the chrome height changed, to avoid a resize command
+        // every frame. Because the chrome height is added on top of a constant
+        // image height, expanding the bottom panel makes the window taller by
+        // exactly the panel's height rather than eating into the image.
         let toolbar_height = toolbar_response.response.rect.height();
         let bottom_bar_height = scrub_bar_response.response.rect.height();
         let chrome_height = toolbar_height + bottom_bar_height;
@@ -624,12 +906,13 @@ impl eframe::App for ViewerApp {
                 // Round to whole pixels so floating-point jitter in content_rect
                 // doesn't cause an endless resize→repaint→resize feedback loop.
                 let target_w_px = target_w.round();
-                let target_h_px = (target_w_px / aspect + chrome_height).round().max(200.0);
+                let chrome_px = chrome_height.round();
+                let target_h_px = (target_w_px / aspect + chrome_px).max(200.0);
 
-                let last_px = self.last_enforced_w.map(|v| v.round());
-                if last_px != Some(target_w_px) {
+                let key = (target_w_px, chrome_px);
+                if self.last_enforced != Some(key) {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(target_w_px, target_h_px)));
-                    self.last_enforced_w = Some(target_w_px);
+                    self.last_enforced = Some(key);
                 }
             }
         }

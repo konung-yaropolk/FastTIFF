@@ -24,6 +24,7 @@ const TAG_SAMPLES_PER_PIXEL: u16 = 277;
 const TAG_ROWS_PER_STRIP: u16 = 278;
 const TAG_STRIP_BYTE_COUNTS: u16 = 279;
 const TAG_PREDICTOR: u16 = 317;
+const TAG_PLANAR_CONFIG: u16 = 284;
 const TAG_SAMPLE_FORMAT: u16 = 339;
 // Tags 50838/50839 (IJMetadataByteCounts / IJMetadata) carry ImageJ's binary
 // per-channel LUT/range block. That format is undocumented and best-effort to
@@ -58,9 +59,25 @@ pub struct FrameInfo {
     pub sample_format: SampleFormat,
     pub compression: Compression,
     pub predictor: u16, // 1 = none, 2 = horizontal differencing
+    /// PhotometricInterpretation (tag 262): 2 = RGB, others treated as a
+    /// single-plane grayscale/whatever. Used to decide whether a frame's
+    /// multiple samples are color components to deinterleave.
+    pub photometric: u16,
+    /// PlanarConfiguration (tag 284): 1 = chunky (samples interleaved per
+    /// pixel, the default and only layout we deinterleave), 2 = planar
+    /// (separate sample planes — not supported for multi-sample data).
+    pub planar_config: u16,
     pub strip_offsets: Vec<u64>,
     pub strip_byte_counts: Vec<u64>,
     pub rows_per_strip: u32,
+}
+
+impl FrameInfo {
+    /// True for a chunky (interleaved) RGB frame whose 3+ samples are color
+    /// components we can deinterleave into red/green/blue planes.
+    pub fn is_rgb(&self) -> bool {
+        self.photometric == 2 && self.samples_per_pixel >= 3 && self.planar_config == 1
+    }
 }
 
 pub struct TiffStack {
@@ -138,6 +155,8 @@ fn frame_info_from_entries(
     let mut sample_format_raw = 1u16; // default: unsigned integer
     let mut compression_raw = 1u16; // default: no compression
     let mut predictor = 1u16;
+    let mut photometric = 1u16; // default: BlackIsZero grayscale
+    let mut planar_config = 1u16; // default: chunky / interleaved
     let mut rows_per_strip = u32::MAX; // default: whole image is one strip
     let mut strip_offsets = None;
     let mut strip_byte_counts = None;
@@ -154,7 +173,8 @@ fn frame_info_from_entries(
             TAG_ROWS_PER_STRIP => rows_per_strip = e.as_u32(file, order)?,
             TAG_STRIP_OFFSETS => strip_offsets = Some(e.as_u32_array(file, order)?),
             TAG_STRIP_BYTE_COUNTS => strip_byte_counts = Some(e.as_u32_array(file, order)?),
-            TAG_PHOTOMETRIC => { /* read but not currently needed beyond LUT defaulting */ }
+            TAG_PHOTOMETRIC => photometric = e.as_u32(file, order)? as u16,
+            TAG_PLANAR_CONFIG => planar_config = e.as_u32(file, order)? as u16,
             _ => {}
         }
     }
@@ -191,6 +211,8 @@ fn frame_info_from_entries(
         sample_format,
         compression,
         predictor,
+        photometric,
+        planar_config,
         strip_offsets: strip_offsets.into_iter().map(|v| v as u64).collect(),
         strip_byte_counts: strip_byte_counts.into_iter().map(|v| v as u64).collect(),
         rows_per_strip,
