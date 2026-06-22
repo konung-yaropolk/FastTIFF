@@ -294,20 +294,23 @@ fn ignores_non_imagej_description_text() {
 }
 
 #[test]
-fn parses_ij_metadata_luts_and_ranges() {
+fn ignores_ij_metadata_block() {
+    // The binary IJMetadata block (tags 50838/50839) is deprecated and no
+    // longer read — even when present, the per-channel LUTs and ranges it
+    // carries must be ignored in favor of the documented ImageDescription.
+    // Here the description declares 2 composite channels but no min=/max=, so
+    // both channels fall back to default composite colors and auto-contrast
+    // (range None), NOT the red/green LUTs and 50..500 ranges in the blob.
     let width = 2;
     let height = 2;
     let frame0 = vec![10u16, 20, 30, 40];
 
-    let mut red_lut = [[0u8; 3]; 256];
-    let mut green_lut = [[0u8; 3]; 256];
-    for i in 0..256 {
-        red_lut[i] = [i as u8, 0, 0];
-        green_lut[i] = [0, i as u8, 0];
-    }
+    // Distinctive constant-white LUTs so they can't coincide with any of the
+    // default composite channel colors (channel 0's default is a red ramp).
+    let white_lut = [[255u8; 3]; 256];
     let (ij_bytes, ij_counts) = build_ij_metadata_blob(
         &[(50.0, 500.0), (60.0, 600.0)],
-        &[red_lut, green_lut],
+        &[white_lut, white_lut],
     );
 
     let bytes = build_synthetic_tiff(
@@ -323,11 +326,12 @@ fn parses_ij_metadata_luts_and_ranges() {
     std::fs::write(&path, &bytes).unwrap();
 
     let stack = TiffStack::open(&path).unwrap();
-    assert!(stack.meta.ij_metadata_parsed, "IJMetadata block should have parsed");
-    assert_eq!(stack.meta.channel_display[0].range, Some((50.0, 500.0)));
-    assert_eq!(stack.meta.channel_display[1].range, Some((60.0, 600.0)));
-    assert_eq!(stack.meta.channel_display[0].lut[128], [128, 0, 0]);
-    assert_eq!(stack.meta.channel_display[1].lut[200], [0, 200, 0]);
+    // No min=/max= in the description, and the binary ranges are ignored.
+    assert_eq!(stack.meta.channel_display[0].range, None);
+    assert_eq!(stack.meta.channel_display[1].range, None);
+    // The blob's constant-white LUTs must not have been applied.
+    assert_ne!(stack.meta.channel_display[0].lut[128], [255, 255, 255]);
+    assert_ne!(stack.meta.channel_display[1].lut[200], [255, 255, 255]);
 }
 
 #[test]
@@ -367,10 +371,6 @@ fn rejects_stale_lut_block_with_mismatched_channel_count() {
 
     let stack = TiffStack::open(&path).unwrap();
     assert_eq!(stack.meta.channels, 1);
-    assert!(
-        !stack.meta.ij_metadata_parsed,
-        "mismatched-count LUT/range block should have been rejected entirely"
-    );
     // Default grayscale LUT: identity ramp, not the stale red.
     assert_eq!(stack.meta.channel_display[0].lut[128], [128, 128, 128]);
     assert_eq!(stack.meta.channel_display[0].range, None);

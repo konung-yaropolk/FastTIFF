@@ -7,15 +7,15 @@
 //!
 //! 2. `IJMetadata` / `IJMetadataByteCounts` (tags 50839 / 50838): a binary
 //!    blob containing per-channel LUTs, display ranges, slice labels, ROIs,
-//!    etc. **This format is not officially documented by ImageJ** — the
-//!    parser below is reconstructed from known open-source reader
-//!    implementations (e.g. tifffile's `imagej_metadata`). It's best-effort:
-//!    every step is defensive and falls back to sane defaults (grayscale,
-//!    auto-contrast) rather than producing garbage if a layout assumption
-//!    turns out to be wrong for a particular file. If composite-mode colors
-//!    look off, this is the module to revisit.
+//!    etc. **This format is not officially documented by ImageJ**, and reading
+//!    it caused otherwise-identical files to render differently depending on
+//!    inconsistencies in this block. It is therefore **no longer read** — all
+//!    display metadata now comes from the `ImageDescription` text above.
+//!    Composite-channel colors fall back to a standard cycling palette and
+//!    contrast falls back to the file's `min=`/`max=` (or the data's own
+//!    min/max). The former best-effort binary parser was removed; see git
+//!    history if it ever needs to be revived.
 
-use crate::ifd::ByteOrder;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,9 +45,6 @@ pub struct StackMeta {
     pub unit: Option<String>,
     pub frame_interval_s: Option<f64>,
     pub channel_display: Vec<ChannelDisplay>,
-    /// True if IJMetadata LUT/range parsing succeeded for at least one
-    /// channel. If false, everything in `channel_display` is a default.
-    pub ij_metadata_parsed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,6 +266,18 @@ pub fn default_composite_lut(channel_index: usize) -> [[u8; 3]; 256] {
     lut
 }
 
+/// The default LUT for channel `c` under display `mode`: a flat grayscale
+/// ramp in grayscale mode, otherwise the cycling composite-color palette.
+/// The single source of truth so `build_stack_meta` and `resize_channel_display`
+/// (in the app) can't drift — a grayscale stack stays grayscale even after a
+/// channel-count change.
+pub fn default_lut_for(mode: DisplayMode, c: usize) -> [[u8; 3]; 256] {
+    match mode {
+        DisplayMode::Grayscale => grayscale_lut(),
+        DisplayMode::Composite | DisplayMode::Color => default_composite_lut(c),
+    }
+}
+
 /// Parse the `key=value` lines of an ImageDescription tag.
 fn parse_description(desc: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
@@ -280,12 +289,7 @@ fn parse_description(desc: &str) -> HashMap<String, String> {
     map
 }
 
-pub fn build_stack_meta(
-    description: Option<&str>,
-    ij_metadata: Option<&[u8]>,
-    ij_metadata_counts: Option<&[u32]>,
-    total_ifds: usize,
-) -> StackMeta {
+pub fn build_stack_meta(description: Option<&str>, total_ifds: usize) -> StackMeta {
     // Only parse ImageDescription as ImageJ's key=value format if it
     // actually carries ImageJ's own signature. A TIFF written by something
     // else entirely (a different microscopy package, a generic image
@@ -313,10 +317,15 @@ pub fn build_stack_meta(
         (total_ifds / (channels * slices)).max(1)
     });
 
+    // Default to grayscale when no `mode=` is present. A missing mode used to
+    // be inferred as composite whenever channels>1, but a mislabeled
+    // `channels=N` (really a frame count — see `resolve_dimensions`) would
+    // then wrongly tint the image. With no explicit mode the safe assumption
+    // is plain grayscale; composite/color colors only apply when the file
+    // actually says so.
     let mode = match kv.get("mode").map(|s| s.as_str()) {
         Some("composite") => DisplayMode::Composite,
         Some("color") => DisplayMode::Color,
-        _ if channels > 1 => DisplayMode::Composite,
         _ => DisplayMode::Grayscale,
     };
 
@@ -325,48 +334,12 @@ pub fn build_stack_meta(
         _ => None,
     };
 
-    let mut channel_display: Vec<ChannelDisplay> = (0..channels)
+    let channel_display: Vec<ChannelDisplay> = (0..channels)
         .map(|c| ChannelDisplay {
-            lut: if channels == 1 {
-                grayscale_lut()
-            } else {
-                default_composite_lut(c)
-            },
+            lut: default_lut_for(mode, c),
             range: global_range,
         })
         .collect();
-
-    let mut ij_metadata_parsed = false;
-    if let (Some(data), Some(counts)) = (ij_metadata, ij_metadata_counts) {
-        let blocks = try_parse_ij_blocks(data, counts, ByteOrder::Big)
-            .or_else(|| try_parse_ij_blocks(data, counts, ByteOrder::Little));
-        if let Some(blocks) = blocks {
-            // Require an exact count match against the channel count this
-            // file's ImageDescription actually declares. A correctly-formed
-            // IJMetadata block has exactly one range-pair and one LUT per
-            // channel; anything else (a stale block left over from before
-            // the file was reduced to fewer channels, or a structurally
-            // "valid" but mislabeled parse — the directory format isn't
-            // officially documented, see module docs) means we can't trust
-            // which entry corresponds to which channel, so don't guess.
-            if let Some(ranges) = &blocks.ranges {
-                if ranges.len() == channels {
-                    for (disp, &r) in channel_display.iter_mut().zip(ranges.iter()) {
-                        if r.1 > r.0 && r.0.is_finite() && r.1.is_finite() {
-                            disp.range = Some(r);
-                            ij_metadata_parsed = true;
-                        }
-                    }
-                }
-            }
-            if blocks.luts.len() == channels {
-                for (disp, lut) in channel_display.iter_mut().zip(blocks.luts.iter()) {
-                    disp.lut = *lut;
-                    ij_metadata_parsed = true;
-                }
-            }
-        }
-    }
 
     StackMeta {
         channels,
@@ -376,99 +349,5 @@ pub fn build_stack_meta(
         unit: kv.get("unit").cloned(),
         frame_interval_s: get_f64("finterval"),
         channel_display,
-        ij_metadata_parsed,
     }
-}
-
-struct IjBlocks {
-    ranges: Option<Vec<(f64, f64)>>,
-    luts: Vec<[[u8; 3]; 256]>,
-}
-
-/// Best-effort parse of the IJMetadata directory format. Returns `None` on
-/// any structural inconsistency rather than guessing — callers fall back to
-/// defaults in that case. See module docs for the honesty caveat here.
-fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32], header_order: ByteOrder) -> Option<IjBlocks> {
-    if byte_counts.is_empty() {
-        return None;
-    }
-    let header_len = *byte_counts.first()? as usize;
-    let header = data.get(..header_len)?;
-
-    // Header is a sequence of 8-byte records: 4-byte ASCII type code + a
-    // 4-byte count. The on-disk endianness of this internal directory isn't
-    // officially documented; we try big-endian first (consistent with this
-    // block being written by Java's DataOutputStream) and fall back to
-    // little-endian if that doesn't produce a structurally consistent plan.
-    if header_len % 8 != 0 {
-        return None;
-    }
-    let mut plan: Vec<([u8; 4], usize)> = Vec::new();
-    for chunk in header.chunks_exact(8) {
-        let mut code = [0u8; 4];
-        code.copy_from_slice(&chunk[0..4]);
-        if !code.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
-            return None; // doesn't look like a real type code; bail out
-        }
-        let count = header_order.u32(&chunk[4..8]) as usize;
-        plan.push((code, count));
-    }
-
-    let expanded: usize = plan.iter().map(|(_, n)| n).sum();
-    if byte_counts.len() != 1 + expanded {
-        return None; // doesn't match our assumed layout
-    }
-
-    let mut cursor = header_len;
-    let mut block_idx = 1; // byte_counts[0] was the header itself
-    let mut ranges: Option<Vec<(f64, f64)>> = None;
-    let mut luts: Vec<[[u8; 3]; 256]> = Vec::new();
-
-    for (code, n) in plan {
-        for _ in 0..n {
-            let len = *byte_counts.get(block_idx)? as usize;
-            let block = data.get(cursor..cursor + len)?;
-            cursor += len;
-            block_idx += 1;
-
-            match &code {
-                b"rang" => {
-                    // n channel pairs of f64 (min, max), same endianness as the directory.
-                    let mut parsed = Vec::new();
-                    for pair in block.chunks_exact(16) {
-                        let lo = header_order.f64_from(&pair[0..8]);
-                        let hi = header_order.f64_from(&pair[8..16]);
-                        parsed.push((lo, hi));
-                    }
-                    if !parsed.is_empty() {
-                        ranges = Some(parsed);
-                    }
-                }
-                b"luts" => {
-                    // 768 bytes: 256 R, then 256 G, then 256 B (planar, not interleaved).
-                    if block.len() == 768 {
-                        let mut lut = [[0u8; 3]; 256];
-                        for i in 0..256 {
-                            lut[i] = [block[i], block[256 + i], block[512 + i]];
-                        }
-                        luts.push(lut);
-                    }
-                }
-                _ => { /* info / labl / roi / over / plot: not needed for rendering */ }
-            }
-        }
-    }
-
-    if ranges.is_none() && luts.is_empty() {
-        return None;
-    }
-    if cursor != data.len() {
-        // A correct parse should land exactly on the end of the buffer.
-        // Landing short or overrunning means the directory was
-        // misinterpreted somewhere — possibly correctly counting total
-        // bytes by coincidence while misattributing which bytes belong to
-        // which block type. Don't trust a result we can't fully account for.
-        return None;
-    }
-    Some(IjBlocks { ranges, luts })
 }

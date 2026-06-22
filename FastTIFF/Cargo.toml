@@ -1,6 +1,6 @@
 [package]
 name = "FastTIFF"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 description = "Fast multi-frame TIFF stack viewer with ImageJ-compatible LUT/contrast rendering."
 

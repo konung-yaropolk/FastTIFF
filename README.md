@@ -56,8 +56,8 @@ hovering over the image, or the left/right arrow keys.
 - Multi-frame grayscale and multi-channel composite TIFFs, 8/16/32-bit.
 - ImageJ `ImageDescription` parsing (channels/slices/frames, mode,
   min/max, unit, frame interval) — solid, well-documented format.
-- Per-channel LUT and display-range extraction from the `IJMetadata` block
-  — best-effort (see caveat below).
+- Composite-channel colors from a standard cycling palette; contrast from
+  `min=`/`max=` in `ImageDescription` (or auto-contrast from the data).
 - Horizontal frame scrubber + mouse-wheel scrubbing + arrow keys.
 - Per-channel enable/disable + manual contrast (min/max) override.
 - Z-slice selector when `slices > 1` (the scrubber itself always drives
@@ -69,30 +69,20 @@ ROIs, measurements, image processing, saving/exporting, zoom/pan. All
 straightforward to add later on top of this structure if you want them —
 the render pipeline already separates "decode" from "display" cleanly.
 
-## Known caveat: IJMetadata LUT parsing is best-effort
+## Deprecated: the binary IJMetadata block (tags 50838/50839)
 
 ImageJ's `ImageDescription` text block (channels/slices/frames/min/max) is
 well documented and the parser for it is solid. The binary `IJMetadata` /
 `IJMetadataByteCounts` tags (which carry per-channel custom LUTs and
-display ranges for composite stacks) are **not officially documented** —
-`tiff_core/src/ij_metadata.rs` reconstructs the format from known reader
-implementations, with two defensive properties:
+display ranges for composite stacks) are **not officially documented**, and
+in practice two otherwise-identical files could render differently purely
+because of inconsistencies in this block.
 
-1. It tries both header endiannesses and bails out to defaults (grayscale,
-   auto-contrast from the first frame) on any structural inconsistency,
-   rather than risk silently misreading the directory.
-2. If it's wrong on one of your real files, the failure mode is "default
-   colors instead of your custom LUT" — not a crash, not corrupted pixels.
-
-This only matters for **multi-channel composite** stacks with custom
-per-channel LUTs/ranges saved in ImageJ. Single-channel grayscale (the
-common case for calcium imaging time series) never touches this code path
-at all — it just uses `min=`/`max=` from `ImageDescription`, or
-auto-contrast from the first frame if that's absent too.
-
-If composite-mode colors look wrong on a real file, that's the function to
-look at (`try_parse_ij_blocks`) — happy to fix it against an actual
-example if you hit this.
+These tags are therefore **no longer read**. All display metadata comes
+from `ImageDescription` alone: composite-channel colors use a standard
+cycling palette, and contrast uses `min=`/`max=` from the description (or
+auto-contrast from the data when that's absent). The former best-effort
+binary parser was removed — see git history if it ever needs reviving.
 
 ## Known caveat: plane ordering assumption
 

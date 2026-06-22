@@ -30,8 +30,11 @@ pub fn read_frame_u16<'a>(
     let n_samples = frame.width as usize * frame.height as usize * frame.samples_per_pixel as usize;
 
     // --- Fast path: uncompressed, single strip, native 16-bit, native byte order ---
+    // Signed-int frames are excluded: they need the +32768 offset applied
+    // below (see the `16 =>` arm), so they can't be a zero-copy reinterpret.
     if frame.compression == Compression::None
         && frame.bits_per_sample == 16
+        && frame.sample_format != SampleFormat::SignedInt
         && file_order == ByteOrder::host()
         && frame.strip_offsets.len() == 1
     {
@@ -52,15 +55,24 @@ pub fn read_frame_u16<'a>(
     // --- General path ---
     let native_bytes = decode_native_bytes(mmap, frame, file_order)?;
 
+    // ImageJ stores signed-integer images by offsetting into unsigned space
+    // for display (a signed `v` is shown/windowed as `v + 2^(bits-1)`), and it
+    // writes the display window (`min=`/`max=`) in that same offset space. To
+    // match — so a signed-int16 file and the equivalent unsigned+calibration
+    // file render identically — flip the sign bit, which is exactly that
+    // offset modulo the sample range (XOR 0x8000 == +32768 for 16-bit).
+    let signed = frame.sample_format == SampleFormat::SignedInt;
     let mut out = vec![0u16; n_samples];
     match frame.bits_per_sample {
         16 => {
             for (i, chunk) in native_bytes.chunks_exact(2).enumerate().take(n_samples) {
-                out[i] = file_order.u16(chunk);
+                let v = file_order.u16(chunk);
+                out[i] = if signed { v ^ 0x8000 } else { v };
             }
         }
         8 => {
             for (i, &b) in native_bytes.iter().enumerate().take(n_samples) {
+                let b = if signed { b ^ 0x80 } else { b };
                 out[i] = ((b as u16) << 8) | b as u16;
             }
         }
@@ -434,6 +446,23 @@ mod tests {
         // 10.0 out of a 0..100 range is exactly 10%.
         let expected = (65535.0_f64 * 0.10).round() as u16;
         assert!(pixels[1].abs_diff(expected) <= 1);
+    }
+
+    #[test]
+    fn signed_int16_is_offset_into_unsigned_display_space() {
+        // ImageJ stores signed-16 images and windows them in unsigned+32768
+        // space. A signed -72 must decode to 32696, signed 0 to 32768, etc. —
+        // so a signed file lines up with the equivalent unsigned+calibration
+        // file (and the same min=/max= window applies to both).
+        let mut frame = make_frame(2, 2, 1);
+        frame.sample_format = SampleFormat::SignedInt;
+        let values: [i16; 4] = [-72, 0, 878, -32768];
+        let mut file = Vec::new();
+        for v in values {
+            file.extend_from_slice(&v.to_le_bytes());
+        }
+        let pixels = read_frame_u16(&file, &frame, ByteOrder::Little, None).unwrap();
+        assert_eq!(&*pixels, &[32696u16, 32768, 33646, 0]);
     }
 
     #[test]

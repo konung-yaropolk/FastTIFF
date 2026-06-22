@@ -227,17 +227,19 @@ fn first_frame_float_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f3
     tiff_core::frame_float_minmax(&tiff.mmap, frame, tiff.byte_order).ok()?
 }
 
-/// Resizes `meta.channel_display` to `new_channels` entries, keeping
-/// existing LUT/range entries where the index still exists and
-/// synthesizing defaults for any new ones.
+/// Resizes `meta.channel_display` to `new_channels` entries. The display
+/// range is preserved per-channel where the index still exists, but the LUT
+/// is always regenerated from the stack's `mode` — so collapsing a
+/// mislabeled `channels=N` stack down to a single grayscale channel (see
+/// `resolve_dimensions`) doesn't leave channel 0 wearing a stale composite
+/// (e.g. red) LUT.
 fn resize_channel_display(meta: &mut tiff_core::StackMeta, new_channels: usize) {
     let old = std::mem::take(&mut meta.channel_display);
+    let mode = meta.mode;
     meta.channel_display = (0..new_channels)
-        .map(|c| {
-            old.get(c).cloned().unwrap_or_else(|| tiff_core::ChannelDisplay {
-                lut: tiff_core::default_composite_lut(c),
-                range: None,
-            })
+        .map(|c| tiff_core::ChannelDisplay {
+            lut: tiff_core::default_lut_for(mode, c),
+            range: old.get(c).and_then(|d| d.range),
         })
         .collect();
 }
@@ -291,10 +293,6 @@ fn compute_status(meta: &tiff_core::StackMeta, triple_axis_warning: bool) -> Opt
             "Note: stack has {} channels; showing the first {MAX_CHANNELS}.",
             meta.channels
         ))
-    } else if !meta.ij_metadata_parsed && meta.channels > 1 {
-        Some(
-            "Note: couldn't parse per-channel LUTs/ranges from this file's IJMetadata block — using default colors and auto-contrast. Adjust manually below if needed.".to_string(),
-        )
     } else {
         None
     }
