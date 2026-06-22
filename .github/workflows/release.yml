@@ -31,10 +31,10 @@ jobs:
       - name: Build release exe
         run: cargo build --release -p FastTIFF
 
-      # # Give the asset a versioned name
-      # - name: Stage artifact
-      #   shell: bash
-      #   run: cp target/release/FastTIFF.exe "FastTIFF-${{ github.event.release.tag_name }}.exe"
+      # Give the asset a versioned name
+      - name: Stage artifact
+        shell: bash
+        run: cp target/release/FastTIFF.exe "FastTIFF.exe"
 
       - name: Attach exe to release
         uses: softprops/action-gh-release@v2
