@@ -114,6 +114,15 @@ pub struct ViewerApp {
     /// Fractional-frame carry so a non-integer frames-per-render-tick advance
     /// doesn't lose or gain time over a long playback.
     play_accumulator: f64,
+    /// The window size at the previous frame. We only repaint on input events
+    /// (to stay idle when nothing changes), but a wgpu surface resize needs
+    /// fresh paints or the last frame is left stretched over the new size.
+    last_canvas_size: Option<egui::Vec2>,
+    /// When the channels panel was just toggled: the bottom-bar height *before*
+    /// the toggle took visual effect, so the next frame can grow/shrink the
+    /// window by exactly the panel's height change. `false` when idle.
+    panel_grow_armed: bool,
+    panel_old_h: f32,
 }
 
 /// Playback rate used when the file's metadata doesn't specify `fps=`.
@@ -132,6 +141,9 @@ impl ViewerApp {
             playing: false,
             last_play_time: None,
             play_accumulator: 0.0,
+            last_canvas_size: None,
+            panel_grow_armed: false,
+            panel_old_h: 0.0,
         };
         if let Some(path) = initial_path {
             app.open_file(path);
@@ -806,6 +818,12 @@ impl eframe::App for ViewerApp {
 
         if toggle_requested {
             self.channels_panel_expanded = !self.channels_panel_expanded;
+            // Remember the panel's height *before* it expands/collapses; the
+            // next frame (once it's redrawn in the new state) grows or shrinks
+            // the window by the difference. This frame still shows the old
+            // height, so the actual delta only becomes known next frame.
+            self.panel_grow_armed = true;
+            self.panel_old_h = scrub_bar_response.response.rect.height();
         }
 
         if play_toggle_requested {
@@ -926,6 +944,30 @@ impl eframe::App for ViewerApp {
         let toolbar_height = toolbar_response.response.rect.height();
         let bottom_bar_height = scrub_bar_response.response.rect.height();
         let chrome_height = toolbar_height + bottom_bar_height;
+
+        // Panel expand/collapse: grow (or shrink) the window height by the
+        // panel's own height change, so the image and toolbar above stay put
+        // and the panel "drops down" from its position. One-shot, triggered
+        // only by the toggle. Skipped when the window is maximized — there the
+        // image just letterboxes into the space the panel takes. We stay armed
+        // until the height actually changes (the toggle frame still reports the
+        // old height), repainting meanwhile so the next frame lands.
+        if self.panel_grow_armed {
+            let delta = bottom_bar_height - self.panel_old_h;
+            if delta.abs() > 0.5 {
+                self.panel_grow_armed = false;
+                let maximized = ui.ctx().input(|i| i.viewport().maximized).unwrap_or(false);
+                if !maximized {
+                    let cur = ui.ctx().content_rect().size();
+                    let h = (cur.y + delta).round().max(200.0);
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(cur.x.round(), h)));
+                }
+            } else {
+                ui.ctx().request_repaint();
+            }
+        }
+
         if let Some(loaded) = &self.stack {
             if let Some(first) = loaded.tiff.frames.first() {
                 let img_w = first.width as f32;
@@ -972,5 +1014,17 @@ impl eframe::App for ViewerApp {
             self.sync_gpu(&render_state);
         }
 
+        // Force one more paint whenever the window size changed since last
+        // frame. Without this, a resize can leave the previous frame stretched
+        // across the new surface (image overlapping the title bar / a doubled
+        // bottom panel) until some other event triggers a redraw. While a drag
+        // is ongoing the size keeps changing, so this re-arms itself each frame
+        // and the canvas tracks the resize live; once it settles, one final
+        // paint lands and we go idle again.
+        let canvas_size = ui.ctx().content_rect().size();
+        if self.last_canvas_size != Some(canvas_size) {
+            self.last_canvas_size = Some(canvas_size);
+            ui.ctx().request_repaint();
+        }
     }
 }
