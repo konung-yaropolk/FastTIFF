@@ -474,3 +474,88 @@ fn opens_rgb8_tiff_and_deinterleaves_planes() {
     assert_eq!(red, vec![up(10), up(40), up(70), up(100)]);
     assert_eq!(blue, vec![up(30), up(60), up(90), up(120)]);
 }
+
+/// Builds a chained multi-IFD 16-bit grayscale TIFF with one frame per `(w, h)`
+/// in `dims` — used to exercise the uniform-size validation with deliberately
+/// mismatched frames (e.g. a pyramidal stack). Pixel data is just zeros.
+fn build_multi_size_tiff(dims: &[(u32, u32)]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"II");
+    buf.extend_from_slice(&42u16.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // first-IFD offset, patched below
+
+    let mut strip_offsets = Vec::new();
+    for &(w, h) in dims {
+        strip_offsets.push(buf.len() as u32);
+        buf.extend(std::iter::repeat(0u8).take((w * h * 2) as usize));
+    }
+
+    let n = dims.len();
+    let ifd_size = 2 + 9 * 12 + 4; // entry count + 9 entries + next-offset
+    let ifd_start: Vec<u32> = {
+        let mut starts = Vec::new();
+        let mut cursor = buf.len() as u32;
+        for _ in 0..n {
+            starts.push(cursor);
+            cursor += ifd_size as u32;
+        }
+        starts
+    };
+    buf[4..8].copy_from_slice(&ifd_start[0].to_le_bytes());
+
+    for i in 0..n {
+        let (w, h) = dims[i];
+        let mut entries: Vec<IfdEntrySpec> = vec![
+            (TAG_IMAGE_WIDTH, 4, 1, long_val(w)),
+            (TAG_IMAGE_LENGTH, 4, 1, long_val(h)),
+            (TAG_BITS_PER_SAMPLE, 3, 1, short_val(16)),
+            (TAG_COMPRESSION, 3, 1, short_val(1)),
+            (TAG_PHOTOMETRIC, 3, 1, short_val(1)),
+            (TAG_STRIP_OFFSETS, 4, 1, long_val(strip_offsets[i])),
+            (TAG_SAMPLES_PER_PIXEL, 3, 1, short_val(1)),
+            (TAG_ROWS_PER_STRIP, 4, 1, long_val(h)),
+            (TAG_STRIP_BYTE_COUNTS, 4, 1, long_val(w * h * 2)),
+        ];
+        entries.sort_by_key(|e| e.0);
+        buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, ftype, count, val) in &entries {
+            buf.extend_from_slice(&tag.to_le_bytes());
+            buf.extend_from_slice(&ftype.to_le_bytes());
+            buf.extend_from_slice(&count.to_le_bytes());
+            buf.extend_from_slice(val);
+        }
+        let next = if i + 1 < n { ifd_start[i + 1] } else { 0 };
+        buf.extend_from_slice(&next.to_le_bytes());
+    }
+    buf
+}
+
+#[test]
+fn rejects_non_uniform_frame_sizes() {
+    // Frame 0 is 2x2, frame 1 is 3x3 — a pyramidal / mixed-size stack that
+    // can't go into one fixed-size texture. Must fail to open with a clear
+    // error rather than silently mis-rendering the odd frame.
+    let bytes = build_multi_size_tiff(&[(2, 2), (3, 3)]);
+    let path = unique_temp_path("mismatched.tif");
+    std::fs::write(&path, &bytes).unwrap();
+
+    match TiffStack::open(&path) {
+        Ok(_) => panic!("mismatched frame sizes should fail to open"),
+        Err(e) => {
+            let msg = format!("{e:#}");
+            assert!(msg.contains("not uniform"), "unexpected error: {msg}");
+        }
+    }
+}
+
+#[test]
+fn accepts_uniform_frame_sizes() {
+    // The same builder with consistent dimensions opens fine (guards against
+    // the uniform-size check being too strict).
+    let bytes = build_multi_size_tiff(&[(4, 3), (4, 3), (4, 3)]);
+    let path = unique_temp_path("uniform.tif");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let stack = TiffStack::open(&path).expect("uniform frames should open");
+    assert_eq!(stack.frames.len(), 3);
+}

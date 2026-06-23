@@ -140,6 +140,33 @@ impl TiffStack {
             bail!("TIFF has no image directories");
         }
 
+        // Every frame in the stack must share the first frame's geometry and
+        // pixel layout. The viewer uploads every frame into one fixed-size GPU
+        // texture (sized to frame 0) and decodes with a single stride, so a
+        // differently-shaped frame — e.g. the reduced-resolution levels of a
+        // pyramidal TIFF, or an appended thumbnail page — would otherwise be
+        // silently mis-rendered. Catch it here with a clear error instead.
+        let f0 = &frames[0];
+        let f0_shape = (f0.width, f0.height, f0.bits_per_sample, f0.samples_per_pixel);
+        if let Some((i, f)) = frames.iter().enumerate().find(|(_, f)| {
+            (f.width, f.height, f.bits_per_sample, f.samples_per_pixel) != f0_shape
+        }) {
+            bail!(
+                "TIFF frames are not uniform: frame 0 is {}x{} ({}-bit, {} sample(s)/px) but \
+                 frame {} is {}x{} ({}-bit, {} sample(s)/px). This looks like a pyramidal or \
+                 mixed-size TIFF, which this stack viewer doesn't support.",
+                f0.width,
+                f0.height,
+                f0.bits_per_sample,
+                f0.samples_per_pixel,
+                i,
+                f.width,
+                f.height,
+                f.bits_per_sample,
+                f.samples_per_pixel,
+            );
+        }
+
         let meta = ij_metadata::build_stack_meta(
             description.as_deref(),
             ij_metadata_bytes.as_deref(),

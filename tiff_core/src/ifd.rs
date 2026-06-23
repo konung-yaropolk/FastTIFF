@@ -135,6 +135,21 @@ impl RawIfdEntry {
 
     /// Interpret as a single u32 (first element; common for scalar tags).
     pub fn as_u32(&self, file: &[u8], order: ByteOrder) -> Result<u32> {
+        let sz = type_size(self.field_type)
+            .ok_or_else(|| anyhow!("unsupported TIFF field type {}", self.field_type))?;
+        // Fast path for the overwhelmingly common scalar case (ImageWidth,
+        // BitsPerSample, …): the value is stored inline in the 4-byte field, so
+        // read it directly without the per-call Vec allocation of
+        // `as_u32_array` — this is called ~once per tag per IFD, i.e. tens of
+        // thousands of times when opening a large multi-frame stack.
+        if self.count == 1 && sz <= 4 {
+            return Ok(match sz {
+                1 => self.value_or_offset[0] as u32,
+                2 => order.u16(&self.value_or_offset[0..2]) as u32,
+                4 => order.u32(&self.value_or_offset),
+                _ => bail!("tag {} has non-integer field type {}", self.tag, self.field_type),
+            });
+        }
         self.as_u32_array(file, order)?
             .first()
             .copied()
