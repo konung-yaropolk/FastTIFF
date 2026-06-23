@@ -88,6 +88,11 @@ pub struct ViewerApp {
     /// Channel buttons + contrast sliders are tucked under a small
     /// triangle toggle to keep the bar minimal by default.
     channels_panel_expanded: bool,
+    /// User preference (persists across files): tint a multi-channel *grayscale*
+    /// stack with the standard channel palette (ch1 red, ch2 green, ch3 blue,
+    /// …). Has no effect on stacks that already carry colors (composite mode,
+    /// or RGB) — those keep their own LUTs.
+    apply_pseudocolor: bool,
     /// Zoom factor used the last time we sized the window: 1.0 = one window
     /// pixel per image pixel. The window is only ever resized in response to an
     /// explicit event (opening a file, or a zoom in/out) — never every frame —
@@ -134,6 +139,7 @@ impl ViewerApp {
             stack: None,
             status: None,
             channels_panel_expanded: false,
+            apply_pseudocolor: false,
             zoom: 1.0,
             pending_initial_fit: false,
             resize_to_zoom: false,
@@ -176,6 +182,8 @@ impl ViewerApp {
                 if loaded.tiff.frames.first().is_some_and(|f| f.is_rgb()) {
                     setup_rgb(&mut loaded);
                 }
+                // Carry the pseudocolor preference onto the new stack.
+                refresh_pseudocolor(&mut loaded, self.apply_pseudocolor);
 
                 self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
                 self.stack = Some(loaded);
@@ -549,6 +557,32 @@ fn setup_rgb(loaded: &mut LoadedStack) {
     loaded.luts_uploaded = false;
 }
 
+/// Whether the "apply pseudocolor" option is meaningful for this stack: only
+/// multi-channel grayscale stacks (composite files already carry colors; RGB is
+/// handled separately) can be optionally tinted with the channel palette.
+fn pseudocolor_applicable(loaded: &LoadedStack) -> bool {
+    !loaded.rgb
+        && loaded.channel_settings.len() > 1
+        && loaded.tiff.meta.mode == tiff_core::DisplayMode::Grayscale
+}
+
+/// Sets the per-channel LUTs of an applicable (multi-channel grayscale) stack:
+/// the standard channel palette (ch1 red, ch2 green, …) when `apply` is true,
+/// plain grayscale otherwise. No-op for stacks that carry their own colors.
+fn refresh_pseudocolor(loaded: &mut LoadedStack, apply: bool) {
+    if !pseudocolor_applicable(loaded) {
+        return;
+    }
+    for (c, disp) in loaded.tiff.meta.channel_display.iter_mut().enumerate() {
+        disp.lut = if apply {
+            tiff_core::default_composite_lut(c)
+        } else {
+            tiff_core::grayscale_lut()
+        };
+    }
+    loaded.luts_uploaded = false; // force re-upload on the next sync
+}
+
 /// Applies a manual channels/frames swap from the dimension-order
 /// dropdown. Z (if any) and the triple-axis warning are carried over
 /// unchanged — the swap only concerns the channels/frames roles.
@@ -635,9 +669,11 @@ impl eframe::App for ViewerApp {
 
         let panel_expanded = self.channels_panel_expanded;
         let is_playing = self.playing;
+        let pseudocolor_on = self.apply_pseudocolor;
         let mut toggle_requested = false;
         let mut play_toggle_requested = false;
         let mut dimension_override: Option<(usize, usize)> = None;
+        let mut pseudocolor_toggle: Option<bool> = None;
         let mut scroll_step: i32 = 0;
         let current_status = self.status.clone();
 
@@ -750,6 +786,20 @@ impl eframe::App for ViewerApp {
                                     }
                                 }
                             });
+
+                        // Optional channel palette — only for multi-channel
+                        // grayscale stacks that carry no colors of their own.
+                        if pseudocolor_applicable(loaded) {
+                            ui.separator();
+                            let mut on = pseudocolor_on;
+                            if ui
+                                .checkbox(&mut on, "Apply pseudocolor")
+                                .on_hover_text("Tint channels ch1 = red, ch2 = green, ch3 = blue, …")
+                                .changed()
+                            {
+                                pseudocolor_toggle = Some(on);
+                            }
+                        }
                     });
                     ui.label(
                         RichText::new(
@@ -834,6 +884,13 @@ impl eframe::App for ViewerApp {
             self.play_accumulator = 0.0;
         }
 
+        if let Some(on) = pseudocolor_toggle {
+            self.apply_pseudocolor = on;
+            if let Some(loaded) = &mut self.stack {
+                refresh_pseudocolor(loaded, on);
+            }
+        }
+
         // Looped playback: advance by real elapsed time so the movie runs at
         // the file's `fps` (or the default) regardless of render cadence, and
         // request continuous repaints while it's running.
@@ -865,6 +922,9 @@ impl eframe::App for ViewerApp {
         if let Some((c, f)) = dimension_override {
             if let Some(loaded) = &mut self.stack {
                 apply_dimension_override(loaded, c, f);
+                // The swap rebuilds channel_display from `mode`, so re-apply the
+                // pseudocolor preference on top of the fresh LUTs.
+                refresh_pseudocolor(loaded, self.apply_pseudocolor);
                 self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
             }
         }
