@@ -1,4 +1,7 @@
-#![windows_subsystem = "windows"]
+// TEMP: console kept on so any OpenGL shader compile/link panic is visible
+// while bringing up the glow renderer. Restore `#![windows_subsystem =
+// "windows"]` once images render correctly.
+// #![windows_subsystem = "windows"]
 
 mod app;
 mod render;
@@ -18,7 +21,8 @@ fn main() -> eframe::Result {
             // resizing and zoom-out (which letterboxes below this size).
             .with_min_inner_size([256.0, 256.0])
             .with_title("FastTIFF"),
-        renderer: eframe::Renderer::Wgpu,
+        // glow (OpenGL) backend: avoids the Windows + wgpu idle-CPU spin.
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
 
@@ -26,12 +30,14 @@ fn main() -> eframe::Result {
         "FastTIFF",
         native_options,
         Box::new(|cc| {
-            let render_state = cc
-                .wgpu_render_state
+            let gl = cc
+                .gl
                 .as_ref()
-                .expect("FastTIFF requires the wgpu backend (NativeOptions::renderer = Wgpu)");
-            render::pipeline::install(render_state);
-            Ok(Box::new(app::ViewerApp::new(initial_path)))
+                .expect("FastTIFF requires the glow backend (NativeOptions::renderer = Glow)");
+            let render = std::sync::Arc::new(std::sync::Mutex::new(
+                render::pipeline::ImageRenderResources::new(gl),
+            ));
+            Ok(Box::new(app::ViewerApp::new(initial_path, render)))
         }),
     )
 }

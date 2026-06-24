@@ -6,7 +6,9 @@ description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible r
 
 [dependencies]
 tiff_core = { path = "../tiff_core" }
-eframe = { version = "0.34", default-features = true }
+# `glow` feature added on top of defaults (which include `wgpu`) to test the
+# glow backend for the idle-CPU spin. TEMP — revert if glow doesn't help.
+eframe = { version = "0.34", default-features = true, features = ["glow"] }
 egui = "0.34"
 egui_extras = "0.34"
 bytemuck = "1.25"
