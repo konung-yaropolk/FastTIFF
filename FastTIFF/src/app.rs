@@ -1,19 +1,14 @@
 //! The viewer's egui::App. Holds the loaded stack (if any), per-channel
 //! display settings, and the current scrub position. Drives GPU texture
-//! uploads directly from UI code (not from inside the paint callback) so a
-//! frame change is just: mmap read -> glTexSubImage -> (next frame) draw call.
+//! uploads directly from UI code (not from inside the paint callback —
+//! see render/callback.rs for why) so a frame change is just:
+//!   mmap read -> queue.write_texture -> (next egui frame) draw call.
 
 use crate::render::pipeline::{ChannelUniform, ImageRenderResources, MAX_CHANNELS};
-use eframe::{egui_glow, glow};
+use eframe::egui_wgpu;
 use egui::{Color32, RichText};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use tiff_core::TiffStack;
-
-/// Shared handle to the GL render resources. `Arc<Mutex>` because the egui_glow
-/// paint callback (which draws) must be `Send + Sync + 'static`; uploads happen
-/// in `update`/`sync_gpu`, so the lock is uncontended (both on the UI thread).
-pub type SharedRender = Arc<Mutex<ImageRenderResources>>;
 
 /// Discrete zoom levels the viewer snaps to (6.25%, 12.5%, 25%, … 3200%).
 /// Zooming in/out steps between adjacent levels.
@@ -109,9 +104,6 @@ struct LoadedStack {
 }
 
 pub struct ViewerApp {
-    /// GL textures/shader for compositing the image, shared with the paint
-    /// callback. Created once at startup from the glow context.
-    render: SharedRender,
     stack: Option<LoadedStack>,
     status: Option<String>,
     /// Channel buttons + contrast sliders are tucked under a small
@@ -185,9 +177,8 @@ pub struct ViewerApp {
 const DEFAULT_FPS: f64 = 30.0;
 
 impl ViewerApp {
-    pub fn new(initial_path: Option<PathBuf>, render: SharedRender) -> Self {
+    pub fn new(initial_path: Option<PathBuf>) -> Self {
         let mut app = Self {
-            render,
             stack: None,
             status: None,
             channels_panel_expanded: false,
@@ -278,9 +269,12 @@ impl ViewerApp {
         loaded.frame_index * meta.slices * meta.channels + channel
     }
 
-    fn sync_gpu(&mut self, gl: &glow::Context) {
+    fn sync_gpu(&mut self, render_state: &egui_wgpu::RenderState) {
         let Some(loaded) = &mut self.stack else { return };
-        let mut resources = self.render.lock().unwrap();
+        let mut renderer = render_state.renderer.write();
+        let Some(resources) = renderer.callback_resources.get_mut::<ImageRenderResources>() else {
+            return;
+        };
 
         let n_channels = loaded.channel_settings.len();
         if n_channels == 0 {
@@ -288,12 +282,12 @@ impl ViewerApp {
         }
 
         if let Some(first) = loaded.tiff.frames.first() {
-            resources.ensure_size(gl, first.width, first.height);
+            resources.ensure_size(&render_state.device, first.width, first.height);
         }
 
         if !loaded.luts_uploaded {
             for c in 0..n_channels {
-                resources.upload_lut(gl, c, &loaded.tiff.meta.channel_display[c].lut);
+                resources.upload_lut(&render_state.queue, c, &loaded.tiff.meta.channel_display[c].lut);
             }
             loaded.luts_uploaded = true;
         }
@@ -318,7 +312,13 @@ impl ViewerApp {
                     };
                     match decoded {
                         Ok(pixels) => {
-                            resources.upload_channel(gl, c, frame_info.width, frame_info.height, &pixels);
+                            resources.upload_channel(
+                                &render_state.queue,
+                                c,
+                                frame_info.width,
+                                frame_info.height,
+                                &pixels,
+                            );
                         }
                         Err(e) => {
                             self.status = Some(format!("Failed to decode frame: {e:#}"));
@@ -349,7 +349,13 @@ impl ViewerApp {
                 ChannelUniform { min, max, enabled: s.enabled }
             })
             .collect();
-        resources.set_params(&uniforms, n_channels as u32, self.uv_offset.into(), self.uv_scale.into());
+        resources.update_params(
+            &render_state.queue,
+            &uniforms,
+            n_channels as u32,
+            self.uv_offset.into(),
+            self.uv_scale.into(),
+        );
     }
 }
 
@@ -1133,16 +1139,10 @@ impl eframe::App for ViewerApp {
                 let inv = egui::vec2(1.0 / img_px.x.max(1.0), 1.0 / img_px.y.max(1.0));
                 self.uv_offset = (visible.min - origin) * inv;
                 self.uv_scale = visible.size() * inv;
-                let res = self.render.clone();
-                let callback = egui_glow::CallbackFn::new(move |_info, painter| {
-                    if let Ok(r) = res.lock() {
-                        r.paint(painter.gl());
-                    }
-                });
-                ui.painter().with_clip_rect(panel_rect).add(egui::Shape::Callback(egui::PaintCallback {
-                    rect: visible,
-                    callback: Arc::new(callback),
-                }));
+                ui.painter().with_clip_rect(panel_rect).add(egui_wgpu::Callback::new_paint_callback(
+                    visible,
+                    crate::render::callback::ImagePaintCallback,
+                ));
             }
 
             response.on_hover_cursor(if pannable {
@@ -1360,8 +1360,8 @@ impl eframe::App for ViewerApp {
             self.last_title = Some(desired_title);
         }
 
-        if let Some(gl) = frame.gl().cloned() {
-            self.sync_gpu(&gl);
+        if let Some(render_state) = frame.wgpu_render_state().cloned() {
+            self.sync_gpu(&render_state);
         }
     }
 }
