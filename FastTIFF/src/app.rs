@@ -140,10 +140,6 @@ pub struct ViewerApp {
     /// Fractional-frame carry so a non-integer frames-per-render-tick advance
     /// doesn't lose or gain time over a long playback.
     play_accumulator: f64,
-    /// The window size at the previous frame. We only repaint on input events
-    /// (to stay idle when nothing changes), but a wgpu surface resize needs
-    /// fresh paints or the last frame is left stretched over the new size.
-    last_canvas_size: Option<egui::Vec2>,
     /// When the channels panel was just toggled: the bottom-bar height *before*
     /// the toggle took visual effect, so the next frame can grow/shrink the
     /// window by exactly the panel's height change. `false` when idle.
@@ -194,7 +190,6 @@ impl ViewerApp {
             playing: false,
             last_play_time: None,
             play_accumulator: 0.0,
-            last_canvas_size: None,
             panel_grow_armed: false,
             panel_old_h: 0.0,
             playback_fps: DEFAULT_FPS,
@@ -455,6 +450,10 @@ fn format_calibrated(calibration: Option<(f64, f64)>, raw: f32) -> String {
 /// cross. `salt` disambiguates the interaction ids when several sliders share
 /// a parent (e.g. one per channel).
 fn range_slider(ui: &mut egui::Ui, salt: u64, min: &mut f32, max: &mut f32, lo: f32, hi: f32, width: f32) {
+    // Defensive: keep the handles inside the track and ordered, even if the
+    // values were pushed out of range elsewhere (e.g. by the shift-sync).
+    *min = (*min).clamp(lo, hi);
+    *max = (*max).clamp(lo, hi).max(*min);
     let height = 18.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
     let span = (hi - lo).max(f32::EPSILON);
@@ -931,6 +930,12 @@ impl eframe::App for ViewerApp {
                 let rgb = loaded.rgb;
                 if loaded.channel_settings.len() > 1 {
                     ui.separator();
+                    // Hold Shift while dragging one channel's slider to move every
+                    // channel's window by the same amount. Snapshot the values
+                    // first so we can detect which one moved and by how much.
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    let before: Vec<(f32, f32)> =
+                        loaded.channel_settings.iter().map(|s| (s.min, s.max)).collect();
                     // One row per channel — checkbox in line with its slider —
                     // stacked vertically.
                     for (c, settings) in loaded.channel_settings.iter_mut().enumerate() {
@@ -955,6 +960,31 @@ impl eframe::App for ViewerApp {
                             range_slider(ui, c as u64, &mut settings.min, &mut settings.max, lo, hi, slider_w);
                             ui.label(RichText::new(value).small());
                         });
+                    }
+                    // Shift-sync: if a slider moved this frame, apply the same
+                    // delta to every other channel (clamped to its own bounds).
+                    if shift {
+                        let moved = loaded.channel_settings.iter().enumerate().find_map(|(c, s)| {
+                            let (bmin, bmax) = before[c];
+                            let (dmin, dmax) = (s.min - bmin, s.max - bmax);
+                            if dmin != 0.0 || dmax != 0.0 {
+                                Some((c, dmin, dmax))
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some((src, dmin, dmax)) = moved {
+                            for (i, s) in loaded.channel_settings.iter_mut().enumerate() {
+                                if i == src {
+                                    continue;
+                                }
+                                s.min = (s.min + dmin).clamp(s.bounds.0, s.bounds.1);
+                                s.max = (s.max + dmax).clamp(s.bounds.0, s.bounds.1);
+                                if s.min > s.max {
+                                    s.min = s.max;
+                                }
+                            }
+                        }
                     }
                 } else if let Some(settings) = loaded.channel_settings.first_mut() {
                     ui.separator();
@@ -1194,8 +1224,11 @@ impl eframe::App for ViewerApp {
                     self.pending_initial_fit = false;
                     self.resize_to_zoom = true;
                 } else {
-                    // Monitor size not known yet — try again next frame.
-                    ui.ctx().request_repaint();
+                    // Monitor size not reported yet (can stay unknown until the
+                    // window first gets focus/input). Poll a few times a second
+                    // rather than spinning `request_repaint` every frame, which
+                    // would peg a CPU core while the app sits idle on load.
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
                 }
             }
 
@@ -1329,19 +1362,6 @@ impl eframe::App for ViewerApp {
 
         if let Some(render_state) = frame.wgpu_render_state().cloned() {
             self.sync_gpu(&render_state);
-        }
-
-        // Force one more paint whenever the window size changed since last
-        // frame. Without this, a resize can leave the previous frame stretched
-        // across the new surface (image overlapping the title bar / a doubled
-        // bottom panel) until some other event triggers a redraw. While a drag
-        // is ongoing the size keeps changing, so this re-arms itself each frame
-        // and the canvas tracks the resize live; once it settles, one final
-        // paint lands and we go idle again.
-        let canvas_size = ui.ctx().content_rect().size();
-        if self.last_canvas_size != Some(canvas_size) {
-            self.last_canvas_size = Some(canvas_size);
-            ui.ctx().request_repaint();
         }
     }
 }

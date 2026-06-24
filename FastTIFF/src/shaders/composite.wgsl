@@ -65,15 +65,37 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
     return out;
 }
 
-fn sample_channel(tex: texture_2d<u32>, uv: vec2<f32>) -> u32 {
-    let dims = textureDimensions(tex);
-    let coord = vec2<i32>(uv * vec2<f32>(dims));
-    let clamped = clamp(coord, vec2<i32>(0, 0), vec2<i32>(dims) - vec2<i32>(1, 1));
-    return textureLoad(tex, clamped, 0).r;
+fn load_texel(tex: texture_2d<u32>, uv: vec2<f32>, dims: vec2<f32>) -> f32 {
+    let coord = clamp(vec2<i32>(uv * dims), vec2<i32>(0, 0), vec2<i32>(dims) - vec2<i32>(1, 1));
+    return f32(textureLoad(tex, coord, 0).r);
 }
 
-fn apply_channel(raw: u32, channel_index: i32, cp: ChannelParams) -> vec3<f32> {
-    let value = f32(raw);
+// Returns the (averaged) sample value at `uv`. `footprint` is the UV-space size
+// of one output pixel (from screen-space derivatives). When magnifying or at
+// 1:1 the footprint is ≤ 1 texel, so it's a single crisp nearest read. When
+// minifying (zoomed out), it box-filters an NxN grid spread across the texel
+// footprint to anti-alias — the shimmer that plain nearest sampling produces on
+// shrunk images. N is capped so the per-pixel cost stays bounded.
+fn sample_channel(tex: texture_2d<u32>, uv: vec2<f32>, footprint: vec2<f32>) -> f32 {
+    let dims = vec2<f32>(textureDimensions(tex));
+    let texels = footprint * dims; // source texels covered by this output pixel
+    let n = i32(clamp(ceil(max(texels.x, texels.y)), 1.0, 4.0));
+    if (n <= 1) {
+        return load_texel(tex, uv, dims);
+    }
+    let fn_ = f32(n);
+    var sum = 0.0;
+    for (var i = 0; i < n; i = i + 1) {
+        for (var j = 0; j < n; j = j + 1) {
+            // Stratified offsets in [-0.5, 0.5] across the footprint.
+            let o = (vec2<f32>(f32(i), f32(j)) + 0.5) / fn_ - 0.5;
+            sum = sum + load_texel(tex, uv + o * footprint, dims);
+        }
+    }
+    return sum / (fn_ * fn_);
+}
+
+fn apply_channel(value: f32, channel_index: i32, cp: ChannelParams) -> vec3<f32> {
     let span = max(cp.min_max.y - cp.min_max.x, 1.0);
     let t = clamp((value - cp.min_max.x) / span, 0.0, 1.0);
     let color = textureSample(lut_tex, lut_sampler, vec2<f32>(t, 0.5), channel_index).rgb;
@@ -86,22 +108,25 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
     // Remap the quad UV onto the visible sub-region of the image (pan/zoom).
     let uv = params.uv_offset + in.uv * params.uv_scale;
+    // UV-space size of one output pixel — drives the minification box filter.
+    // Computed in uniform control flow (derivatives must not be in a branch).
+    let footprint = fwidth(uv);
 
-    color += apply_channel(sample_channel(ch0_tex, uv), 0, params.channels[0]);
+    color += apply_channel(sample_channel(ch0_tex, uv, footprint), 0, params.channels[0]);
     if (params.num_channels > 1u) {
-        color += apply_channel(sample_channel(ch1_tex, uv), 1, params.channels[1]);
+        color += apply_channel(sample_channel(ch1_tex, uv, footprint), 1, params.channels[1]);
     }
     if (params.num_channels > 2u) {
-        color += apply_channel(sample_channel(ch2_tex, uv), 2, params.channels[2]);
+        color += apply_channel(sample_channel(ch2_tex, uv, footprint), 2, params.channels[2]);
     }
     if (params.num_channels > 3u) {
-        color += apply_channel(sample_channel(ch3_tex, uv), 3, params.channels[3]);
+        color += apply_channel(sample_channel(ch3_tex, uv, footprint), 3, params.channels[3]);
     }
     if (params.num_channels > 4u) {
-        color += apply_channel(sample_channel(ch4_tex, uv), 4, params.channels[4]);
+        color += apply_channel(sample_channel(ch4_tex, uv, footprint), 4, params.channels[4]);
     }
     if (params.num_channels > 5u) {
-        color += apply_channel(sample_channel(ch5_tex, uv), 5, params.channels[5]);
+        color += apply_channel(sample_channel(ch5_tex, uv, footprint), 5, params.channels[5]);
     }
 
     return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
