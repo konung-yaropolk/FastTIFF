@@ -10,32 +10,53 @@ use egui::{Color32, RichText};
 use std::path::PathBuf;
 use tiff_core::TiffStack;
 
-const ZOOM_STEP: f32 = 0.1;
-const MIN_ZOOM: f32 = 0.2;
-const MAX_ZOOM: f32 = 8.0;
-/// Granularity of the initial fit-to-screen zoom: the opening scale is always
-/// a multiple of this (1.0, 0.8, 0.6, …), never an awkward fraction.
-const FIT_ZOOM_STEP: f32 = 0.2;
+/// Discrete zoom levels the viewer snaps to (6.25%, 12.5%, 25%, … 3200%).
+/// Zooming in/out steps between adjacent levels.
+const ZOOM_LEVELS: [f32; 10] =
+    [0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
 
-/// The opening zoom for a freshly loaded image: 1.0 (100%, one window pixel per
-/// image pixel) when it fits the monitor, otherwise the largest `FIT_ZOOM_STEP`
-/// multiple at which the image plus chrome still fits the monitor's work area.
-/// Returns `None` when the monitor size isn't reported yet (caller should keep
-/// waiting rather than guess) so a huge image never briefly opens oversized.
+/// Smallest the window is ever sized to (inner size, points). Zooming out past
+/// this keeps the window here and just letterboxes the shrinking image.
+const MIN_WINDOW: f32 = 256.0;
+
+/// The next zoom level in `dir` (+1 = in, −1 = out) from whichever level is
+/// nearest `current`, clamped to the ends of `ZOOM_LEVELS`.
+fn stepped_zoom(current: f32, dir: i32) -> f32 {
+    let nearest = ZOOM_LEVELS
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            (**a - current).abs().partial_cmp(&(**b - current).abs()).unwrap()
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let next = (nearest as i32 + dir).clamp(0, ZOOM_LEVELS.len() as i32 - 1) as usize;
+    ZOOM_LEVELS[next]
+}
+
+/// The usable desktop area for the window, i.e. the monitor size minus headroom
+/// for the title bar, taskbar, and window borders. `None` until the monitor
+/// size is reported. This is the cap on how large the window may grow — beyond
+/// it the image overflows the window and becomes pannable.
+fn monitor_work_area(ctx: &egui::Context) -> Option<egui::Vec2> {
+    ctx.input(|i| i.viewport().monitor_size)
+        .map(|m| egui::vec2((m.x * 0.95).max(1.0), (m.y * 0.90).max(1.0)))
+}
+
+/// The opening zoom for a freshly loaded image: the largest zoom level ≤ 100%
+/// at which the image plus chrome still fits the monitor's work area (so a
+/// normal image opens at 100%, a big one at 50% or 25%). Returns `None` when the
+/// monitor size isn't reported yet (caller should keep waiting rather than
+/// guess) so a huge image never briefly opens oversized.
 fn initial_fit_zoom(ctx: &egui::Context, img_w: f32, img_h: f32, chrome_h: f32) -> Option<f32> {
-    let monitor = ctx.input(|i| i.viewport().monitor_size)?;
-    // Leave headroom for the title bar, taskbar, and window borders.
-    let avail_w = (monitor.x * 0.95).max(1.0);
-    let avail_h = (monitor.y * 0.90).max(1.0);
-    let mut z = 1.0_f32;
-    while z > FIT_ZOOM_STEP {
-        if img_w * z <= avail_w && img_h * z + chrome_h <= avail_h {
-            break;
+    let avail = monitor_work_area(ctx)?;
+    // Levels at most 100%, largest first.
+    for &z in &[1.0_f32, 0.5, 0.25, 0.125, 0.0625] {
+        if img_w * z <= avail.x && img_h * z + chrome_h <= avail.y {
+            return Some(z);
         }
-        z -= FIT_ZOOM_STEP;
     }
-    // Snap off the float error from repeated subtraction; clamp to [0.2, 1.0].
-    Some(((z / FIT_ZOOM_STEP).round() * FIT_ZOOM_STEP).clamp(MIN_ZOOM, 1.0))
+    Some(0.0625) // even 6.25% overflows — open there and let the image pan
 }
 
 #[derive(Clone, Copy)]
@@ -128,6 +149,32 @@ pub struct ViewerApp {
     /// window by exactly the panel's height change. `false` when idle.
     panel_grow_armed: bool,
     panel_old_h: f32,
+    /// Playback rate (frames/second) the user can edit. Seeded from the file's
+    /// `fps=` metadata (or `DEFAULT_FPS`) on every load.
+    playback_fps: f64,
+    /// Scroll offset of the image inside the central panel, in screen points:
+    /// how far the image's top-left is pushed up/left past the panel's. Only
+    /// meaningful when the image is larger than the panel (zoomed past what the
+    /// monitor-capped window can show); 0 otherwise. Drag to pan.
+    pan: egui::Vec2,
+    /// The central panel's rect and the image's painted top-left from the last
+    /// frame, cached so the early zoom step (which runs before the panel is
+    /// redrawn) can keep the point under the cursor fixed while zooming.
+    panel_rect: egui::Rect,
+    image_origin: egui::Pos2,
+    /// Set by the early zoom step when zoom changed this frame: `(old_zoom,
+    /// cursor)`, consumed later by the window-sizing code to decide whether to
+    /// reposition the window. Separate from the zoom value itself, which is
+    /// applied early so the image redraws this same frame.
+    zoom_reposition: Option<(f32, egui::Pos2)>,
+    /// The visible UV sub-rect of the image (`uv_offset`, `uv_scale`), computed
+    /// from zoom + pan in the central panel and uploaded to the shader. The
+    /// image is always rendered into the on-screen visible rect with the
+    /// pan/zoom done via these UVs — never via an oversized viewport, which
+    /// egui-wgpu would clamp to the framebuffer (squashing the image instead of
+    /// zooming).
+    uv_offset: egui::Vec2,
+    uv_scale: egui::Vec2,
 }
 
 /// Playback rate used when the file's metadata doesn't specify `fps=`.
@@ -150,6 +197,13 @@ impl ViewerApp {
             last_canvas_size: None,
             panel_grow_armed: false,
             panel_old_h: 0.0,
+            playback_fps: DEFAULT_FPS,
+            pan: egui::Vec2::ZERO,
+            panel_rect: egui::Rect::ZERO,
+            image_origin: egui::Pos2::ZERO,
+            zoom_reposition: None,
+            uv_offset: egui::Vec2::ZERO,
+            uv_scale: egui::Vec2::splat(1.0),
         };
         if let Some(path) = initial_path {
             app.open_file(path);
@@ -185,11 +239,15 @@ impl ViewerApp {
                 // Carry the pseudocolor preference onto the new stack.
                 refresh_pseudocolor(&mut loaded, self.apply_pseudocolor);
 
+                // Seed the editable playback rate from the file (or default).
+                self.playback_fps = loaded.tiff.meta.fps.unwrap_or(DEFAULT_FPS);
+
                 self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
                 self.stack = Some(loaded);
                 // Start at 1:1; the next frame computes a fit-to-screen zoom
                 // (≤ 1.0, in 0.2 steps) and sizes the window once.
                 self.zoom = 1.0;
+                self.pan = egui::Vec2::ZERO;
                 self.pending_initial_fit = true;
                 self.resize_to_zoom = false;
                 self.playing = false;
@@ -296,7 +354,13 @@ impl ViewerApp {
                 ChannelUniform { min, max, enabled: s.enabled }
             })
             .collect();
-        resources.update_params(&render_state.queue, &uniforms, n_channels as u32);
+        resources.update_params(
+            &render_state.queue,
+            &uniforms,
+            n_channels as u32,
+            self.uv_offset.into(),
+            self.uv_scale.into(),
+        );
     }
 }
 
@@ -624,6 +688,33 @@ impl eframe::App for ViewerApp {
             (from_scroll + from_keys).clamp(-1, 1)
         });
 
+        // Apply the zoom value *before* the panels are drawn, so the image
+        // redraws at the new zoom in this very frame. (Doing it after the
+        // central panel meant the change only showed once a window resize
+        // happened to drive an extra frame — so zooming past the monitor cap,
+        // where the window no longer resizes, appeared frozen.) The window
+        // resize and optional reposition are handled later, once the chrome
+        // height is known. Cursor-centering uses last frame's cached geometry.
+        if zoom_step != 0 && self.stack.is_some() {
+            let old_zoom = self.zoom;
+            let new_zoom = stepped_zoom(old_zoom, zoom_step);
+            if (new_zoom - old_zoom).abs() > f32::EPSILON {
+                let cursor = ui
+                    .ctx()
+                    .input(|i| i.pointer.latest_pos())
+                    .filter(|p| self.panel_rect.contains(*p))
+                    .unwrap_or_else(|| self.panel_rect.center());
+                // The native-pixel point under the cursor, kept fixed by pan
+                // (used when the image overflows; re-clamped to 0 when it fits,
+                // where the window move below handles the centering instead).
+                let p = (cursor - self.image_origin) / old_zoom;
+                self.pan = self.panel_rect.min - (cursor - p * new_zoom);
+                self.zoom = new_zoom;
+                self.resize_to_zoom = true;
+                self.zoom_reposition = Some((old_zoom, cursor));
+            }
+        }
+
         let toolbar_response = egui::Panel::top("toolbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open TIFF...").clicked() {
@@ -636,6 +727,13 @@ impl eframe::App for ViewerApp {
                 }
                 if let Some(loaded) = &self.stack {
                     let meta = &loaded.tiff.meta;
+                    ui.separator();
+                    // Up to 2 decimals, trailing zeros trimmed: 6.25%, 12.5%,
+                    // 100%, 3200% — so the fractional small zooms read correctly.
+                    let pct = format!("{:.2}", self.zoom * 100.0);
+                    let pct = pct.trim_end_matches('0').trim_end_matches('.');
+                    ui.label(RichText::new(format!("{pct}%")).monospace())
+                        .on_hover_text("Zoom (Ctrl+scroll to change)");
                     ui.separator();
                     let channels_desc = if loaded.rgb {
                         "RGB".to_string()
@@ -675,6 +773,7 @@ impl eframe::App for ViewerApp {
         let mut dimension_override: Option<(usize, usize)> = None;
         let mut pseudocolor_toggle: Option<bool> = None;
         let mut scroll_step: i32 = 0;
+        let mut playback_fps = self.playback_fps;
         let current_status = self.status.clone();
 
         let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
@@ -765,11 +864,13 @@ impl eframe::App for ViewerApp {
             });
 
             if panel_expanded {
-                // The channels-vs-time guess (and its override) is meaningless
-                // for RGB, where the "channels" are fixed color planes.
-                if !loaded.rgb {
-                    ui.separator();
-                    ui.horizontal(|ui| {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    // The channels-vs-time guess (and its override) is
+                    // meaningless for RGB, where the "channels" are fixed color
+                    // planes — so the dropdown and pseudocolor toggle are hidden
+                    // there, but the playback-rate field stays.
+                    if !loaded.rgb {
                         ui.label("Dimension order:");
                         let c = loaded.tiff.meta.channels;
                         let f = loaded.tiff.meta.frames;
@@ -800,10 +901,25 @@ impl eframe::App for ViewerApp {
                                 pseudocolor_toggle = Some(on);
                             }
                         }
+                        ui.separator();
+                    }
+
+                    // Editable playback rate (seeded from metadata `fps=`, else 30).
+                    ui.add_enabled_ui(loaded.tiff.meta.frames > 1, |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut playback_fps)
+                                .speed(0.5)
+                                .range(0.1..=240.0)
+                                .max_decimals(2)
+                                .suffix(" fps"),
+                        )
+                        .on_hover_text("Playback speed (frames per second)");
                     });
+                });
+                if !loaded.rgb {
                     ui.label(
                         RichText::new(
-                            "Channels are guessed automatically (4 or fewer = channels, more = time); \
+                            "Channels are guessed automatically (6 or fewer = channels, more = time); \
                              use this if that guess is wrong for this file.",
                         )
                         .small()
@@ -841,22 +957,21 @@ impl eframe::App for ViewerApp {
                         });
                     }
                 } else if let Some(settings) = loaded.channel_settings.first_mut() {
+                    ui.separator();
                     ui.horizontal(|ui| {
                         ui.label("Contrast:");
-                        let (lo, hi) = settings.bounds;
-                        let width = ui.available_width().max(120.0);
-                        range_slider(ui, 0, &mut settings.min, &mut settings.max, lo, hi, width);
-                    });
-                    ui.label(
-                        RichText::new(format!(
-                            "{} – {}{}",
+                        let value = format!(
+                            "{} – {}",
                             format_calibrated(calibration, settings.min),
                             format_calibrated(calibration, settings.max),
-                            calibration.map(|_| " (calibrated)").unwrap_or(""),
-                        ))
-                        .small()
-                        .weak(),
-                    );
+                        );
+                        // Reserve room for the value text on the right; the
+                        // slider fills what's left of the row.
+                        let slider_w = (ui.available_width() - 120.0).max(80.0);
+                        let (lo, hi) = settings.bounds;
+                        range_slider(ui, 0, &mut settings.min, &mut settings.max, lo, hi, slider_w);
+                        ui.label(RichText::new(value).small());
+                    });
                 }
             }
             if let Some(status) = &current_status {
@@ -865,6 +980,8 @@ impl eframe::App for ViewerApp {
             }
             ui.add_space(4.0);
         });
+
+        self.playback_fps = playback_fps;
 
         if toggle_requested {
             self.channels_panel_expanded = !self.channels_panel_expanded;
@@ -898,7 +1015,7 @@ impl eframe::App for ViewerApp {
             if let Some(loaded) = &mut self.stack {
                 let n = loaded.tiff.meta.frames.max(1);
                 if n > 1 {
-                    let fps = loaded.tiff.meta.fps.unwrap_or(DEFAULT_FPS).max(0.1);
+                    let fps = self.playback_fps.max(0.1);
                     let now = ui.input(|i| i.time);
                     if let Some(last) = self.last_play_time {
                         self.play_accumulator += (now - last) * fps;
@@ -929,14 +1046,19 @@ impl eframe::App for ViewerApp {
             }
         }
 
-        // Central panel: image always fills the available space with correct
-        // aspect ratio. No overflow, no panning. The user can resize the
-        // window freely — the image adapts. Zoom only controls the *window
-        // size* (handled below), not the rendering here.
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        // Central panel: the image is drawn at exactly `image_size × zoom`. When
+        // that fits the panel it's centered (letterboxed); when it's larger
+        // (zoomed past what the monitor-capped window can show) it overflows and
+        // is pannable by dragging. Aspect ratio is always preserved.
+        // Zero inner margin: the window is sized to exactly the image, so any
+        // panel padding would make the available area smaller than the image
+        // and produce a small spurious pan/overflow even when it should fit.
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().inner_margin(egui::Margin::ZERO))
+            .show_inside(ui, |ui| {
             let Some(loaded) = &self.stack else {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Drag and drop a TIFF stack here, or click \"Open TIFF...\" above.");
+                    ui.label("Drag and drop a TIFF stack here, \nor click \"Open TIFF...\" above.");
                 });
                 return;
             };
@@ -948,28 +1070,61 @@ impl eframe::App for ViewerApp {
             };
 
             let available = ui.available_size();
-            let aspect = w as f32 / h as f32;
-            // Fit the image inside the available area, preserving aspect.
-            let fitted = if available.x / available.y.max(1.0) > aspect {
-                egui::vec2(available.y * aspect, available.y)
+            let (panel_rect, response) =
+                ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+            self.panel_rect = panel_rect;
+
+            let img_px = egui::vec2(w as f32 * self.zoom, h as f32 * self.zoom);
+            // A 1px tolerance so sub-pixel rounding between the window size and
+            // the panel's available area doesn't register as a pannable overflow.
+            let overflow = egui::vec2(
+                (img_px.x - available.x - 1.0).max(0.0),
+                (img_px.y - available.y - 1.0).max(0.0),
+            );
+            let pannable = overflow.x > 0.0 || overflow.y > 0.0;
+
+            // Drag to pan when the image overflows the panel.
+            if pannable && response.dragged() {
+                self.pan -= response.drag_delta();
+            }
+            self.pan.x = self.pan.x.clamp(0.0, overflow.x);
+            self.pan.y = self.pan.y.clamp(0.0, overflow.y);
+
+            // Where the image's top-left *would* be if drawn full-size: scrolled
+            // by `pan` on an overflowing axis, centered on an axis that fits.
+            // (Cached for cursor-centered zoom; may lie outside the panel.)
+            let origin = egui::pos2(
+                if overflow.x > 0.0 { panel_rect.min.x - self.pan.x } else { panel_rect.min.x + (available.x - img_px.x) * 0.5 },
+                if overflow.y > 0.0 { panel_rect.min.y - self.pan.y } else { panel_rect.min.y + (available.y - img_px.y) * 0.5 },
+            );
+            self.image_origin = origin;
+
+            // Render into the on-screen *visible* rectangle only, and pan/zoom
+            // via UVs. Drawing into an oversized rect doesn't work: egui-wgpu
+            // clamps the callback viewport to the framebuffer, which would just
+            // squash the whole image back to fit instead of zooming.
+            let full_rect = egui::Rect::from_min_size(origin, img_px);
+            let visible = full_rect.intersect(panel_rect);
+            if visible.is_positive() {
+                let inv = egui::vec2(1.0 / img_px.x.max(1.0), 1.0 / img_px.y.max(1.0));
+                self.uv_offset = (visible.min - origin) * inv;
+                self.uv_scale = visible.size() * inv;
+                ui.painter().with_clip_rect(panel_rect).add(egui_wgpu::Callback::new_paint_callback(
+                    visible,
+                    crate::render::callback::ImagePaintCallback,
+                ));
+            }
+
+            response.on_hover_cursor(if pannable {
+                egui::CursorIcon::Grab
             } else {
-                egui::vec2(available.x, available.x / aspect.max(0.0001))
-            };
-            let padding = (available - fitted) * 0.5;
-
-            let (panel_rect, response) = ui.allocate_exact_size(available, egui::Sense::hover());
-            let response = response.on_hover_cursor(egui::CursorIcon::Crosshair);
-
-            let image_rect = egui::Rect::from_min_size(panel_rect.min + padding, fitted);
-            ui.painter().with_clip_rect(panel_rect).add(egui_wgpu::Callback::new_paint_callback(
-                image_rect,
-                crate::render::callback::ImagePaintCallback,
-            ));
+                egui::CursorIcon::Crosshair
+            });
 
             // Plain scroll (no Ctrl) scrubs frames when hovering the image.
             // Ctrl+scroll is consumed by egui's zoom_delta() above, so
             // smooth_scroll_delta here is always zero when Ctrl is held.
-            if response.hovered() {
+            if ui.rect_contains_pointer(panel_rect) {
                 let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                 if scroll < 0.0 {
                     scroll_step = 1;
@@ -990,17 +1145,10 @@ impl eframe::App for ViewerApp {
             }
         }
 
-        // A zoom in/out requests a one-shot window resize to the new scale.
-        if zoom_step != 0 {
-            self.zoom = (self.zoom + zoom_step as f32 * ZOOM_STEP).clamp(MIN_ZOOM, MAX_ZOOM);
-            self.resize_to_zoom = true;
-        }
-
         // Window sizing happens ONLY in response to explicit events — a freshly
-        // opened file, or a zoom change — never every frame. That's what lets
-        // the window be freely resized and maximized without shaking or being
-        // snapped back: between these events the central panel above simply
-        // letterboxes the image to fit the current window, aspect ratio locked.
+        // opened file, or a zoom change (handled below) — never every frame.
+        // That's what lets the window be freely resized and maximized without
+        // shaking or being snapped back.
         let toolbar_height = toolbar_response.response.rect.height();
         let bottom_bar_height = scrub_bar_response.response.rect.height();
         let chrome_height = toolbar_height + bottom_bar_height;
@@ -1028,32 +1176,141 @@ impl eframe::App for ViewerApp {
             }
         }
 
-        if let Some(loaded) = &self.stack {
-            if let Some(first) = loaded.tiff.frames.first() {
-                let img_w = first.width as f32;
-                let img_h = first.height as f32;
+        let img_dims = self
+            .stack
+            .as_ref()
+            .and_then(|l| l.tiff.frames.first())
+            .map(|f| (f.width as f32, f.height as f32));
 
-                // On open: pick the largest 0.2-step zoom ≤ 1.0 at which the
-                // image + chrome still fits the monitor (a huge image opens
-                // scaled down, a normal one at 100%). Deferred to here because
-                // the chrome height and monitor size aren't known at open time.
-                if self.pending_initial_fit {
-                    if let Some(z) = initial_fit_zoom(ui.ctx(), img_w, img_h, chrome_height) {
-                        self.zoom = z;
-                        self.pending_initial_fit = false;
-                        self.resize_to_zoom = true;
-                    } else {
-                        // Monitor size not known yet — try again next frame.
-                        ui.ctx().request_repaint();
+        if let Some((img_w, img_h)) = img_dims {
+            // On open: pick the largest 0.2-step zoom ≤ 1.0 at which the image +
+            // chrome still fits the monitor (a huge image opens scaled down, a
+            // normal one at 100%). Deferred to here because the chrome height
+            // and monitor size aren't known at open time.
+            if self.pending_initial_fit {
+                if let Some(z) = initial_fit_zoom(ui.ctx(), img_w, img_h, chrome_height) {
+                    self.zoom = z;
+                    self.pan = egui::Vec2::ZERO;
+                    self.pending_initial_fit = false;
+                    self.resize_to_zoom = true;
+                } else {
+                    // Monitor size not known yet — try again next frame.
+                    ui.ctx().request_repaint();
+                }
+            }
+
+            // When maximized, the window is left completely alone on zoom — the
+            // image just zooms/pans/letterboxes inside it (handled by the
+            // central panel's UV transform).
+            let maximized = ui.ctx().input(|i| i.viewport().maximized).unwrap_or(false);
+
+            // The target window inner size for the current zoom: the image scaled
+            // uniformly, clamped to fit the monitor and to the minimum size. Once
+            // it hits the minimum the window stops shrinking and the image just
+            // letterboxes. Computed once so the reposition decision and the
+            // actual resize agree. `None` when maximized (window left alone).
+            let target_window = if maximized {
+                None
+            } else {
+                let window_scale = match monitor_work_area(ui.ctx()) {
+                    Some(m) => {
+                        let fit = (m.x / img_w).min((m.y - chrome_height).max(1.0) / img_h);
+                        self.zoom.min(fit)
+                    }
+                    None => self.zoom,
+                };
+                let w = (img_w * window_scale).round().max(MIN_WINDOW);
+                let h = (img_h * window_scale + chrome_height).round().max(MIN_WINDOW);
+                Some(egui::vec2(w, h))
+            };
+
+            // The zoom value + pan were already applied early (above), so the
+            // image is redrawing at the new zoom this frame. Here we only decide
+            // whether to move the window so the cursor's point stays on the same
+            // desktop spot.
+            let mut reposition: Option<egui::Pos2> = None;
+            if let Some((old_zoom, cursor)) = self.zoom_reposition.take() {
+                let new_zoom = self.zoom;
+                let fits = monitor_work_area(ui.ctx())
+                    .map(|m| img_w * new_zoom <= m.x && img_h * new_zoom + chrome_height <= m.y)
+                    .unwrap_or(true);
+                // Whether the window grew vs. the previous frame (zoom-in case),
+                // and whether the image is now letterboxed inside the window
+                // (smaller than the content on either axis).
+                let cur_inner = ui.ctx().input(|i| i.viewport().inner_rect.map(|r| r.size()));
+                let grew = match (target_window, cur_inner) {
+                    (Some(t), Some(c)) => t.x > c.x + 0.5 || t.y > c.y + 0.5,
+                    _ => true,
+                };
+                let letterboxing = match target_window {
+                    Some(t) => {
+                        img_w * new_zoom < t.x - 0.5 || img_h * new_zoom < (t.y - chrome_height) - 0.5
+                    }
+                    None => false,
+                };
+                // Whether the image was letterboxed *before* this zoom step. In
+                // that state the cursor can sit in the empty margin, off the
+                // image, so the cursor-anchor math would jump the window — skip
+                // the one reposition on the letterboxed → first-fitted step.
+                let was_letterboxing = match cur_inner {
+                    Some(c) => {
+                        img_w * old_zoom < c.x - 0.5 || img_h * old_zoom < (c.y - chrome_height) - 0.5
+                    }
+                    None => false,
+                };
+                // Follow the cursor when zooming *in* and the window grows (but
+                // not on the first step out of a letterboxed state), or when
+                // zooming *out* while the image still fills the window. Once it's
+                // letterboxing at the minimum size, or maximized, it stays put.
+                let follow = !maximized
+                    && fits
+                    && ((new_zoom > old_zoom && grew && !was_letterboxing)
+                        || (new_zoom < old_zoom && !letterboxing));
+                if follow {
+                    if let Some(outer) = ui.ctx().input(|i| i.viewport().outer_rect.map(|r| r.min)) {
+                        let ratio = new_zoom / old_zoom;
+                        reposition = Some(outer + (cursor - self.panel_rect.min) * (1.0 - ratio));
                     }
                 }
+            }
 
-                if self.resize_to_zoom {
-                    let w = (img_w * self.zoom).round().max(200.0);
-                    let h = (img_h * self.zoom + chrome_height).round().max(200.0);
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
-                    self.resize_to_zoom = false;
+            // Apply a pending resize (one-shot), unless maximized.
+            if self.resize_to_zoom {
+                if let Some(size) = target_window {
+                    let (w, h) = (size.x, size.y);
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+
+                    // Keep the window fully on the desktop. The target position is
+                    // the cursor-zoom move (or the current position when none).
+                    // Horizontally it's clamped to the monitor width. Vertically,
+                    // if the (grown) window's bottom would drop below the usable
+                    // area, it's *centered* between the top and bottom of the
+                    // monitor — symmetric margins, so it's least likely to be
+                    // covered by a taskbar whether that's docked at the top or
+                    // the bottom (egui doesn't report which).
+                    let info = ui.ctx().input(|i| {
+                        (i.viewport().outer_rect, i.viewport().inner_rect, i.viewport().monitor_size)
+                    });
+                    if let (Some(outer), Some(inner), Some(monitor)) = info {
+                        let decoration = outer.size() - inner.size();
+                        let new_outer = egui::vec2(w, h) + decoration;
+                        let target = reposition.unwrap_or(outer.min);
+                        let max_x = (monitor.x - new_outer.x).max(0.0);
+                        let usable_bottom = monitor_work_area(ui.ctx()).map(|wa| wa.y).unwrap_or(monitor.y);
+                        let y = if target.y + new_outer.y > usable_bottom {
+                            ((monitor.y - new_outer.y) * 0.5).max(0.0)
+                        } else {
+                            target.y.max(0.0)
+                        };
+                        let clamped = egui::pos2(target.x.clamp(0.0, max_x), y);
+                        if (clamped - outer.min).length() > 0.5 {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(clamped));
+                        }
+                    } else if let Some(pos) = reposition {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+                    }
                 }
+                self.resize_to_zoom = false;
             }
         }
 

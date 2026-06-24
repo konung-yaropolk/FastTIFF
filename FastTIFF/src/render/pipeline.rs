@@ -8,8 +8,12 @@
 use eframe::egui_wgpu::{self, wgpu};
 use std::num::NonZeroU64;
 
-pub const MAX_CHANNELS: usize = 4;
+pub const MAX_CHANNELS: usize = 6;
 const LUT_WIDTH: u32 = 256;
+/// Bind-group binding indices: channel textures occupy `1..=MAX_CHANNELS`, then
+/// the LUT array and sampler follow.
+const LUT_BINDING: u32 = MAX_CHANNELS as u32 + 1;
+const SAMPLER_BINDING: u32 = MAX_CHANNELS as u32 + 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -23,6 +27,9 @@ struct ChannelParamsGpu {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ParamsGpu {
     channels: [ChannelParamsGpu; MAX_CHANNELS],
+    /// UV sub-rect of the image to display: `sampled_uv = uv_offset + uv * uv_scale`.
+    uv_offset: [f32; 2],
+    uv_scale: [f32; 2],
     num_channels: u32,
     _pad: [u32; 3],
 }
@@ -47,40 +54,38 @@ impl ImageRenderResources {
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/composite.wgsl").into()),
         });
 
+        let mut layout_entries = vec![wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(std::mem::size_of::<ParamsGpu>() as u64),
+            },
+            count: None,
+        }];
+        for c in 0..MAX_CHANNELS as u32 {
+            layout_entries.push(channel_texture_entry(c + 1));
+        }
+        layout_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: LUT_BINDING,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        });
+        layout_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: SAMPLER_BINDING,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("FastTIFFbind group layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<ParamsGpu>() as u64),
-                    },
-                    count: None,
-                },
-                channel_texture_entry(1),
-                channel_texture_entry(2),
-                channel_texture_entry(3),
-                channel_texture_entry(4),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
+            entries: &layout_entries,
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -236,15 +241,24 @@ impl ImageRenderResources {
         );
     }
 
-    /// Update per-channel window/level + enabled flags, and the active
-    /// channel count, in one uniform buffer write.
-    pub fn update_params(&self, queue: &wgpu::Queue, channels: &[ChannelUniform], num_channels: u32) {
+    /// Update per-channel window/level + enabled flags, the active channel
+    /// count, and the visible UV sub-rect (pan/zoom), in one uniform write.
+    pub fn update_params(
+        &self,
+        queue: &wgpu::Queue,
+        channels: &[ChannelUniform],
+        num_channels: u32,
+        uv_offset: [f32; 2],
+        uv_scale: [f32; 2],
+    ) {
         let mut gpu = ParamsGpu {
             channels: [ChannelParamsGpu {
                 min_max: [0.0, 65535.0],
                 enabled: 0.0,
                 _pad: 0.0,
             }; MAX_CHANNELS],
+            uv_offset,
+            uv_scale,
             num_channels,
             _pad: [0; 3],
         };
@@ -336,39 +350,29 @@ fn build_bind_group(
         ..Default::default()
     });
 
+    let mut entries = vec![wgpu::BindGroupEntry {
+        binding: 0,
+        resource: uniform_buffer.as_entire_binding(),
+    }];
+    for (i, view) in channel_views.iter().enumerate() {
+        entries.push(wgpu::BindGroupEntry {
+            binding: i as u32 + 1,
+            resource: wgpu::BindingResource::TextureView(view),
+        });
+    }
+    entries.push(wgpu::BindGroupEntry {
+        binding: LUT_BINDING,
+        resource: wgpu::BindingResource::TextureView(&lut_view),
+    });
+    entries.push(wgpu::BindGroupEntry {
+        binding: SAMPLER_BINDING,
+        resource: wgpu::BindingResource::Sampler(sampler),
+    });
+
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("FastTIFFbind group"),
         layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&channel_views[0]),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::TextureView(&channel_views[1]),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::TextureView(&channel_views[2]),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(&channel_views[3]),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: wgpu::BindingResource::TextureView(&lut_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-        ],
+        entries: &entries,
     })
 }
 

@@ -14,6 +14,9 @@ fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([320.0, 320.0])
+            // Keep in sync with `app::MIN_WINDOW` — the floor for both manual
+            // resizing and zoom-out (which letterboxes below this size).
+            .with_min_inner_size([256.0, 256.0])
             .with_title("FastTIFF"),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()

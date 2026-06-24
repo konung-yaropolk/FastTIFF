@@ -80,11 +80,12 @@ pub struct ResolvedDimensions {
 }
 
 /// A dimension this size or smaller is assumed to be channels; anything
-/// larger is assumed to be time. Hardcoded rather than configurable: there's
-/// no size that's correct for every dataset, but a per-file manual
-/// channels/frames swap (exposed in the UI) covers the cases this misses,
-/// without the complexity of a global adjustable setting.
-const CHANNEL_SIZE_CUTOFF: usize = 4;
+/// larger is assumed to be time. Matches the renderer's `MAX_CHANNELS` (6) so a
+/// genuine 5- or 6-channel hyperstack isn't mistaken for a short time series.
+/// Hardcoded rather than configurable: there's no size that's correct for every
+/// dataset, but a per-file manual channels/frames swap (exposed in the UI)
+/// covers the cases this misses, without the complexity of a global setting.
+const CHANNEL_SIZE_CUTOFF: usize = 6;
 
 /// Decides the *effective* (channels, slices, frames) to use, classifying
 /// by size rather than trusting the file's own axis labels: a dimension of

@@ -17,7 +17,12 @@ struct ChannelParams {
 };
 
 struct Params {
-    channels: array<ChannelParams, 4>,
+    channels: array<ChannelParams, 6>,
+    // Maps the quad's 0..1 UV onto the visible sub-rectangle of the image:
+    // sampled_uv = uv_offset + uv * uv_scale. With (0,0)/(1,1) the whole image
+    // fills the quad; smaller values show a zoomed/panned sub-region.
+    uv_offset: vec2<f32>,
+    uv_scale: vec2<f32>,
     num_channels: u32,
     _pad0: u32,
     _pad1: u32,
@@ -29,8 +34,10 @@ struct Params {
 @group(0) @binding(2) var ch1_tex: texture_2d<u32>;
 @group(0) @binding(3) var ch2_tex: texture_2d<u32>;
 @group(0) @binding(4) var ch3_tex: texture_2d<u32>;
-@group(0) @binding(5) var lut_tex: texture_2d_array<f32>;
-@group(0) @binding(6) var lut_sampler: sampler;
+@group(0) @binding(5) var ch4_tex: texture_2d<u32>;
+@group(0) @binding(6) var ch5_tex: texture_2d<u32>;
+@group(0) @binding(7) var lut_tex: texture_2d_array<f32>;
+@group(0) @binding(8) var lut_sampler: sampler;
 
 struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -77,15 +84,24 @@ fn apply_channel(raw: u32, channel_index: i32, cp: ChannelParams) -> vec3<f32> {
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var color = vec3<f32>(0.0, 0.0, 0.0);
 
-    color += apply_channel(sample_channel(ch0_tex, in.uv), 0, params.channels[0]);
+    // Remap the quad UV onto the visible sub-region of the image (pan/zoom).
+    let uv = params.uv_offset + in.uv * params.uv_scale;
+
+    color += apply_channel(sample_channel(ch0_tex, uv), 0, params.channels[0]);
     if (params.num_channels > 1u) {
-        color += apply_channel(sample_channel(ch1_tex, in.uv), 1, params.channels[1]);
+        color += apply_channel(sample_channel(ch1_tex, uv), 1, params.channels[1]);
     }
     if (params.num_channels > 2u) {
-        color += apply_channel(sample_channel(ch2_tex, in.uv), 2, params.channels[2]);
+        color += apply_channel(sample_channel(ch2_tex, uv), 2, params.channels[2]);
     }
     if (params.num_channels > 3u) {
-        color += apply_channel(sample_channel(ch3_tex, in.uv), 3, params.channels[3]);
+        color += apply_channel(sample_channel(ch3_tex, uv), 3, params.channels[3]);
+    }
+    if (params.num_channels > 4u) {
+        color += apply_channel(sample_channel(ch4_tex, uv), 4, params.channels[4]);
+    }
+    if (params.num_channels > 5u) {
+        color += apply_channel(sample_channel(ch5_tex, uv), 5, params.channels[5]);
     }
 
     return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);

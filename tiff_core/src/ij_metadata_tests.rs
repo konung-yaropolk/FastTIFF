@@ -99,17 +99,17 @@ fn warns_on_genuine_triple_axis_stack() {
 #[test]
 fn channel_size_boundary_is_inclusive_at_cutoff() {
     check(
-        4,
+        6,
         1,
         100,
-        ResolvedDimensions { channels: 4, slices: 1, frames: 100, triple_axis_warning: false },
-        "exactly at the cutoff (4) counts as channel-sized",
+        ResolvedDimensions { channels: 6, slices: 1, frames: 100, triple_axis_warning: false },
+        "exactly at the cutoff (6) counts as channel-sized",
     );
     check(
-        5,
+        7,
         1,
         100,
-        ResolvedDimensions { channels: 1, slices: 1, frames: 500, triple_axis_warning: false },
+        ResolvedDimensions { channels: 1, slices: 1, frames: 700, triple_axis_warning: false },
         "one past the cutoff does not count as channel-sized",
     );
 }
