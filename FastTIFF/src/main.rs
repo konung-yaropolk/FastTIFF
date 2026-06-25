@@ -1,7 +1,4 @@
-// TEMP: console kept on so any OpenGL shader compile/link panic is visible
-// while bringing up the glow renderer. Restore `#![windows_subsystem =
-// "windows"]` once images render correctly.
-// #![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 
 mod app;
 mod render;
