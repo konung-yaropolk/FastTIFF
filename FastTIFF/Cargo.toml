@@ -1,15 +1,31 @@
 [package]
 name = "FastTIFF"
-version = "1.2.6"
+version = "1.3.0"
 edition = "2021"
 description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering."
 
+# Exactly one GPU renderer is compiled in, chosen by these features. glow
+# (OpenGL) is the default: it avoids a Windows 10 idle-CPU spin that the wgpu
+# backend triggers on some machines, and works on Windows/Linux/macOS today.
+# Build the wgpu variant with:
+#     cargo build --no-default-features --features renderer-wgpu
+# (wgpu = DX12/Vulkan/Metal — preferable on macOS, where OpenGL is deprecated).
+# Each feature turns on the matching eframe backend, so the *unused* renderer's
+# entire dependency subtree is excluded from the build (verify: `cargo tree`).
+[features]
+default = ["renderer-glow"]
+renderer-glow = ["eframe/glow"]
+renderer-wgpu = ["eframe/wgpu"]
+
 [dependencies]
 tiff_core = { path = "../tiff_core" }
-# glow is the renderer (it avoids the Windows+wgpu idle-CPU spin). default
-# features are off to drop `accesskit` (unused accessibility layer) and `wgpu`
-# (no longer used); `default_fonts` keeps the bundled text fonts.
-eframe = { version = "0.34", default-features = false, features = ["glow", "default_fonts"] }
+# eframe with default features off: drops the active accesskit integration
+# (`accesskit_winit`/`_windows`/`_consumer` — Windows UI Automation pumped from
+# the event loop, unused here) and leaves the GPU backend unset so the
+# `renderer-*` features above pick exactly one. `default_fonts` keeps the
+# bundled text fonts. (egui still pulls the passive `accesskit` data-types crate
+# as an unavoidable core dependency.)
+eframe = { version = "0.34", default-features = false, features = ["default_fonts"] }
 egui = "0.34"
 egui_extras = "0.34"
 bytemuck = "1.25"

@@ -18,8 +18,8 @@ fn main() -> eframe::Result {
             // resizing and zoom-out (which letterboxes below this size).
             .with_min_inner_size([256.0, 256.0])
             .with_title("FastTIFF"),
-        // glow (OpenGL) backend: avoids the Windows + wgpu idle-CPU spin.
-        renderer: eframe::Renderer::Glow,
+        // glow or wgpu, picked at compile time by the `renderer-*` features.
+        renderer: render::RENDERER,
         ..Default::default()
     };
 
@@ -27,13 +27,7 @@ fn main() -> eframe::Result {
         "FastTIFF",
         native_options,
         Box::new(|cc| {
-            let gl = cc
-                .gl
-                .as_ref()
-                .expect("FastTIFF requires the glow backend (NativeOptions::renderer = Glow)");
-            let render = std::sync::Arc::new(std::sync::Mutex::new(
-                render::pipeline::ImageRenderResources::new(gl),
-            ));
+            let render = render::init(cc);
             Ok(Box::new(app::ViewerApp::new(initial_path, render)))
         }),
     )

@@ -1,14 +1,59 @@
-//! OpenGL (glow) rendering for the composited image. Mirrors the previous wgpu
-//! pipeline: up to `MAX_CHANNELS` single-channel raw-sample textures (R16UI),
-//! a LUT texture (one row per channel), and a fragment shader that does
-//! per-channel window/level → LUT → additive blend, with a minification box
-//! filter for clean zoom-out. Uploads happen from `app.rs` (it holds the glow
-//! context via `Frame::gl`); `paint` is invoked from the egui_glow callback.
+//! OpenGL (glow) rendering for the composited image: up to `MAX_CHANNELS`
+//! single-channel raw-sample textures (R16UI), a LUT texture (one row per
+//! channel), and a fragment shader that does per-channel window/level → LUT →
+//! additive blend, with a minification box filter for clean zoom-out. Uploads
+//! happen from `app.rs` via `UploadCtx` (the live GL context from `Frame::gl`);
+//! `paint` is invoked from the egui_glow callback built by `paint_callback`.
 
+use super::{ChannelUniform, MAX_CHANNELS};
 use eframe::glow::{self, HasContext as _};
+use eframe::egui_glow;
+use std::sync::{Arc, Mutex};
 
-pub const MAX_CHANNELS: usize = 6;
 const LUT_WIDTH: i32 = 256;
+
+/// The `eframe::Renderer` this backend needs requested in `NativeOptions`.
+pub const RENDERER: eframe::Renderer = eframe::Renderer::Glow;
+
+/// Shared handle to the GL render resources. `Arc<Mutex>` because the egui_glow
+/// paint callback (which draws) must be `Send + Sync + 'static`; uploads happen
+/// in `app::sync_gpu`, so the lock is uncontended (both on the UI thread).
+pub type Render = Arc<Mutex<ImageRenderResources>>;
+
+/// Build the render resources from eframe's creation context (its glow
+/// context). Called once at startup.
+pub fn init(cc: &eframe::CreationContext<'_>) -> Render {
+    let gl = cc
+        .gl
+        .as_ref()
+        .expect("FastTIFF requires the glow backend (NativeOptions::renderer = Glow)");
+    Arc::new(Mutex::new(ImageRenderResources::new(gl)))
+}
+
+/// Per-frame upload handle: the live GL context, pulled from `eframe::Frame`.
+/// `None` before the backend is up (shouldn't happen after init).
+pub struct UploadCtx<'a> {
+    gl: &'a glow::Context,
+}
+
+pub fn upload_ctx(frame: &eframe::Frame) -> Option<UploadCtx<'_>> {
+    frame.gl().map(|gl| UploadCtx { gl })
+}
+
+/// The egui paint callback that draws the current image into `rect`. Captures a
+/// clone of the shared resources and locks them at paint time.
+pub fn paint_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
+    let res = render.clone();
+    let callback = egui_glow::CallbackFn::new(move |_info, painter| {
+        if let Ok(r) = res.lock() {
+            r.paint(painter.gl());
+        }
+    });
+    egui::Shape::Callback(egui::PaintCallback {
+        rect,
+        callback: Arc::new(callback),
+    })
+}
 
 /// egui_glow gives us a desktop GL 3.x context, for which it uses GLSL `#version
 /// 140`. We match that so usampler2D / texelFetch / gl_VertexID are available.
@@ -89,13 +134,6 @@ void main() {
 }
 "#;
 
-#[derive(Clone, Copy)]
-pub struct ChannelUniform {
-    pub min: f32,
-    pub max: f32,
-    pub enabled: bool,
-}
-
 pub struct ImageRenderResources {
     program: glow::NativeProgram,
     vao: glow::NativeVertexArray,
@@ -152,10 +190,11 @@ impl ImageRenderResources {
     }
 
     /// Reallocate the channel textures when the frame size changes.
-    pub fn ensure_size(&mut self, gl: &glow::Context, width: u32, height: u32) {
+    pub fn ensure_size(&mut self, ctx: &UploadCtx, width: u32, height: u32) {
         if self.current_size == (width, height) {
             return;
         }
+        let gl = ctx.gl;
         unsafe {
             for &tex in &self.channel_textures {
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -176,10 +215,11 @@ impl ImageRenderResources {
     }
 
     /// Upload one channel's raw 16-bit samples.
-    pub fn upload_channel(&self, gl: &glow::Context, channel: usize, width: u32, height: u32, samples: &[u16]) {
+    pub fn upload_channel(&self, ctx: &UploadCtx, channel: usize, width: u32, height: u32, samples: &[u16]) {
         if channel >= MAX_CHANNELS {
             return;
         }
+        let gl = ctx.gl;
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_textures[channel]));
             gl.tex_sub_image_2d(
@@ -197,10 +237,11 @@ impl ImageRenderResources {
     }
 
     /// Upload one channel's LUT (256 RGB entries) into row `channel`.
-    pub fn upload_lut(&self, gl: &glow::Context, channel: usize, lut: &[[u8; 3]; 256]) {
+    pub fn upload_lut(&self, ctx: &UploadCtx, channel: usize, lut: &[[u8; 3]; 256]) {
         if channel >= MAX_CHANNELS {
             return;
         }
+        let gl = ctx.gl;
         let mut rgba = [0u8; (LUT_WIDTH * 4) as usize];
         for (i, px) in lut.iter().enumerate() {
             rgba[i * 4] = px[0];
@@ -225,9 +266,12 @@ impl ImageRenderResources {
     }
 
     /// Stash the per-channel window/level + enabled flags, channel count, and
-    /// the visible UV sub-rect (pan/zoom); applied as uniforms in `paint`.
+    /// the visible UV sub-rect (pan/zoom); applied as uniforms in `paint`. The
+    /// glow backend uploads nothing here (it has no per-frame uniform buffer),
+    /// so `ctx` is unused — the signature matches the wgpu backend, which does.
     pub fn set_params(
         &mut self,
+        _ctx: &UploadCtx,
         channels: &[ChannelUniform],
         num_channels: u32,
         uv_offset: [f32; 2],
