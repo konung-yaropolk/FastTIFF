@@ -182,6 +182,7 @@ const DEFAULT_FPS: f64 = 30.0;
 impl ViewerApp {
     pub fn new(initial_path: Option<PathBuf>, render: Render) -> Self {
         let mut app = Self {
+            render,
             stack: None,
             status: None,
             channels_panel_expanded: false,
@@ -277,10 +278,7 @@ impl ViewerApp {
         // backend is compiled in. `None` only before the backend is initialized.
         let Some(ctx) = render::upload_ctx(frame) else { return };
         let Some(loaded) = &mut self.stack else { return };
-        let mut renderer = render_state.renderer.write();
-        let Some(resources) = renderer.callback_resources.get_mut::<ImageRenderResources>() else {
-            return;
-        };
+        let mut resources = self.render.lock().unwrap();
 
         let n_channels = loaded.channel_settings.len();
         if n_channels == 0 {
