@@ -1,11 +1,11 @@
 //! The viewer's egui::App. Holds the loaded stack (if any), per-channel
 //! display settings, and the current scrub position. Drives GPU texture
-//! uploads directly from UI code (not from inside the paint callback —
-//! see render/callback.rs for why) so a frame change is just:
-//!   mmap read -> queue.write_texture -> (next egui frame) draw call.
+//! uploads directly from UI code (not from inside the paint callback) so a
+//! frame change is just: mmap read -> texture upload -> (next frame) draw call.
+//! The GPU backend (glow or wgpu) is reached only through `crate::render`'s
+//! backend-agnostic surface, so nothing here mentions either by name.
 
-use crate::render::pipeline::{ChannelUniform, ImageRenderResources, MAX_CHANNELS};
-use eframe::egui_wgpu;
+use crate::render::{self, ChannelUniform, Render, MAX_CHANNELS};
 use egui::{Color32, RichText};
 use std::path::PathBuf;
 use tiff_core::TiffStack;
@@ -104,6 +104,9 @@ struct LoadedStack {
 }
 
 pub struct ViewerApp {
+    /// GPU textures/shader for compositing the image, shared with the paint
+    /// callback. Created once at startup (see `crate::render::init`).
+    render: Render,
     stack: Option<LoadedStack>,
     status: Option<String>,
     /// Channel buttons + contrast sliders are tucked under a small
@@ -177,7 +180,7 @@ pub struct ViewerApp {
 const DEFAULT_FPS: f64 = 30.0;
 
 impl ViewerApp {
-    pub fn new(initial_path: Option<PathBuf>) -> Self {
+    pub fn new(initial_path: Option<PathBuf>, render: Render) -> Self {
         let mut app = Self {
             stack: None,
             status: None,
@@ -269,7 +272,10 @@ impl ViewerApp {
         loaded.frame_index * meta.slices * meta.channels + channel
     }
 
-    fn sync_gpu(&mut self, render_state: &egui_wgpu::RenderState) {
+    fn sync_gpu(&mut self, frame: &eframe::Frame) {
+        // The per-frame upload handle (GL context, or device+queue) for whatever
+        // backend is compiled in. `None` only before the backend is initialized.
+        let Some(ctx) = render::upload_ctx(frame) else { return };
         let Some(loaded) = &mut self.stack else { return };
         let mut renderer = render_state.renderer.write();
         let Some(resources) = renderer.callback_resources.get_mut::<ImageRenderResources>() else {
@@ -282,12 +288,12 @@ impl ViewerApp {
         }
 
         if let Some(first) = loaded.tiff.frames.first() {
-            resources.ensure_size(&render_state.device, first.width, first.height);
+            resources.ensure_size(&ctx, first.width, first.height);
         }
 
         if !loaded.luts_uploaded {
             for c in 0..n_channels {
-                resources.upload_lut(&render_state.queue, c, &loaded.tiff.meta.channel_display[c].lut);
+                resources.upload_lut(&ctx, c, &loaded.tiff.meta.channel_display[c].lut);
             }
             loaded.luts_uploaded = true;
         }
@@ -312,13 +318,7 @@ impl ViewerApp {
                     };
                     match decoded {
                         Ok(pixels) => {
-                            resources.upload_channel(
-                                &render_state.queue,
-                                c,
-                                frame_info.width,
-                                frame_info.height,
-                                &pixels,
-                            );
+                            resources.upload_channel(&ctx, c, frame_info.width, frame_info.height, &pixels);
                         }
                         Err(e) => {
                             self.status = Some(format!("Failed to decode frame: {e:#}"));
@@ -349,13 +349,7 @@ impl ViewerApp {
                 ChannelUniform { min, max, enabled: s.enabled }
             })
             .collect();
-        resources.update_params(
-            &render_state.queue,
-            &uniforms,
-            n_channels as u32,
-            self.uv_offset.into(),
-            self.uv_scale.into(),
-        );
+        resources.set_params(&ctx, &uniforms, n_channels as u32, self.uv_offset.into(), self.uv_scale.into());
     }
 }
 
@@ -1130,19 +1124,18 @@ impl eframe::App for ViewerApp {
             self.image_origin = origin;
 
             // Render into the on-screen *visible* rectangle only, and pan/zoom
-            // via UVs. Drawing into an oversized rect doesn't work: egui-wgpu
-            // clamps the callback viewport to the framebuffer, which would just
-            // squash the whole image back to fit instead of zooming.
+            // via UVs. Drawing into an oversized rect doesn't work: the callback
+            // viewport is clamped to the framebuffer, which would just squash the
+            // whole image back to fit instead of zooming.
             let full_rect = egui::Rect::from_min_size(origin, img_px);
             let visible = full_rect.intersect(panel_rect);
             if visible.is_positive() {
                 let inv = egui::vec2(1.0 / img_px.x.max(1.0), 1.0 / img_px.y.max(1.0));
                 self.uv_offset = (visible.min - origin) * inv;
                 self.uv_scale = visible.size() * inv;
-                ui.painter().with_clip_rect(panel_rect).add(egui_wgpu::Callback::new_paint_callback(
-                    visible,
-                    crate::render::callback::ImagePaintCallback,
-                ));
+                ui.painter()
+                    .with_clip_rect(panel_rect)
+                    .add(render::paint_callback(&self.render, visible));
             }
 
             response.on_hover_cursor(if pannable {
@@ -1360,8 +1353,6 @@ impl eframe::App for ViewerApp {
             self.last_title = Some(desired_title);
         }
 
-        if let Some(render_state) = frame.wgpu_render_state().cloned() {
-            self.sync_gpu(&render_state);
-        }
+        self.sync_gpu(frame);
     }
 }

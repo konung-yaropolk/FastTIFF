@@ -1,19 +1,88 @@
-//! Owns every GPU resource the viewer needs: the render pipeline, the
-//! fixed set of MAX_CHANNELS raw-sample textures, the LUT texture array,
-//! and the uniform buffer carrying per-channel window/level + enabled
-//! flags. Created once at startup and stored in egui_wgpu's
-//! `CallbackResources` map (see callback.rs), exactly like the
-//! `custom3d_wgpu` pattern in the egui repo.
+//! wgpu rendering for the composited image: the render pipeline, the fixed set
+//! of `MAX_CHANNELS` raw-sample textures (R16Uint), the LUT texture array, and
+//! the uniform buffer carrying per-channel window/level + enabled flags. Uploads
+//! happen from `app.rs` via `UploadCtx` (the device + queue from
+//! `Frame::wgpu_render_state`); `paint` is invoked from the
+//! `egui_wgpu::CallbackTrait` built by `paint_callback`.
+//!
+//! Unlike egui's `custom3d_wgpu` example (which parks resources in
+//! egui_wgpu's `CallbackResources` map), we keep them in an `Arc<Mutex>` owned
+//! by the app and captured by the callback — matching the glow backend so the
+//! two are interchangeable behind one app-side interface.
 
+use super::{ChannelUniform, MAX_CHANNELS};
 use eframe::egui_wgpu::{self, wgpu};
 use std::num::NonZeroU64;
+use std::sync::{Arc, Mutex};
 
-pub const MAX_CHANNELS: usize = 6;
 const LUT_WIDTH: u32 = 256;
 /// Bind-group binding indices: channel textures occupy `1..=MAX_CHANNELS`, then
 /// the LUT array and sampler follow.
 const LUT_BINDING: u32 = MAX_CHANNELS as u32 + 1;
 const SAMPLER_BINDING: u32 = MAX_CHANNELS as u32 + 2;
+
+/// The `eframe::Renderer` this backend needs requested in `NativeOptions`.
+pub const RENDERER: eframe::Renderer = eframe::Renderer::Wgpu;
+
+/// Shared handle to the wgpu render resources. `Arc<Mutex>` because the
+/// egui_wgpu paint callback (which draws) must be `Send + Sync + 'static`;
+/// uploads happen in `app::sync_gpu`, so the lock is uncontended (both on the
+/// UI thread, and never overlap — uploads finish before the callback paints).
+pub type Render = Arc<Mutex<ImageRenderResources>>;
+
+/// Build the render resources from eframe's creation context (its wgpu render
+/// state). Called once at startup.
+pub fn init(cc: &eframe::CreationContext<'_>) -> Render {
+    let rs = cc
+        .wgpu_render_state
+        .as_ref()
+        .expect("FastTIFF requires the wgpu backend (NativeOptions::renderer = Wgpu)");
+    Arc::new(Mutex::new(ImageRenderResources::new(&rs.device, rs.target_format)))
+}
+
+/// Per-frame upload handle: the device + queue, pulled from `eframe::Frame`.
+/// `None` before the backend is up (shouldn't happen after init).
+pub struct UploadCtx<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+}
+
+pub fn upload_ctx(frame: &eframe::Frame) -> Option<UploadCtx<'_>> {
+    frame
+        .wgpu_render_state()
+        .map(|rs| UploadCtx { device: &rs.device, queue: &rs.queue })
+}
+
+/// The egui paint callback that draws the current image into `rect`. Captures a
+/// clone of the shared resources and locks them at paint time.
+pub fn paint_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
+    egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(
+        rect,
+        ImagePaintCallback { resources: render.clone() },
+    ))
+}
+
+/// The `egui_wgpu::CallbackTrait` impl invoked once per egui frame to draw the
+/// image. Holds its own clone of the resources (not egui_wgpu's resource map).
+struct ImagePaintCallback {
+    resources: Render,
+}
+
+impl egui_wgpu::CallbackTrait for ImagePaintCallback {
+    // `prepare` is left as the trait default (no-op): all GPU state updates
+    // (texture uploads, uniform writes) happen synchronously in app.rs before
+    // this callback is queued, via direct queue.write_* calls.
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        _resources: &egui_wgpu::CallbackResources,
+    ) {
+        if let Ok(r) = self.resources.lock() {
+            r.paint(render_pass);
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -160,10 +229,11 @@ impl ImageRenderResources {
 
     /// Recreate channel textures if the frame dimensions changed (new
     /// stack opened, or stack with different per-frame size).
-    pub fn ensure_size(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    pub fn ensure_size(&mut self, ctx: &UploadCtx, width: u32, height: u32) {
         if self.current_size == (width, height) {
             return;
         }
+        let device = ctx.device;
         self.channel_textures = std::array::from_fn(|i| {
             create_channel_texture(device, width, height, &format!("FastTIFFchannel {i}"))
         });
@@ -179,11 +249,11 @@ impl ImageRenderResources {
     }
 
     /// Upload one channel's raw 16-bit samples.
-    pub fn upload_channel(&self, queue: &wgpu::Queue, channel: usize, width: u32, height: u32, samples: &[u16]) {
+    pub fn upload_channel(&self, ctx: &UploadCtx, channel: usize, width: u32, height: u32, samples: &[u16]) {
         if channel >= MAX_CHANNELS {
             return;
         }
-        queue.write_texture(
+        ctx.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.channel_textures[channel],
                 mip_level: 0,
@@ -205,7 +275,7 @@ impl ImageRenderResources {
     }
 
     /// Upload one channel's LUT (256 RGB entries) into the LUT texture array.
-    pub fn upload_lut(&self, queue: &wgpu::Queue, channel: usize, lut: &[[u8; 3]; 256]) {
+    pub fn upload_lut(&self, ctx: &UploadCtx, channel: usize, lut: &[[u8; 3]; 256]) {
         if channel >= MAX_CHANNELS {
             return;
         }
@@ -216,7 +286,7 @@ impl ImageRenderResources {
             rgba[i * 4 + 2] = px[2];
             rgba[i * 4 + 3] = 255;
         }
-        queue.write_texture(
+        ctx.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.lut_texture,
                 mip_level: 0,
@@ -243,9 +313,9 @@ impl ImageRenderResources {
 
     /// Update per-channel window/level + enabled flags, the active channel
     /// count, and the visible UV sub-rect (pan/zoom), in one uniform write.
-    pub fn update_params(
-        &self,
-        queue: &wgpu::Queue,
+    pub fn set_params(
+        &mut self,
+        ctx: &UploadCtx,
         channels: &[ChannelUniform],
         num_channels: u32,
         uv_offset: [f32; 2],
@@ -269,7 +339,7 @@ impl ImageRenderResources {
                 _pad: 0.0,
             };
         }
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&gpu));
+        ctx.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&gpu));
     }
 
     pub fn paint(&self, render_pass: &mut wgpu::RenderPass<'_>) {
@@ -277,13 +347,6 @@ impl ImageRenderResources {
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.draw(0..6, 0..1);
     }
-}
-
-#[derive(Clone, Copy)]
-pub struct ChannelUniform {
-    pub min: f32,
-    pub max: f32,
-    pub enabled: bool,
 }
 
 fn channel_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -374,15 +437,4 @@ fn build_bind_group(
         layout,
         entries: &entries,
     })
-}
-
-/// Registers the pipeline in egui_wgpu's per-frame resource map, following
-/// the same pattern as the egui repo's `custom3d_wgpu` example.
-pub fn install(render_state: &egui_wgpu::RenderState) {
-    let resources = ImageRenderResources::new(&render_state.device, render_state.target_format);
-    render_state
-        .renderer
-        .write()
-        .callback_resources
-        .insert(resources);
 }

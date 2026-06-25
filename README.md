@@ -20,6 +20,21 @@ https://github.com/konung-yaropolk/FastTIFF/releases
 cargo run --release
 ```
 
+### Renderer (glow vs wgpu)
+
+The GPU backend is chosen at compile time. 
+**glow** (OpenGL) is the default;
+**wgpu** (DX12/Vulkan/Metal) is opt-in:
+
+```sh
+cargo run --release                                                  # glow (default)
+cargo run --release --no-default-features --features renderer-wgpu   # wgpu
+```
+
+glow is the default because wgpu pegs a CPU core while idle on some Windows 10
+machines; wgpu may be preferable on macOS (Metal). Only the selected backend is
+compiled in — the other's dependencies are excluded entirely.
+
 ## Why it's fast
 
 ImageJ re-renders each slice on the CPU (Java `BufferedImage`/AWT) every time
@@ -29,8 +44,8 @@ you move the slider. This viewer instead:
   saving raw stacks), reading a frame is a direct reinterpret of file bytes
   already sitting in mapped memory - no decode step, no allocation.
 - Uploads the raw 16-bit samples straight to the GPU as a texture.
-- Does window/level (contrast) and LUT color mapping in a WGSL fragment
-  shader, per pixel, on the GPU. The CPU never touches pixel values.
+- Does window/level (contrast) and LUT color mapping in a fragment shader,
+  per pixel, on the GPU. The CPU never touches pixel values.
 
 
 ## Project layout
@@ -43,8 +58,8 @@ you move the slider. This viewer instead:
   pipeline - this is the part most worth trusting blind, since it's
   actually verified.
 - **`FastTIFF/`** — the GUI binary: eframe/egui for the window and controls,
-  a custom wgpu render pipeline (via `egui_wgpu::CallbackTrait`) for the
-  image itself.
+  a custom GPU render pipeline for the image itself, with interchangeable
+  glow (OpenGL) and wgpu backends selected at build time (see Renderer above).
 
 ## What v1 covers
 

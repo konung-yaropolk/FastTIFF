@@ -18,7 +18,8 @@ fn main() -> eframe::Result {
             // resizing and zoom-out (which letterboxes below this size).
             .with_min_inner_size([256.0, 256.0])
             .with_title("FastTIFF"),
-        renderer: eframe::Renderer::Wgpu,
+        // glow or wgpu, picked at compile time by the `renderer-*` features.
+        renderer: render::RENDERER,
         ..Default::default()
     };
 
@@ -26,12 +27,8 @@ fn main() -> eframe::Result {
         "FastTIFF",
         native_options,
         Box::new(|cc| {
-            let render_state = cc
-                .wgpu_render_state
-                .as_ref()
-                .expect("FastTIFF requires the wgpu backend (NativeOptions::renderer = Wgpu)");
-            render::pipeline::install(render_state);
-            Ok(Box::new(app::ViewerApp::new(initial_path)))
+            let render = render::init(cc);
+            Ok(Box::new(app::ViewerApp::new(initial_path, render)))
         }),
     )
 }
