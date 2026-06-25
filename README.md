@@ -23,12 +23,15 @@ cargo run --release
 ### Renderer (glow vs wgpu)
 
 The GPU backend is chosen at compile time. 
-**glow** (OpenGL) is the default;
-**wgpu** (DX12/Vulkan/Metal) is opt-in:
 
+**glow** (OpenGL) is the default:
 ```sh
-cargo run --release                                                  # glow (default)
-cargo run --release --no-default-features --features renderer-wgpu   # wgpu
+cargo run --release
+```
+**wgpu** (DX12/Vulkan/Metal) is opt-in:
+```sh
+# wgpu
+cargo run --release --no-default-features --features renderer-wgpu
 ```
 
 glow is the default because wgpu pegs a CPU core while idle on some Windows 10
