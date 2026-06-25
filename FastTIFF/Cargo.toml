@@ -6,7 +6,12 @@ description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible r
 
 [dependencies]
 tiff_core = { path = "../tiff_core" }
-eframe = { version = "0.34", default-features = true }
+# default features off to drop the active accesskit integration
+# (`accesskit_winit`/`_windows`/`_consumer`) — the part that hooks Windows UI
+# Automation and pumps the native event loop, which is unused here. Keep the
+# wgpu renderer and the bundled fonts. (egui still pulls the passive `accesskit`
+# data-types crate as a core dependency; that part is unavoidable.)
+eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts"] }
 egui = "0.34"
 egui_extras = "0.34"
 bytemuck = "1.25"
