@@ -653,10 +653,13 @@ fn apply_dimension_override(loaded: &mut LoadedStack, channels: usize, frames: u
 
 impl eframe::App for ViewerApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        // Drag-and-drop a file onto the window.
-        let dropped = ui.ctx().input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()));
-        if let Some(path) = dropped {
-            self.open_file(path);
+        // Drag-and-drop files onto the window: open the first in this window and
+        // launch each of the rest in its own process, so dropping several at once
+        // opens them all side by side (mirrors the command-line behavior).
+        let dropped: Vec<PathBuf> =
+            ui.ctx().input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        if let Some(first) = crate::process::open_all(&dropped) {
+            self.open_file(first.clone());
         }
 
         // Collect zoom input before panels consume events.
@@ -715,6 +718,19 @@ impl eframe::App for ViewerApp {
                     {
                         self.open_file(path);
                     }
+                }
+                if self.stack.is_none() {
+                    // Nothing open yet: show the version + active render backend
+                    // in the space the file info will later occupy.
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!(
+                            "FastTIFF v{}, Renderer: {}",
+                            env!("CARGO_PKG_VERSION"),
+                            render::BACKEND
+                        ))
+                        .weak(),
+                    );
                 }
                 if let Some(loaded) = &self.stack {
                     let meta = &loaded.tiff.meta;
@@ -835,12 +851,28 @@ impl eframe::App for ViewerApp {
                         }
 
                         let remaining = ui.available_width();
-                        ui.spacing_mut().slider_width = remaining.max(40.0);
-                        ui.add(
-                            egui::Slider::new(&mut loaded.frame_index, 0..=max_frame)
-                                .show_value(false)
-                                .trailing_fill(true),
-                        );
+                        if has_multiple_frames {
+                            ui.spacing_mut().slider_width = remaining.max(40.0);
+                            ui.add(
+                                egui::Slider::new(&mut loaded.frame_index, 0..=max_frame)
+                                    .show_value(false)
+                                    .trailing_fill(true),
+                            );
+                        } else {
+                            // Single-frame stack: there's nothing to scrub, so draw
+                            // a flat, handleless track instead of a slider parked at
+                            // zero (the whole row is already disabled above).
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(remaining.max(40.0), 18.0),
+                                egui::Sense::hover(),
+                            );
+                            let y = rect.center().y;
+                            let track = egui::Rect::from_min_max(
+                                egui::pos2(rect.left(), y - 2.0),
+                                egui::pos2(rect.right(), y + 2.0),
+                            );
+                            ui.painter().rect_filled(track, 2.0, ui.visuals().widgets.inactive.bg_fill);
+                        }
                     });
                 });
             });
@@ -978,6 +1010,11 @@ impl eframe::App for ViewerApp {
                             }
                         }
                     }
+                    ui.label(
+                        RichText::new("Hold Shift while dragging to adjust all channels together.")
+                            .small()
+                            .weak(),
+                    );
                 } else if let Some(settings) = loaded.channel_settings.first_mut() {
                     ui.separator();
                     ui.horizontal(|ui| {

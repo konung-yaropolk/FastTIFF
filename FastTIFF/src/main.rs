@@ -1,15 +1,20 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod process;
 mod render;
 
 fn main() -> eframe::Result {
     env_logger::init();
 
-    // argv[0] is the program path itself; argv[1], if present, is the file
-    // Windows passes when the program is launched via "Open with", a file
-    // association, or a file dragged onto the .exe / its shortcut.
-    let initial_path = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    // argv[0] is the program path itself; argv[1..] are the files passed when
+    // the program is launched via "Open with", a file association, or files
+    // dragged onto the .exe / its shortcut. Selecting several files at once
+    // passes them all to a single invocation — open the first here and launch
+    // each of the rest in its own process so they all appear side by side.
+    let files: Vec<std::path::PathBuf> =
+        std::env::args_os().skip(1).map(std::path::PathBuf::from).collect();
+    let initial_path = process::open_all(&files).cloned();
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

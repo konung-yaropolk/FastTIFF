@@ -30,7 +30,6 @@ cargo run --release
 ```
 **wgpu** (DX12/Vulkan/Metal) is opt-in:
 ```sh
-# wgpu
 cargo run --release --no-default-features --features renderer-wgpu
 ```
 
@@ -113,14 +112,14 @@ this is the one-line formula to change.
 ## To Do:
 
 - Done: Fix bug with skewed first frame when loading some tifs through command
+- Done: add label with version, and gpu backend info
+- Done: add suppport to open multiple files if passed in command - open needed number of processes and open eah image in it
+- Done: Hide slider for single-frame tiffs
+- Done: add label in channels slider to hold shift to synchronize adjustments
 - Fix viewing >6Gb tifs (no frames change when scrolling)
-- Hide slider for single-frame tiffs
-- add suppport to open multiple files if passed in command - open needed number of processes and open eah image in it
 - Add bigtiff support
-- add label in channels slider to hold shift to synchronize adjustments
 - Port to linux and mac
 - Add windows installer with files association
-- add about dialog with version, crates involved, license and gpu backend info
 - publish tiff_core as FastTiffLib in to crates.io
 
 

@@ -15,6 +15,9 @@ const LUT_WIDTH: i32 = 256;
 /// The `eframe::Renderer` this backend needs requested in `NativeOptions`.
 pub const RENDERER: eframe::Renderer = eframe::Renderer::Glow;
 
+/// Short human-readable backend name, shown in the UI.
+pub const BACKEND: &str = "glow";
+
 /// Shared handle to the GL render resources. `Arc<Mutex>` because the egui_glow
 /// paint callback (which draws) must be `Send + Sync + 'static`; uploads happen
 /// in `app::sync_gpu`, so the lock is uncontended (both on the UI thread).
