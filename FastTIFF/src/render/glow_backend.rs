@@ -1,13 +1,16 @@
 //! OpenGL (glow) rendering for the composited image: up to `MAX_CHANNELS`
-//! single-channel raw-sample textures (R16UI), a LUT texture (one row per
-//! channel), and a fragment shader that does per-channel window/level → LUT →
-//! additive blend, with a minification box filter for clean zoom-out. Uploads
-//! happen from `app.rs` via `UploadCtx` (the live GL context from `Frame::gl`);
-//! `paint` is invoked from the egui_glow callback built by `paint_callback`.
+//! single-channel raw-sample textures, a LUT texture (one row per channel), and
+//! a fragment shader that does per-channel window/level → LUT → additive blend,
+//! with a minification box filter for clean zoom-out. Each channel is either an
+//! integer texture (R16Uint — 8/16/32-bit-int sources, window/level in 0..65535
+//! units) or a float texture (R32F — 32-bit float sources, window/level in the
+//! data's own units, so the per-frame CPU rescale is avoided). Uploads happen
+//! from `app.rs` via `UploadCtx` (the live GL context from `Frame::gl`); `paint`
+//! is invoked from the egui_glow callback built by `paint_callback`.
 
 use super::{ChannelUniform, MAX_CHANNELS};
-use eframe::glow::{self, HasContext as _};
 use eframe::egui_glow;
+use eframe::glow::{self, HasContext as _};
 use std::sync::{Arc, Mutex};
 
 const LUT_WIDTH: i32 = 256;
@@ -74,6 +77,10 @@ void main() {
 }
 "#;
 
+// Each channel has both an integer sampler (`chN_tex`, R16Uint) and a float
+// sampler (`chN_ftex`, R32F); `ch_is_float[N]` selects which one carries this
+// channel's data (the other is a 1x1 dummy). The window/level math is identical
+// for both — only the sampled value's source and units differ.
 const FRAGMENT_SRC: &str = r#"#version 140
 in vec2 v_uv;
 out vec4 frag_color;
@@ -84,9 +91,16 @@ uniform usampler2D ch2_tex;
 uniform usampler2D ch3_tex;
 uniform usampler2D ch4_tex;
 uniform usampler2D ch5_tex;
+uniform sampler2D ch0_ftex;
+uniform sampler2D ch1_ftex;
+uniform sampler2D ch2_ftex;
+uniform sampler2D ch3_ftex;
+uniform sampler2D ch4_ftex;
+uniform sampler2D ch5_ftex;
 uniform sampler2D lut_tex;
 uniform vec2 ch_min_max[6];
 uniform float ch_enabled[6];
+uniform float ch_is_float[6];
 uniform int num_channels;
 uniform vec2 uv_offset;
 uniform vec2 uv_scale;
@@ -95,10 +109,16 @@ float load_texel(usampler2D tex, vec2 uv, vec2 dims) {
     ivec2 c = clamp(ivec2(uv * dims), ivec2(0), ivec2(dims) - ivec2(1));
     return float(texelFetch(tex, c, 0).r);
 }
+float load_texel_f(sampler2D tex, vec2 uv, vec2 dims) {
+    ivec2 c = clamp(ivec2(uv * dims), ivec2(0), ivec2(dims) - ivec2(1));
+    return texelFetch(tex, c, 0).r;
+}
 
 // Single crisp nearest read at 1:1 / zoom-in; an NxN box filter when minifying
 // (zoom-out), to kill nearest-neighbor shimmer. N is capped so cost is bounded.
-float sample_channel(usampler2D tex, vec2 uv, vec2 footprint) {
+// Two near-identical copies, one per sampler type (GLSL can't pass a sampler of
+// runtime-chosen type).
+float sample_int(usampler2D tex, vec2 uv, vec2 footprint) {
     vec2 dims = vec2(textureSize(tex, 0));
     vec2 texels = footprint * dims;
     int n = int(clamp(ceil(max(texels.x, texels.y)), 1.0, 4.0));
@@ -115,6 +135,23 @@ float sample_channel(usampler2D tex, vec2 uv, vec2 footprint) {
     }
     return sum / (fn * fn);
 }
+float sample_flt(sampler2D tex, vec2 uv, vec2 footprint) {
+    vec2 dims = vec2(textureSize(tex, 0));
+    vec2 texels = footprint * dims;
+    int n = int(clamp(ceil(max(texels.x, texels.y)), 1.0, 4.0));
+    if (n <= 1) {
+        return load_texel_f(tex, uv, dims);
+    }
+    float fn = float(n);
+    float sum = 0.0;
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            vec2 o = (vec2(float(i), float(j)) + 0.5) / fn - 0.5;
+            sum += load_texel_f(tex, uv + o * footprint, dims);
+        }
+    }
+    return sum / (fn * fn);
+}
 
 vec3 apply_channel(float value, int idx, vec2 mm, float en) {
     float span = max(mm.y - mm.x, 1.0);
@@ -125,29 +162,39 @@ vec3 apply_channel(float value, int idx, vec2 mm, float en) {
 
 void main() {
     vec2 uv = uv_offset + v_uv * uv_scale;
-    vec2 footprint = fwidth(uv);
+    vec2 fp = fwidth(uv);
     vec3 color = vec3(0.0);
-    color += apply_channel(sample_channel(ch0_tex, uv, footprint), 0, ch_min_max[0], ch_enabled[0]);
-    if (num_channels > 1) color += apply_channel(sample_channel(ch1_tex, uv, footprint), 1, ch_min_max[1], ch_enabled[1]);
-    if (num_channels > 2) color += apply_channel(sample_channel(ch2_tex, uv, footprint), 2, ch_min_max[2], ch_enabled[2]);
-    if (num_channels > 3) color += apply_channel(sample_channel(ch3_tex, uv, footprint), 3, ch_min_max[3], ch_enabled[3]);
-    if (num_channels > 4) color += apply_channel(sample_channel(ch4_tex, uv, footprint), 4, ch_min_max[4], ch_enabled[4]);
-    if (num_channels > 5) color += apply_channel(sample_channel(ch5_tex, uv, footprint), 5, ch_min_max[5], ch_enabled[5]);
+    color += apply_channel(ch_is_float[0] > 0.5 ? sample_flt(ch0_ftex, uv, fp) : sample_int(ch0_tex, uv, fp), 0, ch_min_max[0], ch_enabled[0]);
+    if (num_channels > 1) color += apply_channel(ch_is_float[1] > 0.5 ? sample_flt(ch1_ftex, uv, fp) : sample_int(ch1_tex, uv, fp), 1, ch_min_max[1], ch_enabled[1]);
+    if (num_channels > 2) color += apply_channel(ch_is_float[2] > 0.5 ? sample_flt(ch2_ftex, uv, fp) : sample_int(ch2_tex, uv, fp), 2, ch_min_max[2], ch_enabled[2]);
+    if (num_channels > 3) color += apply_channel(ch_is_float[3] > 0.5 ? sample_flt(ch3_ftex, uv, fp) : sample_int(ch3_tex, uv, fp), 3, ch_min_max[3], ch_enabled[3]);
+    if (num_channels > 4) color += apply_channel(ch_is_float[4] > 0.5 ? sample_flt(ch4_ftex, uv, fp) : sample_int(ch4_tex, uv, fp), 4, ch_min_max[4], ch_enabled[4]);
+    if (num_channels > 5) color += apply_channel(ch_is_float[5] > 0.5 ? sample_flt(ch5_ftex, uv, fp) : sample_int(ch5_tex, uv, fp), 5, ch_min_max[5], ch_enabled[5]);
     frag_color = vec4(clamp(color, vec3(0.0), vec3(1.0)), 1.0);
 }
 "#;
 
+/// Per-channel texture-allocation kind, tracked so `ensure_size` only
+/// reallocates when something actually changes.
+const KIND_UNUSED: u8 = 0; // channel not present: both textures are 1x1 dummies
+const KIND_INT: u8 = 1; // integer channel: R16Uint full-size, R32F dummy
+const KIND_FLOAT: u8 = 2; // float channel: R32F full-size, R16Uint dummy
+
 pub struct ImageRenderResources {
     program: glow::NativeProgram,
     vao: glow::NativeVertexArray,
-    channel_textures: [glow::NativeTexture; MAX_CHANNELS],
+    channel_textures: [glow::NativeTexture; MAX_CHANNELS], // R16Uint (integer channels)
+    channel_ftextures: [glow::NativeTexture; MAX_CHANNELS], // R32F (float channels)
     lut_texture: glow::NativeTexture,
     current_size: (u32, u32),
+    current_kinds: [u8; MAX_CHANNELS],
 
     u_ch_tex: [Option<glow::NativeUniformLocation>; MAX_CHANNELS],
+    u_ch_ftex: [Option<glow::NativeUniformLocation>; MAX_CHANNELS],
     u_lut: Option<glow::NativeUniformLocation>,
     u_min_max: Option<glow::NativeUniformLocation>,
     u_enabled: Option<glow::NativeUniformLocation>,
+    u_is_float: Option<glow::NativeUniformLocation>,
     u_num_channels: Option<glow::NativeUniformLocation>,
     u_uv_offset: Option<glow::NativeUniformLocation>,
     u_uv_scale: Option<glow::NativeUniformLocation>,
@@ -155,6 +202,7 @@ pub struct ImageRenderResources {
     // Current draw params, set from app.rs and applied in `paint`.
     min_max: [f32; MAX_CHANNELS * 2],
     enabled: [f32; MAX_CHANNELS],
+    is_float: [f32; MAX_CHANNELS],
     num_channels: i32,
     uv_offset: [f32; 2],
     uv_scale: [f32; 2],
@@ -165,26 +213,33 @@ impl ImageRenderResources {
         unsafe {
             let program = link_program(gl, VERTEX_SRC, FRAGMENT_SRC);
             let vao = gl.create_vertex_array().expect("create VAO");
-            let channel_textures = std::array::from_fn(|_| create_channel_texture(gl, 1, 1));
+            let channel_textures = std::array::from_fn(|_| create_int_texture(gl, 1, 1));
+            let channel_ftextures = std::array::from_fn(|_| create_float_texture(gl, 1, 1));
             let lut_texture = create_lut_texture(gl);
 
             let u_ch_tex = std::array::from_fn(|c| gl.get_uniform_location(program, &format!("ch{c}_tex")));
+            let u_ch_ftex = std::array::from_fn(|c| gl.get_uniform_location(program, &format!("ch{c}_ftex")));
 
             Self {
                 program,
                 vao,
                 channel_textures,
+                channel_ftextures,
                 lut_texture,
                 current_size: (1, 1),
+                current_kinds: [KIND_UNUSED; MAX_CHANNELS],
                 u_ch_tex,
+                u_ch_ftex,
                 u_lut: gl.get_uniform_location(program, "lut_tex"),
                 u_min_max: gl.get_uniform_location(program, "ch_min_max"),
                 u_enabled: gl.get_uniform_location(program, "ch_enabled"),
+                u_is_float: gl.get_uniform_location(program, "ch_is_float"),
                 u_num_channels: gl.get_uniform_location(program, "num_channels"),
                 u_uv_offset: gl.get_uniform_location(program, "uv_offset"),
                 u_uv_scale: gl.get_uniform_location(program, "uv_scale"),
                 min_max: [0.0; MAX_CHANNELS * 2],
                 enabled: [0.0; MAX_CHANNELS],
+                is_float: [0.0; MAX_CHANNELS],
                 num_channels: 0,
                 uv_offset: [0.0, 0.0],
                 uv_scale: [1.0, 1.0],
@@ -192,32 +247,39 @@ impl ImageRenderResources {
         }
     }
 
-    /// Reallocate the channel textures when the frame size changes.
-    pub fn ensure_size(&mut self, ctx: &UploadCtx, width: u32, height: u32) {
-        if self.current_size == (width, height) {
+    /// (Re)allocate channel textures for the current frame size and per-channel
+    /// kind. `is_float[c]` true → channel `c` uses the float (R32F) texture at
+    /// full size and its integer texture is a 1x1 dummy (and vice versa);
+    /// channels past `is_float.len()` are unused (both 1x1). No-op when nothing
+    /// changed since the last call.
+    pub fn ensure_size(&mut self, ctx: &UploadCtx, width: u32, height: u32, is_float: &[bool]) {
+        let mut want = [KIND_UNUSED; MAX_CHANNELS];
+        for (c, slot) in want.iter_mut().enumerate() {
+            *slot = match is_float.get(c) {
+                None => KIND_UNUSED,
+                Some(false) => KIND_INT,
+                Some(true) => KIND_FLOAT,
+            };
+        }
+        if self.current_size == (width, height) && self.current_kinds == want {
             return;
         }
         let gl = ctx.gl;
         unsafe {
-            for &tex in &self.channel_textures {
-                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                gl.tex_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    glow::R16UI as i32,
-                    width as i32,
-                    height as i32,
-                    0,
-                    glow::RED_INTEGER,
-                    glow::UNSIGNED_SHORT,
-                    glow::PixelUnpackData::Slice(None),
-                );
+            for c in 0..MAX_CHANNELS {
+                let (iw, ih) = if want[c] == KIND_INT { (width, height) } else { (1, 1) };
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_textures[c]));
+                alloc_int(gl, iw, ih);
+                let (fw, fh) = if want[c] == KIND_FLOAT { (width, height) } else { (1, 1) };
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_ftextures[c]));
+                alloc_float(gl, fw, fh);
             }
         }
         self.current_size = (width, height);
+        self.current_kinds = want;
     }
 
-    /// Upload one channel's raw 16-bit samples.
+    /// Upload one integer channel's raw 16-bit samples (R16Uint texture).
     pub fn upload_channel(&self, ctx: &UploadCtx, channel: usize, width: u32, height: u32, samples: &[u16]) {
         if channel >= MAX_CHANNELS {
             return;
@@ -241,6 +303,29 @@ impl ImageRenderResources {
                 height as i32,
                 glow::RED_INTEGER,
                 glow::UNSIGNED_SHORT,
+                glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(samples))),
+            );
+        }
+    }
+
+    /// Upload one float channel's raw 32-bit float samples (R32F texture).
+    pub fn upload_channel_f32(&self, ctx: &UploadCtx, channel: usize, width: u32, height: u32, samples: &[f32]) {
+        if channel >= MAX_CHANNELS {
+            return;
+        }
+        let gl = ctx.gl;
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_ftextures[channel]));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                glow::RED,
+                glow::FLOAT,
                 glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(samples))),
             );
         }
@@ -279,10 +364,10 @@ impl ImageRenderResources {
         }
     }
 
-    /// Stash the per-channel window/level + enabled flags, channel count, and
-    /// the visible UV sub-rect (pan/zoom); applied as uniforms in `paint`. The
-    /// glow backend uploads nothing here (it has no per-frame uniform buffer),
-    /// so `ctx` is unused — the signature matches the wgpu backend, which does.
+    /// Stash the per-channel window/level + enabled + is-float flags, channel
+    /// count, and the visible UV sub-rect (pan/zoom); applied as uniforms in
+    /// `paint`. The glow backend uploads no per-frame uniform buffer, so `ctx`
+    /// is unused — the signature matches the wgpu backend, which does.
     pub fn set_params(
         &mut self,
         _ctx: &UploadCtx,
@@ -293,10 +378,12 @@ impl ImageRenderResources {
     ) {
         self.min_max = [0.0; MAX_CHANNELS * 2];
         self.enabled = [0.0; MAX_CHANNELS];
+        self.is_float = [0.0; MAX_CHANNELS];
         for (i, c) in channels.iter().take(MAX_CHANNELS).enumerate() {
             self.min_max[i * 2] = c.min;
             self.min_max[i * 2 + 1] = c.max;
             self.enabled[i] = if c.enabled { 1.0 } else { 0.0 };
+            self.is_float[i] = if c.is_float { 1.0 } else { 0.0 };
         }
         self.num_channels = num_channels as i32;
         self.uv_offset = uv_offset;
@@ -309,17 +396,28 @@ impl ImageRenderResources {
         unsafe {
             gl.use_program(Some(self.program));
             gl.bind_vertex_array(Some(self.vao));
+            // Integer channel textures → units 0..MAX_CHANNELS.
             for c in 0..MAX_CHANNELS {
                 gl.active_texture(glow::TEXTURE0 + c as u32);
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_textures[c]));
                 gl.uniform_1_i32(self.u_ch_tex[c].as_ref(), c as i32);
             }
-            gl.active_texture(glow::TEXTURE0 + MAX_CHANNELS as u32);
+            // LUT → unit MAX_CHANNELS.
+            let lut_unit = MAX_CHANNELS as u32;
+            gl.active_texture(glow::TEXTURE0 + lut_unit);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.lut_texture));
-            gl.uniform_1_i32(self.u_lut.as_ref(), MAX_CHANNELS as i32);
+            gl.uniform_1_i32(self.u_lut.as_ref(), lut_unit as i32);
+            // Float channel textures → units MAX_CHANNELS+1 .. 2*MAX_CHANNELS+1.
+            for c in 0..MAX_CHANNELS {
+                let unit = MAX_CHANNELS as u32 + 1 + c as u32;
+                gl.active_texture(glow::TEXTURE0 + unit);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_ftextures[c]));
+                gl.uniform_1_i32(self.u_ch_ftex[c].as_ref(), unit as i32);
+            }
 
             gl.uniform_2_f32_slice(self.u_min_max.as_ref(), &self.min_max);
             gl.uniform_1_f32_slice(self.u_enabled.as_ref(), &self.enabled);
+            gl.uniform_1_f32_slice(self.u_is_float.as_ref(), &self.is_float);
             gl.uniform_1_i32(self.u_num_channels.as_ref(), self.num_channels);
             gl.uniform_2_f32(self.u_uv_offset.as_ref(), self.uv_offset[0], self.uv_offset[1]);
             gl.uniform_2_f32(self.u_uv_scale.as_ref(), self.uv_scale[0], self.uv_scale[1]);
@@ -331,14 +429,8 @@ impl ImageRenderResources {
     }
 }
 
-unsafe fn create_channel_texture(gl: &glow::Context, width: u32, height: u32) -> glow::NativeTexture {
-    let tex = gl.create_texture().expect("create channel texture");
-    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-    // Integer textures must use NEAREST filtering (we read via texelFetch).
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+/// Allocate storage for the currently-bound texture as R16Uint (no data).
+unsafe fn alloc_int(gl: &glow::Context, width: u32, height: u32) {
     gl.tex_image_2d(
         glow::TEXTURE_2D,
         0,
@@ -350,7 +442,47 @@ unsafe fn create_channel_texture(gl: &glow::Context, width: u32, height: u32) ->
         glow::UNSIGNED_SHORT,
         glow::PixelUnpackData::Slice(None),
     );
+}
+
+/// Allocate storage for the currently-bound texture as R32F (no data).
+unsafe fn alloc_float(gl: &glow::Context, width: u32, height: u32) {
+    gl.tex_image_2d(
+        glow::TEXTURE_2D,
+        0,
+        glow::R32F as i32,
+        width as i32,
+        height as i32,
+        0,
+        glow::RED,
+        glow::FLOAT,
+        glow::PixelUnpackData::Slice(None),
+    );
+}
+
+unsafe fn create_int_texture(gl: &glow::Context, width: u32, height: u32) -> glow::NativeTexture {
+    let tex = gl.create_texture().expect("create channel texture");
+    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+    // Integer textures must use NEAREST filtering (we read via texelFetch).
+    set_nearest_clamp(gl);
+    alloc_int(gl, width, height);
     tex
+}
+
+unsafe fn create_float_texture(gl: &glow::Context, width: u32, height: u32) -> glow::NativeTexture {
+    let tex = gl.create_texture().expect("create float channel texture");
+    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+    // NEAREST is required for R32F sampling on older GL (and we read via
+    // texelFetch anyway, which ignores the filter).
+    set_nearest_clamp(gl);
+    alloc_float(gl, width, height);
+    tex
+}
+
+unsafe fn set_nearest_clamp(gl: &glow::Context) {
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
 }
 
 unsafe fn create_lut_texture(gl: &glow::Context) -> glow::NativeTexture {

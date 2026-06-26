@@ -13,7 +13,9 @@
 struct ChannelParams {
     min_max: vec2<f32>,
     enabled: f32,
-    _pad: f32,
+    // 1.0 if this channel's data is in its float (R32F) texture, 0.0 if in its
+    // integer (R16Uint) texture. The other texture is then a 1x1 dummy.
+    is_float: f32,
 };
 
 struct Params {
@@ -38,6 +40,13 @@ struct Params {
 @group(0) @binding(6) var ch5_tex: texture_2d<u32>;
 @group(0) @binding(7) var lut_tex: texture_2d_array<f32>;
 @group(0) @binding(8) var lut_sampler: sampler;
+// Per-channel float textures (R32F), used when params.channels[c].is_float == 1.
+@group(0) @binding(9) var ch0_ftex: texture_2d<f32>;
+@group(0) @binding(10) var ch1_ftex: texture_2d<f32>;
+@group(0) @binding(11) var ch2_ftex: texture_2d<f32>;
+@group(0) @binding(12) var ch3_ftex: texture_2d<f32>;
+@group(0) @binding(13) var ch4_ftex: texture_2d<f32>;
+@group(0) @binding(14) var ch5_ftex: texture_2d<f32>;
 
 struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -95,6 +104,31 @@ fn sample_channel(tex: texture_2d<u32>, uv: vec2<f32>, footprint: vec2<f32>) -> 
     return sum / (fn_ * fn_);
 }
 
+// Float (R32F) twins of the two functions above — same box filter, but the
+// sampled value is already a float in the data's own units (no u32 cast).
+fn load_texel_f(tex: texture_2d<f32>, uv: vec2<f32>, dims: vec2<f32>) -> f32 {
+    let coord = clamp(vec2<i32>(uv * dims), vec2<i32>(0, 0), vec2<i32>(dims) - vec2<i32>(1, 1));
+    return textureLoad(tex, coord, 0).r;
+}
+
+fn sample_channel_f(tex: texture_2d<f32>, uv: vec2<f32>, footprint: vec2<f32>) -> f32 {
+    let dims = vec2<f32>(textureDimensions(tex));
+    let texels = footprint * dims;
+    let n = i32(clamp(ceil(max(texels.x, texels.y)), 1.0, 4.0));
+    if (n <= 1) {
+        return load_texel_f(tex, uv, dims);
+    }
+    let fn_ = f32(n);
+    var sum = 0.0;
+    for (var i = 0; i < n; i = i + 1) {
+        for (var j = 0; j < n; j = j + 1) {
+            let o = (vec2<f32>(f32(i), f32(j)) + 0.5) / fn_ - 0.5;
+            sum = sum + load_texel_f(tex, uv + o * footprint, dims);
+        }
+    }
+    return sum / (fn_ * fn_);
+}
+
 fn apply_channel(value: f32, channel_index: i32, cp: ChannelParams) -> vec3<f32> {
     let span = max(cp.min_max.y - cp.min_max.x, 1.0);
     let t = clamp((value - cp.min_max.x) / span, 0.0, 1.0);
@@ -112,21 +146,25 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Computed in uniform control flow (derivatives must not be in a branch).
     let footprint = fwidth(uv);
 
-    color += apply_channel(sample_channel(ch0_tex, uv, footprint), 0, params.channels[0]);
+    // Per channel, sample the integer or the float texture depending on
+    // `is_float`. `select` computes both (the unused one reads a 1x1 dummy,
+    // which is cheap) and picks; textureLoad needs no derivatives, so this is
+    // safe in uniform control flow.
+    color += apply_channel(select(sample_channel(ch0_tex, uv, footprint), sample_channel_f(ch0_ftex, uv, footprint), params.channels[0].is_float > 0.5), 0, params.channels[0]);
     if (params.num_channels > 1u) {
-        color += apply_channel(sample_channel(ch1_tex, uv, footprint), 1, params.channels[1]);
+        color += apply_channel(select(sample_channel(ch1_tex, uv, footprint), sample_channel_f(ch1_ftex, uv, footprint), params.channels[1].is_float > 0.5), 1, params.channels[1]);
     }
     if (params.num_channels > 2u) {
-        color += apply_channel(sample_channel(ch2_tex, uv, footprint), 2, params.channels[2]);
+        color += apply_channel(select(sample_channel(ch2_tex, uv, footprint), sample_channel_f(ch2_ftex, uv, footprint), params.channels[2].is_float > 0.5), 2, params.channels[2]);
     }
     if (params.num_channels > 3u) {
-        color += apply_channel(sample_channel(ch3_tex, uv, footprint), 3, params.channels[3]);
+        color += apply_channel(select(sample_channel(ch3_tex, uv, footprint), sample_channel_f(ch3_ftex, uv, footprint), params.channels[3].is_float > 0.5), 3, params.channels[3]);
     }
     if (params.num_channels > 4u) {
-        color += apply_channel(sample_channel(ch4_tex, uv, footprint), 4, params.channels[4]);
+        color += apply_channel(select(sample_channel(ch4_tex, uv, footprint), sample_channel_f(ch4_ftex, uv, footprint), params.channels[4].is_float > 0.5), 4, params.channels[4]);
     }
     if (params.num_channels > 5u) {
-        color += apply_channel(sample_channel(ch5_tex, uv, footprint), 5, params.channels[5]);
+        color += apply_channel(select(sample_channel(ch5_tex, uv, footprint), sample_channel_f(ch5_ftex, uv, footprint), params.channels[5].is_float > 0.5), 5, params.channels[5]);
     }
 
     return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);

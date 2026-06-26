@@ -119,6 +119,64 @@ pub fn read_plane_u16(
     Ok(out)
 }
 
+/// Decode a 32-bit-float frame's samples as **raw `f32`**, without the
+/// rescale-to-u16 step `read_frame_u16` does. This is for channels uploaded to
+/// a float (R32F) GPU texture, where window/level happens on the GPU — so the
+/// per-frame CPU cost drops to a borrow (fast path) or a single decode pass.
+///
+/// Zero-copy (`Cow::Borrowed` over the memory map) when the data is
+/// uncompressed, 32-bit float, single-sample, native byte order and a single
+/// strip; otherwise an owned `Vec<f32>`. Mirrors `read_frame_u16`'s fast path.
+/// Only valid for 32-bit data (4 bytes/sample); callers use it for float
+/// channels.
+pub fn read_frame_f32<'a>(
+    mmap: &'a [u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+) -> Result<Cow<'a, [f32]>> {
+    let n_pixels = frame.width as usize * frame.height as usize;
+
+    if frame.compression == Compression::None
+        && frame.bits_per_sample == 32
+        && frame.sample_format == SampleFormat::Float
+        && frame.samples_per_pixel == 1
+        && file_order == ByteOrder::host()
+        && frame.strip_offsets.len() == 1
+    {
+        let offset = frame.strip_offsets[0] as usize;
+        let len_bytes = n_pixels * 4;
+        let slice = mmap
+            .get(offset..offset + len_bytes)
+            .ok_or_else(|| anyhow!("strip data out of file bounds"))?;
+        if let Ok(samples) = bytemuck::try_cast_slice::<u8, f32>(slice) {
+            return Ok(Cow::Borrowed(samples));
+        }
+        // Misaligned (rare) — fall through to the owned path.
+    }
+
+    Ok(Cow::Owned(read_plane_f32(mmap, frame, file_order, 0)?))
+}
+
+/// Decode a single sample plane of a 32-bit frame into raw `f32` values
+/// (deinterleaving chunky multi-sample data), with integer 32-bit samples cast
+/// to `f32`. The per-pixel read is parallelized across cores.
+pub fn read_plane_f32(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+    plane: usize,
+) -> Result<Vec<f32>> {
+    let spp = (frame.samples_per_pixel as usize).max(1);
+    let plane = plane.min(spp - 1);
+    let n_pixels = frame.width as usize * frame.height as usize;
+    let native = decode_native_bytes(mmap, frame, file_order)?;
+    let format = frame.sample_format;
+    Ok((0..n_pixels)
+        .into_par_iter()
+        .map(|i| sample_f32(&native[(i * spp + plane) * 4..], file_order, format))
+        .collect())
+}
+
 /// The actual min/max of a 32-bit frame's raw values (int or float) — used to
 /// establish a channel's initial display range, the same way ImageJ
 /// auto-ranges a 32-bit image to its own data instead of assuming a fixed

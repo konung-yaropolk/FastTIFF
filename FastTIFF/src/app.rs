@@ -303,8 +303,14 @@ impl ViewerApp {
             return;
         }
 
+        // A channel is "float" (uploaded as an R32F texture, window/level on the
+        // GPU) exactly when it carries a 32-bit-float encoding range. Everything
+        // else (8/16/32-bit int, RGB planes) stays on the integer R16Uint path.
+        let is_float: Vec<bool> =
+            loaded.channel_settings.iter().map(|s| s.encoding_range.is_some()).collect();
+
         if let Some(first) = loaded.tiff.frames.first() {
-            resources.ensure_size(&ctx, first.width, first.height);
+            resources.ensure_size(&ctx, first.width, first.height, &is_float);
         }
 
         if !loaded.luts_uploaded {
@@ -332,20 +338,26 @@ impl ViewerApp {
                 } else {
                     (Self::ifd_index(loaded, c), 0)
                 };
-                let encoding_range = loaded.channel_settings.get(c).and_then(|s| s.encoding_range);
                 if let Some(frame_info) = loaded.tiff.frames.get(ifd_idx) {
-                    let decoded = if loaded.rgb {
-                        tiff_core::read_plane_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, encoding_range, plane)
-                            .map(std::borrow::Cow::Owned)
-                    } else {
-                        tiff_core::read_frame_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, encoding_range)
-                    };
-                    match decoded {
-                        Ok(pixels) => {
-                            resources.upload_channel(&ctx, c, frame_info.width, frame_info.height, &pixels);
+                    let (w, h) = (frame_info.width, frame_info.height);
+                    if is_float[c] {
+                        // 32-bit float channel: upload raw floats and let the
+                        // shader do window/level — no per-frame CPU rescale.
+                        match tiff_core::read_frame_f32(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order) {
+                            Ok(pixels) => resources.upload_channel_f32(&ctx, c, w, h, &pixels),
+                            Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
                         }
-                        Err(e) => {
-                            self.status = Some(format!("Failed to decode frame: {e:#}"));
+                    } else {
+                        // Integer channel (incl. RGB planes): decode to u16.
+                        let decoded = if loaded.rgb {
+                            tiff_core::read_plane_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, None, plane)
+                                .map(std::borrow::Cow::Owned)
+                        } else {
+                            tiff_core::read_frame_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, None)
+                        };
+                        match decoded {
+                            Ok(pixels) => resources.upload_channel(&ctx, c, w, h, &pixels),
+                            Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
                         }
                     }
                 }
@@ -354,24 +366,19 @@ impl ViewerApp {
             loaded.last_enabled = enabled;
         }
 
-        // For float channels the texture holds samples already rescaled
-        // through `encoding_range` into 0..65535, so the user's contrast
-        // window (in real float units) needs the same remap before it's a
-        // meaningful window/level pair for the shader. Integer channels
-        // pass their min/max straight through, unchanged.
+        // Window/level goes to the shader in the data's own units for every
+        // channel: integer channels in raw 0..65535, float channels in their own
+        // float units (their R32F texture holds the raw samples now, so no
+        // texture-space remap is needed). `is_float` tells the shader which
+        // texture to sample.
         let uniforms: Vec<ChannelUniform> = loaded
             .channel_settings
             .iter()
-            .map(|s| {
-                let (min, max) = match s.encoding_range {
-                    Some((lo, hi)) => {
-                        let span = (hi - lo).max(f32::EPSILON);
-                        let to_texture_space = |v: f32| ((v - lo) / span * 65535.0).clamp(0.0, 65535.0);
-                        (to_texture_space(s.min), to_texture_space(s.max))
-                    }
-                    None => (s.min, s.max),
-                };
-                ChannelUniform { min, max, enabled: s.enabled }
+            .map(|s| ChannelUniform {
+                min: s.min,
+                max: s.max,
+                enabled: s.enabled,
+                is_float: s.encoding_range.is_some(),
             })
             .collect();
         resources.set_params(&ctx, &uniforms, n_channels as u32, self.uv_offset.into(), self.uv_scale.into());
