@@ -10,10 +10,16 @@ use egui::{Color32, RichText};
 use std::path::PathBuf;
 use tiff_core::TiffStack;
 
-/// Discrete zoom levels the viewer snaps to (6.25%, 12.5%, 25%, … 3200%).
-/// Zooming in/out steps between adjacent levels.
-const ZOOM_LEVELS: [f32; 10] =
-    [0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+/// Discrete zoom levels the viewer snaps to (3.1% … 3200%). Zooming in/out
+/// steps between adjacent levels. Above 100% the levels are mostly whole-number
+/// magnifications (200%, 300%, 400%, …), where one source pixel maps to an exact
+/// NxN block of screen pixels — crisp and uniform under our nearest sampling —
+/// with 150% as the one fractional step for finer control. The stored values
+/// are rounded to the percentages shown in the UI (e.g. 0.333 reads as 33.3%).
+const ZOOM_LEVELS: [f32; 21] = [
+    0.031, 0.042, 0.063, 0.083, 0.125, 0.167, 0.25, 0.333, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0,
+    6.0, 8.0, 12.0, 16.0, 24.0, 32.0,
+];
 
 /// Smallest the window is ever sized to (inner size, points). Zooming out past
 /// this keeps the window here and just letterboxes the shrinking image.
@@ -50,13 +56,13 @@ fn monitor_work_area(ctx: &egui::Context) -> Option<egui::Vec2> {
 /// guess) so a huge image never briefly opens oversized.
 fn initial_fit_zoom(ctx: &egui::Context, img_w: f32, img_h: f32, chrome_h: f32) -> Option<f32> {
     let avail = monitor_work_area(ctx)?;
-    // Levels at most 100%, largest first.
-    for &z in &[1.0_f32, 0.5, 0.25, 0.125, 0.0625] {
+    // Largest zoom level at most 100% that still fits the work area.
+    for &z in ZOOM_LEVELS.iter().rev().filter(|&&z| z <= 1.0) {
         if img_w * z <= avail.x && img_h * z + chrome_h <= avail.y {
             return Some(z);
         }
     }
-    Some(0.0625) // even 6.25% overflows — open there and let the image pan
+    Some(ZOOM_LEVELS[0]) // even the smallest level overflows — open there and pan
 }
 
 #[derive(Clone, Copy)]
@@ -125,7 +131,7 @@ pub struct ViewerApp {
     /// locked (letterboxed), handled entirely in the central panel.
     zoom: f32,
     /// Set when a file is opened: the next frame computes an initial fit-to-
-    /// screen zoom (largest 0.2 step ≤ 1.0 that fits the monitor) and sizes the
+    /// screen zoom (largest level ≤ 100% that fits the monitor) and sizes the
     /// window once. Deferred to `ui()` because the chrome height and monitor
     /// size aren't known yet at open time.
     pending_initial_fit: bool,
@@ -244,7 +250,7 @@ impl ViewerApp {
                 self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
                 self.stack = Some(loaded);
                 // Start at 1:1; the next frame computes a fit-to-screen zoom
-                // (≤ 1.0, in 0.2 steps) and sizes the window once.
+                // (the largest level ≤ 100% that fits) and sizes the window once.
                 self.zoom = 1.0;
                 self.pan = egui::Vec2::ZERO;
                 self.pending_initial_fit = true;
@@ -440,8 +446,19 @@ fn format_calibrated(calibration: Option<(f64, f64)>, raw: f32) -> String {
 /// A two-handle horizontal range slider editing `(min, max)` within the
 /// inclusive track `[lo, hi]` (all in raw sample units). The handles can't
 /// cross. `salt` disambiguates the interaction ids when several sliders share
-/// a parent (e.g. one per channel).
-fn range_slider(ui: &mut egui::Ui, salt: u64, min: &mut f32, max: &mut f32, lo: f32, hi: f32, width: f32) {
+/// a parent (e.g. one per channel). `tint`, when set, colors the selected span
+/// with the channel's display color (composite/RGB or pseudocolor); otherwise
+/// the default selection color is used.
+fn range_slider(
+    ui: &mut egui::Ui,
+    salt: u64,
+    min: &mut f32,
+    max: &mut f32,
+    lo: f32,
+    hi: f32,
+    width: f32,
+    tint: Option<Color32>,
+) {
     // Defensive: keep the handles inside the track and ordered, even if the
     // values were pushed out of range elsewhere (e.g. by the shift-sync).
     *min = (*min).clamp(lo, hi);
@@ -464,7 +481,7 @@ fn range_slider(ui: &mut egui::Ui, salt: u64, min: &mut f32, max: &mut f32, lo: 
         egui::pos2(x_of(*min), track_y - 2.0),
         egui::pos2(x_of(*max), track_y + 2.0),
     );
-    ui.painter().rect_filled(sel, 2.0, visuals.selection.bg_fill);
+    ui.painter().rect_filled(sel, 2.0, tint.unwrap_or(visuals.selection.bg_fill));
 
     let radius = 6.0;
     // min handle.
@@ -500,6 +517,20 @@ fn handle_color(visuals: &egui::Visuals, active: bool) -> Color32 {
         visuals.widgets.active.fg_stroke.color
     } else {
         visuals.widgets.inactive.fg_stroke.color
+    }
+}
+
+/// The channel's display color for tinting its contrast slider, taken from the
+/// top (full-intensity) entry of its LUT. Returns `None` for a plain grayscale
+/// LUT (`r == g == b`), so only genuinely colored channels — composite/RGB, or a
+/// pseudocolored grayscale stack — get a tinted slider; grayscale ones keep the
+/// default selection color.
+fn channel_tint(lut: &[[u8; 3]; 256]) -> Option<Color32> {
+    let [r, g, b] = lut[255];
+    if r == g && g == b {
+        None
+    } else {
+        Some(Color32::from_rgb(r, g, b))
     }
 }
 
@@ -735,7 +766,7 @@ impl eframe::App for ViewerApp {
                 if let Some(loaded) = &self.stack {
                     let meta = &loaded.tiff.meta;
                     ui.separator();
-                    // Up to 2 decimals, trailing zeros trimmed: 6.25%, 12.5%,
+                    // Up to 2 decimals, trailing zeros trimmed: 3.1%, 33.3%,
                     // 100%, 3200% — so the fractional small zooms read correctly.
                     let pct = format!("{:.2}", self.zoom * 100.0);
                     let pct = pct.trim_end_matches('0').trim_end_matches('.');
@@ -960,6 +991,16 @@ impl eframe::App for ViewerApp {
                     let shift = ui.input(|i| i.modifiers.shift);
                     let before: Vec<(f32, f32)> =
                         loaded.channel_settings.iter().map(|s| (s.min, s.max)).collect();
+                    // Per-channel slider tints from each channel's display LUT —
+                    // colored only for composite/RGB or pseudocolor stacks, `None`
+                    // (default color) for plain grayscale.
+                    let tints: Vec<Option<Color32>> = loaded
+                        .tiff
+                        .meta
+                        .channel_display
+                        .iter()
+                        .map(|cd| channel_tint(&cd.lut))
+                        .collect();
                     // One row per channel — checkbox in line with its slider —
                     // stacked vertically.
                     for (c, settings) in loaded.channel_settings.iter_mut().enumerate() {
@@ -981,7 +1022,8 @@ impl eframe::App for ViewerApp {
                             // slider fills what's left of the row.
                             let slider_w = (ui.available_width() - 120.0).max(80.0);
                             let (lo, hi) = settings.bounds;
-                            range_slider(ui, c as u64, &mut settings.min, &mut settings.max, lo, hi, slider_w);
+                            let tint = tints.get(c).copied().flatten();
+                            range_slider(ui, c as u64, &mut settings.min, &mut settings.max, lo, hi, slider_w, tint);
                             ui.label(RichText::new(value).small());
                         });
                     }
@@ -1028,7 +1070,8 @@ impl eframe::App for ViewerApp {
                         // slider fills what's left of the row.
                         let slider_w = (ui.available_width() - 120.0).max(80.0);
                         let (lo, hi) = settings.bounds;
-                        range_slider(ui, 0, &mut settings.min, &mut settings.max, lo, hi, slider_w);
+                        // Single channel is effectively grayscale here, so no tint.
+                        range_slider(ui, 0, &mut settings.min, &mut settings.max, lo, hi, slider_w, None);
                         ui.label(RichText::new(value).small());
                     });
                 }
@@ -1241,7 +1284,7 @@ impl eframe::App for ViewerApp {
             .map(|f| (f.width as f32, f.height as f32));
 
         if let Some((img_w, img_h)) = img_dims {
-            // On open: pick the largest 0.2-step zoom ≤ 1.0 at which the image +
+            // On open: pick the largest zoom level ≤ 100% at which the image +
             // chrome still fits the monitor (a huge image opens scaled down, a
             // normal one at 100%). Deferred to here because the chrome height
             // and monitor size aren't known at open time.
