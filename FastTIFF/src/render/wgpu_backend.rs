@@ -24,6 +24,9 @@ const SAMPLER_BINDING: u32 = MAX_CHANNELS as u32 + 2;
 /// The `eframe::Renderer` this backend needs requested in `NativeOptions`.
 pub const RENDERER: eframe::Renderer = eframe::Renderer::Wgpu;
 
+/// Short human-readable backend name, shown in the UI.
+pub const BACKEND: &str = "wgpu";
+
 /// Shared handle to the wgpu render resources. `Arc<Mutex>` because the
 /// egui_wgpu paint callback (which draws) must be `Send + Sync + 'static`;
 /// uploads happen in `app::sync_gpu`, so the lock is uncontended (both on the

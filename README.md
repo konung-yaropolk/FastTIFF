@@ -23,12 +23,14 @@ cargo run --release
 ### Renderer (glow vs wgpu)
 
 The GPU backend is chosen at compile time. 
-**glow** (OpenGL) is the default;
-**wgpu** (DX12/Vulkan/Metal) is opt-in:
 
+**glow** (OpenGL) is the default:
 ```sh
-cargo run --release                                                  # glow (default)
-cargo run --release --no-default-features --features renderer-wgpu   # wgpu
+cargo run --release
+```
+**wgpu** (DX12/Vulkan/Metal) is opt-in:
+```sh
+cargo run --release --no-default-features --features renderer-wgpu
 ```
 
 glow is the default because wgpu pegs a CPU core while idle on some Windows 10
@@ -109,15 +111,15 @@ this is the one-line formula to change.
 
 ## To Do:
 
-- Fix bug with skewed first frame when loading some tifs through command
+- Done: Fix bug with skewed first frame when loading some tifs through command
+- Done: add label with version, and gpu backend info
+- Done: add suppport to open multiple files if passed in command - open needed number of processes and open eah image in it
+- Done: Hide slider for single-frame tiffs
+- Done: add label in channels slider to hold shift to synchronize adjustments
 - Fix viewing >6Gb tifs (no frames change when scrolling)
-- Hide slider for single-frame tiffs
-- add suppport to open multiple files if passed in command - open needed number of processes and open eah image in it
 - Add bigtiff support
-- add label in channels slider to hold shift to synchronize adjustments
 - Port to linux and mac
 - Add windows installer with files association
-- add about dialog with version, crates involved, license and gpu backend info
 - publish tiff_core as FastTiffLib in to crates.io
 
 
