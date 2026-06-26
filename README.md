@@ -112,7 +112,7 @@ this is the one-line formula to change.
 
 ## To Do:
 
-- Fix bug with skewed first frame when loading some tifs through command
+- Done: Fix bug with skewed first frame when loading some tifs through command
 - Fix viewing >6Gb tifs (no frames change when scrolling)
 - Hide slider for single-frame tiffs
 - add suppport to open multiple files if passed in command - open needed number of processes and open eah image in it

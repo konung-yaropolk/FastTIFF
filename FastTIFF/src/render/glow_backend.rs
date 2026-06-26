@@ -222,6 +222,13 @@ impl ImageRenderResources {
         let gl = ctx.gl;
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_textures[channel]));
+            // Our rows are tightly packed (`width * 2` bytes for R16UI). Force
+            // the unpack alignment to 1 so an odd-width image — whose row length
+            // isn't a multiple of GL's default alignment of 4 — isn't read with
+            // phantom end-of-row padding, which shears the image diagonally. We
+            // set it on every upload because the GL context is shared with
+            // egui_glow, which changes this global state for its own textures.
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
             gl.tex_sub_image_2d(
                 glow::TEXTURE_2D,
                 0,
@@ -251,6 +258,10 @@ impl ImageRenderResources {
         }
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.lut_texture));
+            // Match `upload_channel`: keep alignment at 1 so the shared context's
+            // unpack state can't misread our tightly-packed rows. (The LUT's
+            // 256*4-byte rows are already 4-aligned, but stay explicit.)
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
             gl.tex_sub_image_2d(
                 glow::TEXTURE_2D,
                 0,
