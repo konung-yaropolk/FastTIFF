@@ -7,7 +7,8 @@ frame change.
 
 Open a stack via the "Open TIFF..." button or by dragging a `.tif`/`.tiff`
 file onto the window. Scrub with the bottom slider, the mouse wheel while
-hovering over the image, or the left/right arrow keys.
+hovering over the image (one frame per notch; hold **Shift** for fast
+continuous scrolling), or the left/right arrow keys.
 
 Downloads here:
 https://github.com/konung-yaropolk/FastTIFF/releases

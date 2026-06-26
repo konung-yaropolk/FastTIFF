@@ -180,6 +180,11 @@ pub struct ViewerApp {
     /// zooming).
     uv_offset: egui::Vec2,
     uv_scale: egui::Vec2,
+    /// Accumulated mouse-wheel scroll not yet turned into a frame step, for the
+    /// precise (no-Shift) scrubbing mode. One wheel notch is a Line event of ±1
+    /// → exactly one frame; touchpad pixel scrolls accumulate here until they
+    /// cross a whole frame, so fine scrolling isn't lost or jumpy.
+    scroll_accum: f32,
 }
 
 /// Playback rate used when the file's metadata doesn't specify `fps=`.
@@ -209,6 +214,7 @@ impl ViewerApp {
             zoom_reposition: None,
             uv_offset: egui::Vec2::ZERO,
             uv_scale: egui::Vec2::splat(1.0),
+            scroll_accum: 0.0,
         };
         if let Some(path) = initial_path {
             app.open_file(path);
@@ -909,11 +915,14 @@ impl eframe::App for ViewerApp {
             });
 
             ui.input(|i| {
+                // Shift jumps 10 frames at a time instead of 1.
+                let step = if i.modifiers.shift { 10 } else { 1 };
+                let max_frame = loaded.tiff.meta.frames.saturating_sub(1);
                 if i.key_pressed(egui::Key::ArrowRight) {
-                    loaded.frame_index = (loaded.frame_index + 1).min(loaded.tiff.meta.frames.saturating_sub(1));
+                    loaded.frame_index = (loaded.frame_index + step).min(max_frame);
                 }
                 if i.key_pressed(egui::Key::ArrowLeft) {
-                    loaded.frame_index = loaded.frame_index.saturating_sub(1);
+                    loaded.frame_index = loaded.frame_index.saturating_sub(step);
                 }
             });
 
@@ -1160,7 +1169,7 @@ impl eframe::App for ViewerApp {
             .show_inside(ui, |ui| {
             let Some(loaded) = &self.stack else {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Drag and drop a TIFF stack here, \nor click \"Open TIFF...\" above.");
+                    ui.label("Drag and drop a TIFF here, \nor click \"Open TIFF...\" above.\n\n\n\nScroll — navigate frames\nShift + Scroll — fast navigate\nCtrl + Scroll — zoom");
                 });
                 return;
             };
@@ -1222,27 +1231,57 @@ impl eframe::App for ViewerApp {
                 egui::CursorIcon::Crosshair
             });
 
-            // Plain scroll (no Ctrl) scrubs frames when hovering the image.
-            // Ctrl+scroll is consumed by egui's zoom_delta() above, so
-            // smooth_scroll_delta here is always zero when Ctrl is held.
+            // Scrub frames by scrolling over the image (Ctrl+scroll is zoom, so
+            // it's excluded). Two modes:
+            //   • normal — read the discrete wheel *events* so one mouse notch is
+            //     exactly one frame (touchpad pixels accumulate to ~one notch);
+            //   • Shift (fast-scroll) — the original smoothed-scroll behavior,
+            //     which glides through several frames per notch, at double rate.
+            // egui remaps Shift+wheel to horizontal scrolling, so the smoothed
+            // delta lands on `.x` with the same sign — `x + y` recovers it.
             if ui.rect_contains_pointer(panel_rect) {
-                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                if scroll < 0.0 {
-                    scroll_step = 1;
-                } else if scroll > 0.0 {
-                    scroll_step = -1;
+                let shift = ui.input(|i| i.modifiers.shift);
+                if shift {
+                    let glide = ui.input(|i| {
+                        let s = i.smooth_scroll_delta;
+                        s.x + s.y
+                    });
+                    if glide < 0.0 {
+                        scroll_step = 2;
+                    } else if glide > 0.0 {
+                        scroll_step = -2;
+                    }
+                    self.scroll_accum = 0.0;
+                } else {
+                    // Pixels of touchpad scroll that count as one frame step.
+                    const POINTS_PER_FRAME: f32 = 50.0;
+                    let notches = ui.input(|i| {
+                        i.events.iter().fold(0.0_f32, |acc, e| match e {
+                            egui::Event::MouseWheel { unit, delta, modifiers, .. } if !modifiers.ctrl => {
+                                acc + match unit {
+                                    egui::MouseWheelUnit::Point => delta.y / POINTS_PER_FRAME,
+                                    _ => delta.y, // Line / Page: one frame per unit
+                                }
+                            }
+                            _ => acc,
+                        })
+                    });
+                    // egui scroll is +y up; we scrub the next frame on scroll-down.
+                    self.scroll_accum -= notches;
+                    let steps = self.scroll_accum.trunc();
+                    self.scroll_accum -= steps;
+                    scroll_step = steps as i32;
                 }
+            } else {
+                self.scroll_accum = 0.0;
             }
         });
 
         if scroll_step != 0 {
             if let Some(loaded) = &mut self.stack {
-                let max_frame = loaded.tiff.meta.frames.saturating_sub(1);
-                if scroll_step > 0 {
-                    loaded.frame_index = (loaded.frame_index + 1).min(max_frame);
-                } else {
-                    loaded.frame_index = loaded.frame_index.saturating_sub(1);
-                }
+                let max_frame = loaded.tiff.meta.frames.saturating_sub(1) as i64;
+                let target = (loaded.frame_index as i64 + scroll_step as i64).clamp(0, max_frame);
+                loaded.frame_index = target as usize;
             }
         }
 
