@@ -8,6 +8,7 @@
 use crate::ifd::ByteOrder;
 use crate::index::{Compression, FrameInfo, SampleFormat};
 use anyhow::{anyhow, bail, Result};
+use rayon::prelude::*;
 use std::borrow::Cow;
 
 /// Decoded pixel data for one plane, always exposed as 16-bit samples:
@@ -98,15 +99,20 @@ pub fn read_plane_u16(
             }
         }
         32 => {
+            // The heaviest per-pixel path: read each 32-bit sample as f32, then
+            // linearly rescale into 0..65535. Both passes are parallelized across
+            // cores (the input is read-only and the output writes are disjoint).
+            let format = frame.sample_format;
             let floats: Vec<f32> = (0..n_pixels)
-                .map(|i| sample_f32(&native[(i * spp + plane) * 4..], file_order, frame.sample_format))
+                .into_par_iter()
+                .map(|i| sample_f32(&native[(i * spp + plane) * 4..], file_order, format))
                 .collect();
             let (lo, hi) = float_range.unwrap_or_else(|| minmax_f32(&floats));
             let span = (hi - lo).max(f32::EPSILON);
-            for (o, &v) in out.iter_mut().zip(floats.iter()) {
+            out.par_iter_mut().zip(floats.par_iter()).for_each(|(o, &v)| {
                 let t = ((v - lo) / span).clamp(0.0, 1.0);
                 *o = (t * 65535.0).round() as u16;
-            }
+            });
         }
         other => bail!("unsupported bits_per_sample: {other}"),
     }
@@ -204,24 +210,34 @@ fn decode_native_bytes<'a>(mmap: &'a [u8], frame: &FrameInfo, file_order: ByteOr
         };
     }
 
-    // General path: multi-strip and/or compressed — assemble into an owned
-    // buffer, decompressing each strip independently (see the doc comment).
+    // General path: multi-strip and/or compressed. Strips are independently
+    // compressed units (own LZW dictionary / zlib stream), so they decode in
+    // parallel; rayon's ordered `collect` keeps them in row order. Each strip's
+    // row span is derived from its index (no sequential carry), so the map is
+    // pure. The last strip may legitimately have fewer rows than
+    // `rows_per_strip` when the image height doesn't divide evenly.
+    let compression = frame.compression;
+    let strips: Vec<Vec<u8>> = frame
+        .strip_offsets
+        .par_iter()
+        .zip(frame.strip_byte_counts.par_iter())
+        .enumerate()
+        .map(|(i, (&offset, &len))| -> Result<Vec<u8>> {
+            let raw_strip = mmap
+                .get(offset as usize..(offset + len) as usize)
+                .ok_or_else(|| anyhow!("strip at offset {offset} (len {len}) out of file bounds"))?;
+            let rows_this_strip = rows_per_strip.min(total_rows.saturating_sub(i * rows_per_strip));
+            let expected_len = rows_this_strip * row_bytes;
+            match compression {
+                // Uncompressed strips need no decode step.
+                Compression::None => Ok(raw_strip.to_vec()),
+                _ => decompress(raw_strip, compression, expected_len),
+            }
+        })
+        .collect::<Result<_>>()?;
     let mut native = Vec::with_capacity(total_len);
-    let mut rows_done = 0usize;
-    for (&offset, &len) in frame.strip_offsets.iter().zip(frame.strip_byte_counts.iter()) {
-        let raw_strip = mmap
-            .get(offset as usize..(offset + len) as usize)
-            .ok_or_else(|| anyhow!("strip at offset {offset} (len {len}) out of file bounds"))?;
-        // The last strip may legitimately have fewer rows than
-        // `rows_per_strip` if the image height doesn't divide evenly.
-        let rows_this_strip = rows_per_strip.min(total_rows.saturating_sub(rows_done));
-        let expected_len = rows_this_strip * row_bytes;
-        match frame.compression {
-            // Uncompressed strips need no decode step — copy once, straight in.
-            Compression::None => native.extend_from_slice(raw_strip),
-            _ => native.extend_from_slice(&decompress(raw_strip, frame.compression, expected_len)?),
-        }
-        rows_done += rows_this_strip;
+    for strip in &strips {
+        native.extend_from_slice(strip);
     }
 
     if native.len() < total_len {

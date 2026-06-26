@@ -1,6 +1,6 @@
 [package]
 name = "tiff_core"
-version = "0.2.6"
+version = "0.3.0"
 edition = "2021"
 description = "Lazy, memory-mapped reader for multi-frame (ImageJ hyperstack) TIFF files: IFD indexing, ImageJ metadata/LUT parsing, and per-frame strip decoding."
 
@@ -10,5 +10,6 @@ weezl = "0.2"      # LZW decoder (compression = 5)
 flate2 = "1.1"     # Deflate/Zip decoder (compression = 8 / 32946)
 anyhow = "1.0"
 bytemuck = { version = "1.25", features = ["extern_crate_alloc"] }
+rayon = "1.10"     # data-parallel strip decompression + 32-bit conversion
 
 [dev-dependencies]

@@ -95,6 +95,11 @@ struct LoadedStack {
     channel_settings: Vec<ChannelSettings>,
     frame_index: usize,
     last_uploaded: Option<usize>,
+    /// The per-channel `enabled` flags as of the last GPU upload. A disabled
+    /// channel is skipped during upload (the shader multiplies it out anyway),
+    /// so re-enabling one must re-upload it even when the frame index is
+    /// unchanged — a difference here forces that.
+    last_enabled: Vec<bool>,
     luts_uploaded: bool,
     /// Set once at load time when the file genuinely has channels, Z, and
     /// time all present simultaneously — Z then stays permanently frozen
@@ -231,6 +236,7 @@ impl ViewerApp {
                     channel_settings: Vec::new(),
                     frame_index: 0,
                     last_uploaded: None,
+                    last_enabled: Vec::new(),
                     luts_uploaded: false,
                     triple_axis_warning: false,
                     rgb: false,
@@ -308,8 +314,16 @@ impl ViewerApp {
             loaded.luts_uploaded = true;
         }
 
-        if loaded.last_uploaded != Some(loaded.frame_index) {
+        // Skip the decode+upload of disabled channels — the shader multiplies
+        // them out, so their texture contents don't matter while off. Re-upload
+        // when the frame moves *or* the set of enabled channels changes (so a
+        // channel toggled back on gets the current frame).
+        let enabled: Vec<bool> = loaded.channel_settings.iter().map(|s| s.enabled).collect();
+        if loaded.last_uploaded != Some(loaded.frame_index) || loaded.last_enabled != enabled {
             for c in 0..n_channels {
+                if !enabled[c] {
+                    continue;
+                }
                 // RGB: every display channel is a sample plane of the *same*
                 // IFD (one full-color image per frame). Otherwise each channel
                 // is its own IFD (the hyperstack plane layout).
@@ -337,6 +351,7 @@ impl ViewerApp {
                 }
             }
             loaded.last_uploaded = Some(loaded.frame_index);
+            loaded.last_enabled = enabled;
         }
 
         // For float channels the texture holds samples already rescaled
