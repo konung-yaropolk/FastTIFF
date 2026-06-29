@@ -1246,7 +1246,13 @@ impl eframe::App for ViewerApp {
                         }
                     }
                     self.last_play_time = Some(now);
-                    ui.ctx().request_repaint();
+                    // Ask for the next repaint at the playback rate rather than
+                    // immediately: no point re-running egui faster than frames
+                    // actually change. If a frame takes longer than this to
+                    // produce, egui repaints as soon as it's ready, so we still
+                    // render as fast as we can when behind (and `demand` above
+                    // still detects it).
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(1.0 / fps));
                 } else {
                     self.playing = false;
                 }
