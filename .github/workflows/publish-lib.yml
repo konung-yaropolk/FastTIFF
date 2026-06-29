@@ -1,0 +1,39 @@
+name: Publish fast-tiff-lib
+
+on:
+  release:
+    types: [published]          # fires on each GitHub release (same trigger as your exe build)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Read lib version
+        id: ver
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name=="fast-tiff-lib") | .version')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "fast-tiff-lib version: $v"
+
+      - name: Already on crates.io?
+        id: pub
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+                 -H "User-Agent: ${{ github.repository }} publish CI" \
+                 "https://crates.io/api/v1/crates/fast-tiff-lib/${{ steps.ver.outputs.version }}")
+          if [ "$code" = "200" ]; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v${{ steps.ver.outputs.version }} already published — skipping."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: steps.pub.outputs.already == 'false'
+        run: cargo publish -p fast-tiff-lib
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
