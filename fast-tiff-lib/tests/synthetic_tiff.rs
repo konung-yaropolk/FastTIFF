@@ -5,7 +5,7 @@
 //! arithmetic, not just type-checking.
 
 use std::io::Write;
-use tiff_core::TiffStack;
+use fast_tiff_lib::TiffStack;
 
 /// Minimal stand-in for `tempfile::tempdir()` — avoids pulling in a
 /// dev-dependency whose transitive deps require a newer toolchain than
@@ -244,7 +244,7 @@ fn opens_multi_frame_stack_and_reads_correct_pixels() {
         let frame = &stack.frames[i];
         assert_eq!(frame.width, width);
         assert_eq!(frame.height, height);
-        let pixels = tiff_core::read_frame_u16(&stack.mmap, frame, stack.byte_order, None).unwrap();
+        let pixels = fast_tiff_lib::read_frame_u16(&stack.mmap, frame, stack.byte_order, None).unwrap();
         assert_eq!(&*pixels, expected.as_slice(), "frame {i} pixel mismatch");
     }
 }
@@ -469,8 +469,8 @@ fn opens_rgb8_tiff_and_deinterleaves_planes() {
     assert!(frame.is_rgb(), "frame should be detected as chunky RGB");
 
     let up = |b: u8| ((b as u16) << 8) | b as u16;
-    let red = tiff_core::read_plane_u16(&stack.mmap, frame, stack.byte_order, None, 0).unwrap();
-    let blue = tiff_core::read_plane_u16(&stack.mmap, frame, stack.byte_order, None, 2).unwrap();
+    let red = fast_tiff_lib::read_plane_u16(&stack.mmap, frame, stack.byte_order, None, 0).unwrap();
+    let blue = fast_tiff_lib::read_plane_u16(&stack.mmap, frame, stack.byte_order, None, 2).unwrap();
     assert_eq!(red, vec![up(10), up(40), up(70), up(100)]);
     assert_eq!(blue, vec![up(30), up(60), up(90), up(120)]);
 }

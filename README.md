@@ -53,10 +53,10 @@ you move the slider. This viewer instead:
 
 ## Project layout
 
-- **`tiff_core/`** - pure parsing/decoding library, no GUI or GPU
+- **`fast-tiff-lib/`** - pure parsing/decoding library, no GUI or GPU
   dependencies. IFD-chain walking, ImageJ metadata parsing, strip decoding
   (uncompressed fast path + LZW/Deflate/PackBits + predictor undo). Has a
-  real test suite (`cargo test -p tiff_core`) that builds synthetic
+  real test suite (`cargo test -p fast-tiff-lib`) that builds synthetic
   multi-frame TIFFs in memory and round-trips them through the whole
   pipeline - this is the part most worth trusting blind, since it's
   actually verified.
@@ -117,12 +117,14 @@ this is the one-line formula to change.
 - Done: add suppport to open multiple files if passed in command - open needed number of processes and open eah image in it
 - Done: Hide slider for single-frame tiffs
 - Done: add label in channels slider to hold shift to synchronize adjustments
+- Add zstd compression support
 - Fix viewing >6Gb tifs (no frames change when scrolling)
 - Add bigtiff support
 - Port to linux and mac
 - Add windows installer with files association
-- publish tiff_core as FastTiffLib in to crates.io
+- publish fast-tiff-lib as FastTiffLib in to crates.io
 
 
 
 
+- issue with performance in optimized version - 16 bit compressed tiff playback holds 12% cpu spreaded by multiple cores, but unoptimized - 4-5% which is ~50% single core load

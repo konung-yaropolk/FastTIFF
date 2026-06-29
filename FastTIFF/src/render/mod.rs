@@ -50,4 +50,9 @@ pub struct ChannelUniform {
     pub min: f32,
     pub max: f32,
     pub enabled: bool,
+    /// True if this channel's data is uploaded as a float (R32F) texture — i.e.
+    /// 32-bit float source. The shader then samples it as a float and applies
+    /// window/level in the data's own units. False = integer (R16Uint) channel,
+    /// where `min`/`max` are in raw 0..65535 sample units (unchanged path).
+    pub is_float: bool,
 }
