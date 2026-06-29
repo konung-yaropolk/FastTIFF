@@ -113,6 +113,11 @@ fn read_frame_u16(mmap, frame, order, float_range: Option<(f32, f32)>) -> Result
 // frame; `plane` selects the component.
 fn read_plane_u16(mmap, frame, order, float_range: Option<(f32, f32)>, plane: usize) -> Result<Vec<u16>>;
 
+// Raw unsigned 8-bit bytes, *no* widening to 16-bit — for callers that scale to
+// 0..=255 themselves (e.g. on the GPU). Zero-copy for uncompressed, single-strip
+// 8-bit. Only valid for unsigned single-sample 8-bit frames.
+fn read_frame_u8(mmap, frame, order) -> Result<Cow<[u8]>>;
+
 // Raw 32-bit float samples, *no* rescaling — for callers that do window/level
 // themselves (e.g. on the GPU). Zero-copy for uncompressed, single-strip,
 // native-order float; integer 32-bit is cast to f32.
@@ -126,7 +131,10 @@ fn frame_float_minmax(mmap, frame, order) -> Result<Option<(f32, f32)>>;
 // Eager counterparts: decode *every* frame at once, in parallel across frames,
 // into owned buffers (one per frame). For consumers that need the whole stack
 // resident in RAM rather than scrubbing it lazily (see "Design & prior art").
+// `_u16` covers any depth (8-bit is widened, 32-bit rescaled); `_u8` is the
+// half-memory raw-byte loader for unsigned 8-bit stacks; `_f32` is raw float.
 fn preload_frames_u16(stack: &TiffStack, float_range: Option<(f32, f32)>) -> Result<Vec<Vec<u16>>>;
+fn preload_frames_u8(stack: &TiffStack) -> Result<Vec<Vec<u8>>>;   // unsigned 8-bit stacks
 fn preload_frames_f32(stack: &TiffStack) -> Result<Vec<Vec<f32>>>;
 ```
 
@@ -207,9 +215,9 @@ for downstream batch processing (e.g. aerial/remote-sensing recognition).
 | Zero-copy for uncompressed | no (always copies) | yes |
 
 If you do want the paper's load-everything-at-once behavior, `fast-tiff-lib` offers
-it explicitly via `preload_frames_u16` / `preload_frames_f32` — they decode all
-frames in parallel across frames into owned buffers — while the default path
-stays lazy and zero-copy.
+it explicitly via `preload_frames_u16` / `preload_frames_u8` / `preload_frames_f32`
+— they decode all frames in parallel across frames into owned buffers — while the
+default path stays lazy and zero-copy.
 
 ## Dependencies
 

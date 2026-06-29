@@ -271,6 +271,22 @@ pub fn preload_frames_f32(stack: &TiffStack) -> Result<Vec<Vec<f32>>> {
         .collect()
 }
 
+/// Eagerly decode every frame to raw 8-bit bytes, in parallel across frames —
+/// the byte counterpart to [`preload_frames_u16`], at half the memory (1 byte
+/// per pixel, no widening). See that function for the parallelism/memory notes.
+///
+/// Only meaningful for **unsigned single-sample 8-bit** stacks (the same data
+/// [`read_frame_u8`] handles); gate on `bits_per_sample == 8` before calling.
+/// For other formats it returns the frame's raw native bytes as-is, which won't
+/// be the display-ready samples — use [`preload_frames_u16`] instead.
+pub fn preload_frames_u8(stack: &TiffStack) -> Result<Vec<Vec<u8>>> {
+    stack
+        .frames
+        .par_iter()
+        .map(|frame| Ok(read_frame_u8(&stack.mmap, frame, stack.byte_order)?.into_owned()))
+        .collect()
+}
+
 /// The actual min/max of a 32-bit frame's raw values (int or float) — used to
 /// establish a channel's initial display range, the same way ImageJ
 /// auto-ranges a 32-bit image to its own data instead of assuming a fixed
