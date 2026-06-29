@@ -43,6 +43,21 @@ pub use wgpu_backend::{init, paint_callback, upload_ctx, Render, BACKEND, RENDER
 /// backends (texture/uniform array sizes) and by `app.rs`.
 pub const MAX_CHANNELS: usize = 6;
 
+/// How a channel's pixels are stored in its GPU texture. Picked per channel from
+/// the source format so each gets the cheapest upload, while the shader stays
+/// uniform (the two integer kinds share one `usampler2D`/`texture_2d<u32>` — the
+/// window/level units differ, which `app.rs` accounts for):
+///   * `Int8`  — `R8Uint`,  raw unsigned 8-bit bytes (zero-copy, no widening).
+///   * `Int16` — `R16Uint`, the default integer path (16-bit native, or 8-bit
+///               signed / 32-bit int rescaled into 0..65535 on the CPU).
+///   * `Float` — `R32F`,    raw 32-bit float (window/level done on the GPU).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ChannelKind {
+    Int8,
+    Int16,
+    Float,
+}
+
 /// One channel's window/level + on/off state, as `app.rs` produces it each
 /// frame. The backend maps it to whatever GPU representation it uses.
 #[derive(Clone, Copy)]

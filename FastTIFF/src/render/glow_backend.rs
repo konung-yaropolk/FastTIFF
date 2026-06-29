@@ -8,7 +8,7 @@
 //! from `app.rs` via `UploadCtx` (the live GL context from `Frame::gl`); `paint`
 //! is invoked from the egui_glow callback built by `paint_callback`.
 
-use super::{ChannelUniform, MAX_CHANNELS};
+use super::{ChannelKind, ChannelUniform, MAX_CHANNELS};
 use eframe::egui_glow;
 use eframe::glow::{self, HasContext as _};
 use std::sync::{Arc, Mutex};
@@ -177,8 +177,9 @@ void main() {
 /// Per-channel texture-allocation kind, tracked so `ensure_size` only
 /// reallocates when something actually changes.
 const KIND_UNUSED: u8 = 0; // channel not present: both textures are 1x1 dummies
-const KIND_INT: u8 = 1; // integer channel: R16Uint full-size, R32F dummy
-const KIND_FLOAT: u8 = 2; // float channel: R32F full-size, R16Uint dummy
+const KIND_INT8: u8 = 1; // integer channel: R8Uint full-size, R32F dummy
+const KIND_INT16: u8 = 2; // integer channel: R16Uint full-size, R32F dummy
+const KIND_FLOAT: u8 = 3; // float channel: R32F full-size, int texture dummy
 
 pub struct ImageRenderResources {
     program: glow::NativeProgram,
@@ -248,17 +249,18 @@ impl ImageRenderResources {
     }
 
     /// (Re)allocate channel textures for the current frame size and per-channel
-    /// kind. `is_float[c]` true → channel `c` uses the float (R32F) texture at
-    /// full size and its integer texture is a 1x1 dummy (and vice versa);
-    /// channels past `is_float.len()` are unused (both 1x1). No-op when nothing
-    /// changed since the last call.
-    pub fn ensure_size(&mut self, ctx: &UploadCtx, width: u32, height: u32, is_float: &[bool]) {
+    /// `kind`. An `Int8`/`Int16` channel gets a full-size R8Uint/R16Uint integer
+    /// texture (float texture a 1x1 dummy); a `Float` channel gets a full-size
+    /// R32F float texture (integer texture a 1x1 dummy); channels past
+    /// `kinds.len()` are unused (both 1x1). No-op when nothing changed.
+    pub fn ensure_size(&mut self, ctx: &UploadCtx, width: u32, height: u32, kinds: &[ChannelKind]) {
         let mut want = [KIND_UNUSED; MAX_CHANNELS];
         for (c, slot) in want.iter_mut().enumerate() {
-            *slot = match is_float.get(c) {
+            *slot = match kinds.get(c) {
                 None => KIND_UNUSED,
-                Some(false) => KIND_INT,
-                Some(true) => KIND_FLOAT,
+                Some(ChannelKind::Int8) => KIND_INT8,
+                Some(ChannelKind::Int16) => KIND_INT16,
+                Some(ChannelKind::Float) => KIND_FLOAT,
             };
         }
         if self.current_size == (width, height) && self.current_kinds == want {
@@ -267,9 +269,15 @@ impl ImageRenderResources {
         let gl = ctx.gl;
         unsafe {
             for c in 0..MAX_CHANNELS {
-                let (iw, ih) = if want[c] == KIND_INT { (width, height) } else { (1, 1) };
+                // Integer texture: R8Uint or R16Uint at full size for an integer
+                // channel, else a 1x1 R16Uint dummy.
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_textures[c]));
-                alloc_int(gl, iw, ih);
+                match want[c] {
+                    KIND_INT8 => alloc_int(gl, width, height, true),
+                    KIND_INT16 => alloc_int(gl, width, height, false),
+                    _ => alloc_int(gl, 1, 1, false),
+                }
+                // Float texture: full size for a float channel, else 1x1 dummy.
                 let (fw, fh) = if want[c] == KIND_FLOAT { (width, height) } else { (1, 1) };
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_ftextures[c]));
                 alloc_float(gl, fw, fh);
@@ -304,6 +312,31 @@ impl ImageRenderResources {
                 glow::RED_INTEGER,
                 glow::UNSIGNED_SHORT,
                 glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(samples))),
+            );
+        }
+    }
+
+    /// Upload one integer channel's raw 8-bit samples (R8Uint texture). Skips
+    /// the CPU `0..255 -> 0..65535` widening; the window/level is scaled to
+    /// 0..255 units on the app side instead.
+    pub fn upload_channel_u8(&self, ctx: &UploadCtx, channel: usize, width: u32, height: u32, samples: &[u8]) {
+        if channel >= MAX_CHANNELS {
+            return;
+        }
+        let gl = ctx.gl;
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_textures[channel]));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                glow::RED_INTEGER,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(samples)),
             );
         }
     }
@@ -429,17 +462,24 @@ impl ImageRenderResources {
     }
 }
 
-/// Allocate storage for the currently-bound texture as R16Uint (no data).
-unsafe fn alloc_int(gl: &glow::Context, width: u32, height: u32) {
+/// Allocate storage for the currently-bound integer texture (no data) as either
+/// R8Uint (`eight_bit`) or R16Uint. Both are read through the same `usampler2D`
+/// in the shader; `texelFetch` returns 0..255 or 0..65535 accordingly.
+unsafe fn alloc_int(gl: &glow::Context, width: u32, height: u32, eight_bit: bool) {
+    let (internal, ty) = if eight_bit {
+        (glow::R8UI, glow::UNSIGNED_BYTE)
+    } else {
+        (glow::R16UI, glow::UNSIGNED_SHORT)
+    };
     gl.tex_image_2d(
         glow::TEXTURE_2D,
         0,
-        glow::R16UI as i32,
+        internal as i32,
         width as i32,
         height as i32,
         0,
         glow::RED_INTEGER,
-        glow::UNSIGNED_SHORT,
+        ty,
         glow::PixelUnpackData::Slice(None),
     );
 }
@@ -464,7 +504,7 @@ unsafe fn create_int_texture(gl: &glow::Context, width: u32, height: u32) -> glo
     gl.bind_texture(glow::TEXTURE_2D, Some(tex));
     // Integer textures must use NEAREST filtering (we read via texelFetch).
     set_nearest_clamp(gl);
-    alloc_int(gl, width, height);
+    alloc_int(gl, width, height, false);
     tex
 }
 

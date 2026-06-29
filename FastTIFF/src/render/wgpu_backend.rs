@@ -15,7 +15,7 @@
 //! captured by the callback — matching the glow backend so the two are
 //! interchangeable behind one app-side interface.
 
-use super::{ChannelUniform, MAX_CHANNELS};
+use super::{ChannelKind, ChannelUniform, MAX_CHANNELS};
 use eframe::egui_wgpu::{self, wgpu};
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
@@ -27,11 +27,12 @@ const LUT_BINDING: u32 = MAX_CHANNELS as u32 + 1;
 const SAMPLER_BINDING: u32 = MAX_CHANNELS as u32 + 2;
 const FTEX_BINDING_BASE: u32 = MAX_CHANNELS as u32 + 3;
 
-/// Per-channel texture-allocation kind (which set is full-size), tracked so
-/// `ensure_size` only rebuilds when something actually changes.
+/// Per-channel texture-allocation kind (which set is full-size + the integer
+/// format), tracked so `ensure_size` only rebuilds when something changes.
 const KIND_UNUSED: u8 = 0; // channel not present: both textures are 1x1 dummies
-const KIND_INT: u8 = 1; // integer channel: R16Uint full-size, R32F dummy
-const KIND_FLOAT: u8 = 2; // float channel: R32F full-size, R16Uint dummy
+const KIND_INT8: u8 = 1; // integer channel: R8Uint full-size, R32F dummy
+const KIND_INT16: u8 = 2; // integer channel: R16Uint full-size, R32F dummy
+const KIND_FLOAT: u8 = 3; // float channel: R32F full-size, int texture dummy
 
 /// The `eframe::Renderer` this backend needs requested in `NativeOptions`.
 pub const RENDERER: eframe::Renderer = eframe::Renderer::Wgpu;
@@ -214,7 +215,9 @@ impl ImageRenderResources {
 
         // 1x1 placeholder textures to start; resized via `ensure_size`.
         let channel_textures =
-            std::array::from_fn(|i| create_int_texture(device, 1, 1, &format!("FastTIFFchannel {i}")));
+            std::array::from_fn(|i| {
+                create_int_texture(device, 1, 1, wgpu::TextureFormat::R16Uint, &format!("FastTIFFchannel {i}"))
+            });
         let channel_ftextures =
             std::array::from_fn(|i| create_float_texture(device, 1, 1, &format!("FastTIFFchannel-f {i}")));
         let lut_texture = create_lut_texture(device);
@@ -252,29 +255,37 @@ impl ImageRenderResources {
     }
 
     /// (Re)allocate channel textures for the current frame size and per-channel
-    /// kind. `is_float[c]` true → channel `c` uses its float (R32F) texture at
-    /// full size and its integer texture is a 1x1 dummy (and vice versa);
-    /// channels past `is_float.len()` are unused (both 1x1). Rebuilds the bind
-    /// group when anything changed; no-op otherwise.
-    pub fn ensure_size(&mut self, ctx: &UploadCtx, width: u32, height: u32, is_float: &[bool]) {
-        let mut kinds = [KIND_UNUSED; MAX_CHANNELS];
-        for (c, slot) in kinds.iter_mut().enumerate() {
-            *slot = match is_float.get(c) {
+    /// `kind`. An `Int8`/`Int16` channel gets a full-size R8Uint/R16Uint integer
+    /// texture (float texture a 1x1 dummy); a `Float` channel gets a full-size
+    /// R32F float texture (integer texture a 1x1 dummy); channels past
+    /// `kinds.len()` are unused (both 1x1). Rebuilds the bind group when anything
+    /// changed; no-op otherwise.
+    pub fn ensure_size(&mut self, ctx: &UploadCtx, width: u32, height: u32, kinds: &[ChannelKind]) {
+        let mut want = [KIND_UNUSED; MAX_CHANNELS];
+        for (c, slot) in want.iter_mut().enumerate() {
+            *slot = match kinds.get(c) {
                 None => KIND_UNUSED,
-                Some(false) => KIND_INT,
-                Some(true) => KIND_FLOAT,
+                Some(ChannelKind::Int8) => KIND_INT8,
+                Some(ChannelKind::Int16) => KIND_INT16,
+                Some(ChannelKind::Float) => KIND_FLOAT,
             };
         }
-        if self.current_size == (width, height) && self.current_kinds == kinds {
+        if self.current_size == (width, height) && self.current_kinds == want {
             return;
         }
         let device = ctx.device;
         self.channel_textures = std::array::from_fn(|c| {
-            let (w, h) = if kinds[c] == KIND_INT { (width, height) } else { (1, 1) };
-            create_int_texture(device, w, h, &format!("FastTIFFchannel {c}"))
+            let label = format!("FastTIFFchannel {c}");
+            // R8Uint or R16Uint at full size for an integer channel, else a 1x1
+            // R16Uint dummy. Both are sampled through the same `texture_2d<u32>`.
+            match want[c] {
+                KIND_INT8 => create_int_texture(device, width, height, wgpu::TextureFormat::R8Uint, &label),
+                KIND_INT16 => create_int_texture(device, width, height, wgpu::TextureFormat::R16Uint, &label),
+                _ => create_int_texture(device, 1, 1, wgpu::TextureFormat::R16Uint, &label),
+            }
         });
         self.channel_ftextures = std::array::from_fn(|c| {
-            let (w, h) = if kinds[c] == KIND_FLOAT { (width, height) } else { (1, 1) };
+            let (w, h) = if want[c] == KIND_FLOAT { (width, height) } else { (1, 1) };
             create_float_texture(device, w, h, &format!("FastTIFFchannel-f {c}"))
         });
         self.bind_group = build_bind_group(
@@ -287,7 +298,7 @@ impl ImageRenderResources {
             &self.sampler,
         );
         self.current_size = (width, height);
-        self.current_kinds = kinds;
+        self.current_kinds = want;
     }
 
     /// Upload one integer channel's raw 16-bit samples (R16Uint texture).
@@ -306,6 +317,34 @@ impl ImageRenderResources {
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(width * 2),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// Upload one integer channel's raw 8-bit samples (R8Uint texture). Skips
+    /// the CPU `0..255 -> 0..65535` widening; the window/level is scaled to
+    /// 0..255 units on the app side instead.
+    pub fn upload_channel_u8(&self, ctx: &UploadCtx, channel: usize, width: u32, height: u32, samples: &[u8]) {
+        if channel >= MAX_CHANNELS {
+            return;
+        }
+        ctx.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.channel_textures[channel],
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            samples,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width),
                 rows_per_image: Some(height),
             },
             wgpu::Extent3d {
@@ -446,7 +485,13 @@ fn float_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn create_int_texture(device: &wgpu::Device, width: u32, height: u32, label: &str) -> wgpu::Texture {
+fn create_int_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    label: &str,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -457,7 +502,7 @@ fn create_int_texture(device: &wgpu::Device, width: u32, height: u32, label: &st
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R16Uint,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     })

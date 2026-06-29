@@ -88,6 +88,18 @@ pub fn read_frame_u16<'a>(
     Ok(Cow::Owned(read_plane_u16(mmap, frame, file_order, float_range, 0)?))
 }
 
+/// Decode an **unsigned 8-bit, single-sample** frame's raw bytes, *without* the
+/// `0..255 -> 0..65535` widening `read_frame_u16` does for 8-bit. Zero-copy
+/// (a borrow over the memory map) for the uncompressed, single-strip case;
+/// otherwise an owned `Vec<u8>` (decompressed, predictor undone). Intended for
+/// upload to an `R8Uint` GPU texture so the widening never touches the CPU on
+/// the per-frame hot path — the caller scales the window/level into 0..255 units
+/// instead (dividing by 257). Only valid for `bits_per_sample == 8`,
+/// `samples_per_pixel == 1`, `UnsignedInt`; callers gate on that.
+pub fn read_frame_u8<'a>(mmap: &'a [u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Cow<'a, [u8]>> {
+    decode_native_bytes(mmap, frame, file_order)
+}
+
 /// Decode a single sample plane (`plane`, `< samples_per_pixel`) of a frame
 /// into `width * height` u16 values, deinterleaving chunky multi-sample data
 /// such as RGB. For single-sample frames `plane` is 0 and this returns the
