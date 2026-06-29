@@ -1,5 +1,10 @@
 # FastTIFF - a lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering
 
+[![Release](https://img.shields.io/github/v/release/konung-yaropolk/FastTIFF?label=release)](https://github.com/konung-yaropolk/FastTIFF/releases)
+[![License](https://img.shields.io/github/license/konung-yaropolk/FastTIFF)](LICENSE)
+[![Build](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/release.yml?label=build)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
+[![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/ci.yml)
+
 A fast multi-frame TIFF stack viewer for huge ImageJ hyperstacks: a horizontal
 scrubber instead of ImageJ's slice slider, GPU-side LUT/contrast rendering,
 and (for the common uncompressed case) zero CPU-side image processing per
@@ -127,4 +132,4 @@ this is the one-line formula to change.
 
 
 
-- issue with performance in optimized version - 16 bit compressed tiff playback holds 12% cpu spreaded by multiple cores, but unoptimized - 4-5% which is ~50% single core load
+- Solved: issue with performance in optimized version - 16 bit compressed tiff playback holds 12% cpu spreaded by multiple cores, but unoptimized - 4-5% which is ~50% single core load

@@ -1,0 +1,30 @@
+name: CI
+
+# Runs the full workspace test suite on pushes to main (and PRs targeting it),
+# so the "tests" badge reflects current health between releases — not just the
+# last published release. Windows matches the release environment, where the
+# eframe/glow app builds without any extra system packages.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --workspace
