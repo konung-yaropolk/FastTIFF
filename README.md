@@ -128,8 +128,10 @@ this is the one-line formula to change.
 - Port to linux and mac
 - Add windows installer with files association
 - publish fast-tiff-lib as FastTiffLib in to crates.io
+- make inactive decode mode for plane tiffs
 
 
 
+- fix possible bug: add read_plane_u8 absent in lib now
 
 - Solved: issue with performance in optimized version - 16 bit compressed tiff playback holds 12% cpu spreaded by multiple cores, but unoptimized - 4-5% which is ~50% single core load

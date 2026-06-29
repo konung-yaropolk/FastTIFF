@@ -1,13 +1,13 @@
 [package]
 name = "fast-tiff-lib"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
-description = "Lazy, memory-mapped reader for multi-frame (ImageJ hyperstack) TIFF files: IFD indexing, ImageJ metadata/LUT parsing, and per-frame strip decoding."
-license = "LGPL-3.0-only"
+description = "Lazy, memory-mapped reader for single and multi-frame TIFF files: IFD indexing, ImageJ metadata/LUT parsing, and per-frame strip decoding."
+license = "MPL-2.0"
 readme = "README.md"
 repository = "https://github.com/konung-yaropolk/FastTIFF"
 keywords = ["tiff", "imagej", "science", "microscopy", "astronomy"]
-categories = ["multimedia::images", "parser-implementations", "science"]
+categories = ["visualization", "multimedia::images", "parser-implementations", "parsing-tools", "science"]
 
 [dependencies]
 memmap2 = "0.9"

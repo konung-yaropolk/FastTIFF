@@ -231,4 +231,4 @@ default path stays lazy and zero-copy.
 
 ## License
 
-LGPL-3.0-only. See the [LICENSE](https://github.com/konung-yaropolk/FastTIFF/blob/main/fast-tiff-lib/LICENSE).
+Mozilla Public License 2.0. See the [LICENSE](https://github.com/konung-yaropolk/FastTIFF/blob/main/fast-tiff-lib/LICENSE).
