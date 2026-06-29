@@ -117,6 +117,7 @@ this is the one-line formula to change.
 - Done: add suppport to open multiple files if passed in command - open needed number of processes and open eah image in it
 - Done: Hide slider for single-frame tiffs
 - Done: add label in channels slider to hold shift to synchronize adjustments
+- Add zstd compression support
 - Fix viewing >6Gb tifs (no frames change when scrolling)
 - Add bigtiff support
 - Port to linux and mac
@@ -126,3 +127,4 @@ this is the one-line formula to change.
 
 
 
+- issue with performance in optimized version - 16 bit compressed tiff playback holds 12% cpu spreaded by multiple cores, but unoptimized - 4-5% which is ~50% single core load

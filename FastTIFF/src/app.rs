@@ -65,6 +65,40 @@ fn initial_fit_zoom(ctx: &egui::Context, img_w: f32, img_h: f32, chrome_h: f32) 
     Some(ZOOM_LEVELS[0]) // even the smallest level overflows — open there and pan
 }
 
+/// How per-frame decoding is split across CPU cores. The choice maps onto
+/// `tiff_core`'s parallel-decode hint each frame (see `sync_gpu`).
+#[derive(Clone, Copy, PartialEq)]
+enum DecodeMode {
+    /// Serial by default; switch to threaded automatically when real-time
+    /// playback starts dropping frames (a core saturating on decode).
+    Auto,
+    /// Always single-threaded (lowest total CPU; one core).
+    Serial,
+    /// Always multi-threaded for large frames (spreads load across cores).
+    Threaded,
+}
+
+impl DecodeMode {
+    fn label(self) -> &'static str {
+        match self {
+            DecodeMode::Auto => "Auto",
+            DecodeMode::Serial => "Serial",
+            DecodeMode::Threaded => "Threaded",
+        }
+    }
+
+    /// The parallel-decode flag this mode feeds to `tiff_core`. `latched` is
+    /// whether `Auto`'s adaptive trigger has fired (playback fell behind); it
+    /// only matters in `Auto`.
+    fn parallel(self, latched: bool) -> bool {
+        match self {
+            DecodeMode::Serial => false,
+            DecodeMode::Threaded => true,
+            DecodeMode::Auto => latched,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ChannelSettings {
     min: f32,
@@ -154,6 +188,18 @@ pub struct ViewerApp {
     /// Fractional-frame carry so a non-integer frames-per-render-tick advance
     /// doesn't lose or gain time over a long playback.
     play_accumulator: f64,
+    /// Smoothed "frames demanded per render" while playing: how many frames the
+    /// elapsed real time wanted us to advance each render tick. ~1 when we're
+    /// keeping up; >1 means renders are slower than the target fps (we're
+    /// dropping frames — one core is saturated). Drives `decode_parallel`.
+    play_demand_ema: f32,
+    /// Latched once playback falls behind (in `Auto` mode): ask `tiff_core` to
+    /// split decoding across cores (worth the extra total CPU only when a single
+    /// core can't keep up). Reset per stack — see `set_parallel_decode`.
+    decode_parallel: bool,
+    /// User's decode-parallelism preference (persists across files). `Auto` uses
+    /// `decode_parallel`; `Serial`/`Threaded` force it off/on.
+    decode_mode: DecodeMode,
     /// When the channels panel was just toggled: the bottom-bar height *before*
     /// the toggle took visual effect, so the next frame can grow/shrink the
     /// window by exactly the panel's height change. `false` when idle.
@@ -210,6 +256,9 @@ impl ViewerApp {
             playing: false,
             last_play_time: None,
             play_accumulator: 0.0,
+            play_demand_ema: 1.0,
+            decode_parallel: false,
+            decode_mode: DecodeMode::Auto,
             panel_grow_armed: false,
             panel_old_h: 0.0,
             playback_fps: DEFAULT_FPS,
@@ -270,6 +319,10 @@ impl ViewerApp {
                 self.playing = false;
                 self.last_play_time = None;
                 self.play_accumulator = 0.0;
+                // New stack: re-evaluate decode parallelism from scratch (its
+                // per-frame decode cost is different).
+                self.play_demand_ema = 1.0;
+                self.decode_parallel = false;
             }
             Err(e) => {
                 self.status = Some(format!("Failed to open file: {e:#}"));
@@ -319,6 +372,10 @@ impl ViewerApp {
             }
             loaded.luts_uploaded = true;
         }
+
+        // Push the decode-parallelism choice to tiff_core: Auto follows the
+        // playback-keeping-up latch, Serial/Threaded force it off/on.
+        tiff_core::set_parallel_decode(self.decode_mode.parallel(self.decode_parallel));
 
         // Skip the decode+upload of disabled channels — the shader multiplies
         // them out, so their texture contents don't matter while off. Re-upload
@@ -840,6 +897,7 @@ impl eframe::App for ViewerApp {
         let mut pseudocolor_toggle: Option<bool> = None;
         let mut scroll_step: i32 = 0;
         let mut playback_fps = self.playback_fps;
+        let mut decode_mode = self.decode_mode;
         let current_status = self.status.clone();
 
         let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
@@ -1000,6 +1058,21 @@ impl eframe::App for ViewerApp {
                         )
                         .on_hover_text("Playback speed (frames per second)");
                     });
+
+                    // CPU decode parallelism: Auto threads only when playback
+                    // can't keep up; Serial/Threaded force it off/on.
+                    ui.separator();
+                    ui.label("Decode:");
+                    egui::ComboBox::from_id_salt("decode_mode")
+                        .selected_text(decode_mode.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut decode_mode, DecodeMode::Auto, "Auto")
+                                .on_hover_text("Single-threaded until playback drops frames, then multi-threaded");
+                            ui.selectable_value(&mut decode_mode, DecodeMode::Serial, "Serial")
+                                .on_hover_text("Always single-threaded (lowest total CPU)");
+                            ui.selectable_value(&mut decode_mode, DecodeMode::Threaded, "Threaded")
+                                .on_hover_text("Always multi-threaded for large frames (spreads across cores)");
+                        });
                 });
                 if !loaded.rgb {
                     ui.label(
@@ -1115,6 +1188,7 @@ impl eframe::App for ViewerApp {
         });
 
         self.playback_fps = playback_fps;
+        self.decode_mode = decode_mode;
 
         if toggle_requested {
             self.channels_panel_expanded = !self.channels_panel_expanded;
@@ -1132,6 +1206,9 @@ impl eframe::App for ViewerApp {
             // resuming doesn't jump by however long we were paused.
             self.last_play_time = None;
             self.play_accumulator = 0.0;
+            // Start the keeping-up estimate neutral (decode_parallel stays
+            // latched across a pause — if this stack needed it, it still does).
+            self.play_demand_ema = 1.0;
         }
 
         if let Some(on) = pseudocolor_toggle {
@@ -1151,7 +1228,17 @@ impl eframe::App for ViewerApp {
                     let fps = self.playback_fps.max(0.1);
                     let now = ui.input(|i| i.time);
                     if let Some(last) = self.last_play_time {
-                        self.play_accumulator += (now - last) * fps;
+                        // `demand` = frames the elapsed real time wanted this
+                        // render to cover. ~1 when keeping up; >1 means renders
+                        // are slower than the fps target (frames dropping → a
+                        // core is saturated). Once the smoothed demand crosses
+                        // the threshold, latch parallel decoding for this stack.
+                        let demand = (now - last) * fps;
+                        self.play_demand_ema = self.play_demand_ema * 0.9 + demand as f32 * 0.1;
+                        if self.decode_mode == DecodeMode::Auto && self.play_demand_ema > 1.3 {
+                            self.decode_parallel = true;
+                        }
+                        self.play_accumulator += demand;
                         if self.play_accumulator >= 1.0 {
                             let steps = self.play_accumulator.floor() as usize;
                             self.play_accumulator -= steps as f64;
@@ -1493,5 +1580,23 @@ impl eframe::App for ViewerApp {
         }
 
         self.sync_gpu(frame);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DecodeMode;
+
+    #[test]
+    fn decode_mode_drives_parallel_flag() {
+        // Serial is always off and Threaded always on, regardless of whether
+        // Auto's "falling behind" latch happens to be set.
+        assert!(!DecodeMode::Serial.parallel(false));
+        assert!(!DecodeMode::Serial.parallel(true));
+        assert!(DecodeMode::Threaded.parallel(false));
+        assert!(DecodeMode::Threaded.parallel(true));
+        // Auto follows the latch: serial until playback falls behind, then parallel.
+        assert!(!DecodeMode::Auto.parallel(false));
+        assert!(DecodeMode::Auto.parallel(true));
     }
 }
