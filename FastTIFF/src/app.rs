@@ -5,7 +5,8 @@
 //! The GPU backend (glow or wgpu) is reached only through `crate::render`'s
 //! backend-agnostic surface, so nothing here mentions either by name.
 
-use crate::render::{self, ChannelUniform, Render, MAX_CHANNELS};
+use crate::prefetch::{decode_channel, ChannelJob, Decoded, PrefetchResult};
+use crate::render::{self, ChannelKind, ChannelUniform, Render, MAX_CHANNELS};
 use egui::{Color32, RichText};
 use std::path::PathBuf;
 use fast_tiff_lib::TiffStack;
@@ -109,18 +110,14 @@ struct ChannelSettings {
     /// include any metadata window) at load time so the two handles always sit
     /// somewhere on the track.
     bounds: (f32, f32),
-    /// For 32-bit float channels only: the fixed range used to encode raw
-    /// float samples into the GPU's 16-bit texture space (see
-    /// `fast_tiff_lib::read_frame_u16`'s `float_range` parameter), established
-    /// once from the channel's first frame and then reused for every
-    /// subsequent frame so the texture encoding — and therefore contrast —
-    /// doesn't jump around as you scrub. `min`/`max` above are the
-    /// user-facing contrast window in the data's own float units (matching
-    /// how ImageJ shows float image contrast); they get remapped through
-    /// this fixed range into texture-space when building the GPU uniform
-    /// (see `sync_gpu`). `None` for integer-format channels, which don't
-    /// need this indirection — their texture already holds native values.
-    encoding_range: Option<(f32, f32)>,
+    /// Which GPU texture format this channel uploads to (picked from the source
+    /// pixel format): `Int8` (R8Uint, raw 8-bit — zero-copy), `Float` (R32F, raw
+    /// float, window/level on the GPU), or `Int16` (R16Uint — the default, incl.
+    /// RGB planes and any data the CPU widens/rescales into 0..65535). Drives
+    /// both texture allocation and the decode path in `sync_gpu`. For float
+    /// channels `min`/`max` are the contrast window in the data's own float
+    /// units (matching how ImageJ shows float-image contrast).
+    kind: render::ChannelKind,
 }
 
 struct LoadedStack {
@@ -146,6 +143,16 @@ struct LoadedStack {
     /// on upload), not separate IFDs. Flips how `ifd_index`/`sync_gpu` map a
     /// display channel to file data.
     rgb: bool,
+    /// Background decode-ahead worker (own mmap), present only for **compressed**
+    /// stacks — where decoding is heavy enough that overlapping it with the
+    /// current frame's upload/render pays off. `None` for uncompressed stacks
+    /// (their inline decode is already zero-copy, so prefetch would only add a
+    /// copy). See `crate::prefetch`.
+    prefetch: Option<crate::prefetch::Prefetcher>,
+    /// Bumped whenever the decode plan changes (dimension-order swap, enabled-set
+    /// change) so an in-flight prefetch decoded under the old plan is recognized
+    /// as stale and ignored rather than uploaded.
+    prefetch_gen: u64,
 }
 
 pub struct ViewerApp {
@@ -279,6 +286,13 @@ impl ViewerApp {
     fn open_file(&mut self, path: PathBuf) {
         match TiffStack::open(&path) {
             Ok(tiff) => {
+                // Spin up a decode-ahead worker only for compressed stacks (see
+                // `LoadedStack::prefetch`); for uncompressed it'd only add a copy.
+                let compressed = tiff
+                    .frames
+                    .first()
+                    .is_some_and(|f| f.compression != fast_tiff_lib::Compression::None);
+                let prefetch = compressed.then(|| crate::prefetch::Prefetcher::new(path.clone())).flatten();
                 let mut loaded = LoadedStack {
                     tiff,
                     path,
@@ -289,6 +303,8 @@ impl ViewerApp {
                     luts_uploaded: false,
                     triple_axis_warning: false,
                     rgb: false,
+                    prefetch,
+                    prefetch_gen: 0,
                 };
                 let (c, z, f) = (
                     loaded.tiff.meta.channels,
@@ -330,20 +346,6 @@ impl ViewerApp {
         }
     }
 
-    /// Index into `tiff.frames` for (current frame, channel). Z is never
-    /// separately navigable (see `resolve_dimensions`) — this always reads
-    /// the first Z-slice within each frame's stride, which is correct
-    /// whether `meta.slices` is 1 (the common case, Z folded away
-    /// entirely) or >1 (the rare channels+Z+time case, where Z stays
-    /// frozen at index 0 by construction). Assumes ImageJ's default
-    /// `xyczt` plane order (channel varies fastest, then z, then t) — if
-    /// scrubbing shows the wrong plane on a particular file, this is the
-    /// formula to revisit.
-    fn ifd_index(loaded: &LoadedStack, channel: usize) -> usize {
-        let meta = &loaded.tiff.meta;
-        loaded.frame_index * meta.slices * meta.channels + channel
-    }
-
     fn sync_gpu(&mut self, frame: &eframe::Frame) {
         // The per-frame upload handle (GL context, or device+queue) for whatever
         // backend is compiled in. `None` only before the backend is initialized.
@@ -356,14 +358,13 @@ impl ViewerApp {
             return;
         }
 
-        // A channel is "float" (uploaded as an R32F texture, window/level on the
-        // GPU) exactly when it carries a 32-bit-float encoding range. Everything
-        // else (8/16/32-bit int, RGB planes) stays on the integer R16Uint path.
-        let is_float: Vec<bool> =
-            loaded.channel_settings.iter().map(|s| s.encoding_range.is_some()).collect();
+        // Per-channel GPU texture kind (R8Uint / R16Uint / R32F), picked from the
+        // source format at load time — drives both texture allocation and the
+        // decode path below.
+        let kinds: Vec<ChannelKind> = loaded.channel_settings.iter().map(|s| s.kind).collect();
 
         if let Some(first) = loaded.tiff.frames.first() {
-            resources.ensure_size(&ctx, first.width, first.height, &is_float);
+            resources.ensure_size(&ctx, first.width, first.height, &kinds);
         }
 
         if !loaded.luts_uploaded {
@@ -377,69 +378,124 @@ impl ViewerApp {
         // playback-keeping-up latch, Serial/Threaded force it off/on.
         fast_tiff_lib::set_parallel_decode(self.decode_mode.parallel(self.decode_parallel));
 
-        // Skip the decode+upload of disabled channels — the shader multiplies
-        // them out, so their texture contents don't matter while off. Re-upload
-        // when the frame moves *or* the set of enabled channels changes (so a
-        // channel toggled back on gets the current frame).
+        // Skip disabled channels (the shader multiplies them out). Re-upload when
+        // the frame moves *or* the enabled set changes; an enabled-set change also
+        // bumps the prefetch generation so an in-flight prefetch under the old set
+        // is recognized as stale.
         let enabled: Vec<bool> = loaded.channel_settings.iter().map(|s| s.enabled).collect();
+        if loaded.last_enabled != enabled {
+            loaded.prefetch_gen = loaded.prefetch_gen.wrapping_add(1);
+        }
         if loaded.last_uploaded != Some(loaded.frame_index) || loaded.last_enabled != enabled {
-            for c in 0..n_channels {
-                if !enabled[c] {
-                    continue;
-                }
-                // RGB: every display channel is a sample plane of the *same*
-                // IFD (one full-color image per frame). Otherwise each channel
-                // is its own IFD (the hyperstack plane layout).
-                let (ifd_idx, plane) = if loaded.rgb {
-                    (loaded.frame_index * loaded.tiff.meta.slices, c)
-                } else {
-                    (Self::ifd_index(loaded, c), 0)
-                };
-                if let Some(frame_info) = loaded.tiff.frames.get(ifd_idx) {
-                    let (w, h) = (frame_info.width, frame_info.height);
-                    if is_float[c] {
-                        // 32-bit float channel: upload raw floats and let the
-                        // shader do window/level — no per-frame CPU rescale.
-                        match fast_tiff_lib::read_frame_f32(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order) {
-                            Ok(pixels) => resources.upload_channel_f32(&ctx, c, w, h, &pixels),
-                            Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
+            let frame_index = loaded.frame_index;
+            let want_gen = loaded.prefetch_gen;
+            let jobs = build_jobs(loaded, frame_index, &enabled, &kinds);
+
+            // Use a prefetched frame if one is ready and matches exactly
+            // (generation, frame index, and channel layout); otherwise decode
+            // inline. A mismatch only costs a little redundant work — it can
+            // never upload the wrong frame.
+            let mut used_prefetch = false;
+            if let Some(p) = &loaded.prefetch {
+                if let Some(result) = p.take_matching(want_gen, frame_index) {
+                    if prefetch_matches(&result, &jobs) {
+                        for ch in &result.channels {
+                            match &ch.data {
+                                Decoded::U8(v) => resources.upload_channel_u8(&ctx, ch.channel, ch.width, ch.height, v),
+                                Decoded::U16(v) => resources.upload_channel(&ctx, ch.channel, ch.width, ch.height, v),
+                                Decoded::F32(v) => resources.upload_channel_f32(&ctx, ch.channel, ch.width, ch.height, v),
+                            }
                         }
-                    } else {
-                        // Integer channel (incl. RGB planes): decode to u16.
-                        let decoded = if loaded.rgb {
-                            fast_tiff_lib::read_plane_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, None, plane)
-                                .map(std::borrow::Cow::Owned)
-                        } else {
-                            fast_tiff_lib::read_frame_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, None)
-                        };
-                        match decoded {
-                            Ok(pixels) => resources.upload_channel(&ctx, c, w, h, &pixels),
-                            Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
-                        }
+                        used_prefetch = true;
                     }
                 }
             }
-            loaded.last_uploaded = Some(loaded.frame_index);
-            loaded.last_enabled = enabled;
+            if !used_prefetch {
+                for job in &jobs {
+                    let Some(frame_info) = loaded.tiff.frames.get(job.ifd_idx) else { continue };
+                    match decode_channel(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, job.kind, job.plane, job.rgb) {
+                        Ok(Decoded::U8(v)) => resources.upload_channel_u8(&ctx, job.channel, job.width, job.height, &v),
+                        Ok(Decoded::U16(v)) => resources.upload_channel(&ctx, job.channel, job.width, job.height, &v),
+                        Ok(Decoded::F32(v)) => resources.upload_channel_f32(&ctx, job.channel, job.width, job.height, &v),
+                        Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
+                    }
+                }
+            }
+            loaded.last_uploaded = Some(frame_index);
         }
 
-        // Window/level goes to the shader in the data's own units for every
-        // channel: integer channels in raw 0..65535, float channels in their own
-        // float units (their R32F texture holds the raw samples now, so no
-        // texture-space remap is needed). `is_float` tells the shader which
-        // texture to sample.
+        // Decode-ahead: while playing and keeping up (serial regime), ask the
+        // worker to decode the next frame so reaching it is just an upload.
+        // Skipped when behind (parallel decode handles that) or when there's no
+        // worker (uncompressed stack).
+        if self.playing && !self.decode_parallel {
+            if let Some(p) = &loaded.prefetch {
+                let n = loaded.tiff.meta.frames.max(1);
+                if n > 1 {
+                    let next = (loaded.frame_index + 1) % n;
+                    let next_jobs = build_jobs(loaded, next, &enabled, &kinds);
+                    p.request(loaded.prefetch_gen, next, next_jobs);
+                }
+            }
+        }
+        loaded.last_enabled = enabled;
+
+        // Window/level goes to the shader in the units its texture actually
+        // holds: 16-bit ints in raw 0..65535, floats in their own units (R32F
+        // holds raw samples), and 8-bit ints in 0..255 — the slider keeps the
+        // window in 0..65535, so an 8-bit channel's bounds are rescaled by 257
+        // (the widening factor) here. `is_float` tells the shader which texture
+        // to sample; the two integer formats share one sampler.
+        const SCALE_8BIT: f32 = 257.0;
         let uniforms: Vec<ChannelUniform> = loaded
             .channel_settings
             .iter()
-            .map(|s| ChannelUniform {
-                min: s.min,
-                max: s.max,
-                enabled: s.enabled,
-                is_float: s.encoding_range.is_some(),
+            .map(|s| {
+                let scale = if s.kind == ChannelKind::Int8 { SCALE_8BIT } else { 1.0 };
+                ChannelUniform {
+                    min: s.min / scale,
+                    max: s.max / scale,
+                    enabled: s.enabled,
+                    is_float: s.kind == ChannelKind::Float,
+                }
             })
             .collect();
         resources.set_params(&ctx, &uniforms, n_channels as u32, self.uv_offset.into(), self.uv_scale.into());
     }
+}
+
+/// The per-channel decode jobs for `frame_index`'s enabled channels, used both
+/// to decode inline and to ask the prefetch worker for the next frame. Maps each
+/// display channel to its IFD/plane: for RGB, all channels are sample planes of
+/// one IFD per frame; otherwise each channel is its own IFD in ImageJ's default
+/// `xyczt` plane order (channel fastest, then Z — frozen at slice 0 — then time).
+fn build_jobs(loaded: &LoadedStack, frame_index: usize, enabled: &[bool], kinds: &[ChannelKind]) -> Vec<ChannelJob> {
+    let (width, height) = match loaded.tiff.frames.first() {
+        Some(f) => (f.width, f.height),
+        None => return Vec::new(),
+    };
+    let meta = &loaded.tiff.meta;
+    (0..loaded.channel_settings.len())
+        .filter(|&c| enabled.get(c).copied().unwrap_or(false))
+        .map(|c| {
+            let (ifd_idx, plane) = if loaded.rgb {
+                (frame_index * meta.slices, c)
+            } else {
+                (frame_index * meta.slices * meta.channels + c, 0)
+            };
+            ChannelJob { channel: c, ifd_idx, plane, kind: kinds[c], rgb: loaded.rgb, width, height }
+        })
+        .collect()
+}
+
+/// Whether a prefetched result still matches the wanted jobs (same channels, in
+/// order, with matching kind + dimensions). The generation/frame check happens
+/// first; this guards against any residual layout mismatch before upload.
+fn prefetch_matches(result: &PrefetchResult, jobs: &[ChannelJob]) -> bool {
+    result.channels.len() == jobs.len()
+        && result.channels.iter().zip(jobs).all(|(ch, job)| {
+            ch.channel == job.channel && ch.kind == job.kind && ch.width == job.width && ch.height == job.height
+        })
 }
 
 /// Actual pixel min/max of channel `c`'s first frame, for integer-format
@@ -626,10 +682,16 @@ fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
     (0..tiff.meta.channels.min(MAX_CHANNELS))
         .map(|c| {
             let disp = &tiff.meta.channel_display[c];
-            let is_float = tiff
-                .frames
-                .get(c)
+            let frame = tiff.frames.get(c);
+            let is_float = frame
                 .is_some_and(|f| f.sample_format == fast_tiff_lib::SampleFormat::Float && f.bits_per_sample == 32);
+            // Unsigned single-sample 8-bit can upload raw (R8Uint) instead of
+            // being widened to 16-bit on the CPU each frame.
+            let is_u8 = frame.is_some_and(|f| {
+                f.bits_per_sample == 8
+                    && f.sample_format == fast_tiff_lib::SampleFormat::UnsignedInt
+                    && f.samples_per_pixel == 1
+            });
 
             if is_float {
                 let data = first_frame_float_minmax(tiff, c);
@@ -639,7 +701,7 @@ fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
                     .or(data)
                     .unwrap_or((0.0, 1.0));
                 let bounds = slider_bounds((lo, hi), data);
-                ChannelSettings { min: lo, max: hi, enabled: true, encoding_range: Some((lo, hi)), bounds }
+                ChannelSettings { min: lo, max: hi, enabled: true, bounds, kind: ChannelKind::Float }
             } else {
                 let data = first_frame_minmax(tiff, c);
                 let (min, max) = disp
@@ -651,7 +713,11 @@ fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
                     .or(data)
                     .unwrap_or((0.0, 65535.0));
                 let bounds = slider_bounds((min, max), data);
-                ChannelSettings { min, max, enabled: true, encoding_range: None, bounds }
+                // min/max stay in the widened 0..65535 space (slider unchanged);
+                // for an 8-bit (R8Uint) channel `sync_gpu` rescales them to the
+                // 0..255 the texture actually holds.
+                let kind = if is_u8 { ChannelKind::Int8 } else { ChannelKind::Int16 };
+                ChannelSettings { min, max, enabled: true, bounds, kind }
             }
         })
         .collect()
@@ -720,7 +786,9 @@ fn setup_rgb(loaded: &mut LoadedStack) {
             max: 65535.0,
             enabled: true,
             bounds: (0.0, 65535.0),
-            encoding_range: None,
+            // RGB planes are deinterleaved + widened to u16 by `read_plane_u16`,
+            // so they ride the R16Uint integer path regardless of source depth.
+            kind: ChannelKind::Int16,
         })
         .collect();
     loaded.frame_index = 0;
@@ -765,6 +833,9 @@ fn apply_dimension_override(loaded: &mut LoadedStack, channels: usize, frames: u
         triple_axis_warning: loaded.triple_axis_warning,
     };
     apply_resolved_dimensions(loaded, resolved);
+    // The channel->IFD mapping just changed, so invalidate any in-flight prefetch
+    // decoded under the old mapping.
+    loaded.prefetch_gen = loaded.prefetch_gen.wrapping_add(1);
 }
 
 impl eframe::App for ViewerApp {
