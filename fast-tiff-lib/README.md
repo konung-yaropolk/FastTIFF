@@ -4,7 +4,7 @@
 [![Downloads](https://img.shields.io/crates/d/fast-tiff-lib)](https://crates.io/crates/fast-tiff-lib)
 [![License](https://img.shields.io/crates/l/fast-tiff-lib?color=green)](https://github.com/konung-yaropolk/FastTIFF/blob/main/LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/release.yml?label=build)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
-[![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
 
 A lazy, memory-mapped reader for multi-frame (ImageJ hyperstack) TIFF files:
 IFD-chain indexing, ImageJ metadata/LUT parsing, and per-frame strip decoding —
