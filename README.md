@@ -53,10 +53,10 @@ you move the slider. This viewer instead:
 
 ## Project layout
 
-- **`tiff_core/`** - pure parsing/decoding library, no GUI or GPU
+- **`fast-tiff-lib/`** - pure parsing/decoding library, no GUI or GPU
   dependencies. IFD-chain walking, ImageJ metadata parsing, strip decoding
   (uncompressed fast path + LZW/Deflate/PackBits + predictor undo). Has a
-  real test suite (`cargo test -p tiff_core`) that builds synthetic
+  real test suite (`cargo test -p fast-tiff-lib`) that builds synthetic
   multi-frame TIFFs in memory and round-trips them through the whole
   pipeline - this is the part most worth trusting blind, since it's
   actually verified.
@@ -122,7 +122,7 @@ this is the one-line formula to change.
 - Add bigtiff support
 - Port to linux and mac
 - Add windows installer with files association
-- publish tiff_core as FastTiffLib in to crates.io
+- publish fast-tiff-lib as FastTiffLib in to crates.io
 
 
 

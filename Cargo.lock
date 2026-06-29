@@ -12,9 +12,9 @@ dependencies = [
  "egui",
  "egui_extras",
  "env_logger",
+ "fast-tiff-lib",
  "log",
  "rfd",
- "tiff_core",
  "winres",
 ]
 
@@ -812,6 +812,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1a05365e3b1c6d1650318537c7460c6923f1abdd272ad6842baa2b509957a06"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "fast-tiff-lib"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "flate2",
+ "memmap2",
+ "rayon",
+ "weezl 0.2.1",
 ]
 
 [[package]]
@@ -2704,18 +2716,6 @@ dependencies = [
  "quick-error",
  "weezl 0.1.12",
  "zune-jpeg",
-]
-
-[[package]]
-name = "tiff_core"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "flate2",
- "memmap2",
- "rayon",
- "weezl 0.2.1",
 ]
 
 [[package]]

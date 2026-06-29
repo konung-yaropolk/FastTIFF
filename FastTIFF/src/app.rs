@@ -8,7 +8,7 @@
 use crate::render::{self, ChannelUniform, Render, MAX_CHANNELS};
 use egui::{Color32, RichText};
 use std::path::PathBuf;
-use tiff_core::TiffStack;
+use fast_tiff_lib::TiffStack;
 
 /// Discrete zoom levels the viewer snaps to (3.1% … 3200%). Zooming in/out
 /// steps between adjacent levels. Above 100% the levels are mostly whole-number
@@ -66,7 +66,7 @@ fn initial_fit_zoom(ctx: &egui::Context, img_w: f32, img_h: f32, chrome_h: f32) 
 }
 
 /// How per-frame decoding is split across CPU cores. The choice maps onto
-/// `tiff_core`'s parallel-decode hint each frame (see `sync_gpu`).
+/// `fast-tiff-lib`'s parallel-decode hint each frame (see `sync_gpu`).
 #[derive(Clone, Copy, PartialEq)]
 enum DecodeMode {
     /// Serial by default; switch to threaded automatically when real-time
@@ -87,7 +87,7 @@ impl DecodeMode {
         }
     }
 
-    /// The parallel-decode flag this mode feeds to `tiff_core`. `latched` is
+    /// The parallel-decode flag this mode feeds to `fast-tiff-lib`. `latched` is
     /// whether `Auto`'s adaptive trigger has fired (playback fell behind); it
     /// only matters in `Auto`.
     fn parallel(self, latched: bool) -> bool {
@@ -111,7 +111,7 @@ struct ChannelSettings {
     bounds: (f32, f32),
     /// For 32-bit float channels only: the fixed range used to encode raw
     /// float samples into the GPU's 16-bit texture space (see
-    /// `tiff_core::read_frame_u16`'s `float_range` parameter), established
+    /// `fast_tiff_lib::read_frame_u16`'s `float_range` parameter), established
     /// once from the channel's first frame and then reused for every
     /// subsequent frame so the texture encoding — and therefore contrast —
     /// doesn't jump around as you scrub. `min`/`max` above are the
@@ -193,7 +193,7 @@ pub struct ViewerApp {
     /// keeping up; >1 means renders are slower than the target fps (we're
     /// dropping frames — one core is saturated). Drives `decode_parallel`.
     play_demand_ema: f32,
-    /// Latched once playback falls behind (in `Auto` mode): ask `tiff_core` to
+    /// Latched once playback falls behind (in `Auto` mode): ask `fast-tiff-lib` to
     /// split decoding across cores (worth the extra total CPU only when a single
     /// core can't keep up). Reset per stack — see `set_parallel_decode`.
     decode_parallel: bool,
@@ -295,7 +295,7 @@ impl ViewerApp {
                     loaded.tiff.meta.slices,
                     loaded.tiff.meta.frames,
                 );
-                let resolved = tiff_core::resolve_dimensions(c, z, f);
+                let resolved = fast_tiff_lib::resolve_dimensions(c, z, f);
                 apply_resolved_dimensions(&mut loaded, resolved);
                 // Chunky RGB overrides the channel layout: the sample planes of
                 // each IFD become red/green/blue display channels.
@@ -373,9 +373,9 @@ impl ViewerApp {
             loaded.luts_uploaded = true;
         }
 
-        // Push the decode-parallelism choice to tiff_core: Auto follows the
+        // Push the decode-parallelism choice to fast-tiff-lib: Auto follows the
         // playback-keeping-up latch, Serial/Threaded force it off/on.
-        tiff_core::set_parallel_decode(self.decode_mode.parallel(self.decode_parallel));
+        fast_tiff_lib::set_parallel_decode(self.decode_mode.parallel(self.decode_parallel));
 
         // Skip the decode+upload of disabled channels — the shader multiplies
         // them out, so their texture contents don't matter while off. Re-upload
@@ -400,17 +400,17 @@ impl ViewerApp {
                     if is_float[c] {
                         // 32-bit float channel: upload raw floats and let the
                         // shader do window/level — no per-frame CPU rescale.
-                        match tiff_core::read_frame_f32(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order) {
+                        match fast_tiff_lib::read_frame_f32(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order) {
                             Ok(pixels) => resources.upload_channel_f32(&ctx, c, w, h, &pixels),
                             Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
                         }
                     } else {
                         // Integer channel (incl. RGB planes): decode to u16.
                         let decoded = if loaded.rgb {
-                            tiff_core::read_plane_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, None, plane)
+                            fast_tiff_lib::read_plane_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, None, plane)
                                 .map(std::borrow::Cow::Owned)
                         } else {
-                            tiff_core::read_frame_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, None)
+                            fast_tiff_lib::read_frame_u16(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, None)
                         };
                         match decoded {
                             Ok(pixels) => resources.upload_channel(&ctx, c, w, h, &pixels),
@@ -448,7 +448,7 @@ impl ViewerApp {
 fn first_frame_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
     let idx = channel.min(tiff.frames.len().saturating_sub(1));
     let frame = tiff.frames.get(idx)?;
-    let pixels = tiff_core::read_frame_u16(&tiff.mmap, frame, tiff.byte_order, None).ok()?;
+    let pixels = fast_tiff_lib::read_frame_u16(&tiff.mmap, frame, tiff.byte_order, None).ok()?;
     let (mut lo, mut hi) = (u16::MAX, 0u16);
     for &p in pixels.iter() {
         lo = lo.min(p);
@@ -466,7 +466,7 @@ fn first_frame_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
 fn first_frame_float_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
     let idx = channel.min(tiff.frames.len().saturating_sub(1));
     let frame = tiff.frames.get(idx)?;
-    tiff_core::frame_float_minmax(&tiff.mmap, frame, tiff.byte_order).ok()?
+    fast_tiff_lib::frame_float_minmax(&tiff.mmap, frame, tiff.byte_order).ok()?
 }
 
 /// Resizes `meta.channel_display` to `new_channels` entries, preserving the
@@ -477,16 +477,16 @@ fn first_frame_float_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f3
 /// manual channels/frames swap), the old LUTs no longer correspond to the new
 /// channels, so they're regenerated from `mode` — which also avoids leaving a
 /// collapsed grayscale stack wearing a stale composite (e.g. red) LUT.
-fn resize_channel_display(meta: &mut tiff_core::StackMeta, new_channels: usize) {
+fn resize_channel_display(meta: &mut fast_tiff_lib::StackMeta, new_channels: usize) {
     let old = std::mem::take(&mut meta.channel_display);
     let mode = meta.mode;
     let keep_luts = new_channels == old.len();
     meta.channel_display = (0..new_channels)
-        .map(|c| tiff_core::ChannelDisplay {
+        .map(|c| fast_tiff_lib::ChannelDisplay {
             lut: if keep_luts {
                 old[c].lut
             } else {
-                tiff_core::default_lut_for(mode, c)
+                fast_tiff_lib::default_lut_for(mode, c)
             },
             range: old.get(c).and_then(|d| d.range),
         })
@@ -629,7 +629,7 @@ fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
             let is_float = tiff
                 .frames
                 .get(c)
-                .is_some_and(|f| f.sample_format == tiff_core::SampleFormat::Float && f.bits_per_sample == 32);
+                .is_some_and(|f| f.sample_format == fast_tiff_lib::SampleFormat::Float && f.bits_per_sample == 32);
 
             if is_float {
                 let data = first_frame_float_minmax(tiff, c);
@@ -661,7 +661,7 @@ fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
 /// stack's current (resolved) dimensions. Shared between the initial load
 /// and the manual dimension-order override so the two can't drift out of
 /// sync with each other.
-fn compute_status(meta: &tiff_core::StackMeta, triple_axis_warning: bool) -> Option<String> {
+fn compute_status(meta: &fast_tiff_lib::StackMeta, triple_axis_warning: bool) -> Option<String> {
     if triple_axis_warning {
         Some(format!(
             "Warning: this file has channels, Z-slices, and time frames all present at once \
@@ -685,7 +685,7 @@ fn compute_status(meta: &tiff_core::StackMeta, triple_axis_warning: bool) -> Opt
 /// position. The one place that does this, so the manual channels/frames
 /// swap can't drift out of sync with `open_file` the way `self.status`
 /// previously did.
-fn apply_resolved_dimensions(loaded: &mut LoadedStack, resolved: tiff_core::ResolvedDimensions) {
+fn apply_resolved_dimensions(loaded: &mut LoadedStack, resolved: fast_tiff_lib::ResolvedDimensions) {
     loaded.tiff.meta.channels = resolved.channels;
     loaded.tiff.meta.slices = resolved.slices;
     loaded.tiff.meta.frames = resolved.frames;
@@ -707,10 +707,10 @@ fn setup_rgb(loaded: &mut LoadedStack) {
     let spp = loaded.tiff.frames.first().map(|f| f.samples_per_pixel as usize).unwrap_or(3);
     let planes = spp.min(3).min(MAX_CHANNELS); // RGB only; ignore any alpha/extra samples
     loaded.rgb = true;
-    loaded.tiff.meta.mode = tiff_core::DisplayMode::Color;
+    loaded.tiff.meta.mode = fast_tiff_lib::DisplayMode::Color;
     loaded.tiff.meta.channel_display = (0..planes)
-        .map(|c| tiff_core::ChannelDisplay {
-            lut: tiff_core::default_composite_lut(c), // 0 = red, 1 = green, 2 = blue
+        .map(|c| fast_tiff_lib::ChannelDisplay {
+            lut: fast_tiff_lib::default_composite_lut(c), // 0 = red, 1 = green, 2 = blue
             range: None,
         })
         .collect();
@@ -734,7 +734,7 @@ fn setup_rgb(loaded: &mut LoadedStack) {
 fn pseudocolor_applicable(loaded: &LoadedStack) -> bool {
     !loaded.rgb
         && loaded.channel_settings.len() > 1
-        && loaded.tiff.meta.mode == tiff_core::DisplayMode::Grayscale
+        && loaded.tiff.meta.mode == fast_tiff_lib::DisplayMode::Grayscale
 }
 
 /// Sets the per-channel LUTs of an applicable (multi-channel grayscale) stack:
@@ -746,9 +746,9 @@ fn refresh_pseudocolor(loaded: &mut LoadedStack, apply: bool) {
     }
     for (c, disp) in loaded.tiff.meta.channel_display.iter_mut().enumerate() {
         disp.lut = if apply {
-            tiff_core::default_composite_lut(c)
+            fast_tiff_lib::default_composite_lut(c)
         } else {
-            tiff_core::grayscale_lut()
+            fast_tiff_lib::grayscale_lut()
         };
     }
     loaded.luts_uploaded = false; // force re-upload on the next sync
@@ -758,7 +758,7 @@ fn refresh_pseudocolor(loaded: &mut LoadedStack, apply: bool) {
 /// dropdown. Z (if any) and the triple-axis warning are carried over
 /// unchanged — the swap only concerns the channels/frames roles.
 fn apply_dimension_override(loaded: &mut LoadedStack, channels: usize, frames: usize) {
-    let resolved = tiff_core::ResolvedDimensions {
+    let resolved = fast_tiff_lib::ResolvedDimensions {
         channels,
         slices: loaded.tiff.meta.slices,
         frames,

@@ -1,4 +1,4 @@
-# tiff_core
+# fast-tiff-lib
 
 A lazy, memory-mapped reader for multi-frame (ImageJ hyperstack) TIFF files:
 IFD-chain indexing, ImageJ metadata/LUT parsing, and per-frame strip decoding —
@@ -37,7 +37,7 @@ with a clear error at `open`).
 ## Quick start
 
 ```rust
-use tiff_core::{read_frame_u16, TiffStack};
+use fast_tiff_lib::{read_frame_u16, TiffStack};
 
 let stack = TiffStack::open("movie.tif")?;
 println!(
@@ -140,8 +140,8 @@ strip decompression and 32-bit conversion across cores. It's controlled by a
 **process-wide hint**, switchable at any time:
 
 ```rust
-tiff_core::set_parallel_decode(true);  // split large decodes across cores
-tiff_core::set_parallel_decode(false); // serial (default)
+fast_tiff_lib::set_parallel_decode(true);  // split large decodes across cores
+fast_tiff_lib::set_parallel_decode(false); // serial (default)
 ```
 
 This is a **performance hint only** — decoded pixels are identical either way.
@@ -182,7 +182,7 @@ Helpers:
 
 ## Design & prior art
 
-`tiff_core` is built around **lazy, on-demand decoding**: `open` only indexes the
+`fast-tiff-lib` is built around **lazy, on-demand decoding**: `open` only indexes the
 IFD chain (offsets, dimensions, metadata), and pixels are decoded per frame when
 asked — for uncompressed, native-order data that decode is a **zero-copy
 reinterpret** of the mapped bytes (no allocation, no copy). This suits a
@@ -198,7 +198,7 @@ buffers at load time, in parallel across frames**, using a custom work-stealing
 thread pool. That targets a different use case — loading a whole file resident
 for downstream batch processing (e.g. aerial/remote-sensing recognition).
 
-| | Lv et al. "FastTIFF" | `tiff_core` |
+| | Lv et al. "FastTIFF" | `fast-tiff-lib` |
 | --- | --- | --- |
 | Memory-mapped access | yes | yes |
 | Eager full-stack load at open | yes (the point) | no — lazy / on-demand |
@@ -206,7 +206,7 @@ for downstream batch processing (e.g. aerial/remote-sensing recognition).
 | Parallel **within a frame** | no | yes (rayon, adaptive) |
 | Zero-copy for uncompressed | no (always copies) | yes |
 
-If you do want the paper's load-everything-at-once behavior, `tiff_core` offers
+If you do want the paper's load-everything-at-once behavior, `fast-tiff-lib` offers
 it explicitly via `preload_frames_u16` / `preload_frames_f32` — they decode all
 frames in parallel across frames into owned buffers — while the default path
 stays lazy and zero-copy.
@@ -217,4 +217,4 @@ stays lazy and zero-copy.
 
 ## License
 
-GPL-3.0-only. See the [LICENSE](https://github.com/konung-yaropolk/FastTIFF/blob/main/LICENSE).
+LGPL-3.0-only. See the [LICENSE](https://github.com/konung-yaropolk/FastTIFF/blob/main/fast-tiff-lib/LICENSE).
