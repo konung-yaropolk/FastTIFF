@@ -1,7 +1,7 @@
 # FastTIFF - a lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering
 
 [![Release](https://img.shields.io/github/v/release/konung-yaropolk/FastTIFF?label=release)](https://github.com/konung-yaropolk/FastTIFF/releases)
-[![License](https://img.shields.io/github/license/konung-yaropolk/FastTIFF/FastTIFF)](LICENSE)
+[![License](https://img.shields.io/github/license/konung-yaropolk/FastTIFF)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/release.yml?label=build)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
 [![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/ci.yml)
 
