@@ -6,7 +6,7 @@ description = "Lazy, memory-mapped reader for multi-frame (ImageJ hyperstack) TI
 license = "LGPL-3.0-only"
 readme = "README.md"
 repository = "https://github.com/konung-yaropolk/FastTIFF"
-keywords = ["tiff", "imagej", "science", "microscopy", "astronomy", "hyperstack", "image"]
+keywords = ["tiff", "imagej", "science", "microscopy", "astronomy"]
 categories = ["multimedia::images", "parser-implementations", "science"]
 
 [dependencies]
