@@ -122,12 +122,15 @@ this is the one-line formula to change.
 - Done: add suppport to open multiple files if passed in command - open needed number of processes and open eah image in it
 - Done: Hide slider for single-frame tiffs
 - Done: add label in channels slider to hold shift to synchronize adjustments
+- Done: publish fast-tiff-lib as FastTiffLib in to crates.io
+- change fast scroll to 10% of moie length instead fixed frames number
 - Add zstd compression support
+- Add tiff write support
 - Fix viewing >6Gb tifs (no frames change when scrolling)
 - Add bigtiff support
 - Port to linux and mac
 - Add windows installer with files association
-- publish fast-tiff-lib as FastTiffLib in to crates.io
+
 
 
 
