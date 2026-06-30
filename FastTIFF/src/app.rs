@@ -780,15 +780,28 @@ fn setup_rgb(loaded: &mut LoadedStack) {
             range: None,
         })
         .collect();
+    // Unsigned 8-bit RGB deinterleaves into raw u8 planes (`read_plane_u8`) and
+    // rides the R8Uint path — half the texture memory + upload of widening each
+    // plane to u16. Deeper or signed RGB still widens to u16 via `read_plane_u16`.
+    // The window stays in 0..65535 either way; `sync_gpu` rescales it to 0..255
+    // for an 8-bit (Int8) channel.
+    let kind = if loaded
+        .tiff
+        .frames
+        .first()
+        .is_some_and(|f| f.bits_per_sample == 8 && f.sample_format == fast_tiff_lib::SampleFormat::UnsignedInt)
+    {
+        ChannelKind::Int8
+    } else {
+        ChannelKind::Int16
+    };
     loaded.channel_settings = (0..planes)
         .map(|_| ChannelSettings {
             min: 0.0,
             max: 65535.0,
             enabled: true,
             bounds: (0.0, 65535.0),
-            // RGB planes are deinterleaved + widened to u16 by `read_plane_u16`,
-            // so they ride the R16Uint integer path regardless of source depth.
-            kind: ChannelKind::Int16,
+            kind,
         })
         .collect();
     loaded.frame_index = 0;

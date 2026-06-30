@@ -5,7 +5,7 @@ pub mod index;
 
 pub use decode::{
     frame_float_minmax, preload_frames_f32, preload_frames_u16, preload_frames_u8, read_frame_f32, read_frame_u16,
-    read_frame_u8, read_plane_f32, read_plane_u16, set_parallel_decode,
+    read_frame_u8, read_plane_f32, read_plane_u16, read_plane_u8, set_parallel_decode,
 };
 pub use ifd::ByteOrder;
 pub use ij_metadata::{

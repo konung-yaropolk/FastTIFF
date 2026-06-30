@@ -173,6 +173,31 @@ pub fn read_plane_u16(
     Ok(out)
 }
 
+/// Decode a single sample plane (`plane`, `< samples_per_pixel`) of a frame as
+/// **raw unsigned 8-bit bytes**, deinterleaving chunky multi-sample data such as
+/// 8-bit RGB. The `u8` sibling of [`read_plane_u16`]: same strided gather, but it
+/// keeps the bytes at native 8-bit width (no widening to 0..65535) for callers
+/// that upload to an `R8Uint` texture and scale to 0..255 themselves — mirroring
+/// [`read_frame_u8`].
+///
+/// Always allocates: a chunky plane is a strided gather, so unlike
+/// [`read_frame_u8`] there's no zero-copy borrow. Only valid for unsigned 8-bit
+/// frames (`bits_per_sample == 8`); callers gate on that.
+pub fn read_plane_u8(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder, plane: usize) -> Result<Vec<u8>> {
+    if frame.bits_per_sample != 8 {
+        bail!("read_plane_u8 requires 8-bit samples, got {}", frame.bits_per_sample);
+    }
+    let spp = (frame.samples_per_pixel as usize).max(1);
+    let plane = plane.min(spp - 1);
+    let n_pixels = frame.width as usize * frame.height as usize;
+    let native = decode_native_bytes(mmap, frame, file_order)?;
+    let mut out = vec![0u8; n_pixels];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = native[i * spp + plane];
+    }
+    Ok(out)
+}
+
 /// Decode a 32-bit-float frame's samples as **raw `f32`**, without the
 /// rescale-to-u16 step `read_frame_u16` does. This is for channels uploaded to
 /// a float (R32F) GPU texture, where window/level happens on the GPU — so the
