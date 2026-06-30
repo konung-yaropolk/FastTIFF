@@ -123,6 +123,9 @@ this is the one-line formula to change.
 - Done: Hide slider for single-frame tiffs
 - Done: add label in channels slider to hold shift to synchronize adjustments
 - Done: publish fast-tiff-lib as FastTiffLib in to crates.io
+- Done: added read_plane_u8 to lib
+- Done: optimization 8bit rgb halved in occupied memory
+
 - change fast scroll to 10% of moie length instead fixed frames number
 - Add zstd compression support
 - Add tiff write support
@@ -130,11 +133,10 @@ this is the one-line formula to change.
 - Add bigtiff support
 - Port to linux and mac
 - Add windows installer with files association
-
 - make inactive decode mode for plane tiffs
 
 
 
-- fix possible bug: add read_plane_u8 absent in lib now
+
 
 - Solved: issue with performance in optimized version - 16 bit compressed tiff playback holds 12% cpu spreaded by multiple cores, but unoptimized - 4-5% which is ~50% single core load
