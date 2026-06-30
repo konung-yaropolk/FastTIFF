@@ -101,7 +101,7 @@ jobs:
   # as an unprivileged user; every dependency is pre-installed, so makepkg needs
   # no sudo/pacman access of its own.
   build-arch:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container:
       image: archlinux:latest
     steps:
