@@ -119,14 +119,14 @@ this is the one-line formula to change.
 
 - Done: Fix bug with skewed first frame when loading some tifs through command
 - Done: add label with version, and gpu backend info
-- Done: add suppport to open multiple files if passed in command - open needed number of processes and open eah image in it
+- Done: add suppport to open multiple files if passed in command - open needed number of processes and open each image in it
 - Done: Hide slider for single-frame tiffs
 - Done: add label in channels slider to hold shift to synchronize adjustments
 - Done: publish fast-tiff-lib as FastTiffLib in to crates.io
 - Done: added read_plane_u8 to lib
 - Done: optimization 8bit rgb halved in occupied memory
-
-- change fast scroll to 10% of moie length instead fixed frames number
+- Done: change fast scroll to 10% of movie length instead of fixed frames number
+  
 - Add zstd compression support
 - Add tiff write support
 - Fix viewing >6Gb tifs (no frames change when scrolling)
