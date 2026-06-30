@@ -1423,50 +1423,42 @@ impl eframe::App for ViewerApp {
             });
 
             // Scrub frames by scrolling over the image (Ctrl+scroll is zoom, so
-            // it's excluded). Two modes:
-            //   • normal — read the discrete wheel *events* so one mouse notch is
-            //     exactly one frame (touchpad pixels accumulate to ~one notch);
-            //   • Shift (fast-scroll) — the smoothed-scroll behavior, jumping
-            //     ~5% of the movie length (min 1 frame) per notch, so long and
-            //     short stacks both traverse in a similar number of notches.
-            // egui remaps Shift+wheel to horizontal scrolling, so the smoothed
-            // delta lands on `.x` with the same sign — `x + y` recovers it.
+            // it's excluded). One wheel notch is one frame normally, or ~5% of
+            // the stack (min 1 frame) with Shift held for fast-scroll.
+            //
+            // Both modes read the discrete wheel *events*, not the smoothed
+            // glide delta: the glide lingers for several egui frames after one
+            // notch, so stepping per glide-frame multiplied the jump ~10-20x
+            // (and by render speed, so 2-channel scrolled half as far as 1).
+            // Shift remaps the wheel to the x axis, so its delta can land on
+            // either axis — `delta.x + delta.y` recovers it.
             if ui.rect_contains_pointer(panel_rect) {
-                let shift = ui.input(|i| i.modifiers.shift);
-                if shift {
-                    // One fast-scroll notch jumps ~5% of the stack's frame count.
-                    let n_frames = self.stack.as_ref().map(|l| l.tiff.meta.frames).unwrap_or(1);
-                    let fast_step = ((n_frames as f64 * 0.05).round() as i32).max(1);
-                    let glide = ui.input(|i| {
-                        let s = i.smooth_scroll_delta;
-                        s.x + s.y
-                    });
-                    if glide < 0.0 {
-                        scroll_step = fast_step;
-                    } else if glide > 0.0 {
-                        scroll_step = -fast_step;
-                    }
-                    self.scroll_accum = 0.0;
-                } else {
-                    // Pixels of touchpad scroll that count as one frame step.
-                    const POINTS_PER_FRAME: f32 = 50.0;
-                    let notches = ui.input(|i| {
-                        i.events.iter().fold(0.0_f32, |acc, e| match e {
-                            egui::Event::MouseWheel { unit, delta, modifiers, .. } if !modifiers.ctrl => {
-                                acc + match unit {
-                                    egui::MouseWheelUnit::Point => delta.y / POINTS_PER_FRAME,
-                                    _ => delta.y, // Line / Page: one frame per unit
-                                }
+                // Touchpad pixels (Point unit) that count as one frame step.
+                const POINTS_PER_FRAME: f32 = 50.0;
+                let notches = ui.input(|i| {
+                    i.events.iter().fold(0.0_f32, |acc, e| match e {
+                        egui::Event::MouseWheel { unit, delta, modifiers, .. } if !modifiers.ctrl => {
+                            let d = if modifiers.shift { delta.x + delta.y } else { delta.y };
+                            acc + match unit {
+                                egui::MouseWheelUnit::Point => d / POINTS_PER_FRAME,
+                                _ => d, // Line / Page: one notch per unit
                             }
-                            _ => acc,
-                        })
-                    });
-                    // egui scroll is +y up; we scrub the next frame on scroll-down.
-                    self.scroll_accum -= notches;
-                    let steps = self.scroll_accum.trunc();
-                    self.scroll_accum -= steps;
-                    scroll_step = steps as i32;
-                }
+                        }
+                        _ => acc,
+                    })
+                });
+                // egui scroll is +y up; scrub the next frame on scroll-down.
+                self.scroll_accum -= notches;
+                let steps = self.scroll_accum.trunc();
+                self.scroll_accum -= steps;
+                // Shift fast-scroll multiplies each notch to ~5% of the stack.
+                let per_notch = if ui.input(|i| i.modifiers.shift) {
+                    let n_frames = self.stack.as_ref().map(|l| l.tiff.meta.frames).unwrap_or(1);
+                    ((n_frames as f64 * 0.05).round() as i32).max(1)
+                } else {
+                    1
+                };
+                scroll_step = steps as i32 * per_notch;
             } else {
                 self.scroll_accum = 0.0;
             }
