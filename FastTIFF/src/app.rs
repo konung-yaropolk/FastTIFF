@@ -1066,8 +1066,13 @@ impl eframe::App for ViewerApp {
             });
 
             ui.input(|i| {
-                // Shift jumps 10 frames at a time instead of 1.
-                let step = if i.modifiers.shift { 10 } else { 1 };
+                // Shift jumps ~5% of the stack at a time (min 1 frame) instead
+                // of 1, matching the Shift+wheel fast-scroll step.
+                let step = if i.modifiers.shift {
+                    ((loaded.tiff.meta.frames as f64 * 0.05).round() as usize).max(1)
+                } else {
+                    1
+                };
                 let max_frame = loaded.tiff.meta.frames.saturating_sub(1);
                 if i.key_pressed(egui::Key::ArrowRight) {
                     loaded.frame_index = (loaded.frame_index + step).min(max_frame);
