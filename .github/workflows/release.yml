@@ -86,7 +86,7 @@ jobs:
         with:
           files: target/debian/*.deb
 
-  # Builds a pacman package (.pkg.tar.zst) from packaging/arch/PKGBUILD when a
+  # Builds a pacman package (.pkg.tar.zst) from FastTIFF/packaging/arch/PKGBUILD when a
   # GitHub Release is published, and attaches it to that release — the Arch
   # counterpart to the .deb / .exe jobs in release.yml.
   #
@@ -115,13 +115,13 @@ jobs:
       - name: Set pkgver from release tag
         env:
           TAG: ${{ github.event.release.tag_name }}
-        run: sed -i "s/^pkgver=.*/pkgver=${TAG#v}/" packaging/arch/PKGBUILD
+        run: sed -i "s/^pkgver=.*/pkgver=${TAG#v}/" FastTIFF/packaging/arch/PKGBUILD
 
       # makepkg downloads the tagged source tarball, builds it, and packages.
       - name: Build package
         run: |
           useradd -m builder
-          cp packaging/arch/PKGBUILD /home/builder/PKGBUILD
+          cp FastTIFF/packaging/arch/PKGBUILD /home/builder/PKGBUILD
           chown -R builder:builder /home/builder
           sudo -u builder bash -lc 'cd ~ && makepkg --noconfirm'
 
