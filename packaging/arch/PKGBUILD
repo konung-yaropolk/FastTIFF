@@ -15,6 +15,9 @@ license=('GPL-3.0-only')
 depends=('gcc-libs' 'glibc' 'gtk3' 'libglvnd' 'libxkbcommon'
          'libx11' 'libxcursor' 'libxi' 'libxrandr' 'wayland' 'fontconfig')
 makedepends=('rust')
+# Strip the binary but don't split symbols into a separate fasttiff-debug
+# package — so the release only gets the one .pkg.tar.zst.
+options=('!debug' 'strip')
 # GitHub's tag tarball for v$pkgver extracts to $_reponame-$pkgver/.
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
