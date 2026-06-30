@@ -1,0 +1,53 @@
+name: Release (Arch Linux package)
+
+# Builds a pacman package (.pkg.tar.zst) from packaging/arch/PKGBUILD when a
+# GitHub Release is published, and attaches it to that release — the Arch
+# counterpart to the .deb / .exe jobs in release.yml.
+#
+# Runs inside an Arch container. makepkg refuses to run as root, so it's driven
+# as an unprivileged user; every dependency is pre-installed, so makepkg needs
+# no sudo/pacman access of its own.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-arch:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      # base-devel = makepkg + fakeroot etc.; curl for the source download;
+      # rust for the build; the rest are the GUI runtime libs (also the
+      # PKGBUILD's depends, so makepkg's dep check passes without -s).
+      - name: Install build tooling + runtime libs
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel curl git rust \
+            gtk3 libglvnd libxkbcommon libx11 libxcursor libxi libxrandr wayland fontconfig
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Pin the PKGBUILD to the released version. Tags are v-prefixed (v1.4.3);
+      # pkgver and the `v$pkgver` source URL want the bare number.
+      - name: Set pkgver from release tag
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: sed -i "s/^pkgver=.*/pkgver=${TAG#v}/" packaging/arch/PKGBUILD
+
+      # makepkg downloads the tagged source tarball, builds it, and packages.
+      - name: Build package
+        run: |
+          useradd -m builder
+          cp packaging/arch/PKGBUILD /home/builder/PKGBUILD
+          chown -R builder:builder /home/builder
+          sudo -u builder bash -lc 'cd ~ && makepkg --noconfirm'
+
+      - name: Attach package to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: /home/builder/*.pkg.tar.zst

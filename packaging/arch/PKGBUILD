@@ -1,0 +1,36 @@
+# Maintainer: konung_yaropolk
+# Builds FastTIFF from the tagged GitHub source. Used both for AUR submission
+# and by .github/workflows/release-arch.yml (which rewrites pkgver per release).
+pkgname=fasttiff
+_reponame=FastTIFF
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering"
+arch=('x86_64')
+url="https://github.com/konung-yaropolk/FastTIFF"
+license=('GPL-3.0-only')
+# Runtime libs the glow GUI links (winit X11/Wayland + rfd GTK3 + OpenGL).
+# Trim with `namcap` against the built package if you want a minimal set.
+depends=('gcc-libs' 'glibc' 'gtk3' 'libglvnd' 'libxkbcommon'
+         'libx11' 'libxcursor' 'libxi' 'libxrandr' 'wayland' 'fontconfig')
+makedepends=('rust')
+# GitHub's tag tarball for v$pkgver extracts to $_reponame-$pkgver/.
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$_reponame-$pkgver"
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$_reponame-$pkgver"
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release -p FastTIFF
+}
+
+package() {
+    cd "$_reponame-$pkgver"
+    install -Dm755 target/release/FastTIFF "$pkgdir/usr/bin/FastTIFF"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
