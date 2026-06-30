@@ -4,7 +4,7 @@
 # per release).
 pkgname=fasttiff
 _reponame=FastTIFF
-pkgver=0.0.0
+pkgver=1.4.7
 pkgrel=1
 pkgdesc="A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering"
 arch=('x86_64')
