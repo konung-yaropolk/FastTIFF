@@ -1123,7 +1123,7 @@ impl eframe::App for ViewerApp {
                         ui.add(
                             egui::DragValue::new(&mut playback_fps)
                                 .speed(0.5)
-                                .range(0.1..=240.0)
+                                .range(0.1..=1000.0)
                                 .max_decimals(2)
                                 .suffix(" fps"),
                         )
@@ -1421,21 +1421,25 @@ impl eframe::App for ViewerApp {
             // it's excluded). Two modes:
             //   • normal — read the discrete wheel *events* so one mouse notch is
             //     exactly one frame (touchpad pixels accumulate to ~one notch);
-            //   • Shift (fast-scroll) — the original smoothed-scroll behavior,
-            //     which glides through several frames per notch, at double rate.
+            //   • Shift (fast-scroll) — the smoothed-scroll behavior, jumping
+            //     ~5% of the movie length (min 1 frame) per notch, so long and
+            //     short stacks both traverse in a similar number of notches.
             // egui remaps Shift+wheel to horizontal scrolling, so the smoothed
             // delta lands on `.x` with the same sign — `x + y` recovers it.
             if ui.rect_contains_pointer(panel_rect) {
                 let shift = ui.input(|i| i.modifiers.shift);
                 if shift {
+                    // One fast-scroll notch jumps ~5% of the stack's frame count.
+                    let n_frames = self.stack.as_ref().map(|l| l.tiff.meta.frames).unwrap_or(1);
+                    let fast_step = ((n_frames as f64 * 0.05).round() as i32).max(1);
                     let glide = ui.input(|i| {
                         let s = i.smooth_scroll_delta;
                         s.x + s.y
                     });
                     if glide < 0.0 {
-                        scroll_step = 2;
+                        scroll_step = fast_step;
                     } else if glide > 0.0 {
-                        scroll_step = -2;
+                        scroll_step = -fast_step;
                     }
                     self.scroll_accum = 0.0;
                 } else {
