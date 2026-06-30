@@ -26,6 +26,18 @@ const ZOOM_LEVELS: [f32; 21] = [
 /// this keeps the window here and just letterboxes the shrinking image.
 const MIN_WINDOW: f32 = 256.0;
 
+/// Fast-scroll rate is a fraction of movie total frames number to be skipped
+/// per mouse wheel notch or arrow press when Shift is held. (0.1 means 10% of the stack)
+/// Fast-scroll glide speed in *steps per second* (one step is FAST_SCROLL_RATE of the stack).
+/// while the Shift+wheel glide decays after a notch, the frame position advances
+/// at this rate. Scaling by the real per-frame delta-time — not a flat per-frame
+/// amount — makes one notch's jump depend only on the glide's (frame-rate
+/// independent) real-time duration, so single- and multi-channel stacks, which
+/// render at different speeds, scroll the SAME distance. ~3.75/s reproduces the
+/// previous 1/16-per-frame feel at 60 fps; raise/lower it to taste.
+const FAST_SCROLL_RATE: f64 = 0.1;
+const FAST_SCROLL_GLIDE_RATE: f64 = 5.5;
+
 /// The next zoom level in `dir` (+1 = in, −1 = out) from whichever level is
 /// nearest `current`, clamped to the ends of `ZOOM_LEVELS`.
 fn stepped_zoom(current: f32, dir: i32) -> f32 {
@@ -1079,8 +1091,13 @@ impl eframe::App for ViewerApp {
             });
 
             ui.input(|i| {
-                // Shift jumps 10 frames at a time instead of 1.
-                let step = if i.modifiers.shift { 10 } else { 1 };
+                // Shift jumps ~5% of the stack at a time (min 1 frame) instead
+                // of 1, matching the Shift+wheel fast-scroll step.
+                let step = if i.modifiers.shift {
+                    ((loaded.tiff.meta.frames as f64 * FAST_SCROLL_RATE).round() as usize).max(1)
+                } else {
+                    1
+                };
                 let max_frame = loaded.tiff.meta.frames.saturating_sub(1);
                 if i.key_pressed(egui::Key::ArrowRight) {
                     loaded.frame_index = (loaded.frame_index + step).min(max_frame);
@@ -1136,7 +1153,7 @@ impl eframe::App for ViewerApp {
                         ui.add(
                             egui::DragValue::new(&mut playback_fps)
                                 .speed(0.5)
-                                .range(0.1..=240.0)
+                                .range(0.1..=1000.0)
                                 .max_decimals(2)
                                 .suffix(" fps"),
                         )
@@ -1432,25 +1449,37 @@ impl eframe::App for ViewerApp {
 
             // Scrub frames by scrolling over the image (Ctrl+scroll is zoom, so
             // it's excluded). Two modes:
-            //   • normal — read the discrete wheel *events* so one mouse notch is
-            //     exactly one frame (touchpad pixels accumulate to ~one notch);
-            //   • Shift (fast-scroll) — the original smoothed-scroll behavior,
-            //     which glides through several frames per notch, at double rate.
+            //   • normal — discrete wheel *events*, so one mouse notch is exactly
+            //     one frame (touchpad pixels accumulate to ~one notch);
+            //   • Shift (fast-scroll) — ride the smoothed glide, advancing a
+            //     ~10%-of-stack step at `FAST_SCROLL_GLIDE_RATE` per second (time-
+            //     scaled, so single- and multi-channel stacks scroll the same),
+            //     so one notch sums to ~10% while keeping the smooth glide feel.
             // egui remaps Shift+wheel to horizontal scrolling, so the smoothed
             // delta lands on `.x` with the same sign — `x + y` recovers it.
             if ui.rect_contains_pointer(panel_rect) {
                 let shift = ui.input(|i| i.modifiers.shift);
                 if shift {
-                    let glide = ui.input(|i| {
+                    let (glide, dt) = ui.input(|i| {
                         let s = i.smooth_scroll_delta;
-                        s.x + s.y
+                        (s.x + s.y, i.stable_dt)
                     });
-                    if glide < 0.0 {
-                        scroll_step = 2;
-                    } else if glide > 0.0 {
-                        scroll_step = -2;
+                    if glide != 0.0 {
+                        // ~10% of the stack per notch, spread across the glide.
+                        let n_frames = self.stack.as_ref().map(|l| l.tiff.meta.frames).unwrap_or(1);
+                        let fast_step = (n_frames as f64 * FAST_SCROLL_RATE).max(1.0);
+                        // glide < 0 is scroll-down → advance frames. Advance at a
+                        // fixed rate *per second* (scaled by the frame time), so
+                        // the jump depends only on the glide's real-time duration
+                        // — identical for single- and multi-channel stacks despite
+                        // their different render speeds. Fractions accumulate so
+                        // short stacks still move.
+                        let dir = if glide < 0.0 { 1.0 } else { -1.0 };
+                        self.scroll_accum += (dir * fast_step * FAST_SCROLL_GLIDE_RATE * dt as f64) as f32;
+                        let steps = self.scroll_accum.trunc();
+                        self.scroll_accum -= steps;
+                        scroll_step = steps as i32;
                     }
-                    self.scroll_accum = 0.0;
                 } else {
                     // Pixels of touchpad scroll that count as one frame step.
                     const POINTS_PER_FRAME: f32 = 50.0;
