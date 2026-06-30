@@ -44,7 +44,13 @@ pub fn decode_channel(
     rgb: bool,
 ) -> anyhow::Result<Decoded> {
     Ok(match kind {
-        ChannelKind::Int8 => Decoded::U8(fast_tiff_lib::read_frame_u8(mmap, frame, order)?.into_owned()),
+        ChannelKind::Int8 => {
+            if rgb {
+                Decoded::U8(fast_tiff_lib::read_plane_u8(mmap, frame, order, plane)?)
+            } else {
+                Decoded::U8(fast_tiff_lib::read_frame_u8(mmap, frame, order)?.into_owned())
+            }
+        }
         ChannelKind::Float => Decoded::F32(fast_tiff_lib::read_frame_f32(mmap, frame, order)?.into_owned()),
         ChannelKind::Int16 => {
             if rgb {

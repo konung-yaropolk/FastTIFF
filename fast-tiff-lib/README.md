@@ -124,6 +124,11 @@ fn read_plane_u16(mmap, frame, order, float_range: Option<(f32, f32)>, plane: us
 // 8-bit. Only valid for unsigned single-sample 8-bit frames.
 fn read_frame_u8(mmap, frame, order) -> Result<Cow<[u8]>>;
 
+// The deinterleaving sibling of read_frame_u8: one raw 8-bit sample plane of a
+// chunky frame (e.g. 8-bit RGB), un-widened. Always allocates (a chunky plane is
+// a strided gather, so no zero-copy borrow). 8-bit only.
+fn read_plane_u8(mmap, frame, order, plane: usize) -> Result<Vec<u8>>;
+
 // Raw 32-bit float samples, *no* rescaling — for callers that do window/level
 // themselves (e.g. on the GPU). Zero-copy for uncompressed, single-strip,
 // native-order float; integer 32-bit is cast to f32.

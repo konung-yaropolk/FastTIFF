@@ -177,6 +177,25 @@ fn rgb8_deinterleaves_into_color_planes() {
 }
 
 #[test]
+fn rgb8_plane_u8_keeps_raw_bytes() {
+    // Same chunky RGB8 as `rgb8_deinterleaves_into_color_planes`, but the u8
+    // plane reader returns the bytes un-widened — the R8Uint upload path.
+    let mut frame = make_frame(2, 1, 1);
+    frame.bits_per_sample = 8;
+    frame.samples_per_pixel = 3;
+    frame.photometric = 2;
+    frame.strip_byte_counts = vec![6];
+    let file: Vec<u8> = vec![10, 20, 30, 40, 50, 60];
+
+    let red = read_plane_u8(&file, &frame, ByteOrder::Little, 0).unwrap();
+    let green = read_plane_u8(&file, &frame, ByteOrder::Little, 1).unwrap();
+    let blue = read_plane_u8(&file, &frame, ByteOrder::Little, 2).unwrap();
+    assert_eq!(red, vec![10, 40]);
+    assert_eq!(green, vec![20, 50]);
+    assert_eq!(blue, vec![30, 60]);
+}
+
+#[test]
 fn unsigned_int32_rescales_into_texture_range() {
     // 32-bit unsigned integers must be rescaled (not reinterpreted as
     // float). With an explicit range the mapping is linear into 0..65535.
