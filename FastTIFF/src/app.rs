@@ -26,12 +26,14 @@ const ZOOM_LEVELS: [f32; 21] = [
 /// this keeps the window here and just letterboxes the shrinking image.
 const MIN_WINDOW: f32 = 256.0;
 
-/// Fraction of the fast-scroll step applied per egui frame while the Shift+wheel
-/// glide is decaying. The smoothed scroll lingers for roughly `1 / COEFF` frames
-/// after one notch, so adding this fraction of the ~5%-of-stack step each frame
-/// sums to about one full step per notch — keeping the glide feel without the
-/// runaway overshoot of stepping the whole amount every frame. (1/16 = 0.0625.)
-const FAST_SCROLL_GLIDE_COEFF: f64 = 0.0625;
+/// Fast-scroll glide speed in *steps per second* (one step ≈ 5% of the stack):
+/// while the Shift+wheel glide decays after a notch, the frame position advances
+/// at this rate. Scaling by the real per-frame delta-time — not a flat per-frame
+/// amount — makes one notch's jump depend only on the glide's (frame-rate
+/// independent) real-time duration, so single- and multi-channel stacks, which
+/// render at different speeds, scroll the SAME distance. ~3.75/s reproduces the
+/// previous 1/16-per-frame feel at 60 fps; raise/lower it to taste.
+const FAST_SCROLL_GLIDE_RATE: f64 = 3.75;
 
 /// The next zoom level in `dir` (+1 = in, −1 = out) from whichever level is
 /// nearest `current`, clamped to the ends of `ZOOM_LEVELS`.
@@ -1433,28 +1435,31 @@ impl eframe::App for ViewerApp {
             // it's excluded). Two modes:
             //   • normal — discrete wheel *events*, so one mouse notch is exactly
             //     one frame (touchpad pixels accumulate to ~one notch);
-            //   • Shift (fast-scroll) — ride the smoothed glide, adding a small
-            //     fraction (`FAST_SCROLL_GLIDE_COEFF`) of a ~5%-of-stack step
-            //     each glide frame so one notch sums to ~5% while keeping the
-            //     smooth glide feel.
+            //   • Shift (fast-scroll) — ride the smoothed glide, advancing a
+            //     ~5%-of-stack step at `FAST_SCROLL_GLIDE_RATE` per second (time-
+            //     scaled, so single- and multi-channel stacks scroll the same),
+            //     so one notch sums to ~5% while keeping the smooth glide feel.
             // egui remaps Shift+wheel to horizontal scrolling, so the smoothed
             // delta lands on `.x` with the same sign — `x + y` recovers it.
             if ui.rect_contains_pointer(panel_rect) {
                 let shift = ui.input(|i| i.modifiers.shift);
                 if shift {
-                    let glide = ui.input(|i| {
+                    let (glide, dt) = ui.input(|i| {
                         let s = i.smooth_scroll_delta;
-                        s.x + s.y
+                        (s.x + s.y, i.stable_dt)
                     });
                     if glide != 0.0 {
                         // ~5% of the stack per notch, spread across the glide.
                         let n_frames = self.stack.as_ref().map(|l| l.tiff.meta.frames).unwrap_or(1);
                         let fast_step = (n_frames as f64 * 0.05).max(1.0);
-                        // glide < 0 is scroll-down → advance frames. Accumulate
-                        // the fractional per-frame step so short stacks (where
-                        // the fraction is < 1 frame) still move.
+                        // glide < 0 is scroll-down → advance frames. Advance at a
+                        // fixed rate *per second* (scaled by the frame time), so
+                        // the jump depends only on the glide's real-time duration
+                        // — identical for single- and multi-channel stacks despite
+                        // their different render speeds. Fractions accumulate so
+                        // short stacks still move.
                         let dir = if glide < 0.0 { 1.0 } else { -1.0 };
-                        self.scroll_accum += (dir * fast_step * FAST_SCROLL_GLIDE_COEFF) as f32;
+                        self.scroll_accum += (dir * fast_step * FAST_SCROLL_GLIDE_RATE * dt as f64) as f32;
                         let steps = self.scroll_accum.trunc();
                         self.scroll_accum -= steps;
                         scroll_step = steps as i32;
