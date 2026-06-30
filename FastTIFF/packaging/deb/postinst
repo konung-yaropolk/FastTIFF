@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+# Lowercase convenience name: /usr/bin/fasttiff -> FastTIFF. Created here (not
+# shipped as a packaged file) because dpkg/cargo-deb don't track a symlink we
+# add to /usr/bin directly.
+if [ "$1" = "configure" ]; then
+    ln -sf FastTIFF /usr/bin/fasttiff
+fi

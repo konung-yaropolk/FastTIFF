@@ -71,6 +71,11 @@ jobs:
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
 
+      # Maintainer scripts are committed from Windows without the exec bit;
+      # dpkg requires them executable.
+      - name: Make deb maintainer scripts executable
+        run: chmod 0755 FastTIFF/packaging/deb/postinst FastTIFF/packaging/deb/postrm
+
       # Reads [package.metadata.deb] from FastTIFF/Cargo.toml.
       # Output: target/debian/fasttiff_<version>-1_amd64.deb
       - name: Build .deb

@@ -62,3 +62,17 @@ maintainer = "konung_yaropolk"
 section = "graphics"
 priority = "optional"
 depends = "$auto"
+# postinst/postrm add and remove the lowercase `fasttiff` -> `FastTIFF` symlink
+# in /usr/bin (a symlink we create there isn't a tracked package file).
+maintainer-scripts = "packaging/deb"
+# Listing assets disables cargo-deb's automatic binary inclusion, so the binary
+# is listed here too. Paths are relative to this manifest dir; the workspace
+# `target/` is resolved automatically. The .desktop entry + hicolor icons give
+# the app a menu launcher (dpkg refreshes the icon/desktop caches on install).
+assets = [
+    ["target/release/FastTIFF", "usr/bin/FastTIFF", "755"],
+    ["packaging/fasttiff.desktop", "usr/share/applications/fasttiff.desktop", "644"],
+    ["icon/icon16.png", "usr/share/icons/hicolor/16x16/apps/fasttiff.png", "644"],
+    ["icon/icon32.png", "usr/share/icons/hicolor/32x32/apps/fasttiff.png", "644"],
+    ["icon/icon48.png", "usr/share/icons/hicolor/48x48/apps/fasttiff.png", "644"],
+]

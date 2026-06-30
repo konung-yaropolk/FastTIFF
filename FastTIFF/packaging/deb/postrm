@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+# Remove the lowercase symlink the postinst created (dpkg won't, as it isn't a
+# tracked package file).
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    rm -f /usr/bin/fasttiff
+fi

@@ -1,6 +1,7 @@
 # Maintainer: konung_yaropolk
 # Builds FastTIFF from the tagged GitHub source. Used both for AUR submission
-# and by .github/workflows/release-arch.yml (which rewrites pkgver per release).
+# and by the Arch job in .github/workflows/release.yml (which rewrites pkgver
+# per release).
 pkgname=fasttiff
 _reponame=FastTIFF
 pkgver=0.0.0
@@ -32,5 +33,12 @@ build() {
 package() {
     cd "$_reponame-$pkgver"
     install -Dm755 target/release/FastTIFF "$pkgdir/usr/bin/FastTIFF"
+    # Lowercase convenience name.
+    ln -s FastTIFF "$pkgdir/usr/bin/fasttiff"
+    # Desktop menu launcher + hicolor icons (pacman hooks refresh the caches).
+    install -Dm644 FastTIFF/packaging/fasttiff.desktop "$pkgdir/usr/share/applications/fasttiff.desktop"
+    install -Dm644 FastTIFF/icon/icon16.png "$pkgdir/usr/share/icons/hicolor/16x16/apps/fasttiff.png"
+    install -Dm644 FastTIFF/icon/icon32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/fasttiff.png"
+    install -Dm644 FastTIFF/icon/icon48.png "$pkgdir/usr/share/icons/hicolor/48x48/apps/fasttiff.png"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

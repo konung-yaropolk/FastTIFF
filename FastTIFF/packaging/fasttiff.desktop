@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=FastTIFF
+GenericName=TIFF Viewer
+Comment=A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering
+Exec=FastTIFF %F
+Icon=fasttiff
+Terminal=false
+Categories=Graphics;Viewer;Science;
+MimeType=image/tiff;
+StartupNotify=true
