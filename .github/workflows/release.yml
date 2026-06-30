@@ -6,6 +6,7 @@ name: Release
 on:
   release:
     types: [published]
+  workflow_dispatch: 
 
 # Needed so the workflow can upload the built .exe back onto the release.
 permissions:
