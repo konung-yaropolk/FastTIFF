@@ -43,10 +43,17 @@ jobs:
           # to give versioned name:
           # files: FastTIFF-${{ github.event.release.tag_name }}.exe
 
-  # Builds the x86_64 Debian/Ubuntu .deb with cargo-deb and attaches it to the
-  # release, alongside the Windows .exe above.
+  # Builds the Debian/Ubuntu .deb with cargo-deb and attaches it to the release,
+  # alongside the Windows .exe above. Runs once per architecture on a native
+  # runner (no cross-compiling the GTK/GL/X11 stack): ubuntu-latest -> amd64,
+  # ubuntu-24.04-arm -> arm64. cargo-deb names each by its arch, so both land
+  # on the release without colliding.
   build-linux-deb:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -76,8 +83,8 @@ jobs:
       - name: Make deb maintainer scripts executable
         run: chmod 0755 FastTIFF/packaging/deb/postinst FastTIFF/packaging/deb/postrm
 
-      # Reads [package.metadata.deb] from FastTIFF/Cargo.toml.
-      # Output: target/debian/fasttiff_<version>-1_amd64.deb
+      # Reads [package.metadata.deb] from FastTIFF/Cargo.toml. Output:
+      # target/debian/fasttiff_<version>-1_<amd64|arm64>.deb (per runner arch).
       - name: Build .deb
         run: cargo deb -p FastTIFF
 
