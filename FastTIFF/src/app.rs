@@ -924,11 +924,16 @@ impl eframe::App for ViewerApp {
         let toolbar_response = egui::Panel::top("toolbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open TIFF...").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
+                    // Allow selecting several files at once: open the first in
+                    // this window and launch each of the rest in its own process
+                    // (same fan-out as drag-drop / the command line).
+                    if let Some(paths) = rfd::FileDialog::new()
                         .add_filter("TIFF", &["tif", "tiff"])
-                        .pick_file()
+                        .pick_files()
                     {
-                        self.open_file(path);
+                        if let Some(first) = crate::process::open_all(&paths) {
+                            self.open_file(first.clone());
+                        }
                     }
                 }
                 if self.stack.is_none() {
