@@ -9,6 +9,13 @@ repository = "https://github.com/konung-yaropolk/FastTIFF"
 keywords = ["tiff", "imagej", "science", "microscopy", "astronomy"]
 categories = ["visualization", "multimedia::images", "parser-implementations", "science"]
 
+include = [
+    "src/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
+
 [dependencies]
 memmap2 = "0.9"
 weezl = "0.2"      # LZW codec (compression = 5)
