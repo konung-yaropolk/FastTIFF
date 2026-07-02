@@ -47,7 +47,9 @@ metadata (and back).
 
 Tiled TIFFs, planar (non-chunky) multi-sample data, BigTIFF, and pyramidal /
 mixed-size stacks (every frame must share frame 0's geometry — this is enforced
-with a clear error at `open`).
+with a clear error at `open`). A 64-bit target is assumed: offset arithmetic
+uses `usize`, and classic TIFF tops out at 4 GiB — near the 32-bit address
+space limit anyway.
 
 ## Quick start
 
@@ -144,6 +146,13 @@ fn read_plane_u8(mmap, frame, order, plane: usize) -> Result<Vec<u8>>;
 fn read_frame_f32(mmap, frame, order) -> Result<Cow<[f32]>>;
 fn read_plane_f32(mmap, frame, order, plane: usize) -> Result<Vec<f32>>;
 
+// All sample planes in ONE decompression pass — for chunky RGB this is ~3x
+// cheaper than three read_plane_* calls on compressed data (each of which
+// decompresses the whole frame again). One Vec per sample plane.
+fn read_planes_u16(mmap, frame, order, float_range) -> Result<Vec<Vec<u16>>>;
+fn read_planes_u8(mmap, frame, order) -> Result<Vec<Vec<u8>>>;
+fn read_planes_f32(mmap, frame, order) -> Result<Vec<Vec<f32>>>;
+
 // Actual min/max of a 32-bit frame's raw values (for auto-ranging the display);
 // `None` for non-32-bit frames.
 fn frame_float_minmax(mmap, frame, order) -> Result<Option<(f32, f32)>>;
@@ -213,7 +222,8 @@ writer.finish()?; // writes the IFD chain; the file isn't valid without it
   (tag 50000) — plus optional `predictor(true)`, which usually shrinks
   LZW/Deflate/ZSTD output on continuous-tone data: integers get TIFF
   Predictor 2 (any width), `F32` gets Predictor 3 (the TechNote 3
-  floating-point predictor libtiff uses).
+  floating-point predictor libtiff uses). `compression_level(n)` sets the
+  effort for the codecs that have one (Deflate 0–9, ZSTD 1–22).
 - **Strips:** uncompressed frames are one strip; compressed frames default to
   ~256 KiB strips. A big frame's strips compress in parallel under the same
   `set_parallel_decode` hint + size floor that governs decoding — one
@@ -246,7 +256,8 @@ ImageJ's `xyczt` order, matching the reader's indexing.
 ### Guarantees & limits
 
 - Output is always **little-endian**, IFD entries in spec-required ascending
-  tag order, ASCII fields NUL-terminated, IFDs word-aligned — standard TIFF6
+  tag order, ASCII fields NUL-terminated, IFDs word-aligned, and samples
+  beyond the photometric base declared in `ExtraSamples` — standard TIFF6
   any reader accepts (libtiff, ImageJ, this crate).
 - The uncompressed default (single strip, native order) is **exactly this
   reader's zero-copy path**: `read_frame_u16`/`_u8`/`_f32` borrow straight

@@ -303,6 +303,39 @@ fn multi_strip_lzw_decodes_past_the_first_strip() {
     assert_eq!(&*pixels, expected.as_slice(), "bottom strip's pixels are missing or wrong");
 }
 
+/// `read_planes_*` (one decompression pass for all planes) must produce
+/// exactly what the per-plane calls produce.
+#[test]
+fn read_planes_matches_per_plane_reads() {
+    // Chunky RGB8: pixel0 = (10,20,30), pixel1 = (40,50,60).
+    let mut frame = make_frame(2, 1, 1);
+    frame.bits_per_sample = 8;
+    frame.samples_per_pixel = 3;
+    frame.photometric = 2;
+    frame.strip_byte_counts = vec![6];
+    let file: Vec<u8> = vec![10, 20, 30, 40, 50, 60];
+
+    let planes8 = read_planes_u8(&file, &frame, ByteOrder::Little).unwrap();
+    let planes16 = read_planes_u16(&file, &frame, ByteOrder::Little, None).unwrap();
+    assert_eq!(planes8.len(), 3);
+    assert_eq!(planes16.len(), 3);
+    for p in 0..3 {
+        assert_eq!(planes8[p], read_plane_u8(&file, &frame, ByteOrder::Little, p).unwrap(), "u8 plane {p}");
+        assert_eq!(
+            planes16[p],
+            read_plane_u16(&file, &frame, ByteOrder::Little, None, p).unwrap(),
+            "u16 plane {p}"
+        );
+    }
+
+    // Single-sample frames return exactly one plane.
+    let frame = make_frame(2, 2, 1);
+    let file: Vec<u8> = (0..8).collect();
+    let planes = read_planes_u16(&file, &frame, ByteOrder::Little, None).unwrap();
+    assert_eq!(planes.len(), 1);
+    assert_eq!(planes[0], read_plane_u16(&file, &frame, ByteOrder::Little, None, 0).unwrap());
+}
+
 /// Some writers pad strips (e.g. to even byte counts). The padding must be
 /// dropped when strips are concatenated — counting it would shift every
 /// following row sideways.

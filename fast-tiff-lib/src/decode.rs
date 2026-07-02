@@ -122,10 +122,42 @@ pub fn read_plane_u16(
     float_range: Option<(f32, f32)>,
     plane: usize,
 ) -> Result<Vec<u16>> {
+    let native = decode_native_bytes(mmap, frame, file_order)?;
+    plane_u16_from_native(&native, frame, file_order, float_range, plane)
+}
+
+/// Decode **all** sample planes to u16 with a single decompression pass — for
+/// chunky RGB this is ~3x cheaper than three [`read_plane_u16`] calls on
+/// compressed data (each of which decompresses the whole frame again). Returns
+/// one plane per sample, in sample order; single-sample frames return one
+/// plane. With `float_range = None`, each 32-bit plane auto-ranges to its own
+/// min/max, exactly like the per-plane call.
+pub fn read_planes_u16(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+    float_range: Option<(f32, f32)>,
+) -> Result<Vec<Vec<u16>>> {
+    let native = decode_native_bytes(mmap, frame, file_order)?;
+    let spp = (frame.samples_per_pixel as usize).max(1);
+    (0..spp)
+        .map(|p| plane_u16_from_native(&native, frame, file_order, float_range, p))
+        .collect()
+}
+
+/// The conversion core shared by [`read_plane_u16`] / [`read_planes_u16`]:
+/// deinterleave + widen/offset/rescale one plane out of already-decoded
+/// native bytes.
+fn plane_u16_from_native(
+    native: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+    float_range: Option<(f32, f32)>,
+    plane: usize,
+) -> Result<Vec<u16>> {
     let spp = (frame.samples_per_pixel as usize).max(1);
     let plane = plane.min(spp - 1);
     let n_pixels = frame.width as usize * frame.height as usize;
-    let native = decode_native_bytes(mmap, frame, file_order)?;
     let signed = frame.sample_format == SampleFormat::SignedInt;
     let mut out = vec![0u16; n_pixels];
 
@@ -219,13 +251,28 @@ pub fn read_plane_u16(
 /// [`read_frame_u8`] there's no zero-copy borrow. Only valid for unsigned 8-bit
 /// frames (`bits_per_sample == 8`); callers gate on that.
 pub fn read_plane_u8(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder, plane: usize) -> Result<Vec<u8>> {
+    let native = decode_native_bytes(mmap, frame, file_order)?;
+    plane_u8_from_native(&native, frame, plane)
+}
+
+/// Decode **all** sample planes as raw 8-bit bytes with a single
+/// decompression pass — the u8 sibling of [`read_planes_u16`], ~3x cheaper
+/// than three [`read_plane_u8`] calls on compressed chunky RGB. Same validity
+/// rules as the per-plane call (unsigned 8-bit frames).
+pub fn read_planes_u8(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Vec<Vec<u8>>> {
+    let native = decode_native_bytes(mmap, frame, file_order)?;
+    let spp = (frame.samples_per_pixel as usize).max(1);
+    (0..spp).map(|p| plane_u8_from_native(&native, frame, p)).collect()
+}
+
+/// The gather core shared by [`read_plane_u8`] / [`read_planes_u8`].
+fn plane_u8_from_native(native: &[u8], frame: &FrameInfo, plane: usize) -> Result<Vec<u8>> {
     if frame.bits_per_sample != 8 {
         bail!("read_plane_u8 requires 8-bit samples, got {}", frame.bits_per_sample);
     }
     let spp = (frame.samples_per_pixel as usize).max(1);
     let plane = plane.min(spp - 1);
     let n_pixels = frame.width as usize * frame.height as usize;
-    let native = decode_native_bytes(mmap, frame, file_order)?;
     let mut out = vec![0u8; n_pixels];
     for (i, o) in out.iter_mut().enumerate() {
         *o = native[i * spp + plane];
@@ -283,12 +330,26 @@ pub fn read_plane_f32(
     file_order: ByteOrder,
     plane: usize,
 ) -> Result<Vec<f32>> {
+    let native = decode_native_bytes(mmap, frame, file_order)?;
+    Ok(plane_f32_from_native(&native, frame, file_order, plane))
+}
+
+/// Decode **all** sample planes as raw `f32` with a single decompression pass
+/// — the float sibling of [`read_planes_u16`]. Same validity rules as the
+/// per-plane call (32-bit data).
+pub fn read_planes_f32(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Vec<Vec<f32>>> {
+    let native = decode_native_bytes(mmap, frame, file_order)?;
+    let spp = (frame.samples_per_pixel as usize).max(1);
+    Ok((0..spp).map(|p| plane_f32_from_native(&native, frame, file_order, p)).collect())
+}
+
+/// The conversion core shared by [`read_plane_f32`] / [`read_planes_f32`].
+fn plane_f32_from_native(native: &[u8], frame: &FrameInfo, file_order: ByteOrder, plane: usize) -> Vec<f32> {
     let spp = (frame.samples_per_pixel as usize).max(1);
     let plane = plane.min(spp - 1);
     let n_pixels = frame.width as usize * frame.height as usize;
-    let native = decode_native_bytes(mmap, frame, file_order)?;
     let format = frame.sample_format;
-    Ok(if should_parallelize(n_pixels) {
+    if should_parallelize(n_pixels) {
         (0..n_pixels)
             .into_par_iter()
             .map(|i| sample_f32(&native[(i * spp + plane) * 4..], file_order, format))
@@ -297,7 +358,7 @@ pub fn read_plane_f32(
         (0..n_pixels)
             .map(|i| sample_f32(&native[(i * spp + plane) * 4..], file_order, format))
             .collect()
-    })
+    }
 }
 
 /// Eagerly decode **every** frame to 16-bit samples, in parallel *across*
@@ -528,14 +589,30 @@ fn decompress(raw: &[u8], compression: Compression, expected_len: usize) -> Resu
     match compression {
         Compression::None => Ok(raw[..raw.len().min(expected_len)].to_vec()),
         Compression::Lzw => {
+            // Low-level decode into a fixed `expected_len` buffer: unlike the
+            // streaming API, output can't even *allocate* past the cap, no
+            // matter what a corrupt/hostile stream expands to.
             let mut decoder = weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
-            let mut out = Vec::with_capacity(expected_len);
-            decoder
-                .into_stream(&mut out)
-                .decode_all(raw)
-                .status
-                .map_err(|e| anyhow!("LZW decode failed: {e:?}"))?;
-            out.truncate(expected_len);
+            let mut out = vec![0u8; expected_len];
+            let mut in_pos = 0;
+            let mut out_pos = 0;
+            loop {
+                let res = decoder.decode_bytes(&raw[in_pos..], &mut out[out_pos..]);
+                in_pos += res.consumed_in;
+                out_pos += res.consumed_out;
+                match res.status {
+                    Ok(weezl::LzwStatus::Done) => break,
+                    Ok(weezl::LzwStatus::Ok) => {
+                        // Cap reached, or no forward progress possible.
+                        if out_pos == out.len() || (res.consumed_in == 0 && res.consumed_out == 0) {
+                            break;
+                        }
+                    }
+                    Ok(weezl::LzwStatus::NoProgress) => break, // input exhausted early
+                    Err(e) => return Err(anyhow!("LZW decode failed: {e:?}")),
+                }
+            }
+            out.truncate(out_pos);
             Ok(out)
         }
         Compression::Deflate => {

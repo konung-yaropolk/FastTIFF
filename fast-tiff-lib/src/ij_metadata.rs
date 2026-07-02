@@ -39,6 +39,10 @@ pub struct ChannelDisplay {
     pub range: Option<(f64, f64)>,
 }
 
+// `non_exhaustive`: fields have been added before (`spacing`,
+// `loop_playback`) and may be again; it's produced by parsing, not
+// constructed downstream.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct StackMeta {
     pub channels: usize,

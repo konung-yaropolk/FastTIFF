@@ -32,10 +32,9 @@ pub enum Decoded {
     F32(Vec<f32>),
 }
 
-/// Decode one channel of a frame into owned pixels. Shared by the inline path
-/// (in `app.rs`) and the prefetch worker so both produce byte-identical results.
+/// Decode one channel of a frame into owned pixels.
 /// `plane`/`rgb` select the RGB-plane deinterleave; otherwise the whole image.
-pub fn decode_channel(
+fn decode_channel(
     mmap: &[u8],
     frame: &FrameInfo,
     order: ByteOrder,
@@ -60,6 +59,61 @@ pub fn decode_channel(
             }
         }
     })
+}
+
+/// Decode all of one frame-request's channels, returning results in `jobs`
+/// order. Shared by the inline path (in `app.rs`) and the prefetch worker so
+/// both produce byte-identical results.
+///
+/// RGB channels are sample planes of the *same* IFD, so they're decoded with a
+/// single decompression pass (`read_planes_*`) instead of one full decode per
+/// channel — ~3x cheaper on compressed RGB. Non-RGB (and float) jobs decode
+/// per-channel as before.
+pub fn decode_jobs(
+    mmap: &[u8],
+    frames: &[FrameInfo],
+    order: ByteOrder,
+    jobs: &[ChannelJob],
+) -> anyhow::Result<Vec<Decoded>> {
+    // Batched RGB path: every job is a plane of one IFD with one integer kind.
+    if jobs.len() > 1
+        && jobs
+            .iter()
+            .all(|j| j.rgb && j.ifd_idx == jobs[0].ifd_idx && j.kind == jobs[0].kind)
+        && matches!(jobs[0].kind, ChannelKind::Int8 | ChannelKind::Int16)
+    {
+        let frame = frames
+            .get(jobs[0].ifd_idx)
+            .ok_or_else(|| anyhow::anyhow!("frame {} out of range", jobs[0].ifd_idx))?;
+        return match jobs[0].kind {
+            ChannelKind::Int8 => {
+                let mut planes = fast_tiff_lib::read_planes_u8(mmap, frame, order)?;
+                jobs.iter().map(|j| Ok(Decoded::U8(take_plane(&mut planes, j.plane)?))).collect()
+            }
+            _ => {
+                let mut planes = fast_tiff_lib::read_planes_u16(mmap, frame, order, None)?;
+                jobs.iter().map(|j| Ok(Decoded::U16(take_plane(&mut planes, j.plane)?))).collect()
+            }
+        };
+    }
+
+    jobs.iter()
+        .map(|job| {
+            let frame = frames
+                .get(job.ifd_idx)
+                .ok_or_else(|| anyhow::anyhow!("frame {} out of range", job.ifd_idx))?;
+            decode_channel(mmap, frame, order, job.kind, job.plane, job.rgb)
+        })
+        .collect()
+}
+
+/// Move one plane out of a `read_planes_*` result (each plane is taken once —
+/// display channels map to distinct planes by construction).
+fn take_plane<T>(planes: &mut [Vec<T>], plane: usize) -> anyhow::Result<Vec<T>> {
+    if plane >= planes.len() {
+        anyhow::bail!("sample plane {plane} out of range ({} planes)", planes.len());
+    }
+    Ok(std::mem::take(&mut planes[plane]))
 }
 
 /// How to decode one channel of a requested frame (the app computes these from
@@ -158,26 +212,21 @@ fn worker_loop(stack: TiffStack, rx: Receiver<Request>, result: Arc<Mutex<Option
             req = newer;
         }
         let mut channels = Vec::with_capacity(req.jobs.len());
-        let mut ok = true;
-        for job in &req.jobs {
-            let Some(frame) = stack.frames.get(job.ifd_idx) else {
-                ok = false;
-                break;
-            };
-            match decode_channel(&stack.mmap, frame, stack.byte_order, job.kind, job.plane, job.rgb) {
-                Ok(data) => channels.push(DecodedChannel {
-                    channel: job.channel,
-                    width: job.width,
-                    height: job.height,
-                    kind: job.kind,
-                    data,
-                }),
-                Err(_) => {
-                    ok = false;
-                    break;
+        let ok = match decode_jobs(&stack.mmap, &stack.frames, stack.byte_order, &req.jobs) {
+            Ok(decoded) => {
+                for (job, data) in req.jobs.iter().zip(decoded) {
+                    channels.push(DecodedChannel {
+                        channel: job.channel,
+                        width: job.width,
+                        height: job.height,
+                        kind: job.kind,
+                        data,
+                    });
                 }
+                true
             }
-        }
+            Err(_) => false,
+        };
         if ok {
             if let Ok(mut slot) = result.lock() {
                 *slot = Some(PrefetchResult {

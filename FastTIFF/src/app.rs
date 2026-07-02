@@ -5,7 +5,7 @@
 //! The GPU backend (glow or wgpu) is reached only through `crate::render`'s
 //! backend-agnostic surface, so nothing here mentions either by name.
 
-use crate::prefetch::{decode_channel, ChannelJob, Decoded, PrefetchResult};
+use crate::prefetch::{decode_jobs, ChannelJob, Decoded, PrefetchResult};
 use crate::render::{self, ChannelKind, ChannelUniform, Render, MAX_CHANNELS};
 use egui::{Color32, RichText};
 use std::path::PathBuf;
@@ -423,14 +423,19 @@ impl ViewerApp {
                 }
             }
             if !used_prefetch {
-                for job in &jobs {
-                    let Some(frame_info) = loaded.tiff.frames.get(job.ifd_idx) else { continue };
-                    match decode_channel(&loaded.tiff.mmap, frame_info, loaded.tiff.byte_order, job.kind, job.plane, job.rgb) {
-                        Ok(Decoded::U8(v)) => resources.upload_channel_u8(&ctx, job.channel, job.width, job.height, &v),
-                        Ok(Decoded::U16(v)) => resources.upload_channel(&ctx, job.channel, job.width, job.height, &v),
-                        Ok(Decoded::F32(v)) => resources.upload_channel_f32(&ctx, job.channel, job.width, job.height, &v),
-                        Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
+                // One call decodes every enabled channel; RGB planes share a
+                // single decompression pass inside `decode_jobs`.
+                match decode_jobs(&loaded.tiff.mmap, &loaded.tiff.frames, loaded.tiff.byte_order, &jobs) {
+                    Ok(decoded) => {
+                        for (job, data) in jobs.iter().zip(decoded) {
+                            match data {
+                                Decoded::U8(v) => resources.upload_channel_u8(&ctx, job.channel, job.width, job.height, &v),
+                                Decoded::U16(v) => resources.upload_channel(&ctx, job.channel, job.width, job.height, &v),
+                                Decoded::F32(v) => resources.upload_channel_f32(&ctx, job.channel, job.width, job.height, &v),
+                            }
+                        }
                     }
+                    Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
                 }
             }
             loaded.last_uploaded = Some(frame_index);

@@ -6,7 +6,8 @@ pub mod index;
 
 pub use decode::{
     frame_float_minmax, preload_frames_f32, preload_frames_u16, preload_frames_u8, read_frame_f32, read_frame_u16,
-    read_frame_u8, read_plane_f32, read_plane_u16, read_plane_u8, set_parallel_decode,
+    read_frame_u8, read_plane_f32, read_plane_u16, read_plane_u8, read_planes_f32, read_planes_u16, read_planes_u8,
+    set_parallel_decode,
 };
 pub use encode::{ImageJOptions, SampleType, TiffWriter, WriterOptions};
 pub use ifd::ByteOrder;

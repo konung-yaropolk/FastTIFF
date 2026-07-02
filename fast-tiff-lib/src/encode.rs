@@ -37,6 +37,10 @@ use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
+/// ExtraSamples (tag 338): declares chunky samples beyond the photometric
+/// base (write-side only — the reader deinterleaves any chunky layout).
+const TAG_EXTRA_SAMPLES: u16 = 338;
+
 /// Classic TIFF stores every offset as a u32, so nothing may live at or past
 /// 4 GiB. (BigTIFF, which lifts this, is not supported — matching the reader.)
 const MAX_CLASSIC_TIFF: u64 = u32::MAX as u64;
@@ -201,6 +205,7 @@ pub struct WriterOptions {
     sample_type: SampleType,
     samples_per_pixel: u16,
     compression: Compression,
+    compression_level: Option<i32>,
     predictor: bool,
     rows_per_strip: Option<u32>,
     ij: Option<ImageJOptions>,
@@ -215,6 +220,7 @@ impl WriterOptions {
             sample_type,
             samples_per_pixel: 1,
             compression: Compression::None,
+            compression_level: None,
             predictor: false,
             rows_per_strip: None,
             ij: None,
@@ -234,6 +240,15 @@ impl WriterOptions {
     /// `Zstd` (tag 50000, the libtiff/GDAL extension).
     pub fn compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Compression effort level, for the codecs that have one: Deflate takes
+    /// 0..=9 (clamped; default 6) and Zstd 1..=22 (default 3, negative =
+    /// faster-than-1 modes). Ignored for `Lzw`/`PackBits`, which have no
+    /// level. Unset = each codec's default.
+    pub fn compression_level(mut self, level: i32) -> Self {
+        self.compression_level = Some(level);
         self
     }
 
@@ -297,6 +312,7 @@ pub struct TiffWriter<W: Write + Seek> {
     sample_type: SampleType,
     spp: usize,
     compression: Compression,
+    compression_level: Option<i32>,
     /// TIFF Predictor tag value: 1 = off, 2 = integer horizontal differencing,
     /// 3 = floating-point (TechNote 3). Resolved from the sample type at
     /// construction.
@@ -334,6 +350,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             sample_type,
             samples_per_pixel,
             compression,
+            compression_level,
             predictor,
             rows_per_strip,
             ij,
@@ -358,6 +375,24 @@ impl<W: Write + Seek> TiffWriter<W> {
         };
         if ij.is_some() && description.is_some() {
             bail!("imagej(..) and description(..) are mutually exclusive (both write tag 270)");
+        }
+        // ASCII fields are NUL-terminated, so an interior NUL would silently
+        // truncate the text on read-back; ImageJ's format is line-oriented, so
+        // stray newlines / '=' in its strings would corrupt the key=value
+        // lines. Reject both up front instead of writing a broken file.
+        if description.as_deref().is_some_and(|d| d.contains('\0')) {
+            bail!("description must not contain NUL bytes (TIFF ASCII fields are NUL-terminated)");
+        }
+        if let Some(ij) = &ij {
+            let clean = |s: &str| !s.contains('\0') && !s.contains('\n');
+            if !ij.unit.as_deref().map_or(true, clean) {
+                bail!("ImageJ unit must not contain NUL or newline characters");
+            }
+            for (key, value) in &ij.extra {
+                if !clean(key) || key.contains('=') || !clean(value) {
+                    bail!("ImageJ extra key/value {key:?} must not contain NUL, newline, or '=' in the key");
+                }
+            }
         }
 
         let spp = samples_per_pixel as usize;
@@ -387,6 +422,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             sample_type,
             spp,
             compression,
+            compression_level,
             predictor_tag,
             rows_per_strip,
             ij,
@@ -452,6 +488,7 @@ impl<W: Write + Seek> TiffWriter<W> {
         } else {
             let chunks: Vec<&[u8]> = processed.chunks(strip_len).collect();
             let compression = self.compression;
+            let level = self.compression_level;
             let row_bytes = self.row_bytes;
             // Strips are independent compressed units, so a big frame's strips
             // compress in parallel (ordered collect preserves row order) —
@@ -461,12 +498,12 @@ impl<W: Write + Seek> TiffWriter<W> {
             let compressed: Vec<Vec<u8>> = if chunks.len() > 1 && crate::decode::should_parallelize(n_pixels) {
                 chunks
                     .par_iter()
-                    .map(|c| compress_strip(c, compression, row_bytes))
+                    .map(|c| compress_strip(c, compression, row_bytes, level))
                     .collect::<Result<_>>()?
             } else {
                 chunks
                     .iter()
-                    .map(|c| compress_strip(c, compression, row_bytes))
+                    .map(|c| compress_strip(c, compression, row_bytes, level))
                     .collect::<Result<_>>()?
             };
             for strip in &compressed {
@@ -635,6 +672,13 @@ impl<W: Write + Seek> TiffWriter<W> {
         entries.push(Entry::longs(TAG_STRIP_BYTE_COUNTS, &strips.byte_counts));
         if self.predictor_tag != 1 {
             entries.push(Entry::short(TAG_PREDICTOR, self.predictor_tag));
+        }
+        // Samples beyond what the photometric interpretation accounts for
+        // (3 for RGB, 1 for grayscale) must be declared in ExtraSamples per
+        // TIFF6; value 0 = unspecified data (not premultiplied alpha).
+        let base_samples: usize = if photometric == 2 { 3 } else { 1 };
+        if spp as usize > base_samples {
+            entries.push(Entry::shorts(TAG_EXTRA_SAMPLES, &vec![0u16; spp as usize - base_samples]));
         }
         entries.push(Entry::shorts(
             TAG_SAMPLE_FORMAT,
@@ -862,8 +906,9 @@ fn apply_float_predictor(data: &mut [u8], row_bytes: usize, spp: usize) {
 
 /// Compress one strip. Mirrors `decode::decompress` codec-for-codec so
 /// everything written here reads back with the sibling decoder (and libtiff,
-/// ImageJ, etc.).
-fn compress_strip(strip: &[u8], compression: Compression, row_bytes: usize) -> Result<Vec<u8>> {
+/// ImageJ, etc.). `level` is the optional effort knob for the codecs that
+/// have one (Deflate 0..=9 clamped, Zstd 1..=22); `None` = codec default.
+fn compress_strip(strip: &[u8], compression: Compression, row_bytes: usize, level: Option<i32>) -> Result<Vec<u8>> {
     match compression {
         Compression::None => Ok(strip.to_vec()),
         Compression::Lzw => {
@@ -879,16 +924,20 @@ fn compress_strip(strip: &[u8], compression: Compression, row_bytes: usize) -> R
             Ok(out)
         }
         Compression::Deflate => {
-            let mut encoder = flate2::write::ZlibEncoder::new(
-                Vec::with_capacity(strip.len() / 2),
-                flate2::Compression::default(),
-            );
+            let flate_level = match level {
+                Some(l) => flate2::Compression::new(l.clamp(0, 9) as u32),
+                None => flate2::Compression::default(),
+            };
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::with_capacity(strip.len() / 2), flate_level);
             encoder.write_all(strip).map_err(|e| anyhow!("Deflate encode failed: {e}"))?;
             encoder.finish().map_err(|e| anyhow!("Deflate encode failed: {e}"))
         }
         Compression::PackBits => Ok(packbits_encode(strip, row_bytes)),
-        Compression::Zstd => zstd::stream::encode_all(strip, zstd::DEFAULT_COMPRESSION_LEVEL)
-            .map_err(|e| anyhow!("ZSTD encode failed: {e}")),
+        Compression::Zstd => {
+            zstd::stream::encode_all(strip, level.unwrap_or(zstd::DEFAULT_COMPRESSION_LEVEL))
+                .map_err(|e| anyhow!("ZSTD encode failed: {e}"))
+        }
         Compression::Other(code) => bail!("unsupported TIFF compression scheme: {code}"),
     }
 }

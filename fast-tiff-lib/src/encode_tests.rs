@@ -327,6 +327,66 @@ fn description_carries_spacing_loop_and_extra_keys() {
 }
 
 #[test]
+fn compression_level_knob_roundtrips() {
+    let pixels: Vec<u16> = (0..8 * 4).map(|i| (i as u16 * 37) % 500).collect();
+    let data = le_bytes_u16(&pixels);
+    for (compression, level) in [
+        (Compression::Deflate, 1),
+        (Compression::Deflate, 9),
+        (Compression::Zstd, 1),
+        (Compression::Zstd, 19),
+    ] {
+        let opts = WriterOptions::new(8, 4, SampleType::U16)
+            .compression(compression)
+            .compression_level(level);
+        let bytes = write_stack(opts, &[data.clone()]);
+        let (frames, order) = parse_frames(&bytes);
+        let decoded = read_frame_u16(&bytes, &frames[0], order, None).unwrap();
+        assert_eq!(decoded.as_ref(), &pixels[..], "{compression:?} level {level}");
+    }
+}
+
+#[test]
+fn four_sample_chunky_declares_extra_samples() {
+    // 2 pixels x 4 samples (e.g. RGBA-shaped): photometric stays RGB and the
+    // 4th sample must be declared in ExtraSamples (tag 338) per TIFF6.
+    let data: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8];
+    let opts = WriterOptions::new(2, 1, SampleType::U8).samples_per_pixel(4);
+    let bytes = write_stack(opts, &[data]);
+
+    let (order, first) = ifd::read_header(&bytes).unwrap();
+    let ifd0 = ifd::read_ifd(&bytes, first as usize, order).unwrap();
+    let extra = ifd0.entries.iter().find(|e| e.tag == 338).expect("ExtraSamples tag present");
+    assert_eq!(extra.as_u32_array(&bytes, order).unwrap(), vec![0], "one unspecified extra sample");
+
+    // And the 4th plane still reads back.
+    let (frames, order) = parse_frames(&bytes);
+    assert_eq!(read_plane_u8(&bytes, &frames[0], order, 3).unwrap(), vec![4, 8]);
+}
+
+#[test]
+fn rejects_nul_and_newline_in_metadata_strings() {
+    // NUL in a verbatim description would truncate on read-back.
+    assert!(TiffWriter::new(
+        Cursor::new(Vec::new()),
+        WriterOptions::new(1, 1, SampleType::U8).description("bad\0text")
+    )
+    .is_err());
+    // Newline in the ImageJ unit would corrupt the key=value lines.
+    assert!(TiffWriter::new(
+        Cursor::new(Vec::new()),
+        WriterOptions::new(1, 1, SampleType::U8).imagej(ImageJOptions::new(1, 1).unit("u\nm"))
+    )
+    .is_err());
+    // '=' in an extra key would parse back as the wrong key.
+    assert!(TiffWriter::new(
+        Cursor::new(Vec::new()),
+        WriterOptions::new(1, 1, SampleType::U8).imagej(ImageJOptions::new(1, 1).extra("a=b", "c"))
+    )
+    .is_err());
+}
+
+#[test]
 fn rejects_invalid_configurations_and_data() {
     // Wrong frame length.
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), WriterOptions::new(4, 4, SampleType::U16)).unwrap();
