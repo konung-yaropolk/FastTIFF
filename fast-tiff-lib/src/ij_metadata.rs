@@ -207,6 +207,16 @@ fn parse_description(desc: &str) -> HashMap<String, String> {
     map
 }
 
+/// The `images=N` plane count from an ImageJ description, if present. Used by
+/// `index` to detect ImageJ's single-IFD contiguous big-stack layout (where
+/// the IFD chain has one entry but the file carries N contiguous frames).
+pub(crate) fn imagej_images_count(description: &str) -> Option<usize> {
+    if !description.contains("ImageJ=") {
+        return None;
+    }
+    parse_description(description).get("images").and_then(|s| s.parse().ok())
+}
+
 pub fn build_stack_meta(
     description: Option<&str>,
     ij_metadata: Option<&[u8]>,

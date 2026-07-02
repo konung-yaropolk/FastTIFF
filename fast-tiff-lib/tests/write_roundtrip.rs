@@ -166,6 +166,34 @@ fn imagej_hyperstack_metadata_roundtrips_through_stack_meta() {
 }
 
 #[test]
+fn forced_bigtiff_file_roundtrips_through_stack_open() {
+    let path = unique_temp_path("big.tif");
+    let _cleanup = Cleanup(path.clone());
+
+    let frames: Vec<Vec<u16>> = (0..3)
+        .map(|f| (0..4 * 3).map(|i| (f * 2000 + i * 13) as u16).collect())
+        .collect();
+    let opts = WriterOptions::new(4, 3, SampleType::U16).bigtiff(true);
+    let mut w = TiffWriter::create(&path, opts).unwrap();
+    for f in &frames {
+        w.write_frame_u16(f).unwrap();
+    }
+    w.finish().unwrap();
+
+    let stack = TiffStack::open(&path).unwrap();
+    assert_eq!(stack.flavor, fast_tiff_lib::TiffFlavor::Big);
+    assert_eq!(stack.frames.len(), 3);
+    for (i, expected) in frames.iter().enumerate() {
+        let got = read_frame_u16(&stack.mmap, &stack.frames[i], stack.byte_order, None).unwrap();
+        assert_eq!(got.as_ref(), &expected[..], "frame {i}");
+        // BigTIFF changes only the directory layout — the zero-copy pixel
+        // fast path is identical.
+        #[cfg(target_endian = "little")]
+        assert!(matches!(got, Cow::Borrowed(_)), "frame {i} should decode zero-copy");
+    }
+}
+
+#[test]
 fn verbatim_description_roundtrips_raw() {
     let path = unique_temp_path("desc.tif");
     let _cleanup = Cleanup(path.clone());

@@ -108,6 +108,12 @@ tff("tff_u16_spp1_p2_zstd-rps4.tif", "u16", 2, compression="zstd", rowsperstrip=
 tff("tff_u16_spp1_p2_zstd-pred2.tif", "u16", 2, compression="zstd", predictor=2)
 tff("tff_f32_spp1_p2_zstd-pred3.tif", "f32", 2, compression="zstd", predictor=3)
 
+# --- 4c. BigTIFF (magic 43, 64-bit offsets) — small files are still valid ---
+tff("tff_u16_spp1_p2_none-le-bigtiff.tif", "u16", 2, bigtiff=True)
+tff("tff_u16_spp1_p2_zip-pred2-bigtiff.tif", "u16", 2, bigtiff=True, compression="zlib", predictor=2)
+tff("tff_f32_spp1_p2_zstd-pred3-bigtiff.tif", "f32", 2, bigtiff=True, compression="zstd", predictor=3)
+tff("tff_u16_spp1_p2_none-be-bigtiff.tif", "u16", 2, bigtiff=True, byteorder=">")
+
 # --- 5. Big-endian files (incl. BE floating-point predictor) ---
 tff("tff_u16_spp1_p2_none-be.tif", "u16", 2, byteorder=">")
 tff("tff_i16_spp1_p2_none-be.tif", "i16", 2, byteorder=">")
