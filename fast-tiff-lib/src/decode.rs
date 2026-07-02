@@ -24,18 +24,21 @@ const PARALLEL_MIN_PIXELS: usize = 1024 * 1024;
 /// real-time playback is falling behind — see `set_parallel_decode`.
 static PARALLEL_DECODE: AtomicBool = AtomicBool::new(false);
 
-/// Enable/disable parallel decoding. A performance hint, not a correctness knob:
-/// the decoded pixels are identical either way. The viewer flips this on when
-/// playback starts dropping frames (one core saturating on decode) and off
-/// otherwise, so steady-state playback that keeps up stays on the cheaper serial
-/// path. Off by default.
+/// Enable/disable parallel decoding *and* encoding. A performance hint, not a
+/// correctness knob: the pixels are identical either way. The viewer flips this
+/// on when playback starts dropping frames (one core saturating on decode) and
+/// off otherwise, so steady-state playback that keeps up stays on the cheaper
+/// serial path. The same hint governs the writer's per-strip compression (see
+/// `encode`), so a host application has one switch for all CPU-heavy pixel
+/// work. Off by default.
 pub fn set_parallel_decode(enabled: bool) {
     PARALLEL_DECODE.store(enabled, Ordering::Relaxed);
 }
 
-/// Whether this decode should use rayon: only when the caller asked for it *and*
-/// the frame is big enough for the speedup to beat the fork-join cost.
-fn should_parallelize(n_pixels: usize) -> bool {
+/// Whether a CPU-heavy pass should use rayon: only when the caller asked for it
+/// *and* the frame is big enough for the speedup to beat the fork-join cost.
+/// Shared with `encode` so both directions honor the one hint.
+pub(crate) fn should_parallelize(n_pixels: usize) -> bool {
     PARALLEL_DECODE.load(Ordering::Relaxed) && n_pixels >= PARALLEL_MIN_PIXELS
 }
 
@@ -61,10 +64,13 @@ pub fn read_frame_u16<'a>(
     // --- Fast path: uncompressed, single strip, native 16-bit, native byte order ---
     // Signed-int frames are excluded: they need the +32768 offset applied
     // below (see the `16 =>` arm), so they can't be a zero-copy reinterpret.
+    // Predictor-differenced frames (legal even without compression) are
+    // excluded too: their bytes need the undo pass first.
     if frame.compression == Compression::None
         && frame.bits_per_sample == 16
         && frame.samples_per_pixel == 1
         && frame.sample_format != SampleFormat::SignedInt
+        && frame.predictor == 1
         && file_order == ByteOrder::host()
         && frame.strip_offsets.len() == 1
     {
@@ -219,6 +225,9 @@ pub fn read_frame_f32<'a>(
         && frame.bits_per_sample == 32
         && frame.sample_format == SampleFormat::Float
         && frame.samples_per_pixel == 1
+        // Predictor-differenced data (legal even uncompressed) needs its undo
+        // pass, so it can't be borrowed raw.
+        && frame.predictor == 1
         && file_order == ByteOrder::host()
         && frame.strip_offsets.len() == 1
     {
@@ -395,7 +404,7 @@ fn decode_native_bytes<'a>(mmap: &'a [u8], frame: &FrameInfo, file_order: ByteOr
         let slice = mmap
             .get(offset..offset + total_len)
             .ok_or_else(|| anyhow!("strip data out of file bounds"))?;
-        return if frame.predictor == 2 {
+        return if frame.predictor != 1 {
             // Predictor undo mutates in place, so it needs an owned copy.
             Ok(Cow::Owned(undo_predictor(slice.to_vec(), frame, sample_bytes, file_order)?))
         } else {
@@ -519,13 +528,14 @@ fn packbits_decode(input: &[u8], expected_len: usize) -> Vec<u8> {
     out
 }
 
-/// Undo TIFF Predictor=2 (horizontal differencing). Operates per scanline,
-/// per sample (so RGB/multi-sample data differences each channel
-/// independently), matching the TIFF6 spec. Reads/writes in `file_order`
-/// since this runs before the final byte-order normalization pass. Strip
-/// boundaries are always a whole number of rows, so running this once on
-/// the full concatenated buffer (rather than per-strip before
-/// concatenating) gives the same result, since differencing resets at
+/// Undo the TIFF predictor pass: Predictor 2 (horizontal differencing, any
+/// integer width) or Predictor 3 (TechNote 3 floating-point differencing).
+/// Operates per scanline, per sample (so RGB/multi-sample data differences
+/// each channel independently), matching the TIFF6 spec / libtiff. Reads and
+/// writes in `file_order` since this runs before the final byte-order
+/// normalization pass. Strip boundaries are always a whole number of rows, so
+/// running this once on the full concatenated buffer (rather than per-strip
+/// before concatenating) gives the same result, since differencing resets at
 /// every row regardless of which strip it came from.
 fn undo_predictor(
     mut data: Vec<u8>,
@@ -533,15 +543,20 @@ fn undo_predictor(
     sample_bytes: usize,
     file_order: ByteOrder,
 ) -> Result<Vec<u8>> {
-    if frame.predictor != 2 {
-        return Ok(data);
-    }
     let spp = frame.samples_per_pixel as usize;
     let row_samples = frame.width as usize * spp;
     let row_bytes = row_samples * sample_bytes;
 
-    match sample_bytes {
-        2 => {
+    match (frame.predictor, sample_bytes) {
+        (1, _) => return Ok(data),
+        (2, 1) => {
+            for row in data.chunks_exact_mut(row_bytes) {
+                for i in spp..row_samples {
+                    row[i] = row[i].wrapping_add(row[i - spp]);
+                }
+            }
+        }
+        (2, 2) => {
             for row in data.chunks_exact_mut(row_bytes) {
                 for i in spp..row_samples {
                     let prev_off = (i - spp) * 2;
@@ -558,16 +573,54 @@ fn undo_predictor(
                 }
             }
         }
-        1 => {
+        (2, 4) => {
+            // 32-bit integer horizontal differencing (libtiff writes these).
             for row in data.chunks_exact_mut(row_bytes) {
                 for i in spp..row_samples {
-                    row[i] = row[i].wrapping_add(row[i - spp]);
+                    let prev_off = (i - spp) * 4;
+                    let cur_off = i * 4;
+                    let prev = file_order.u32(&row[prev_off..prev_off + 4]);
+                    let delta = file_order.u32(&row[cur_off..cur_off + 4]);
+                    let val = prev.wrapping_add(delta);
+                    let bytes = match file_order {
+                        ByteOrder::Little => val.to_le_bytes(),
+                        ByteOrder::Big => val.to_be_bytes(),
+                    };
+                    row[cur_off..cur_off + 4].copy_from_slice(&bytes);
                 }
             }
         }
-        _ => bail!("predictor undo not implemented for {sample_bytes}-byte samples"),
+        (3, 4) => undo_float_predictor(&mut data, row_bytes, spp, file_order),
+        (2, other) => bail!("predictor 2 undo not implemented for {other}-byte samples"),
+        (3, other) => bail!("floating-point predictor requires 32-bit samples, got {other}-byte"),
+        (other, _) => bail!("unsupported TIFF predictor: {other}"),
     }
     Ok(std::mem::take(&mut data))
+}
+
+/// Undo TIFF Predictor 3 (TIFF TechNote 3 floating-point horizontal
+/// differencing), per row: first undo the byte-level differencing (stride =
+/// samples per pixel, mirroring libtiff's `fpAcc`), then gather each float's
+/// bytes back from the row's four byte-significance planes — the spec stores
+/// them MSB-plane-first regardless of the file's byte order — and store the
+/// value in `file_order` for the normal downstream reads.
+fn undo_float_predictor(data: &mut [u8], row_bytes: usize, spp: usize, file_order: ByteOrder) {
+    let wc = row_bytes / 4; // f32 values per row
+    let mut scratch = vec![0u8; row_bytes];
+    for row in data.chunks_exact_mut(row_bytes) {
+        for i in spp..row_bytes {
+            row[i] = row[i].wrapping_add(row[i - spp]);
+        }
+        for v in 0..wc {
+            let be = [row[v], row[wc + v], row[2 * wc + v], row[3 * wc + v]];
+            let bytes = match file_order {
+                ByteOrder::Little => [be[3], be[2], be[1], be[0]],
+                ByteOrder::Big => be,
+            };
+            scratch[v * 4..v * 4 + 4].copy_from_slice(&bytes);
+        }
+        row.copy_from_slice(&scratch);
+    }
 }
 
 #[cfg(test)]

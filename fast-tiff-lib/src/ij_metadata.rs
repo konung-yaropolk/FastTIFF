@@ -58,6 +58,10 @@ pub struct StackMeta {
     /// Playback rate in frames/second from ImageJ's `fps=`. `None` when the
     /// file doesn't specify one — the viewer falls back to a default.
     pub fps: Option<f64>,
+    /// Z-step between slices (in `unit`s) from ImageJ's `spacing=`.
+    pub spacing: Option<f64>,
+    /// Whether playback should loop, from ImageJ's `loop=`.
+    pub loop_playback: Option<bool>,
 }
 
 impl StackMeta {
@@ -313,6 +317,8 @@ pub fn build_stack_meta(
         channel_display,
         calibration,
         fps,
+        spacing: get_f64("spacing"),
+        loop_playback: kv.get("loop").map(|s| s == "true"),
     }
 }
 

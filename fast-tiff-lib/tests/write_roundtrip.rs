@@ -134,7 +134,10 @@ fn imagej_hyperstack_metadata_roundtrips_through_stack_meta() {
             .frame_interval_s(0.08)
             .unit("um")
             .range(100.0, 4000.0)
-            .calibration(2.0, 0.5),
+            .calibration(2.0, 0.5)
+            .spacing(0.3)
+            .loop_playback(false)
+            .extra("vunit", "V"),
     );
     let mut w = TiffWriter::create(&path, opts).unwrap();
     for i in 0..6u16 {
@@ -142,7 +145,8 @@ fn imagej_hyperstack_metadata_roundtrips_through_stack_meta() {
     }
     w.finish().unwrap();
 
-    let meta = TiffStack::open(&path).unwrap().meta;
+    let stack = TiffStack::open(&path).unwrap();
+    let meta = &stack.meta;
     assert_eq!(meta.channels, 2);
     assert_eq!(meta.slices, 1);
     assert_eq!(meta.frames, 3);
@@ -151,6 +155,29 @@ fn imagej_hyperstack_metadata_roundtrips_through_stack_meta() {
     assert_eq!(meta.frame_interval_s, Some(0.08));
     assert_eq!(meta.unit.as_deref(), Some("um"));
     assert_eq!(meta.calibration, Some((2.0, 0.5)));
+    assert_eq!(meta.spacing, Some(0.3));
+    assert_eq!(meta.loop_playback, Some(false));
     assert_eq!(meta.channel_display.len(), 2);
     assert_eq!(meta.channel_display[0].range, Some((100.0, 4000.0)));
+    // The raw tag-270 text is exposed verbatim alongside the parsed view,
+    // including keys without a parsed field (the extra() escape hatch).
+    let desc = stack.description.as_deref().expect("raw description exposed");
+    assert!(desc.contains("vunit=V"), "raw description keeps extra keys:\n{desc}");
+}
+
+#[test]
+fn verbatim_description_roundtrips_raw() {
+    let path = unique_temp_path("desc.tif");
+    let _cleanup = Cleanup(path.clone());
+
+    let text = "acquired with rig 3\nlaser=488nm\noperator=YA";
+    let opts = WriterOptions::new(1, 1, SampleType::U8).description(text);
+    let mut w = TiffWriter::create(&path, opts).unwrap();
+    w.write_frame_u8(&[42]).unwrap();
+    w.finish().unwrap();
+
+    let stack = TiffStack::open(&path).unwrap();
+    assert_eq!(stack.description.as_deref(), Some(text));
+    // Non-ImageJ text must not be mistaken for hyperstack metadata.
+    assert_eq!(stack.meta.channels, 1);
 }

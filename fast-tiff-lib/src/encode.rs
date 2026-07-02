@@ -37,11 +37,6 @@ use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
-/// Frames at least this large (in bytes) compress their strips in parallel via
-/// rayon. Writing is a bulk operation (not latency-sensitive like scrubbing),
-/// so no runtime hint is involved — see `set_parallel_decode` for the read side.
-const PARALLEL_MIN_BYTES: usize = 1 << 20;
-
 /// Classic TIFF stores every offset as a u32, so nothing may live at or past
 /// 4 GiB. (BigTIFF, which lifts this, is not supported — matching the reader.)
 const MAX_CLASSIC_TIFF: u64 = u32::MAX as u64;
@@ -104,6 +99,13 @@ pub struct ImageJOptions {
     /// Linear calibration `(c0, c1)` written as `cf=0`/`c0=`/`c1=`:
     /// real value = `c0 + c1 * raw`.
     calibration: Option<(f64, f64)>,
+    /// Z-step between slices, written as `spacing=`.
+    spacing: Option<f64>,
+    /// Whether playback should loop, written as `loop=`.
+    loop_playback: Option<bool>,
+    /// Extra verbatim `key=value` lines appended to the description, for any
+    /// documented ImageJ key without a dedicated setter (`vunit`, `tunit`, ...).
+    extra: Vec<(String, String)>,
 }
 
 impl ImageJOptions {
@@ -120,6 +122,9 @@ impl ImageJOptions {
             unit: None,
             range: None,
             calibration: None,
+            spacing: None,
+            loop_playback: None,
+            extra: Vec::new(),
         }
     }
 
@@ -155,6 +160,26 @@ impl ImageJOptions {
     /// Linear pixel calibration: real value = `c0 + c1 * raw`.
     pub fn calibration(mut self, c0: f64, c1: f64) -> Self {
         self.calibration = Some((c0, c1));
+        self
+    }
+
+    /// Z-step between slices (in `unit`s), written as `spacing=`.
+    pub fn spacing(mut self, spacing: f64) -> Self {
+        self.spacing = Some(spacing);
+        self
+    }
+
+    /// Whether playback should loop, written as `loop=`.
+    pub fn loop_playback(mut self, looped: bool) -> Self {
+        self.loop_playback = Some(looped);
+        self
+    }
+
+    /// Append a verbatim `key=value` line — the escape hatch for any ImageJ
+    /// description key without a dedicated setter. Appended after the built-in
+    /// keys, in insertion order.
+    pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra.push((key.into(), value.into()));
         self
     }
 }
@@ -211,9 +236,10 @@ impl WriterOptions {
         self
     }
 
-    /// TIFF Predictor 2 (horizontal differencing) before compression — usually
-    /// shrinks LZW/Deflate output on continuous-tone data. 8/16-bit integer
-    /// samples only (the same envelope the reader decodes).
+    /// Predictor pass before compression — usually shrinks LZW/Deflate output
+    /// on continuous-tone data. Integer samples get TIFF Predictor 2
+    /// (horizontal differencing, 8/16/32-bit); `F32` gets Predictor 3 (the
+    /// TechNote 3 floating-point predictor, as libtiff writes for float data).
     pub fn predictor(mut self, on: bool) -> Self {
         self.predictor = on;
         self
@@ -270,7 +296,10 @@ pub struct TiffWriter<W: Write + Seek> {
     sample_type: SampleType,
     spp: usize,
     compression: Compression,
-    predictor: bool,
+    /// TIFF Predictor tag value: 1 = off, 2 = integer horizontal differencing,
+    /// 3 = floating-point (TechNote 3). Resolved from the sample type at
+    /// construction.
+    predictor_tag: u16,
     rows_per_strip: u32,
     ij: Option<ImageJOptions>,
     description: Option<String>,
@@ -319,12 +348,13 @@ impl<W: Write + Seek> TiffWriter<W> {
         if let Compression::Other(code) = compression {
             bail!("cannot write unsupported compression scheme {code} (use None/Lzw/PackBits/Deflate)");
         }
-        if predictor && sample_type.bytes() == 4 {
-            bail!(
-                "predictor is only supported for 8/16-bit integer samples \
-                 (TIFF predictor 2 doesn't apply to 32-bit data here)"
-            );
-        }
+        // Predictor 2 for integers (any width), Predictor 3 for floats —
+        // matching what libtiff chooses for the same data.
+        let predictor_tag: u16 = match (predictor, sample_type) {
+            (false, _) => 1,
+            (true, SampleType::F32) => 3,
+            (true, _) => 2,
+        };
         if ij.is_some() && description.is_some() {
             bail!("imagej(..) and description(..) are mutually exclusive (both write tag 270)");
         }
@@ -356,7 +386,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             sample_type,
             spp,
             compression,
-            predictor,
+            predictor_tag,
             rows_per_strip,
             ij,
             description,
@@ -394,12 +424,18 @@ impl<W: Write + Seek> TiffWriter<W> {
         // Predictor first (a per-row operation, so strip boundaries — always
         // whole rows — don't affect it), then split into strips and compress
         // each strip independently, as the TIFF spec requires.
-        let processed: Cow<[u8]> = if self.predictor {
-            let mut owned = data.to_vec();
-            apply_predictor(&mut owned, self.row_bytes, self.spp, self.sample_type.bytes());
-            Cow::Owned(owned)
-        } else {
-            Cow::Borrowed(data)
+        let processed: Cow<[u8]> = match self.predictor_tag {
+            2 => {
+                let mut owned = data.to_vec();
+                apply_predictor(&mut owned, self.row_bytes, self.spp, self.sample_type.bytes());
+                Cow::Owned(owned)
+            }
+            3 => {
+                let mut owned = data.to_vec();
+                apply_float_predictor(&mut owned, self.row_bytes, self.spp);
+                Cow::Owned(owned)
+            }
+            _ => Cow::Borrowed(data),
         };
 
         let strip_len = self.rows_per_strip as usize * self.row_bytes;
@@ -417,8 +453,11 @@ impl<W: Write + Seek> TiffWriter<W> {
             let compression = self.compression;
             let row_bytes = self.row_bytes;
             // Strips are independent compressed units, so a big frame's strips
-            // compress in parallel (ordered collect preserves row order).
-            let compressed: Vec<Vec<u8>> = if chunks.len() > 1 && processed.len() >= PARALLEL_MIN_BYTES {
+            // compress in parallel (ordered collect preserves row order) —
+            // under the same process-wide hint + size floor as decoding
+            // (`set_parallel_decode`), so the host has one threading switch.
+            let n_pixels = self.width as usize * self.height as usize;
+            let compressed: Vec<Vec<u8>> = if chunks.len() > 1 && crate::decode::should_parallelize(n_pixels) {
                 chunks
                     .par_iter()
                     .map(|c| compress_strip(c, compression, row_bytes))
@@ -592,8 +631,8 @@ impl<W: Write + Seek> TiffWriter<W> {
         entries.push(Entry::short(TAG_SAMPLES_PER_PIXEL, spp));
         entries.push(Entry::long(TAG_ROWS_PER_STRIP, self.rows_per_strip));
         entries.push(Entry::longs(TAG_STRIP_BYTE_COUNTS, &strips.byte_counts));
-        if self.predictor {
-            entries.push(Entry::short(TAG_PREDICTOR, 2));
+        if self.predictor_tag != 1 {
+            entries.push(Entry::short(TAG_PREDICTOR, self.predictor_tag));
         }
         entries.push(Entry::shorts(
             TAG_SAMPLE_FORMAT,
@@ -736,11 +775,20 @@ fn build_ij_description(planes: usize, ij: &ImageJOptions) -> Result<String> {
     if let Some(fps) = ij.fps {
         s += &format!("fps={fps}\n");
     }
+    if let Some(spacing) = ij.spacing {
+        s += &format!("spacing={spacing}\n");
+    }
+    if let Some(looped) = ij.loop_playback {
+        s += &format!("loop={looped}\n");
+    }
     if let Some((lo, hi)) = ij.range {
         s += &format!("min={lo}\nmax={hi}\n");
     }
     if let Some((c0, c1)) = ij.calibration {
         s += &format!("cf=0\nc0={c0}\nc1={c1}\n");
+    }
+    for (key, value) in &ij.extra {
+        s += &format!("{key}={value}\n");
     }
     Ok(s)
 }
@@ -770,8 +818,43 @@ fn apply_predictor(data: &mut [u8], row_bytes: usize, spp: usize, sample_bytes: 
                 }
             }
         }
-        // 4-byte samples are rejected at TiffWriter construction.
-        _ => unreachable!("predictor validated to 8/16-bit at construction"),
+        4 => {
+            // 32-bit integers (U32/I32) — floats route to predictor 3 instead.
+            for row in data.chunks_exact_mut(row_bytes) {
+                for i in (spp..row_samples).rev() {
+                    let cur = u32::from_le_bytes(row[i * 4..i * 4 + 4].try_into().unwrap());
+                    let prev = u32::from_le_bytes(row[(i - spp) * 4..(i - spp) * 4 + 4].try_into().unwrap());
+                    let diff = cur.wrapping_sub(prev).to_le_bytes();
+                    row[i * 4..i * 4 + 4].copy_from_slice(&diff);
+                }
+            }
+        }
+        _ => unreachable!("sample widths are 1/2/4 bytes"),
+    }
+}
+
+/// Apply TIFF Predictor 3 (TechNote 3 floating-point differencing) in place —
+/// the exact inverse of `decode::undo_float_predictor`. Per row: split each
+/// f32 into the row's four byte-significance planes (MSB plane first, as the
+/// spec requires regardless of file byte order), then difference the plane
+/// bytes horizontally with stride = samples per pixel, mirroring libtiff's
+/// `fpDiff`.
+fn apply_float_predictor(data: &mut [u8], row_bytes: usize, spp: usize) {
+    let wc = row_bytes / 4; // f32 values per row
+    let mut scratch = vec![0u8; row_bytes];
+    for row in data.chunks_exact_mut(row_bytes) {
+        for v in 0..wc {
+            // Values arrive little-endian (this writer's only order); the
+            // planes want big-endian byte significance.
+            scratch[v] = row[v * 4 + 3];
+            scratch[wc + v] = row[v * 4 + 2];
+            scratch[2 * wc + v] = row[v * 4 + 1];
+            scratch[3 * wc + v] = row[v * 4];
+        }
+        for i in (spp..row_bytes).rev() {
+            scratch[i] = scratch[i].wrapping_sub(scratch[i - spp]);
+        }
+        row.copy_from_slice(&scratch);
     }
 }
 

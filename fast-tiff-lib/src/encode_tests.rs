@@ -237,18 +237,95 @@ fn imagej_description_lands_on_first_ifd_only() {
 }
 
 #[test]
+fn predictor_covers_all_sample_widths_and_floats() {
+    // 32-bit integers: Predictor 2 with 4-byte differencing (libtiff parity).
+    let ints: [i32; 6] = [-1_000_000, -999_800, 0, 7, 2_000_000_000, 1_999_999_500];
+    let data: Vec<u8> = ints.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let opts = WriterOptions::new(3, 2, SampleType::I32)
+        .compression(Compression::Deflate)
+        .predictor(true);
+    let bytes = write_stack(opts, &[data]);
+    let (frames, order) = parse_frames(&bytes);
+    assert_eq!(frames[0].predictor, 2, "integer data gets predictor 2");
+    let decoded = read_frame_f32(&bytes, &frames[0], order).unwrap();
+    let expected: Vec<f32> = ints.iter().map(|&v| v as f32).collect();
+    assert_eq!(decoded.as_ref(), &expected[..]);
+
+    // f32: Predictor 3 (TechNote 3 floating-point differencing), compressed
+    // and uncompressed — uncompressed also proves the reader's zero-copy fast
+    // path correctly steps aside for predictor-differenced data.
+    let floats: Vec<f32> = (0..8).map(|i| -2.5 + i as f32 * 0.75).collect();
+    let data: Vec<u8> = floats.iter().flat_map(|v| v.to_le_bytes()).collect();
+    for compression in [Compression::None, Compression::Deflate] {
+        let opts = WriterOptions::new(4, 2, SampleType::F32)
+            .compression(compression)
+            .predictor(true);
+        let bytes = write_stack(opts, &[data.clone()]);
+        let (frames, order) = parse_frames(&bytes);
+        assert_eq!(frames[0].predictor, 3, "float data gets predictor 3");
+        let decoded = read_frame_f32(&bytes, &frames[0], order).unwrap();
+        assert_eq!(decoded.as_ref(), &floats[..], "{compression:?}");
+    }
+
+    // Predictor without compression on u16: the read_frame_u16 zero-copy fast
+    // path must also step aside and undo the differencing.
+    let pixels: Vec<u16> = vec![100, 105, 90, 200, 1000, 999];
+    let opts = WriterOptions::new(3, 2, SampleType::U16).predictor(true);
+    let bytes = write_stack(opts, &[le_bytes_u16(&pixels)]);
+    let (frames, order) = parse_frames(&bytes);
+    let decoded = read_frame_u16(&bytes, &frames[0], order, None).unwrap();
+    assert_eq!(decoded.as_ref(), &pixels[..]);
+
+    // Chunky RGB16 + predictor + LZW: differencing must stride by
+    // samples-per-pixel so each color plane differences independently.
+    let rgb: Vec<u16> = vec![1000, 2000, 3000, 1010, 1990, 3020, 990, 2020, 2980];
+    let opts = WriterOptions::new(3, 1, SampleType::U16)
+        .samples_per_pixel(3)
+        .compression(Compression::Lzw)
+        .predictor(true);
+    let bytes = write_stack(opts, &[le_bytes_u16(&rgb)]);
+    let (frames, order) = parse_frames(&bytes);
+    let red = crate::decode::read_plane_u16(&bytes, &frames[0], order, None, 0).unwrap();
+    assert_eq!(red, vec![1000, 1010, 990]);
+    let blue = crate::decode::read_plane_u16(&bytes, &frames[0], order, None, 2).unwrap();
+    assert_eq!(blue, vec![3000, 3020, 2980]);
+}
+
+#[test]
+fn unknown_predictor_errors_instead_of_garbage() {
+    // A frame claiming predictor 9: the reader must refuse, not decode wrong.
+    let pixels: Vec<u16> = vec![1, 2, 3, 4];
+    let bytes = write_stack(WriterOptions::new(2, 2, SampleType::U16), &[le_bytes_u16(&pixels)]);
+    let (mut frames, order) = parse_frames(&bytes);
+    frames[0].predictor = 9;
+    assert!(read_frame_u16(&bytes, &frames[0], order, None).is_err());
+}
+
+#[test]
+fn description_carries_spacing_loop_and_extra_keys() {
+    let opts = WriterOptions::new(1, 1, SampleType::U8).imagej(
+        ImageJOptions::new(1, 2)
+            .spacing(1.5)
+            .loop_playback(true)
+            .extra("vunit", "V")
+            .extra("tunit", "s"),
+    );
+    let bytes = write_stack(opts, &[vec![0], vec![1]]);
+    let (order, first) = ifd::read_header(&bytes).unwrap();
+    let ifd0 = ifd::read_ifd(&bytes, first as usize, order).unwrap();
+    let desc = ifd0.entries.iter().find(|e| e.tag == 270).unwrap().as_ascii(&bytes, order).unwrap();
+    for expected in ["spacing=1.5", "loop=true", "vunit=V", "tunit=s", "slices=2"] {
+        assert!(desc.contains(expected), "description missing {expected:?}:\n{desc}");
+    }
+}
+
+#[test]
 fn rejects_invalid_configurations_and_data() {
     // Wrong frame length.
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), WriterOptions::new(4, 4, SampleType::U16)).unwrap();
     assert!(w.write_frame_bytes(&[0u8; 3]).is_err());
     // Typed method on the wrong sample type.
     assert!(w.write_frame_u8(&[0u8; 32]).is_err());
-    // Predictor on 32-bit data.
-    assert!(TiffWriter::new(
-        Cursor::new(Vec::new()),
-        WriterOptions::new(2, 2, SampleType::F32).predictor(true)
-    )
-    .is_err());
     // Unknown compression code.
     assert!(TiffWriter::new(
         Cursor::new(Vec::new()),

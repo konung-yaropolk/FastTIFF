@@ -37,7 +37,9 @@ metadata (and back).
 ### Supported pixel formats
 
 - 8-, 16-, and 32-bit; integer (signed or unsigned) or 32-bit IEEE float.
-- Compression: none, LZW, PackBits, Deflate/zip; horizontal predictor (2) undone.
+- Compression: none, LZW, PackBits, Deflate/zip. Predictor 2 (horizontal
+  differencing, any integer width) and Predictor 3 (TechNote 3 floating-point,
+  as libtiff writes for float data) are undone.
 - Chunky (interleaved) RGB is deinterleaved per sample plane.
 
 ### Not supported
@@ -169,6 +171,9 @@ fast_tiff_lib::set_parallel_decode(true);  // split large decodes across cores
 fast_tiff_lib::set_parallel_decode(false); // serial (default)
 ```
 
+The same hint governs the [writer](#writing)'s per-strip compression, so one
+switch controls all CPU-heavy pixel work in both directions.
+
 This is a **performance hint only** — decoded pixels are identical either way.
 Parallel decode spreads load across cores but uses *more total CPU* (fork-join
 overhead), so it's only a win when a single core can't keep up (e.g. real-time
@@ -204,17 +209,21 @@ writer.finish()?; // writes the IFD chain; the file isn't valid without it
 - **Layout:** grayscale planes (`samples_per_pixel(1)`, default) or chunky
   interleaved RGB (`samples_per_pixel(3)`, tagged photometric=RGB).
 - **Compression:** `None` (default), `Lzw`, `PackBits`, `Deflate` — plus
-  optional `predictor(true)` (TIFF Predictor 2, 8/16-bit integers only),
-  which usually shrinks LZW/Deflate on continuous-tone data.
+  optional `predictor(true)`, which usually shrinks LZW/Deflate on
+  continuous-tone data: integers get TIFF Predictor 2 (any width), `F32`
+  gets Predictor 3 (the TechNote 3 floating-point predictor libtiff uses).
 - **Strips:** uncompressed frames are one strip; compressed frames default to
-  ~256 KiB strips (a big frame's strips are compressed in parallel, and
-  decompress in parallel on the way back in). Override with
-  `rows_per_strip(n)`.
+  ~256 KiB strips. A big frame's strips compress in parallel under the same
+  `set_parallel_decode` hint + size floor that governs decoding — one
+  threading switch for all CPU-heavy pixel work — and decompress in parallel
+  on the way back in. Override with `rows_per_strip(n)`.
 - **Metadata:** `imagej(ImageJOptions...)` embeds an ImageJ hyperstack
   description — channels/slices (time frames are derived from the plane count
   at `finish()`), display mode, `fps`, frame interval, unit, `min=`/`max=`
-  display range, linear calibration. Or `description(text)` for a verbatim
-  `ImageDescription`.
+  display range, linear calibration, Z `spacing`, playback `loop`, plus
+  `extra(key, value)` for any other documented key. Or `description(text)`
+  for a fully verbatim `ImageDescription` — either way, the reader hands the
+  whole tag 270 text back via `TiffStack::description`.
 
 ```rust
 use fast_tiff_lib::{Compression, DisplayMode, ImageJOptions, SampleType, WriterOptions};
@@ -261,7 +270,21 @@ pub struct StackMeta {
     pub channel_display: Vec<ChannelDisplay>,   // per-channel LUT + range
     pub calibration: Option<(f64, f64)>,        // linear (c0, c1): value = c0 + c1*raw
     pub fps: Option<f64>,
+    pub spacing: Option<f64>,               // Z-step between slices (spacing=)
+    pub loop_playback: Option<bool>,        // playback looping (loop=)
 }
+```
+
+This is the *parsed ImageJ view* of the metadata. The raw `ImageDescription`
+(tag 270) text is also exposed verbatim — whatever the writer put there,
+ImageJ-formatted or not:
+
+```rust
+let stack = fast_tiff_lib::TiffStack::open("movie.tif")?;
+if let Some(desc) = &stack.description {
+    println!("{desc}"); // the whole tag 270 text, unparsed
+}
+# Ok::<(), anyhow::Error>(())
 
 pub struct ChannelDisplay {
     pub lut: [[u8; 3]; 256],          // 256-entry RGB lookup table

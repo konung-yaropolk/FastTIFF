@@ -87,6 +87,11 @@ pub struct TiffStack {
     pub byte_order: ByteOrder,
     pub frames: Vec<FrameInfo>,
     pub meta: StackMeta,
+    /// The first IFD's raw `ImageDescription` (tag 270) text, verbatim —
+    /// full access to whatever the writer put there. `meta` holds the parsed
+    /// ImageJ view of it; this is the unparsed original (which may not be
+    /// ImageJ-formatted at all).
+    pub description: Option<String>,
 }
 
 impl TiffStack {
@@ -181,6 +186,7 @@ impl TiffStack {
             byte_order: order,
             frames,
             meta,
+            description,
         })
     }
 }
