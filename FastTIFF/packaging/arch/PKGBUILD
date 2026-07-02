@@ -4,7 +4,7 @@
 # per release).
 pkgname=fasttiff
 _reponame=FastTIFF
-pkgver=1.4.7
+pkgver=$pkgver
 pkgrel=1
 pkgdesc="A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering"
 arch=('x86_64')
@@ -21,6 +21,12 @@ options=('!debug' 'strip')
 # GitHub's tag tarball for v$pkgver extracts to $_reponame-$pkgver/.
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/$pkgname"
+    # take the FIRST version = "..." line (the [package] one) and strip quotes
+    grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/'
+}
 
 prepare() {
     cd "$_reponame-$pkgver"

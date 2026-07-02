@@ -133,7 +133,7 @@ this is the one-line formula to change.
 - Add bigtiff support
 - Port to linux and mac
 - Add windows installer with files association
-- make inactive decode mode for plane tiffs
+- make inactive decode mode for when it is actual unneeded, make single mode default
 
 
 
