@@ -125,18 +125,19 @@ this is the one-line formula to change.
 - Done: publish fast-tiff-lib as FastTiffLib in to crates.io
 - Done: added read_plane_u8 to lib
 - Done: optimization 8bit rgb halved in occupied memory
-- Done: change fast scroll to 10% of movie length instead of fixed frames number
-  
-- Add zstd compression support
-- Add tiff write support
-- Fix viewing >6Gb tifs (no frames change when scrolling)
-- Add bigtiff support
+- Done: change fast scroll to 10% of movie length instead of fixed frames number  
+- Done: Add zstd compression support
+- Done: Add tiff write support
+- Done: Fix viewing >6Gb tifs (no frames change when scrolling)
+- Done: Add bigtiff support
+- Done: make inactive decode mode for when it is actual unneeded, make single mode default
+- Solved: issue with performance in optimized version - 16 bit compressed tiff playback holds 12% cpu spreaded by multiple cores, but unoptimized - 4-5% which is ~50% single core load
+
+
 - Port to linux and mac
 - Add windows installer with files association
-- make inactive decode mode for when it is actual unneeded, make single mode default
 
 
 
 
 
-- Solved: issue with performance in optimized version - 16 bit compressed tiff playback holds 12% cpu spreaded by multiple cores, but unoptimized - 4-5% which is ~50% single core load
