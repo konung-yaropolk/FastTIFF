@@ -177,6 +177,22 @@ impl TiffStack {
             );
         }
 
+        // Planar (non-chunky) multi-sample data stores each sample plane
+        // separately; every decoder here assumes chunky interleaving, so a
+        // planar file would silently deinterleave into garbage. Refuse it
+        // with a clear error instead (same policy as tiled TIFFs).
+        if let Some((i, f)) = frames
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.samples_per_pixel > 1 && f.planar_config == 2)
+        {
+            bail!(
+                "frame {i} stores its {} samples/pixel in planar (non-interleaved) layout \
+                 (PlanarConfiguration=2), which is not supported — only chunky TIFFs are",
+                f.samples_per_pixel
+            );
+        }
+
         let meta = ij_metadata::build_stack_meta(
             description.as_deref(),
             ij_metadata_bytes.as_deref(),

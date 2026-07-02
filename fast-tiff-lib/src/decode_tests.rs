@@ -302,3 +302,31 @@ fn multi_strip_lzw_decodes_past_the_first_strip() {
     expected.extend_from_slice(&bottom);
     assert_eq!(&*pixels, expected.as_slice(), "bottom strip's pixels are missing or wrong");
 }
+
+/// Some writers pad strips (e.g. to even byte counts). The padding must be
+/// dropped when strips are concatenated — counting it would shift every
+/// following row sideways.
+#[test]
+fn padded_strip_byte_counts_dont_shift_rows() {
+    // 2x4 u8, two 2-row strips of 8 bytes each; each strip stored with one
+    // trailing pad byte (0xEE) included in its byte count.
+    let top: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    let bottom: [u8; 8] = [11, 12, 13, 14, 15, 16, 17, 18];
+    let mut file = Vec::new();
+    file.extend_from_slice(&top);
+    file.push(0xEE);
+    let bottom_offset = file.len() as u64;
+    file.extend_from_slice(&bottom);
+    file.push(0xEE);
+
+    let mut frame = make_frame(4, 4, 1);
+    frame.bits_per_sample = 8;
+    frame.rows_per_strip = 2;
+    frame.strip_offsets = vec![0, bottom_offset];
+    frame.strip_byte_counts = vec![9, 9]; // 8 data bytes + 1 pad each
+
+    let pixels = read_frame_u8(&file, &frame, ByteOrder::Little).unwrap();
+    let mut expected = top.to_vec();
+    expected.extend_from_slice(&bottom);
+    assert_eq!(pixels.as_ref(), expected.as_slice(), "pad bytes leaked into the pixel data");
+}

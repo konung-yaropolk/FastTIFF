@@ -131,17 +131,46 @@ pub fn read_plane_u16(
 
     match frame.bits_per_sample {
         16 => {
-            for (i, o) in out.iter_mut().enumerate() {
-                let off = (i * spp + plane) * 2;
-                let v = file_order.u16(&native[off..off + 2]);
-                *o = if signed { v ^ 0x8000 } else { v };
+            if spp == 1 {
+                // Contiguous samples — the per-frame hot path for compressed
+                // 16-bit playback. Bulk-convert with the byte-order branch
+                // hoisted out of the loop and no strided indexing (the
+                // sign-bit flip folds in branchlessly: xor with 0 is a no-op).
+                let flip = if signed { 0x8000 } else { 0 };
+                let pairs = native[..n_pixels * 2].chunks_exact(2);
+                match file_order {
+                    ByteOrder::Little => {
+                        for (o, c) in out.iter_mut().zip(pairs) {
+                            *o = u16::from_le_bytes([c[0], c[1]]) ^ flip;
+                        }
+                    }
+                    ByteOrder::Big => {
+                        for (o, c) in out.iter_mut().zip(pairs) {
+                            *o = u16::from_be_bytes([c[0], c[1]]) ^ flip;
+                        }
+                    }
+                }
+            } else {
+                for (i, o) in out.iter_mut().enumerate() {
+                    let off = (i * spp + plane) * 2;
+                    let v = file_order.u16(&native[off..off + 2]);
+                    *o = if signed { v ^ 0x8000 } else { v };
+                }
             }
         }
         8 => {
-            for (i, o) in out.iter_mut().enumerate() {
-                let b = native[i * spp + plane];
-                let b = if signed { b ^ 0x80 } else { b };
-                *o = ((b as u16) << 8) | b as u16;
+            if spp == 1 {
+                let flip = if signed { 0x80 } else { 0 };
+                for (o, &b) in out.iter_mut().zip(native[..n_pixels].iter()) {
+                    let b = b ^ flip;
+                    *o = ((b as u16) << 8) | b as u16;
+                }
+            } else {
+                for (i, o) in out.iter_mut().enumerate() {
+                    let b = native[i * spp + plane];
+                    let b = if signed { b ^ 0x80 } else { b };
+                    *o = ((b as u16) << 8) | b as u16;
+                }
             }
         }
         32 => {
@@ -332,10 +361,22 @@ pub fn frame_float_minmax(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder)
     }
     let native = decode_native_bytes(mmap, frame, file_order)?;
     let n_samples = frame.width as usize * frame.height as usize * frame.samples_per_pixel as usize;
-    let floats: Vec<f32> = (0..n_samples)
-        .map(|i| sample_f32(&native[i * 4..], file_order, frame.sample_format))
-        .collect();
-    Ok(Some(minmax_f32(&floats)))
+    // Fold directly over the decoded bytes — no width*height*4 temporary.
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for chunk in native[..n_samples * 4].chunks_exact(4) {
+        let v = sample_f32(chunk, file_order, frame.sample_format);
+        if v.is_finite() {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    // Same degenerate-data fallback as `minmax_f32`.
+    if !lo.is_finite() || !hi.is_finite() || hi <= lo {
+        Ok(Some((0.0, 1.0)))
+    } else {
+        Ok(Some((lo, hi)))
+    }
 }
 
 /// Reads one 32-bit sample as `f32`, interpreting the 4 bytes per the frame's
@@ -453,7 +494,8 @@ fn decode_native_bytes<'a>(mmap: &'a [u8], frame: &FrameInfo, file_order: ByteOr
             let rows_this_strip = rows_per_strip.min(total_rows.saturating_sub(rows_done));
             let expected_len = rows_this_strip * row_bytes;
             match compression {
-                Compression::None => native.extend_from_slice(raw_strip),
+                // Same cap as `decompress`: padded strips must not shift rows.
+                Compression::None => native.extend_from_slice(&raw_strip[..raw_strip.len().min(expected_len)]),
                 _ => native.extend_from_slice(&decompress(raw_strip, compression, expected_len)?),
             }
             rows_done += rows_this_strip;
@@ -475,9 +517,16 @@ fn decode_native_bytes<'a>(mmap: &'a [u8], frame: &FrameInfo, file_order: ByteOr
     Ok(Cow::Owned(undo_predictor(native, frame, sample_bytes, file_order)?))
 }
 
+/// Decompress one strip, returning **at most `expected_len` bytes** (the
+/// strip's rows x row bytes). Some writers pad strips — trailing alignment
+/// bytes in the raw data, or whole padded rows in the compressed stream —
+/// and without this cap the excess would shift every following row of the
+/// assembled frame sideways. For the streaming codecs (Deflate/ZSTD) the cap
+/// also bounds the memory a corrupt/hostile stream can expand into.
 fn decompress(raw: &[u8], compression: Compression, expected_len: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
     match compression {
-        Compression::None => Ok(raw.to_vec()),
+        Compression::None => Ok(raw[..raw.len().min(expected_len)].to_vec()),
         Compression::Lzw => {
             let mut decoder = weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
             let mut out = Vec::with_capacity(expected_len);
@@ -486,20 +535,30 @@ fn decompress(raw: &[u8], compression: Compression, expected_len: usize) -> Resu
                 .decode_all(raw)
                 .status
                 .map_err(|e| anyhow!("LZW decode failed: {e:?}"))?;
+            out.truncate(expected_len);
             Ok(out)
         }
         Compression::Deflate => {
-            use std::io::Read;
-            let mut decoder = flate2::read::ZlibDecoder::new(raw);
             let mut out = Vec::with_capacity(expected_len);
-            decoder
+            flate2::read::ZlibDecoder::new(raw)
+                .take(expected_len as u64)
                 .read_to_end(&mut out)
                 .map_err(|e| anyhow!("Deflate decode failed: {e}"))?;
             Ok(out)
         }
-        Compression::PackBits => Ok(packbits_decode(raw, expected_len)),
+        Compression::PackBits => {
+            let mut out = packbits_decode(raw, expected_len);
+            out.truncate(expected_len);
+            Ok(out)
+        }
         Compression::Zstd => {
-            zstd::stream::decode_all(raw).map_err(|e| anyhow!("ZSTD decode failed: {e}"))
+            let mut out = Vec::with_capacity(expected_len);
+            zstd::stream::read::Decoder::new(raw)
+                .map_err(|e| anyhow!("ZSTD decode failed: {e}"))?
+                .take(expected_len as u64)
+                .read_to_end(&mut out)
+                .map_err(|e| anyhow!("ZSTD decode failed: {e}"))?;
+            Ok(out)
         }
         Compression::Other(code) => bail!("unsupported TIFF compression scheme: {code}"),
     }
