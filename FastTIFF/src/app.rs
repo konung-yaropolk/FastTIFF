@@ -1166,19 +1166,28 @@ impl eframe::App for ViewerApp {
                     });
 
                     // CPU decode parallelism: Auto threads only when playback
-                    // can't keep up; Serial/Threaded force it off/on.
-                    ui.separator();
-                    ui.label("Decode:");
-                    egui::ComboBox::from_id_salt("decode_mode")
-                        .selected_text(decode_mode.label())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut decode_mode, DecodeMode::Auto, "Auto")
-                                .on_hover_text("Single-threaded until playback drops frames, then multi-threaded");
-                            ui.selectable_value(&mut decode_mode, DecodeMode::Serial, "Serial")
-                                .on_hover_text("Always single-threaded (lowest total CPU)");
-                            ui.selectable_value(&mut decode_mode, DecodeMode::Threaded, "Threaded")
-                                .on_hover_text("Always multi-threaded for large frames (spreads across cores)");
-                        });
+                    // can't keep up; Serial/Threaded force it off/on. Only shown
+                    // for compressed stacks — uncompressed frames decode
+                    // zero-copy, so the setting would have no effect.
+                    let compressed = loaded
+                        .tiff
+                        .frames
+                        .first()
+                        .is_some_and(|f| f.compression != fast_tiff_lib::Compression::None);
+                    if compressed {
+                        ui.separator();
+                        ui.label("Decode:");
+                        egui::ComboBox::from_id_salt("decode_mode")
+                            .selected_text(decode_mode.label())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut decode_mode, DecodeMode::Auto, "Auto")
+                                    .on_hover_text("Single-threaded until playback drops frames, then multi-threaded");
+                                ui.selectable_value(&mut decode_mode, DecodeMode::Serial, "Serial")
+                                    .on_hover_text("Always single-threaded (lowest total CPU)");
+                                ui.selectable_value(&mut decode_mode, DecodeMode::Threaded, "Threaded")
+                                    .on_hover_text("Always multi-threaded for large frames (spreads across cores)");
+                            });
+                    }
                 });
                 if !loaded.rgb {
                     ui.label(
