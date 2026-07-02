@@ -28,15 +28,18 @@ pkgver() {
 
 prepare() {
     cd "$pkgname"
-    # No --locked: don't fail when the committed Cargo.lock lags a version bump.
-    # cargo refreshes it here (with network) so the offline build below works.
-    cargo fetch --target "$(rustc -vV | sed -n 's/host: //p')"
+    # Reconcile only the bumped workspace version into Cargo.lock: --workspace
+    # leaves every external dependency at its locked version, so the build stays
+    # reproducible while --locked/--frozen below no longer fail when the
+    # committed lock lags a version bump.
+    cargo update --workspace
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
     cd "$pkgname"
     export CARGO_TARGET_DIR=target
-    cargo build --release --offline -p FastTIFF
+    cargo build --frozen --release -p FastTIFF
 }
 
 package() {
