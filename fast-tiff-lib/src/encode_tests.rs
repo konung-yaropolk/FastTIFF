@@ -77,6 +77,7 @@ fn parse_frames(bytes: &[u8]) -> (Vec<FrameInfo>, ByteOrder) {
                 5 => Compression::Lzw,
                 32773 => Compression::PackBits,
                 8 | 32946 => Compression::Deflate,
+                50000 | 34926 => Compression::Zstd,
                 other => Compression::Other(other),
             },
             predictor,
@@ -137,7 +138,13 @@ fn all_codecs_roundtrip_with_and_without_predictor() {
     let pixels: Vec<u16> = (0..6 * 5).map(|i| 500 + (i as u16 % 7) * 3).collect();
     let data = le_bytes_u16(&pixels);
 
-    for compression in [Compression::None, Compression::Lzw, Compression::Deflate, Compression::PackBits] {
+    for compression in [
+        Compression::None,
+        Compression::Lzw,
+        Compression::Deflate,
+        Compression::PackBits,
+        Compression::Zstd,
+    ] {
         for predictor in [false, true] {
             let opts = WriterOptions::new(6, 5, SampleType::U16)
                 .compression(compression)

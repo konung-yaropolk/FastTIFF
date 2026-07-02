@@ -230,7 +230,8 @@ impl WriterOptions {
         self
     }
 
-    /// Strip compression: `None` (default), `Lzw`, `PackBits`, or `Deflate`.
+    /// Strip compression: `None` (default), `Lzw`, `PackBits`, `Deflate`, or
+    /// `Zstd` (tag 50000, the libtiff/GDAL extension).
     pub fn compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
         self
@@ -346,7 +347,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             bail!("samples_per_pixel must be at least 1");
         }
         if let Compression::Other(code) = compression {
-            bail!("cannot write unsupported compression scheme {code} (use None/Lzw/PackBits/Deflate)");
+            bail!("cannot write unsupported compression scheme {code} (use None/Lzw/PackBits/Deflate/Zstd)");
         }
         // Predictor 2 for integers (any width), Predictor 3 for floats —
         // matching what libtiff chooses for the same data.
@@ -612,6 +613,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             Compression::Lzw => 5,
             Compression::Deflate => 8,
             Compression::PackBits => 32773,
+            Compression::Zstd => 50000, // libtiff/GDAL registered extension
             Compression::Other(code) => code, // rejected at construction
         };
         // Chunky data with 3+ samples is RGB (photometric 2); everything else
@@ -885,6 +887,8 @@ fn compress_strip(strip: &[u8], compression: Compression, row_bytes: usize) -> R
             encoder.finish().map_err(|e| anyhow!("Deflate encode failed: {e}"))
         }
         Compression::PackBits => Ok(packbits_encode(strip, row_bytes)),
+        Compression::Zstd => zstd::stream::encode_all(strip, zstd::DEFAULT_COMPRESSION_LEVEL)
+            .map_err(|e| anyhow!("ZSTD encode failed: {e}")),
         Compression::Other(code) => bail!("unsupported TIFF compression scheme: {code}"),
     }
 }

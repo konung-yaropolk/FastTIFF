@@ -103,6 +103,11 @@ tff("tff_u32_spp1_p2_zip-pred2.tif", "u32", 2, compression="zlib", predictor=2)
 tff("tff_f32_spp1_p2_zip-pred3.tif", "f32", 2, compression="zlib", predictor=3)
 tff("tff_f32_spp1_p2_lzw-pred3.tif", "f32", 2, compression="lzw", predictor=3)
 
+# --- 4b. ZSTD (tag 50000, libtiff/GDAL extension; needs imagecodecs) ---
+tff("tff_u16_spp1_p2_zstd-rps4.tif", "u16", 2, compression="zstd", rowsperstrip=4)
+tff("tff_u16_spp1_p2_zstd-pred2.tif", "u16", 2, compression="zstd", predictor=2)
+tff("tff_f32_spp1_p2_zstd-pred3.tif", "f32", 2, compression="zstd", predictor=3)
+
 # --- 5. Big-endian files (incl. BE floating-point predictor) ---
 tff("tff_u16_spp1_p2_none-be.tif", "u16", 2, byteorder=">")
 tff("tff_i16_spp1_p2_none-be.tif", "i16", 2, byteorder=">")

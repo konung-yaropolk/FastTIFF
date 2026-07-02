@@ -37,9 +37,10 @@ metadata (and back).
 ### Supported pixel formats
 
 - 8-, 16-, and 32-bit; integer (signed or unsigned) or 32-bit IEEE float.
-- Compression: none, LZW, PackBits, Deflate/zip. Predictor 2 (horizontal
-  differencing, any integer width) and Predictor 3 (TechNote 3 floating-point,
-  as libtiff writes for float data) are undone.
+- Compression: none, LZW, PackBits, Deflate/zip, ZSTD (tag 50000, the
+  libtiff/GDAL extension). Predictor 2 (horizontal differencing, any integer
+  width) and Predictor 3 (TechNote 3 floating-point, as libtiff writes for
+  float data) are undone.
 - Chunky (interleaved) RGB is deinterleaved per sample plane.
 
 ### Not supported
@@ -208,10 +209,11 @@ writer.finish()?; // writes the IFD chain; the file isn't valid without it
   unsigned/signed/float at 8/16/32 bits.
 - **Layout:** grayscale planes (`samples_per_pixel(1)`, default) or chunky
   interleaved RGB (`samples_per_pixel(3)`, tagged photometric=RGB).
-- **Compression:** `None` (default), `Lzw`, `PackBits`, `Deflate` — plus
-  optional `predictor(true)`, which usually shrinks LZW/Deflate on
-  continuous-tone data: integers get TIFF Predictor 2 (any width), `F32`
-  gets Predictor 3 (the TechNote 3 floating-point predictor libtiff uses).
+- **Compression:** `None` (default), `Lzw`, `PackBits`, `Deflate`, `Zstd`
+  (tag 50000) — plus optional `predictor(true)`, which usually shrinks
+  LZW/Deflate/ZSTD output on continuous-tone data: integers get TIFF
+  Predictor 2 (any width), `F32` gets Predictor 3 (the TechNote 3
+  floating-point predictor libtiff uses).
 - **Strips:** uncompressed frames are one strip; compressed frames default to
   ~256 KiB strips. A big frame's strips compress in parallel under the same
   `set_parallel_decode` hint + size floor that governs decoding — one
@@ -343,7 +345,8 @@ with `tests/fixtures/generate_fixtures.py`.
 
 ## Dependencies
 
-`memmap2`, `weezl` (LZW), `flate2` (Deflate), `anyhow`, `bytemuck`, `rayon`.
+`memmap2`, `weezl` (LZW), `flate2` (Deflate), `zstd` (ZSTD; builds the C
+library via `zstd-sys`), `anyhow`, `bytemuck`, `rayon`.
 
 ## License
 

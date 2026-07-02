@@ -11,8 +11,9 @@ categories = ["visualization", "multimedia::images", "parser-implementations", "
 
 [dependencies]
 memmap2 = "0.9"
-weezl = "0.2"      # LZW decoder (compression = 5)
-flate2 = "1.1"     # Deflate/Zip decoder (compression = 8 / 32946)
+weezl = "0.2"      # LZW codec (compression = 5)
+flate2 = "1.1"     # Deflate/Zip codec (compression = 8 / 32946)
+zstd = "0.13"      # ZSTD codec (compression = 50000, libtiff/GDAL extension)
 anyhow = "1.0"
 bytemuck = { version = "1.25", features = ["extern_crate_alloc"] }
 rayon = "1.10"     # data-parallel strip decompression + 32-bit conversion

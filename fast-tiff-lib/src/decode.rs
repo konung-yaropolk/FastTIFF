@@ -498,6 +498,9 @@ fn decompress(raw: &[u8], compression: Compression, expected_len: usize) -> Resu
             Ok(out)
         }
         Compression::PackBits => Ok(packbits_decode(raw, expected_len)),
+        Compression::Zstd => {
+            zstd::stream::decode_all(raw).map_err(|e| anyhow!("ZSTD decode failed: {e}"))
+        }
         Compression::Other(code) => bail!("unsupported TIFF compression scheme: {code}"),
     }
 }

@@ -48,6 +48,9 @@ pub enum Compression {
     Lzw,
     PackBits,
     Deflate,
+    /// ZSTD (tag value 50000; a libtiff/GDAL registered extension. The
+    /// withdrawn experimental value 34926 is accepted on read too.)
+    Zstd,
     Other(u16),
 }
 
@@ -248,6 +251,7 @@ fn frame_info_from_entries(
         5 => Compression::Lzw,
         32773 => Compression::PackBits,
         8 | 32946 => Compression::Deflate,
+        50000 | 34926 => Compression::Zstd,
         other => Compression::Other(other),
     };
 
