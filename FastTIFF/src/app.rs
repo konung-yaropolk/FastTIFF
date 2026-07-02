@@ -1166,15 +1166,16 @@ impl eframe::App for ViewerApp {
                     });
 
                     // CPU decode parallelism: Auto threads only when playback
-                    // can't keep up; Serial/Threaded force it off/on. Only shown
-                    // for compressed stacks — uncompressed frames decode
-                    // zero-copy, so the setting would have no effect.
-                    let compressed = loaded
-                        .tiff
-                        .frames
-                        .first()
-                        .is_some_and(|f| f.compression != fast_tiff_lib::Compression::None);
-                    if compressed {
+                    // can't keep up; Serial/Threaded force it off/on. Threaded
+                    // decode only ever kicks in for compressed frames (parallel
+                    // strip decompression) or 32-bit frames (parallel per-pixel
+                    // rescale/cast). 8- and 16-bit uncompressed frames decode
+                    // zero-copy or with an unthreaded copy, so the control has no
+                    // effect and is hidden for them.
+                    let threadable = loaded.tiff.frames.first().is_some_and(|f| {
+                        f.compression != fast_tiff_lib::Compression::None || f.bits_per_sample == 32
+                    });
+                    if threadable {
                         ui.separator();
                         ui.label("Decode:");
                         egui::ComboBox::from_id_salt("decode_mode")
