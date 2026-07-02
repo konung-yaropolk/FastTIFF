@@ -5,7 +5,7 @@
 //! TIFF walker, not an ImageJ-specific format — it doesn't assume anything
 //! about how many IFDs there are or what writer produced them.
 
-use crate::ifd::{self, ByteOrder, RawIfdEntry};
+use crate::ifd::{self, ByteOrder, RawIfdEntry, TiffFlavor};
 use crate::ij_metadata::{self, StackMeta};
 use anyhow::{anyhow, bail, Result};
 use memmap2::Mmap;
@@ -102,6 +102,9 @@ pub struct TiffStack {
     /// ImageJ view of it; this is the unparsed original (which may not be
     /// ImageJ-formatted at all).
     pub description: Option<String>,
+    /// Classic TIFF (magic 42) or BigTIFF (magic 43). Informational — frames
+    /// decode identically either way.
+    pub flavor: TiffFlavor,
 }
 
 impl TiffStack {
@@ -113,14 +116,15 @@ impl TiffStack {
         // mapping as immutable for the lifetime of the TiffStack.
         let mmap = unsafe { Mmap::map(&file)? };
 
-        let (order, first_ifd) = ifd::read_header(&mmap)?;
+        let (order, flavor, first_ifd) = ifd::read_header(&mmap)?;
 
         let mut frames = Vec::new();
         let mut description: Option<String> = None;
         let mut ij_metadata_bytes: Option<Vec<u8>> = None;
         let mut ij_metadata_counts: Option<Vec<u32>> = None;
 
-        let mut offset = first_ifd as usize;
+        let mut offset = usize::try_from(first_ifd)
+            .map_err(|_| anyhow!("first IFD offset exceeds address space"))?;
         let mut visited = HashSet::new();
         let mut first = true;
 
@@ -128,7 +132,7 @@ impl TiffStack {
             if !visited.insert(offset) {
                 bail!("malformed TIFF: IFD chain loops back to offset {offset}");
             }
-            let parsed = ifd::read_ifd(&mmap, offset, order)?;
+            let parsed = ifd::read_ifd(&mmap, offset, order, flavor)?;
             let frame = frame_info_from_entries(&parsed.entries, &mmap, order)?;
 
             if first {
@@ -150,7 +154,8 @@ impl TiffStack {
             }
 
             frames.push(frame);
-            offset = parsed.next_offset as usize;
+            offset = usize::try_from(parsed.next_offset)
+                .map_err(|_| anyhow!("next-IFD offset exceeds address space"))?;
         }
 
         if frames.is_empty() {
@@ -200,6 +205,21 @@ impl TiffStack {
             );
         }
 
+        // ImageJ's own writer handles >4 GiB stacks not with BigTIFF but with
+        // a classic-TIFF hack: ONE IFD, `images=N` in the description, and the
+        // remaining N-1 frames appended as raw contiguous pixel data after the
+        // first. Without this, such a file opens as a single frame and
+        // scrubbing does nothing. Synthesize the virtual frames (tifffile does
+        // the same). Only the unambiguous case qualifies: a single
+        // uncompressed, predictor-free IFD whose strip data is contiguous.
+        if frames.len() == 1 {
+            if let Some(n) = description.as_deref().and_then(ij_metadata::imagej_images_count) {
+                if n > 1 {
+                    expand_imagej_contiguous(&mut frames, n, mmap.len());
+                }
+            }
+        }
+
         let meta = ij_metadata::build_stack_meta(
             description.as_deref(),
             ij_metadata_bytes.as_deref(),
@@ -213,8 +233,56 @@ impl TiffStack {
             frames,
             meta,
             description,
+            flavor,
         })
     }
+}
+
+/// Expand a single-IFD ImageJ "contiguous" stack (see the call site) into `n`
+/// virtual single-strip frames at `base + i * frame_bytes`. Leaves `frames`
+/// untouched unless the layout is unambiguously the ImageJ hack; `n` is
+/// clamped to the frames that actually fit in the file (ImageJ itself writes
+/// the count before the data, so truncated files exist in the wild).
+fn expand_imagej_contiguous(frames: &mut Vec<FrameInfo>, n: usize, file_len: usize) {
+    let f = &frames[0];
+    let sample_bytes = match f.bits_per_sample {
+        8 => 1usize,
+        16 => 2,
+        32 => 4,
+        _ => return,
+    };
+    if f.compression != Compression::None || f.predictor != 1 {
+        return;
+    }
+    let frame_bytes =
+        f.width as u64 * f.height as u64 * f.samples_per_pixel as u64 * sample_bytes as u64;
+    if frame_bytes == 0 || f.strip_offsets.is_empty() {
+        return;
+    }
+    // The IFD's strips must cover frame 0 contiguously from its first offset.
+    let base = f.strip_offsets[0];
+    let mut cursor = base;
+    for (&off, &len) in f.strip_offsets.iter().zip(f.strip_byte_counts.iter()) {
+        if off != cursor {
+            return; // gap between strips: not the contiguous layout
+        }
+        cursor += len;
+    }
+    if cursor - base < frame_bytes {
+        return; // declared strips don't even cover one frame
+    }
+
+    let available = (file_len as u64).saturating_sub(base) / frame_bytes;
+    let n = (n as u64).min(available).max(1);
+    let template = frames[0].clone();
+    *frames = (0..n)
+        .map(|i| FrameInfo {
+            strip_offsets: vec![base + i * frame_bytes],
+            strip_byte_counts: vec![frame_bytes],
+            rows_per_strip: template.height,
+            ..template.clone()
+        })
+        .collect();
 }
 
 fn frame_info_from_entries(
@@ -248,8 +316,9 @@ fn frame_info_from_entries(
             TAG_COMPRESSION => compression_raw = e.as_u32(file, order)? as u16,
             TAG_PREDICTOR => predictor = e.as_u32(file, order)? as u16,
             TAG_ROWS_PER_STRIP => rows_per_strip = e.as_u32(file, order)?,
-            TAG_STRIP_OFFSETS => strip_offsets = Some(e.as_u32_array(file, order)?),
-            TAG_STRIP_BYTE_COUNTS => strip_byte_counts = Some(e.as_u32_array(file, order)?),
+            // u64 accessors: BigTIFF stores these as LONG8 past 4 GiB.
+            TAG_STRIP_OFFSETS => strip_offsets = Some(e.as_u64_array(file, order)?),
+            TAG_STRIP_BYTE_COUNTS => strip_byte_counts = Some(e.as_u64_array(file, order)?),
             TAG_PHOTOMETRIC => photometric = e.as_u32(file, order)? as u16,
             TAG_PLANAR_CONFIG => planar_config = e.as_u32(file, order)? as u16,
             _ => {}
@@ -291,8 +360,8 @@ fn frame_info_from_entries(
         predictor,
         photometric,
         planar_config,
-        strip_offsets: strip_offsets.into_iter().map(|v| v as u64).collect(),
-        strip_byte_counts: strip_byte_counts.into_iter().map(|v| v as u64).collect(),
+        strip_offsets,
+        strip_byte_counts,
         rows_per_strip,
     })
 }

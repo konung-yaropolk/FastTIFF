@@ -10,7 +10,7 @@ pub use decode::{
     set_parallel_decode,
 };
 pub use encode::{ImageJOptions, SampleType, TiffWriter, WriterOptions};
-pub use ifd::ByteOrder;
+pub use ifd::{ByteOrder, TiffFlavor};
 pub use ij_metadata::{
     default_composite_lut, default_lut_for, grayscale_lut, resolve_dimensions, ChannelDisplay, DisplayMode,
     ResolvedDimensions, StackMeta,

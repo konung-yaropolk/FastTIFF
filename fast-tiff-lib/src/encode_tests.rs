@@ -21,11 +21,11 @@ fn write_stack(options: WriterOptions, frames: &[Vec<u8>]) -> Vec<u8> {
 /// `index::frame_info_from_entries` uses), so unit tests can decode written
 /// bytes without touching the filesystem.
 fn parse_frames(bytes: &[u8]) -> (Vec<FrameInfo>, ByteOrder) {
-    let (order, first) = ifd::read_header(bytes).unwrap();
+    let (order, flavor, first) = ifd::read_header(bytes).unwrap();
     let mut frames = Vec::new();
     let mut offset = first as usize;
     while offset != 0 {
-        let parsed = ifd::read_ifd(bytes, offset, order).unwrap();
+        let parsed = ifd::read_ifd(bytes, offset, order, flavor).unwrap();
         // The spec requires ascending tag order; verify on every IFD we parse.
         let tags: Vec<u16> = parsed.entries.iter().map(|e| e.tag).collect();
         let mut sorted = tags.clone();
@@ -229,8 +229,8 @@ fn imagej_description_lands_on_first_ifd_only() {
     let frame = le_bytes_u16(&[1, 2]);
     let bytes = write_stack(opts, &[frame.clone(), frame.clone(), frame.clone(), frame]);
 
-    let (order, first) = ifd::read_header(&bytes).unwrap();
-    let ifd0 = ifd::read_ifd(&bytes, first as usize, order).unwrap();
+    let (order, flavor, first) = ifd::read_header(&bytes).unwrap();
+    let ifd0 = ifd::read_ifd(&bytes, first as usize, order, flavor).unwrap();
     let desc_entry = ifd0.entries.iter().find(|e| e.tag == 270).expect("first IFD carries tag 270");
     let desc = desc_entry.as_ascii(&bytes, order).unwrap();
     for expected in [
@@ -239,7 +239,7 @@ fn imagej_description_lands_on_first_ifd_only() {
     ] {
         assert!(desc.contains(expected), "description missing {expected:?}:\n{desc}");
     }
-    let ifd1 = ifd::read_ifd(&bytes, ifd0.next_offset as usize, order).unwrap();
+    let ifd1 = ifd::read_ifd(&bytes, ifd0.next_offset as usize, order, flavor).unwrap();
     assert!(ifd1.entries.iter().all(|e| e.tag != 270), "later IFDs must not repeat the description");
 }
 
@@ -318,12 +318,49 @@ fn description_carries_spacing_loop_and_extra_keys() {
             .extra("tunit", "s"),
     );
     let bytes = write_stack(opts, &[vec![0], vec![1]]);
-    let (order, first) = ifd::read_header(&bytes).unwrap();
-    let ifd0 = ifd::read_ifd(&bytes, first as usize, order).unwrap();
+    let (order, flavor, first) = ifd::read_header(&bytes).unwrap();
+    let ifd0 = ifd::read_ifd(&bytes, first as usize, order, flavor).unwrap();
     let desc = ifd0.entries.iter().find(|e| e.tag == 270).unwrap().as_ascii(&bytes, order).unwrap();
     for expected in ["spacing=1.5", "loop=true", "vunit=V", "tunit=s", "slices=2"] {
         assert!(desc.contains(expected), "description missing {expected:?}:\n{desc}");
     }
+}
+
+#[test]
+fn classic_stays_classic_and_forced_bigtiff_roundtrips() {
+    let pixels: Vec<u16> = (0..12).map(|v| v * 900).collect();
+
+    // Default small file: classic header (magic 42), 8 zero pad bytes after
+    // it (data starts at 16 under both flavors), and normal decode.
+    let bytes = write_stack(WriterOptions::new(4, 3, SampleType::U16), &[le_bytes_u16(&pixels)]);
+    let (order, flavor, _) = ifd::read_header(&bytes).unwrap();
+    assert_eq!(order.u16(&bytes[2..4]), 42);
+    assert_eq!(flavor, crate::ifd::TiffFlavor::Classic);
+    assert_eq!(&bytes[8..16], &[0u8; 8], "classic keeps the reserved bytes as legal padding");
+
+    // Forced BigTIFF: magic 43, 8-byte offsets, LONG8 strip locations — and
+    // the same pixels decode back through the flavor-aware parser.
+    let opts = WriterOptions::new(4, 3, SampleType::U16).bigtiff(true);
+    let bytes = write_stack(opts, &[le_bytes_u16(&pixels), le_bytes_u16(&pixels)]);
+    let (order, flavor, _) = ifd::read_header(&bytes).unwrap();
+    assert_eq!(order.u16(&bytes[2..4]), 43);
+    assert_eq!(flavor, crate::ifd::TiffFlavor::Big);
+    let (frames, order) = parse_frames(&bytes);
+    assert_eq!(frames.len(), 2);
+    for f in &frames {
+        let decoded = read_frame_u16(&bytes, f, order, None).unwrap();
+        assert_eq!(decoded.as_ref(), &pixels[..]);
+    }
+
+    // BigTIFF works with the whole codec/predictor machinery too.
+    let opts = WriterOptions::new(4, 3, SampleType::U16)
+        .bigtiff(true)
+        .compression(Compression::Deflate)
+        .predictor(true);
+    let bytes = write_stack(opts, &[le_bytes_u16(&pixels)]);
+    let (frames, order) = parse_frames(&bytes);
+    let decoded = read_frame_u16(&bytes, &frames[0], order, None).unwrap();
+    assert_eq!(decoded.as_ref(), &pixels[..]);
 }
 
 #[test]
@@ -354,8 +391,8 @@ fn four_sample_chunky_declares_extra_samples() {
     let opts = WriterOptions::new(2, 1, SampleType::U8).samples_per_pixel(4);
     let bytes = write_stack(opts, &[data]);
 
-    let (order, first) = ifd::read_header(&bytes).unwrap();
-    let ifd0 = ifd::read_ifd(&bytes, first as usize, order).unwrap();
+    let (order, flavor, first) = ifd::read_header(&bytes).unwrap();
+    let ifd0 = ifd::read_ifd(&bytes, first as usize, order, flavor).unwrap();
     let extra = ifd0.entries.iter().find(|e| e.tag == 338).expect("ExtraSamples tag present");
     assert_eq!(extra.as_u32_array(&bytes, order).unwrap(), vec![0], "one unspecified extra sample");
 

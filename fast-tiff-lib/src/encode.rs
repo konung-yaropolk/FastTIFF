@@ -24,6 +24,7 @@
 //! (checked, with a clear error). BigTIFF, tiles, and planar (non-chunky)
 //! layouts are out of scope — matching the reader.
 
+use crate::ifd::TiffFlavor;
 use crate::ij_metadata::DisplayMode;
 use crate::index::{
     Compression, TAG_BITS_PER_SAMPLE, TAG_COMPRESSION, TAG_IMAGE_DESCRIPTION, TAG_IMAGE_LENGTH,
@@ -42,7 +43,8 @@ use std::path::Path;
 const TAG_EXTRA_SAMPLES: u16 = 338;
 
 /// Classic TIFF stores every offset as a u32, so nothing may live at or past
-/// 4 GiB. (BigTIFF, which lifts this, is not supported — matching the reader.)
+/// 4 GiB. Files that would exceed this are automatically written as BigTIFF
+/// instead (see `finish`).
 const MAX_CLASSIC_TIFF: u64 = u32::MAX as u64;
 
 /// The pixel sample layout of every frame in the stack, mapping onto TIFF's
@@ -208,6 +210,7 @@ pub struct WriterOptions {
     compression_level: Option<i32>,
     predictor: bool,
     rows_per_strip: Option<u32>,
+    force_bigtiff: bool,
     ij: Option<ImageJOptions>,
     description: Option<String>,
 }
@@ -223,6 +226,7 @@ impl WriterOptions {
             compression_level: None,
             predictor: false,
             rows_per_strip: None,
+            force_bigtiff: false,
             ij: None,
             description: None,
         }
@@ -266,6 +270,15 @@ impl WriterOptions {
     /// (parallel-decompression-friendly).
     pub fn rows_per_strip(mut self, rows: u32) -> Self {
         self.rows_per_strip = Some(rows);
+        self
+    }
+
+    /// Force BigTIFF output (magic 43, 64-bit offsets). Rarely needed: the
+    /// writer upgrades to BigTIFF **automatically** when the file grows past
+    /// classic TIFF's 4 GiB offset limit; this knob forces it for smaller
+    /// files (e.g. interop testing).
+    pub fn bigtiff(mut self, force: bool) -> Self {
+        self.force_bigtiff = force;
         self
     }
 
@@ -313,6 +326,7 @@ pub struct TiffWriter<W: Write + Seek> {
     spp: usize,
     compression: Compression,
     compression_level: Option<i32>,
+    force_bigtiff: bool,
     /// TIFF Predictor tag value: 1 = off, 2 = integer horizontal differencing,
     /// 3 = floating-point (TechNote 3). Resolved from the sample type at
     /// construction.
@@ -325,8 +339,8 @@ pub struct TiffWriter<W: Write + Seek> {
 }
 
 struct FrameStrips {
-    offsets: Vec<u32>,
-    byte_counts: Vec<u32>,
+    offsets: Vec<u64>,
+    byte_counts: Vec<u64>,
 }
 
 impl TiffWriter<BufWriter<File>> {
@@ -353,6 +367,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             compression_level,
             predictor,
             rows_per_strip,
+            force_bigtiff,
             ij,
             description,
         } = options;
@@ -407,15 +422,17 @@ impl<W: Write + Seek> TiffWriter<W> {
             None => (((256 * 1024) / row_bytes.max(1)).max(1) as u32).min(height),
         };
 
-        // Header: "II" (little-endian), magic 42, first-IFD offset patched in
-        // finish() once the chain's location is known.
-        w.write_all(b"II")?;
-        w.write_all(&42u16.to_le_bytes())?;
-        w.write_all(&0u32.to_le_bytes())?;
+        // Reserve 16 zero bytes and start pixel data at offset 16: enough
+        // room for either header. finish() writes the real one — classic
+        // (8 bytes + 8 legal pad bytes) or BigTIFF (16 bytes) — once it knows
+        // whether the file outgrew classic TIFF's 4 GiB offsets. This is what
+        // makes the BigTIFF upgrade automatic with zero re-writing of pixel
+        // data: offsets are identical under both headers.
+        w.write_all(&[0u8; 16])?;
 
         Ok(Self {
             w,
-            pos: 8,
+            pos: 16,
             frames: Vec::new(),
             width,
             height,
@@ -423,6 +440,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             spp,
             compression,
             compression_level,
+            force_bigtiff,
             predictor_tag,
             rows_per_strip,
             ij,
@@ -555,41 +573,66 @@ impl<W: Write + Seek> TiffWriter<W> {
             self.pos += 1;
         }
 
-        // Build every frame's entry list, then lay the region out twice: a
-        // sizing pass to learn each IFD table's offset (needed for the
-        // next-IFD pointers), and a serialization pass using those offsets.
-        let entry_lists: Vec<Vec<Entry>> = (0..self.frames.len())
-            .map(|i| self.build_entries(i, if i == 0 { description.as_deref() } else { None }))
-            .collect();
+        // Decide classic vs BigTIFF: classic when everything — pixel data AND
+        // the IFD region — fits below the 4 GiB offset limit. The sizing pass
+        // uses classic-shaped entries; entry sizes don't depend on the offset
+        // *values*, so this is exact even when those values wouldn't fit.
+        let build_all = |big: bool| -> Vec<Vec<Entry>> {
+            (0..self.frames.len())
+                .map(|i| self.build_entries(i, if i == 0 { description.as_deref() } else { None }, big))
+                .collect()
+        };
+        let size_region = |entry_lists: &[Vec<Entry>], flavor: TiffFlavor| -> (Vec<u64>, u64) {
+            let mut table_offsets = Vec::with_capacity(entry_lists.len());
+            let mut cursor = self.pos;
+            for entries in entry_lists {
+                let (end, table) = layout_ifd(entries, cursor, 0, flavor, None);
+                table_offsets.push(table);
+                cursor = end;
+            }
+            (table_offsets, cursor)
+        };
 
-        let mut table_offsets = Vec::with_capacity(entry_lists.len());
-        let mut cursor = self.pos;
-        for entries in &entry_lists {
-            let (end, table) = layout_ifd(entries, cursor, 0, None);
-            table_offsets.push(table);
-            cursor = end;
-        }
-        if cursor > MAX_CLASSIC_TIFF {
-            bail!(
-                "file would be {} bytes, past the 4 GiB classic-TIFF offset limit \
-                 (BigTIFF is not supported)",
-                cursor
-            );
-        }
+        let classic_lists = build_all(false);
+        let (_, classic_end) = size_region(&classic_lists, TiffFlavor::Classic);
+        let big = self.force_bigtiff || classic_end > MAX_CLASSIC_TIFF;
 
-        let mut region = Vec::with_capacity((cursor - self.pos) as usize);
+        let (flavor, entry_lists) = if big {
+            (TiffFlavor::Big, build_all(true))
+        } else {
+            (TiffFlavor::Classic, classic_lists)
+        };
+        let (table_offsets, end) = size_region(&entry_lists, flavor);
+
+        let mut region = Vec::with_capacity((end - self.pos) as usize);
         let mut start = self.pos;
         for (i, entries) in entry_lists.iter().enumerate() {
-            let next = if i + 1 < table_offsets.len() { table_offsets[i + 1] as u32 } else { 0 };
-            let (end, _) = layout_ifd(entries, start, next, Some(&mut region));
-            start = end;
+            let next = if i + 1 < table_offsets.len() { table_offsets[i + 1] } else { 0 };
+            let (new_start, _) = layout_ifd(entries, start, next, flavor, Some(&mut region));
+            start = new_start;
         }
         self.w.write_all(&region)?;
 
-        // The one seek: point the header at the first IFD table.
+        // The one seek: write the real header over the 16 reserved bytes.
+        // Both layouts leave pixel data untouched (it starts at offset 16);
+        // classic files just carry 8 legal pad bytes after their header.
         self.w.flush()?;
-        self.w.seek(SeekFrom::Start(4))?;
-        self.w.write_all(&(table_offsets[0] as u32).to_le_bytes())?;
+        self.w.seek(SeekFrom::Start(0))?;
+        let mut header = Vec::with_capacity(16);
+        header.extend_from_slice(b"II");
+        match flavor {
+            TiffFlavor::Classic => {
+                header.extend_from_slice(&42u16.to_le_bytes());
+                header.extend_from_slice(&(table_offsets[0] as u32).to_le_bytes());
+            }
+            TiffFlavor::Big => {
+                header.extend_from_slice(&43u16.to_le_bytes());
+                header.extend_from_slice(&8u16.to_le_bytes()); // offset byte size
+                header.extend_from_slice(&0u16.to_le_bytes()); // reserved
+                header.extend_from_slice(&table_offsets[0].to_le_bytes());
+            }
+        }
+        self.w.write_all(&header)?;
         self.w.flush()?;
         Ok(self.w)
     }
@@ -624,24 +667,20 @@ impl<W: Write + Seek> TiffWriter<W> {
         }
     }
 
-    /// Record and write one strip, guarding the classic-TIFF offset limit.
+    /// Record and write one strip. No size limit here: offsets are tracked as
+    /// u64, and finish() picks BigTIFF automatically when they outgrow u32.
     fn push_strip_bytes(&mut self, bytes: &[u8], strips: &mut FrameStrips) -> Result<()> {
-        if self.pos + bytes.len() as u64 > MAX_CLASSIC_TIFF {
-            bail!(
-                "writing this strip would push the file past the 4 GiB classic-TIFF offset \
-                 limit (BigTIFF is not supported) — split the stack across several files"
-            );
-        }
-        strips.offsets.push(self.pos as u32);
-        strips.byte_counts.push(bytes.len() as u32);
+        strips.offsets.push(self.pos);
+        strips.byte_counts.push(bytes.len() as u64);
         self.w.write_all(bytes)?;
         self.pos += bytes.len() as u64;
         Ok(())
     }
 
     /// The IFD entries for frame `i`, in ascending tag order (required by the
-    /// TIFF spec). `description` is only passed for the first frame.
-    fn build_entries(&self, i: usize, description: Option<&str>) -> Vec<Entry> {
+    /// TIFF spec). `description` is only passed for the first frame. `big`
+    /// selects LONG8 (BigTIFF) vs LONG storage for the strip locations.
+    fn build_entries(&self, i: usize, description: Option<&str>, big: bool) -> Vec<Entry> {
         let strips = &self.frames[i];
         let spp = self.spp as u16;
         let bits = self.sample_type.bits();
@@ -666,10 +705,24 @@ impl<W: Write + Seek> TiffWriter<W> {
         if let Some(text) = description {
             entries.push(Entry::ascii(TAG_IMAGE_DESCRIPTION, text));
         }
-        entries.push(Entry::longs(TAG_STRIP_OFFSETS, &strips.offsets));
+        // Strip locations: LONG8 in BigTIFF (offsets can exceed u32), LONG in
+        // classic (the flavor decision guarantees they fit — truncation below
+        // can only happen in the discarded classic sizing pass of a file that
+        // will be BigTIFF).
+        if big {
+            entries.push(Entry::long8s(TAG_STRIP_OFFSETS, &strips.offsets));
+        } else {
+            let offs: Vec<u32> = strips.offsets.iter().map(|&v| v as u32).collect();
+            entries.push(Entry::longs(TAG_STRIP_OFFSETS, &offs));
+        }
         entries.push(Entry::short(TAG_SAMPLES_PER_PIXEL, spp));
         entries.push(Entry::long(TAG_ROWS_PER_STRIP, self.rows_per_strip));
-        entries.push(Entry::longs(TAG_STRIP_BYTE_COUNTS, &strips.byte_counts));
+        if big {
+            entries.push(Entry::long8s(TAG_STRIP_BYTE_COUNTS, &strips.byte_counts));
+        } else {
+            let counts: Vec<u32> = strips.byte_counts.iter().map(|&v| v as u32).collect();
+            entries.push(Entry::longs(TAG_STRIP_BYTE_COUNTS, &counts));
+        }
         if self.predictor_tag != 1 {
             entries.push(Entry::short(TAG_PREDICTOR, self.predictor_tag));
         }
@@ -717,6 +770,14 @@ impl Entry {
         }
         Entry { tag, ftype: 4, count: vals.len() as u32, data }
     }
+    /// LONG8 (type 16) — BigTIFF's 64-bit unsigned, for strip locations.
+    fn long8s(tag: u16, vals: &[u64]) -> Self {
+        let mut data = Vec::with_capacity(vals.len() * 8);
+        for v in vals {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        Entry { tag, ftype: 16, count: vals.len() as u32, data }
+    }
     fn ascii(tag: u16, text: &str) -> Self {
         // ASCII fields are NUL-terminated; the count includes the terminator.
         let mut data = text.as_bytes().to_vec();
@@ -727,17 +788,28 @@ impl Entry {
 }
 
 /// Lay out (and optionally serialize) one IFD at absolute offset `start`:
-/// external value blobs first (even-aligned, for entries whose data exceeds the
-/// 4-byte inline field), then the entry table. Returns `(end_offset,
-/// table_offset)` — the table offset is what next-IFD pointers and the header
-/// must point at. Sizing and serialization share this one function so they
-/// can't drift apart.
-fn layout_ifd(entries: &[Entry], start: u64, next_ifd: u32, mut out: Option<&mut Vec<u8>>) -> (u64, u64) {
+/// external value blobs first (even-aligned, for entries whose data exceeds
+/// the flavor's inline field — 4 bytes classic, 8 BigTIFF), then the entry
+/// table (12-byte entries / u16 count / u32 next for classic; 20-byte entries
+/// / u64 count / u64 next for BigTIFF). Returns `(end_offset, table_offset)`
+/// — the table offset is what next-IFD pointers and the header must point at.
+/// Sizing and serialization share this one function so they can't drift apart.
+fn layout_ifd(
+    entries: &[Entry],
+    start: u64,
+    next_ifd: u64,
+    flavor: TiffFlavor,
+    mut out: Option<&mut Vec<u8>>,
+) -> (u64, u64) {
+    let (inline_cap, count_len, entry_len, next_len) = match flavor {
+        TiffFlavor::Classic => (4usize, 2u64, 12u64, 4u64),
+        TiffFlavor::Big => (8, 8, 20, 8),
+    };
     let mut ext_len = 0u64;
-    let mut value_fields: Vec<[u8; 4]> = Vec::with_capacity(entries.len());
+    let mut value_fields: Vec<[u8; 8]> = Vec::with_capacity(entries.len());
     for e in entries {
-        if e.data.len() <= 4 {
-            let mut field = [0u8; 4];
+        if e.data.len() <= inline_cap {
+            let mut field = [0u8; 8];
             field[..e.data.len()].copy_from_slice(&e.data);
             value_fields.push(field);
         } else {
@@ -747,7 +819,9 @@ fn layout_ifd(entries: &[Entry], start: u64, next_ifd: u32, mut out: Option<&mut
                     out.push(0);
                 }
             }
-            value_fields.push(((start + ext_len) as u32).to_le_bytes());
+            let mut field = [0u8; 8];
+            field.copy_from_slice(&(start + ext_len).to_le_bytes());
+            value_fields.push(field);
             ext_len += e.data.len() as u64;
             if let Some(out) = out.as_deref_mut() {
                 out.extend_from_slice(&e.data);
@@ -761,16 +835,30 @@ fn layout_ifd(entries: &[Entry], start: u64, next_ifd: u32, mut out: Option<&mut
         }
     }
     let table_offset = start + ext_len;
-    let end = table_offset + 2 + entries.len() as u64 * 12 + 4;
+    let end = table_offset + count_len + entries.len() as u64 * entry_len + next_len;
     if let Some(out) = out {
-        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        match flavor {
+            TiffFlavor::Classic => out.extend_from_slice(&(entries.len() as u16).to_le_bytes()),
+            TiffFlavor::Big => out.extend_from_slice(&(entries.len() as u64).to_le_bytes()),
+        }
         for (e, field) in entries.iter().zip(&value_fields) {
             out.extend_from_slice(&e.tag.to_le_bytes());
             out.extend_from_slice(&e.ftype.to_le_bytes());
-            out.extend_from_slice(&e.count.to_le_bytes());
-            out.extend_from_slice(field);
+            match flavor {
+                TiffFlavor::Classic => {
+                    out.extend_from_slice(&e.count.to_le_bytes());
+                    out.extend_from_slice(&field[..4]);
+                }
+                TiffFlavor::Big => {
+                    out.extend_from_slice(&(e.count as u64).to_le_bytes());
+                    out.extend_from_slice(field);
+                }
+            }
         }
-        out.extend_from_slice(&next_ifd.to_le_bytes());
+        match flavor {
+            TiffFlavor::Classic => out.extend_from_slice(&(next_ifd as u32).to_le_bytes()),
+            TiffFlavor::Big => out.extend_from_slice(&next_ifd.to_le_bytes()),
+        }
     }
     (end, table_offset)
 }
