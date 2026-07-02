@@ -302,3 +302,64 @@ fn multi_strip_lzw_decodes_past_the_first_strip() {
     expected.extend_from_slice(&bottom);
     assert_eq!(&*pixels, expected.as_slice(), "bottom strip's pixels are missing or wrong");
 }
+
+/// `read_planes_*` (one decompression pass for all planes) must produce
+/// exactly what the per-plane calls produce.
+#[test]
+fn read_planes_matches_per_plane_reads() {
+    // Chunky RGB8: pixel0 = (10,20,30), pixel1 = (40,50,60).
+    let mut frame = make_frame(2, 1, 1);
+    frame.bits_per_sample = 8;
+    frame.samples_per_pixel = 3;
+    frame.photometric = 2;
+    frame.strip_byte_counts = vec![6];
+    let file: Vec<u8> = vec![10, 20, 30, 40, 50, 60];
+
+    let planes8 = read_planes_u8(&file, &frame, ByteOrder::Little).unwrap();
+    let planes16 = read_planes_u16(&file, &frame, ByteOrder::Little, None).unwrap();
+    assert_eq!(planes8.len(), 3);
+    assert_eq!(planes16.len(), 3);
+    for p in 0..3 {
+        assert_eq!(planes8[p], read_plane_u8(&file, &frame, ByteOrder::Little, p).unwrap(), "u8 plane {p}");
+        assert_eq!(
+            planes16[p],
+            read_plane_u16(&file, &frame, ByteOrder::Little, None, p).unwrap(),
+            "u16 plane {p}"
+        );
+    }
+
+    // Single-sample frames return exactly one plane.
+    let frame = make_frame(2, 2, 1);
+    let file: Vec<u8> = (0..8).collect();
+    let planes = read_planes_u16(&file, &frame, ByteOrder::Little, None).unwrap();
+    assert_eq!(planes.len(), 1);
+    assert_eq!(planes[0], read_plane_u16(&file, &frame, ByteOrder::Little, None, 0).unwrap());
+}
+
+/// Some writers pad strips (e.g. to even byte counts). The padding must be
+/// dropped when strips are concatenated — counting it would shift every
+/// following row sideways.
+#[test]
+fn padded_strip_byte_counts_dont_shift_rows() {
+    // 2x4 u8, two 2-row strips of 8 bytes each; each strip stored with one
+    // trailing pad byte (0xEE) included in its byte count.
+    let top: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    let bottom: [u8; 8] = [11, 12, 13, 14, 15, 16, 17, 18];
+    let mut file = Vec::new();
+    file.extend_from_slice(&top);
+    file.push(0xEE);
+    let bottom_offset = file.len() as u64;
+    file.extend_from_slice(&bottom);
+    file.push(0xEE);
+
+    let mut frame = make_frame(4, 4, 1);
+    frame.bits_per_sample = 8;
+    frame.rows_per_strip = 2;
+    frame.strip_offsets = vec![0, bottom_offset];
+    frame.strip_byte_counts = vec![9, 9]; // 8 data bytes + 1 pad each
+
+    let pixels = read_frame_u8(&file, &frame, ByteOrder::Little).unwrap();
+    let mut expected = top.to_vec();
+    expected.extend_from_slice(&bottom);
+    assert_eq!(pixels.as_ref(), expected.as_slice(), "pad bytes leaked into the pixel data");
+}

@@ -6,13 +6,15 @@
 [![Build](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/release.yml?label=build)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
 [![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
 
-A lazy, memory-mapped reader for multi-frame (ImageJ hyperstack) TIFF files:
-IFD-chain indexing, ImageJ metadata/LUT parsing, and per-frame strip decoding —
-with a zero-copy fast path for the common uncompressed case.
+A lazy, memory-mapped reader — and a streaming writer — for multi-frame
+(ImageJ hyperstack) TIFF files: IFD-chain indexing, ImageJ metadata/LUT
+parsing, and per-frame strip decoding, with a zero-copy fast path for the
+common uncompressed case. The [writer](#writing) emits exactly that fast-path
+layout by default, so files it produces scrub back with no decode work.
 
 It's the decode/parsing engine behind [FastTIFF](https://github.com/konung-yaropolk/FastTIFF),
 split out so it can be used on its own. No GUI, no GPU — just file → pixels +
-metadata.
+metadata (and back).
 
 ## What it does
 
@@ -27,18 +29,27 @@ metadata.
 - **Parses display metadata** from ImageJ's `ImageDescription` (tag 270) and,
   as a fallback, the binary `IJMetadata` block: channel/slice/frame counts,
   display mode, per-channel LUTs + contrast ranges, calibration, `fps`, etc.
+- **Writes multi-frame stacks** streamingly (append a frame at a time, nothing
+  buffered but the current frame): 8/16/32-bit integer or float, grayscale or
+  chunky RGB, None/LZW/PackBits/Deflate compression with optional predictor,
+  and ImageJ hyperstack metadata — see [Writing](#writing).
 
 ### Supported pixel formats
 
 - 8-, 16-, and 32-bit; integer (signed or unsigned) or 32-bit IEEE float.
-- Compression: none, LZW, PackBits, Deflate/zip; horizontal predictor (2) undone.
+- Compression: none, LZW, PackBits, Deflate/zip, ZSTD (tag 50000, the
+  libtiff/GDAL extension). Predictor 2 (horizontal differencing, any integer
+  width) and Predictor 3 (TechNote 3 floating-point, as libtiff writes for
+  float data) are undone.
 - Chunky (interleaved) RGB is deinterleaved per sample plane.
 
 ### Not supported
 
 Tiled TIFFs, planar (non-chunky) multi-sample data, BigTIFF, and pyramidal /
 mixed-size stacks (every frame must share frame 0's geometry — this is enforced
-with a clear error at `open`).
+with a clear error at `open`). A 64-bit target is assumed: offset arithmetic
+uses `usize`, and classic TIFF tops out at 4 GiB — near the 32-bit address
+space limit anyway.
 
 ## Quick start
 
@@ -135,6 +146,13 @@ fn read_plane_u8(mmap, frame, order, plane: usize) -> Result<Vec<u8>>;
 fn read_frame_f32(mmap, frame, order) -> Result<Cow<[f32]>>;
 fn read_plane_f32(mmap, frame, order, plane: usize) -> Result<Vec<f32>>;
 
+// All sample planes in ONE decompression pass — for chunky RGB this is ~3x
+// cheaper than three read_plane_* calls on compressed data (each of which
+// decompresses the whole frame again). One Vec per sample plane.
+fn read_planes_u16(mmap, frame, order, float_range) -> Result<Vec<Vec<u16>>>;
+fn read_planes_u8(mmap, frame, order) -> Result<Vec<Vec<u8>>>;
+fn read_planes_f32(mmap, frame, order) -> Result<Vec<Vec<f32>>>;
+
 // Actual min/max of a 32-bit frame's raw values (for auto-ranging the display);
 // `None` for non-32-bit frames.
 fn frame_float_minmax(mmap, frame, order) -> Result<Option<(f32, f32)>>;
@@ -163,12 +181,94 @@ fast_tiff_lib::set_parallel_decode(true);  // split large decodes across cores
 fast_tiff_lib::set_parallel_decode(false); // serial (default)
 ```
 
+The same hint governs the [writer](#writing)'s per-strip compression, so one
+switch controls all CPU-heavy pixel work in both directions.
+
 This is a **performance hint only** — decoded pixels are identical either way.
 Parallel decode spreads load across cores but uses *more total CPU* (fork-join
 overhead), so it's only a win when a single core can't keep up (e.g. real-time
 playback of a large compressed stack dropping frames). It's **off by default**,
 and a small frame-size floor means tiny frames always decode serially regardless.
 The host application is expected to flip it on only when needed.
+
+## Writing
+
+The write side is a streaming stack writer in the spirit of
+[TinyTIFF](https://github.com/jkriege2/TinyTIFF): fix the frame layout up
+front, append frames one at a time, `finish()`. Format coverage follows
+libtiff (compression, predictor, sample formats, strips); the Rust shape
+follows the `tiff` crate (`TiffWriter<W: Write + Seek>`, so files and
+in-memory `Cursor`s both work).
+
+```rust
+use fast_tiff_lib::{SampleType, TiffWriter, WriterOptions};
+
+let opts = WriterOptions::new(512, 512, SampleType::U16);
+let mut writer = TiffWriter::create("stack.tif", opts)?;
+for frame in frames {
+    writer.write_frame_u16(&frame)?; // one plane per call, streamed to disk
+}
+writer.finish()?; // writes the IFD chain; the file isn't valid without it
+# Ok::<(), anyhow::Error>(())
+```
+
+### What it writes
+
+- **Samples:** `SampleType::{U8, I8, U16, I16, U32, I32, F32}` — TIFF
+  unsigned/signed/float at 8/16/32 bits.
+- **Layout:** grayscale planes (`samples_per_pixel(1)`, default) or chunky
+  interleaved RGB (`samples_per_pixel(3)`, tagged photometric=RGB).
+- **Compression:** `None` (default), `Lzw`, `PackBits`, `Deflate`, `Zstd`
+  (tag 50000) — plus optional `predictor(true)`, which usually shrinks
+  LZW/Deflate/ZSTD output on continuous-tone data: integers get TIFF
+  Predictor 2 (any width), `F32` gets Predictor 3 (the TechNote 3
+  floating-point predictor libtiff uses). `compression_level(n)` sets the
+  effort for the codecs that have one (Deflate 0–9, ZSTD 1–22).
+- **Strips:** uncompressed frames are one strip; compressed frames default to
+  ~256 KiB strips. A big frame's strips compress in parallel under the same
+  `set_parallel_decode` hint + size floor that governs decoding — one
+  threading switch for all CPU-heavy pixel work — and decompress in parallel
+  on the way back in. Override with `rows_per_strip(n)`.
+- **Metadata:** `imagej(ImageJOptions...)` embeds an ImageJ hyperstack
+  description — channels/slices (time frames are derived from the plane count
+  at `finish()`), display mode, `fps`, frame interval, unit, `min=`/`max=`
+  display range, linear calibration, Z `spacing`, playback `loop`, plus
+  `extra(key, value)` for any other documented key. Or `description(text)`
+  for a fully verbatim `ImageDescription` — either way, the reader hands the
+  whole tag 270 text back via `TiffStack::description`.
+
+```rust
+use fast_tiff_lib::{Compression, DisplayMode, ImageJOptions, SampleType, WriterOptions};
+
+// A 2-channel composite time series, Deflate-compressed:
+let opts = WriterOptions::new(1024, 1024, SampleType::U16)
+    .compression(Compression::Deflate)
+    .predictor(true)
+    .imagej(ImageJOptions::new(2, 1).mode(DisplayMode::Composite).fps(20.0));
+```
+
+Typed appenders `write_frame_u8` / `write_frame_u16` / `write_frame_f32`
+mirror the readers; `write_frame_bytes` takes raw little-endian sample bytes
+and covers the other sample types (`bytemuck::cast_slice` on any `&[i16]`,
+`&[u32]`, ... produces them for free on little-endian hosts). Planes go in
+ImageJ's `xyczt` order, matching the reader's indexing.
+
+### Guarantees & limits
+
+- Output is always **little-endian**, IFD entries in spec-required ascending
+  tag order, ASCII fields NUL-terminated, IFDs word-aligned, and samples
+  beyond the photometric base declared in `ExtraSamples` — standard TIFF6
+  any reader accepts (libtiff, ImageJ, this crate).
+- The uncompressed default (single strip, native order) is **exactly this
+  reader's zero-copy path**: `read_frame_u16`/`_u8`/`_f32` borrow straight
+  from the mapping, no decode pass. Verified by round-trip tests.
+- Pixel data streams to the sink as frames arrive; `finish()` buffers only
+  the IFD tables (~150 bytes/frame) and seeks once, to patch the header.
+- **Classic TIFF only:** the file must stay under 4 GiB (offsets are u32) —
+  exceeded writes fail with a clear error rather than corrupt. BigTIFF,
+  tiles, and planar (non-chunky) layouts are not written — the same envelope
+  the reader accepts. Binary `IJMetadata` LUT blocks aren't written (contrast
+  ranges go in the description; LUT writing may come later).
 
 ### Metadata (`StackMeta`)
 
@@ -183,7 +283,21 @@ pub struct StackMeta {
     pub channel_display: Vec<ChannelDisplay>,   // per-channel LUT + range
     pub calibration: Option<(f64, f64)>,        // linear (c0, c1): value = c0 + c1*raw
     pub fps: Option<f64>,
+    pub spacing: Option<f64>,               // Z-step between slices (spacing=)
+    pub loop_playback: Option<bool>,        // playback looping (loop=)
 }
+```
+
+This is the *parsed ImageJ view* of the metadata. The raw `ImageDescription`
+(tag 270) text is also exposed verbatim — whatever the writer put there,
+ImageJ-formatted or not:
+
+```rust
+let stack = fast_tiff_lib::TiffStack::open("movie.tif")?;
+if let Some(desc) = &stack.description {
+    println!("{desc}"); // the whole tag 270 text, unparsed
+}
+# Ok::<(), anyhow::Error>(())
 
 pub struct ChannelDisplay {
     pub lut: [[u8; 3]; 256],          // 256-entry RGB lookup table
@@ -230,9 +344,20 @@ it explicitly via `preload_frames_u16` / `preload_frames_u8` / `preload_frames_f
 — they decode all frames in parallel across frames into owned buffers — while the
 default path stays lazy and zero-copy.
 
+## Testing
+
+Besides unit and writer→reader round-trip tests, the reader is
+cross-validated against **independently-produced files**: a committed fixture
+matrix (`tests/fixtures/`, ~30 files) generated by Python's `tifffile` and by
+Pillow (whose compressed path runs the actual libtiff encoders) — covering
+every sample type, all codecs, predictor 2/3, big-endian, RGB, multi-strip,
+ImageJ hyperstack metadata, and an unsupported-tiled error case. Regenerate
+with `tests/fixtures/generate_fixtures.py`.
+
 ## Dependencies
 
-`memmap2`, `weezl` (LZW), `flate2` (Deflate), `anyhow`, `bytemuck`, `rayon`.
+`memmap2`, `weezl` (LZW), `flate2` (Deflate), `zstd` (ZSTD; builds the C
+library via `zstd-sys`), `anyhow`, `bytemuck`, `rayon`.
 
 ## License
 

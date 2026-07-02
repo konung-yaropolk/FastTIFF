@@ -13,19 +13,21 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::path::Path;
 
-const TAG_IMAGE_WIDTH: u16 = 256;
-const TAG_IMAGE_LENGTH: u16 = 257;
-const TAG_BITS_PER_SAMPLE: u16 = 258;
-const TAG_COMPRESSION: u16 = 259;
-const TAG_PHOTOMETRIC: u16 = 262;
-const TAG_IMAGE_DESCRIPTION: u16 = 270;
-const TAG_STRIP_OFFSETS: u16 = 273;
-const TAG_SAMPLES_PER_PIXEL: u16 = 277;
-const TAG_ROWS_PER_STRIP: u16 = 278;
-const TAG_STRIP_BYTE_COUNTS: u16 = 279;
-const TAG_PREDICTOR: u16 = 317;
-const TAG_PLANAR_CONFIG: u16 = 284;
-const TAG_SAMPLE_FORMAT: u16 = 339;
+// `pub(crate)`: shared with the write side (`encode`), so reader and writer
+// can never disagree on tag numbers.
+pub(crate) const TAG_IMAGE_WIDTH: u16 = 256;
+pub(crate) const TAG_IMAGE_LENGTH: u16 = 257;
+pub(crate) const TAG_BITS_PER_SAMPLE: u16 = 258;
+pub(crate) const TAG_COMPRESSION: u16 = 259;
+pub(crate) const TAG_PHOTOMETRIC: u16 = 262;
+pub(crate) const TAG_IMAGE_DESCRIPTION: u16 = 270;
+pub(crate) const TAG_STRIP_OFFSETS: u16 = 273;
+pub(crate) const TAG_SAMPLES_PER_PIXEL: u16 = 277;
+pub(crate) const TAG_ROWS_PER_STRIP: u16 = 278;
+pub(crate) const TAG_STRIP_BYTE_COUNTS: u16 = 279;
+pub(crate) const TAG_PREDICTOR: u16 = 317;
+pub(crate) const TAG_PLANAR_CONFIG: u16 = 284;
+pub(crate) const TAG_SAMPLE_FORMAT: u16 = 339;
 // Tags 50838/50839 (IJMetadataByteCounts / IJMetadata) carry ImageJ's binary
 // per-channel LUT/range block. The format is undocumented and best-effort to
 // parse, so it's used only as a supplementary fallback for display info the
@@ -40,12 +42,18 @@ pub enum SampleFormat {
     Float,
 }
 
+// `non_exhaustive`: codecs have been added before (ZSTD) and may be again;
+// downstream matches keep a wildcard arm so that's not a breaking change.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Compression {
     None,
     Lzw,
     PackBits,
     Deflate,
+    /// ZSTD (tag value 50000; a libtiff/GDAL registered extension. The
+    /// withdrawn experimental value 34926 is accepted on read too.)
+    Zstd,
     Other(u16),
 }
 
@@ -80,11 +88,20 @@ impl FrameInfo {
     }
 }
 
+// `non_exhaustive`: fields have been added before (`description`) and may be
+// again; constructing this outside the crate isn't meaningful anyway (it's
+// produced by `open`).
+#[non_exhaustive]
 pub struct TiffStack {
     pub mmap: Mmap,
     pub byte_order: ByteOrder,
     pub frames: Vec<FrameInfo>,
     pub meta: StackMeta,
+    /// The first IFD's raw `ImageDescription` (tag 270) text, verbatim —
+    /// full access to whatever the writer put there. `meta` holds the parsed
+    /// ImageJ view of it; this is the unparsed original (which may not be
+    /// ImageJ-formatted at all).
+    pub description: Option<String>,
 }
 
 impl TiffStack {
@@ -167,6 +184,22 @@ impl TiffStack {
             );
         }
 
+        // Planar (non-chunky) multi-sample data stores each sample plane
+        // separately; every decoder here assumes chunky interleaving, so a
+        // planar file would silently deinterleave into garbage. Refuse it
+        // with a clear error instead (same policy as tiled TIFFs).
+        if let Some((i, f)) = frames
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.samples_per_pixel > 1 && f.planar_config == 2)
+        {
+            bail!(
+                "frame {i} stores its {} samples/pixel in planar (non-interleaved) layout \
+                 (PlanarConfiguration=2), which is not supported — only chunky TIFFs are",
+                f.samples_per_pixel
+            );
+        }
+
         let meta = ij_metadata::build_stack_meta(
             description.as_deref(),
             ij_metadata_bytes.as_deref(),
@@ -179,6 +212,7 @@ impl TiffStack {
             byte_order: order,
             frames,
             meta,
+            description,
         })
     }
 }
@@ -190,7 +224,10 @@ fn frame_info_from_entries(
 ) -> Result<FrameInfo> {
     let mut width = None;
     let mut height = None;
-    let mut bits_per_sample = 16u16; // baseline TIFF default if tag absent
+    // The TIFF6 default for a missing BitsPerSample is 1 (bilevel), but 1-bit
+    // data isn't decodable here anyway; 16 is the pragmatic default for the
+    // scientific files this library targets, where the tag is always present.
+    let mut bits_per_sample = 16u16;
     let mut samples_per_pixel = 1u16; // default per spec
     let mut sample_format_raw = 1u16; // default: unsigned integer
     let mut compression_raw = 1u16; // default: no compression
@@ -240,6 +277,7 @@ fn frame_info_from_entries(
         5 => Compression::Lzw,
         32773 => Compression::PackBits,
         8 | 32946 => Compression::Deflate,
+        50000 | 34926 => Compression::Zstd,
         other => Compression::Other(other),
     };
 
