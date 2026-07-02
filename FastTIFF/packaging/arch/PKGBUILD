@@ -1,10 +1,10 @@
 # Maintainer: konung_yaropolk
-# Builds FastTIFF from the tagged GitHub source. Used both for AUR submission
-# and by the Arch job in .github/workflows/release.yml (which rewrites pkgver
-# per release).
+# Builds FastTIFF from git. The version is read from FastTIFF/Cargo.toml by
+# pkgver() (a tarball source can't, since the URL would need the version up
+# front). Used for AUR and by the Arch job in .github/workflows/release.yml,
+# which pins the checkout to the released tag.
 pkgname=fasttiff
-_reponame=FastTIFF
-pkgver=$pkgver
+pkgver=0
 pkgrel=1
 pkgdesc="A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering"
 arch=('x86_64')
@@ -14,33 +14,33 @@ license=('GPL-3.0-only')
 # Trim with `namcap` against the built package if you want a minimal set.
 depends=('gcc-libs' 'glibc' 'gtk3' 'libglvnd' 'libxkbcommon'
          'libx11' 'libxcursor' 'libxi' 'libxrandr' 'wayland' 'fontconfig')
-makedepends=('rust')
+makedepends=('rust' 'git')
 # Strip the binary but don't split symbols into a separate fasttiff-debug
 # package — so the release only gets the one .pkg.tar.zst.
 options=('!debug' 'strip')
-# GitHub's tag tarball for v$pkgver extracts to $_reponame-$pkgver/.
-source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+source=("$pkgname::git+$url.git")
 sha256sums=('SKIP')
 
 pkgver() {
-    cd "$srcdir/$pkgname"
-    # take the FIRST version = "..." line (the [package] one) and strip quotes
-    grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/'
+    # The crate version from the app's Cargo.toml (the workspace root has none).
+    awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' "$srcdir/$pkgname/FastTIFF/Cargo.toml"
 }
 
 prepare() {
-    cd "$_reponame-$pkgver"
-    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+    cd "$pkgname"
+    # No --locked: don't fail when the committed Cargo.lock lags a version bump.
+    # cargo refreshes it here (with network) so the offline build below works.
+    cargo fetch --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-    cd "$_reponame-$pkgver"
+    cd "$pkgname"
     export CARGO_TARGET_DIR=target
-    cargo build --frozen --release -p FastTIFF
+    cargo build --release --offline -p FastTIFF
 }
 
 package() {
-    cd "$_reponame-$pkgver"
+    cd "$pkgname"
     install -Dm755 target/release/FastTIFF "$pkgdir/usr/bin/FastTIFF"
     # Lowercase convenience name.
     ln -s FastTIFF "$pkgdir/usr/bin/fasttiff"

@@ -117,14 +117,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Pin the PKGBUILD to the released version. Tags are v-prefixed (v1.4.3);
-      # pkgver and the `v$pkgver` source URL want the bare number.
-      - name: Set pkgver from release tag
+      # Build exactly the released commit: pin the git source to the tag.
+      # pkgver() in the PKGBUILD derives the version number from Cargo.toml.
+      - name: Pin source to released tag
         env:
           TAG: ${{ github.event.release.tag_name }}
-        run: sed -i "s/^pkgver=.*/pkgver=${TAG#v}/" FastTIFF/packaging/arch/PKGBUILD
+        run: sed -i "s|\.git\")|.git#tag=${TAG}\")|" FastTIFF/packaging/arch/PKGBUILD
 
-      # makepkg downloads the tagged source tarball, builds it, and packages.
+      # makepkg clones the tagged source, builds it, and packages.
       - name: Build package
         run: |
           useradd -m builder
