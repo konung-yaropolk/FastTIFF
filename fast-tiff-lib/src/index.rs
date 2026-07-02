@@ -13,19 +13,21 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::path::Path;
 
-const TAG_IMAGE_WIDTH: u16 = 256;
-const TAG_IMAGE_LENGTH: u16 = 257;
-const TAG_BITS_PER_SAMPLE: u16 = 258;
-const TAG_COMPRESSION: u16 = 259;
-const TAG_PHOTOMETRIC: u16 = 262;
-const TAG_IMAGE_DESCRIPTION: u16 = 270;
-const TAG_STRIP_OFFSETS: u16 = 273;
-const TAG_SAMPLES_PER_PIXEL: u16 = 277;
-const TAG_ROWS_PER_STRIP: u16 = 278;
-const TAG_STRIP_BYTE_COUNTS: u16 = 279;
-const TAG_PREDICTOR: u16 = 317;
-const TAG_PLANAR_CONFIG: u16 = 284;
-const TAG_SAMPLE_FORMAT: u16 = 339;
+// `pub(crate)`: shared with the write side (`encode`), so reader and writer
+// can never disagree on tag numbers.
+pub(crate) const TAG_IMAGE_WIDTH: u16 = 256;
+pub(crate) const TAG_IMAGE_LENGTH: u16 = 257;
+pub(crate) const TAG_BITS_PER_SAMPLE: u16 = 258;
+pub(crate) const TAG_COMPRESSION: u16 = 259;
+pub(crate) const TAG_PHOTOMETRIC: u16 = 262;
+pub(crate) const TAG_IMAGE_DESCRIPTION: u16 = 270;
+pub(crate) const TAG_STRIP_OFFSETS: u16 = 273;
+pub(crate) const TAG_SAMPLES_PER_PIXEL: u16 = 277;
+pub(crate) const TAG_ROWS_PER_STRIP: u16 = 278;
+pub(crate) const TAG_STRIP_BYTE_COUNTS: u16 = 279;
+pub(crate) const TAG_PREDICTOR: u16 = 317;
+pub(crate) const TAG_PLANAR_CONFIG: u16 = 284;
+pub(crate) const TAG_SAMPLE_FORMAT: u16 = 339;
 // Tags 50838/50839 (IJMetadataByteCounts / IJMetadata) carry ImageJ's binary
 // per-channel LUT/range block. The format is undocumented and best-effort to
 // parse, so it's used only as a supplementary fallback for display info the

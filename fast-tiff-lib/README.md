@@ -6,13 +6,15 @@
 [![Build](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/release.yml?label=build)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
 [![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
 
-A lazy, memory-mapped reader for multi-frame (ImageJ hyperstack) TIFF files:
-IFD-chain indexing, ImageJ metadata/LUT parsing, and per-frame strip decoding —
-with a zero-copy fast path for the common uncompressed case.
+A lazy, memory-mapped reader — and a streaming writer — for multi-frame
+(ImageJ hyperstack) TIFF files: IFD-chain indexing, ImageJ metadata/LUT
+parsing, and per-frame strip decoding, with a zero-copy fast path for the
+common uncompressed case. The [writer](#writing) emits exactly that fast-path
+layout by default, so files it produces scrub back with no decode work.
 
 It's the decode/parsing engine behind [FastTIFF](https://github.com/konung-yaropolk/FastTIFF),
 split out so it can be used on its own. No GUI, no GPU — just file → pixels +
-metadata.
+metadata (and back).
 
 ## What it does
 
@@ -27,6 +29,10 @@ metadata.
 - **Parses display metadata** from ImageJ's `ImageDescription` (tag 270) and,
   as a fallback, the binary `IJMetadata` block: channel/slice/frame counts,
   display mode, per-channel LUTs + contrast ranges, calibration, `fps`, etc.
+- **Writes multi-frame stacks** streamingly (append a frame at a time, nothing
+  buffered but the current frame): 8/16/32-bit integer or float, grayscale or
+  chunky RGB, None/LZW/PackBits/Deflate compression with optional predictor,
+  and ImageJ hyperstack metadata — see [Writing](#writing).
 
 ### Supported pixel formats
 
@@ -169,6 +175,78 @@ overhead), so it's only a win when a single core can't keep up (e.g. real-time
 playback of a large compressed stack dropping frames). It's **off by default**,
 and a small frame-size floor means tiny frames always decode serially regardless.
 The host application is expected to flip it on only when needed.
+
+## Writing
+
+The write side is a streaming stack writer in the spirit of
+[TinyTIFF](https://github.com/jkriege2/TinyTIFF): fix the frame layout up
+front, append frames one at a time, `finish()`. Format coverage follows
+libtiff (compression, predictor, sample formats, strips); the Rust shape
+follows the `tiff` crate (`TiffWriter<W: Write + Seek>`, so files and
+in-memory `Cursor`s both work).
+
+```rust
+use fast_tiff_lib::{SampleType, TiffWriter, WriterOptions};
+
+let opts = WriterOptions::new(512, 512, SampleType::U16);
+let mut writer = TiffWriter::create("stack.tif", opts)?;
+for frame in frames {
+    writer.write_frame_u16(&frame)?; // one plane per call, streamed to disk
+}
+writer.finish()?; // writes the IFD chain; the file isn't valid without it
+# Ok::<(), anyhow::Error>(())
+```
+
+### What it writes
+
+- **Samples:** `SampleType::{U8, I8, U16, I16, U32, I32, F32}` — TIFF
+  unsigned/signed/float at 8/16/32 bits.
+- **Layout:** grayscale planes (`samples_per_pixel(1)`, default) or chunky
+  interleaved RGB (`samples_per_pixel(3)`, tagged photometric=RGB).
+- **Compression:** `None` (default), `Lzw`, `PackBits`, `Deflate` — plus
+  optional `predictor(true)` (TIFF Predictor 2, 8/16-bit integers only),
+  which usually shrinks LZW/Deflate on continuous-tone data.
+- **Strips:** uncompressed frames are one strip; compressed frames default to
+  ~256 KiB strips (a big frame's strips are compressed in parallel, and
+  decompress in parallel on the way back in). Override with
+  `rows_per_strip(n)`.
+- **Metadata:** `imagej(ImageJOptions...)` embeds an ImageJ hyperstack
+  description — channels/slices (time frames are derived from the plane count
+  at `finish()`), display mode, `fps`, frame interval, unit, `min=`/`max=`
+  display range, linear calibration. Or `description(text)` for a verbatim
+  `ImageDescription`.
+
+```rust
+use fast_tiff_lib::{Compression, DisplayMode, ImageJOptions, SampleType, WriterOptions};
+
+// A 2-channel composite time series, Deflate-compressed:
+let opts = WriterOptions::new(1024, 1024, SampleType::U16)
+    .compression(Compression::Deflate)
+    .predictor(true)
+    .imagej(ImageJOptions::new(2, 1).mode(DisplayMode::Composite).fps(20.0));
+```
+
+Typed appenders `write_frame_u8` / `write_frame_u16` / `write_frame_f32`
+mirror the readers; `write_frame_bytes` takes raw little-endian sample bytes
+and covers the other sample types (`bytemuck::cast_slice` on any `&[i16]`,
+`&[u32]`, ... produces them for free on little-endian hosts). Planes go in
+ImageJ's `xyczt` order, matching the reader's indexing.
+
+### Guarantees & limits
+
+- Output is always **little-endian**, IFD entries in spec-required ascending
+  tag order, ASCII fields NUL-terminated, IFDs word-aligned — standard TIFF6
+  any reader accepts (libtiff, ImageJ, this crate).
+- The uncompressed default (single strip, native order) is **exactly this
+  reader's zero-copy path**: `read_frame_u16`/`_u8`/`_f32` borrow straight
+  from the mapping, no decode pass. Verified by round-trip tests.
+- Pixel data streams to the sink as frames arrive; `finish()` buffers only
+  the IFD tables (~150 bytes/frame) and seeks once, to patch the header.
+- **Classic TIFF only:** the file must stay under 4 GiB (offsets are u32) —
+  exceeded writes fail with a clear error rather than corrupt. BigTIFF,
+  tiles, and planar (non-chunky) layouts are not written — the same envelope
+  the reader accepts. Binary `IJMetadata` LUT blocks aren't written (contrast
+  ranges go in the description; LUT writing may come later).
 
 ### Metadata (`StackMeta`)
 
