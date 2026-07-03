@@ -364,10 +364,14 @@ fn bench_raw(raw_path: &Path, cfg: &TestConfig) -> Result<FrameResult> {
     Ok(FrameResult { name: "RAW fread", per_frame_us: per_frame, bytes_per_frame: bpf, checksum: sum, open_us })
 }
 
-/// fast-tiff-lib per-frame reads: the format-appropriate read_* call, forced
-/// to an owned buffer. RGB uses read_planes_* (one decompression, all planes).
+/// fast-tiff-lib per-frame reads via the `*_into` API: each frame decodes
+/// into a **reused host buffer** — the same model as the C readers (and the
+/// RAW baseline), so per-frame allocation isn't part of the measurement. RGB
+/// uses read_planes_*_into (one decompression pass, all planes).
 fn bench_fast_tiff(path: &Path, cfg: &TestConfig) -> Result<FrameResult> {
-    use fast_tiff_lib::{read_frame_f32, read_frame_u16, read_frame_u8, read_planes_u16, read_planes_u8};
+    use fast_tiff_lib::{
+        read_frame_f32_into, read_frame_u16_into, read_frame_u8_into, read_planes_u16_into, read_planes_u8_into,
+    };
 
     let bpf = cfg.bytes_per_frame();
     let t_open = Instant::now();
@@ -379,36 +383,41 @@ fn bench_fast_tiff(path: &Path, cfg: &TestConfig) -> Result<FrameResult> {
     let order = stack.byte_order;
     let mut per_frame = Vec::with_capacity(cfg.frames);
     let mut sum: u64 = 0;
+    let mut buf8: Vec<u8> = Vec::new();
+    let mut buf16: Vec<u16> = Vec::new();
+    let mut buf32: Vec<f32> = Vec::new();
+    let mut planes8: Vec<Vec<u8>> = Vec::new();
+    let mut planes16: Vec<Vec<u16>> = Vec::new();
 
     for frame in &stack.frames {
         let t = Instant::now();
         match cfg.format {
             PixelFormat::U8 => {
-                let data = read_frame_u8(&stack.mmap, frame, order)?.into_owned();
+                read_frame_u8_into(&stack.mmap, frame, order, &mut buf8)?;
                 per_frame.push(t.elapsed().as_secs_f64() * 1e6);
-                sum = sum.wrapping_add(checksum_bytes(&data));
+                sum = sum.wrapping_add(checksum_bytes(&buf8));
             }
             PixelFormat::U16 => {
-                let data = read_frame_u16(&stack.mmap, frame, order, None)?.into_owned();
+                read_frame_u16_into(&stack.mmap, frame, order, None, &mut buf16)?;
                 per_frame.push(t.elapsed().as_secs_f64() * 1e6);
-                sum = sum.wrapping_add(checksum_u16(&data));
+                sum = sum.wrapping_add(checksum_u16(&buf16));
             }
             PixelFormat::F32 => {
-                let data = read_frame_f32(&stack.mmap, frame, order)?.into_owned();
+                read_frame_f32_into(&stack.mmap, frame, order, &mut buf32)?;
                 per_frame.push(t.elapsed().as_secs_f64() * 1e6);
-                sum = sum.wrapping_add(checksum_f32(&data));
+                sum = sum.wrapping_add(checksum_f32(&buf32));
             }
             PixelFormat::RgbU8 => {
-                let planes = read_planes_u8(&stack.mmap, frame, order)?;
+                read_planes_u8_into(&stack.mmap, frame, order, &mut planes8)?;
                 per_frame.push(t.elapsed().as_secs_f64() * 1e6);
-                for p in &planes {
+                for p in &planes8 {
                     sum = sum.wrapping_add(checksum_bytes(p));
                 }
             }
             PixelFormat::RgbU16 => {
-                let planes = read_planes_u16(&stack.mmap, frame, order, None)?;
+                read_planes_u16_into(&stack.mmap, frame, order, None, &mut planes16)?;
                 per_frame.push(t.elapsed().as_secs_f64() * 1e6);
-                for p in &planes {
+                for p in &planes16 {
                     sum = sum.wrapping_add(checksum_u16(p));
                 }
             }

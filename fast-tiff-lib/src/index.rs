@@ -285,6 +285,31 @@ fn expand_imagej_contiguous(frames: &mut Vec<FrameInfo>, n: usize, file_len: usi
         .collect();
 }
 
+impl TiffStack {
+    /// Touch every page of `frame`'s strip data so a subsequent decode doesn't
+    /// stall on page faults. First access to a memory-mapped page soft-faults,
+    /// which is cheap on Linux but costs real time on Windows; calling this
+    /// from a background thread (e.g. a decode-ahead worker) for the *next*
+    /// frame absorbs those faults off the latency-critical path. Purely a
+    /// performance hint — safe to skip, safe to repeat.
+    pub fn prefetch_frame(&self, frame: &FrameInfo) {
+        const PAGE: usize = 4096;
+        for (&off, &len) in frame.strip_offsets.iter().zip(frame.strip_byte_counts.iter()) {
+            let start = off as usize;
+            let end = start.saturating_add(len as usize).min(self.mmap.len());
+            let Some(strip) = self.mmap.get(start..end) else { continue };
+            let mut i = 0;
+            while i < strip.len() {
+                std::hint::black_box(strip[i]);
+                i += PAGE;
+            }
+            if let Some(&last) = strip.last() {
+                std::hint::black_box(last);
+            }
+        }
+    }
+}
+
 fn frame_info_from_entries(
     entries: &[RawIfdEntry],
     file: &[u8],

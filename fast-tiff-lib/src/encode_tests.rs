@@ -296,6 +296,34 @@ fn predictor_covers_all_sample_widths_and_floats() {
     assert_eq!(red, vec![1000, 1010, 990]);
     let blue = crate::decode::read_plane_u16(&bytes, &frames[0], order, None, 2).unwrap();
     assert_eq!(blue, vec![3000, 3020, 2980]);
+    // The batched planes reader fuses the predictor undo into its gather —
+    // it must agree exactly with the unfused per-plane reads.
+    let planes = crate::decode::read_planes_u16(&bytes, &frames[0], order, None).unwrap();
+    for p in 0..3 {
+        assert_eq!(
+            planes[p],
+            crate::decode::read_plane_u16(&bytes, &frames[0], order, None, p).unwrap(),
+            "fused vs unfused predictor-2 plane {p}"
+        );
+    }
+
+    // Same fusion check for raw 8-bit RGB planes.
+    let rgb8: Vec<u8> = vec![10, 20, 30, 14, 18, 33, 9, 22, 28];
+    let opts = WriterOptions::new(3, 1, SampleType::U8)
+        .samples_per_pixel(3)
+        .compression(Compression::Deflate)
+        .predictor(true);
+    let bytes = write_stack(opts, &[rgb8]);
+    let (frames, order) = parse_frames(&bytes);
+    let planes = crate::decode::read_planes_u8(&bytes, &frames[0], order).unwrap();
+    assert_eq!(planes[0], vec![10, 14, 9]);
+    for p in 0..3 {
+        assert_eq!(
+            planes[p],
+            crate::decode::read_plane_u8(&bytes, &frames[0], order, p).unwrap(),
+            "fused vs unfused 8-bit predictor-2 plane {p}"
+        );
+    }
 }
 
 #[test]
