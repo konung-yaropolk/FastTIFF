@@ -773,7 +773,7 @@ fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &LoadedStack) {
     egui::Window::new("File metadata")
         .open(open)
         .resizable(true)
-        .default_width(440.0)
+        .default_width(256.0)
         .vscroll(true)
         .show(ctx, |ui| {
             fn kv(ui: &mut egui::Ui, k: &str, v: impl Into<String>) {
@@ -784,11 +784,10 @@ fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &LoadedStack) {
 
             ui.heading("File");
             egui::Grid::new("meta_file").num_columns(2).striped(true).show(ui, |ui| {
-                kv(ui, "Path", loaded.path.display().to_string());
                 kv(ui, "Size", human_bytes(tiff.mmap.len() as u64));
                 let container = match tiff.flavor {
-                    fast_tiff_lib::TiffFlavor::Classic => "classic TIFF (magic 42, 32-bit offsets)",
-                    fast_tiff_lib::TiffFlavor::Big => "BigTIFF (magic 43, 64-bit offsets)",
+                    fast_tiff_lib::TiffFlavor::Classic => "classic TIFF",
+                    fast_tiff_lib::TiffFlavor::Big => "BigTIFF",
                 };
                 kv(ui, "Container", container);
                 let order = match tiff.byte_order {
@@ -800,7 +799,7 @@ fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &LoadedStack) {
             });
 
             if let Some(f) = tiff.frames.first() {
-                ui.add_space(6.0);
+                ui.add_space(12.0);
                 ui.heading("Frame format");
                 egui::Grid::new("meta_frame").num_columns(2).striped(true).show(ui, |ui| {
                     kv(ui, "Dimensions", format!("{} x {} px", f.width, f.height));
@@ -828,7 +827,7 @@ fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &LoadedStack) {
                     };
                     kv(ui, "Photometric", photometric);
                     let compression = match f.compression {
-                        fast_tiff_lib::Compression::None => "none (uncompressed)".into(),
+                        fast_tiff_lib::Compression::None => "uncompressed".into(),
                         fast_tiff_lib::Compression::Lzw => "LZW".into(),
                         fast_tiff_lib::Compression::PackBits => "PackBits".into(),
                         fast_tiff_lib::Compression::Deflate => "Deflate (zip)".into(),
@@ -856,7 +855,26 @@ fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &LoadedStack) {
                 });
             }
 
-            ui.add_space(6.0);
+            ui.add_space(12.0);
+            egui::CollapsingHeader::new("ImageDescription (tag 270)")
+                .default_open(true)
+                .show(ui, |ui| match &tiff.description {
+                    Some(desc) => {
+                        // Read-only TextEdit: selectable + copyable.
+                        let mut text = desc.as_str();
+                        ui.add(
+                            egui::TextEdit::multiline(&mut text)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(desc.lines().count().clamp(2, 16)),
+                        );
+                    }
+                    None => {
+                        ui.label(RichText::new("(this file carries no ImageDescription)").weak());
+                    }
+                });
+
+            ui.add_space(12.0);
             ui.heading("ImageJ metadata");
             let meta = &tiff.meta;
             egui::Grid::new("meta_ij").num_columns(2).striped(true).show(ui, |ui| {
@@ -900,25 +918,6 @@ fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &LoadedStack) {
                     kv(ui, &format!("Ch {} display range", i + 1), range);
                 }
             });
-
-            ui.add_space(6.0);
-            egui::CollapsingHeader::new("ImageDescription (tag 270, raw)")
-                .default_open(false)
-                .show(ui, |ui| match &tiff.description {
-                    Some(desc) => {
-                        // Read-only TextEdit: selectable + copyable.
-                        let mut text = desc.as_str();
-                        ui.add(
-                            egui::TextEdit::multiline(&mut text)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(desc.lines().count().clamp(2, 16)),
-                        );
-                    }
-                    None => {
-                        ui.label(RichText::new("(this file carries no ImageDescription)").weak());
-                    }
-                });
         });
 }
 
@@ -1373,9 +1372,9 @@ impl eframe::App for ViewerApp {
                     }
 
                     // File-metadata pop-up toggle, pushed to the row's right edge.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {                        
                         if ui
-                            .button(RichText::new("\u{1F5CE}").size(16.0))
+                            .button(RichText::new("</>").size(16.0))
                             .on_hover_text("See metadata")
                             .clicked()
                         {
