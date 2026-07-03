@@ -385,6 +385,43 @@ BigTIFF (including big-endian BigTIFF), ImageJ hyperstack metadata, and an
 unsupported-tiled error case. Regenerate with
 `tests/fixtures/generate_fixtures.py`.
 
+## Benchmarks
+
+[`bench/`](https://github.com/konung-yaropolk/FastTIFF/tree/main/fast-tiff-lib/bench)
+holds a reproducible benchmark comparing per-frame read speed against the
+pure-Rust [`tiff`](https://crates.io/crates/tiff) crate, the C
+[TinyTIFF](https://github.com/jkriege2/TinyTIFF) reader (vendored), optionally
+system libtiff, and a raw `fread` floor — across every sample format, codec,
+predictor, strip layout, BigTIFF, and several frame counts, on stacks written
+by this crate's own writer. Numbers below: Ryzen 7 5800X, Windows 10,
+rustc 1.96.
+
+- **Scrubbing — the design target.** After the up-front IFD index, reading a
+  frame of a **1,000,000-frame** stack takes **0.08 µs**, vs 1.5–2.4 µs for
+  every other reader (≈20–30×). Even *including* its ~0.4 s open/index cost,
+  the full million-frame pass finishes in ~0.6 s — fastest in the field
+  (tiff-rs 2.2 s, TinyTIFF 2.5 s, raw `fread` 1.6 s).
+- **Coverage matrix** (45 runs): geometric-mean relative speed **2.0×** of
+  each run's fastest reader — ahead of tiff-rs (2.2×). TinyTIFF leads the
+  uncompressed-only subset it supports (see the caveat below).
+- **Outright wins:** PackBits (46 µs vs tiff-rs's 4 200 µs per frame, ≈90×)
+  and compressed RGB with predictor (the fused `read_planes_*` path).
+- **Batch loading:** `preload_frames_*` (rayon, across frames) wins 17 of its
+  39 runs — the fastest way to slurp a compressed stack into RAM.
+- **Writer throughput:** ≈2.7 GB/s uncompressed, 1.0 GB/s PackBits,
+  460 MB/s ZSTD, 150 MB/s Deflate, 115 MB/s LZW.
+
+![Benchmark summary](https://raw.githubusercontent.com/konung-yaropolk/FastTIFF/main/fast-tiff-lib/docs/bench_summary.png)
+
+![Frame-count sweep](https://raw.githubusercontent.com/konung-yaropolk/FastTIFF/main/fast-tiff-lib/docs/bench_sweep.png)
+
+One honest caveat: the benchmark forces every reader to produce owned buffers
+and reads each frame exactly once, which bills mmap's one-time page-fault
+cost (expensive on Windows, minor on Linux) entirely to this crate while
+giving its zero-copy design no credit — the uncompressed single-pass rows are
+a *lower bound*. Methodology, machine details, and how to run are in
+[`bench/README.md`](https://github.com/konung-yaropolk/FastTIFF/blob/main/fast-tiff-lib/bench/README.md).
+
 ## Dependencies
 
 `memmap2`, `weezl` (LZW), `flate2` (Deflate), `zstd` (ZSTD; builds the C
