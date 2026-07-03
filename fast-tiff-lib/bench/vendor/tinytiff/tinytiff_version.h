@@ -1,0 +1,7 @@
+#ifndef TINYTIFF_VERSION_DEFINES_H
+#define TINYTIFF_VERSION_DEFINES_H
+#define TINYTIFF_VERSION "4.0.0"
+#define TINYTIFF_COMPILETIME "benchmark"
+#define TINYTIFF_GITVERSION "vendored"
+#define TINYTIFF_FULLVERSION "4.0.0 (benchmark)"
+#endif
