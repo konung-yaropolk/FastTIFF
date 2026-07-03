@@ -336,6 +336,84 @@ fn read_planes_matches_per_plane_reads() {
     assert_eq!(planes[0], read_plane_u16(&file, &frame, ByteOrder::Little, None, 0).unwrap());
 }
 
+/// The `_into` variants (reused caller buffers, direct strip paths) must be
+/// byte-identical to the Vec-returning APIs — across single/multi-strip,
+/// byte orders, signedness, and repeated calls into the same buffer.
+#[test]
+fn into_apis_match_vec_apis() {
+    // Multi-strip uncompressed u16 (exercises the direct strip path), both
+    // byte orders, signed and unsigned.
+    for (order, signed) in [
+        (ByteOrder::Little, false),
+        (ByteOrder::Little, true),
+        (ByteOrder::Big, false),
+    ] {
+        let mut frame = make_frame(4, 4, 1);
+        frame.rows_per_strip = 2;
+        if signed {
+            frame.sample_format = SampleFormat::SignedInt;
+        }
+        let values: Vec<u16> = (0..16).map(|v| v * 1000).collect();
+        let mut file = Vec::new();
+        for v in &values {
+            match order {
+                ByteOrder::Little => file.extend_from_slice(&v.to_le_bytes()),
+                ByteOrder::Big => file.extend_from_slice(&v.to_be_bytes()),
+            }
+        }
+        frame.strip_offsets = vec![0, 16];
+        frame.strip_byte_counts = vec![16, 16];
+
+        let expected = read_frame_u16(&file, &frame, order, None).unwrap();
+        let mut out = vec![9u16; 3]; // wrong-sized, pre-filled: must be fixed up
+        read_frame_u16_into(&file, &frame, order, None, &mut out).unwrap();
+        assert_eq!(out.as_slice(), expected.as_ref(), "u16 order={order:?} signed={signed}");
+        // Second call reuses the buffer and must still be identical.
+        read_frame_u16_into(&file, &frame, order, None, &mut out).unwrap();
+        assert_eq!(out.as_slice(), expected.as_ref());
+    }
+
+    // u8 direct path with PADDED strip byte counts (pad must be dropped).
+    let mut frame = make_frame(4, 4, 1);
+    frame.bits_per_sample = 8;
+    frame.rows_per_strip = 2;
+    let mut file: Vec<u8> = (1..=8).collect();
+    file.push(0xEE); // pad
+    frame.strip_offsets = vec![0, 9];
+    frame.strip_byte_counts = vec![9, 9]; // 8 data + 1 pad each
+    file.extend(11..=18u8);
+    file.push(0xEE);
+    let expected = read_frame_u8(&file, &frame, ByteOrder::Little).unwrap();
+    let mut out8 = Vec::new();
+    read_frame_u8_into(&file, &frame, ByteOrder::Little, &mut out8).unwrap();
+    assert_eq!(out8.as_slice(), expected.as_ref(), "padded u8 direct path");
+
+    // f32 direct path.
+    let values: Vec<f32> = (0..6).map(|i| i as f32 * 0.5 - 1.0).collect();
+    let mut file = Vec::new();
+    for v in &values {
+        file.extend_from_slice(&v.to_le_bytes());
+    }
+    let frame = float_frame(3, 2);
+    let mut outf = Vec::new();
+    read_frame_f32_into(&file, &frame, ByteOrder::Little, &mut outf).unwrap();
+    assert_eq!(outf, values);
+
+    // Plane/planes _into on chunky RGB8.
+    let mut frame = make_frame(2, 1, 1);
+    frame.bits_per_sample = 8;
+    frame.samples_per_pixel = 3;
+    frame.photometric = 2;
+    frame.strip_byte_counts = vec![6];
+    let file: Vec<u8> = vec![10, 20, 30, 40, 50, 60];
+    let mut planes = Vec::new();
+    read_planes_u8_into(&file, &frame, ByteOrder::Little, &mut planes).unwrap();
+    assert_eq!(planes, read_planes_u8(&file, &frame, ByteOrder::Little).unwrap());
+    let mut plane1 = Vec::new();
+    read_plane_u16_into(&file, &frame, ByteOrder::Little, None, 1, &mut plane1).unwrap();
+    assert_eq!(plane1, read_plane_u16(&file, &frame, ByteOrder::Little, None, 1).unwrap());
+}
+
 /// Some writers pad strips (e.g. to even byte counts). The padding must be
 /// dropped when strips are concatenated — counting it would shift every
 /// following row sideways.

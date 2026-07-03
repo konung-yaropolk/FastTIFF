@@ -157,10 +157,28 @@ fn read_plane_f32(mmap, frame, order, plane: usize) -> Result<Vec<f32>>;
 
 // All sample planes in ONE decompression pass — for chunky RGB this is ~3x
 // cheaper than three read_plane_* calls on compressed data (each of which
-// decompresses the whole frame again). One Vec per sample plane.
+// decompresses the whole frame again). One Vec per sample plane. With
+// Predictor 2, the undo is fused into the per-plane gather (one pass).
 fn read_planes_u16(mmap, frame, order, float_range) -> Result<Vec<Vec<u16>>>;
 fn read_planes_u8(mmap, frame, order) -> Result<Vec<Vec<u8>>>;
 fn read_planes_f32(mmap, frame, order) -> Result<Vec<Vec<f32>>>;
+```
+
+Every reader above also has a **`*_into` variant** (`read_frame_u16_into(...,
+&mut buf)`, `read_planes_u8_into(..., &mut planes)`, ...) that decodes into a
+caller-provided buffer, reusing its allocation — for hot per-frame loops this
+skips the allocation, the zero-fill, and fresh-page faults of a new `Vec`
+every frame. For uncompressed predictor-free frames the `_into` paths convert
+each strip **straight from the mapping into the output** (a plain memcpy in
+the native-order case) with no intermediate assembly buffer at all; compressed
+strips likewise decompress directly into their row ranges, single-pass.
+
+`TiffStack::prefetch_frame(&frame)` is a performance hint that touches the
+frame's mapped pages so a subsequent decode doesn't stall on page faults —
+call it from a read-ahead thread for the *next* frame (first-touch faults are
+cheap on Linux but cost real time on Windows).
+
+```rust
 
 // Actual min/max of a 32-bit frame's raw values (for auto-ranging the display);
 // `None` for non-32-bit frames.

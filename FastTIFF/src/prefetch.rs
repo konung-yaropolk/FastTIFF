@@ -1,13 +1,20 @@
-//! Background decode-ahead for playback. While the UI thread uploads + renders
-//! the current frame, a worker thread decodes the *next* frame into ready
-//! buffers, so when playback reaches it the UI thread only has to upload — a
-//! steady second-core pipeline with none of the per-frame fork/join overhead of
-//! intra-frame parallel decode.
+//! Background read-ahead for playback, in one of two modes. While the UI
+//! thread uploads + renders the current frame, a worker thread prepares the
+//! *next* one:
 //!
-//! It only pays off when decoding is non-trivial *and* the inline decode isn't
-//! already zero-copy (otherwise prefetch would just add a copy), so `app.rs`
-//! gates it to **compressed** stacks during real-time playback that's keeping up
-//! (the serial-decode regime). When playback falls behind, the adaptive parallel
+//! - **Decode-ahead** (compressed stacks): the worker decodes the next frame
+//!   into ready buffers, so reaching it is just an upload — a steady
+//!   second-core pipeline with none of the per-frame fork/join overhead of
+//!   intra-frame parallel decode.
+//! - **Page-touch** (uncompressed stacks): decoding is a zero-copy borrow, so
+//!   decoding ahead would only add a copy — but the *first* access to each
+//!   memory-mapped page still soft-faults, which costs real time on Windows.
+//!   The worker touches the next frame's pages (`TiffStack::prefetch_frame`),
+//!   absorbing those faults off the UI thread; the UI thread then decodes
+//!   inline, fault-free.
+//!
+//! Both modes run only during real-time playback that's keeping up (the
+//! serial-decode regime). When playback falls behind, the adaptive parallel
 //! decode takes over instead.
 //!
 //! The worker is self-contained: it opens its **own** memory map of the same
@@ -161,9 +168,11 @@ pub struct Prefetcher {
 }
 
 impl Prefetcher {
-    /// Spawn a worker that opens its own map of `path`. Returns `None` if the
-    /// thread or the worker's file open fails — callers then just decode inline.
-    pub fn new(path: PathBuf) -> Option<Self> {
+    /// Spawn a worker that opens its own map of `path`. `touch_only` selects
+    /// the page-touch mode (uncompressed stacks — see module docs); otherwise
+    /// the worker decodes ahead. Returns `None` if the thread or the worker's
+    /// file open fails — callers then just decode inline.
+    pub fn new(path: PathBuf, touch_only: bool) -> Option<Self> {
         let (tx, rx) = channel::<Request>();
         let result = Arc::new(Mutex::new(None));
         let result_worker = Arc::clone(&result);
@@ -173,7 +182,7 @@ impl Prefetcher {
                 // Second mmap of the same file: shares the OS page cache, so no
                 // duplicate pixel RAM; the IFD walk is a one-time cost.
                 match TiffStack::open(&path) {
-                    Ok(stack) => worker_loop(stack, rx, result_worker),
+                    Ok(stack) => worker_loop(stack, rx, result_worker, touch_only),
                     Err(e) => log::warn!("prefetch worker: can't open {}: {e:#}", path.display()),
                 }
             })
@@ -204,12 +213,28 @@ impl Prefetcher {
     }
 }
 
-fn worker_loop(stack: TiffStack, rx: Receiver<Request>, result: Arc<Mutex<Option<PrefetchResult>>>) {
+fn worker_loop(
+    stack: TiffStack,
+    rx: Receiver<Request>,
+    result: Arc<Mutex<Option<PrefetchResult>>>,
+    touch_only: bool,
+) {
     // Block for a request; channel closed (Prefetcher dropped) -> exit.
     while let Ok(mut req) = rx.recv() {
         // Skip superseded predictions: only the most recent request matters.
         while let Ok(newer) = rx.try_recv() {
             req = newer;
+        }
+        // Page-touch mode: absorb the next frame's soft page faults here and
+        // store no result — the UI thread's inline decode is then fault-free
+        // (and stays zero-copy, which decoding ahead would have forfeited).
+        if touch_only {
+            for job in &req.jobs {
+                if let Some(frame) = stack.frames.get(job.ifd_idx) {
+                    stack.prefetch_frame(frame);
+                }
+            }
+            continue;
         }
         let mut channels = Vec::with_capacity(req.jobs.len());
         let ok = match decode_jobs(&stack.mmap, &stack.frames, stack.byte_order, &req.jobs) {

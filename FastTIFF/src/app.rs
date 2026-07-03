@@ -155,11 +155,10 @@ struct LoadedStack {
     /// on upload), not separate IFDs. Flips how `ifd_index`/`sync_gpu` map a
     /// display channel to file data.
     rgb: bool,
-    /// Background decode-ahead worker (own mmap), present only for **compressed**
-    /// stacks — where decoding is heavy enough that overlapping it with the
-    /// current frame's upload/render pays off. `None` for uncompressed stacks
-    /// (their inline decode is already zero-copy, so prefetch would only add a
-    /// copy). See `crate::prefetch`.
+    /// Background read-ahead worker (own mmap): decode-ahead for compressed
+    /// stacks, page-touch for uncompressed ones (absorbs the next frame's mmap
+    /// soft faults off the UI thread while its inline decode stays zero-copy).
+    /// `None` only if the worker failed to start. See `crate::prefetch`.
     prefetch: Option<crate::prefetch::Prefetcher>,
     /// Bumped whenever the decode plan changes (dimension-order swap, enabled-set
     /// change) so an in-flight prefetch decoded under the old plan is recognized
@@ -298,13 +297,13 @@ impl ViewerApp {
     fn open_file(&mut self, path: PathBuf) {
         match TiffStack::open(&path) {
             Ok(tiff) => {
-                // Spin up a decode-ahead worker only for compressed stacks (see
-                // `LoadedStack::prefetch`); for uncompressed it'd only add a copy.
+                // Spin up the read-ahead worker: decode-ahead for compressed
+                // stacks, page-touch for uncompressed (see `LoadedStack::prefetch`).
                 let compressed = tiff
                     .frames
                     .first()
                     .is_some_and(|f| f.compression != fast_tiff_lib::Compression::None);
-                let prefetch = compressed.then(|| crate::prefetch::Prefetcher::new(path.clone())).flatten();
+                let prefetch = crate::prefetch::Prefetcher::new(path.clone(), !compressed);
                 let mut loaded = LoadedStack {
                     tiff,
                     path,
@@ -441,10 +440,10 @@ impl ViewerApp {
             loaded.last_uploaded = Some(frame_index);
         }
 
-        // Decode-ahead: while playing and keeping up (serial regime), ask the
-        // worker to decode the next frame so reaching it is just an upload.
-        // Skipped when behind (parallel decode handles that) or when there's no
-        // worker (uncompressed stack).
+        // Read-ahead: while playing and keeping up (serial regime), ask the
+        // worker to prepare the next frame — decode it (compressed) or touch
+        // its pages (uncompressed) — so reaching it costs only the upload.
+        // Skipped when behind (parallel decode handles that).
         if self.playing && !self.decode_parallel {
             if let Some(p) = &loaded.prefetch {
                 let n = loaded.tiff.meta.frames.max(1);

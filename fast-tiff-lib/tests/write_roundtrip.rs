@@ -44,6 +44,8 @@ fn u16_stack_roundtrips_and_scrubs_zero_copy() {
     let stack = TiffStack::open(&path).unwrap();
     assert_eq!(stack.frames.len(), 3);
     for (i, expected) in frames.iter().enumerate() {
+        // Prefetch is a pure performance hint: must be safe before any read.
+        stack.prefetch_frame(&stack.frames[i]);
         let got = read_frame_u16(&stack.mmap, &stack.frames[i], stack.byte_order, None).unwrap();
         assert_eq!(got.as_ref(), &expected[..], "frame {i}");
         // The writer's default layout IS the reader's zero-copy fast path.
