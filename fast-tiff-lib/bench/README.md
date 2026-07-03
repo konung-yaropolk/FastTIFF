@@ -63,15 +63,23 @@ files are self-describing.
   median / worst relative speed, mean throughput; an ASCII bar infographic;
   fast-tiff-lib write throughput by codec.
 - **`bench_results.csv`** — every (config × frames × reader) data point.
-- **Single-figure infographic**:
+- **Figures** — one command renders all of them:
 
 ```bash
-python plot_results.py bench_results.csv bench_summary.png
+python plot_results.py               # defaults: bench_results.csv -> PNGs
+# or: python plot_results.py bench_results.csv bench_summary.png graphs/
 ```
 
-produces one PNG with four panels: overall relative speed, throughput by
-codec, frame-count scaling, and the environment/writer summary. The sweep has
-its own plots:
+  - `bench_summary.png` — the overall four-panel infographic (relative speed,
+    throughput by codec, frame-count scaling, environment/writer summary).
+  - `graphs/all_tests.png` — a **compilation**: one mini bar chart per test,
+    all in a single grid, so every configuration's reader ranking is visible
+    at a glance.
+  - `graphs/tests/NN_<config>.png` — a **separate, labeled bar chart for each
+    individual test** (mean µs/frame per reader, with the relative multiplier
+    and any `n/s` readers noted).
+
+The sweep has its own plots:
 
 ```bash
 cargo run --release -- sweep
