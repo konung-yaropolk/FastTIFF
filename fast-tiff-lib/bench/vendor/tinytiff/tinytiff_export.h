@@ -1,0 +1,5 @@
+#ifndef TINYTIFF_EXPORT_H
+#define TINYTIFF_EXPORT_H
+#define TINYTIFF_EXPORT
+#define TINYTIFF_NO_EXPORT
+#endif

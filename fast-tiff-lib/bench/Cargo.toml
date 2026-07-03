@@ -1,0 +1,41 @@
+# A reader/writer speed benchmark comparing, on identical multi-frame TIFF
+# stacks (written by fast-tiff-lib's own writer, cross-validated against
+# libtiff/tifffile in the crate's test suite):
+#   * fast-tiff-lib   (Rust, this repo, memory-mapped)  -- per-frame + preload
+#   * tiff            (Rust, crates.io, pure Rust)      -- reference decoder
+#   * TinyTIFF        (C, vendored, via FFI)            -- uncompressed only
+#   * libtiff         (C, system library, via FFI)      -- optional feature
+#   * RAW fread       (lower-bound baseline)
+#
+# Methodology follows jkriege2/TinyTIFF's speedtest: per-frame timing, the
+# slowest REMOVE_SLOWEST_PERCENT trimmed before averaging, warm page cache.
+#
+# `--features libtiff` needs a system libtiff (Linux: libtiff-dev). Everything
+# else builds anywhere a C compiler exists (for the vendored TinyTIFF).
+
+[package]
+name = "tiff_read_bench"
+version = "0.2.0"
+edition = "2021"
+build = "build.rs"
+
+# Standalone: not a member of the repo's workspace.
+[workspace]
+
+[features]
+default = []
+libtiff = []
+
+[dependencies]
+fast-tiff-lib = { path = ".." }
+tiff = "0.11"
+anyhow = "1"
+sysinfo = "0.30"
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
