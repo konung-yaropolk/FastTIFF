@@ -226,6 +226,9 @@ pub struct ViewerApp {
     /// Playback rate (frames/second) the user can edit. Seeded from the file's
     /// `fps=` metadata (or `DEFAULT_FPS`) on every load.
     playback_fps: f64,
+    /// Whether the file-metadata pop-up window is open (toggled by the 🗎
+    /// button in the expanded bottom panel).
+    show_metadata: bool,
     /// Scroll offset of the image inside the central panel, in screen points:
     /// how far the image's top-left is pushed up/left past the panel's. Only
     /// meaningful when the image is larger than the panel (zoomed past what the
@@ -280,6 +283,7 @@ impl ViewerApp {
             panel_grow_armed: false,
             panel_old_h: 0.0,
             playback_fps: DEFAULT_FPS,
+            show_metadata: false,
             pan: egui::Vec2::ZERO,
             panel_rect: egui::Rect::ZERO,
             image_origin: egui::Pos2::ZERO,
@@ -761,6 +765,178 @@ fn compute_status(meta: &fast_tiff_lib::StackMeta, triple_axis_warning: bool) ->
     }
 }
 
+/// The 🗎 pop-up: everything we know about the opened file — container
+/// format, per-frame pixel layout, the parsed ImageJ metadata, and the raw
+/// `ImageDescription` (tag 270) text, selectable for copying.
+fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &LoadedStack) {
+    let tiff = &loaded.tiff;
+    egui::Window::new("File metadata")
+        .open(open)
+        .resizable(true)
+        .default_width(256.0)
+        .vscroll(true)
+        .show(ctx, |ui| {
+            fn kv(ui: &mut egui::Ui, k: &str, v: impl Into<String>) {
+                ui.label(RichText::new(k).strong());
+                ui.label(v.into());
+                ui.end_row();
+            }
+
+            ui.heading("File");
+            egui::Grid::new("meta_file").num_columns(2).striped(true).show(ui, |ui| {
+                kv(ui, "Size", human_bytes(tiff.mmap.len() as u64));
+                let container = match tiff.flavor {
+                    fast_tiff_lib::TiffFlavor::Classic => "classic TIFF",
+                    fast_tiff_lib::TiffFlavor::Big => "BigTIFF",
+                };
+                kv(ui, "Container", container);
+                let order = match tiff.byte_order {
+                    fast_tiff_lib::ByteOrder::Little => "little-endian (II)",
+                    fast_tiff_lib::ByteOrder::Big => "big-endian (MM)",
+                };
+                kv(ui, "Byte order", order);
+                kv(ui, "Planes (IFDs)", tiff.frames.len().to_string());
+            });
+
+            if let Some(f) = tiff.frames.first() {
+                ui.add_space(12.0);
+                ui.heading("Frame format");
+                egui::Grid::new("meta_frame").num_columns(2).striped(true).show(ui, |ui| {
+                    kv(ui, "Dimensions", format!("{} x {} px", f.width, f.height));
+                    let format = match f.sample_format {
+                        fast_tiff_lib::SampleFormat::UnsignedInt => "unsigned integer",
+                        fast_tiff_lib::SampleFormat::SignedInt => "signed integer",
+                        fast_tiff_lib::SampleFormat::Float => "IEEE float",
+                    };
+                    kv(ui, "Pixel type", format!("{}-bit {format}", f.bits_per_sample));
+                    kv(
+                        ui,
+                        "Samples/pixel",
+                        if f.is_rgb() {
+                            format!("{} (chunky RGB)", f.samples_per_pixel)
+                        } else {
+                            f.samples_per_pixel.to_string()
+                        },
+                    );
+                    let photometric = match f.photometric {
+                        0 => "0 (WhiteIsZero)".into(),
+                        1 => "1 (BlackIsZero)".into(),
+                        2 => "2 (RGB)".into(),
+                        3 => "3 (palette)".into(),
+                        other => format!("{other}"),
+                    };
+                    kv(ui, "Photometric", photometric);
+                    let compression = match f.compression {
+                        fast_tiff_lib::Compression::None => "uncompressed".into(),
+                        fast_tiff_lib::Compression::Lzw => "LZW".into(),
+                        fast_tiff_lib::Compression::PackBits => "PackBits".into(),
+                        fast_tiff_lib::Compression::Deflate => "Deflate (zip)".into(),
+                        fast_tiff_lib::Compression::Zstd => "ZSTD".into(),
+                        other => format!("{other:?}"),
+                    };
+                    kv(ui, "Compression", compression);
+                    let predictor = match f.predictor {
+                        1 => "none".into(),
+                        2 => "2 (horizontal differencing)".into(),
+                        3 => "3 (floating-point)".into(),
+                        other => format!("{other}"),
+                    };
+                    kv(ui, "Predictor", predictor);
+                    kv(
+                        ui,
+                        "Strips/frame",
+                        format!("{} ({} rows/strip)", f.strip_offsets.len(), f.rows_per_strip),
+                    );
+                    let bpf = f.width as u64
+                        * f.height as u64
+                        * f.samples_per_pixel as u64
+                        * (f.bits_per_sample as u64 / 8);
+                    kv(ui, "Decoded frame", human_bytes(bpf));
+                });
+            }
+
+            ui.add_space(12.0);
+            egui::CollapsingHeader::new("ImageDescription (tag 270)")
+                .default_open(true)
+                .show(ui, |ui| match &tiff.description {
+                    Some(desc) => {
+                        // Read-only TextEdit: selectable + copyable.
+                        let mut text = desc.as_str();
+                        ui.add(
+                            egui::TextEdit::multiline(&mut text)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(desc.lines().count().clamp(2, 16)),
+                        );
+                    }
+                    None => {
+                        ui.label(RichText::new("(this file carries no ImageDescription)").weak());
+                    }
+                });
+
+            ui.add_space(12.0);
+            ui.heading("ImageJ metadata");
+            let meta = &tiff.meta;
+            egui::Grid::new("meta_ij").num_columns(2).striped(true).show(ui, |ui| {
+                kv(
+                    ui,
+                    "Dimensions",
+                    format!(
+                        "{} channel(s) x {} slice(s) x {} frame(s)",
+                        meta.channels, meta.slices, meta.frames
+                    ),
+                );
+                let mode = match meta.mode {
+                    fast_tiff_lib::DisplayMode::Grayscale => "grayscale",
+                    fast_tiff_lib::DisplayMode::Composite => "composite",
+                    fast_tiff_lib::DisplayMode::Color => "color",
+                };
+                kv(ui, "Display mode", mode);
+                if let Some(unit) = &meta.unit {
+                    kv(ui, "Unit", unit.clone());
+                }
+                if let Some(fi) = meta.frame_interval_s {
+                    kv(ui, "Frame interval", format!("{fi} s"));
+                }
+                if let Some(fps) = meta.fps {
+                    kv(ui, "Playback fps", fps.to_string());
+                }
+                if let Some(spacing) = meta.spacing {
+                    kv(ui, "Z spacing", spacing.to_string());
+                }
+                if let Some(looped) = meta.loop_playback {
+                    kv(ui, "Loop playback", looped.to_string());
+                }
+                if let Some((c0, c1)) = meta.calibration {
+                    kv(ui, "Calibration", format!("value = {c0} + {c1} x raw"));
+                }
+                for (i, cd) in meta.channel_display.iter().enumerate() {
+                    let range = match cd.range {
+                        Some((lo, hi)) => format!("{lo} .. {hi}"),
+                        None => "auto-contrast".into(),
+                    };
+                    kv(ui, &format!("Ch {} display range", i + 1), range);
+                }
+            });
+        });
+}
+
+/// `1234567` -> `"1.2 MiB (1234567 bytes)"`.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{:.1} {} ({n} bytes)", v, UNITS[u])
+    }
+}
+
 /// Applies a (possibly newly resolved) channel/slice/frame interpretation
 /// to a stack: updates the metadata, rebuilds channel_display +
 /// channel_settings to match the new channel count, and resets the scrub
@@ -1003,6 +1179,7 @@ impl eframe::App for ViewerApp {
         let mut scroll_step: i32 = 0;
         let mut playback_fps = self.playback_fps;
         let mut decode_mode = self.decode_mode;
+        let mut metadata_toggle = false;
         let current_status = self.status.clone();
 
         let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
@@ -1193,6 +1370,17 @@ impl eframe::App for ViewerApp {
                                     .on_hover_text("Always multi-threaded for large frames (spreads across cores)");
                             });
                     }
+
+                    // File-metadata pop-up toggle, pushed to the row's right edge.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {                        
+                        if ui
+                            .button(RichText::new("</>").size(16.0))
+                            .on_hover_text("See metadata")
+                            .clicked()
+                        {
+                            metadata_toggle = true;
+                        }
+                    });
                 });
                 if !loaded.rgb {
                     ui.label(
@@ -1309,6 +1497,15 @@ impl eframe::App for ViewerApp {
 
         self.playback_fps = playback_fps;
         self.decode_mode = decode_mode;
+        if metadata_toggle {
+            self.show_metadata = !self.show_metadata;
+        }
+        if self.show_metadata {
+            match &self.stack {
+                Some(loaded) => metadata_window(ui.ctx(), &mut self.show_metadata, loaded),
+                None => self.show_metadata = false,
+            }
+        }
 
         if toggle_requested {
             self.channels_panel_expanded = !self.channels_panel_expanded;
