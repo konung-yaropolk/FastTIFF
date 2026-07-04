@@ -126,63 +126,57 @@ impl TestConfig {
     }
 }
 
+/// Frame counts each test family is crossed with: seven decades, so the
+/// per-family line charts (graphs/all_tests.png) show how every reader
+/// scales from a single frame to a million.
+const FRAME_COUNTS: [usize; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+
+/// Per-stack pixel-data budget. Counts that would push a family's stack past
+/// this are skipped (a 1M-frame 256x256 u16 stack would be 128 GB): 256x256
+/// families reach 10k frames, 2048x2048 reaches 100, and the 16x16 family —
+/// the frame-count sweep's classic subject — covers all seven decades.
+const MAX_STACK_BYTES: u64 = 4 << 30;
+
 /// The coverage matrix: every functional axis of the library, each crossed
-/// with several frame counts so per-frame overhead scales are visible.
+/// with every frame count that fits the budget.
 fn configs(quick: bool) -> Vec<TestConfig> {
     use Compression::*;
-    // (format, compression, predictor, rows_per_strip, bigtiff)
-    type Fmt = (PixelFormat, Compression, bool, Option<u32>, bool);
-    let coverage: &[Fmt] = &[
-        (PixelFormat::U8, None, false, Option::None, false),
-        (PixelFormat::U16, None, false, Option::None, false), // zero-copy fast path
-        (PixelFormat::U16, None, false, Some(32), false),     // multi-strip uncompressed
-        (PixelFormat::F32, None, false, Option::None, false), // zero-copy f32 fast path
-        (PixelFormat::U16, Lzw, false, Option::None, false),
-        (PixelFormat::U16, Lzw, true, Option::None, false),
-        (PixelFormat::U16, Deflate, true, Option::None, false),
-        (PixelFormat::U16, Zstd, true, Option::None, false),
-        (PixelFormat::U16, PackBits, false, Option::None, false),
-        (PixelFormat::F32, Zstd, true, Option::None, false), // fp predictor 3
-        (PixelFormat::RgbU8, None, false, Option::None, false),
-        (PixelFormat::RgbU16, Deflate, true, Option::None, false),
-        (PixelFormat::U16, None, false, Option::None, true), // BigTIFF
-    ];
-    let big_frames: &[Fmt] = &[
-        (PixelFormat::U16, None, false, Option::None, false),
-        (PixelFormat::U16, None, false, Some(64), false),
-        (PixelFormat::U16, Zstd, true, Option::None, false),
+    // (width, height, format, compression, predictor, rows_per_strip, bigtiff)
+    type Fmt = (usize, usize, PixelFormat, Compression, bool, Option<u32>, bool);
+    let families: &[Fmt] = &[
+        // Tiny frames: pixel volume is negligible, so this family isolates
+        // per-frame overhead (open + IFD stepping) out to 1M frames — the
+        // in-matrix version of the dedicated `sweep` mode.
+        (16, 16, PixelFormat::U16, None, false, Option::None, false),
+        // Format/codec coverage at 256x256.
+        (256, 256, PixelFormat::U8, None, false, Option::None, false),
+        (256, 256, PixelFormat::U16, None, false, Option::None, false), // zero-copy fast path
+        (256, 256, PixelFormat::U16, None, false, Some(32), false),     // multi-strip uncompressed
+        (256, 256, PixelFormat::F32, None, false, Option::None, false), // zero-copy f32 fast path
+        (256, 256, PixelFormat::U16, Lzw, false, Option::None, false),
+        (256, 256, PixelFormat::U16, Lzw, true, Option::None, false),
+        (256, 256, PixelFormat::U16, Deflate, true, Option::None, false),
+        (256, 256, PixelFormat::U16, Zstd, true, Option::None, false),
+        (256, 256, PixelFormat::U16, PackBits, false, Option::None, false),
+        (256, 256, PixelFormat::F32, Zstd, true, Option::None, false), // fp predictor 3
+        (256, 256, PixelFormat::RgbU8, None, false, Option::None, false),
+        (256, 256, PixelFormat::RgbU16, Deflate, true, Option::None, false),
+        (256, 256, PixelFormat::U16, None, false, Option::None, true), // BigTIFF
+        // Large frames: pixel-throughput-bound.
+        (2048, 2048, PixelFormat::U16, None, false, Option::None, false),
+        (2048, 2048, PixelFormat::U16, None, false, Some(64), false),
+        (2048, 2048, PixelFormat::U16, Zstd, true, Option::None, false),
     ];
 
-    let coverage_counts: &[usize] = if quick { &[24] } else { &[40, 160, 640] };
-    let big_counts: &[usize] = if quick { &[6] } else { &[8, 24] };
+    let counts: &[usize] = if quick { &[10] } else { &FRAME_COUNTS };
 
     let mut v = Vec::new();
-    for &(format, compression, predictor, rows_per_strip, bigtiff) in coverage {
-        for &frames in coverage_counts {
-            v.push(TestConfig {
-                width: 256,
-                height: 256,
-                frames,
-                format,
-                compression,
-                predictor,
-                rows_per_strip,
-                bigtiff,
-            });
-        }
-    }
-    for &(format, compression, predictor, rows_per_strip, bigtiff) in big_frames {
-        for &frames in big_counts {
-            v.push(TestConfig {
-                width: 2048,
-                height: 2048,
-                frames,
-                format,
-                compression,
-                predictor,
-                rows_per_strip,
-                bigtiff,
-            });
+    for &(width, height, format, compression, predictor, rows_per_strip, bigtiff) in families {
+        for &frames in counts {
+            let cfg = TestConfig { width, height, frames, format, compression, predictor, rows_per_strip, bigtiff };
+            if frames as u64 * cfg.bytes_per_frame() as u64 <= MAX_STACK_BYTES {
+                v.push(cfg);
+            }
         }
     }
     v
@@ -335,6 +329,17 @@ fn write_stack(dir: &Path, cfg: &TestConfig) -> Result<(PathBuf, PathBuf, f64)> 
         f.write_all(&frame)?;
     }
     Ok((path, raw_path, write_secs))
+}
+
+/// Where the generated stacks live: `TIFF_BENCH_DIR` if set, else the system
+/// temp dir. The biggest configurations peak at ~7.5 GB on disk (a 4 GiB
+/// stack plus its raw-baseline sibling), which can overflow a tight system
+/// drive — point `TIFF_BENCH_DIR` at a roomier volume in that case.
+fn scratch_dir(sub: &str) -> PathBuf {
+    match std::env::var_os("TIFF_BENCH_DIR") {
+        Some(dir) => PathBuf::from(dir).join(sub),
+        None => std::env::temp_dir().join(sub),
+    }
 }
 
 fn warm_cache(path: &Path) -> Result<()> {
@@ -853,7 +858,7 @@ fn run_one(path: &Path, raw_path: &Path, cfg: &TestConfig) -> Result<Vec<Outcome
 }
 
 fn run_matrix(quick: bool) -> Result<()> {
-    let tmp = std::env::temp_dir().join("tiff_read_bench_data");
+    let tmp = scratch_dir("tiff_read_bench_data");
     std::fs::create_dir_all(&tmp)?;
     println!("mode: matrix   scratch dir: {}", tmp.display());
 
@@ -971,7 +976,7 @@ fn run_sweep(quick: bool) -> Result<()> {
     };
 
     println!("mode: sweep  (frame={W}x{H}, u16, single-strip)");
-    let tmp = std::env::temp_dir().join("tiff_read_bench_sweep");
+    let tmp = scratch_dir("tiff_read_bench_sweep");
     std::fs::create_dir_all(&tmp)?;
 
     let mut csv = String::new();

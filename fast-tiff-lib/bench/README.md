@@ -25,15 +25,19 @@ Every stack is **written by fast-tiff-lib's own `TiffWriter`** (which the
 crate's test suite cross-validates against libtiff/tifffile-generated
 fixtures), so the write timing per configuration is reported for free.
 
-Axes, crossed with **several frame counts each** (40 / 160 / 640 at 256²,
-8 / 24 at 2048²):
+Every test family is crossed with the frame counts
+**1 / 10 / 100 / 1k / 10k / 100k / 1M**, capped by a 4 GiB per-stack budget
+(a 1M-frame 256² u16 stack would be 128 GB): 256² families reach 10k frames,
+2048² reaches 100, and a dedicated **16×16 tiny-frame family** — where pixel
+volume is negligible, so per-frame overhead is what's measured — covers all
+seven decades inside the matrix.
 
 - **Sample formats**: u8, u16, f32, chunky RGB8, chunky RGB16
 - **Codecs**: none, LZW, Deflate, PackBits, ZSTD
 - **Predictor**: horizontal (2) on integers, floating-point (3) on f32
 - **Strip layouts**: single-strip (the zero-copy fast path) and multi-strip
 - **BigTIFF** (magic 43)
-- **Frame sizes**: 256×256 (per-frame overhead visible) and 2048×2048
+- **Frame sizes**: 16×16 (pure per-frame overhead), 256×256, and 2048×2048
   (pixel-throughput bound)
 
 Readers that can't handle a configuration are reported as `n/s` with the
@@ -72,18 +76,20 @@ python plot_results.py               # defaults: bench_results.csv -> PNGs
 
   - `bench_summary.png` — the overall four-panel infographic (relative speed,
     throughput by codec, frame-count scaling, environment/writer summary).
-  - `graphs/all_tests.png` — a **compilation**: one mini bar chart per test,
-    all in a single grid, so every configuration's reader ranking is visible
-    at a glance.
+  - `graphs/all_tests.png` — a **compilation**: one line+point chart per test
+    *family*, mean µs/frame vs frame count (log-log), one series per reader —
+    every configuration's scaling behavior in a single grid.
   - `graphs/tests/NN_<config>.png` — a **separate, labeled bar chart for each
     individual test** (mean µs/frame per reader, with the relative multiplier
     and any `n/s` readers noted).
-
-The sweep has its own plots:
+  - `graphs/sweep_*.png` — the **frame-count sweep statistics** (open/index
+    cost, per-frame read, total wall time, throughput vs count), rendered
+    automatically whenever `sweep_results.csv` is present:
 
 ```bash
-cargo run --release -- sweep
-python plot_sweep.py sweep_results.csv graphs/
+cargo run --release -- sweep      # produces sweep_results.csv
+python plot_results.py            # renders matrix + sweep figures together
+# (plot_sweep.py still works standalone too)
 ```
 
 ## Reading the results honestly
@@ -120,6 +126,10 @@ python plot_sweep.py sweep_results.csv graphs/
   (`sudo apt-get install libtiff-dev`; linked via pkg-config, falling back to
   `-ltiff`). Off by default so the bench builds out of the box on Windows.
 - Plotting: `pip install matplotlib`.
+- **Disk space**: generated stacks live in the system temp dir and the
+  biggest configurations peak at ~7.5 GB on disk. If your system drive is
+  tight, point `TIFF_BENCH_DIR` at a roomier volume:
+  `TIFF_BENCH_DIR=/big/disk cargo run --release`.
 
 ## Layout
 

@@ -10,8 +10,12 @@ leading `# ...` comment lines carry machine/toolchain info.
 
 Produces:
   bench_summary.png            overall 4-panel infographic
-  <graphs>/all_tests.png       compilation: one mini bar chart per test
+  <graphs>/all_tests.png       compilation: one line+point chart per test
+                               family (mean us/frame vs frame count, log-log)
   <graphs>/tests/NN_<slug>.png one bar chart per individual test
+  <graphs>/sweep_*.png         the frame-count sweep statistics, rendered
+                               automatically when sweep_results.csv exists
+                               (produced by `cargo run --release -- sweep`)
 
 Requires matplotlib (`pip install matplotlib`).
 """
@@ -146,22 +150,74 @@ def per_test_figures(order, grouped, skipped, tests_dir: Path):
     print(f"wrote {len(order)} per-test charts to {tests_dir}/")
 
 
-def compilation_figure(order, grouped, skipped, readers_present, out_path: Path):
-    n = len(order)
-    cols = 4 if n <= 12 else (5 if n <= 30 else 6)
+def family_of(config):
+    """`"256x256 u16 lzw+pred / 1000 frames"` -> `"256x256 u16 lzw+pred"` —
+    the test family, i.e. the config with the frame count stripped."""
+    return config.split(" / ")[0]
+
+
+def fmt_count(n):
+    if n >= 1_000_000 and n % 1_000_000 == 0:
+        return f"{n // 1_000_000}M"
+    if n >= 1_000 and n % 1_000 == 0:
+        return f"{n // 1_000}k"
+    return str(n)
+
+
+def compilation_figure(ok, skipped, readers_present, out_path: Path):
+    """One tile per test *family*: mean us/frame vs frame count, one
+    line+point series per reader (log-log, lower is better)."""
+    families = []
+    by_fam = defaultdict(lambda: defaultdict(list))  # family -> reader -> [(frames, mean_us)]
+    for r in ok:
+        fam = family_of(r["config"])
+        if fam not in families:
+            families.append(fam)
+        by_fam[fam][r["reader"]].append((r["frames"], r["mean_us"]))
+    fam_skipped = defaultdict(set)
+    for cfg, names in skipped.items():
+        fam_skipped[family_of(cfg)] |= names
+
+    n = len(families)
+    cols = 4 if n <= 12 else (5 if n <= 20 else 6)
     nrows = math.ceil(n / cols)
-    fig, axes = plt.subplots(nrows, cols, figsize=(cols * 3.5, nrows * 2.15), squeeze=False)
-    for idx, cfg in enumerate(order):
+    fig, axes = plt.subplots(nrows, cols, figsize=(cols * 3.6, nrows * 2.6), squeeze=False)
+    for idx, fam in enumerate(families):
         ax = axes[idx // cols][idx % cols]
-        draw_test(ax, grouped[cfg], skipped.get(cfg, set()), compact=True)
-        ax.set_title(cfg, fontsize=8)
+        counts = sorted({f for pts in by_fam[fam].values() for f, _ in pts})
+        for name in readers_present:
+            pts = sorted(by_fam[fam].get(name, []))
+            if pts:
+                ax.plot(
+                    [p[0] for p in pts],
+                    [max(p[1], 1e-3) for p in pts],
+                    marker="o", ms=3, lw=1.1, color=color(name),
+                )
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        if counts:
+            ax.set_xticks(counts)
+            ax.set_xticklabels([fmt_count(c) for c in counts], fontsize=6)
+            ax.minorticks_off()
+        ax.tick_params(axis="y", labelsize=6)
+        ax.grid(alpha=0.3, which="both")
+        ax.set_title(fam, fontsize=8)
+        if idx % cols == 0:
+            ax.set_ylabel("us/frame", fontsize=7)
+        if idx // cols == nrows - 1:
+            ax.set_xlabel("frames", fontsize=7)
+        if fam_skipped[fam]:
+            ax.text(
+                0.02, 0.04, "n/s: " + ", ".join(sorted(short(s) for s in fam_skipped[fam])),
+                transform=ax.transAxes, fontsize=6, color="#888",
+            )
     for idx in range(n, nrows * cols):
         axes[idx // cols][idx % cols].axis("off")
 
     handles = [Patch(color=color(r), label=r) for r in readers_present]
-    top = 1.0 - 0.5 / (nrows * 2.15)  # scale headroom to the figure height
+    top = 1.0 - 0.55 / (nrows * 2.6)  # scale headroom to the figure height
     fig.suptitle(
-        "Per-test comparison — mean us/frame per reader (lower is better)",
+        "Per-family scaling — mean us/frame vs frame count (log-log, lower is better)",
         fontsize=15, fontweight="bold", y=0.997,
     )
     fig.legend(handles=handles, loc="upper center", ncol=len(handles), fontsize=10, frameon=False, bbox_to_anchor=(0.5, top))
@@ -293,8 +349,23 @@ def main():
     order = list(grouped)  # first-seen (= benchmark emission) order
 
     summary_figure(sysinfo, ok, readers, summary_path)
-    compilation_figure(order, grouped, skipped, readers, graphs_dir / "all_tests.png")
+    compilation_figure(ok, skipped, readers, graphs_dir / "all_tests.png")
     per_test_figures(order, grouped, skipped, graphs_dir / "tests")
+
+    # Sweep statistics (open/index cost, total wall time, throughput vs frame
+    # count) render automatically when the sweep CSV sits next to the matrix
+    # CSV — one plotting command covers both benchmarks.
+    sweep_csv = csv_path.parent / "sweep_results.csv"
+    if sweep_csv.exists():
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        try:
+            import plot_sweep
+
+            plot_sweep.render(sweep_csv, graphs_dir)
+        except Exception as e:  # never let the sweep charts sink the rest
+            print(f"(sweep charts skipped: {e})")
+    else:
+        print("(no sweep_results.csv — run `cargo run --release -- sweep` to add the sweep statistics)")
 
 
 if __name__ == "__main__":

@@ -116,17 +116,9 @@ PANELS = [
 ]
 
 
-def main():
-    csv_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("sweep_results.csv")
-    out_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("graphs")
-    if not csv_path.exists():
-        sys.exit(
-            f"{csv_path} not found.\n"
-            "Generate it first with the sweep benchmark:\n"
-            "    cargo run --release -- sweep\n"
-            "then re-run:  python plot_sweep.py"
-        )
-
+def render(csv_path: Path, out_dir: Path):
+    """Render every sweep chart from `csv_path` into `out_dir`. Callable from
+    other scripts (plot_results.py delegates here when a sweep CSV exists)."""
     rows = load(csv_path)
     if not rows:
         sys.exit(f"{csv_path} contains no data rows — re-run the benchmark.")
@@ -151,6 +143,19 @@ def main():
     path = out_dir / "sweep_combined.png"
     fig.savefig(path, dpi=140)
     print(f"wrote {path}")
+
+
+def main():
+    csv_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("sweep_results.csv")
+    out_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("graphs")
+    if not csv_path.exists():
+        sys.exit(
+            f"{csv_path} not found.\n"
+            "Generate it first with the sweep benchmark:\n"
+            "    cargo run --release -- sweep\n"
+            "then re-run:  python plot_sweep.py"
+        )
+    render(csv_path, out_dir)
 
 
 if __name__ == "__main__":
