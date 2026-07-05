@@ -15,7 +15,7 @@
 //! captured by the callback — matching the glow backend so the two are
 //! interchangeable behind one app-side interface.
 
-use super::{ChannelKind, ChannelUniform, MAX_CHANNELS};
+use super::{ChannelKind, ChannelUniform, VolumeInterp, VolumeKind, VolumeParams, MAX_CHANNELS};
 use eframe::egui_wgpu::{self, wgpu};
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
@@ -76,6 +76,16 @@ pub fn paint_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
         rect,
         ImagePaintCallback { resources: render.clone() },
     ))
+}
+
+/// 3D volume rendering is not implemented on the wgpu backend yet — the glow
+/// backend (the default) carries it. This paints a plain black canvas and logs
+/// once so a wgpu user sees a clear blank rather than stale 2D pixels.
+pub fn paint_volume_callback(_render: &Render, rect: egui::Rect) -> egui::Shape {
+    use std::sync::Once;
+    static WARN: Once = Once::new();
+    WARN.call_once(|| log::warn!("3D volume view is only implemented on the glow renderer; wgpu shows a blank canvas"));
+    egui::Shape::rect_filled(rect, 0.0, egui::Color32::BLACK)
 }
 
 /// The `egui_wgpu::CallbackTrait` impl invoked once per egui frame to draw the
@@ -253,6 +263,16 @@ impl ImageRenderResources {
             current_kinds: [KIND_UNUSED; MAX_CHANNELS],
         }
     }
+
+    // --- 3D volume: not implemented on wgpu; these keep the backend-agnostic
+    // surface identical to glow's so app.rs compiles unchanged. See
+    // `paint_volume_callback` above. ---
+    pub fn max_3d_texture_size(&self, _ctx: &UploadCtx) -> u32 {
+        2048 // a safe conservative default; the volume path is unused here
+    }
+    pub fn upload_volume(&mut self, _ctx: &UploadCtx, _w: u32, _h: u32, _d: u32, _kind: VolumeKind, _bytes: &[u8]) {}
+    pub fn set_volume_interp(&mut self, _ctx: &UploadCtx, _interp: VolumeInterp) {}
+    pub fn set_volume_params(&mut self, _params: VolumeParams) {}
 
     /// (Re)allocate channel textures for the current frame size and per-channel
     /// `kind`. An `Int8`/`Int16` channel gets a full-size R8Uint/R16Uint integer

@@ -29,7 +29,7 @@ compile_error!(
 #[cfg(feature = "renderer-glow")]
 mod glow_backend;
 #[cfg(feature = "renderer-glow")]
-pub use glow_backend::{init, paint_callback, upload_ctx, Render, BACKEND, RENDERER};
+pub use glow_backend::{init, paint_callback, paint_volume_callback, upload_ctx, Render, BACKEND, RENDERER};
 
 // The `not(renderer-glow)` guard means that turning on *both* features (a hard
 // error, above) selects only the glow backend here — so the build fails with
@@ -37,7 +37,7 @@ pub use glow_backend::{init, paint_callback, upload_ctx, Render, BACKEND, RENDER
 #[cfg(all(feature = "renderer-wgpu", not(feature = "renderer-glow")))]
 mod wgpu_backend;
 #[cfg(all(feature = "renderer-wgpu", not(feature = "renderer-glow")))]
-pub use wgpu_backend::{init, paint_callback, upload_ctx, Render, BACKEND, RENDERER};
+pub use wgpu_backend::{init, paint_callback, paint_volume_callback, upload_ctx, Render, BACKEND, RENDERER};
 
 /// Maximum number of display channels composited at once. Shared by both
 /// backends (texture/uniform array sizes) and by `app.rs`.
@@ -56,6 +56,57 @@ pub enum ChannelKind {
     Int8,
     Int16,
     Float,
+}
+
+/// How the 3D volume's scalar samples are stored in its GPU texture. Chosen
+/// from channel 0's `ChannelKind` so the volume mirrors the 2D display:
+///   * `U8`  — `R8`  unorm (8-bit source)
+///   * `U16` — `R16` unorm (16-bit source, or CPU-widened 8-bit/rescaled ints)
+///   * `F32` — `R32F`      (32-bit float source, window/level in its own units)
+/// Unlike the 2D integer path (which uses `usampler`, NEAREST-only), the volume
+/// uses *normalized* textures so trilinear interpolation is available.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum VolumeKind {
+    U8,
+    U16,
+    F32,
+}
+
+/// Volume texture sampling: `Nearest` (crisp voxels) or `Linear` (trilinear
+/// smoothing). Applied as the 3D texture's min/mag filter.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum VolumeInterp {
+    Nearest,
+    Linear,
+}
+
+/// Everything the ray-march fragment shader needs for one 3D frame. The camera
+/// is passed as an explicit basis (rather than matrices) so the shader builds
+/// per-pixel rays with no matrix inverse; `app.rs` computes it from the orbit
+/// angles + zoom. Distances/positions are in the volume's own normalized box
+/// space, whose half-extents `box_he` already fold in the per-axis dimension
+/// scale (voxel anisotropy).
+#[derive(Clone, Copy)]
+// The wgpu backend's 3D path is a stub that ignores these (glow reads them all),
+// so under a wgpu-only build the fields are legitimately never read.
+#[cfg_attr(not(feature = "renderer-glow"), allow(dead_code))]
+pub struct VolumeParams {
+    /// Window/level (min, max) in the sampled texture's units: raw value for
+    /// `F32`; the 0..65535 display window divided by 65535 for `U8`/`U16`.
+    pub window: [f32; 2],
+    pub is_float: bool,
+    /// Which LUT row (channel) colors the projection.
+    pub lut_row: u32,
+    /// Ray-march sample count along the longest box axis.
+    pub steps: i32,
+    pub eye: [f32; 3],
+    pub forward: [f32; 3],
+    pub right: [f32; 3],
+    pub up: [f32; 3],
+    pub tan_half_fov: f32,
+    pub aspect: f32,
+    /// Half-extents of the volume box (largest scaled axis = 0.5).
+    pub box_he: [f32; 3],
 }
 
 /// One channel's window/level + on/off state, as `app.rs` produces it each

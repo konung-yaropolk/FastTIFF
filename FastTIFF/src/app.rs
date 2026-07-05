@@ -112,6 +112,14 @@ impl DecodeMode {
     }
 }
 
+/// Which view the central panel shows: the 2D movie (scrub/play through frames)
+/// or the GPU-ray-marched 3D volume built from the whole stack.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Movie,
+    Volume,
+}
+
 #[derive(Clone, Copy)]
 struct ChannelSettings {
     min: f32,
@@ -257,6 +265,33 @@ pub struct ViewerApp {
     /// → exactly one frame; touchpad pixel scrolls accumulate here until they
     /// cross a whole frame, so fine scrolling isn't lost or jumpy.
     scroll_accum: f32,
+
+    // --- 3D volume view -----------------------------------------------------
+    /// Movie (2D) vs. Volume (3D). Reset to `Movie` when a single-frame stack
+    /// is opened (nothing to build a volume from).
+    view_mode: ViewMode,
+    /// Orbit camera angles (radians) and zoom for the volume view. Yaw spins
+    /// around the vertical axis, pitch tilts up/down; zoom reuses the 2D
+    /// `ZOOM_LEVELS` ladder via `stepped_zoom`.
+    vol_yaw: f32,
+    vol_pitch: f32,
+    vol_zoom: f32,
+    /// Per-axis voxel scale (x, y, z) for the volume box. Seeded from the
+    /// stack's Z spacing metadata on load (else 1:1:1); editable in the render
+    /// settings window.
+    vol_scale: [f32; 3],
+    /// Volume texture filtering: nearest (no interpolation) or trilinear.
+    vol_interp: render::VolumeInterp,
+    /// The volume viewport aspect ratio (width/height), captured each frame so
+    /// the ray-march projection matches the on-screen rect.
+    vol_aspect: f32,
+    /// Set when the volume texture must be (re)built from the stack — on open,
+    /// or after a dimension-order swap changes the frame axis. Cleared once
+    /// `sync_gpu` uploads the volume.
+    volume_dirty: bool,
+    /// Whether the render-settings pop-up (voxel scale + interpolation) is open,
+    /// toggled by the ⚙ button in the expanded bottom panel.
+    show_render_settings: bool,
 }
 
 /// Playback rate used when the file's metadata doesn't specify `fps=`.
@@ -291,6 +326,15 @@ impl ViewerApp {
             uv_offset: egui::Vec2::ZERO,
             uv_scale: egui::Vec2::splat(1.0),
             scroll_accum: 0.0,
+            view_mode: ViewMode::Movie,
+            vol_yaw: 0.7,
+            vol_pitch: 0.5,
+            vol_zoom: 1.0,
+            vol_scale: [1.0, 1.0, 1.0],
+            vol_interp: render::VolumeInterp::Linear,
+            vol_aspect: 1.0,
+            volume_dirty: false,
+            show_render_settings: false,
         };
         if let Some(path) = initial_path {
             app.open_file(path);
@@ -338,6 +382,27 @@ impl ViewerApp {
 
                 // Seed the editable playback rate from the file (or default).
                 self.playback_fps = loaded.tiff.meta.fps.unwrap_or(DEFAULT_FPS);
+
+                // 3D volume defaults for the new stack: per-axis voxel scale from
+                // the Z-spacing metadata (else 1:1:1), a fresh orbit, and a
+                // rebuild flag so entering 3D uploads this stack's volume. A
+                // single-frame stack has no depth to ray-march — force movie view.
+                let z_scale = loaded
+                    .tiff
+                    .meta
+                    .spacing
+                    .filter(|s| s.is_finite() && *s > 0.0)
+                    .map(|s| s as f32)
+                    .unwrap_or(1.0)
+                    .clamp(0.01, 100.0);
+                self.vol_scale = [1.0, 1.0, z_scale];
+                self.vol_yaw = 0.7;
+                self.vol_pitch = 0.5;
+                self.vol_zoom = 1.0;
+                self.volume_dirty = true;
+                if loaded.tiff.meta.frames < 2 {
+                    self.view_mode = ViewMode::Movie;
+                }
 
                 self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
                 self.stack = Some(loaded);
@@ -387,6 +452,32 @@ impl ViewerApp {
                 resources.upload_lut(&ctx, c, &loaded.tiff.meta.channel_display[c].lut);
             }
             loaded.luts_uploaded = true;
+        }
+
+        // 3D volume view: (re)build the volume texture once per stack, then push
+        // the camera + window params every frame. The 2D per-frame decode/upload
+        // path below is skipped entirely — the volume already holds every slice.
+        if self.view_mode == ViewMode::Volume {
+            if self.volume_dirty {
+                let max_dim = resources.max_3d_texture_size(&ctx);
+                if let Some((vw, vh, vd, vkind, bytes)) = build_volume(loaded, max_dim) {
+                    resources.upload_volume(&ctx, vw, vh, vd, vkind, &bytes);
+                }
+                // Clear even on failure (no frames / decode error) so we don't
+                // retry the build every frame; the canvas just stays black.
+                self.volume_dirty = false;
+            }
+            resources.set_volume_interp(&ctx, self.vol_interp);
+            let params = build_volume_params(
+                loaded,
+                self.vol_yaw,
+                self.vol_pitch,
+                self.vol_zoom,
+                self.vol_aspect,
+                self.vol_scale,
+            );
+            resources.set_volume_params(params);
+            return;
         }
 
         // Push the decode-parallelism choice to fast-tiff-lib: Auto follows the
@@ -506,6 +597,194 @@ fn build_jobs(loaded: &LoadedStack, frame_index: usize, enabled: &[bool], kinds:
             ChannelJob { channel: c, ifd_idx, plane, kind: kinds[c], rgb: loaded.rgb, width, height }
         })
         .collect()
+}
+
+/// Rough upper bound on the volume texture's footprint. The builder subsamples
+/// each axis until the volume fits under this before uploading, so a huge stack
+/// degrades to a coarser volume rather than exhausting VRAM.
+const MAX_VOLUME_BYTES: usize = 768 << 20;
+
+/// Build the scalar 3D volume for the current stack from channel 0 of every
+/// frame (the scrub axis becomes depth). Each axis is subsampled to satisfy the
+/// GPU's 3D-texture size limit `max_dim` and the `MAX_VOLUME_BYTES` budget.
+/// Returns `(width, height, depth, kind, native-endian bytes)`, or `None` when
+/// there's no multi-frame volume to build.
+fn build_volume(loaded: &LoadedStack, max_dim: u32) -> Option<(u32, u32, u32, render::VolumeKind, Vec<u8>)> {
+    let f0 = loaded.tiff.frames.first()?;
+    let (w, h) = (f0.width, f0.height);
+    let depth = loaded.tiff.meta.frames.max(1) as u32;
+    if w == 0 || h == 0 || depth < 2 {
+        return None;
+    }
+
+    let kind0 = loaded
+        .channel_settings
+        .first()
+        .map(|s| s.kind)
+        .unwrap_or(ChannelKind::Int16);
+    let (vkind, bps) = match kind0 {
+        ChannelKind::Int8 => (render::VolumeKind::U8, 1usize),
+        ChannelKind::Int16 => (render::VolumeKind::U16, 2),
+        ChannelKind::Float => (render::VolumeKind::F32, 4),
+    };
+
+    let max_dim = max_dim.max(64);
+    let out = |n: u32, s: u32| n.div_ceil(s);
+    // Smallest stride that fits the texture-size limit per axis, then coarsen
+    // the largest output axis until the byte budget is met.
+    let mut sx = w.div_ceil(max_dim).max(1);
+    let mut sy = h.div_ceil(max_dim).max(1);
+    let mut sz = depth.div_ceil(max_dim).max(1);
+    loop {
+        let (ox, oy, oz) = (out(w, sx), out(h, sy), out(depth, sz));
+        if (ox as usize) * (oy as usize) * (oz as usize) * bps <= MAX_VOLUME_BYTES {
+            break;
+        }
+        if ox >= oy && ox >= oz {
+            sx += 1;
+        } else if oy >= oz {
+            sy += 1;
+        } else {
+            sz += 1;
+        }
+    }
+    let (ow, oh, od) = (out(w, sx), out(h, sy), out(depth, sz));
+
+    let slices = loaded.tiff.meta.slices.max(1);
+    let channels = loaded.tiff.meta.channels.max(1);
+    let slice_bytes = ow as usize * oh as usize * bps;
+    let mut buf = vec![0u8; slice_bytes * od as usize];
+
+    for oz in 0..od {
+        let src_frame = (oz * sz) as usize;
+        // Channel 0's IFD/plane for this frame, mirroring `build_jobs`.
+        let (ifd_idx, plane, rgb) = if loaded.rgb {
+            (src_frame * slices, 0, true)
+        } else {
+            (src_frame * slices * channels, 0, false)
+        };
+        let job = ChannelJob { channel: 0, ifd_idx, plane, kind: kind0, rgb, width: w, height: h };
+        let decoded = decode_jobs(&loaded.tiff.mmap, &loaded.tiff.frames, loaded.tiff.byte_order, &[job]).ok()?;
+        let dst = &mut buf[oz as usize * slice_bytes..(oz as usize + 1) * slice_bytes];
+        match decoded.first()? {
+            Decoded::U8(v) => downsample_slice(v, (w, h), (sx, sy), (ow, oh), dst),
+            Decoded::U16(v) => downsample_slice(v, (w, h), (sx, sy), (ow, oh), dst),
+            Decoded::F32(v) => downsample_slice(v, (w, h), (sx, sy), (ow, oh), dst),
+        }
+    }
+    Some((ow, oh, od, vkind, buf))
+}
+
+/// Point-sample one decoded slice into `dst` at `stride` (sx, sy), writing each
+/// sample's native-endian bytes (matches the GPU upload's pixel type). `dims` is
+/// the source (w, h); `out` is the destination (ow, oh).
+fn downsample_slice<T: bytemuck::Pod>(src: &[T], dims: (u32, u32), stride: (u32, u32), out: (u32, u32), dst: &mut [u8]) {
+    let (w, h) = dims;
+    let (sx, sy) = stride;
+    let (ow, oh) = out;
+    let bps = std::mem::size_of::<T>();
+    for oy in 0..oh {
+        let src_row = (oy * sy).min(h - 1) as usize * w as usize;
+        let dst_row = oy as usize * ow as usize;
+        for ox in 0..ow {
+            let sx_i = (ox * sx).min(w - 1) as usize;
+            if let Some(sample) = src.get(src_row + sx_i) {
+                let di = (dst_row + ox as usize) * bps;
+                dst[di..di + bps].copy_from_slice(bytemuck::bytes_of(sample));
+            }
+        }
+    }
+}
+
+/// Assemble the ray-march uniforms for the current orbit + window. `dims` is the
+/// stack's true voxel dimensions (width, height, frames); the box half-extents
+/// fold in the per-axis scale so anisotropic voxels render with correct
+/// proportions regardless of the (subsampled) texture size.
+fn build_volume_params(loaded: &LoadedStack, yaw: f32, pitch: f32, zoom: f32, aspect: f32, scale: [f32; 3]) -> render::VolumeParams {
+    let f0 = loaded.tiff.frames.first();
+    let w = f0.map(|f| f.width).unwrap_or(1);
+    let h = f0.map(|f| f.height).unwrap_or(1);
+    let d = loaded.tiff.meta.frames.max(1) as u32;
+    let cam = volume_camera(yaw, pitch, zoom, scale, (w, h, d));
+
+    // Window/level from channel 0, in the sampled texture's units: raw for
+    // float, else the 0..65535 display window divided by 65535 (both U8 and U16
+    // volumes are unorm-normalized — see render::VolumeKind).
+    let s0 = loaded.channel_settings.first();
+    let kind = s0.map(|s| s.kind).unwrap_or(ChannelKind::Int16);
+    let (mut lo, mut hi) = s0.map(|s| (s.min, s.max)).unwrap_or((0.0, 65535.0));
+    let is_float = kind == ChannelKind::Float;
+    if !is_float {
+        lo /= 65535.0;
+        hi /= 65535.0;
+    }
+
+    // Oversample relative to depth so linear filtering isn't undersampled, then
+    // cap to keep the shader loop bounded.
+    let steps = ((d as f32 * 1.5) as i32).clamp(64, 512);
+
+    render::VolumeParams {
+        window: [lo, hi],
+        is_float,
+        lut_row: 0,
+        steps,
+        eye: cam.eye,
+        forward: cam.forward,
+        right: cam.right,
+        up: cam.up,
+        tan_half_fov: cam.tan_half_fov,
+        aspect,
+        box_he: cam.box_he,
+    }
+}
+
+/// The camera basis (eye + orthonormal forward/right/up) and volume-box
+/// half-extents the ray-march shader consumes.
+struct VolumeCamera {
+    eye: [f32; 3],
+    forward: [f32; 3],
+    right: [f32; 3],
+    up: [f32; 3],
+    tan_half_fov: f32,
+    box_he: [f32; 3],
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+fn norm3(v: [f32; 3]) -> [f32; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len > 1e-6 {
+        [v[0] / len, v[1] / len, v[2] / len]
+    } else {
+        [0.0, 0.0, 1.0]
+    }
+}
+
+/// Orbit camera basis + volume-box half-extents for the ray-marcher. `yaw`/
+/// `pitch` place the eye on a sphere around the origin; `zoom` reuses the 2D
+/// ladder so 3D zoom feels the same. The box's largest scaled axis is 0.5.
+fn volume_camera(yaw: f32, pitch: f32, zoom: f32, scale: [f32; 3], dims: (u32, u32, u32)) -> VolumeCamera {
+    let pitch = pitch.clamp(-1.54, 1.54); // ~±88°, avoid the pole singularity
+    let (cy, sy) = (yaw.cos(), yaw.sin());
+    let (cp, sp) = (pitch.cos(), pitch.sin());
+    let dir = [cp * sy, sp, cp * cy]; // origin -> eye
+    let dist = (3.0 / zoom.clamp(0.05, 20.0)).clamp(0.5, 200.0);
+    let eye = [dir[0] * dist, dir[1] * dist, dir[2] * dist];
+    let forward = norm3([-dir[0], -dir[1], -dir[2]]);
+    let right = norm3(cross(forward, [0.0, 1.0, 0.0]));
+    let up = norm3(cross(right, forward));
+
+    let phys = [dims.0 as f32 * scale[0], dims.1 as f32 * scale[1], dims.2 as f32 * scale[2]];
+    let m = phys[0].max(phys[1]).max(phys[2]).max(1e-6);
+    let box_he = [
+        (0.5 * phys[0] / m).max(1e-3),
+        (0.5 * phys[1] / m).max(1e-3),
+        (0.5 * phys[2] / m).max(1e-3),
+    ];
+    let tan_half_fov = (45.0f32.to_radians() * 0.5).tan();
+    VolumeCamera { eye, forward, right, up, tan_half_fov, box_he }
 }
 
 /// Whether a prefetched result still matches the wanted jobs (same channels, in
@@ -768,6 +1047,68 @@ fn compute_status(meta: &fast_tiff_lib::StackMeta, triple_axis_warning: bool) ->
 /// The 🗎 pop-up: everything we know about the opened file — container
 /// format, per-frame pixel layout, the parsed ImageJ metadata, and the raw
 /// `ImageDescription` (tag 270) text, selectable for copying.
+/// The 3D render-settings pop-up: per-axis voxel scale (x:y:z) and the volume
+/// interpolation mode. Scale defaults to the stack's Z-spacing metadata, with a
+/// button to re-seed it; interpolation offers nearest (no smoothing) or
+/// trilinear.
+fn render_settings_window(
+    ctx: &egui::Context,
+    open: &mut bool,
+    scale: &mut [f32; 3],
+    interp: &mut render::VolumeInterp,
+    loaded: Option<&LoadedStack>,
+) {
+    egui::Window::new("3D render settings")
+        .open(open)
+        .resizable(false)
+        .default_width(280.0)
+        .show(ctx, |ui| {
+            ui.label(RichText::new("Voxel scale (x : y : z)").strong());
+            ui.horizontal(|ui| {
+                for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+                    ui.label(*axis);
+                    ui.add(
+                        egui::DragValue::new(&mut scale[i])
+                            .speed(0.01)
+                            .range(0.01..=100.0)
+                            .max_decimals(3),
+                    );
+                }
+            });
+            if let Some(loaded) = loaded {
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Reset from metadata")
+                        .on_hover_text("Re-seed the Z scale from the file's spacing (else 1:1:1)")
+                        .clicked()
+                    {
+                        let z = loaded
+                            .tiff
+                            .meta
+                            .spacing
+                            .filter(|s| s.is_finite() && *s > 0.0)
+                            .map(|s| s as f32)
+                            .unwrap_or(1.0)
+                            .clamp(0.01, 100.0);
+                        *scale = [1.0, 1.0, z];
+                    }
+                    if let Some(unit) = loaded.tiff.meta.unit.as_deref().filter(|u| !u.is_empty()) {
+                        ui.label(RichText::new(format!("unit: {unit}")).weak());
+                    }
+                });
+            }
+
+            ui.separator();
+            ui.label(RichText::new("Interpolation").strong());
+            ui.horizontal(|ui| {
+                ui.selectable_value(interp, render::VolumeInterp::Nearest, "None (nearest)")
+                    .on_hover_text("Crisp voxels, no smoothing");
+                ui.selectable_value(interp, render::VolumeInterp::Linear, "Trilinear")
+                    .on_hover_text("Smoothly interpolated samples");
+            });
+        });
+}
+
 fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &LoadedStack) {
     let tiff = &loaded.tiff;
     egui::Window::new("File metadata")
@@ -1081,7 +1422,7 @@ impl eframe::App for ViewerApp {
         // where the window no longer resizes, appeared frozen.) The window
         // resize and optional reposition are handled later, once the chrome
         // height is known. Cursor-centering uses last frame's cached geometry.
-        if zoom_step != 0 && self.stack.is_some() {
+        if zoom_step != 0 && self.stack.is_some() && self.view_mode == ViewMode::Movie {
             let old_zoom = self.zoom;
             let new_zoom = stepped_zoom(old_zoom, zoom_step);
             if (new_zoom - old_zoom).abs() > f32::EPSILON {
@@ -1100,6 +1441,11 @@ impl eframe::App for ViewerApp {
                 self.zoom_reposition = Some((old_zoom, cursor));
             }
         }
+
+        // 2D/3D view toggle is set inside the toolbar closure via this request
+        // (applied after) so the closure never needs a second borrow of `self`.
+        let current_view_mode = self.view_mode;
+        let mut mode_request: Option<ViewMode> = None;
 
         let toolbar_response = egui::Panel::top("toolbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1165,9 +1511,38 @@ impl eframe::App for ViewerApp {
                         let current_time = loaded.frame_index as f64 * interval;
                         ui.label(RichText::new(format!("t = {current_time:>time_width$.3}s")).monospace());
                     }
+
+                    // 2D/3D switch, pinned to the right edge. 3D needs at least
+                    // two frames to build a volume; disabled otherwise.
+                    let can_3d = meta.frames >= 2;
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_enabled_ui(can_3d, |ui| {
+                            if ui
+                                .selectable_label(current_view_mode == ViewMode::Volume, "3D")
+                                .on_hover_text("Volume (3D) view — drag to rotate, scroll to zoom")
+                                .clicked()
+                            {
+                                mode_request = Some(ViewMode::Volume);
+                            }
+                            if ui
+                                .selectable_label(current_view_mode == ViewMode::Movie, "2D")
+                                .on_hover_text("Movie (2D) view")
+                                .clicked()
+                            {
+                                mode_request = Some(ViewMode::Movie);
+                            }
+                        });
+                        ui.label("View:");
+                    });
                 }
             });
         });
+        if let Some(mode) = mode_request {
+            self.view_mode = mode;
+        }
+        // In 3D the arrow keys rotate the volume (handled in the central panel),
+        // so the movie's arrow-scrub and wheel-scrub paths must stand down.
+        let view_is_volume = self.view_mode == ViewMode::Volume;
 
         let panel_expanded = self.channels_panel_expanded;
         let is_playing = self.playing;
@@ -1180,6 +1555,7 @@ impl eframe::App for ViewerApp {
         let mut playback_fps = self.playback_fps;
         let mut decode_mode = self.decode_mode;
         let mut metadata_toggle = false;
+        let mut render_settings_toggle = false;
         let current_status = self.status.clone();
 
         let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
@@ -1276,22 +1652,24 @@ impl eframe::App for ViewerApp {
                 });
             });
 
-            ui.input(|i| {
-                // Shift jumps ~5% of the stack at a time (min 1 frame) instead
-                // of 1, matching the Shift+wheel fast-scroll step.
-                let step = if i.modifiers.shift {
-                    ((loaded.tiff.meta.frames as f64 * FAST_SCROLL_RATE).round() as usize).max(1)
-                } else {
-                    1
-                };
-                let max_frame = loaded.tiff.meta.frames.saturating_sub(1);
-                if i.key_pressed(egui::Key::ArrowRight) {
-                    loaded.frame_index = (loaded.frame_index + step).min(max_frame);
-                }
-                if i.key_pressed(egui::Key::ArrowLeft) {
-                    loaded.frame_index = loaded.frame_index.saturating_sub(step);
-                }
-            });
+            if !view_is_volume {
+                ui.input(|i| {
+                    // Shift jumps ~5% of the stack at a time (min 1 frame) instead
+                    // of 1, matching the Shift+wheel fast-scroll step.
+                    let step = if i.modifiers.shift {
+                        ((loaded.tiff.meta.frames as f64 * FAST_SCROLL_RATE).round() as usize).max(1)
+                    } else {
+                        1
+                    };
+                    let max_frame = loaded.tiff.meta.frames.saturating_sub(1);
+                    if i.key_pressed(egui::Key::ArrowRight) {
+                        loaded.frame_index = (loaded.frame_index + step).min(max_frame);
+                    }
+                    if i.key_pressed(egui::Key::ArrowLeft) {
+                        loaded.frame_index = loaded.frame_index.saturating_sub(step);
+                    }
+                });
+            }
 
             if panel_expanded {
                 ui.separator();
@@ -1371,14 +1749,22 @@ impl eframe::App for ViewerApp {
                             });
                     }
 
-                    // File-metadata pop-up toggle, pushed to the row's right edge.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {                        
+                    // File-metadata + 3D-render-settings pop-up toggles, pushed to
+                    // the row's right edge.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .button(RichText::new("</>").size(16.0))
                             .on_hover_text("See metadata")
                             .clicked()
                         {
                             metadata_toggle = true;
+                        }
+                        if ui
+                            .button(RichText::new("⚙").size(16.0))
+                            .on_hover_text("3D render settings (voxel scale, interpolation)")
+                            .clicked()
+                        {
+                            render_settings_toggle = true;
                         }
                     });
                 });
@@ -1506,6 +1892,18 @@ impl eframe::App for ViewerApp {
                 None => self.show_metadata = false,
             }
         }
+        if render_settings_toggle {
+            self.show_render_settings = !self.show_render_settings;
+        }
+        if self.show_render_settings {
+            render_settings_window(
+                ui.ctx(),
+                &mut self.show_render_settings,
+                &mut self.vol_scale,
+                &mut self.vol_interp,
+                self.stack.as_ref(),
+            );
+        }
 
         if toggle_requested {
             self.channels_panel_expanded = !self.channels_panel_expanded;
@@ -1587,6 +1985,8 @@ impl eframe::App for ViewerApp {
                 refresh_pseudocolor(loaded, self.apply_pseudocolor);
                 self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
             }
+            // The frame axis (volume depth) just changed — rebuild on next 3D draw.
+            self.volume_dirty = true;
         }
 
         // Central panel: the image is drawn at exactly `image_size × zoom`. When
@@ -1616,6 +2016,74 @@ impl eframe::App for ViewerApp {
             let (panel_rect, response) =
                 ui.allocate_exact_size(available, egui::Sense::click_and_drag());
             self.panel_rect = panel_rect;
+
+            // 3D volume view: orbit with drag/arrows, zoom the wheel on the same
+            // ladder as 2D, and paint the GPU ray-march. The 2D pan/UV/scrub path
+            // below is bypassed entirely.
+            if self.view_mode == ViewMode::Volume {
+                self.vol_aspect = (panel_rect.width() / panel_rect.height().max(1.0)).clamp(0.1, 10.0);
+
+                let mut animating = false;
+
+                // `on_hover_cursor` consumes the response, so read what we need first.
+                let dragged = response.dragged();
+                let drag_delta = if dragged { response.drag_delta() } else { egui::Vec2::ZERO };
+                response.on_hover_cursor(egui::CursorIcon::Grab);
+
+                // Drag to orbit: horizontal = yaw, vertical = pitch.
+                if drag_delta != egui::Vec2::ZERO {
+                    self.vol_yaw -= drag_delta.x * 0.01;
+                    self.vol_pitch = (self.vol_pitch + drag_delta.y * 0.01).clamp(-1.54, 1.54);
+                    animating = true;
+                }
+
+                // Arrow keys rotate; plain wheel zooms one ladder step per notch.
+                if ui.rect_contains_pointer(panel_rect) || dragged {
+                    let (kx, ky, notches) = ui.input(|i| {
+                        const KEY_STEP: f32 = 0.04;
+                        let mut kx = 0.0;
+                        let mut ky = 0.0;
+                        if i.key_down(egui::Key::ArrowLeft) { kx += KEY_STEP; }
+                        if i.key_down(egui::Key::ArrowRight) { kx -= KEY_STEP; }
+                        if i.key_down(egui::Key::ArrowUp) { ky += KEY_STEP; }
+                        if i.key_down(egui::Key::ArrowDown) { ky -= KEY_STEP; }
+                        // Discrete wheel notches (one frame each), touchpad pixels
+                        // scaled down — same convention as the 2D scrub.
+                        let notches = i.events.iter().fold(0.0_f32, |acc, e| match e {
+                            egui::Event::MouseWheel { unit, delta, .. } => {
+                                acc + match unit {
+                                    egui::MouseWheelUnit::Point => delta.y / 50.0,
+                                    _ => delta.y,
+                                }
+                            }
+                            _ => acc,
+                        });
+                        (kx, ky, notches)
+                    });
+                    if kx != 0.0 || ky != 0.0 {
+                        self.vol_yaw += kx;
+                        self.vol_pitch = (self.vol_pitch + ky).clamp(-1.54, 1.54);
+                        animating = true;
+                    }
+                    // Scroll up = zoom in (matches 2D Ctrl+scroll direction).
+                    if notches > 0.5 {
+                        self.vol_zoom = stepped_zoom(self.vol_zoom, 1);
+                    } else if notches < -0.5 {
+                        self.vol_zoom = stepped_zoom(self.vol_zoom, -1);
+                    }
+                }
+
+                ui.painter()
+                    .with_clip_rect(panel_rect)
+                    .add(render::paint_volume_callback(&self.render, panel_rect));
+
+                // Keep repainting while keys are held / a drag is live so the
+                // orbit animates; otherwise the view is static and idle.
+                if animating {
+                    ui.ctx().request_repaint();
+                }
+                return;
+            }
 
             let img_px = egui::vec2(w as f32 * self.zoom, h as f32 * self.zoom);
             // A 1px tolerance so sub-pixel rounding between the window size and
