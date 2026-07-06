@@ -38,14 +38,14 @@ STYLE = {
     "libtiff":           dict(color="#1a73e8", marker="s", label="libtiff (C)"),
     "TinyTIFF":          dict(color="#e8710a", marker="^", label="TinyTIFF (C)"),
     "fast-tiff-lib":     dict(color="#137333", marker="D", label="fast-tiff-lib (Rust)"),
-    "fast-tiff-preload": dict(color="#81c995", marker="P", label="fast-tiff-lib preload (batch)"),
+    "fast-tiff-lib (preload)": dict(color="#90ee90", marker="P", label="fast-tiff-lib preload (Rust)"),
     "tiff-rs":           dict(color="#a142f4", marker="v", label="tiff crate (Rust)"),
 }
-ORDER = ["fast-tiff-lib", "fast-tiff-preload", "libtiff", "TinyTIFF", "tiff-rs", "RAW"]
+ORDER = ["fast-tiff-lib", "fast-tiff-lib (preload)", "libtiff", "TinyTIFF", "tiff-rs", "RAW"]
 
 
 def style_for(reader):
-    return STYLE.get(reader, dict(color="#555555", marker="x", label=reader))
+    return STYLE.get(reader, dict(color="#90ee90", marker="x", label=reader))
 
 
 def load(csv_path: Path):

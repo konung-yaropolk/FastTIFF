@@ -26,9 +26,11 @@ metadata (and back).
   common case — uncompressed, single strip, native byte order — decoding a
   16-bit frame is a **zero-copy reinterpret** of the mapped bytes (no allocation,
   no decode pass).
-- **Parses display metadata** from ImageJ's `ImageDescription` (tag 270) and,
-  as a fallback, the binary `IJMetadata` block: channel/slice/frame counts,
-  display mode, per-channel LUTs + contrast ranges, calibration, `fps`, etc.
+- **Parses display metadata** from ImageJ's `ImageDescription` (tag 270), the
+  binary `IJMetadata` block, and the TIFF resolution tags: channel/slice/frame
+  counts, display mode, per-channel LUTs + contrast ranges, calibration, `fps`,
+  Z `spacing`, and x/y pixel size (from XResolution/YResolution) — enough to
+  reconstruct the physical voxel scale.
 - **Writes multi-frame stacks** streamingly (append a frame at a time, nothing
   buffered but the current frame): 8/16/32-bit integer or float, grayscale or
   chunky RGB, None/LZW/PackBits/Deflate compression with optional predictor,
@@ -303,20 +305,29 @@ ImageJ's `xyczt` order, matching the reader's indexing.
 ### Metadata (`StackMeta`)
 
 ```rust
+#[non_exhaustive] // fields are added over time; construct it only via `open`
 pub struct StackMeta {
     pub channels: usize,
     pub slices: usize,
     pub frames: usize,
     pub mode: DisplayMode,                  // Grayscale | Composite | Color
-    pub unit: Option<String>,
+    pub unit: Option<String>,               // calibration unit (\uXXXX escapes decoded, e.g. µm)
     pub frame_interval_s: Option<f64>,
     pub channel_display: Vec<ChannelDisplay>,   // per-channel LUT + range
     pub calibration: Option<(f64, f64)>,        // linear (c0, c1): value = c0 + c1*raw
     pub fps: Option<f64>,
     pub spacing: Option<f64>,               // Z-step between slices (spacing=)
     pub loop_playback: Option<bool>,        // playback looping (loop=)
+    pub pixel_width: Option<f64>,           // x pixel size in `unit`s (from XResolution)
+    pub pixel_height: Option<f64>,          // y pixel size in `unit`s (from YResolution)
+    pub has_explicit_luts: bool,            // file supplied real (colored) per-channel LUTs
 }
 ```
+
+`has_explicit_luts` reports whether the `IJMetadata` block carried genuine
+colored LUTs (which take priority over the mode-derived default, including over
+`mode=grayscale`) — so a consumer knows not to override the file's own channel
+colors.
 
 This is the *parsed ImageJ view* of the metadata. The raw `ImageDescription`
 (tag 270) text is also exposed verbatim — whatever the writer put there,
@@ -337,6 +348,11 @@ pub struct ChannelDisplay {
 
 Helpers:
 
+- `meta.calibrate(raw) -> f64` — apply the linear calibration (`c0 + c1·raw`),
+  or return the value unchanged when the file has none.
+- `meta.voxel_scale() -> [f32; 3]` — physical x:y:z voxel scale from the pixel
+  calibration and Z `spacing` (the raw calibrated values, all in `unit`;
+  `1:1:1` when uncalibrated) — for anisotropy-correct 3D display.
 - `resolve_dimensions(c, z, f) -> ResolvedDimensions` — sanity-resolves
   channel/slice/frame counts against the actual plane count (and flags the
   ambiguous channels×Z×time case).

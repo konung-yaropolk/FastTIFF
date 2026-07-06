@@ -35,24 +35,24 @@ try:
 except ImportError:
     sys.exit("matplotlib is required:  pip install matplotlib")
 
-READER_ORDER = ["RAW", "fast-tiff-lib", "fast-tiff-preload", "tiff-rs", "TinyTIFF", "libtiff"]
+READER_ORDER = ["RAW", "fast-tiff-lib", "fast-tiff-lib (preload)", "tiff-rs", "TinyTIFF", "libtiff"]
 COLORS = {
-    "RAW": "#9e9e9e",
-    "fast-tiff-lib": "#d62728",
-    "fast-tiff-preload": "#ff9896",
-    "tiff-rs": "#1f77b4",
-    "TinyTIFF": "#2ca02c",
-    "libtiff": "#9467bd",
+    "RAW": "#9aa0a6",
+    "fast-tiff-lib": "#137333",
+    "fast-tiff-lib (preload)": "#90ee90",
+    "tiff-rs": "#a142f4",
+    "TinyTIFF": "#e8710a",
+    "libtiff": "#1a73e8",
 }
 SHORT = {
     "RAW": "RAW",
     "fast-tiff-lib": "fast",
-    "fast-tiff-preload": "preload",
+    "fast-tiff-lib (preload)": "preload",
     "tiff-rs": "tiff-rs",
     "TinyTIFF": "TinyTIFF",
     "libtiff": "libtiff",
 }
-FALLBACK_COLOR = "#555555"
+FALLBACK_COLOR = "#90ee90"
 NUMERIC = ("open_us", "mean_us", "min_us", "mb_s", "rel", "write_mb_s")
 
 

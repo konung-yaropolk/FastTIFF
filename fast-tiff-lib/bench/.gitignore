@@ -2,5 +2,4 @@
 bench_results.csv
 sweep_results.csv
 bench_summary.png
-/graphs
 __pycache__/

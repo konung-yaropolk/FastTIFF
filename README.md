@@ -87,12 +87,34 @@ you move the slider. This viewer instead:
   values shown are calibrated (`c0 + c1·raw`) when the file has calibration.
 - Z-slice selector when `slices > 1` (the scrubber itself always drives
   the time/frame axis).
+- Zoom (Ctrl+scroll) and pan (drag) of the 2D image, with the window sized
+  to fit on open.
+
+## 3D volume view
+
+A **2D / 3D** toggle in the top toolbar switches the stack between the movie
+view and a GPU-ray-marched 3D volume, built from every frame and composited
+with the same per-channel LUTs and contrast as the 2D view.
+
+- Two rendering modes: **Max intensity** (MIP) and a translucent **Volume**
+  mode modelled on ImageJ's 3D Viewer (emission–absorption alpha compositing,
+  with a density control).
+- **Navigation styles** — CAD, Blender, Maya, and a first-person **WASD Fly** —
+  selectable in the render-settings window (⚙). Orbit modes rotate around the
+  point where the view center enters the volume; the wheel zooms and WASD moves
+  in every mode.
+- **Interpolation**: none (nearest), trilinear, or tricubic B-spline.
+- **Voxel scale** (x:y:z) seeded from the file's pixel calibration
+  (XResolution/YResolution) and Z `spacing`, editable in the settings window.
+- **4D**: for channels+Z+time stacks, playing the movie animates the volume
+  through time.
+- Runs on both the glow and wgpu backends.
 
 ## What it doesn't do (intentionally out of scope for a "viewer")
 
-ROIs, measurements, image processing, saving/exporting, zoom/pan. All
-straightforward to add later on top of this structure if you want them —
-the render pipeline already separates "decode" from "display" cleanly.
+ROIs, measurements, image processing, saving/exporting. All straightforward to
+add later on top of this structure if you want them — the render pipeline
+already separates "decode" from "display" cleanly.
 
 ## Known caveat: plane ordering assumption
 
@@ -132,6 +154,9 @@ this is the one-line formula to change.
 - Done: Add bigtiff support
 - Done: make inactive decode mode for when it is actual unneeded, make single mode default
 - Solved: issue with performance in optimized version - 16 bit compressed tiff playback holds 12% cpu spreaded by multiple cores, but unoptimized - 4-5% which is ~50% single core load
+- Done: 2D zoom (Ctrl+scroll) and pan
+- Done: 3D volume view (MIP + ImageJ-style alpha), navigation modes, interpolation, 4D playback
+- Done: 3D volume view on the wgpu backend (was blank on Windows 10)
 
 
 - Port to linux and mac
