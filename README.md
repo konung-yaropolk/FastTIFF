@@ -148,6 +148,7 @@ this is the one-line formula to change.
 - Done: added read_plane_u8 to lib
 - Done: optimization 8bit rgb halved in occupied memory
 - Done: change fast scroll to 10% of movie length instead of fixed frames number  
+- Done: Port to linux
 - Done: Add zstd compression support
 - Done: Add tiff write support
 - Done: Fix viewing >6Gb tifs (no frames change when scrolling)
@@ -159,8 +160,12 @@ this is the one-line formula to change.
 - Done: 3D volume view on the wgpu backend (was blank on Windows 10)
 
 
-- Port to linux and mac
+
+- Port to mac and publish at Brew
 - Add windows installer with files association
+- mome to wgpu default
+- Set default compression rates on write in lib
+- add shift and space keys navigation in CAD and Maya modes
 
 
 
