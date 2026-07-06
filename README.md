@@ -168,6 +168,7 @@ this is the one-line formula to change.
 - add shift and space keys navigation in CAD and Maya modes
 - change mouse wheel zoom logic - outside of the box like zoom, inside the box - linear like in spectator mode
 - add orbiting mechanism in to spectator mode by pressing right mouse button
+- add right mouse button camera angle change as in spectator mode 
 
 
 
