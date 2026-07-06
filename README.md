@@ -167,6 +167,7 @@ this is the one-line formula to change.
 - Set default compression rates on write in lib
 - add shift and space keys navigation in CAD and Maya modes
 - change mouse wheel zoom logic - outside of the box like zoom, inside the box - linear like in spectator mode
+- add orbiting mechanism in to spectator mode by pressing right mouse button
 
 
 
