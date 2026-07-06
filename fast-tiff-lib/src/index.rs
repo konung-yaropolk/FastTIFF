@@ -22,6 +22,8 @@ pub(crate) const TAG_COMPRESSION: u16 = 259;
 pub(crate) const TAG_PHOTOMETRIC: u16 = 262;
 pub(crate) const TAG_IMAGE_DESCRIPTION: u16 = 270;
 pub(crate) const TAG_STRIP_OFFSETS: u16 = 273;
+pub(crate) const TAG_X_RESOLUTION: u16 = 282;
+pub(crate) const TAG_Y_RESOLUTION: u16 = 283;
 pub(crate) const TAG_SAMPLES_PER_PIXEL: u16 = 277;
 pub(crate) const TAG_ROWS_PER_STRIP: u16 = 278;
 pub(crate) const TAG_STRIP_BYTE_COUNTS: u16 = 279;
@@ -122,6 +124,9 @@ impl TiffStack {
         let mut description: Option<String> = None;
         let mut ij_metadata_bytes: Option<Vec<u8>> = None;
         let mut ij_metadata_counts: Option<Vec<u32>> = None;
+        // XResolution/YResolution (pixels per unit) → x/y pixel calibration.
+        let mut x_resolution: Option<f64> = None;
+        let mut y_resolution: Option<f64> = None;
 
         let mut offset = usize::try_from(first_ifd)
             .map_err(|_| anyhow!("first IFD offset exceeds address space"))?;
@@ -146,6 +151,12 @@ impl TiffStack {
                         }
                         TAG_IJ_METADATA_BYTE_COUNTS => {
                             ij_metadata_counts = e.as_u32_array(&mmap, order).ok();
+                        }
+                        TAG_X_RESOLUTION => {
+                            x_resolution = e.as_rational(&mmap, order).ok();
+                        }
+                        TAG_Y_RESOLUTION => {
+                            y_resolution = e.as_rational(&mmap, order).ok();
                         }
                         _ => {}
                     }
@@ -225,6 +236,8 @@ impl TiffStack {
             ij_metadata_bytes.as_deref(),
             ij_metadata_counts.as_deref(),
             frames.len(),
+            x_resolution,
+            y_resolution,
         );
 
         Ok(TiffStack {

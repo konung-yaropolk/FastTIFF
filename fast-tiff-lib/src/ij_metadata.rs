@@ -9,14 +9,15 @@
 //!    blob containing per-channel LUTs, display ranges, slice labels, ROIs,
 //!    etc. **This format is not officially documented by ImageJ** — the parser
 //!    below is reconstructed from known open-source readers and is best-effort.
-//!    It is read only as a **supplementary fallback**: it fills in display
-//!    information the `ImageDescription` text didn't provide (a per-channel
-//!    display range when there's no `min=`/`max=`, and per-channel composite
-//!    LUTs, which `ImageDescription` never carries). It never overrides a value
-//!    that tag 270 already specified — so it can't make two files with the same
-//!    `ImageDescription` render differently in any axis that text controls.
-//!    Every step is defensive and requires an exact channel-count match before
-//!    trusting the block, falling back to defaults on any inconsistency.
+//!    It fills in display information the `ImageDescription` text can't carry:
+//!    a per-channel display range when there's no `min=`/`max=`, and the actual
+//!    per-channel LUTs. `ImageDescription` only carries `mode=`, never the LUT
+//!    bytes, so a count-matched *colored* LUT block is the genuine source of
+//!    channel colors and takes priority over the mode-derived default —
+//!    including over `mode=grayscale`. It never overrides the numeric values
+//!    tag 270 specifies (dimensions, `min`/`max`). Every step is defensive and
+//!    requires an exact channel-count match before trusting the block, falling
+//!    back to defaults on any inconsistency.
 
 use crate::ifd::ByteOrder;
 use std::collections::HashMap;
@@ -66,6 +67,14 @@ pub struct StackMeta {
     pub spacing: Option<f64>,
     /// Whether playback should loop, from ImageJ's `loop=`.
     pub loop_playback: Option<bool>,
+    /// Physical pixel width/height (in `unit`s) from the TIFF XResolution /
+    /// YResolution tags (`pixel = 1 / resolution`). `None` when uncalibrated.
+    pub pixel_width: Option<f64>,
+    pub pixel_height: Option<f64>,
+    /// True when the file supplied real per-channel LUTs (the binary IJMetadata
+    /// block), so the viewer should keep them rather than override with its
+    /// grayscale/pseudocolor default.
+    pub has_explicit_luts: bool,
 }
 
 impl StackMeta {
@@ -76,6 +85,21 @@ impl StackMeta {
             Some((c0, c1)) => c0 + c1 * raw,
             None => raw,
         }
+    }
+
+    /// Physical voxel scale `(x, y, z)` for 3D display, from the pixel
+    /// calibration (X/YResolution → pixel width/height) and the Z `spacing`, all
+    /// in the same `unit` — the raw calibrated numbers, *not* normalized (the 3D
+    /// viewer normalizes them for display on its own). Missing values default to
+    /// 1.0 (an uncalibrated stack is 1:1:1; one with only `spacing=` keeps its
+    /// 1:1:z ratio).
+    pub fn voxel_scale(&self) -> [f32; 3] {
+        let pos = |v: Option<f64>| v.filter(|x| x.is_finite() && *x > 0.0);
+        let px = pos(self.pixel_width).unwrap_or(1.0);
+        let py = pos(self.pixel_height).unwrap_or(px); // assume square pixels
+        let pz = pos(self.spacing).unwrap_or(1.0);
+        let clamp = |v: f64| (v as f32).clamp(1e-4, 1e6);
+        [clamp(px), clamp(py), clamp(pz)]
     }
 }
 
@@ -196,6 +220,34 @@ pub fn default_lut_for(mode: DisplayMode, c: usize) -> [[u8; 3]; 256] {
     }
 }
 
+/// Decode Java-style `\uXXXX` escapes that ImageJ writes into text fields for
+/// non-ASCII values — most commonly `unit=µm`, which should read as `µm`.
+/// Invalid escapes are left verbatim.
+fn decode_ij_escapes(s: &str) -> String {
+    if !s.contains("\\u") {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek() == Some(&'u') {
+            chars.next(); // consume 'u'
+            let hex: String = (0..4).map_while(|_| chars.next_if(|d| d.is_ascii_hexdigit())).collect();
+            match u32::from_str_radix(&hex, 16).ok().filter(|_| hex.len() == 4).and_then(char::from_u32) {
+                Some(ch) => out.push(ch),
+                None => {
+                    out.push('\\');
+                    out.push('u');
+                    out.push_str(&hex);
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Parse the `key=value` lines of an ImageDescription tag.
 fn parse_description(desc: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
@@ -222,6 +274,8 @@ pub fn build_stack_meta(
     ij_metadata: Option<&[u8]>,
     ij_metadata_counts: Option<&[u32]>,
     total_ifds: usize,
+    x_resolution: Option<f64>,
+    y_resolution: Option<f64>,
 ) -> StackMeta {
     // Only parse ImageDescription as ImageJ's key=value format if it
     // actually carries ImageJ's own signature. A TIFF written by something
@@ -286,12 +340,12 @@ pub fn build_stack_meta(
         })
         .collect();
 
-    // Supplement (never override) the above from the binary IJMetadata block,
-    // filling only what ImageDescription didn't provide. A correctly-formed
+    // Supplement the above from the binary IJMetadata block. A correctly-formed
     // block has exactly one range-pair and one LUT per channel; we require that
     // exact count match before trusting it (a mismatched block is stale — e.g.
     // left over from before the file was reduced to fewer channels — so it's
     // ignored entirely rather than misattributed).
+    let mut has_explicit_luts = false;
     if let (Some(data), Some(counts)) = (ij_metadata, ij_metadata_counts) {
         let blocks = try_parse_ij_blocks(data, counts, ByteOrder::Big)
             .or_else(|| try_parse_ij_blocks(data, counts, ByteOrder::Little));
@@ -311,28 +365,42 @@ pub fn build_stack_meta(
             }
             // Per-channel LUTs: ImageDescription only carries `mode=`, never the
             // actual colors, so a count-matched LUT block is the genuine source
-            // of custom composite colors. Skip it for grayscale mode, where the
-            // color isn't "missing" — the file explicitly asked for grayscale.
-            if mode != DisplayMode::Grayscale && blocks.luts.len() == channels {
+            // of channel colors — and it takes priority over the mode-derived
+            // default (including grayscale). Only *colored* LUTs count as
+            // "explicit": a block of plain grayscale ramps is applied (a no-op
+            // visually) but leaves the pseudocolor toggle available, so a truly
+            // grayscale stack can still be tinted on demand.
+            if blocks.luts.len() == channels {
+                let colored = blocks
+                    .luts
+                    .iter()
+                    .any(|lut| lut.iter().any(|px| px[0] != px[1] || px[1] != px[2]));
                 for (disp, lut) in channel_display.iter_mut().zip(blocks.luts.iter()) {
                     disp.lut = *lut;
                 }
+                has_explicit_luts = colored;
             }
         }
     }
+
+    let px = x_resolution.filter(|r| r.is_finite() && *r > 0.0).map(|r| 1.0 / r);
+    let py = y_resolution.filter(|r| r.is_finite() && *r > 0.0).map(|r| 1.0 / r);
 
     StackMeta {
         channels,
         slices,
         frames,
         mode,
-        unit: kv.get("unit").cloned(),
+        unit: kv.get("unit").map(|u| decode_ij_escapes(u)),
         frame_interval_s: get_f64("finterval"),
         channel_display,
         calibration,
         fps,
         spacing: get_f64("spacing"),
         loop_playback: kv.get("loop").map(|s| s == "true"),
+        pixel_width: px,
+        pixel_height: py,
+        has_explicit_luts,
     }
 }
 

@@ -113,3 +113,28 @@ fn channel_size_boundary_is_inclusive_at_cutoff() {
         "one past the cutoff does not count as channel-sized",
     );
 }
+
+#[test]
+fn decodes_imagej_unit_escapes() {
+    // ImageJ writes the micron unit as a literal Java \uXXXX escape.
+    assert_eq!(decode_ij_escapes("\\u00B5m"), "µm");
+    assert_eq!(decode_ij_escapes("um"), "um"); // plain ASCII untouched
+    assert_eq!(decode_ij_escapes("pixel"), "pixel");
+    // A malformed escape is left verbatim rather than dropped.
+    assert_eq!(decode_ij_escapes("\\uZZ"), "\\uZZ");
+    assert_eq!(decode_ij_escapes("\\u12"), "\\u12");
+}
+
+#[test]
+fn voxel_scale_reports_raw_calibration() {
+    let mut meta = build_stack_meta(None, None, None, 1, None, None);
+    // Calibrated: 0.1 µm pixels, 0.5 µm z-step → the raw values (not normalized).
+    meta.pixel_width = Some(0.1);
+    meta.pixel_height = Some(0.1);
+    meta.spacing = Some(0.5);
+    assert_eq!(meta.voxel_scale(), [0.1, 0.1, 0.5]);
+
+    // Uncalibrated (no pixel size, no spacing) → 1:1:1.
+    let bare = build_stack_meta(None, None, None, 1, None, None);
+    assert_eq!(bare.voxel_scale(), [1.0, 1.0, 1.0]);
+}

@@ -212,6 +212,24 @@ impl RawIfdEntry {
             .ok_or_else(|| anyhow!("tag {} has no data", self.tag))
     }
 
+    /// Interpret as a single RATIONAL value (`numerator / denominator`), for
+    /// tags like XResolution/YResolution. Reads the first pair only.
+    pub fn as_rational(&self, file: &[u8], order: ByteOrder) -> Result<f64> {
+        if self.field_type != 5 {
+            bail!("tag {} is not a RATIONAL (field type {})", self.tag, self.field_type);
+        }
+        let bytes = self.owned_bytes(file, order)?;
+        let pair = bytes
+            .get(..8)
+            .ok_or_else(|| anyhow!("tag {} RATIONAL data too short", self.tag))?;
+        let num = order.u32(&pair[0..4]);
+        let den = order.u32(&pair[4..8]);
+        if den == 0 {
+            bail!("tag {} RATIONAL has a zero denominator", self.tag);
+        }
+        Ok(num as f64 / den as f64)
+    }
+
     /// Interpret as ASCII text (null-terminator and trailing nulls stripped).
     pub fn as_ascii(&self, file: &[u8], order: ByteOrder) -> Result<String> {
         let bytes = self.owned_bytes(file, order)?;

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.6.1"
+version = "1.7.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -13,7 +13,9 @@ dependencies = [
  "egui_extras",
  "env_logger",
  "fast-tiff-lib",
+ "half",
  "log",
+ "naga",
  "rfd",
  "winres",
 ]
@@ -836,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-lib"
-version = "0.6.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "bytemuck",

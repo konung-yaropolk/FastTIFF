@@ -8,7 +8,7 @@
 //! from `app.rs` via `UploadCtx` (the live GL context from `Frame::gl`); `paint`
 //! is invoked from the egui_glow callback built by `paint_callback`.
 
-use super::{ChannelKind, ChannelUniform, MAX_CHANNELS};
+use super::{ChannelKind, ChannelUniform, VolumeInterp, VolumeKind, VolumeParams, MAX_CHANNELS};
 use eframe::egui_glow;
 use eframe::glow::{self, HasContext as _};
 use std::sync::{Arc, Mutex};
@@ -53,6 +53,20 @@ pub fn paint_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
     let callback = egui_glow::CallbackFn::new(move |_info, painter| {
         if let Ok(r) = res.lock() {
             r.paint(painter.gl());
+        }
+    });
+    egui::Shape::Callback(egui::PaintCallback {
+        rect,
+        callback: Arc::new(callback),
+    })
+}
+
+/// The egui paint callback that ray-marches the 3D volume into `rect`.
+pub fn paint_volume_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
+    let res = render.clone();
+    let callback = egui_glow::CallbackFn::new(move |_info, painter| {
+        if let Ok(r) = res.lock() {
+            r.paint_volume(painter.gl());
         }
     });
     egui::Shape::Callback(egui::PaintCallback {
@@ -174,6 +188,216 @@ void main() {
 }
 "#;
 
+// --- 3D volume ray-march ---------------------------------------------------
+// A fullscreen pass that, per pixel, builds a camera ray and marches it through
+// the 3D texture(s). Two compositing modes (`u_mode`): maximum-intensity
+// projection (order-independent), and emission-absorption alpha compositing
+// (the ImageJ 3D Viewer's "Volume" look). The camera arrives as an explicit
+// basis (eye/forward/right/up + fov), avoiding any matrix inverse in-shader.
+//
+// Sample spacing is derived from the actual voxel size (via `textureSize`) so
+// it's the same regardless of the view direction — this, plus a per-pixel
+// jitter of the ray start, is what kills the slice-aligned banding that showed
+// up when looking down an axis. Keeping every sample strictly inside the box
+// (jitter < one step) plus a zero texture border avoids the edge artifacts.
+
+const VOL_VERTEX_SRC: &str = r#"#version 140
+out vec2 v_ndc;
+void main() {
+    const vec2 P[6] = vec2[6](
+        vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
+        vec2(-1.0, 1.0),  vec2(1.0, -1.0), vec2(1.0, 1.0));
+    gl_Position = vec4(P[gl_VertexID], 0.0, 1.0);
+    v_ndc = P[gl_VertexID];
+}
+"#;
+
+// One MIP pass per channel, summed — the 3D analog of the 2D compositor. Each
+// channel has an unorm sampler (`volN`, integer sources) and a float sampler
+// (`volfN`, R32F); `ch_is_float[N]` selects which carries the data (the other is
+// a 1x1x1 dummy). `num_channels` is a uniform, so the per-channel `if` guards are
+// uniform control flow (texture sampling inside them is well-defined).
+const VOL_FRAGMENT_SRC: &str = r#"#version 140
+in vec2 v_ndc;
+out vec4 frag_color;
+
+uniform sampler3D vol0;
+uniform sampler3D vol1;
+uniform sampler3D vol2;
+uniform sampler3D vol3;
+uniform sampler3D vol4;
+uniform sampler3D vol5;
+uniform sampler3D volf0;
+uniform sampler3D volf1;
+uniform sampler3D volf2;
+uniform sampler3D volf3;
+uniform sampler3D volf4;
+uniform sampler3D volf5;
+uniform sampler2D lut_tex;
+uniform vec3 cam_eye;
+uniform vec3 cam_forward;
+uniform vec3 cam_right;
+uniform vec3 cam_up;
+uniform float tan_half_fov;
+uniform float aspect;
+uniform vec3 box_he;         // volume box half-extents (scaled dims)
+uniform vec2 ch_window[6];   // per-channel min, max in sampled-texture units
+uniform float ch_enabled[6];
+uniform float ch_is_float[6];
+uniform int num_channels;
+uniform int u_mode;          // 0 = MIP, 1 = alpha DVR
+uniform float u_density;     // alpha-DVR opacity scale (higher = more solid)
+uniform int u_interp;        // 0 = point/linear (GL filter), 1 = in-shader tricubic
+
+const int MAX_STEPS = 512;
+
+// Fast tricubic B-spline reconstruction: 8 hardware-linear taps (Sigg &
+// Hadwiger). Smoother than trilinear; used when u_interp == 1 (the GL filter is
+// LINEAR then, so each tap is a bilinear-in-3D fetch).
+float sampleCubic(sampler3D tex, vec3 coord) {
+    vec3 n = vec3(textureSize(tex, 0));
+    vec3 cg = coord * n - 0.5;
+    vec3 idx = floor(cg);
+    vec3 f = cg - idx;
+    vec3 f2 = f * f;
+    vec3 f3 = f2 * f;
+    vec3 w0 = (1.0 / 6.0) * (-f3 + 3.0 * f2 - 3.0 * f + 1.0);
+    vec3 w1 = (1.0 / 6.0) * (3.0 * f3 - 6.0 * f2 + 4.0);
+    vec3 w2 = (1.0 / 6.0) * (-3.0 * f3 + 3.0 * f2 + 3.0 * f + 1.0);
+    vec3 w3 = (1.0 / 6.0) * f3;
+    vec3 g0 = w0 + w1;
+    vec3 g1 = w2 + w3;
+    vec3 h0 = (w1 / g0 - 0.5 + idx) / n;
+    vec3 h1 = (w3 / g1 + 1.5 + idx) / n;
+    float s000 = texture(tex, vec3(h0.x, h0.y, h0.z)).r;
+    float s100 = texture(tex, vec3(h1.x, h0.y, h0.z)).r;
+    float s010 = texture(tex, vec3(h0.x, h1.y, h0.z)).r;
+    float s110 = texture(tex, vec3(h1.x, h1.y, h0.z)).r;
+    float s001 = texture(tex, vec3(h0.x, h0.y, h1.z)).r;
+    float s101 = texture(tex, vec3(h1.x, h0.y, h1.z)).r;
+    float s011 = texture(tex, vec3(h0.x, h1.y, h1.z)).r;
+    float s111 = texture(tex, vec3(h1.x, h1.y, h1.z)).r;
+    float x00 = mix(s100, s000, g0.x);
+    float x10 = mix(s110, s010, g0.x);
+    float x01 = mix(s101, s001, g0.x);
+    float x11 = mix(s111, s011, g0.x);
+    float y0 = mix(x10, x00, g0.y);
+    float y1 = mix(x11, x01, g0.y);
+    return mix(y1, y0, g0.z);
+}
+
+// One texel value: GL-filtered fetch (nearest/linear) or the tricubic above.
+float smp(sampler3D tex, vec3 c) {
+    return (u_interp == 1) ? sampleCubic(tex, c) : texture(tex, c).r;
+}
+
+// Raw sampled value for each channel (its unorm or float texture).
+float raw0(vec3 tc) { return ch_is_float[0] > 0.5 ? smp(volf0, tc) : smp(vol0, tc); }
+float raw1(vec3 tc) { return ch_is_float[1] > 0.5 ? smp(volf1, tc) : smp(vol1, tc); }
+float raw2(vec3 tc) { return ch_is_float[2] > 0.5 ? smp(volf2, tc) : smp(vol2, tc); }
+float raw3(vec3 tc) { return ch_is_float[3] > 0.5 ? smp(volf3, tc) : smp(vol3, tc); }
+float raw4(vec3 tc) { return ch_is_float[4] > 0.5 ? smp(volf4, tc) : smp(vol4, tc); }
+float raw5(vec3 tc) { return ch_is_float[5] > 0.5 ? smp(volf5, tc) : smp(vol5, tc); }
+
+float norm_ch(float v, int idx) {
+    vec2 mm = ch_window[idx];
+    return clamp((v - mm.x) / max(mm.y - mm.x, 1e-6), 0.0, 1.0);
+}
+vec3 lut_col(float t, int idx) {
+    return texture(lut_tex, vec2(t, (float(idx) + 0.5) / 6.0)).rgb;
+}
+
+// World point -> volume texcoord, with Y and Z flipped so the volume matches the
+// 2D movie: image row 0 stays at the top (Y), and movie frame 0 is the slice
+// nearest the default camera (Z). X already matches.
+vec3 vol_coord(vec3 p) {
+    vec3 tc = (p + box_he) * (0.5 / box_he);
+    return clamp(vec3(tc.x, 1.0 - tc.y, 1.0 - tc.z), 0.0, 1.0);
+}
+
+void main() {
+    vec3 rd = normalize(cam_forward
+        + v_ndc.x * aspect * tan_half_fov * cam_right
+        + v_ndc.y * tan_half_fov * cam_up);
+    vec3 ro = cam_eye;
+
+    // Slab intersection with the axis-aligned box [-box_he, box_he].
+    vec3 inv = 1.0 / rd;
+    vec3 ta = (-box_he - ro) * inv;
+    vec3 tb = (box_he - ro) * inv;
+    vec3 tmin = min(ta, tb);
+    vec3 tmax = max(ta, tb);
+    float t0 = max(max(tmin.x, tmin.y), tmin.z);
+    float t1 = min(min(tmax.x, tmax.y), tmax.z);
+    if (t1 < max(t0, 0.0)) {
+        frag_color = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    t0 = max(t0, 0.0);
+
+    // Even sample spacing from the actual voxel size (view-independent).
+    ivec3 tdim = (ch_is_float[0] > 0.5) ? textureSize(volf0, 0) : textureSize(vol0, 0);
+    vec3 voxel = 2.0 * box_he / max(vec3(tdim), vec3(1.0));
+    float base_step = max(min(voxel.x, min(voxel.y, voxel.z)) * 0.5, 1e-4);
+    float span = t1 - t0;
+    int n = clamp(int(span / base_step) + 1, 1, MAX_STEPS);
+    float dt = span / float(n);
+
+    // Jitter the start within one step: decorrelates slice-aligned banding and
+    // keeps all n samples strictly inside [t0, t1].
+    float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    vec3 dp = rd * dt;
+    vec3 p = ro + rd * (t0 + jitter * dt);
+
+    if (u_mode == 1) {
+        // Alpha DVR (ImageJ 3D Viewer "Volume"): emission-absorption, front-to-back.
+        vec3 col = vec3(0.0);
+        float acc = 0.0;
+        for (int i = 0; i < MAX_STEPS; i++) {
+            if (i >= n) break;
+            vec3 tc = vol_coord(p);
+            vec3 emit = vec3(0.0);
+            float wsum = 0.0;
+            float t;
+            t = norm_ch(raw0(tc), 0);                       { float w = t * ch_enabled[0]; emit += w * lut_col(t, 0); wsum += w; }
+            if (num_channels > 1) { t = norm_ch(raw1(tc), 1); float w = t * ch_enabled[1]; emit += w * lut_col(t, 1); wsum += w; }
+            if (num_channels > 2) { t = norm_ch(raw2(tc), 2); float w = t * ch_enabled[2]; emit += w * lut_col(t, 2); wsum += w; }
+            if (num_channels > 3) { t = norm_ch(raw3(tc), 3); float w = t * ch_enabled[3]; emit += w * lut_col(t, 3); wsum += w; }
+            if (num_channels > 4) { t = norm_ch(raw4(tc), 4); float w = t * ch_enabled[4]; emit += w * lut_col(t, 4); wsum += w; }
+            if (num_channels > 5) { t = norm_ch(raw5(tc), 5); float w = t * ch_enabled[5]; emit += w * lut_col(t, 5); wsum += w; }
+            float a = 1.0 - exp(-u_density * wsum * dt);
+            vec3 albedo = (wsum > 1e-6) ? emit / wsum : vec3(0.0);
+            col += (1.0 - acc) * a * albedo;
+            acc += (1.0 - acc) * a;
+            if (acc > 0.995) break;
+            p += dp;
+        }
+        frag_color = vec4(clamp(col, vec3(0.0), vec3(1.0)), 1.0);
+    } else {
+        // MIP: per-channel maximum, then color + sum.
+        float m0 = 0.0, m1 = 0.0, m2 = 0.0, m3 = 0.0, m4 = 0.0, m5 = 0.0;
+        for (int i = 0; i < MAX_STEPS; i++) {
+            if (i >= n) break;
+            vec3 tc = vol_coord(p);
+            m0 = max(m0, raw0(tc));
+            if (num_channels > 1) m1 = max(m1, raw1(tc));
+            if (num_channels > 2) m2 = max(m2, raw2(tc));
+            if (num_channels > 3) m3 = max(m3, raw3(tc));
+            if (num_channels > 4) m4 = max(m4, raw4(tc));
+            if (num_channels > 5) m5 = max(m5, raw5(tc));
+            p += dp;
+        }
+        vec3 color = ch_enabled[0] * lut_col(norm_ch(m0, 0), 0);
+        if (num_channels > 1) color += ch_enabled[1] * lut_col(norm_ch(m1, 1), 1);
+        if (num_channels > 2) color += ch_enabled[2] * lut_col(norm_ch(m2, 2), 2);
+        if (num_channels > 3) color += ch_enabled[3] * lut_col(norm_ch(m3, 3), 3);
+        if (num_channels > 4) color += ch_enabled[4] * lut_col(norm_ch(m4, 4), 4);
+        if (num_channels > 5) color += ch_enabled[5] * lut_col(norm_ch(m5, 5), 5);
+        frag_color = vec4(clamp(color, vec3(0.0), vec3(1.0)), 1.0);
+    }
+}
+"#;
+
 /// Per-channel texture-allocation kind, tracked so `ensure_size` only
 /// reallocates when something actually changes.
 const KIND_UNUSED: u8 = 0; // channel not present: both textures are 1x1 dummies
@@ -207,6 +431,74 @@ pub struct ImageRenderResources {
     num_channels: i32,
     uv_offset: [f32; 2],
     uv_scale: [f32; 2],
+
+    /// The 3D ray-march pipeline + volume texture (see `paint_volume`).
+    volume: VolumeGl,
+}
+
+/// The 3D volume pipeline: its own program, per-channel unorm (R8/R16) and R32F
+/// 3D textures (one of each pair carries the data, the other is a 1x1x1 dummy —
+/// mirroring the 2D int/float split), and the marshalled draw params.
+struct VolumeGl {
+    program: glow::NativeProgram,
+    tex_unorm: [glow::NativeTexture; MAX_CHANNELS],
+    tex_float: [glow::NativeTexture; MAX_CHANNELS],
+    dims: (u32, u32, u32),
+    /// Per-channel kind (`None` = unused: both textures are 1x1x1 dummies).
+    kinds: [Option<VolumeKind>; MAX_CHANNELS],
+    interp: i32,      // GL_NEAREST / GL_LINEAR
+    interp_mode: i32, // shader `u_interp`: 0 = point/linear, 1 = tricubic
+    u_vol: [Option<glow::NativeUniformLocation>; MAX_CHANNELS],
+    u_volf: [Option<glow::NativeUniformLocation>; MAX_CHANNELS],
+    u_lut: Option<glow::NativeUniformLocation>,
+    u_eye: Option<glow::NativeUniformLocation>,
+    u_forward: Option<glow::NativeUniformLocation>,
+    u_right: Option<glow::NativeUniformLocation>,
+    u_up: Option<glow::NativeUniformLocation>,
+    u_tan: Option<glow::NativeUniformLocation>,
+    u_aspect: Option<glow::NativeUniformLocation>,
+    u_box_he: Option<glow::NativeUniformLocation>,
+    u_window: Option<glow::NativeUniformLocation>,
+    u_enabled: Option<glow::NativeUniformLocation>,
+    u_is_float: Option<glow::NativeUniformLocation>,
+    u_num_channels: Option<glow::NativeUniformLocation>,
+    u_mode: Option<glow::NativeUniformLocation>,
+    u_density: Option<glow::NativeUniformLocation>,
+    u_interp: Option<glow::NativeUniformLocation>,
+    params: Option<VolumeParams>,
+}
+
+impl VolumeGl {
+    unsafe fn new(gl: &glow::Context) -> Self {
+        let program = link_program(gl, VOL_VERTEX_SRC, VOL_FRAGMENT_SRC);
+        VolumeGl {
+            program,
+            tex_unorm: std::array::from_fn(|_| create_volume_texture(gl, false)),
+            tex_float: std::array::from_fn(|_| create_volume_texture(gl, true)),
+            dims: (1, 1, 1),
+            kinds: [None; MAX_CHANNELS],
+            interp: glow::NEAREST as i32,
+            interp_mode: 0,
+            u_vol: std::array::from_fn(|c| gl.get_uniform_location(program, &format!("vol{c}"))),
+            u_volf: std::array::from_fn(|c| gl.get_uniform_location(program, &format!("volf{c}"))),
+            u_lut: gl.get_uniform_location(program, "lut_tex"),
+            u_eye: gl.get_uniform_location(program, "cam_eye"),
+            u_forward: gl.get_uniform_location(program, "cam_forward"),
+            u_right: gl.get_uniform_location(program, "cam_right"),
+            u_up: gl.get_uniform_location(program, "cam_up"),
+            u_tan: gl.get_uniform_location(program, "tan_half_fov"),
+            u_aspect: gl.get_uniform_location(program, "aspect"),
+            u_box_he: gl.get_uniform_location(program, "box_he"),
+            u_window: gl.get_uniform_location(program, "ch_window"),
+            u_enabled: gl.get_uniform_location(program, "ch_enabled"),
+            u_is_float: gl.get_uniform_location(program, "ch_is_float"),
+            u_num_channels: gl.get_uniform_location(program, "num_channels"),
+            u_mode: gl.get_uniform_location(program, "u_mode"),
+            u_density: gl.get_uniform_location(program, "u_density"),
+            u_interp: gl.get_uniform_location(program, "u_interp"),
+            params: None,
+        }
+    }
 }
 
 impl ImageRenderResources {
@@ -244,7 +536,143 @@ impl ImageRenderResources {
                 num_channels: 0,
                 uv_offset: [0.0, 0.0],
                 uv_scale: [1.0, 1.0],
+                volume: VolumeGl::new(gl),
             }
+        }
+    }
+
+    /// Largest per-axis 3D-texture dimension the driver supports; the app uses
+    /// it (with a memory cap) to decide whether the volume must be subsampled.
+    pub fn max_3d_texture_size(&self, ctx: &UploadCtx) -> u32 {
+        unsafe { ctx.gl.get_parameter_i32(glow::MAX_3D_TEXTURE_SIZE).max(0) as u32 }
+    }
+
+    /// (Re)upload the whole volume, one entry per channel: each `bytes` is
+    /// `w*h*d` samples, z-major, in the units of its `kind` (U8/U16 unorm, F32).
+    /// Channels past `channels.len()` are shrunk to 1x1x1 dummies. Sized once per
+    /// stack — window/level, LUT, camera and interpolation change without this.
+    pub fn upload_volumes(&mut self, ctx: &UploadCtx, w: u32, h: u32, d: u32, channels: &[(VolumeKind, Vec<u8>)]) {
+        let gl = ctx.gl;
+        let v = &mut self.volume;
+        unsafe {
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            for c in 0..MAX_CHANNELS {
+                match channels.get(c) {
+                    Some((kind, bytes)) => {
+                        let (data_tex, dummy_tex) = if *kind == VolumeKind::F32 {
+                            (v.tex_float[c], v.tex_unorm[c])
+                        } else {
+                            (v.tex_unorm[c], v.tex_float[c])
+                        };
+                        gl.bind_texture(glow::TEXTURE_3D, Some(data_tex));
+                        set_volume_filter(gl, v.interp, *kind);
+                        let (internal, fmt, ty) = match kind {
+                            VolumeKind::U8 => (glow::R8, glow::RED, glow::UNSIGNED_BYTE),
+                            VolumeKind::U16 => (glow::R16, glow::RED, glow::UNSIGNED_SHORT),
+                            VolumeKind::F32 => (glow::R32F, glow::RED, glow::FLOAT),
+                        };
+                        gl.tex_image_3d(
+                            glow::TEXTURE_3D,
+                            0,
+                            internal as i32,
+                            w as i32,
+                            h as i32,
+                            d as i32,
+                            0,
+                            fmt,
+                            ty,
+                            glow::PixelUnpackData::Slice(Some(bytes)),
+                        );
+                        // Shrink the unused sibling texture to a 1x1x1 dummy.
+                        gl.bind_texture(glow::TEXTURE_3D, Some(dummy_tex));
+                        let dummy_kind = if *kind == VolumeKind::F32 { VolumeKind::U8 } else { VolumeKind::F32 };
+                        alloc_volume_dummy(gl, dummy_kind);
+                        v.kinds[c] = Some(*kind);
+                    }
+                    None => {
+                        // Absent channel: both textures back to 1x1x1 dummies.
+                        gl.bind_texture(glow::TEXTURE_3D, Some(v.tex_unorm[c]));
+                        alloc_volume_dummy(gl, VolumeKind::U8);
+                        gl.bind_texture(glow::TEXTURE_3D, Some(v.tex_float[c]));
+                        alloc_volume_dummy(gl, VolumeKind::F32);
+                        v.kinds[c] = None;
+                    }
+                }
+            }
+        }
+        v.dims = (w, h, d);
+    }
+
+    /// Switch every present volume channel's sampling filter without re-uploading.
+    /// Cubic uses the GL linear filter (its 8-tap reconstruction is in-shader).
+    pub fn set_volume_interp(&mut self, ctx: &UploadCtx, interp: VolumeInterp) {
+        let gl_interp = match interp {
+            VolumeInterp::Nearest => glow::NEAREST as i32,
+            VolumeInterp::Linear | VolumeInterp::Cubic => glow::LINEAR as i32,
+        };
+        self.volume.interp = gl_interp;
+        self.volume.interp_mode = interp.shader_mode();
+        for c in 0..MAX_CHANNELS {
+            if let Some(kind) = self.volume.kinds[c] {
+                let tex = if kind == VolumeKind::F32 { self.volume.tex_float[c] } else { self.volume.tex_unorm[c] };
+                unsafe {
+                    ctx.gl.bind_texture(glow::TEXTURE_3D, Some(tex));
+                    set_volume_filter(ctx.gl, gl_interp, kind);
+                }
+            }
+        }
+    }
+
+    /// Stash the ray-march params (camera, per-channel window, steps); applied in
+    /// `paint_volume`.
+    pub fn set_volume_params(&mut self, params: VolumeParams) {
+        self.volume.params = Some(params);
+    }
+
+    /// Ray-march the current volume, compositing every channel. The egui_glow
+    /// callback has already set the viewport/scissor to the canvas rect.
+    pub fn paint_volume(&self, gl: &glow::Context) {
+        let v = &self.volume;
+        let Some(p) = v.params else { return };
+        unsafe {
+            gl.use_program(Some(v.program));
+            gl.bind_vertex_array(Some(self.vao));
+            // Unorm channel textures → units 0..MAX_CHANNELS.
+            for c in 0..MAX_CHANNELS {
+                gl.active_texture(glow::TEXTURE0 + c as u32);
+                gl.bind_texture(glow::TEXTURE_3D, Some(v.tex_unorm[c]));
+                gl.uniform_1_i32(v.u_vol[c].as_ref(), c as i32);
+            }
+            // LUT → unit MAX_CHANNELS.
+            let lut_unit = MAX_CHANNELS as u32;
+            gl.active_texture(glow::TEXTURE0 + lut_unit);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.lut_texture));
+            gl.uniform_1_i32(v.u_lut.as_ref(), lut_unit as i32);
+            // Float channel textures → units MAX_CHANNELS+1 .. 2*MAX_CHANNELS+1.
+            for c in 0..MAX_CHANNELS {
+                let unit = MAX_CHANNELS as u32 + 1 + c as u32;
+                gl.active_texture(glow::TEXTURE0 + unit);
+                gl.bind_texture(glow::TEXTURE_3D, Some(v.tex_float[c]));
+                gl.uniform_1_i32(v.u_volf[c].as_ref(), unit as i32);
+            }
+
+            gl.uniform_3_f32(v.u_eye.as_ref(), p.eye[0], p.eye[1], p.eye[2]);
+            gl.uniform_3_f32(v.u_forward.as_ref(), p.forward[0], p.forward[1], p.forward[2]);
+            gl.uniform_3_f32(v.u_right.as_ref(), p.right[0], p.right[1], p.right[2]);
+            gl.uniform_3_f32(v.u_up.as_ref(), p.up[0], p.up[1], p.up[2]);
+            gl.uniform_1_f32(v.u_tan.as_ref(), p.tan_half_fov);
+            gl.uniform_1_f32(v.u_aspect.as_ref(), p.aspect);
+            gl.uniform_3_f32(v.u_box_he.as_ref(), p.box_he[0], p.box_he[1], p.box_he[2]);
+            gl.uniform_2_f32_slice(v.u_window.as_ref(), &p.windows);
+            gl.uniform_1_f32_slice(v.u_enabled.as_ref(), &p.enabled);
+            gl.uniform_1_f32_slice(v.u_is_float.as_ref(), &p.is_float);
+            gl.uniform_1_i32(v.u_num_channels.as_ref(), p.num_channels);
+            gl.uniform_1_i32(v.u_mode.as_ref(), p.render_mode);
+            gl.uniform_1_f32(v.u_density.as_ref(), p.density);
+            gl.uniform_1_i32(v.u_interp.as_ref(), v.interp_mode);
+
+            gl.disable(glow::BLEND);
+            gl.draw_arrays(glow::TRIANGLES, 0, 6);
         }
     }
 
@@ -523,6 +951,44 @@ unsafe fn set_nearest_clamp(gl: &glow::Context) {
     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+}
+
+/// Allocate a 1x1x1 dummy for the currently-bound 3D texture in `kind`'s format
+/// (the volume's unused int/float sibling always shrinks to this).
+unsafe fn alloc_volume_dummy(gl: &glow::Context, kind: VolumeKind) {
+    let (internal, fmt, ty) = match kind {
+        VolumeKind::U8 => (glow::R8, glow::RED, glow::UNSIGNED_BYTE),
+        VolumeKind::U16 => (glow::R16, glow::RED, glow::UNSIGNED_SHORT),
+        VolumeKind::F32 => (glow::R32F, glow::RED, glow::FLOAT),
+    };
+    gl.tex_image_3d(glow::TEXTURE_3D, 0, internal as i32, 1, 1, 1, 0, fmt, ty, glow::PixelUnpackData::Slice(None));
+}
+
+/// Create a 3D texture (clamped, NEAREST) with a 1x1x1 dummy allocation.
+/// `is_float` picks R32F, else R8 (re-specified to R8/R16 at upload time).
+unsafe fn create_volume_texture(gl: &glow::Context, is_float: bool) -> glow::NativeTexture {
+    let tex = gl.create_texture().expect("create volume texture");
+    gl.bind_texture(glow::TEXTURE_3D, Some(tex));
+    let kind = if is_float { VolumeKind::F32 } else { VolumeKind::U8 };
+    set_volume_filter(gl, glow::NEAREST as i32, kind);
+    alloc_volume_dummy(gl, kind);
+    tex
+}
+
+/// Set the currently-bound 3D texture's filter (`gl_interp` = NEAREST/LINEAR)
+/// and a **zero border** on all three axes. `CLAMP_TO_BORDER` (border = 0)
+/// rather than `CLAMP_TO_EDGE` means samples at/just outside a face fade to 0
+/// instead of smearing the boundary voxel — no bright edge shell on MIP, and a
+/// clean silhouette on the alpha DVR. `kind` is unused today but kept so a
+/// future nearest-only fallback for unfilterable float formats stays a one-line
+/// change.
+unsafe fn set_volume_filter(gl: &glow::Context, gl_interp: i32, _kind: VolumeKind) {
+    gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_MIN_FILTER, gl_interp);
+    gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_MAG_FILTER, gl_interp);
+    gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_BORDER as i32);
+    gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_BORDER as i32);
+    gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_WRAP_R, glow::CLAMP_TO_BORDER as i32);
+    gl.tex_parameter_f32_slice(glow::TEXTURE_3D, glow::TEXTURE_BORDER_COLOR, &[0.0, 0.0, 0.0, 0.0]);
 }
 
 unsafe fn create_lut_texture(gl: &glow::Context) -> glow::NativeTexture {

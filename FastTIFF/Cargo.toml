@@ -1,6 +1,6 @@
 [package]
 name = "FastTIFF"
-version = "1.6.1"
+version = "1.7.1"
 edition = "2021"
 description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering."
 license = "GPL-3.0-only"
@@ -16,7 +16,9 @@ license = "GPL-3.0-only"
 [features]
 default = ["renderer-glow"]
 renderer-glow = ["eframe/glow"]
-renderer-wgpu = ["eframe/wgpu"]
+# `half` (f32 -> f16) is only used by the wgpu volume path, which stores samples
+# in R16Float 3D textures; already in the tree via wgpu, so this adds nothing.
+renderer-wgpu = ["eframe/wgpu", "dep:half"]
 
 [dependencies]
 fast-tiff-lib = { path = "../fast-tiff-lib" }
@@ -30,10 +32,18 @@ eframe = { version = "0.34", default-features = false, features = ["default_font
 egui = "0.34"
 egui_extras = "0.34"
 bytemuck = "1.25"
+# f32 -> f16 for the wgpu volume textures (R16Float); wgpu-only, so optional.
+half = { version = "2", optional = true }
 anyhow = "1.0"
 rfd = "0.17"
 log = "0.4"
 env_logger = "0.11"
+
+# WGSL shaders are only validated by wgpu at runtime (shader-module creation),
+# so this lets `cargo test` catch shader errors offline (no GPU needed). naga is
+# already in the tree via wgpu; the test is gated to the wgpu feature.
+[dev-dependencies]
+naga = { version = "29", features = ["wgsl-in"] }
 
 # Only needed on Windows, where build.rs embeds the icon + version metadata
 # as a Win32 resource. Gated so non-Windows builds don't pull winres in.
