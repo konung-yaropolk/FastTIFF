@@ -427,9 +427,11 @@ rustc 1.96.
 - **Writer throughput:** ≈2.7 GB/s uncompressed, 1.0 GB/s PackBits,
   460 MB/s ZSTD, 150 MB/s Deflate, 115 MB/s LZW.
 
-![Benchmark summary](https://raw.githubusercontent.com/konung-yaropolk/FastTIFF/main/fast-tiff-lib/docs/bench_summary.png)
+![Benchmark summary](https://raw.githubusercontent.com/konung-yaropolk/FastTIFF/main/fast-tiff-lib/bench/bench_summary.png)
 
-![Frame-count sweep](https://raw.githubusercontent.com/konung-yaropolk/FastTIFF/main/fast-tiff-lib/docs/bench_sweep.png)
+![Frame-count sweep](https://raw.githubusercontent.com/konung-yaropolk/FastTIFF/main/fast-tiff-lib/bench/graphs/sweep_combined.png)
+
+![All tests](https://raw.githubusercontent.com/konung-yaropolk/FastTIFF/main/fast-tiff-lib/bench/graphs/all_tests.png)
 
 One honest caveat: the benchmark forces every reader to produce owned buffers
 and reads each frame exactly once, which bills mmap's one-time page-fault
