@@ -166,6 +166,7 @@ this is the one-line formula to change.
 - mome to wgpu default
 - Set default compression rates on write in lib
 - add shift and space keys navigation in CAD and Maya modes
+- change mouse wheel zoom logic - outside of the box like zoom, inside the box - linear like in spectator mode
 
 
 
