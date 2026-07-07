@@ -170,6 +170,7 @@ this is the one-line formula to change.
 
 
 - add color selector for grayscale images applying for both 2d and 3d
+- add different colormaps to the selector like magma, plasma, viridis, turbo etc
 - Port to mac and publish at Brew
 - Add windows installer with files association
 
