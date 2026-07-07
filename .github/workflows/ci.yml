@@ -2,8 +2,8 @@ name: CI
 
 # Runs the full workspace test suite on pushes to main (and PRs targeting it),
 # so the "tests" badge reflects current health between releases — not just the
-# last published release. Windows matches the release environment, where the
-# eframe/glow app builds without any extra system packages.
+# last published release. Windows matches the release environment there, where
+# the default (wgpu/DX12) app builds without any extra system packages.
 on:
   push:
     branches: [main]
@@ -28,3 +28,10 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+      # The test run above exercises the default (wgpu) backend. glow is the
+      # Linux release backend but isn't otherwise compiled here, so a glow-only
+      # break would stay green until a release build fails. This compile-only
+      # check catches that (glow links just OpenGL — no extra system packages).
+      - name: Build glow backend
+        run: cargo build -p FastTIFF --no-default-features --features renderer-glow

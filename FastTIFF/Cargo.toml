@@ -1,24 +1,25 @@
 [package]
 name = "FastTIFF"
-version = "1.7.1"
+version = "1.7.2"
 edition = "2021"
 description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering."
 license = "GPL-3.0-only"
 
-# Exactly one GPU renderer is compiled in, chosen by these features. glow
-# (OpenGL) is the default: it avoids a Windows 10 idle-CPU spin that the wgpu
-# backend triggers on some machines, and works on Windows/Linux/macOS today.
-# Build the wgpu variant with:
-#     cargo build --no-default-features --features renderer-wgpu
-# (wgpu = DX12/Vulkan/Metal — preferable on macOS, where OpenGL is deprecated).
-# Each feature turns on the matching eframe backend, so the *unused* renderer's
-# entire dependency subtree is excluded from the build (verify: `cargo tree`).
+# Exactly one GPU renderer is compiled in, chosen by these features. wgpu
+# (DX12/Vulkan/Metal) is the default — preferred on macOS (where OpenGL is
+# deprecated) and the more actively developed backend. Build the glow (OpenGL)
+# variant with:
+#     cargo build --no-default-features --features renderer-glow
+# glow is the portable fallback: it links only OpenGL (near-universal on
+# Linux), and avoids a Windows 10 idle-CPU spin that wgpu triggers on some
+# machines. Each feature turns on the matching eframe backend, so the *unused*
+# renderer's entire dependency subtree is excluded from the build (`cargo tree`).
 [features]
-default = ["renderer-glow"]
-renderer-glow = ["eframe/glow"]
-# `half` (f32 -> f16) is only used by the wgpu volume path, which stores samples
-# in R16Float 3D textures; already in the tree via wgpu, so this adds nothing.
+default = ["renderer-wgpu"]
+# `half` (f32 -> f16) is only used by the wgpu volume path (16-bit volume
+# textures); it's already in the tree via wgpu, so this adds nothing.
 renderer-wgpu = ["eframe/wgpu", "dep:half"]
+renderer-glow = ["eframe/glow"]
 
 [dependencies]
 fast-tiff-lib = { path = "../fast-tiff-lib" }
@@ -32,6 +33,8 @@ eframe = { version = "0.34", default-features = false, features = ["default_font
 egui = "0.34"
 egui_extras = "0.34"
 bytemuck = "1.25"
+# Parallel-across-slices 3D volume assembly (already in the tree via fast-tiff-lib).
+rayon = "1.10"
 # f32 -> f16 for the wgpu volume textures (R16Float); wgpu-only, so optional.
 half = { version = "2", optional = true }
 anyhow = "1.0"

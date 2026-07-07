@@ -4,6 +4,7 @@ mod app;
 mod prefetch;
 mod process;
 mod render;
+mod volume;
 
 fn main() -> eframe::Result {
     env_logger::init();
@@ -26,7 +27,7 @@ fn main() -> eframe::Result {
         std::env::args_os().skip(1).map(std::path::PathBuf::from).collect();
     let initial_path = process::open_all(&files).cloned();
 
-    let native_options = eframe::NativeOptions {
+    let mut native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([320.0, 320.0])
             // Keep in sync with `app::MIN_WINDOW` — the floor for both manual
@@ -37,6 +38,9 @@ fn main() -> eframe::Result {
         renderer: render::RENDERER,
         ..Default::default()
     };
+    // Backend-specific option tweaks (wgpu: request the optional 16-bit-norm
+    // texture feature for full-precision volume textures; glow: no-op).
+    render::tune_native_options(&mut native_options);
 
     eframe::run_native(
         "FastTIFF",

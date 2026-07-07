@@ -11,7 +11,9 @@ pub use decode::{
     read_planes_f32_into, read_planes_u16, read_planes_u16_into, read_planes_u8, read_planes_u8_into,
     set_parallel_decode,
 };
-pub use encode::{ImageJOptions, SampleType, TiffWriter, WriterOptions};
+pub use encode::{
+    ImageJOptions, SampleType, TiffWriter, WriterOptions, DEFAULT_DEFLATE_LEVEL, DEFAULT_ZSTD_LEVEL,
+};
 pub use ifd::{ByteOrder, TiffFlavor};
 pub use ij_metadata::{
     default_composite_lut, default_lut_for, grayscale_lut, resolve_dimensions, ChannelDisplay, DisplayMode,

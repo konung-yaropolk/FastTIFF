@@ -83,6 +83,40 @@ pub fn paint_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
     ))
 }
 
+/// GPU bytes per volume sample on this backend: every channel is stored as a
+/// 16-bit texel (R16Unorm or R16Float), whatever the source kind. The volume
+/// builder budgets on the larger of CPU/GPU footprint, so 8-bit sources count
+/// as 2 bytes here instead of silently doubling past the budget in VRAM.
+pub fn volume_gpu_bps(_kind: VolumeKind) -> usize {
+    2
+}
+
+/// Backend hook for `eframe::NativeOptions`: request the 16-bit-norm texture
+/// feature when the adapter has it (nearly universal on desktop), so 16-bit
+/// volume data keeps its full precision (R16Unorm) instead of rounding through
+/// f16 (~11 bits). The device init falls back cleanly when it's missing.
+pub fn tune_native_options(options: &mut eframe::NativeOptions) {
+    if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        setup.device_descriptor = Arc::new(|adapter| {
+            // Mirror eframe's default limits choice, plus our optional feature.
+            let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                wgpu::Limits::downlevel_webgl2_defaults()
+            } else {
+                wgpu::Limits::default()
+            };
+            wgpu::DeviceDescriptor {
+                label: Some("egui wgpu device"),
+                required_features: adapter.features() & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
+                required_limits: wgpu::Limits {
+                    max_texture_dimension_2d: 8192,
+                    ..base_limits
+                },
+                ..Default::default()
+            }
+        });
+    }
+}
+
 /// The egui paint callback that ray-marches the 3D volume into `rect`.
 pub fn paint_volume_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
     egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(
@@ -202,8 +236,13 @@ pub struct ImageRenderResources {
     volume_bind_group_layout: wgpu::BindGroupLayout,
     volume_bind_group: wgpu::BindGroup,
     volume_uniform_buffer: wgpu::Buffer,
-    /// Per-channel R16Float 3D textures (1x1x1 dummies until a volume is built).
+    /// Per-channel 16-bit 3D textures (1x1x1 dummies until a volume is built):
+    /// R16Unorm for integer sources when the device has the 16-bit-norm feature
+    /// (full 16-bit precision, and u16 uploads become plain memcpys), else
+    /// R16Float; float sources are always R16Float.
     volume_textures: [wgpu::Texture; MAX_CHANNELS],
+    /// Whether the device has `TEXTURE_FORMAT_16BIT_NORM` (see `tune_native_options`).
+    volume_unorm16: bool,
     /// `interp` for the shader: 0 = nearest, 1 = linear, 2 = cubic.
     volume_interp_mode: i32,
     /// The camera/window params, stashed by `set_volume_params` and written to
@@ -319,6 +358,7 @@ impl ImageRenderResources {
 
         let (volume_pipeline, volume_bind_group_layout, volume_bind_group, volume_uniform_buffer, volume_textures) =
             create_volume_resources(device, target_format, &lut_texture, &sampler);
+        let volume_unorm16 = device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM);
 
         Self {
             pipeline,
@@ -336,6 +376,7 @@ impl ImageRenderResources {
             volume_bind_group,
             volume_uniform_buffer,
             volume_textures,
+            volume_unorm16,
             volume_interp_mode: 1, // linear
             volume_params: None,
         }
@@ -350,31 +391,90 @@ impl ImageRenderResources {
     }
 
     /// (Re)upload the volume, one entry per channel: each `bytes` is `w*h*d`
-    /// samples in native `kind` format, converted to normalized f16 for the
-    /// R16Float 3D textures. Channels past `channels.len()` become 1x1x1 dummies.
+    /// samples in native `kind` format, uploaded to 16-bit 3D textures (see the
+    /// `volume_textures` field for the format choice). Channels past
+    /// `channels.len()` become 1x1x1 dummies. Textures whose size + format are
+    /// unchanged (a 4D timepoint step) are refilled in place; the bind group is
+    /// only rebuilt when a texture was recreated. Conversion happens in bounded
+    /// z-slab chunks (or not at all: u16 -> R16Unorm is a straight copy).
     pub fn upload_volumes(&mut self, ctx: &UploadCtx, w: u32, h: u32, d: u32, channels: &[(VolumeKind, Vec<u8>)]) {
         let device = ctx.device;
+        let mut rebind = false;
         for c in 0..MAX_CHANNELS {
-            match channels.get(c) {
-                Some((kind, bytes)) => {
-                    self.volume_textures[c] = create_volume_texture(device, w, h, d, &format!("FastTIFFvol {c}"));
-                    let half_bits = volume_to_f16(*kind, bytes);
-                    write_volume_texture(ctx.queue, &self.volume_textures[c], w, h, d, &half_bits);
-                }
-                None => {
-                    self.volume_textures[c] = create_volume_texture(device, 1, 1, 1, &format!("FastTIFFvol {c}"));
-                    write_volume_texture(ctx.queue, &self.volume_textures[c], 1, 1, 1, &[0u16]);
+            let entry = channels.get(c);
+            let (want_w, want_h, want_d) = if entry.is_some() { (w, h, d) } else { (1, 1, 1) };
+            let want = wgpu::Extent3d {
+                width: want_w,
+                height: want_h,
+                depth_or_array_layers: want_d,
+            };
+            let want_fmt = match entry {
+                Some((kind, _)) => self.volume_format(*kind),
+                None => wgpu::TextureFormat::R16Float,
+            };
+            if self.volume_textures[c].size() != want || self.volume_textures[c].format() != want_fmt {
+                self.volume_textures[c] =
+                    create_volume_texture(device, want_w, want_h, want_d, want_fmt, &format!("FastTIFFvol {c}"));
+                rebind = true;
+                if entry.is_none() {
+                    write_volume_region(ctx.queue, &self.volume_textures[c], 1, 1, 0, 1, &[0u8, 0u8]);
                 }
             }
+            if let Some((kind, bytes)) = entry {
+                self.upload_volume_channel(ctx.queue, c, (w, h, d), *kind, bytes);
+            }
         }
-        self.volume_bind_group = build_volume_bind_group(
-            device,
-            &self.volume_bind_group_layout,
-            &self.volume_uniform_buffer,
-            &self.volume_textures,
-            &self.lut_texture,
-            &self.sampler,
-        );
+        if rebind {
+            self.volume_bind_group = build_volume_bind_group(
+                device,
+                &self.volume_bind_group_layout,
+                &self.volume_uniform_buffer,
+                &self.volume_textures,
+                &self.lut_texture,
+                &self.sampler,
+            );
+        }
+    }
+
+    /// The texture format a volume channel of `kind` uses on this device.
+    fn volume_format(&self, kind: VolumeKind) -> wgpu::TextureFormat {
+        match kind {
+            VolumeKind::U8 | VolumeKind::U16 if self.volume_unorm16 => wgpu::TextureFormat::R16Unorm,
+            _ => wgpu::TextureFormat::R16Float,
+        }
+    }
+
+    /// Fill one channel's volume texture from native-format samples. u16 data on
+    /// an R16Unorm texture uploads verbatim (no conversion pass at all); every
+    /// other combination converts z-slab by z-slab into a reused buffer, so the
+    /// transient allocation is bounded by `VOLUME_UPLOAD_CHUNK_BYTES` instead of
+    /// a second full-volume copy.
+    fn upload_volume_channel(&self, queue: &wgpu::Queue, c: usize, dims: (u32, u32, u32), kind: VolumeKind, bytes: &[u8]) {
+        let (w, h, d) = dims;
+        let texture = &self.volume_textures[c];
+        let unorm = texture.format() == wgpu::TextureFormat::R16Unorm;
+        if kind == VolumeKind::U16 && unorm {
+            // Raw u16 samples are exactly R16Unorm texels: one straight upload.
+            write_volume_region(queue, texture, w, h, 0, d, bytes);
+            return;
+        }
+        let slice_texels = w as usize * h as usize;
+        let src_bps = match kind {
+            VolumeKind::U8 => 1,
+            VolumeKind::U16 => 2,
+            VolumeKind::F32 => 4,
+        };
+        let slices_per_chunk = (VOLUME_UPLOAD_CHUNK_BYTES / (slice_texels * 2).max(1)).clamp(1, d as usize);
+        let mut buf: Vec<u16> = Vec::with_capacity(slices_per_chunk * slice_texels);
+        let mut z0 = 0usize;
+        while z0 < d as usize {
+            let zn = slices_per_chunk.min(d as usize - z0);
+            let src = &bytes[z0 * slice_texels * src_bps..(z0 + zn) * slice_texels * src_bps];
+            buf.clear();
+            convert_volume_texels(kind, unorm, src, &mut buf);
+            write_volume_region(queue, texture, w, h, z0 as u32, zn as u32, bytemuck::cast_slice(&buf));
+            z0 += zn;
+        }
     }
 
     /// Store the sampling mode for the shader (0 = nearest, 1 = linear, 2 = cubic).
@@ -849,7 +949,9 @@ fn create_volume_resources(
         mapped_at_creation: false,
     });
 
-    let textures = std::array::from_fn(|c| create_volume_texture(device, 1, 1, 1, &format!("FastTIFFvol {c}")));
+    let textures = std::array::from_fn(|c| {
+        create_volume_texture(device, 1, 1, 1, wgpu::TextureFormat::R16Float, &format!("FastTIFFvol {c}"))
+    });
     let bind_group = build_volume_bind_group(device, &layout, &uniform_buffer, &textures, lut_texture, sampler);
 
     (pipeline, layout, bind_group, uniform_buffer, textures)
@@ -860,7 +962,8 @@ fn volume_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Texture {
-            // R16Float is core-filterable, so linear/cubic use the hardware sampler.
+            // R16Float is core-filterable; R16Unorm is filterable under the
+            // TEXTURE_FORMAT_16BIT_NORM feature. Both fit this entry.
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             view_dimension: wgpu::TextureViewDimension::D3,
             multisampled: false,
@@ -869,7 +972,14 @@ fn volume_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn create_volume_texture(device: &wgpu::Device, w: u32, h: u32, d: u32, label: &str) -> wgpu::Texture {
+fn create_volume_texture(
+    device: &wgpu::Device,
+    w: u32,
+    h: u32,
+    d: u32,
+    format: wgpu::TextureFormat,
+    label: &str,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -880,22 +990,26 @@ fn create_volume_texture(device: &wgpu::Device, w: u32, h: u32, d: u32, label: &
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D3,
-        format: wgpu::TextureFormat::R16Float,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     })
 }
 
-/// Write `w*h*d` f16 samples (native-endian u16 bit patterns) into a 3D texture.
-fn write_volume_texture(queue: &wgpu::Queue, texture: &wgpu::Texture, w: u32, h: u32, d: u32, half_bits: &[u16]) {
+/// Bound on the converted-texel scratch buffer for chunked volume uploads.
+const VOLUME_UPLOAD_CHUNK_BYTES: usize = 32 << 20;
+
+/// Write a z-slab of 16-bit texels (`data` = `w*h*d` texels starting at `z0`)
+/// into a 3D texture.
+fn write_volume_region(queue: &wgpu::Queue, texture: &wgpu::Texture, w: u32, h: u32, z0: u32, d: u32, data: &[u8]) {
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture,
             mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
+            origin: wgpu::Origin3d { x: 0, y: 0, z: z0 },
             aspect: wgpu::TextureAspect::All,
         },
-        bytemuck::cast_slice(half_bits),
+        data,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(w * 2),
@@ -909,21 +1023,27 @@ fn write_volume_texture(queue: &wgpu::Queue, texture: &wgpu::Texture, w: u32, h:
     );
 }
 
-/// Convert one channel's native-format samples to normalized f16 bit patterns:
-/// U8 -> raw/255, U16 -> raw/65535, F32 -> raw (matching the glow unorm/float
-/// units, so the per-channel window applies unchanged).
-fn volume_to_f16(kind: VolumeKind, bytes: &[u8]) -> Vec<u16> {
+/// Convert native-format samples to 16-bit texels, appended to `out`:
+///   * R16Unorm target: U8 widens ×257 (exact: 255·257 = 65535).
+///   * R16Float target: U8 -> raw/255, U16 -> raw/65535, F32 -> raw — matching
+///     the glow unorm/float units, so the per-channel window applies unchanged.
+///
+/// The input holds native-endian samples (filled via `bytemuck` casts).
+fn convert_volume_texels(kind: VolumeKind, unorm: bool, bytes: &[u8], out: &mut Vec<u16>) {
     use half::f16;
     match kind {
-        VolumeKind::U8 => bytes.iter().map(|&b| f16::from_f32(b as f32 / 255.0).to_bits()).collect(),
-        VolumeKind::U16 => bytes
-            .chunks_exact(2)
-            .map(|c| f16::from_f32(u16::from_le_bytes([c[0], c[1]]) as f32 / 65535.0).to_bits())
-            .collect(),
-        VolumeKind::F32 => bytes
-            .chunks_exact(4)
-            .map(|c| f16::from_f32(f32::from_le_bytes([c[0], c[1], c[2], c[3]])).to_bits())
-            .collect(),
+        VolumeKind::U8 if unorm => out.extend(bytes.iter().map(|&b| b as u16 * 257)),
+        VolumeKind::U8 => out.extend(bytes.iter().map(|&b| f16::from_f32(b as f32 / 255.0).to_bits())),
+        VolumeKind::U16 => out.extend(
+            bytes
+                .chunks_exact(2)
+                .map(|c| f16::from_f32(u16::from_ne_bytes([c[0], c[1]]) as f32 / 65535.0).to_bits()),
+        ),
+        VolumeKind::F32 => out.extend(
+            bytes
+                .chunks_exact(4)
+                .map(|c| f16::from_f32(f32::from_ne_bytes([c[0], c[1], c[2], c[3]])).to_bits()),
+        ),
     }
 }
 

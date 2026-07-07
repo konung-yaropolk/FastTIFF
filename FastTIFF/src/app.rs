@@ -209,6 +209,11 @@ struct LoadedStack {
     /// change) so an in-flight prefetch decoded under the old plan is recognized
     /// as stale and ignored rather than uploaded.
     prefetch_gen: u64,
+    /// Background 3D-volume builder (own mmap), spawned lazily on the first 3D
+    /// use. `None` after a failed spawn (`volume_builder_tried` set) — volume
+    /// builds then fall back to running synchronously on the UI thread.
+    volume_builder: Option<crate::volume::VolumeBuilder>,
+    volume_builder_tried: bool,
 }
 
 pub struct ViewerApp {
@@ -339,15 +344,18 @@ pub struct ViewerApp {
     /// the ray-march projection matches the on-screen rect.
     vol_aspect: f32,
     /// Which timepoint the currently-uploaded volume holds (`Some(frame_index)`
-    /// in the 4D case, else `Some(0)`); `None` means no volume is built yet, so
-    /// the next 3D draw does the initial (loading-screened) build. A mismatch
-    /// with the current timepoint triggers an inline rebuild — this is what makes
+    /// in the 4D case, else `Some(0)`); `None` means no volume is uploaded yet,
+    /// so the loading screen shows until the first background build lands. A
+    /// mismatch with the current timepoint queues a rebuild — this is what makes
     /// 4D playback advance the volume through time.
     volume_built_frame: Option<usize>,
-    /// One-frame latch: the black "Loading 3D…" screen has been shown, so the
-    /// next `sync_gpu` may run the blocking initial build without the freeze
-    /// landing on the previous (2D) view.
-    volume_pending_build: bool,
+    /// Generation for background volume builds: bumped when the plan changes
+    /// shape (new file, dimension-order swap) so an in-flight build for the old
+    /// layout is recognized as stale and ignored.
+    volume_gen: u64,
+    /// The `(generation, time)` currently queued on the background builder, so
+    /// the request isn't re-sent on every polling frame.
+    volume_requested: Option<(u64, usize)>,
     /// Whether the render-settings pop-up (voxel scale + interpolation) is open,
     /// toggled by the ⚙ button in the expanded bottom panel.
     show_render_settings: bool,
@@ -399,7 +407,8 @@ impl ViewerApp {
             vol_density: 100.0,
             vol_aspect: 1.0,
             volume_built_frame: None,
-            volume_pending_build: false,
+            volume_gen: 0,
+            volume_requested: None,
             show_render_settings: false,
         };
         if let Some(path) = initial_path {
@@ -430,6 +439,8 @@ impl ViewerApp {
                     rgb: false,
                     prefetch,
                     prefetch_gen: 0,
+                    volume_builder: None,
+                    volume_builder_tried: false,
                 };
                 let (c, z, f) = (
                     loaded.tiff.meta.channels,
@@ -457,7 +468,8 @@ impl ViewerApp {
                 self.vol_scale = loaded.tiff.meta.voxel_scale();
                 self.reset_volume_camera();
                 self.volume_built_frame = None;
-                self.volume_pending_build = false;
+                self.volume_gen = self.volume_gen.wrapping_add(1);
+                self.volume_requested = None;
                 // Always start a newly-opened file in the 2D movie view.
                 self.view_mode = ViewMode::Movie;
 
@@ -513,25 +525,61 @@ impl ViewerApp {
         ];
     }
 
-    /// Move the orbit pivot to where the camera's focal axis first enters the
+    /// The eye's world position for the given look direction: `fly_pos` in the
+    /// free-fly mode, else `target - forward*dist` (the orbit eye).
+    fn current_eye(&self, forward: [f32; 3]) -> [f32; 3] {
+        if self.nav_mode.is_fly() {
+            self.vol_fly_pos
+        } else {
+            let dist = vol_dist_clamped(self.vol_dist);
+            [
+                self.vol_target[0] - forward[0] * dist,
+                self.vol_target[1] - forward[1] * dist,
+                self.vol_target[2] - forward[2] * dist,
+            ]
+        }
+    }
+
+    /// Set the orbit pivot to where the camera's focal axis first enters the
     /// volume box, keeping the eye where it is (the orbit radius becomes that
-    /// entry distance). No-op if the focal ray misses the box. Called when an
-    /// orbit drag begins, so the rotation centers on what's under the view. When
-    /// the eye is inside the box the entry distance is 0, so the pivot lands on
-    /// the eye itself — the camera then rotates in place.
+    /// entry distance). Called when an orbit drag begins, so the rotation centers
+    /// on what's under the view. When the eye is inside the box the entry distance
+    /// is 0, so the pivot lands on the eye itself — the camera rotates in place.
+    /// If the focal ray misses the box, the pivot falls to the focal-axis point
+    /// nearest the box center (still on the axis, so the eye never jumps).
     fn repivot_to_focal(&mut self) {
         let (forward, _, _) = volume_basis(self.vol_yaw, self.vol_pitch);
+        let eye = self.current_eye(forward);
+        let t = focal_box_entry(eye, forward, self.vol_box_he).unwrap_or_else(|| {
+            (-(eye[0] * forward[0] + eye[1] * forward[1] + eye[2] * forward[2])).max(0.0)
+        });
+        self.vol_target = [eye[0] + forward[0] * t, eye[1] + forward[1] * t, eye[2] + forward[2] * t];
+        // Radius = eye->pivot distance, so the eye doesn't move (t = 0 inside).
+        self.vol_dist = vol_dist_clamped(t);
+    }
+
+    /// Rotate the view while keeping the eye fixed (first-person "mouse look"):
+    /// the pivot swings to stay `dist` ahead of the eye along the new direction.
+    fn vol_look_in_place(&mut self, delta: egui::Vec2) {
+        let (forward, _, _) = volume_basis(self.vol_yaw, self.vol_pitch);
+        let eye = self.current_eye(forward);
+        self.vol_orbit(delta);
+        let (fwd, _, _) = volume_basis(self.vol_yaw, self.vol_pitch);
         let dist = vol_dist_clamped(self.vol_dist);
-        let eye = [
-            self.vol_target[0] - forward[0] * dist,
-            self.vol_target[1] - forward[1] * dist,
-            self.vol_target[2] - forward[2] * dist,
+        self.vol_target = [eye[0] + fwd[0] * dist, eye[1] + fwd[1] * dist, eye[2] + fwd[2] * dist];
+    }
+
+    /// Orbit the free-fly eye around the current pivot (used by the free-fly
+    /// mode's right-drag): rotate, then place `fly_pos` on the orbit sphere.
+    fn vol_orbit_fly(&mut self, delta: egui::Vec2) {
+        self.vol_orbit(delta);
+        let (fwd, _, _) = volume_basis(self.vol_yaw, self.vol_pitch);
+        let dist = vol_dist_clamped(self.vol_dist);
+        self.vol_fly_pos = [
+            self.vol_target[0] - fwd[0] * dist,
+            self.vol_target[1] - fwd[1] * dist,
+            self.vol_target[2] - fwd[2] * dist,
         ];
-        if let Some(t) = focal_box_entry(eye, forward, self.vol_box_he) {
-            self.vol_target = [eye[0] + forward[0] * t, eye[1] + forward[1] * t, eye[2] + forward[2] * t];
-            // Radius = eye->pivot distance, so the eye doesn't move (t = 0 inside).
-            self.vol_dist = vol_dist_clamped(t);
-        }
     }
 
     /// Keep the view continuous when switching between a free-fly and an orbit
@@ -619,6 +667,7 @@ impl ViewerApp {
         let drag_r = response.dragged_by(egui::PointerButton::Secondary);
         let start_l = response.drag_started_by(egui::PointerButton::Primary);
         let start_m = response.drag_started_by(egui::PointerButton::Middle);
+        let start_r = response.drag_started_by(egui::PointerButton::Secondary);
 
         // Mouse drag → orbit / pan / dolly, mapped per navigation style. Orbit
         // modes re-pivot to where the focal axis enters the volume when the orbit
@@ -634,6 +683,11 @@ impl ViewerApp {
                 }
                 if drag_m && moved {
                     self.vol_pan(d, right, up, pan_speed);
+                    animating = true;
+                }
+                if drag_r && moved {
+                    // Right-drag looks around from a fixed eye (first-person).
+                    self.vol_look_in_place(d);
                     animating = true;
                 }
             }
@@ -672,14 +726,23 @@ impl ViewerApp {
             }
             NavMode::WasdFly => {
                 if drag_l && moved {
-                    self.vol_orbit(d); // mouse-look (first-person, no pivot)
+                    self.vol_orbit(d); // mouse-look (first-person)
+                    animating = true;
+                }
+                if start_r {
+                    // Right-drag orbits: pivot on where the view enters the box.
+                    self.repivot_to_focal();
+                }
+                if drag_r && moved {
+                    self.vol_orbit_fly(d);
                     animating = true;
                 }
             }
         }
 
-        // WASD translation, in every mode: fly moves the eye (Space/Shift add
-        // vertical), orbit modes move the pivot (WASD only, no vertical).
+        // WASD translation, in every mode: fly moves the eye, orbit modes move
+        // the pivot. Space/Shift add vertical movement in the fly, CAD and Maya
+        // modes — not Blender, where Shift is the pan modifier.
         if hovered {
             let mut mv = [0.0f32; 3];
             if wasd[0] {
@@ -694,7 +757,8 @@ impl ViewerApp {
             if wasd[3] {
                 mv[2] -= 1.0;
             }
-            if self.nav_mode.is_fly() {
+            let vertical_keys = self.nav_mode.is_fly() || matches!(self.nav_mode, NavMode::Cad | NavMode::Maya);
+            if vertical_keys {
                 if space {
                     mv[1] += 1.0;
                 }
@@ -729,30 +793,42 @@ impl ViewerApp {
                 arot.y += KEY_ROT;
             }
             if arot != egui::Vec2::ZERO {
-                self.vol_yaw += arot.x;
+                // Apply `arot` like a mouse drag delta so the keys match the
+                // pointer's sense of rotation (see `vol_orbit`): yaw is negated,
+                // pitch is not. Without the negation the left/right keys spin the
+                // camera the wrong way (vertical, which isn't negated, was fine).
+                self.vol_yaw -= arot.x;
                 self.vol_pitch = (self.vol_pitch + arot.y).clamp(-1.54, 1.54);
                 animating = true;
             }
         }
 
-        // Wheel: dolly the eye in fly mode, else a continuous multiplicative
-        // orbit zoom (wheel up = in/closer, so the radius shrinks). The floor
-        // lets it back out of a radius-0 (in-place) orbit.
+        // Wheel: a linear fly along the focal axis (not a zoom). In fly mode it
+        // moves the eye; in orbit modes it moves the whole camera (eye + pivot).
+        // Speed is spectator-slow inside the box and grows with the eye's
+        // distance from the box, so far views approach fast and near ones creep.
         if wheel.abs() > 0.01 {
             if self.nav_mode.is_fly() {
                 for (p, f) in self.vol_fly_pos.iter_mut().zip(forward) {
                     *p += f * wheel * FLY_WHEEL;
                 }
             } else {
-                self.vol_dist =
-                    vol_dist_clamped(self.vol_dist.max(VOL_DIST_UNSTICK) * VOL_ZOOM_PER_NOTCH.powf(-wheel));
+                let eye = self.current_eye(forward);
+                let to_box = focal_box_entry(eye, forward, self.vol_box_he)
+                    .unwrap_or_else(|| (eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]).sqrt());
+                let m = wheel * (to_box * 0.15).max(FLY_WHEEL);
+                self.vol_target = [
+                    self.vol_target[0] + forward[0] * m,
+                    self.vol_target[1] + forward[1] * m,
+                    self.vol_target[2] + forward[2] * m,
+                ];
             }
         }
 
         animating
     }
 
-    fn sync_gpu(&mut self, frame: &eframe::Frame) {
+    fn sync_gpu(&mut self, egui_ctx: &egui::Context, frame: &eframe::Frame) {
         // The per-frame upload handle (GL context, or device+queue) for whatever
         // backend is compiled in. `None` only before the backend is initialized.
         let Some(ctx) = render::upload_ctx(frame) else { return };
@@ -780,40 +856,57 @@ impl ViewerApp {
             loaded.luts_uploaded = true;
         }
 
-        // 3D volume view: (re)build the volume textures for the current timepoint,
-        // then push the camera + per-channel window params. The 2D per-frame
-        // decode/upload path below is skipped — the volume holds every slice.
+        // 3D volume view: make sure the volume textures hold the current
+        // timepoint, then push the camera + per-channel window params. The 2D
+        // per-frame decode/upload path below is skipped — the volume holds
+        // every slice.
         //
-        // In the 4D case (a separate time axis, `slices > 1`) the volume depth is
-        // Z at the current frame_index (time); advancing time rebuilds the volume
-        // inline (no loading screen), which is what animates 4D playback. In the
-        // ordinary case the frame axis *is* the depth, so `time` stays 0 and the
-        // volume is built exactly once.
+        // The build itself runs on a background thread (`volume::VolumeBuilder`)
+        // so neither the initial build nor a 4D timepoint step blocks the UI:
+        // until the result lands, the loading screen (initial) or the previous
+        // timepoint's volume (4D) stays on screen, and we poll each frame. In
+        // the 4D case (`slices > 1`) the volume depth is Z at the current
+        // frame_index (time), so playback animates the volume through time; in
+        // the ordinary case the frame axis *is* the depth and `time` stays 0.
         if self.view_mode == ViewMode::Volume {
             let is_4d = loaded.tiff.meta.slices > 1;
             let time = if is_4d { loaded.frame_index } else { 0 };
             if self.volume_built_frame != Some(time) {
-                if self.volume_built_frame.is_none() {
-                    // Initial build for this stack: defer one frame so the black
-                    // loading screen paints before the heavy decode blocks.
-                    if self.volume_pending_build {
-                        let max_dim = resources.max_3d_texture_size(&ctx);
-                        if let Some((vw, vh, vd, chans)) = build_volume(loaded, max_dim) {
+                // Lazily spawn the background builder on first 3D use (it opens
+                // its own mmap of the file, like the prefetch worker).
+                if loaded.volume_builder.is_none() && !loaded.volume_builder_tried {
+                    loaded.volume_builder = crate::volume::VolumeBuilder::new(loaded.path.clone());
+                    loaded.volume_builder_tried = true;
+                }
+                let max_dim = resources.max_3d_texture_size(&ctx);
+                let plan = plan_volume(loaded, max_dim, time);
+                let mut handled = false;
+                if let Some(builder) = &loaded.volume_builder {
+                    if let Some(built) = builder.take_matching(self.volume_gen, time) {
+                        if let Some((vw, vh, vd, chans)) = built {
                             resources.upload_volumes(&ctx, vw, vh, vd, &chans);
                         }
-                        // Mark built even on failure so we don't retry every frame
-                        // (the canvas just stays black).
+                        // Mark built even on failure so we don't retry every
+                        // frame (the canvas just stays black).
                         self.volume_built_frame = Some(time);
-                        self.volume_pending_build = false;
+                        self.volume_requested = None;
+                        handled = true;
                     } else {
-                        self.volume_pending_build = true;
-                        return;
+                        let queued = self.volume_requested == Some((self.volume_gen, time))
+                            || builder.request(self.volume_gen, plan.clone());
+                        if queued {
+                            self.volume_requested = Some((self.volume_gen, time));
+                            // In flight: poll again next frame (the previous
+                            // volume / loading screen stays up meanwhile).
+                            egui_ctx.request_repaint();
+                            handled = true;
+                        }
+                        // queued == false: the worker died (its file open
+                        // failed) — fall through to the synchronous build.
                     }
-                } else {
-                    // 4D timepoint change: rebuild inline. The previous volume
-                    // stays on screen during the brief decode — no loading screen.
-                    let max_dim = resources.max_3d_texture_size(&ctx);
-                    if let Some((vw, vh, vd, chans)) = build_volume(loaded, max_dim) {
+                }
+                if !handled {
+                    if let Some((vw, vh, vd, chans)) = crate::volume::build_volume(&loaded.tiff, &plan) {
                         resources.upload_volumes(&ctx, vw, vh, vd, &chans);
                     }
                     self.volume_built_frame = Some(time);
@@ -960,127 +1053,18 @@ fn build_jobs(loaded: &LoadedStack, frame_index: usize, enabled: &[bool], kinds:
         .collect()
 }
 
-/// Rough upper bound on the volume texture's footprint. The builder subsamples
-/// each axis until the volume fits under this before uploading, so a huge stack
-/// degrades to a coarser volume rather than exhausting VRAM.
-const MAX_VOLUME_BYTES: usize = 768 << 20;
-
-/// A built volume: `(width, height, depth)` plus one `(kind, native-endian
-/// bytes)` entry per channel — what `build_volume` hands to `upload_volumes`.
-type BuiltVolume = (u32, u32, u32, Vec<(render::VolumeKind, Vec<u8>)>);
-
-/// Build the 3D volume for the current stack — one scalar texture per channel.
-/// The depth axis is the whole scrub axis in the ordinary case, or (in the 4D
-/// channels+Z+time case, `slices > 1`) the Z axis at the current timepoint
-/// `frame_index`. All channels share the same subsampling, chosen so the
-/// *combined* footprint fits the GPU's 3D-texture size limit `max_dim` and the
-/// `MAX_VOLUME_BYTES` budget. Returns `(width, height, depth, per-channel
-/// (kind, native-endian bytes))`, or `None` when there's no volume to build.
-fn build_volume(loaded: &LoadedStack, max_dim: u32) -> Option<BuiltVolume> {
-    let f0 = loaded.tiff.frames.first()?;
-    let (w, h) = (f0.width, f0.height);
-    let slices = loaded.tiff.meta.slices.max(1);
-    let channels = loaded.tiff.meta.channels.max(1);
-    let is_4d = slices > 1;
-    // Depth axis: Z at the current timepoint (4D) or the whole frame axis.
-    let depth = if is_4d { slices as u32 } else { loaded.tiff.meta.frames.max(1) as u32 };
-    let time = if is_4d { loaded.frame_index } else { 0 };
-    let n = loaded.channel_settings.len().min(MAX_CHANNELS);
-    if w == 0 || h == 0 || depth < 2 || n == 0 {
-        return None;
-    }
-
-    // Per-channel source kind + GPU volume kind + bytes-per-sample.
-    let ckinds: Vec<ChannelKind> = loaded.channel_settings.iter().take(n).map(|s| s.kind).collect();
-    let vkinds: Vec<(render::VolumeKind, usize)> = ckinds
-        .iter()
-        .map(|k| match k {
-            ChannelKind::Int8 => (render::VolumeKind::U8, 1usize),
-            ChannelKind::Int16 => (render::VolumeKind::U16, 2),
-            ChannelKind::Float => (render::VolumeKind::F32, 4),
-        })
-        .collect();
-    let sum_bps: usize = vkinds.iter().map(|(_, b)| *b).sum();
-
-    let max_dim = max_dim.max(64);
-    let out = |n: u32, s: u32| n.div_ceil(s);
-    // Smallest stride that fits the texture-size limit per axis, then coarsen the
-    // largest output axis until the *combined* byte budget is met.
-    let mut sx = w.div_ceil(max_dim).max(1);
-    let mut sy = h.div_ceil(max_dim).max(1);
-    let mut sz = depth.div_ceil(max_dim).max(1);
-    loop {
-        let (ox, oy, oz) = (out(w, sx), out(h, sy), out(depth, sz));
-        if (ox as usize) * (oy as usize) * (oz as usize) * sum_bps <= MAX_VOLUME_BYTES {
-            break;
-        }
-        if ox >= oy && ox >= oz {
-            sx += 1;
-        } else if oy >= oz {
-            sy += 1;
-        } else {
-            sz += 1;
-        }
-    }
-    let (ow, oh, od) = (out(w, sx), out(h, sy), out(depth, sz));
-
-    let mut bufs: Vec<Vec<u8>> = vkinds
-        .iter()
-        .map(|(_, bps)| vec![0u8; ow as usize * oh as usize * od as usize * bps])
-        .collect();
-
-    for oz in 0..od {
-        // Depth index → (time, z): in 4D the depth is Z at the fixed timepoint;
-        // otherwise the depth index *is* the frame (time = k, z = 0). The IFD
-        // layout is time-major, then Z, then channel — mirroring `build_jobs`.
-        let k = (oz * sz) as usize;
-        let (t, z) = if is_4d { (time, k) } else { (k, 0) };
-        let jobs: Vec<ChannelJob> = (0..n)
-            .map(|c| {
-                let (ifd_idx, plane) = if loaded.rgb {
-                    (t * slices + z, c)
-                } else {
-                    (t * slices * channels + z * channels + c, 0)
-                };
-                ChannelJob { channel: c, ifd_idx, plane, kind: ckinds[c], rgb: loaded.rgb, width: w, height: h }
-            })
-            .collect();
-        let decoded = decode_jobs(&loaded.tiff.mmap, &loaded.tiff.frames, loaded.tiff.byte_order, &jobs).ok()?;
-        for (c, dec) in decoded.iter().enumerate() {
-            let bps = vkinds[c].1;
-            let slice_bytes = ow as usize * oh as usize * bps;
-            let dst = &mut bufs[c][oz as usize * slice_bytes..(oz as usize + 1) * slice_bytes];
-            match dec {
-                Decoded::U8(v) => downsample_slice(v, (w, h), (sx, sy), (ow, oh), dst),
-                Decoded::U16(v) => downsample_slice(v, (w, h), (sx, sy), (ow, oh), dst),
-                Decoded::F32(v) => downsample_slice(v, (w, h), (sx, sy), (ow, oh), dst),
-            }
-        }
-    }
-
-    let channels_out: Vec<(render::VolumeKind, Vec<u8>)> =
-        vkinds.iter().map(|(k, _)| *k).zip(bufs).collect();
-    Some((ow, oh, od, channels_out))
-}
-
-/// Point-sample one decoded slice into `dst` at `stride` (sx, sy), writing each
-/// sample's native-endian bytes (matches the GPU upload's pixel type). `dims` is
-/// the source (w, h); `out` is the destination (ow, oh).
-fn downsample_slice<T: bytemuck::Pod>(src: &[T], dims: (u32, u32), stride: (u32, u32), out: (u32, u32), dst: &mut [u8]) {
-    let (w, h) = dims;
-    let (sx, sy) = stride;
-    let (ow, oh) = out;
-    let bps = std::mem::size_of::<T>();
-    for oy in 0..oh {
-        let src_row = (oy * sy).min(h - 1) as usize * w as usize;
-        let dst_row = oy as usize * ow as usize;
-        for ox in 0..ow {
-            let sx_i = (ox * sx).min(w - 1) as usize;
-            if let Some(sample) = src.get(src_row + sx_i) {
-                let di = (dst_row + ox as usize) * bps;
-                dst[di..di + bps].copy_from_slice(bytemuck::bytes_of(sample));
-            }
-        }
+/// Snapshot everything the volume builder needs (see `volume::VolumePlan`):
+/// the dimensions come from the app's (possibly manually overridden) metadata
+/// so a channels/frames swap is honored, `time` is the 4D timepoint to build.
+fn plan_volume(loaded: &LoadedStack, max_dim: u32, time: usize) -> crate::volume::VolumePlan {
+    crate::volume::VolumePlan {
+        kinds: loaded.channel_settings.iter().map(|s| s.kind).collect(),
+        rgb: loaded.rgb,
+        channels: loaded.tiff.meta.channels,
+        slices: loaded.tiff.meta.slices,
+        frames: loaded.tiff.meta.frames,
+        time,
+        max_dim,
     }
 }
 
@@ -1190,8 +1174,6 @@ fn norm3(v: [f32; 3]) -> [f32; 3] {
 const VOL_DIST_MIN: f32 = 0.0;
 const VOL_DIST_MAX: f32 = 300.0;
 const VOL_DIST_UNSTICK: f32 = 0.02;
-/// Per-wheel-notch zoom multiplier (~1.5× gentler than the old ladder step).
-const VOL_ZOOM_PER_NOTCH: f32 = 1.25;
 
 fn vol_dist_clamped(dist: f32) -> f32 {
     dist.clamp(VOL_DIST_MIN, VOL_DIST_MAX)
@@ -2551,9 +2533,11 @@ impl eframe::App for ViewerApp {
                 refresh_pseudocolor(loaded, self.apply_pseudocolor);
                 self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
             }
-            // The frame axis (volume depth) just changed — rebuild on next 3D draw.
+            // The frame axis (volume depth) just changed — rebuild on next 3D
+            // draw, and invalidate any in-flight build under the old layout.
             self.volume_built_frame = None;
-            self.volume_pending_build = false;
+            self.volume_gen = self.volume_gen.wrapping_add(1);
+            self.volume_requested = None;
         }
 
         // Central panel: the image is drawn at exactly `image_size × zoom`. When
@@ -2917,7 +2901,7 @@ impl eframe::App for ViewerApp {
             self.last_title = Some(desired_title);
         }
 
-        self.sync_gpu(frame);
+        self.sync_gpu(ui.ctx(), frame);
     }
 }
 

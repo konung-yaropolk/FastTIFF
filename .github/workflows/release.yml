@@ -28,8 +28,12 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --release
 
+      # Windows ships the wgpu (DX12) backend. Pinned explicitly rather than
+      # relying on the crate default so the per-OS split (Windows = wgpu,
+      # Linux = glow, see the deb/arch jobs below) stays intentional even if
+      # the default renderer feature ever changes.
       - name: Build release exe
-        run: cargo build --release -p FastTIFF
+        run: cargo build --release -p FastTIFF --no-default-features --features renderer-wgpu
 
       # Give the asset a versioned name
       - name: Stage artifact
@@ -85,8 +89,12 @@ jobs:
 
       # Reads [package.metadata.deb] from FastTIFF/Cargo.toml. Output:
       # target/debian/fasttiff_<version>-1_<amd64|arm64>.deb (per runner arch).
+      # Linux ships the glow (OpenGL) backend, not the crate default (wgpu):
+      # OpenGL is near-universal on Linux, whereas a wgpu binary needs a Vulkan
+      # ICD at runtime that cargo-deb's $auto dep scan can't see (wgpu dlopens
+      # libvulkan). cargo-deb forwards these flags to the cargo build it runs.
       - name: Build .deb
-        run: cargo deb -p FastTIFF
+        run: cargo deb -p FastTIFF --no-default-features --features renderer-glow
 
       - name: Attach .deb to release
         uses: softprops/action-gh-release@v2

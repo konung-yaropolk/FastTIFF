@@ -248,9 +248,9 @@ impl WriterOptions {
     }
 
     /// Compression effort level, for the codecs that have one: Deflate takes
-    /// 0..=9 (clamped; default 6) and Zstd 1..=22 (default 3, negative =
-    /// faster-than-1 modes). Ignored for `Lzw`/`PackBits`, which have no
-    /// level. Unset = each codec's default.
+    /// 0..=9 (clamped) and Zstd 1..=22 (negative = faster-than-1 modes). Ignored
+    /// for `Lzw`/`PackBits`, which have no level. Unset applies the lib defaults:
+    /// `DEFAULT_DEFLATE_LEVEL` (6) and `DEFAULT_ZSTD_LEVEL` (3).
     pub fn compression_level(mut self, level: i32) -> Self {
         self.compression_level = Some(level);
         self
@@ -992,10 +992,18 @@ fn apply_float_predictor(data: &mut [u8], row_bytes: usize, spp: usize) {
     }
 }
 
+/// Default effort levels used when the caller doesn't set `compression_level`:
+/// a balanced Deflate 6 and a fast Zstd 3 (both the usual library defaults),
+/// chosen here explicitly so the write path's behavior is fixed and documented
+/// rather than inherited from whatever the codec crate happens to default to.
+pub const DEFAULT_DEFLATE_LEVEL: i32 = 6;
+pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
+
 /// Compress one strip. Mirrors `decode::decompress` codec-for-codec so
 /// everything written here reads back with the sibling decoder (and libtiff,
-/// ImageJ, etc.). `level` is the optional effort knob for the codecs that
-/// have one (Deflate 0..=9 clamped, Zstd 1..=22); `None` = codec default.
+/// ImageJ, etc.). `level` is the optional effort knob for the codecs that have
+/// one (Deflate 0..=9 clamped, Zstd 1..=22); `None` = the lib default
+/// (`DEFAULT_DEFLATE_LEVEL` / `DEFAULT_ZSTD_LEVEL`).
 fn compress_strip(strip: &[u8], compression: Compression, row_bytes: usize, level: Option<i32>) -> Result<Vec<u8>> {
     match compression {
         Compression::None => Ok(strip.to_vec()),
@@ -1012,10 +1020,8 @@ fn compress_strip(strip: &[u8], compression: Compression, row_bytes: usize, leve
             Ok(out)
         }
         Compression::Deflate => {
-            let flate_level = match level {
-                Some(l) => flate2::Compression::new(l.clamp(0, 9) as u32),
-                None => flate2::Compression::default(),
-            };
+            let l = level.unwrap_or(DEFAULT_DEFLATE_LEVEL).clamp(0, 9);
+            let flate_level = flate2::Compression::new(l as u32);
             let mut encoder =
                 flate2::write::ZlibEncoder::new(Vec::with_capacity(strip.len() / 2), flate_level);
             encoder.write_all(strip).map_err(|e| anyhow!("Deflate encode failed: {e}"))?;
@@ -1023,7 +1029,7 @@ fn compress_strip(strip: &[u8], compression: Compression, row_bytes: usize, leve
         }
         Compression::PackBits => Ok(packbits_encode(strip, row_bytes)),
         Compression::Zstd => {
-            zstd::stream::encode_all(strip, level.unwrap_or(zstd::DEFAULT_COMPRESSION_LEVEL))
+            zstd::stream::encode_all(strip, level.unwrap_or(DEFAULT_ZSTD_LEVEL))
                 .map_err(|e| anyhow!("ZSTD encode failed: {e}"))
         }
         Compression::Other(code) => bail!("unsupported TIFF compression scheme: {code}"),

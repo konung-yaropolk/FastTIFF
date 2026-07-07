@@ -26,22 +26,24 @@ https://github.com/konung-yaropolk/FastTIFF/releases
 cargo run --release
 ```
 
-### Renderer (glow vs wgpu)
+### Renderer (wgpu vs glow)
 
-The GPU backend is chosen at compile time. 
+The GPU backend is chosen at compile time.
 
-**glow** (OpenGL) is the default:
+**wgpu** (DX12/Vulkan/Metal) is the default:
 ```sh
 cargo run --release
 ```
-**wgpu** (DX12/Vulkan/Metal) is opt-in:
+**glow** (OpenGL) is opt-in:
 ```sh
-cargo run --release --no-default-features --features renderer-wgpu
+cargo run --release --no-default-features --features renderer-glow
 ```
 
-glow is the default because wgpu pegs a CPU core while idle on some Windows 10
-machines; wgpu may be preferable on macOS (Metal). Only the selected backend is
-compiled in — the other's dependencies are excluded entirely.
+wgpu is the default: it's the more actively developed backend and preferable on
+macOS (Metal, since OpenGL is deprecated there). glow is the portable fallback —
+it links only OpenGL (near-universal on Linux) and avoids a Windows 10 idle-CPU
+spin that wgpu triggers on some machines. Only the selected backend is compiled
+in — the other's dependencies are excluded entirely.
 
 ## Why it's fast
 
@@ -158,19 +160,18 @@ this is the one-line formula to change.
 - Done: 2D zoom (Ctrl+scroll) and pan
 - Done: 3D volume view (MIP + ImageJ-style alpha), navigation modes, interpolation, 4D playback
 - Done: 3D volume view on the wgpu backend (was blank on Windows 10)
+- Done: move to wgpu default
+- Done: Set default compression rates on write in lib
+- Done: add shift and space keys navigation in CAD and Maya modes
+- Done: change mouse wheel zoom logic - outside of the box like zoom, inside the box - linear like in spectator mode
+- Done: add orbiting mechanism in to spectator mode by pressing right mouse button
+- Done: add right mouse button camera angle change as in spectator mode 
 
 
 
+- add color selector for grayscale images applying for both 2d and 3d
 - Port to mac and publish at Brew
 - Add windows installer with files association
-- mome to wgpu default
-- Set default compression rates on write in lib
-- add shift and space keys navigation in CAD and Maya modes
-- change mouse wheel zoom logic - outside of the box like zoom, inside the box - linear like in spectator mode
-- add orbiting mechanism in to spectator mode by pressing right mouse button
-- add right mouse button camera angle change as in spectator mode 
-
-
 
 
 

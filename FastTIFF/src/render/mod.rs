@@ -29,7 +29,10 @@ compile_error!(
 #[cfg(feature = "renderer-glow")]
 mod glow_backend;
 #[cfg(feature = "renderer-glow")]
-pub use glow_backend::{init, paint_callback, paint_volume_callback, upload_ctx, Render, BACKEND, RENDERER};
+pub use glow_backend::{
+    init, paint_callback, paint_volume_callback, tune_native_options, upload_ctx, volume_gpu_bps, Render, BACKEND,
+    RENDERER,
+};
 
 // The `not(renderer-glow)` guard means that turning on *both* features (a hard
 // error, above) selects only the glow backend here — so the build fails with
@@ -37,7 +40,10 @@ pub use glow_backend::{init, paint_callback, paint_volume_callback, upload_ctx, 
 #[cfg(all(feature = "renderer-wgpu", not(feature = "renderer-glow")))]
 mod wgpu_backend;
 #[cfg(all(feature = "renderer-wgpu", not(feature = "renderer-glow")))]
-pub use wgpu_backend::{init, paint_callback, paint_volume_callback, upload_ctx, Render, BACKEND, RENDERER};
+pub use wgpu_backend::{
+    init, paint_callback, paint_volume_callback, tune_native_options, upload_ctx, volume_gpu_bps, Render, BACKEND,
+    RENDERER,
+};
 
 /// Maximum number of display channels composited at once. Shared by both
 /// backends (texture/uniform array sizes) and by `app.rs`.

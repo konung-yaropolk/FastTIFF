@@ -35,7 +35,11 @@ struct VolParams {
 @group(0) @binding(7) var lut_tex: texture_2d_array<f32>;
 @group(0) @binding(8) var samp: sampler;
 
-const MAX_STEPS: i32 = 512;
+// Upper bound on ray-march samples. High enough that the largest volume the
+// memory budget admits (~1600-voxel diagonal) still gets half-voxel sampling;
+// the loops run `n` iterations (n <= MAX_STEPS), so ordinary volumes never pay
+// for the headroom.
+const MAX_STEPS: i32 = 4096;
 
 struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -174,22 +178,22 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
     if (P.modes.y == 1) {
         // Alpha DVR (ImageJ 3D Viewer "Volume"): emission-absorption, front-to-back.
+        // The edge fade applies to the *windowed* value (fading raw values breaks
+        // float data whose window doesn't start at 0). Disabled channels are
+        // skipped entirely (uniform branch, no sampling cost).
         var col = vec3<f32>(0.0);
         var acc = 0.0;
-        for (var i = 0; i < MAX_STEPS; i = i + 1) {
-            if (i >= n) { break; }
+        for (var i = 0; i < n; i = i + 1) {
             let tc = vol_coord(p);
             let fade = edge_fade(tc, tdim);
             var emit = vec3<f32>(0.0);
             var wsum = 0.0;
-            var t = norm_ch(raw0(tc) * fade, 0);
-            var w = t * enabled(0);
-            emit += w * lut_col(t, 0); wsum += w;
-            if (nc > 1) { t = norm_ch(raw1(tc) * fade, 1); w = t * enabled(1); emit += w * lut_col(t, 1); wsum += w; }
-            if (nc > 2) { t = norm_ch(raw2(tc) * fade, 2); w = t * enabled(2); emit += w * lut_col(t, 2); wsum += w; }
-            if (nc > 3) { t = norm_ch(raw3(tc) * fade, 3); w = t * enabled(3); emit += w * lut_col(t, 3); wsum += w; }
-            if (nc > 4) { t = norm_ch(raw4(tc) * fade, 4); w = t * enabled(4); emit += w * lut_col(t, 4); wsum += w; }
-            if (nc > 5) { t = norm_ch(raw5(tc) * fade, 5); w = t * enabled(5); emit += w * lut_col(t, 5); wsum += w; }
+            if (enabled(0) > 0.5) { let t = norm_ch(raw0(tc), 0) * fade; emit += t * lut_col(t, 0); wsum += t; }
+            if (nc > 1 && enabled(1) > 0.5) { let t = norm_ch(raw1(tc), 1) * fade; emit += t * lut_col(t, 1); wsum += t; }
+            if (nc > 2 && enabled(2) > 0.5) { let t = norm_ch(raw2(tc), 2) * fade; emit += t * lut_col(t, 2); wsum += t; }
+            if (nc > 3 && enabled(3) > 0.5) { let t = norm_ch(raw3(tc), 3) * fade; emit += t * lut_col(t, 3); wsum += t; }
+            if (nc > 4 && enabled(4) > 0.5) { let t = norm_ch(raw4(tc), 4) * fade; emit += t * lut_col(t, 4); wsum += t; }
+            if (nc > 5 && enabled(5) > 0.5) { let t = norm_ch(raw5(tc), 5) * fade; emit += t * lut_col(t, 5); wsum += t; }
             let a = 1.0 - exp(-density * wsum * dt);
             var albedo = vec3<f32>(0.0);
             if (wsum > 1e-6) { albedo = emit / wsum; }
@@ -201,25 +205,27 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
     }
 
-    // MIP: per-channel maximum, then color + sum.
+    // MIP: per-channel maximum of the *windowed* value (norm_ch is monotonic, so
+    // this equals windowing the raw max — but stays correct for float data with
+    // negative values, where a raw-space max seeded at 0 would be wrong), then
+    // color + sum. Disabled channels are skipped entirely.
     var m0 = 0.0; var m1 = 0.0; var m2 = 0.0; var m3 = 0.0; var m4 = 0.0; var m5 = 0.0;
-    for (var i = 0; i < MAX_STEPS; i = i + 1) {
-        if (i >= n) { break; }
+    for (var i = 0; i < n; i = i + 1) {
         let tc = vol_coord(p);
         let fade = edge_fade(tc, tdim);
-        m0 = max(m0, raw0(tc) * fade);
-        if (nc > 1) { m1 = max(m1, raw1(tc) * fade); }
-        if (nc > 2) { m2 = max(m2, raw2(tc) * fade); }
-        if (nc > 3) { m3 = max(m3, raw3(tc) * fade); }
-        if (nc > 4) { m4 = max(m4, raw4(tc) * fade); }
-        if (nc > 5) { m5 = max(m5, raw5(tc) * fade); }
+        if (enabled(0) > 0.5) { m0 = max(m0, norm_ch(raw0(tc), 0) * fade); }
+        if (nc > 1 && enabled(1) > 0.5) { m1 = max(m1, norm_ch(raw1(tc), 1) * fade); }
+        if (nc > 2 && enabled(2) > 0.5) { m2 = max(m2, norm_ch(raw2(tc), 2) * fade); }
+        if (nc > 3 && enabled(3) > 0.5) { m3 = max(m3, norm_ch(raw3(tc), 3) * fade); }
+        if (nc > 4 && enabled(4) > 0.5) { m4 = max(m4, norm_ch(raw4(tc), 4) * fade); }
+        if (nc > 5 && enabled(5) > 0.5) { m5 = max(m5, norm_ch(raw5(tc), 5) * fade); }
         p += dp;
     }
-    var color = enabled(0) * lut_col(norm_ch(m0, 0), 0);
-    if (nc > 1) { color += enabled(1) * lut_col(norm_ch(m1, 1), 1); }
-    if (nc > 2) { color += enabled(2) * lut_col(norm_ch(m2, 2), 2); }
-    if (nc > 3) { color += enabled(3) * lut_col(norm_ch(m3, 3), 3); }
-    if (nc > 4) { color += enabled(4) * lut_col(norm_ch(m4, 4), 4); }
-    if (nc > 5) { color += enabled(5) * lut_col(norm_ch(m5, 5), 5); }
+    var color = enabled(0) * lut_col(m0, 0);
+    if (nc > 1) { color += enabled(1) * lut_col(m1, 1); }
+    if (nc > 2) { color += enabled(2) * lut_col(m2, 2); }
+    if (nc > 3) { color += enabled(3) * lut_col(m3, 3); }
+    if (nc > 4) { color += enabled(4) * lut_col(m4, 4); }
+    if (nc > 5) { color += enabled(5) * lut_col(m5, 5); }
     return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }

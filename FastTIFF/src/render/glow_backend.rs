@@ -61,6 +61,20 @@ pub fn paint_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
     })
 }
 
+/// GPU bytes per volume sample for `kind` on this backend — glow stores each
+/// kind natively (R8/R16/R32F), so it matches the CPU-side size exactly. The
+/// volume builder budgets on the larger of CPU/GPU footprint.
+pub fn volume_gpu_bps(kind: VolumeKind) -> usize {
+    match kind {
+        VolumeKind::U8 => 1,
+        VolumeKind::U16 => 2,
+        VolumeKind::F32 => 4,
+    }
+}
+
+/// Backend hook for `eframe::NativeOptions` tweaks; the glow backend needs none.
+pub fn tune_native_options(_options: &mut eframe::NativeOptions) {}
+
 /// The egui paint callback that ray-marches the 3D volume into `rect`.
 pub fn paint_volume_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
     let res = render.clone();
@@ -249,7 +263,17 @@ uniform int u_mode;          // 0 = MIP, 1 = alpha DVR
 uniform float u_density;     // alpha-DVR opacity scale (higher = more solid)
 uniform int u_interp;        // 0 = point/linear (GL filter), 1 = in-shader tricubic
 
-const int MAX_STEPS = 512;
+// Upper bound on ray-march samples. High enough that the largest volume the
+// memory budget admits (~1600-voxel diagonal) still gets half-voxel sampling;
+// the loops run `n` iterations (n <= MAX_STEPS), so ordinary volumes never pay
+// for the headroom.
+const int MAX_STEPS = 4096;
+
+// NOTE: every texture read in this shader uses textureLod (explicit LOD 0).
+// The march loop's trip count and the early return are per-fragment, i.e.
+// non-uniform control flow, where implicit-LOD texture() is undefined in GLSL
+// — the textures are single-level so most drivers cope, but explicit LOD makes
+// it well-defined everywhere (and skips the LOD calculation).
 
 // Fast tricubic B-spline reconstruction: 8 hardware-linear taps (Sigg &
 // Hadwiger). Smoother than trilinear; used when u_interp == 1 (the GL filter is
@@ -269,14 +293,14 @@ float sampleCubic(sampler3D tex, vec3 coord) {
     vec3 g1 = w2 + w3;
     vec3 h0 = (w1 / g0 - 0.5 + idx) / n;
     vec3 h1 = (w3 / g1 + 1.5 + idx) / n;
-    float s000 = texture(tex, vec3(h0.x, h0.y, h0.z)).r;
-    float s100 = texture(tex, vec3(h1.x, h0.y, h0.z)).r;
-    float s010 = texture(tex, vec3(h0.x, h1.y, h0.z)).r;
-    float s110 = texture(tex, vec3(h1.x, h1.y, h0.z)).r;
-    float s001 = texture(tex, vec3(h0.x, h0.y, h1.z)).r;
-    float s101 = texture(tex, vec3(h1.x, h0.y, h1.z)).r;
-    float s011 = texture(tex, vec3(h0.x, h1.y, h1.z)).r;
-    float s111 = texture(tex, vec3(h1.x, h1.y, h1.z)).r;
+    float s000 = textureLod(tex, vec3(h0.x, h0.y, h0.z), 0.0).r;
+    float s100 = textureLod(tex, vec3(h1.x, h0.y, h0.z), 0.0).r;
+    float s010 = textureLod(tex, vec3(h0.x, h1.y, h0.z), 0.0).r;
+    float s110 = textureLod(tex, vec3(h1.x, h1.y, h0.z), 0.0).r;
+    float s001 = textureLod(tex, vec3(h0.x, h0.y, h1.z), 0.0).r;
+    float s101 = textureLod(tex, vec3(h1.x, h0.y, h1.z), 0.0).r;
+    float s011 = textureLod(tex, vec3(h0.x, h1.y, h1.z), 0.0).r;
+    float s111 = textureLod(tex, vec3(h1.x, h1.y, h1.z), 0.0).r;
     float x00 = mix(s100, s000, g0.x);
     float x10 = mix(s110, s010, g0.x);
     float x01 = mix(s101, s001, g0.x);
@@ -288,7 +312,7 @@ float sampleCubic(sampler3D tex, vec3 coord) {
 
 // One texel value: GL-filtered fetch (nearest/linear) or the tricubic above.
 float smp(sampler3D tex, vec3 c) {
-    return (u_interp == 1) ? sampleCubic(tex, c) : texture(tex, c).r;
+    return (u_interp == 1) ? sampleCubic(tex, c) : textureLod(tex, c, 0.0).r;
 }
 
 // Raw sampled value for each channel (its unorm or float texture).
@@ -304,7 +328,7 @@ float norm_ch(float v, int idx) {
     return clamp((v - mm.x) / max(mm.y - mm.x, 1e-6), 0.0, 1.0);
 }
 vec3 lut_col(float t, int idx) {
-    return texture(lut_tex, vec2(t, (float(idx) + 0.5) / 6.0)).rgb;
+    return textureLod(lut_tex, vec2(t, (float(idx) + 0.5) / 6.0), 0.0).rgb;
 }
 
 // World point -> volume texcoord, with Y and Z flipped so the volume matches the
@@ -351,20 +375,19 @@ void main() {
 
     if (u_mode == 1) {
         // Alpha DVR (ImageJ 3D Viewer "Volume"): emission-absorption, front-to-back.
+        // Disabled channels are skipped entirely (uniform branch, no sampling cost).
         vec3 col = vec3(0.0);
         float acc = 0.0;
-        for (int i = 0; i < MAX_STEPS; i++) {
-            if (i >= n) break;
+        for (int i = 0; i < n; i++) {
             vec3 tc = vol_coord(p);
             vec3 emit = vec3(0.0);
             float wsum = 0.0;
-            float t;
-            t = norm_ch(raw0(tc), 0);                       { float w = t * ch_enabled[0]; emit += w * lut_col(t, 0); wsum += w; }
-            if (num_channels > 1) { t = norm_ch(raw1(tc), 1); float w = t * ch_enabled[1]; emit += w * lut_col(t, 1); wsum += w; }
-            if (num_channels > 2) { t = norm_ch(raw2(tc), 2); float w = t * ch_enabled[2]; emit += w * lut_col(t, 2); wsum += w; }
-            if (num_channels > 3) { t = norm_ch(raw3(tc), 3); float w = t * ch_enabled[3]; emit += w * lut_col(t, 3); wsum += w; }
-            if (num_channels > 4) { t = norm_ch(raw4(tc), 4); float w = t * ch_enabled[4]; emit += w * lut_col(t, 4); wsum += w; }
-            if (num_channels > 5) { t = norm_ch(raw5(tc), 5); float w = t * ch_enabled[5]; emit += w * lut_col(t, 5); wsum += w; }
+            if (ch_enabled[0] > 0.5)                       { float t = norm_ch(raw0(tc), 0); emit += t * lut_col(t, 0); wsum += t; }
+            if (num_channels > 1 && ch_enabled[1] > 0.5) { float t = norm_ch(raw1(tc), 1); emit += t * lut_col(t, 1); wsum += t; }
+            if (num_channels > 2 && ch_enabled[2] > 0.5) { float t = norm_ch(raw2(tc), 2); emit += t * lut_col(t, 2); wsum += t; }
+            if (num_channels > 3 && ch_enabled[3] > 0.5) { float t = norm_ch(raw3(tc), 3); emit += t * lut_col(t, 3); wsum += t; }
+            if (num_channels > 4 && ch_enabled[4] > 0.5) { float t = norm_ch(raw4(tc), 4); emit += t * lut_col(t, 4); wsum += t; }
+            if (num_channels > 5 && ch_enabled[5] > 0.5) { float t = norm_ch(raw5(tc), 5); emit += t * lut_col(t, 5); wsum += t; }
             float a = 1.0 - exp(-u_density * wsum * dt);
             vec3 albedo = (wsum > 1e-6) ? emit / wsum : vec3(0.0);
             col += (1.0 - acc) * a * albedo;
@@ -374,25 +397,27 @@ void main() {
         }
         frag_color = vec4(clamp(col, vec3(0.0), vec3(1.0)), 1.0);
     } else {
-        // MIP: per-channel maximum, then color + sum.
+        // MIP: per-channel maximum of the *windowed* value (norm_ch is monotonic,
+        // so this equals windowing the raw max — but stays correct for float data
+        // with negative values, where a raw-space max seeded at 0 would be wrong),
+        // then color + sum. Disabled channels are skipped entirely.
         float m0 = 0.0, m1 = 0.0, m2 = 0.0, m3 = 0.0, m4 = 0.0, m5 = 0.0;
-        for (int i = 0; i < MAX_STEPS; i++) {
-            if (i >= n) break;
+        for (int i = 0; i < n; i++) {
             vec3 tc = vol_coord(p);
-            m0 = max(m0, raw0(tc));
-            if (num_channels > 1) m1 = max(m1, raw1(tc));
-            if (num_channels > 2) m2 = max(m2, raw2(tc));
-            if (num_channels > 3) m3 = max(m3, raw3(tc));
-            if (num_channels > 4) m4 = max(m4, raw4(tc));
-            if (num_channels > 5) m5 = max(m5, raw5(tc));
+            if (ch_enabled[0] > 0.5) m0 = max(m0, norm_ch(raw0(tc), 0));
+            if (num_channels > 1 && ch_enabled[1] > 0.5) m1 = max(m1, norm_ch(raw1(tc), 1));
+            if (num_channels > 2 && ch_enabled[2] > 0.5) m2 = max(m2, norm_ch(raw2(tc), 2));
+            if (num_channels > 3 && ch_enabled[3] > 0.5) m3 = max(m3, norm_ch(raw3(tc), 3));
+            if (num_channels > 4 && ch_enabled[4] > 0.5) m4 = max(m4, norm_ch(raw4(tc), 4));
+            if (num_channels > 5 && ch_enabled[5] > 0.5) m5 = max(m5, norm_ch(raw5(tc), 5));
             p += dp;
         }
-        vec3 color = ch_enabled[0] * lut_col(norm_ch(m0, 0), 0);
-        if (num_channels > 1) color += ch_enabled[1] * lut_col(norm_ch(m1, 1), 1);
-        if (num_channels > 2) color += ch_enabled[2] * lut_col(norm_ch(m2, 2), 2);
-        if (num_channels > 3) color += ch_enabled[3] * lut_col(norm_ch(m3, 3), 3);
-        if (num_channels > 4) color += ch_enabled[4] * lut_col(norm_ch(m4, 4), 4);
-        if (num_channels > 5) color += ch_enabled[5] * lut_col(norm_ch(m5, 5), 5);
+        vec3 color = ch_enabled[0] * lut_col(m0, 0);
+        if (num_channels > 1) color += ch_enabled[1] * lut_col(m1, 1);
+        if (num_channels > 2) color += ch_enabled[2] * lut_col(m2, 2);
+        if (num_channels > 3) color += ch_enabled[3] * lut_col(m3, 3);
+        if (num_channels > 4) color += ch_enabled[4] * lut_col(m4, 4);
+        if (num_channels > 5) color += ch_enabled[5] * lut_col(m5, 5);
         frag_color = vec4(clamp(color, vec3(0.0), vec3(1.0)), 1.0);
     }
 }
@@ -549,8 +574,9 @@ impl ImageRenderResources {
 
     /// (Re)upload the whole volume, one entry per channel: each `bytes` is
     /// `w*h*d` samples, z-major, in the units of its `kind` (U8/U16 unorm, F32).
-    /// Channels past `channels.len()` are shrunk to 1x1x1 dummies. Sized once per
-    /// stack — window/level, LUT, camera and interpolation change without this.
+    /// Channels past `channels.len()` are shrunk to 1x1x1 dummies. When a
+    /// channel's dims + kind are unchanged (a 4D timepoint step), the existing
+    /// storage is refilled with `tex_sub_image_3d` instead of reallocated.
     pub fn upload_volumes(&mut self, ctx: &UploadCtx, w: u32, h: u32, d: u32, channels: &[(VolumeKind, Vec<u8>)]) {
         let gl = ctx.gl;
         let v = &mut self.volume;
@@ -564,38 +590,57 @@ impl ImageRenderResources {
                         } else {
                             (v.tex_unorm[c], v.tex_float[c])
                         };
-                        gl.bind_texture(glow::TEXTURE_3D, Some(data_tex));
-                        set_volume_filter(gl, v.interp, *kind);
                         let (internal, fmt, ty) = match kind {
                             VolumeKind::U8 => (glow::R8, glow::RED, glow::UNSIGNED_BYTE),
                             VolumeKind::U16 => (glow::R16, glow::RED, glow::UNSIGNED_SHORT),
                             VolumeKind::F32 => (glow::R32F, glow::RED, glow::FLOAT),
                         };
-                        gl.tex_image_3d(
-                            glow::TEXTURE_3D,
-                            0,
-                            internal as i32,
-                            w as i32,
-                            h as i32,
-                            d as i32,
-                            0,
-                            fmt,
-                            ty,
-                            glow::PixelUnpackData::Slice(Some(bytes)),
-                        );
-                        // Shrink the unused sibling texture to a 1x1x1 dummy.
-                        gl.bind_texture(glow::TEXTURE_3D, Some(dummy_tex));
-                        let dummy_kind = if *kind == VolumeKind::F32 { VolumeKind::U8 } else { VolumeKind::F32 };
-                        alloc_volume_dummy(gl, dummy_kind);
-                        v.kinds[c] = Some(*kind);
+                        gl.bind_texture(glow::TEXTURE_3D, Some(data_tex));
+                        if v.kinds[c] == Some(*kind) && v.dims == (w, h, d) {
+                            // Same shape: refill in place (no driver realloc).
+                            gl.tex_sub_image_3d(
+                                glow::TEXTURE_3D,
+                                0,
+                                0,
+                                0,
+                                0,
+                                w as i32,
+                                h as i32,
+                                d as i32,
+                                fmt,
+                                ty,
+                                glow::PixelUnpackData::Slice(Some(bytes)),
+                            );
+                        } else {
+                            set_volume_filter(gl, v.interp, *kind);
+                            gl.tex_image_3d(
+                                glow::TEXTURE_3D,
+                                0,
+                                internal as i32,
+                                w as i32,
+                                h as i32,
+                                d as i32,
+                                0,
+                                fmt,
+                                ty,
+                                glow::PixelUnpackData::Slice(Some(bytes)),
+                            );
+                            // Shrink the unused sibling texture to a 1x1x1 dummy.
+                            gl.bind_texture(glow::TEXTURE_3D, Some(dummy_tex));
+                            let dummy_kind = if *kind == VolumeKind::F32 { VolumeKind::U8 } else { VolumeKind::F32 };
+                            alloc_volume_dummy(gl, dummy_kind);
+                            v.kinds[c] = Some(*kind);
+                        }
                     }
                     None => {
-                        // Absent channel: both textures back to 1x1x1 dummies.
-                        gl.bind_texture(glow::TEXTURE_3D, Some(v.tex_unorm[c]));
-                        alloc_volume_dummy(gl, VolumeKind::U8);
-                        gl.bind_texture(glow::TEXTURE_3D, Some(v.tex_float[c]));
-                        alloc_volume_dummy(gl, VolumeKind::F32);
-                        v.kinds[c] = None;
+                        if v.kinds[c].is_some() {
+                            // Absent channel: both textures back to 1x1x1 dummies.
+                            gl.bind_texture(glow::TEXTURE_3D, Some(v.tex_unorm[c]));
+                            alloc_volume_dummy(gl, VolumeKind::U8);
+                            gl.bind_texture(glow::TEXTURE_3D, Some(v.tex_float[c]));
+                            alloc_volume_dummy(gl, VolumeKind::F32);
+                            v.kinds[c] = None;
+                        }
                     }
                 }
             }
@@ -605,13 +650,18 @@ impl ImageRenderResources {
 
     /// Switch every present volume channel's sampling filter without re-uploading.
     /// Cubic uses the GL linear filter (its 8-tap reconstruction is in-shader).
+    /// No-op when nothing changed (this is called every 3D frame).
     pub fn set_volume_interp(&mut self, ctx: &UploadCtx, interp: VolumeInterp) {
         let gl_interp = match interp {
             VolumeInterp::Nearest => glow::NEAREST as i32,
             VolumeInterp::Linear | VolumeInterp::Cubic => glow::LINEAR as i32,
         };
+        let mode = interp.shader_mode();
+        if self.volume.interp == gl_interp && self.volume.interp_mode == mode {
+            return;
+        }
         self.volume.interp = gl_interp;
-        self.volume.interp_mode = interp.shader_mode();
+        self.volume.interp_mode = mode;
         for c in 0..MAX_CHANNELS {
             if let Some(kind) = self.volume.kinds[c] {
                 let tex = if kind == VolumeKind::F32 { self.volume.tex_float[c] } else { self.volume.tex_unorm[c] };

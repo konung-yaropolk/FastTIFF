@@ -252,7 +252,9 @@ writer.finish()?; // writes the IFD chain; the file isn't valid without it
   LZW/Deflate/ZSTD output on continuous-tone data: integers get TIFF
   Predictor 2 (any width), `F32` gets Predictor 3 (the TechNote 3
   floating-point predictor libtiff uses). `compression_level(n)` sets the
-  effort for the codecs that have one (Deflate 0–9, ZSTD 1–22).
+  effort for the codecs that have one (Deflate 0–9, ZSTD 1–22); when left unset
+  the lib applies its own defaults — `DEFAULT_DEFLATE_LEVEL` (6) and
+  `DEFAULT_ZSTD_LEVEL` (3) — so a codec choice alone always compresses sensibly.
 - **Strips:** uncompressed frames are one strip; compressed frames default to
   ~256 KiB strips. A big frame's strips compress in parallel under the same
   `set_parallel_decode` hint + size floor that governs decoding — one
