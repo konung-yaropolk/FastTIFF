@@ -214,6 +214,11 @@ struct LoadedStack {
     /// builds then fall back to running synchronously on the UI thread.
     volume_builder: Option<crate::volume::VolumeBuilder>,
     volume_builder_tried: bool,
+    /// Which LUT the single-channel grayscale color selector currently shows
+    /// (index into `GRAY_LUT_OPTIONS`; 0 = plain grayscale). Only meaningful
+    /// while `gray_lut_applicable` holds. Lives on the stack — not the app — so
+    /// it resets to grayscale for each newly opened file (the "default" state).
+    gray_lut_sel: usize,
 }
 
 pub struct ViewerApp {
@@ -359,6 +364,12 @@ pub struct ViewerApp {
     /// Whether the render-settings pop-up (voxel scale + interpolation) is open,
     /// toggled by the ⚙ button in the expanded bottom panel.
     show_render_settings: bool,
+    /// User-adjustable 3D navigation speeds (multipliers on the built-in base
+    /// rates), edited in the render-settings window. `move_speed` scales WASD /
+    /// Space / Shift translation; `scroll_speed` scales the mouse-wheel fly.
+    /// Persist across files (they're input preferences, not per-stack state).
+    move_speed: f32,
+    scroll_speed: f32,
 }
 
 /// Playback rate used when the file's metadata doesn't specify `fps=`.
@@ -410,6 +421,8 @@ impl ViewerApp {
             volume_gen: 0,
             volume_requested: None,
             show_render_settings: false,
+            move_speed: 1.0,
+            scroll_speed: 1.0,
         };
         if let Some(path) = initial_path {
             app.open_file(path);
@@ -441,6 +454,7 @@ impl ViewerApp {
                     prefetch_gen: 0,
                     volume_builder: None,
                     volume_builder_tried: false,
+                    gray_lut_sel: 0,
                 };
                 let (c, z, f) = (
                     loaded.tiff.meta.channels,
@@ -767,7 +781,7 @@ impl ViewerApp {
                 }
             }
             if mv != [0.0; 3] {
-                let speed = FLY_UNITS_PER_SEC * dt;
+                let speed = FLY_UNITS_PER_SEC * dt * self.move_speed;
                 if self.nav_mode.is_fly() {
                     self.vol_fly_pos = translate3(self.vol_fly_pos, forward, right, mv, speed);
                 } else {
@@ -810,13 +824,13 @@ impl ViewerApp {
         if wheel.abs() > 0.01 {
             if self.nav_mode.is_fly() {
                 for (p, f) in self.vol_fly_pos.iter_mut().zip(forward) {
-                    *p += f * wheel * FLY_WHEEL;
+                    *p += f * wheel * FLY_WHEEL * self.scroll_speed;
                 }
             } else {
                 let eye = self.current_eye(forward);
                 let to_box = focal_box_entry(eye, forward, self.vol_box_he)
                     .unwrap_or_else(|| (eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]).sqrt());
-                let m = wheel * (to_box * 0.15).max(FLY_WHEEL);
+                let m = wheel * (to_box * 0.15).max(FLY_WHEEL) * self.scroll_speed;
                 self.vol_target = [
                     self.vol_target[0] + forward[0] * m,
                     self.vol_target[1] + forward[1] * m,
@@ -1438,6 +1452,57 @@ fn channel_tint(lut: &[[u8; 3]; 256]) -> Option<Color32> {
     }
 }
 
+/// Like `channel_tint`, but taken from the LUT's *low* (index 0) entry — the
+/// color the darkest samples map to. Used by the single-channel grayscale color
+/// selector, where the low end better identifies a perceptual colormap (whose
+/// high end washes out to near-white) than the top does. `None` for a
+/// grayscale/black low entry (`r == g == b`), so plain grayscale and the pure
+/// single-hue channel ramps — whose low end is black — keep the default color.
+fn ui_tint(lut: &[[u8; 3]; 256]) -> Option<Color32> {
+    let [r, g, b] = lut[127];
+    (!(r == g && g == b)).then(|| Color32::from_rgb(r, g, b))
+}
+
+/// The named channel colors the single-channel grayscale color selector offers
+/// (after plain grayscale, before the perceptual colormaps). Order matches the
+/// palette `fast_tiff_lib::default_composite_lut` cycles through, so color option
+/// *i* maps to `default_composite_lut(i)`. White is omitted — its ramp is
+/// identical to grayscale.
+const GRAY_LUT_COLOR_NAMES: [&str; 6] = ["Red", "Green", "Blue", "Yellow", "Magenta", "Cyan"];
+
+/// Number of options in the grayscale color selector: plain grayscale, then the
+/// named channel colors, then the perceptual colormaps (`crate::colormap`).
+fn gray_lut_option_count() -> usize {
+    1 + GRAY_LUT_COLOR_NAMES.len() + crate::colormap::NAMES.len()
+}
+
+/// Display name for grayscale-color option `sel` (see `gray_lut_for` for the
+/// index layout).
+fn gray_lut_name(sel: usize) -> &'static str {
+    let colors = GRAY_LUT_COLOR_NAMES.len();
+    if sel == 0 {
+        "Grayscale"
+    } else if sel <= colors {
+        GRAY_LUT_COLOR_NAMES[sel - 1]
+    } else {
+        crate::colormap::NAMES[sel - 1 - colors]
+    }
+}
+
+/// The 256-entry LUT for grayscale-color option `sel`: `0` = plain grayscale,
+/// `1..=6` = the named channel colors, the rest = the perceptual colormaps —
+/// the same order the selector lists them in.
+fn gray_lut_for(sel: usize) -> [[u8; 3]; 256] {
+    let colors = GRAY_LUT_COLOR_NAMES.len();
+    if sel == 0 {
+        fast_tiff_lib::grayscale_lut()
+    } else if sel <= colors {
+        fast_tiff_lib::default_composite_lut(sel - 1)
+    } else {
+        crate::colormap::LUTS[sel - 1 - colors]
+    }
+}
+
 /// Builds the UI-level per-channel settings (window/level, enabled,
 /// float-encoding range) from `tiff.meta`'s current channel count and
 /// display info.
@@ -1519,6 +1584,8 @@ fn render_settings_window(
     scale: &mut [f32; 3],
     interp: &mut render::VolumeInterp,
     nav: &mut NavMode,
+    move_speed: &mut f32,
+    scroll_speed: &mut f32,
     render_mode: &mut render::VolumeRender,
     density: &mut f32,
     reset_position: &mut bool,
@@ -1593,6 +1660,23 @@ fn render_settings_window(
             });
             // Controls hint for the selected mode.
             ui.label(RichText::new(nav.help()).small().weak());
+            // Speed multipliers on the built-in WASD / wheel base rates.
+            // Logarithmic so 1.0 (the default) sits mid-track with symmetric
+            // slower/faster range; the reset button restores both to 1×.
+            ui.horizontal(|ui| {
+                ui.label("Move speed");
+                ui.add(egui::Slider::new(move_speed, 0.1..=10.0).logarithmic(true))
+                    .on_hover_text("WASD / Space / Shift movement speed (× the default)");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Scroll speed");
+                ui.add(egui::Slider::new(scroll_speed, 0.1..=10.0).logarithmic(true))
+                    .on_hover_text("Mouse-wheel fly speed (× the default)");
+                if ui.small_button("Reset").on_hover_text("Restore both speeds to 1×").clicked() {
+                    *move_speed = 1.0;
+                    *scroll_speed = 1.0;
+                }
+            });
 
             ui.separator();
             ui.horizontal(|ui| {
@@ -1853,6 +1937,16 @@ fn pseudocolor_applicable(loaded: &LoadedStack) -> bool {
         && !loaded.tiff.meta.has_explicit_luts
 }
 
+/// Whether the single-channel grayscale color/colormap selector applies: exactly
+/// one channel, genuinely grayscale (not RGB or composite, no file-supplied
+/// LUTs). The multi-channel case is covered by the pseudocolor toggle instead.
+fn gray_lut_applicable(loaded: &LoadedStack) -> bool {
+    !loaded.rgb
+        && loaded.channel_settings.len() == 1
+        && loaded.tiff.meta.mode == fast_tiff_lib::DisplayMode::Grayscale
+        && !loaded.tiff.meta.has_explicit_luts
+}
+
 /// Sets the per-channel LUTs of an applicable (multi-channel grayscale) stack:
 /// the standard channel palette (ch1 red, ch2 green, …) when `apply` is true,
 /// plain grayscale otherwise. No-op for stacks that carry their own colors.
@@ -2089,6 +2183,8 @@ impl eframe::App for ViewerApp {
         let mut play_toggle_requested = false;
         let mut dimension_override: Option<(usize, usize)> = None;
         let mut pseudocolor_toggle: Option<bool> = None;
+        // New selection for the single-channel grayscale color/colormap selector.
+        let mut gray_lut_change: Option<usize> = None;
         let mut scroll_step: i32 = 0;
         let mut playback_fps = self.playback_fps;
         let mut decode_mode = self.decode_mode;
@@ -2266,6 +2362,36 @@ impl eframe::App for ViewerApp {
                         .on_hover_text("Playback speed (frames per second)");
                     });
 
+                    // Grayscale color LUT: show a single grayscale channel
+                    // through a channel color or a perceptual colormap
+                    // (magma/plasma/inferno/viridis/turbo). Hidden for RGB,
+                    // composite, and multi-channel stacks — there the per-channel
+                    // colors / pseudocolor toggle already handle coloring.
+                    if gray_lut_applicable(loaded) {
+                        ui.separator();
+                        ui.label("LUT:");
+                        let sel = loaded.gray_lut_sel;
+                        egui::ComboBox::from_id_salt("gray_lut")
+                            .selected_text(gray_lut_name(sel))
+                            .show_ui(ui, |ui| {
+                                for opt in 0..gray_lut_option_count() {
+                                    // Tint each entry with its LUT's low (dark) end
+                                    // — the color the darkest samples map to. A
+                                    // grayscale/black low end (grayscale + the pure
+                                    // channel-color ramps) keeps the default text color.
+                                    let text = match ui_tint(&gray_lut_for(opt)) {
+                                        Some(c) => RichText::new(gray_lut_name(opt)).color(c),
+                                        None => RichText::new(gray_lut_name(opt)),
+                                    };
+                                    if ui.selectable_label(opt == sel, text).clicked() {
+                                        gray_lut_change = Some(opt);
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text("Display this grayscale channel through a color LUT or colormap");
+                    }
+
                     // CPU decode parallelism: Auto threads only when playback
                     // can't keep up; Serial/Threaded force it off/on. Threaded
                     // decode only ever kicks in for compressed frames (parallel
@@ -2315,6 +2441,13 @@ impl eframe::App for ViewerApp {
 
                 let calibration = loaded.tiff.meta.calibration;
                 let rgb = loaded.rgb;
+                // Tint for the single-channel contrast slider: the low (dark) end
+                // of its chosen color LUT (grayscale/black → None → the default
+                // selection color). Snapshot here, before the mutable borrow of
+                // `channel_settings` below.
+                let single_tint = (loaded.channel_settings.len() == 1)
+                    .then(|| ui_tint(&loaded.tiff.meta.channel_display[0].lut))
+                    .flatten();
                 if loaded.channel_settings.len() > 1 {
                     ui.separator();
                     // Hold Shift while dragging one channel's slider to move every
@@ -2402,8 +2535,9 @@ impl eframe::App for ViewerApp {
                         // slider fills what's left of the row.
                         let slider_w = (ui.available_width() - 120.0).max(80.0);
                         let (lo, hi) = settings.bounds;
-                        // Single channel is effectively grayscale here, so no tint.
-                        range_slider(ui, 0, &mut settings.min, &mut settings.max, lo, hi, slider_w, None);
+                        // Tinted when a color LUT/colormap is chosen, else `None`
+                        // (plain grayscale → the default selection color).
+                        range_slider(ui, 0, &mut settings.min, &mut settings.max, lo, hi, slider_w, single_tint);
                         ui.label(RichText::new(value).small());
                     });
                 }
@@ -2438,6 +2572,8 @@ impl eframe::App for ViewerApp {
                 &mut self.vol_scale,
                 &mut self.vol_interp,
                 &mut self.nav_mode,
+                &mut self.move_speed,
+                &mut self.scroll_speed,
                 &mut self.vol_render,
                 &mut self.vol_density,
                 &mut reset_position,
@@ -2478,6 +2614,16 @@ impl eframe::App for ViewerApp {
             self.apply_pseudocolor = on;
             if let Some(loaded) = &mut self.stack {
                 refresh_pseudocolor(loaded, on);
+            }
+        }
+
+        if let Some(sel) = gray_lut_change {
+            if let Some(loaded) = &mut self.stack {
+                loaded.gray_lut_sel = sel;
+                if let Some(disp) = loaded.tiff.meta.channel_display.first_mut() {
+                    disp.lut = gray_lut_for(sel);
+                }
+                loaded.luts_uploaded = false; // force LUT re-upload next sync
             }
         }
 
