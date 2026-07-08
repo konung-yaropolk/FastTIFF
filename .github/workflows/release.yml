@@ -266,13 +266,16 @@ jobs:
           # not support" TIFFs, so Finder's "Open With" and setting FastTIFF as
           # the default TIFF app both fail. Bind to the system UTI public.tiff,
           # which already maps to both .tif and .tiff — no custom UTI/extension
-          # list needed. Rank "Alternate" offers the app without seizing the
-          # default from Preview; users can still make it the default themselves.
+          # list needed. Rank "Default" marks FastTIFF as a first-class handler
+          # (it renders scientific TIFF stacks better than Preview). This does
+          # NOT forcibly override an existing user default — where Preview is
+          # already set, the user still picks FastTIFF via Get Info > "Change
+          # All" — but it makes FastTIFF the preferred choice absent a user default.
           add ":CFBundleDocumentTypes"                        array
           add ":CFBundleDocumentTypes:0"                      dict
           add ":CFBundleDocumentTypes:0:CFBundleTypeName"     string  "TIFF image"
           add ":CFBundleDocumentTypes:0:CFBundleTypeRole"     string  "Viewer"
-          add ":CFBundleDocumentTypes:0:LSHandlerRank"        string  "Alternate"
+          add ":CFBundleDocumentTypes:0:LSHandlerRank"        string  "Default"
           add ":CFBundleDocumentTypes:0:LSItemContentTypes"   array
           add ":CFBundleDocumentTypes:0:LSItemContentTypes:0" string  "public.tiff"
 

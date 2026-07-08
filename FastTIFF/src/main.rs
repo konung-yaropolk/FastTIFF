@@ -9,6 +9,17 @@ mod process;
 mod render;
 mod volume;
 
+/// Decode the bundled 256×256 PNG into the RGBA image `ViewportBuilder::with_icon`
+/// wants. Baked into the binary with `include_bytes!`, so it needs no icon file
+/// at runtime; winit / the OS downscales it for each context (title bar, taskbar,
+/// alt-tab). Returns `None` if the embedded PNG somehow fails to decode, in which
+/// case the window just falls back to the default icon.
+fn window_icon() -> Option<egui::IconData> {
+    let image = image::load_from_memory(include_bytes!("../icon/icon256.png")).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    Some(egui::IconData { rgba: image.into_raw(), width, height })
+}
+
 fn main() -> eframe::Result {
     env_logger::init();
 
@@ -36,13 +47,22 @@ fn main() -> eframe::Result {
         std::env::args_os().skip(1).map(std::path::PathBuf::from).collect();
     let initial_path = process::open_all(&files).cloned();
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([320.0, 320.0])
+        // Keep in sync with `app::MIN_WINDOW` — the floor for both manual
+        // resizing and zoom-out (which letterboxes below this size).
+        .with_min_inner_size([256.0, 256.0])
+        .with_title("FastTIFF");
+    // Set the window icon (title bar / taskbar / task switcher) from the bundled
+    // PNG, so it isn't the egui default. On macOS the Dock icon comes from the
+    // .app bundle's .icns instead (winit ignores per-window icons there), so this
+    // is effectively a no-op on macOS but fixes Windows and Linux/X11.
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+
     let mut native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([320.0, 320.0])
-            // Keep in sync with `app::MIN_WINDOW` — the floor for both manual
-            // resizing and zoom-out (which letterboxes below this size).
-            .with_min_inner_size([256.0, 256.0])
-            .with_title("FastTIFF"),
+        viewport,
         // glow or wgpu, picked at compile time by the `renderer-*` features.
         renderer: render::RENDERER,
         ..Default::default()

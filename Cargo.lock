@@ -14,6 +14,7 @@ dependencies = [
  "env_logger",
  "fast-tiff-lib",
  "half",
+ "image",
  "log",
  "naga",
  "rayon",

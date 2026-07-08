@@ -41,6 +41,10 @@ anyhow = "1.0"
 rfd = "0.17"
 log = "0.4"
 env_logger = "0.11"
+# Decode the bundled PNG into RGBA for the window icon (see main.rs). `image`
+# with the png codec is already in the tree (eframe + arboard pull it), so this
+# only makes it directly nameable — it compiles no new crates.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # WGSL shaders are only validated by wgpu at runtime (shader-module creation),
 # so this lets `cargo test` catch shader errors offline (no GPU needed). naga is
