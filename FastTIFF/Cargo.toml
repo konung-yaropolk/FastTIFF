@@ -1,6 +1,6 @@
 [package]
 name = "FastTIFF"
-version = "1.7.4"
+version = "1.7.5"
 edition = "2021"
 description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering."
 license = "GPL-3.0-only"

@@ -2,6 +2,8 @@
 
 mod app;
 mod colormap;
+#[cfg(target_os = "macos")]
+mod macos_open;
 mod prefetch;
 mod process;
 mod render;
@@ -9,6 +11,12 @@ mod volume;
 
 fn main() -> eframe::Result {
     env_logger::init();
+
+    // macOS delivers "Open With" / double-clicked files as an Apple Event, not
+    // argv — install the handler before the event loop so the cold-launch open
+    // is captured. The app's update loop drains what it queues. See `macos_open`.
+    #[cfg(target_os = "macos")]
+    macos_open::install();
 
     // On Linux, default to winit's X11 backend so file drag-and-drop works:
     // winit's Wayland backend doesn't reliably deliver file drops (notably on
@@ -47,6 +55,11 @@ fn main() -> eframe::Result {
         "FastTIFF",
         native_options,
         Box::new(|cc| {
+            // Now that the event loop is up, hand the macOS open-file handler the
+            // egui context (so it can wake an idle UI) and re-assert the handler
+            // in case AppKit's own launch-time install replaced ours.
+            #[cfg(target_os = "macos")]
+            macos_open::set_ctx(cc.egui_ctx.clone());
             let render = render::init(cc);
             Ok(Box::new(app::ViewerApp::new(initial_path, render)))
         }),

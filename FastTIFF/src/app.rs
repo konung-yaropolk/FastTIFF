@@ -1991,6 +1991,17 @@ impl eframe::App for ViewerApp {
             self.open_file(first.clone());
         }
 
+        // macOS "Open With" / double-click delivers files via an Apple Event
+        // (not argv); drain whatever `macos_open`'s handler has queued and open
+        // them the same way as drag-drop.
+        #[cfg(target_os = "macos")]
+        {
+            let opened = crate::macos_open::take_opened_files();
+            if let Some(first) = crate::process::open_all(&opened) {
+                self.open_file(first.clone());
+            }
+        }
+
         // Collect zoom input before panels consume events.
         // `zoom_delta()` is the correct API: egui routes Ctrl+scroll into
         // `zoom_factor_delta` rather than `smooth_scroll_delta`, so checking
