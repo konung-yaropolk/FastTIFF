@@ -4,6 +4,10 @@ name: CI
 # so the "tests" badge reflects current health between releases — not just the
 # last published release. Windows matches the release environment there, where
 # the default (wgpu/DX12) app builds without any extra system packages.
+#
+# build.rs embeds the committed icon/icon.ico into the .exe via winres; the icon
+# is pre-rendered from icon.svg by tools/generate-icons.bat and committed, so no
+# rasterization happens here.
 on:
   push:
     branches: [main]
@@ -25,23 +29,6 @@ jobs:
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
-
-      # build.rs embeds icon/icon.ico into the .exe via winres, and the icon is
-      # generated from icon.svg at build time (not committed), so it must exist
-      # before any cargo build/test that triggers build.rs. Rasterize it here
-      # with ImageMagick (preinstalled on windows-latest). Without this, the
-      # winres step would warn about a missing icon and the .exe would build
-      # without one — harmless for tests, but this keeps CI faithful to release.
-      - name: Generate Windows icon (.ico) from SVG
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd FastTIFF/icon
-          for s in 16 32 48 64 128 256; do
-            magick -background none icon.svg -resize ${s}x${s} "ico_${s}.png"
-          done
-          magick ico_16.png ico_32.png ico_48.png ico_64.png ico_128.png ico_256.png icon.ico
-          rm -f ico_*.png
 
       - name: Run tests
         run: cargo test --workspace

@@ -25,5 +25,5 @@ target
 *.tif
 
 # Icons
-FastTIFF/icon/*.png
-FastTIFF/icon/icon.ico
+# FastTIFF/icon/*.png
+# FastTIFF/icon/icon.ico
