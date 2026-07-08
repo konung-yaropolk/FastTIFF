@@ -247,7 +247,10 @@ jobs:
           # --- Info.plist ---
           PLIST="$APP/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Clear dict" "$PLIST" 2>/dev/null || true
-          add() { /usr/libexec/PlistBuddy -c "Add $1 $2 $3" "$PLIST"; }
+          # `${3:-}` so container entries (array/dict) can omit the value arg
+          # without tripping `set -u` ("unbound variable"); PlistBuddy ignores
+          # the resulting trailing space.
+          add() { /usr/libexec/PlistBuddy -c "Add $1 $2 ${3:-}" "$PLIST"; }
           add ":CFBundleName"                  string  "$PRODUCT_NAME"
           add ":CFBundleDisplayName"           string  "$PRODUCT_NAME"
           add ":CFBundleExecutable"            string  "FastTIFF"
