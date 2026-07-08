@@ -41,10 +41,6 @@ anyhow = "1.0"
 rfd = "0.17"
 log = "0.4"
 env_logger = "0.11"
-# Decode the bundled PNG into RGBA for the window icon (see main.rs). `image`
-# with the png codec is already in the tree (eframe + arboard pull it), so this
-# only makes it directly nameable — it compiles no new crates.
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 # WGSL shaders are only validated by wgpu at runtime (shader-module creation),
 # so this lets `cargo test` catch shader errors offline (no GPU needed). naga is
@@ -61,6 +57,14 @@ winres = "0.1.12"
 # features above; target-gating keeps X11/Wayland out of Windows/macOS builds.
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.34", default-features = false, features = ["x11", "wayland"] }
+
+# Decodes the bundled PNG into RGBA for the window icon (see `window_icon` in
+# main.rs). Excluded on macOS, where winit ignores per-window icons (the Dock
+# icon comes from the .app bundle's .icns) — so nothing there references `image`.
+# The png codec is already in the tree via eframe/arboard, so this compiles no
+# new crates on the platforms that do use it.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [package.metadata.winres]
 OriginalFilename = "FastTIFF"

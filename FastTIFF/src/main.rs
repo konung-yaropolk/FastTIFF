@@ -14,6 +14,11 @@ mod volume;
 /// at runtime; winit / the OS downscales it for each context (title bar, taskbar,
 /// alt-tab). Returns `None` if the embedded PNG somehow fails to decode, in which
 /// case the window just falls back to the default icon.
+///
+/// Not compiled on macOS: winit ignores per-window icons there (the Dock icon
+/// comes from the .app bundle's .icns), so decoding it would only waste a
+/// ~256 KB RGBA allocation at startup.
+#[cfg(not(target_os = "macos"))]
 fn window_icon() -> Option<egui::IconData> {
     let image = image::load_from_memory(include_bytes!("../icon/icon256.png")).ok()?.into_rgba8();
     let (width, height) = image.dimensions();
@@ -47,19 +52,22 @@ fn main() -> eframe::Result {
         std::env::args_os().skip(1).map(std::path::PathBuf::from).collect();
     let initial_path = process::open_all(&files).cloned();
 
-    let mut viewport = egui::ViewportBuilder::default()
+    let viewport = egui::ViewportBuilder::default()
         .with_inner_size([320.0, 320.0])
         // Keep in sync with `app::MIN_WINDOW` — the floor for both manual
         // resizing and zoom-out (which letterboxes below this size).
         .with_min_inner_size([256.0, 256.0])
         .with_title("FastTIFF");
     // Set the window icon (title bar / taskbar / task switcher) from the bundled
-    // PNG, so it isn't the egui default. On macOS the Dock icon comes from the
-    // .app bundle's .icns instead (winit ignores per-window icons there), so this
-    // is effectively a no-op on macOS but fixes Windows and Linux/X11.
-    if let Some(icon) = window_icon() {
-        viewport = viewport.with_icon(std::sync::Arc::new(icon));
-    }
+    // PNG, so it isn't the egui default. Only where winit honors a per-window
+    // icon — Windows and Linux/X11; macOS uses the .app bundle .icns and is
+    // skipped entirely (see `window_icon`), so this shadowing rebind is compiled
+    // out there.
+    #[cfg(not(target_os = "macos"))]
+    let viewport = match window_icon() {
+        Some(icon) => viewport.with_icon(std::sync::Arc::new(icon)),
+        None => viewport,
+    };
 
     let mut native_options = eframe::NativeOptions {
         viewport,
