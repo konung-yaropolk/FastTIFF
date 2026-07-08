@@ -1,4 +1,4 @@
-# FastTIFF - a lightning-fast multi-frame TIFF 3D-viewer with ImageJ-compatible GPU-rendering
+# FastTIFF - a lightning-fast multi-frame 3D-viewer with ImageJ-compatible GPU-rendering
 
 [![Release](https://img.shields.io/github/v/release/konung-yaropolk/FastTIFF?label=release)](https://github.com/konung-yaropolk/FastTIFF/releases)
 [![License](https://img.shields.io/badge/license-%20%20GNU%20GPLv3%20-green)](LICENSE)
