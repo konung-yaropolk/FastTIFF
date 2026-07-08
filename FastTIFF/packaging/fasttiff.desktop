@@ -2,7 +2,7 @@
 Type=Application
 Name=FastTIFF
 GenericName=TIFF Viewer
-Comment=A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering
+Comment= A lightning-fast multi-frame 2D- and 3D-viewer with ImageJ-compatible GPU-rendering
 Exec=FastTIFF %F
 Icon=fasttiff
 Terminal=false
