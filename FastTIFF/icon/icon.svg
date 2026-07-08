@@ -34,7 +34,7 @@
      showgrid="true"
      showguides="true"
      inkscape:zoom="0.70710678"
-     inkscape:cx="350.01786"
+     inkscape:cx="429.21382"
      inkscape:cy="543.05801"
      inkscape:window-width="1920"
      inkscape:window-height="1129"
@@ -115,8 +115,7 @@
        y="32"
        ry="112"
        rx="112"
-       inkscape:label="Frame"
-       sodipodi:insensitive="true" />
+       inkscape:label="Frame" />
     <rect
        style="fill:url(#meshgradient8699);fill-opacity:1;stroke:#ffffff;stroke-width:0;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1"
        id="rect2-2"
@@ -126,32 +125,27 @@
        y="104"
        ry="40"
        rx="40"
-       inkscape:label="Canvas"
-       sodipodi:insensitive="true" />
+       inkscape:label="Canvas" />
     <g
        aria-label="TIF"
        id="text24167"
        style="font-size:192px;font-family:Arial, 'MS PGothic', SimSun;-inkscape-font-specification:'Arial, MS PGothic, SimSun';text-align:center;word-spacing:0px;text-anchor:middle;fill:#747474;fill-opacity:1;stroke:#747474;stroke-width:12.8031;stroke-linecap:round;stroke-linejoin:round;stroke-opacity:1"
-       inkscape:label="TIF"
-       sodipodi:insensitive="true">
+       inkscape:label="TIF">
       <path
          d="m 236.54687,202.28125 q 0,1.78125 -0.1875,3.09375 -0.1875,1.3125 -0.65625,2.15625 -0.375,0.75 -1.03125,1.125 -0.5625,0.375 -1.3125,0.375 h -34.125 v 105.1875 q 0,0.75 -0.375,1.3125 -0.375,0.5625 -1.3125,0.9375 -0.9375,0.28125 -2.53125,0.46875 -1.5,0.28125 -3.84375,0.28125 -2.25,0 -3.84375,-0.28125 -1.59375,-0.1875 -2.53125,-0.46875 -0.9375,-0.375 -1.3125,-0.9375 -0.375,-0.5625 -0.375,-1.3125 v -105.1875 h -34.125 q -0.75,0 -1.40625,-0.375 -0.5625,-0.375 -0.9375,-1.125 -0.375,-0.84375 -0.65625,-2.15625 -0.1875,-1.3125 -0.1875,-3.09375 0,-1.78125 0.1875,-3.09375 0.28125,-1.40625 0.65625,-2.25 0.375,-0.84375 0.9375,-1.21875 0.65625,-0.375 1.40625,-0.375 h 84.375 q 0.75,0 1.3125,0.375 0.65625,0.375 1.03125,1.21875 0.46875,0.84375 0.65625,2.25 0.1875,1.3125 0.1875,3.09375 z"
          style="font-family:Calibri;-inkscape-font-specification:Calibri;fill:#747474;fill-opacity:1;stroke:#747474;stroke-opacity:1"
          id="path28951"
-         inkscape:label="F"
-         sodipodi:insensitive="true" />
+         inkscape:label="F" />
       <path
          d="m 270.20312,314.21875 q 0,0.75 -0.375,1.3125 -0.375,0.5625 -1.3125,0.9375 -0.9375,0.28125 -2.53125,0.46875 -1.5,0.28125 -3.84375,0.28125 -2.25,0 -3.84375,-0.28125 -1.59375,-0.1875 -2.53125,-0.46875 -0.9375,-0.375 -1.3125,-0.9375 -0.375,-0.5625 -0.375,-1.3125 v -116.4375 q 0,-0.75 0.375,-1.3125 0.46875,-0.5625 1.40625,-0.84375 1.03125,-0.375 2.53125,-0.5625 1.59375,-0.28125 3.75,-0.28125 2.34375,0 3.84375,0.28125 1.59375,0.1875 2.53125,0.5625 0.9375,0.28125 1.3125,0.84375 0.375,0.5625 0.375,1.3125 z"
          style="font-family:Calibri;-inkscape-font-specification:Calibri;fill:#747474;fill-opacity:1;stroke:#747474;stroke-opacity:1"
          id="path28953"
-         inkscape:label="I"
-         sodipodi:insensitive="true" />
+         inkscape:label="I" />
       <path
          d="m 366.20312,202.28125 q 0,1.78125 -0.1875,3.09375 -0.1875,1.3125 -0.65625,2.15625 -0.46875,0.75 -1.125,1.125 -0.5625,0.375 -1.21875,0.375 h -44.4375 v 41.25 h 42 q 0.65625,0 1.21875,0.375 0.65625,0.28125 1.125,1.03125 0.46875,0.75 0.65625,2.0625 0.1875,1.21875 0.1875,3.1875 0,1.78125 -0.1875,3.09375 -0.1875,1.21875 -0.65625,2.0625 -0.46875,0.75 -1.125,1.21875 -0.5625,0.375 -1.21875,0.375 h -42 v 50.53125 q 0,0.65625 -0.375,1.3125 -0.375,0.5625 -1.3125,0.9375 -0.9375,0.28125 -2.4375,0.46875 -1.5,0.28125 -3.9375,0.28125 -2.25,0 -3.84375,-0.28125 -1.59375,-0.1875 -2.53125,-0.46875 -0.9375,-0.375 -1.3125,-0.9375 -0.375,-0.65625 -0.375,-1.3125 v -112.3125 q 0,-3.65625 1.875,-5.0625 1.96875,-1.5 4.125,-1.5 h 54.5625 q 0.65625,0 1.21875,0.375 0.65625,0.375 1.125,1.21875 0.46875,0.84375 0.65625,2.25 0.1875,1.3125 0.1875,3.09375 z"
          style="font-family:Calibri;-inkscape-font-specification:Calibri;fill:#747474;fill-opacity:1;stroke:#747474;stroke-opacity:1"
          id="path28955"
-         inkscape:label="T"
-         sodipodi:insensitive="true" />
+         inkscape:label="T" />
     </g>
   </g>
   <metadata
