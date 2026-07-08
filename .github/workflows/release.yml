@@ -1,13 +1,18 @@
 name: Release
 
-# Runs when you publish a GitHub Release. It tests the workspace, builds the
-# optimized Windows .exe (with the embedded icon + version metadata from
-# build.rs / winres), and attaches the binary to the release that triggered it.
+# Runs when you publish a GitHub Release. Builds the app for Windows, Linux
+# (.deb + Arch .pkg.tar.zst), and macOS (.dmg, arm64 + x86_64), and attaches
+# every artifact to the release that triggered the run.
+#
+# Icons are generated from FastTIFF/icon/icon.svg at build time — the SVG is the
+# single source of truth. Each job rasterizes exactly the icon format it needs
+# (Windows .ico, Linux hicolor PNGs, macOS .icns) before the build that consumes
+# it, so there are no committed raster files to keep in sync.
 on:
   release:
     types: [published]
 
-# Needed so the workflow can upload the built .exe back onto the release.
+# Needed so the workflow can upload the built artifacts back onto the release.
 permissions:
   contents: write
 
@@ -23,6 +28,23 @@ jobs:
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+
+      # build.rs embeds icon/icon.ico into the .exe via winres, so the .ico must
+      # exist before `cargo build`/`cargo test`. Rasterize it from the SVG into a
+      # multi-resolution ICO (16-256). rsvg (via the librsvg pip wheel is not a
+      # thing on Windows) — use ImageMagick, preinstalled on windows-latest, with
+      # its built-in SVG/MSVG delegate.
+      - name: Generate Windows icon (.ico) from SVG
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd FastTIFF/icon
+          for s in 16 32 48 64 128 256; do
+            magick -background none icon.svg -resize ${s}x${s} "ico_${s}.png"
+          done
+          magick ico_16.png ico_32.png ico_48.png ico_64.png ico_128.png ico_256.png icon.ico
+          rm -f ico_*.png
+          magick identify icon.ico
 
       # Release-mode tests so the optimized build below reuses these artifacts.
       - name: Run tests
@@ -71,13 +93,26 @@ jobs:
       # Build-time libs the glow GUI links: GTK3 (rfd file dialog), OpenGL, and
       # the X11 / Wayland / xkbcommon stack winit needs. cargo-deb derives the
       # matching *runtime* package deps from the binary (depends = "$auto").
+      # librsvg2-bin provides rsvg-convert for the icon generation below.
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libgtk-3-dev libgl1-mesa-dev \
             libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
-            libxkbcommon-dev libwayland-dev
+            libxkbcommon-dev libwayland-dev \
+            librsvg2-bin
+
+      # [package.metadata.deb] lists icon/icon{16,32,48,64,128,256}.png as assets
+      # installed into hicolor/. Rasterize them from the SVG before `cargo deb`.
+      - name: Generate Linux hicolor icons from SVG
+        run: |
+          set -euo pipefail
+          cd FastTIFF/icon
+          for s in 16 32 48 64 128 256; do
+            rsvg-convert -w $s -h $s --background-color none icon.svg -o "icon${s}.png"
+          done
+          ls -la icon*.png
 
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
@@ -108,6 +143,10 @@ jobs:
   # Runs inside an Arch container. makepkg refuses to run as root, so it's driven
   # as an unprivileged user; every dependency is pre-installed, so makepkg needs
   # no sudo/pacman access of its own.
+  #
+  # The PKGBUILD builds from a fresh git clone of the tag, so it rasterizes its
+  # own hicolor icons from icon.svg in package() (via librsvg, a makedepend
+  # there) — the workflow's generated files aren't visible to makepkg.
   build-arch:
     runs-on: ubuntu-24.04
     container:
@@ -144,3 +183,150 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: /home/builder/*.pkg.tar.zst
+
+  # Builds the macOS .app bundle and packages it into a .dmg, then attaches it
+  # to the release — the macOS counterpart to the .exe / .deb / pacman jobs above.
+  # Runs once per architecture on a native runner (no cross-compiling the Metal /
+  # Cocoa stack): macos-14 -> arm64 (Apple Silicon), macos-15-intel -> x86_64.
+  # Apple has deprecated x86_64; macos-15-intel is the last Intel image Actions
+  # offers (available through ~August 2027), so the Intel job is best-effort and
+  # allowed to fail without blocking the arm64 one (fail-fast: false).
+  build-macos-dmg:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            arch: x86_64
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Pin the target so the build matches the runner's arch even if the
+          # host default ever drifts (belt-and-suspenders on native runners).
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Release-mode tests so the optimized build below reuses these artifacts.
+      - name: Run tests
+        run: cargo test --workspace --release --target ${{ matrix.target }}
+
+      # macOS ships the wgpu (Metal) backend, matching the crate default and the
+      # Windows job. wgpu is preferred on macOS because Apple deprecated OpenGL,
+      # so the glow path used for Linux is intentionally NOT used here. Pinned
+      # explicitly so the per-OS renderer split stays deliberate.
+      - name: Build release binary
+        run: >
+          cargo build --release --target ${{ matrix.target }}
+          -p FastTIFF --no-default-features --features renderer-wgpu
+
+      # Assemble FastTIFF.app by hand (no cargo-bundle dependency): synthesize an
+      # Info.plist whose strings mirror [package.metadata.winres] from
+      # FastTIFF/Cargo.toml (kept in sync with the embedded Windows metadata),
+      # build an .icns rendered natively from icon.svg at every size (no
+      # upscaling), and drop the binary in MacOS/. macOS ships rsvg via Homebrew.
+      - name: Install icon tooling
+        run: brew install librsvg
+
+      - name: Build .app bundle
+        shell: bash
+        env:
+          # Mirror of [package.metadata.winres] — edit both together.
+          PRODUCT_NAME: "Fast TIFF Viewer"
+          BUNDLE_ID: "com.konung-yaropolk.fasttiff"
+          COPYRIGHT: "konung_yaropolk © 2026"
+          DESCRIPTION: "Fast TIFF Viewer"
+        run: |
+          set -euo pipefail
+          VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import sys,json; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="FastTIFF"))')"
+          echo "Building FastTIFF.app version $VERSION for ${{ matrix.arch }}"
+
+          APP="FastTIFF.app"
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+          # --- binary ---
+          cp "target/${{ matrix.target }}/release/FastTIFF" "$APP/Contents/MacOS/FastTIFF"
+          chmod +x "$APP/Contents/MacOS/FastTIFF"
+
+          # --- icon: render each iconset slot natively from the SVG (no
+          #     upscaling), then iconutil packs the .icns ---
+          SVG="FastTIFF/icon/icon.svg"
+          ICONSET="FastTIFF.iconset"
+          rm -rf "$ICONSET"; mkdir -p "$ICONSET"
+          render() { rsvg-convert -w "$1" -h "$1" --background-color none "$SVG" -o "$ICONSET/$2"; }
+          render 16   icon_16x16.png
+          render 32   icon_16x16@2x.png
+          render 32   icon_32x32.png
+          render 64   icon_32x32@2x.png
+          render 128  icon_128x128.png
+          render 256  icon_128x128@2x.png
+          render 256  icon_256x256.png
+          render 512  icon_256x256@2x.png
+          render 512  icon_512x512.png
+          render 1024 icon_512x512@2x.png
+          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/FastTIFF.icns"
+          rm -rf "$ICONSET"
+
+          # --- Info.plist ---
+          PLIST="$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Clear dict" "$PLIST" 2>/dev/null || true
+          add() { /usr/libexec/PlistBuddy -c "Add $1 $2 $3" "$PLIST"; }
+          add ":CFBundleName"                  string  "$PRODUCT_NAME"
+          add ":CFBundleDisplayName"           string  "$PRODUCT_NAME"
+          add ":CFBundleExecutable"            string  "FastTIFF"
+          add ":CFBundleIdentifier"            string  "$BUNDLE_ID"
+          add ":CFBundleIconFile"              string  "FastTIFF.icns"
+          add ":CFBundleShortVersionString"    string  "$VERSION"
+          add ":CFBundleVersion"               string  "$VERSION"
+          add ":CFBundlePackageType"           string  "APPL"
+          add ":CFBundleInfoDictionaryVersion" string  "6.0"
+          add ":CFBundleGetInfoString"         string  "$DESCRIPTION"
+          add ":NSHumanReadableCopyright"      string  "$COPYRIGHT"
+          add ":LSMinimumSystemVersion"        string  "11.0"
+          add ":NSHighResolutionCapable"       bool    true
+
+          plutil -lint "$PLIST"
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      # Ad-hoc code-sign so the app launches on the build arch without an
+      # "is damaged" Gatekeeper error from a totally unsigned bundle. This is
+      # NOT notarized — end users on another Mac will still need to right-click
+      # -> Open (or `xattr -dr com.apple.quarantine`) the first time. Real
+      # notarization needs an Apple Developer ID cert.
+      - name: Ad-hoc sign the app
+        run: codesign --force --deep --sign - "FastTIFF.app"
+
+      # Stage the .app in a clean folder with an /Applications symlink so the
+      # DMG opens showing the familiar "drag to Applications" layout, then build
+      # a compressed (UDZO) read-only image with hdiutil (first-party tooling).
+      - name: Create DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="dmg_stage"
+          rm -rf "$STAGE"; mkdir -p "$STAGE"
+          cp -R "FastTIFF.app" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          DMG="FastTIFF-${APP_VERSION}-${{ matrix.arch }}.dmg"
+          rm -f "$DMG"
+          hdiutil create -volname "Fast TIFF Viewer" \
+            -srcfolder "$STAGE" -fs HFS+ -format UDZO -imagekey zlib-level=9 \
+            "$DMG"
+          echo "DMG_NAME=$DMG" >> "$GITHUB_ENV"
+
+      - name: Attach DMG to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.DMG_NAME }}

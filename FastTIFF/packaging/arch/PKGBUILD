@@ -14,7 +14,7 @@ license=('GPL-3.0-only')
 # Trim with `namcap` against the built package if you want a minimal set.
 depends=('gcc-libs' 'glibc' 'gtk3' 'libglvnd' 'libxkbcommon'
          'libx11' 'libxcursor' 'libxi' 'libxrandr' 'wayland' 'fontconfig' 'zstd')
-makedepends=('rust' 'git')
+makedepends=('rust' 'git' 'librsvg')
 # Strip the binary but don't split symbols into a separate fasttiff-debug
 # package — so the release only gets the one .pkg.tar.zst.
 options=('!debug' 'strip')
@@ -53,8 +53,14 @@ package() {
     ln -s FastTIFF "$pkgdir/usr/bin/fasttiff"
     # Desktop menu launcher + hicolor icons (pacman hooks refresh the caches).
     install -Dm644 FastTIFF/packaging/fasttiff.desktop "$pkgdir/usr/share/applications/fasttiff.desktop"
-    install -Dm644 FastTIFF/icon/icon16.png "$pkgdir/usr/share/icons/hicolor/16x16/apps/fasttiff.png"
-    install -Dm644 FastTIFF/icon/icon32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/fasttiff.png"
-    install -Dm644 FastTIFF/icon/icon48.png "$pkgdir/usr/share/icons/hicolor/48x48/apps/fasttiff.png"
+    # Icons are generated from icon.svg (the single source of truth) rather than
+    # committed as PNGs. rsvg-convert (librsvg, a makedepend) rasterizes each
+    # hicolor size natively — no upscaling. pacman hooks refresh the caches.
+    for s in 16 32 48 64 128 256; do
+        rsvg-convert -w "$s" -h "$s" --background-color none \
+            FastTIFF/icon/icon.svg -o "fasttiff-${s}.png"
+        install -Dm644 "fasttiff-${s}.png" \
+            "$pkgdir/usr/share/icons/hicolor/${s}x${s}/apps/fasttiff.png"
+    done
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

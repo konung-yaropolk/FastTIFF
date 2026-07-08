@@ -23,3 +23,7 @@ target
 
 # tiff testcase files
 *.tif
+
+# Icons
+FastTIFF/icon/*.png
+FastTIFF/icon/icon.ico

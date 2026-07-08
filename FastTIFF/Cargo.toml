@@ -1,6 +1,6 @@
 [package]
 name = "FastTIFF"
-version = "1.7.2"
+version = "1.7.3"
 edition = "2021"
 description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering."
 license = "GPL-3.0-only"
@@ -88,4 +88,7 @@ assets = [
     ["icon/icon16.png", "usr/share/icons/hicolor/16x16/apps/fasttiff.png", "644"],
     ["icon/icon32.png", "usr/share/icons/hicolor/32x32/apps/fasttiff.png", "644"],
     ["icon/icon48.png", "usr/share/icons/hicolor/48x48/apps/fasttiff.png", "644"],
+    ["icon/icon64.png", "usr/share/icons/hicolor/64x64/apps/fasttiff.png", "644"],
+    ["icon/icon128.png", "usr/share/icons/hicolor/128x128/apps/fasttiff.png", "644"],
+    ["icon/icon256.png", "usr/share/icons/hicolor/256x256/apps/fasttiff.png", "644"],
 ]
