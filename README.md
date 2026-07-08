@@ -18,6 +18,12 @@ continuous scrolling), or the left/right arrow keys.
 Downloads here:
 https://github.com/konung-yaropolk/FastTIFF/releases
 
+<img width="320" height="404" alt="2D" src="https://github.com/user-attachments/assets/5ba646bc-f451-4872-978b-bc0d5cf8b056" />  
+
+<p align="center">
+  <video src="[https://github.com](https://github.com/user-attachments/assets/5f338459-6fbd-4ea2-8fb8-7e1a31b7e045)" autoplay loop muted playsinline width="100%"></video>
+</p>
+
 <img width="1137" height="923" alt="Untitled" src="https://github.com/user-attachments/assets/e3fe4619-bd53-4b68-bf7f-019231cf20a6" />
 
 ## Build & run
