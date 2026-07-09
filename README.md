@@ -6,7 +6,7 @@
 [![Build](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/release.yml?label=build)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
 [![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/ci.yml)
 
-
+[![FastTIFF](https://github.com/user-attachments/assets/3a64fd9b-e0b2-455f-a4fa-00b408abb8e3)](https://github.com/konung-yaropolk/FastTIFF/releases)  
 A fast multi-frame TIFF stack viewer for huge ImageJ hyperstacks: a horizontal
 scrubber instead of ImageJ's slice slider, GPU-side LUT/contrast rendering,
 and (for the common uncompressed case) zero CPU-side image processing per
@@ -18,7 +18,6 @@ hovering over the image (one frame per notch; hold **Shift** for fast
 continuous scrolling), or the left/right arrow keys.
 
 
-[![FastTIFF](https://github.com/user-attachments/assets/3a64fd9b-e0b2-455f-a4fa-00b408abb8e3)](https://github.com/konung-yaropolk/FastTIFF/releases)  
 [**Download**](https://github.com/konung-yaropolk/FastTIFF/releases)  
 
 
