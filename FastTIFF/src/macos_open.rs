@@ -2,23 +2,43 @@
 //!
 //! On macOS, opening a document from Finder (double-click, drag-onto-icon, or
 //! "Open With") does NOT put the path in `argv` the way Windows and Linux do —
-//! it's delivered to the app as a `kAEOpenDocuments` Apple Event. winit 0.30
-//! doesn't surface that event, so without this the app launches but never sees
-//! the file (an empty window).
+//! it's delivered as a `kAEOpenDocuments` Apple Event. winit 0.30 doesn't
+//! surface that event, so without this the app launches but never sees the
+//! file (an empty window).
 //!
-//! We install a Carbon Apple Event Manager handler (still supported on macOS 14)
-//! for `kCoreEventClass` / `kAEOpenDocuments`, pull the file paths out of the
-//! event, and queue them. The egui update loop drains the queue and opens them
-//! through the same `process::open_all` path as argv / drag-drop. No
-//! Objective-C class or extra crate is needed — just a C callback and a few
-//! framework calls.
+//! Two delivery windows need covering, and they need different mechanisms:
 //!
-//! `install()` is called both before the event loop starts (to catch the
-//! cold-launch event that's already queued) and again once the app is up (in
-//! case AppKit's own launch-time handler install clobbered the first one).
+//! * **Cold launch** (double-click starts the app): AppKit delivers the open
+//!   event *between* `applicationWillFinishLaunching` and
+//!   `applicationDidFinishLaunching`, through its own Apple Event handler,
+//!   which forwards to the app delegate's `application:openURLs:`. winit's
+//!   delegate doesn't implement that selector, so stock AppKit replies
+//!   "not handled" — Finder then shows a "does not support this file type"
+//!   dialog and the app opens empty. Any handler we install before `run` is
+//!   clobbered when AppKit installs its own during `finishLaunching`, and
+//!   anything we install from the eframe creator (= `didFinishLaunching`, via
+//!   winit's `resumed`) runs *after* the event was already dispatched. The fix:
+//!   observe `NSApplicationWillFinishLaunchingNotification` (fires after
+//!   winit's delegate exists, before the event dispatch) and inject an
+//!   `application:openURLs:` method onto the delegate's class with
+//!   `class_addMethod`, so AppKit's own handler delivers the URLs to us and
+//!   replies success.
+//!
+//! * **App already running** (warm open): `set_ctx` — called from the eframe
+//!   creator — installs a classic Carbon Apple Event handler for
+//!   `kCoreEventClass`/`kAEOpenDocuments`, replacing AppKit's dispatch entry,
+//!   so later open events come straight to us. (The injected delegate method
+//!   would cover this too if the Carbon install ever failed — belt and
+//!   suspenders.)
+//!
+//! Both paths queue the paths here; the egui update loop drains the queue and
+//! opens them through the same `process::open_all` path as argv / drag-drop.
+//! No Objective-C class of our own and no extra crates — just C FFI into
+//! CoreServices (Apple Event Manager), CoreFoundation (notification center),
+//! and libobjc (runtime).
 
-use std::ffi::{c_void, OsString};
-use std::os::raw::c_long;
+use std::ffi::{c_void, CStr, OsString};
+use std::os::raw::{c_char, c_long};
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -73,6 +93,57 @@ extern "C" {
     fn AEDisposeDesc(desc: *mut AEDesc) -> i16;
 }
 
+// --- CoreFoundation notification FFI --------------------------------------
+
+type CFNotificationCallback = extern "C" fn(
+    center: *mut c_void,
+    observer: *mut c_void,
+    name: *const c_void,
+    object: *const c_void,
+    user_info: *const c_void,
+);
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFNotificationCenterGetLocalCenter() -> *mut c_void;
+    fn CFNotificationCenterAddObserver(
+        center: *mut c_void,
+        observer: *const c_void,
+        callback: CFNotificationCallback,
+        name: *const c_void,
+        object: *const c_void,
+        suspension_behavior: isize,
+    );
+    fn CFStringCreateWithCString(alloc: *const c_void, c_str: *const c_char, encoding: u32) -> *const c_void;
+}
+
+const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+const CF_NOTIFICATION_DELIVER_IMMEDIATELY: isize = 4;
+
+// --- Objective-C runtime FFI (libobjc) -------------------------------------
+
+#[link(name = "objc")]
+extern "C" {
+    /// Untyped; cast per call site to the exact signature before invoking (the
+    /// ABI Apple documents for `objc_msgSend` dispatch from C).
+    fn objc_msgSend();
+    fn objc_getClass(name: *const c_char) -> *mut c_void;
+    fn object_getClass(obj: *mut c_void) -> *mut c_void;
+    fn sel_registerName(name: *const c_char) -> *const c_void;
+    fn class_addMethod(cls: *mut c_void, name: *const c_void, imp: *mut c_void, types: *const c_char) -> u8;
+}
+
+/// `[obj sel]` returning an object pointer.
+///
+/// # Safety
+/// `obj` must be a valid Objective-C object (or class) and `sel` a selector it
+/// responds to with a `()`-args, object-return signature.
+unsafe fn msg_obj(obj: *mut c_void, sel: *const c_void) -> *mut c_void {
+    let f: unsafe extern "C" fn(*mut c_void, *const c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, sel)
+}
+
 /// Pack four ASCII bytes into a big-endian `FourCharCode`.
 const fn fourcc(code: &[u8; 4]) -> u32 {
     ((code[0] as u32) << 24) | ((code[1] as u32) << 16) | ((code[2] as u32) << 8) | (code[3] as u32)
@@ -93,11 +164,27 @@ fn ctx_slot() -> &'static OnceLock<egui::Context> {
     &C
 }
 
-/// Remember the egui context (and (re)install the handler now that AppKit has
-/// finished its own launch-time setup). Call once, from the eframe creator.
+/// Queue opened paths and wake the UI so `take_opened_files` runs promptly.
+/// (During cold launch the context isn't stashed yet — that's fine, the first
+/// frames render unconditionally and drain the queue.)
+fn deliver(paths: Vec<PathBuf>) {
+    if paths.is_empty() {
+        return;
+    }
+    if let Ok(mut q) = queue().lock() {
+        q.extend(paths);
+    }
+    if let Some(ctx) = ctx_slot().get() {
+        ctx.request_repaint();
+    }
+}
+
+/// Remember the egui context (and install the Carbon handler now that AppKit
+/// has finished its own launch-time setup — this replaces AppKit's dispatch
+/// entry, covering warm opens). Call once, from the eframe creator.
 pub fn set_ctx(ctx: egui::Context) {
     let _ = ctx_slot().set(ctx);
-    install();
+    install_ae_handler();
 }
 
 /// Drain any paths delivered since the last call.
@@ -108,9 +195,131 @@ pub fn take_opened_files() -> Vec<PathBuf> {
     }
 }
 
-/// Install the `kAEOpenDocuments` handler. Idempotent — installing the same
-/// class/id/handler just replaces it, so calling twice is harmless.
+/// Launch-time setup; call from `main` before the event loop starts. Registers
+/// the `willFinishLaunching` observer that injects `application:openURLs:` onto
+/// winit's app delegate — the piece that catches the *cold-launch* open event
+/// (see the module docs for why nothing later works for that one).
 pub fn install() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        let name = CFStringCreateWithCString(
+            std::ptr::null(),
+            c"NSApplicationWillFinishLaunchingNotification".as_ptr(),
+            K_CF_STRING_ENCODING_UTF8,
+        );
+        if name.is_null() {
+            log::error!("macOS: couldn't create launch-notification name");
+            return;
+        }
+        // Observer `NULL` = non-removable, which is fine: the notification
+        // fires exactly once per process lifetime.
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetLocalCenter(),
+            std::ptr::null(),
+            on_will_finish_launching,
+            name,
+            std::ptr::null(),
+            CF_NOTIFICATION_DELIVER_IMMEDIATELY,
+        );
+    });
+}
+
+/// Fires after winit created `NSApplication` and set its delegate, but before
+/// AppKit dispatches the queued open-documents event — the one moment where
+/// adding the delegate method helps the cold-launch case.
+extern "C" fn on_will_finish_launching(
+    _center: *mut c_void,
+    _observer: *mut c_void,
+    _name: *const c_void,
+    _object: *const c_void,
+    _user_info: *const c_void,
+) {
+    // SAFETY: called on the main thread by the local notification center while
+    // NSApplication exists; all pointers checked before use.
+    unsafe { inject_open_urls_method() };
+}
+
+/// Add `application:openURLs:` to winit's application-delegate class so
+/// AppKit's own open-documents handler delivers files to us (and replies
+/// success — no "does not support this file type" dialog).
+///
+/// # Safety
+/// Must run on the main thread with `NSApplication` initialized.
+unsafe fn inject_open_urls_method() {
+    let app_cls = objc_getClass(c"NSApplication".as_ptr());
+    if app_cls.is_null() {
+        log::error!("macOS: NSApplication class not found");
+        return;
+    }
+    let app = msg_obj(app_cls, sel_registerName(c"sharedApplication".as_ptr()));
+    let delegate = if app.is_null() {
+        std::ptr::null_mut()
+    } else {
+        msg_obj(app, sel_registerName(c"delegate".as_ptr()))
+    };
+    if delegate.is_null() {
+        log::error!("macOS: no app delegate at willFinishLaunching; cold-launch open won't work");
+        return;
+    }
+    let cls = object_getClass(delegate);
+    let added = class_addMethod(
+        cls,
+        sel_registerName(c"application:openURLs:".as_ptr()),
+        handle_open_urls as *mut c_void,
+        c"v@:@@".as_ptr(), // void (id self, SEL _cmd, id app, id urls)
+    );
+    if added == 0 {
+        // The delegate (a future winit?) already implements it; leave theirs.
+        log::warn!("macOS: app delegate already implements application:openURLs:");
+    }
+}
+
+/// The injected `application:openURLs:` implementation. `urls` is an
+/// `NSArray<NSURL *>`.
+extern "C" fn handle_open_urls(_this: *mut c_void, _cmd: *const c_void, _app: *mut c_void, urls: *mut c_void) {
+    // SAFETY: AppKit passes a valid NSArray for the duration of this call.
+    deliver(unsafe { ns_urls_to_paths(urls) });
+}
+
+/// Read an `NSArray<NSURL *>` into filesystem paths via each URL's
+/// `fileSystemRepresentation` (bytes are copied out immediately, before the
+/// autorelease pool can reclaim them).
+///
+/// # Safety
+/// `urls` must be a valid `NSArray<NSURL *>` (or null, which yields empty).
+unsafe fn ns_urls_to_paths(urls: *mut c_void) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if urls.is_null() {
+        return out;
+    }
+    let count: unsafe extern "C" fn(*mut c_void, *const c_void) -> usize =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    let at_index: unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    let fs_repr: unsafe extern "C" fn(*mut c_void, *const c_void) -> *const c_char =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+
+    let n = count(urls, sel_registerName(c"count".as_ptr()));
+    for i in 0..n {
+        let url = at_index(urls, sel_registerName(c"objectAtIndex:".as_ptr()), i);
+        if url.is_null() {
+            continue;
+        }
+        let repr = fs_repr(url, sel_registerName(c"fileSystemRepresentation".as_ptr()));
+        if repr.is_null() {
+            continue;
+        }
+        let bytes = CStr::from_ptr(repr).to_bytes().to_vec();
+        out.push(PathBuf::from(OsString::from_vec(bytes)));
+    }
+    out
+}
+
+// --- Carbon Apple Event handler (warm opens) -------------------------------
+
+/// Install the `kAEOpenDocuments` handler, replacing whatever entry (ours or
+/// AppKit's) currently holds that class/id. Idempotent.
+fn install_ae_handler() {
     // SAFETY: a plain Apple Event Manager registration; the handler is a
     // 'static `extern "C"` fn, and no arguments outlive the call.
     let err = unsafe {
@@ -124,16 +333,7 @@ pub fn install() {
 /// C callback: runs on the main thread when Finder asks us to open documents.
 extern "C" fn handle_open_documents(event: *const AEDesc, _reply: *mut AEDesc, _refcon: *mut c_void) -> i16 {
     // SAFETY: `event` is a valid AppleEvent for the lifetime of this call.
-    let paths = unsafe { extract_paths(event) };
-    if !paths.is_empty() {
-        if let Ok(mut q) = queue().lock() {
-            q.extend(paths);
-        }
-        // Wake the UI so `take_opened_files` runs even if the app was idle.
-        if let Some(ctx) = ctx_slot().get() {
-            ctx.request_repaint();
-        }
-    }
+    deliver(unsafe { extract_paths(event) });
     0 // noErr
 }
 

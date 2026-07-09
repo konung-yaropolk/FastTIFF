@@ -29,8 +29,10 @@ fn main() -> eframe::Result {
     env_logger::init();
 
     // macOS delivers "Open With" / double-clicked files as an Apple Event, not
-    // argv — install the handler before the event loop so the cold-launch open
-    // is captured. The app's update loop drains what it queues. See `macos_open`.
+    // argv. Register the launch observer that hooks the open-documents event
+    // during AppKit's launch sequence (the cold-launch open fires before the
+    // eframe creator runs, so it must be armed here). The app's update loop
+    // drains what it queues. See `macos_open` for the full timing story.
     #[cfg(target_os = "macos")]
     macos_open::install();
 
@@ -83,9 +85,9 @@ fn main() -> eframe::Result {
         "FastTIFF",
         native_options,
         Box::new(|cc| {
-            // Now that the event loop is up, hand the macOS open-file handler the
-            // egui context (so it can wake an idle UI) and re-assert the handler
-            // in case AppKit's own launch-time install replaced ours.
+            // Now that the event loop is up, hand the macOS open-file machinery
+            // the egui context (so it can wake an idle UI) and install the Apple
+            // Event handler that covers opens while the app is already running.
             #[cfg(target_os = "macos")]
             macos_open::set_ctx(cc.egui_ctx.clone());
             let render = render::init(cc);
