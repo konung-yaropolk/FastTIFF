@@ -36,6 +36,39 @@ https://github.com/konung-yaropolk/FastTIFF/releases
   </tr>
 </table>
 
+## Download
+
+Prebuilt binaries for the latest version are attached to each release on the
+[**Releases**](https://github.com/konung-yaropolk/FastTIFF/releases) page. Grab
+the one file that matches your operating system and CPU:
+
+| File | Target system | Install / run |
+|------|---------------|---------------|
+| `FastTIFF.exe` | **Windows 10 / 11** — 64-bit | Portable single executable — just run it, no installer. |
+| `FastTIFF-<version>-arm64.dmg` | **macOS 11+ · Apple Silicon** (M1/M2/M3/M4) | Open the `.dmg`, drag **FastTIFF** into Applications. |
+| `FastTIFF-<version>-x86_64.dmg` | **macOS 11+ · Intel** Macs | Open the `.dmg`, drag **FastTIFF** into Applications. |
+| `fasttiff_<version>-1_amd64.deb` | **Debian / Ubuntu** — x86-64 (Intel/AMD) | `sudo apt install ./fasttiff_<version>-1_amd64.deb` |
+| `fasttiff_<version>-1_arm64.deb` | **Debian / Ubuntu** — ARM64 (aarch64) | `sudo apt install ./fasttiff_<version>-1_arm64.deb` |
+| `fasttiff-<version>-1-x86_64.pkg.tar.zst` | **Arch Linux** — x86-64 | `sudo pacman -U fasttiff-<version>-1-x86_64.pkg.tar.zst` |
+
+`<version>` is the release number (e.g. `1.7.5`). After installing on Linux,
+launch it from your applications menu or by running `FastTIFF` (or `fasttiff`)
+in a terminal.
+
+**Not sure which CPU you have?**
+- **macOS:**  → *About This Mac*. A "Chip: Apple M…" line means **arm64**; an "Intel" processor means **x86_64**.
+- **Linux:** run `uname -m` — `x86_64` → the `amd64` file, `aarch64` → the `arm64` file.
+
+**First-launch security prompt** (the binaries are not signed with a paid
+developer certificate):
+- **Windows** — SmartScreen may warn: click *More info → Run anyway*.
+- **macOS** — Gatekeeper blocks unsigned apps the first time: **right-click the
+  app → Open** (then confirm), or run
+  `xattr -dr com.apple.quarantine /Applications/FastTIFF.app` once.
+
+On a system that isn't listed (32-bit, another distro, a different CPU)? Build
+it from source — see below; it's a single `cargo` command.
+
 ## Build & run
 
 ```sh
