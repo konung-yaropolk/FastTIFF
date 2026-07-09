@@ -34,7 +34,7 @@ continuous scrolling), or the left/right arrow keys.
   </tr>
 </table>
 
-## Download
+## Downloads
 
 Prebuilt binaries for the latest version are attached to each release on the
 [**Releases**](https://github.com/konung-yaropolk/FastTIFF/releases) page. Grab
