@@ -1048,26 +1048,8 @@ fn convert_volume_texels(kind: VolumeKind, unorm: bool, bytes: &[u8], out: &mut 
 }
 
 #[cfg(test)]
-mod wgsl_tests {
-    /// Parse + validate a WGSL source with naga (what wgpu does at runtime), so a
-    /// shader error is a failing test rather than a blank 3D canvas at startup.
-    fn validate(src: &str, name: &str) {
-        let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name}: parse: {e}"));
-        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-            .validate(&module)
-            .unwrap_or_else(|e| panic!("{name}: validate: {e:?}"));
-    }
-
-    #[test]
-    fn volume_shader_is_valid() {
-        validate(include_str!("../shaders/volume.wgsl"), "volume.wgsl");
-    }
-
-    #[test]
-    fn composite_shader_is_valid() {
-        validate(include_str!("../shaders/composite.wgsl"), "composite.wgsl");
-    }
-}
+#[path = "wgsl_tests.rs"]
+mod wgsl_tests;
 
 fn build_volume_bind_group(
     device: &wgpu::Device,

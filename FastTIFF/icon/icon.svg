@@ -33,15 +33,15 @@
      inkscape:document-units="px"
      showgrid="true"
      showguides="true"
-     inkscape:zoom="0.7071068"
-     inkscape:cx="207.88939"
-     inkscape:cy="219.9102"
+     inkscape:zoom="0.5"
+     inkscape:cx="464"
+     inkscape:cy="-205"
      inkscape:window-width="1920"
      inkscape:window-height="1017"
      inkscape:window-x="-8"
      inkscape:window-y="-8"
      inkscape:window-maximized="1"
-     inkscape:current-layer="g1"
+     inkscape:current-layer="layer1"
      inkscape:export-bgcolor="#ffffff00">
     <inkscape:grid
        id="grid1"
@@ -65,6 +65,12 @@
   <defs
      id="defs1">
     <rect
+       x="92.499998"
+       y="166"
+       width="327.49999"
+       height="187"
+       id="rect1" />
+    <rect
        x="64"
        y="64"
        width="384"
@@ -76,7 +82,7 @@
        gradientUnits="userSpaceOnUse"
        x="130.28571"
        y="130.28571"
-       gradientTransform="matrix(0.95,0,0,0.95,12.800001,12.800001)">
+       gradientTransform="matrix(0.95,0,0,0.95,11.28972,10.941313)">
       <meshrow
          id="meshrow3319">
         <meshpatch
@@ -106,19 +112,9 @@
      inkscape:groupmode="layer"
      id="layer1"
      sodipodi:insensitive="true">
-    <rect
-       style="display:none;mix-blend-mode:normal;fill:none;fill-opacity:1;stroke:#747474;stroke-width:48;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1"
-       id="rect2"
-       width="448"
-       height="448"
-       x="32"
-       y="32"
-       ry="127.96916"
-       rx="127.96916"
-       inkscape:label="Frame" />
     <g
        id="g1"
-       transform="matrix(1.4736842,0,0,1.4736842,-121.26315,-121.26315)"
+       transform="matrix(1.4749895,0,0,1.4749895,-117.83326,-118.83414)"
        style="display:inline;stroke-width:0.678571"
        inkscape:label="plane">
       <rect
@@ -126,32 +122,18 @@
          id="rect2-2"
          width="304"
          height="304"
-         x="104"
-         y="104"
+         x="102.48971"
+         y="102.14131"
          ry="86.85714"
          rx="86.85714"
          inkscape:label="Canvas" />
-      <g
+      <path
+         d="m 187.83763,200.97799 v 113.27225 h -4.04544 V 200.97799 Z m 34.7752,0 v 3.88985 h -73.67364 v -3.88985 z m 37.36397,0 v 113.27225 h -4.12323 V 200.97799 Z m 42.75435,0 v 113.27225 h -4.04543 V 200.97799 Z m 48.70085,53.21307 v 4.12323 h -51.34594 v -4.12323 z m 6.69053,-53.21307 v 3.88985 h -58.03647 v -3.88985 z"
+         id="text2"
+         style="font-size:159.328px;font-family:Roboto;-inkscape-font-specification:'Roboto, @wght=100';font-variation-settings:'wght' 100;text-align:center;letter-spacing:3.70032px;word-spacing:0px;text-anchor:middle;fill:#ececec;stroke:#ececec;stroke-width:23.8731;stroke-linecap:round;stroke-linejoin:round"
+         inkscape:label="TIF_Roboto"
          aria-label="TIF"
-         id="text24167"
-         style="font-size:192px;font-family:Arial, 'MS PGothic', SimSun;-inkscape-font-specification:'Arial, MS PGothic, SimSun';text-align:center;word-spacing:0px;text-anchor:middle;fill:#ececec;fill-opacity:1;stroke:#ececec;stroke-width:8.14286;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1"
-         inkscape:label="TIF">
-        <path
-           d="m 236.54687,202.28125 q 0,1.78125 -0.1875,3.09375 -0.1875,1.3125 -0.65625,2.15625 -0.375,0.75 -1.03125,1.125 -0.5625,0.375 -1.3125,0.375 h -34.125 v 105.1875 q 0,0.75 -0.375,1.3125 -0.375,0.5625 -1.3125,0.9375 -0.9375,0.28125 -2.53125,0.46875 -1.5,0.28125 -3.84375,0.28125 -2.25,0 -3.84375,-0.28125 -1.59375,-0.1875 -2.53125,-0.46875 -0.9375,-0.375 -1.3125,-0.9375 -0.375,-0.5625 -0.375,-1.3125 v -105.1875 h -34.125 q -0.75,0 -1.40625,-0.375 -0.5625,-0.375 -0.9375,-1.125 -0.375,-0.84375 -0.65625,-2.15625 -0.1875,-1.3125 -0.1875,-3.09375 0,-1.78125 0.1875,-3.09375 0.28125,-1.40625 0.65625,-2.25 0.375,-0.84375 0.9375,-1.21875 0.65625,-0.375 1.40625,-0.375 h 84.375 q 0.75,0 1.3125,0.375 0.65625,0.375 1.03125,1.21875 0.46875,0.84375 0.65625,2.25 0.1875,1.3125 0.1875,3.09375 z"
-           style="font-family:Calibri;-inkscape-font-specification:Calibri;fill:#ececec;fill-opacity:1;stroke:#ececec;stroke-width:8.14286;stroke-dasharray:none;stroke-opacity:1"
-           id="path28951"
-           inkscape:label="F" />
-        <path
-           d="m 270.20312,314.21875 q 0,0.75 -0.375,1.3125 -0.375,0.5625 -1.3125,0.9375 -0.9375,0.28125 -2.53125,0.46875 -1.5,0.28125 -3.84375,0.28125 -2.25,0 -3.84375,-0.28125 -1.59375,-0.1875 -2.53125,-0.46875 -0.9375,-0.375 -1.3125,-0.9375 -0.375,-0.5625 -0.375,-1.3125 v -116.4375 q 0,-0.75 0.375,-1.3125 0.46875,-0.5625 1.40625,-0.84375 1.03125,-0.375 2.53125,-0.5625 1.59375,-0.28125 3.75,-0.28125 2.34375,0 3.84375,0.28125 1.59375,0.1875 2.53125,0.5625 0.9375,0.28125 1.3125,0.84375 0.375,0.5625 0.375,1.3125 z"
-           style="font-family:Calibri;-inkscape-font-specification:Calibri;fill:#ececec;fill-opacity:1;stroke:#ececec;stroke-width:8.14286;stroke-dasharray:none;stroke-opacity:1"
-           id="path28953"
-           inkscape:label="I" />
-        <path
-           d="m 366.20312,202.28125 q 0,1.78125 -0.1875,3.09375 -0.1875,1.3125 -0.65625,2.15625 -0.46875,0.75 -1.125,1.125 -0.5625,0.375 -1.21875,0.375 h -44.4375 v 41.25 h 42 q 0.65625,0 1.21875,0.375 0.65625,0.28125 1.125,1.03125 0.46875,0.75 0.65625,2.0625 0.1875,1.21875 0.1875,3.1875 0,1.78125 -0.1875,3.09375 -0.1875,1.21875 -0.65625,2.0625 -0.46875,0.75 -1.125,1.21875 -0.5625,0.375 -1.21875,0.375 h -42 v 50.53125 q 0,0.65625 -0.375,1.3125 -0.375,0.5625 -1.3125,0.9375 -0.9375,0.28125 -2.4375,0.46875 -1.5,0.28125 -3.9375,0.28125 -2.25,0 -3.84375,-0.28125 -1.59375,-0.1875 -2.53125,-0.46875 -0.9375,-0.375 -1.3125,-0.9375 -0.375,-0.65625 -0.375,-1.3125 v -112.3125 q 0,-3.65625 1.875,-5.0625 1.96875,-1.5 4.125,-1.5 h 54.5625 q 0.65625,0 1.21875,0.375 0.65625,0.375 1.125,1.21875 0.46875,0.84375 0.65625,2.25 0.1875,1.3125 0.1875,3.09375 z"
-           style="font-family:Calibri;-inkscape-font-specification:Calibri;fill:#ececec;fill-opacity:1;stroke:#ececec;stroke-width:8.14286;stroke-dasharray:none;stroke-opacity:1"
-           id="path28955"
-           inkscape:label="T" />
-      </g>
+         sodipodi:nodetypes="cccccccccccccccccccccccccccccc" />
     </g>
   </g>
   <metadata
