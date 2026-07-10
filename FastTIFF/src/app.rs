@@ -1361,6 +1361,11 @@ fn format_calibrated(calibration: Option<(f64, f64)>, raw: f32) -> String {
     }
 }
 
+/// The contrast range sliders never draw narrower than this, no matter how
+/// small the window gets — below it the two handles collide and the slider
+/// stops being usable. The value text to the right clips first.
+const MIN_CONTRAST_SLIDER_W: f32 = 80.0;
+
 /// A two-handle horizontal range slider editing `(min, max)` within the
 /// inclusive track `[lo, hi]` (all in raw sample units). The handles can't
 /// cross. `salt` disambiguates the interaction ids when several sliders share
@@ -1964,13 +1969,17 @@ fn refresh_pseudocolor(loaded: &mut LoadedStack, apply: bool) {
     loaded.luts_uploaded = false; // force re-upload on the next sync
 }
 
-/// Applies a manual channels/frames swap from the dimension-order
-/// dropdown. Z (if any) and the triple-axis warning are carried over
-/// unchanged — the swap only concerns the channels/frames roles.
-fn apply_dimension_override(loaded: &mut LoadedStack, channels: usize, frames: usize) {
+/// Applies a manual dimension-order change from the dropdown: reassigns the
+/// channels / Z-slices / time-frames roles to the given counts (the product
+/// stays the stack's plane count — the selector only offers permutations).
+/// For stacks without a real Z axis the selector passes `slices` through
+/// unchanged, so it stays a plain channels/time swap. The triple-axis
+/// warning flag is carried over — it describes the file, not the current
+/// role assignment.
+fn apply_dimension_override(loaded: &mut LoadedStack, channels: usize, slices: usize, frames: usize) {
     let resolved = fast_tiff_lib::ResolvedDimensions {
         channels,
-        slices: loaded.tiff.meta.slices,
+        slices,
         frames,
         triple_axis_warning: loaded.triple_axis_warning,
     };
@@ -2192,7 +2201,8 @@ impl eframe::App for ViewerApp {
         let pseudocolor_on = self.apply_pseudocolor;
         let mut toggle_requested = false;
         let mut play_toggle_requested = false;
-        let mut dimension_override: Option<(usize, usize)> = None;
+        // A requested dimension-role reassignment: (channels, slices, frames).
+        let mut dimension_override: Option<(usize, usize, usize)> = None;
         let mut pseudocolor_toggle: Option<bool> = None;
         // New selection for the single-channel grayscale color/colormap selector.
         let mut gray_lut_change: Option<usize> = None;
@@ -2323,24 +2333,50 @@ impl eframe::App for ViewerApp {
             if panel_expanded {
                 ui.separator();
                 ui.horizontal(|ui| {
+                    // Whether a control group already sits in this row — each
+                    // optional group below draws its leading separator only if
+                    // so, so hiding a group never leaves an orphaned separator.
+                    let mut row_has_items = false;
+
                     // The channels-vs-time guess (and its override) is
                     // meaningless for RGB, where the "channels" are fixed color
                     // planes — so the dropdown and pseudocolor toggle are hidden
-                    // there, but the playback-rate field stays.
+                    // there.
                     if !loaded.rgb {
                         ui.label("Dimension order:");
                         let c = loaded.tiff.meta.channels;
+                        let z = loaded.tiff.meta.slices;
                         let f = loaded.tiff.meta.frames;
-                        let mut options = vec![(c, f), (f, c)];
+                        // With a real Z axis alongside channels and time, offer
+                        // every assignment of the three counts to the three
+                        // roles; otherwise just the channels/time swap (Z passes
+                        // through untouched). sort+dedup collapses duplicates
+                        // when counts are equal and keeps the list order stable
+                        // across reinterpretations.
+                        let all_three = c > 1 && z > 1 && f > 1;
+                        let mut options: Vec<(usize, usize, usize)> = if all_three {
+                            vec![(c, z, f), (c, f, z), (z, c, f), (z, f, c), (f, c, z), (f, z, c)]
+                        } else {
+                            vec![(c, z, f), (f, z, c)]
+                        };
                         options.sort_unstable();
                         options.dedup();
+                        let dim_label = |oc: usize, oz: usize, of: usize| {
+                            if all_three {
+                                format!("c: {oc}  z: {oz}  t: {of}")
+                            } else {
+                                format!("c: {oc}  t: {of}")
+                            }
+                        };
                         egui::ComboBox::from_id_salt("dim_override")
-                            .selected_text(format!("c: {c}  f: {f}"))
+                            .selected_text(dim_label(c, z, f))
                             .show_ui(ui, |ui| {
-                                for (oc, of) in options {
-                                    let label = format!("c: {oc}  f: {of}");
-                                    if ui.selectable_label((oc, of) == (c, f), label).clicked() {
-                                        dimension_override = Some((oc, of));
+                                for (oc, oz, of) in options {
+                                    if ui
+                                        .selectable_label((oc, oz, of) == (c, z, f), dim_label(oc, oz, of))
+                                        .clicked()
+                                    {
+                                        dimension_override = Some((oc, oz, of));
                                     }
                                 }
                             });
@@ -2358,11 +2394,20 @@ impl eframe::App for ViewerApp {
                                 pseudocolor_toggle = Some(on);
                             }
                         }
-                        ui.separator();
+                        row_has_items = true;
                     }
 
-                    // Editable playback rate (seeded from metadata `fps=`, else 30).
-                    ui.add_enabled_ui(loaded.tiff.meta.frames > 1, |ui| {
+                    // Editable playback rate (seeded from metadata `fps=`, else
+                    // 30). Only shown when there's a playable time axis: several
+                    // frames in 2D; in 3D the frame axis is the volume's depth,
+                    // so time only exists for 4D stacks (`slices > 1`) — matches
+                    // the play/scrub controls' enable logic above.
+                    let fps_playable = loaded.tiff.meta.frames > 1
+                        && !(view_is_volume && loaded.tiff.meta.slices <= 1);
+                    if fps_playable {
+                        if row_has_items {
+                            ui.separator();
+                        }
                         ui.add(
                             egui::DragValue::new(&mut playback_fps)
                                 .speed(0.5)
@@ -2371,7 +2416,8 @@ impl eframe::App for ViewerApp {
                                 .suffix(" fps"),
                         )
                         .on_hover_text("Playback speed (frames per second)");
-                    });
+                        row_has_items = true;
+                    }
 
                     // Grayscale color LUT: show a single grayscale channel
                     // through a channel color or a perceptual colormap
@@ -2379,7 +2425,9 @@ impl eframe::App for ViewerApp {
                     // composite, and multi-channel stacks — there the per-channel
                     // colors / pseudocolor toggle already handle coloring.
                     if gray_lut_applicable(loaded) {
-                        ui.separator();
+                        if row_has_items {
+                            ui.separator();
+                        }
                         ui.label("LUT:");
                         let sel = loaded.gray_lut_sel;
                         egui::ComboBox::from_id_salt("gray_lut")
@@ -2401,6 +2449,7 @@ impl eframe::App for ViewerApp {
                             })
                             .response
                             .on_hover_text("Display this grayscale channel through a color LUT or colormap");
+                        row_has_items = true;
                     }
 
                     // CPU decode parallelism: Auto threads only when playback
@@ -2414,7 +2463,9 @@ impl eframe::App for ViewerApp {
                         f.compression != fast_tiff_lib::Compression::None || f.bits_per_sample == 32
                     });
                     if threadable {
-                        ui.separator();
+                        if row_has_items {
+                            ui.separator();
+                        }
                         ui.label("Decode:");
                         egui::ComboBox::from_id_salt("decode_mode")
                             .selected_text(decode_mode.label())
@@ -2496,7 +2547,7 @@ impl eframe::App for ViewerApp {
                             );
                             // Reserve room for the value text on the right; the
                             // slider fills what's left of the row.
-                            let slider_w = (ui.available_width() - 120.0).max(80.0);
+                            let slider_w = (ui.available_width() - 120.0).max(MIN_CONTRAST_SLIDER_W);
                             let (lo, hi) = settings.bounds;
                             let tint = tints.get(c).copied().flatten();
                             range_slider(ui, c as u64, &mut settings.min, &mut settings.max, lo, hi, slider_w, tint);
@@ -2544,7 +2595,7 @@ impl eframe::App for ViewerApp {
                         );
                         // Reserve room for the value text on the right; the
                         // slider fills what's left of the row.
-                        let slider_w = (ui.available_width() - 120.0).max(80.0);
+                        let slider_w = (ui.available_width() - 120.0).max(MIN_CONTRAST_SLIDER_W);
                         let (lo, hi) = settings.bounds;
                         // Tinted when a color LUT/colormap is chosen, else `None`
                         // (plain grayscale → the default selection color).
@@ -2554,8 +2605,15 @@ impl eframe::App for ViewerApp {
                 }
             }
             if let Some(status) = &current_status {
-                ui.separator();
-                ui.label(RichText::new(status).color(Color32::from_rgb(230, 170, 60)).small());
+                // The triple-axis note explains that 2D freezes Z at its first
+                // slice — but the 3D view *does* use Z (as the volume depth), so
+                // showing it there would be wrong. When `triple_axis_warning` is
+                // set, the status IS that note (`compute_status` short-circuits
+                // on it), so this suppresses exactly the right message.
+                if !(view_is_volume && loaded.triple_axis_warning) {
+                    ui.separator();
+                    ui.label(RichText::new(status).color(Color32::from_rgb(230, 170, 60)).small());
+                }
             }
             ui.add_space(4.0);
         });
@@ -2682,9 +2740,9 @@ impl eframe::App for ViewerApp {
             self.play_accumulator = 0.0;
         }
 
-        if let Some((c, f)) = dimension_override {
+        if let Some((c, z, f)) = dimension_override {
             if let Some(loaded) = &mut self.stack {
-                apply_dimension_override(loaded, c, f);
+                apply_dimension_override(loaded, c, z, f);
                 // The swap rebuilds channel_display from `mode`, so re-apply the
                 // pseudocolor preference on top of the fresh LUTs.
                 refresh_pseudocolor(loaded, self.apply_pseudocolor);
@@ -2695,6 +2753,21 @@ impl eframe::App for ViewerApp {
             self.volume_built_frame = None;
             self.volume_gen = self.volume_gen.wrapping_add(1);
             self.volume_requested = None;
+        }
+
+        // A dimension swap can collapse the stack to a single frame (e.g.
+        // 1 ch × N frames -> N ch × 1 frame), which can't build a volume — the
+        // stale volume (first channel only) would keep showing, and with the
+        // 2D/3D toggle disabled below two frames the user would be stranded in
+        // 3D. Drop back to 2D; the toggle stays disabled until a swap restores
+        // a multi-frame layout. (Runs before the central panel so the click
+        // frame already renders 2D.)
+        if self.view_mode == ViewMode::Volume
+            && self.stack.as_ref().is_some_and(|l| l.tiff.meta.frames < 2)
+        {
+            self.view_mode = ViewMode::Movie;
+            self.playing = false;
+            self.last_play_time = None;
         }
 
         // Central panel: the image is drawn at exactly `image_size × zoom`. When
