@@ -1,4 +1,3 @@
-
 # FastTIFF - a lightning-fast multi-frame 2D- and 3D-viewer with ImageJ-compatible GPU-rendering
 
 [![Release](https://img.shields.io/github/v/release/konung-yaropolk/FastTIFF?label=release)](https://github.com/konung-yaropolk/FastTIFF/releases)
@@ -6,7 +5,7 @@
 [![Build](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/release.yml?label=build)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
 [![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/ci.yml)
 
-[![FastTIFF](https://github.com/user-attachments/assets/3a64fd9b-e0b2-455f-a4fa-00b408abb8e3)](https://github.com/konung-yaropolk/FastTIFF/releases)  
+[![FastTIFF](https://github.com/user-attachments/assets/b935b2fa-86cc-4edf-ab5a-255a1aa73e4d)](https://github.com/konung-yaropolk/FastTIFF/releases)  
 A fast multi-frame TIFF stack viewer for huge ImageJ hyperstacks: a horizontal
 scrubber instead of ImageJ's slice slider, GPU-side LUT/contrast rendering,
 and (for the common uncompressed case) zero CPU-side image processing per
