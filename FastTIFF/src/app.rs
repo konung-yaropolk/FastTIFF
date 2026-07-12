@@ -623,15 +623,19 @@ impl eframe::App for ViewerApp {
                         }
                     });
                     // 3D render-settings button, next to the toggle. The file-info
-                    // group below adds the trailing separator.
+                    // group below adds the trailing separator. Disabled together
+                    // with the 2D/3D toggle: without a third dimension to show,
+                    // the 3D render settings have nothing to apply to.
                     ui.separator();
-                    if ui
-                        .button(RichText::new("⚙").size(16.0))
-                        .on_hover_text("3D render settings")
-                        .clicked()
-                    {
-                        render_settings_toggle = true;
-                    }
+                    ui.add_enabled_ui(can_3d, |ui| {
+                        if ui
+                            .button(RichText::new("⚙").size(16.0))
+                            .on_hover_text("3D render settings")
+                            .clicked()
+                        {
+                            render_settings_toggle = true;
+                        }
+                    });
                 }
                 if self.stack.is_none() {
                     // Nothing open yet: show the version + active render backend
