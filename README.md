@@ -215,10 +215,13 @@ this is the one-line formula to change.
 - Done: add color selector for grayscale images applying for both 2d and 3d
 - Done: add different colormaps to the selector like magma, plasma, viridis, turbo etc
 - Done: add adjustable WASD and mouse scroll speed input into 3d settings window in navigation section
+- Done: Port to macOS
 
 
-- Port to mac and publish at Brew
+- close all opened dialog windows when opened new file
 - Add windows installer with files association
+- publish in Brew
+- Add 3D volume save in best suitable format for the gpu rendering (not necessary now, need to study the idea)
 
 
 
