@@ -87,10 +87,10 @@ planar):
 | Feature | `fast-tiff-lib` | `tiff` (Rust) | TinyTIFF (C) | libtiff (C)|
 | --- | :---: | :---: | :---: | :---: |
 | 8 / 16 / 32-bit integer | ✓ | ✓ | ✓ ¹ | ✓ |
-| **64-bit integer** | ✓ | ✓ | ✓ ¹ | ✓ |
+| 64-bit integer | ✓ | ✓ | ✓ ¹ | ✓ |
 | Signed integer | ✓ | ✓ | ✗ ¹ | ✓ |
 | 32-bit float | ✓ | ✓ | ✗ ¹ | ✓ |
-| **64-bit float** | ✓ | ✓ | ✗ ¹ | ✓ |
+| 64-bit float | ✓ | ✓ | ✗ ¹ | ✓ |
 | LZW · PackBits · Deflate | ✓ | ✓ | ✗ | ✓ |
 | ZSTD (tag 50000) | ✓ | read only ² | ✗ | ✓ ³ |
 | Predictor 2 · 3 (float) | ✓ | ✓ | ✗ | ✓ |
