@@ -4,8 +4,8 @@
 //! `src/encode_tests.rs`.)
 
 use fast_tiff_lib::{
-    read_frame_f32, read_frame_u16, read_frame_u8, Compression, DisplayMode, ImageJOptions,
-    SampleType, TiffStack, TiffWriter, WriterOptions,
+    frame_float_minmax, read_frame_f32, read_frame_u16, read_frame_u8, Compression, DisplayMode,
+    ImageJOptions, SampleType, TiffStack, TiffWriter, WriterOptions,
 };
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -210,4 +210,52 @@ fn verbatim_description_roundtrips_raw() {
     assert_eq!(stack.description.as_deref(), Some(text));
     // Non-ImageJ text must not be mistaken for hyperstack metadata.
     assert_eq!(stack.meta.channels, 1);
+}
+
+#[test]
+fn f64_stack_opens_and_downcasts_to_f32() {
+    let path = unique_temp_path("f64.tif");
+    let _cleanup = Cleanup(path.clone());
+
+    let frames: Vec<Vec<f64>> = (0..2)
+        .map(|f| (0..4 * 3).map(|i| f as f64 * 10.0 + i as f64 / 3.0).collect())
+        .collect();
+
+    let mut w = TiffWriter::create(&path, WriterOptions::new(4, 3, SampleType::F64)).unwrap();
+    for f in &frames {
+        w.write_frame_f64(f).unwrap();
+    }
+    w.finish().unwrap();
+
+    let stack = TiffStack::open(&path).unwrap();
+    assert_eq!(stack.frames.len(), 2);
+    assert_eq!(stack.frames[0].bits_per_sample, 64);
+    for (i, expected) in frames.iter().enumerate() {
+        let got = read_frame_f32(&stack.mmap, &stack.frames[i], stack.byte_order).unwrap();
+        let want: Vec<f32> = expected.iter().map(|&v| v as f32).collect();
+        assert_eq!(got.as_ref(), &want[..], "frame {i}");
+    }
+    // 64-bit float auto-ranges to its own data min/max (like 32-bit float).
+    assert!(frame_float_minmax(&stack.mmap, &stack.frames[0], stack.byte_order).unwrap().is_some());
+}
+
+#[test]
+fn u64_stack_opens_and_rescales_to_display_space() {
+    let path = unique_temp_path("u64.tif");
+    let _cleanup = Cleanup(path.clone());
+
+    // A 2x2 frame whose min (0) and max (2^40) bracket the display range; the
+    // two interior values sit at 1/4 and 1/2 of the span.
+    let vals: [u64; 4] = [0, 1u64 << 38, 1u64 << 39, 1u64 << 40];
+    let data: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let mut w = TiffWriter::create(&path, WriterOptions::new(2, 2, SampleType::U64)).unwrap();
+    w.write_frame_bytes(&data).unwrap(); // no typed u64 writer (like U32/I32)
+    w.finish().unwrap();
+
+    let stack = TiffStack::open(&path).unwrap();
+    assert_eq!(stack.frames[0].bits_per_sample, 64);
+    let got = read_frame_u16(&stack.mmap, &stack.frames[0], stack.byte_order, None).unwrap();
+    // 2^38 / 2^40 = 0.25 -> 16384, 2^39 / 2^40 = 0.5 -> 32768, 2^40 -> 65535.
+    assert_eq!(got.as_ref(), &[0, 16384, 32768, 65535]);
 }

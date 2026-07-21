@@ -151,8 +151,13 @@ pub(super) fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
         .map(|c| {
             let disp = &tiff.meta.channel_display[c];
             let frame = tiff.frames.get(c);
-            let is_float = frame
-                .is_some_and(|f| f.sample_format == fast_tiff_lib::SampleFormat::Float && f.bits_per_sample == 32);
+            // 32- and 64-bit IEEE floats both go to the R32F GPU path (64-bit is
+            // downcast to f32 on decode). Integer data of every width — including
+            // 64-bit int — takes the u16-rescale path below instead.
+            let is_float = frame.is_some_and(|f| {
+                f.sample_format == fast_tiff_lib::SampleFormat::Float
+                    && (f.bits_per_sample == 32 || f.bits_per_sample == 64)
+            });
             // Unsigned single-sample 8-bit can upload raw (R8Uint) instead of
             // being widened to 16-bit on the CPU each frame.
             let is_u8 = frame.is_some_and(|f| {

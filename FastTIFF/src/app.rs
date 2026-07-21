@@ -485,6 +485,11 @@ impl ViewerApp {
                 self.volume_requested = None;
                 // Always start a newly-opened file in the 2D movie view.
                 self.view_mode = ViewMode::Movie;
+                // Close any pop-up windows left open from the previous file —
+                // their contents (metadata, 3D settings) describe that stack, so
+                // a fresh open should start with a clean view.
+                self.show_metadata = false;
+                self.show_render_settings = false;
 
                 self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
                 self.stack = Some(loaded);
@@ -986,12 +991,12 @@ impl eframe::App for ViewerApp {
                     // CPU decode parallelism: Auto threads only when playback
                     // can't keep up; Serial/Threaded force it off/on. Threaded
                     // decode only ever kicks in for compressed frames (parallel
-                    // strip decompression) or 32-bit frames (parallel per-pixel
-                    // rescale/cast). 8- and 16-bit uncompressed frames decode
-                    // zero-copy or with an unthreaded copy, so the control has no
-                    // effect and is hidden for them.
+                    // strip decompression) or wide 32-/64-bit frames (parallel
+                    // per-pixel rescale/cast). 8- and 16-bit uncompressed frames
+                    // decode zero-copy or with an unthreaded copy, so the control
+                    // has no effect and is hidden for them.
                     let threadable = loaded.tiff.frames.first().is_some_and(|f| {
-                        f.compression != fast_tiff_lib::Compression::None || f.bits_per_sample == 32
+                        f.compression != fast_tiff_lib::Compression::None || f.bits_per_sample >= 32
                     });
                     if threadable {
                         if row_has_items {

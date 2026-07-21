@@ -1,6 +1,6 @@
 [package]
 name = "fast-tiff-lib"
-version = "0.7.5"
+version = "0.8.1"
 edition = "2021"
 description = "Lazy, memory-mapped reader/writer for TIFF files: IFD indexing, ImageJ metadata/LUT parsing, and per-frame strip decoding."
 license = "MPL-2.0"

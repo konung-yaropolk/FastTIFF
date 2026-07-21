@@ -58,6 +58,9 @@ pub enum SampleType {
     U32,
     I32,
     F32,
+    U64,
+    I64,
+    F64,
 }
 
 impl SampleType {
@@ -67,6 +70,7 @@ impl SampleType {
             SampleType::U8 | SampleType::I8 => 8,
             SampleType::U16 | SampleType::I16 => 16,
             SampleType::U32 | SampleType::I32 | SampleType::F32 => 32,
+            SampleType::U64 | SampleType::I64 | SampleType::F64 => 64,
         }
     }
 
@@ -78,9 +82,9 @@ impl SampleType {
     /// TIFF `SampleFormat` code: 1 = unsigned, 2 = signed, 3 = IEEE float.
     fn format_code(self) -> u16 {
         match self {
-            SampleType::U8 | SampleType::U16 | SampleType::U32 => 1,
-            SampleType::I8 | SampleType::I16 | SampleType::I32 => 2,
-            SampleType::F32 => 3,
+            SampleType::U8 | SampleType::U16 | SampleType::U32 | SampleType::U64 => 1,
+            SampleType::I8 | SampleType::I16 | SampleType::I32 | SampleType::I64 => 2,
+            SampleType::F32 | SampleType::F64 => 3,
         }
     }
 }
@@ -385,7 +389,7 @@ impl<W: Write + Seek> TiffWriter<W> {
         // matching what libtiff chooses for the same data.
         let predictor_tag: u16 = match (predictor, sample_type) {
             (false, _) => 1,
-            (true, SampleType::F32) => 3,
+            (true, SampleType::F32 | SampleType::F64) => 3,
             (true, _) => 2,
         };
         if ij.is_some() && description.is_some() {
@@ -487,7 +491,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             }
             3 => {
                 let mut owned = data.to_vec();
-                apply_float_predictor(&mut owned, self.row_bytes, self.spp);
+                apply_float_predictor(&mut owned, self.row_bytes, self.spp, self.sample_type.bytes());
                 Cow::Owned(owned)
             }
             _ => Cow::Borrowed(data),
@@ -548,6 +552,12 @@ impl<W: Write + Seek> TiffWriter<W> {
     /// Append one frame of `f32` samples. Requires `SampleType::F32`.
     pub fn write_frame_f32(&mut self, samples: &[f32]) -> Result<()> {
         self.expect_type(SampleType::F32, "write_frame_f32")?;
+        self.write_samples(samples)
+    }
+
+    /// Append one frame of `f64` samples. Requires `SampleType::F64`.
+    pub fn write_frame_f64(&mut self, samples: &[f64]) -> Result<()> {
+        self.expect_type(SampleType::F64, "write_frame_f64")?;
         self.write_samples(samples)
     }
 
@@ -963,27 +973,37 @@ fn apply_predictor(data: &mut [u8], row_bytes: usize, spp: usize, sample_bytes: 
                 }
             }
         }
-        _ => unreachable!("sample widths are 1/2/4 bytes"),
+        8 => {
+            // 64-bit integers (U64/I64) — floats route to predictor 3 instead.
+            for row in data.chunks_exact_mut(row_bytes) {
+                for i in (spp..row_samples).rev() {
+                    let cur = u64::from_le_bytes(row[i * 8..i * 8 + 8].try_into().unwrap());
+                    let prev = u64::from_le_bytes(row[(i - spp) * 8..(i - spp) * 8 + 8].try_into().unwrap());
+                    let diff = cur.wrapping_sub(prev).to_le_bytes();
+                    row[i * 8..i * 8 + 8].copy_from_slice(&diff);
+                }
+            }
+        }
+        _ => unreachable!("sample widths are 1/2/4/8 bytes"),
     }
 }
 
 /// Apply TIFF Predictor 3 (TechNote 3 floating-point differencing) in place —
 /// the exact inverse of `decode::undo_float_predictor`. Per row: split each
-/// f32 into the row's four byte-significance planes (MSB plane first, as the
-/// spec requires regardless of file byte order), then difference the plane
-/// bytes horizontally with stride = samples per pixel, mirroring libtiff's
-/// `fpDiff`.
-fn apply_float_predictor(data: &mut [u8], row_bytes: usize, spp: usize) {
-    let wc = row_bytes / 4; // f32 values per row
+/// float into the row's `sample_bytes` byte-significance planes (MSB plane
+/// first, as the spec requires regardless of file byte order), then difference
+/// the plane bytes horizontally with stride = samples per pixel, mirroring
+/// libtiff's `fpDiff`. Handles f32 (`sample_bytes == 4`) and f64 (`== 8`).
+fn apply_float_predictor(data: &mut [u8], row_bytes: usize, spp: usize, sample_bytes: usize) {
+    let wc = row_bytes / sample_bytes; // float values per row
     let mut scratch = vec![0u8; row_bytes];
     for row in data.chunks_exact_mut(row_bytes) {
         for v in 0..wc {
-            // Values arrive little-endian (this writer's only order); the
-            // planes want big-endian byte significance.
-            scratch[v] = row[v * 4 + 3];
-            scratch[wc + v] = row[v * 4 + 2];
-            scratch[2 * wc + v] = row[v * 4 + 1];
-            scratch[3 * wc + v] = row[v * 4];
+            // Values arrive little-endian (this writer's only order); plane p
+            // (0 = MSB) takes the LE byte at significance `sample_bytes-1-p`.
+            for p in 0..sample_bytes {
+                scratch[p * wc + v] = row[v * sample_bytes + (sample_bytes - 1 - p)];
+            }
         }
         for i in (spp..row_bytes).rev() {
             scratch[i] = scratch[i].wrapping_sub(scratch[i - spp]);

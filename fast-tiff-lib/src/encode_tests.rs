@@ -327,6 +327,86 @@ fn predictor_covers_all_sample_widths_and_floats() {
 }
 
 #[test]
+fn f64_frames_downcast_to_f32() {
+    // Values chosen to prove a genuine f64->f32 downcast: 0.1 and 1/3 aren't
+    // exactly f32-representable, 1e300 overflows f32 to +inf, and 1e-300
+    // underflows to 0. The reader exposes 64-bit data through the same f32 GPU
+    // path as 32-bit float, so the decode is exactly `v as f32`.
+    let pixels: Vec<f64> = vec![0.1, 1.0 / 3.0, 1e300, -1e-300, 2.5, -7.25];
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), WriterOptions::new(3, 2, SampleType::F64)).unwrap();
+    w.write_frame_f64(&pixels).unwrap();
+    let bytes = w.finish().unwrap().into_inner();
+    let (frames, order) = parse_frames(&bytes);
+    assert_eq!(frames[0].bits_per_sample, 64);
+    assert_eq!(frames[0].sample_format, SampleFormat::Float);
+    let decoded = read_frame_f32(&bytes, &frames[0], order).unwrap();
+    let expected: Vec<f32> = pixels.iter().map(|&v| v as f32).collect();
+    assert_eq!(decoded.as_ref(), &expected[..]);
+}
+
+#[test]
+fn u64_i64_rescale_into_display_space() {
+    // 64-bit integers take the same u16-rescale path as 32-bit ints: auto-range
+    // to the frame's own min/max onto 0..65535. Endpoints map to 0 and 65535;
+    // a mid value maps by linear interpolation (rounded).
+    let unsigned: [u64; 4] = [0, 250, 500, 1000];
+    let data: Vec<u8> = unsigned.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let bytes = write_stack(WriterOptions::new(4, 1, SampleType::U64), &[data]);
+    let (frames, order) = parse_frames(&bytes);
+    assert_eq!(frames[0].bits_per_sample, 64);
+    assert_eq!(frames[0].sample_format, SampleFormat::UnsignedInt);
+    let decoded = read_frame_u16(&bytes, &frames[0], order, None).unwrap();
+    // 250/1000 -> 16384, 500/1000 -> 32768 (round-half-up), 1000 -> 65535.
+    assert_eq!(decoded.as_ref(), &[0, 16384, 32768, 65535]);
+
+    // Signed 64-bit: values span negatives; the same auto-range applies.
+    let signed: [i64; 4] = [-2_000_000_000_000, -1_000_000_000_000, 0, 2_000_000_000_000];
+    let data: Vec<u8> = signed.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let bytes = write_stack(WriterOptions::new(4, 1, SampleType::I64), &[data]);
+    let (frames, order) = parse_frames(&bytes);
+    assert_eq!(frames[0].sample_format, SampleFormat::SignedInt);
+    let decoded = read_frame_u16(&bytes, &frames[0], order, None).unwrap();
+    // Range is [-2e12, 2e12] (span 4e12): -1e12 -> 0.25 -> 16384, 0 -> 0.5 -> 32768.
+    assert_eq!(decoded.as_ref(), &[0, 16384, 32768, 65535]);
+}
+
+#[test]
+fn predictor_roundtrips_64bit_int_and_float() {
+    // 64-bit integer: Predictor 2 with 8-byte differencing, compressed. Reading
+    // back as f32 proves the bytes round-tripped exactly (any predictor slip
+    // would change the i64 value, hence its f32 cast). Values stay under 2^24 so
+    // `i64 as f32` is lossless and the assert is exact.
+    let ints: [i64; 6] = [-1000, -800, 0, 7, 16_000_000, 15_999_500];
+    let data: Vec<u8> = ints.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let opts = WriterOptions::new(3, 2, SampleType::I64)
+        .compression(Compression::Deflate)
+        .predictor(true);
+    let bytes = write_stack(opts, &[data]);
+    let (frames, order) = parse_frames(&bytes);
+    assert_eq!(frames[0].predictor, 2, "64-bit integer data gets predictor 2");
+    let decoded = read_frame_f32(&bytes, &frames[0], order).unwrap();
+    let expected: Vec<f32> = ints.iter().map(|&v| v as f32).collect();
+    assert_eq!(decoded.as_ref(), &expected[..]);
+
+    // 64-bit float: Predictor 3 (TechNote 3), compressed and uncompressed.
+    // Multiples of 0.25 downcast to f32 losslessly, so a byte-plane slip in the
+    // width-generic float predictor would show up exactly.
+    let floats: Vec<f64> = (0..8).map(|i| -3.0 + i as f64 * 0.75).collect();
+    let data: Vec<u8> = floats.iter().flat_map(|v| v.to_le_bytes()).collect();
+    for compression in [Compression::None, Compression::Deflate] {
+        let opts = WriterOptions::new(4, 2, SampleType::F64)
+            .compression(compression)
+            .predictor(true);
+        let bytes = write_stack(opts, &[data.clone()]);
+        let (frames, order) = parse_frames(&bytes);
+        assert_eq!(frames[0].predictor, 3, "64-bit float data gets predictor 3");
+        let decoded = read_frame_f32(&bytes, &frames[0], order).unwrap();
+        let expected: Vec<f32> = floats.iter().map(|&v| v as f32).collect();
+        assert_eq!(decoded.as_ref(), &expected[..], "{compression:?}");
+    }
+}
+
+#[test]
 fn unknown_predictor_errors_instead_of_garbage() {
     // A frame claiming predictor 9: the reader must refuse, not decode wrong.
     let pixels: Vec<u16> = vec![1, 2, 3, 4];
