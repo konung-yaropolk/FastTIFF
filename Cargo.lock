@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.7.8"
+version = "1.8.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-lib"
-version = "0.7.5"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "bytemuck",

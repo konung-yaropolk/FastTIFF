@@ -170,10 +170,16 @@ pub fn read_frame_u8_into(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder,
 
 /// Bytes per sample from the frame's bit depth (the widths this crate decodes).
 fn sample_bytes(frame: &FrameInfo) -> Result<usize> {
-    match frame.bits_per_sample {
+    bytes_for_bits(frame.bits_per_sample)
+}
+
+/// Bytes per sample for a supported bit depth (8/16/32/64), or an error.
+fn bytes_for_bits(bits: u16) -> Result<usize> {
+    match bits {
         8 => Ok(1),
         16 => Ok(2),
         32 => Ok(4),
+        64 => Ok(8),
         other => bail!("unsupported bits_per_sample: {other}"),
     }
 }
@@ -412,20 +418,21 @@ fn plane_u16_from_native(
                 }
             }
         }
-        32 => {
-            // The heaviest per-pixel path: read each 32-bit sample as f32, then
-            // linearly rescale into 0..65535. Parallelized across cores for large
-            // frames only (input is read-only, output writes are disjoint).
+        32 | 64 => {
+            // The heaviest per-pixel path: read each wide (32- or 64-bit) sample
+            // as f32, then linearly rescale into 0..65535. Parallelized across
+            // cores for large frames only (input is read-only, writes disjoint).
             let format = frame.sample_format;
+            let sb = if frame.bits_per_sample == 64 { 8 } else { 4 };
             let parallel = should_parallelize(n_pixels);
             let floats: Vec<f32> = if parallel {
                 (0..n_pixels)
                     .into_par_iter()
-                    .map(|i| sample_f32(&native[(i * spp + plane) * 4..], file_order, format))
+                    .map(|i| wide_sample_f32(&native[(i * spp + plane) * sb..], file_order, format, sb))
                     .collect()
             } else {
                 (0..n_pixels)
-                    .map(|i| sample_f32(&native[(i * spp + plane) * 4..], file_order, format))
+                    .map(|i| wide_sample_f32(&native[(i * spp + plane) * sb..], file_order, format, sb))
                     .collect()
             };
             let (lo, hi) = float_range.unwrap_or_else(|| minmax_f32(&floats));
@@ -663,18 +670,21 @@ pub fn read_planes_f32_into(
 }
 
 /// The conversion core shared by the f32 plane readers (`out` pre-sized).
+/// 64-bit sources (f64 / i64 / u64) are downcast to f32 here; 32-bit sources
+/// take the unchanged 4-byte path.
 fn plane_f32_from_native(native: &[u8], frame: &FrameInfo, file_order: ByteOrder, plane: usize, out: &mut [f32]) {
     let spp = (frame.samples_per_pixel as usize).max(1);
     let plane = plane.min(spp - 1);
     let n_pixels = frame.width as usize * frame.height as usize;
     let format = frame.sample_format;
+    let sb = if frame.bits_per_sample == 64 { 8 } else { 4 };
     if should_parallelize(n_pixels) {
         out.par_iter_mut()
             .enumerate()
-            .for_each(|(i, o)| *o = sample_f32(&native[(i * spp + plane) * 4..], file_order, format));
+            .for_each(|(i, o)| *o = wide_sample_f32(&native[(i * spp + plane) * sb..], file_order, format, sb));
     } else {
         for (i, o) in out.iter_mut().enumerate() {
-            *o = sample_f32(&native[(i * spp + plane) * 4..], file_order, format);
+            *o = wide_sample_f32(&native[(i * spp + plane) * sb..], file_order, format, sb);
         }
     }
 }
@@ -735,16 +745,19 @@ pub fn preload_frames_u8(stack: &TiffStack) -> Result<Vec<Vec<u8>>> {
 /// scale. `None` for non-32-bit frames (8/16-bit use their native integer
 /// min/max instead).
 pub fn frame_float_minmax(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Option<(f32, f32)>> {
-    if frame.bits_per_sample != 32 {
+    // Only the wide (32/64-bit) formats auto-range this way; 8/16-bit use their
+    // native integer min/max instead.
+    if frame.bits_per_sample != 32 && frame.bits_per_sample != 64 {
         return Ok(None);
     }
+    let sb = if frame.bits_per_sample == 64 { 8 } else { 4 };
     let native = decode_native_bytes(mmap, frame, file_order)?;
     let n_samples = frame.width as usize * frame.height as usize * frame.samples_per_pixel as usize;
-    // Fold directly over the decoded bytes — no width*height*4 temporary.
+    // Fold directly over the decoded bytes — no width*height*sb temporary.
     let mut lo = f32::INFINITY;
     let mut hi = f32::NEG_INFINITY;
-    for chunk in native[..n_samples * 4].chunks_exact(4) {
-        let v = sample_f32(chunk, file_order, frame.sample_format);
+    for chunk in native[..n_samples * sb].chunks_exact(sb) {
+        let v = wide_sample_f32(chunk, file_order, frame.sample_format, sb);
         if v.is_finite() {
             lo = lo.min(v);
             hi = hi.max(v);
@@ -769,6 +782,35 @@ fn sample_f32(chunk: &[u8], file_order: ByteOrder, format: SampleFormat) -> f32 
         (SampleFormat::SignedInt, ByteOrder::Big) => i32::from_be_bytes(arr) as f32,
         (SampleFormat::UnsignedInt, ByteOrder::Little) => u32::from_le_bytes(arr) as f32,
         (SampleFormat::UnsignedInt, ByteOrder::Big) => u32::from_be_bytes(arr) as f32,
+    }
+}
+
+/// Reads one 64-bit sample as `f32` — the 8-byte sibling of [`sample_f32`]
+/// (f64/i64/u64 per the sample format, downcast to f32). Values outside f32's
+/// range become ±inf, which the auto-range fold treats as non-finite; this
+/// precision loss is inherent to displaying 64-bit data through an f32 GPU path.
+fn sample_f32_64(chunk: &[u8], file_order: ByteOrder, format: SampleFormat) -> f32 {
+    let arr: [u8; 8] = chunk[..8].try_into().unwrap();
+    match (format, file_order) {
+        (SampleFormat::Float, ByteOrder::Little) => f64::from_le_bytes(arr) as f32,
+        (SampleFormat::Float, ByteOrder::Big) => f64::from_be_bytes(arr) as f32,
+        (SampleFormat::SignedInt, ByteOrder::Little) => i64::from_le_bytes(arr) as f32,
+        (SampleFormat::SignedInt, ByteOrder::Big) => i64::from_be_bytes(arr) as f32,
+        (SampleFormat::UnsignedInt, ByteOrder::Little) => u64::from_le_bytes(arr) as f32,
+        (SampleFormat::UnsignedInt, ByteOrder::Big) => u64::from_be_bytes(arr) as f32,
+    }
+}
+
+/// Reads one wide (32- or 64-bit) sample as `f32`, dispatching on `sample_bytes`
+/// (4 or 8). The width is loop-invariant at every call site, so the branch is
+/// free in practice; keeping the two readers separate leaves the 32-bit hot
+/// loops byte-for-byte unchanged.
+#[inline]
+fn wide_sample_f32(chunk: &[u8], file_order: ByteOrder, format: SampleFormat, sample_bytes: usize) -> f32 {
+    if sample_bytes == 8 {
+        sample_f32_64(chunk, file_order, format)
+    } else {
+        sample_f32(chunk, file_order, format)
     }
 }
 
@@ -813,12 +855,7 @@ fn decode_native_bytes_opt<'a>(
     file_order: ByteOrder,
     undo_pred: bool,
 ) -> Result<Cow<'a, [u8]>> {
-    let sample_bytes = match frame.bits_per_sample {
-        16 => 2,
-        8 => 1,
-        32 => 4,
-        other => bail!("unsupported bits_per_sample: {other}"),
-    };
+    let sample_bytes = bytes_for_bits(frame.bits_per_sample)?;
     let row_bytes = frame.width as usize * frame.samples_per_pixel as usize * sample_bytes;
     let total_rows = frame.height as usize;
     let total_len = total_rows * row_bytes;
@@ -1080,9 +1117,26 @@ fn undo_predictor(
                 }
             }
         }
-        (3, 4) => undo_float_predictor(&mut data, row_bytes, spp, file_order),
+        (2, 8) => {
+            // 64-bit integer horizontal differencing.
+            for row in data.chunks_exact_mut(row_bytes) {
+                for i in spp..row_samples {
+                    let prev_off = (i - spp) * 8;
+                    let cur_off = i * 8;
+                    let prev = file_order.u64(&row[prev_off..prev_off + 8]);
+                    let delta = file_order.u64(&row[cur_off..cur_off + 8]);
+                    let val = prev.wrapping_add(delta);
+                    let bytes = match file_order {
+                        ByteOrder::Little => val.to_le_bytes(),
+                        ByteOrder::Big => val.to_be_bytes(),
+                    };
+                    row[cur_off..cur_off + 8].copy_from_slice(&bytes);
+                }
+            }
+        }
+        (3, 4) | (3, 8) => undo_float_predictor(&mut data, row_bytes, spp, sample_bytes, file_order),
         (2, other) => bail!("predictor 2 undo not implemented for {other}-byte samples"),
-        (3, other) => bail!("floating-point predictor requires 32-bit samples, got {other}-byte"),
+        (3, other) => bail!("floating-point predictor requires 32- or 64-bit samples, got {other}-byte"),
         (other, _) => bail!("unsupported TIFF predictor: {other}"),
     }
     Ok(std::mem::take(&mut data))
@@ -1091,23 +1145,28 @@ fn undo_predictor(
 /// Undo TIFF Predictor 3 (TIFF TechNote 3 floating-point horizontal
 /// differencing), per row: first undo the byte-level differencing (stride =
 /// samples per pixel, mirroring libtiff's `fpAcc`), then gather each float's
-/// bytes back from the row's four byte-significance planes — the spec stores
-/// them MSB-plane-first regardless of the file's byte order — and store the
-/// value in `file_order` for the normal downstream reads.
-fn undo_float_predictor(data: &mut [u8], row_bytes: usize, spp: usize, file_order: ByteOrder) {
-    let wc = row_bytes / 4; // f32 values per row
+/// bytes back from the row's `sample_bytes` byte-significance planes — the spec
+/// stores them MSB-plane-first regardless of the file's byte order — and store
+/// the value in `file_order` for the normal downstream reads. Handles both f32
+/// (`sample_bytes == 4`) and f64 (`sample_bytes == 8`).
+fn undo_float_predictor(data: &mut [u8], row_bytes: usize, spp: usize, sample_bytes: usize, file_order: ByteOrder) {
+    let wc = row_bytes / sample_bytes; // float values per row
     let mut scratch = vec![0u8; row_bytes];
     for row in data.chunks_exact_mut(row_bytes) {
         for i in spp..row_bytes {
             row[i] = row[i].wrapping_add(row[i - spp]);
         }
         for v in 0..wc {
-            let be = [row[v], row[wc + v], row[2 * wc + v], row[3 * wc + v]];
-            let bytes = match file_order {
-                ByteOrder::Little => [be[3], be[2], be[1], be[0]],
-                ByteOrder::Big => be,
-            };
-            scratch[v * 4..v * 4 + 4].copy_from_slice(&bytes);
+            // Gather this value's bytes, most-significant plane first.
+            for p in 0..sample_bytes {
+                // Plane `p` holds significance (sample_bytes-1-p): plane 0 = MSB.
+                let byte = row[p * wc + v];
+                let dst = match file_order {
+                    ByteOrder::Little => sample_bytes - 1 - p, // little-endian: MSB last
+                    ByteOrder::Big => p,                       // big-endian: MSB first
+                };
+                scratch[v * sample_bytes + dst] = byte;
+            }
         }
         row.copy_from_slice(&scratch);
     }

@@ -262,6 +262,7 @@ fn expand_imagej_contiguous(frames: &mut Vec<FrameInfo>, n: usize, file_len: usi
         8 => 1usize,
         16 => 2,
         32 => 4,
+        64 => 8,
         _ => return,
     };
     if f.compression != Compression::None || f.predictor != 1 {

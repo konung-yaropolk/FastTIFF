@@ -22,28 +22,38 @@ metadata (and back).
   one *plane* (one channel at one Z/T position), which is how ImageJ writes
   hyperstacks (`xyczt` order). It's a generic multi-page TIFF walker, not tied
   to any specific writer.
-- **Decodes a plane to 16-bit or 32-bit-float samples** on demand. For the
-  common case — uncompressed, single strip, native byte order — decoding a
-  16-bit frame is a **zero-copy reinterpret** of the mapped bytes (no allocation,
-  no decode pass).
+- **Decodes a plane to 16-bit or 32-bit-float samples** on demand (64-bit
+  int/float are down-converted to these — see [Supported pixel
+  formats](#supported-pixel-formats)). For the common case — uncompressed,
+  single strip, native byte order — decoding a 16-bit frame is a **zero-copy
+  reinterpret** of the mapped bytes (no allocation, no decode pass).
 - **Parses display metadata** from ImageJ's `ImageDescription` (tag 270), the
   binary `IJMetadata` block, and the TIFF resolution tags: channel/slice/frame
   counts, display mode, per-channel LUTs + contrast ranges, calibration, `fps`,
   Z `spacing`, and x/y pixel size (from XResolution/YResolution) — enough to
   reconstruct the physical voxel scale.
 - **Writes multi-frame stacks** streamingly (append a frame at a time, nothing
-  buffered but the current frame): 8/16/32-bit integer or float, grayscale or
-  chunky RGB, None/LZW/PackBits/Deflate compression with optional predictor,
-  and ImageJ hyperstack metadata — see [Writing](#writing).
+  buffered but the current frame): 8/16/32/64-bit integer or 32/64-bit float,
+  grayscale or chunky RGB, None/LZW/PackBits/Deflate/ZSTD compression with
+  optional predictor, and ImageJ hyperstack metadata — see [Writing](#writing).
 
 ### Supported pixel formats
 
-- 8-, 16-, and 32-bit; integer (signed or unsigned) or 32-bit IEEE float.
+- 8-, 16-, 32-, and 64-bit; integer (signed or unsigned) or 32-/64-bit IEEE
+  float.
 - Compression: none, LZW, PackBits, Deflate/zip, ZSTD (tag 50000, the
   libtiff/GDAL extension). Predictor 2 (horizontal differencing, any integer
-  width) and Predictor 3 (TechNote 3 floating-point, as libtiff writes for
-  float data) are undone.
+  width, 8–64-bit) and Predictor 3 (TechNote 3 floating-point, f32 and f64, as
+  libtiff writes for float data) are undone.
 - Chunky (interleaved) RGB is deinterleaved per sample plane.
+
+Because the display pipeline (and GPUs) work at ≤32 bits, **64-bit samples are
+decoded through the same paths as 32-bit**: a 64-bit float is downcast to `f32`,
+and a 64-bit integer is rescaled into the 0..=65535 display window exactly like a
+32-bit integer. The full 64-bit values aren't widened past `f32` — more than
+enough precision for display/contrast, but not a lossless numeric round-trip for
+values beyond `f32`'s range. (The bytes themselves round-trip losslessly through
+the *writer*; the down-conversion is only in the decode-to-display readers.)
 
 ### Also handled
 
@@ -61,6 +71,48 @@ Tiled TIFFs, planar (non-chunky) multi-sample data, and pyramidal /
 mixed-size stacks (every frame must share frame 0's geometry — this is enforced
 with a clear error at `open`). A 64-bit target is assumed: offset arithmetic
 uses `usize`.
+
+### Compared with other TIFF libraries
+
+How the format coverage lines up against the readers/writers this crate is
+[benchmarked](#benchmarks) against — the pure-Rust
+[`tiff`](https://crates.io/crates/tiff) crate (image-rs), the C
+[TinyTIFF](https://github.com/jkriege2/TinyTIFF), and
+[libtiff](http://www.libtiff.org/) (the de-facto reference). `fast-tiff-lib` is a
+*specialized* engine for lazily scrubbing scientific hyperstacks, not a
+general-purpose TIFF library — the table is meant to show where that focus adds
+reach (ImageJ metadata, lazy/zero-copy) and where it deliberately stops (tiled,
+planar):
+
+| Feature | `fast-tiff-lib` | `tiff` (Rust) | TinyTIFF (C) | libtiff (C)|
+| --- | :---: | :---: | :---: | :---: |
+| 8 / 16 / 32-bit integer | ✓ | ✓ | ✓ ¹ | ✓ |
+| 64-bit integer | ✓ | ✓ | ✓ ¹ | ✓ |
+| Signed integer | ✓ | ✓ | ✗ ¹ | ✓ |
+| 32-bit float | ✓ | ✓ | ✗ ¹ | ✓ |
+| 64-bit float | ✓ | ✓ | ✗ ¹ | ✓ |
+| LZW · PackBits · Deflate | ✓ | ✓ | ✗ | ✓ |
+| ZSTD (tag 50000) | ✓ | read only ² | ✗ | ✓ ³ |
+| Predictor 2 · 3 (float) | ✓ | ✓ | ✗ | ✓ |
+| Chunky RGB (deinterleaved) | ✓ | ✓ | ✓ | ✓ |
+| Planar · tiled | ✗ | ✗ ⁴ | ✗ | ✓ |
+| BigTIFF | ✓ | ✓ | ✗ | ✓ |
+| ImageJ hyperstack metadata | ✓ | ✗ | ✗ | ✗ ⁵ |
+| Memory-mapped, lazy per-frame decode | ✓ | ✗ | ✗ | ✗ ⁶ |
+| Zero-copy uncompressed frame | ✓ | ✗ | ✗ | ✗ |
+| Streaming (append-a-frame) writer | ✓ | ✗ ⁷ | ✓ | ✓ |
+
+<sub>✓ supported · ✗ not supported. Reflects each library's documented
+capabilities at the time of writing; general-purpose libtiff/`tiff` evolve, so
+check their current docs.</sub>
+
+1. TinyTIFF reads/writes **uncompressed unsigned-integer** data only (8/16/32/64-bit) — no signed, no float, no compression.
+2. `tiff` *decodes* ZSTD behind a cargo feature but does not *encode* it.
+3. libtiff's ZSTD codec requires building against libzstd (added in libtiff 4.0.7).
+4. `tiff` doesn't handle planar layout; tiled *reading* isn't listed in its README.
+5. libtiff hands back the raw `ImageDescription` text but doesn't parse ImageJ hyperstack semantics (channels/slices/LUTs/calibration).
+6. libtiff reads through its strip/tile API into owned buffers; memory-mapping is left to the caller.
+7. `tiff`'s encoder writes a whole image per call rather than appending frames one at a time.
 
 ## Quick start
 
@@ -132,8 +184,8 @@ All decoders take the mapped bytes, the `FrameInfo`, and the file's
 
 ```rust
 // 16-bit display path. 8-bit is upcast to 0..=65535; signed ints are offset
-// into unsigned display space; 32-bit (int/float) is linearly rescaled into
-// 0..=65535 using `float_range` (or the frame's own min/max when `None`).
+// into unsigned display space; 32- and 64-bit (int/float) are linearly rescaled
+// into 0..=65535 using `float_range` (or the frame's own min/max when `None`).
 // Zero-copy (Cow::Borrowed) for uncompressed, single-strip, native-order 16-bit.
 fn read_frame_u16(mmap, frame, order, float_range: Option<(f32, f32)>) -> Result<Cow<[u16]>>;
 
@@ -153,7 +205,8 @@ fn read_plane_u8(mmap, frame, order, plane: usize) -> Result<Vec<u8>>;
 
 // Raw 32-bit float samples, *no* rescaling — for callers that do window/level
 // themselves (e.g. on the GPU). Zero-copy for uncompressed, single-strip,
-// native-order float; integer 32-bit is cast to f32.
+// native-order f32; 32-bit int is cast, and 64-bit int/float is down-converted,
+// to f32.
 fn read_frame_f32(mmap, frame, order) -> Result<Cow<[f32]>>;
 fn read_plane_f32(mmap, frame, order, plane: usize) -> Result<Vec<f32>>;
 
@@ -182,14 +235,14 @@ cheap on Linux but cost real time on Windows).
 
 ```rust
 
-// Actual min/max of a 32-bit frame's raw values (for auto-ranging the display);
-// `None` for non-32-bit frames.
+// Actual min/max of a 32- or 64-bit frame's raw values (for auto-ranging the
+// display); `None` for 8/16-bit frames (use their native integer min/max).
 fn frame_float_minmax(mmap, frame, order) -> Result<Option<(f32, f32)>>;
 
 // Eager counterparts: decode *every* frame at once, in parallel across frames,
 // into owned buffers (one per frame). For consumers that need the whole stack
 // resident in RAM rather than scrubbing it lazily (see "Design & prior art").
-// `_u16` covers any depth (8-bit is widened, 32-bit rescaled); `_u8` is the
+// `_u16` covers any depth (8-bit is widened, 32/64-bit rescaled); `_u8` is the
 // half-memory raw-byte loader for unsigned 8-bit stacks; `_f32` is raw float.
 fn preload_frames_u16(stack: &TiffStack, float_range: Option<(f32, f32)>) -> Result<Vec<Vec<u16>>>;
 fn preload_frames_u8(stack: &TiffStack) -> Result<Vec<Vec<u8>>>;   // unsigned 8-bit stacks
@@ -202,7 +255,7 @@ fastest), the position in `frames` is `frame_index * slices * channels + channel
 ### Parallel decoding (runtime hint)
 
 Decoding can use [rayon](https://crates.io/crates/rayon) to split a frame's
-strip decompression and 32-bit conversion across cores. It's controlled by a
+strip decompression and 32-/64-bit per-pixel conversion across cores. It's controlled by a
 **process-wide hint**, switchable at any time:
 
 ```rust
@@ -243,14 +296,14 @@ writer.finish()?; // writes the IFD chain; the file isn't valid without it
 
 ### What it writes
 
-- **Samples:** `SampleType::{U8, I8, U16, I16, U32, I32, F32}` — TIFF
-  unsigned/signed/float at 8/16/32 bits.
+- **Samples:** `SampleType::{U8, I8, U16, I16, U32, I32, F32, U64, I64, F64}` —
+  TIFF unsigned/signed/float at 8/16/32/64 bits.
 - **Layout:** grayscale planes (`samples_per_pixel(1)`, default) or chunky
   interleaved RGB (`samples_per_pixel(3)`, tagged photometric=RGB).
 - **Compression:** `None` (default), `Lzw`, `PackBits`, `Deflate`, `Zstd`
   (tag 50000) — plus optional `predictor(true)`, which usually shrinks
   LZW/Deflate/ZSTD output on continuous-tone data: integers get TIFF
-  Predictor 2 (any width), `F32` gets Predictor 3 (the TechNote 3
+  Predictor 2 (any width, 8–64-bit), `F32`/`F64` get Predictor 3 (the TechNote 3
   floating-point predictor libtiff uses). `compression_level(n)` sets the
   effort for the codecs that have one (Deflate 0–9, ZSTD 1–22); when left unset
   the lib applies its own defaults — `DEFAULT_DEFLATE_LEVEL` (6) and
@@ -278,11 +331,12 @@ let opts = WriterOptions::new(1024, 1024, SampleType::U16)
     .imagej(ImageJOptions::new(2, 1).mode(DisplayMode::Composite).fps(20.0));
 ```
 
-Typed appenders `write_frame_u8` / `write_frame_u16` / `write_frame_f32`
-mirror the readers; `write_frame_bytes` takes raw little-endian sample bytes
-and covers the other sample types (`bytemuck::cast_slice` on any `&[i16]`,
-`&[u32]`, ... produces them for free on little-endian hosts). Planes go in
-ImageJ's `xyczt` order, matching the reader's indexing.
+Typed appenders `write_frame_u8` / `write_frame_u16` / `write_frame_f32` /
+`write_frame_f64` mirror the readers; `write_frame_bytes` takes raw
+little-endian sample bytes and covers the other sample types
+(`bytemuck::cast_slice` on any `&[i16]`, `&[u32]`, `&[i64]`, ... produces them
+for free on little-endian hosts). Planes go in ImageJ's `xyczt` order, matching
+the reader's indexing.
 
 ### Guarantees & limits
 
