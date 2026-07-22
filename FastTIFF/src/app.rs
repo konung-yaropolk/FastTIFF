@@ -1018,7 +1018,7 @@ impl eframe::App for ViewerApp {
                     // File-metadata pop-up toggle, pushed to the row's right edge.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .button(RichText::new("(i)").size(16.0))
+                            .button(RichText::new("( i )").size(12.0))
                             .on_hover_text("See metadata")
                             .clicked()
                         {
