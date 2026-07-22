@@ -123,6 +123,95 @@ fn rgb8_stack_opens_as_rgb() {
     assert_eq!(red, vec![255, 0, 0, 10]);
 }
 
+/// Writing planar must produce a file whose *decoded planes* are identical to
+/// the chunky file holding the same image — same pixels, different byte layout
+/// on disk. Run across the strip/compression/predictor combinations, since
+/// planar changes how strips are split (per plane) and how the predictor
+/// strides (by 1, not by `spp`).
+#[test]
+fn planar_rgb_roundtrips_and_matches_chunky() {
+    // 4x3 RGB16: distinct values per sample so a mixed-up plane can't pass.
+    let (w, h, spp) = (4usize, 3usize, 3usize);
+    let chunky: Vec<u16> =
+        (0..w * h).flat_map(|i| [i as u16, 1000 + i as u16, 2000 + i as u16]).collect();
+    let planar: Vec<u16> =
+        (0..spp).flat_map(|p| (0..w * h).map(|i| chunky[i * spp + p]).collect::<Vec<_>>()).collect();
+
+    for (label, compression, predictor, rows_per_strip) in [
+        ("plain", Compression::None, false, None),
+        ("multistrip", Compression::None, false, Some(2)),
+        ("deflate+pred", Compression::Deflate, true, Some(2)),
+        ("lzw", Compression::Lzw, false, None),
+    ] {
+        let base = || {
+            let mut o = WriterOptions::new(w as u32, h as u32, SampleType::U16)
+                .samples_per_pixel(spp as u16)
+                .compression(compression)
+                .predictor(predictor);
+            if let Some(r) = rows_per_strip {
+                o = o.rows_per_strip(r);
+            }
+            o
+        };
+
+        let p_path = unique_temp_path(&format!("planar_{label}.tif"));
+        let _pc = Cleanup(p_path.clone());
+        let mut pw = TiffWriter::create(&p_path, base().planar(true)).unwrap();
+        pw.write_frame_u16(&planar).unwrap();
+        pw.finish().unwrap();
+
+        let c_path = unique_temp_path(&format!("chunky_{label}.tif"));
+        let _cc = Cleanup(c_path.clone());
+        let mut cw = TiffWriter::create(&c_path, base()).unwrap();
+        cw.write_frame_u16(&chunky).unwrap();
+        cw.finish().unwrap();
+
+        let ps = TiffStack::open(&p_path).unwrap();
+        let cs = TiffStack::open(&c_path).unwrap();
+        let (pf, cf) = (&ps.frames[0], &cs.frames[0]);
+
+        assert_eq!(pf.planar_config, 2, "{label}: PlanarConfiguration tag");
+        assert!(pf.is_planar(), "{label}: should read back as planar");
+        assert!(pf.is_rgb(), "{label}: 3 samples is still RGB");
+        assert_eq!(cf.planar_config, 1, "{label}: chunky writes no tag (default 1)");
+        // Planar splits strips per plane, so it has `spp` times as many.
+        assert_eq!(
+            pf.strip_offsets.len(),
+            cf.strip_offsets.len() * spp,
+            "{label}: strips per frame"
+        );
+
+        for p in 0..spp {
+            let got = fast_tiff_lib::read_plane_u16(&ps.mmap, pf, ps.byte_order, None, p).unwrap();
+            let want = fast_tiff_lib::read_plane_u16(&cs.mmap, cf, cs.byte_order, None, p).unwrap();
+            assert_eq!(got, want, "{label}: plane {p}");
+            // ...and against the source data, so a symmetric bug in both paths
+            // can't make this vacuously true.
+            let expect: Vec<u16> = (0..w * h).map(|i| chunky[i * spp + p]).collect();
+            assert_eq!(got, expect, "{label}: plane {p} vs source");
+        }
+    }
+}
+
+/// `planar(true)` on single-sample data is a no-op, not an error: TIFF6 calls
+/// PlanarConfiguration irrelevant there, and the two layouts are byte-identical.
+#[test]
+fn planar_is_ignored_for_single_sample_frames() {
+    let path = unique_temp_path("planar_gray.tif");
+    let _cleanup = Cleanup(path.clone());
+    let frame: Vec<u16> = (0..8).collect();
+    let opts = WriterOptions::new(4, 2, SampleType::U16).planar(true);
+    let mut w = TiffWriter::create(&path, opts).unwrap();
+    w.write_frame_u16(&frame).unwrap();
+    w.finish().unwrap();
+
+    let stack = TiffStack::open(&path).unwrap();
+    assert_eq!(stack.frames[0].planar_config, 1, "no tag written -> chunky default");
+    assert!(!stack.frames[0].is_planar());
+    let got = read_frame_u16(&stack.mmap, &stack.frames[0], stack.byte_order, None).unwrap();
+    assert_eq!(got.as_ref(), &frame[..]);
+}
+
 #[test]
 fn imagej_hyperstack_metadata_roundtrips_through_stack_meta() {
     let path = unique_temp_path("ij.tif");

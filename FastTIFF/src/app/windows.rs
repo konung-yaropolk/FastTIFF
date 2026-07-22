@@ -170,10 +170,11 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Loa
                     kv(
                         ui,
                         "Samples/pixel",
-                        if f.is_rgb() {
-                            format!("{} (chunky RGB)", f.samples_per_pixel)
-                        } else {
-                            f.samples_per_pixel.to_string()
+                        match (f.is_rgb(), f.is_planar()) {
+                            (true, false) => format!("{} (chunky RGB)", f.samples_per_pixel),
+                            (true, true) => format!("{} (planar RGB)", f.samples_per_pixel),
+                            (false, true) => format!("{} (planar)", f.samples_per_pixel),
+                            (false, false) => f.samples_per_pixel.to_string(),
                         },
                     );
                     let photometric = match f.photometric {

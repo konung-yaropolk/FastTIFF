@@ -4,6 +4,7 @@
 [![License](https://img.shields.io/badge/license-%20%20GNU%20GPLv3%20-green)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/release.yml?label=build)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
 [![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/ci.yml)
+[![Crate](https://img.shields.io/crates/v/fast-tiff-lib?label=fast-tiff-lib)](https://crates.io/crates/fast-tiff-lib)
 
 [![FastTIFF](https://github.com/user-attachments/assets/b935b2fa-86cc-4edf-ab5a-255a1aa73e4d)](https://github.com/konung-yaropolk/FastTIFF/releases)  
 A fast multi-frame TIFF stack viewer for huge ImageJ hyperstacks: a horizontal
@@ -112,16 +113,42 @@ you move the slider. This viewer instead:
   real test suite (`cargo test -p fast-tiff-lib`) that builds synthetic
   multi-frame TIFFs in memory and round-trips them through the whole
   pipeline - this is the part most worth trusting blind, since it's
-  actually verified.
+  actually verified. **Published on crates.io** — see below.
 - **`FastTIFF/`** — the GUI binary: eframe/egui for the window and controls,
   a custom GPU render pipeline for the image itself, with interchangeable
   glow (OpenGL) and wgpu backends selected at build time (see Renderer above).
 
+## The TIFF engine is a standalone crate
+
+The viewer isn't built on an existing TIFF library — the whole reader/writer
+was written from scratch for it, and it's published separately as
+[**`fast-tiff-lib`**](https://crates.io/crates/fast-tiff-lib) so it can be used
+without any of the GUI:
+
+```sh
+cargo add fast-tiff-lib
+```
+
+[![Crate](https://img.shields.io/crates/v/fast-tiff-lib?label=crates.io)](https://crates.io/crates/fast-tiff-lib)
+[![Docs](https://img.shields.io/docsrs/fast-tiff-lib?label=docs.rs)](https://docs.rs/fast-tiff-lib)
+
+It's a *specialized* engine for lazily scrubbing large scientific hyperstacks
+rather than a general-purpose TIFF library: memory-mapped and lazy (frames
+decode on demand, never the whole stack), zero-copy for uncompressed data, and
+it parses ImageJ hyperstack metadata (channels/slices/frames, LUTs, calibration)
+that general TIFF readers hand back as an opaque string. It also writes:
+streaming multi-frame output with automatic BigTIFF upgrade. Full format
+coverage, a comparison against libtiff / the `tiff` crate / TinyTIFF, and
+benchmarks are in [`fast-tiff-lib/README.md`](fast-tiff-lib/README.md).
+
+Note the licenses differ: the viewer is GPLv3, but the crate is **MPL-2.0**, so
+it can be used in projects that couldn't take a GPL dependency.
+
 ## What v1 covers
 
-- Multi-frame grayscale, multi-channel composite, and chunky RGB TIFFs in
-  8-bit, 16-bit, and 32-bit (integer or float) - 32-bit and float data is
-  auto-ranged into the display, RGB is deinterleaved into R/G/B planes.
+- Multi-frame grayscale, multi-channel composite, and RGB TIFFs (chunky or
+  planar) in 8-bit, 16-bit, and 32-bit (integer or float) - 32-bit and float
+  data is auto-ranged into the display, RGB is split into R/G/B planes.
 - ImageJ `ImageDescription` parsing (channels/slices/frames, mode,
   min/max, unit, frame interval, linear calibration `c0`/`c1`, `fps`) —
   solid, well-documented format.
@@ -192,7 +219,7 @@ this is the one-line formula to change.
 - Done: add suppport to open multiple files if passed in command - open needed number of processes and open each image in it
 - Done: Hide slider for single-frame tiffs
 - Done: add label in channels slider to hold shift to synchronize adjustments
-- Done: publish fast-tiff-lib as FastTiffLib in to crates.io
+- Done: publish fast-tiff-lib to crates.io
 - Done: added read_plane_u8 to lib
 - Done: optimization 8bit rgb halved in occupied memory
 - Done: change fast scroll to 10% of movie length instead of fixed frames number  

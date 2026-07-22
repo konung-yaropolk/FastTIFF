@@ -34,8 +34,9 @@ metadata (and back).
   reconstruct the physical voxel scale.
 - **Writes multi-frame stacks** streamingly (append a frame at a time, nothing
   buffered but the current frame): 8/16/32/64-bit integer or 32/64-bit float,
-  grayscale or chunky RGB, None/LZW/PackBits/Deflate/ZSTD compression with
-  optional predictor, and ImageJ hyperstack metadata — see [Writing](#writing).
+  grayscale or RGB (chunky or planar), None/LZW/PackBits/Deflate/ZSTD
+  compression with optional predictor, and ImageJ hyperstack metadata — see
+  [Writing](#writing).
 
 ### Supported pixel formats
 
@@ -45,7 +46,11 @@ metadata (and back).
   libtiff/GDAL extension). Predictor 2 (horizontal differencing, any integer
   width, 8–64-bit) and Predictor 3 (TechNote 3 floating-point, f32 and f64, as
   libtiff writes for float data) are undone.
-- Chunky (interleaved) RGB is deinterleaved per sample plane.
+- Multi-sample (e.g. RGB) data is split per sample plane in either
+  interleaving: chunky (`PlanarConfiguration=1`, samples interleaved per pixel)
+  and planar (`PlanarConfiguration=2`, each sample stored as its own whole
+  plane — what `tifffile` writes for a `(3|4, H, W)` array and what libtiff
+  writes as `PLANARCONFIG_SEPARATE`).
 
 Because the display pipeline (and GPUs) work at ≤32 bits, **64-bit samples are
 decoded through the same paths as 32-bit**: a 64-bit float is downcast to `f32`,
@@ -67,10 +72,9 @@ the *writer*; the down-conversion is only in the decode-to-display readers.)
 
 ### Not supported
 
-Tiled TIFFs, planar (non-chunky) multi-sample data, and pyramidal /
-mixed-size stacks (every frame must share frame 0's geometry — this is enforced
-with a clear error at `open`). A 64-bit target is assumed: offset arithmetic
-uses `usize`.
+Tiled TIFFs and pyramidal / mixed-size stacks (every frame must share frame 0's
+geometry — this is enforced with a clear error at `open`). A 64-bit target is
+assumed: offset arithmetic uses `usize`.
 
 ### Compared with other TIFF libraries
 
@@ -81,8 +85,8 @@ How the format coverage lines up against the readers/writers this crate is
 [libtiff](http://www.libtiff.org/) (the de-facto reference). `fast-tiff-lib` is a
 *specialized* engine for lazily scrubbing scientific hyperstacks, not a
 general-purpose TIFF library — the table is meant to show where that focus adds
-reach (ImageJ metadata, lazy/zero-copy) and where it deliberately stops (tiled,
-planar):
+reach (ImageJ metadata, lazy/zero-copy) and where it deliberately stops
+(tiled):
 
 | Feature | `fast-tiff-lib` | `tiff` (Rust) | TinyTIFF (C) | libtiff (C)|
 | --- | :---: | :---: | :---: | :---: |
@@ -95,7 +99,8 @@ planar):
 | ZSTD (tag 50000) | ✓ | read only ² | ✗ | ✓ ³ |
 | Predictor 2 · 3 (float) | ✓ | ✓ | ✗ | ✓ |
 | Chunky RGB (deinterleaved) | ✓ | ✓ | ✓ | ✓ |
-| Planar · tiled | ✗ | ✗ ⁴ | ✗ | ✓ |
+| Planar RGB | ✓ | ✗ ⁴ | ✓ | ✓ |
+| Tiled | ✗ | ✗ ⁴ | ✗ | ✓ |
 | BigTIFF | ✓ | ✓ | ✗ | ✓ |
 | ImageJ hyperstack metadata | ✓ | ✗ | ✗ | ✗ ⁵ |
 | Memory-mapped, lazy per-frame decode | ✓ | ✗ | ✗ | ✗ ⁶ |
@@ -167,15 +172,16 @@ pub struct FrameInfo {
     pub compression: Compression,      // None | Lzw | PackBits | Deflate | Other(u16)
     pub predictor: u16,                // 1 = none, 2 = horizontal differencing
     pub photometric: u16,              // 2 = RGB
-    pub planar_config: u16,            // 1 = chunky
+    pub planar_config: u16,            // 1 = chunky, 2 = planar
     pub strip_offsets: Vec<u64>,
     pub strip_byte_counts: Vec<u64>,
     pub rows_per_strip: u32,
 }
 ```
 
-`frame.is_rgb()` is true for a chunky RGB frame whose samples are color
-components you can deinterleave.
+`frame.is_rgb()` is true for an RGB frame whose samples are color components you
+can split out; `frame.is_planar()` says which interleaving they're stored in.
+The plane readers below handle both, so callers rarely need to check.
 
 ### Decoding
 
@@ -298,8 +304,12 @@ writer.finish()?; // writes the IFD chain; the file isn't valid without it
 
 - **Samples:** `SampleType::{U8, I8, U16, I16, U32, I32, F32, U64, I64, F64}` —
   TIFF unsigned/signed/float at 8/16/32/64 bits.
-- **Layout:** grayscale planes (`samples_per_pixel(1)`, default) or chunky
-  interleaved RGB (`samples_per_pixel(3)`, tagged photometric=RGB).
+- **Layout:** grayscale planes (`samples_per_pixel(1)`, default) or RGB
+  (`samples_per_pixel(3)`, tagged photometric=RGB), interleaved per pixel by
+  default or as separate sample planes with `planar(true)`
+  (`PlanarConfiguration=2`). **The frame buffer you pass matches the file
+  layout** — chunky is `RGB RGB RGB…`, planar is `RRR… GGG… BBB…` — and both are
+  the same length, so a mismatch is not caught by the length check.
 - **Compression:** `None` (default), `Lzw`, `PackBits`, `Deflate`, `Zstd`
   (tag 50000) — plus optional `predictor(true)`, which usually shrinks
   LZW/Deflate/ZSTD output on continuous-tone data: integers get TIFF
@@ -353,10 +363,12 @@ the reader's indexing.
   4 GiB offset limit and upgrade to BigTIFF (magic 43, 64-bit offsets) when
   they outgrow it — decided at `finish()`, with no re-writing of pixel data
   (a 16-byte header slot is reserved up front; classic files carry 8 legal
-  pad bytes in it). `bigtiff(true)` forces BigTIFF for smaller files. Tiles
-  and planar (non-chunky) layouts are not written — the same envelope the
-  reader accepts. Binary `IJMetadata` LUT blocks aren't written (contrast
-  ranges go in the description; LUT writing may come later).
+  pad bytes in it). `bigtiff(true)` forces BigTIFF for smaller files. Tiles are
+  not written — the same envelope the reader accepts. `planar(true)` writes
+  `PlanarConfiguration=2` (separate sample planes, strips split per plane);
+  chunky is the default and writes no tag at all, which TIFF6 defines as
+  chunky. Binary `IJMetadata` LUT blocks aren't written (contrast ranges go in
+  the description; LUT writing may come later).
 
 ### Metadata (`StackMeta`)
 

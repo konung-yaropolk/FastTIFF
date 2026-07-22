@@ -184,6 +184,41 @@ fn bytes_for_bits(bits: u16) -> Result<usize> {
     }
 }
 
+/// The uncompressed byte length each of the frame's strips decodes into, in
+/// file order — the plan both strip walkers below carve their destination
+/// buffer by, and the one place the two interleavings differ:
+///
+/// - **chunky** (PlanarConfiguration=1): one image of `height` rows, each row
+///   holding `width * samples_per_pixel` interleaved samples.
+/// - **planar** (PlanarConfiguration=2): `samples_per_pixel` such images of
+///   `width`-sample rows, one whole sample plane after another, each plane
+///   split into strips independently (TIFF6: StripsPerImage strips per plane).
+///
+/// The lengths always sum to the frame's full sample count either way; only
+/// the per-strip split differs. A frame declaring more strips than the plan
+/// has entries has the excess ignored; declaring fewer is caught downstream by
+/// the short-data checks.
+fn strip_dest_lens(frame: &FrameInfo, sample_bytes: usize) -> Vec<usize> {
+    let spp = (frame.samples_per_pixel as usize).max(1);
+    let (n_planes, row_bytes) = if frame.is_planar() {
+        (spp, frame.width as usize * sample_bytes)
+    } else {
+        (1, frame.width as usize * spp * sample_bytes)
+    };
+    let total_rows = frame.height as usize;
+    let rows_per_strip = (frame.rows_per_strip as usize).max(1);
+    let mut lens = Vec::new();
+    for _ in 0..n_planes {
+        let mut rows_done = 0usize;
+        while rows_done < total_rows {
+            let rows = rows_per_strip.min(total_rows - rows_done);
+            lens.push(rows * row_bytes);
+            rows_done += rows;
+        }
+    }
+    lens
+}
+
 /// Walk an uncompressed, predictor-free frame's strips, handing each strip's
 /// source bytes plus its destination `(sample_start, n_samples)` range to `f`
 /// — the engine of the direct read paths, which skip the assembly buffer
@@ -196,17 +231,14 @@ fn for_each_raw_strip(
     mut f: impl FnMut(&[u8], usize, usize),
 ) -> Result<()> {
     let spp = (frame.samples_per_pixel as usize).max(1);
-    let row_samples = frame.width as usize * spp;
-    let total_samples = row_samples * frame.height as usize;
-    let rows_per_strip = (frame.rows_per_strip as usize).max(1);
+    let total_samples = frame.width as usize * frame.height as usize * spp;
     let mut sample_pos = 0usize;
-    for (&offset, &len) in frame.strip_offsets.iter().zip(frame.strip_byte_counts.iter()) {
-        if sample_pos >= total_samples {
-            break;
-        }
-        let rows = rows_per_strip.min((total_samples - sample_pos) / row_samples.max(1));
-        let n_samples = (rows * row_samples).max(1).min(total_samples - sample_pos);
-        let expected = n_samples * sample_bytes;
+    for ((&offset, &len), expected) in frame
+        .strip_offsets
+        .iter()
+        .zip(frame.strip_byte_counts.iter())
+        .zip(strip_dest_lens(frame, sample_bytes))
+    {
         let avail = (len as usize).min(expected);
         let src = mmap
             .get(offset as usize..offset as usize + avail)
@@ -218,6 +250,7 @@ fn for_each_raw_strip(
                 expected
             );
         }
+        let n_samples = expected / sample_bytes;
         f(src, sample_pos, n_samples);
         sample_pos += n_samples;
     }
@@ -304,8 +337,9 @@ pub fn read_planes_u16_into(
     // per-plane gather (each sample channel differences independently, so a
     // plane is just a running sum along each row) — one pass per plane over
     // untouched native bytes, instead of a full read-modify-write undo pass
-    // followed by the gathers.
-    let fuse = spp > 1 && frame.predictor == 2 && matches!(frame.bits_per_sample, 8 | 16);
+    // followed by the gathers. Planar frames row up differently (one sample
+    // per row position, spp planes of rows), so they take the general path.
+    let fuse = spp > 1 && !frame.is_planar() && frame.predictor == 2 && matches!(frame.bits_per_sample, 8 | 16);
     let native = decode_native_bytes_opt(mmap, frame, file_order, !fuse)?;
     out.resize_with(spp, Vec::new);
     for (p, plane_out) in out.iter_mut().enumerate() {
@@ -317,6 +351,28 @@ pub fn read_planes_u16_into(
         }
     }
     Ok(())
+}
+
+/// Where sample plane `plane` lives inside a frame's assembled native buffer,
+/// as `(first sample index, stride in samples)` — the one piece of layout the
+/// per-plane gathers need:
+///
+/// - **chunky**: samples interleaved per pixel, so the plane starts at `plane`
+///   and steps by `samples_per_pixel`.
+/// - **planar**: each plane stored whole, one after another, so it starts at
+///   `plane * width * height` and steps by 1 (contiguous — the gathers take
+///   their bulk path for it, same as single-sample data).
+///
+/// `plane` is clamped to the frame's sample count, matching what the gathers
+/// did before this was factored out.
+fn plane_layout(frame: &FrameInfo, plane: usize) -> (usize, usize) {
+    let spp = (frame.samples_per_pixel as usize).max(1);
+    let plane = plane.min(spp - 1);
+    if frame.is_planar() {
+        (plane * frame.width as usize * frame.height as usize, 1)
+    } else {
+        (plane, spp)
+    }
 }
 
 /// Fused Predictor-2 undo + deinterleave for one 8/16-bit plane of a chunky
@@ -368,21 +424,21 @@ fn plane_u16_from_native(
     plane: usize,
     out: &mut [u16],
 ) -> Result<()> {
-    let spp = (frame.samples_per_pixel as usize).max(1);
-    let plane = plane.min(spp - 1);
+    let (base, stride) = plane_layout(frame, plane);
     let n_pixels = frame.width as usize * frame.height as usize;
     let signed = frame.sample_format == SampleFormat::SignedInt;
     debug_assert_eq!(out.len(), n_pixels);
 
     match frame.bits_per_sample {
         16 => {
-            if spp == 1 {
+            if stride == 1 {
                 // Contiguous samples — the per-frame hot path for compressed
-                // 16-bit playback. Bulk-convert with the byte-order branch
-                // hoisted out of the loop and no strided indexing (the
-                // sign-bit flip folds in branchlessly: xor with 0 is a no-op).
+                // 16-bit playback (and every planar plane). Bulk-convert with
+                // the byte-order branch hoisted out of the loop and no strided
+                // indexing (the sign-bit flip folds in branchlessly: xor with
+                // 0 is a no-op).
                 let flip = if signed { 0x8000 } else { 0 };
-                let pairs = native[..n_pixels * 2].chunks_exact(2);
+                let pairs = native[base * 2..(base + n_pixels) * 2].chunks_exact(2);
                 match file_order {
                     ByteOrder::Little => {
                         for (o, c) in out.iter_mut().zip(pairs) {
@@ -397,22 +453,22 @@ fn plane_u16_from_native(
                 }
             } else {
                 for (i, o) in out.iter_mut().enumerate() {
-                    let off = (i * spp + plane) * 2;
+                    let off = (base + i * stride) * 2;
                     let v = file_order.u16(&native[off..off + 2]);
                     *o = if signed { v ^ 0x8000 } else { v };
                 }
             }
         }
         8 => {
-            if spp == 1 {
+            if stride == 1 {
                 let flip = if signed { 0x80 } else { 0 };
-                for (o, &b) in out.iter_mut().zip(native[..n_pixels].iter()) {
+                for (o, &b) in out.iter_mut().zip(native[base..base + n_pixels].iter()) {
                     let b = b ^ flip;
                     *o = ((b as u16) << 8) | b as u16;
                 }
             } else {
                 for (i, o) in out.iter_mut().enumerate() {
-                    let b = native[i * spp + plane];
+                    let b = native[base + i * stride];
                     let b = if signed { b ^ 0x80 } else { b };
                     *o = ((b as u16) << 8) | b as u16;
                 }
@@ -428,11 +484,11 @@ fn plane_u16_from_native(
             let floats: Vec<f32> = if parallel {
                 (0..n_pixels)
                     .into_par_iter()
-                    .map(|i| wide_sample_f32(&native[(i * spp + plane) * sb..], file_order, format, sb))
+                    .map(|i| wide_sample_f32(&native[(base + i * stride) * sb..], file_order, format, sb))
                     .collect()
             } else {
                 (0..n_pixels)
-                    .map(|i| wide_sample_f32(&native[(i * spp + plane) * sb..], file_order, format, sb))
+                    .map(|i| wide_sample_f32(&native[(base + i * stride) * sb..], file_order, format, sb))
                     .collect()
             };
             let (lo, hi) = float_range.unwrap_or_else(|| minmax_f32(&floats));
@@ -503,7 +559,7 @@ pub fn read_planes_u8_into(
     let spp = (frame.samples_per_pixel as usize).max(1);
     let n_pixels = frame.width as usize * frame.height as usize;
     // Same predictor-2 fusion as the u16 planes path (see there), raw bytes.
-    let fuse = spp > 1 && frame.predictor == 2 && frame.bits_per_sample == 8;
+    let fuse = spp > 1 && !frame.is_planar() && frame.predictor == 2 && frame.bits_per_sample == 8;
     let native = decode_native_bytes_opt(mmap, frame, file_order, !fuse)?;
     out.resize_with(spp, Vec::new);
     for (p, plane_out) in out.iter_mut().enumerate() {
@@ -532,10 +588,9 @@ fn plane_u8_from_native(native: &[u8], frame: &FrameInfo, plane: usize, out: &mu
     if frame.bits_per_sample != 8 {
         bail!("read_plane_u8 requires 8-bit samples, got {}", frame.bits_per_sample);
     }
-    let spp = (frame.samples_per_pixel as usize).max(1);
-    let plane = plane.min(spp - 1);
+    let (base, stride) = plane_layout(frame, plane);
     for (i, o) in out.iter_mut().enumerate() {
-        *o = native[i * spp + plane];
+        *o = native[base + i * stride];
     }
     Ok(())
 }
@@ -673,18 +728,17 @@ pub fn read_planes_f32_into(
 /// 64-bit sources (f64 / i64 / u64) are downcast to f32 here; 32-bit sources
 /// take the unchanged 4-byte path.
 fn plane_f32_from_native(native: &[u8], frame: &FrameInfo, file_order: ByteOrder, plane: usize, out: &mut [f32]) {
-    let spp = (frame.samples_per_pixel as usize).max(1);
-    let plane = plane.min(spp - 1);
+    let (base, stride) = plane_layout(frame, plane);
     let n_pixels = frame.width as usize * frame.height as usize;
     let format = frame.sample_format;
     let sb = if frame.bits_per_sample == 64 { 8 } else { 4 };
     if should_parallelize(n_pixels) {
         out.par_iter_mut()
             .enumerate()
-            .for_each(|(i, o)| *o = wide_sample_f32(&native[(i * spp + plane) * sb..], file_order, format, sb));
+            .for_each(|(i, o)| *o = wide_sample_f32(&native[(base + i * stride) * sb..], file_order, format, sb));
     } else {
         for (i, o) in out.iter_mut().enumerate() {
-            *o = wide_sample_f32(&native[(i * spp + plane) * sb..], file_order, format, sb);
+            *o = wide_sample_f32(&native[(base + i * stride) * sb..], file_order, format, sb);
         }
     }
 }
@@ -856,10 +910,10 @@ fn decode_native_bytes_opt<'a>(
     undo_pred: bool,
 ) -> Result<Cow<'a, [u8]>> {
     let sample_bytes = bytes_for_bits(frame.bits_per_sample)?;
-    let row_bytes = frame.width as usize * frame.samples_per_pixel as usize * sample_bytes;
-    let total_rows = frame.height as usize;
-    let total_len = total_rows * row_bytes;
-    let rows_per_strip = (frame.rows_per_strip as usize).max(1);
+    // Total decoded size is the same under either interleaving — only the
+    // per-strip split differs (see `strip_dest_lens`).
+    let total_len =
+        frame.width as usize * frame.height as usize * frame.samples_per_pixel.max(1) as usize * sample_bytes;
 
     // Fast path: a single uncompressed strip that already covers the whole
     // image can be read straight out of the memory map — no intermediate copy.
@@ -891,15 +945,14 @@ fn decode_native_bytes_opt<'a>(
     let mut native = vec![0u8; total_len];
 
     // Carve `native` into per-strip destination slices (disjoint row ranges).
+    // The plan's lengths sum to exactly `total_len`, so taking at most one per
+    // declared strip can never overrun the buffer.
     let mut dests: Vec<&mut [u8]> = Vec::with_capacity(frame.strip_offsets.len());
     let mut rest: &mut [u8] = &mut native;
-    let mut rows_done = 0usize;
-    for _ in 0..frame.strip_offsets.len() {
-        let rows_this_strip = rows_per_strip.min(total_rows.saturating_sub(rows_done));
-        let (dest, tail) = rest.split_at_mut(rows_this_strip * row_bytes);
+    for len in strip_dest_lens(frame, sample_bytes).into_iter().take(frame.strip_offsets.len()) {
+        let (dest, tail) = rest.split_at_mut(len);
         dests.push(dest);
         rest = tail;
-        rows_done += rows_this_strip;
     }
 
     // Strips are independent compressed units, so for *large* compressed frames
@@ -1070,23 +1123,31 @@ fn undo_predictor(
     sample_bytes: usize,
     file_order: ByteOrder,
 ) -> Result<Vec<u8>> {
-    let spp = frame.samples_per_pixel as usize;
-    let row_samples = frame.width as usize * spp;
+    // Distance (in samples) to the pixel left of this one: `spp` when samples
+    // interleave per pixel, 1 when each plane is stored whole. Rows follow the
+    // same split — a planar frame has `height * spp` rows of `width` samples,
+    // and `chunks_exact_mut` below walks them all.
+    let spp = (frame.samples_per_pixel as usize).max(1);
+    let stride = if frame.is_planar() { 1 } else { spp };
+    let row_samples = frame.width as usize * stride;
     let row_bytes = row_samples * sample_bytes;
+    if row_bytes == 0 {
+        return Ok(data); // zero-width frame: nothing to difference
+    }
 
     match (frame.predictor, sample_bytes) {
         (1, _) => return Ok(data),
         (2, 1) => {
             for row in data.chunks_exact_mut(row_bytes) {
-                for i in spp..row_samples {
-                    row[i] = row[i].wrapping_add(row[i - spp]);
+                for i in stride..row_samples {
+                    row[i] = row[i].wrapping_add(row[i - stride]);
                 }
             }
         }
         (2, 2) => {
             for row in data.chunks_exact_mut(row_bytes) {
-                for i in spp..row_samples {
-                    let prev_off = (i - spp) * 2;
+                for i in stride..row_samples {
+                    let prev_off = (i - stride) * 2;
                     let cur_off = i * 2;
                     let prev = file_order.u16(&row[prev_off..prev_off + 2]);
                     let delta = file_order.u16(&row[cur_off..cur_off + 2]);
@@ -1103,8 +1164,8 @@ fn undo_predictor(
         (2, 4) => {
             // 32-bit integer horizontal differencing (libtiff writes these).
             for row in data.chunks_exact_mut(row_bytes) {
-                for i in spp..row_samples {
-                    let prev_off = (i - spp) * 4;
+                for i in stride..row_samples {
+                    let prev_off = (i - stride) * 4;
                     let cur_off = i * 4;
                     let prev = file_order.u32(&row[prev_off..prev_off + 4]);
                     let delta = file_order.u32(&row[cur_off..cur_off + 4]);
@@ -1120,8 +1181,8 @@ fn undo_predictor(
         (2, 8) => {
             // 64-bit integer horizontal differencing.
             for row in data.chunks_exact_mut(row_bytes) {
-                for i in spp..row_samples {
-                    let prev_off = (i - spp) * 8;
+                for i in stride..row_samples {
+                    let prev_off = (i - stride) * 8;
                     let cur_off = i * 8;
                     let prev = file_order.u64(&row[prev_off..prev_off + 8]);
                     let delta = file_order.u64(&row[cur_off..cur_off + 8]);
@@ -1134,7 +1195,7 @@ fn undo_predictor(
                 }
             }
         }
-        (3, 4) | (3, 8) => undo_float_predictor(&mut data, row_bytes, spp, sample_bytes, file_order),
+        (3, 4) | (3, 8) => undo_float_predictor(&mut data, row_bytes, stride, sample_bytes, file_order),
         (2, other) => bail!("predictor 2 undo not implemented for {other}-byte samples"),
         (3, other) => bail!("floating-point predictor requires 32- or 64-bit samples, got {other}-byte"),
         (other, _) => bail!("unsupported TIFF predictor: {other}"),
@@ -1143,18 +1204,19 @@ fn undo_predictor(
 }
 
 /// Undo TIFF Predictor 3 (TIFF TechNote 3 floating-point horizontal
-/// differencing), per row: first undo the byte-level differencing (stride =
-/// samples per pixel, mirroring libtiff's `fpAcc`), then gather each float's
-/// bytes back from the row's `sample_bytes` byte-significance planes — the spec
-/// stores them MSB-plane-first regardless of the file's byte order — and store
+/// differencing), per row: first undo the byte-level differencing (`stride` =
+/// samples per pixel for chunky rows, 1 for planar ones, mirroring libtiff's
+/// `fpAcc`), then gather each float's bytes back from the row's `sample_bytes`
+/// byte-significance planes — the spec stores them MSB-plane-first
+/// regardless of the file's byte order — and store
 /// the value in `file_order` for the normal downstream reads. Handles both f32
 /// (`sample_bytes == 4`) and f64 (`sample_bytes == 8`).
-fn undo_float_predictor(data: &mut [u8], row_bytes: usize, spp: usize, sample_bytes: usize, file_order: ByteOrder) {
+fn undo_float_predictor(data: &mut [u8], row_bytes: usize, stride: usize, sample_bytes: usize, file_order: ByteOrder) {
     let wc = row_bytes / sample_bytes; // float values per row
     let mut scratch = vec![0u8; row_bytes];
     for row in data.chunks_exact_mut(row_bytes) {
-        for i in spp..row_bytes {
-            row[i] = row[i].wrapping_add(row[i - spp]);
+        for i in stride..row_bytes {
+            row[i] = row[i].wrapping_add(row[i - stride]);
         }
         for v in 0..wc {
             // Gather this value's bytes, most-significant plane first.

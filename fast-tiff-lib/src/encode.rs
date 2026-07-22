@@ -3,7 +3,7 @@
 //! model (open with a fixed frame layout, append frames one at a time, finish),
 //! the format coverage follows libtiff (None/LZW/PackBits/Deflate compression,
 //! horizontal predictor, unsigned/signed/float samples at 8/16/32 bits, chunky
-//! RGB, multi-strip), and the Rust idioms follow the `tiff` crate (a writer
+//! or planar RGB, multi-strip), and the Rust idioms follow the `tiff` crate (a writer
 //! generic over `Write + Seek`, so files and in-memory `Cursor`s both work).
 //!
 //! Layout choices are made for *this* library's reader:
@@ -21,15 +21,19 @@
 //!   themselves compressed in parallel here when the frame is large.
 //!
 //! Classic TIFF only: offsets are 32-bit, so the file must stay under 4 GiB
-//! (checked, with a clear error). BigTIFF, tiles, and planar (non-chunky)
-//! layouts are out of scope — matching the reader.
+//! (checked, with a clear error). Tiles are out of scope — matching the reader.
+//! Both sample interleavings are written: chunky by default (the layout the
+//! reader's zero-copy and fused paths are tuned for), or planar via
+//! `WriterOptions::planar`, which emits `PlanarConfiguration=2` and splits
+//! strips per sample plane. An absent tag is chunky per TIFF6, so the default
+//! output carries no PlanarConfiguration entry at all.
 
 use crate::ifd::TiffFlavor;
 use crate::ij_metadata::DisplayMode;
 use crate::index::{
     Compression, TAG_BITS_PER_SAMPLE, TAG_COMPRESSION, TAG_IMAGE_DESCRIPTION, TAG_IMAGE_LENGTH,
-    TAG_IMAGE_WIDTH, TAG_PHOTOMETRIC, TAG_PREDICTOR, TAG_ROWS_PER_STRIP, TAG_SAMPLES_PER_PIXEL,
-    TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS,
+    TAG_IMAGE_WIDTH, TAG_PHOTOMETRIC, TAG_PLANAR_CONFIG, TAG_PREDICTOR, TAG_ROWS_PER_STRIP,
+    TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS,
 };
 use anyhow::{anyhow, bail, Result};
 use rayon::prelude::*;
@@ -38,8 +42,8 @@ use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
-/// ExtraSamples (tag 338): declares chunky samples beyond the photometric
-/// base (write-side only — the reader deinterleaves any chunky layout).
+/// ExtraSamples (tag 338): declares samples beyond the photometric base, in
+/// either interleaving (write-side only — the reader splits planes regardless).
 const TAG_EXTRA_SAMPLES: u16 = 338;
 
 /// Classic TIFF stores every offset as a u32, so nothing may live at or past
@@ -210,6 +214,7 @@ pub struct WriterOptions {
     height: u32,
     sample_type: SampleType,
     samples_per_pixel: u16,
+    planar: bool,
     compression: Compression,
     compression_level: Option<i32>,
     predictor: bool,
@@ -226,6 +231,7 @@ impl WriterOptions {
             height,
             sample_type,
             samples_per_pixel: 1,
+            planar: false,
             compression: Compression::None,
             compression_level: None,
             predictor: false,
@@ -237,10 +243,39 @@ impl WriterOptions {
     }
 
     /// Samples per pixel: 1 (default) writes single-plane grayscale frames;
-    /// 3 writes chunky (interleaved) RGB. Data passed to `write_frame_*` is
-    /// `width * height * samples_per_pixel` samples, interleaved per pixel.
+    /// 3 writes RGB. Data passed to `write_frame_*` is
+    /// `width * height * samples_per_pixel` samples, in the interleaving
+    /// [`planar`](Self::planar) selects (interleaved per pixel by default).
     pub fn samples_per_pixel(mut self, spp: u16) -> Self {
         self.samples_per_pixel = spp;
+        self
+    }
+
+    /// Write multi-sample frames as **planar** (`PlanarConfiguration=2`): each
+    /// sample stored as its own whole plane, one after another, instead of the
+    /// default chunky interleaving (`PlanarConfiguration=1`).
+    ///
+    /// **This changes the layout `write_frame_*` expects.** The buffer is
+    /// always laid out the way the file is, so no reordering pass sits between
+    /// caller and disk. For a 3-sample frame:
+    ///
+    /// - chunky (default): `R0 G0 B0  R1 G1 B1  R2 G2 B2 …`
+    /// - planar: `R0 R1 R2 …  G0 G1 G2 …  B0 B1 B2 …`
+    ///
+    /// The total length is identical either way, so passing chunky data with
+    /// this set (or vice versa) is **not** caught by the length check — it
+    /// silently scrambles the image. This is the layout a `(C, H, W)` numpy
+    /// array already has, and what `tifffile` writes for one.
+    ///
+    /// Ignored when `samples_per_pixel` is 1: the two layouts are then
+    /// byte-identical, and TIFF6 calls PlanarConfiguration irrelevant in that
+    /// case, so the tag is simply not written.
+    ///
+    /// Chunky remains the default and is what the reader's zero-copy path is
+    /// tuned for; reach for this when a consuming tool specifically needs
+    /// separate planes.
+    pub fn planar(mut self, on: bool) -> Self {
+        self.planar = on;
         self
     }
 
@@ -328,6 +363,10 @@ pub struct TiffWriter<W: Write + Seek> {
     height: u32,
     sample_type: SampleType,
     spp: usize,
+    /// True when samples are written as separate whole planes
+    /// (`PlanarConfiguration=2`). Already normalized: never true for `spp == 1`,
+    /// where the two layouts are byte-identical.
+    planar: bool,
     compression: Compression,
     compression_level: Option<i32>,
     force_bigtiff: bool,
@@ -338,7 +377,14 @@ pub struct TiffWriter<W: Write + Seek> {
     rows_per_strip: u32,
     ij: Option<ImageJOptions>,
     description: Option<String>,
+    /// Bytes in one strip-splittable row: `width * spp * sample_bytes` chunky,
+    /// `width * sample_bytes` planar (a planar row holds one sample plane's
+    /// pixels only).
     row_bytes: usize,
+    /// Bytes in one strip-splittable *image*: the whole frame when chunky, one
+    /// sample plane when planar. Strips never span a plane boundary, so this is
+    /// what the strip split resets on.
+    plane_bytes: usize,
     frame_bytes: usize,
 }
 
@@ -367,6 +413,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             height,
             sample_type,
             samples_per_pixel,
+            planar,
             compression,
             compression_level,
             predictor,
@@ -415,8 +462,17 @@ impl<W: Write + Seek> TiffWriter<W> {
         }
 
         let spp = samples_per_pixel as usize;
-        let row_bytes = width as usize * spp * sample_type.bytes();
-        let frame_bytes = row_bytes * height as usize;
+        // PlanarConfiguration is irrelevant for single-sample data (TIFF6), and
+        // the two layouts are byte-identical there — normalize it away so every
+        // check downstream (and the tag emission) has one meaning.
+        let planar = planar && spp > 1;
+        // Planar splits the frame into `spp` images of `width`-sample rows;
+        // chunky is one image of `width * spp`-sample rows. Either way the
+        // frame is the same total size — only the strip split differs.
+        let n_planes = if planar { spp } else { 1 };
+        let row_bytes = width as usize * (spp / n_planes) * sample_type.bytes();
+        let plane_bytes = row_bytes * height as usize;
+        let frame_bytes = plane_bytes * n_planes;
         let rows_per_strip = match rows_per_strip {
             Some(r) => r.clamp(1, height),
             // Uncompressed: one strip per frame — the reader's zero-copy fast
@@ -442,6 +498,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             height,
             sample_type,
             spp,
+            planar,
             compression,
             compression_level,
             force_bigtiff,
@@ -450,6 +507,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             ij,
             description,
             row_bytes,
+            plane_bytes,
             frame_bytes,
         })
     }
@@ -464,8 +522,11 @@ impl<W: Write + Seek> TiffWriter<W> {
     /// 32-bit-integer ones without a typed method (on a little-endian host,
     /// `bytemuck::cast_slice` turns any `&[i16]`/`&[u32]`/... into these bytes
     /// for free). Length must be exactly
-    /// `width * height * samples_per_pixel * bytes_per_sample`;
-    /// multi-sample data is chunky (interleaved per pixel).
+    /// `width * height * samples_per_pixel * bytes_per_sample`; multi-sample
+    /// data is chunky (interleaved per pixel) unless [`WriterOptions::planar`]
+    /// was set, in which case it is plane-major (all of sample 0, then all of
+    /// sample 1, …). Both layouts are the same length, so the check below
+    /// cannot tell them apart — see that method.
     pub fn write_frame_bytes(&mut self, data: &[u8]) -> Result<()> {
         if data.len() != self.frame_bytes {
             bail!(
@@ -482,33 +543,44 @@ impl<W: Write + Seek> TiffWriter<W> {
 
         // Predictor first (a per-row operation, so strip boundaries — always
         // whole rows — don't affect it), then split into strips and compress
-        // each strip independently, as the TIFF spec requires.
+        // each strip independently, as the TIFF spec requires. The differencing
+        // stride is one pixel to the left: `spp` samples away when interleaved,
+        // 1 when each plane is stored whole.
+        let stride = if self.planar { 1 } else { self.spp };
         let processed: Cow<[u8]> = match self.predictor_tag {
             2 => {
                 let mut owned = data.to_vec();
-                apply_predictor(&mut owned, self.row_bytes, self.spp, self.sample_type.bytes());
+                apply_predictor(&mut owned, self.row_bytes, stride, self.sample_type.bytes());
                 Cow::Owned(owned)
             }
             3 => {
                 let mut owned = data.to_vec();
-                apply_float_predictor(&mut owned, self.row_bytes, self.spp, self.sample_type.bytes());
+                apply_float_predictor(&mut owned, self.row_bytes, stride, self.sample_type.bytes());
                 Cow::Owned(owned)
             }
             _ => Cow::Borrowed(data),
         };
 
+        // Strips never span a plane boundary: chunky yields one plane (the
+        // whole frame), planar yields `spp`, each split independently —
+        // StripsPerImage x SamplesPerPixel strips, as TIFF6 requires and as the
+        // reader's `strip_dest_lens` expects on the way back in.
         let strip_len = self.rows_per_strip as usize * self.row_bytes;
+        let plane_bytes = self.plane_bytes;
         let mut strips = FrameStrips { offsets: Vec::new(), byte_counts: Vec::new() };
 
         if self.compression == Compression::None {
             // Raw strips stream straight from the (possibly borrowed) frame
             // buffer — for the default single-strip layout this is one
             // contiguous write with no intermediate allocation.
-            for chunk in processed.chunks(strip_len) {
-                self.push_strip_bytes(chunk, &mut strips)?;
+            for plane in processed.chunks(plane_bytes) {
+                for chunk in plane.chunks(strip_len) {
+                    self.push_strip_bytes(chunk, &mut strips)?;
+                }
             }
         } else {
-            let chunks: Vec<&[u8]> = processed.chunks(strip_len).collect();
+            let chunks: Vec<&[u8]> =
+                processed.chunks(plane_bytes).flat_map(|plane| plane.chunks(strip_len)).collect();
             let compression = self.compression;
             let level = self.compression_level;
             let row_bytes = self.row_bytes;
@@ -702,8 +774,9 @@ impl<W: Write + Seek> TiffWriter<W> {
             Compression::Zstd => 50000, // libtiff/GDAL registered extension
             Compression::Other(code) => code, // rejected at construction
         };
-        // Chunky data with 3+ samples is RGB (photometric 2); everything else
-        // is BlackIsZero grayscale — mirroring what the reader's `is_rgb` keys on.
+        // 3+ samples is RGB (photometric 2) in either interleaving; everything
+        // else is BlackIsZero grayscale — mirroring what the reader's `is_rgb`
+        // keys on.
         let photometric: u16 = if spp >= 3 { 2 } else { 1 };
 
         let mut entries = Vec::with_capacity(12);
@@ -732,6 +805,12 @@ impl<W: Write + Seek> TiffWriter<W> {
         } else {
             let counts: Vec<u32> = strips.byte_counts.iter().map(|&v| v as u32).collect();
             entries.push(Entry::longs(TAG_STRIP_BYTE_COUNTS, &counts));
+        }
+        // PlanarConfiguration is only written when it isn't the default: TIFF6
+        // defines an absent tag as 1 (chunky), and calls it irrelevant for
+        // single-sample data (which `self.planar` has already normalized away).
+        if self.planar {
+            entries.push(Entry::short(TAG_PLANAR_CONFIG, 2));
         }
         if self.predictor_tag != 1 {
             entries.push(Entry::short(TAG_PREDICTOR, self.predictor_tag));
@@ -941,21 +1020,21 @@ fn build_ij_description(planes: usize, ij: &ImageJOptions) -> Result<String> {
 /// inverse of `decode::undo_predictor`, in little-endian (the only order this
 /// writer emits). Per row, per sample plane; iterates right-to-left so each
 /// difference reads the original (not already-differenced) left neighbor.
-fn apply_predictor(data: &mut [u8], row_bytes: usize, spp: usize, sample_bytes: usize) {
+fn apply_predictor(data: &mut [u8], row_bytes: usize, stride: usize, sample_bytes: usize) {
     let row_samples = row_bytes / sample_bytes;
     match sample_bytes {
         1 => {
             for row in data.chunks_exact_mut(row_bytes) {
-                for i in (spp..row_samples).rev() {
-                    row[i] = row[i].wrapping_sub(row[i - spp]);
+                for i in (stride..row_samples).rev() {
+                    row[i] = row[i].wrapping_sub(row[i - stride]);
                 }
             }
         }
         2 => {
             for row in data.chunks_exact_mut(row_bytes) {
-                for i in (spp..row_samples).rev() {
+                for i in (stride..row_samples).rev() {
                     let cur = u16::from_le_bytes([row[i * 2], row[i * 2 + 1]]);
-                    let prev = u16::from_le_bytes([row[(i - spp) * 2], row[(i - spp) * 2 + 1]]);
+                    let prev = u16::from_le_bytes([row[(i - stride) * 2], row[(i - stride) * 2 + 1]]);
                     let diff = cur.wrapping_sub(prev).to_le_bytes();
                     row[i * 2] = diff[0];
                     row[i * 2 + 1] = diff[1];
@@ -965,9 +1044,9 @@ fn apply_predictor(data: &mut [u8], row_bytes: usize, spp: usize, sample_bytes: 
         4 => {
             // 32-bit integers (U32/I32) — floats route to predictor 3 instead.
             for row in data.chunks_exact_mut(row_bytes) {
-                for i in (spp..row_samples).rev() {
+                for i in (stride..row_samples).rev() {
                     let cur = u32::from_le_bytes(row[i * 4..i * 4 + 4].try_into().unwrap());
-                    let prev = u32::from_le_bytes(row[(i - spp) * 4..(i - spp) * 4 + 4].try_into().unwrap());
+                    let prev = u32::from_le_bytes(row[(i - stride) * 4..(i - stride) * 4 + 4].try_into().unwrap());
                     let diff = cur.wrapping_sub(prev).to_le_bytes();
                     row[i * 4..i * 4 + 4].copy_from_slice(&diff);
                 }
@@ -976,9 +1055,9 @@ fn apply_predictor(data: &mut [u8], row_bytes: usize, spp: usize, sample_bytes: 
         8 => {
             // 64-bit integers (U64/I64) — floats route to predictor 3 instead.
             for row in data.chunks_exact_mut(row_bytes) {
-                for i in (spp..row_samples).rev() {
+                for i in (stride..row_samples).rev() {
                     let cur = u64::from_le_bytes(row[i * 8..i * 8 + 8].try_into().unwrap());
-                    let prev = u64::from_le_bytes(row[(i - spp) * 8..(i - spp) * 8 + 8].try_into().unwrap());
+                    let prev = u64::from_le_bytes(row[(i - stride) * 8..(i - stride) * 8 + 8].try_into().unwrap());
                     let diff = cur.wrapping_sub(prev).to_le_bytes();
                     row[i * 8..i * 8 + 8].copy_from_slice(&diff);
                 }
@@ -994,7 +1073,7 @@ fn apply_predictor(data: &mut [u8], row_bytes: usize, spp: usize, sample_bytes: 
 /// first, as the spec requires regardless of file byte order), then difference
 /// the plane bytes horizontally with stride = samples per pixel, mirroring
 /// libtiff's `fpDiff`. Handles f32 (`sample_bytes == 4`) and f64 (`== 8`).
-fn apply_float_predictor(data: &mut [u8], row_bytes: usize, spp: usize, sample_bytes: usize) {
+fn apply_float_predictor(data: &mut [u8], row_bytes: usize, stride: usize, sample_bytes: usize) {
     let wc = row_bytes / sample_bytes; // float values per row
     let mut scratch = vec![0u8; row_bytes];
     for row in data.chunks_exact_mut(row_bytes) {
@@ -1005,8 +1084,8 @@ fn apply_float_predictor(data: &mut [u8], row_bytes: usize, spp: usize, sample_b
                 scratch[p * wc + v] = row[v * sample_bytes + (sample_bytes - 1 - p)];
             }
         }
-        for i in (spp..row_bytes).rev() {
-            scratch[i] = scratch[i].wrapping_sub(scratch[i - spp]);
+        for i in (stride..row_bytes).rev() {
+            scratch[i] = scratch[i].wrapping_sub(scratch[i - stride]);
         }
         row.copy_from_slice(&scratch);
     }

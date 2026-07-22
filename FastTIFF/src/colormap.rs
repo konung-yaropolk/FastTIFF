@@ -6,7 +6,7 @@
 //!
 //! The tables are baked in, so the app has no runtime or build-time dependency
 //! on matplotlib. Regenerate with `scripts/gen_colormaps.py` (matplotlib
-//! 3.10.0 was used here).
+//! 3.10.9 was used here).
 
 /// Colormap display names, in UI order (parallel to [`LUTS`]).
 pub const NAMES: [&str; 5] = ["Magma", "Plasma", "Inferno", "Viridis", "Turbo"];

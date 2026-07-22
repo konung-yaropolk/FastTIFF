@@ -47,15 +47,37 @@ pub(super) fn apply_resolved_dimensions(loaded: &mut LoadedStack, resolved: fast
     loaded.luts_uploaded = false;
 }
 
-/// Reconfigures a freshly-loaded chunky-RGB stack: the first `min(spp, 3)`
-/// sample planes become red/green/blue display channels with identity
-/// full-range windows (so true colors show without any contrast tweaking).
-/// Additively blending the three color ramps in the composite shader
-/// reconstructs the original RGB pixel. Frame navigation still walks IFDs (one
-/// full-color image per IFD) — see `LoadedStack::rgb`.
+/// Which sample planes of an `spp`-sample RGB frame get a display channel, and
+/// which of those start enabled — one entry per channel, `true` = on. The whole
+/// policy `setup_rgb` applies, split out so it's testable without a
+/// file-and-GPU-backed `LoadedStack`. See `setup_rgb` for the reasoning.
+///
+/// Beyond `MAX_CHANNELS` the shader has no slot to composite into, so further
+/// samples are dropped — no real file has 7+ samples/pixel.
+pub(super) fn rgb_channel_plan(spp: usize) -> Vec<bool> {
+    (0..spp.min(MAX_CHANNELS)).map(|c| c < 3).collect()
+}
+
+/// Reconfigures a freshly-loaded RGB stack (chunky or planar): every sample
+/// plane becomes a display channel with an identity full-range window (so true
+/// colors show without any contrast tweaking). Additively blending the red,
+/// green and blue ramps in the composite shader reconstructs the original RGB
+/// pixel. Frame navigation still walks IFDs (one full-color image per IFD) —
+/// see `LoadedStack::rgb`.
+///
+/// Samples past the third (TIFF ExtraSamples — alpha, or anything else a writer
+/// packed in) get channels too, but **start disabled**. They're real data the
+/// user may want: `tifffile` writes any `(4, H, W)` array as RGB + one extra
+/// sample, so for scientific stacks the fourth plane is a measurement, not
+/// transparency. Compositing it on by default would wreck genuine RGBA images
+/// though — an opaque alpha plane is a constant full-intensity channel, which
+/// the additive shader would blend in as a solid color wash over the picture.
+/// Off-by-default is the only setting that's harmless for both: the channel row
+/// is visible, and one click shows it.
 pub(super) fn setup_rgb(loaded: &mut LoadedStack) {
     let spp = loaded.tiff.frames.first().map(|f| f.samples_per_pixel as usize).unwrap_or(3);
-    let planes = spp.min(3).min(MAX_CHANNELS); // RGB only; ignore any alpha/extra samples
+    let plan = rgb_channel_plan(spp);
+    let planes = plan.len();
     loaded.rgb = true;
     loaded.tiff.meta.mode = fast_tiff_lib::DisplayMode::Color;
     loaded.tiff.meta.channel_display = (0..planes)
@@ -79,11 +101,12 @@ pub(super) fn setup_rgb(loaded: &mut LoadedStack) {
     } else {
         ChannelKind::Int16
     };
-    loaded.channel_settings = (0..planes)
-        .map(|_| ChannelSettings {
+    loaded.channel_settings = plan
+        .iter()
+        .map(|&enabled| ChannelSettings {
             min: 0.0,
             max: 65535.0,
-            enabled: true,
+            enabled,
             bounds: (0.0, 65535.0),
             kind,
         })

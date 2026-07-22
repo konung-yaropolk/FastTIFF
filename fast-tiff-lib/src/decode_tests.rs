@@ -336,6 +336,45 @@ fn read_planes_matches_per_plane_reads() {
     assert_eq!(planes[0], read_plane_u16(&file, &frame, ByteOrder::Little, None, 0).unwrap());
 }
 
+/// A planar frame's rows hold one sample each, so Predictor 2 differences with
+/// a stride of 1 and resets every `width` samples — `height * spp` rows in all,
+/// not `height` rows of `width * spp`. Getting that stride from the chunky rule
+/// would leak each plane's first pixels into its neighbours.
+#[test]
+fn planar_predictor2_differences_per_plane_row() {
+    // 2 planes x 2 rows x 3 pixels, stored plane after plane.
+    let original: [u8; 12] = [
+        10, 12, 15, /* p0 r0 */ 20, 21, 25, /* p0 r1 */
+        90, 80, 70, /* p1 r0 */ 60, 50, 40, /* p1 r1 */
+    ];
+    let mut frame = make_frame(3, 2, 2);
+    frame.bits_per_sample = 8;
+    frame.samples_per_pixel = 2;
+    frame.planar_config = 2;
+    frame.strip_byte_counts = vec![12];
+
+    // Horizontal-difference each 3-sample row independently.
+    let mut differenced = original;
+    for row in differenced.chunks_exact_mut(3) {
+        for i in (1..3).rev() {
+            row[i] = row[i].wrapping_sub(row[i - 1]);
+        }
+    }
+    let restored = undo_predictor(differenced.to_vec(), &frame, 1, ByteOrder::Little).unwrap();
+    assert_eq!(restored, original);
+
+    // ...and the plane gathers must pick the right run out of the result.
+    let file = restored;
+    let up = |b: u8| ((b as u16) << 8) | b as u16;
+    let mut plain = frame.clone();
+    plain.predictor = 1;
+    assert_eq!(
+        read_plane_u16(&file, &plain, ByteOrder::Little, None, 1).unwrap(),
+        original[6..].iter().map(|&b| up(b)).collect::<Vec<_>>()
+    );
+    assert_eq!(read_plane_u8(&file, &plain, ByteOrder::Little, 0).unwrap(), original[..6].to_vec());
+}
+
 /// The `_into` variants (reused caller buffers, direct strip paths) must be
 /// byte-identical to the Vec-returning APIs — across single/multi-strip,
 /// byte orders, signedness, and repeated calls into the same buffer.

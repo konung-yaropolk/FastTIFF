@@ -74,8 +74,8 @@ pub struct FrameInfo {
     /// multiple samples are color components to deinterleave.
     pub photometric: u16,
     /// PlanarConfiguration (tag 284): 1 = chunky (samples interleaved per
-    /// pixel, the default and only layout we deinterleave), 2 = planar
-    /// (separate sample planes — not supported for multi-sample data).
+    /// pixel, the default), 2 = planar (each sample stored as its own whole
+    /// plane, one after another). Both are decoded; see `FrameInfo::is_planar`.
     pub planar_config: u16,
     pub strip_offsets: Vec<u64>,
     pub strip_byte_counts: Vec<u64>,
@@ -83,10 +83,20 @@ pub struct FrameInfo {
 }
 
 impl FrameInfo {
-    /// True for a chunky (interleaved) RGB frame whose 3+ samples are color
-    /// components we can deinterleave into red/green/blue planes.
+    /// True for an RGB frame whose 3+ samples are color components we can
+    /// split into red/green/blue planes. Either interleaving works — the
+    /// decoders gather a plane from chunky and planar frames alike.
     pub fn is_rgb(&self) -> bool {
-        self.photometric == 2 && self.samples_per_pixel >= 3 && self.planar_config == 1
+        self.photometric == 2 && self.samples_per_pixel >= 3
+    }
+
+    /// True when this frame's samples are stored as separate whole planes
+    /// (PlanarConfiguration=2) rather than interleaved per pixel — the layout
+    /// `tifffile` writes for a `(3|4, H, W)` array, and libtiff's
+    /// `PLANARCONFIG_SEPARATE`. Single-sample frames are identical either way,
+    /// so they never count as planar.
+    pub fn is_planar(&self) -> bool {
+        self.planar_config == 2 && self.samples_per_pixel > 1
     }
 }
 
@@ -197,22 +207,6 @@ impl TiffStack {
                 f.height,
                 f.bits_per_sample,
                 f.samples_per_pixel,
-            );
-        }
-
-        // Planar (non-chunky) multi-sample data stores each sample plane
-        // separately; every decoder here assumes chunky interleaving, so a
-        // planar file would silently deinterleave into garbage. Refuse it
-        // with a clear error instead (same policy as tiled TIFFs).
-        if let Some((i, f)) = frames
-            .iter()
-            .enumerate()
-            .find(|(_, f)| f.samples_per_pixel > 1 && f.planar_config == 2)
-        {
-            bail!(
-                "frame {i} stores its {} samples/pixel in planar (non-interleaved) layout \
-                 (PlanarConfiguration=2), which is not supported — only chunky TIFFs are",
-                f.samples_per_pixel
             );
         }
 

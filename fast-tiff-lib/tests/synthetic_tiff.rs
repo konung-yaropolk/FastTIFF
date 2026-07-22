@@ -31,6 +31,7 @@ const TAG_SAMPLES_PER_PIXEL: u16 = 277;
 const TAG_ROWS_PER_STRIP: u16 = 278;
 const TAG_STRIP_BYTE_COUNTS: u16 = 279;
 const TAG_PLANAR_CONFIG: u16 = 284;
+const TAG_SAMPLE_FORMAT: u16 = 339;
 const TAG_IJ_METADATA_BYTE_COUNTS: u16 = 50838;
 const TAG_IJ_METADATA: u16 = 50839;
 
@@ -473,6 +474,183 @@ fn opens_rgb8_tiff_and_deinterleaves_planes() {
     let blue = fast_tiff_lib::read_plane_u16(&stack.mmap, frame, stack.byte_order, None, 2).unwrap();
     assert_eq!(red, vec![up(10), up(40), up(70), up(100)]);
     assert_eq!(blue, vec![up(30), up(60), up(90), up(120)]);
+}
+
+/// Builds a single-IFD **planar** TIFF (PlanarConfiguration=2): each sample
+/// plane stored whole, one after another, and each plane split into its own
+/// strips of `rows_per_strip` rows. This is what `tifffile.imwrite` emits for a
+/// `(3|4, H, W)` array — it labels such an array RGB with separate component
+/// planes — and what libtiff writes under `PLANARCONFIG_SEPARATE`.
+///
+/// `planes` holds each plane's raw little-endian sample bytes. Assumes 3+
+/// samples, so the per-sample BitsPerSample/SampleFormat arrays never fit the
+/// inline value field and always live at their own offset.
+fn build_planar_tiff(
+    width: u32,
+    height: u32,
+    bits: u16,
+    sample_format: u16,
+    planes: &[Vec<u8>],
+    rows_per_strip: u32,
+) -> Vec<u8> {
+    let spp = planes.len() as u16;
+    let row_bytes = width * (bits as u32 / 8);
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"II");
+    buf.extend_from_slice(&42u16.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // first-IFD offset, patched below
+
+    // --- pixel data: one whole plane after another, each strip-split ---
+    let mut strip_offsets = Vec::new();
+    let mut strip_counts = Vec::new();
+    for plane in planes {
+        let mut row = 0u32;
+        while row < height {
+            let rows = rows_per_strip.min(height - row);
+            let (start, len) = ((row * row_bytes) as usize, (rows * row_bytes) as usize);
+            strip_offsets.push(buf.len() as u32);
+            strip_counts.push(len as u32);
+            buf.extend_from_slice(&plane[start..start + len]);
+            row += rows;
+        }
+    }
+
+    let bits_offset = buf.len() as u32;
+    for _ in 0..spp {
+        buf.extend_from_slice(&bits.to_le_bytes());
+    }
+    let format_offset = buf.len() as u32;
+    for _ in 0..spp {
+        buf.extend_from_slice(&sample_format.to_le_bytes());
+    }
+    let offsets_offset = buf.len() as u32;
+    for &o in &strip_offsets {
+        buf.extend_from_slice(&o.to_le_bytes());
+    }
+    let counts_offset = buf.len() as u32;
+    for &c in &strip_counts {
+        buf.extend_from_slice(&c.to_le_bytes());
+    }
+
+    let ifd_offset = buf.len() as u32;
+    buf[4..8].copy_from_slice(&ifd_offset.to_le_bytes());
+
+    // A one-strip array fits inline; anything longer is referenced by offset.
+    let n_strips = strip_offsets.len() as u32;
+    let inline_or = |values: &[u32], offset: u32| {
+        if values.len() == 1 { long_val(values[0]) } else { long_val(offset) }
+    };
+
+    let mut entries: Vec<IfdEntrySpec> = vec![
+        (TAG_IMAGE_WIDTH, 4, 1, long_val(width)),
+        (TAG_IMAGE_LENGTH, 4, 1, long_val(height)),
+        (TAG_BITS_PER_SAMPLE, 3, spp as u32, long_val(bits_offset)),
+        (TAG_COMPRESSION, 3, 1, short_val(1)),
+        (TAG_PHOTOMETRIC, 3, 1, short_val(2)), // RGB
+        (TAG_STRIP_OFFSETS, 4, n_strips, inline_or(&strip_offsets, offsets_offset)),
+        (TAG_SAMPLES_PER_PIXEL, 3, 1, short_val(spp)),
+        (TAG_ROWS_PER_STRIP, 4, 1, long_val(rows_per_strip)),
+        (TAG_STRIP_BYTE_COUNTS, 4, n_strips, inline_or(&strip_counts, counts_offset)),
+        (TAG_PLANAR_CONFIG, 3, 1, short_val(2)), // separate sample planes
+        (TAG_SAMPLE_FORMAT, 3, spp as u32, long_val(format_offset)),
+    ];
+    entries.sort_by_key(|e| e.0);
+
+    buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for (tag, ftype, count, val) in &entries {
+        buf.extend_from_slice(&tag.to_le_bytes());
+        buf.extend_from_slice(&ftype.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        buf.extend_from_slice(val);
+    }
+    buf.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+    buf
+}
+
+/// A planar file must decode to exactly the same planes as the chunky file
+/// holding the same pixels — the interleaving is the only difference. Run at
+/// one strip per plane and at one strip per *row*, since planar splits strips
+/// per plane (StripsPerImage x SamplesPerPixel of them) rather than per image.
+#[test]
+fn planar_rgb8_decodes_same_planes_as_chunky() {
+    let pixels = [(10u8, 20, 30), (40, 50, 60), (70, 80, 90), (100, 110, 120)];
+    let (w, h) = (2u32, 2u32);
+    let planes: Vec<Vec<u8>> = (0..3)
+        .map(|p| pixels.iter().map(|px| [px.0, px.1, px.2][p]).collect())
+        .collect();
+
+    let chunky = TiffStack::open({
+        let path = unique_temp_path("chunky_rgb8.tif");
+        std::fs::write(&path, build_rgb8_tiff(w, h, &pixels)).unwrap();
+        path
+    })
+    .expect("chunky RGB8 should parse");
+
+    for rows_per_strip in [h, 1] {
+        let path = unique_temp_path(&format!("planar_rgb8_rps{rows_per_strip}.tif"));
+        // sample_format 1 = unsigned integer, matching the chunky builder.
+        std::fs::write(&path, build_planar_tiff(w, h, 8, 1, &planes, rows_per_strip)).unwrap();
+        let stack = TiffStack::open(&path).expect("planar RGB8 should parse");
+
+        let frame = &stack.frames[0];
+        assert_eq!(frame.samples_per_pixel, 3);
+        assert_eq!(frame.planar_config, 2);
+        assert!(frame.is_planar(), "frame should be detected as planar");
+        assert!(frame.is_rgb(), "planar RGB is still RGB");
+        assert_eq!(frame.strip_offsets.len(), 3 * h.div_ceil(rows_per_strip) as usize);
+
+        let cf = &chunky.frames[0];
+        for p in 0..3 {
+            let got = fast_tiff_lib::read_plane_u16(&stack.mmap, frame, stack.byte_order, None, p).unwrap();
+            let want = fast_tiff_lib::read_plane_u16(&chunky.mmap, cf, chunky.byte_order, None, p).unwrap();
+            assert_eq!(got, want, "u16 plane {p} @ {rows_per_strip} rows/strip");
+
+            let got8 = fast_tiff_lib::read_plane_u8(&stack.mmap, frame, stack.byte_order, p).unwrap();
+            let want8 = fast_tiff_lib::read_plane_u8(&chunky.mmap, cf, chunky.byte_order, p).unwrap();
+            assert_eq!(got8, want8, "u8 plane {p} @ {rows_per_strip} rows/strip");
+        }
+        // The single-pass all-planes reader must agree with the per-plane one.
+        let all = fast_tiff_lib::read_planes_u16(&stack.mmap, frame, stack.byte_order, None).unwrap();
+        assert_eq!(all.len(), 3);
+        for (p, plane) in all.iter().enumerate() {
+            assert_eq!(
+                *plane,
+                fast_tiff_lib::read_plane_u16(&stack.mmap, frame, stack.byte_order, None, p).unwrap()
+            );
+        }
+    }
+}
+
+/// The other half of what `gen_sample_tiff.py` produces: a `(4, H, W)` float64
+/// array, which `tifffile` writes as a 4-sample planar frame (RGB + one extra
+/// sample). Every plane must come back with its own values, not the first one's.
+#[test]
+fn opens_planar_float64_tiff() {
+    let (w, h) = (2u32, 2u32);
+    let values: Vec<Vec<f64>> = (0..4)
+        .map(|p| (0..4).map(|i| p as f64 * 10.0 + i as f64 * 0.5).collect())
+        .collect();
+    let planes: Vec<Vec<u8>> = values
+        .iter()
+        .map(|plane| plane.iter().flat_map(|v| v.to_le_bytes()).collect())
+        .collect();
+
+    let path = unique_temp_path("planar_f64.tif");
+    // sample_format 3 = IEEE float.
+    std::fs::write(&path, build_planar_tiff(w, h, 64, 3, &planes, h)).unwrap();
+    let stack = TiffStack::open(&path).expect("planar float64 should parse");
+
+    let frame = &stack.frames[0];
+    assert_eq!(frame.samples_per_pixel, 4);
+    assert_eq!(frame.bits_per_sample, 64);
+    assert_eq!(frame.sample_format, fast_tiff_lib::SampleFormat::Float);
+
+    for (p, want) in values.iter().enumerate() {
+        let got = fast_tiff_lib::read_plane_f32(&stack.mmap, frame, stack.byte_order, p).unwrap();
+        let want: Vec<f32> = want.iter().map(|&v| v as f32).collect();
+        assert_eq!(got, want, "plane {p}");
+    }
 }
 
 /// Builds a chained multi-IFD 16-bit grayscale TIFF with one frame per `(w, h)`

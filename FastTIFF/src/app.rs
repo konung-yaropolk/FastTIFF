@@ -1018,7 +1018,7 @@ impl eframe::App for ViewerApp {
                     // File-metadata pop-up toggle, pushed to the row's right edge.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .button(RichText::new("</>").size(16.0))
+                            .button(RichText::new("(i)").size(16.0))
                             .on_hover_text("See metadata")
                             .clicked()
                         {
@@ -1069,13 +1069,32 @@ impl eframe::App for ViewerApp {
                     for (c, settings) in loaded.channel_settings.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             let label = if rgb {
-                                ["R", "G", "B", "A"].get(c).copied().unwrap_or("Ch").to_string()
+                                // Sample planes past RGBA have no conventional
+                                // letter — number them instead.
+                                ["R", "G", "B", "A"]
+                                    .get(c)
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| format!("S{}", c + 1))
                             } else {
                                 format!("Ch {}", c + 1)
                             };
                             // Fixed-width checkbox so every slider starts at the
                             // same x regardless of label length.
-                            ui.add_sized(egui::vec2(48.0, 18.0), egui::Checkbox::new(&mut settings.enabled, label));
+                            let check = ui.add_sized(
+                                egui::vec2(48.0, 18.0),
+                                egui::Checkbox::new(&mut settings.enabled, label),
+                            );
+                            // Samples past RGB start off (see `setup_rgb`) — say
+                            // why, on the row it applies to.
+                            if rgb && c >= 3 {
+                                check.on_hover_text(
+                                    "Extra sample plane beyond RGB (TIFF ExtraSamples). Usually alpha, \
+                                     but writers also put real data here — a (4, H, W) array saved by \
+                                     tifffile lands as RGB + this. Off by default because compositing \
+                                     an opaque alpha plane washes the image out; enable it to see the \
+                                     data.",
+                                );
+                            }
                             let value = format!(
                                 "{} – {}",
                                 format_calibrated(calibration, settings.min),
