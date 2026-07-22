@@ -21,7 +21,7 @@ pub(super) fn format_calibrated(calibration: Option<(f64, f64)>, raw: f32) -> St
 /// The contrast range sliders never draw narrower than this, no matter how
 /// small the window gets — below it the two handles collide and the slider
 /// stops being usable. The value text to the right clips first.
-pub(super) const MIN_CONTRAST_SLIDER_W: f32 = 25.0;
+pub(super) const MIN_CONTRAST_SLIDER_W: f32 = 60.0;
 
 /// A two-handle horizontal range slider editing `(min, max)` within the
 /// inclusive track `[lo, hi]` (all in raw sample units). The handles can't
