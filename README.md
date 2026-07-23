@@ -1,7 +1,7 @@
 # FastTIFF - a lightning-fast multi-frame 2D- and 3D-viewer with ImageJ-compatible GPU-rendering
 
 [![Release](https://img.shields.io/github/v/release/konung-yaropolk/FastTIFF?label=release)](https://github.com/konung-yaropolk/FastTIFF/releases)
-[![Crates.io](https://img.shields.io/crates/v/fast-tiff-lib?color=yellow)](https://crates.io/crates/fast-tiff-lib)
+[![Crates.io](https://img.shields.io/crates/v/fast-tiff-lib?color=yellow&label=fast-tiff-lib)](https://crates.io/crates/fast-tiff-lib)
 [![License](https://img.shields.io/badge/license-%20%20GNU%20GPLv3%20-green)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/release.yml?label=build)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
 [![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/ci.yml)
