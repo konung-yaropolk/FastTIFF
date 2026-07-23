@@ -700,6 +700,7 @@ impl eframe::App for ViewerApp {
                                 .monospace(),
                         );
                         if let Some(interval) = meta.frame_interval_s {
+                            ui.separator();
                             let max_time = meta.frames.saturating_sub(1) as f64 * interval;
                             let time_width = format!("{max_time:.3}").len();
                             let current_time = loaded.frame_index as f64 * interval;
@@ -1024,6 +1025,9 @@ impl eframe::App for ViewerApp {
                         {
                             metadata_toggle = true;
                         }
+                        // Layout is right-to-left, so this lands to the button's
+                        // left — separating it from the controls before it.
+                        ui.separator();
                     });
                 });
                 if !loaded.rgb {
