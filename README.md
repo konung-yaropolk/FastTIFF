@@ -93,7 +93,7 @@ spin that wgpu triggers on some machines. Only the selected backend is compiled
 in — the other's dependencies are excluded entirely.
 
 
-## test and lint
+## Test and lint
 
 Unit Test:
 ```sh
