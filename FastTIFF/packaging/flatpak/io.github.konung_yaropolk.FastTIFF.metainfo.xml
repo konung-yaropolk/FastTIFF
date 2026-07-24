@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metainfo for the Flatpak build. Basename must match the app ID. -->
+<component type="desktop-application">
+  <id>io.github.konung_yaropolk.FastTIFF</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>Fast TIFF Viewer</name>
+  <summary>Lightning-fast multi-frame 2D and 3D TIFF viewer</summary>
+  <description>
+    <p>
+      FastTIFF is a fast viewer for large multi-frame scientific TIFF stacks
+      (ImageJ hyperstacks and OME-TIFF). It memory-maps the file and renders
+      frames on the GPU, so scrubbing through a multi-gigabyte stack stays
+      instant, with no per-frame CPU image processing for the common
+      uncompressed case.
+    </p>
+    <ul>
+      <li>2D movie scrubbing and a GPU ray-marched 3D volume view</li>
+      <li>8/16/32/64-bit integer and 32/64-bit float, grayscale, composite and RGB</li>
+      <li>Per-channel contrast, LUTs, colormaps, and pseudocolor</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.konung_yaropolk.FastTIFF.desktop</launchable>
+  <url type="homepage">https://github.com/konung-yaropolk/FastTIFF</url>
+  <url type="bugtracker">https://github.com/konung-yaropolk/FastTIFF/issues</url>
+  <provides>
+    <binary>FastTIFF</binary>
+  </provides>
+  <categories>
+    <category>Graphics</category>
+    <category>Science</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.9.0" date="2026-07-24"/>
+  </releases>
+</component>

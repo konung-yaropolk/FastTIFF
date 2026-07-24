@@ -1,0 +1,62 @@
+# Flatpak manifest for FastTIFF (Linux / glow OpenGL backend).
+#
+# Built by the build-flatpak job in .github/workflows/release.yml. Because the
+# flatpak-builder sandbox has no network during the build, the job first runs
+# flatpak-cargo-generator on Cargo.lock to produce `generated-sources.json` (the
+# offline crate vendoring referenced under `sources:` below) — so that file
+# won't exist in a fresh checkout; generate it before building locally:
+#     python3 flatpak-cargo-generator.py Cargo.lock -o generated-sources.json
+#
+# App ID uses the reverse-DNS `io.github.<user>` form (GitHub username's hyphen
+# becomes an underscore — Flatpak IDs disallow hyphens). It must match the
+# basenames of the exported .desktop / .metainfo / icon files.
+id: io.github.konung_yaropolk.FastTIFF
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: FastTIFF
+
+finish-args:
+  - --share=ipc
+  # winit is forced to X11 on Linux (see main.rs), delivered via the X11 socket;
+  # wayland is offered too for compositors that prefer it.
+  - --socket=fallback-x11
+  - --socket=wayland
+  # GPU access for the OpenGL (glow) renderer.
+  - --device=dri
+  # A viewer only reads files; grant read-only access to the host so files
+  # opened via drag-drop or the command line resolve (the file dialog itself
+  # goes through the portal and needs no static permission).
+  - --filesystem=host:ro
+
+modules:
+  - name: fasttiff
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        # Cargo reads the vendored-sources config that generated-sources.json
+        # drops here; the build dir is /run/build/<module-name>.
+        CARGO_HOME: /run/build/fasttiff/cargo
+    # Export the .desktop / icons / metainfo under the app ID so the desktop
+    # entry and its icon are picked up. The committed .desktop uses
+    # `Icon=fasttiff`; rewrite it to the app ID the exported icon is named by.
+    build-commands:
+      - cargo --offline build --release -p FastTIFF --no-default-features --features renderer-glow
+      - install -Dm755 target/release/FastTIFF /app/bin/FastTIFF
+      - install -Dm644 FastTIFF/packaging/fasttiff.desktop /app/share/applications/io.github.konung_yaropolk.FastTIFF.desktop
+      - sed -i 's/^Icon=.*/Icon=io.github.konung_yaropolk.FastTIFF/' /app/share/applications/io.github.konung_yaropolk.FastTIFF.desktop
+      - install -Dm644 FastTIFF/icon/icon256.png /app/share/icons/hicolor/256x256/apps/io.github.konung_yaropolk.FastTIFF.png
+      - install -Dm644 FastTIFF/icon/icon128.png /app/share/icons/hicolor/128x128/apps/io.github.konung_yaropolk.FastTIFF.png
+      - install -Dm644 FastTIFF/icon/icon64.png /app/share/icons/hicolor/64x64/apps/io.github.konung_yaropolk.FastTIFF.png
+      - install -Dm644 FastTIFF/icon/icon48.png /app/share/icons/hicolor/48x48/apps/io.github.konung_yaropolk.FastTIFF.png
+      - install -Dm644 FastTIFF/icon/icon32.png /app/share/icons/hicolor/32x32/apps/io.github.konung_yaropolk.FastTIFF.png
+      - install -Dm644 FastTIFF/packaging/flatpak/io.github.konung_yaropolk.FastTIFF.metainfo.xml /app/share/metainfo/io.github.konung_yaropolk.FastTIFF.metainfo.xml
+    sources:
+      # The whole repo (build-dir/repo live outside it in CI, so no recursion).
+      - type: dir
+        path: ../../..
+      # Vendored crates + cargo config, generated from Cargo.lock in CI.
+      - generated-sources.json

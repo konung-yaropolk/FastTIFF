@@ -1,8 +1,11 @@
 name: Release
 
-# Runs when you publish a GitHub Release. Builds the app for Windows, Linux
-# (.deb + Arch .pkg.tar.zst), and macOS (.dmg, arm64 + x86_64), and attaches
-# every artifact to the release that triggered the run.
+# Runs when you publish a GitHub Release. Builds the app for Windows (portable
+# .exe + Inno Setup installer), Linux (.deb, .rpm, Arch .pkg.tar.zst, and a
+# Flatpak bundle — the last three all x86_64 + arm64), and macOS (.dmg, arm64 +
+# x86_64), and attaches every artifact to the release that triggered the run.
+# Jobs are independent: a failing packager attaches nothing but never blocks the
+# release or the other packages.
 #
 # Icons are committed, pre-rendered from icon.svg by tools/generate-icons.bat
 # (run once at dev time). icon.svg uses an SVG mesh gradient that headless CLI
@@ -52,6 +55,28 @@ jobs:
           files: FastTIFF.exe
           # to give versioned name:
           # files: FastTIFF-${{ github.event.release.tag_name }}.exe
+
+      # Package the same exe into an installer (Start Menu + optional desktop
+      # shortcut, .tif/.tiff "Open with" registration, uninstaller) with Inno
+      # Setup — reads FastTIFF/packaging/windows/fasttiff.iss. No rebuild: it
+      # bundles the FastTIFF.exe staged above. Ships alongside the portable .exe
+      # so users can pick either.
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $ver = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages `
+            | Where-Object { $_.name -eq 'FastTIFF' } | Select-Object -ExpandProperty version
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc "/DMyAppVersion=$ver" FastTIFF\packaging\windows\fasttiff.iss
+
+      - name: Attach installer to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: FastTIFF-*-setup.exe
 
   # Builds the Debian/Ubuntu .deb with cargo-deb and attaches it to the release,
   # alongside the Windows .exe above. Runs once per architecture on a native
@@ -108,6 +133,57 @@ jobs:
         with:
           files: target/debian/*.deb
 
+  # Builds the Fedora/RHEL/openSUSE .rpm with cargo-generate-rpm (pure Rust — no
+  # rpmbuild) and attaches it, mirroring the .deb job: same native runners
+  # (ubuntu-24.04 -> x86_64, ubuntu-24.04-arm -> aarch64), same glow backend,
+  # same system build-deps. Reads [package.metadata.generate-rpm] from
+  # FastTIFF/Cargo.toml. Like the .deb, it links the runner's glibc, so it
+  # targets recent RPM distros.
+  build-linux-rpm:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Same build-time libs the glow GUI links as the .deb job.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libgtk-3-dev libgl1-mesa-dev \
+            libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libxkbcommon-dev libwayland-dev
+
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked
+
+      # Linux ships glow (OpenGL), same rationale as the .deb (see that job).
+      # The release profile already strips the binary, which cargo-generate-rpm
+      # packages as-is; auto-req still reads the ELF's NEEDED sonames.
+      - name: Build release binary (glow)
+        run: cargo build --release -p FastTIFF --no-default-features --features renderer-glow
+
+      # Run from the workspace root so the metadata's root-relative asset paths
+      # resolve. Output: target/generate-rpm/fasttiff-<version>-1.<arch>.rpm
+      # (arch auto-detected from the binary, so the two runners don't collide).
+      - name: Build .rpm
+        run: cargo generate-rpm -p FastTIFF
+
+      - name: Attach .rpm to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/generate-rpm/*.rpm
+
   # Builds a pacman package (.pkg.tar.zst) from FastTIFF/packaging/arch/PKGBUILD when a
   # GitHub Release is published, and attaches it to that release — the Arch
   # counterpart to the .deb / .exe jobs in release.yml.
@@ -152,6 +228,69 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: /home/builder/*.pkg.tar.zst
+
+  # Builds a distributable Flatpak bundle (.flatpak) for both architectures on
+  # native runners (ubuntu-24.04 -> x86_64, ubuntu-24.04-arm -> aarch64) and
+  # attaches it. Ships the glow (OpenGL) backend, like the other Linux packages.
+  #
+  # The flatpak-builder sandbox has no build-time network, so crates are vendored
+  # first: flatpak-cargo-generator turns Cargo.lock into generated-sources.json,
+  # which the manifest (FastTIFF/packaging/flatpak/…yml) references. The app is
+  # then compiled offline inside the org.freedesktop 24.08 SDK + rust-stable
+  # extension. No Rust toolchain is needed on the host — only Cargo.lock.
+  build-flatpak:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install flatpak + builder + generator deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            flatpak flatpak-builder python3-aiohttp python3-toml
+          flatpak remote-add --user --if-not-exists flathub \
+            https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive flathub \
+            org.freedesktop.Platform//24.08 \
+            org.freedesktop.Sdk//24.08 \
+            org.freedesktop.Sdk.Extension.rust-stable//24.08
+
+      # Vendor every crate from Cargo.lock into generated-sources.json (offline
+      # sources the manifest pulls in), next to the manifest.
+      - name: Generate offline cargo sources
+        run: |
+          curl -sSL -o flatpak-cargo-generator.py \
+            https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
+          python3 flatpak-cargo-generator.py Cargo.lock \
+            -o FastTIFF/packaging/flatpak/generated-sources.json
+
+      # Keep build-dir/repo OUTSIDE the checkout: the manifest's `dir` source is
+      # the repo root, so building inside it would recurse.
+      - name: Build Flatpak bundle
+        run: |
+          set -euo pipefail
+          VERSION="$(awk -F'"' '/^version = / {print $2; exit}' FastTIFF/Cargo.toml)"
+          flatpak-builder --user --disable-rofiles-fuse --force-clean \
+            --repo="$RUNNER_TEMP/repo" "$RUNNER_TEMP/build-dir" \
+            FastTIFF/packaging/flatpak/io.github.konung_yaropolk.FastTIFF.yml
+          flatpak build-bundle "$RUNNER_TEMP/repo" \
+            "FastTIFF-${VERSION}-${{ matrix.arch }}.flatpak" \
+            io.github.konung_yaropolk.FastTIFF
+          echo "FLATPAK_NAME=FastTIFF-${VERSION}-${{ matrix.arch }}.flatpak" >> "$GITHUB_ENV"
+
+      - name: Attach .flatpak to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.FLATPAK_NAME }}
 
   # Builds the macOS .app bundle and packages it into a .dmg, then attaches it
   # to the release — the macOS counterpart to the .exe / .deb / pacman jobs above.

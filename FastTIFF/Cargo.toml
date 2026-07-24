@@ -100,3 +100,38 @@ assets = [
     ["icon/icon128.png", "usr/share/icons/hicolor/128x128/apps/fasttiff.png", "644"],
     ["icon/icon256.png", "usr/share/icons/hicolor/256x256/apps/fasttiff.png", "644"],
 ]
+
+# `cargo generate-rpm` packaging (Fedora/RHEL/openSUSE) — the RPM counterpart to
+# [package.metadata.deb], used by the build-linux-rpm job in
+# .github/workflows/release.yml. cargo-generate-rpm is pure Rust (no rpmbuild
+# needed), so the RPM is built on the same Ubuntu runner as the .deb. That means
+# it links the runner's glibc, so it targets *recent* RPM distros (glibc ≥ the
+# build image's) — the same portability envelope as the .deb.
+#
+# `cargo generate-rpm -p FastTIFF` runs from the WORKSPACE ROOT, so these asset
+# `source` paths are workspace-root-relative (unlike the deb assets above, which
+# cargo-deb resolves against this manifest's dir). Output lands in
+# target/generate-rpm/fasttiff-<version>-1.<arch>.rpm (arch auto-detected).
+[package.metadata.generate-rpm]
+name = "fasttiff"
+# `builtin`: scan the ELF's NEEDED sonames and emit `libfoo.so.N()(64bit)`
+# Requires, which every RPM distro resolves through its own package Provides —
+# more portable than hard-coding Fedora vs openSUSE package names, and it works
+# when building on a non-RPM host (Ubuntu) where the usual find-requires helper
+# isn't present.
+auto-req = "builtin"
+# Mirror the .deb/PKGBUILD lowercase `fasttiff` -> `FastTIFF` convenience symlink.
+# Guard the %postun so it only fires on real removal ($1 == 0), not on an upgrade
+# (where the new %post has already recreated the link).
+post_install_script = "ln -sf FastTIFF /usr/bin/fasttiff"
+post_uninstall_script = "if [ \"$1\" = 0 ]; then rm -f /usr/bin/fasttiff; fi"
+assets = [
+    { source = "target/release/FastTIFF", dest = "/usr/bin/FastTIFF", mode = "755" },
+    { source = "FastTIFF/packaging/fasttiff.desktop", dest = "/usr/share/applications/fasttiff.desktop", mode = "644" },
+    { source = "FastTIFF/icon/icon16.png", dest = "/usr/share/icons/hicolor/16x16/apps/fasttiff.png", mode = "644" },
+    { source = "FastTIFF/icon/icon32.png", dest = "/usr/share/icons/hicolor/32x32/apps/fasttiff.png", mode = "644" },
+    { source = "FastTIFF/icon/icon48.png", dest = "/usr/share/icons/hicolor/48x48/apps/fasttiff.png", mode = "644" },
+    { source = "FastTIFF/icon/icon64.png", dest = "/usr/share/icons/hicolor/64x64/apps/fasttiff.png", mode = "644" },
+    { source = "FastTIFF/icon/icon128.png", dest = "/usr/share/icons/hicolor/128x128/apps/fasttiff.png", mode = "644" },
+    { source = "FastTIFF/icon/icon256.png", dest = "/usr/share/icons/hicolor/256x256/apps/fasttiff.png", mode = "644" },
+]
