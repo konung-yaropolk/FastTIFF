@@ -1,8 +1,8 @@
 [package]
 name = "fast-tiff-lib"
-version = "0.8.3"
+version = "0.9.0"
 edition = "2021"
-description = "Lazy, memory-mapped reader/writer for TIFF files: IFD indexing, ImageJ metadata/LUT parsing, and per-frame strip decoding."
+description = "Lazy, memory-mapped reader/writer for TIFF files: IFD indexing, ImageJ + OME-TIFF metadata parsing, and per-frame strip decoding."
 license = "MPL-2.0"
 readme = "README.md"
 repository = "https://github.com/konung-yaropolk/FastTIFF"
@@ -24,5 +24,6 @@ zstd = "0.13"      # ZSTD codec (compression = 50000, libtiff/GDAL extension)
 anyhow = "1.0"
 bytemuck = { version = "1.25", features = ["extern_crate_alloc"] }
 rayon = "1.10"     # data-parallel strip decompression + 32-bit conversion
+quick-xml = "0.37" # OME-TIFF metadata (OME-XML in ImageDescription)
 
 [dev-dependencies]

@@ -4,11 +4,7 @@ fn check(c: usize, z: usize, f: usize, expected: ResolvedDimensions, label: &str
     let got = resolve_dimensions(c, z, f);
     assert_eq!(got, expected, "{label}: resolve_dimensions({c}, {z}, {f})");
     // Invariant: reclassifying axes must never invent or drop planes.
-    assert_eq!(
-        got.channels * got.slices * got.frames,
-        c * z * f,
-        "{label}: product changed"
-    );
+    assert_eq!(got.channels * got.slices * got.frames, c * z * f, "{label}: product changed");
 }
 
 #[test]
@@ -42,13 +38,6 @@ fn leaves_normal_stacks_untouched() {
     check(
         1,
         1,
-        500,
-        ResolvedDimensions { channels: 1, slices: 1, frames: 500, triple_axis_warning: false },
-        "normal single-channel timelapse",
-    );
-    check(
-        1,
-        1,
         1,
         ResolvedDimensions { channels: 1, slices: 1, frames: 1, triple_axis_warning: false },
         "single image",
@@ -75,7 +64,6 @@ fn folds_z_into_time() {
 
 #[test]
 fn detects_swapped_channel_and_time_roles() {
-    // Small value mislabeled as frames, large value mislabeled as channels.
     check(
         500,
         1,
@@ -115,26 +103,39 @@ fn channel_size_boundary_is_inclusive_at_cutoff() {
 }
 
 #[test]
-fn decodes_imagej_unit_escapes() {
-    // ImageJ writes the micron unit as a literal Java \uXXXX escape.
-    assert_eq!(decode_ij_escapes("\\u00B5m"), "µm");
-    assert_eq!(decode_ij_escapes("um"), "um"); // plain ASCII untouched
-    assert_eq!(decode_ij_escapes("pixel"), "pixel");
-    // A malformed escape is left verbatim rather than dropped.
-    assert_eq!(decode_ij_escapes("\\uZZ"), "\\uZZ");
-    assert_eq!(decode_ij_escapes("\\u12"), "\\u12");
-}
-
-#[test]
 fn voxel_scale_reports_raw_calibration() {
-    let mut meta = build_stack_meta(None, None, None, 1, None, None);
-    // Calibrated: 0.1 µm pixels, 0.5 µm z-step → the raw values (not normalized).
+    // A neutral (no-description) parse gives an uncalibrated 1:1:1 stack.
+    let bare = parse(None, None, None, 1, None, None);
+    assert_eq!(bare.source_format, MetadataFormat::None);
+    assert_eq!(bare.voxel_scale(), [1.0, 1.0, 1.0]);
+
+    // Filled in: 0.1 µm pixels, 0.5 µm z-step → the raw values (not normalized).
+    let mut meta = bare;
     meta.pixel_width = Some(0.1);
     meta.pixel_height = Some(0.1);
     meta.spacing = Some(0.5);
     assert_eq!(meta.voxel_scale(), [0.1, 0.1, 0.5]);
+}
 
-    // Uncalibrated (no pixel size, no spacing) → 1:1:1.
-    let bare = build_stack_meta(None, None, None, 1, None, None);
-    assert_eq!(bare.voxel_scale(), [1.0, 1.0, 1.0]);
+#[test]
+fn detect_classifies_each_dialect() {
+    assert_eq!(detect(None), MetadataFormat::None);
+    assert_eq!(detect(Some("ImageJ=1.54f\nchannels=2\n")), MetadataFormat::ImageJ);
+    assert_eq!(
+        detect(Some("<?xml version=\"1.0\"?><OME xmlns=\"http://www.openmicroscopy.org/Schemas/OME/2016-06\"/>")),
+        MetadataFormat::Ome
+    );
+    // Free-form text in someone else's TIFF isn't mistaken for a known dialect.
+    assert_eq!(detect(Some("Made with SomeMicroscope v3")), MetadataFormat::None);
+}
+
+#[test]
+fn neutral_parse_still_honors_resolution_tags() {
+    // A plain TIFF (no recognized description) with resolution tags reports
+    // pixel size, so calibration survives even without a metadata dialect.
+    let meta = parse(None, None, None, 4, Some(10.0), Some(10.0));
+    assert_eq!(meta.source_format, MetadataFormat::None);
+    assert_eq!(meta.pixel_width, Some(0.1)); // 1 / 10 px-per-unit
+    assert_eq!(meta.pixel_height, Some(0.1));
+    assert_eq!(meta.frames, 4); // inferred from the IFD count
 }

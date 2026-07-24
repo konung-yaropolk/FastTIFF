@@ -154,6 +154,12 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Loa
                 };
                 kv(ui, "Byte order", order);
                 kv(ui, "Planes (IFDs)", tiff.frames.len().to_string());
+                let meta_format = match tiff.meta.source_format {
+                    fast_tiff_lib::MetadataFormat::ImageJ => "ImageJ",
+                    fast_tiff_lib::MetadataFormat::Ome => "OME-XML",
+                    _ => "—",
+                };
+                kv(ui, "Metadata", meta_format);
             });
 
             if let Some(f) = tiff.frames.first() {

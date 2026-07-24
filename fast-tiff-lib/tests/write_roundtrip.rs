@@ -5,7 +5,7 @@
 
 use fast_tiff_lib::{
     frame_float_minmax, read_frame_f32, read_frame_u16, read_frame_u8, Compression, DisplayMode,
-    ImageJOptions, SampleType, TiffStack, TiffWriter, WriterOptions,
+    MetadataFormat, SampleType, StackMetaWrite, TiffStack, TiffWriter, WriterOptions,
 };
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -218,8 +218,8 @@ fn imagej_hyperstack_metadata_roundtrips_through_stack_meta() {
     let _cleanup = Cleanup(path.clone());
 
     // 2 channels x 3 time frames = 6 planes.
-    let opts = WriterOptions::new(2, 2, SampleType::U16).imagej(
-        ImageJOptions::new(2, 1)
+    let opts = WriterOptions::new(2, 2, SampleType::U16).metadata(
+        StackMetaWrite::new(2, 1)
             .mode(DisplayMode::Composite)
             .fps(12.5)
             .frame_interval_s(0.08)
@@ -238,6 +238,7 @@ fn imagej_hyperstack_metadata_roundtrips_through_stack_meta() {
 
     let stack = TiffStack::open(&path).unwrap();
     let meta = &stack.meta;
+    assert_eq!(meta.source_format, MetadataFormat::ImageJ);
     assert_eq!(meta.channels, 2);
     assert_eq!(meta.slices, 1);
     assert_eq!(meta.frames, 3);
@@ -254,6 +255,52 @@ fn imagej_hyperstack_metadata_roundtrips_through_stack_meta() {
     // including keys without a parsed field (the extra() escape hatch).
     let desc = stack.description.as_deref().expect("raw description exposed");
     assert!(desc.contains("vunit=V"), "raw description keeps extra keys:\n{desc}");
+}
+
+/// The same neutral metadata builder, written as OME instead of ImageJ, must
+/// produce a file that opens as OME with the dimensions, pixel size, and pixels
+/// intact — the end-to-end proof of OME write+read through a real file.
+#[test]
+fn ome_metadata_roundtrips_through_stack_meta() {
+    let path = unique_temp_path("ome.tif");
+    let _cleanup = Cleanup(path.clone());
+
+    // 2 channels x 3 time frames = 6 planes.
+    let opts = WriterOptions::new(2, 2, SampleType::U16)
+        .metadata_format(MetadataFormat::Ome)
+        .metadata(
+            StackMetaWrite::new(2, 1)
+                .mode(DisplayMode::Composite)
+                .unit("µm")
+                .pixel_size(0.1, 0.1)
+                .frame_interval_s(1.5)
+                .channel("DAPI", [0, 0, 255])
+                .channel("GFP", [0, 255, 0]),
+        );
+    let mut w = TiffWriter::create(&path, opts).unwrap();
+    let frames: Vec<[u16; 4]> = (0..6).map(|i| [i, i + 1, i + 2, i + 3]).collect();
+    for f in &frames {
+        w.write_frame_u16(f).unwrap();
+    }
+    w.finish().unwrap();
+
+    let stack = TiffStack::open(&path).unwrap();
+    let meta = &stack.meta;
+    assert_eq!(meta.source_format, MetadataFormat::Ome);
+    assert_eq!((meta.channels, meta.slices, meta.frames), (2, 1, 3));
+    assert_eq!(meta.mode, DisplayMode::Composite);
+    assert_eq!(meta.unit.as_deref(), Some("µm"));
+    assert_eq!(meta.pixel_width, Some(0.1));
+    assert_eq!(meta.pixel_height, Some(0.1));
+    assert_eq!(meta.frame_interval_s, Some(1.5));
+    // The raw description is genuinely OME-XML, not ImageJ key=value.
+    let desc = stack.description.as_deref().expect("raw description");
+    assert!(desc.contains("<OME"), "description should be OME-XML:\n{desc}");
+    // Pixels survive: each written frame decodes back to what went in.
+    for (i, f) in frames.iter().enumerate() {
+        let got = read_frame_u16(&stack.mmap, &stack.frames[i], stack.byte_order, None).unwrap();
+        assert_eq!(got.as_ref(), &f[..], "frame {i}");
+    }
 }
 
 #[test]

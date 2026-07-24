@@ -8,10 +8,10 @@
 [![Docs](https://img.shields.io/docsrs/fast-tiff-lib?label=docs.rs)](https://docs.rs/fast-tiff-lib)
 
 A lazy, memory-mapped reader — and a streaming writer — for multi-frame
-(ImageJ hyperstack) TIFF files: IFD-chain indexing, ImageJ metadata/LUT
-parsing, and per-frame strip decoding, with a zero-copy fast path for the
-common uncompressed case. The [writer](#writing) emits exactly that fast-path
-layout by default, so files it produces scrub back with no decode work.
+scientific TIFF files: IFD-chain indexing, ImageJ + OME-TIFF metadata parsing,
+and per-frame strip decoding, with a zero-copy fast path for the common
+uncompressed case. The [writer](#writing) emits exactly that fast-path layout by
+default, so files it produces scrub back with no decode work.
 
 It's the decode/parsing engine behind [FastTIFF](https://github.com/konung-yaropolk/FastTIFF),
 split out so it can be used on its own. No GUI, no GPU — just file → pixels +
@@ -28,16 +28,18 @@ metadata (and back).
   formats](#supported-pixel-formats)). For the common case — uncompressed,
   single strip, native byte order — decoding a 16-bit frame is a **zero-copy
   reinterpret** of the mapped bytes (no allocation, no decode pass).
-- **Parses display metadata** from ImageJ's `ImageDescription` (tag 270), the
-  binary `IJMetadata` block, and the TIFF resolution tags: channel/slice/frame
-  counts, display mode, per-channel LUTs + contrast ranges, calibration, `fps`,
-  Z `spacing`, and x/y pixel size (from XResolution/YResolution) — enough to
-  reconstruct the physical voxel scale.
+- **Parses display metadata** from several dialects into one normalized
+  `StackMeta`, picking the dialect by inspecting `ImageDescription` (tag 270):
+  **ImageJ** (`key=value` + the binary `IJMetadata` LUT block) and **OME-TIFF**
+  (OME-XML). Either way you get channel/slice/frame counts, display mode,
+  per-channel LUTs + contrast ranges, calibration, `fps`, Z `spacing`, and x/y
+  pixel size — enough to reconstruct the physical voxel scale. `meta.source_format`
+  says which dialect a file used; new dialects slot in without changing consumers.
 - **Writes multi-frame stacks** streamingly (append a frame at a time, nothing
   buffered but the current frame): 8/16/32/64-bit integer or 32/64-bit float,
   grayscale or RGB (chunky or planar), None/LZW/PackBits/Deflate/ZSTD
-  compression with optional predictor, and ImageJ hyperstack metadata — see
-  [Writing](#writing).
+  compression with optional predictor, and structured metadata in the ImageJ or
+  OME dialect from one neutral builder — see [Writing](#writing).
 
 ### Supported pixel formats
 
@@ -104,6 +106,7 @@ reach (ImageJ metadata, lazy/zero-copy) and where it deliberately stops
 | Tiled | ✗ | ✗ ⁴ | ✗ | ✓ |
 | BigTIFF | ✓ | ✓ | ✗ | ✓ |
 | ImageJ hyperstack metadata | ✓ | ✗ | ✗ | ✗ ⁵ |
+| OME-TIFF metadata (OME-XML) | ✓ | ✗ | ✗ | ✗ ⁵ |
 | Memory-mapped, lazy per-frame decode | ✓ | ✗ | ✗ | ✗ ⁶ |
 | Zero-copy uncompressed frame | ✓ | ✗ | ✗ | ✗ |
 | Streaming (append-a-frame) writer | ✓ | ✗ ⁷ | ✓ | ✓ |
@@ -116,7 +119,7 @@ check their current docs.</sub>
 2. `tiff` *decodes* ZSTD behind a cargo feature but does not *encode* it.
 3. libtiff's ZSTD codec requires building against libzstd (added in libtiff 4.0.7).
 4. `tiff` doesn't handle planar layout; tiled *reading* isn't listed in its README.
-5. libtiff hands back the raw `ImageDescription` text but doesn't parse ImageJ hyperstack semantics (channels/slices/LUTs/calibration).
+5. libtiff hands back the raw `ImageDescription` text but doesn't parse ImageJ/OME hyperstack semantics (channels/slices/LUTs/calibration). This crate reads a minimal but useful OME-XML subset (the `Pixels` core + per-`Channel` name/color); ROIs, instruments, and per-plane records are not modeled.
 6. libtiff reads through its strip/tile API into owned buffers; memory-mapping is left to the caller.
 7. `tiff`'s encoder writes a whole image per call rather than appending frames one at a time.
 
@@ -155,7 +158,7 @@ pub struct TiffStack {
     pub mmap: memmap2::Mmap,        // the mapped file bytes
     pub byte_order: ByteOrder,      // Little or Big (the file's endianness)
     pub frames: Vec<FrameInfo>,     // one entry per IFD/plane, in file order
-    pub meta: StackMeta,            // parsed ImageJ display metadata
+    pub meta: StackMeta,            // normalized display metadata (ImageJ / OME / inferred)
 }
 ```
 
@@ -324,22 +327,34 @@ writer.finish()?; // writes the IFD chain; the file isn't valid without it
   `set_parallel_decode` hint + size floor that governs decoding — one
   threading switch for all CPU-heavy pixel work — and decompress in parallel
   on the way back in. Override with `rows_per_strip(n)`.
-- **Metadata:** `imagej(ImageJOptions...)` embeds an ImageJ hyperstack
-  description — channels/slices (time frames are derived from the plane count
-  at `finish()`), display mode, `fps`, frame interval, unit, `min=`/`max=`
-  display range, linear calibration, Z `spacing`, playback `loop`, plus
-  `extra(key, value)` for any other documented key. Or `description(text)`
-  for a fully verbatim `ImageDescription` — either way, the reader hands the
-  whole tag 270 text back via `TiffStack::description`.
+- **Metadata:** fill one neutral `metadata(StackMetaWrite...)` builder —
+  channels/slices (time frames are derived from the plane count at `finish()`),
+  display mode, `fps`, frame interval, unit, `min`/`max` display range, linear
+  calibration, Z `spacing`, playback `loop`, physical `pixel_size` (written to
+  the resolution tags), per-`channel(name, color)`, plus `extra(key, value)` —
+  then pick the dialect with `metadata_format(MetadataFormat::ImageJ | Ome)`
+  (ImageJ by default). The same input serializes to either an ImageJ
+  `key=value` block or an OME-XML document. Or `description(text)` for a fully
+  verbatim `ImageDescription`. Either way the reader hands the whole tag 270
+  text back via `TiffStack::description`, with the parsed view in `meta`.
 
 ```rust
-use fast_tiff_lib::{Compression, DisplayMode, ImageJOptions, SampleType, WriterOptions};
+use fast_tiff_lib::{Compression, DisplayMode, MetadataFormat, SampleType, StackMetaWrite, WriterOptions};
 
-// A 2-channel composite time series, Deflate-compressed:
+// A 2-channel composite time series, Deflate-compressed, written as OME-TIFF.
+// Drop the `.metadata_format(..)` line to write the same metadata as ImageJ.
 let opts = WriterOptions::new(1024, 1024, SampleType::U16)
     .compression(Compression::Deflate)
     .predictor(true)
-    .imagej(ImageJOptions::new(2, 1).mode(DisplayMode::Composite).fps(20.0));
+    .metadata_format(MetadataFormat::Ome)
+    .metadata(
+        StackMetaWrite::new(2, 1)
+            .mode(DisplayMode::Composite)
+            .fps(20.0)
+            .pixel_size(0.1, 0.1)
+            .channel("DAPI", [0, 0, 255])
+            .channel("GFP", [0, 255, 0]),
+    );
 ```
 
 Typed appenders `write_frame_u8` / `write_frame_u16` / `write_frame_f32` /
@@ -368,8 +383,11 @@ the reader's indexing.
   not written — the same envelope the reader accepts. `planar(true)` writes
   `PlanarConfiguration=2` (separate sample planes, strips split per plane);
   chunky is the default and writes no tag at all, which TIFF6 defines as
-  chunky. Binary `IJMetadata` LUT blocks aren't written (contrast ranges go in
-  the description; LUT writing may come later).
+  chunky. Physical `pixel_size` is written to the XResolution/YResolution tags
+  (in either dialect); the unit name travels in the metadata text (ImageJ) or
+  OME-XML `PhysicalSize` (OME). ImageJ output never writes the binary
+  `IJMetadata` LUT block — contrast ranges go in the description and channel
+  colors follow `mode`; OME output carries per-channel colors as `Channel/@Color`.
 
 ### Metadata (`StackMeta`)
 
@@ -387,20 +405,23 @@ pub struct StackMeta {
     pub fps: Option<f64>,
     pub spacing: Option<f64>,               // Z-step between slices (spacing=)
     pub loop_playback: Option<bool>,        // playback looping (loop=)
-    pub pixel_width: Option<f64>,           // x pixel size in `unit`s (from XResolution)
-    pub pixel_height: Option<f64>,          // y pixel size in `unit`s (from YResolution)
-    pub has_explicit_luts: bool,            // file supplied real (colored) per-channel LUTs
+    pub pixel_width: Option<f64>,           // x pixel size in `unit`s (OME PhysicalSize, else XResolution)
+    pub pixel_height: Option<f64>,          // y pixel size in `unit`s (OME PhysicalSize, else YResolution)
+    pub has_explicit_luts: bool,            // file supplied real (colored) per-channel LUTs/colors
+    pub source_format: MetadataFormat,      // ImageJ | Ome | None (which dialect was parsed)
 }
 ```
 
-`has_explicit_luts` reports whether the `IJMetadata` block carried genuine
-colored LUTs (which take priority over the mode-derived default, including over
-`mode=grayscale`) — so a consumer knows not to override the file's own channel
-colors.
+`has_explicit_luts` reports whether the file carried genuine colored LUTs (the
+ImageJ `IJMetadata` block, or OME channel `Color`s) — which take priority over
+the mode-derived default, including over grayscale — so a consumer knows not to
+override the file's own channel colors. `source_format` names the dialect the
+values came from (`None` if the description matched no known dialect and the
+dimensions were inferred from the IFD count).
 
-This is the *parsed ImageJ view* of the metadata. The raw `ImageDescription`
-(tag 270) text is also exposed verbatim — whatever the writer put there,
-ImageJ-formatted or not:
+This is the *normalized view* — the same shape regardless of which dialect the
+file used. The raw `ImageDescription` (tag 270) text is also exposed verbatim —
+whatever the writer put there, ImageJ / OME / neither:
 
 ```rust
 let stack = fast_tiff_lib::TiffStack::open("movie.tif")?;

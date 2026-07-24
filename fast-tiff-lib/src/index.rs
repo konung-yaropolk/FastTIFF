@@ -6,7 +6,7 @@
 //! about how many IFDs there are or what writer produced them.
 
 use crate::ifd::{self, ByteOrder, RawIfdEntry, TiffFlavor};
-use crate::ij_metadata::{self, StackMeta};
+use crate::metadata::{self, StackMeta};
 use anyhow::{anyhow, bail, Result};
 use memmap2::Mmap;
 use std::collections::HashSet;
@@ -33,7 +33,7 @@ pub(crate) const TAG_SAMPLE_FORMAT: u16 = 339;
 // Tags 50838/50839 (IJMetadataByteCounts / IJMetadata) carry ImageJ's binary
 // per-channel LUT/range block. The format is undocumented and best-effort to
 // parse, so it's used only as a supplementary fallback for display info the
-// `ImageDescription` (tag 270) didn't provide — see `ij_metadata`.
+// `ImageDescription` (tag 270) didn't provide — see `metadata::imagej`.
 const TAG_IJ_METADATA_BYTE_COUNTS: u16 = 50838;
 const TAG_IJ_METADATA: u16 = 50839;
 
@@ -218,14 +218,14 @@ impl TiffStack {
         // the same). Only the unambiguous case qualifies: a single
         // uncompressed, predictor-free IFD whose strip data is contiguous.
         if frames.len() == 1 {
-            if let Some(n) = description.as_deref().and_then(ij_metadata::imagej_images_count) {
+            if let Some(n) = description.as_deref().and_then(metadata::imagej::images_count) {
                 if n > 1 {
                     expand_imagej_contiguous(&mut frames, n, mmap.len());
                 }
             }
         }
 
-        let meta = ij_metadata::build_stack_meta(
+        let meta = metadata::parse(
             description.as_deref(),
             ij_metadata_bytes.as_deref(),
             ij_metadata_counts.as_deref(),

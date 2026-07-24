@@ -29,12 +29,13 @@
 //! output carries no PlanarConfiguration entry at all.
 
 use crate::ifd::TiffFlavor;
-use crate::ij_metadata::DisplayMode;
 use crate::index::{
     Compression, TAG_BITS_PER_SAMPLE, TAG_COMPRESSION, TAG_IMAGE_DESCRIPTION, TAG_IMAGE_LENGTH,
     TAG_IMAGE_WIDTH, TAG_PHOTOMETRIC, TAG_PLANAR_CONFIG, TAG_PREDICTOR, TAG_ROWS_PER_STRIP,
     TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS,
+    TAG_X_RESOLUTION, TAG_Y_RESOLUTION,
 };
+use crate::metadata::{self, MetadataFormat, StackMetaWrite, WriteGeometry};
 use anyhow::{anyhow, bail, Result};
 use rayon::prelude::*;
 use std::borrow::Cow;
@@ -45,6 +46,10 @@ use std::path::Path;
 /// ExtraSamples (tag 338): declares samples beyond the photometric base, in
 /// either interleaving (write-side only — the reader splits planes regardless).
 const TAG_EXTRA_SAMPLES: u16 = 338;
+/// ResolutionUnit (tag 296): 1 = none. We write pixel *size* through
+/// XResolution/YResolution and carry the unit name in the metadata text
+/// (matching ImageJ), so the standardized unit is left unspecified.
+const TAG_RESOLUTION_UNIT: u16 = 296;
 
 /// Classic TIFF stores every offset as a u32, so nothing may live at or past
 /// 4 GiB. Files that would exceed this are automatically written as BigTIFF
@@ -91,110 +96,22 @@ impl SampleType {
             SampleType::F32 | SampleType::F64 => 3,
         }
     }
-}
 
-/// ImageJ hyperstack metadata to embed in the file's `ImageDescription`
-/// (tag 270), so ImageJ — and this crate's own reader — sees the plane chain as
-/// channels × Z-slices × time frames instead of a flat image sequence. Planes
-/// are expected in ImageJ's default `xyczt` order (channel fastest, then Z,
-/// then time); the time-frame count is derived at `finish()` from the number of
-/// planes actually written (`planes / (channels * slices)`, which must divide
-/// evenly).
-#[derive(Clone, Debug)]
-pub struct ImageJOptions {
-    channels: usize,
-    slices: usize,
-    mode: DisplayMode,
-    fps: Option<f64>,
-    frame_interval_s: Option<f64>,
-    unit: Option<String>,
-    /// Display window written as `min=`/`max=` (applies to all channels).
-    range: Option<(f64, f64)>,
-    /// Linear calibration `(c0, c1)` written as `cf=0`/`c0=`/`c1=`:
-    /// real value = `c0 + c1 * raw`.
-    calibration: Option<(f64, f64)>,
-    /// Z-step between slices, written as `spacing=`.
-    spacing: Option<f64>,
-    /// Whether playback should loop, written as `loop=`.
-    loop_playback: Option<bool>,
-    /// Extra verbatim `key=value` lines appended to the description, for any
-    /// documented ImageJ key without a dedicated setter (`vunit`, `tunit`, ...).
-    extra: Vec<(String, String)>,
-}
-
-impl ImageJOptions {
-    /// `channels` and `slices` describe the plane order; both are clamped to a
-    /// minimum of 1. Display mode defaults to grayscale (ImageJ's own default
-    /// when `mode=` is absent).
-    pub fn new(channels: usize, slices: usize) -> Self {
-        Self {
-            channels: channels.max(1),
-            slices: slices.max(1),
-            mode: DisplayMode::Grayscale,
-            fps: None,
-            frame_interval_s: None,
-            unit: None,
-            range: None,
-            calibration: None,
-            spacing: None,
-            loop_playback: None,
-            extra: Vec::new(),
+    /// The OME `Pixels/@Type` name for this sample type (`uint16`, `float`, …) —
+    /// for the OME-XML writer. 64-bit integers have no OME name, so they fall
+    /// back to `double` (the widest OME numeric type), matching how this crate
+    /// already treats 64-bit data as `f32`/`f64` for display.
+    fn ome_pixel_type(self) -> &'static str {
+        match self {
+            SampleType::U8 => "uint8",
+            SampleType::I8 => "int8",
+            SampleType::U16 => "uint16",
+            SampleType::I16 => "int16",
+            SampleType::U32 => "uint32",
+            SampleType::I32 => "int32",
+            SampleType::F32 => "float",
+            SampleType::U64 | SampleType::I64 | SampleType::F64 => "double",
         }
-    }
-
-    pub fn mode(mut self, mode: DisplayMode) -> Self {
-        self.mode = mode;
-        self
-    }
-
-    /// Playback rate, written as `fps=`.
-    pub fn fps(mut self, fps: f64) -> Self {
-        self.fps = Some(fps);
-        self
-    }
-
-    /// Seconds between time frames, written as `finterval=`.
-    pub fn frame_interval_s(mut self, seconds: f64) -> Self {
-        self.frame_interval_s = Some(seconds);
-        self
-    }
-
-    /// Spatial unit label (e.g. `"um"`), written as `unit=`.
-    pub fn unit(mut self, unit: impl Into<String>) -> Self {
-        self.unit = Some(unit.into());
-        self
-    }
-
-    /// Display window, written as `min=`/`max=`.
-    pub fn range(mut self, min: f64, max: f64) -> Self {
-        self.range = Some((min, max));
-        self
-    }
-
-    /// Linear pixel calibration: real value = `c0 + c1 * raw`.
-    pub fn calibration(mut self, c0: f64, c1: f64) -> Self {
-        self.calibration = Some((c0, c1));
-        self
-    }
-
-    /// Z-step between slices (in `unit`s), written as `spacing=`.
-    pub fn spacing(mut self, spacing: f64) -> Self {
-        self.spacing = Some(spacing);
-        self
-    }
-
-    /// Whether playback should loop, written as `loop=`.
-    pub fn loop_playback(mut self, looped: bool) -> Self {
-        self.loop_playback = Some(looped);
-        self
-    }
-
-    /// Append a verbatim `key=value` line — the escape hatch for any ImageJ
-    /// description key without a dedicated setter. Appended after the built-in
-    /// keys, in insertion order.
-    pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.extra.push((key.into(), value.into()));
-        self
     }
 }
 
@@ -220,7 +137,8 @@ pub struct WriterOptions {
     predictor: bool,
     rows_per_strip: Option<u32>,
     force_bigtiff: bool,
-    ij: Option<ImageJOptions>,
+    metadata: Option<StackMetaWrite>,
+    metadata_format: MetadataFormat,
     description: Option<String>,
 }
 
@@ -237,7 +155,8 @@ impl WriterOptions {
             predictor: false,
             rows_per_strip: None,
             force_bigtiff: false,
-            ij: None,
+            metadata: None,
+            metadata_format: MetadataFormat::ImageJ,
             description: None,
         }
     }
@@ -321,15 +240,25 @@ impl WriterOptions {
         self
     }
 
-    /// Embed ImageJ hyperstack metadata (mutually exclusive with
-    /// [`description`](Self::description)).
-    pub fn imagej(mut self, ij: ImageJOptions) -> Self {
-        self.ij = Some(ij);
+    /// Embed stack metadata, rendered in the [`metadata_format`] dialect
+    /// (ImageJ by default) into the `ImageDescription` tag at `finish()`.
+    /// Mutually exclusive with [`description`](Self::description).
+    ///
+    /// [`metadata_format`]: Self::metadata_format
+    pub fn metadata(mut self, meta: StackMetaWrite) -> Self {
+        self.metadata = Some(meta);
         self
     }
 
-    /// Embed a verbatim `ImageDescription` text instead of ImageJ metadata
-    /// (mutually exclusive with [`imagej`](Self::imagej)).
+    /// The dialect [`metadata`](Self::metadata) is serialized in — `ImageJ`
+    /// (default) or `Ome`. Has no effect without `metadata(..)`.
+    pub fn metadata_format(mut self, format: MetadataFormat) -> Self {
+        self.metadata_format = format;
+        self
+    }
+
+    /// Embed a verbatim `ImageDescription` text instead of structured metadata
+    /// (mutually exclusive with [`metadata`](Self::metadata)).
     pub fn description(mut self, text: impl Into<String>) -> Self {
         self.description = Some(text.into());
         self
@@ -375,8 +304,13 @@ pub struct TiffWriter<W: Write + Seek> {
     /// construction.
     predictor_tag: u16,
     rows_per_strip: u32,
-    ij: Option<ImageJOptions>,
+    metadata: Option<StackMetaWrite>,
+    metadata_format: MetadataFormat,
     description: Option<String>,
+    /// Physical pixel size (width, height, in the metadata's unit), from
+    /// [`StackMetaWrite::pixel_size`]. Written as XResolution/YResolution tags
+    /// (`resolution = 1 / size`) on every IFD.
+    pixel_size: Option<(f64, f64)>,
     /// Bytes in one strip-splittable row: `width * spp * sample_bytes` chunky,
     /// `width * sample_bytes` planar (a planar row holds one sample plane's
     /// pixels only).
@@ -419,7 +353,8 @@ impl<W: Write + Seek> TiffWriter<W> {
             predictor,
             rows_per_strip,
             force_bigtiff,
-            ij,
+            metadata,
+            metadata_format,
             description,
         } = options;
 
@@ -439,27 +374,23 @@ impl<W: Write + Seek> TiffWriter<W> {
             (true, SampleType::F32 | SampleType::F64) => 3,
             (true, _) => 2,
         };
-        if ij.is_some() && description.is_some() {
-            bail!("imagej(..) and description(..) are mutually exclusive (both write tag 270)");
+        if metadata.is_some() && description.is_some() {
+            bail!("metadata(..) and description(..) are mutually exclusive (both write tag 270)");
         }
         // ASCII fields are NUL-terminated, so an interior NUL would silently
-        // truncate the text on read-back; ImageJ's format is line-oriented, so
-        // stray newlines / '=' in its strings would corrupt the key=value
-        // lines. Reject both up front instead of writing a broken file.
+        // truncate the text on read-back. Reject up front instead of writing a
+        // broken file; the ImageJ dialect additionally forbids newlines / '='.
         if description.as_deref().is_some_and(|d| d.contains('\0')) {
             bail!("description must not contain NUL bytes (TIFF ASCII fields are NUL-terminated)");
         }
-        if let Some(ij) = &ij {
-            let clean = |s: &str| !s.contains('\0') && !s.contains('\n');
-            if !ij.unit.as_deref().map_or(true, clean) {
-                bail!("ImageJ unit must not contain NUL or newline characters");
-            }
-            for (key, value) in &ij.extra {
-                if !clean(key) || key.contains('=') || !clean(value) {
-                    bail!("ImageJ extra key/value {key:?} must not contain NUL, newline, or '=' in the key");
-                }
-            }
+        if let Some(meta) = &metadata {
+            meta.validate_text(metadata_format == MetadataFormat::ImageJ)?;
         }
+        // Pixel size for the resolution tags: taken from the metadata builder.
+        let pixel_size = metadata
+            .as_ref()
+            .and_then(|m| m.pixel_width.zip(m.pixel_height))
+            .filter(|(w, h)| w.is_finite() && *w > 0.0 && h.is_finite() && *h > 0.0);
 
         let spp = samples_per_pixel as usize;
         // PlanarConfiguration is irrelevant for single-sample data (TIFF6), and
@@ -504,8 +435,10 @@ impl<W: Write + Seek> TiffWriter<W> {
             force_bigtiff,
             predictor_tag,
             rows_per_strip,
-            ij,
+            metadata,
+            metadata_format,
             description,
+            pixel_size,
             row_bytes,
             plane_bytes,
             frame_bytes,
@@ -641,10 +574,19 @@ impl<W: Write + Seek> TiffWriter<W> {
             bail!("no frames were written — a TIFF needs at least one image");
         }
 
-        // The ImageDescription for the first IFD: ImageJ metadata (with the
-        // now-known plane count), or the verbatim text, or nothing.
-        let description: Option<String> = match (&self.ij, &self.description) {
-            (Some(ij), _) => Some(build_ij_description(self.frames.len(), ij)?),
+        // The ImageDescription for the first IFD: structured metadata rendered
+        // in the chosen dialect (with the now-known plane count), or the
+        // verbatim text, or nothing.
+        let description: Option<String> = match (&self.metadata, &self.description) {
+            (Some(meta), _) => {
+                let geom = WriteGeometry {
+                    width: self.width,
+                    height: self.height,
+                    samples_per_pixel: self.spp,
+                    ome_pixel_type: self.sample_type.ome_pixel_type(),
+                };
+                Some(metadata::serialize_description(self.metadata_format, meta, self.frames.len(), &geom)?)
+            }
             (None, Some(text)) => Some(text.clone()),
             (None, None) => None,
         };
@@ -800,6 +742,14 @@ impl<W: Write + Seek> TiffWriter<W> {
         }
         entries.push(Entry::short(TAG_SAMPLES_PER_PIXEL, spp));
         entries.push(Entry::long(TAG_ROWS_PER_STRIP, self.rows_per_strip));
+        // Physical pixel size → XResolution/YResolution (pixels per unit =
+        // 1 / size). ResolutionUnit is left "none" (1); the unit name travels
+        // in the metadata text (ImageJ) / OME-XML (`PhysicalSize`).
+        if let Some((pw, ph)) = self.pixel_size {
+            entries.push(Entry::rational(TAG_X_RESOLUTION, resolution_rational(pw)));
+            entries.push(Entry::rational(TAG_Y_RESOLUTION, resolution_rational(ph)));
+            entries.push(Entry::short(TAG_RESOLUTION_UNIT, 1));
+        }
         if big {
             entries.push(Entry::long8s(TAG_STRIP_BYTE_COUNTS, &strips.byte_counts));
         } else {
@@ -826,6 +776,11 @@ impl<W: Write + Seek> TiffWriter<W> {
             TAG_SAMPLE_FORMAT,
             &vec![self.sample_type.format_code(); spp as usize],
         ));
+        // TIFF requires IFD entries in ascending tag order. The pushes above are
+        // already mostly in order, but the optional tags (resolution, planar,
+        // predictor, extrasamples) interleave by tag number — sort so the push
+        // order never has to be kept perfectly by hand.
+        entries.sort_by_key(|e| e.tag);
         entries
     }
 }
@@ -866,6 +821,14 @@ impl Entry {
             data.extend_from_slice(&v.to_le_bytes());
         }
         Entry { tag, ftype: 16, count: vals.len() as u32, data }
+    }
+    /// RATIONAL (type 5) — two u32 (numerator, denominator), for the resolution
+    /// tags. Eight bytes, so it always lives in the out-of-line value region.
+    fn rational(tag: u16, (num, den): (u32, u32)) -> Self {
+        let mut data = Vec::with_capacity(8);
+        data.extend_from_slice(&num.to_le_bytes());
+        data.extend_from_slice(&den.to_le_bytes());
+        Entry { tag, ftype: 5, count: 1, data }
     }
     fn ascii(tag: u16, text: &str) -> Self {
         // ASCII fields are NUL-terminated; the count includes the terminator.
@@ -952,68 +915,14 @@ fn layout_ifd(
     (end, table_offset)
 }
 
-/// The ImageJ `ImageDescription` block, using exactly the keys
-/// `ij_metadata::build_stack_meta` parses back (`images`, `channels`, `slices`,
-/// `frames`, `mode`, `unit`, `finterval`, `fps`, `min`/`max`, `cf`/`c0`/`c1`).
-fn build_ij_description(planes: usize, ij: &ImageJOptions) -> Result<String> {
-    let per_frame = ij.channels * ij.slices;
-    if planes % per_frame != 0 {
-        bail!(
-            "{planes} plane(s) written, which doesn't divide evenly into {} channel(s) x {} \
-             slice(s) — an ImageJ hyperstack needs channels x slices planes per time frame",
-            ij.channels,
-            ij.slices
-        );
-    }
-    let frames = planes / per_frame;
-
-    let mut s = String::from("ImageJ=1.54f\n");
-    s += &format!("images={planes}\n");
-    if ij.channels > 1 {
-        s += &format!("channels={}\n", ij.channels);
-    }
-    if ij.slices > 1 {
-        s += &format!("slices={}\n", ij.slices);
-    }
-    if frames > 1 {
-        s += &format!("frames={frames}\n");
-    }
-    if [ij.channels > 1, ij.slices > 1, frames > 1].iter().filter(|&&b| b).count() >= 2 {
-        s += "hyperstack=true\n";
-    }
-    if ij.channels > 1 || ij.mode != DisplayMode::Grayscale {
-        let mode = match ij.mode {
-            DisplayMode::Grayscale => "grayscale",
-            DisplayMode::Composite => "composite",
-            DisplayMode::Color => "color",
-        };
-        s += &format!("mode={mode}\n");
-    }
-    if let Some(unit) = &ij.unit {
-        s += &format!("unit={unit}\n");
-    }
-    if let Some(fi) = ij.frame_interval_s {
-        s += &format!("finterval={fi}\n");
-    }
-    if let Some(fps) = ij.fps {
-        s += &format!("fps={fps}\n");
-    }
-    if let Some(spacing) = ij.spacing {
-        s += &format!("spacing={spacing}\n");
-    }
-    if let Some(looped) = ij.loop_playback {
-        s += &format!("loop={looped}\n");
-    }
-    if let Some((lo, hi)) = ij.range {
-        s += &format!("min={lo}\nmax={hi}\n");
-    }
-    if let Some((c0, c1)) = ij.calibration {
-        s += &format!("cf=0\nc0={c0}\nc1={c1}\n");
-    }
-    for (key, value) in &ij.extra {
-        s += &format!("{key}={value}\n");
-    }
-    Ok(s)
+/// Encode a physical pixel size as a TIFF RATIONAL resolution (pixels per
+/// unit). The reader inverts this (`pixel = 1 / resolution`), so we put the
+/// size in the denominator against a fixed `1e6` numerator — recovering the
+/// size to ~6 decimals. Clamped so the denominator stays a valid positive u32.
+fn resolution_rational(pixel_size: f64) -> (u32, u32) {
+    const SCALE: f64 = 1_000_000.0;
+    let den = (pixel_size * SCALE).round().clamp(1.0, u32::MAX as f64) as u32;
+    (SCALE as u32, den)
 }
 
 /// Apply TIFF Predictor 2 (horizontal differencing) in place — the exact

@@ -92,6 +92,20 @@ it links only OpenGL (near-universal on Linux) and avoids a Windows 10 idle-CPU
 spin that wgpu triggers on some machines. Only the selected backend is compiled
 in — the other's dependencies are excluded entirely.
 
+
+## test and lint
+
+Unit Test:
+```sh
+cargo test --workspace
+```
+
+Lint:
+```sh
+cargo clippy --workspace --all-targets
+```
+
+
 ## Why it's fast
 
 ImageJ re-renders each slice on the CPU (Java `BufferedImage`/AWT) every time
@@ -139,11 +153,12 @@ cargo add fast-tiff-lib
 It's a *specialized* engine for lazily scrubbing large scientific hyperstacks
 rather than a general-purpose TIFF library: memory-mapped and lazy (frames
 decode on demand, never the whole stack), zero-copy for uncompressed data, and
-it parses ImageJ hyperstack metadata (channels/slices/frames, LUTs, calibration)
-that general TIFF readers hand back as an opaque string. It also writes:
-streaming multi-frame output with automatic BigTIFF upgrade. Full format
-coverage, a comparison against libtiff / the `tiff` crate / TinyTIFF, and
-benchmarks are in [`fast-tiff-lib/README.md`](fast-tiff-lib/README.md).
+it parses **ImageJ and OME-TIFF** hyperstack metadata (channels/slices/frames,
+LUTs, calibration) — into one normalized view — that general TIFF readers hand
+back as an opaque string. It also writes: streaming multi-frame output with
+automatic BigTIFF upgrade, and metadata in either dialect from one neutral
+builder. Full format coverage, a comparison against libtiff / the `tiff` crate /
+TinyTIFF, and benchmarks are in [`fast-tiff-lib/README.md`](fast-tiff-lib/README.md).
 
 Note the licenses differ: the viewer is GPLv3, but the crate is **MPL-2.0**, so
 it can be used in projects that couldn't take a GPL dependency.

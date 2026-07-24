@@ -6,6 +6,7 @@ use super::*;
 use crate::decode::{read_frame_f32, read_frame_u16, read_frame_u8, read_plane_u8};
 use crate::ifd::{self, ByteOrder};
 use crate::index::{FrameInfo, SampleFormat};
+use crate::metadata::{DisplayMode, StackMetaWrite};
 use std::io::Cursor;
 
 /// Write `frames` through a fully-configured writer into an in-memory buffer.
@@ -218,8 +219,8 @@ fn signed_i16_maps_into_display_space_like_imagej() {
 
 #[test]
 fn imagej_description_lands_on_first_ifd_only() {
-    let opts = WriterOptions::new(2, 1, SampleType::U16).imagej(
-        ImageJOptions::new(2, 1)
+    let opts = WriterOptions::new(2, 1, SampleType::U16).metadata(
+        StackMetaWrite::new(2, 1)
             .mode(DisplayMode::Composite)
             .fps(12.5)
             .unit("um")
@@ -418,8 +419,8 @@ fn unknown_predictor_errors_instead_of_garbage() {
 
 #[test]
 fn description_carries_spacing_loop_and_extra_keys() {
-    let opts = WriterOptions::new(1, 1, SampleType::U8).imagej(
-        ImageJOptions::new(1, 2)
+    let opts = WriterOptions::new(1, 1, SampleType::U8).metadata(
+        StackMetaWrite::new(1, 2)
             .spacing(1.5)
             .loop_playback(true)
             .extra("vunit", "V")
@@ -520,13 +521,13 @@ fn rejects_nul_and_newline_in_metadata_strings() {
     // Newline in the ImageJ unit would corrupt the key=value lines.
     assert!(TiffWriter::new(
         Cursor::new(Vec::new()),
-        WriterOptions::new(1, 1, SampleType::U8).imagej(ImageJOptions::new(1, 1).unit("u\nm"))
+        WriterOptions::new(1, 1, SampleType::U8).metadata(StackMetaWrite::new(1, 1).unit("u\nm"))
     )
     .is_err());
     // '=' in an extra key would parse back as the wrong key.
     assert!(TiffWriter::new(
         Cursor::new(Vec::new()),
-        WriterOptions::new(1, 1, SampleType::U8).imagej(ImageJOptions::new(1, 1).extra("a=b", "c"))
+        WriterOptions::new(1, 1, SampleType::U8).metadata(StackMetaWrite::new(1, 1).extra("a=b", "c"))
     )
     .is_err());
 }
@@ -544,11 +545,11 @@ fn rejects_invalid_configurations_and_data() {
         WriterOptions::new(2, 2, SampleType::U8).compression(Compression::Other(7))
     )
     .is_err());
-    // imagej + description both set.
+    // metadata + description both set.
     assert!(TiffWriter::new(
         Cursor::new(Vec::new()),
         WriterOptions::new(2, 2, SampleType::U8)
-            .imagej(ImageJOptions::new(1, 1))
+            .metadata(StackMetaWrite::new(1, 1))
             .description("x")
     )
     .is_err());
@@ -558,7 +559,7 @@ fn rejects_invalid_configurations_and_data() {
     // Plane count not divisible by channels x slices.
     let mut w = TiffWriter::new(
         Cursor::new(Vec::new()),
-        WriterOptions::new(1, 1, SampleType::U8).imagej(ImageJOptions::new(2, 1)),
+        WriterOptions::new(1, 1, SampleType::U8).metadata(StackMetaWrite::new(2, 1)),
     )
     .unwrap();
     w.write_frame_u8(&[1]).unwrap();
