@@ -252,7 +252,7 @@ jobs:
   # The flatpak-builder sandbox has no build-time network, so crates are vendored
   # first: flatpak-cargo-generator turns Cargo.lock into generated-sources.json,
   # which the manifest (FastTIFF/packaging/flatpak/…yml) references. The app is
-  # then compiled offline inside the org.freedesktop 24.08 SDK + rust-stable
+  # then compiled offline inside the org.freedesktop 25.08 SDK + rust-stable
   # extension. No Rust toolchain is needed on the host — only Cargo.lock.
   build-flatpak:
     strategy:
@@ -278,9 +278,9 @@ jobs:
           flatpak remote-add --user --if-not-exists flathub \
             https://flathub.org/repo/flathub.flatpakrepo
           flatpak install --user --noninteractive flathub \
-            org.freedesktop.Platform//24.08 \
-            org.freedesktop.Sdk//24.08 \
-            org.freedesktop.Sdk.Extension.rust-stable//24.08
+            org.freedesktop.Platform//25.08 \
+            org.freedesktop.Sdk//25.08 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
 
       # Stamp the release version + date into the AppStream metainfo's <release>
       # entry, so it never has to be hand-edited before a release (the committed
@@ -374,6 +374,9 @@ jobs:
         run: |
           set -euo pipefail
           export APPIMAGE_EXTRACT_AND_RUN=1
+          # The gtk plugin can't auto-detect the toolkit version from our binary
+          # (rfd links GTK indirectly), so tell it explicitly — FastTIFF uses GTK3.
+          export DEPLOY_GTK_VERSION=3
           base="https://github.com/linuxdeploy"
           curl -sSL -o linuxdeploy \
             "$base/linuxdeploy/releases/download/continuous/linuxdeploy-${{ matrix.arch }}.AppImage"
