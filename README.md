@@ -18,9 +18,6 @@ hovering over the image (one frame per notch; hold **Shift** for fast
 continuous scrolling), or the left/right arrow keys.
 
 
-[**Download**](https://github.com/konung-yaropolk/FastTIFF/releases)  
-
-
 
 <table align="center" style="border: none;">
   <tr>
