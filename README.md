@@ -270,10 +270,8 @@ this is the one-line formula to change.
 - Done: add different colormaps to the selector like magma, plasma, viridis, turbo etc
 - Done: add adjustable WASD and mouse scroll speed input into 3d settings window in navigation section
 - Done: Port to macOS
-
-
-- close all opened dialog windows when opened new file
-- Add windows installer with files association
+- Done: close all opened dialog windows when opened new file
+- Done: Add windows installer with files association
 - publish in Brew
 - Add 3D volume save in best suitable format for the gpu rendering (not necessary now, need to study the idea)
 
