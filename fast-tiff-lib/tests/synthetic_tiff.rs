@@ -665,7 +665,7 @@ fn build_multi_size_tiff(dims: &[(u32, u32)]) -> Vec<u8> {
     let mut strip_offsets = Vec::new();
     for &(w, h) in dims {
         strip_offsets.push(buf.len() as u32);
-        buf.extend(std::iter::repeat(0u8).take((w * h * 2) as usize));
+        buf.extend(std::iter::repeat_n(0u8, (w * h * 2) as usize));
     }
 
     let n = dims.len();
