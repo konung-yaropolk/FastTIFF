@@ -3,7 +3,7 @@
 
 use super::*;
 
-use super::camera::NavMode;
+use super::camera::{NavMode, OrbitPoint};
 use crate::render;
 use egui::RichText;
 
@@ -18,10 +18,12 @@ pub(super) fn render_settings_window(
     scale: &mut [f32; 3],
     interp: &mut render::VolumeInterp,
     nav: &mut NavMode,
+    orbit_point: &mut OrbitPoint,
     move_speed: &mut f32,
     scroll_speed: &mut f32,
     render_mode: &mut render::VolumeRender,
     density: &mut f32,
+    show_coord_box: &mut bool,
     reset_position: &mut bool,
     loaded: Option<&LoadedStack>,
 ) {
@@ -34,7 +36,7 @@ pub(super) fn render_settings_window(
             ui.horizontal(|ui| {
                 ui.selectable_value(render_mode, render::VolumeRender::Mip, "Max intensity")
                     .on_hover_text("Maximum-intensity projection: brightest sample along each ray");
-                ui.selectable_value(render_mode, render::VolumeRender::Alpha, "Volume (ImageJ)")
+                ui.selectable_value(render_mode, render::VolumeRender::Alpha, "Volume")
                     .on_hover_text("ImageJ 3D Viewer style: translucent alpha-blended volume");
             });
             // Density only affects the alpha DVR — disabled for MIP.
@@ -111,6 +113,19 @@ pub(super) fn render_settings_window(
                     *scroll_speed = 1.0;
                 }
             });
+            // What an orbit drag rotates around.
+            ui.label("Orbiting point:");
+            ui.radio_value(orbit_point, OrbitPoint::VolumeCenter, "Volume center")
+                .on_hover_text("Rotate around the volume's center — a turntable that re-centers the box");
+            ui.radio_value(orbit_point, OrbitPoint::ScreenCenter, "Screen center")
+                .on_hover_text("Rotate around whatever the view center is aimed at");
+
+            ui.separator();
+            ui.label(RichText::new("Overlay").strong());
+            ui.checkbox(show_coord_box, "Coordinate box").on_hover_text(
+                "Draw the volume's bounding box with x/y/z tick coordinates \
+                 (pixels, or calibrated length if the file has a physical unit)",
+            );
 
             ui.separator();
             ui.horizontal(|ui| {

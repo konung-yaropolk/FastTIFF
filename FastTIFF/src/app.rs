@@ -25,12 +25,13 @@ mod camera;
 mod channels;
 mod dimensions;
 mod gpu_sync;
+mod overlay;
 mod widgets;
 mod windows;
 #[cfg(test)]
 mod tests;
 
-use camera::NavMode;
+use camera::{NavMode, OrbitPoint};
 use channels::{
     channel_tint, gray_lut_applicable, gray_lut_for, gray_lut_name, gray_lut_option_count,
     pseudocolor_applicable, refresh_pseudocolor, ui_tint,
@@ -332,6 +333,12 @@ pub struct ViewerApp {
     vol_fly_pos: [f32; 3],
     /// How mouse/keyboard drive the 3D camera (CAD/Blender/Maya/Minecraft).
     nav_mode: NavMode,
+    /// What an orbit drag rotates around: the volume center (default) or the
+    /// screen-center box entry. Persists across files (a nav preference).
+    orbit_point: OrbitPoint,
+    /// Overlay: draw the volume's bounding box with x/y/z coordinate ticks.
+    /// Off by default; persists across files.
+    show_coord_box: bool,
     /// Per-axis voxel scale (x, y, z) for the volume box. Seeded from the
     /// stack's Z spacing metadata on load (else 1:1:1); editable in the render
     /// settings window.
@@ -409,6 +416,8 @@ impl ViewerApp {
             vol_box_he: [0.5, 0.5, 0.5],
             vol_fly_pos: [0.0, 0.0, 3.0],
             nav_mode: NavMode::Cad,
+            orbit_point: OrbitPoint::VolumeCenter,
+            show_coord_box: false,
             vol_scale: [1.0, 1.0, 1.0],
             vol_interp: render::VolumeInterp::Linear,
             vol_render: render::VolumeRender::Mip,
@@ -1200,10 +1209,12 @@ impl eframe::App for ViewerApp {
                 &mut self.vol_scale,
                 &mut self.vol_interp,
                 &mut self.nav_mode,
+                &mut self.orbit_point,
                 &mut self.move_speed,
                 &mut self.scroll_speed,
                 &mut self.vol_render,
                 &mut self.vol_density,
+                &mut self.show_coord_box,
                 &mut reset_position,
                 self.stack.as_ref(),
             );
@@ -1378,6 +1389,12 @@ impl eframe::App for ViewerApp {
                 ui.painter()
                     .with_clip_rect(panel_rect)
                     .add(render::paint_volume_callback(&self.render, panel_rect));
+                // Coordinate-box overlay, drawn on top of the ray-march with the
+                // 2D painter (aligned via the same camera; see `overlay`).
+                if self.show_coord_box {
+                    let painter = ui.painter().with_clip_rect(panel_rect);
+                    self.draw_coord_box(&painter, panel_rect);
+                }
                 // Keep repainting while a drag or held key keeps the camera moving.
                 if animating {
                     ui.ctx().request_repaint();

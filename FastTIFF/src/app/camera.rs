@@ -43,6 +43,18 @@ impl NavMode {
     }
 }
 
+/// What an orbit drag rotates around, for the orbit nav modes (CAD/Blender/Maya
+/// and the free-fly right-drag).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum OrbitPoint {
+    /// The volume's geometric center (a turntable): the view re-centers on the
+    /// box and spins around it. The default.
+    VolumeCenter,
+    /// Whatever the view center is aimed at — the point where the focal axis
+    /// enters the box (the original mechanics), good for inspecting a feature.
+    ScreenCenter,
+}
+
 impl ViewerApp {
     /// Reset the 3D camera to a default three-quarter view looking at the origin.
     /// Used on load and by the Reset-position button.
@@ -105,6 +117,50 @@ impl ViewerApp {
         self.vol_target = [eye[0] + forward[0] * t, eye[1] + forward[1] * t, eye[2] + forward[2] * t];
         // Radius = eye->pivot distance, so the eye doesn't move (t = 0 inside).
         self.vol_dist = vol_dist_clamped(t);
+    }
+
+    /// Re-pivot at an orbit drag's start. Only the screen-center mode moves the
+    /// pivot (to the focal box entry); the volume-center mode orbits rigidly
+    /// around the origin (see `vol_orbit_center`) and must NOT touch the look-at
+    /// here, or an off-center view would snap back to center on every orbit.
+    fn repivot(&mut self) {
+        if self.orbit_point == OrbitPoint::ScreenCenter {
+            self.repivot_to_focal();
+        }
+    }
+
+    /// Apply an orbit drag per the orbit-point setting.
+    fn orbit_drag(&mut self, delta: egui::Vec2) {
+        match self.orbit_point {
+            OrbitPoint::VolumeCenter => self.vol_orbit_center(delta),
+            OrbitPoint::ScreenCenter => self.vol_orbit(delta),
+        }
+    }
+
+    /// Orbit rigidly around the volume center (the origin): apply the camera's
+    /// orientation change to the look-at target as well, so the eye
+    /// (= `target - forward*dist`) and the target rotate by the same rotation
+    /// about the origin. The framing — which may be off-center after a pan — is
+    /// preserved: the volume center stays fixed on screen, and the camera never
+    /// re-aims at it. Exact (the two orthonormal bases give the rotation
+    /// directly), so no drift accumulates.
+    fn vol_orbit_center(&mut self, delta: egui::Vec2) {
+        let (f0, r0, u0) = volume_basis(self.vol_yaw, self.vol_pitch);
+        self.vol_orbit(delta); // update yaw/pitch (same as the screen-center orbit)
+        let (f1, r1, u1) = volume_basis(self.vol_yaw, self.vol_pitch);
+        // Re-express the target in the old camera basis, then rebuild it in the
+        // new one — i.e. rotate it about the origin by the basis change.
+        let t = self.vol_target;
+        let (a, b, c) = (
+            t[0] * r0[0] + t[1] * r0[1] + t[2] * r0[2],
+            t[0] * u0[0] + t[1] * u0[1] + t[2] * u0[2],
+            t[0] * f0[0] + t[1] * f0[1] + t[2] * f0[2],
+        );
+        self.vol_target = [
+            a * r1[0] + b * u1[0] + c * f1[0],
+            a * r1[1] + b * u1[1] + c * f1[1],
+            a * r1[2] + b * u1[2] + c * f1[2],
+        ];
     }
 
     /// Rotate the view while keeping the eye fixed (first-person "mouse look"):
@@ -224,10 +280,10 @@ impl ViewerApp {
         match self.nav_mode {
             NavMode::Cad => {
                 if start_l {
-                    self.repivot_to_focal();
+                    self.repivot();
                 }
                 if drag_l && moved {
-                    self.vol_orbit(d);
+                    self.orbit_drag(d);
                     animating = true;
                 }
                 if drag_m && moved {
@@ -242,24 +298,24 @@ impl ViewerApp {
             }
             NavMode::Blender => {
                 if start_m && !shift {
-                    self.repivot_to_focal();
+                    self.repivot();
                 }
                 if drag_m && moved {
                     if shift {
                         self.vol_pan(d, right, up, pan_speed);
                     } else {
-                        self.vol_orbit(d);
+                        self.orbit_drag(d);
                     }
                     animating = true;
                 }
             }
             NavMode::Maya => {
                 if alt && start_l {
-                    self.repivot_to_focal();
+                    self.repivot();
                 }
                 if alt && moved {
                     if drag_l {
-                        self.vol_orbit(d);
+                        self.orbit_drag(d);
                         animating = true;
                     } else if drag_m {
                         self.vol_pan(d, right, up, pan_speed);
@@ -279,7 +335,9 @@ impl ViewerApp {
                     animating = true;
                 }
                 if start_r {
-                    // Right-drag orbits: pivot on where the view enters the box.
+                    // Right-drag orbits the free eye around the box-entry point.
+                    // Fly is first-person, so it always uses the focal pivot
+                    // (the orbit-point setting governs the orbit modes above).
                     self.repivot_to_focal();
                 }
                 if drag_r && moved {
