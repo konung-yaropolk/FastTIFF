@@ -36,36 +36,45 @@ continuous scrolling), or the left/right arrow keys.
 
 ## Downloads
 
-Prebuilt binaries for the latest version are attached to each release on the
-[**Releases**](https://github.com/konung-yaropolk/FastTIFF/releases) page. Grab
-the one file that matches your operating system and CPU:
+Every link below points at the **latest release** — GitHub's
+`releases/latest/download/` redirect always resolves to the current version, so
+these links never go stale. (Or browse the
+[**Releases**](https://github.com/konung-yaropolk/FastTIFF/releases) page for a
+specific or older version.)
 
-| File | Target system | Install / run |
-|------|---------------|---------------|
-| `FastTIFF.exe` | **Windows 10 / 11** — 64-bit | Portable single executable — just run it, no installer. |
-| `FastTIFF-<version>-arm64.dmg` | **macOS 11+ · Apple Silicon** (M1/M2/M3/M4) | Open the `.dmg`, drag **FastTIFF** into Applications. |
-| `FastTIFF-<version>-x86_64.dmg` | **macOS 11+ · Intel** Macs | Open the `.dmg`, drag **FastTIFF** into Applications. |
-| `fasttiff_<version>-1_amd64.deb` | **Debian / Ubuntu** — x86-64 (Intel/AMD) | `sudo apt install ./fasttiff_<version>-1_amd64.deb` |
-| `fasttiff_<version>-1_arm64.deb` | **Debian / Ubuntu** — ARM64 (aarch64) | `sudo apt install ./fasttiff_<version>-1_arm64.deb` |
-| `fasttiff-<version>-1-x86_64.pkg.tar.zst` | **Arch Linux** — x86-64 | `sudo pacman -U fasttiff-<version>-1-x86_64.pkg.tar.zst` |
+| Download | For | Install / run |
+|----------|-----|---------------|
+| [**Installer**](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-setup.exe) · [portable `.exe`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF.exe) | **Windows 10 / 11** — 64-bit | Installer adds a Start-menu entry + "Open with" for TIFFs; the portable `.exe` just runs. |
+| [`FastTIFF-arm64.dmg`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-arm64.dmg) | **macOS 11+** — Apple Silicon (M1–M4) | Open the `.dmg`, drag **FastTIFF** into Applications. |
+| [`FastTIFF-x86_64.dmg`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-x86_64.dmg) | **macOS 11+** — Intel | Open the `.dmg`, drag **FastTIFF** into Applications. |
+| [`FastTIFF-amd64.deb`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-amd64.deb) | **Debian / Ubuntu** — x86-64 | `sudo apt install ./FastTIFF-amd64.deb` |
+| [`FastTIFF-arm64.deb`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-arm64.deb) | **Debian / Ubuntu** — ARM64 | `sudo apt install ./FastTIFF-arm64.deb` |
+| [`FastTIFF-x86_64.rpm`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-x86_64.rpm) | **Fedora / RHEL / openSUSE** — x86-64 | `sudo dnf install ./FastTIFF-x86_64.rpm` |
+| [`FastTIFF-aarch64.rpm`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-aarch64.rpm) | **Fedora / RHEL / openSUSE** — ARM64 | `sudo dnf install ./FastTIFF-aarch64.rpm` |
+| [`FastTIFF-x86_64.pkg.tar.zst`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-x86_64.pkg.tar.zst) | **Arch Linux** — x86-64 | `sudo pacman -U ./FastTIFF-x86_64.pkg.tar.zst` |
+| [`FastTIFF-x86_64.flatpak`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-x86_64.flatpak) | **Any Linux** · Flatpak — x86-64 | `flatpak install --user ./FastTIFF-x86_64.flatpak` |
+| [`FastTIFF-aarch64.flatpak`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-aarch64.flatpak) | **Any Linux** · Flatpak — ARM64 | `flatpak install --user ./FastTIFF-aarch64.flatpak` |
+| [`FastTIFF-x86_64.AppImage`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-x86_64.AppImage) | **Any Linux** · AppImage — x86-64 | `chmod +x FastTIFF-x86_64.AppImage && ./FastTIFF-x86_64.AppImage` |
+| [`FastTIFF-aarch64.AppImage`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-aarch64.AppImage) | **Any Linux** · AppImage — ARM64 | `chmod +x FastTIFF-aarch64.AppImage && ./FastTIFF-aarch64.AppImage` |
 
-`<version>` is the release number (e.g. `1.7.5`). After installing on Linux,
-launch it from your applications menu or by running `FastTIFF` (or `fasttiff`)
-in a terminal.
+**Which one?** On Linux, the **.deb** / **.rpm** / **pacman** packages integrate
+with your system package manager; the **Flatpak** and **AppImage** are
+distro-agnostic and self-contained — handy when no native package matches your
+distro. For the CPU: 64-bit Intel/AMD → the `amd64` / `x86_64` files; 64-bit ARM
+(Raspberry Pi, Ampere, Apple Silicon) → the `arm64` / `aarch64` files. `uname -m`
+prints `x86_64` or `aarch64` on Linux; *About This Mac* shows "Apple M…" (arm64)
+or "Intel" (x86_64) on macOS. After installing on Linux, launch it from the apps
+menu or by running `FastTIFF` (or `fasttiff`) in a terminal.
 
-**Not sure which CPU you have?**
-- **macOS:**  → *About This Mac*. A "Chip: Apple M…" line means **arm64**; an "Intel" processor means **x86_64**.
-- **Linux:** run `uname -m` — `x86_64` → the `amd64` file, `aarch64` → the `arm64` file.
-
-**First-launch security prompt** (the binaries are not signed with a paid
+**First-launch security prompt** (the binaries aren't signed with a paid
 developer certificate):
 - **Windows** — SmartScreen may warn: click *More info → Run anyway*.
 - **macOS** — Gatekeeper blocks unsigned apps the first time: **right-click the
   app → Open** (then confirm), or run
   `xattr -dr com.apple.quarantine /Applications/FastTIFF.app` once.
 
-On a system that isn't listed (32-bit, another distro, a different CPU)? Build
-it from source — see below; it's a single `cargo` command.
+Not listed (32-bit, a different CPU)? Build from source — see below; it's a
+single `cargo` command.
 
 ## Build & run
 
