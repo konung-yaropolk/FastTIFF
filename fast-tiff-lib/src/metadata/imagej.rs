@@ -272,7 +272,7 @@ fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32], header_order: ByteOrder
     // count. The on-disk endianness of this internal directory isn't officially
     // documented; try big-endian first (consistent with Java's
     // DataOutputStream) and fall back to little-endian.
-    if header_len % 8 != 0 {
+    if !header_len.is_multiple_of(8) {
         return None;
     }
     let mut plan: Vec<([u8; 4], usize)> = Vec::new();
@@ -316,16 +316,15 @@ fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32], header_order: ByteOrder
                         ranges = Some(parsed);
                     }
                 }
-                b"luts" => {
+                b"luts"
                     // 768 bytes: 256 R, then 256 G, then 256 B (planar, not interleaved).
-                    if block.len() == 768 {
+                    if block.len() == 768 => {
                         let mut lut = [[0u8; 3]; 256];
                         for i in 0..256 {
                             lut[i] = [block[i], block[256 + i], block[512 + i]];
                         }
                         luts.push(lut);
                     }
-                }
                 _ => { /* info / labl / roi / over / plot: not needed for rendering */ }
             }
         }

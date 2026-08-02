@@ -339,7 +339,7 @@ impl StackMetaWrite {
     /// channels×slices layout, or an error if they don't divide evenly.
     pub(crate) fn derive_frames(&self, planes: usize) -> Result<usize> {
         let per_frame = self.channels * self.slices;
-        if per_frame == 0 || planes % per_frame != 0 {
+        if per_frame == 0 || !planes.is_multiple_of(per_frame) {
             anyhow::bail!(
                 "{planes} plane(s) written, which doesn't divide evenly into {} channel(s) x {} \
                  slice(s) — a hyperstack needs channels x slices planes per time frame",
@@ -366,7 +366,7 @@ impl StackMetaWrite {
         }
         if strict_lines {
             let clean = |s: &str| !s.contains('\0') && !s.contains('\n');
-            if !self.unit.as_deref().map_or(true, clean) {
+            if !self.unit.as_deref().is_none_or(clean) {
                 anyhow::bail!("ImageJ unit must not contain NUL or newline characters");
             }
             for (key, value) in &self.extra {

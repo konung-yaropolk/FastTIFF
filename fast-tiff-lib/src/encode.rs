@@ -681,8 +681,8 @@ impl<W: Write + Seek> TiffWriter<W> {
         if cfg!(target_endian = "little") {
             self.write_frame_bytes(bytemuck::cast_slice(samples))
         } else {
-            let size = std::mem::size_of::<T>();
-            let mut le = Vec::with_capacity(samples.len() * size);
+            let _size = std::mem::size_of::<T>();
+            let mut le = Vec::with_capacity(std::mem::size_of_val(samples));
             for s in samples {
                 let bytes = bytemuck::bytes_of(s);
                 le.extend(bytes.iter().rev()); // native BE -> LE

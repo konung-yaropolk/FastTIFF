@@ -391,7 +391,7 @@ fn rejects_stale_lut_block_with_mismatched_channel_count() {
     let bytes = build_synthetic_tiff(
         width,
         height,
-        &[frame0.clone()],
+        std::slice::from_ref(&frame0),
         "ImageJ=1.54f\nimages=1\nchannels=1\nslices=1\nframes=1\nmode=grayscale\n",
         Some(&ij_bytes),
         Some(&ij_counts),
@@ -665,7 +665,7 @@ fn build_multi_size_tiff(dims: &[(u32, u32)]) -> Vec<u8> {
     let mut strip_offsets = Vec::new();
     for &(w, h) in dims {
         strip_offsets.push(buf.len() as u32);
-        buf.extend(std::iter::repeat(0u8).take((w * h * 2) as usize));
+        buf.extend(std::iter::repeat_n(0u8, (w * h * 2) as usize));
     }
 
     let n = dims.len();

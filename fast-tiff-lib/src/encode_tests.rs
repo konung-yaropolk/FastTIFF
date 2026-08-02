@@ -153,7 +153,7 @@ fn all_codecs_roundtrip_with_and_without_predictor() {
                 // 2 rows per strip over height 5: multi-strip with a short
                 // last strip — the layout that once broke naive readers.
                 .rows_per_strip(2);
-            let bytes = write_stack(opts, &[data.clone()]);
+            let bytes = write_stack(opts, std::slice::from_ref(&data));
             let (frames, order) = parse_frames(&bytes);
             assert_eq!(frames[0].strip_offsets.len(), 3, "{compression:?}");
             let decoded = read_frame_u16(&bytes, &frames[0], order, None).unwrap();
@@ -268,7 +268,7 @@ fn predictor_covers_all_sample_widths_and_floats() {
         let opts = WriterOptions::new(4, 2, SampleType::F32)
             .compression(compression)
             .predictor(true);
-        let bytes = write_stack(opts, &[data.clone()]);
+        let bytes = write_stack(opts, std::slice::from_ref(&data));
         let (frames, order) = parse_frames(&bytes);
         assert_eq!(frames[0].predictor, 3, "float data gets predictor 3");
         let decoded = read_frame_f32(&bytes, &frames[0], order).unwrap();
@@ -300,7 +300,7 @@ fn predictor_covers_all_sample_widths_and_floats() {
     // The batched planes reader fuses the predictor undo into its gather —
     // it must agree exactly with the unfused per-plane reads.
     let planes = crate::decode::read_planes_u16(&bytes, &frames[0], order, None).unwrap();
-    for p in 0..3 {
+    for (p, _plane) in planes.iter().enumerate().take(3) {
         assert_eq!(
             planes[p],
             crate::decode::read_plane_u16(&bytes, &frames[0], order, None, p).unwrap(),
@@ -318,7 +318,7 @@ fn predictor_covers_all_sample_widths_and_floats() {
     let (frames, order) = parse_frames(&bytes);
     let planes = crate::decode::read_planes_u8(&bytes, &frames[0], order).unwrap();
     assert_eq!(planes[0], vec![10, 14, 9]);
-    for p in 0..3 {
+    for (p, _plane) in planes.iter().enumerate().take(3) {
         assert_eq!(
             planes[p],
             crate::decode::read_plane_u8(&bytes, &frames[0], order, p).unwrap(),
@@ -398,7 +398,7 @@ fn predictor_roundtrips_64bit_int_and_float() {
         let opts = WriterOptions::new(4, 2, SampleType::F64)
             .compression(compression)
             .predictor(true);
-        let bytes = write_stack(opts, &[data.clone()]);
+        let bytes = write_stack(opts, std::slice::from_ref(&data));
         let (frames, order) = parse_frames(&bytes);
         assert_eq!(frames[0].predictor, 3, "64-bit float data gets predictor 3");
         let decoded = read_frame_f32(&bytes, &frames[0], order).unwrap();
@@ -485,7 +485,7 @@ fn compression_level_knob_roundtrips() {
         let opts = WriterOptions::new(8, 4, SampleType::U16)
             .compression(compression)
             .compression_level(level);
-        let bytes = write_stack(opts, &[data.clone()]);
+        let bytes = write_stack(opts, std::slice::from_ref(&data));
         let (frames, order) = parse_frames(&bytes);
         let decoded = read_frame_u16(&bytes, &frames[0], order, None).unwrap();
         assert_eq!(decoded.as_ref(), &pixels[..], "{compression:?} level {level}");
