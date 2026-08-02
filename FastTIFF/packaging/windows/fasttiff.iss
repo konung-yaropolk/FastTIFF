@@ -55,7 +55,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "assoc"; Description: "Associate .tif / .tiff with FastTIFF (adds it to ""Open with"" and gives those files FastTIFF's icon once it's your default TIFF app)"; GroupDescription: "File associations:"
+Name: "assoc"; Description: "Associate .tif / .tiff with FastTIFF (adds it to ""Open with"")"; GroupDescription: "File associations:"
 
 [Files]
 Source: "..\..\..\FastTIFF.exe"; DestDir: "{app}"; Flags: ignoreversion
