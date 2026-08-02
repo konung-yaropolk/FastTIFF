@@ -44,8 +44,8 @@ specific or older version.)
 
 | Download | For | Install / run |
 |----------|-----|---------------|
-| [**Installer**](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-setup.exe) · [portable `.exe`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF.exe) | **Windows 10 / 11** — 64-bit | Installer adds a Start-menu entry + "Open with" for TIFFs; the portable `.exe` just runs. |
-| [`FastTIFF-arm64.dmg`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-arm64.dmg) | **macOS 11+** — Apple Silicon (M1–M4) | Open the `.dmg`, drag **FastTIFF** into Applications. |
+| [**Installer**](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-setup.exe) or [portable `.exe`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF.exe) | **Windows 10 / 11** — 64-bit | Installer adds a Start-menu entry + "Open with" for TIFFs; the portable `.exe` just runs. |
+| [`FastTIFF-arm64.dmg`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-arm64.dmg) | **macOS 11+** — Apple Silicon (M-series chipsets) | Open the `.dmg`, drag **FastTIFF** into Applications. |
 | [`FastTIFF-x86_64.dmg`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-x86_64.dmg) | **macOS 11+** — Intel | Open the `.dmg`, drag **FastTIFF** into Applications. |
 | [`FastTIFF-amd64.deb`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-amd64.deb) | **Debian / Ubuntu** — x86-64 | `sudo apt install ./FastTIFF-amd64.deb` |
 | [`FastTIFF-arm64.deb`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-arm64.deb) | **Debian / Ubuntu** — ARM64 | `sudo apt install ./FastTIFF-arm64.deb` |
