@@ -391,7 +391,7 @@ fn rejects_stale_lut_block_with_mismatched_channel_count() {
     let bytes = build_synthetic_tiff(
         width,
         height,
-        &[frame0.clone()],
+        std::slice::from_ref(&frame0),
         "ImageJ=1.54f\nimages=1\nchannels=1\nslices=1\nframes=1\nmode=grayscale\n",
         Some(&ij_bytes),
         Some(&ij_counts),
