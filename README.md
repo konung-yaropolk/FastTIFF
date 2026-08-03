@@ -33,9 +33,7 @@ continuous scrolling), or the left/right arrow keys.
 
 ## Downloads
 
-Every link below points at the **latest release** — GitHub's
-`releases/latest/download/` redirect always resolves to the current version, so
-these links never go stale. (Or browse the
+Every link below points at the **latest release**. You can either browse the
 [**Releases**](https://github.com/konung-yaropolk/FastTIFF/releases) page for a
 specific or older version.)
 
