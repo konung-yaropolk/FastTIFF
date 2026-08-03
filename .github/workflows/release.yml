@@ -80,14 +80,18 @@ jobs:
 
   # Builds the Debian/Ubuntu .deb with cargo-deb and attaches it to the release,
   # alongside the Windows .exe above. Runs once per architecture on a native
-  # runner (no cross-compiling the GTK/GL/X11 stack): ubuntu-latest -> amd64,
-  # ubuntu-24.04-arm -> arm64. cargo-deb names each by its arch, so both land
-  # on the release without colliding.
+  # runner (no cross-compiling the GTK/GL/X11 stack): ubuntu-24.04 -> x86_64,
+  # ubuntu-24.04-arm -> arm64. The attached file is renamed to a stable
+  # FastTIFF-<arch>.deb (the .deb's own Architecture tag stays amd64/arm64).
   build-linux-deb:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -132,7 +136,7 @@ jobs:
       # filename) so the README can link via releases/latest/download/. The
       # package's own metadata still carries the version.
       - name: Stage stable-named .deb
-        run: cp target/debian/*.deb "FastTIFF-$(dpkg --print-architecture).deb"
+        run: cp target/debian/*.deb "FastTIFF-${{ matrix.arch }}.deb"
 
       - name: Attach .deb to release
         uses: softprops/action-gh-release@v2
@@ -141,7 +145,7 @@ jobs:
 
   # Builds the Fedora/RHEL/openSUSE .rpm with cargo-generate-rpm (pure Rust — no
   # rpmbuild) and attaches it, mirroring the .deb job: same native runners
-  # (ubuntu-24.04 -> x86_64, ubuntu-24.04-arm -> aarch64), same glow backend,
+  # (ubuntu-24.04 -> x86_64, ubuntu-24.04-arm -> arm64), same glow backend,
   # same system build-deps. Reads [package.metadata.generate-rpm] from
   # FastTIFF/Cargo.toml. Like the .deb, it links the runner's glibc, so it
   # targets recent RPM distros.
@@ -149,7 +153,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -186,9 +194,9 @@ jobs:
         run: cargo generate-rpm -p FastTIFF
 
       # Stable, version-less name for the README's latest/download/ link (the
-      # RPM's own metadata still carries the version). `uname -m` = x86_64/aarch64.
+      # RPM's own metadata still carries the version + its own arch tag).
       - name: Stage stable-named .rpm
-        run: cp target/generate-rpm/*.rpm "FastTIFF-$(uname -m).rpm"
+        run: cp target/generate-rpm/*.rpm "FastTIFF-${{ matrix.arch }}.rpm"
 
       - name: Attach .rpm to release
         uses: softprops/action-gh-release@v2
@@ -246,7 +254,7 @@ jobs:
           files: FastTIFF-x86_64.pkg.tar.zst
 
   # Builds a distributable Flatpak bundle (.flatpak) for both architectures on
-  # native runners (ubuntu-24.04 -> x86_64, ubuntu-24.04-arm -> aarch64) and
+  # native runners (ubuntu-24.04 -> x86_64, ubuntu-24.04-arm -> arm64) and
   # attaches it. Ships the glow (OpenGL) backend, like the other Linux packages.
   #
   # The flatpak-builder sandbox has no build-time network, so crates are vendored
@@ -262,7 +270,7 @@ jobs:
           - runner: ubuntu-24.04
             arch: x86_64
           - runner: ubuntu-24.04-arm
-            arch: aarch64
+            arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -324,7 +332,7 @@ jobs:
           files: ${{ env.FLATPAK_NAME }}
 
   # Builds a portable AppImage for both architectures (ubuntu-24.04 -> x86_64,
-  # ubuntu-24.04-arm -> aarch64). linuxdeploy bundles the glow binary together
+  # ubuntu-24.04-arm -> arm64). linuxdeploy bundles the glow binary together
   # with its shared-library dependencies (GTK3, OpenGL, X11, xkbcommon, …) into a
   # single self-contained file that runs on most modern Linux distros with
   # nothing to install. Native runners so the bundled libs match the target arch.
@@ -336,7 +344,7 @@ jobs:
           - runner: ubuntu-24.04
             arch: x86_64
           - runner: ubuntu-24.04-arm
-            arch: aarch64
+            arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -378,10 +386,14 @@ jobs:
           # (rfd links GTK indirectly), so tell it explicitly — FastTIFF uses GTK3.
           export DEPLOY_GTK_VERSION=3
           base="https://github.com/linuxdeploy"
+          # Our asset names use arm64, but linuxdeploy's own releases use the
+          # kernel name aarch64 — map it just for these download URLs.
+          dl_arch="${{ matrix.arch }}"
+          [ "$dl_arch" = arm64 ] && dl_arch=aarch64
           curl -sSL -o linuxdeploy \
-            "$base/linuxdeploy/releases/download/continuous/linuxdeploy-${{ matrix.arch }}.AppImage"
+            "$base/linuxdeploy/releases/download/continuous/linuxdeploy-${dl_arch}.AppImage"
           curl -sSL -o linuxdeploy-plugin-appimage \
-            "$base/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-${{ matrix.arch }}.AppImage"
+            "$base/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-${dl_arch}.AppImage"
           curl -sSL -o linuxdeploy-plugin-gtk \
             "$base/linuxdeploy-plugin-gtk/raw/master/linuxdeploy-plugin-gtk.sh"
           chmod +x linuxdeploy linuxdeploy-plugin-appimage linuxdeploy-plugin-gtk
