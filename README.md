@@ -35,7 +35,7 @@ continuous scrolling), or the left/right arrow keys.
 
 Every link below points at the **latest release**. You can either browse the
 [**Releases**](https://github.com/konung-yaropolk/FastTIFF/releases) page for a
-specific or older version.)
+specific or older version.
 
 | Download | For | Install / run |
 |----------|-----|---------------|
