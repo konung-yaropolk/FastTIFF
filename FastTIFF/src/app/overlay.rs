@@ -127,7 +127,7 @@ fn draw_box(
 
     // 12 edges: corner pairs differing in exactly one axis bit. Skip an edge if
     // either endpoint is behind the camera (rare — only when zoomed inside).
-    let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(230));
+    let stroke = egui::Stroke::new(1.0f32, egui::Color32::from_white_alpha(230));
     for i in 0..8usize {
         for bit in [1usize, 2, 4] {
             let j = i ^ bit;
