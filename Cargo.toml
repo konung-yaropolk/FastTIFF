@@ -6,7 +6,7 @@ members = ["fast-tiff-lib", "FastTIFF"]
 
 [profile.release]
 opt-level = 3
-lto = true         # Enable Link-Time Optimization
+lto = "fat"        # Enable Link-Time Optimization
 codegen-units = 1  # Helps LTO optimize more effectively
 strip = true       # Automatically strip symbols from the binary.
 panic = 'unwind'   # 'abort' to kill process or 'unwind' for safe memory cleanup
