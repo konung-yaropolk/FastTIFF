@@ -107,6 +107,7 @@ impl ViewerApp {
                     aspect: self.vol_aspect,
                     render: self.vol_render,
                     density: self.vol_density,
+                    iso: self.vol_iso,
                 },
             );
             // Cache the box extents so the orbit re-pivot can ray-cast the box.
@@ -288,6 +289,7 @@ pub(super) fn build_volume_params(loaded: &LoadedStack, view: VolumeCam) -> rend
         is_float,
         render_mode: view.render.shader_mode(),
         density: view.density,
+        iso: view.iso,
         eye: cam.eye,
         forward: cam.forward,
         right: cam.right,

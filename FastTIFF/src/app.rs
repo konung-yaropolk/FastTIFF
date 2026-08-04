@@ -349,6 +349,8 @@ pub struct ViewerApp {
     vol_render: render::VolumeRender,
     /// Alpha-DVR opacity scale (only used by the `Alpha` render mode).
     vol_density: f32,
+    /// Isosurface threshold in windowed units 0..1 (only used by `Surface`).
+    vol_iso: f32,
     /// The volume viewport aspect ratio (width/height), captured each frame so
     /// the ray-march projection matches the on-screen rect.
     vol_aspect: f32,
@@ -422,6 +424,7 @@ impl ViewerApp {
             vol_interp: render::VolumeInterp::Linear,
             vol_render: render::VolumeRender::Mip,
             vol_density: 100.0,
+            vol_iso: 0.1,
             vol_aspect: 1.0,
             volume_built_frame: None,
             volume_gen: 0,
@@ -1214,6 +1217,7 @@ impl eframe::App for ViewerApp {
                 &mut self.scroll_speed,
                 &mut self.vol_render,
                 &mut self.vol_density,
+                &mut self.vol_iso,
                 &mut self.show_coord_box,
                 &mut reset_position,
                 self.stack.as_ref(),

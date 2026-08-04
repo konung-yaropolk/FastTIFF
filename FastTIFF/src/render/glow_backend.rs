@@ -204,10 +204,11 @@ void main() {
 
 // --- 3D volume ray-march ---------------------------------------------------
 // A fullscreen pass that, per pixel, builds a camera ray and marches it through
-// the 3D texture(s). Two compositing modes (`u_mode`): maximum-intensity
-// projection (order-independent), and emission-absorption alpha compositing
-// (the ImageJ 3D Viewer's "Volume" look). The camera arrives as an explicit
-// basis (eye/forward/right/up + fov), avoiding any matrix inverse in-shader.
+// the 3D texture(s). Three compositing modes (`u_mode`): maximum-intensity
+// projection (order-independent), emission-absorption alpha compositing (the
+// ImageJ 3D Viewer's "Volume" look), and an opaque gradient-shaded isosurface.
+// The camera arrives as an explicit basis (eye/forward/right/up + fov), avoiding
+// any matrix inverse in-shader.
 //
 // Sample spacing is derived from the actual voxel size (via `textureSize`) so
 // it's the same regardless of the view direction — this, plus a per-pixel
@@ -259,8 +260,9 @@ uniform vec2 ch_window[6];   // per-channel min, max in sampled-texture units
 uniform float ch_enabled[6];
 uniform float ch_is_float[6];
 uniform int num_channels;
-uniform int u_mode;          // 0 = MIP, 1 = alpha DVR
+uniform int u_mode;          // 0 = MIP, 1 = alpha DVR, 2 = isosurface
 uniform float u_density;     // alpha-DVR opacity scale (higher = more solid)
+uniform float u_iso;         // isosurface threshold in windowed units (0..1)
 uniform int u_interp;        // 0 = point/linear (GL filter), 1 = in-shader tricubic
 
 // Upper bound on ray-march samples. High enough that the largest volume the
@@ -339,6 +341,40 @@ vec3 vol_coord(vec3 p) {
     return clamp(vec3(tc.x, 1.0 - tc.y, 1.0 - tc.z), 0.0, 1.0);
 }
 
+// Composite scalar field for the isosurface: the max windowed value across every
+// enabled channel, plus (via `col`) the *full-intensity* LUT color of whichever
+// channel is the maximum there. Using the LUT's top color (not the color at the
+// crossing value) as the surface albedo keeps the surface equally bright at every
+// threshold — the iso level chooses only where the surface is, the lighting term
+// does the shading. Returns the field value in [0,1].
+float field_col(vec3 tc, out vec3 col) {
+    float f = 0.0;
+    col = vec3(0.0);
+    if (ch_enabled[0] > 0.5)                     { float t = norm_ch(raw0(tc), 0); if (t > f) { f = t; col = lut_col(1.0, 0); } }
+    if (num_channels > 1 && ch_enabled[1] > 0.5) { float t = norm_ch(raw1(tc), 1); if (t > f) { f = t; col = lut_col(1.0, 1); } }
+    if (num_channels > 2 && ch_enabled[2] > 0.5) { float t = norm_ch(raw2(tc), 2); if (t > f) { f = t; col = lut_col(1.0, 2); } }
+    if (num_channels > 3 && ch_enabled[3] > 0.5) { float t = norm_ch(raw3(tc), 3); if (t > f) { f = t; col = lut_col(1.0, 3); } }
+    if (num_channels > 4 && ch_enabled[4] > 0.5) { float t = norm_ch(raw4(tc), 4); if (t > f) { f = t; col = lut_col(1.0, 4); } }
+    if (num_channels > 5 && ch_enabled[5] > 0.5) { float t = norm_ch(raw5(tc), 5); if (t > f) { f = t; col = lut_col(1.0, 5); } }
+    return f;
+}
+
+float field_scalar(vec3 tc) {
+    vec3 ignore;
+    return field_col(tc, ignore);
+}
+
+// World-space gradient of the field (central differences, one voxel apart). It
+// points toward increasing intensity; used (normalized, two-sided) as the
+// surface normal for shading.
+vec3 field_grad(vec3 wp, vec3 voxel) {
+    return vec3(
+        field_scalar(vol_coord(wp + vec3(voxel.x, 0.0, 0.0))) - field_scalar(vol_coord(wp - vec3(voxel.x, 0.0, 0.0))),
+        field_scalar(vol_coord(wp + vec3(0.0, voxel.y, 0.0))) - field_scalar(vol_coord(wp - vec3(0.0, voxel.y, 0.0))),
+        field_scalar(vol_coord(wp + vec3(0.0, 0.0, voxel.z))) - field_scalar(vol_coord(wp - vec3(0.0, 0.0, voxel.z)))
+    );
+}
+
 void main() {
     vec3 rd = normalize(cam_forward
         + v_ndc.x * aspect * tan_half_fov * cam_right
@@ -396,6 +432,35 @@ void main() {
             p += dp;
         }
         frag_color = vec4(clamp(col, vec3(0.0), vec3(1.0)), 1.0);
+    } else if (u_mode == 2) {
+        // Isosurface: walk the ray until the composite field first reaches u_iso,
+        // refine the crossing between the two bracketing samples, then shade the
+        // hit from the field gradient with a camera headlight (two-sided, so both
+        // faces are lit and silhouettes fall off to the ambient term).
+        float prev_f = 0.0;
+        vec3 hit_col = vec3(0.0);
+        bool hit = false;
+        for (int i = 0; i < n; i++) {
+            vec3 tc = vol_coord(p);
+            vec3 fcol;
+            float f = field_col(tc, fcol);
+            if (f >= u_iso) {
+                float frac = clamp((u_iso - prev_f) / max(f - prev_f, 1e-6), 0.0, 1.0);
+                vec3 hp = p - dp * (1.0 - frac);
+                vec3 g = field_grad(hp, voxel);
+                vec3 nrm = (length(g) > 1e-6) ? normalize(g) : vec3(0.0, 0.0, 1.0);
+                float diff = abs(dot(nrm, -rd));
+                float shade = 0.2 + 0.8 * diff;
+                // Scale the albedo to Blender's classic 0.8 base gray, so a plain
+                // grayscale surface reads as soft gray rather than a blown-out white.
+                hit_col = clamp(fcol * 0.8 * shade, vec3(0.0), vec3(1.0));
+                hit = true;
+                break;
+            }
+            prev_f = f;
+            p += dp;
+        }
+        frag_color = vec4(hit ? hit_col : vec3(0.0), 1.0);
     } else {
         // MIP: per-channel maximum of the *windowed* value (norm_ch is monotonic,
         // so this equals windowing the raw max — but stays correct for float data
@@ -489,6 +554,7 @@ struct VolumeGl {
     u_num_channels: Option<glow::NativeUniformLocation>,
     u_mode: Option<glow::NativeUniformLocation>,
     u_density: Option<glow::NativeUniformLocation>,
+    u_iso: Option<glow::NativeUniformLocation>,
     u_interp: Option<glow::NativeUniformLocation>,
     params: Option<VolumeParams>,
 }
@@ -520,6 +586,7 @@ impl VolumeGl {
             u_num_channels: gl.get_uniform_location(program, "num_channels"),
             u_mode: gl.get_uniform_location(program, "u_mode"),
             u_density: gl.get_uniform_location(program, "u_density"),
+            u_iso: gl.get_uniform_location(program, "u_iso"),
             u_interp: gl.get_uniform_location(program, "u_interp"),
             params: None,
         }
@@ -719,6 +786,7 @@ impl ImageRenderResources {
             gl.uniform_1_i32(v.u_num_channels.as_ref(), p.num_channels);
             gl.uniform_1_i32(v.u_mode.as_ref(), p.render_mode);
             gl.uniform_1_f32(v.u_density.as_ref(), p.density);
+            gl.uniform_1_f32(v.u_iso.as_ref(), p.iso);
             gl.uniform_1_i32(v.u_interp.as_ref(), v.interp_mode);
 
             gl.disable(glow::BLEND);

@@ -1,6 +1,6 @@
 // volume.wgsl — GPU ray-march of a 3D stack (wgpu backend). Mirrors the glow
-// backend's volume shader: MIP or alpha-DVR compositing, per-channel LUT,
-// nearest/linear/cubic sampling, view-consistent sample spacing + per-pixel
+// backend's volume shader: MIP, alpha-DVR, or isosurface compositing, per-channel
+// LUT, nearest/linear/cubic sampling, view-consistent sample spacing + per-pixel
 // jitter, and the Y/Z flip that matches the 2D movie orientation.
 //
 // All volume channels are R16Float 3D textures holding *normalized* samples
@@ -21,8 +21,8 @@ struct VolParams {
     cam_right: vec4<f32>,
     cam_up: vec4<f32>,
     box_he: vec4<f32>,
-    misc: vec4<f32>,   // tan_half_fov, aspect, density, unused
-    modes: vec4<i32>,  // num_channels, render_mode (0=MIP,1=alpha), interp (0=nearest,1=linear,2=cubic), unused
+    misc: vec4<f32>,   // tan_half_fov, aspect, density, iso
+    modes: vec4<i32>,  // num_channels, render_mode (0=MIP,1=alpha,2=surface), interp (0=nearest,1=linear,2=cubic), unused
 };
 
 @group(0) @binding(0) var<uniform> P: VolParams;
@@ -138,11 +138,48 @@ fn edge_fade(tc: vec3<f32>, dim: vec3<f32>) -> f32 {
     return clamp(min(d.x, min(d.y, d.z)), 0.0, 1.0);
 }
 
+// Composite scalar field for the isosurface: the max windowed value across every
+// enabled channel (edge-faded, matching MIP), plus the *full-intensity* LUT color
+// of whichever channel is the maximum there. Using the LUT's top color (not the
+// color at the crossing value) as the surface albedo keeps the surface equally
+// bright at every threshold — the iso level chooses only where the surface is, and
+// the lighting term does the shading. Returned as rgb = surface color, a = field.
+fn field_col(tc: vec3<f32>) -> vec4<f32> {
+    let nc = P.modes.x;
+    let fade = edge_fade(tc, vec3<f32>(textureDimensions(vol0)));
+    var f = 0.0;
+    var col = vec3<f32>(0.0);
+    if (enabled(0) > 0.5) { let t = norm_ch(raw0(tc), 0) * fade; if (t > f) { f = t; col = lut_col(1.0, 0); } }
+    if (nc > 1 && enabled(1) > 0.5) { let t = norm_ch(raw1(tc), 1) * fade; if (t > f) { f = t; col = lut_col(1.0, 1); } }
+    if (nc > 2 && enabled(2) > 0.5) { let t = norm_ch(raw2(tc), 2) * fade; if (t > f) { f = t; col = lut_col(1.0, 2); } }
+    if (nc > 3 && enabled(3) > 0.5) { let t = norm_ch(raw3(tc), 3) * fade; if (t > f) { f = t; col = lut_col(1.0, 3); } }
+    if (nc > 4 && enabled(4) > 0.5) { let t = norm_ch(raw4(tc), 4) * fade; if (t > f) { f = t; col = lut_col(1.0, 4); } }
+    if (nc > 5 && enabled(5) > 0.5) { let t = norm_ch(raw5(tc), 5) * fade; if (t > f) { f = t; col = lut_col(1.0, 5); } }
+    return vec4<f32>(col, f);
+}
+
+fn field_scalar(tc: vec3<f32>) -> f32 { return field_col(tc).a; }
+
+// World-space gradient of the field (central differences, one voxel apart). It
+// points toward increasing intensity; used (normalized, two-sided) as the surface
+// normal for shading.
+fn field_grad(wp: vec3<f32>, voxel: vec3<f32>) -> vec3<f32> {
+    let ex = vec3<f32>(voxel.x, 0.0, 0.0);
+    let ey = vec3<f32>(0.0, voxel.y, 0.0);
+    let ez = vec3<f32>(0.0, 0.0, voxel.z);
+    return vec3<f32>(
+        field_scalar(vol_coord(wp + ex)) - field_scalar(vol_coord(wp - ex)),
+        field_scalar(vol_coord(wp + ey)) - field_scalar(vol_coord(wp - ey)),
+        field_scalar(vol_coord(wp + ez)) - field_scalar(vol_coord(wp - ez)),
+    );
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let tan = P.misc.x;
     let aspect = P.misc.y;
     let density = P.misc.z;
+    let iso = P.misc.w;
     let nc = P.modes.x;
     let he = P.box_he.xyz;
 
@@ -203,6 +240,35 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             p += dp;
         }
         return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    }
+
+    if (P.modes.y == 2) {
+        // Isosurface: walk the ray until the composite field first reaches `iso`,
+        // refine the crossing between the two bracketing samples, then shade the
+        // hit from the field gradient with a camera headlight (two-sided, so both
+        // sides of the surface are lit and silhouettes fall off to the ambient term).
+        var prev_f = 0.0;
+        for (var i = 0; i < n; i = i + 1) {
+            let tc = vol_coord(p);
+            let fc = field_col(tc);
+            let f = fc.a;
+            if (f >= iso) {
+                let frac = clamp((iso - prev_f) / max(f - prev_f, 1e-6), 0.0, 1.0);
+                let hit = p - dp * (1.0 - frac);
+                let g = field_grad(hit, voxel);
+                var nrm = vec3<f32>(0.0, 0.0, 1.0);
+                let glen = length(g);
+                if (glen > 1e-6) { nrm = g / glen; }
+                let diff = abs(dot(nrm, -rd));
+                let shade = 0.2 + 0.8 * diff;
+                // Scale the albedo to Blender's classic 0.8 base gray, so a plain
+                // grayscale surface reads as soft gray rather than a blown-out white.
+                return vec4<f32>(clamp(fc.rgb * 0.8 * shade, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+            }
+            prev_f = f;
+            p += dp;
+        }
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
 
     // MIP: per-channel maximum of the *windowed* value (norm_ch is monotonic, so

@@ -23,6 +23,7 @@ pub(super) fn render_settings_window(
     scroll_speed: &mut f32,
     render_mode: &mut render::VolumeRender,
     density: &mut f32,
+    iso: &mut f32,
     show_coord_box: &mut bool,
     reset_position: &mut bool,
     loaded: Option<&LoadedStack>,
@@ -38,13 +39,23 @@ pub(super) fn render_settings_window(
                     .on_hover_text("Maximum-intensity projection: brightest sample along each ray");
                 ui.selectable_value(render_mode, render::VolumeRender::Alpha, "Volume")
                     .on_hover_text("ImageJ 3D Viewer style: translucent alpha-blended volume");
+                ui.selectable_value(render_mode, render::VolumeRender::Surface, "Surface")
+                    .on_hover_text("Opaque isosurface: a shaded solid at the intensity threshold");
             });
-            // Density only affects the alpha DVR — disabled for MIP.
+            // Density only affects the alpha DVR — disabled for the other modes.
             ui.add_enabled_ui(*render_mode == render::VolumeRender::Alpha, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Density");
                     ui.add(egui::Slider::new(density, 1.0..=1000.0).logarithmic(true))
                         .on_hover_text("Opacity of the alpha volume (higher = brighter/more solid)");
+                });
+            });
+            // Iso threshold only affects the surface mode — disabled otherwise.
+            ui.add_enabled_ui(*render_mode == render::VolumeRender::Surface, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Threshold");
+                    ui.add(egui::Slider::new(iso, 0.01..=1.0))
+                        .on_hover_text("Isosurface level in windowed units (higher = only brighter voxels)");
                 });
             });
 
