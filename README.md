@@ -69,8 +69,7 @@ developer certificate):
   app → Open** (then confirm), or run
   `xattr -dr com.apple.quarantine /Applications/FastTIFF.app` once.
 
-Not listed (32-bit, a different CPU)? Build from source — see below; it's a
-single `cargo` command.
+Not listed (32-bit or a different CPU)? Build from source.
 
 ## Build & run
 
@@ -95,7 +94,7 @@ wgpu is the default: it's the more actively developed backend and preferable on
 macOS (Metal, since OpenGL is deprecated there). glow is the portable fallback —
 it links only OpenGL (near-universal on Linux) and avoids a Windows 10 idle-CPU
 spin that wgpu triggers on some machines. Only the selected backend is compiled
-in — the other's dependencies are excluded entirely.
+in - the other's dependencies are excluded entirely.
 
 
 ## Test and lint
@@ -267,6 +266,7 @@ this is the one-line formula to change.
 - Done: add adjustable WASD and mouse scroll speed input into 3d settings window in navigation section
 - Done: Port to macOS
 - Done: close all opened dialog windows when opened new file
+- Done: surface rendering mode added
 - Done: Add windows installer with files association
 - publish in Brew
 - Add 3D volume save in best suitable format for the gpu rendering (not necessary now, need to study the idea)
