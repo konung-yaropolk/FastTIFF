@@ -450,6 +450,7 @@ pub(super) struct VolumeCam {
     pub(super) aspect: f32,
     pub(super) render: render::VolumeRender,
     pub(super) density: f32,
+    pub(super) iso: f32,
 }
 
 /// The camera basis (eye + orthonormal forward/right/up) and volume-box

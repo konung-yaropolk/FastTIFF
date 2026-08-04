@@ -33,6 +33,7 @@ impl ViewerApp {
                 aspect: self.vol_aspect,
                 render: self.vol_render,
                 density: self.vol_density,
+                iso: self.vol_iso,
             },
             dims,
         );

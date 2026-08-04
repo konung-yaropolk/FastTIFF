@@ -102,15 +102,19 @@ impl VolumeInterp {
 }
 
 /// How the ray-marcher turns samples along a ray into a pixel:
-///   * `Mip`   — maximum-intensity projection (brightest sample wins; the
-///               default, order-independent, good for sparse/bright structures).
+///   * `Mip` — maximum-intensity projection (brightest sample wins; the default,
+///     order-independent, good for sparse/bright structures).
 ///   * `Alpha` — emission-absorption alpha compositing, à la the ImageJ 3D
-///               Viewer's "Volume" mode: a translucent, depth-cued render where
-///               intensity drives both color (LUT) and opacity.
+///     Viewer's "Volume" mode: a translucent, depth-cued render where intensity
+///     drives both color (LUT) and opacity.
+///   * `Surface` — an opaque isosurface: the ray stops at the first voxel whose
+///     windowed intensity crosses the `iso` threshold, and the hit is shaded from
+///     the field gradient (a solid, depth-cued surface).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum VolumeRender {
     Mip,
     Alpha,
+    Surface,
 }
 
 impl VolumeRender {
@@ -119,6 +123,7 @@ impl VolumeRender {
         match self {
             VolumeRender::Mip => 0,
             VolumeRender::Alpha => 1,
+            VolumeRender::Surface => 2,
         }
     }
 }
@@ -147,10 +152,13 @@ pub struct VolumeParams {
     /// Per-channel: 1.0 if the channel's data is in the float texture, else 0.0.
     pub is_float: [f32; MAX_CHANNELS],
     /// Ray-march compositing mode (see `VolumeRender::shader_mode`): 0 = MIP,
-    /// 1 = alpha DVR. The sample count is derived in-shader from the voxel size.
+    /// 1 = alpha DVR, 2 = isosurface. The sample count is derived in-shader from
+    /// the voxel size.
     pub render_mode: i32,
-    /// Alpha-DVR opacity scale (higher = more solid). Ignored by the MIP mode.
+    /// Alpha-DVR opacity scale (higher = more solid). Ignored by MIP/surface.
     pub density: f32,
+    /// Isosurface threshold in windowed units (0..1). Only used by surface mode.
+    pub iso: f32,
     pub eye: [f32; 3],
     pub forward: [f32; 3],
     pub right: [f32; 3],
