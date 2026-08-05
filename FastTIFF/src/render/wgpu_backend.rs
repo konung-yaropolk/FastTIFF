@@ -98,19 +98,20 @@ pub fn volume_gpu_bps(_kind: VolumeKind) -> usize {
 pub fn tune_native_options(options: &mut eframe::NativeOptions) {
     if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
         setup.device_descriptor = Arc::new(|adapter| {
-            // Mirror eframe's default limits choice, plus our optional feature.
-            let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
-                wgpu::Limits::downlevel_webgl2_defaults()
-            } else {
-                wgpu::Limits::default()
-            };
             wgpu::DeviceDescriptor {
                 label: Some("egui wgpu device"),
                 required_features: adapter.features() & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
-                required_limits: wgpu::Limits {
-                    max_texture_dimension_2d: 8192,
-                    ..base_limits
-                },
+                // Request exactly the adapter's own limits rather than wgpu's
+                // generic defaults. The defaults ask for more than some low-end
+                // GPUs provide — e.g. the Raspberry Pi's V3DV Vulkan driver caps
+                // `max_color_attachments` at 4 vs the default 8 — and wgpu rejects
+                // the entire device request when any single limit is exceeded. We
+                // only ever draw to one color target and size every texture against
+                // a memory budget, so the adapter's real limits are always enough
+                // and, by definition, never exceed what the hardware allows. (On
+                // the GL backend this also reports the driver's true max 2D texture
+                // size instead of WebGL2's conservative 2048 floor.)
+                required_limits: adapter.limits(),
                 ..Default::default()
             }
         });
