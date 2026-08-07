@@ -31,6 +31,7 @@ const TAG_SAMPLES_PER_PIXEL: u16 = 277;
 const TAG_ROWS_PER_STRIP: u16 = 278;
 const TAG_STRIP_BYTE_COUNTS: u16 = 279;
 const TAG_PLANAR_CONFIG: u16 = 284;
+const TAG_COLOR_MAP: u16 = 320;
 const TAG_SAMPLE_FORMAT: u16 = 339;
 const TAG_IJ_METADATA_BYTE_COUNTS: u16 = 50838;
 const TAG_IJ_METADATA: u16 = 50839;
@@ -408,6 +409,93 @@ fn rejects_stale_lut_block_with_mismatched_channel_count() {
 }
 
 /// Builds a minimal single-IFD chunky RGB8 TIFF (photometric=2, spp=3).
+/// Builds a single-IFD 8-bit **palette** TIFF (photometric=3): one index per
+/// pixel plus a ColorMap (tag 320) of 256 planar 16-bit RGB entries. `colors`
+/// gives the palette (index → RGB, in 0..=255, stored scaled to 16-bit).
+fn build_palette_tiff(width: u32, height: u32, indices: &[u8], colors: &[(u8, u8, u8); 256]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"II");
+    buf.extend_from_slice(&42u16.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // first-IFD offset, patched below
+
+    let strip_offset = buf.len() as u32;
+    buf.extend_from_slice(indices);
+    let strip_len = indices.len() as u32;
+
+    // ColorMap: 3 * 256 SHORTs, all reds then greens then blues, scaled to
+    // 16-bit (`v << 8 | v`) as the spec expects.
+    let colormap_offset = buf.len() as u32;
+    let up16 = |v: u8| ((v as u16) << 8) | v as u16;
+    for &(r, _, _) in colors {
+        buf.extend_from_slice(&up16(r).to_le_bytes());
+    }
+    for &(_, g, _) in colors {
+        buf.extend_from_slice(&up16(g).to_le_bytes());
+    }
+    for &(_, _, b) in colors {
+        buf.extend_from_slice(&up16(b).to_le_bytes());
+    }
+
+    let ifd_offset = buf.len() as u32;
+    buf[4..8].copy_from_slice(&ifd_offset.to_le_bytes());
+
+    let mut entries: Vec<IfdEntrySpec> = vec![
+        (TAG_IMAGE_WIDTH, 4, 1, long_val(width)),
+        (TAG_IMAGE_LENGTH, 4, 1, long_val(height)),
+        (TAG_BITS_PER_SAMPLE, 3, 1, short_val(8)),
+        (TAG_COMPRESSION, 3, 1, short_val(1)),
+        (TAG_PHOTOMETRIC, 3, 1, short_val(3)), // palette color
+        (TAG_STRIP_OFFSETS, 4, 1, long_val(strip_offset)),
+        (TAG_SAMPLES_PER_PIXEL, 3, 1, short_val(1)),
+        (TAG_ROWS_PER_STRIP, 4, 1, long_val(height)),
+        (TAG_STRIP_BYTE_COUNTS, 4, 1, long_val(strip_len)),
+        (TAG_COLOR_MAP, 3, 768, long_val(colormap_offset)),
+    ];
+    entries.sort_by_key(|e| e.0);
+
+    buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for (tag, ftype, count, val) in &entries {
+        buf.extend_from_slice(&tag.to_le_bytes());
+        buf.extend_from_slice(&ftype.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        buf.extend_from_slice(val);
+    }
+    buf.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+    buf
+}
+
+#[test]
+fn palette_tiff_installs_colormap_as_channel_lut() {
+    // A 3-color palette: index 0=red, 1=green, 2=blue, rest black.
+    let mut colors = [(0u8, 0u8, 0u8); 256];
+    colors[0] = (255, 0, 0);
+    colors[1] = (0, 255, 0);
+    colors[2] = (0, 0, 255);
+    let indices: Vec<u8> = vec![0, 1, 2, 0]; // 2x2
+    let bytes = build_palette_tiff(2, 2, &indices, &colors);
+    let path = unique_temp_path("palette.tif");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let stack = TiffStack::open(&path).expect("palette TIFF should open");
+    let frame = &stack.frames[0];
+    assert_eq!(frame.photometric, 3);
+    assert!(frame.is_palette(), "frame should be detected as palette");
+
+    // The ColorMap became the single channel's display LUT, marked explicit so
+    // the viewer keeps it instead of showing raw gray indices.
+    assert_eq!(stack.meta.channels, 1);
+    assert!(stack.meta.has_explicit_luts, "palette colors are explicit LUTs");
+    let lut = &stack.meta.channel_display[0].lut;
+    assert_eq!(lut[0], [255, 0, 0], "index 0 -> red");
+    assert_eq!(lut[1], [0, 255, 0], "index 1 -> green");
+    assert_eq!(lut[2], [0, 0, 255], "index 2 -> blue");
+
+    // The pixels themselves still decode as the raw indices (the LUT maps them
+    // to color on the GPU, not on decode).
+    let px = fast_tiff_lib::read_frame_u8(&stack.mmap, frame, stack.byte_order).unwrap();
+    assert_eq!(&*px, &[0, 1, 2, 0]);
+}
+
 fn build_rgb8_tiff(width: u32, height: u32, pixels: &[(u8, u8, u8)]) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(b"II");

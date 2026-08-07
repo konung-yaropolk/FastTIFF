@@ -192,6 +192,12 @@ struct LoadedStack {
     /// on upload), not separate IFDs. Flips how `ifd_index`/`sync_gpu` map a
     /// display channel to file data.
     rgb: bool,
+    /// True for a palette-color (indexed) stack: the single channel's pixels are
+    /// indices into the file's ColorMap, installed as its display LUT by
+    /// `fast_tiff_lib`. Its contrast window is fixed to an identity map (index →
+    /// LUT entry), so the contrast slider is suppressed for it — see
+    /// `build_channel_settings` and the contrast-UI guards.
+    palette: bool,
     /// Background read-ahead worker (own mmap): decode-ahead for compressed
     /// stacks, page-touch for uncompressed ones (absorbs the next frame's mmap
     /// soft faults off the UI thread while its inline decode stays zero-copy).
@@ -459,6 +465,7 @@ impl ViewerApp {
                     luts_uploaded: false,
                     triple_axis_warning: false,
                     rgb: false,
+                    palette: false,
                     prefetch,
                     prefetch_gen: 0,
                     volume_builder: None,
@@ -479,6 +486,10 @@ impl ViewerApp {
                 if loaded.tiff.frames.first().is_some_and(|f| f.is_rgb()) {
                     setup_rgb(&mut loaded);
                 }
+                // Palette (indexed) images: the ColorMap is already installed as
+                // the channel LUT by the lib; flag it so the fixed identity
+                // contrast window is kept and its slider is hidden.
+                loaded.palette = loaded.tiff.frames.first().is_some_and(|f| f.is_palette());
                 // Carry the pseudocolor preference onto the new stack.
                 refresh_pseudocolor(&mut loaded, self.apply_pseudocolor);
 
@@ -1055,6 +1066,9 @@ impl eframe::App for ViewerApp {
 
                 let calibration = loaded.tiff.meta.calibration;
                 let rgb = loaded.rgb;
+                // A palette channel's window is a fixed index→LUT identity, so
+                // there's nothing to adjust — its contrast slider is suppressed.
+                let palette = loaded.palette;
                 // Tint for the single-channel contrast slider: the low (dark) end
                 // of its chosen color LUT (grayscale/black → None → the default
                 // selection color). Snapshot here, before the mutable borrow of
@@ -1155,24 +1169,26 @@ impl eframe::App for ViewerApp {
                             .small()
                             .weak(),
                     );
-                } else if let Some(settings) = loaded.channel_settings.first_mut() {
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("Contrast:");
-                        let value = format!(
-                            "{} – {}",
-                            format_calibrated(calibration, settings.min),
-                            format_calibrated(calibration, settings.max),
-                        );
-                        // Reserve room for the value text on the right; the
-                        // slider fills what's left of the row.
-                        let slider_w = (ui.available_width() - 120.0).max(MIN_CONTRAST_SLIDER_W);
-                        let (lo, hi) = settings.bounds;
-                        // Tinted when a color LUT/colormap is chosen, else `None`
-                        // (plain grayscale → the default selection color).
-                        range_slider(ui, 0, &mut settings.min, &mut settings.max, lo, hi, slider_w, single_tint);
-                        ui.label(RichText::new(value).small());
-                    });
+                } else if !palette {
+                    if let Some(settings) = loaded.channel_settings.first_mut() {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Contrast:");
+                            let value = format!(
+                                "{} – {}",
+                                format_calibrated(calibration, settings.min),
+                                format_calibrated(calibration, settings.max),
+                            );
+                            // Reserve room for the value text on the right; the
+                            // slider fills what's left of the row.
+                            let slider_w = (ui.available_width() - 120.0).max(MIN_CONTRAST_SLIDER_W);
+                            let (lo, hi) = settings.bounds;
+                            // Tinted when a color LUT/colormap is chosen, else `None`
+                            // (plain grayscale → the default selection color).
+                            range_slider(ui, 0, &mut settings.min, &mut settings.max, lo, hi, slider_w, single_tint);
+                            ui.label(RichText::new(value).small());
+                        });
+                    }
                 }
             }
             if let Some(status) = &current_status {

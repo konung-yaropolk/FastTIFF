@@ -66,6 +66,12 @@ the *writer*; the down-conversion is only in the decode-to-display readers.)
 
 - **BigTIFF** (magic 43, 64-bit offsets) reads exactly like classic TIFF —
   `TiffStack::flavor` says which one you got.
+- **Palette-color (indexed) images** (PhotometricInterpretation=3, 8-bit): the
+  ColorMap (tag 320) is decoded into the channel's display LUT
+  (`channel_display[0].lut`) so the raw index renders as its real color instead
+  of a gray level. `FrameInfo::is_palette()` flags such frames; the pixels
+  themselves still decode as the bare indices (the palette is a display LUT, not
+  a decode step). 16-bit- and 8-bit-scaled ColorMaps are both handled.
 - **ImageJ's contiguous big-stack layout**: ImageJ writes its own >4 GiB
   stacks as a classic TIFF with a *single* IFD, `images=N` in the
   description, and the remaining frames appended as raw contiguous data.
@@ -174,7 +180,7 @@ pub struct FrameInfo {
     pub sample_format: SampleFormat,   // UnsignedInt | SignedInt | Float
     pub compression: Compression,      // None | Lzw | PackBits | Deflate | Other(u16)
     pub predictor: u16,                // 1 = none, 2 = horizontal differencing
-    pub photometric: u16,              // 2 = RGB
+    pub photometric: u16,              // 2 = RGB, 3 = palette (indexed)
     pub planar_config: u16,            // 1 = chunky, 2 = planar
     pub strip_offsets: Vec<u64>,
     pub strip_byte_counts: Vec<u64>,
