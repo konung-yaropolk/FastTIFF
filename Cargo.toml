@@ -2,8 +2,6 @@
 resolver = "2"
 members = ["fast-tiff-lib", "FastTIFF"]
 
-
-
 [profile.release]
 opt-level = 3
 lto = "fat"        # Enable Link-Time Optimization

@@ -130,6 +130,30 @@ fn detect_classifies_each_dialect() {
 }
 
 #[test]
+fn colormap_to_lut_scales_and_validates() {
+    // 16-bit-scaled colormap (the TIFF6 spec form): planar R[256], G[256], B[256].
+    let mut cm = vec![0u32; 768];
+    cm[0] = 0xFFFF; // R[0] = full
+    cm[256 + 1] = 0x8000; // G[1] = half
+    cm[512 + 2] = 0x0100; // B[2] = 1 at 8-bit
+    let lut = colormap_to_lut(&cm).expect("256-entry map");
+    assert_eq!(lut[0], [255, 0, 0]); // 0xFFFF >> 8 = 255
+    assert_eq!(lut[1], [0, 128, 0]); // 0x8000 >> 8 = 128
+    assert_eq!(lut[2], [0, 0, 1]); // 0x0100 >> 8 = 1
+
+    // 8-bit-scaled colormap (values never exceed 255): taken as-is, not shifted.
+    let mut cm8 = vec![0u32; 768];
+    cm8[0] = 200;
+    cm8[256] = 100;
+    cm8[512] = 50;
+    let lut8 = colormap_to_lut(&cm8).unwrap();
+    assert_eq!(lut8[0], [200, 100, 50]);
+
+    // Wrong length → not an 8-bit palette.
+    assert!(colormap_to_lut(&[0u32; 48]).is_none());
+}
+
+#[test]
 fn neutral_parse_still_honors_resolution_tags() {
     // A plain TIFF (no recognized description) with resolution tags reports
     // pixel size, so calibration survives even without a metadata dialect.

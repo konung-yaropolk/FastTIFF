@@ -151,6 +151,18 @@ pub(super) fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
         .map(|c| {
             let disp = &tiff.meta.channel_display[c];
             let frame = tiff.frames.get(c);
+            // Palette (indexed) channel: pixels are direct ColorMap indices, and
+            // the ColorMap is already this channel's LUT. Pin the window to a
+            // texel-centered identity so index i maps to LUT entry i exactly —
+            // t = (i + 0.5)/256 lands on texel i's center, so even a linearly
+            // filtered LUT returns entry i with no blend into a neighbour. The
+            // window is in the 0..65535 UI space that `sync_gpu` divides by 257
+            // for the 8-bit texture, so -0.5 and 255.5 in index space are:
+            if frame.is_some_and(|f| f.is_palette()) {
+                const W: f32 = 257.0; // the 8-bit → 0..65535 widening sync_gpu undoes
+                let (lo, hi) = (-0.5 * W, 255.5 * W);
+                return ChannelSettings { min: lo, max: hi, enabled: true, bounds: (lo, hi), kind: ChannelKind::Int8 };
+            }
             // 32- and 64-bit IEEE floats both go to the R32F GPU path (64-bit is
             // downcast to f32 on decode). Integer data of every width — including
             // 64-bit int — takes the u16-rescale path below instead.

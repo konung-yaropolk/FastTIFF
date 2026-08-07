@@ -30,6 +30,9 @@ pub(crate) const TAG_STRIP_BYTE_COUNTS: u16 = 279;
 pub(crate) const TAG_PREDICTOR: u16 = 317;
 pub(crate) const TAG_PLANAR_CONFIG: u16 = 284;
 pub(crate) const TAG_SAMPLE_FORMAT: u16 = 339;
+/// ColorMap (tag 320): the palette for a PhotometricInterpretation=3 (indexed)
+/// image — `3 * 2^BitsPerSample` SHORT values, all reds then greens then blues.
+const TAG_COLOR_MAP: u16 = 320;
 // Tags 50838/50839 (IJMetadataByteCounts / IJMetadata) carry ImageJ's binary
 // per-channel LUT/range block. The format is undocumented and best-effort to
 // parse, so it's used only as a supplementary fallback for display info the
@@ -98,6 +101,16 @@ impl FrameInfo {
     pub fn is_planar(&self) -> bool {
         self.planar_config == 2 && self.samples_per_pixel > 1
     }
+
+    /// True for a palette-color (indexed) frame: PhotometricInterpretation=3,
+    /// one 8-bit sample per pixel that indexes the ColorMap (tag 320). The pixel
+    /// value is a lookup index, not a brightness — a consumer should map it
+    /// through the palette (exposed as `channel_display[0].lut`) rather than
+    /// show it as a gray level. Only 8-bit palettes are recognized (a 256-entry
+    /// map); wider indices aren't decoded here anyway.
+    pub fn is_palette(&self) -> bool {
+        self.photometric == 3 && self.samples_per_pixel == 1 && self.bits_per_sample == 8
+    }
 }
 
 // `non_exhaustive`: fields have been added before (`description`) and may be
@@ -137,6 +150,8 @@ impl TiffStack {
         // XResolution/YResolution (pixels per unit) → x/y pixel calibration.
         let mut x_resolution: Option<f64> = None;
         let mut y_resolution: Option<f64> = None;
+        // ColorMap (tag 320) for a palette image → the channel's display LUT.
+        let mut color_map: Option<Vec<u32>> = None;
 
         let mut offset = usize::try_from(first_ifd)
             .map_err(|_| anyhow!("first IFD offset exceeds address space"))?;
@@ -167,6 +182,9 @@ impl TiffStack {
                         }
                         TAG_Y_RESOLUTION => {
                             y_resolution = e.as_rational(&mmap, order).ok();
+                        }
+                        TAG_COLOR_MAP => {
+                            color_map = e.as_u32_array(&mmap, order).ok();
                         }
                         _ => {}
                     }
@@ -225,7 +243,7 @@ impl TiffStack {
             }
         }
 
-        let meta = metadata::parse(
+        let mut meta = metadata::parse(
             description.as_deref(),
             ij_metadata_bytes.as_deref(),
             ij_metadata_counts.as_deref(),
@@ -233,6 +251,25 @@ impl TiffStack {
             x_resolution,
             y_resolution,
         );
+
+        // A palette (indexed) image: the ColorMap *is* the channel's display
+        // LUT, and the raw pixel is a direct index into it. Install it so the
+        // consumer renders the real colors instead of the bare index as a gray
+        // level. This is orthogonal to the metadata dialect — a palette TIFF
+        // usually carries no ImageJ/OME description at all — so it's applied
+        // here, after the dialect parse, over the single (grayscale-default)
+        // channel it produced.
+        if frames[0].is_palette() {
+            if let Some(lut) = color_map.as_deref().and_then(metadata::colormap_to_lut) {
+                if let Some(cd) = meta.channel_display.first_mut() {
+                    cd.lut = lut;
+                }
+                // The file supplies genuine colors: keep them (no pseudocolor
+                // override), and it's an indexed/color image, not grayscale.
+                meta.has_explicit_luts = true;
+                meta.mode = metadata::DisplayMode::Color;
+            }
+        }
 
         Ok(TiffStack {
             mmap,

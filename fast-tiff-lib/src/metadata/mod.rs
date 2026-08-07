@@ -522,6 +522,27 @@ pub fn default_composite_lut(channel_index: usize) -> [[u8; 3]; 256] {
     color_ramp_lut(composite_color(channel_index))
 }
 
+/// Convert a TIFF ColorMap (tag 320) into a 256-entry display LUT. The map is
+/// `3 * 256` values in planar order — all 256 reds, then greens, then blues —
+/// each nominally a 16-bit intensity (0..=65535), which scales down to the
+/// LUT's 8 bits. Returns `None` unless it's exactly a 256-entry (8-bit) map.
+///
+/// Some writers store the channels at 8-bit scale (0..=255) instead of the
+/// spec's 16-bit, so a map whose values never exceed 255 is taken as-is rather
+/// than shifted down to near-black.
+pub fn colormap_to_lut(colormap: &[u32]) -> Option<[[u8; 3]; 256]> {
+    if colormap.len() != 768 {
+        return None; // only 8-bit (256-entry) palettes
+    }
+    let scaled_16bit = colormap.iter().any(|&v| v > 255);
+    let to_u8 = |v: u32| if scaled_16bit { (v >> 8) as u8 } else { v as u8 };
+    let mut lut = [[0u8; 3]; 256];
+    for (i, entry) in lut.iter_mut().enumerate() {
+        *entry = [to_u8(colormap[i]), to_u8(colormap[256 + i]), to_u8(colormap[512 + i])];
+    }
+    Some(lut)
+}
+
 /// The default LUT for channel `c` under display `mode`: a flat grayscale
 /// ramp in grayscale mode, otherwise the cycling composite-color palette.
 /// The single source of truth so parsers and `resize_channel_display` (in the
