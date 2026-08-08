@@ -149,8 +149,24 @@ fn colormap_to_lut_scales_and_validates() {
     let lut8 = colormap_to_lut(&cm8).unwrap();
     assert_eq!(lut8[0], [200, 100, 50]);
 
-    // Wrong length → not an 8-bit palette.
-    assert!(colormap_to_lut(&[0u32; 48]).is_none());
+    // A 4-bit (16-entry) map: entries fill LUT slots 0..16, the tail repeats
+    // the last entry (index 15 here is [10,20,30]).
+    let mut cm4 = vec![0u32; 48];
+    cm4[0] = 200; // R[0]
+    cm4[16] = 100; // G[0]
+    cm4[32] = 50; // B[0]
+    cm4[15] = 10;
+    cm4[16 + 15] = 20;
+    cm4[32 + 15] = 30;
+    let lut4 = colormap_to_lut(&cm4).unwrap();
+    assert_eq!(lut4[0], [200, 100, 50]);
+    assert_eq!(lut4[15], [10, 20, 30]);
+    assert_eq!(lut4[255], [10, 20, 30], "tail repeats the last real entry");
+
+    // Genuinely invalid: not a multiple of 3, or too large.
+    assert!(colormap_to_lut(&[0u32; 49]).is_none());
+    assert!(colormap_to_lut(&[0u32; 3 * 300]).is_none());
+    assert!(colormap_to_lut(&[]).is_none());
 }
 
 #[test]

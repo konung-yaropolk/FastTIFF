@@ -66,12 +66,20 @@ the *writer*; the down-conversion is only in the decode-to-display readers.)
 
 - **BigTIFF** (magic 43, 64-bit offsets) reads exactly like classic TIFF —
   `TiffStack::flavor` says which one you got.
-- **Palette-color (indexed) images** (PhotometricInterpretation=3, 8-bit): the
-  ColorMap (tag 320) is decoded into the channel's display LUT
-  (`channel_display[0].lut`) so the raw index renders as its real color instead
-  of a gray level. `FrameInfo::is_palette()` flags such frames; the pixels
-  themselves still decode as the bare indices (the palette is a display LUT, not
-  a decode step). 16-bit- and 8-bit-scaled ColorMaps are both handled.
+- **ColorMap (tag 320) as a display LUT**, in the two situations ImageJ writes
+  one — the map becomes the channel's display LUT (`channel_display[0].lut`), the
+  pixels decode unchanged, and the color is applied on display:
+  - **4-/8-bit palette** images (PhotometricInterpretation=3): the pixel is a
+    direct index into the map (`2^BitsPerSample` entries). `FrameInfo::is_palette()`
+    flags these (the viewer maps index → entry through an identity contrast
+    window); 4-bit indices are unpacked two-per-byte on decode.
+  - **grayscale** images (PhotometricInterpretation=1) that ImageJ has colored
+    with a Fire/Ice-style LUT: the 256-entry map is applied through the normal
+    contrast window (`min=`/`max=`), not as an index.
+
+  This is **sample-format agnostic** — it applies to unsigned, signed, and
+  float grayscale alike (8/16/32/64-bit). 16-bit- and 8-bit-scaled ColorMaps are
+  both handled.
 - **ImageJ's contiguous big-stack layout**: ImageJ writes its own >4 GiB
   stacks as a classic TIFF with a *single* IFD, `images=N` in the
   description, and the remaining frames appended as raw contiguous data.
@@ -336,7 +344,10 @@ writer.finish()?; // writes the IFD chain; the file isn't valid without it
   channels/slices (time frames are derived from the plane count at `finish()`),
   display mode, `fps`, frame interval, unit, `min`/`max` display range, linear
   calibration, Z `spacing`, playback `loop`, physical `pixel_size` (written to
-  the resolution tags), per-`channel(name, color)`, plus `extra(key, value)` —
+  the resolution tags), per-`channel(name, color)` (OME) or
+  per-`channel_lut(lut)` (ImageJ — a 256-entry color LUT written to the binary
+  `IJMetadata` block, so a colorized 8-/16-/32-bit stack keeps its colors),
+  plus `extra(key, value)` —
   then pick the dialect with `metadata_format(MetadataFormat::ImageJ | Ome)`
   (ImageJ by default). The same input serializes to either an ImageJ
   `key=value` block or an OME-XML document. Or `description(text)` for a fully
@@ -390,9 +401,11 @@ the reader's indexing.
   chunky is the default and writes no tag at all, which TIFF6 defines as
   chunky. Physical `pixel_size` is written to the XResolution/YResolution tags
   (in either dialect); the unit name travels in the metadata text (ImageJ) or
-  OME-XML `PhysicalSize` (OME). ImageJ output never writes the binary
-  `IJMetadata` LUT block — contrast ranges go in the description and channel
-  colors follow `mode`; OME output carries per-channel colors as `Channel/@Color`.
+  OME-XML `PhysicalSize` (OME). ImageJ output writes the binary `IJMetadata` LUT
+  block (tags 50839/50838, the real `IJIJ`/`JIJI`-magic format ImageJ and
+  tifffile use) only when `channel_lut` LUTs are supplied — so a colorized
+  16/32-bit stack round-trips its colors; contrast ranges otherwise go in the
+  description. OME output carries per-channel colors as `Channel/@Color`.
 
 ### Metadata (`StackMeta`)
 

@@ -257,6 +257,47 @@ fn imagej_hyperstack_metadata_roundtrips_through_stack_meta() {
     assert!(desc.contains("vunit=V"), "raw description keeps extra keys:\n{desc}");
 }
 
+/// Per-channel color LUTs written into the ImageJ binary metadata block must
+/// survive a round-trip through a real 16-bit file — the read+write halves of
+/// "colorize 16/32-bit images like ImageJ". No CPU pixel change: the LUT is a
+/// display table the reader hands back on `channel_display`.
+#[test]
+fn imagej_channel_luts_round_trip_through_stack_meta() {
+    let path = unique_temp_path("luts.tif");
+    let _cleanup = Cleanup(path.clone());
+
+    // Two distinct LUTs: magenta ramp and cyan ramp.
+    let mut magenta = [[0u8; 3]; 256];
+    let mut cyan = [[0u8; 3]; 256];
+    for i in 0..256 {
+        magenta[i] = [i as u8, 0, i as u8];
+        cyan[i] = [0, i as u8, i as u8];
+    }
+
+    // 2-channel 16-bit composite, 3 time frames = 6 planes.
+    let opts = WriterOptions::new(2, 2, SampleType::U16).metadata(
+        StackMetaWrite::new(2, 1)
+            .mode(DisplayMode::Composite)
+            .channel_lut(magenta)
+            .channel_lut(cyan),
+    );
+    let mut w = TiffWriter::create(&path, opts).unwrap();
+    for i in 0..6u16 {
+        w.write_frame_u16(&[i, i + 1, i + 2, i + 3]).unwrap();
+    }
+    w.finish().unwrap();
+
+    let stack = TiffStack::open(&path).unwrap();
+    let meta = &stack.meta;
+    assert_eq!(meta.source_format, MetadataFormat::ImageJ);
+    assert_eq!(meta.channels, 2);
+    // The colored LUTs came back and are flagged explicit (so the viewer keeps
+    // them instead of applying a default).
+    assert!(meta.has_explicit_luts, "colored LUTs are explicit");
+    assert_eq!(meta.channel_display[0].lut[255], [255, 0, 255], "channel 0 → magenta top");
+    assert_eq!(meta.channel_display[1].lut[255], [0, 255, 255], "channel 1 → cyan top");
+}
+
 /// The same neutral metadata builder, written as OME instead of ImageJ, must
 /// produce a file that opens as OME with the dimensions, pixel size, and pixels
 /// intact — the end-to-end proof of OME write+read through a real file.

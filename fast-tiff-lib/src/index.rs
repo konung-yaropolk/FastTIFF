@@ -103,13 +103,13 @@ impl FrameInfo {
     }
 
     /// True for a palette-color (indexed) frame: PhotometricInterpretation=3,
-    /// one 8-bit sample per pixel that indexes the ColorMap (tag 320). The pixel
-    /// value is a lookup index, not a brightness — a consumer should map it
-    /// through the palette (exposed as `channel_display[0].lut`) rather than
-    /// show it as a gray level. Only 8-bit palettes are recognized (a 256-entry
-    /// map); wider indices aren't decoded here anyway.
+    /// one 4- or 8-bit sample per pixel that indexes the ColorMap (tag 320). The
+    /// pixel value is a lookup index, not a brightness — a consumer should map
+    /// it through the palette (exposed as `channel_display[0].lut`) rather than
+    /// show it as a gray level. 4-bit indices are unpacked to one byte each on
+    /// decode, so both ride the same 8-bit-index display path.
     pub fn is_palette(&self) -> bool {
-        self.photometric == 3 && self.samples_per_pixel == 1 && self.bits_per_sample == 8
+        self.photometric == 3 && self.samples_per_pixel == 1 && matches!(self.bits_per_sample, 4 | 8)
     }
 }
 
@@ -252,22 +252,33 @@ impl TiffStack {
             y_resolution,
         );
 
-        // A palette (indexed) image: the ColorMap *is* the channel's display
-        // LUT, and the raw pixel is a direct index into it. Install it so the
-        // consumer renders the real colors instead of the bare index as a gray
-        // level. This is orthogonal to the metadata dialect — a palette TIFF
-        // usually carries no ImageJ/OME description at all — so it's applied
-        // here, after the dialect parse, over the single (grayscale-default)
-        // channel it produced.
-        if frames[0].is_palette() {
+        // A ColorMap (tag 320) is the single channel's display LUT. ImageJ
+        // attaches one in two situations, and we honor both — the pixels stay
+        // as-is (the LUT is applied on display), and the consumer renders the
+        // file's real colors instead of a gray level:
+        //   - 8-bit **palette** images (photometric=3): the pixel is a direct
+        //     index into the map (see `FrameInfo::is_palette`; the viewer then
+        //     maps index → entry with an identity contrast window).
+        //   - 16-/32-bit **grayscale** images (photometric=1) that ImageJ has
+        //     colored with a Fire/Ice-style LUT: the map is applied through the
+        //     normal contrast window (`min=`/`max=`), not as a direct index.
+        // This is orthogonal to the metadata dialect, so it's applied here after
+        // the parse, over the single (grayscale-default) channel it produced.
+        if frames[0].samples_per_pixel == 1 {
             if let Some(lut) = color_map.as_deref().and_then(metadata::colormap_to_lut) {
+                // A grayscale ramp is a visual no-op — apply it (harmless) but
+                // don't mark it "explicit", so the pseudocolor toggle stays
+                // available for a genuinely grayscale file.
+                let colored = lut.iter().any(|px| px[0] != px[1] || px[1] != px[2]);
                 if let Some(cd) = meta.channel_display.first_mut() {
                     cd.lut = lut;
                 }
-                // The file supplies genuine colors: keep them (no pseudocolor
-                // override), and it's an indexed/color image, not grayscale.
-                meta.has_explicit_luts = true;
-                meta.mode = metadata::DisplayMode::Color;
+                if colored {
+                    // Keep the file's colors (no pseudocolor override); it's a
+                    // color image, not grayscale.
+                    meta.has_explicit_luts = true;
+                    meta.mode = metadata::DisplayMode::Color;
+                }
             }
         }
 

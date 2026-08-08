@@ -143,6 +143,42 @@ pub(super) fn gray_lut_for(sel: usize) -> [[u8; 3]; 256] {
     }
 }
 
+// When the file carries its own LUT (`builtin_lut`), the selector prepends a
+// leading "Built-in LUT" entry (the default) ahead of the computed options —
+// so the built-in colormap is one option among grayscale/colors/colormaps. The
+// three helpers below fold that offset in, so the selector index (`gray_lut_sel`)
+// is `0 = Built-in` when present, else `0 = Grayscale`.
+
+/// 1 when a leading "Built-in LUT" option is present, else 0.
+fn gray_lut_offset(loaded: &LoadedStack) -> usize {
+    loaded.builtin_lut.is_some() as usize
+}
+
+/// Total selector options, including the leading "Built-in LUT" when present.
+pub(super) fn gray_lut_count(loaded: &LoadedStack) -> usize {
+    gray_lut_option_count() + gray_lut_offset(loaded)
+}
+
+/// Display name for selector index `sel` ("Built-in LUT" at 0 when present).
+pub(super) fn gray_lut_sel_name(loaded: &LoadedStack, sel: usize) -> &'static str {
+    let off = gray_lut_offset(loaded);
+    if off == 1 && sel == 0 {
+        "Built-in"
+    } else {
+        gray_lut_name(sel - off)
+    }
+}
+
+/// The 256-entry LUT for selector index `sel` (the file's own map at 0 when
+/// present, otherwise the computed option).
+pub(super) fn gray_lut_sel_lut(loaded: &LoadedStack, sel: usize) -> [[u8; 3]; 256] {
+    let off = gray_lut_offset(loaded);
+    match loaded.builtin_lut {
+        Some(lut) if sel == 0 => lut,
+        _ => gray_lut_for(sel - off),
+    }
+}
+
 /// Builds the UI-level per-channel settings (window/level, enabled,
 /// float-encoding range) from `tiff.meta`'s current channel count and
 /// display info.
@@ -170,10 +206,11 @@ pub(super) fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
                 f.sample_format == fast_tiff_lib::SampleFormat::Float
                     && (f.bits_per_sample == 32 || f.bits_per_sample == 64)
             });
-            // Unsigned single-sample 8-bit can upload raw (R8Uint) instead of
-            // being widened to 16-bit on the CPU each frame.
+            // Unsigned single-sample 8-bit uploads raw (R8Uint) instead of being
+            // widened to 16-bit on the CPU each frame. 4-bit indices decode to
+            // one byte each, so they ride the same R8Uint path.
             let is_u8 = frame.is_some_and(|f| {
-                f.bits_per_sample == 8
+                matches!(f.bits_per_sample, 4 | 8)
                     && f.sample_format == fast_tiff_lib::SampleFormat::UnsignedInt
                     && f.samples_per_pixel == 1
             });
@@ -220,14 +257,14 @@ pub(super) fn pseudocolor_applicable(loaded: &LoadedStack) -> bool {
         && !loaded.tiff.meta.has_explicit_luts
 }
 
-/// Whether the single-channel grayscale color/colormap selector applies: exactly
-/// one channel, genuinely grayscale (not RGB or composite, no file-supplied
-/// LUTs). The multi-channel case is covered by the pseudocolor toggle instead.
+/// Whether the single-channel LUT/colormap selector applies: exactly one
+/// channel that isn't RGB. It applies whether the channel is plain grayscale
+/// *or* already carries a file-supplied LUT — in the latter case the selector
+/// leads with a "Built-in LUT" option (the default) so the file's colors show,
+/// with grayscale / channel colors / colormaps available to override. The
+/// multi-channel case is covered by the pseudocolor toggle instead.
 pub(super) fn gray_lut_applicable(loaded: &LoadedStack) -> bool {
-    !loaded.rgb
-        && loaded.channel_settings.len() == 1
-        && loaded.tiff.meta.mode == fast_tiff_lib::DisplayMode::Grayscale
-        && !loaded.tiff.meta.has_explicit_luts
+    !loaded.rgb && loaded.channel_settings.len() == 1
 }
 
 /// Sets the per-channel LUTs of an applicable (multi-channel grayscale) stack:
