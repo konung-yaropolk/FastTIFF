@@ -147,6 +147,9 @@ pub fn read_frame_u16_into(
 /// instead (dividing by 257). Only valid for `bits_per_sample == 8`,
 /// `samples_per_pixel == 1`, `UnsignedInt`; callers gate on that.
 pub fn read_frame_u8<'a>(mmap: &'a [u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Cow<'a, [u8]>> {
+    if frame.bits_per_sample == 4 {
+        return Ok(Cow::Owned(decode_4bit_indices(mmap, frame)?));
+    }
     decode_native_bytes(mmap, frame, file_order)
 }
 
@@ -154,6 +157,12 @@ pub fn read_frame_u8<'a>(mmap: &'a [u8], frame: &FrameInfo, file_order: ByteOrde
 /// For uncompressed predictor-free frames the strips are copied straight from
 /// the mapping into `out` — no intermediate buffer, no per-frame allocation.
 pub fn read_frame_u8_into(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder, out: &mut Vec<u8>) -> Result<()> {
+    if frame.bits_per_sample == 4 {
+        let indices = decode_4bit_indices(mmap, frame)?;
+        ensure_len(out, indices.len());
+        out.copy_from_slice(&indices);
+        return Ok(());
+    }
     let sample_bytes = sample_bytes(frame)?;
     if frame.compression == Compression::None && frame.predictor == 1 {
         let spp = (frame.samples_per_pixel as usize).max(1);
@@ -182,6 +191,54 @@ fn bytes_for_bits(bits: u16) -> Result<usize> {
         64 => Ok(8),
         other => bail!("unsupported bits_per_sample: {other}"),
     }
+}
+
+/// Decode a **4-bit single-sample** frame into one byte per pixel (each an index
+/// 0..=15). 4-bit samples are packed two per byte, high nibble first (TIFF's
+/// FillOrder-1 default). Rows are byte-aligned — a byte is never split across
+/// rows — so an odd width leaves the last nibble of its final byte unused.
+///
+/// Used for palette-color TIFFs whose ColorMap is indexed by a 4-bit value (the
+/// widened index rides the same R8Uint upload + LUT path as an 8-bit palette).
+/// Handles the compressions the strip decoder does; multi-sample 4-bit isn't a
+/// thing we support.
+fn decode_4bit_indices(mmap: &[u8], frame: &FrameInfo) -> Result<Vec<u8>> {
+    if frame.samples_per_pixel > 1 {
+        bail!("4-bit multi-sample images are not supported");
+    }
+    let width = frame.width as usize;
+    let height = frame.height as usize;
+    let packed_row = width.div_ceil(2); // bytes per row (byte-aligned)
+    let rows_per_strip = (frame.rows_per_strip as usize).max(1);
+
+    // Assemble the packed bytes, decompressing each strip into its row range.
+    let mut packed = vec![0u8; packed_row * height];
+    let mut rows_done = 0usize;
+    for (&off, &len) in frame.strip_offsets.iter().zip(frame.strip_byte_counts.iter()) {
+        if rows_done >= height {
+            break;
+        }
+        let rows = rows_per_strip.min(height - rows_done);
+        let src = mmap
+            .get(off as usize..(off as usize).saturating_add(len as usize).min(mmap.len()))
+            .ok_or_else(|| anyhow!("strip at offset {off} out of file bounds"))?;
+        let dst = &mut packed[rows_done * packed_row..(rows_done + rows) * packed_row];
+        decompress_into(src, frame.compression, dst)?;
+        rows_done += rows;
+    }
+    if rows_done < height {
+        bail!("4-bit strips cover only {rows_done} of {height} rows");
+    }
+
+    // Unpack nibbles → one index byte per pixel.
+    let mut out = vec![0u8; width * height];
+    for (prow, orow) in packed.chunks_exact(packed_row).zip(out.chunks_exact_mut(width.max(1))) {
+        for (x, o) in orow.iter_mut().enumerate() {
+            let byte = prow[x / 2];
+            *o = if x % 2 == 0 { byte >> 4 } else { byte & 0x0f };
+        }
+    }
+    Ok(out)
 }
 
 /// The uncompressed byte length each of the frame's strips decodes into, in
@@ -534,6 +591,13 @@ pub fn read_plane_u8_into(
     plane: usize,
     out: &mut Vec<u8>,
 ) -> Result<()> {
+    // 4-bit is single-sample (plane 0 is the whole image).
+    if frame.bits_per_sample == 4 {
+        let indices = decode_4bit_indices(mmap, frame)?;
+        ensure_len(out, indices.len());
+        out.copy_from_slice(&indices);
+        return Ok(());
+    }
     let native = decode_native_bytes(mmap, frame, file_order)?;
     ensure_len(out, frame.width as usize * frame.height as usize);
     plane_u8_from_native(&native, frame, plane, out)

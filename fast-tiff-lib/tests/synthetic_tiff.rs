@@ -178,6 +178,9 @@ fn build_ij_metadata_blob(ranges: &[(f64, f64)], luts: &[[[u8; 3]; 256]]) -> (Ve
 
     let mut body = Vec::new();
 
+    // "IJIJ" magic marks a big-endian directory (codes/counts big-endian); a
+    // real ImageJ block always starts with it (or "JIJI" for little-endian).
+    header.extend_from_slice(b"IJIJ");
     // directory: one "rang" record covering all channels, one "luts" record per channel
     header.extend_from_slice(b"rang");
     header.extend_from_slice(&1u32.to_be_bytes());
@@ -408,32 +411,42 @@ fn rejects_stale_lut_block_with_mismatched_channel_count() {
     assert_eq!(stack.meta.channel_display[0].range, None);
 }
 
-/// Builds a minimal single-IFD chunky RGB8 TIFF (photometric=2, spp=3).
-/// Builds a single-IFD 8-bit **palette** TIFF (photometric=3): one index per
-/// pixel plus a ColorMap (tag 320) of 256 planar 16-bit RGB entries. `colors`
-/// gives the palette (index → RGB, in 0..=255, stored scaled to 16-bit).
-fn build_palette_tiff(width: u32, height: u32, indices: &[u8], colors: &[(u8, u8, u8); 256]) -> Vec<u8> {
+/// Builds a single-IFD TIFF with a ColorMap (tag 320) — the palette/LUT.
+/// `pixel_bytes` is the raw little-endian sample data (`bits`-wide samples, or
+/// packed nibbles for 4-bit), `photometric` selects palette (3) vs grayscale
+/// (1), `sample_format` is the TIFF SampleFormat (1 unsigned, 2 signed, 3
+/// float). The ColorMap holds `2^bits` entries for a palette and 256 for a
+/// grayscale display LUT — how ImageJ stores each. Covers 4/8-bit palettes and
+/// 16/32-bit grayscale-with-LUT across signed/unsigned/float.
+fn build_colormap_tiff(
+    width: u32,
+    height: u32,
+    pixel_bytes: &[u8],
+    bits: u16,
+    photometric: u16,
+    sample_format: u16,
+    colors: &[(u8, u8, u8); 256],
+) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(b"II");
     buf.extend_from_slice(&42u16.to_le_bytes());
     buf.extend_from_slice(&0u32.to_le_bytes()); // first-IFD offset, patched below
 
     let strip_offset = buf.len() as u32;
-    buf.extend_from_slice(indices);
-    let strip_len = indices.len() as u32;
+    buf.extend_from_slice(pixel_bytes);
+    let strip_len = pixel_bytes.len() as u32;
 
-    // ColorMap: 3 * 256 SHORTs, all reds then greens then blues, scaled to
-    // 16-bit (`v << 8 | v`) as the spec expects.
+    // ColorMap: 3 * N SHORTs (all reds, greens, blues), each scaled to 16-bit
+    // (`v << 8 | v`) as the spec expects. N = 2^bits for a palette, 256 for a
+    // grayscale display LUT.
+    let cm_entries: usize = if photometric == 3 { 1usize << bits.min(8) } else { 256 };
     let colormap_offset = buf.len() as u32;
     let up16 = |v: u8| ((v as u16) << 8) | v as u16;
-    for &(r, _, _) in colors {
-        buf.extend_from_slice(&up16(r).to_le_bytes());
-    }
-    for &(_, g, _) in colors {
-        buf.extend_from_slice(&up16(g).to_le_bytes());
-    }
-    for &(_, _, b) in colors {
-        buf.extend_from_slice(&up16(b).to_le_bytes());
+    for chan in 0..3 {
+        for &(r, g, b) in &colors[..cm_entries] {
+            let v = [r, g, b][chan];
+            buf.extend_from_slice(&up16(v).to_le_bytes());
+        }
     }
 
     let ifd_offset = buf.len() as u32;
@@ -442,14 +455,15 @@ fn build_palette_tiff(width: u32, height: u32, indices: &[u8], colors: &[(u8, u8
     let mut entries: Vec<IfdEntrySpec> = vec![
         (TAG_IMAGE_WIDTH, 4, 1, long_val(width)),
         (TAG_IMAGE_LENGTH, 4, 1, long_val(height)),
-        (TAG_BITS_PER_SAMPLE, 3, 1, short_val(8)),
+        (TAG_BITS_PER_SAMPLE, 3, 1, short_val(bits)),
         (TAG_COMPRESSION, 3, 1, short_val(1)),
-        (TAG_PHOTOMETRIC, 3, 1, short_val(3)), // palette color
+        (TAG_PHOTOMETRIC, 3, 1, short_val(photometric)),
         (TAG_STRIP_OFFSETS, 4, 1, long_val(strip_offset)),
         (TAG_SAMPLES_PER_PIXEL, 3, 1, short_val(1)),
         (TAG_ROWS_PER_STRIP, 4, 1, long_val(height)),
         (TAG_STRIP_BYTE_COUNTS, 4, 1, long_val(strip_len)),
-        (TAG_COLOR_MAP, 3, 768, long_val(colormap_offset)),
+        (TAG_COLOR_MAP, 3, (3 * cm_entries) as u32, long_val(colormap_offset)),
+        (TAG_SAMPLE_FORMAT, 3, 1, short_val(sample_format)),
     ];
     entries.sort_by_key(|e| e.0);
 
@@ -472,7 +486,7 @@ fn palette_tiff_installs_colormap_as_channel_lut() {
     colors[1] = (0, 255, 0);
     colors[2] = (0, 0, 255);
     let indices: Vec<u8> = vec![0, 1, 2, 0]; // 2x2
-    let bytes = build_palette_tiff(2, 2, &indices, &colors);
+    let bytes = build_colormap_tiff(2, 2, &indices, 8, 3, 1, &colors);
     let path = unique_temp_path("palette.tif");
     std::fs::write(&path, &bytes).unwrap();
 
@@ -494,6 +508,99 @@ fn palette_tiff_installs_colormap_as_channel_lut() {
     // to color on the GPU, not on decode).
     let px = fast_tiff_lib::read_frame_u8(&stack.mmap, frame, stack.byte_order).unwrap();
     assert_eq!(&*px, &[0, 1, 2, 0]);
+}
+
+/// The case behind the bug report: ImageJ attaches a 256-entry ColorMap to a
+/// **16-bit grayscale** image (photometric=1) as a display LUT. The reader must
+/// install it as the channel LUT — otherwise the viewer shows raw grays — but
+/// *not* treat it as a true palette (the pixel is an intensity, not an index).
+#[test]
+fn colormap_on_16bit_grayscale_becomes_display_lut() {
+    let mut colors = [(0u8, 0u8, 0u8); 256];
+    colors[64] = (128, 0, 200); // a distinctly colored entry
+    colors[200] = (255, 210, 0);
+    // 2x2 of arbitrary 16-bit intensities (little-endian).
+    let pixels: Vec<u8> = [10u16, 4000, 30000, 65535].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let bytes = build_colormap_tiff(2, 2, &pixels, 16, 1, 1, &colors);
+    let path = unique_temp_path("lut16.tif");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let stack = TiffStack::open(&path).expect("16-bit LUT TIFF should open");
+    let frame = &stack.frames[0];
+    assert_eq!(frame.photometric, 1);
+    assert_eq!(frame.bits_per_sample, 16);
+    assert!(!frame.is_palette(), "photometric=1 16-bit is NOT a true palette");
+
+    // The ColorMap is installed as the channel's display LUT and flagged
+    // explicit, so the viewer colorizes instead of showing gray.
+    assert!(stack.meta.has_explicit_luts, "colored ColorMap must be explicit");
+    let lut = &stack.meta.channel_display[0].lut;
+    assert_eq!(lut[64], [128, 0, 200]);
+    assert_eq!(lut[200], [255, 210, 0]);
+}
+
+/// The ColorMap-as-display-LUT logic is sample-format-agnostic: signed-integer
+/// and float grayscale images get the LUT installed and decode fine, just like
+/// unsigned. (Unsigned 16-bit is covered above; here signed 16-bit and 32-bit
+/// float.)
+#[test]
+fn colormap_applies_to_signed_and_float() {
+    let mut colors = [(0u8, 0u8, 0u8); 256];
+    colors[100] = (10, 150, 240);
+
+    // Signed 16-bit (SampleFormat=2).
+    let signed: Vec<u8> = [-30000i16, -1, 1, 30000].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let path = unique_temp_path("lut_i16.tif");
+    std::fs::write(&path, build_colormap_tiff(2, 2, &signed, 16, 1, 2, &colors)).unwrap();
+    let stack = TiffStack::open(&path).unwrap();
+    assert_eq!(stack.frames[0].sample_format, fast_tiff_lib::SampleFormat::SignedInt);
+    assert!(stack.meta.has_explicit_luts);
+    assert_eq!(stack.meta.channel_display[0].lut[100], [10, 150, 240]);
+    // Decodes without error (signed → display space); just check it runs.
+    fast_tiff_lib::read_frame_u16(&stack.mmap, &stack.frames[0], stack.byte_order, None).unwrap();
+
+    // 32-bit float (SampleFormat=3).
+    let floats: Vec<u8> = [0.0f32, 42.5, 100.0, 255.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let path = unique_temp_path("lut_f32.tif");
+    std::fs::write(&path, build_colormap_tiff(2, 2, &floats, 32, 1, 3, &colors)).unwrap();
+    let stack = TiffStack::open(&path).unwrap();
+    assert_eq!(stack.frames[0].sample_format, fast_tiff_lib::SampleFormat::Float);
+    assert!(stack.meta.has_explicit_luts);
+    assert_eq!(stack.meta.channel_display[0].lut[100], [10, 150, 240]);
+    let got = fast_tiff_lib::read_frame_f32(&stack.mmap, &stack.frames[0], stack.byte_order).unwrap();
+    assert_eq!(&*got, &[0.0, 42.5, 100.0, 255.0]);
+}
+
+/// A **4-bit palette** (photometric=3, BitsPerSample=4): two indices packed per
+/// byte (high nibble first), indexing a 16-entry ColorMap. The reader must
+/// unpack the nibbles to one index byte per pixel and install the 16-color map
+/// as the LUT (entries at slots 0..16).
+#[test]
+fn four_bit_palette_unpacks_and_colors() {
+    let mut colors = [(0u8, 0u8, 0u8); 256];
+    colors[0] = (255, 0, 0);
+    colors[1] = (0, 255, 0);
+    colors[7] = (0, 0, 255);
+    // 4x2 indices 0..7, packed high-nibble-first: [0,1][2,3] / [4,5][6,7].
+    let packed = vec![0x01u8, 0x23, 0x45, 0x67];
+    let path = unique_temp_path("palette4.tif");
+    std::fs::write(&path, build_colormap_tiff(4, 2, &packed, 4, 3, 1, &colors)).unwrap();
+
+    let stack = TiffStack::open(&path).expect("4-bit palette should open");
+    let frame = &stack.frames[0];
+    assert_eq!(frame.bits_per_sample, 4);
+    assert!(frame.is_palette(), "4-bit photometric=3 is a palette");
+    assert!(stack.meta.has_explicit_luts);
+
+    // The 16 colors land at LUT slots 0..16.
+    let lut = &stack.meta.channel_display[0].lut;
+    assert_eq!(lut[0], [255, 0, 0]);
+    assert_eq!(lut[1], [0, 255, 0]);
+    assert_eq!(lut[7], [0, 0, 255]);
+
+    // Pixels unpack to the raw indices, one byte each.
+    let px = fast_tiff_lib::read_frame_u8(&stack.mmap, frame, stack.byte_order).unwrap();
+    assert_eq!(&*px, &[0, 1, 2, 3, 4, 5, 6, 7]);
 }
 
 fn build_rgb8_tiff(width: u32, height: u32, pixels: &[(u8, u8, u8)]) -> Vec<u8> {

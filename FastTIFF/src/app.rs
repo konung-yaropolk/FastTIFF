@@ -33,7 +33,7 @@ mod tests;
 
 use camera::{NavMode, OrbitPoint};
 use channels::{
-    channel_tint, gray_lut_applicable, gray_lut_for, gray_lut_name, gray_lut_option_count,
+    channel_tint, gray_lut_applicable, gray_lut_count, gray_lut_sel_lut, gray_lut_sel_name,
     pseudocolor_applicable, refresh_pseudocolor, ui_tint,
 };
 use dimensions::{apply_dimension_override, apply_resolved_dimensions, compute_status, setup_rgb};
@@ -218,11 +218,17 @@ struct LoadedStack {
     /// assigns 1 to Z must not collapse the selector to the two-way c/t swap
     /// and strand Z there.
     has_z_axis: bool,
-    /// Which LUT the single-channel grayscale color selector currently shows
-    /// (index into `GRAY_LUT_OPTIONS`; 0 = plain grayscale). Only meaningful
-    /// while `gray_lut_applicable` holds. Lives on the stack — not the app — so
-    /// it resets to grayscale for each newly opened file (the "default" state).
+    /// Which LUT the single-channel color selector currently shows (selector
+    /// index; `0` = the leading "Built-in LUT" when the file has one, else plain
+    /// grayscale). Only meaningful while `gray_lut_applicable` holds. Lives on
+    /// the stack — not the app — so it resets to the default (index 0) for each
+    /// newly opened file.
     gray_lut_sel: usize,
+    /// The file's own display LUT for the single channel, if it supplied one
+    /// (a ColorMap or ImageJ LUT). Kept verbatim so the selector's "Built-in
+    /// LUT" option can restore it after the user tries another. `None` when the
+    /// file carries no LUT (or isn't single-channel).
+    builtin_lut: Option<[[u8; 3]; 256]>,
 }
 
 pub struct ViewerApp {
@@ -471,6 +477,7 @@ impl ViewerApp {
                     volume_builder: None,
                     volume_builder_tried: false,
                     gray_lut_sel: 0,
+                    builtin_lut: None,
                     has_z_axis: false,
                 };
                 let (c, z, f) = (
@@ -490,6 +497,14 @@ impl ViewerApp {
                 // the channel LUT by the lib; flag it so the fixed identity
                 // contrast window is kept and its slider is hidden.
                 loaded.palette = loaded.tiff.frames.first().is_some_and(|f| f.is_palette());
+                // Remember the file's own LUT (a single-channel image that
+                // carries a ColorMap / ImageJ LUT) so the LUT selector can offer
+                // a "Built-in LUT" option that restores it. Captured now, before
+                // pseudocolor could touch it (it won't, for an explicit-LUT
+                // channel, but capture first regardless).
+                loaded.builtin_lut = (loaded.tiff.meta.has_explicit_luts
+                    && loaded.channel_settings.len() == 1)
+                    .then(|| loaded.tiff.meta.channel_display[0].lut);
                 // Carry the pseudocolor preference onto the new stack.
                 refresh_pseudocolor(&mut loaded, self.apply_pseudocolor);
 
@@ -979,11 +994,13 @@ impl eframe::App for ViewerApp {
                         row_has_items = true;
                     }
 
-                    // Grayscale color LUT: show a single grayscale channel
-                    // through a channel color or a perceptual colormap
-                    // (magma/plasma/inferno/viridis/turbo). Hidden for RGB,
-                    // composite, and multi-channel stacks — there the per-channel
-                    // colors / pseudocolor toggle already handle coloring.
+                    // LUT selector for a single channel: show it through a
+                    // channel color or a perceptual colormap
+                    // (magma/plasma/inferno/viridis/turbo). When the file carries
+                    // its own LUT the list leads with "Built-in LUT" (the
+                    // default). Hidden for RGB, composite, and multi-channel
+                    // stacks — there the per-channel colors / pseudocolor toggle
+                    // already handle coloring.
                     if gray_lut_applicable(loaded) {
                         if row_has_items {
                             ui.separator();
@@ -991,16 +1008,17 @@ impl eframe::App for ViewerApp {
                         ui.label("LUT:");
                         let sel = loaded.gray_lut_sel;
                         egui::ComboBox::from_id_salt("gray_lut")
-                            .selected_text(gray_lut_name(sel))
+                            .selected_text(gray_lut_sel_name(loaded, sel))
                             .show_ui(ui, |ui| {
-                                for opt in 0..gray_lut_option_count() {
+                                for opt in 0..gray_lut_count(loaded) {
                                     // Tint each entry with its LUT's low (dark) end
                                     // — the color the darkest samples map to. A
                                     // grayscale/black low end (grayscale + the pure
                                     // channel-color ramps) keeps the default text color.
-                                    let text = match ui_tint(&gray_lut_for(opt)) {
-                                        Some(c) => RichText::new(gray_lut_name(opt)).color(c),
-                                        None => RichText::new(gray_lut_name(opt)),
+                                    let name = gray_lut_sel_name(loaded, opt);
+                                    let text = match ui_tint(&gray_lut_sel_lut(loaded, opt)) {
+                                        Some(c) => RichText::new(name).color(c),
+                                        None => RichText::new(name),
                                     };
                                     if ui.selectable_label(opt == sel, text).clicked() {
                                         gray_lut_change = Some(opt);
@@ -1008,7 +1026,7 @@ impl eframe::App for ViewerApp {
                                 }
                             })
                             .response
-                            .on_hover_text("Display this grayscale channel through a color LUT or colormap");
+                            .on_hover_text("Display this channel through a color LUT or colormap");
                         row_has_items = true;
                     }
 
@@ -1279,8 +1297,9 @@ impl eframe::App for ViewerApp {
         if let Some(sel) = gray_lut_change {
             if let Some(loaded) = &mut self.stack {
                 loaded.gray_lut_sel = sel;
+                let lut = gray_lut_sel_lut(loaded, sel); // "Built-in LUT" restores the file's map
                 if let Some(disp) = loaded.tiff.meta.channel_display.first_mut() {
-                    disp.lut = gray_lut_for(sel);
+                    disp.lut = lut;
                 }
                 loaded.luts_uploaded = false; // force LUT re-upload next sync
             }

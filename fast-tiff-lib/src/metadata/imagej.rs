@@ -144,9 +144,8 @@ pub fn parse(
     // left over from before the file was reduced to fewer channels).
     let mut has_explicit_luts = false;
     if let (Some(data), Some(counts)) = (ij_metadata, ij_metadata_counts) {
-        let blocks = try_parse_ij_blocks(data, counts, ByteOrder::Big)
-            .or_else(|| try_parse_ij_blocks(data, counts, ByteOrder::Little));
-        if let Some(blocks) = blocks {
+        // Byte order is self-describing (the block's magic), so one call.
+        if let Some(blocks) = try_parse_ij_blocks(data, counts) {
             // Display range: only as a fallback when ImageDescription gave no
             // `min=`/`max=` window at all.
             if global_range.is_none() {
@@ -253,6 +252,35 @@ pub(crate) fn serialize(planes: usize, meta: &StackMetaWrite) -> Result<String> 
     Ok(s)
 }
 
+/// Serialize per-channel color LUTs into an ImageJ `IJMetadata` block — the
+/// binary `(IJMetadata, IJMetadataByteCounts)` tag pair (50839 / 50838) that
+/// ImageJ (and tifffile) store LUTs in, so a colorized 16-/32-bit stack keeps
+/// its colors on round-trip. Emitted in the little-endian form this crate's
+/// writer uses: the `JIJI` magic, one byte-reversed `stul` (`luts`) directory
+/// entry, then a 768-byte planar R,G,B block per channel. Returns
+/// `(blob, byte_counts)` for the two tags, or `None` when there are no LUTs.
+/// The exact inverse of [`try_parse_ij_blocks`] for the `luts` type.
+pub(crate) fn serialize_ij_metadata(luts: &[[[u8; 3]; 256]]) -> Option<(Vec<u8>, Vec<u32>)> {
+    if luts.is_empty() {
+        return None;
+    }
+    // Header: "JIJI" magic + one directory entry ("luts" reversed for LE + count).
+    let mut blob = Vec::new();
+    blob.extend_from_slice(b"JIJI");
+    blob.extend_from_slice(b"stul"); // "luts" reversed for little-endian
+    blob.extend_from_slice(&(luts.len() as u32).to_le_bytes());
+    let mut byte_counts = vec![blob.len() as u32]; // [0] = header length (12)
+
+    for lut in luts {
+        let start = blob.len();
+        blob.extend(lut.iter().map(|px| px[0])); // 256 R
+        blob.extend(lut.iter().map(|px| px[1])); // 256 G
+        blob.extend(lut.iter().map(|px| px[2])); // 256 B
+        byte_counts.push((blob.len() - start) as u32); // 768
+    }
+    Some((blob, byte_counts))
+}
+
 struct IjBlocks {
     ranges: Option<Vec<(f64, f64)>>,
     luts: Vec<[[u8; 3]; 256]>,
@@ -261,28 +289,39 @@ struct IjBlocks {
 /// Best-effort parse of the IJMetadata directory format. Returns `None` on any
 /// structural inconsistency rather than guessing — callers fall back to
 /// defaults in that case. See module docs for the honesty caveat here.
-fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32], header_order: ByteOrder) -> Option<IjBlocks> {
+fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32]) -> Option<IjBlocks> {
     if byte_counts.is_empty() {
         return None;
     }
     let header_len = *byte_counts.first()? as usize;
     let header = data.get(..header_len)?;
 
-    // Header is a sequence of 8-byte records: 4-byte ASCII type code + a 4-byte
-    // count. The on-disk endianness of this internal directory isn't officially
-    // documented; try big-endian first (consistent with Java's
-    // DataOutputStream) and fall back to little-endian.
-    if !header_len.is_multiple_of(8) {
+    // The block opens with a 4-byte magic whose spelling encodes its byte order
+    // — `IJIJ` big-endian (ImageJ/Java's native order), `JIJI` little-endian
+    // (what tifffile writes into a little-endian TIFF). The rest of the header
+    // is a sequence of 8-byte records: a 4-byte type code + a u32 count, all in
+    // that same order (and for little-endian the type codes are byte-reversed,
+    // e.g. `luts` → `stul`). Bounds match tifffile: 12 ≤ header ≤ 804, and the
+    // records fill exactly `header_len - 4` bytes.
+    let order = match header.get(..4)? {
+        b"IJIJ" => ByteOrder::Big,
+        b"JIJI" => ByteOrder::Little,
+        _ => return None,
+    };
+    if !(12..=804).contains(&header_len) || !(header_len - 4).is_multiple_of(8) {
         return None;
     }
     let mut plan: Vec<([u8; 4], usize)> = Vec::new();
-    for chunk in header.chunks_exact(8) {
+    for chunk in header[4..].chunks_exact(8) {
         let mut code = [0u8; 4];
         code.copy_from_slice(&chunk[0..4]);
+        if order == ByteOrder::Little {
+            code.reverse(); // undo tifffile's little-endian code reversal
+        }
         if !code.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
             return None; // doesn't look like a real type code; bail out
         }
-        let count = header_order.u32(&chunk[4..8]) as usize;
+        let count = order.u32(&chunk[4..8]) as usize;
         plan.push((code, count));
     }
 
@@ -291,6 +330,7 @@ fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32], header_order: ByteOrder
         return None; // doesn't match our assumed layout
     }
 
+    let header_order = order; // used by the `rang` block decode below
     let mut cursor = header_len;
     let mut block_idx = 1; // byte_counts[0] was the header itself
     let mut ranges: Option<Vec<(f64, f64)>> = None;

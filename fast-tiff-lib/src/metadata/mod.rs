@@ -203,14 +203,15 @@ pub(crate) fn resolution_to_pixel(resolution: Option<f64>) -> Option<f64> {
 
 // ---- write side ----
 
-/// One channel's write-side display info: an optional name and RGB color.
-/// Consumed by dialects that carry per-channel color (OME); the ImageJ dialect
-/// takes channel colors from [`StackMetaWrite::mode`] instead (it doesn't write
-/// the binary LUT block).
+/// One channel's write-side display info: an optional name, RGB color, and full
+/// 256-entry color LUT. `name`/`color` feed dialects that carry per-channel
+/// color (OME `Channel`); `lut` feeds ImageJ's binary `IJMetadata` LUT block
+/// (see [`imagej::serialize_ij_metadata`]).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ChannelWrite {
     pub name: Option<String>,
     pub color: Option<[u8; 3]>,
+    pub lut: Option<[[u8; 3]; 256]>,
 }
 
 /// Format-neutral metadata to embed when writing a stack — the single input
@@ -323,8 +324,26 @@ impl StackMetaWrite {
     /// dialects that carry per-channel color (OME); the ImageJ dialect ignores
     /// it (its colors follow [`mode`](Self::mode)).
     pub fn channel(mut self, name: impl Into<String>, color: [u8; 3]) -> Self {
-        self.channel_info.push(ChannelWrite { name: Some(name.into()), color: Some(color) });
+        self.channel_info.push(ChannelWrite { name: Some(name.into()), color: Some(color), lut: None });
         self
+    }
+
+    /// Add one channel's full 256-entry color LUT, in channel order — written to
+    /// ImageJ's binary `IJMetadata` block so a colorized 8-/16-/32-bit stack
+    /// keeps its colors on round-trip (the display maps the pixel through the
+    /// contrast window, then this LUT — exactly how ImageJ colors non-8-bit
+    /// images). Only the ImageJ metadata format writes it. Each `channel_lut`
+    /// call appends one channel, in order; pair with one call per channel.
+    pub fn channel_lut(mut self, lut: [[u8; 3]; 256]) -> Self {
+        self.channel_info.push(ChannelWrite { name: None, color: None, lut: Some(lut) });
+        self
+    }
+
+    /// The per-channel LUTs supplied via [`channel_lut`](Self::channel_lut), or
+    /// an empty slice-like `Vec` when none — used by the ImageJ serializer to
+    /// decide whether to emit the binary LUT block.
+    pub(crate) fn channel_luts(&self) -> Vec<[[u8; 3]; 256]> {
+        self.channel_info.iter().filter_map(|c| c.lut).collect()
     }
 
     /// Append a verbatim `key=value` line — the escape hatch for ImageJ
@@ -523,22 +542,28 @@ pub fn default_composite_lut(channel_index: usize) -> [[u8; 3]; 256] {
 }
 
 /// Convert a TIFF ColorMap (tag 320) into a 256-entry display LUT. The map is
-/// `3 * 256` values in planar order — all 256 reds, then greens, then blues —
-/// each nominally a 16-bit intensity (0..=65535), which scales down to the
-/// LUT's 8 bits. Returns `None` unless it's exactly a 256-entry (8-bit) map.
+/// `3 * N` values in planar order — all N reds, then greens, then blues — where
+/// `N = 2^BitsPerSample` (16 for a 4-bit image, 256 for an 8-bit one), each
+/// nominally a 16-bit intensity (0..=65535) that scales down to the LUT's 8
+/// bits. The N entries fill LUT slots `0..N`; the rest repeat the last entry
+/// (indices never exceed `N-1`, so those slots are only reached — harmlessly —
+/// by a display-range window on a sparse map). Returns `None` for an empty or
+/// oversized (`N > 256`) map, or one whose length isn't a multiple of 3.
 ///
 /// Some writers store the channels at 8-bit scale (0..=255) instead of the
 /// spec's 16-bit, so a map whose values never exceed 255 is taken as-is rather
 /// than shifted down to near-black.
 pub fn colormap_to_lut(colormap: &[u32]) -> Option<[[u8; 3]; 256]> {
-    if colormap.len() != 768 {
-        return None; // only 8-bit (256-entry) palettes
+    let n = colormap.len() / 3;
+    if n == 0 || n > 256 || colormap.len() != n * 3 {
+        return None;
     }
     let scaled_16bit = colormap.iter().any(|&v| v > 255);
     let to_u8 = |v: u32| if scaled_16bit { (v >> 8) as u8 } else { v as u8 };
     let mut lut = [[0u8; 3]; 256];
     for (i, entry) in lut.iter_mut().enumerate() {
-        *entry = [to_u8(colormap[i]), to_u8(colormap[256 + i]), to_u8(colormap[512 + i])];
+        let src = i.min(n - 1); // pad the tail with the last real entry
+        *entry = [to_u8(colormap[src]), to_u8(colormap[n + src]), to_u8(colormap[2 * n + src])];
     }
     Some(lut)
 }
