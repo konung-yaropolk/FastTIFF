@@ -4,7 +4,7 @@
 //! ```text
 //!   fast-tiff-lib     file I/O, IFD index, decode, metadata
 //!         │
-//!   fast-tiff-render  GPU pipelines, textures, ray-marching
+//!   stack-renderer  GPU pipelines, textures, ray-marching
 //!         │
 //!   fast-tiff-core    ← you are here: stack model, channel settings,
 //!         │             c/z/t interpretation, camera, decode→GPU sync
@@ -52,9 +52,9 @@ pub mod sync;
 // frontend selects one, and it must be the *same* one — the app's `renderer-*`
 // features forward to both crates, which is what keeps them in step.
 #[cfg(feature = "backend-glow")]
-pub use fast_tiff_render::glow_backend as backend;
+pub use stack_renderer::glow_backend as backend;
 #[cfg(all(feature = "backend-wgpu", not(feature = "backend-glow")))]
-pub use fast_tiff_render::wgpu_backend as backend;
+pub use stack_renderer::wgpu_backend as backend;
 
 /// The concrete renderer [`Viewer::sync`] drives, so callers name it once.
 #[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
@@ -64,7 +64,7 @@ pub use stack::{ChannelSettings, Stack};
 pub use viewer::{DecodeMode, Playback, ViewMode, Viewer, VolumeView, DEFAULT_FPS};
 
 // Re-exported so a frontend needs only this crate in its imports for the common
-// path; reach for `fast_tiff_lib` / `fast_tiff_render` directly when you need
+// path; reach for `fast_tiff_lib` / `stack_renderer` directly when you need
 // something more specific.
 pub use fast_tiff_lib::{self, TiffStack};
-pub use fast_tiff_render::{self, ChannelKind, Lut, VolumeInterp, VolumeKind, VolumeRender, MAX_CHANNELS};
+pub use stack_renderer::{self, ChannelKind, Lut, VolumeInterp, VolumeKind, VolumeRender, MAX_CHANNELS};

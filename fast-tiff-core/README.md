@@ -9,7 +9,7 @@ in sight.
 ```text
   fast-tiff-lib     file I/O, IFD index, decode, metadata
         │
-  fast-tiff-render  GPU pipelines, textures, ray-marching
+  stack-renderer    GPU pipelines, textures, ray-marching
         │
   fast-tiff-core    ← this crate: stack model, channel settings,
         │             c/z/t interpretation, camera, decode→GPU sync

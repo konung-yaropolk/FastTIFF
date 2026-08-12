@@ -3,8 +3,8 @@
 //! tables, and the pseudocolor toggle. Split from `app.rs`.
 
 use crate::stack::{ChannelSettings, Stack};
-use fast_tiff_render::{ChannelKind, Lut, MAX_CHANNELS};
 use fast_tiff_lib::TiffStack;
+use stack_renderer::{ChannelKind, Lut, MAX_CHANNELS};
 
 /// Actual pixel min/max of channel `c`'s first frame, for integer-format
 /// data. Used as the auto-contrast fallback when no display range came

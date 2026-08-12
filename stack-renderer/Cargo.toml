@@ -1,12 +1,12 @@
 [package]
-name = "fast-tiff-render"
+name = "stack-renderer"
 version = "0.9.6"
 edition = "2021"
-description = "GUI-agnostic GPU rendering for multi-channel scientific image stacks: per-channel window/level + LUT compositing and 3D volume ray-marching, on wgpu or OpenGL."
+description = "GPU rendering for multi-channel scientific image stacks: per-channel window/level + LUT compositing and 3D volume ray-marching, on wgpu or OpenGL. No GUI toolkit, no file format — you bring the pixels."
 license = "MPL-2.0"
 readme = "README.md"
 repository = "https://github.com/konung-yaropolk/FastTIFF"
-keywords = ["wgpu", "volume-rendering", "microscopy", "gpu", "visualization"]
+keywords = ["wgpu", "volume-rendering", "raymarching", "gpu", "microscopy"]
 categories = ["rendering", "visualization", "graphics", "science"]
 
 # The WGSL sources are `include_str!`d into the wgpu backend, so they must ship

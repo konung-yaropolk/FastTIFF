@@ -8,7 +8,7 @@
 //! right pixels?" — if yes, it's in `core`.
 //!
 //! The GPU is reached only through `crate::render`, the eframe adapter over
-//! `fast-tiff-render`, so nothing here mentions glow or wgpu.
+//! `stack-renderer`, so nothing here mentions glow or wgpu.
 //!
 //! Supporting clusters live in child modules (which share this module's
 //! privacy, so the split adds no `pub` surface beyond `pub(super)`):

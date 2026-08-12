@@ -13,10 +13,10 @@ dependencies = [
  "env_logger",
  "fast-tiff-core",
  "fast-tiff-lib",
- "fast-tiff-render",
  "image",
  "log",
  "rfd",
+ "stack-renderer",
  "winres",
 ]
 
@@ -843,9 +843,9 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "fast-tiff-lib",
- "fast-tiff-render",
  "log",
  "rayon",
+ "stack-renderer",
 ]
 
 [[package]]
@@ -860,17 +860,6 @@ dependencies = [
  "rayon",
  "weezl 0.2.1",
  "zstd",
-]
-
-[[package]]
-name = "fast-tiff-render"
-version = "0.9.6"
-dependencies = [
- "bytemuck",
- "glow",
- "half",
- "naga",
- "wgpu",
 ]
 
 [[package]]
@@ -2720,6 +2709,17 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "stack-renderer"
+version = "0.9.6"
+dependencies = [
+ "bytemuck",
+ "glow",
+ "half",
+ "naga",
+ "wgpu",
+]
 
 [[package]]
 name = "static_assertions"

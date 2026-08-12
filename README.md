@@ -132,7 +132,7 @@ intended second one):
 ```text
   fast-tiff-lib     file I/O, IFD index, decode, metadata
         │
-  fast-tiff-render  GPU pipelines, textures, ray-marching
+  stack-renderer    GPU pipelines, textures, ray-marching
         │
   fast-tiff-core    stack model, channel settings, decode → GPU sync
         │
@@ -146,7 +146,7 @@ intended second one):
   multi-frame TIFFs in memory and round-trips them through the whole
   pipeline - this is the part most worth trusting blind, since it's
   actually verified. **Published on crates.io** — see below.
-- **`fast-tiff-render/`** — all GPU work, free of any GUI toolkit: the
+- **`stack-renderer/`** — all GPU work, free of any GUI toolkit: the
   compositing pipeline, per-channel textures and LUTs, and the volume
   ray-marcher. Never creates a device, a surface or a window — construction
   takes the host's device, painting takes the host's render pass. Two additive

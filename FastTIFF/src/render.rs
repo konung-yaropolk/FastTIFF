@@ -1,7 +1,7 @@
-//! The eframe/egui adapter over [`fast_tiff_render`].
+//! The eframe/egui adapter over [`stack_renderer`].
 //!
 //! All GPU work — pipelines, textures, shaders, the ray-marcher — lives in the
-//! `fast-tiff-render` crate, which knows nothing about egui. This module is the
+//! `stack-renderer` crate, which knows nothing about egui. This module is the
 //! only place that bridges the two, and it does exactly three things:
 //!
 //!   * pulls the GPU handles out of eframe's `CreationContext` ([`init`]),
@@ -10,11 +10,12 @@
 //!   * turns a draw request into an [`egui::Shape`] ([`paint_callback`],
 //!     [`paint_volume_callback`]).
 //!
-//! Everything else is a re-export, so the rest of the app keeps saying
-//! `crate::render::ChannelKind` and never names glow, wgpu, *or* the render
-//! crate. A different host (a browser canvas, an offscreen encoder) writes its
-//! own module of this size and reuses the renderer untouched — that is the
-//! whole reason the GPU code moved out.
+//! It also re-exports the handful of renderer types the UI itself names, so no
+//! other file in the app mentions glow, wgpu, *or* `stack_renderer`. Everything
+//! else reaches the GPU through `fast_tiff_core`, which is what actually drives
+//! it. A different host (a browser canvas, an offscreen encoder) writes its own
+//! module of this size and reuses the renderer untouched — that is the whole
+//! reason the GPU code moved out.
 
 // Exactly one renderer must be selected. This is an *app* constraint, not a
 // renderer one: eframe initializes a single GPU backend per process, so the
@@ -36,16 +37,16 @@ use std::sync::{Arc, Mutex};
 // The two parameter types the UI itself names (the 3D settings pop-up edits
 // them). The rest of the renderer's vocabulary reaches the app through
 // `fast_tiff_core`, which is what actually drives the GPU.
-pub use fast_tiff_render::{VolumeInterp, VolumeRender};
+pub use stack_renderer::{VolumeInterp, VolumeRender};
 
 // Pick the one backend the selected eframe renderer can drive. The
 // `not(renderer-glow)` guard on the wgpu arm means enabling *both* features (a
 // hard error, above) selects only glow here — so the build fails with the clean
 // `compile_error!` message rather than a duplicate-definition cascade.
 #[cfg(feature = "renderer-glow")]
-use fast_tiff_render::glow_backend as backend;
+use stack_renderer::glow_backend as backend;
 #[cfg(all(feature = "renderer-wgpu", not(feature = "renderer-glow")))]
-use fast_tiff_render::wgpu_backend as backend;
+use stack_renderer::wgpu_backend as backend;
 
 pub use backend::{ImageRenderResources, BACKEND};
 
@@ -158,7 +159,7 @@ mod glue {
             setup.device_descriptor = Arc::new(|adapter| {
                 wgpu::DeviceDescriptor {
                     label: Some("egui wgpu device"),
-                    required_features: fast_tiff_render::wgpu_backend::optional_features(adapter),
+                    required_features: stack_renderer::wgpu_backend::optional_features(adapter),
                     // Request exactly the adapter's own limits rather than wgpu's
                     // generic defaults. The defaults ask for more than some low-end
                     // GPUs provide — e.g. the Raspberry Pi's V3DV Vulkan driver caps

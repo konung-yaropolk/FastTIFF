@@ -4,7 +4,7 @@
 
 use crate::channels::{build_channel_settings, resize_channel_display};
 use crate::stack::{ChannelSettings, Stack};
-use fast_tiff_render::{ChannelKind, MAX_CHANNELS};
+use stack_renderer::{ChannelKind, MAX_CHANNELS};
 
 /// The status note shown at the top of the window, derived from the
 /// stack's current (resolved) dimensions. Shared between the initial load

@@ -11,7 +11,7 @@ use crate::camera::CameraState;
 use crate::channels::refresh_pseudocolor;
 use crate::dimensions::{apply_dimension_override, compute_status};
 use crate::stack::Stack;
-use fast_tiff_render::{VolumeInterp, VolumeRender};
+use stack_renderer::{VolumeInterp, VolumeRender};
 use std::path::PathBuf;
 
 /// Playback rate used when the file's metadata doesn't specify `fps=`.

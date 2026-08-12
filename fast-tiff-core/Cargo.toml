@@ -25,8 +25,8 @@ default = ["threads"]
 # and `volume::build_volume`; with neither, the crate still provides the whole
 # CPU-side model (stack state, channel settings, dimension resolution, camera
 # math) — useful for tests and headless tooling.
-backend-wgpu = ["fast-tiff-render/backend-wgpu"]
-backend-glow = ["fast-tiff-render/backend-glow"]
+backend-wgpu = ["stack-renderer/backend-wgpu"]
+backend-glow = ["stack-renderer/backend-glow"]
 # Background worker threads (read-ahead decode + 3D volume assembly). On by
 # default; a single-threaded host — notably `wasm32-unknown-unknown`, where
 # `std::thread::spawn` is unavailable — turns this off and gets the synchronous
@@ -39,7 +39,7 @@ threads = ["dep:rayon"]
 # version is what a published crate resolves against — without it
 # `cargo package` refuses the manifest.
 fast-tiff-lib = { path = "../fast-tiff-lib", version = "0.9.6" }
-fast-tiff-render = { path = "../fast-tiff-render", version = "0.9.6" }
+stack-renderer = { path = "../stack-renderer", version = "0.9.6" }
 anyhow = "1.0"
 bytemuck = "1.25"
 log = "0.4"
