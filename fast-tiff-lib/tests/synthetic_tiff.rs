@@ -3,6 +3,10 @@
 //! then runs it through `TiffStack::open` and checks every value against
 //! what we put in. This is the test that actually exercises offset
 //! arithmetic, not just type-checking.
+//! Requires the `mmap` feature: every case here writes a temp file and opens it
+//! through `TiffStack::open`. The filesystem-free path is covered by
+//! `from_bytes.rs`, which runs in both configurations.
+#![cfg(feature = "mmap")]
 
 use std::io::Write;
 use fast_tiff_lib::TiffStack;
@@ -249,7 +253,7 @@ fn opens_multi_frame_stack_and_reads_correct_pixels() {
         let frame = &stack.frames[i];
         assert_eq!(frame.width, width);
         assert_eq!(frame.height, height);
-        let pixels = fast_tiff_lib::read_frame_u16(&stack.mmap, frame, stack.byte_order, None).unwrap();
+        let pixels = fast_tiff_lib::read_frame_u16(&stack.data, frame, stack.byte_order, None).unwrap();
         assert_eq!(&*pixels, expected.as_slice(), "frame {i} pixel mismatch");
     }
 }
@@ -506,7 +510,7 @@ fn palette_tiff_installs_colormap_as_channel_lut() {
 
     // The pixels themselves still decode as the raw indices (the LUT maps them
     // to color on the GPU, not on decode).
-    let px = fast_tiff_lib::read_frame_u8(&stack.mmap, frame, stack.byte_order).unwrap();
+    let px = fast_tiff_lib::read_frame_u8(&stack.data, frame, stack.byte_order).unwrap();
     assert_eq!(&*px, &[0, 1, 2, 0]);
 }
 
@@ -557,7 +561,7 @@ fn colormap_applies_to_signed_and_float() {
     assert!(stack.meta.has_explicit_luts);
     assert_eq!(stack.meta.channel_display[0].lut[100], [10, 150, 240]);
     // Decodes without error (signed → display space); just check it runs.
-    fast_tiff_lib::read_frame_u16(&stack.mmap, &stack.frames[0], stack.byte_order, None).unwrap();
+    fast_tiff_lib::read_frame_u16(&stack.data, &stack.frames[0], stack.byte_order, None).unwrap();
 
     // 32-bit float (SampleFormat=3).
     let floats: Vec<u8> = [0.0f32, 42.5, 100.0, 255.0].iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -567,7 +571,7 @@ fn colormap_applies_to_signed_and_float() {
     assert_eq!(stack.frames[0].sample_format, fast_tiff_lib::SampleFormat::Float);
     assert!(stack.meta.has_explicit_luts);
     assert_eq!(stack.meta.channel_display[0].lut[100], [10, 150, 240]);
-    let got = fast_tiff_lib::read_frame_f32(&stack.mmap, &stack.frames[0], stack.byte_order).unwrap();
+    let got = fast_tiff_lib::read_frame_f32(&stack.data, &stack.frames[0], stack.byte_order).unwrap();
     assert_eq!(&*got, &[0.0, 42.5, 100.0, 255.0]);
 }
 
@@ -599,7 +603,7 @@ fn four_bit_palette_unpacks_and_colors() {
     assert_eq!(lut[7], [0, 0, 255]);
 
     // Pixels unpack to the raw indices, one byte each.
-    let px = fast_tiff_lib::read_frame_u8(&stack.mmap, frame, stack.byte_order).unwrap();
+    let px = fast_tiff_lib::read_frame_u8(&stack.data, frame, stack.byte_order).unwrap();
     assert_eq!(&*px, &[0, 1, 2, 3, 4, 5, 6, 7]);
 }
 
@@ -665,8 +669,8 @@ fn opens_rgb8_tiff_and_deinterleaves_planes() {
     assert!(frame.is_rgb(), "frame should be detected as chunky RGB");
 
     let up = |b: u8| ((b as u16) << 8) | b as u16;
-    let red = fast_tiff_lib::read_plane_u16(&stack.mmap, frame, stack.byte_order, None, 0).unwrap();
-    let blue = fast_tiff_lib::read_plane_u16(&stack.mmap, frame, stack.byte_order, None, 2).unwrap();
+    let red = fast_tiff_lib::read_plane_u16(&stack.data, frame, stack.byte_order, None, 0).unwrap();
+    let blue = fast_tiff_lib::read_plane_u16(&stack.data, frame, stack.byte_order, None, 2).unwrap();
     assert_eq!(red, vec![up(10), up(40), up(70), up(100)]);
     assert_eq!(blue, vec![up(30), up(60), up(90), up(120)]);
 }
@@ -797,21 +801,21 @@ fn planar_rgb8_decodes_same_planes_as_chunky() {
 
         let cf = &chunky.frames[0];
         for p in 0..3 {
-            let got = fast_tiff_lib::read_plane_u16(&stack.mmap, frame, stack.byte_order, None, p).unwrap();
-            let want = fast_tiff_lib::read_plane_u16(&chunky.mmap, cf, chunky.byte_order, None, p).unwrap();
+            let got = fast_tiff_lib::read_plane_u16(&stack.data, frame, stack.byte_order, None, p).unwrap();
+            let want = fast_tiff_lib::read_plane_u16(&chunky.data, cf, chunky.byte_order, None, p).unwrap();
             assert_eq!(got, want, "u16 plane {p} @ {rows_per_strip} rows/strip");
 
-            let got8 = fast_tiff_lib::read_plane_u8(&stack.mmap, frame, stack.byte_order, p).unwrap();
-            let want8 = fast_tiff_lib::read_plane_u8(&chunky.mmap, cf, chunky.byte_order, p).unwrap();
+            let got8 = fast_tiff_lib::read_plane_u8(&stack.data, frame, stack.byte_order, p).unwrap();
+            let want8 = fast_tiff_lib::read_plane_u8(&chunky.data, cf, chunky.byte_order, p).unwrap();
             assert_eq!(got8, want8, "u8 plane {p} @ {rows_per_strip} rows/strip");
         }
         // The single-pass all-planes reader must agree with the per-plane one.
-        let all = fast_tiff_lib::read_planes_u16(&stack.mmap, frame, stack.byte_order, None).unwrap();
+        let all = fast_tiff_lib::read_planes_u16(&stack.data, frame, stack.byte_order, None).unwrap();
         assert_eq!(all.len(), 3);
         for (p, plane) in all.iter().enumerate() {
             assert_eq!(
                 *plane,
-                fast_tiff_lib::read_plane_u16(&stack.mmap, frame, stack.byte_order, None, p).unwrap()
+                fast_tiff_lib::read_plane_u16(&stack.data, frame, stack.byte_order, None, p).unwrap()
             );
         }
     }
@@ -842,7 +846,7 @@ fn opens_planar_float64_tiff() {
     assert_eq!(frame.sample_format, fast_tiff_lib::SampleFormat::Float);
 
     for (p, want) in values.iter().enumerate() {
-        let got = fast_tiff_lib::read_plane_f32(&stack.mmap, frame, stack.byte_order, p).unwrap();
+        let got = fast_tiff_lib::read_plane_f32(&stack.data, frame, stack.byte_order, p).unwrap();
         let want: Vec<f32> = want.iter().map(|&v| v as f32).collect();
         assert_eq!(got, want, "plane {p}");
     }

@@ -141,7 +141,10 @@ intended second one):
 
 - **`fast-tiff-lib/`** - pure parsing/decoding library, no GUI or GPU
   dependencies. IFD-chain walking, ImageJ metadata parsing, strip decoding
-  (uncompressed fast path + LZW/Deflate/PackBits + predictor undo). Has a
+  (uncompressed fast path + LZW/Deflate/PackBits + predictor undo). Reads
+  either a memory-mapped path (`TiffStack::open`) or a plain byte buffer
+  (`TiffStack::from_bytes`), so it also builds for
+  `wasm32-unknown-unknown` with `--no-default-features`. Has a
   real test suite (`cargo test -p fast-tiff-lib`) that builds synthetic
   multi-frame TIFFs in memory and round-trips them through the whole
   pipeline - this is the part most worth trusting blind, since it's
@@ -183,8 +186,9 @@ cargo add fast-tiff-lib
 [![Docs](https://img.shields.io/docsrs/fast-tiff-lib?label=docs.rs)](https://docs.rs/fast-tiff-lib)
 
 It's a *specialized* engine for lazily scrubbing large scientific hyperstacks
-rather than a general-purpose TIFF library: memory-mapped and lazy (frames
-decode on demand, never the whole stack), zero-copy for uncompressed data, and
+rather than a general-purpose TIFF library: memory-mapped and lazy by default
+(frames decode on demand, never the whole stack — or read from a byte buffer
+where there's no filesystem), zero-copy for uncompressed data, and
 it parses **ImageJ and OME-TIFF** hyperstack metadata (channels/slices/frames,
 LUTs, calibration) — into one normalized view — that general TIFF readers hand
 back as an opaque string. It also writes: streaming multi-frame output with

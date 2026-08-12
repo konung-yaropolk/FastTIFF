@@ -3,6 +3,10 @@
 //! The reader must expand it into N virtual frames (this is what "opens but
 //! scrubbing does nothing" looked like before). Files are hand-built here —
 //! our own writer (correctly) never produces this layout.
+//! Requires the `mmap` feature: every case here writes a temp file and opens it
+//! through `TiffStack::open`. The filesystem-free path is covered by
+//! `from_bytes.rs`, which runs in both configurations.
+#![cfg(feature = "mmap")]
 
 use fast_tiff_lib::{read_frame_u16, TiffStack};
 use std::borrow::Cow;
@@ -95,7 +99,7 @@ fn single_ifd_contiguous_stack_expands_to_virtual_frames() {
     assert_eq!(stack.frames.len(), 3, "images=3 must expand to 3 virtual frames");
     assert_eq!(stack.meta.frames, 3);
     for i in 0..3u16 {
-        let got = read_frame_u16(&stack.mmap, &stack.frames[i as usize], stack.byte_order, None).unwrap();
+        let got = read_frame_u16(&stack.data, &stack.frames[i as usize], stack.byte_order, None).unwrap();
         assert_eq!(got.as_ref(), &[i * 100, i * 100 + 1, i * 100 + 2, i * 100 + 3]);
         // Virtual frames are single uncompressed native strips: zero-copy.
         #[cfg(target_endian = "little")]
@@ -117,9 +121,9 @@ fn truncated_contiguous_stack_clamps_to_available_frames() {
     // and every synthesized frame must decode within the file.
     assert!(stack.frames.len() >= 3 && stack.frames.len() <= 5);
     for f in &stack.frames {
-        assert!(read_frame_u16(&stack.mmap, f, stack.byte_order, None).is_ok());
+        assert!(read_frame_u16(&stack.data, f, stack.byte_order, None).is_ok());
     }
-    let got = read_frame_u16(&stack.mmap, &stack.frames[2], stack.byte_order, None).unwrap();
+    let got = read_frame_u16(&stack.data, &stack.frames[2], stack.byte_order, None).unwrap();
     assert_eq!(got.as_ref(), &[200, 201, 202, 203]);
 }
 
@@ -138,6 +142,6 @@ fn multi_ifd_files_are_not_touched_by_the_expansion() {
 
     let stack = TiffStack::open(&path).unwrap();
     assert_eq!(stack.frames.len(), 2);
-    let got = read_frame_u16(&stack.mmap, &stack.frames[1], stack.byte_order, None).unwrap();
+    let got = read_frame_u16(&stack.data, &stack.frames[1], stack.byte_order, None).unwrap();
     assert_eq!(got.as_ref(), &[5, 6, 7, 8]);
 }

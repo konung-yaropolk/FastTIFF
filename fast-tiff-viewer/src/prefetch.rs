@@ -268,7 +268,7 @@ fn worker_loop(
             continue;
         }
         let mut channels = Vec::with_capacity(req.jobs.len());
-        let ok = match decode_jobs(&stack.mmap, &stack.frames, stack.byte_order, &req.jobs) {
+        let ok = match decode_jobs(&stack.data, &stack.frames, stack.byte_order, &req.jobs) {
             Ok(decoded) => {
                 for (job, data) in req.jobs.iter().zip(decoded) {
                     channels.push(DecodedChannel {

@@ -23,6 +23,8 @@ COLORMAPS = [
     ("INFERNO", "inferno"),
     ("VIRIDIS", "viridis"),
     ("TURBO", "turbo"),
+    ("BONE", "bone"),
+    ("SUMMER", "summer"),
 ]
 
 

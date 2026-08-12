@@ -19,6 +19,10 @@
 //!
 //! Filename grammar: `{gen}_{dtype}_spp{s}_p{pages}_{info}.tif`; prefix
 //! `err_` = the file must fail to open, `ij_` = ImageJ metadata checks.
+//! Requires the `mmap` feature: every case here writes a temp file and opens it
+//! through `TiffStack::open`. The filesystem-free path is covered by
+//! `from_bytes.rs`, which runs in both configurations.
+#![cfg(feature = "mmap")]
 
 use fast_tiff_lib::{
     read_frame_f32, read_frame_u16, read_frame_u8, read_plane_f32, read_plane_u16, read_plane_u8,
@@ -77,32 +81,32 @@ fn check_pixels(stack: &TiffStack, dtype: &str, spp: usize, pages: usize, name: 
             match dtype {
                 "u8" => {
                     let got: Vec<u8> = if spp > 1 {
-                        read_plane_u8(&stack.mmap, frame, stack.byte_order, pl).unwrap()
+                        read_plane_u8(&stack.data, frame, stack.byte_order, pl).unwrap()
                     } else {
-                        read_frame_u8(&stack.mmap, frame, stack.byte_order).unwrap().into_owned()
+                        read_frame_u8(&stack.data, frame, stack.byte_order).unwrap().into_owned()
                     };
                     let want: Vec<u8> = (0..n_pixels).map(|i| expect_u8(g_of(i))).collect();
                     assert_eq!(got, want, "{name}: page {p} plane {pl}");
                 }
                 "i8" => {
-                    let got = read_frame_u16(&stack.mmap, frame, stack.byte_order, None).unwrap();
+                    let got = read_frame_u16(&stack.data, frame, stack.byte_order, None).unwrap();
                     let want: Vec<u16> = (0..n_pixels).map(|i| widen(expect_u8(g_of(i)))).collect();
                     assert_eq!(got.as_ref(), &want[..], "{name}: page {p}");
                 }
                 "u16" | "i16" => {
                     let got: Vec<u16> = if spp > 1 {
-                        read_plane_u16(&stack.mmap, frame, stack.byte_order, None, pl).unwrap()
+                        read_plane_u16(&stack.data, frame, stack.byte_order, None, pl).unwrap()
                     } else {
-                        read_frame_u16(&stack.mmap, frame, stack.byte_order, None).unwrap().into_owned()
+                        read_frame_u16(&stack.data, frame, stack.byte_order, None).unwrap().into_owned()
                     };
                     let want: Vec<u16> = (0..n_pixels).map(|i| expect_u16(g_of(i))).collect();
                     assert_eq!(got, want, "{name}: page {p} plane {pl}");
                 }
                 "u32" | "i32" | "f32" => {
                     let got: Vec<f32> = if spp > 1 {
-                        read_plane_f32(&stack.mmap, frame, stack.byte_order, pl).unwrap()
+                        read_plane_f32(&stack.data, frame, stack.byte_order, pl).unwrap()
                     } else {
-                        read_frame_f32(&stack.mmap, frame, stack.byte_order).unwrap().into_owned()
+                        read_frame_f32(&stack.data, frame, stack.byte_order).unwrap().into_owned()
                     };
                     let f = match dtype {
                         "u32" => expect_u32_as_f32,

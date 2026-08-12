@@ -106,15 +106,37 @@ impl Stack {
     /// `apply_pseudocolor` carries the frontend's persistent preference onto the
     /// new stack (it only affects multi-channel grayscale stacks — see
     /// [`crate::channels::pseudocolor_applicable`]).
+    #[cfg(feature = "mmap")]
     pub fn open(path: PathBuf, apply_pseudocolor: bool) -> anyhow::Result<Self> {
-        let tiff = TiffStack::open(&path)?;
+        Self::from_tiff(TiffStack::open(&path)?, path, apply_pseudocolor)
+    }
+
+    /// Same, for a stack already in memory. `name` is only a label — it fills
+    /// the `path` field so a frontend can show a filename and the background
+    /// workers have something to reopen — so a browser can pass the picked
+    /// file's name and nothing will try to touch the filesystem.
+    pub fn from_bytes(bytes: Vec<u8>, name: PathBuf, apply_pseudocolor: bool) -> anyhow::Result<Self> {
+        Self::from_tiff(TiffStack::from_bytes(bytes)?, name, apply_pseudocolor)
+    }
+
+    /// The shared tail of both constructors: derive the display model from an
+    /// already-indexed stack.
+    fn from_tiff(tiff: TiffStack, path: PathBuf, apply_pseudocolor: bool) -> anyhow::Result<Self> {
         // Spin up the read-ahead worker: decode-ahead for compressed stacks,
         // page-touch for uncompressed (see the `prefetch` field).
+        // Only the read-ahead worker cares, and it only exists with `mmap`.
+        #[cfg(feature = "mmap")]
         let compressed = tiff
             .frames
             .first()
             .is_some_and(|f| f.compression != fast_tiff_lib::Compression::None);
+        // The worker reopens the file by path, so it only exists where there is
+        // a filesystem. Without it every frame decodes inline — the same path
+        // taken whenever a spawn fails.
+        #[cfg(feature = "mmap")]
         let prefetch = Prefetcher::new(path.clone(), !compressed);
+        #[cfg(not(feature = "mmap"))]
+        let prefetch = None;
 
         let mut stack = Stack {
             tiff,

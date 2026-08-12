@@ -1072,6 +1072,12 @@ fn compress_strip(strip: &[u8], compression: Compression, row_bytes: usize, leve
         }
         Compression::PackBits => Ok(packbits_encode(strip, row_bytes)),
         Compression::Zstd => {
+            #[cfg(not(feature = "codec-zstd"))]
+            return Err(anyhow!(
+                "ZSTD output needs the `codec-zstd` feature (a C dependency, so it is \
+                 unavailable on wasm)"
+            ));
+            #[cfg(feature = "codec-zstd")]
             zstd::stream::encode_all(strip, level.unwrap_or(DEFAULT_ZSTD_LEVEL))
                 .map_err(|e| anyhow!("ZSTD encode failed: {e}"))
         }

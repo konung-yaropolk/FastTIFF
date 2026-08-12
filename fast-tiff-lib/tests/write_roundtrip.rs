@@ -2,6 +2,10 @@
 //! consumer does — `TiffWriter::create` → `TiffStack::open` → decode — with
 //! nothing stubbed. (In-memory codec/structure tests live in
 //! `src/encode_tests.rs`.)
+//! Requires the `mmap` feature: every case here writes a temp file and opens it
+//! through `TiffStack::open`. The filesystem-free path is covered by
+//! `from_bytes.rs`, which runs in both configurations.
+#![cfg(feature = "mmap")]
 
 use fast_tiff_lib::{
     frame_float_minmax, read_frame_f32, read_frame_u16, read_frame_u8, Compression, DisplayMode,
@@ -46,7 +50,7 @@ fn u16_stack_roundtrips_and_scrubs_zero_copy() {
     for (i, expected) in frames.iter().enumerate() {
         // Prefetch is a pure performance hint: must be safe before any read.
         stack.prefetch_frame(&stack.frames[i]);
-        let got = read_frame_u16(&stack.mmap, &stack.frames[i], stack.byte_order, None).unwrap();
+        let got = read_frame_u16(&stack.data, &stack.frames[i], stack.byte_order, None).unwrap();
         assert_eq!(got.as_ref(), &expected[..], "frame {i}");
         // The writer's default layout IS the reader's zero-copy fast path.
         #[cfg(target_endian = "little")]
@@ -63,7 +67,7 @@ fn u8_and_f32_typed_frames_roundtrip() {
     w.write_frame_u8(&pixels8).unwrap();
     w.finish().unwrap();
     let stack = TiffStack::open(&path8).unwrap();
-    let got = read_frame_u8(&stack.mmap, &stack.frames[0], stack.byte_order).unwrap();
+    let got = read_frame_u8(&stack.data, &stack.frames[0], stack.byte_order).unwrap();
     assert_eq!(got.as_ref(), &pixels8[..]);
 
     let pathf = unique_temp_path("f32.tif");
@@ -73,7 +77,7 @@ fn u8_and_f32_typed_frames_roundtrip() {
     w.write_frame_f32(&pixelsf).unwrap();
     w.finish().unwrap();
     let stack = TiffStack::open(&pathf).unwrap();
-    let got = read_frame_f32(&stack.mmap, &stack.frames[0], stack.byte_order).unwrap();
+    let got = read_frame_f32(&stack.data, &stack.frames[0], stack.byte_order).unwrap();
     assert_eq!(got.as_ref(), &pixelsf[..]);
 }
 
@@ -101,7 +105,7 @@ fn compressed_multistrip_stack_roundtrips() {
     assert_eq!(stack.frames[0].compression, Compression::Lzw);
     assert_eq!(stack.frames[0].strip_offsets.len(), 3);
     for (i, expected) in frames.iter().enumerate() {
-        let got = read_frame_u16(&stack.mmap, &stack.frames[i], stack.byte_order, None).unwrap();
+        let got = read_frame_u16(&stack.data, &stack.frames[i], stack.byte_order, None).unwrap();
         assert_eq!(got.as_ref(), &expected[..], "frame {i}");
     }
 }
@@ -119,7 +123,7 @@ fn rgb8_stack_opens_as_rgb() {
 
     let stack = TiffStack::open(&path).unwrap();
     assert!(stack.frames[0].is_rgb());
-    let red = fast_tiff_lib::read_plane_u8(&stack.mmap, &stack.frames[0], stack.byte_order, 0).unwrap();
+    let red = fast_tiff_lib::read_plane_u8(&stack.data, &stack.frames[0], stack.byte_order, 0).unwrap();
     assert_eq!(red, vec![255, 0, 0, 10]);
 }
 
@@ -182,8 +186,8 @@ fn planar_rgb_roundtrips_and_matches_chunky() {
         );
 
         for p in 0..spp {
-            let got = fast_tiff_lib::read_plane_u16(&ps.mmap, pf, ps.byte_order, None, p).unwrap();
-            let want = fast_tiff_lib::read_plane_u16(&cs.mmap, cf, cs.byte_order, None, p).unwrap();
+            let got = fast_tiff_lib::read_plane_u16(&ps.data, pf, ps.byte_order, None, p).unwrap();
+            let want = fast_tiff_lib::read_plane_u16(&cs.data, cf, cs.byte_order, None, p).unwrap();
             assert_eq!(got, want, "{label}: plane {p}");
             // ...and against the source data, so a symmetric bug in both paths
             // can't make this vacuously true.
@@ -208,7 +212,7 @@ fn planar_is_ignored_for_single_sample_frames() {
     let stack = TiffStack::open(&path).unwrap();
     assert_eq!(stack.frames[0].planar_config, 1, "no tag written -> chunky default");
     assert!(!stack.frames[0].is_planar());
-    let got = read_frame_u16(&stack.mmap, &stack.frames[0], stack.byte_order, None).unwrap();
+    let got = read_frame_u16(&stack.data, &stack.frames[0], stack.byte_order, None).unwrap();
     assert_eq!(got.as_ref(), &frame[..]);
 }
 
@@ -339,7 +343,7 @@ fn ome_metadata_roundtrips_through_stack_meta() {
     assert!(desc.contains("<OME"), "description should be OME-XML:\n{desc}");
     // Pixels survive: each written frame decodes back to what went in.
     for (i, f) in frames.iter().enumerate() {
-        let got = read_frame_u16(&stack.mmap, &stack.frames[i], stack.byte_order, None).unwrap();
+        let got = read_frame_u16(&stack.data, &stack.frames[i], stack.byte_order, None).unwrap();
         assert_eq!(got.as_ref(), &f[..], "frame {i}");
     }
 }
@@ -363,7 +367,7 @@ fn forced_bigtiff_file_roundtrips_through_stack_open() {
     assert_eq!(stack.flavor, fast_tiff_lib::TiffFlavor::Big);
     assert_eq!(stack.frames.len(), 3);
     for (i, expected) in frames.iter().enumerate() {
-        let got = read_frame_u16(&stack.mmap, &stack.frames[i], stack.byte_order, None).unwrap();
+        let got = read_frame_u16(&stack.data, &stack.frames[i], stack.byte_order, None).unwrap();
         assert_eq!(got.as_ref(), &expected[..], "frame {i}");
         // BigTIFF changes only the directory layout — the zero-copy pixel
         // fast path is identical.
@@ -408,12 +412,12 @@ fn f64_stack_opens_and_downcasts_to_f32() {
     assert_eq!(stack.frames.len(), 2);
     assert_eq!(stack.frames[0].bits_per_sample, 64);
     for (i, expected) in frames.iter().enumerate() {
-        let got = read_frame_f32(&stack.mmap, &stack.frames[i], stack.byte_order).unwrap();
+        let got = read_frame_f32(&stack.data, &stack.frames[i], stack.byte_order).unwrap();
         let want: Vec<f32> = expected.iter().map(|&v| v as f32).collect();
         assert_eq!(got.as_ref(), &want[..], "frame {i}");
     }
     // 64-bit float auto-ranges to its own data min/max (like 32-bit float).
-    assert!(frame_float_minmax(&stack.mmap, &stack.frames[0], stack.byte_order).unwrap().is_some());
+    assert!(frame_float_minmax(&stack.data, &stack.frames[0], stack.byte_order).unwrap().is_some());
 }
 
 #[test]
@@ -432,7 +436,7 @@ fn u64_stack_opens_and_rescales_to_display_space() {
 
     let stack = TiffStack::open(&path).unwrap();
     assert_eq!(stack.frames[0].bits_per_sample, 64);
-    let got = read_frame_u16(&stack.mmap, &stack.frames[0], stack.byte_order, None).unwrap();
+    let got = read_frame_u16(&stack.data, &stack.frames[0], stack.byte_order, None).unwrap();
     // 2^38 / 2^40 = 0.25 -> 16384, 2^39 / 2^40 = 0.5 -> 32768, 2^40 -> 65535.
     assert_eq!(got.as_ref(), &[0, 16384, 32768, 65535]);
 }

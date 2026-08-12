@@ -168,7 +168,7 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Sta
 
             ui.heading("File");
             egui::Grid::new("meta_file").num_columns(2).striped(true).show(ui, |ui| {
-                kv(ui, "Size", human_bytes(tiff.mmap.len() as u64));
+                kv(ui, "Size", human_bytes(tiff.data.len() as u64));
                 let container = match tiff.flavor {
                     fast_tiff_lib::TiffFlavor::Classic => "classic TIFF",
                     fast_tiff_lib::TiffFlavor::Big => "BigTIFF",

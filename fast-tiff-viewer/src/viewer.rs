@@ -201,8 +201,25 @@ impl Viewer {
     ///
     /// Frontend-side chrome (window title, zoom, open pop-ups) is *not* touched
     /// — that's the frontend's to reset.
+    #[cfg(feature = "mmap")]
     pub fn open(&mut self, path: PathBuf) -> anyhow::Result<()> {
-        match Stack::open(path, self.apply_pseudocolor) {
+        let opened = Stack::open(path, self.apply_pseudocolor);
+        self.adopt(opened)
+    }
+
+    /// Load a stack from bytes already in memory — the browser's entry point,
+    /// where `name` is just the picked file's name for display. Otherwise
+    /// identical to [`Viewer::open`], including every per-stack default it
+    /// re-seeds.
+    pub fn load_bytes(&mut self, bytes: Vec<u8>, name: PathBuf) -> anyhow::Result<()> {
+        let opened = Stack::from_bytes(bytes, name, self.apply_pseudocolor);
+        self.adopt(opened)
+    }
+
+    /// Install a freshly opened stack (or record why it failed), re-seeding
+    /// every per-stack default. Shared so the two entry points can't drift.
+    fn adopt(&mut self, opened: anyhow::Result<Stack>) -> anyhow::Result<()> {
+        match opened {
             Ok(stack) => {
                 self.playback = Playback { fps: stack.tiff.meta.fps.unwrap_or(DEFAULT_FPS), ..Default::default() };
                 // 3D defaults for the new stack: per-axis voxel scale from the

@@ -139,7 +139,7 @@ fn sync_movie(
         if !used_prefetch {
             // One call decodes every enabled channel; RGB planes share a single
             // decompression pass inside `decode_jobs`.
-            match decode_jobs(&loaded.tiff.mmap, &loaded.tiff.frames, loaded.tiff.byte_order, &jobs) {
+            match decode_jobs(&loaded.tiff.data, &loaded.tiff.frames, loaded.tiff.byte_order, &jobs) {
                 Ok(decoded) => {
                     for (job, data) in jobs.iter().zip(decoded) {
                         upload(renderer, job.channel, job.width, job.height, &data);

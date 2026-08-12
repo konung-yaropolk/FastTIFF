@@ -164,7 +164,7 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
                 ChannelJob { channel: c, ifd_idx, plane, kind: ckinds[c], rgb: plan.rgb, width: w, height: h }
             })
             .collect();
-        let decoded = decode_jobs(&tiff.mmap, &tiff.frames, tiff.byte_order, &jobs)?;
+        let decoded = decode_jobs(&tiff.data, &tiff.frames, tiff.byte_order, &jobs)?;
         for (dec, dst) in decoded.iter().zip(dsts.iter_mut()) {
             let dst: &mut [u8] = dst;
             match dec {

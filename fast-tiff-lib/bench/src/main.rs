@@ -398,29 +398,29 @@ fn bench_fast_tiff(path: &Path, cfg: &TestConfig) -> Result<FrameResult> {
         let t = Instant::now();
         match cfg.format {
             PixelFormat::U8 => {
-                read_frame_u8_into(&stack.mmap, frame, order, &mut buf8)?;
+                read_frame_u8_into(&stack.data, frame, order, &mut buf8)?;
                 per_frame.push(t.elapsed().as_secs_f64() * 1e6);
                 sum = sum.wrapping_add(checksum_bytes(&buf8));
             }
             PixelFormat::U16 => {
-                read_frame_u16_into(&stack.mmap, frame, order, None, &mut buf16)?;
+                read_frame_u16_into(&stack.data, frame, order, None, &mut buf16)?;
                 per_frame.push(t.elapsed().as_secs_f64() * 1e6);
                 sum = sum.wrapping_add(checksum_u16(&buf16));
             }
             PixelFormat::F32 => {
-                read_frame_f32_into(&stack.mmap, frame, order, &mut buf32)?;
+                read_frame_f32_into(&stack.data, frame, order, &mut buf32)?;
                 per_frame.push(t.elapsed().as_secs_f64() * 1e6);
                 sum = sum.wrapping_add(checksum_f32(&buf32));
             }
             PixelFormat::RgbU8 => {
-                read_planes_u8_into(&stack.mmap, frame, order, &mut planes8)?;
+                read_planes_u8_into(&stack.data, frame, order, &mut planes8)?;
                 per_frame.push(t.elapsed().as_secs_f64() * 1e6);
                 for p in &planes8 {
                     sum = sum.wrapping_add(checksum_bytes(p));
                 }
             }
             PixelFormat::RgbU16 => {
-                read_planes_u16_into(&stack.mmap, frame, order, None, &mut planes16)?;
+                read_planes_u16_into(&stack.data, frame, order, None, &mut planes16)?;
                 per_frame.push(t.elapsed().as_secs_f64() * 1e6);
                 for p in &planes16 {
                     sum = sum.wrapping_add(checksum_u16(p));

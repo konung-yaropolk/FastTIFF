@@ -39,6 +39,13 @@ pub fn set_parallel_decode(enabled: bool) {
 /// *and* the frame is big enough for the speedup to beat the fork-join cost.
 /// Shared with `encode` so both directions honor the one hint.
 pub(crate) fn should_parallelize(n_pixels: usize) -> bool {
+    // wasm32 has no threads to fork onto: rayon compiles there, but spawning
+    // would panic at runtime. Making every parallel path unreachable keeps one
+    // code path for both targets, with no `#[cfg]` scattered through the
+    // decoders.
+    if cfg!(target_arch = "wasm32") {
+        return false;
+    }
     PARALLEL_DECODE.load(Ordering::Relaxed) && n_pixels >= PARALLEL_MIN_PIXELS
 }
 
@@ -823,10 +830,13 @@ fn plane_f32_from_native(native: &[u8], frame: &FrameInfo, file_order: ByteOrder
 /// Note the memory cost: this holds the entire decoded stack at once
 /// (`frames * width * height * 2` bytes).
 pub fn preload_frames_u16(stack: &TiffStack, float_range: Option<(f32, f32)>) -> Result<Vec<Vec<u16>>> {
-    stack
-        .frames
-        .par_iter()
-        .map(|frame| Ok(read_frame_u16(&stack.mmap, frame, stack.byte_order, float_range)?.into_owned()))
+    // Parallel across frames on native; serial on wasm, which has no threads.
+    #[cfg(not(target_arch = "wasm32"))]
+    let frames = stack.frames.par_iter();
+    #[cfg(target_arch = "wasm32")]
+    let frames = stack.frames.iter();
+    frames
+        .map(|frame| Ok(read_frame_u16(&stack.data, frame, stack.byte_order, float_range)?.into_owned()))
         .collect()
 }
 
@@ -834,10 +844,13 @@ pub fn preload_frames_u16(stack: &TiffStack, float_range: Option<(f32, f32)>) ->
 /// float counterpart to [`preload_frames_u16`] (for 32-bit-float stacks, no
 /// rescaling). See that function for the parallelism/memory notes.
 pub fn preload_frames_f32(stack: &TiffStack) -> Result<Vec<Vec<f32>>> {
-    stack
-        .frames
-        .par_iter()
-        .map(|frame| Ok(read_frame_f32(&stack.mmap, frame, stack.byte_order)?.into_owned()))
+    // Parallel across frames on native; serial on wasm, which has no threads.
+    #[cfg(not(target_arch = "wasm32"))]
+    let frames = stack.frames.par_iter();
+    #[cfg(target_arch = "wasm32")]
+    let frames = stack.frames.iter();
+    frames
+        .map(|frame| Ok(read_frame_f32(&stack.data, frame, stack.byte_order)?.into_owned()))
         .collect()
 }
 
@@ -850,10 +863,13 @@ pub fn preload_frames_f32(stack: &TiffStack) -> Result<Vec<Vec<f32>>> {
 /// For other formats it returns the frame's raw native bytes as-is, which won't
 /// be the display-ready samples — use [`preload_frames_u16`] instead.
 pub fn preload_frames_u8(stack: &TiffStack) -> Result<Vec<Vec<u8>>> {
-    stack
-        .frames
-        .par_iter()
-        .map(|frame| Ok(read_frame_u8(&stack.mmap, frame, stack.byte_order)?.into_owned()))
+    // Parallel across frames on native; serial on wasm, which has no threads.
+    #[cfg(not(target_arch = "wasm32"))]
+    let frames = stack.frames.par_iter();
+    #[cfg(target_arch = "wasm32")]
+    let frames = stack.frames.iter();
+    frames
+        .map(|frame| Ok(read_frame_u8(&stack.data, frame, stack.byte_order)?.into_owned()))
         .collect()
 }
 
@@ -1110,10 +1126,20 @@ fn decompress_into(raw: &[u8], compression: Compression, dest: &mut [u8]) -> Res
             read_all_into(flate2::read::ZlibDecoder::new(raw), dest).map_err(|e| anyhow!("Deflate decode failed: {e}"))
         }
         Compression::PackBits => Ok(packbits_decode_into(raw, dest)),
+        #[cfg(feature = "codec-zstd")]
         Compression::Zstd => {
             let dec = zstd::stream::read::Decoder::new(raw).map_err(|e| anyhow!("ZSTD decode failed: {e}"))?;
             read_all_into(dec, dest).map_err(|e| anyhow!("ZSTD decode failed: {e}"))
         }
+        // Without the codec the tag is still recognized — the file just can't be
+        // decoded here. Saying so beats the generic "unsupported scheme" arm,
+        // which would leave a wasm user guessing why a file that opens natively
+        // fails in the browser.
+        #[cfg(not(feature = "codec-zstd"))]
+        Compression::Zstd => bail!(
+            "this frame uses ZSTD compression, but the `codec-zstd` feature is off \
+             (it needs a C toolchain, so it is unavailable on wasm)"
+        ),
         Compression::Other(code) => bail!("unsupported TIFF compression scheme: {code}"),
     }
 }

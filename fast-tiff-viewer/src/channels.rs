@@ -12,7 +12,7 @@ use scivis_render::{ChannelKind, Lut, MAX_CHANNELS};
 pub fn first_frame_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
     let idx = channel.min(tiff.frames.len().saturating_sub(1));
     let frame = tiff.frames.get(idx)?;
-    let pixels = fast_tiff_lib::read_frame_u16(&tiff.mmap, frame, tiff.byte_order, None).ok()?;
+    let pixels = fast_tiff_lib::read_frame_u16(&tiff.data, frame, tiff.byte_order, None).ok()?;
     let (mut lo, mut hi) = (u16::MAX, 0u16);
     for &p in pixels.iter() {
         lo = lo.min(p);
@@ -30,7 +30,7 @@ pub fn first_frame_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)
 pub fn first_frame_float_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
     let idx = channel.min(tiff.frames.len().saturating_sub(1));
     let frame = tiff.frames.get(idx)?;
-    fast_tiff_lib::frame_float_minmax(&tiff.mmap, frame, tiff.byte_order).ok()?
+    fast_tiff_lib::frame_float_minmax(&tiff.data, frame, tiff.byte_order).ok()?
 }
 
 /// Resizes `meta.channel_display` to `new_channels` entries, preserving the

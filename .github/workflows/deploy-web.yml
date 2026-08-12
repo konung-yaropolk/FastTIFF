@@ -1,0 +1,96 @@
+# Build FastTIFF-web and publish it to GitHub Pages.
+#
+# Enable once under Settings → Pages → Source → "GitHub Actions"; after that
+# every push to main redeploys. `workflow_dispatch` allows a manual run.
+name: Deploy web viewer
+
+on:
+  push:
+    branches: [main]
+    # Only rebuild when something the bundle actually contains changes.
+    paths:
+      - "FastTIFF-web/**"
+      - "fast-tiff-lib/**"
+      - "fast-tiff-viewer/**"
+      - "scivis-render/**"
+      - ".github/workflows/deploy-web.yml"
+  workflow_dispatch:
+
+# Pages needs these; `contents: read` is enough for the checkout.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race; let an in-flight one finish rather than
+# cancelling it half-published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            FastTIFF-web/crate/target
+          key: wasm-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'FastTIFF-web/crate/Cargo.toml') }}
+          restore-keys: wasm-${{ runner.os }}-
+
+      - uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: FastTIFF-web/package-lock.json
+
+      - name: Install JS dependencies
+        working-directory: FastTIFF-web
+        run: npm ci
+
+      # Build the wasm first so the generated .d.ts exists — then the
+      # type-check is a real gate on the React code rather than something that
+      # has to be waved through.
+      - name: Build wasm bindings
+        working-directory: FastTIFF-web
+        run: npm run wasm
+
+      - name: Type-check
+        working-directory: FastTIFF-web
+        run: npm run typecheck
+
+      - name: Build site
+        working-directory: FastTIFF-web
+        # A project site is served from /<repo>/, so assets need that prefix.
+        # `github.event.repository.name` keeps this correct if the repo is renamed.
+        env:
+          BASE_PATH: /${{ github.event.repository.name }}/
+        run: npx vite build
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: FastTIFF-web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

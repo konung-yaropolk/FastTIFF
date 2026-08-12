@@ -139,13 +139,17 @@ fn all_codecs_roundtrip_with_and_without_predictor() {
     let pixels: Vec<u16> = (0..6 * 5).map(|i| 500 + (i as u16 % 7) * 3).collect();
     let data = le_bytes_u16(&pixels);
 
-    for compression in [
+    // ZSTD only when its codec is compiled in — the pure-Rust codecs must still
+    // be exercised in a `--no-default-features` (wasm-shaped) build.
+    let mut codecs = vec![
         Compression::None,
         Compression::Lzw,
         Compression::Deflate,
         Compression::PackBits,
-        Compression::Zstd,
-    ] {
+    ];
+    #[cfg(feature = "codec-zstd")]
+    codecs.push(Compression::Zstd);
+    for compression in codecs {
         for predictor in [false, true] {
             let opts = WriterOptions::new(6, 5, SampleType::U16)
                 .compression(compression)
@@ -476,12 +480,10 @@ fn classic_stays_classic_and_forced_bigtiff_roundtrips() {
 fn compression_level_knob_roundtrips() {
     let pixels: Vec<u16> = (0..8 * 4).map(|i| (i as u16 * 37) % 500).collect();
     let data = le_bytes_u16(&pixels);
-    for (compression, level) in [
-        (Compression::Deflate, 1),
-        (Compression::Deflate, 9),
-        (Compression::Zstd, 1),
-        (Compression::Zstd, 19),
-    ] {
+    let mut cases = vec![(Compression::Deflate, 1), (Compression::Deflate, 9)];
+    #[cfg(feature = "codec-zstd")]
+    cases.extend([(Compression::Zstd, 1), (Compression::Zstd, 19)]);
+    for (compression, level) in cases {
         let opts = WriterOptions::new(8, 4, SampleType::U16)
             .compression(compression)
             .compression_level(level);
