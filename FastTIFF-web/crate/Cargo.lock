@@ -231,7 +231,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "fast-tiff-lib"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-wasm"
-version = "0.9.6"
+version = "0.9.8"
 dependencies = [
  "console_error_panic_hook",
  "console_log",

@@ -9,7 +9,7 @@
 
 [package]
 name = "fasttiff-wasm"
-version = "0.9.8"
+version = "0.9.9"
 edition = "2021"
 description = "wasm-bindgen bindings exposing the FastTIFF viewer core to a browser canvas."
 license = "GPL-3.0-only"

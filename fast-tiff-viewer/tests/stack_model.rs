@@ -1,5 +1,5 @@
 //! End-to-end tests of the viewer model against real TIFF fixtures — the whole
-//! path from `Stack::open` through channel/contrast derivation, dimension
+//! path from opening a stack through channel/contrast derivation, dimension
 //! reinterpretation and the playback clock, with no GPU and no window.
 //!
 //! Being able to run this at all is a direct payoff of the core/frontend split:
@@ -24,10 +24,44 @@ fn fixture(name: &str) -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// Open a stack through whichever entry point this build has.
+///
+/// With `mmap` (the default) that's the memory-mapped `Stack::open`; without
+/// it, the bytes are read here and handed to `Stack::from_bytes` — the path a
+/// browser takes. So the two CI configurations between them cover both.
+fn open_stack(path: PathBuf, pseudocolor: bool) -> anyhow::Result<Stack> {
+    #[cfg(feature = "mmap")]
+    {
+        Stack::open(path, pseudocolor)
+    }
+    #[cfg(not(feature = "mmap"))]
+    {
+        let bytes = std::fs::read(&path)?;
+        Stack::from_bytes(bytes, path, pseudocolor)
+    }
+}
+
+/// The `Viewer` counterpart to [`open_stack`].
+fn load(viewer: &mut Viewer, path: PathBuf) -> anyhow::Result<()> {
+    #[cfg(feature = "mmap")]
+    {
+        viewer.open(path)
+    }
+    #[cfg(not(feature = "mmap"))]
+    {
+        // A missing file yields no bytes — hand over what we have (nothing) so
+        // the *viewer* reports the failure and records it in `status`, rather
+        // than the error escaping here. That matches both how `open` surfaces a
+        // bad file and how a browser fails: bytes arrive, and they don't parse.
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        viewer.load_bytes(bytes, path)
+    }
+}
+
 #[test]
 fn opens_an_imagej_hyperstack_with_derived_channel_settings() {
     let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
-    let stack = Stack::open(path, false).expect("hyperstack should open");
+    let stack = open_stack(path, false).expect("hyperstack should open");
 
     let (w, h) = stack.dimensions().expect("dimensions");
     assert!(w > 0 && h > 0);
@@ -51,7 +85,7 @@ fn opens_an_imagej_hyperstack_with_derived_channel_settings() {
 #[test]
 fn rgb_stack_becomes_three_display_channels() {
     let Some(path) = fixture("tff_u8_spp3_p2_none.tif") else { return };
-    let stack = Stack::open(path, false).expect("rgb should open");
+    let stack = open_stack(path, false).expect("rgb should open");
 
     assert!(stack.rgb, "a 3-sample photometric-RGB frame should set the rgb flag");
     assert_eq!(stack.channel_settings.len(), 3, "R/G/B become three display channels");
@@ -65,7 +99,7 @@ fn rgb_stack_becomes_three_display_channels() {
 #[test]
 fn float_stack_windows_in_its_own_units() {
     let Some(path) = fixture("tff_f32_spp1_p2_none-le.tif") else { return };
-    let stack = Stack::open(path, false).expect("float should open");
+    let stack = open_stack(path, false).expect("float should open");
 
     let s = stack.channel_settings.first().expect("one channel");
     assert_eq!(s.kind, ChannelKind::Float, "32-bit float takes the R32F path");
@@ -79,7 +113,7 @@ fn float_stack_windows_in_its_own_units() {
 fn dimension_override_conserves_the_plane_count() {
     let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
     let mut viewer = Viewer::new();
-    viewer.open(path).expect("hyperstack should open");
+    load(&mut viewer, path).expect("hyperstack should open");
 
     let planes = {
         let m = &viewer.stack.as_ref().unwrap().tiff.meta;
@@ -113,7 +147,7 @@ fn dimension_override_conserves_the_plane_count() {
 fn pseudocolor_tints_channels_and_reverts() {
     let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
     let mut viewer = Viewer::new();
-    viewer.open(path).expect("open");
+    load(&mut viewer, path).expect("open");
 
     if !pseudocolor_applicable(viewer.stack.as_ref().unwrap()) {
         return; // this fixture carries its own colors; nothing to assert
@@ -146,11 +180,11 @@ fn pseudocolor_tints_channels_and_reverts() {
 fn a_failed_open_keeps_the_current_stack() {
     let Some(good) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
     let mut viewer = Viewer::new();
-    viewer.open(good).expect("open");
+    load(&mut viewer, good).expect("open");
     assert!(viewer.stack.is_some());
 
     // Dropping a corrupt/nonexistent file must not close the good image.
-    let err = viewer.open(PathBuf::from("definitely-not-a-file.tif"));
+    let err = load(&mut viewer, PathBuf::from("definitely-not-a-file.tif"));
     assert!(err.is_err());
     assert!(viewer.stack.is_some(), "a failed open must not drop the loaded stack");
     assert!(viewer.status.as_deref().unwrap_or("").contains("Failed to open"));
@@ -160,7 +194,7 @@ fn a_failed_open_keeps_the_current_stack() {
 fn playback_advances_by_real_elapsed_time() {
     let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
     let mut viewer = Viewer::new();
-    viewer.open(path).expect("open");
+    load(&mut viewer, path).expect("open");
     let n = viewer.stack.as_ref().unwrap().frame_count();
     if n < 2 {
         return;
@@ -194,7 +228,7 @@ fn playback_advances_by_real_elapsed_time() {
 fn falling_behind_latches_parallel_decode_only_in_auto() {
     let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
     let mut viewer = Viewer::new();
-    viewer.open(path).expect("open");
+    load(&mut viewer, path).expect("open");
     if viewer.stack.as_ref().unwrap().frame_count() < 2 {
         return;
     }
@@ -216,6 +250,6 @@ fn falling_behind_latches_parallel_decode_only_in_auto() {
 
     // Opening a new stack re-evaluates it from scratch.
     let Some(again) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
-    viewer.open(again).expect("reopen");
+    load(&mut viewer, again).expect("reopen");
     assert!(!viewer.decode_parallel, "a new stack starts from the serial path again");
 }
