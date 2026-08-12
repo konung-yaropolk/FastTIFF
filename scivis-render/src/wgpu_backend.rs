@@ -1,29 +1,29 @@
 //! wgpu rendering for the composited image: the render pipeline, two per-channel
 //! texture sets (R16Uint for integer sources, R32F for 32-bit-float sources),
 //! the LUT texture array, and the uniform buffer carrying per-channel
-//! window/level + enabled + is-float flags. Uploads happen from `app.rs` via
-//! `UploadCtx` (the device + queue from `Frame::wgpu_render_state`); `paint` is
-//! invoked from the `egui_wgpu::CallbackTrait` built by `paint_callback`.
+//! window/level + enabled + is-float flags.
 //!
 //! Each channel is either integer or float: the one carrying its data is a
 //! full-size texture, the other a 1x1 dummy (`is_float` in the uniform tells the
 //! shader which to sample). Float channels skip the per-frame CPU rescale —
 //! window/level is done on the GPU in the data's own units.
 //!
-//! Unlike egui's `custom3d_wgpu` example (which parks resources in egui_wgpu's
-//! `CallbackResources` map), we keep them in an `Arc<Mutex>` owned by the app and
-//! captured by the callback — matching the glow backend so the two are
-//! interchangeable behind one app-side interface.
+//! The 3D volume view shares the same resources: per-channel R16Float 3D
+//! textures (all channels normalized to a common unit, so window/level applies
+//! directly), a separate ray-march pipeline (`volume.wgsl`), and its own
+//! uniform. R16Float is core-filterable, so linear/cubic sampling use the
+//! hardware sampler.
 //!
-//! The 3D volume view shares this handle: per-channel R16Float 3D textures (all
-//! channels normalized to a common unit, so window/level applies directly), a
-//! separate ray-march pipeline (`volume.wgsl`), and its own uniform. R16Float is
-//! core-filterable, so linear/cubic sampling use the hardware sampler.
+//! # Host responsibilities
+//!
+//! The host creates the device and queue (both are cheap `Clone` handles, so we
+//! keep our own) and owns the render pass. Two entry points need its
+//! cooperation each 3D frame: [`ImageRenderResources::write_volume_uniform`]
+//! must run before [`ImageRenderResources::paint_volume`] — under egui_wgpu
+//! that's `prepare` then `paint`, elsewhere just call them in order.
 
-use super::{ChannelKind, ChannelUniform, VolumeInterp, VolumeKind, VolumeParams, MAX_CHANNELS};
-use eframe::egui_wgpu::{self, wgpu};
+use crate::{ChannelKind, ChannelUniform, Lut, VolumeInterp, VolumeKind, VolumeParams, MAX_CHANNELS};
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex};
 
 const LUT_WIDTH: u32 = 256;
 /// Bind-group binding indices. Integer channel textures occupy `1..=MAX_CHANNELS`,
@@ -39,146 +39,27 @@ const KIND_INT8: u8 = 1; // integer channel: R8Uint full-size, R32F dummy
 const KIND_INT16: u8 = 2; // integer channel: R16Uint full-size, R32F dummy
 const KIND_FLOAT: u8 = 3; // float channel: R32F full-size, int texture dummy
 
-/// The `eframe::Renderer` this backend needs requested in `NativeOptions`.
-pub const RENDERER: eframe::Renderer = eframe::Renderer::Wgpu;
-
-/// Short human-readable backend name, shown in the UI.
+/// Short human-readable backend name, for a host that wants to show it.
 pub const BACKEND: &str = "wgpu";
 
-/// Shared handle to the wgpu render resources. `Arc<Mutex>` because the
-/// egui_wgpu paint callback (which draws) must be `Send + Sync + 'static`;
-/// uploads happen in `app::sync_gpu`, so the lock is uncontended (both on the
-/// UI thread, and never overlap — uploads finish before the callback paints).
-pub type Render = Arc<Mutex<ImageRenderResources>>;
-
-/// Build the render resources from eframe's creation context (its wgpu render
-/// state). Called once at startup.
-pub fn init(cc: &eframe::CreationContext<'_>) -> Render {
-    let rs = cc
-        .wgpu_render_state
-        .as_ref()
-        .expect("FastTIFF requires the wgpu backend (NativeOptions::renderer = Wgpu)");
-    Arc::new(Mutex::new(ImageRenderResources::new(&rs.device, rs.target_format)))
-}
-
-/// Per-frame upload handle: the device + queue, pulled from `eframe::Frame`.
-/// `None` before the backend is up (shouldn't happen after init).
-pub struct UploadCtx<'a> {
-    device: &'a wgpu::Device,
-    queue: &'a wgpu::Queue,
-}
-
-pub fn upload_ctx(frame: &eframe::Frame) -> Option<UploadCtx<'_>> {
-    frame
-        .wgpu_render_state()
-        .map(|rs| UploadCtx { device: &rs.device, queue: &rs.queue })
-}
-
-/// The egui paint callback that draws the current image into `rect`. Captures a
-/// clone of the shared resources and locks them at paint time.
-pub fn paint_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
-    egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(
-        rect,
-        ImagePaintCallback { resources: render.clone() },
-    ))
-}
-
 /// GPU bytes per volume sample on this backend: every channel is stored as a
-/// 16-bit texel (R16Unorm or R16Float), whatever the source kind. The volume
-/// builder budgets on the larger of CPU/GPU footprint, so 8-bit sources count
-/// as 2 bytes here instead of silently doubling past the budget in VRAM.
+/// 16-bit texel (R16Unorm or R16Float), whatever the source kind. A volume
+/// builder should budget on the larger of CPU/GPU footprint, so 8-bit sources
+/// count as 2 bytes here instead of silently doubling past the budget in VRAM.
 pub fn volume_gpu_bps(_kind: VolumeKind) -> usize {
     2
 }
 
-/// Backend hook for `eframe::NativeOptions`: request the 16-bit-norm texture
-/// feature when the adapter has it (nearly universal on desktop), so 16-bit
-/// volume data keeps its full precision (R16Unorm) instead of rounding through
-/// f16 (~11 bits). The device init falls back cleanly when it's missing.
-pub fn tune_native_options(options: &mut eframe::NativeOptions) {
-    if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
-        setup.device_descriptor = Arc::new(|adapter| {
-            wgpu::DeviceDescriptor {
-                label: Some("egui wgpu device"),
-                required_features: adapter.features() & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
-                // Request exactly the adapter's own limits rather than wgpu's
-                // generic defaults. The defaults ask for more than some low-end
-                // GPUs provide — e.g. the Raspberry Pi's V3DV Vulkan driver caps
-                // `max_color_attachments` at 4 vs the default 8 — and wgpu rejects
-                // the entire device request when any single limit is exceeded. We
-                // only ever draw to one color target and size every texture against
-                // a memory budget, so the adapter's real limits are always enough
-                // and, by definition, never exceed what the hardware allows. (On
-                // the GL backend this also reports the driver's true max 2D texture
-                // size instead of WebGL2's conservative 2048 floor.)
-                required_limits: adapter.limits(),
-                ..Default::default()
-            }
-        });
-    }
-}
-
-/// The egui paint callback that ray-marches the 3D volume into `rect`.
-pub fn paint_volume_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
-    egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(
-        rect,
-        VolumePaintCallback { resources: render.clone() },
-    ))
-}
-
-/// The volume-view callback. `prepare` writes the camera/window uniform (it has
-/// the queue; `set_volume_params` only stashed the params), then `paint` draws.
-struct VolumePaintCallback {
-    resources: Render,
-}
-
-impl egui_wgpu::CallbackTrait for VolumePaintCallback {
-    fn prepare(
-        &self,
-        _device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        _screen: &egui_wgpu::ScreenDescriptor,
-        _encoder: &mut wgpu::CommandEncoder,
-        _resources: &mut egui_wgpu::CallbackResources,
-    ) -> Vec<wgpu::CommandBuffer> {
-        if let Ok(r) = self.resources.lock() {
-            r.write_volume_uniform(queue);
-        }
-        Vec::new()
-    }
-
-    fn paint(
-        &self,
-        _info: egui::PaintCallbackInfo,
-        render_pass: &mut wgpu::RenderPass<'static>,
-        _resources: &egui_wgpu::CallbackResources,
-    ) {
-        if let Ok(r) = self.resources.lock() {
-            r.paint_volume(render_pass);
-        }
-    }
-}
-
-/// The `egui_wgpu::CallbackTrait` impl invoked once per egui frame to draw the
-/// image. Holds its own clone of the resources (not egui_wgpu's resource map).
-struct ImagePaintCallback {
-    resources: Render,
-}
-
-impl egui_wgpu::CallbackTrait for ImagePaintCallback {
-    // `prepare` is left as the trait default (no-op): all GPU state updates
-    // (texture uploads, uniform writes) happen synchronously in app.rs before
-    // this callback is queued, via direct queue.write_* calls.
-    fn paint(
-        &self,
-        _info: egui::PaintCallbackInfo,
-        render_pass: &mut wgpu::RenderPass<'static>,
-        _resources: &egui_wgpu::CallbackResources,
-    ) {
-        if let Ok(r) = self.resources.lock() {
-            r.paint(render_pass);
-        }
-    }
+/// The optional device features this backend benefits from, intersected with
+/// what `adapter` actually offers — pass the result as `required_features` when
+/// you create the device.
+///
+/// Today that's `TEXTURE_FORMAT_16BIT_NORM` (nearly universal on desktop, often
+/// absent on WebGL): with it, 16-bit volume data keeps full precision in
+/// R16Unorm instead of rounding through f16's ~11 bits. Everything falls back
+/// cleanly when it's missing, so this is a quality knob, not a requirement.
+pub fn optional_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+    adapter.features() & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
 }
 
 #[repr(C)]
@@ -219,6 +100,12 @@ struct VolParamsGpu {
 }
 
 pub struct ImageRenderResources {
+    /// Our own handles on the host's device/queue. Both are `Clone` in wgpu
+    /// (internally reference-counted), so this is a refcount bump, not a second
+    /// device — and it's what lets every upload method drop the per-call
+    /// context parameter the eframe-coupled version needed.
+    device: wgpu::Device,
+    queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
@@ -242,20 +129,27 @@ pub struct ImageRenderResources {
     /// (full 16-bit precision, and u16 uploads become plain memcpys), else
     /// R16Float; float sources are always R16Float.
     volume_textures: [wgpu::Texture; MAX_CHANNELS],
-    /// Whether the device has `TEXTURE_FORMAT_16BIT_NORM` (see `tune_native_options`).
+    /// Whether the device has `TEXTURE_FORMAT_16BIT_NORM` (see `optional_features`).
     volume_unorm16: bool,
     /// `interp` for the shader: 0 = nearest, 1 = linear, 2 = cubic.
     volume_interp_mode: i32,
-    /// The camera/window params, stashed by `set_volume_params` and written to
-    /// the uniform buffer by the paint callback's `prepare`.
+    /// The camera/window params, stashed by `set_volume_params` and marshalled
+    /// into the uniform buffer by `write_volume_uniform`.
     volume_params: Option<VolumeParams>,
 }
 
 impl ImageRenderResources {
-    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+    /// Build every pipeline, texture and buffer on `device`. `target_format` is
+    /// the format of the color attachment the host will later paint into — the
+    /// pipelines are compiled against it, so it must match the render pass.
+    ///
+    /// Both handles are kept (cheap refcounted clones); the host does not need
+    /// to hand them back on later calls.
+    pub fn new(gpu: wgpu::Device, queue: wgpu::Queue, target_format: wgpu::TextureFormat) -> Self {
+        let device = &gpu;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("FastTIFFcomposite shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/composite.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/composite.wgsl").into()),
         });
 
         let mut layout_entries = vec![wgpu::BindGroupLayoutEntry {
@@ -362,6 +256,8 @@ impl ImageRenderResources {
         let volume_unorm16 = device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM);
 
         Self {
+            device: gpu.clone(),
+            queue,
             pipeline,
             bind_group_layout,
             bind_group,
@@ -387,8 +283,8 @@ impl ImageRenderResources {
 
     /// Largest per-axis 3D-texture dimension the device supports; the app uses it
     /// (with a memory cap) to decide whether the volume must be subsampled.
-    pub fn max_3d_texture_size(&self, ctx: &UploadCtx) -> u32 {
-        ctx.device.limits().max_texture_dimension_3d
+    pub fn max_3d_texture_size(&self) -> u32 {
+        self.device.limits().max_texture_dimension_3d
     }
 
     /// (Re)upload the volume, one entry per channel: each `bytes` is `w*h*d`
@@ -398,8 +294,8 @@ impl ImageRenderResources {
     /// unchanged (a 4D timepoint step) are refilled in place; the bind group is
     /// only rebuilt when a texture was recreated. Conversion happens in bounded
     /// z-slab chunks (or not at all: u16 -> R16Unorm is a straight copy).
-    pub fn upload_volumes(&mut self, ctx: &UploadCtx, w: u32, h: u32, d: u32, channels: &[(VolumeKind, Vec<u8>)]) {
-        let device = ctx.device;
+    pub fn upload_volumes(&mut self, w: u32, h: u32, d: u32, channels: &[(VolumeKind, Vec<u8>)]) {
+        let device = &self.device;
         let mut rebind = false;
         for c in 0..MAX_CHANNELS {
             let entry = channels.get(c);
@@ -418,11 +314,11 @@ impl ImageRenderResources {
                     create_volume_texture(device, want_w, want_h, want_d, want_fmt, &format!("FastTIFFvol {c}"));
                 rebind = true;
                 if entry.is_none() {
-                    write_volume_region(ctx.queue, &self.volume_textures[c], 1, 1, 0, 1, &[0u8, 0u8]);
+                    write_volume_region(&self.queue, &self.volume_textures[c], 1, 1, 0, 1, &[0u8, 0u8]);
                 }
             }
             if let Some((kind, bytes)) = entry {
-                self.upload_volume_channel(ctx.queue, c, (w, h, d), *kind, bytes);
+                self.upload_volume_channel(c, (w, h, d), *kind, bytes);
             }
         }
         if rebind {
@@ -450,7 +346,8 @@ impl ImageRenderResources {
     /// other combination converts z-slab by z-slab into a reused buffer, so the
     /// transient allocation is bounded by `VOLUME_UPLOAD_CHUNK_BYTES` instead of
     /// a second full-volume copy.
-    fn upload_volume_channel(&self, queue: &wgpu::Queue, c: usize, dims: (u32, u32, u32), kind: VolumeKind, bytes: &[u8]) {
+    fn upload_volume_channel(&self, c: usize, dims: (u32, u32, u32), kind: VolumeKind, bytes: &[u8]) {
+        let queue = &self.queue;
         let (w, h, d) = dims;
         let texture = &self.volume_textures[c];
         let unorm = texture.format() == wgpu::TextureFormat::R16Unorm;
@@ -481,7 +378,7 @@ impl ImageRenderResources {
     /// Store the sampling mode for the shader (0 = nearest, 1 = linear, 2 = cubic).
     /// A single linear sampler serves all three (nearest snaps to texel centers,
     /// cubic reconstructs in-shader), so no GPU state changes here.
-    pub fn set_volume_interp(&mut self, _ctx: &UploadCtx, interp: VolumeInterp) {
+    pub fn set_volume_interp(&mut self, interp: VolumeInterp) {
         self.volume_interp_mode = match interp {
             VolumeInterp::Nearest => 0,
             VolumeInterp::Linear => 1,
@@ -489,15 +386,16 @@ impl ImageRenderResources {
         };
     }
 
-    /// Stash the ray-march params; the paint callback's `prepare` writes them to
-    /// the uniform buffer (which is where the queue is available).
+    /// Stash the ray-march params. They reach the GPU in `write_volume_uniform`,
+    /// which the host must call before `paint_volume`.
     pub fn set_volume_params(&mut self, params: VolumeParams) {
         self.volume_params = Some(params);
     }
 
     /// Marshal the stashed params + interp mode into the volume uniform buffer.
-    /// Called from the paint callback's `prepare`.
-    fn write_volume_uniform(&self, queue: &wgpu::Queue) {
+    /// Call once per 3D frame, before `paint_volume` (under egui_wgpu this is
+    /// the callback's `prepare` step). No-op until `set_volume_params` has run.
+    pub fn write_volume_uniform(&self) {
         let Some(p) = self.volume_params else { return };
         let mut gpu = VolParamsGpu {
             channels: [[0.0; 4]; MAX_CHANNELS],
@@ -512,7 +410,7 @@ impl ImageRenderResources {
         for c in 0..MAX_CHANNELS {
             gpu.channels[c] = [p.windows[c * 2], p.windows[c * 2 + 1], p.enabled[c], 0.0];
         }
-        queue.write_buffer(&self.volume_uniform_buffer, 0, bytemuck::bytes_of(&gpu));
+        self.queue.write_buffer(&self.volume_uniform_buffer, 0, bytemuck::bytes_of(&gpu));
     }
 
     /// Ray-march the current volume. `prepare` has already written the uniform.
@@ -531,7 +429,7 @@ impl ImageRenderResources {
     /// R32F float texture (integer texture a 1x1 dummy); channels past
     /// `kinds.len()` are unused (both 1x1). Rebuilds the bind group when anything
     /// changed; no-op otherwise.
-    pub fn ensure_size(&mut self, ctx: &UploadCtx, width: u32, height: u32, kinds: &[ChannelKind]) {
+    pub fn ensure_size(&mut self, width: u32, height: u32, kinds: &[ChannelKind]) {
         let mut want = [KIND_UNUSED; MAX_CHANNELS];
         for (c, slot) in want.iter_mut().enumerate() {
             *slot = match kinds.get(c) {
@@ -544,7 +442,7 @@ impl ImageRenderResources {
         if self.current_size == (width, height) && self.current_kinds == want {
             return;
         }
-        let device = ctx.device;
+        let device = &self.device;
         self.channel_textures = std::array::from_fn(|c| {
             let label = format!("FastTIFFchannel {c}");
             // R8Uint or R16Uint at full size for an integer channel, else a 1x1
@@ -573,11 +471,11 @@ impl ImageRenderResources {
     }
 
     /// Upload one integer channel's raw 16-bit samples (R16Uint texture).
-    pub fn upload_channel(&self, ctx: &UploadCtx, channel: usize, width: u32, height: u32, samples: &[u16]) {
+    pub fn upload_channel_u16(&self, channel: usize, width: u32, height: u32, samples: &[u16]) {
         if channel >= MAX_CHANNELS {
             return;
         }
-        ctx.queue.write_texture(
+        self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.channel_textures[channel],
                 mip_level: 0,
@@ -601,11 +499,11 @@ impl ImageRenderResources {
     /// Upload one integer channel's raw 8-bit samples (R8Uint texture). Skips
     /// the CPU `0..255 -> 0..65535` widening; the window/level is scaled to
     /// 0..255 units on the app side instead.
-    pub fn upload_channel_u8(&self, ctx: &UploadCtx, channel: usize, width: u32, height: u32, samples: &[u8]) {
+    pub fn upload_channel_u8(&self, channel: usize, width: u32, height: u32, samples: &[u8]) {
         if channel >= MAX_CHANNELS {
             return;
         }
-        ctx.queue.write_texture(
+        self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.channel_textures[channel],
                 mip_level: 0,
@@ -627,11 +525,11 @@ impl ImageRenderResources {
     }
 
     /// Upload one float channel's raw 32-bit float samples (R32F texture).
-    pub fn upload_channel_f32(&self, ctx: &UploadCtx, channel: usize, width: u32, height: u32, samples: &[f32]) {
+    pub fn upload_channel_f32(&self, channel: usize, width: u32, height: u32, samples: &[f32]) {
         if channel >= MAX_CHANNELS {
             return;
         }
-        ctx.queue.write_texture(
+        self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.channel_ftextures[channel],
                 mip_level: 0,
@@ -653,7 +551,7 @@ impl ImageRenderResources {
     }
 
     /// Upload one channel's LUT (256 RGB entries) into the LUT texture array.
-    pub fn upload_lut(&self, ctx: &UploadCtx, channel: usize, lut: &[[u8; 3]; 256]) {
+    pub fn upload_lut(&self, channel: usize, lut: &Lut) {
         if channel >= MAX_CHANNELS {
             return;
         }
@@ -664,7 +562,7 @@ impl ImageRenderResources {
             rgba[i * 4 + 2] = px[2];
             rgba[i * 4 + 3] = 255;
         }
-        ctx.queue.write_texture(
+        self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.lut_texture,
                 mip_level: 0,
@@ -694,7 +592,6 @@ impl ImageRenderResources {
     /// write.
     pub fn set_params(
         &mut self,
-        ctx: &UploadCtx,
         channels: &[ChannelUniform],
         num_channels: u32,
         uv_offset: [f32; 2],
@@ -718,7 +615,7 @@ impl ImageRenderResources {
                 is_float: if c.is_float { 1.0 } else { 0.0 },
             };
         }
-        ctx.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&gpu));
+        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&gpu));
     }
 
     pub fn paint(&self, render_pass: &mut wgpu::RenderPass<'_>) {
@@ -879,7 +776,7 @@ fn create_volume_resources(
 ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::BindGroup, wgpu::Buffer, [wgpu::Texture; MAX_CHANNELS]) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("FastTIFFvolume shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/volume.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/volume.wgsl").into()),
     });
 
     let mut entries = vec![wgpu::BindGroupLayoutEntry {
@@ -1047,10 +944,6 @@ fn convert_volume_texels(kind: VolumeKind, unorm: bool, bytes: &[u8], out: &mut 
         ),
     }
 }
-
-#[cfg(test)]
-#[path = "wgsl_tests.rs"]
-mod wgsl_tests;
 
 fn build_volume_bind_group(
     device: &wgpu::Device,

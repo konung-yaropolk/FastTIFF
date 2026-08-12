@@ -5,41 +5,24 @@
 //! (`rd = forward + ndc.x·aspect·tan·right + ndc.y·tan·up`), so it lines up with
 //! the rendered volume on both the wgpu and glow backends.
 
-use super::camera::{volume_camera, VolumeCam, VolumeCamera};
 use super::*;
+use fast_tiff_viewer::camera::{volume_camera, VolumeCamera};
 
 impl ViewerApp {
     /// Draw the coordinate box for the current volume view into `painter` (which
     /// the caller has clipped to the volume rect). No-op without a loaded stack.
     pub(super) fn draw_coord_box(&self, painter: &egui::Painter, rect: egui::Rect) {
-        let Some(loaded) = &self.stack else { return };
+        let Some(loaded) = &self.core.stack else { return };
         let f0 = loaded.tiff.frames.first();
         let (Some(w), Some(h)) = (f0.map(|f| f.width), f0.map(|f| f.height)) else { return };
-        let slices = loaded.tiff.meta.slices.max(1);
-        let d = if slices > 1 { slices as u32 } else { loaded.tiff.meta.frames.max(1) as u32 };
-        let dims = (w, h, d);
+        let dims = (w, h, loaded.volume_depth());
 
         // Rebuild the exact camera the shader used this frame (box half-extents
         // fold in the voxel scale, matching what's on screen).
-        let cam = volume_camera(
-            VolumeCam {
-                yaw: self.vol_yaw,
-                pitch: self.vol_pitch,
-                dist: self.vol_dist,
-                target: self.vol_target,
-                fly_pos: self.vol_fly_pos,
-                nav: self.nav_mode,
-                scale: self.vol_scale,
-                aspect: self.vol_aspect,
-                render: self.vol_render,
-                density: self.vol_density,
-                iso: self.vol_iso,
-            },
-            dims,
-        );
+        let cam = volume_camera(&self.core.volume.cam, self.core.volume.scale, dims);
 
         let unit = loaded.tiff.meta.unit.as_deref().filter(|u| !u.is_empty());
-        draw_box(painter, rect, &cam, self.vol_aspect, dims, self.vol_scale, unit);
+        draw_box(painter, rect, &cam, self.core.volume.aspect, dims, self.core.volume.scale, unit);
     }
 }
 

@@ -2,16 +2,15 @@
 //! channel/Z/time roles to a loaded stack, RGB plane setup, and the derived
 //! status line. Split from `app.rs`.
 
-use super::*;
-
-use super::channels::{build_channel_settings, resize_channel_display};
-use crate::render::{ChannelKind, MAX_CHANNELS};
+use crate::channels::{build_channel_settings, resize_channel_display};
+use crate::stack::{ChannelSettings, Stack};
+use scivis_render::{ChannelKind, MAX_CHANNELS};
 
 /// The status note shown at the top of the window, derived from the
 /// stack's current (resolved) dimensions. Shared between the initial load
 /// and the manual dimension-order override so the two can't drift out of
 /// sync with each other.
-pub(super) fn compute_status(meta: &fast_tiff_lib::StackMeta, triple_axis_warning: bool) -> Option<String> {
+pub fn compute_status(meta: &fast_tiff_lib::StackMeta, triple_axis_warning: bool) -> Option<String> {
     if triple_axis_warning {
         Some(format!(
             "Warning: this file has channels, Z-slices, and time frames all present at once \
@@ -35,7 +34,7 @@ pub(super) fn compute_status(meta: &fast_tiff_lib::StackMeta, triple_axis_warnin
 /// position. The one place that does this, so the manual channels/frames
 /// swap can't drift out of sync with `open_file` the way `self.status`
 /// previously did.
-pub(super) fn apply_resolved_dimensions(loaded: &mut LoadedStack, resolved: fast_tiff_lib::ResolvedDimensions) {
+pub fn apply_resolved_dimensions(loaded: &mut Stack, resolved: fast_tiff_lib::ResolvedDimensions) {
     loaded.tiff.meta.channels = resolved.channels;
     loaded.tiff.meta.slices = resolved.slices;
     loaded.tiff.meta.frames = resolved.frames;
@@ -50,11 +49,11 @@ pub(super) fn apply_resolved_dimensions(loaded: &mut LoadedStack, resolved: fast
 /// Which sample planes of an `spp`-sample RGB frame get a display channel, and
 /// which of those start enabled — one entry per channel, `true` = on. The whole
 /// policy `setup_rgb` applies, split out so it's testable without a
-/// file-and-GPU-backed `LoadedStack`. See `setup_rgb` for the reasoning.
+/// file-and-GPU-backed `Stack`. See `setup_rgb` for the reasoning.
 ///
 /// Beyond `MAX_CHANNELS` the shader has no slot to composite into, so further
 /// samples are dropped — no real file has 7+ samples/pixel.
-pub(super) fn rgb_channel_plan(spp: usize) -> Vec<bool> {
+pub fn rgb_channel_plan(spp: usize) -> Vec<bool> {
     (0..spp.min(MAX_CHANNELS)).map(|c| c < 3).collect()
 }
 
@@ -63,7 +62,7 @@ pub(super) fn rgb_channel_plan(spp: usize) -> Vec<bool> {
 /// colors show without any contrast tweaking). Additively blending the red,
 /// green and blue ramps in the composite shader reconstructs the original RGB
 /// pixel. Frame navigation still walks IFDs (one full-color image per IFD) —
-/// see `LoadedStack::rgb`.
+/// see `Stack::rgb`.
 ///
 /// Samples past the third (TIFF ExtraSamples — alpha, or anything else a writer
 /// packed in) get channels too, but **start disabled**. They're real data the
@@ -74,7 +73,7 @@ pub(super) fn rgb_channel_plan(spp: usize) -> Vec<bool> {
 /// the additive shader would blend in as a solid color wash over the picture.
 /// Off-by-default is the only setting that's harmless for both: the channel row
 /// is visible, and one click shows it.
-pub(super) fn setup_rgb(loaded: &mut LoadedStack) {
+pub fn setup_rgb(loaded: &mut Stack) {
     let spp = loaded.tiff.frames.first().map(|f| f.samples_per_pixel as usize).unwrap_or(3);
     let plan = rgb_channel_plan(spp);
     let planes = plan.len();
@@ -123,7 +122,7 @@ pub(super) fn setup_rgb(loaded: &mut LoadedStack) {
 /// unchanged, so it stays a plain channels/time swap. The triple-axis
 /// warning flag is carried over — it describes the file, not the current
 /// role assignment.
-pub(super) fn apply_dimension_override(loaded: &mut LoadedStack, channels: usize, slices: usize, frames: usize) {
+pub fn apply_dimension_override(loaded: &mut Stack, channels: usize, slices: usize, frames: usize) {
     let resolved = fast_tiff_lib::ResolvedDimensions {
         channels,
         slices,

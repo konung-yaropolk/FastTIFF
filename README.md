@@ -125,6 +125,20 @@ you move the slider. This viewer instead:
 
 ## Project layout
 
+Four crates, layered bottom-up. Each one below the app is free of any GUI
+toolkit, so the same engine can drive a different frontend (a wasm/web UI is the
+intended second one):
+
+```text
+  fast-tiff-lib     file I/O, IFD index, decode, metadata
+        │
+  scivis-render     GPU pipelines, textures, ray-marching
+        │
+  fast-tiff-viewer  stack model, channel settings, decode → GPU sync
+        │
+  FastTIFF          the eframe desktop frontend
+```
+
 - **`fast-tiff-lib/`** - pure parsing/decoding library, no GUI or GPU
   dependencies. IFD-chain walking, ImageJ metadata parsing, strip decoding
   (uncompressed fast path + LZW/Deflate/PackBits + predictor undo). Has a
@@ -132,9 +146,24 @@ you move the slider. This viewer instead:
   multi-frame TIFFs in memory and round-trips them through the whole
   pipeline - this is the part most worth trusting blind, since it's
   actually verified. **Published on crates.io** — see below.
-- **`FastTIFF/`** — the GUI binary: eframe/egui for the window and controls,
-  a custom GPU render pipeline for the image itself, with interchangeable
-  glow (OpenGL) and wgpu backends selected at build time (see Renderer above).
+- **`scivis-render/`** — all GPU work, free of any GUI toolkit: the
+  compositing pipeline, per-channel textures and LUTs, and the volume
+  ray-marcher. Never creates a device, a surface or a window — construction
+  takes the host's device, painting takes the host's render pass. Two additive
+  backends (`backend-wgpu`, `backend-glow`). Its WGSL shaders are validated
+  offline with naga, so a broken shader fails `cargo test` instead of showing a
+  blank canvas.
+- **`fast-tiff-viewer/`** — everything between "a TIFF on disk" and "pixels on the
+  GPU": the loaded-stack model, per-channel contrast/LUT derivation, c/z/t
+  interpretation, the display-channel → IFD mapping, 3D volume assembly,
+  read-ahead, the camera, the playback clock, and the per-frame sync that drives
+  the renderer. A `threads` feature (on by default) can be turned off for a
+  single-threaded host such as `wasm32-unknown-unknown`.
+- **`FastTIFF/`** — the GUI binary: eframe/egui for the window and controls.
+  It holds a `fast_tiff_viewer::Viewer` plus the things only a desktop window has
+  (zoom, pan, window sizing, which panels are open). `src/render.rs` is the sole
+  file bridging the renderer to eframe — a browser frontend writes its own
+  ~150-line equivalent and reuses everything else.
 
 ## The TIFF engine is a standalone crate
 
@@ -218,7 +247,7 @@ already separates "decode" from "display" cleanly.
 For multi-channel/multi-slice stacks, the formula mapping (frame, slice,
 channel) to a position in the IFD chain assumes ImageJ's default `xyczt`
 plane order (channel varies fastest, then Z, then T) - see
-`ifd_index()` in `FastTIFF/src/app.rs`. This is what ImageJ's TIFF writer
+`build_jobs()` in `fast-tiff-viewer/src/sync.rs`. This is what ImageJ's TIFF writer
 uses by default. If a particular file was produced with reordered planes,
 this is the one-line formula to change.
 

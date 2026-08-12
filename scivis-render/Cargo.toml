@@ -1,0 +1,53 @@
+[package]
+name = "scivis-render"
+version = "0.9.7"
+edition = "2021"
+description = "Scientific visualization on the GPU: per-channel window/level + LUT compositing of multi-channel image stacks in 2D, and volume ray-marching in 3D, on wgpu or OpenGL. No GUI toolkit, no file format — you bring the pixels."
+license = "MPL-2.0"
+readme = "README.md"
+repository = "https://github.com/konung-yaropolk/FastTIFF"
+keywords = ["wgpu", "volume-rendering", "raymarching", "microscopy", "imaging"]
+categories = ["rendering", "visualization", "graphics", "science"]
+
+# The WGSL sources are `include_str!`d into the wgpu backend, so they must ship
+# with the crate.
+include = [
+    "src/**/*.rs",
+    "src/**/*.wgsl",
+    # The shader-validation tests are this crate's only tests and need no
+    # fixtures, so ship them — a published crate you can't `cargo test` is
+    # strictly worse than a few KB larger.
+    "tests/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
+
+# Backends are additive, not exclusive — nothing here forbids compiling both
+# (they're independent modules over independent GPU crates). A *host* that can
+# only drive one, like the eframe app, enforces that on its own side; a host
+# that wants runtime fallback can build both. Neither enabled leaves just the
+# shared parameter types, which is what a CPU-side caller (volume budgeting,
+# window/level math) needs.
+[features]
+default = []
+backend-wgpu = ["dep:wgpu", "dep:half", "dep:bytemuck"]
+backend-glow = ["dep:glow", "dep:bytemuck"]
+
+[dependencies]
+# Version-critical: the host hands us its own `wgpu::Device`/`Queue` (or
+# `glow::Context`), so these must resolve to the SAME crate versions the host's
+# windowing layer uses — egui-wgpu 0.34 → wgpu 29, egui_glow 0.34 → glow 0.17.
+# Cargo unifies them automatically while the majors match; a host on a different
+# major would get a type mismatch at the `new()` call, not a subtle bug.
+wgpu = { version = "29", optional = true }
+glow = { version = "0.17", optional = true }
+# f32 -> f16 for the wgpu volume textures (R16Float); already in wgpu's tree.
+half = { version = "2", optional = true }
+bytemuck = { version = "1.25", optional = true }
+
+# WGSL is only validated by wgpu at runtime (shader-module creation), so this
+# lets `cargo test` catch shader errors offline, with no GPU and regardless of
+# which backend feature is on. naga is already in the tree via wgpu.
+[dev-dependencies]
+naga = { version = "29", features = ["wgsl-in"] }

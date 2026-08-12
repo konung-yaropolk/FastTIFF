@@ -2,15 +2,14 @@
 //! the data or metadata, slider tints, the grayscale color/colormap selector
 //! tables, and the pseudocolor toggle. Split from `app.rs`.
 
-use super::*;
-use crate::render::{ChannelKind, MAX_CHANNELS};
-use egui::Color32;
+use crate::stack::{ChannelSettings, Stack};
 use fast_tiff_lib::TiffStack;
+use scivis_render::{ChannelKind, Lut, MAX_CHANNELS};
 
 /// Actual pixel min/max of channel `c`'s first frame, for integer-format
 /// data. Used as the auto-contrast fallback when no display range came
 /// from the file's metadata.
-pub(super) fn first_frame_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
+pub fn first_frame_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
     let idx = channel.min(tiff.frames.len().saturating_sub(1));
     let frame = tiff.frames.get(idx)?;
     let pixels = fast_tiff_lib::read_frame_u16(&tiff.mmap, frame, tiff.byte_order, None).ok()?;
@@ -28,7 +27,7 @@ pub(super) fn first_frame_minmax(tiff: &TiffStack, channel: usize) -> Option<(f3
 /// Actual float min/max of channel `c`'s first frame, for 32-bit float
 /// data — matches ImageJ auto-ranging a float image to its own values
 /// rather than assuming a fixed integer-shaped scale.
-pub(super) fn first_frame_float_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
+pub fn first_frame_float_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
     let idx = channel.min(tiff.frames.len().saturating_sub(1));
     let frame = tiff.frames.get(idx)?;
     fast_tiff_lib::frame_float_minmax(&tiff.mmap, frame, tiff.byte_order).ok()?
@@ -42,7 +41,7 @@ pub(super) fn first_frame_float_minmax(tiff: &TiffStack, channel: usize) -> Opti
 /// manual channels/frames swap), the old LUTs no longer correspond to the new
 /// channels, so they're regenerated from `mode` — which also avoids leaving a
 /// collapsed grayscale stack wearing a stale composite (e.g. red) LUT.
-pub(super) fn resize_channel_display(meta: &mut fast_tiff_lib::StackMeta, new_channels: usize) {
+pub fn resize_channel_display(meta: &mut fast_tiff_lib::StackMeta, new_channels: usize) {
     let old = std::mem::take(&mut meta.channel_display);
     let mode = meta.mode;
     let keep_luts = new_channels == old.len();
@@ -64,7 +63,7 @@ pub(super) fn resize_channel_display(meta: &mut fast_tiff_lib::StackMeta, new_ch
 /// window past the metadata defaults. Falls back to the window alone when the
 /// data range is unknown, and pads a degenerate (zero-width) range so the
 /// slider stays usable.
-pub(super) fn slider_bounds(window: (f32, f32), data: Option<(f32, f32)>) -> (f32, f32) {
+pub fn slider_bounds(window: (f32, f32), data: Option<(f32, f32)>) -> (f32, f32) {
     let (mut lo, mut hi) = window;
     if let Some((dlo, dhi)) = data {
         lo = lo.min(dlo);
@@ -82,14 +81,14 @@ pub(super) fn slider_bounds(window: (f32, f32), data: Option<(f32, f32)>) -> (f3
 /// top (full-intensity) entry of its LUT. Returns `None` for a plain grayscale
 /// LUT (`r == g == b`), so only genuinely colored channels — composite/RGB, or a
 /// pseudocolored grayscale stack — get a tinted slider; grayscale ones keep the
-/// default selection color.
-pub(super) fn channel_tint(lut: &[[u8; 3]; 256]) -> Option<Color32> {
+/// frontend's default selection color.
+///
+/// Returns raw RGB rather than a toolkit color type: picking *whether* there is
+/// a tint is display logic that belongs here, while turning it into an
+/// `egui::Color32` (or a CSS string) belongs to the frontend.
+pub fn channel_tint(lut: &Lut) -> Option<[u8; 3]> {
     let [r, g, b] = lut[255];
-    if r == g && g == b {
-        None
-    } else {
-        Some(Color32::from_rgb(r, g, b))
-    }
+    (!(r == g && g == b)).then_some([r, g, b])
 }
 
 /// Like `channel_tint`, but taken from the LUT's *low* (index 0) entry — the
@@ -98,9 +97,9 @@ pub(super) fn channel_tint(lut: &[[u8; 3]; 256]) -> Option<Color32> {
 /// high end washes out to near-white) than the top does. `None` for a
 /// grayscale/black low entry (`r == g == b`), so plain grayscale and the pure
 /// single-hue channel ramps — whose low end is black — keep the default color.
-pub(super) fn ui_tint(lut: &[[u8; 3]; 256]) -> Option<Color32> {
+pub fn ui_tint(lut: &Lut) -> Option<[u8; 3]> {
     let [r, g, b] = lut[127];
-    (!(r == g && g == b)).then(|| Color32::from_rgb(r, g, b))
+    (!(r == g && g == b)).then_some([r, g, b])
 }
 
 /// The named channel colors the single-channel grayscale color selector offers
@@ -108,17 +107,17 @@ pub(super) fn ui_tint(lut: &[[u8; 3]; 256]) -> Option<Color32> {
 /// palette `fast_tiff_lib::default_composite_lut` cycles through, so color option
 /// *i* maps to `default_composite_lut(i)`. White is omitted — its ramp is
 /// identical to grayscale.
-pub(super) const GRAY_LUT_COLOR_NAMES: [&str; 6] = ["Red", "Green", "Blue", "Yellow", "Magenta", "Cyan"];
+pub const GRAY_LUT_COLOR_NAMES: [&str; 6] = ["Red", "Green", "Blue", "Yellow", "Magenta", "Cyan"];
 
 /// Number of options in the grayscale color selector: plain grayscale, then the
 /// named channel colors, then the perceptual colormaps (`crate::colormap`).
-pub(super) fn gray_lut_option_count() -> usize {
+pub fn gray_lut_option_count() -> usize {
     1 + GRAY_LUT_COLOR_NAMES.len() + crate::colormap::NAMES.len()
 }
 
 /// Display name for grayscale-color option `sel` (see `gray_lut_for` for the
 /// index layout).
-pub(super) fn gray_lut_name(sel: usize) -> &'static str {
+pub fn gray_lut_name(sel: usize) -> &'static str {
     let colors = GRAY_LUT_COLOR_NAMES.len();
     if sel == 0 {
         "Grayscale"
@@ -132,7 +131,7 @@ pub(super) fn gray_lut_name(sel: usize) -> &'static str {
 /// The 256-entry LUT for grayscale-color option `sel`: `0` = plain grayscale,
 /// `1..=6` = the named channel colors, the rest = the perceptual colormaps —
 /// the same order the selector lists them in.
-pub(super) fn gray_lut_for(sel: usize) -> [[u8; 3]; 256] {
+pub fn gray_lut_for(sel: usize) -> Lut {
     let colors = GRAY_LUT_COLOR_NAMES.len();
     if sel == 0 {
         fast_tiff_lib::grayscale_lut()
@@ -150,17 +149,17 @@ pub(super) fn gray_lut_for(sel: usize) -> [[u8; 3]; 256] {
 // is `0 = Built-in` when present, else `0 = Grayscale`.
 
 /// 1 when a leading "Built-in LUT" option is present, else 0.
-fn gray_lut_offset(loaded: &LoadedStack) -> usize {
+fn gray_lut_offset(loaded: &Stack) -> usize {
     loaded.builtin_lut.is_some() as usize
 }
 
 /// Total selector options, including the leading "Built-in LUT" when present.
-pub(super) fn gray_lut_count(loaded: &LoadedStack) -> usize {
+pub fn gray_lut_count(loaded: &Stack) -> usize {
     gray_lut_option_count() + gray_lut_offset(loaded)
 }
 
 /// Display name for selector index `sel` ("Built-in LUT" at 0 when present).
-pub(super) fn gray_lut_sel_name(loaded: &LoadedStack, sel: usize) -> &'static str {
+pub fn gray_lut_sel_name(loaded: &Stack, sel: usize) -> &'static str {
     let off = gray_lut_offset(loaded);
     if off == 1 && sel == 0 {
         "Built-in"
@@ -171,7 +170,7 @@ pub(super) fn gray_lut_sel_name(loaded: &LoadedStack, sel: usize) -> &'static st
 
 /// The 256-entry LUT for selector index `sel` (the file's own map at 0 when
 /// present, otherwise the computed option).
-pub(super) fn gray_lut_sel_lut(loaded: &LoadedStack, sel: usize) -> [[u8; 3]; 256] {
+pub fn gray_lut_sel_lut(loaded: &Stack, sel: usize) -> Lut {
     let off = gray_lut_offset(loaded);
     match loaded.builtin_lut {
         Some(lut) if sel == 0 => lut,
@@ -182,7 +181,7 @@ pub(super) fn gray_lut_sel_lut(loaded: &LoadedStack, sel: usize) -> [[u8; 3]; 25
 /// Builds the UI-level per-channel settings (window/level, enabled,
 /// float-encoding range) from `tiff.meta`'s current channel count and
 /// display info.
-pub(super) fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
+pub fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
     (0..tiff.meta.channels.min(MAX_CHANNELS))
         .map(|c| {
             let disp = &tiff.meta.channel_display[c];
@@ -248,7 +247,7 @@ pub(super) fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
 /// Whether the "apply pseudocolor" option is meaningful for this stack: only
 /// multi-channel grayscale stacks (composite files already carry colors; RGB is
 /// handled separately) can be optionally tinted with the channel palette.
-pub(super) fn pseudocolor_applicable(loaded: &LoadedStack) -> bool {
+pub fn pseudocolor_applicable(loaded: &Stack) -> bool {
     !loaded.rgb
         && loaded.channel_settings.len() > 1
         && loaded.tiff.meta.mode == fast_tiff_lib::DisplayMode::Grayscale
@@ -263,14 +262,14 @@ pub(super) fn pseudocolor_applicable(loaded: &LoadedStack) -> bool {
 /// leads with a "Built-in LUT" option (the default) so the file's colors show,
 /// with grayscale / channel colors / colormaps available to override. The
 /// multi-channel case is covered by the pseudocolor toggle instead.
-pub(super) fn gray_lut_applicable(loaded: &LoadedStack) -> bool {
+pub fn gray_lut_applicable(loaded: &Stack) -> bool {
     !loaded.rgb && loaded.channel_settings.len() == 1
 }
 
 /// Sets the per-channel LUTs of an applicable (multi-channel grayscale) stack:
 /// the standard channel palette (ch1 red, ch2 green, …) when `apply` is true,
 /// plain grayscale otherwise. No-op for stacks that carry their own colors.
-pub(super) fn refresh_pseudocolor(loaded: &mut LoadedStack, apply: bool) {
+pub fn refresh_pseudocolor(loaded: &mut Stack, apply: bool) {
     if !pseudocolor_applicable(loaded) {
         return;
     }

@@ -4,21 +4,19 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.9.6"
+version = "1.9.7"
 dependencies = [
  "anyhow",
- "bytemuck",
  "eframe",
  "egui",
  "egui_extras",
  "env_logger",
  "fast-tiff-lib",
- "half",
+ "fast-tiff-viewer",
  "image",
  "log",
- "naga",
- "rayon",
  "rfd",
+ "scivis-render",
  "winres",
 ]
 
@@ -850,6 +848,18 @@ dependencies = [
  "rayon",
  "weezl 0.2.1",
  "zstd",
+]
+
+[[package]]
+name = "fast-tiff-viewer"
+version = "0.9.7"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "fast-tiff-lib",
+ "log",
+ "rayon",
+ "scivis-render",
 ]
 
 [[package]]
@@ -2492,6 +2502,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "scivis-render"
+version = "0.9.7"
+dependencies = [
+ "bytemuck",
+ "glow",
+ "half",
+ "naga",
+ "wgpu",
 ]
 
 [[package]]

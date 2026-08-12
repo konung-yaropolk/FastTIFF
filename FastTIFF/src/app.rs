@@ -1,44 +1,45 @@
-//! The viewer's egui::App. Holds the loaded stack (if any), per-channel
-//! display settings, and the current scrub position. Drives GPU texture
-//! uploads directly from UI code (not from inside the paint callback) so a
-//! frame change is just: mmap read -> texture upload -> (next frame) draw call.
-//! The GPU backend (glow or wgpu) is reached only through `crate::render`'s
-//! backend-agnostic surface, so nothing here mentions either by name.
+//! The viewer's `eframe::App`: window chrome, widgets, and input.
 //!
-//! This file keeps the state types (`ViewerApp`, `LoadedStack`, …) and the
-//! per-frame `ui()` orchestration; the supporting clusters live in child
-//! modules (which share this module's privacy, so the split adds no `pub`
-//! surface beyond `pub(super)`):
-//!   * `camera`     — 3D navigation modes + camera math and input driving
-//!   * `gpu_sync`   — per-frame decode/upload + volume plan/uniforms
-//!   * `channels`   — per-channel settings, LUT/color + pseudocolor helpers
-//!   * `dimensions` — stack-shape (c/z/t) interpretation + status line
-//!   * `widgets`    — the contrast range slider + value formatting
-//!   * `windows`    — the render-settings and file-metadata pop-ups
+//! All non-GUI state and logic lives in `fast_tiff_viewer::Viewer` — the loaded
+//! stack, channel settings, playback clock, 3D camera, and the per-frame
+//! decode→GPU sync. `ViewerApp` holds one of those plus the things only a
+//! desktop window has: zoom, pan, window sizing, which panels are open. The
+//! rule for where a field belongs is "would a browser UI need this to show the
+//! right pixels?" — if yes, it's in `core`.
+//!
+//! The GPU is reached only through `crate::render`, the eframe adapter over
+//! `scivis-render`, so nothing here mentions glow or wgpu.
+//!
+//! Supporting clusters live in child modules (which share this module's
+//! privacy, so the split adds no `pub` surface beyond `pub(super)`):
+//!   * `camera`  — egui input → the core camera
+//!   * `overlay` — the 3D coordinate-box overlay, drawn with the egui painter
+//!   * `widgets` — the contrast range slider + value formatting
+//!   * `windows` — the render-settings and file-metadata pop-ups
 
 use crate::render::{self, Render};
 use egui::{Color32, RichText};
+use fast_tiff_viewer::channels::{
+    channel_tint, gray_lut_applicable, gray_lut_count, gray_lut_sel_lut, gray_lut_sel_name,
+    pseudocolor_applicable, ui_tint,
+};
+use fast_tiff_viewer::{DecodeMode, Stack, ViewMode, Viewer};
 use std::path::PathBuf;
-use fast_tiff_lib::TiffStack;
 
 mod camera;
-mod channels;
-mod dimensions;
-mod gpu_sync;
 mod overlay;
 mod widgets;
 mod windows;
-#[cfg(test)]
-mod tests;
 
-use camera::{NavMode, OrbitPoint};
-use channels::{
-    channel_tint, gray_lut_applicable, gray_lut_count, gray_lut_sel_lut, gray_lut_sel_name,
-    pseudocolor_applicable, refresh_pseudocolor, ui_tint,
-};
-use dimensions::{apply_dimension_override, apply_resolved_dimensions, compute_status, setup_rgb};
 use widgets::{format_calibrated, range_slider, MIN_CONTRAST_SLIDER_W};
 use windows::{metadata_window, render_settings_window};
+
+/// Turn a core LUT tint (raw RGB, or `None` for "plain grayscale — use the
+/// default color") into an egui color. The *decision* is display logic and
+/// lives in `fast_tiff_viewer::channels`; only this conversion is egui's.
+fn tint_color(tint: Option<[u8; 3]>) -> Option<Color32> {
+    tint.map(|[r, g, b]| Color32::from_rgb(r, g, b))
+}
 
 /// Discrete zoom levels the viewer snaps to (3.1% … 3200%). Zooming in/out
 /// steps between adjacent levels. Above 100% the levels are mostly whole-number
@@ -107,144 +108,18 @@ fn initial_fit_zoom(ctx: &egui::Context, img_w: f32, img_h: f32, chrome_h: f32) 
     Some(ZOOM_LEVELS[0]) // even the smallest level overflows — open there and pan
 }
 
-/// How per-frame decoding is split across CPU cores. The choice maps onto
-/// `fast-tiff-lib`'s parallel-decode hint each frame (see `sync_gpu`).
-#[derive(Clone, Copy, PartialEq)]
-enum DecodeMode {
-    /// Serial by default; switch to threaded automatically when real-time
-    /// playback starts dropping frames (a core saturating on decode).
-    Auto,
-    /// Always single-threaded (lowest total CPU; one core).
-    Serial,
-    /// Always multi-threaded for large frames (spreads load across cores).
-    Threaded,
-}
-
-impl DecodeMode {
-    fn label(self) -> &'static str {
-        match self {
-            DecodeMode::Auto => "Auto",
-            DecodeMode::Serial => "Serial",
-            DecodeMode::Threaded => "Threaded",
-        }
-    }
-
-    /// The parallel-decode flag this mode feeds to `fast-tiff-lib`. `latched` is
-    /// whether `Auto`'s adaptive trigger has fired (playback fell behind); it
-    /// only matters in `Auto`.
-    fn parallel(self, latched: bool) -> bool {
-        match self {
-            DecodeMode::Serial => false,
-            DecodeMode::Threaded => true,
-            DecodeMode::Auto => latched,
-        }
-    }
-}
-
-/// Which view the central panel shows: the 2D movie (scrub/play through frames)
-/// or the GPU-ray-marched 3D volume built from the whole stack.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ViewMode {
-    Movie,
-    Volume,
-}
-
-#[derive(Clone, Copy)]
-struct ChannelSettings {
-    min: f32,
-    max: f32,
-    enabled: bool,
-    /// The full track range `(lo, hi)` the contrast range-slider spans, in raw
-    /// sample units. Derived from the channel's data range (and widened to
-    /// include any metadata window) at load time so the two handles always sit
-    /// somewhere on the track.
-    bounds: (f32, f32),
-    /// Which GPU texture format this channel uploads to (picked from the source
-    /// pixel format): `Int8` (R8Uint, raw 8-bit — zero-copy), `Float` (R32F, raw
-    /// float, window/level on the GPU), or `Int16` (R16Uint — the default, incl.
-    /// RGB planes and any data the CPU widens/rescales into 0..65535). Drives
-    /// both texture allocation and the decode path in `sync_gpu`. For float
-    /// channels `min`/`max` are the contrast window in the data's own float
-    /// units (matching how ImageJ shows float-image contrast).
-    kind: render::ChannelKind,
-}
-
-struct LoadedStack {
-    tiff: TiffStack,
-    path: PathBuf,
-    channel_settings: Vec<ChannelSettings>,
-    frame_index: usize,
-    last_uploaded: Option<usize>,
-    /// The per-channel `enabled` flags as of the last GPU upload. A disabled
-    /// channel is skipped during upload (the shader multiplies it out anyway),
-    /// so re-enabling one must re-upload it even when the frame index is
-    /// unchanged — a difference here forces that.
-    last_enabled: Vec<bool>,
-    luts_uploaded: bool,
-    /// Set once at load time when the file genuinely has channels, Z, and
-    /// time all present simultaneously — Z then stays permanently frozen
-    /// at its first slice (see `resolve_dimensions`). Kept around so the
-    /// warning note is still shown correctly after a manual channels/frames
-    /// swap via the dimension-order dropdown, which never touches Z.
-    triple_axis_warning: bool,
-    /// True when each IFD is a chunky RGB image: the "channels" are then the
-    /// red/green/blue sample planes of a *single* IFD per frame (deinterleaved
-    /// on upload), not separate IFDs. Flips how `ifd_index`/`sync_gpu` map a
-    /// display channel to file data.
-    rgb: bool,
-    /// True for a palette-color (indexed) stack: the single channel's pixels are
-    /// indices into the file's ColorMap, installed as its display LUT by
-    /// `fast_tiff_lib`. Its contrast window is fixed to an identity map (index →
-    /// LUT entry), so the contrast slider is suppressed for it — see
-    /// `build_channel_settings` and the contrast-UI guards.
-    palette: bool,
-    /// Background read-ahead worker (own mmap): decode-ahead for compressed
-    /// stacks, page-touch for uncompressed ones (absorbs the next frame's mmap
-    /// soft faults off the UI thread while its inline decode stays zero-copy).
-    /// `None` only if the worker failed to start. See `crate::prefetch`.
-    prefetch: Option<crate::prefetch::Prefetcher>,
-    /// Bumped whenever the decode plan changes (dimension-order swap, enabled-set
-    /// change) so an in-flight prefetch decoded under the old plan is recognized
-    /// as stale and ignored rather than uploaded.
-    prefetch_gen: u64,
-    /// Background 3D-volume builder (own mmap), spawned lazily on the first 3D
-    /// use. `None` after a failed spawn (`volume_builder_tried` set) — volume
-    /// builds then fall back to running synchronously on the UI thread.
-    volume_builder: Option<crate::volume::VolumeBuilder>,
-    volume_builder_tried: bool,
-    /// Whether the file had a real Z axis (`slices > 1`) as loaded. Gates the
-    /// three-way (c/z/t) dimension-order selector, and deliberately snapshots
-    /// the *load-time* shape rather than the current one: a permutation that
-    /// assigns 1 to Z must not collapse the selector to the two-way c/t swap
-    /// and strand Z there.
-    has_z_axis: bool,
-    /// Which LUT the single-channel color selector currently shows (selector
-    /// index; `0` = the leading "Built-in LUT" when the file has one, else plain
-    /// grayscale). Only meaningful while `gray_lut_applicable` holds. Lives on
-    /// the stack — not the app — so it resets to the default (index 0) for each
-    /// newly opened file.
-    gray_lut_sel: usize,
-    /// The file's own display LUT for the single channel, if it supplied one
-    /// (a ColorMap or ImageJ LUT). Kept verbatim so the selector's "Built-in
-    /// LUT" option can restore it after the user tries another. `None` when the
-    /// file carries no LUT (or isn't single-channel).
-    builtin_lut: Option<[[u8; 3]; 256]>,
-}
-
 pub struct ViewerApp {
+    /// Everything that isn't GUI: the loaded stack, channel settings, playback
+    /// clock, 3D camera, and the decode→GPU sync. See `fast_tiff_viewer`.
+    core: Viewer,
     /// GPU textures/shader for compositing the image, shared with the paint
     /// callback. Created once at startup (see `crate::render::init`).
     render: Render,
-    stack: Option<LoadedStack>,
-    status: Option<String>,
+
+    // --- window chrome ------------------------------------------------------
     /// Channel buttons + contrast sliders are tucked under a small
     /// triangle toggle to keep the bar minimal by default.
     channels_panel_expanded: bool,
-    /// User preference (persists across files): tint a multi-channel *grayscale*
-    /// stack with the standard channel palette (ch1 red, ch2 green, ch3 blue,
-    /// …). Has no effect on stacks that already carry colors (composite mode,
-    /// or RGB) — those keep their own LUTs.
-    apply_pseudocolor: bool,
     /// Zoom factor used the last time we sized the window: 1.0 = one window
     /// pixel per image pixel. The window is only ever resized in response to an
     /// explicit event (opening a file, or a zoom in/out) — never every frame —
@@ -262,38 +137,15 @@ pub struct ViewerApp {
     resize_to_zoom: bool,
     /// The window title last sent via `ViewportCommand::Title`.
     last_title: Option<String>,
-    /// Whether the stack is auto-advancing (looped playback).
-    playing: bool,
-    /// `egui` input time (seconds) at the previous frame while playing, used
-    /// to advance by real elapsed time regardless of render rate. `None` when
-    /// not playing.
-    last_play_time: Option<f64>,
-    /// Fractional-frame carry so a non-integer frames-per-render-tick advance
-    /// doesn't lose or gain time over a long playback.
-    play_accumulator: f64,
-    /// Smoothed "frames demanded per render" while playing: how many frames the
-    /// elapsed real time wanted us to advance each render tick. ~1 when we're
-    /// keeping up; >1 means renders are slower than the target fps (we're
-    /// dropping frames — one core is saturated). Drives `decode_parallel`.
-    play_demand_ema: f32,
-    /// Latched once playback falls behind (in `Auto` mode): ask `fast-tiff-lib` to
-    /// split decoding across cores (worth the extra total CPU only when a single
-    /// core can't keep up). Reset per stack — see `set_parallel_decode`.
-    decode_parallel: bool,
-    /// User's decode-parallelism preference (persists across files). `Auto` uses
-    /// `decode_parallel`; `Serial`/`Threaded` force it off/on.
-    decode_mode: DecodeMode,
     /// When the channels panel was just toggled: the bottom-bar height *before*
     /// the toggle took visual effect, so the next frame can grow/shrink the
     /// window by exactly the panel's height change. `false` when idle.
     panel_grow_armed: bool,
     panel_old_h: f32,
-    /// Playback rate (frames/second) the user can edit. Seeded from the file's
-    /// `fps=` metadata (or `DEFAULT_FPS`) on every load.
-    playback_fps: f64,
-    /// Whether the file-metadata pop-up window is open (toggled by the 🗎
-    /// button in the expanded bottom panel).
+    /// Whether the file-metadata pop-up window is open.
     show_metadata: bool,
+    /// Whether the 3D render-settings pop-up is open.
+    show_render_settings: bool,
     /// Scroll offset of the image inside the central panel, in screen points:
     /// how far the image's top-left is pushed up/left past the panel's. Only
     /// meaningful when the image is larger than the panel (zoomed past what the
@@ -309,139 +161,42 @@ pub struct ViewerApp {
     /// reposition the window. Separate from the zoom value itself, which is
     /// applied early so the image redraws this same frame.
     zoom_reposition: Option<(f32, egui::Pos2)>,
-    /// The visible UV sub-rect of the image (`uv_offset`, `uv_scale`), computed
-    /// from zoom + pan in the central panel and uploaded to the shader. The
-    /// image is always rendered into the on-screen visible rect with the
-    /// pan/zoom done via these UVs — never via an oversized viewport, which
-    /// egui-wgpu would clamp to the framebuffer (squashing the image instead of
-    /// zooming).
-    uv_offset: egui::Vec2,
-    uv_scale: egui::Vec2,
     /// Accumulated mouse-wheel scroll not yet turned into a frame step, for the
     /// precise (no-Shift) scrubbing mode. One wheel notch is a Line event of ±1
     /// → exactly one frame; touchpad pixel scrolls accumulate here until they
     /// cross a whole frame, so fine scrolling isn't lost or jumpy.
     scroll_accum: f32,
 
-    // --- 3D volume view -----------------------------------------------------
-    /// Movie (2D) vs. Volume (3D). Reset to `Movie` when a single-frame stack
-    /// is opened (nothing to build a volume from).
-    view_mode: ViewMode,
-    /// Orbit camera angles (radians) and the eye→pivot distance for the volume
-    /// view. Yaw spins around the vertical axis, pitch tilts up/down; `vol_dist`
-    /// is the orbit radius (0 = rotate in place around the eye).
-    vol_yaw: f32,
-    vol_pitch: f32,
-    vol_dist: f32,
-    /// Orbit pivot (world space): pan translates this so orbit modes can slide
-    /// the volume off-center. Origin by default. Also re-set to the focal-axis
-    /// box-entry point when an orbit drag begins.
-    vol_target: [f32; 3],
-    /// The volume box half-extents from the last `sync_gpu` (mirrors the shader's
-    /// `box_he`), cached so the orbit re-pivot can ray-cast against the box
-    /// without the stack dimensions on hand.
-    vol_box_he: [f32; 3],
-    /// Free-fly eye position (world space) for the `Minecraft` nav mode.
-    vol_fly_pos: [f32; 3],
-    /// How mouse/keyboard drive the 3D camera (CAD/Blender/Maya/Minecraft).
-    nav_mode: NavMode,
-    /// What an orbit drag rotates around: the volume center (default) or the
-    /// screen-center box entry. Persists across files (a nav preference).
-    orbit_point: OrbitPoint,
+    // --- 3D input preferences (persist across files) ------------------------
     /// Overlay: draw the volume's bounding box with x/y/z coordinate ticks.
-    /// Off by default; persists across files.
     show_coord_box: bool,
-    /// Per-axis voxel scale (x, y, z) for the volume box. Seeded from the
-    /// stack's Z spacing metadata on load (else 1:1:1); editable in the render
-    /// settings window.
-    vol_scale: [f32; 3],
-    /// Volume texture filtering: nearest (no interpolation) or trilinear.
-    vol_interp: render::VolumeInterp,
-    /// Ray-march compositing: MIP (default) or ImageJ-3D-Viewer-style alpha DVR.
-    vol_render: render::VolumeRender,
-    /// Alpha-DVR opacity scale (only used by the `Alpha` render mode).
-    vol_density: f32,
-    /// Isosurface threshold in windowed units 0..1 (only used by `Surface`).
-    vol_iso: f32,
-    /// The volume viewport aspect ratio (width/height), captured each frame so
-    /// the ray-march projection matches the on-screen rect.
-    vol_aspect: f32,
-    /// Which timepoint the currently-uploaded volume holds (`Some(frame_index)`
-    /// in the 4D case, else `Some(0)`); `None` means no volume is uploaded yet,
-    /// so the loading screen shows until the first background build lands. A
-    /// mismatch with the current timepoint queues a rebuild — this is what makes
-    /// 4D playback advance the volume through time.
-    volume_built_frame: Option<usize>,
-    /// Generation for background volume builds: bumped when the plan changes
-    /// shape (new file, dimension-order swap) so an in-flight build for the old
-    /// layout is recognized as stale and ignored.
-    volume_gen: u64,
-    /// The `(generation, time)` currently queued on the background builder, so
-    /// the request isn't re-sent on every polling frame.
-    volume_requested: Option<(u64, usize)>,
-    /// Whether the render-settings pop-up (voxel scale + interpolation) is open,
-    /// toggled by the ⚙ button in the expanded bottom panel.
-    show_render_settings: bool,
     /// User-adjustable 3D navigation speeds (multipliers on the built-in base
     /// rates), edited in the render-settings window. `move_speed` scales WASD /
     /// Space / Shift translation; `scroll_speed` scales the mouse-wheel fly.
-    /// Persist across files (they're input preferences, not per-stack state).
     move_speed: f32,
     scroll_speed: f32,
 }
 
-/// Playback rate used when the file's metadata doesn't specify `fps=`.
-const DEFAULT_FPS: f64 = 30.0;
-
 impl ViewerApp {
     pub fn new(initial_path: Option<PathBuf>, render: Render) -> Self {
         let mut app = Self {
+            core: Viewer::new(),
             render,
-            stack: None,
-            status: None,
             channels_panel_expanded: false,
-            apply_pseudocolor: false,
             zoom: 1.0,
             pending_initial_fit: false,
             resize_to_zoom: false,
             last_title: None,
-            playing: false,
-            last_play_time: None,
-            play_accumulator: 0.0,
-            play_demand_ema: 1.0,
-            decode_parallel: false,
-            decode_mode: DecodeMode::Auto,
             panel_grow_armed: false,
             panel_old_h: 0.0,
-            playback_fps: DEFAULT_FPS,
             show_metadata: false,
+            show_render_settings: false,
             pan: egui::Vec2::ZERO,
             panel_rect: egui::Rect::ZERO,
             image_origin: egui::Pos2::ZERO,
             zoom_reposition: None,
-            uv_offset: egui::Vec2::ZERO,
-            uv_scale: egui::Vec2::splat(1.0),
             scroll_accum: 0.0,
-            view_mode: ViewMode::Movie,
-            vol_yaw: 0.7,
-            vol_pitch: 0.5,
-            vol_dist: 3.0,
-            vol_target: [0.0, 0.0, 0.0],
-            vol_box_he: [0.5, 0.5, 0.5],
-            vol_fly_pos: [0.0, 0.0, 3.0],
-            nav_mode: NavMode::Cad,
-            orbit_point: OrbitPoint::VolumeCenter,
             show_coord_box: false,
-            vol_scale: [1.0, 1.0, 1.0],
-            vol_interp: render::VolumeInterp::Linear,
-            vol_render: render::VolumeRender::Mip,
-            vol_density: 100.0,
-            vol_iso: 0.1,
-            vol_aspect: 1.0,
-            volume_built_frame: None,
-            volume_gen: 0,
-            volume_requested: None,
-            show_render_settings: false,
             move_speed: 1.0,
             scroll_speed: 1.0,
         };
@@ -451,110 +206,27 @@ impl ViewerApp {
         app
     }
 
+    /// Open `path`, then reset the window chrome that describes the old file.
+    /// The core handles everything about the stack itself (and records any
+    /// error in `core.status`, which the bottom bar shows).
     fn open_file(&mut self, path: PathBuf) {
-        match TiffStack::open(&path) {
-            Ok(tiff) => {
-                // Spin up the read-ahead worker: decode-ahead for compressed
-                // stacks, page-touch for uncompressed (see `LoadedStack::prefetch`).
-                let compressed = tiff
-                    .frames
-                    .first()
-                    .is_some_and(|f| f.compression != fast_tiff_lib::Compression::None);
-                let prefetch = crate::prefetch::Prefetcher::new(path.clone(), !compressed);
-                let mut loaded = LoadedStack {
-                    tiff,
-                    path,
-                    channel_settings: Vec::new(),
-                    frame_index: 0,
-                    last_uploaded: None,
-                    last_enabled: Vec::new(),
-                    luts_uploaded: false,
-                    triple_axis_warning: false,
-                    rgb: false,
-                    palette: false,
-                    prefetch,
-                    prefetch_gen: 0,
-                    volume_builder: None,
-                    volume_builder_tried: false,
-                    gray_lut_sel: 0,
-                    builtin_lut: None,
-                    has_z_axis: false,
-                };
-                let (c, z, f) = (
-                    loaded.tiff.meta.channels,
-                    loaded.tiff.meta.slices,
-                    loaded.tiff.meta.frames,
-                );
-                let resolved = fast_tiff_lib::resolve_dimensions(c, z, f);
-                apply_resolved_dimensions(&mut loaded, resolved);
-                loaded.has_z_axis = loaded.tiff.meta.slices > 1;
-                // Chunky RGB overrides the channel layout: the sample planes of
-                // each IFD become red/green/blue display channels.
-                if loaded.tiff.frames.first().is_some_and(|f| f.is_rgb()) {
-                    setup_rgb(&mut loaded);
-                }
-                // Palette (indexed) images: the ColorMap is already installed as
-                // the channel LUT by the lib; flag it so the fixed identity
-                // contrast window is kept and its slider is hidden.
-                loaded.palette = loaded.tiff.frames.first().is_some_and(|f| f.is_palette());
-                // Remember the file's own LUT (a single-channel image that
-                // carries a ColorMap / ImageJ LUT) so the LUT selector can offer
-                // a "Built-in LUT" option that restores it. Captured now, before
-                // pseudocolor could touch it (it won't, for an explicit-LUT
-                // channel, but capture first regardless).
-                loaded.builtin_lut = (loaded.tiff.meta.has_explicit_luts
-                    && loaded.channel_settings.len() == 1)
-                    .then(|| loaded.tiff.meta.channel_display[0].lut);
-                // Carry the pseudocolor preference onto the new stack.
-                refresh_pseudocolor(&mut loaded, self.apply_pseudocolor);
-
-                // Seed the editable playback rate from the file (or default).
-                self.playback_fps = loaded.tiff.meta.fps.unwrap_or(DEFAULT_FPS);
-
-                // 3D volume defaults for the new stack: per-axis voxel scale from
-                // the pixel calibration (X/YResolution) + Z spacing (else 1:1:1),
-                // a fresh orbit, and a rebuild flag so entering 3D uploads this
-                // stack's volume. A single-frame stack has no depth to ray-march
-                // — force movie view.
-                self.vol_scale = loaded.tiff.meta.voxel_scale();
-                self.reset_volume_camera();
-                self.volume_built_frame = None;
-                self.volume_gen = self.volume_gen.wrapping_add(1);
-                self.volume_requested = None;
-                // Always start a newly-opened file in the 2D movie view.
-                self.view_mode = ViewMode::Movie;
-                // Close any pop-up windows left open from the previous file —
-                // their contents (metadata, 3D settings) describe that stack, so
-                // a fresh open should start with a clean view.
-                self.show_metadata = false;
-                self.show_render_settings = false;
-
-                self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
-                self.stack = Some(loaded);
-                // Start at 1:1; the next frame computes a fit-to-screen zoom
-                // (the largest level ≤ 100% that fits) and sizes the window once.
-                self.zoom = 1.0;
-                self.pan = egui::Vec2::ZERO;
-                self.pending_initial_fit = true;
-                self.resize_to_zoom = false;
-                self.playing = false;
-                self.last_play_time = None;
-                self.play_accumulator = 0.0;
-                // New stack: re-evaluate decode parallelism from scratch (its
-                // per-frame decode cost is different).
-                self.play_demand_ema = 1.0;
-                self.decode_parallel = false;
-            }
-            Err(e) => {
-                self.status = Some(format!("Failed to open file: {e:#}"));
-            }
-        }
+        let _ = self.core.open(path);
+        // Start at 1:1; the next frame computes a fit-to-screen zoom (the
+        // largest level ≤ 100% that fits) and sizes the window once.
+        self.zoom = 1.0;
+        self.pan = egui::Vec2::ZERO;
+        self.pending_initial_fit = true;
+        self.resize_to_zoom = false;
+        // Close any pop-up windows left open from the previous file — their
+        // contents (metadata, 3D settings) describe that stack, so a fresh open
+        // should start with a clean view.
+        self.show_metadata = false;
+        self.show_render_settings = false;
     }
-
 }
 
 impl eframe::App for ViewerApp {
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Drag-and-drop files onto the window: open the first in this window and
         // launch each of the rest in its own process, so dropping several at once
         // opens them all side by side (mirrors the command-line behavior).
@@ -602,7 +274,7 @@ impl eframe::App for ViewerApp {
         // where the window no longer resizes, appeared frozen.) The window
         // resize and optional reposition are handled later, once the chrome
         // height is known. Cursor-centering uses last frame's cached geometry.
-        if zoom_step != 0 && self.stack.is_some() && self.view_mode == ViewMode::Movie {
+        if zoom_step != 0 && self.core.stack.is_some() && self.core.view_mode == ViewMode::Movie {
             let old_zoom = self.zoom;
             let new_zoom = stepped_zoom(old_zoom, zoom_step);
             if (new_zoom - old_zoom).abs() > f32::EPSILON {
@@ -625,7 +297,7 @@ impl eframe::App for ViewerApp {
         // 2D/3D view toggle + the 3D-settings button are set inside the toolbar
         // closure via these locals (applied after) so the closure never needs a
         // second borrow of `self`.
-        let current_view_mode = self.view_mode;
+        let current_view_mode = self.core.view_mode;
         let mut mode_request: Option<ViewMode> = None;
         let mut render_settings_toggle = false;
 
@@ -646,7 +318,7 @@ impl eframe::App for ViewerApp {
                 }
                 // 2D/3D switch, right next to Open. 3D needs at least two frames
                 // to build a volume; disabled otherwise.
-                if let Some(loaded) = &self.stack {
+                if let Some(loaded) = &self.core.stack {
                     let can_3d = loaded.tiff.meta.frames >= 2;
                     ui.separator();
                     ui.add_enabled_ui(can_3d, |ui| {
@@ -680,7 +352,7 @@ impl eframe::App for ViewerApp {
                         }
                     });
                 }
-                if self.stack.is_none() {
+                if self.core.stack.is_none() {
                     // Nothing open yet: show the version + active render backend
                     // in the space the file info will later occupy.
                     ui.separator();
@@ -693,7 +365,7 @@ impl eframe::App for ViewerApp {
                         .weak(),
                     );
                 }
-                if let Some(loaded) = &self.stack {
+                if let Some(loaded) = &self.core.stack {
                     let meta = &loaded.tiff.meta;
                     // Reflect a toggle click made earlier in this same toolbar
                     // (the 2D/3D buttons run before this), so the layout updates
@@ -749,25 +421,25 @@ impl eframe::App for ViewerApp {
             });
         });
         if let Some(mode) = mode_request {
-            self.view_mode = mode;
+            self.core.view_mode = mode;
             // Entering 3D stops movie playback — unless the stack is 4D (a
             // separate time axis, `slices > 1`), where playing animates the
             // volume through time.
             if mode == ViewMode::Volume {
-                let is_4d = self.stack.as_ref().is_some_and(|l| l.tiff.meta.slices > 1);
+                let is_4d = self.core.stack.as_ref().is_some_and(|l| l.tiff.meta.slices > 1);
                 if !is_4d {
-                    self.playing = false;
-                    self.last_play_time = None;
+                    self.core.playback.playing = false;
+                    self.core.playback.last_time = None;
                 }
             }
         }
         // In 3D the arrow keys rotate the volume (handled in the central panel),
         // so the movie's arrow-scrub and wheel-scrub paths must stand down.
-        let view_is_volume = self.view_mode == ViewMode::Volume;
+        let view_is_volume = self.core.view_mode == ViewMode::Volume;
 
         let panel_expanded = self.channels_panel_expanded;
-        let is_playing = self.playing;
-        let pseudocolor_on = self.apply_pseudocolor;
+        let is_playing = self.core.playback.playing;
+        let pseudocolor_on = self.core.apply_pseudocolor;
         let mut toggle_requested = false;
         let mut play_toggle_requested = false;
         // A requested dimension-role reassignment: (channels, slices, frames).
@@ -776,13 +448,13 @@ impl eframe::App for ViewerApp {
         // New selection for the single-channel grayscale color/colormap selector.
         let mut gray_lut_change: Option<usize> = None;
         let mut scroll_step: i32 = 0;
-        let mut playback_fps = self.playback_fps;
-        let mut decode_mode = self.decode_mode;
+        let mut playback_fps = self.core.playback.fps;
+        let mut decode_mode = self.core.decode_mode;
         let mut metadata_toggle = false;
-        let current_status = self.status.clone();
+        let current_status = self.core.status.clone();
 
         let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
-            let Some(loaded) = &mut self.stack else {
+            let Some(loaded) = &mut self.core.stack else {
                 ui.label("Open a TIFF stack to begin.");
                 return;
             };
@@ -1016,7 +688,7 @@ impl eframe::App for ViewerApp {
                                     // grayscale/black low end (grayscale + the pure
                                     // channel-color ramps) keeps the default text color.
                                     let name = gray_lut_sel_name(loaded, opt);
-                                    let text = match ui_tint(&gray_lut_sel_lut(loaded, opt)) {
+                                    let text = match tint_color(ui_tint(&gray_lut_sel_lut(loaded, opt))) {
                                         Some(c) => RichText::new(name).color(c),
                                         None => RichText::new(name),
                                     };
@@ -1092,7 +764,7 @@ impl eframe::App for ViewerApp {
                 // selection color). Snapshot here, before the mutable borrow of
                 // `channel_settings` below.
                 let single_tint = (loaded.channel_settings.len() == 1)
-                    .then(|| ui_tint(&loaded.tiff.meta.channel_display[0].lut))
+                    .then(|| tint_color(ui_tint(&loaded.tiff.meta.channel_display[0].lut)))
                     .flatten();
                 if loaded.channel_settings.len() > 1 {
                     ui.separator();
@@ -1110,7 +782,7 @@ impl eframe::App for ViewerApp {
                         .meta
                         .channel_display
                         .iter()
-                        .map(|cd| channel_tint(&cd.lut))
+                        .map(|cd| tint_color(channel_tint(&cd.lut)))
                         .collect();
                     // One row per channel — checkbox in line with its slider —
                     // stacked vertically.
@@ -1223,13 +895,13 @@ impl eframe::App for ViewerApp {
             ui.add_space(4.0);
         });
 
-        self.playback_fps = playback_fps;
-        self.decode_mode = decode_mode;
+        self.core.playback.fps = playback_fps;
+        self.core.decode_mode = decode_mode;
         if metadata_toggle {
             self.show_metadata = !self.show_metadata;
         }
         if self.show_metadata {
-            match &self.stack {
+            match &self.core.stack {
                 Some(loaded) => metadata_window(ui.ctx(), &mut self.show_metadata, loaded),
                 None => self.show_metadata = false,
             }
@@ -1238,31 +910,31 @@ impl eframe::App for ViewerApp {
             self.show_render_settings = !self.show_render_settings;
         }
         if self.show_render_settings {
-            let prev_nav = self.nav_mode;
+            let prev_nav = self.core.volume.cam.nav;
             let mut reset_position = false;
             render_settings_window(
                 ui.ctx(),
                 &mut self.show_render_settings,
-                &mut self.vol_scale,
-                &mut self.vol_interp,
-                &mut self.nav_mode,
-                &mut self.orbit_point,
+                &mut self.core.volume.scale,
+                &mut self.core.volume.interp,
+                &mut self.core.volume.cam.nav,
+                &mut self.core.volume.cam.orbit_point,
                 &mut self.move_speed,
                 &mut self.scroll_speed,
-                &mut self.vol_render,
-                &mut self.vol_density,
-                &mut self.vol_iso,
+                &mut self.core.volume.render,
+                &mut self.core.volume.density,
+                &mut self.core.volume.iso,
                 &mut self.show_coord_box,
                 &mut reset_position,
-                self.stack.as_ref(),
+                self.core.stack.as_ref(),
             );
             // Keep the view continuous across a fly⇄orbit switch (the two use
             // different eye representations) instead of snapping to a default.
-            if self.nav_mode != prev_nav {
-                self.sync_camera_for_nav(prev_nav.is_fly());
+            if self.core.volume.cam.nav != prev_nav {
+                self.core.volume.cam.sync_for_nav(prev_nav.is_fly());
             }
             if reset_position {
-                self.reset_volume_camera();
+                self.core.volume.cam.reset();
             }
         }
 
@@ -1277,25 +949,20 @@ impl eframe::App for ViewerApp {
         }
 
         if play_toggle_requested {
-            self.playing = !self.playing;
-            // Start each play/pause from a clean clock so the first tick after
-            // resuming doesn't jump by however long we were paused.
-            self.last_play_time = None;
-            self.play_accumulator = 0.0;
-            // Start the keeping-up estimate neutral (decode_parallel stays
-            // latched across a pause — if this stack needed it, it still does).
-            self.play_demand_ema = 1.0;
+            self.core.playback.playing = !self.core.playback.playing;
+            // Start each play/pause from a clean clock, so the first tick after
+            // resuming doesn't jump by however long we were paused and the
+            // keeping-up estimate starts neutral. (`decode_parallel` stays
+            // latched across a pause — if this stack needed it, it still does.)
+            self.core.playback.restart();
         }
 
         if let Some(on) = pseudocolor_toggle {
-            self.apply_pseudocolor = on;
-            if let Some(loaded) = &mut self.stack {
-                refresh_pseudocolor(loaded, on);
-            }
+            self.core.set_pseudocolor(on);
         }
 
         if let Some(sel) = gray_lut_change {
-            if let Some(loaded) = &mut self.stack {
+            if let Some(loaded) = &mut self.core.stack {
                 loaded.gray_lut_sel = sel;
                 let lut = gray_lut_sel_lut(loaded, sel); // "Built-in LUT" restores the file's map
                 if let Some(disp) = loaded.tiff.meta.channel_display.first_mut() {
@@ -1305,63 +972,24 @@ impl eframe::App for ViewerApp {
             }
         }
 
-        // Looped playback: advance by real elapsed time so the movie runs at
-        // the file's `fps` (or the default) regardless of render cadence, and
-        // request continuous repaints while it's running.
-        if self.playing {
-            if let Some(loaded) = &mut self.stack {
-                let n = loaded.tiff.meta.frames.max(1);
-                if n > 1 {
-                    let fps = self.playback_fps.max(0.1);
-                    let now = ui.input(|i| i.time);
-                    if let Some(last) = self.last_play_time {
-                        // `demand` = frames the elapsed real time wanted this
-                        // render to cover. ~1 when keeping up; >1 means renders
-                        // are slower than the fps target (frames dropping → a
-                        // core is saturated). Once the smoothed demand crosses
-                        // the threshold, latch parallel decoding for this stack.
-                        let demand = (now - last) * fps;
-                        self.play_demand_ema = self.play_demand_ema * 0.9 + demand as f32 * 0.1;
-                        if self.decode_mode == DecodeMode::Auto && self.play_demand_ema > 1.3 {
-                            self.decode_parallel = true;
-                        }
-                        self.play_accumulator += demand;
-                        if self.play_accumulator >= 1.0 {
-                            let steps = self.play_accumulator.floor() as usize;
-                            self.play_accumulator -= steps as f64;
-                            loaded.frame_index = (loaded.frame_index + steps) % n;
-                        }
-                    }
-                    self.last_play_time = Some(now);
-                    // Ask for the next repaint at the playback rate rather than
-                    // immediately: no point re-running egui faster than frames
-                    // actually change. If a frame takes longer than this to
-                    // produce, egui repaints as soon as it's ready, so we still
-                    // render as fast as we can when behind (and `demand` above
-                    // still detects it).
-                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(1.0 / fps));
-                } else {
-                    self.playing = false;
-                }
-            }
-        } else {
-            self.last_play_time = None;
-            self.play_accumulator = 0.0;
+        // Looped playback: the core advances by real elapsed time so the movie
+        // runs at the file's `fps` (or the default) regardless of render
+        // cadence. All we add is the repaint scheduling.
+        self.core.tick_playback(ui.input(|i| i.time));
+        if self.core.playback.playing {
+            // Ask for the next repaint at the playback rate rather than
+            // immediately: no point re-running egui faster than frames actually
+            // change. If a frame takes longer than this to produce, egui
+            // repaints as soon as it's ready, so we still render as fast as we
+            // can when behind (and the core's demand estimate still detects it).
+            let fps = self.core.playback.fps.max(0.1);
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(1.0 / fps));
         }
 
+        // Reassigning the axes also refreshes LUTs + status and invalidates the
+        // volume (the frame axis, i.e. the volume depth, just changed).
         if let Some((c, z, f)) = dimension_override {
-            if let Some(loaded) = &mut self.stack {
-                apply_dimension_override(loaded, c, z, f);
-                // The swap rebuilds channel_display from `mode`, so re-apply the
-                // pseudocolor preference on top of the fresh LUTs.
-                refresh_pseudocolor(loaded, self.apply_pseudocolor);
-                self.status = compute_status(&loaded.tiff.meta, loaded.triple_axis_warning);
-            }
-            // The frame axis (volume depth) just changed — rebuild on next 3D
-            // draw, and invalidate any in-flight build under the old layout.
-            self.volume_built_frame = None;
-            self.volume_gen = self.volume_gen.wrapping_add(1);
-            self.volume_requested = None;
+            self.core.set_dimension_order(c, z, f);
         }
 
         // A dimension swap can collapse the stack to a single frame (e.g.
@@ -1371,12 +999,12 @@ impl eframe::App for ViewerApp {
         // 3D. Drop back to 2D; the toggle stays disabled until a swap restores
         // a multi-frame layout. (Runs before the central panel so the click
         // frame already renders 2D.)
-        if self.view_mode == ViewMode::Volume
-            && self.stack.as_ref().is_some_and(|l| l.tiff.meta.frames < 2)
+        if self.core.view_mode == ViewMode::Volume
+            && self.core.stack.as_ref().is_some_and(|l| l.tiff.meta.frames < 2)
         {
-            self.view_mode = ViewMode::Movie;
-            self.playing = false;
-            self.last_play_time = None;
+            self.core.view_mode = ViewMode::Movie;
+            self.core.playback.playing = false;
+            self.core.playback.last_time = None;
         }
 
         // Central panel: the image is drawn at exactly `image_size × zoom`. When
@@ -1389,7 +1017,7 @@ impl eframe::App for ViewerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().inner_margin(egui::Margin::ZERO))
             .show_inside(ui, |ui| {
-            if self.stack.is_none() {
+            if self.core.stack.is_none() {
                 ui.centered_and_justified(|ui| {
                     ui.label("Drag and drop a TIFF here, \nor click \"Open TIFF...\" above.\n\n\n\nScroll — navigate frames\nShift + Scroll — fast navigate\nCtrl + Scroll — zoom");
                 });
@@ -1404,13 +1032,13 @@ impl eframe::App for ViewerApp {
             // 3D volume view: drive the camera per the active nav mode and paint
             // the GPU ray-march. The 2D pan/UV/scrub path below is bypassed. This
             // runs before the `loaded` borrow so it can call `&mut self` methods.
-            if self.view_mode == ViewMode::Volume {
-                self.vol_aspect = (panel_rect.width() / panel_rect.height().max(1.0)).clamp(0.1, 10.0);
+            if self.core.view_mode == ViewMode::Volume {
+                self.core.volume.aspect = (panel_rect.width() / panel_rect.height().max(1.0)).clamp(0.1, 10.0);
 
                 // Until the first volume is built, show a black loading screen so
                 // the heavy decode doesn't freeze on the previous view (`sync_gpu`
                 // defers the initial build until after this frame paints).
-                if self.volume_built_frame.is_none() {
+                if self.core.volume.built_frame.is_none() {
                     ui.painter().rect_filled(panel_rect, 0.0, egui::Color32::BLACK);
                     ui.painter().text(
                         panel_rect.center(),
@@ -1441,7 +1069,7 @@ impl eframe::App for ViewerApp {
                 return;
             }
 
-            let Some(loaded) = &self.stack else { return };
+            let Some(loaded) = &self.core.stack else { return };
             let (Some(w), Some(h)) = (
                 loaded.tiff.frames.first().map(|f| f.width),
                 loaded.tiff.frames.first().map(|f| f.height),
@@ -1482,8 +1110,8 @@ impl eframe::App for ViewerApp {
             let visible = full_rect.intersect(panel_rect);
             if visible.is_positive() {
                 let inv = egui::vec2(1.0 / img_px.x.max(1.0), 1.0 / img_px.y.max(1.0));
-                self.uv_offset = (visible.min - origin) * inv;
-                self.uv_scale = visible.size() * inv;
+                self.core.uv_offset = ((visible.min - origin) * inv).into();
+                self.core.uv_scale = (visible.size() * inv).into();
                 ui.painter()
                     .with_clip_rect(panel_rect)
                     .add(render::paint_callback(&self.render, visible));
@@ -1514,7 +1142,7 @@ impl eframe::App for ViewerApp {
                     });
                     if glide != 0.0 {
                         // ~10% of the stack per notch, spread across the glide.
-                        let n_frames = self.stack.as_ref().map(|l| l.tiff.meta.frames).unwrap_or(1);
+                        let n_frames = self.core.stack.as_ref().map(|l| l.tiff.meta.frames).unwrap_or(1);
                         let fast_step = (n_frames as f64 * FAST_SCROLL_RATE).max(1.0);
                         // glide < 0 is scroll-down → advance frames. Advance at a
                         // fixed rate *per second* (scaled by the frame time), so
@@ -1554,7 +1182,7 @@ impl eframe::App for ViewerApp {
         });
 
         if scroll_step != 0 {
-            if let Some(loaded) = &mut self.stack {
+            if let Some(loaded) = &mut self.core.stack {
                 let max_frame = loaded.tiff.meta.frames.saturating_sub(1) as i64;
                 let target = (loaded.frame_index as i64 + scroll_step as i64).clamp(0, max_frame);
                 loaded.frame_index = target as usize;
@@ -1593,6 +1221,7 @@ impl eframe::App for ViewerApp {
         }
 
         let img_dims = self
+            .core
             .stack
             .as_ref()
             .and_then(|l| l.tiff.frames.first())
@@ -1734,7 +1363,7 @@ impl eframe::App for ViewerApp {
         }
 
         // Window title: loaded filename, or the app name when nothing is open.
-        let desired_title = match &self.stack {
+        let desired_title = match &self.core.stack {
             Some(loaded) => {
                 let name = loaded.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 format!("{name} — FastTIFF")
@@ -1746,7 +1375,16 @@ impl eframe::App for ViewerApp {
             self.last_title = Some(desired_title);
         }
 
-        self.sync_gpu(ui.ctx(), frame);
+        // Bring the GPU up to date with the core state, then honor a pending
+        // background volume build by scheduling another frame.
+        let Self { core, render, .. } = self;
+        let outcome = match render.lock() {
+            Ok(mut resources) => core.sync(&mut resources),
+            Err(_) => Default::default(),
+        };
+        if outcome.needs_repaint {
+            ui.ctx().request_repaint();
+        }
     }
 }
 
