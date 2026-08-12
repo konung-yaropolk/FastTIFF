@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Bake the perceptual colormaps used by the grayscale color selector into a
-Rust source module (`FastTIFF/src/colormap.rs`).
+Rust source module (`fast-tiff-viewer/src/colormap.rs`).
 
 Each colormap is emitted as a full 256-entry RGB lookup table (index = display
 intensity 0..=255), matching the layout of the app's other channel LUTs. Baking
@@ -9,7 +9,7 @@ them means the app carries no runtime or build-time dependency on matplotlib.
 Run from anywhere; writes `../src/colormap.rs` relative to this script.
 Requires matplotlib (>= 3.3 for `turbo`).
 
-    python FastTIFF/scripts/gen_colormaps.py
+    python fast-tiff-viewer/scripts/gen_colormaps.py
 """
 from pathlib import Path
 

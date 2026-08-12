@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.9.6"
+version = "1.9.7"
 dependencies = [
  "anyhow",
  "eframe",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2506,7 +2506,7 @@ dependencies = [
 
 [[package]]
 name = "scivis-render"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "bytemuck",
  "glow",
