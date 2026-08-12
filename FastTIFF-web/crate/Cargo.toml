@@ -1,0 +1,49 @@
+# wasm-bindgen bindings that put `fast-tiff-viewer` behind a browser canvas.
+#
+# Deliberately NOT a member of the repo's workspace. Cargo unifies features
+# across a workspace, so a single `cargo build` covering both this crate and the
+# desktop app would union `threads`/`mmap`/`codec-zstd` back into the viewer and
+# break the wasm build. Standalone keeps the two feature sets independent — the
+# same reason `fast-tiff-lib/bench` stands alone.
+[workspace]
+
+[package]
+name = "fasttiff-wasm"
+version = "0.9.8"
+edition = "2021"
+description = "wasm-bindgen bindings exposing the FastTIFF viewer core to a browser canvas."
+license = "GPL-3.0-only"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The viewer core, in its single-threaded, filesystem-free shape:
+#   no `threads`     — wasm32-unknown-unknown has no `std::thread::spawn`
+#   no `mmap`        — no filesystem; stacks arrive as bytes from a file input
+#   no `codec-zstd`  — zstd-sys is C and cannot build for this target
+# What's left is the whole CPU-side model plus the wgpu renderer.
+fast-tiff-viewer = { path = "../../fast-tiff-viewer", default-features = false, features = ["backend-wgpu"] }
+scivis-render = { path = "../../scivis-render", features = ["backend-wgpu"] }
+
+wgpu = { version = "29", features = ["webgl"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"
+log = "0.4"
+console_log = "1"
+
+[dependencies.web-sys]
+version = "0.3"
+features = ["HtmlCanvasElement", "Window", "Document", "Element"]
+
+# Small and fast matters more than compile time for a page people wait on.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

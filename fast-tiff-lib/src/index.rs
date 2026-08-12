@@ -8,10 +8,9 @@
 use crate::ifd::{self, ByteOrder, RawIfdEntry, TiffFlavor};
 use crate::metadata::{self, StackMeta};
 use anyhow::{anyhow, bail, Result};
-use memmap2::Mmap;
 use std::collections::HashSet;
-use std::fs::File;
-use std::path::Path;
+#[cfg(feature = "mmap")]
+use {memmap2::Mmap, std::fs::File, std::path::Path};
 
 // `pub(crate)`: shared with the write side (`encode`), so reader and writer
 // can never disagree on tag numbers.
@@ -113,12 +112,49 @@ impl FrameInfo {
     }
 }
 
+/// Where a stack's bytes live. Both variants deref to `&[u8]`, so every decode
+/// entry point takes one shape regardless of how the file was opened.
+///
+/// `Mapped` is the native path — the OS pages data in on demand, so opening a
+/// multi-GB stack costs nothing until pixels are touched. `Owned` is for hosts
+/// with no filesystem to map (a browser, where the bytes arrive from a file
+/// input or `fetch`), and for callers that already hold the whole file.
+pub enum Bytes {
+    #[cfg(feature = "mmap")]
+    Mapped(Mmap),
+    Owned(Vec<u8>),
+}
+
+impl std::ops::Deref for Bytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            #[cfg(feature = "mmap")]
+            Bytes::Mapped(m) => m,
+            Bytes::Owned(v) => v,
+        }
+    }
+}
+
+impl std::fmt::Debug for Bytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self {
+            #[cfg(feature = "mmap")]
+            Bytes::Mapped(_) => "Mapped",
+            Bytes::Owned(_) => "Owned",
+        };
+        write!(f, "Bytes::{kind}({} bytes)", self.len())
+    }
+}
+
 // `non_exhaustive`: fields have been added before (`description`) and may be
 // again; constructing this outside the crate isn't meaningful anyway (it's
-// produced by `open`).
+// produced by `open` / `from_bytes`).
 #[non_exhaustive]
 pub struct TiffStack {
-    pub mmap: Mmap,
+    /// The file's bytes — memory-mapped, or owned. Derefs to `&[u8]`, which is
+    /// what every `read_*` function takes.
+    pub data: Bytes,
     pub byte_order: ByteOrder,
     pub frames: Vec<FrameInfo>,
     pub meta: StackMeta,
@@ -133,6 +169,11 @@ pub struct TiffStack {
 }
 
 impl TiffStack {
+    /// Open and index `path` through a read-only memory map.
+    ///
+    /// Requires the `mmap` feature (on by default). Where there is no
+    /// filesystem to map — wasm, most obviously — use [`TiffStack::from_bytes`].
+    #[cfg(feature = "mmap")]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let file = File::open(path.as_ref())
             .map_err(|e| anyhow!("could not open {}: {e}", path.as_ref().display()))?;
@@ -140,8 +181,25 @@ impl TiffStack {
         // out from under us while mapped. We open read-only and treat the
         // mapping as immutable for the lifetime of the TiffStack.
         let mmap = unsafe { Mmap::map(&file)? };
+        Self::from_backing(Bytes::Mapped(mmap))
+    }
 
-        let (order, flavor, first_ifd) = ifd::read_header(&mmap)?;
+    /// Index a TIFF already held in memory — the entry point for a host with no
+    /// filesystem (a browser file input, a `fetch`, an embedded asset).
+    ///
+    /// Identical to [`TiffStack::open`] in every other respect: same parser,
+    /// same errors, same frame index. The bytes are kept for the stack's
+    /// lifetime, so unlike the mapped path the whole file sits in memory.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        Self::from_backing(Bytes::Owned(bytes))
+    }
+
+    /// Walk the IFD chain and build the frame index + metadata. Shared by both
+    /// entry points, so a mapped and an in-memory stack can never diverge.
+    fn from_backing(data: Bytes) -> Result<Self> {
+        let mmap: &[u8] = &data;
+
+        let (order, flavor, first_ifd) = ifd::read_header(mmap)?;
 
         let mut frames = Vec::new();
         let mut description: Option<String> = None;
@@ -162,29 +220,29 @@ impl TiffStack {
             if !visited.insert(offset) {
                 bail!("malformed TIFF: IFD chain loops back to offset {offset}");
             }
-            let parsed = ifd::read_ifd(&mmap, offset, order, flavor)?;
-            let frame = frame_info_from_entries(&parsed.entries, &mmap, order)?;
+            let parsed = ifd::read_ifd(mmap, offset, order, flavor)?;
+            let frame = frame_info_from_entries(&parsed.entries, mmap, order)?;
 
             if first {
                 for e in &parsed.entries {
                     match e.tag {
                         TAG_IMAGE_DESCRIPTION => {
-                            description = e.as_ascii(&mmap, order).ok();
+                            description = e.as_ascii(mmap, order).ok();
                         }
                         TAG_IJ_METADATA => {
-                            ij_metadata_bytes = e.owned_bytes(&mmap, order).ok();
+                            ij_metadata_bytes = e.owned_bytes(mmap, order).ok();
                         }
                         TAG_IJ_METADATA_BYTE_COUNTS => {
-                            ij_metadata_counts = e.as_u32_array(&mmap, order).ok();
+                            ij_metadata_counts = e.as_u32_array(mmap, order).ok();
                         }
                         TAG_X_RESOLUTION => {
-                            x_resolution = e.as_rational(&mmap, order).ok();
+                            x_resolution = e.as_rational(mmap, order).ok();
                         }
                         TAG_Y_RESOLUTION => {
-                            y_resolution = e.as_rational(&mmap, order).ok();
+                            y_resolution = e.as_rational(mmap, order).ok();
                         }
                         TAG_COLOR_MAP => {
-                            color_map = e.as_u32_array(&mmap, order).ok();
+                            color_map = e.as_u32_array(mmap, order).ok();
                         }
                         _ => {}
                     }
@@ -283,7 +341,7 @@ impl TiffStack {
         }
 
         Ok(TiffStack {
-            mmap,
+            data,
             byte_order: order,
             frames,
             meta,
@@ -352,8 +410,8 @@ impl TiffStack {
         const PAGE: usize = 4096;
         for (&off, &len) in frame.strip_offsets.iter().zip(frame.strip_byte_counts.iter()) {
             let start = off as usize;
-            let end = start.saturating_add(len as usize).min(self.mmap.len());
-            let Some(strip) = self.mmap.get(start..end) else { continue };
+            let end = start.saturating_add(len as usize).min(self.data.len());
+            let Some(strip) = self.data.get(start..end) else { continue };
             let mut i = 0;
             while i < strip.len() {
                 std::hint::black_box(strip[i]);

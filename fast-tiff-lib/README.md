@@ -9,7 +9,8 @@
 A lazy, memory-mapped reader — and a streaming writer — for multi-frame
 scientific TIFF files: IFD-chain indexing, ImageJ + OME-TIFF metadata parsing,
 and per-frame strip decoding, with a zero-copy fast path for the common
-uncompressed case. The [writer](#writing) emits exactly that fast-path layout by
+uncompressed case. It also reads from a plain byte buffer, so it works with no
+filesystem at all — including on `wasm32-unknown-unknown`. The [writer](#writing) emits exactly that fast-path layout by
 default, so files it produces scrub back with no decode work.
 
 It's the decode/parsing engine behind [FastTIFF](https://github.com/konung-yaropolk/FastTIFF),
@@ -152,7 +153,7 @@ println!(
 
 // Decode the first plane to display-ready u16 samples (0..=65535).
 let frame = &stack.frames[0];
-let pixels = read_frame_u16(&stack.mmap, frame, stack.byte_order, None)?;
+let pixels = read_frame_u16(&stack.data, frame, stack.byte_order, None)?;
 assert_eq!(pixels.len(), (frame.width * frame.height) as usize);
 # Ok::<(), anyhow::Error>(())
 ```
@@ -161,19 +162,64 @@ All fallible calls return `anyhow::Result`.
 
 ## Core API
 
-### `TiffStack::open(path) -> Result<TiffStack>`
+### Opening a stack
 
-Opens and indexes the file. The returned struct exposes everything decoding
-needs:
+Two entry points, both returning the same fully-indexed `TiffStack`:
+
+```rust
+// Memory-mapped from a path. Requires the `mmap` feature (on by default).
+let stack = TiffStack::open("movie.tif")?;
+
+// From bytes already in memory — no filesystem needed, so this is the way in
+// on wasm, or for a stack that arrived over the network.
+let bytes: Vec<u8> = std::fs::read("movie.tif")?;
+let stack = TiffStack::from_bytes(bytes)?;
+```
+
+They share one parser, so a mapped and an in-memory stack can never disagree.
+See [Feature flags](#feature-flags) for the trade-off between them.
 
 ```rust
 pub struct TiffStack {
-    pub mmap: memmap2::Mmap,        // the mapped file bytes
+    pub data: Bytes,                // the file's bytes (mapped or owned)
     pub byte_order: ByteOrder,      // Little or Big (the file's endianness)
     pub frames: Vec<FrameInfo>,     // one entry per IFD/plane, in file order
     pub meta: StackMeta,            // normalized display metadata (ImageJ / OME / inferred)
 }
 ```
+
+#### Migrating from 0.9.6 and earlier
+
+`TiffStack::mmap` is now `TiffStack::data`, typed [`Bytes`](#bytes) rather than
+`memmap2::Mmap`. Since `Bytes` derefs to `&[u8]`, call sites that passed the
+field to a decoder need only the rename:
+
+```diff
+- let pixels = read_frame_u16(&stack.mmap, frame, stack.byte_order, None)?;
++ let pixels = read_frame_u16(&stack.data, frame, stack.byte_order, None)?;
+```
+
+Code that named the type (`let m: &Mmap = &stack.mmap`) has to match on `Bytes`
+or go through the deref. Nothing else moved, and `TiffStack::open` is unchanged
+on a default build.
+
+### `Bytes`
+
+Where the file's bytes live. It derefs to `&[u8]`, so it's passed straight to
+every decoder and you rarely name the type:
+
+```rust
+pub enum Bytes {
+    Mapped(memmap2::Mmap),   // only with the `mmap` feature
+    Owned(Vec<u8>),
+}
+```
+
+The choice does **not** affect decoding — the zero-copy fast path borrows out of
+either one. What differs is when you pay for the bytes: `Mapped` reads pages
+lazily on first touch and lets the OS evict them again, so opening a multi-GB
+stack is instant and resident memory tracks what you actually looked at.
+`Owned` reads everything up front and keeps it.
 
 ### `FrameInfo`
 
@@ -202,7 +248,7 @@ The plane readers below handle both, so callers rarely need to check.
 
 ### Decoding
 
-All decoders take the mapped bytes, the `FrameInfo`, and the file's
+All decoders take the file's bytes (`&stack.data`), the `FrameInfo`, and the file's
 `ByteOrder`. They return owned data or a borrow of the mapping (`Cow`).
 
 ```rust
@@ -548,10 +594,45 @@ giving its zero-copy design no credit — the uncompressed single-pass rows are
 a *lower bound*. Methodology, machine details, and how to run are in
 [`bench/README.md`](https://github.com/konung-yaropolk/FastTIFF/blob/main/fast-tiff-lib/bench/README.md).
 
+## Feature flags
+
+| Feature | Default | What it does |
+|---|---|---|
+| `mmap` | ✅ | Memory-mapped file access, and with it `TiffStack::open`. Pulls in `memmap2`. |
+| `codec-zstd` | ✅ | The ZSTD codec (compression 50000). Pulls in `zstd`, which builds a C library via `zstd-sys`. |
+
+Both are on by default, so nothing changes for an ordinary native build.
+
+Turning one off narrows what the crate can do, and says so clearly rather than
+failing obscurely:
+
+- Without `mmap`, `TiffStack::open` doesn't exist; use `TiffStack::from_bytes`.
+- Without `codec-zstd`, a ZSTD-compressed frame returns an error naming the
+  missing feature instead of decoding. Every other codec is pure Rust and
+  unaffected.
+
+### wasm
+
+`--no-default-features` is exactly the shape needed for
+`wasm32-unknown-unknown`, where there's no filesystem to map and no C toolchain
+for `zstd-sys`:
+
+```bash
+cargo build -p fast-tiff-lib --target wasm32-unknown-unknown --no-default-features
+```
+
+`rayon` still compiles for wasm and stays in the dependency tree, but no
+parallel path is ever entered there — `should_parallelize` returns `false` on
+`wasm32`, since the target has no threads to fork onto.
+
+Both configurations are covered in CI, and `tests/from_bytes.rs` deliberately
+runs in each so the filesystem-free path can't silently rot.
+
 ## Dependencies
 
-`memmap2`, `weezl` (LZW), `flate2` (Deflate), `zstd` (ZSTD; builds the C
-library via `zstd-sys`), `anyhow`, `bytemuck`, `rayon`.
+`weezl` (LZW), `flate2` (Deflate), `anyhow`, `bytemuck`, `rayon`, plus two
+optional ones: `memmap2` (feature `mmap`) and `zstd` (feature `codec-zstd`,
+which builds the C library via `zstd-sys`).
 
 ## License
 

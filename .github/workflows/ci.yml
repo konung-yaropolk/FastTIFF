@@ -45,6 +45,20 @@ jobs:
       - name: Build glow backend
         run: cargo build -p FastTIFF --no-default-features --features renderer-glow
 
+      # fast-tiff-lib without memmap or the C zstd codec — the shape the wasm
+      # build uses. The `open`-based integration tests are gated off here, so
+      # `tests/from_bytes.rs` is what keeps the filesystem-free path honest.
+      - name: Test lib with no default features (wasm-shaped)
+        run: cargo test -p fast-tiff-lib --no-default-features
+
+      # And that it genuinely builds for the wasm target, not just with the
+      # features off on a native host.
+      - name: Check the wasm target
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p fast-tiff-lib --target wasm32-unknown-unknown --no-default-features
+          cargo check -p fast-tiff-viewer --target wasm32-unknown-unknown --no-default-features --features backend-wgpu
+
       # The single-threaded shape of fast-tiff-viewer — no read-ahead worker, no
       # background volume builder, no rayon — which is what a wasm frontend will
       # build. Nothing in the desktop app selects it, so without this step the
