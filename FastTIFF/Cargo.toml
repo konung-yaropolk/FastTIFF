@@ -17,19 +17,19 @@ license = "GPL-3.0-only"
 [features]
 default = ["renderer-wgpu"]
 # Each feature turns on the matching eframe backend AND the matching backend in
-# `stack-renderer`, so the *unused* renderer's entire dependency subtree is
+# `scivis-render`, so the *unused* renderer's entire dependency subtree is
 # excluded from the build (`cargo tree`).
-renderer-wgpu = ["eframe/wgpu", "stack-renderer/backend-wgpu", "fast-tiff-core/backend-wgpu"]
-renderer-glow = ["eframe/glow", "stack-renderer/backend-glow", "fast-tiff-core/backend-glow"]
+renderer-wgpu = ["eframe/wgpu", "scivis-render/backend-wgpu", "fast-tiff-viewer/backend-wgpu"]
+renderer-glow = ["eframe/glow", "scivis-render/backend-glow", "fast-tiff-viewer/backend-glow"]
 
 [dependencies]
 # The stack model, channel/contrast settings, camera, and the decode->GPU sync
 # — everything this app does that isn't a window or a widget.
-fast-tiff-core = { path = "../fast-tiff-core" }
+fast-tiff-viewer = { path = "../fast-tiff-viewer" }
 fast-tiff-lib = { path = "../fast-tiff-lib" }
 # All GPU work lives here, free of any GUI toolkit. `src/render.rs` is the only
 # file that bridges it to eframe; see that module's docs.
-stack-renderer = { path = "../stack-renderer" }
+scivis-render = { path = "../scivis-render" }
 # eframe with default features off: drops the active accesskit integration
 # (`accesskit_winit`/`_windows`/`_consumer` — Windows UI Automation pumped from
 # the event loop, unused here) and leaves the GPU backend unset so the

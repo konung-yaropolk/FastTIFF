@@ -6,7 +6,7 @@
 //! the rendered volume on both the wgpu and glow backends.
 
 use super::*;
-use fast_tiff_core::camera::{volume_camera, VolumeCamera};
+use fast_tiff_viewer::camera::{volume_camera, VolumeCamera};
 
 impl ViewerApp {
     /// Draw the coordinate box for the current volume view into `painter` (which

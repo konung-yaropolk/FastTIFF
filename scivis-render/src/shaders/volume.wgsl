@@ -8,6 +8,21 @@
 // directly. R16Float is core-filterable, so linear/cubic use the hardware
 // sampler; "nearest" snaps the coord to a texel center.
 
+// ---------------------------------------------------------------------------
+// Isosurface appearance (render mode 2). Both are compile-time constants: they
+// are a fixed look, not per-frame state, so they cost no uniform slot and stay
+// in step with the glow backend's copy of the same two values.
+//
+//   SURFACE_GRAY     Albedo the surface is scaled to. 1.0 is a blown-out white
+//                    for a plain grayscale stack; lower reads as softer gray.
+//                    (Blender's classic default base color is 0.8.)
+//   SURFACE_CONTRAST Split between ambient and camera-headlight diffuse:
+//                    shade = (1 - CONTRAST) + CONTRAST * diff. 0.0 is flat and
+//                    unshaded, 1.0 falls all the way to black at silhouettes.
+// ---------------------------------------------------------------------------
+const SURFACE_GRAY: f32 = 0.6;
+const SURFACE_CONTRAST: f32 = 0.85;
+
 // data = (window.x, window.y, enabled, unused); packed in a vec4 so the uniform
 // array element is 16-byte aligned.
 struct VolChannel {
@@ -260,10 +275,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 let glen = length(g);
                 if (glen > 1e-6) { nrm = g / glen; }
                 let diff = abs(dot(nrm, -rd));
-                let shade = 0.2 + 0.8 * diff;
-                // Scale the albedo to Blender's classic 0.8 base gray, so a plain
-                // grayscale surface reads as soft gray rather than a blown-out white.
-                return vec4<f32>(clamp(fc.rgb * 0.8 * shade, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+                let shade = (1.0 - SURFACE_CONTRAST) + SURFACE_CONTRAST * diff;
+                return vec4<f32>(clamp(fc.rgb * SURFACE_GRAY * shade, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
             }
             prev_f = f;
             p += dp;

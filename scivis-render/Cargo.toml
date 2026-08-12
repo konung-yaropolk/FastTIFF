@@ -1,12 +1,12 @@
 [package]
-name = "stack-renderer"
+name = "scivis-render"
 version = "0.9.6"
 edition = "2021"
-description = "GPU rendering for multi-channel scientific image stacks: per-channel window/level + LUT compositing and 3D volume ray-marching, on wgpu or OpenGL. No GUI toolkit, no file format — you bring the pixels."
+description = "Scientific visualization on the GPU: per-channel window/level + LUT compositing of multi-channel image stacks in 2D, and volume ray-marching in 3D, on wgpu or OpenGL. No GUI toolkit, no file format — you bring the pixels."
 license = "MPL-2.0"
 readme = "README.md"
 repository = "https://github.com/konung-yaropolk/FastTIFF"
-keywords = ["wgpu", "volume-rendering", "raymarching", "gpu", "microscopy"]
+keywords = ["wgpu", "volume-rendering", "raymarching", "microscopy", "imaging"]
 categories = ["rendering", "visualization", "graphics", "science"]
 
 # The WGSL sources are `include_str!`d into the wgpu backend, so they must ship

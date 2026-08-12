@@ -1,10 +1,10 @@
 //! egui input → 3D camera. This module reads the pointer, wheel and keyboard
-//! and calls the matching [`fast_tiff_core::camera::CameraState`] method; all
+//! and calls the matching [`fast_tiff_viewer::camera::CameraState`] method; all
 //! the camera *math* lives there, so a different frontend reuses it by writing
 //! its own version of just this file.
 
 use super::*;
-use fast_tiff_core::camera::{CameraState, NavMode, FLY_UNITS_PER_SEC, KEY_ROT};
+use fast_tiff_viewer::camera::{CameraState, NavMode, FLY_UNITS_PER_SEC, KEY_ROT};
 
 impl ViewerApp {
     /// Apply this frame's mouse/keyboard to the 3D camera per the active nav mode.

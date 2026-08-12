@@ -1,5 +1,5 @@
 [package]
-name = "fast-tiff-core"
+name = "fast-tiff-viewer"
 version = "0.9.6"
 edition = "2021"
 description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
@@ -25,8 +25,8 @@ default = ["threads"]
 # and `volume::build_volume`; with neither, the crate still provides the whole
 # CPU-side model (stack state, channel settings, dimension resolution, camera
 # math) — useful for tests and headless tooling.
-backend-wgpu = ["stack-renderer/backend-wgpu"]
-backend-glow = ["stack-renderer/backend-glow"]
+backend-wgpu = ["scivis-render/backend-wgpu"]
+backend-glow = ["scivis-render/backend-glow"]
 # Background worker threads (read-ahead decode + 3D volume assembly). On by
 # default; a single-threaded host — notably `wasm32-unknown-unknown`, where
 # `std::thread::spawn` is unavailable — turns this off and gets the synchronous
@@ -38,8 +38,8 @@ threads = ["dep:rayon"]
 # `version` alongside `path`: the path wins inside this workspace, and the
 # version is what a published crate resolves against — without it
 # `cargo package` refuses the manifest.
-fast-tiff-lib = { path = "../fast-tiff-lib", version = "0.9.6" }
-stack-renderer = { path = "../stack-renderer", version = "0.9.6" }
+fast-tiff-lib = { path = "../fast-tiff-lib" }
+scivis-render = { path = "../scivis-render" }
 anyhow = "1.0"
 bytemuck = "1.25"
 log = "0.4"

@@ -45,17 +45,17 @@ jobs:
       - name: Build glow backend
         run: cargo build -p FastTIFF --no-default-features --features renderer-glow
 
-      # The single-threaded shape of fast-tiff-core — no read-ahead worker, no
+      # The single-threaded shape of fast-tiff-viewer — no read-ahead worker, no
       # background volume builder, no rayon — which is what a wasm frontend will
       # build. Nothing in the desktop app selects it, so without this step the
       # `#[cfg(not(feature = "threads"))]` fallbacks would rot unnoticed.
       - name: Check core without threads (wasm-shaped)
-        run: cargo test -p fast-tiff-core --no-default-features --features backend-wgpu
+        run: cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu
 
       # And with no GPU backend at all: the CPU-side model must stand alone, so
       # headless tooling can use it without pulling in wgpu or glow.
       - name: Check core with no backend
-        run: cargo check -p fast-tiff-core --no-default-features
+        run: cargo check -p fast-tiff-viewer --no-default-features
 
   # macOS compiles the `#[cfg(target_os = "macos")]` code no other job sees —
   # the macos_open.rs "Open With" FFI — and runs its unit tests. arm64, matching

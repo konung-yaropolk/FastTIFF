@@ -17,7 +17,7 @@
 
 use crate::prefetch::{decode_jobs, ChannelJob, Decoded};
 use fast_tiff_lib::TiffStack;
-use stack_renderer::{ChannelKind, VolumeKind, MAX_CHANNELS};
+use scivis_render::{ChannelKind, VolumeKind, MAX_CHANNELS};
 use std::path::PathBuf;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;

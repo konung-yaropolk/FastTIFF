@@ -1,6 +1,6 @@
 //! The viewer's `eframe::App`: window chrome, widgets, and input.
 //!
-//! All non-GUI state and logic lives in `fast_tiff_core::Viewer` — the loaded
+//! All non-GUI state and logic lives in `fast_tiff_viewer::Viewer` — the loaded
 //! stack, channel settings, playback clock, 3D camera, and the per-frame
 //! decode→GPU sync. `ViewerApp` holds one of those plus the things only a
 //! desktop window has: zoom, pan, window sizing, which panels are open. The
@@ -8,7 +8,7 @@
 //! right pixels?" — if yes, it's in `core`.
 //!
 //! The GPU is reached only through `crate::render`, the eframe adapter over
-//! `stack-renderer`, so nothing here mentions glow or wgpu.
+//! `scivis-render`, so nothing here mentions glow or wgpu.
 //!
 //! Supporting clusters live in child modules (which share this module's
 //! privacy, so the split adds no `pub` surface beyond `pub(super)`):
@@ -19,11 +19,11 @@
 
 use crate::render::{self, Render};
 use egui::{Color32, RichText};
-use fast_tiff_core::channels::{
+use fast_tiff_viewer::channels::{
     channel_tint, gray_lut_applicable, gray_lut_count, gray_lut_sel_lut, gray_lut_sel_name,
     pseudocolor_applicable, ui_tint,
 };
-use fast_tiff_core::{DecodeMode, Stack, ViewMode, Viewer};
+use fast_tiff_viewer::{DecodeMode, Stack, ViewMode, Viewer};
 use std::path::PathBuf;
 
 mod camera;
@@ -36,7 +36,7 @@ use windows::{metadata_window, render_settings_window};
 
 /// Turn a core LUT tint (raw RGB, or `None` for "plain grayscale — use the
 /// default color") into an egui color. The *decision* is display logic and
-/// lives in `fast_tiff_core::channels`; only this conversion is egui's.
+/// lives in `fast_tiff_viewer::channels`; only this conversion is egui's.
 fn tint_color(tint: Option<[u8; 3]>) -> Option<Color32> {
     tint.map(|[r, g, b]| Color32::from_rgb(r, g, b))
 }
@@ -110,7 +110,7 @@ fn initial_fit_zoom(ctx: &egui::Context, img_w: f32, img_h: f32, chrome_h: f32) 
 
 pub struct ViewerApp {
     /// Everything that isn't GUI: the loaded stack, channel settings, playback
-    /// clock, 3D camera, and the decode→GPU sync. See `fast_tiff_core`.
+    /// clock, 3D camera, and the decode→GPU sync. See `fast_tiff_viewer`.
     core: Viewer,
     /// GPU textures/shader for compositing the image, shared with the paint
     /// callback. Created once at startup (see `crate::render::init`).

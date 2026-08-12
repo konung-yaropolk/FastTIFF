@@ -1,12 +1,12 @@
 //! Integration tests for the display model's public API.
 //!
 //! These were unit tests inside the egui app, back when `DecodeMode` and the
-//! RGB channel plan were private to it. Both are public `fast-tiff-core` API
+//! RGB channel plan were private to it. Both are public `fast-tiff-viewer` API
 //! now, so they belong in `tests/` — which also proves the API is reachable
 //! from outside the crate, something a `#[cfg(test)] mod` can never check.
 
-use fast_tiff_core::dimensions::rgb_channel_plan;
-use fast_tiff_core::{DecodeMode, MAX_CHANNELS};
+use fast_tiff_viewer::dimensions::rgb_channel_plan;
+use fast_tiff_viewer::{DecodeMode, MAX_CHANNELS};
 
 #[test]
 fn decode_mode_drives_parallel_flag() {

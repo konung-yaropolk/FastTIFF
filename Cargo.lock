@@ -11,12 +11,12 @@ dependencies = [
  "egui",
  "egui_extras",
  "env_logger",
- "fast-tiff-core",
  "fast-tiff-lib",
+ "fast-tiff-viewer",
  "image",
  "log",
  "rfd",
- "stack-renderer",
+ "scivis-render",
  "winres",
 ]
 
@@ -837,18 +837,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fast-tiff-core"
-version = "0.9.6"
-dependencies = [
- "anyhow",
- "bytemuck",
- "fast-tiff-lib",
- "log",
- "rayon",
- "stack-renderer",
-]
-
-[[package]]
 name = "fast-tiff-lib"
 version = "0.9.6"
 dependencies = [
@@ -860,6 +848,18 @@ dependencies = [
  "rayon",
  "weezl 0.2.1",
  "zstd",
+]
+
+[[package]]
+name = "fast-tiff-viewer"
+version = "0.9.6"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "fast-tiff-lib",
+ "log",
+ "rayon",
+ "scivis-render",
 ]
 
 [[package]]
@@ -2505,6 +2505,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "scivis-render"
+version = "0.9.6"
+dependencies = [
+ "bytemuck",
+ "glow",
+ "half",
+ "naga",
+ "wgpu",
+]
+
+[[package]]
 name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2709,17 +2720,6 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
-
-[[package]]
-name = "stack-renderer"
-version = "0.9.6"
-dependencies = [
- "bytemuck",
- "glow",
- "half",
- "naga",
- "wgpu",
-]
 
 [[package]]
 name = "static_assertions"

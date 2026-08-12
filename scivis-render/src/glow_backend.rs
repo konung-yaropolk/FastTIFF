@@ -212,6 +212,22 @@ uniform float u_density;     // alpha-DVR opacity scale (higher = more solid)
 uniform float u_iso;         // isosurface threshold in windowed units (0..1)
 uniform int u_interp;        // 0 = point/linear (GL filter), 1 = in-shader tricubic
 
+// ---------------------------------------------------------------------------
+// Isosurface appearance (u_mode == 2). Both are compile-time constants: they
+// are a fixed look, not per-frame state, so they cost no uniform slot and stay
+// in step with the wgpu backend's copy of the same two values (volume.wgsl).
+//
+//   SURFACE_GRAY     Albedo the surface is scaled to. 1.0 is a blown-out white
+//                    for a plain grayscale stack; lower reads as softer gray.
+//                    (Blender's classic default base color is 0.8.)
+//   SURFACE_CONTRAST Split between ambient and camera-headlight diffuse:
+//                    shade = (1 - CONTRAST) + CONTRAST * diff. 0.0 is flat and
+//                    unshaded, 1.0 falls all the way to black at silhouettes.
+// ---------------------------------------------------------------------------
+const float SURFACE_GRAY = 0.6;
+const float SURFACE_CONTRAST = 0.85;
+
+
 // Upper bound on ray-march samples. High enough that the largest volume the
 // memory budget admits (~1600-voxel diagonal) still gets half-voxel sampling;
 // the loops run `n` iterations (n <= MAX_STEPS), so ordinary volumes never pay
@@ -397,10 +413,8 @@ void main() {
                 vec3 g = field_grad(hp, voxel);
                 vec3 nrm = (length(g) > 1e-6) ? normalize(g) : vec3(0.0, 0.0, 1.0);
                 float diff = abs(dot(nrm, -rd));
-                float shade = 0.2 + 0.8 * diff;
-                // Scale the albedo to Blender's classic 0.8 base gray, so a plain
-                // grayscale surface reads as soft gray rather than a blown-out white.
-                hit_col = clamp(fcol * 0.8 * shade, vec3(0.0), vec3(1.0));
+                float shade = (1.0 - SURFACE_CONTRAST) + SURFACE_CONTRAST * diff;
+                hit_col = clamp(fcol * SURFACE_GRAY * shade, vec3(0.0), vec3(1.0));
                 hit = true;
                 break;
             }

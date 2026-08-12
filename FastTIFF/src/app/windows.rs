@@ -3,7 +3,7 @@
 
 use super::*;
 
-use fast_tiff_core::camera::{NavMode, OrbitPoint};
+use fast_tiff_viewer::camera::{NavMode, OrbitPoint};
 use crate::render;
 use egui::RichText;
 

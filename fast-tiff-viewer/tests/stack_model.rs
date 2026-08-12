@@ -10,8 +10,8 @@
 //! there); the tests skip rather than fail if one is missing, so a checkout
 //! without them still builds green.
 
-use fast_tiff_core::channels::{channel_tint, gray_lut_applicable, pseudocolor_applicable};
-use fast_tiff_core::{ChannelKind, Stack, Viewer};
+use fast_tiff_viewer::channels::{channel_tint, gray_lut_applicable, pseudocolor_applicable};
+use fast_tiff_viewer::{ChannelKind, Stack, Viewer};
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> Option<PathBuf> {
@@ -103,7 +103,7 @@ fn dimension_override_conserves_the_plane_count() {
         "reassigning axes must not invent or drop planes"
     );
     // Channel settings and LUTs were rebuilt to match the new channel count...
-    assert_eq!(stack.channel_settings.len(), f.min(fast_tiff_core::MAX_CHANNELS));
+    assert_eq!(stack.channel_settings.len(), f.min(fast_tiff_viewer::MAX_CHANNELS));
     // ...and the volume was invalidated, since the depth axis just changed.
     assert_ne!(viewer.volume.generation, gen_before, "volume should be invalidated");
     assert_eq!(viewer.volume.built_frame, None);
@@ -199,7 +199,7 @@ fn falling_behind_latches_parallel_decode_only_in_auto() {
         return;
     }
 
-    viewer.decode_mode = fast_tiff_core::DecodeMode::Serial;
+    viewer.decode_mode = fast_tiff_viewer::DecodeMode::Serial;
     viewer.playback.playing = true;
     viewer.playback.fps = 60.0;
     // Renders far slower than the target: demand per tick is ~6 frames.
@@ -208,7 +208,7 @@ fn falling_behind_latches_parallel_decode_only_in_auto() {
     }
     assert!(!viewer.decode_parallel, "Serial must never latch parallel decode");
 
-    viewer.decode_mode = fast_tiff_core::DecodeMode::Auto;
+    viewer.decode_mode = fast_tiff_viewer::DecodeMode::Auto;
     for i in 40..80 {
         viewer.tick_playback(i as f64 * 0.1);
     }

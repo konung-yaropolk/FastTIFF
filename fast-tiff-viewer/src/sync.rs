@@ -17,7 +17,7 @@ use crate::stack::Stack;
 use crate::viewer::{ViewMode, Viewer};
 use crate::volume::VolumePlan;
 use crate::Renderer;
-use stack_renderer::{ChannelKind, ChannelUniform, MAX_CHANNELS};
+use scivis_render::{ChannelKind, ChannelUniform, MAX_CHANNELS};
 
 /// What the frontend must do after a [`Viewer::sync`] call, beyond drawing.
 #[derive(Clone, Copy, Debug, Default)]
@@ -239,7 +239,7 @@ fn sync_volume(loaded: &mut Stack, view: &mut crate::viewer::VolumeView, rendere
 
     // Per-channel window/level, in the sampled texture's units: raw for float,
     // else the 0..65535 display window divided by 65535 (both U8 and U16 volumes
-    // are unorm-normalized — see stack_renderer::VolumeKind).
+    // are unorm-normalized — see scivis_render::VolumeKind).
     // Bounded by MAX_CHANNELS, so it lives on the stack — this runs every 3D
     // frame and has no business calling the allocator.
     let mut windows = [(0.0f32, 0.0f32, false, false); MAX_CHANNELS];

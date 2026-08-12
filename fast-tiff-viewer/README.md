@@ -1,4 +1,4 @@
-# fast-tiff-core
+# fast-tiff-viewer
 
 [![License](https://img.shields.io/badge/License-MPL--2.0-green)](https://github.com/konung-yaropolk/FastTIFF/blob/main/LICENSE)
 
@@ -9,9 +9,9 @@ in sight.
 ```text
   fast-tiff-lib     file I/O, IFD index, decode, metadata
         │
-  stack-renderer    GPU pipelines, textures, ray-marching
+  scivis-render     GPU pipelines, textures, ray-marching
         │
-  fast-tiff-core    ← this crate: stack model, channel settings,
+  fast-tiff-viewer  ← this crate: stack model, channel settings,
         │             c/z/t interpretation, camera, decode→GPU sync
   frontend          egui desktop app, or a wasm/JS web UI
 ```
@@ -46,7 +46,7 @@ widgets and input; it borrows everything else from here.
 ## Usage
 
 ```rust,ignore
-use fast_tiff_core::Viewer;
+use fast_tiff_viewer::Viewer;
 
 let mut viewer = Viewer::new();
 viewer.open(path)?;

@@ -14,8 +14,8 @@ fn assert_sync<T: Sync>() {}
 #[cfg(feature = "backend-wgpu")]
 #[test]
 fn wgpu_resources_are_send_and_sync() {
-    assert_send::<stack_renderer::wgpu_backend::ImageRenderResources>();
-    assert_sync::<stack_renderer::wgpu_backend::ImageRenderResources>();
+    assert_send::<scivis_render::wgpu_backend::ImageRenderResources>();
+    assert_sync::<scivis_render::wgpu_backend::ImageRenderResources>();
 }
 
 // Native only: on wasm, `glow::Context` wraps web-sys handles that are neither
@@ -24,16 +24,16 @@ fn wgpu_resources_are_send_and_sync() {
 #[cfg(all(feature = "backend-glow", not(target_arch = "wasm32")))]
 #[test]
 fn glow_resources_are_send_and_sync() {
-    assert_send::<stack_renderer::glow_backend::ImageRenderResources>();
-    assert_sync::<stack_renderer::glow_backend::ImageRenderResources>();
+    assert_send::<scivis_render::glow_backend::ImageRenderResources>();
+    assert_sync::<scivis_render::glow_backend::ImageRenderResources>();
 }
 
 /// The parameter types cross thread boundaries in a host's own plumbing, so
 /// they must be freely shareable.
 #[test]
 fn parameter_types_are_send_and_sync() {
-    assert_send::<stack_renderer::VolumeParams>();
-    assert_sync::<stack_renderer::VolumeParams>();
-    assert_send::<stack_renderer::ChannelUniform>();
-    assert_sync::<stack_renderer::ChannelUniform>();
+    assert_send::<scivis_render::VolumeParams>();
+    assert_sync::<scivis_render::VolumeParams>();
+    assert_send::<scivis_render::ChannelUniform>();
+    assert_sync::<scivis_render::ChannelUniform>();
 }

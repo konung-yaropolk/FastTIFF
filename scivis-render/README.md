@@ -1,9 +1,14 @@
-# stack-renderer
+# scivis-render
 
-[![License](https://img.shields.io/badge/License-MPL--2.0-green)](https://github.com/konung-yaropolk/FastTIFF/blob/main/stack-renderer/LICENSE)
+[![License](https://img.shields.io/badge/License-MPL--2.0-green)](https://github.com/konung-yaropolk/FastTIFF/blob/main/scivis-render/LICENSE)
 
-GPU rendering for **multi-channel scientific image stacks**: per-channel
-window/level → LUT compositing in 2D, and volume ray-marching in 3D.
+**Sci**entific **vis**ualization rendering, on the GPU: per-channel
+window/level → LUT compositing of multi-channel image stacks in 2D, and volume
+ray-marching in 3D.
+
+If you have 16-bit multi-channel or volumetric data — a confocal z-stack, a CT
+series, a spectral cube — this draws it the way the field expects: independent
+contrast and colormap per channel, composited in one pass.
 
 No GUI toolkit and no file format. It never creates a device, a surface or a
 window, and never draws a frame on its own — you bring the pixels and the render
@@ -53,7 +58,7 @@ context), and a cfg-selected façade already gives static dispatch for free.
 # API
 
 Everything lives on one type, `ImageRenderResources`, in either
-`stack_renderer::wgpu_backend` or `stack_renderer::glow_backend`.
+`scivis_render::wgpu_backend` or `scivis_render::glow_backend`.
 
 ## Lifecycle
 
@@ -228,7 +233,7 @@ which one is live.
 ## Worked example
 
 ```rust,ignore
-use stack_renderer::{wgpu_backend::ImageRenderResources, ChannelKind, ChannelUniform};
+use scivis_render::{wgpu_backend::ImageRenderResources, ChannelKind, ChannelUniform};
 
 let mut r = ImageRenderResources::new(device.clone(), queue.clone(), target_format);
 

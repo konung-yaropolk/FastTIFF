@@ -6,7 +6,7 @@
 //! input and call the matching method; the eframe app's `app/camera.rs` does
 //! exactly that, and a browser frontend would do the same with pointer events.
 
-use stack_renderer::{VolumeParams, VolumeRender, MAX_CHANNELS};
+use scivis_render::{VolumeParams, VolumeRender, MAX_CHANNELS};
 
 /// How mouse/keyboard drive the 3D camera, modeled on familiar 3D apps. The
 /// first three orbit a pivot (differing only in which button/modifier does what);
@@ -456,7 +456,7 @@ pub fn volume_camera(cam: &CameraState, scale: [f32; 3], dims: (u32, u32, u32)) 
 /// `windows` is one `(min, max, is_float, enabled)` tuple per channel, already
 /// in the sampled texture's units: raw for a float channel, else the 0..65535
 /// display window divided by 65535 (both U8 and U16 volumes are unorm-normalized
-/// — see [`stack_renderer::VolumeKind`]).
+/// — see [`scivis_render::VolumeKind`]).
 pub fn build_volume_params(
     cam: &VolumeCamera,
     channels: &[(f32, f32, bool, bool)],

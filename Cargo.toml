@@ -2,12 +2,12 @@
 resolver = "2"
 # Layered bottom-up, each crate GUI-agnostic until the last:
 #   fast-tiff-lib     file I/O, IFD index, decode, metadata
-#   stack-renderer  GPU pipelines, textures, ray-marching
-#   fast-tiff-core    stack model, channel settings, decode -> GPU sync
+#   scivis-render     GPU pipelines, textures, ray-marching
+#   fast-tiff-viewer  stack model, channel settings, decode -> GPU sync
 #   FastTIFF          the eframe desktop frontend
 # A future wasm frontend becomes a fifth member alongside `FastTIFF`, reusing
 # the lower three unchanged.
-members = ["fast-tiff-lib", "stack-renderer", "fast-tiff-core", "FastTIFF"]
+members = ["fast-tiff-lib", "scivis-render", "fast-tiff-viewer", "FastTIFF"]
 
 [profile.release]
 opt-level = 3

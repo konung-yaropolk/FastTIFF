@@ -11,7 +11,7 @@ use crate::dimensions::{apply_resolved_dimensions, setup_rgb};
 use crate::prefetch::Prefetcher;
 use crate::volume::VolumeBuilder;
 use fast_tiff_lib::TiffStack;
-use stack_renderer::ChannelKind;
+use scivis_render::ChannelKind;
 use std::path::PathBuf;
 
 /// One display channel's contrast window and GPU upload format.
@@ -95,7 +95,7 @@ pub struct Stack {
     /// (a ColorMap or ImageJ LUT). Kept verbatim so the selector's "Built-in
     /// LUT" option can restore it after the user tries another. `None` when the
     /// file carries no LUT (or isn't single-channel).
-    pub builtin_lut: Option<stack_renderer::Lut>,
+    pub builtin_lut: Option<scivis_render::Lut>,
 }
 
 impl Stack {

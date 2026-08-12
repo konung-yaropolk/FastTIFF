@@ -25,7 +25,7 @@
 //! exactly match what's wanted; any mismatch falls back to inline decode, so a
 //! stale prefetch can cost a little work but can never show the wrong frame.
 
-use stack_renderer::ChannelKind;
+use scivis_render::ChannelKind;
 use fast_tiff_lib::{ByteOrder, FrameInfo};
 use std::path::PathBuf;
 #[cfg(feature = "threads")]
