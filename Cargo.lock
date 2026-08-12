@@ -7,17 +7,15 @@ name = "FastTIFF"
 version = "1.9.6"
 dependencies = [
  "anyhow",
- "bytemuck",
  "eframe",
  "egui",
  "egui_extras",
  "env_logger",
+ "fast-tiff-core",
  "fast-tiff-lib",
- "half",
+ "fast-tiff-render",
  "image",
  "log",
- "naga",
- "rayon",
  "rfd",
  "winres",
 ]
@@ -839,6 +837,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast-tiff-core"
+version = "0.9.6"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "fast-tiff-lib",
+ "fast-tiff-render",
+ "log",
+ "rayon",
+]
+
+[[package]]
 name = "fast-tiff-lib"
 version = "0.9.6"
 dependencies = [
@@ -850,6 +860,17 @@ dependencies = [
  "rayon",
  "weezl 0.2.1",
  "zstd",
+]
+
+[[package]]
+name = "fast-tiff-render"
+version = "0.9.6"
+dependencies = [
+ "bytemuck",
+ "glow",
+ "half",
+ "naga",
+ "wgpu",
 ]
 
 [[package]]

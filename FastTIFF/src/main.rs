@@ -1,13 +1,10 @@
 #![windows_subsystem = "windows"]
 
 mod app;
-mod colormap;
 #[cfg(target_os = "macos")]
 mod macos_open;
-mod prefetch;
 mod process;
 mod render;
-mod volume;
 
 /// Decode the bundled 256×256 PNG into the RGBA image `ViewportBuilder::with_icon`
 /// wants. Baked into the binary with `include_bytes!`, so it needs no icon file

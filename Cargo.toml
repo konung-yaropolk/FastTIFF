@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["fast-tiff-lib", "FastTIFF"]
+# Layered bottom-up, each crate GUI-agnostic until the last:
+#   fast-tiff-lib     file I/O, IFD index, decode, metadata
+#   fast-tiff-render  GPU pipelines, textures, ray-marching
+#   fast-tiff-core    stack model, channel settings, decode -> GPU sync
+#   FastTIFF          the eframe desktop frontend
+# A future wasm frontend becomes a fifth member alongside `FastTIFF`, reusing
+# the lower three unchanged.
+members = ["fast-tiff-lib", "fast-tiff-render", "fast-tiff-core", "FastTIFF"]
 
 [profile.release]
 opt-level = 3

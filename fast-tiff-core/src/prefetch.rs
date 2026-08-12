@@ -25,11 +25,16 @@
 //! exactly match what's wanted; any mismatch falls back to inline decode, so a
 //! stale prefetch can cost a little work but can never show the wrong frame.
 
-use crate::render::ChannelKind;
-use fast_tiff_lib::{ByteOrder, FrameInfo, TiffStack};
+use fast_tiff_render::ChannelKind;
+use fast_tiff_lib::{ByteOrder, FrameInfo};
 use std::path::PathBuf;
+#[cfg(feature = "threads")]
+use fast_tiff_lib::TiffStack;
+#[cfg(feature = "threads")]
 use std::sync::mpsc::{channel, Receiver, Sender};
+#[cfg(feature = "threads")]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "threads")]
 use std::thread::JoinHandle;
 
 /// One channel's decoded pixels, in the format its GPU texture expects.
@@ -153,20 +158,45 @@ pub struct PrefetchResult {
     pub channels: Vec<DecodedChannel>,
 }
 
+#[cfg(feature = "threads")]
 struct Request {
     generation: u64,
     frame_index: usize,
     jobs: Vec<ChannelJob>,
 }
 
+/// Read-ahead is a pure optimization, so a host without threads (notably
+/// `wasm32-unknown-unknown`) gets a stub that never produces a result. Callers
+/// already handle `Prefetcher::new` returning `None` — that's the same path a
+/// failed thread spawn takes — so nothing downstream changes.
+#[cfg(not(feature = "threads"))]
+pub struct Prefetcher(std::convert::Infallible);
+
+#[cfg(not(feature = "threads"))]
+impl Prefetcher {
+    pub fn new(_path: PathBuf, _touch_only: bool) -> Option<Self> {
+        None
+    }
+
+    pub fn request(&self, _generation: u64, _frame_index: usize, _jobs: Vec<ChannelJob>) {
+        match self.0 {}
+    }
+
+    pub fn take_matching(&self, _generation: u64, _frame_index: usize) -> Option<PrefetchResult> {
+        match self.0 {}
+    }
+}
+
 /// Owns the worker thread + the latest result. Dropping it closes the request
 /// channel, which ends the worker (it finishes any in-flight decode first).
+#[cfg(feature = "threads")]
 pub struct Prefetcher {
     tx: Sender<Request>,
     result: Arc<Mutex<Option<PrefetchResult>>>,
     _handle: JoinHandle<()>,
 }
 
+#[cfg(feature = "threads")]
 impl Prefetcher {
     /// Spawn a worker that opens its own map of `path`. `touch_only` selects
     /// the page-touch mode (uncompressed stacks — see module docs); otherwise
@@ -213,6 +243,7 @@ impl Prefetcher {
     }
 }
 
+#[cfg(feature = "threads")]
 fn worker_loop(
     stack: TiffStack,
     rx: Receiver<Request>,

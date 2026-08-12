@@ -16,13 +16,20 @@ license = "GPL-3.0-only"
 # renderer's entire dependency subtree is excluded from the build (`cargo tree`).
 [features]
 default = ["renderer-wgpu"]
-# `half` (f32 -> f16) is only used by the wgpu volume path (16-bit volume
-# textures); it's already in the tree via wgpu, so this adds nothing.
-renderer-wgpu = ["eframe/wgpu", "dep:half"]
-renderer-glow = ["eframe/glow"]
+# Each feature turns on the matching eframe backend AND the matching backend in
+# `fast-tiff-render`, so the *unused* renderer's entire dependency subtree is
+# excluded from the build (`cargo tree`).
+renderer-wgpu = ["eframe/wgpu", "fast-tiff-render/backend-wgpu", "fast-tiff-core/backend-wgpu"]
+renderer-glow = ["eframe/glow", "fast-tiff-render/backend-glow", "fast-tiff-core/backend-glow"]
 
 [dependencies]
+# The stack model, channel/contrast settings, camera, and the decode->GPU sync
+# — everything this app does that isn't a window or a widget.
+fast-tiff-core = { path = "../fast-tiff-core" }
 fast-tiff-lib = { path = "../fast-tiff-lib" }
+# All GPU work lives here, free of any GUI toolkit. `src/render.rs` is the only
+# file that bridges it to eframe; see that module's docs.
+fast-tiff-render = { path = "../fast-tiff-render" }
 # eframe with default features off: drops the active accesskit integration
 # (`accesskit_winit`/`_windows`/`_consumer` — Windows UI Automation pumped from
 # the event loop, unused here) and leaves the GPU backend unset so the
@@ -32,21 +39,10 @@ fast-tiff-lib = { path = "../fast-tiff-lib" }
 eframe = { version = "0.34", default-features = false, features = ["default_fonts"] }
 egui = "0.34"
 egui_extras = "0.34"
-bytemuck = "1.25"
-# Parallel-across-slices 3D volume assembly (already in the tree via fast-tiff-lib).
-rayon = "1.10"
-# f32 -> f16 for the wgpu volume textures (R16Float); wgpu-only, so optional.
-half = { version = "2", optional = true }
 anyhow = "1.0"
 rfd = "0.17"
 log = "0.4"
 env_logger = "0.11"
-
-# WGSL shaders are only validated by wgpu at runtime (shader-module creation),
-# so this lets `cargo test` catch shader errors offline (no GPU needed). naga is
-# already in the tree via wgpu; the test is gated to the wgpu feature.
-[dev-dependencies]
-naga = { version = "29", features = ["wgsl-in"] }
 
 # Only needed on Windows, where build.rs embeds the icon + version metadata
 # as a Win32 resource. Gated so non-Windows builds don't pull winres in.

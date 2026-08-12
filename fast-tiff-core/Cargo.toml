@@ -1,0 +1,48 @@
+[package]
+name = "fast-tiff-core"
+version = "0.9.6"
+edition = "2021"
+description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
+license = "MPL-2.0"
+readme = "README.md"
+repository = "https://github.com/konung-yaropolk/FastTIFF"
+keywords = ["tiff", "imagej", "microscopy", "viewer", "visualization"]
+categories = ["visualization", "multimedia::images", "science"]
+
+include = [
+    "src/**/*.rs",
+    # Ship the tests: they skip gracefully when the shared fixtures (which live
+    # in fast-tiff-lib and are not published) aren't present.
+    "tests/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
+
+[features]
+default = ["threads"]
+# Which GPU backend `sync` drives. Exactly one is required to use `Viewer::sync`
+# and `volume::build_volume`; with neither, the crate still provides the whole
+# CPU-side model (stack state, channel settings, dimension resolution, camera
+# math) — useful for tests and headless tooling.
+backend-wgpu = ["fast-tiff-render/backend-wgpu"]
+backend-glow = ["fast-tiff-render/backend-glow"]
+# Background worker threads (read-ahead decode + 3D volume assembly). On by
+# default; a single-threaded host — notably `wasm32-unknown-unknown`, where
+# `std::thread::spawn` is unavailable — turns this off and gets the synchronous
+# fallback paths, which are already the code path taken whenever a worker fails
+# to spawn.
+threads = ["dep:rayon"]
+
+[dependencies]
+# `version` alongside `path`: the path wins inside this workspace, and the
+# version is what a published crate resolves against — without it
+# `cargo package` refuses the manifest.
+fast-tiff-lib = { path = "../fast-tiff-lib", version = "0.9.6" }
+fast-tiff-render = { path = "../fast-tiff-render", version = "0.9.6" }
+anyhow = "1.0"
+bytemuck = "1.25"
+log = "0.4"
+# Parallel-across-slices 3D volume assembly. Gated with `threads` because rayon
+# needs real threads to build, let alone run.
+rayon = { version = "1.10", optional = true }

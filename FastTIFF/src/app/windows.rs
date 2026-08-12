@@ -3,7 +3,7 @@
 
 use super::*;
 
-use super::camera::{NavMode, OrbitPoint};
+use fast_tiff_core::camera::{NavMode, OrbitPoint};
 use crate::render;
 use egui::RichText;
 
@@ -26,7 +26,7 @@ pub(super) fn render_settings_window(
     iso: &mut f32,
     show_coord_box: &mut bool,
     reset_position: &mut bool,
-    loaded: Option<&LoadedStack>,
+    loaded: Option<&Stack>,
 ) {
     egui::Window::new("3D render settings")
         .open(open)
@@ -152,7 +152,7 @@ pub(super) fn render_settings_window(
         });
 }
 
-pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &LoadedStack) {
+pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Stack) {
     let tiff = &loaded.tiff;
     egui::Window::new("File metadata")
         .open(open)

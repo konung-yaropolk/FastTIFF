@@ -16,13 +16,29 @@
 //! an exact match, so a stale build can cost work but never show wrong data.
 
 use crate::prefetch::{decode_jobs, ChannelJob, Decoded};
-use crate::render::{self, ChannelKind, MAX_CHANNELS};
 use fast_tiff_lib::TiffStack;
-use rayon::prelude::*;
+use fast_tiff_render::{ChannelKind, VolumeKind, MAX_CHANNELS};
 use std::path::PathBuf;
+#[cfg(feature = "threads")]
+use rayon::prelude::*;
+#[cfg(feature = "threads")]
 use std::sync::mpsc::{channel, Receiver, Sender};
+#[cfg(feature = "threads")]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "threads")]
 use std::thread::JoinHandle;
+
+/// GPU bytes per sample for `kind` on the compiled-in backend, or 0 when no
+/// backend is enabled (then the budget below is the CPU footprint alone —
+/// there's no GPU to overflow).
+#[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
+fn gpu_bps(kind: VolumeKind) -> usize {
+    crate::backend::volume_gpu_bps(kind)
+}
+#[cfg(not(any(feature = "backend-wgpu", feature = "backend-glow")))]
+fn gpu_bps(_kind: VolumeKind) -> usize {
+    0
+}
 
 /// Rough upper bound on the volume's footprint. The builder subsamples each
 /// axis until the volume fits under this before uploading, so a huge stack
@@ -34,7 +50,7 @@ const MAX_VOLUME_BYTES: usize = 768 << 20;
 
 /// A built volume: `(width, height, depth)` plus one `(kind, native-endian
 /// bytes)` entry per channel — what `build_volume` hands to `upload_volumes`.
-pub type BuiltVolume = (u32, u32, u32, Vec<(render::VolumeKind, Vec<u8>)>);
+pub type BuiltVolume = (u32, u32, u32, Vec<(VolumeKind, Vec<u8>)>);
 
 /// Everything the builder needs besides the file itself. Dimensions come from
 /// the app's (possibly manually overridden) metadata, not the worker's own
@@ -74,15 +90,15 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
 
     // Per-channel source kind + GPU volume kind + CPU bytes-per-sample.
     let ckinds = &plan.kinds[..n];
-    let vkinds: Vec<(render::VolumeKind, usize)> = ckinds
+    let vkinds: Vec<(VolumeKind, usize)> = ckinds
         .iter()
         .map(|k| match k {
-            ChannelKind::Int8 => (render::VolumeKind::U8, 1usize),
-            ChannelKind::Int16 => (render::VolumeKind::U16, 2),
-            ChannelKind::Float => (render::VolumeKind::F32, 4),
+            ChannelKind::Int8 => (VolumeKind::U8, 1usize),
+            ChannelKind::Int16 => (VolumeKind::U16, 2),
+            ChannelKind::Float => (VolumeKind::F32, 4),
         })
         .collect();
-    let sum_bps: usize = vkinds.iter().map(|(k, bps)| (*bps).max(render::volume_gpu_bps(*k))).sum();
+    let sum_bps: usize = vkinds.iter().map(|(k, bps)| (*bps).max(gpu_bps(*k))).sum();
 
     let max_dim = plan.max_dim.max(64);
     let out = |n: u32, s: u32| n.div_ceil(s);
@@ -125,7 +141,14 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
     }
     drop(chunk_iters);
 
-    let result = tasks.into_par_iter().try_for_each(|(oz, mut dsts)| -> anyhow::Result<()> {
+    #[cfg(feature = "threads")]
+    let task_iter = tasks.into_par_iter();
+    // Without rayon the same closure runs sequentially — identical output, just
+    // one core. (`try_for_each` exists on both iterator kinds with the same
+    // signature, so only the iterator construction differs.)
+    #[cfg(not(feature = "threads"))]
+    let mut task_iter = tasks.into_iter();
+    let result = task_iter.try_for_each(|(oz, mut dsts)| -> anyhow::Result<()> {
         // Depth index → (time, z): in 4D the depth is Z at the fixed timepoint;
         // otherwise the depth index *is* the frame (time = k, z = 0). The IFD
         // layout is time-major, then Z, then channel.
@@ -157,7 +180,7 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
         return None;
     }
 
-    let channels_out: Vec<(render::VolumeKind, Vec<u8>)> = vkinds.iter().map(|(k, _)| *k).zip(bufs).collect();
+    let channels_out: Vec<(VolumeKind, Vec<u8>)> = vkinds.iter().map(|(k, _)| *k).zip(bufs).collect();
     Some((ow, oh, od, channels_out))
 }
 
@@ -202,6 +225,7 @@ fn downsample_slice<T: bytemuck::Pod>(src: &[T], dims: (u32, u32), stride: (u32,
     }
 }
 
+#[cfg(feature = "threads")]
 struct Request {
     generation: u64,
     plan: VolumePlan,
@@ -210,6 +234,7 @@ struct Request {
 /// A finished background build, tagged so the app can confirm it still matches
 /// what's wanted. `volume: None` means the build failed (the app marks the
 /// timepoint built anyway, so it doesn't retry every frame).
+#[cfg(feature = "threads")]
 struct BuiltReply {
     generation: u64,
     time: usize,
@@ -219,12 +244,14 @@ struct BuiltReply {
 /// Owns the volume-builder worker thread + the latest result. Dropping it
 /// closes the request channel, which ends the worker (it finishes any in-flight
 /// build first).
+#[cfg(feature = "threads")]
 pub struct VolumeBuilder {
     tx: Sender<Request>,
     result: Arc<Mutex<Option<BuiltReply>>>,
     _handle: JoinHandle<()>,
 }
 
+#[cfg(feature = "threads")]
 impl VolumeBuilder {
     /// Spawn a worker that opens its own map of `path` (shares the OS page
     /// cache — no duplicate pixel RAM). Returns `None` if the thread fails to
@@ -268,6 +295,7 @@ impl VolumeBuilder {
     }
 }
 
+#[cfg(feature = "threads")]
 fn worker_loop(stack: TiffStack, rx: Receiver<Request>, result: Arc<Mutex<Option<BuiltReply>>>) {
     // Block for a request; channel closed (VolumeBuilder dropped) -> exit.
     while let Ok(mut req) = rx.recv() {
@@ -280,5 +308,27 @@ fn worker_loop(stack: TiffStack, rx: Receiver<Request>, result: Arc<Mutex<Option
         if let Ok(mut slot) = result.lock() {
             *slot = Some(BuiltReply { generation: req.generation, time: req.plan.time, volume });
         }
+    }
+}
+
+/// Without threads there's no background builder; `VolumeBuilder::new` returns
+/// `None` and every build runs synchronously through [`build_volume`] — the
+/// same path a failed thread spawn already takes.
+#[cfg(not(feature = "threads"))]
+pub struct VolumeBuilder(std::convert::Infallible);
+
+#[cfg(not(feature = "threads"))]
+impl VolumeBuilder {
+    pub fn new(_path: PathBuf) -> Option<Self> {
+        None
+    }
+
+    pub fn request(&self, _generation: u64, _plan: VolumePlan) -> bool {
+        match self.0 {}
+    }
+
+    #[allow(clippy::option_option)]
+    pub fn take_matching(&self, _generation: u64, _time: usize) -> Option<Option<BuiltVolume>> {
+        match self.0 {}
     }
 }

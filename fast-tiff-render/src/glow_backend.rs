@@ -4,66 +4,29 @@
 //! with a minification box filter for clean zoom-out. Each channel is either an
 //! integer texture (R16Uint — 8/16/32-bit-int sources, window/level in 0..65535
 //! units) or a float texture (R32F — 32-bit float sources, window/level in the
-//! data's own units, so the per-frame CPU rescale is avoided). Uploads happen
-//! from `app.rs` via `UploadCtx` (the live GL context from `Frame::gl`); `paint`
-//! is invoked from the egui_glow callback built by `paint_callback`.
+//! data's own units, so the per-frame CPU rescale is avoided).
+//!
+//! # Host responsibilities
+//!
+//! The host creates the GL context and hands over an `Arc` of it at
+//! construction; uploads then need no per-call context. `paint` still takes a
+//! `&glow::Context` explicitly, because GL is stateful and the host's drawing
+//! layer may hand back a context it has already configured (viewport, scissor,
+//! bound framebuffer) for the target rect — that setup is the host's job, and
+//! this backend deliberately does not second-guess it.
 
-use super::{ChannelKind, ChannelUniform, VolumeInterp, VolumeKind, VolumeParams, MAX_CHANNELS};
-use eframe::egui_glow;
-use eframe::glow::{self, HasContext as _};
-use std::sync::{Arc, Mutex};
+use crate::{ChannelKind, ChannelUniform, Lut, VolumeInterp, VolumeKind, VolumeParams, MAX_CHANNELS};
+use glow::HasContext as _;
+use std::sync::Arc;
 
 const LUT_WIDTH: i32 = 256;
 
-/// The `eframe::Renderer` this backend needs requested in `NativeOptions`.
-pub const RENDERER: eframe::Renderer = eframe::Renderer::Glow;
-
-/// Short human-readable backend name, shown in the UI.
+/// Short human-readable backend name, for a host that wants to show it.
 pub const BACKEND: &str = "glow";
 
-/// Shared handle to the GL render resources. `Arc<Mutex>` because the egui_glow
-/// paint callback (which draws) must be `Send + Sync + 'static`; uploads happen
-/// in `app::sync_gpu`, so the lock is uncontended (both on the UI thread).
-pub type Render = Arc<Mutex<ImageRenderResources>>;
-
-/// Build the render resources from eframe's creation context (its glow
-/// context). Called once at startup.
-pub fn init(cc: &eframe::CreationContext<'_>) -> Render {
-    let gl = cc
-        .gl
-        .as_ref()
-        .expect("FastTIFF requires the glow backend (NativeOptions::renderer = Glow)");
-    Arc::new(Mutex::new(ImageRenderResources::new(gl)))
-}
-
-/// Per-frame upload handle: the live GL context, pulled from `eframe::Frame`.
-/// `None` before the backend is up (shouldn't happen after init).
-pub struct UploadCtx<'a> {
-    gl: &'a glow::Context,
-}
-
-pub fn upload_ctx(frame: &eframe::Frame) -> Option<UploadCtx<'_>> {
-    frame.gl().map(|gl| UploadCtx { gl })
-}
-
-/// The egui paint callback that draws the current image into `rect`. Captures a
-/// clone of the shared resources and locks them at paint time.
-pub fn paint_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
-    let res = render.clone();
-    let callback = egui_glow::CallbackFn::new(move |_info, painter| {
-        if let Ok(r) = res.lock() {
-            r.paint(painter.gl());
-        }
-    });
-    egui::Shape::Callback(egui::PaintCallback {
-        rect,
-        callback: Arc::new(callback),
-    })
-}
-
 /// GPU bytes per volume sample for `kind` on this backend — glow stores each
-/// kind natively (R8/R16/R32F), so it matches the CPU-side size exactly. The
-/// volume builder budgets on the larger of CPU/GPU footprint.
+/// kind natively (R8/R16/R32F), so it matches the CPU-side size exactly. A
+/// volume builder should budget on the larger of CPU/GPU footprint.
 pub fn volume_gpu_bps(kind: VolumeKind) -> usize {
     match kind {
         VolumeKind::U8 => 1,
@@ -72,25 +35,9 @@ pub fn volume_gpu_bps(kind: VolumeKind) -> usize {
     }
 }
 
-/// Backend hook for `eframe::NativeOptions` tweaks; the glow backend needs none.
-pub fn tune_native_options(_options: &mut eframe::NativeOptions) {}
-
-/// The egui paint callback that ray-marches the 3D volume into `rect`.
-pub fn paint_volume_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
-    let res = render.clone();
-    let callback = egui_glow::CallbackFn::new(move |_info, painter| {
-        if let Ok(r) = res.lock() {
-            r.paint_volume(painter.gl());
-        }
-    });
-    egui::Shape::Callback(egui::PaintCallback {
-        rect,
-        callback: Arc::new(callback),
-    })
-}
-
-/// egui_glow gives us a desktop GL 3.x context, for which it uses GLSL `#version
-/// 140`. We match that so usampler2D / texelFetch / gl_VertexID are available.
+/// Targets a desktop GL 3.x context with GLSL `#version 140` — what egui_glow
+/// and most native GL hosts provide — so usampler2D / texelFetch / gl_VertexID
+/// are available.
 const VERTEX_SRC: &str = r#"#version 140
 out vec2 v_uv;
 void main() {
@@ -496,6 +443,10 @@ const KIND_INT16: u8 = 2; // integer channel: R16Uint full-size, R32F dummy
 const KIND_FLOAT: u8 = 3; // float channel: R32F full-size, int texture dummy
 
 pub struct ImageRenderResources {
+    /// Our handle on the host's GL context, so uploads need no per-call
+    /// context argument. `paint` still takes one explicitly — see the module
+    /// docs on why.
+    gl: Arc<glow::Context>,
     program: glow::NativeProgram,
     vao: glow::NativeVertexArray,
     channel_textures: [glow::NativeTexture; MAX_CHANNELS], // R16Uint (integer channels)
@@ -594,7 +545,11 @@ impl VolumeGl {
 }
 
 impl ImageRenderResources {
-    pub fn new(gl: &glow::Context) -> Self {
+    /// Build every program and texture on `gl`. The `Arc` is kept so later
+    /// uploads don't need the context passed back in.
+    pub fn new(gl: Arc<glow::Context>) -> Self {
+        let ctx = Arc::clone(&gl);
+        let gl: &glow::Context = &ctx;
         unsafe {
             let program = link_program(gl, VERTEX_SRC, FRAGMENT_SRC);
             let vao = gl.create_vertex_array().expect("create VAO");
@@ -606,6 +561,7 @@ impl ImageRenderResources {
             let u_ch_ftex = std::array::from_fn(|c| gl.get_uniform_location(program, &format!("ch{c}_ftex")));
 
             Self {
+                gl: Arc::clone(&ctx),
                 program,
                 vao,
                 channel_textures,
@@ -635,8 +591,8 @@ impl ImageRenderResources {
 
     /// Largest per-axis 3D-texture dimension the driver supports; the app uses
     /// it (with a memory cap) to decide whether the volume must be subsampled.
-    pub fn max_3d_texture_size(&self, ctx: &UploadCtx) -> u32 {
-        unsafe { ctx.gl.get_parameter_i32(glow::MAX_3D_TEXTURE_SIZE).max(0) as u32 }
+    pub fn max_3d_texture_size(&self) -> u32 {
+        unsafe { self.gl.get_parameter_i32(glow::MAX_3D_TEXTURE_SIZE).max(0) as u32 }
     }
 
     /// (Re)upload the whole volume, one entry per channel: each `bytes` is
@@ -644,8 +600,8 @@ impl ImageRenderResources {
     /// Channels past `channels.len()` are shrunk to 1x1x1 dummies. When a
     /// channel's dims + kind are unchanged (a 4D timepoint step), the existing
     /// storage is refilled with `tex_sub_image_3d` instead of reallocated.
-    pub fn upload_volumes(&mut self, ctx: &UploadCtx, w: u32, h: u32, d: u32, channels: &[(VolumeKind, Vec<u8>)]) {
-        let gl = ctx.gl;
+    pub fn upload_volumes(&mut self, w: u32, h: u32, d: u32, channels: &[(VolumeKind, Vec<u8>)]) {
+        let gl: &glow::Context = &self.gl;
         let v = &mut self.volume;
         unsafe {
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
@@ -718,7 +674,7 @@ impl ImageRenderResources {
     /// Switch every present volume channel's sampling filter without re-uploading.
     /// Cubic uses the GL linear filter (its 8-tap reconstruction is in-shader).
     /// No-op when nothing changed (this is called every 3D frame).
-    pub fn set_volume_interp(&mut self, ctx: &UploadCtx, interp: VolumeInterp) {
+    pub fn set_volume_interp(&mut self, interp: VolumeInterp) {
         let gl_interp = match interp {
             VolumeInterp::Nearest => glow::NEAREST as i32,
             VolumeInterp::Linear | VolumeInterp::Cubic => glow::LINEAR as i32,
@@ -733,8 +689,8 @@ impl ImageRenderResources {
             if let Some(kind) = self.volume.kinds[c] {
                 let tex = if kind == VolumeKind::F32 { self.volume.tex_float[c] } else { self.volume.tex_unorm[c] };
                 unsafe {
-                    ctx.gl.bind_texture(glow::TEXTURE_3D, Some(tex));
-                    set_volume_filter(ctx.gl, gl_interp, kind);
+                    self.gl.bind_texture(glow::TEXTURE_3D, Some(tex));
+                    set_volume_filter(&self.gl, gl_interp, kind);
                 }
             }
         }
@@ -746,8 +702,8 @@ impl ImageRenderResources {
         self.volume.params = Some(params);
     }
 
-    /// Ray-march the current volume, compositing every channel. The egui_glow
-    /// callback has already set the viewport/scissor to the canvas rect.
+    /// Ray-march the current volume, compositing every channel. Assumes the
+    /// host has already set the viewport/scissor to the target rect.
     pub fn paint_volume(&self, gl: &glow::Context) {
         let v = &self.volume;
         let Some(p) = v.params else { return };
@@ -799,7 +755,7 @@ impl ImageRenderResources {
     /// texture (float texture a 1x1 dummy); a `Float` channel gets a full-size
     /// R32F float texture (integer texture a 1x1 dummy); channels past
     /// `kinds.len()` are unused (both 1x1). No-op when nothing changed.
-    pub fn ensure_size(&mut self, ctx: &UploadCtx, width: u32, height: u32, kinds: &[ChannelKind]) {
+    pub fn ensure_size(&mut self, width: u32, height: u32, kinds: &[ChannelKind]) {
         let mut want = [KIND_UNUSED; MAX_CHANNELS];
         for (c, slot) in want.iter_mut().enumerate() {
             *slot = match kinds.get(c) {
@@ -812,7 +768,7 @@ impl ImageRenderResources {
         if self.current_size == (width, height) && self.current_kinds == want {
             return;
         }
-        let gl = ctx.gl;
+        let gl: &glow::Context = &self.gl;
         unsafe {
             for c in 0..MAX_CHANNELS {
                 // Integer texture: R8Uint or R16Uint at full size for an integer
@@ -834,19 +790,20 @@ impl ImageRenderResources {
     }
 
     /// Upload one integer channel's raw 16-bit samples (R16Uint texture).
-    pub fn upload_channel(&self, ctx: &UploadCtx, channel: usize, width: u32, height: u32, samples: &[u16]) {
+    pub fn upload_channel_u16(&self, channel: usize, width: u32, height: u32, samples: &[u16]) {
         if channel >= MAX_CHANNELS {
             return;
         }
-        let gl = ctx.gl;
+        let gl: &glow::Context = &self.gl;
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_textures[channel]));
             // Our rows are tightly packed (`width * 2` bytes for R16UI). Force
             // the unpack alignment to 1 so an odd-width image — whose row length
             // isn't a multiple of GL's default alignment of 4 — isn't read with
             // phantom end-of-row padding, which shears the image diagonally. We
-            // set it on every upload because the GL context is shared with
-            // egui_glow, which changes this global state for its own textures.
+            // set it on every upload because the GL context is shared with the
+            // host's own drawing layer, which changes this global state for its
+            // own textures.
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
             gl.tex_sub_image_2d(
                 glow::TEXTURE_2D,
@@ -865,11 +822,11 @@ impl ImageRenderResources {
     /// Upload one integer channel's raw 8-bit samples (R8Uint texture). Skips
     /// the CPU `0..255 -> 0..65535` widening; the window/level is scaled to
     /// 0..255 units on the app side instead.
-    pub fn upload_channel_u8(&self, ctx: &UploadCtx, channel: usize, width: u32, height: u32, samples: &[u8]) {
+    pub fn upload_channel_u8(&self, channel: usize, width: u32, height: u32, samples: &[u8]) {
         if channel >= MAX_CHANNELS {
             return;
         }
-        let gl = ctx.gl;
+        let gl: &glow::Context = &self.gl;
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_textures[channel]));
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
@@ -888,11 +845,11 @@ impl ImageRenderResources {
     }
 
     /// Upload one float channel's raw 32-bit float samples (R32F texture).
-    pub fn upload_channel_f32(&self, ctx: &UploadCtx, channel: usize, width: u32, height: u32, samples: &[f32]) {
+    pub fn upload_channel_f32(&self, channel: usize, width: u32, height: u32, samples: &[f32]) {
         if channel >= MAX_CHANNELS {
             return;
         }
-        let gl = ctx.gl;
+        let gl: &glow::Context = &self.gl;
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_ftextures[channel]));
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
@@ -911,11 +868,11 @@ impl ImageRenderResources {
     }
 
     /// Upload one channel's LUT (256 RGB entries) into row `channel`.
-    pub fn upload_lut(&self, ctx: &UploadCtx, channel: usize, lut: &[[u8; 3]; 256]) {
+    pub fn upload_lut(&self, channel: usize, lut: &Lut) {
         if channel >= MAX_CHANNELS {
             return;
         }
-        let gl = ctx.gl;
+        let gl: &glow::Context = &self.gl;
         let mut rgba = [0u8; (LUT_WIDTH * 4) as usize];
         for (i, px) in lut.iter().enumerate() {
             rgba[i * 4] = px[0];
@@ -945,11 +902,10 @@ impl ImageRenderResources {
 
     /// Stash the per-channel window/level + enabled + is-float flags, channel
     /// count, and the visible UV sub-rect (pan/zoom); applied as uniforms in
-    /// `paint`. The glow backend uploads no per-frame uniform buffer, so `ctx`
-    /// is unused — the signature matches the wgpu backend, which does.
+    /// `paint`. Nothing reaches the GPU here — the glow backend has no per-frame
+    /// uniform buffer, so these are stashed and set at draw time.
     pub fn set_params(
         &mut self,
-        _ctx: &UploadCtx,
         channels: &[ChannelUniform],
         num_channels: u32,
         uv_offset: [f32; 2],
@@ -969,8 +925,8 @@ impl ImageRenderResources {
         self.uv_scale = uv_scale;
     }
 
-    /// Draw the composited image. The egui_glow callback sets the viewport and
-    /// scissor to the image's on-screen rect for us.
+    /// Draw the composited image. Assumes the host has already set the viewport
+    /// and scissor to the image's on-screen rect.
     pub fn paint(&self, gl: &glow::Context) {
         unsafe {
             gl.use_program(Some(self.program));
