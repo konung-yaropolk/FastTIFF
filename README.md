@@ -46,7 +46,7 @@ you can't install software on. For day-to-day work on large stacks, the
 
 Needs a current browser with WebGPU or WebGL2 (Chrome/Edge 113+, Firefox 141+).
 
-## Downloads
+## ⬇️ Desktop App - Download links
 
 Every link below points at the **latest release**. You can either browse the
 [**Releases**](https://github.com/konung-yaropolk/FastTIFF/releases) page for a
