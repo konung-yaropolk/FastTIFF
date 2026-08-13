@@ -32,7 +32,7 @@ continuous scrolling), or the left/right arrow keys.
   </tr>
 </table>
 
-## 🌐 [FastTIFF Online](https://konung-yaropolk.github.io/FastTIFF/) — no install
+## 🌐 [FastTIFF Online](https://konung-yaropolk.github.io/FastTIFF/) - no install
 
 The full viewer runs in the browser: same Rust decoder, same GPU renderer, same
 ImageJ-compatible display. **Your files never leave your machine** — there is no
