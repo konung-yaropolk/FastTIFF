@@ -3,9 +3,9 @@
 # Enable once under Settings → Pages → Source → "GitHub Actions"; after that
 # every push to main redeploys. `workflow_dispatch` allows a manual run.
 #
-# This deploys `FastTIFF-web/` (eframe on a canvas). The React build in
-# `FastTIFF-web/` is still in the repo and still builds — to publish that one
-# instead, see the commented job at the bottom of this file.
+# This deploys `FastTIFF-web/` (egui/eframe on a canvas). The React build in
+# `FastTIFF-web-React-frontend-example/` is still in the repo and still
+# builds — to publish that one instead, see the note at the bottom of this file.
 name: Deploy web viewer
 
 on:
@@ -86,17 +86,17 @@ jobs:
       - id: deployment
         uses: actions/deploy-pages@v4
 # ---------------------------------------------------------------------------
-# To publish the React build (`FastTIFF-web/`) instead, swap the `build` job's
-# steps for:
+# To publish the React build (`FastTIFF-web-React-frontend-example/`) instead,
+# point every `working-directory` below at it and swap the build steps for:
 #
 #   - uses: actions/setup-node@v4
-#     with: { node-version: 20, cache: npm, cache-dependency-path: FastTIFF-web/package-lock.json }
+#     with: { node-version: 20, cache: npm, cache-dependency-path: FastTIFF-web-React-frontend-example/package-lock.json }
 #   - run: npm ci
-#     working-directory: FastTIFF-web
+#     working-directory: FastTIFF-web-React-frontend-example
 #   - run: npm run wasm && npm run typecheck && npx vite build
-#     working-directory: FastTIFF-web
+#     working-directory: FastTIFF-web-React-frontend-example
 #     env:
 #       BASE_PATH: /${{ github.event.repository.name }}/
 #
-# and point `upload-pages-artifact` at `FastTIFF-web/dist`. The React app needs
+# and point `upload-pages-artifact` at `FastTIFF-web-React-frontend-example/dist`. The React app needs
 # BASE_PATH because Vite rewrites asset URLs at build time; the egui one doesn't.

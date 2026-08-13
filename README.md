@@ -4,6 +4,7 @@
 [![License](https://img.shields.io/badge/license-%20%20GNU%20GPLv3%20-green)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/release.yml?label=build)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
 [![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/ci.yml)
+[![Try it online](https://img.shields.io/badge/Try%20it-FastTIFF%20Online-5b9dd9?logo=googlechrome&logoColor=white)](https://konung-yaropolk.github.io/FastTIFF/)
 
 
 [![FastTIFF](https://github.com/user-attachments/assets/b935b2fa-86cc-4edf-ab5a-255a1aa73e4d)](https://github.com/konung-yaropolk/FastTIFF/releases)  
@@ -30,6 +31,20 @@ continuous scrolling), or the left/right arrow keys.
     </td>
   </tr>
 </table>
+
+## 🌐 [FastTIFF Online](https://konung-yaropolk.github.io/FastTIFF/) — no install
+
+The full viewer runs in the browser: same Rust decoder, same GPU renderer, same
+ImageJ-compatible display. **Your files never leave your machine** — there is no
+server and nothing is uploaded. The page is static; the TIFF is decoded and
+rendered locally by WebAssembly and your GPU.
+
+Good for a quick look, a second opinion on someone else's stack, or a machine
+you can't install software on. For day-to-day work on large stacks, the
+[desktop build](#downloads) is substantially faster — see
+[what the browser gives up](#browser-limitations).
+
+Needs a current browser with WebGPU or WebGL2 (Chrome/Edge 113+, Firefox 141+).
 
 ## Downloads
 
@@ -70,6 +85,45 @@ developer certificate):
   `xattr -dr com.apple.quarantine /Applications/FastTIFF.app` once.
 
 Not listed (32-bit or a different CPU)? Build from source.
+
+## Browser limitations
+
+[FastTIFF Online](https://konung-yaropolk.github.io/FastTIFF/) runs the same code as the
+desktop build, but the browser withholds three things the native app relies on. None of it is a
+missing feature — it's the platform:
+
+**File size.** The desktop build memory-maps the file, so opening a 20 GB stack
+is instant and only the frames you actually visit occupy RAM. A browser has no
+filesystem to map, so the whole file is read into WebAssembly memory. That
+memory is 32-bit — a hard ceiling around **4 GB**, and in practice browsers
+start failing well before it. Loading also costs roughly double transiently,
+while the bytes are copied from the browser's buffer into wasm. **Rule of
+thumb: comfortable up to a few hundred MB; multi-GB stacks want the desktop
+build.**
+
+**Speed, especially in 3D.** `wasm32` has no threads, so three things the
+desktop does in the background all happen inline on one core:
+
+- *Read-ahead decoding* is gone. Scrubbing an uncompressed stack is barely
+  affected (decoding is a zero-copy borrow either way), but a compressed one is
+  noticeably slower because each frame decodes on demand.
+- *Volume building is synchronous.* On the desktop a worker thread assembles the
+  3D volume while the UI stays live; in the browser the page **freezes** during
+  "Building the volume…", and again on every timepoint step of a 4D stack.
+- *Parallel decode* never engages, so wide 32-/64-bit frames take the
+  single-core path.
+
+Ray-marching itself is GPU work and stays fast once the volume is built — it's
+getting there that's slower. A large 3D stack can take several seconds and a
+visible stall.
+
+**ZSTD-compressed stacks won't open.** The ZSTD codec is a C library that can't
+be built for this target. LZW, Deflate, PackBits and uncompressed all work; a
+ZSTD file reports a clear error rather than failing silently.
+
+Everything else — per-channel contrast and LUTs, ImageJ/OME metadata,
+dimension-order correction, playback, all three volume modes — behaves exactly
+as it does natively, because it *is* the same code.
 
 ## Build & run
 
