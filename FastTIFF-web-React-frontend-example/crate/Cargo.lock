@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.9.8"
+version = "0.9.9"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-wasm"
-version = "0.9.8"
+version = "0.9.9"
 dependencies = [
  "console_error_panic_hook",
  "console_log",

@@ -1,0 +1,51 @@
+# The egui build of the FastTIFF viewer, running on a browser canvas.
+#
+# Standalone for the same reason as FastTIFF-web/crate: Cargo unifies features
+# across a workspace, so one build covering this crate and the desktop app
+# would union `threads`/`mmap`/`codec-zstd` back into the viewer and break the
+# wasm build.
+[workspace]
+
+[package]
+name = "fasttiff-web-egui"
+version = "0.9.8"
+edition = "2021"
+description = "FastTIFF's egui interface, compiled to WebAssembly and drawn on a browser canvas."
+license = "GPL-3.0-only"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The same core the desktop app and the React build use, in its
+# single-threaded, filesystem-free shape.
+fast-tiff-viewer = { path = "../fast-tiff-viewer", default-features = false, features = ["backend-wgpu"] }
+scivis-render = { path = "../scivis-render", features = ["backend-wgpu"] }
+
+# `default-features = false` drops winit, accesskit and the native windowing
+# stack; `wgpu` is the only backend that works on a canvas here.
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "wgpu"] }
+egui = "0.34"
+# No direct `wgpu` dependency on purpose: `render.rs` takes it through
+# `eframe::egui_wgpu::wgpu`, so there is exactly one wgpu in the build and no
+# chance of this crate's feature choices perturbing eframe's copy.
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+log = "0.4"
+console_log = "1"
+console_error_panic_hook = "0.1"
+# Async file picker — the sync native dialog has no browser equivalent.
+rfd = { version = "0.17", default-features = false }
+
+[dependencies.web-sys]
+version = "0.3"
+features = ["HtmlCanvasElement", "Window", "Document", "Element"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

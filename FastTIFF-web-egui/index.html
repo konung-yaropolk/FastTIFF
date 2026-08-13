@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <meta
+      name="description"
+      content="FastTIFF in the browser — a fast multi-frame scientific TIFF viewer with per-channel contrast, LUTs and GPU volume rendering. Files never leave your machine."
+    />
+    <title>FastTIFF — scientific TIFF viewer in the browser</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #1b1b1f;
+        color: #e6e6ea;
+        font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      /* eframe draws everything into this one canvas. */
+      canvas#app {
+        display: block;
+        width: 100%;
+        height: 100%;
+        outline: none;
+      }
+      #boot {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        text-align: center;
+        padding: 24px;
+      }
+      #boot .sub {
+        color: #a0a0ac;
+        font-size: 13px;
+        max-width: 34em;
+      }
+      #boot.error .title {
+        color: #e06c6c;
+      }
+      .spinner {
+        width: 26px;
+        height: 26px;
+        border: 3px solid #3a3a44;
+        border-top-color: #5b9dd9;
+        border-radius: 50%;
+        animation: spin 0.9s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="app"></canvas>
+
+    <div id="boot">
+      <div class="spinner"></div>
+      <div class="title">Loading FastTIFF…</div>
+      <div class="sub">Compiling the viewer and starting the GPU.</div>
+    </div>
+
+    <script type="module">
+      import init, { start } from "./pkg/fasttiff_web_egui.js";
+
+      const boot = document.getElementById("boot");
+      const fail = (title, detail) => {
+        boot.classList.add("error");
+        boot.innerHTML =
+          `<div class="title">${title}</div><div class="sub">${detail}</div>`;
+      };
+
+      try {
+        await init();
+        // Keep the handle alive: dropping it would tear down the event loop.
+        window.__fasttiff = await start(document.getElementById("app"));
+        boot.remove();
+      } catch (e) {
+        console.error(e);
+        fail(
+          "Could not start the viewer",
+          "This needs a browser with WebGPU or WebGL2 — try a current Chrome, Edge or Firefox. " +
+            "Details are in the developer console.",
+        );
+      }
+    </script>
+  </body>
+</html>

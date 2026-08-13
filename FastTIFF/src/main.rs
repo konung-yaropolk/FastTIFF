@@ -87,6 +87,11 @@ fn main() -> eframe::Result {
             // Event handler that covers opens while the app is already running.
             #[cfg(target_os = "macos")]
             macos_open::set_ctx(cc.egui_ctx.clone());
+            // Dark by default rather than following the system theme: this is an
+            // image viewer, and a light chrome throws stray light onto the
+            // canvas, skewing how dim structures in a microscopy stack read.
+            // The user can still switch it in egui's own settings.
+            cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
             let render = render::init(cc);
             Ok(Box::new(app::ViewerApp::new(initial_path, render)))
         }),

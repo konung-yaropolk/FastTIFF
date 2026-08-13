@@ -1,7 +1,11 @@
-# Build FastTIFF-web and publish it to GitHub Pages.
+# Build the egui web viewer and publish it to GitHub Pages.
 #
 # Enable once under Settings → Pages → Source → "GitHub Actions"; after that
 # every push to main redeploys. `workflow_dispatch` allows a manual run.
+#
+# This deploys `FastTIFF-web/` (eframe on a canvas). The React build in
+# `FastTIFF-web/` is still in the repo and still builds — to publish that one
+# instead, see the commented job at the bottom of this file.
 name: Deploy web viewer
 
 on:
@@ -16,7 +20,6 @@ on:
       - ".github/workflows/deploy-web.yml"
   workflow_dispatch:
 
-# Pages needs these; `contents: read` is enough for the checkout.
 permissions:
   contents: read
   pages: write
@@ -43,42 +46,30 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            FastTIFF-web/crate/target
-          key: wasm-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'FastTIFF-web/crate/Cargo.toml') }}
-          restore-keys: wasm-${{ runner.os }}-
+            FastTIFF-web/target
+          key: egui-wasm-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'FastTIFF-web/Cargo.toml') }}
+          restore-keys: egui-wasm-${{ runner.os }}-
 
       - uses: jetli/wasm-pack-action@v0.4.0
         with:
           version: latest
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: FastTIFF-web/package-lock.json
-
-      - name: Install JS dependencies
+      - name: Build wasm
         working-directory: FastTIFF-web
-        run: npm ci
+        run: wasm-pack build --target web --out-dir pkg --release
 
-      # Build the wasm first so the generated .d.ts exists — then the
-      # type-check is a real gate on the React code rather than something that
-      # has to be waved through.
-      - name: Build wasm bindings
+      # `index.html` loads `./pkg/…` relatively, so the site works at any
+      # subpath — no base-path substitution needed, unlike the Vite build.
+      - name: Assemble the site
         working-directory: FastTIFF-web
-        run: npm run wasm
-
-      - name: Type-check
-        working-directory: FastTIFF-web
-        run: npm run typecheck
-
-      - name: Build site
-        working-directory: FastTIFF-web
-        # A project site is served from /<repo>/, so assets need that prefix.
-        # `github.event.repository.name` keeps this correct if the repo is renamed.
-        env:
-          BASE_PATH: /${{ github.event.repository.name }}/
-        run: npx vite build
+        run: |
+          mkdir -p dist
+          cp index.html dist/
+          cp -r pkg dist/pkg
+          # A small demo stack, so the page is usable without your own file.
+          mkdir -p dist/samples
+          cp ../fast-tiff-lib/tests/fixtures/ij_u16_spp1_p6_hyperstack.tif \
+             dist/samples/hyperstack-6plane-16bit.tif
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
@@ -94,3 +85,18 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+# ---------------------------------------------------------------------------
+# To publish the React build (`FastTIFF-web/`) instead, swap the `build` job's
+# steps for:
+#
+#   - uses: actions/setup-node@v4
+#     with: { node-version: 20, cache: npm, cache-dependency-path: FastTIFF-web/package-lock.json }
+#   - run: npm ci
+#     working-directory: FastTIFF-web
+#   - run: npm run wasm && npm run typecheck && npx vite build
+#     working-directory: FastTIFF-web
+#     env:
+#       BASE_PATH: /${{ github.event.repository.name }}/
+#
+# and point `upload-pages-artifact` at `FastTIFF-web/dist`. The React app needs
+# BASE_PATH because Vite rewrites asset URLs at build time; the egui one doesn't.
