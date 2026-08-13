@@ -57,10 +57,11 @@ pub use backend::{ImageRenderResources, BACKEND};
 pub type Render = Arc<Mutex<ImageRenderResources>>;
 
 /// The `eframe::Renderer` the compiled-in backend needs requested in
-/// `NativeOptions`.
-#[cfg(feature = "renderer-glow")]
+/// `NativeOptions`. Native only — `WebOptions` has no equivalent field; the
+/// browser build is always wgpu.
+#[cfg(all(feature = "renderer-glow", not(target_arch = "wasm32")))]
 pub const RENDERER: eframe::Renderer = eframe::Renderer::Glow;
-#[cfg(all(feature = "renderer-wgpu", not(feature = "renderer-glow")))]
+#[cfg(all(feature = "renderer-wgpu", not(feature = "renderer-glow"), not(target_arch = "wasm32")))]
 pub const RENDERER: eframe::Renderer = eframe::Renderer::Wgpu;
 
 // --- glow ------------------------------------------------------------------
@@ -109,6 +110,7 @@ mod glue {
     }
 
     /// Backend hook for `eframe::NativeOptions`; the glow backend needs none.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn tune_native_options(_options: &mut eframe::NativeOptions) {}
 }
 
@@ -154,6 +156,7 @@ mod glue {
     /// Backend hook for `eframe::NativeOptions`: ask the renderer which optional
     /// device features are worth having (16-bit-norm textures, for full-precision
     /// volume data) and request them when the adapter offers them.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn tune_native_options(options: &mut eframe::NativeOptions) {
         if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
             setup.device_descriptor = Arc::new(|adapter| {
@@ -173,6 +176,26 @@ mod glue {
                     required_limits: adapter.limits(),
                     ..Default::default()
                 }
+            });
+        }
+    }
+
+    /// The web twin of `tune_native_options`, and not optional: eframe would
+    /// otherwise build the device with `wgpu::Limits::default()`, which is
+    /// *smaller* than this renderer needs — the composite pass binds 13 sampled
+    /// textures and the volume pass allocates 3D textures. Exceeding a limit
+    /// makes wgpu reject resource creation, and the fallout surfaces far from
+    /// the cause: egui's own font atlas fails to allocate and the next frame
+    /// panics inside egui-wgpu. The adapter's own limits are by definition
+    /// supported, and every texture here is already sized against a budget.
+    #[cfg(target_arch = "wasm32")]
+    pub fn tune_web_options(options: &mut eframe::WebOptions) {
+        if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+            setup.device_descriptor = Arc::new(|adapter| wgpu::DeviceDescriptor {
+                label: Some("fasttiff wgpu device"),
+                required_features: scivis_render::wgpu_backend::optional_features(adapter),
+                required_limits: adapter.limits(),
+                ..Default::default()
             });
         }
     }
@@ -234,4 +257,8 @@ mod glue {
     }
 }
 
-pub use glue::{init, paint_callback, paint_volume_callback, tune_native_options};
+pub use glue::{init, paint_callback, paint_volume_callback};
+#[cfg(not(target_arch = "wasm32"))]
+pub use glue::tune_native_options;
+#[cfg(target_arch = "wasm32")]
+pub use glue::tune_web_options;

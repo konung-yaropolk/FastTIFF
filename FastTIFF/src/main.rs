@@ -1,10 +1,11 @@
 #![windows_subsystem = "windows"]
 
-mod app;
+// The UI lives in the library half of this crate so the web build can reuse
+// it; see `src/lib.rs`. This file is only the native host.
+use fasttiff::{app, render};
 #[cfg(target_os = "macos")]
-mod macos_open;
-mod process;
-mod render;
+use fasttiff::macos_open;
+use fasttiff::process;
 
 /// Decode the bundled 256×256 PNG into the RGBA image `ViewportBuilder::with_icon`
 /// wants. Baked into the binary with `include_bytes!`, so it needs no icon file

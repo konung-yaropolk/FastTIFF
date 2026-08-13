@@ -21,26 +21,48 @@ Needs a current browser with WebGPU or WebGL2 (Chrome/Edge 113+, Firefox 141+).
 
 ```text
   fast-tiff-lib      TIFF parsing + decode          ┐
-  scivis-render      GPU compositing + ray-marching ├─ shared, unchanged
-  fast-tiff-viewer   stack model, camera, GPU sync  ┘
+  scivis-render      GPU compositing + ray-marching ├─ shared with the desktop app
+  fast-tiff-viewer   stack model, camera, GPU sync  │
+  FastTIFF (lib)     the egui UI + eframe adapter   ┘
         │
-  src/render.rs      eframe ↔ scivis-render adapter (~100 lines)
-  src/app.rs         the egui UI
+  src/lib.rs         this crate: ~57 lines of browser host
 ```
+
+**There is no UI code in this crate.** The interface is the *same*
+`fasttiff::ViewerApp` the desktop binary runs — `FastTIFF` is a lib + bin, and
+both hosts construct the same app. All this crate does is hand eframe a canvas
+instead of a window.
+
+What actually differs between the two hosts is 25 `#[cfg(target_arch = "wasm32")]`
+sites across ~2,600 lines of shared UI, and every one of them is about the
+*host* rather than the viewer:
+
+| | Desktop | Web |
+|---|---|---|
+| Window sizing, position, title | `ViewerApp::manage_window` | nothing — CSS sizes the canvas |
+| Opening a file | blocking dialog, argv, Apple Events → a path | async picker / drop → bytes |
+| GPU option hook | `render::tune_native_options` | `render::tune_web_options` |
+| Extra files at once | launched as sibling processes | n/a |
+
+Both routes to a file meet at one `Opened` enum, so everything downstream —
+loading, fit, resetting the chrome — is shared.
 
 ## Two web builds, one core
 
 | | `FastTIFF-web-React-frontend-example/` | `FastTIFF-web/` (this, deployed) |
 |---|---|---|
 | UI | React + TypeScript, DOM widgets | egui, drawn on the canvas |
-| Bundle | 2.3 MB wasm + 219 kB JS | 6.5 MB wasm, no JS framework |
+| Bundle | 2.3 MB wasm + 219 kB JS | 6.6 MB wasm, no JS framework |
 | Toolchain | wasm-pack + npm + Vite | wasm-pack only |
-| UI shares code with desktop | no — reimplemented | **yes — same toolkit, same idioms** |
+| UI code | reimplemented (~700 lines TSX) | **literally the desktop app's** |
+| Fixing a UI bug | fix it twice | fix it once |
 | Native-feeling DOM (a11y, text selection, mobile) | yes | limited |
 
-Both sit on the identical `fast-tiff-viewer` core; neither reimplements any
-stack, channel, contrast, dimension-order, playback or camera logic. The
-difference is only which toolkit paints.
+Both sit on the identical `fast-tiff-viewer` core and neither reimplements any
+stack, channel, contrast, dimension-order, playback or camera logic. The React
+build is kept as a worked example of driving the core from JavaScript — useful
+if you want a DOM UI — but it does duplicate the interface, which is why the
+egui build is the one deployed.
 
 ## Build
 

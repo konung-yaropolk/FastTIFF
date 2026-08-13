@@ -1,12 +1,12 @@
 //! FastTIFF's egui interface, compiled to WebAssembly.
 //!
-//! The desktop app and this one are the *same* UI toolkit over the *same*
-//! core — the only difference is the host: eframe on winit there, eframe on a
-//! browser canvas here. Compare with `FastTIFF-web/`, which puts a React UI
-//! over the identical core.
-
-mod app;
-mod render;
+//! There is no UI code here: the interface is the **same** [`fasttiff::ViewerApp`]
+//! the desktop binary runs. This crate is only the browser host — it hands
+//! eframe a canvas instead of a window, and hands the shared adapter the
+//! device-limit tuning the web needs.
+//!
+//! The desktop entry point is `FastTIFF/src/main.rs`; compare the two and the
+//! whole difference between the platforms is visible at a glance.
 
 use wasm_bindgen::prelude::*;
 
@@ -21,14 +21,22 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<WebHandle, JsVa
     let _ = console_log::init_with_level(log::Level::Warn);
 
     let mut web_options = eframe::WebOptions::default();
-    render::tune_web_options(&mut web_options);
+    fasttiff::render::tune_web_options(&mut web_options);
 
     let runner = eframe::WebRunner::new();
     runner
         .start(
             canvas,
             web_options,
-            Box::new(|cc| Ok(Box::new(app::WebApp::new(cc)))),
+            Box::new(|cc| {
+                // Dark by default, as on the desktop: a light chrome throws
+                // stray light onto the canvas and skews how dim structures read.
+                cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
+                let render = fasttiff::render::init(cc);
+                // No initial path — a browser has no argv and no filesystem;
+                // files arrive from the picker or a drop.
+                Ok(Box::new(fasttiff::ViewerApp::new(None, render)))
+            }),
         )
         .await?;
     Ok(WebHandle { runner })

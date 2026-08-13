@@ -59,6 +59,14 @@ jobs:
           cargo check -p fast-tiff-lib --target wasm32-unknown-unknown --no-default-features
           cargo check -p fast-tiff-viewer --target wasm32-unknown-unknown --no-default-features --features backend-wgpu
 
+      # The egui UI is shared between the desktop binary and the browser build,
+      # so a desktop-only edit can break the wasm side. This is the check that
+      # catches it — `FastTIFF-web` is its own workspace, hence the separate
+      # invocation.
+      - name: Check the shared UI builds for the web
+        working-directory: FastTIFF-web
+        run: cargo check --target wasm32-unknown-unknown
+
       # The single-threaded shape of fast-tiff-viewer — no read-ahead worker, no
       # background volume builder, no rayon — which is what a wasm frontend will
       # build. Nothing in the desktop app selects it, so without this step the

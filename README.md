@@ -190,8 +190,16 @@ intended second one):
         │
   fast-tiff-viewer  stack model, channel settings, decode → GPU sync
         │
-  FastTIFF          the eframe desktop frontend
+  FastTIFF          the egui UI (lib) + the native binary
+        │
+  FastTIFF-web      a browser host around the same UI (~57 lines)
 ```
+
+`FastTIFF` is a lib + bin: the library half holds the egui interface, and both
+the desktop binary and the web build construct the same `ViewerApp`. The UI is
+written once; what differs per host — window management, how a file is opened,
+the GPU option hook — is confined to a handful of `#[cfg(target_arch = "wasm32")]`
+sites.
 
 - **`fast-tiff-lib/`** - pure parsing/decoding library, no GUI or GPU
   dependencies. IFD-chain walking, ImageJ metadata parsing, strip decoding

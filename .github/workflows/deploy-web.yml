@@ -14,6 +14,9 @@ on:
     # Only rebuild when something the bundle actually contains changes.
     paths:
       - "FastTIFF-web/**"
+      # The shared egui UI lives in the desktop crate's library half, so the
+      # deployed bundle changes when it does.
+      - "FastTIFF/**"
       - "fast-tiff-lib/**"
       - "fast-tiff-viewer/**"
       - "scivis-render/**"

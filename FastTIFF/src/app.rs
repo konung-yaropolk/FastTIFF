@@ -25,6 +25,7 @@ use fast_tiff_viewer::channels::{
 };
 use fast_tiff_viewer::{DecodeMode, Stack, ViewMode, Viewer};
 use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver, Sender};
 
 mod camera;
 mod overlay;
@@ -54,6 +55,8 @@ const ZOOM_LEVELS: [f32; 21] = [
 
 /// Smallest the window is ever sized to (inner size, points). Zooming out past
 /// this keeps the window here and just letterboxes the shrinking image.
+/// Native only — the canvas is sized by the page.
+#[cfg(not(target_arch = "wasm32"))]
 const MIN_WINDOW: f32 = 256.0;
 
 /// Fast-scroll rate is a fraction of movie total frames number to be skipped
@@ -87,6 +90,7 @@ fn stepped_zoom(current: f32, dir: i32) -> f32 {
 /// for the title bar, taskbar, and window borders. `None` until the monitor
 /// size is reported. This is the cap on how large the window may grow — beyond
 /// it the image overflows the window and becomes pannable.
+#[cfg(not(target_arch = "wasm32"))]
 fn monitor_work_area(ctx: &egui::Context) -> Option<egui::Vec2> {
     ctx.input(|i| i.viewport().monitor_size)
         .map(|m| egui::vec2((m.x * 0.95).max(1.0), (m.y * 0.90).max(1.0)))
@@ -97,6 +101,7 @@ fn monitor_work_area(ctx: &egui::Context) -> Option<egui::Vec2> {
 /// normal image opens at 100%, a big one at 50% or 25%). Returns `None` when the
 /// monitor size isn't reported yet (caller should keep waiting rather than
 /// guess) so a huge image never briefly opens oversized.
+#[cfg(not(target_arch = "wasm32"))]
 fn initial_fit_zoom(ctx: &egui::Context, img_w: f32, img_h: f32, chrome_h: f32) -> Option<f32> {
     let avail = monitor_work_area(ctx)?;
     // Largest zoom level at most 100% that still fits the work area.
@@ -108,6 +113,21 @@ fn initial_fit_zoom(ctx: &egui::Context, img_w: f32, img_h: f32, chrome_h: f32) 
     Some(ZOOM_LEVELS[0]) // even the smallest level overflows — open there and pan
 }
 
+/// A file the user asked to open, however it arrived.
+///
+/// Native and web get files by different routes — a path from a dialog, argv or
+/// an Apple Event, versus bytes from an async browser picker or a drop event —
+/// so they meet here and everything downstream is shared.
+enum Opened {
+    /// A path on disk. Native only; the browser has no filesystem to name.
+    #[cfg(not(target_arch = "wasm32"))]
+    Path(PathBuf),
+    /// The file's bytes plus its name, for display. Only the web build
+    /// constructs this — natively every route to a file yields a path.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    Bytes(Vec<u8>, String),
+}
+
 pub struct ViewerApp {
     /// Everything that isn't GUI: the loaded stack, channel settings, playback
     /// clock, 3D camera, and the decode→GPU sync. See `fast_tiff_viewer`.
@@ -115,6 +135,14 @@ pub struct ViewerApp {
     /// GPU textures/shader for compositing the image, shared with the paint
     /// callback. Created once at startup (see `crate::render::init`).
     render: Render,
+    /// Files opened asynchronously arrive here. Only the web picker uses it —
+    /// the native dialog blocks and applies its result directly — but the
+    /// channel exists on both so the drain path is shared.
+    /// Only the async web picker sends; natively the dialog blocks and applies
+    /// its result directly, so the sender is unused there.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    open_tx: Sender<Opened>,
+    open_rx: Receiver<Opened>,
 
     // --- window chrome ------------------------------------------------------
     /// Channel buttons + contrast sliders are tucked under a small
@@ -135,7 +163,9 @@ pub struct ViewerApp {
     /// Set when something (initial fit or a zoom step) wants the window resized
     /// to match `zoom` on this frame. Applied once, then cleared.
     resize_to_zoom: bool,
-    /// The window title last sent via `ViewportCommand::Title`.
+    /// The window title last sent via `ViewportCommand::Title`. Native only —
+    /// a canvas has no title bar; the page's `<title>` is the host's business.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     last_title: Option<String>,
     /// When the channels panel was just toggled: the bottom-bar height *before*
     /// the toggle took visual effect, so the next frame can grow/shrink the
@@ -179,9 +209,13 @@ pub struct ViewerApp {
 
 impl ViewerApp {
     pub fn new(initial_path: Option<PathBuf>, render: Render) -> Self {
+        let (open_tx, open_rx) = channel();
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut app = Self {
             core: Viewer::new(),
             render,
+            open_tx,
+            open_rx,
             channels_panel_expanded: false,
             zoom: 1.0,
             pending_initial_fit: false,
@@ -200,52 +234,318 @@ impl ViewerApp {
             move_speed: 1.0,
             scroll_speed: 1.0,
         };
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = initial_path {
-            app.open_file(path);
+            app.apply_opened(Opened::Path(path));
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = initial_path;
         app
     }
 
-    /// Open `path`, then reset the window chrome that describes the old file.
-    /// The core handles everything about the stack itself (and records any
-    /// error in `core.status`, which the bottom bar shows).
-    fn open_file(&mut self, path: PathBuf) {
-        let _ = self.core.open(path);
-        // Start at 1:1; the next frame computes a fit-to-screen zoom (the
-        // largest level ≤ 100% that fits) and sizes the window once.
+    /// Hand an opened file to the core, then reset the chrome that described
+    /// the previous one. The core records any failure in `core.status`, which
+    /// the bottom bar shows, and keeps the old stack loaded.
+    fn apply_opened(&mut self, opened: Opened) {
+        let _ = match opened {
+            #[cfg(not(target_arch = "wasm32"))]
+            Opened::Path(path) => self.core.open(path),
+            Opened::Bytes(bytes, name) => self.core.load_bytes(bytes, PathBuf::from(name)),
+        };
+        // Start at 1:1; on native the next frame computes a fit-to-screen zoom
+        // and sizes the window once. On the web `pending_initial_fit` is
+        // consumed by the canvas layout instead.
         self.zoom = 1.0;
         self.pan = egui::Vec2::ZERO;
         self.pending_initial_fit = true;
         self.resize_to_zoom = false;
-        // Close any pop-up windows left open from the previous file — their
-        // contents (metadata, 3D settings) describe that stack, so a fresh open
-        // should start with a clean view.
+        // Close any pop-up windows left over from the previous file — their
+        // contents (metadata, 3D settings) describe that stack.
         self.show_metadata = false;
         self.show_render_settings = false;
     }
+
+    /// Drain anything the async picker produced since the last frame. A no-op
+    /// natively, where the dialog is synchronous.
+    fn drain_pending_open(&mut self) {
+        while let Ok(opened) = self.open_rx.try_recv() {
+            self.apply_opened(opened);
+        }
+    }
+
+    /// Show the platform's file picker.
+    ///
+    /// Native: a blocking dialog that can select several files — the first
+    /// opens here and the rest are launched in their own processes, matching
+    /// the command line and drag-drop. Web: an async picker that posts its
+    /// result back through `open_rx`.
+    fn show_open_dialog(&mut self, ctx: &egui::Context) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = ctx;
+            if let Some(paths) = rfd::FileDialog::new().add_filter("TIFF", &["tif", "tiff"]).pick_files() {
+                if let Some(first) = crate::process::open_all(&paths) {
+                    self.apply_opened(Opened::Path(first.clone()));
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let tx = self.open_tx.clone();
+            let ctx = ctx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Some(handle) =
+                    rfd::AsyncFileDialog::new().add_filter("TIFF", &["tif", "tiff"]).pick_file().await
+                {
+                    let name = handle.file_name();
+                    let _ = tx.send(Opened::Bytes(handle.read().await, name));
+                }
+                // Wake the UI whether or not a file was chosen.
+                ctx.request_repaint();
+            });
+        }
+    }
+}
+
+impl ViewerApp {
+    /// Size, position and title the OS window in response to this frame's
+    /// events. Native only — a browser canvas is sized by CSS, and none of
+    /// `ViewportCommand` means anything there.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn manage_window(
+        &mut self,
+        ui: &egui::Ui,
+        toolbar_response: &egui::InnerResponse<()>,
+        scrub_bar_response: &egui::InnerResponse<()>,
+    ) {
+        // Window sizing happens ONLY in response to explicit events — a freshly
+        // opened file, or a zoom change (handled below) — never every frame.
+        // That's what lets the window be freely resized and maximized without
+        // shaking or being snapped back.
+        let toolbar_height = toolbar_response.response.rect.height();
+        let bottom_bar_height = scrub_bar_response.response.rect.height();
+        let chrome_height = toolbar_height + bottom_bar_height;
+
+        // Panel expand/collapse: grow (or shrink) the window height by the
+        // panel's own height change, so the image and toolbar above stay put
+        // and the panel "drops down" from its position. One-shot, triggered
+        // only by the toggle. Skipped when the window is maximized — there the
+        // image just letterboxes into the space the panel takes. We stay armed
+        // until the height actually changes (the toggle frame still reports the
+        // old height), repainting meanwhile so the next frame lands.
+        if self.panel_grow_armed {
+            let delta = bottom_bar_height - self.panel_old_h;
+            if delta.abs() > 0.5 {
+                self.panel_grow_armed = false;
+                let maximized = ui.ctx().input(|i| i.viewport().maximized).unwrap_or(false);
+                if !maximized {
+                    let cur = ui.ctx().content_rect().size();
+                    let h = (cur.y + delta).round().max(200.0);
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(cur.x.round(), h)));
+                }
+            } else {
+                ui.ctx().request_repaint();
+            }
+        }
+
+        let img_dims = self
+            .core
+            .stack
+            .as_ref()
+            .and_then(|l| l.tiff.frames.first())
+            .map(|f| (f.width as f32, f.height as f32));
+
+        if let Some((img_w, img_h)) = img_dims {
+            // On open: pick the largest zoom level ≤ 100% at which the image +
+            // chrome still fits the monitor (a huge image opens scaled down, a
+            // normal one at 100%). Deferred to here because the chrome height
+            // and monitor size aren't known at open time.
+            if self.pending_initial_fit {
+                if let Some(z) = initial_fit_zoom(ui.ctx(), img_w, img_h, chrome_height) {
+                    self.zoom = z;
+                    self.pan = egui::Vec2::ZERO;
+                    self.pending_initial_fit = false;
+                    self.resize_to_zoom = true;
+                } else {
+                    // Monitor size not reported yet (can stay unknown until the
+                    // window first gets focus/input). Poll a few times a second
+                    // rather than spinning `request_repaint` every frame, which
+                    // would peg a CPU core while the app sits idle on load.
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                }
+            }
+
+            // When maximized, the window is left completely alone on zoom — the
+            // image just zooms/pans/letterboxes inside it (handled by the
+            // central panel's UV transform).
+            let maximized = ui.ctx().input(|i| i.viewport().maximized).unwrap_or(false);
+
+            // The target window inner size for the current zoom: the image scaled
+            // uniformly, clamped to fit the monitor and to the minimum size. Once
+            // it hits the minimum the window stops shrinking and the image just
+            // letterboxes. Computed once so the reposition decision and the
+            // actual resize agree. `None` when maximized (window left alone).
+            let target_window = if maximized {
+                None
+            } else {
+                let window_scale = match monitor_work_area(ui.ctx()) {
+                    Some(m) => {
+                        let fit = (m.x / img_w).min((m.y - chrome_height).max(1.0) / img_h);
+                        self.zoom.min(fit)
+                    }
+                    None => self.zoom,
+                };
+                let w = (img_w * window_scale).round().max(MIN_WINDOW);
+                let h = (img_h * window_scale + chrome_height).round().max(MIN_WINDOW);
+                Some(egui::vec2(w, h))
+            };
+
+            // The zoom value + pan were already applied early (above), so the
+            // image is redrawing at the new zoom this frame. Here we only decide
+            // whether to move the window so the cursor's point stays on the same
+            // desktop spot.
+            let mut reposition: Option<egui::Pos2> = None;
+            if let Some((old_zoom, cursor)) = self.zoom_reposition.take() {
+                let new_zoom = self.zoom;
+                let fits = monitor_work_area(ui.ctx())
+                    .map(|m| img_w * new_zoom <= m.x && img_h * new_zoom + chrome_height <= m.y)
+                    .unwrap_or(true);
+                // Whether the window grew vs. the previous frame (zoom-in case),
+                // and whether the image is now letterboxed inside the window
+                // (smaller than the content on either axis).
+                let cur_inner = ui.ctx().input(|i| i.viewport().inner_rect.map(|r| r.size()));
+                let grew = match (target_window, cur_inner) {
+                    (Some(t), Some(c)) => t.x > c.x + 0.5 || t.y > c.y + 0.5,
+                    _ => true,
+                };
+                let letterboxing = match target_window {
+                    Some(t) => {
+                        img_w * new_zoom < t.x - 0.5 || img_h * new_zoom < (t.y - chrome_height) - 0.5
+                    }
+                    None => false,
+                };
+                // Whether the image was letterboxed *before* this zoom step. In
+                // that state the cursor can sit in the empty margin, off the
+                // image, so the cursor-anchor math would jump the window — skip
+                // the one reposition on the letterboxed → first-fitted step.
+                let was_letterboxing = match cur_inner {
+                    Some(c) => {
+                        img_w * old_zoom < c.x - 0.5 || img_h * old_zoom < (c.y - chrome_height) - 0.5
+                    }
+                    None => false,
+                };
+                // Follow the cursor when zooming *in* and the window grows (but
+                // not on the first step out of a letterboxed state), or when
+                // zooming *out* while the image still fills the window. Once it's
+                // letterboxing at the minimum size, or maximized, it stays put.
+                let follow = !maximized
+                    && fits
+                    && ((new_zoom > old_zoom && grew && !was_letterboxing)
+                        || (new_zoom < old_zoom && !letterboxing));
+                if follow {
+                    if let Some(outer) = ui.ctx().input(|i| i.viewport().outer_rect.map(|r| r.min)) {
+                        let ratio = new_zoom / old_zoom;
+                        reposition = Some(outer + (cursor - self.panel_rect.min) * (1.0 - ratio));
+                    }
+                }
+            }
+
+            // Apply a pending resize (one-shot), unless maximized.
+            if self.resize_to_zoom {
+                if let Some(size) = target_window {
+                    let (w, h) = (size.x, size.y);
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+
+                    // Keep the window fully on the desktop. The target position is
+                    // the cursor-zoom move (or the current position when none).
+                    // Horizontally it's clamped to the monitor width. Vertically,
+                    // if the (grown) window's bottom would drop below the usable
+                    // area, it's *centered* between the top and bottom of the
+                    // monitor — symmetric margins, so it's least likely to be
+                    // covered by a taskbar whether that's docked at the top or
+                    // the bottom (egui doesn't report which).
+                    let info = ui.ctx().input(|i| {
+                        (i.viewport().outer_rect, i.viewport().inner_rect, i.viewport().monitor_size)
+                    });
+                    if let (Some(outer), Some(inner), Some(monitor)) = info {
+                        let decoration = outer.size() - inner.size();
+                        let new_outer = egui::vec2(w, h) + decoration;
+                        let target = reposition.unwrap_or(outer.min);
+                        let max_x = (monitor.x - new_outer.x).max(0.0);
+                        let usable_bottom = monitor_work_area(ui.ctx()).map(|wa| wa.y).unwrap_or(monitor.y);
+                        let y = if target.y + new_outer.y > usable_bottom {
+                            ((monitor.y - new_outer.y) * 0.5).max(0.0)
+                        } else {
+                            target.y.max(0.0)
+                        };
+                        let clamped = egui::pos2(target.x.clamp(0.0, max_x), y);
+                        if (clamped - outer.min).length() > 0.5 {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(clamped));
+                        }
+                    } else if let Some(pos) = reposition {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+                    }
+                }
+                self.resize_to_zoom = false;
+            }
+        }
+
+        // Window title: loaded filename, or the app name when nothing is open.
+        let desired_title = match &self.core.stack {
+            Some(loaded) => {
+                let name = loaded.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                format!("{name} — FastTIFF")
+            }
+            None => "FastTIFF".to_string(),
+        };
+        if self.last_title.as_deref() != Some(desired_title.as_str()) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(desired_title.clone()));
+            self.last_title = Some(desired_title);
+        }
+
+    }
+
 }
 
 impl eframe::App for ViewerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Drag-and-drop files onto the window: open the first in this window and
-        // launch each of the rest in its own process, so dropping several at once
-        // opens them all side by side (mirrors the command-line behavior).
-        let dropped: Vec<PathBuf> =
-            ui.ctx().input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
-        if let Some(first) = crate::process::open_all(&dropped) {
-            self.open_file(first.clone());
-        }
-
-        // macOS "Open With" / double-click delivers files via an Apple Event
-        // (not argv); drain whatever `macos_open`'s handler has queued and open
-        // them the same way as drag-drop.
-        #[cfg(target_os = "macos")]
+        // Files dropped onto the window. Natively these carry a path, and
+        // dropping several opens the first here and launches the rest in their
+        // own processes; in a browser the drop event carries the bytes instead.
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            let opened = crate::macos_open::take_opened_files();
-            if let Some(first) = crate::process::open_all(&opened) {
-                self.open_file(first.clone());
+            let dropped: Vec<PathBuf> =
+                ui.ctx().input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+            if let Some(first) = crate::process::open_all(&dropped) {
+                self.apply_opened(Opened::Path(first.clone()));
+            }
+
+            // macOS "Open With" / double-click delivers files via an Apple Event
+            // (not argv); drain whatever `macos_open`'s handler has queued and
+            // open them the same way as drag-drop.
+            #[cfg(target_os = "macos")]
+            {
+                let opened = crate::macos_open::take_opened_files();
+                if let Some(first) = crate::process::open_all(&opened) {
+                    self.apply_opened(Opened::Path(first.clone()));
+                }
             }
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let dropped: Vec<Opened> = ui.ctx().input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|f| f.bytes.as_ref().map(|b| Opened::Bytes(b.to_vec(), f.name.clone())))
+                    .collect()
+            });
+            for d in dropped {
+                self.apply_opened(d);
+            }
+        }
+        self.drain_pending_open();
 
         // Collect zoom input before panels consume events.
         // `zoom_delta()` is the correct API: egui routes Ctrl+scroll into
@@ -299,22 +599,13 @@ impl eframe::App for ViewerApp {
         // second borrow of `self`.
         let current_view_mode = self.core.view_mode;
         let mut mode_request: Option<ViewMode> = None;
+        let mut open_requested = false;
         let mut render_settings_toggle = false;
 
         let toolbar_response = egui::Panel::top("toolbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open TIFF...").clicked() {
-                    // Allow selecting several files at once: open the first in
-                    // this window and launch each of the rest in its own process
-                    // (same fan-out as drag-drop / the command line).
-                    if let Some(paths) = rfd::FileDialog::new()
-                        .add_filter("TIFF", &["tif", "tiff"])
-                        .pick_files()
-                    {
-                        if let Some(first) = crate::process::open_all(&paths) {
-                            self.open_file(first.clone());
-                        }
-                    }
+                    open_requested = true;
                 }
                 // 2D/3D switch, right next to Open. 3D needs at least two frames
                 // to build a volume; disabled otherwise.
@@ -420,6 +711,9 @@ impl eframe::App for ViewerApp {
                 }
             });
         });
+        if open_requested {
+            self.show_open_dialog(ui.ctx());
+        }
         if let Some(mode) = mode_request {
             self.core.view_mode = mode;
             // Entering 3D stops movie playback — unless the stack is 4D (a
@@ -1189,191 +1483,11 @@ impl eframe::App for ViewerApp {
             }
         }
 
-        // Window sizing happens ONLY in response to explicit events — a freshly
-        // opened file, or a zoom change (handled below) — never every frame.
-        // That's what lets the window be freely resized and maximized without
-        // shaking or being snapped back.
-        let toolbar_height = toolbar_response.response.rect.height();
-        let bottom_bar_height = scrub_bar_response.response.rect.height();
-        let chrome_height = toolbar_height + bottom_bar_height;
-
-        // Panel expand/collapse: grow (or shrink) the window height by the
-        // panel's own height change, so the image and toolbar above stay put
-        // and the panel "drops down" from its position. One-shot, triggered
-        // only by the toggle. Skipped when the window is maximized — there the
-        // image just letterboxes into the space the panel takes. We stay armed
-        // until the height actually changes (the toggle frame still reports the
-        // old height), repainting meanwhile so the next frame lands.
-        if self.panel_grow_armed {
-            let delta = bottom_bar_height - self.panel_old_h;
-            if delta.abs() > 0.5 {
-                self.panel_grow_armed = false;
-                let maximized = ui.ctx().input(|i| i.viewport().maximized).unwrap_or(false);
-                if !maximized {
-                    let cur = ui.ctx().content_rect().size();
-                    let h = (cur.y + delta).round().max(200.0);
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(cur.x.round(), h)));
-                }
-            } else {
-                ui.ctx().request_repaint();
-            }
-        }
-
-        let img_dims = self
-            .core
-            .stack
-            .as_ref()
-            .and_then(|l| l.tiff.frames.first())
-            .map(|f| (f.width as f32, f.height as f32));
-
-        if let Some((img_w, img_h)) = img_dims {
-            // On open: pick the largest zoom level ≤ 100% at which the image +
-            // chrome still fits the monitor (a huge image opens scaled down, a
-            // normal one at 100%). Deferred to here because the chrome height
-            // and monitor size aren't known at open time.
-            if self.pending_initial_fit {
-                if let Some(z) = initial_fit_zoom(ui.ctx(), img_w, img_h, chrome_height) {
-                    self.zoom = z;
-                    self.pan = egui::Vec2::ZERO;
-                    self.pending_initial_fit = false;
-                    self.resize_to_zoom = true;
-                } else {
-                    // Monitor size not reported yet (can stay unknown until the
-                    // window first gets focus/input). Poll a few times a second
-                    // rather than spinning `request_repaint` every frame, which
-                    // would peg a CPU core while the app sits idle on load.
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-                }
-            }
-
-            // When maximized, the window is left completely alone on zoom — the
-            // image just zooms/pans/letterboxes inside it (handled by the
-            // central panel's UV transform).
-            let maximized = ui.ctx().input(|i| i.viewport().maximized).unwrap_or(false);
-
-            // The target window inner size for the current zoom: the image scaled
-            // uniformly, clamped to fit the monitor and to the minimum size. Once
-            // it hits the minimum the window stops shrinking and the image just
-            // letterboxes. Computed once so the reposition decision and the
-            // actual resize agree. `None` when maximized (window left alone).
-            let target_window = if maximized {
-                None
-            } else {
-                let window_scale = match monitor_work_area(ui.ctx()) {
-                    Some(m) => {
-                        let fit = (m.x / img_w).min((m.y - chrome_height).max(1.0) / img_h);
-                        self.zoom.min(fit)
-                    }
-                    None => self.zoom,
-                };
-                let w = (img_w * window_scale).round().max(MIN_WINDOW);
-                let h = (img_h * window_scale + chrome_height).round().max(MIN_WINDOW);
-                Some(egui::vec2(w, h))
-            };
-
-            // The zoom value + pan were already applied early (above), so the
-            // image is redrawing at the new zoom this frame. Here we only decide
-            // whether to move the window so the cursor's point stays on the same
-            // desktop spot.
-            let mut reposition: Option<egui::Pos2> = None;
-            if let Some((old_zoom, cursor)) = self.zoom_reposition.take() {
-                let new_zoom = self.zoom;
-                let fits = monitor_work_area(ui.ctx())
-                    .map(|m| img_w * new_zoom <= m.x && img_h * new_zoom + chrome_height <= m.y)
-                    .unwrap_or(true);
-                // Whether the window grew vs. the previous frame (zoom-in case),
-                // and whether the image is now letterboxed inside the window
-                // (smaller than the content on either axis).
-                let cur_inner = ui.ctx().input(|i| i.viewport().inner_rect.map(|r| r.size()));
-                let grew = match (target_window, cur_inner) {
-                    (Some(t), Some(c)) => t.x > c.x + 0.5 || t.y > c.y + 0.5,
-                    _ => true,
-                };
-                let letterboxing = match target_window {
-                    Some(t) => {
-                        img_w * new_zoom < t.x - 0.5 || img_h * new_zoom < (t.y - chrome_height) - 0.5
-                    }
-                    None => false,
-                };
-                // Whether the image was letterboxed *before* this zoom step. In
-                // that state the cursor can sit in the empty margin, off the
-                // image, so the cursor-anchor math would jump the window — skip
-                // the one reposition on the letterboxed → first-fitted step.
-                let was_letterboxing = match cur_inner {
-                    Some(c) => {
-                        img_w * old_zoom < c.x - 0.5 || img_h * old_zoom < (c.y - chrome_height) - 0.5
-                    }
-                    None => false,
-                };
-                // Follow the cursor when zooming *in* and the window grows (but
-                // not on the first step out of a letterboxed state), or when
-                // zooming *out* while the image still fills the window. Once it's
-                // letterboxing at the minimum size, or maximized, it stays put.
-                let follow = !maximized
-                    && fits
-                    && ((new_zoom > old_zoom && grew && !was_letterboxing)
-                        || (new_zoom < old_zoom && !letterboxing));
-                if follow {
-                    if let Some(outer) = ui.ctx().input(|i| i.viewport().outer_rect.map(|r| r.min)) {
-                        let ratio = new_zoom / old_zoom;
-                        reposition = Some(outer + (cursor - self.panel_rect.min) * (1.0 - ratio));
-                    }
-                }
-            }
-
-            // Apply a pending resize (one-shot), unless maximized.
-            if self.resize_to_zoom {
-                if let Some(size) = target_window {
-                    let (w, h) = (size.x, size.y);
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-
-                    // Keep the window fully on the desktop. The target position is
-                    // the cursor-zoom move (or the current position when none).
-                    // Horizontally it's clamped to the monitor width. Vertically,
-                    // if the (grown) window's bottom would drop below the usable
-                    // area, it's *centered* between the top and bottom of the
-                    // monitor — symmetric margins, so it's least likely to be
-                    // covered by a taskbar whether that's docked at the top or
-                    // the bottom (egui doesn't report which).
-                    let info = ui.ctx().input(|i| {
-                        (i.viewport().outer_rect, i.viewport().inner_rect, i.viewport().monitor_size)
-                    });
-                    if let (Some(outer), Some(inner), Some(monitor)) = info {
-                        let decoration = outer.size() - inner.size();
-                        let new_outer = egui::vec2(w, h) + decoration;
-                        let target = reposition.unwrap_or(outer.min);
-                        let max_x = (monitor.x - new_outer.x).max(0.0);
-                        let usable_bottom = monitor_work_area(ui.ctx()).map(|wa| wa.y).unwrap_or(monitor.y);
-                        let y = if target.y + new_outer.y > usable_bottom {
-                            ((monitor.y - new_outer.y) * 0.5).max(0.0)
-                        } else {
-                            target.y.max(0.0)
-                        };
-                        let clamped = egui::pos2(target.x.clamp(0.0, max_x), y);
-                        if (clamped - outer.min).length() > 0.5 {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(clamped));
-                        }
-                    } else if let Some(pos) = reposition {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
-                    }
-                }
-                self.resize_to_zoom = false;
-            }
-        }
-
-        // Window title: loaded filename, or the app name when nothing is open.
-        let desired_title = match &self.core.stack {
-            Some(loaded) => {
-                let name = loaded.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                format!("{name} — FastTIFF")
-            }
-            None => "FastTIFF".to_string(),
-        };
-        if self.last_title.as_deref() != Some(desired_title.as_str()) {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(desired_title.clone()));
-            self.last_title = Some(desired_title);
-        }
+        // Window chrome (sizing, position, title) is a desktop-only concern.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.manage_window(ui, &toolbar_response, &scrub_bar_response);
+        #[cfg(target_arch = "wasm32")]
+        let _ = (&toolbar_response, &scrub_bar_response);
 
         // Bring the GPU up to date with the core state, then honor a pending
         // background volume build by scheduling another frame.

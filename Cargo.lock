@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.10.0"
+version = "1.10.1"
 dependencies = [
  "anyhow",
  "eframe",
@@ -17,6 +17,7 @@ dependencies = [
  "log",
  "rfd",
  "scivis-render",
+ "wasm-bindgen-futures",
  "winres",
 ]
 
