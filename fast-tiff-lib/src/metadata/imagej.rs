@@ -101,12 +101,23 @@ pub fn parse(
     let get_usize = |key: &str| kv.get(key).and_then(|s| s.parse::<usize>().ok());
     let get_f64 = |key: &str| kv.get(key).and_then(|s| s.parse::<f64>().ok());
 
-    let channels = get_usize("channels").unwrap_or(1).max(1);
-    let slices = get_usize("slices").unwrap_or(1).max(1);
+    // `channels`/`slices` are free text in an untrusted description, and
+    // `channels` sizes a `Vec<ChannelDisplay>` (a 256-entry LUT each) below —
+    // so `channels=4000000000` would otherwise ask for hundreds of gigabytes.
+    // Clamp to the plane count, which is the format's own invariant: ImageJ
+    // writes one IFD per channel per Z per T, so a stack cannot hold more
+    // channels (or Z-slices) than it has planes. A file claiming otherwise is
+    // inconsistent, and `resolve_dimensions` would reinterpret it anyway.
+    let planes = total_ifds.max(1);
+    let channels = get_usize("channels").unwrap_or(1).clamp(1, planes);
+    let slices = get_usize("slices").unwrap_or(1).clamp(1, planes);
     // `frames=` may be absent for a plain single-channel time series saved
     // without hyperstack dimension tags; fall back to inferring it from the
     // total IFD count so a bare "N-page TIFF" still scrubs correctly.
-    let frames = get_usize("frames").unwrap_or_else(|| (total_ifds / (channels * slices)).max(1));
+    // `saturating_mul` + `max(1)`: both factors are file-controlled, and an
+    // overflow to zero here would be a divide-by-zero panic.
+    let frames = get_usize("frames")
+        .unwrap_or_else(|| (total_ifds / channels.saturating_mul(slices).max(1)).max(1));
 
     // Default to grayscale when no `mode=` is present. A missing mode used to be
     // inferred as composite whenever channels>1, but a mislabeled `channels=N`

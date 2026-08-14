@@ -8,6 +8,10 @@ resolver = "2"
 # A future wasm frontend becomes a fifth member alongside `FastTIFF`, reusing
 # the lower three unchanged.
 members = ["fast-tiff-lib", "scivis-render", "fast-tiff-viewer", "FastTIFF"]
+# The fuzz harness is its own crate: it needs nightly + libFuzzer, so keeping it
+# out of the workspace means `cargo build/test --workspace` stays stable-only.
+# Run it with `cargo +nightly fuzz run <target>` from `fast-tiff-lib/`.
+exclude = ["fast-tiff-lib/fuzz"]
 
 [profile.release]
 opt-level = 3

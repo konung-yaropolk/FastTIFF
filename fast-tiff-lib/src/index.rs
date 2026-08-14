@@ -32,6 +32,17 @@ pub(crate) const TAG_SAMPLE_FORMAT: u16 = 339;
 /// ColorMap (tag 320): the palette for a PhotometricInterpretation=3 (indexed)
 /// image — `3 * 2^BitsPerSample` SHORT values, all reds then greens then blues.
 const TAG_COLOR_MAP: u16 = 320;
+
+/// Ceiling on how many frames one file may index.
+///
+/// A `FrameInfo` costs on the order of 150 bytes once its two strip vectors are
+/// counted, and a file can declare far more planes than its own size suggests:
+/// a chain of minimal IFDs, or an ImageJ contiguous stack whose frames are a
+/// byte apiece, both turn a small file into a large `Vec<FrameInfo>`. This caps
+/// that amplification at a few hundred megabytes in the worst case while
+/// sitting orders of magnitude above any real stack — a million planes at even
+/// a kilobyte each would already be a gigabyte of pixels.
+const MAX_FRAMES: usize = 1 << 20;
 // Tags 50838/50839 (IJMetadataByteCounts / IJMetadata) carry ImageJ's binary
 // per-channel LUT/range block. The format is undocumented and best-effort to
 // parse, so it's used only as a supplementary fallback for display info the
@@ -109,6 +120,81 @@ impl FrameInfo {
     /// decode, so both ride the same 8-bit-index display path.
     pub fn is_palette(&self) -> bool {
         self.photometric == 3 && self.samples_per_pixel == 1 && matches!(self.bits_per_sample, 4 | 8)
+    }
+
+    /// Bytes one sample occupies at this frame's bit depth, or an error for a
+    /// depth this crate can't decode. 4-bit is *not* included: its samples are
+    /// sub-byte and take a dedicated unpacking path
+    /// (`decode::read_frame_u8`), never the byte-oriented one this feeds.
+    pub fn sample_bytes(&self) -> Result<usize> {
+        match self.bits_per_sample {
+            8 => Ok(1),
+            16 => Ok(2),
+            32 => Ok(4),
+            64 => Ok(8),
+            other => bail!("unsupported bits_per_sample: {other}"),
+        }
+    }
+
+    /// Byte length of this frame fully decoded — `width * height *
+    /// samples_per_pixel * sample_bytes` — computed with **checked** arithmetic.
+    ///
+    /// The inputs all come straight from the file, so a malformed TIFF can make
+    /// this product exceed `usize`. Left unchecked it wraps (release builds
+    /// don't trap on overflow), and a wrapped-small length then drives buffer
+    /// carving that reads far past the allocation. Every allocation and bounds
+    /// check in `decode` derives from this one function so the overflow can only
+    /// be got wrong in a single place.
+    pub fn decoded_len(&self) -> Result<usize> {
+        let sample_bytes = self.sample_bytes()?;
+        let too_big = || {
+            anyhow!(
+                "frame geometry overflows address space: {}x{} x {} sample(s)/px x {} byte(s)/sample",
+                self.width,
+                self.height,
+                self.samples_per_pixel.max(1),
+                sample_bytes
+            )
+        };
+        (self.width as usize)
+            .checked_mul(self.height as usize)
+            .and_then(|v| v.checked_mul(self.samples_per_pixel.max(1) as usize))
+            .and_then(|v| v.checked_mul(sample_bytes))
+            .ok_or_else(too_big)
+    }
+
+    /// Total bytes the frame's usable strips supply.
+    ///
+    /// Counts only strips that have **both** an offset and a byte count — the
+    /// decoders read them zipped, so a file declaring nine `StripByteCounts`
+    /// against one `StripOffsets` supplies exactly one strip's worth, not nine.
+    /// (Summing the raw byte-count array instead let a 291-byte fuzz case claim
+    /// ~591 KB of input and clear the way for a 4.3 GB allocation.) Saturating:
+    /// the values are file-controlled, and `open` has already rejected any
+    /// strip that doesn't lie inside the file.
+    pub(crate) fn strip_bytes_total(&self) -> u64 {
+        self.strip_offsets
+            .iter()
+            .zip(self.strip_byte_counts.iter())
+            .fold(0u64, |acc, (_, &n)| acc.saturating_add(n))
+    }
+
+    /// The most decoded bytes this frame's strips could possibly cover.
+    ///
+    /// A strip holds at most `rows_per_strip` rows, so `strips × rows × row`
+    /// bounds the image regardless of codec — no compression-ratio guesswork,
+    /// and no false positives, because a well-formed frame always declares
+    /// enough strips to cover its own rows (that is what makes it decodable).
+    /// Mirrors `decode::strip_dest_lens`'s row geometry, including the planar
+    /// case where a "row" is one sample plane's worth.
+    pub(crate) fn strip_coverable_bytes(&self) -> Result<u64> {
+        let sample_bytes = self.sample_bytes()? as u64;
+        let per_row_samples = if self.is_planar() { 1 } else { self.samples_per_pixel.max(1) as u64 };
+        let row_bytes = (self.width as u64).saturating_mul(per_row_samples).saturating_mul(sample_bytes);
+        let rows_per_strip = (self.rows_per_strip as u64).max(1).min(self.height as u64);
+        Ok((self.strip_offsets.len() as u64)
+            .saturating_mul(rows_per_strip)
+            .saturating_mul(row_bytes))
     }
 }
 
@@ -251,6 +337,13 @@ impl TiffStack {
             }
 
             frames.push(frame);
+            if frames.len() > MAX_FRAMES {
+                bail!(
+                    "TIFF declares more than {MAX_FRAMES} planes — refusing to index further \
+                     (a malformed chain of minimal IFDs can otherwise amplify a small file \
+                     into gigabytes of frame index)"
+                );
+            }
             offset = usize::try_from(parsed.next_offset)
                 .map_err(|_| anyhow!("next-IFD offset exceeds address space"))?;
         }
@@ -300,6 +393,12 @@ impl TiffStack {
                 }
             }
         }
+
+        // Everything above trusted the file's own numbers. Vet them once, here,
+        // so every `FrameInfo` a caller can reach carries the invariants the
+        // decoders rely on: a non-empty image, geometry that fits in `usize`,
+        // and strips that actually lie inside the file.
+        validate_frames(&frames, mmap.len())?;
 
         let mut meta = metadata::parse(
             description.as_deref(),
@@ -351,6 +450,44 @@ impl TiffStack {
     }
 }
 
+/// Reject frames whose declared geometry or strip locations are impossible for
+/// a file of this size. Runs once at index time, on the final frame list, so
+/// the decoders can treat a `FrameInfo` as already-sane rather than re-deriving
+/// the same checks per call.
+///
+/// Deliberately *not* checked here: an exotic `bits_per_sample` (1-bit bilevel,
+/// say). Those have always opened fine and only failed at decode, and metadata
+/// readers legitimately open such files without ever decoding pixels — so
+/// rejecting them at `open` would be a regression. Their geometry is checked
+/// only if the depth is one we can actually decode.
+fn validate_frames(frames: &[FrameInfo], file_len: usize) -> Result<()> {
+    for (i, f) in frames.iter().enumerate() {
+        if f.width == 0 || f.height == 0 {
+            bail!("frame {i} declares an empty image ({}x{})", f.width, f.height);
+        }
+        // Overflow guard. `decoded_len` is what every downstream allocation is
+        // sized from, so proving it here means it cannot wrap there.
+        if f.sample_bytes().is_ok() {
+            f.decoded_len().map_err(|e| anyhow!("frame {i}: {e}"))?;
+        }
+        // A strip that starts or ends outside the file is unambiguously broken,
+        // and refusing it up front bounds `strip_bytes_total` by the file size —
+        // which is what makes the decode-side plausibility check meaningful.
+        for (&off, &len) in f.strip_offsets.iter().zip(f.strip_byte_counts.iter()) {
+            let end = off
+                .checked_add(len)
+                .ok_or_else(|| anyhow!("frame {i}: strip offset {off} + length {len} overflows"))?;
+            if end > file_len as u64 {
+                bail!(
+                    "frame {i}: strip at offset {off} (+{len} bytes) extends past the end of \
+                     the {file_len}-byte file",
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Expand a single-IFD ImageJ "contiguous" stack (see the call site) into `n`
 /// virtual single-strip frames at `base + i * frame_bytes`. Leaves `frames`
 /// untouched unless the layout is unambiguously the ImageJ hack; `n` is
@@ -368,8 +505,15 @@ fn expand_imagej_contiguous(frames: &mut Vec<FrameInfo>, n: usize, file_len: usi
     if f.compression != Compression::None || f.predictor != 1 {
         return;
     }
-    let frame_bytes =
-        f.width as u64 * f.height as u64 * f.samples_per_pixel as u64 * sample_bytes as u64;
+    // Checked: every factor is file-declared, and a wrapped `frame_bytes` would
+    // make the `available` division below hand back a bogus frame count.
+    let Some(frame_bytes) = (f.width as u64)
+        .checked_mul(f.height as u64)
+        .and_then(|v| v.checked_mul(f.samples_per_pixel as u64))
+        .and_then(|v| v.checked_mul(sample_bytes as u64))
+    else {
+        return;
+    };
     if frame_bytes == 0 || f.strip_offsets.is_empty() {
         return;
     }
@@ -380,14 +524,14 @@ fn expand_imagej_contiguous(frames: &mut Vec<FrameInfo>, n: usize, file_len: usi
         if off != cursor {
             return; // gap between strips: not the contiguous layout
         }
-        cursor += len;
+        cursor = cursor.saturating_add(len);
     }
     if cursor - base < frame_bytes {
         return; // declared strips don't even cover one frame
     }
 
     let available = (file_len as u64).saturating_sub(base) / frame_bytes;
-    let n = (n as u64).min(available).max(1);
+    let n = (n as u64).min(available).min(MAX_FRAMES as u64).max(1);
     let template = frames[0].clone();
     *frames = (0..n)
         .map(|i| FrameInfo {

@@ -38,9 +38,17 @@ pub fn parse(
     let get_usize = |k: &str| get(k).and_then(|v| v.parse::<usize>().ok());
     let get_f64 = |k: &str| get(k).and_then(|v| v.parse::<f64>().ok());
 
-    let size_c = get_usize("SizeC").unwrap_or(1).max(1);
-    let size_z = get_usize("SizeZ").unwrap_or(1).max(1);
-    let size_t = get_usize("SizeT").unwrap_or_else(|| (total_ifds / (size_c * size_z)).max(1)).max(1);
+    // SizeC/SizeZ are attacker-controlled XML text, and SizeC sizes a
+    // `Vec<ChannelDisplay>` (a 256-entry LUT each) below. Clamp to the plane
+    // count — OME's own model is one IFD per C/Z/T combination, so neither can
+    // exceed the number of planes — and saturate the SizeT divisor so an
+    // overflow to zero can't become a divide-by-zero panic.
+    let planes = total_ifds.max(1);
+    let size_c = get_usize("SizeC").unwrap_or(1).clamp(1, planes);
+    let size_z = get_usize("SizeZ").unwrap_or(1).clamp(1, planes);
+    let size_t = get_usize("SizeT")
+        .unwrap_or_else(|| (total_ifds / size_c.saturating_mul(size_z).max(1)).max(1))
+        .max(1);
 
     // Per-channel colors: OME `Color` is a signed int32 RGBA (R in the high
     // byte). A non-gray color makes the stack composite.
