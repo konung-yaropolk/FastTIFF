@@ -277,6 +277,25 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Sta
                         meta.channels, meta.slices, meta.frames
                     ),
                 );
+                // Everything in this panel is the *file's* own metadata, left
+                // exactly as parsed. The viewer's interpretation is separate
+                // (see `fast_tiff_viewer::display`) and routinely differs — a
+                // mislabeled `channels=100` is really a frame count, and the
+                // user can reassign the axes by hand. Show that only when the
+                // two disagree, so the panel stays quiet for ordinary files.
+                let shown = loaded.display.dims;
+                if (shown.channels, shown.slices, shown.frames)
+                    != (meta.channels, meta.slices, meta.frames)
+                {
+                    kv(
+                        ui,
+                        "Shown as",
+                        format!(
+                            "{} channel(s) x {} slice(s) x {} frame(s)",
+                            shown.channels, shown.slices, shown.frames
+                        ),
+                    );
+                }
                 let mode = match meta.mode {
                     fast_tiff_lib::DisplayMode::Grayscale => "grayscale",
                     fast_tiff_lib::DisplayMode::Composite => "composite",

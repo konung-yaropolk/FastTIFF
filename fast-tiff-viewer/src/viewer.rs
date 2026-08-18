@@ -231,7 +231,7 @@ impl Viewer {
                 self.volume.invalidate();
                 // Always start a newly-opened file in the 2D movie view.
                 self.view_mode = ViewMode::Movie;
-                self.status = compute_status(&stack.tiff.meta, stack.triple_axis_warning);
+                self.status = compute_status(stack.display.dims, stack.display.triple_axis_warning);
                 // New stack: re-evaluate decode parallelism from scratch (its
                 // per-frame decode cost is different).
                 self.decode_parallel = false;
@@ -253,7 +253,7 @@ impl Viewer {
             // The swap rebuilds channel_display from `mode`, so re-apply the
             // pseudocolor preference on top of the fresh LUTs.
             refresh_pseudocolor(stack, self.apply_pseudocolor);
-            self.status = compute_status(&stack.tiff.meta, stack.triple_axis_warning);
+            self.status = compute_status(stack.display.dims, stack.display.triple_axis_warning);
         }
         // The frame axis (volume depth) just changed.
         self.volume.invalidate();
@@ -269,6 +269,26 @@ impl Viewer {
     }
 
     /// Whether the stack has enough depth to build a volume from.
+    /// Pick the single-channel LUT by selector index — index 0 is the file's
+    /// own "Built-in" map when it has one, then grayscale, the named channel
+    /// colours, and the perceptual colormaps (see
+    /// [`crate::channels::gray_lut_sel_lut`]).
+    ///
+    /// Restoring "Built-in" works because opening a file never overwrites
+    /// `tiff.meta`: the file's colours are still there to go back to. No-op
+    /// when no stack is open or the selector doesn't apply to it.
+    pub fn set_gray_lut(&mut self, sel: usize) {
+        let Some(stack) = &mut self.stack else { return };
+        if !crate::channels::gray_lut_applicable(stack) {
+            return;
+        }
+        stack.display.gray_lut_sel = sel;
+        let lut = crate::channels::gray_lut_sel_lut(&stack.display, sel);
+        if stack.display.set_lut(0, lut) {
+            stack.luts_uploaded = false; // force a LUT re-upload on the next sync
+        }
+    }
+
     pub fn can_show_volume(&self) -> bool {
         self.stack.as_ref().is_some_and(|s| s.tiff.meta.frames >= 2)
     }

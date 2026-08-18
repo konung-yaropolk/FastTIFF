@@ -2,19 +2,36 @@
 //! the data or metadata, slider tints, the grayscale color/colormap selector
 //! tables, and the pseudocolor toggle. Split from `app.rs`.
 
+use crate::display::Display;
 use crate::stack::{ChannelSettings, Stack};
 use fast_tiff_lib::TiffStack;
-use scivis_render::{ChannelKind, Lut, MAX_CHANNELS};
+use scivis_render::{ChannelKind, Lut};
+
+/// How many samples an auto-contrast scan looks at, at most. The scan runs once
+/// per channel while a file is opening — six of them for a 6-channel stack,
+/// before the first frame can be drawn — so on a large image it is the visible
+/// cost of an open. A strided sample of this many points estimates the display
+/// range just as well: the result only seeds slider positions the user can
+/// drag, and a range off by one outlier pixel is imperceptible.
+const MINMAX_SAMPLE_BUDGET: usize = 1 << 18; // 262144
 
 /// Actual pixel min/max of channel `c`'s first frame, for integer-format
 /// data. Used as the auto-contrast fallback when no display range came
 /// from the file's metadata.
+///
+/// Scans at most [`MINMAX_SAMPLE_BUDGET`] samples, striding across the frame
+/// when it is larger. Decoding still costs a frame, but the scan itself stops
+/// being O(pixels) on a 4K image.
 pub fn first_frame_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
     let idx = channel.min(tiff.frames.len().saturating_sub(1));
     let frame = tiff.frames.get(idx)?;
     let pixels = fast_tiff_lib::read_frame_u16(&tiff.data, frame, tiff.byte_order, None).ok()?;
     let (mut lo, mut hi) = (u16::MAX, 0u16);
-    for &p in pixels.iter() {
+    // A prime-ish stride avoids landing on the same column of every row, which
+    // a power-of-two stride would do on a power-of-two-wide image and could
+    // miss a whole feature.
+    let stride = (pixels.len() / MINMAX_SAMPLE_BUDGET).max(1);
+    for &p in pixels.iter().step_by(stride) {
         lo = lo.min(p);
         hi = hi.max(p);
     }
@@ -31,30 +48,6 @@ pub fn first_frame_float_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32
     let idx = channel.min(tiff.frames.len().saturating_sub(1));
     let frame = tiff.frames.get(idx)?;
     fast_tiff_lib::frame_float_minmax(&tiff.data, frame, tiff.byte_order).ok()?
-}
-
-/// Resizes `meta.channel_display` to `new_channels` entries, preserving the
-/// per-channel display range. When the channel count is *unchanged* (the usual
-/// case after `resolve_dimensions`), the existing LUTs are kept — including any
-/// custom per-channel colors supplied by the IJMetadata block. When the count
-/// *changes* (a mislabeled `channels=N` collapsing to a single channel, or a
-/// manual channels/frames swap), the old LUTs no longer correspond to the new
-/// channels, so they're regenerated from `mode` — which also avoids leaving a
-/// collapsed grayscale stack wearing a stale composite (e.g. red) LUT.
-pub fn resize_channel_display(meta: &mut fast_tiff_lib::StackMeta, new_channels: usize) {
-    let old = std::mem::take(&mut meta.channel_display);
-    let mode = meta.mode;
-    let keep_luts = new_channels == old.len();
-    meta.channel_display = (0..new_channels)
-        .map(|c| fast_tiff_lib::ChannelDisplay {
-            lut: if keep_luts {
-                old[c].lut
-            } else {
-                fast_tiff_lib::default_lut_for(mode, c)
-            },
-            range: old.get(c).and_then(|d| d.range),
-        })
-        .collect();
 }
 
 /// The contrast range-slider's track bounds: the channel's data min/max
@@ -143,24 +136,24 @@ pub fn gray_lut_for(sel: usize) -> Lut {
 }
 
 // When the file carries its own LUT (`builtin_lut`), the selector prepends a
-// leading "Built-in LUT" entry (the default) ahead of the computed options —
-// so the built-in colormap is one option among grayscale/colors/colormaps. The
-// three helpers below fold that offset in, so the selector index (`gray_lut_sel`)
-// is `0 = Built-in` when present, else `0 = Grayscale`.
+// leading "Built-in" entry (the default) ahead of the computed options — so the
+// built-in colormap is one option among grayscale/colors/colormaps. The helpers
+// below fold that offset in, so the selector index (`Display::gray_lut_sel`) is
+// `0 = Built-in` when present, else `0 = Grayscale`.
 
-/// 1 when a leading "Built-in LUT" option is present, else 0.
-fn gray_lut_offset(loaded: &Stack) -> usize {
-    loaded.builtin_lut.is_some() as usize
+/// 1 when a leading "Built-in" option is present, else 0.
+fn gray_lut_offset(display: &Display) -> usize {
+    display.builtin_lut.is_some() as usize
 }
 
-/// Total selector options, including the leading "Built-in LUT" when present.
-pub fn gray_lut_count(loaded: &Stack) -> usize {
-    gray_lut_option_count() + gray_lut_offset(loaded)
+/// Total selector options, including the leading "Built-in" when present.
+pub fn gray_lut_count(display: &Display) -> usize {
+    gray_lut_option_count() + gray_lut_offset(display)
 }
 
-/// Display name for selector index `sel` ("Built-in LUT" at 0 when present).
-pub fn gray_lut_sel_name(loaded: &Stack, sel: usize) -> &'static str {
-    let off = gray_lut_offset(loaded);
+/// Display name for selector index `sel` ("Built-in" at 0 when present).
+pub fn gray_lut_sel_name(display: &Display, sel: usize) -> &'static str {
+    let off = gray_lut_offset(display);
     if off == 1 && sel == 0 {
         "Built-in"
     } else {
@@ -170,21 +163,60 @@ pub fn gray_lut_sel_name(loaded: &Stack, sel: usize) -> &'static str {
 
 /// The 256-entry LUT for selector index `sel` (the file's own map at 0 when
 /// present, otherwise the computed option).
-pub fn gray_lut_sel_lut(loaded: &Stack, sel: usize) -> Lut {
-    let off = gray_lut_offset(loaded);
-    match loaded.builtin_lut {
+///
+/// Returns by value because the caller is *installing* it. To merely tint a
+/// widget, use [`gray_lut_sel_tint`] instead — it avoids building the LUT at all.
+pub fn gray_lut_sel_lut(display: &Display, sel: usize) -> Lut {
+    let off = gray_lut_offset(display);
+    match display.builtin_lut {
         Some(lut) if sel == 0 => lut,
         _ => gray_lut_for(sel - off),
     }
 }
 
-/// Builds the UI-level per-channel settings (window/level, enabled,
-/// float-encoding range) from `tiff.meta`'s current channel count and
-/// display info.
-pub fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
-    (0..tiff.meta.channels.min(MAX_CHANNELS))
+/// The tint colour for selector index `sel`, without materialising its LUT.
+///
+/// A `Lut` is 768 bytes and the selector asks about *every* option on every
+/// frame the combo is open, so building one per option per frame just to read a
+/// single entry is pure waste. Only entry 127 matters (see [`ui_tint`]), and for
+/// the generated ramps that entry is computable directly from the base colour.
+pub fn gray_lut_sel_tint(display: &Display, sel: usize) -> Option<[u8; 3]> {
+    let off = gray_lut_offset(display);
+    if off == 1 && sel == 0 {
+        return display.builtin_lut.as_ref().and_then(ui_tint);
+    }
+    let sel = sel - off;
+    let colors = GRAY_LUT_COLOR_NAMES.len();
+    if sel == 0 {
+        None // plain grayscale: entry 127 is grey, so no tint
+    } else if sel <= colors {
+        // The channel ramps are `base * t`; at entry 127 that is `base * 127/255`.
+        let base = fast_tiff_lib::composite_color(sel - 1);
+        let scaled = [
+            ((base[0] as u16 * 127) / 255) as u8,
+            ((base[1] as u16 * 127) / 255) as u8,
+            ((base[2] as u16 * 127) / 255) as u8,
+        ];
+        (!(scaled[0] == scaled[1] && scaled[1] == scaled[2])).then_some(scaled)
+    } else {
+        // A perceptual colormap is a `const` table — index it, don't copy it.
+        ui_tint(&crate::colormap::LUTS[sel - 1 - colors])
+    }
+}
+
+/// Builds the per-channel settings (window/level, enabled, float-encoding
+/// range) for `channels` display channels.
+///
+/// Reads `tiff.meta` purely as a source of *defaults* — the file's suggested
+/// display window — and never writes to it; the result is owned by
+/// [`Display::settings`](crate::display::Display::settings).
+pub fn build_channel_settings(tiff: &TiffStack, channels: usize) -> Vec<ChannelSettings> {
+    (0..Display::shown_channels(channels))
         .map(|c| {
-            let disp = &tiff.meta.channel_display[c];
+            // The metadata may describe fewer channels than we're showing (a
+            // dimension override can raise the count), so fall back to "no
+            // suggested window" rather than indexing past it.
+            let meta_range = tiff.meta.channel_display.get(c).and_then(|d| d.range);
             let frame = tiff.frames.get(c);
             // Palette (indexed) channel: pixels are direct ColorMap indices, and
             // the ColorMap is already this channel's LUT. Pin the window to a
@@ -216,8 +248,7 @@ pub fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
 
             if is_float {
                 let data = first_frame_float_minmax(tiff, c);
-                let (lo, hi) = disp
-                    .range
+                let (lo, hi) = meta_range
                     .map(|(lo, hi)| (lo as f32, hi as f32))
                     .or(data)
                     .unwrap_or((0.0, 1.0));
@@ -225,8 +256,7 @@ pub fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
                 ChannelSettings { min: lo, max: hi, enabled: true, bounds, kind: ChannelKind::Float }
             } else {
                 let data = first_frame_minmax(tiff, c);
-                let (min, max) = disp
-                    .range
+                let (min, max) = meta_range
                     .map(|(lo, hi)| (lo as f32, hi as f32))
                     // No display range in metadata at all (not even
                     // ImageDescription min=/max=) — fall back to the actual
@@ -248,9 +278,9 @@ pub fn build_channel_settings(tiff: &TiffStack) -> Vec<ChannelSettings> {
 /// multi-channel grayscale stacks (composite files already carry colors; RGB is
 /// handled separately) can be optionally tinted with the channel palette.
 pub fn pseudocolor_applicable(loaded: &Stack) -> bool {
-    !loaded.rgb
-        && loaded.channel_settings.len() > 1
-        && loaded.tiff.meta.mode == fast_tiff_lib::DisplayMode::Grayscale
+    !loaded.display.rgb
+        && loaded.display.channel_count() > 1
+        && loaded.display.mode == fast_tiff_lib::DisplayMode::Grayscale
         // The file's own per-channel LUTs win: don't override them with the
         // grayscale/pseudocolor default.
         && !loaded.tiff.meta.has_explicit_luts
@@ -263,7 +293,7 @@ pub fn pseudocolor_applicable(loaded: &Stack) -> bool {
 /// with grayscale / channel colors / colormaps available to override. The
 /// multi-channel case is covered by the pseudocolor toggle instead.
 pub fn gray_lut_applicable(loaded: &Stack) -> bool {
-    !loaded.rgb && loaded.channel_settings.len() == 1
+    !loaded.display.rgb && loaded.display.channel_count() == 1
 }
 
 /// Sets the per-channel LUTs of an applicable (multi-channel grayscale) stack:
@@ -273,12 +303,13 @@ pub fn refresh_pseudocolor(loaded: &mut Stack, apply: bool) {
     if !pseudocolor_applicable(loaded) {
         return;
     }
-    for (c, disp) in loaded.tiff.meta.channel_display.iter_mut().enumerate() {
-        disp.lut = if apply {
+    for c in 0..loaded.display.channel_count() {
+        let lut = if apply {
             fast_tiff_lib::default_composite_lut(c)
         } else {
             fast_tiff_lib::grayscale_lut()
         };
+        loaded.display.set_lut(c, lut);
     }
     loaded.luts_uploaded = false; // force re-upload on the next sync
 }
