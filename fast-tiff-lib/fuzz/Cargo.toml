@@ -1,0 +1,41 @@
+[package]
+name = "fast-tiff-lib-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Stand alone: this crate builds only under `cargo +nightly fuzz`, so it must not
+# be pulled into the parent workspace's dependency/feature resolution (the parent
+# also lists it in `workspace.exclude`; this table is what actually detaches it).
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.fast-tiff-lib]
+path = ".."
+# No mmap: the fuzzer feeds bytes straight to `TiffStack::from_bytes`, so there
+# is no file to map. No zstd either — it is a C dependency and its own fuzzing
+# target, and excluding it keeps the harness pure-Rust so sanitizers stay clean.
+default-features = false
+
+[[bin]]
+name = "tiff_open"
+path = "fuzz_targets/tiff_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tiff_decode"
+path = "fuzz_targets/tiff_decode.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzzing wants release-grade codegen but keeps debug info for good stack traces.
+[profile.release]
+debug = 1

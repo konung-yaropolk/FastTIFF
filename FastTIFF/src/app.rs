@@ -20,7 +20,8 @@
 use crate::render::{self, Render};
 use egui::{Color32, RichText};
 use fast_tiff_viewer::channels::{
-    channel_tint, gray_lut_applicable, gray_lut_count, gray_lut_sel_lut, gray_lut_sel_name,
+    channel_tint, gray_lut_applicable, gray_lut_count, gray_lut_sel_name,
+    gray_lut_sel_tint,
     pseudocolor_applicable, ui_tint,
 };
 use fast_tiff_viewer::{DecodeMode, Stack, ViewMode, Viewer};
@@ -128,6 +129,68 @@ enum Opened {
     Bytes(Vec<u8>, String),
 }
 
+/// Where the image sits in the viewport: the 2D pan/zoom transform and the
+/// geometry derived from it each frame.
+///
+/// Pan and zoom are *not* applied by moving the viewport — a GPU backend would
+/// clamp an oversized one to the framebuffer and squash the picture. They are
+/// turned into the UV sub-rect the shader samples (`Viewer::uv_offset` /
+/// `uv_scale`); these fields are the frontend's side of that conversion.
+struct View2d {
+    /// Zoom factor: 1.0 = one window pixel per image pixel. The window is only
+    /// resized in response to an explicit event (opening a file, a zoom step) —
+    /// never every frame — so the user can freely resize or maximize it.
+    /// Between those events the image scales to fit, aspect locked.
+    zoom: f32,
+    pan: egui::Vec2,
+    /// Set when a file opens: the next frame computes a fit-to-screen zoom and
+    /// sizes the window once. Deferred because the chrome height and monitor
+    /// size aren't known at open time.
+    pending_initial_fit: bool,
+    /// Set when something (initial fit, or a zoom step) wants the window resized
+    /// to match `zoom` this frame. Applied once, then cleared.
+    resize_to_zoom: bool,
+    /// A pending (zoom, anchor) so a zoom step can keep the point under the
+    /// cursor put, applied once the new layout is known.
+    zoom_reposition: Option<(f32, egui::Pos2)>,
+    /// Sub-notch wheel deltas accumulated until they add up to a frame step.
+    scroll_accum: f32,
+    /// Top-left of the drawn image in screen space, from the last frame.
+    image_origin: egui::Pos2,
+    /// The central panel's rect, from the last frame.
+    panel_rect: egui::Rect,
+}
+
+impl Default for View2d {
+    fn default() -> Self {
+        View2d {
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+            pending_initial_fit: false,
+            resize_to_zoom: false,
+            zoom_reposition: None,
+            scroll_accum: 0.0,
+            image_origin: egui::Pos2::ZERO,
+            panel_rect: egui::Rect::ZERO,
+        }
+    }
+}
+
+/// Layout bookkeeping for the collapsible channels/contrast panel, which grows
+/// and shrinks the window by its own height delta when toggled.
+#[derive(Default)]
+struct PanelLayout {
+    /// Channel buttons + contrast sliders are tucked under a small triangle
+    /// toggle to keep the bar minimal by default.
+    expanded: bool,
+    /// Set on the frame the toggle is clicked; the next frame (once the panel
+    /// has been redrawn at its new size) grows or shrinks the window by the
+    /// difference.
+    grow_armed: bool,
+    /// The panel's height *before* the toggle, for that delta.
+    old_h: f32,
+}
+
 pub struct ViewerApp {
     /// Everything that isn't GUI: the loaded stack, channel settings, playback
     /// clock, 3D camera, and the decode→GPU sync. See `fast_tiff_viewer`.
@@ -135,6 +198,11 @@ pub struct ViewerApp {
     /// GPU textures/shader for compositing the image, shared with the paint
     /// callback. Created once at startup (see `crate::render::init`).
     render: Render,
+    /// Where the image sits in the viewport (pan/zoom and the geometry derived
+    /// from it).
+    view: View2d,
+    /// The collapsible channels panel's layout bookkeeping.
+    panel: PanelLayout,
     /// Files opened asynchronously arrive here. Only the web picker uses it —
     /// the native dialog blocks and applies its result directly — but the
     /// channel exists on both so the drain path is shared.
@@ -145,57 +213,14 @@ pub struct ViewerApp {
     open_rx: Receiver<Opened>,
 
     // --- window chrome ------------------------------------------------------
-    /// Channel buttons + contrast sliders are tucked under a small
-    /// triangle toggle to keep the bar minimal by default.
-    channels_panel_expanded: bool,
-    /// Zoom factor used the last time we sized the window: 1.0 = one window
-    /// pixel per image pixel. The window is only ever resized in response to an
-    /// explicit event (opening a file, or a zoom in/out) — never every frame —
-    /// so the user can freely resize or maximize the window. Between those
-    /// events the image just scales to fit the window with its aspect ratio
-    /// locked (letterboxed), handled entirely in the central panel.
-    zoom: f32,
-    /// Set when a file is opened: the next frame computes an initial fit-to-
-    /// screen zoom (largest level ≤ 100% that fits the monitor) and sizes the
-    /// window once. Deferred to `ui()` because the chrome height and monitor
-    /// size aren't known yet at open time.
-    pending_initial_fit: bool,
-    /// Set when something (initial fit or a zoom step) wants the window resized
-    /// to match `zoom` on this frame. Applied once, then cleared.
-    resize_to_zoom: bool,
     /// The window title last sent via `ViewportCommand::Title`. Native only —
     /// a canvas has no title bar; the page's `<title>` is the host's business.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     last_title: Option<String>,
-    /// When the channels panel was just toggled: the bottom-bar height *before*
-    /// the toggle took visual effect, so the next frame can grow/shrink the
-    /// window by exactly the panel's height change. `false` when idle.
-    panel_grow_armed: bool,
-    panel_old_h: f32,
     /// Whether the file-metadata pop-up window is open.
     show_metadata: bool,
     /// Whether the 3D render-settings pop-up is open.
     show_render_settings: bool,
-    /// Scroll offset of the image inside the central panel, in screen points:
-    /// how far the image's top-left is pushed up/left past the panel's. Only
-    /// meaningful when the image is larger than the panel (zoomed past what the
-    /// monitor-capped window can show); 0 otherwise. Drag to pan.
-    pan: egui::Vec2,
-    /// The central panel's rect and the image's painted top-left from the last
-    /// frame, cached so the early zoom step (which runs before the panel is
-    /// redrawn) can keep the point under the cursor fixed while zooming.
-    panel_rect: egui::Rect,
-    image_origin: egui::Pos2,
-    /// Set by the early zoom step when zoom changed this frame: `(old_zoom,
-    /// cursor)`, consumed later by the window-sizing code to decide whether to
-    /// reposition the window. Separate from the zoom value itself, which is
-    /// applied early so the image redraws this same frame.
-    zoom_reposition: Option<(f32, egui::Pos2)>,
-    /// Accumulated mouse-wheel scroll not yet turned into a frame step, for the
-    /// precise (no-Shift) scrubbing mode. One wheel notch is a Line event of ±1
-    /// → exactly one frame; touchpad pixel scrolls accumulate here until they
-    /// cross a whole frame, so fine scrolling isn't lost or jumpy.
-    scroll_accum: f32,
 
     // --- 3D input preferences (persist across files) ------------------------
     /// Overlay: draw the volume's bounding box with x/y/z coordinate ticks.
@@ -214,22 +239,13 @@ impl ViewerApp {
         let mut app = Self {
             core: Viewer::new(),
             render,
+            view: View2d::default(),
+            panel: PanelLayout::default(),
             open_tx,
             open_rx,
-            channels_panel_expanded: false,
-            zoom: 1.0,
-            pending_initial_fit: false,
-            resize_to_zoom: false,
             last_title: None,
-            panel_grow_armed: false,
-            panel_old_h: 0.0,
             show_metadata: false,
             show_render_settings: false,
-            pan: egui::Vec2::ZERO,
-            panel_rect: egui::Rect::ZERO,
-            image_origin: egui::Pos2::ZERO,
-            zoom_reposition: None,
-            scroll_accum: 0.0,
             show_coord_box: false,
             move_speed: 1.0,
             scroll_speed: 1.0,
@@ -255,10 +271,10 @@ impl ViewerApp {
         // Start at 1:1; on native the next frame computes a fit-to-screen zoom
         // and sizes the window once. On the web `pending_initial_fit` is
         // consumed by the canvas layout instead.
-        self.zoom = 1.0;
-        self.pan = egui::Vec2::ZERO;
-        self.pending_initial_fit = true;
-        self.resize_to_zoom = false;
+        self.view.zoom = 1.0;
+        self.view.pan = egui::Vec2::ZERO;
+        self.view.pending_initial_fit = true;
+        self.view.resize_to_zoom = false;
         // Close any pop-up windows left over from the previous file — their
         // contents (metadata, 3D settings) describe that stack.
         self.show_metadata = false;
@@ -333,10 +349,10 @@ impl ViewerApp {
         // image just letterboxes into the space the panel takes. We stay armed
         // until the height actually changes (the toggle frame still reports the
         // old height), repainting meanwhile so the next frame lands.
-        if self.panel_grow_armed {
-            let delta = bottom_bar_height - self.panel_old_h;
+        if self.panel.grow_armed {
+            let delta = bottom_bar_height - self.panel.old_h;
             if delta.abs() > 0.5 {
-                self.panel_grow_armed = false;
+                self.panel.grow_armed = false;
                 let maximized = ui.ctx().input(|i| i.viewport().maximized).unwrap_or(false);
                 if !maximized {
                     let cur = ui.ctx().content_rect().size();
@@ -361,12 +377,12 @@ impl ViewerApp {
             // chrome still fits the monitor (a huge image opens scaled down, a
             // normal one at 100%). Deferred to here because the chrome height
             // and monitor size aren't known at open time.
-            if self.pending_initial_fit {
+            if self.view.pending_initial_fit {
                 if let Some(z) = initial_fit_zoom(ui.ctx(), img_w, img_h, chrome_height) {
-                    self.zoom = z;
-                    self.pan = egui::Vec2::ZERO;
-                    self.pending_initial_fit = false;
-                    self.resize_to_zoom = true;
+                    self.view.zoom = z;
+                    self.view.pan = egui::Vec2::ZERO;
+                    self.view.pending_initial_fit = false;
+                    self.view.resize_to_zoom = true;
                 } else {
                     // Monitor size not reported yet (can stay unknown until the
                     // window first gets focus/input). Poll a few times a second
@@ -392,9 +408,9 @@ impl ViewerApp {
                 let window_scale = match monitor_work_area(ui.ctx()) {
                     Some(m) => {
                         let fit = (m.x / img_w).min((m.y - chrome_height).max(1.0) / img_h);
-                        self.zoom.min(fit)
+                        self.view.zoom.min(fit)
                     }
-                    None => self.zoom,
+                    None => self.view.zoom,
                 };
                 let w = (img_w * window_scale).round().max(MIN_WINDOW);
                 let h = (img_h * window_scale + chrome_height).round().max(MIN_WINDOW);
@@ -406,8 +422,8 @@ impl ViewerApp {
             // whether to move the window so the cursor's point stays on the same
             // desktop spot.
             let mut reposition: Option<egui::Pos2> = None;
-            if let Some((old_zoom, cursor)) = self.zoom_reposition.take() {
-                let new_zoom = self.zoom;
+            if let Some((old_zoom, cursor)) = self.view.zoom_reposition.take() {
+                let new_zoom = self.view.zoom;
                 let fits = monitor_work_area(ui.ctx())
                     .map(|m| img_w * new_zoom <= m.x && img_h * new_zoom + chrome_height <= m.y)
                     .unwrap_or(true);
@@ -446,13 +462,13 @@ impl ViewerApp {
                 if follow {
                     if let Some(outer) = ui.ctx().input(|i| i.viewport().outer_rect.map(|r| r.min)) {
                         let ratio = new_zoom / old_zoom;
-                        reposition = Some(outer + (cursor - self.panel_rect.min) * (1.0 - ratio));
+                        reposition = Some(outer + (cursor - self.view.panel_rect.min) * (1.0 - ratio));
                     }
                 }
             }
 
             // Apply a pending resize (one-shot), unless maximized.
-            if self.resize_to_zoom {
+            if self.view.resize_to_zoom {
                 if let Some(size) = target_window {
                     let (w, h) = (size.x, size.y);
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
@@ -487,7 +503,7 @@ impl ViewerApp {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
                     }
                 }
-                self.resize_to_zoom = false;
+                self.view.resize_to_zoom = false;
             }
         }
 
@@ -575,22 +591,22 @@ impl eframe::App for ViewerApp {
         // resize and optional reposition are handled later, once the chrome
         // height is known. Cursor-centering uses last frame's cached geometry.
         if zoom_step != 0 && self.core.stack.is_some() && self.core.view_mode == ViewMode::Movie {
-            let old_zoom = self.zoom;
+            let old_zoom = self.view.zoom;
             let new_zoom = stepped_zoom(old_zoom, zoom_step);
             if (new_zoom - old_zoom).abs() > f32::EPSILON {
                 let cursor = ui
                     .ctx()
                     .input(|i| i.pointer.latest_pos())
-                    .filter(|p| self.panel_rect.contains(*p))
-                    .unwrap_or_else(|| self.panel_rect.center());
+                    .filter(|p| self.view.panel_rect.contains(*p))
+                    .unwrap_or_else(|| self.view.panel_rect.center());
                 // The native-pixel point under the cursor, kept fixed by pan
                 // (used when the image overflows; re-clamped to 0 when it fits,
                 // where the window move below handles the centering instead).
-                let p = (cursor - self.image_origin) / old_zoom;
-                self.pan = self.panel_rect.min - (cursor - p * new_zoom);
-                self.zoom = new_zoom;
-                self.resize_to_zoom = true;
-                self.zoom_reposition = Some((old_zoom, cursor));
+                let p = (cursor - self.view.image_origin) / old_zoom;
+                self.view.pan = self.view.panel_rect.min - (cursor - p * new_zoom);
+                self.view.zoom = new_zoom;
+                self.view.resize_to_zoom = true;
+                self.view.zoom_reposition = Some((old_zoom, cursor));
             }
         }
 
@@ -610,7 +626,7 @@ impl eframe::App for ViewerApp {
                 // 2D/3D switch, right next to Open. 3D needs at least two frames
                 // to build a volume; disabled otherwise.
                 if let Some(loaded) = &self.core.stack {
-                    let can_3d = loaded.tiff.meta.frames >= 2;
+                    let can_3d = loaded.display.dims.frames >= 2;
                     ui.separator();
                     ui.add_enabled_ui(can_3d, |ui| {
                         if ui
@@ -673,13 +689,13 @@ impl eframe::App for ViewerApp {
                         ui.separator();
                         // Up to 2 decimals, trailing zeros trimmed: 3.1%, 33.3%,
                         // 100%, 3200% — so the fractional small zooms read correctly.
-                        let pct = format!("{:.2}", self.zoom * 100.0);
+                        let pct = format!("{:.2}", self.view.zoom * 100.0);
                         let pct = pct.trim_end_matches('0').trim_end_matches('.');
                         ui.label(RichText::new(format!("{pct}%")).monospace())
                             .on_hover_text("Zoom (Ctrl+scroll to change)");
                     }
                     ui.separator();
-                    let channels_desc = if loaded.rgb {
+                    let channels_desc = if loaded.display.rgb {
                         "RGB".to_string()
                     } else {
                         format!("{} channel(s)", meta.channels)
@@ -720,7 +736,7 @@ impl eframe::App for ViewerApp {
             // separate time axis, `slices > 1`), where playing animates the
             // volume through time.
             if mode == ViewMode::Volume {
-                let is_4d = self.core.stack.as_ref().is_some_and(|l| l.tiff.meta.slices > 1);
+                let is_4d = self.core.stack.as_ref().is_some_and(|l| l.display.dims.slices > 1);
                 if !is_4d {
                     self.core.playback.playing = false;
                     self.core.playback.last_time = None;
@@ -731,7 +747,7 @@ impl eframe::App for ViewerApp {
         // so the movie's arrow-scrub and wheel-scrub paths must stand down.
         let view_is_volume = self.core.view_mode == ViewMode::Volume;
 
-        let panel_expanded = self.channels_panel_expanded;
+        let panel_expanded = self.panel.expanded;
         let is_playing = self.core.playback.playing;
         let pseudocolor_on = self.core.apply_pseudocolor;
         let mut toggle_requested = false;
@@ -755,13 +771,13 @@ impl eframe::App for ViewerApp {
             ui.add_space(4.0);
 
             ui.horizontal(|ui| {
-                let max_frame = loaded.tiff.meta.frames.saturating_sub(1);
-                let has_multiple_frames = loaded.tiff.meta.frames > 1;
+                let max_frame = loaded.display.dims.frames.saturating_sub(1);
+                let has_multiple_frames = loaded.display.dims.frames > 1;
                 // In 3D the frame axis is the volume's depth, so play/step/scrub
                 // are meaningless unless the stack has a separate time axis
                 // (`slices > 1`). Grey them out otherwise.
                 let frame_nav_enabled =
-                    has_multiple_frames && !(view_is_volume && loaded.tiff.meta.slices <= 1);
+                    has_multiple_frames && !(view_is_volume && loaded.display.dims.slices <= 1);
 
                 let toggle_size = egui::vec2(20.0, 20.0);
                 let toggle_response = ui
@@ -851,11 +867,11 @@ impl eframe::App for ViewerApp {
                     // Shift jumps ~5% of the stack at a time (min 1 frame) instead
                     // of 1, matching the Shift+wheel fast-scroll step.
                     let step = if i.modifiers.shift {
-                        ((loaded.tiff.meta.frames as f64 * FAST_SCROLL_RATE).round() as usize).max(1)
+                        ((loaded.display.dims.frames as f64 * FAST_SCROLL_RATE).round() as usize).max(1)
                     } else {
                         1
                     };
-                    let max_frame = loaded.tiff.meta.frames.saturating_sub(1);
+                    let max_frame = loaded.display.dims.frames.saturating_sub(1);
                     if i.key_pressed(egui::Key::ArrowRight) {
                         loaded.frame_index = (loaded.frame_index + step).min(max_frame);
                     }
@@ -877,11 +893,11 @@ impl eframe::App for ViewerApp {
                     // meaningless for RGB, where the "channels" are fixed color
                     // planes — so the dropdown and pseudocolor toggle are hidden
                     // there.
-                    if !loaded.rgb {
+                    if !loaded.display.rgb {
                         ui.label("Dimension order:");
-                        let c = loaded.tiff.meta.channels;
-                        let z = loaded.tiff.meta.slices;
-                        let f = loaded.tiff.meta.frames;
+                        let c = loaded.display.dims.channels;
+                        let z = loaded.display.dims.slices;
+                        let f = loaded.display.dims.frames;
                         // When the file has a real Z axis (as loaded — see
                         // `has_z_axis`), offer every assignment of the three
                         // counts to the three roles; otherwise just the
@@ -889,7 +905,7 @@ impl eframe::App for ViewerApp {
                         // sort+dedup collapses duplicates when counts are equal
                         // and keeps the list order stable across
                         // reinterpretations.
-                        let show_z = loaded.has_z_axis;
+                        let show_z = loaded.display.has_z_axis;
                         let mut options: Vec<(usize, usize, usize)> = if show_z {
                             vec![(c, z, f), (c, f, z), (z, c, f), (z, f, c), (f, c, z), (f, z, c)]
                         } else {
@@ -943,8 +959,8 @@ impl eframe::App for ViewerApp {
                     // frames in 2D; in 3D the frame axis is the volume's depth,
                     // so time only exists for 4D stacks (`slices > 1`) — matches
                     // the play/scrub controls' enable logic above.
-                    let fps_playable = loaded.tiff.meta.frames > 1
-                        && !(view_is_volume && loaded.tiff.meta.slices <= 1);
+                    let fps_playable = loaded.display.dims.frames > 1
+                        && !(view_is_volume && loaded.display.dims.slices <= 1);
                     if fps_playable {
                         if row_has_items {
                             ui.separator();
@@ -972,17 +988,17 @@ impl eframe::App for ViewerApp {
                             ui.separator();
                         }
                         ui.label("LUT:");
-                        let sel = loaded.gray_lut_sel;
+                        let sel = loaded.display.gray_lut_sel;
                         egui::ComboBox::from_id_salt("gray_lut")
-                            .selected_text(gray_lut_sel_name(loaded, sel))
+                            .selected_text(gray_lut_sel_name(&loaded.display, sel))
                             .show_ui(ui, |ui| {
-                                for opt in 0..gray_lut_count(loaded) {
+                                for opt in 0..gray_lut_count(&loaded.display) {
                                     // Tint each entry with its LUT's low (dark) end
                                     // — the color the darkest samples map to. A
                                     // grayscale/black low end (grayscale + the pure
                                     // channel-color ramps) keeps the default text color.
-                                    let name = gray_lut_sel_name(loaded, opt);
-                                    let text = match tint_color(ui_tint(&gray_lut_sel_lut(loaded, opt))) {
+                                    let name = gray_lut_sel_name(&loaded.display, opt);
+                                    let text = match tint_color(gray_lut_sel_tint(&loaded.display, opt)) {
                                         Some(c) => RichText::new(name).color(c),
                                         None => RichText::new(name),
                                     };
@@ -1037,7 +1053,7 @@ impl eframe::App for ViewerApp {
                         ui.separator();
                     });
                 });
-                if !loaded.rgb {
+                if !loaded.display.rgb {
                     ui.label(
                         RichText::new(
                             "Channels are guessed automatically (6 or fewer = channels, more = time); \
@@ -1049,25 +1065,25 @@ impl eframe::App for ViewerApp {
                 }
 
                 let calibration = loaded.tiff.meta.calibration;
-                let rgb = loaded.rgb;
+                let rgb = loaded.display.rgb;
                 // A palette channel's window is a fixed index→LUT identity, so
                 // there's nothing to adjust — its contrast slider is suppressed.
-                let palette = loaded.palette;
+                let palette = loaded.display.palette;
                 // Tint for the single-channel contrast slider: the low (dark) end
                 // of its chosen color LUT (grayscale/black → None → the default
                 // selection color). Snapshot here, before the mutable borrow of
                 // `channel_settings` below.
-                let single_tint = (loaded.channel_settings.len() == 1)
-                    .then(|| tint_color(ui_tint(&loaded.tiff.meta.channel_display[0].lut)))
+                let single_tint = (loaded.display.settings.len() == 1)
+                    .then(|| tint_color(loaded.display.lut(0).and_then(ui_tint)))
                     .flatten();
-                if loaded.channel_settings.len() > 1 {
+                if loaded.display.settings.len() > 1 {
                     ui.separator();
                     // Hold Shift while dragging one channel's slider to move every
                     // channel's window by the same amount. Snapshot the values
                     // first so we can detect which one moved and by how much.
                     let shift = ui.input(|i| i.modifiers.shift);
                     let before: Vec<(f32, f32)> =
-                        loaded.channel_settings.iter().map(|s| (s.min, s.max)).collect();
+                        loaded.display.settings.iter().map(|s| (s.min, s.max)).collect();
                     // Per-channel slider tints from each channel's display LUT —
                     // colored only for composite/RGB or pseudocolor stacks, `None`
                     // (default color) for plain grayscale.
@@ -1080,7 +1096,7 @@ impl eframe::App for ViewerApp {
                         .collect();
                     // One row per channel — checkbox in line with its slider —
                     // stacked vertically.
-                    for (c, settings) in loaded.channel_settings.iter_mut().enumerate() {
+                    for (c, settings) in loaded.display.settings.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             let label = if rgb {
                                 // Sample planes past RGBA have no conventional
@@ -1126,7 +1142,7 @@ impl eframe::App for ViewerApp {
                     // Shift-sync: if a slider moved this frame, apply the same
                     // delta to every other channel (clamped to its own bounds).
                     if shift {
-                        let moved = loaded.channel_settings.iter().enumerate().find_map(|(c, s)| {
+                        let moved = loaded.display.settings.iter().enumerate().find_map(|(c, s)| {
                             let (bmin, bmax) = before[c];
                             let (dmin, dmax) = (s.min - bmin, s.max - bmax);
                             if dmin != 0.0 || dmax != 0.0 {
@@ -1136,7 +1152,7 @@ impl eframe::App for ViewerApp {
                             }
                         });
                         if let Some((src, dmin, dmax)) = moved {
-                            for (i, s) in loaded.channel_settings.iter_mut().enumerate() {
+                            for (i, s) in loaded.display.settings.iter_mut().enumerate() {
                                 if i == src {
                                     continue;
                                 }
@@ -1154,7 +1170,7 @@ impl eframe::App for ViewerApp {
                             .weak(),
                     );
                 } else if !palette {
-                    if let Some(settings) = loaded.channel_settings.first_mut() {
+                    if let Some(settings) = loaded.display.settings.first_mut() {
                         ui.separator();
                         ui.horizontal(|ui| {
                             ui.label("Contrast:");
@@ -1181,7 +1197,7 @@ impl eframe::App for ViewerApp {
                 // showing it there would be wrong. When `triple_axis_warning` is
                 // set, the status IS that note (`compute_status` short-circuits
                 // on it), so this suppresses exactly the right message.
-                if !(view_is_volume && loaded.triple_axis_warning) {
+                if !(view_is_volume && loaded.display.triple_axis_warning) {
                     ui.separator();
                     ui.label(RichText::new(status).color(Color32::from_rgb(230, 170, 60)).small());
                 }
@@ -1233,13 +1249,13 @@ impl eframe::App for ViewerApp {
         }
 
         if toggle_requested {
-            self.channels_panel_expanded = !self.channels_panel_expanded;
+            self.panel.expanded = !self.panel.expanded;
             // Remember the panel's height *before* it expands/collapses; the
             // next frame (once it's redrawn in the new state) grows or shrinks
             // the window by the difference. This frame still shows the old
             // height, so the actual delta only becomes known next frame.
-            self.panel_grow_armed = true;
-            self.panel_old_h = scrub_bar_response.response.rect.height();
+            self.panel.grow_armed = true;
+            self.panel.old_h = scrub_bar_response.response.rect.height();
         }
 
         if play_toggle_requested {
@@ -1256,14 +1272,7 @@ impl eframe::App for ViewerApp {
         }
 
         if let Some(sel) = gray_lut_change {
-            if let Some(loaded) = &mut self.core.stack {
-                loaded.gray_lut_sel = sel;
-                let lut = gray_lut_sel_lut(loaded, sel); // "Built-in LUT" restores the file's map
-                if let Some(disp) = loaded.tiff.meta.channel_display.first_mut() {
-                    disp.lut = lut;
-                }
-                loaded.luts_uploaded = false; // force LUT re-upload next sync
-            }
+            self.core.set_gray_lut(sel);
         }
 
         // Looped playback: the core advances by real elapsed time so the movie
@@ -1294,7 +1303,7 @@ impl eframe::App for ViewerApp {
         // a multi-frame layout. (Runs before the central panel so the click
         // frame already renders 2D.)
         if self.core.view_mode == ViewMode::Volume
-            && self.core.stack.as_ref().is_some_and(|l| l.tiff.meta.frames < 2)
+            && self.core.stack.as_ref().is_some_and(|l| l.display.dims.frames < 2)
         {
             self.core.view_mode = ViewMode::Movie;
             self.core.playback.playing = false;
@@ -1321,7 +1330,7 @@ impl eframe::App for ViewerApp {
             let available = ui.available_size();
             let (panel_rect, response) =
                 ui.allocate_exact_size(available, egui::Sense::click_and_drag());
-            self.panel_rect = panel_rect;
+            self.view.panel_rect = panel_rect;
 
             // 3D volume view: drive the camera per the active nav mode and paint
             // the GPU ray-march. The 2D pan/UV/scrub path below is bypassed. This
@@ -1371,7 +1380,7 @@ impl eframe::App for ViewerApp {
                 return;
             };
 
-            let img_px = egui::vec2(w as f32 * self.zoom, h as f32 * self.zoom);
+            let img_px = egui::vec2(w as f32 * self.view.zoom, h as f32 * self.view.zoom);
             // A 1px tolerance so sub-pixel rounding between the window size and
             // the panel's available area doesn't register as a pannable overflow.
             let overflow = egui::vec2(
@@ -1382,19 +1391,19 @@ impl eframe::App for ViewerApp {
 
             // Drag to pan when the image overflows the panel.
             if pannable && response.dragged() {
-                self.pan -= response.drag_delta();
+                self.view.pan -= response.drag_delta();
             }
-            self.pan.x = self.pan.x.clamp(0.0, overflow.x);
-            self.pan.y = self.pan.y.clamp(0.0, overflow.y);
+            self.view.pan.x = self.view.pan.x.clamp(0.0, overflow.x);
+            self.view.pan.y = self.view.pan.y.clamp(0.0, overflow.y);
 
             // Where the image's top-left *would* be if drawn full-size: scrolled
             // by `pan` on an overflowing axis, centered on an axis that fits.
             // (Cached for cursor-centered zoom; may lie outside the panel.)
             let origin = egui::pos2(
-                if overflow.x > 0.0 { panel_rect.min.x - self.pan.x } else { panel_rect.min.x + (available.x - img_px.x) * 0.5 },
-                if overflow.y > 0.0 { panel_rect.min.y - self.pan.y } else { panel_rect.min.y + (available.y - img_px.y) * 0.5 },
+                if overflow.x > 0.0 { panel_rect.min.x - self.view.pan.x } else { panel_rect.min.x + (available.x - img_px.x) * 0.5 },
+                if overflow.y > 0.0 { panel_rect.min.y - self.view.pan.y } else { panel_rect.min.y + (available.y - img_px.y) * 0.5 },
             );
-            self.image_origin = origin;
+            self.view.image_origin = origin;
 
             // Render into the on-screen *visible* rectangle only, and pan/zoom
             // via UVs. Drawing into an oversized rect doesn't work: the callback
@@ -1436,7 +1445,7 @@ impl eframe::App for ViewerApp {
                     });
                     if glide != 0.0 {
                         // ~10% of the stack per notch, spread across the glide.
-                        let n_frames = self.core.stack.as_ref().map(|l| l.tiff.meta.frames).unwrap_or(1);
+                        let n_frames = self.core.stack.as_ref().map(|l| l.display.dims.frames).unwrap_or(1);
                         let fast_step = (n_frames as f64 * FAST_SCROLL_RATE).max(1.0);
                         // glide < 0 is scroll-down → advance frames. Advance at a
                         // fixed rate *per second* (scaled by the frame time), so
@@ -1445,9 +1454,9 @@ impl eframe::App for ViewerApp {
                         // their different render speeds. Fractions accumulate so
                         // short stacks still move.
                         let dir = if glide < 0.0 { 1.0 } else { -1.0 };
-                        self.scroll_accum += (dir * fast_step * FAST_SCROLL_GLIDE_RATE * dt as f64) as f32;
-                        let steps = self.scroll_accum.trunc();
-                        self.scroll_accum -= steps;
+                        self.view.scroll_accum += (dir * fast_step * FAST_SCROLL_GLIDE_RATE * dt as f64) as f32;
+                        let steps = self.view.scroll_accum.trunc();
+                        self.view.scroll_accum -= steps;
                         scroll_step = steps as i32;
                     }
                 } else {
@@ -1465,19 +1474,19 @@ impl eframe::App for ViewerApp {
                         })
                     });
                     // egui scroll is +y up; we scrub the next frame on scroll-down.
-                    self.scroll_accum -= notches;
-                    let steps = self.scroll_accum.trunc();
-                    self.scroll_accum -= steps;
+                    self.view.scroll_accum -= notches;
+                    let steps = self.view.scroll_accum.trunc();
+                    self.view.scroll_accum -= steps;
                     scroll_step = steps as i32;
                 }
             } else {
-                self.scroll_accum = 0.0;
+                self.view.scroll_accum = 0.0;
             }
         });
 
         if scroll_step != 0 {
             if let Some(loaded) = &mut self.core.stack {
-                let max_frame = loaded.tiff.meta.frames.saturating_sub(1) as i64;
+                let max_frame = loaded.display.dims.frames.saturating_sub(1) as i64;
                 let target = (loaded.frame_index as i64 + scroll_step as i64).clamp(0, max_frame);
                 loaded.frame_index = target as usize;
             }

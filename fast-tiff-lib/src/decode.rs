@@ -17,6 +17,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// fast enough that they're never the playback bottleneck.
 const PARALLEL_MIN_PIXELS: usize = 1024 * 1024;
 
+/// How far a *compressed* frame's decoded size may exceed the compressed bytes
+/// its strips actually hold, before the file is treated as malformed.
+///
+/// This is a heuristic, and the only one in the size guards — everything else is
+/// structural. It exists because `rows_per_strip` is file-declared, so the
+/// "enough strips to cover the image" check can be satisfied by any frame that
+/// simply claims one enormous strip; something has to bound how far a handful of
+/// input bytes may expand.
+///
+/// The value sits comfortably above every real codec and comfortably below the
+/// absurd. Deflate tops out near 1032:1 and LZW lower; ZSTD is the outlier,
+/// since an RLE block encodes ~128 KiB in a few bytes for a practical ceiling
+/// around 2^15 on degenerate all-one-value data. 2^18 leaves that another eight
+/// times of headroom, while still refusing the tiny-file-claims-a-terabyte case
+/// that motivated these guards.
+const MAX_DECODED_EXPANSION: u64 = 1 << 18;
+
+
 /// Process-wide hint: split large decodes across cores when `true`, run them
 /// serially when `false` (the default). Parallel decode spreads load across
 /// cores but uses *more total CPU* (rayon overhead), so it's only worth it when
@@ -118,6 +136,10 @@ pub fn read_frame_u16_into(
         && frame.compression == Compression::None
         && frame.predictor == 1
     {
+        // This path sizes `out` from the header and fills it from the strips
+        // afterwards, so the size must be vetted first — otherwise the `resize`
+        // below aborts before the strip shortfall is ever noticed.
+        guard_frame_size(frame)?;
         ensure_len(out, frame.width as usize * frame.height as usize);
         let signed = frame.sample_format == SampleFormat::SignedInt;
         let flip = if signed { 0x8000u16 } else { 0 };
@@ -172,8 +194,10 @@ pub fn read_frame_u8_into(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder,
     }
     let sample_bytes = sample_bytes(frame)?;
     if frame.compression == Compression::None && frame.predictor == 1 {
-        let spp = (frame.samples_per_pixel as usize).max(1);
-        ensure_len(out, frame.width as usize * frame.height as usize * spp * sample_bytes);
+        // Vet the header-declared size before sizing `out` from it (see
+        // `guard_frame_size`).
+        let total_len = guard_frame_size(frame)?;
+        ensure_len(out, total_len);
         return for_each_raw_strip(mmap, frame, sample_bytes, |src, start, n| {
             out[start * sample_bytes..start * sample_bytes + n * sample_bytes].copy_from_slice(src);
         });
@@ -200,6 +224,68 @@ fn bytes_for_bits(bits: u16) -> Result<usize> {
     }
 }
 
+/// Reject a frame whose declared decoded size can't possibly be backed by the
+/// bytes its strips hold — **before** anything allocates. Returns the vetted
+/// decoded length.
+///
+/// Everything here comes from the file's header, so without this a few hundred
+/// bytes can demand gigabytes. That matters more than an ordinary error path:
+/// an oversized `vec![0u8; n]` *aborts* the process, because Rust's
+/// allocation-failure path is not catchable — it would take any host
+/// application down with it, uncatchably.
+///
+/// Two bounds, neither of which needs a compression-ratio constant: what the
+/// declared strips can structurally *cover*, and — for uncompressed data, where
+/// the strips are the pixels — what they actually supply. Callers that then
+/// allocate should still do so fallibly (`try_reserve`), so a merely-large
+/// frame on a memory-starved machine degrades to an `Err` rather than an abort.
+fn guard_frame_size(frame: &FrameInfo) -> Result<usize> {
+    let total_len = frame.decoded_len()?;
+
+    // Structural bound, and the load-bearing one: a strip holds at most
+    // `rows_per_strip` rows, so the strips a frame declares can only ever cover
+    // so much image. Codec-independent — no compression-ratio constant to guess
+    // — and it cannot reject a well-formed file, because declaring enough
+    // strips to cover your own rows is what *makes* a frame decodable.
+    let coverable = frame.strip_coverable_bytes()?;
+    if total_len as u64 > coverable {
+        bail!(
+            "frame declares {total_len} decoded bytes but its {} strip(s) of {} row(s) can cover \
+             only {coverable} — refusing to allocate for a malformed or hostile file",
+            frame.strip_offsets.len(),
+            frame.rows_per_strip,
+        );
+    }
+
+    // Input-supply bound. The structural check above is necessary but not
+    // sufficient, because `rows_per_strip` is itself file-declared: setting it
+    // to at least the image height makes "the strips can cover it" trivially
+    // true for any height at all. So also bound the decode by the bytes the
+    // strips actually hold.
+    //
+    // Uncompressed is exact — the strips *are* the pixels. Compressed genuinely
+    // expands, so it gets [`MAX_DECODED_EXPANSION`] of headroom.
+    let available = frame.strip_bytes_total();
+    if frame.compression == Compression::None {
+        if total_len as u64 > available {
+            bail!(
+                "uncompressed frame declares {total_len} decoded bytes but its strips supply \
+                 only {available}"
+            );
+        }
+    } else {
+        let ceiling = available.saturating_mul(MAX_DECODED_EXPANSION);
+        if total_len as u64 > ceiling {
+            bail!(
+                "frame declares {total_len} decoded bytes from only {available} compressed \
+                 byte(s) ({:?}) — beyond any real codec's expansion, refusing to allocate",
+                frame.compression
+            );
+        }
+    }
+    Ok(total_len)
+}
+
 /// Decode a **4-bit single-sample** frame into one byte per pixel (each an index
 /// 0..=15). 4-bit samples are packed two per byte, high nibble first (TIFF's
 /// FillOrder-1 default). Rows are byte-aligned — a byte is never split across
@@ -218,8 +304,38 @@ fn decode_4bit_indices(mmap: &[u8], frame: &FrameInfo) -> Result<Vec<u8>> {
     let packed_row = width.div_ceil(2); // bytes per row (byte-aligned)
     let rows_per_strip = (frame.rows_per_strip as usize).max(1);
 
+    // Checked, and plausibility-bounded, for the same reason as
+    // `decode_native_bytes_opt`: these sizes come from the file. 4-bit geometry
+    // is *not* covered by `FrameInfo::decoded_len` (a 4-bit sample has no whole
+    // byte size), so this path does its own arithmetic and must guard it too.
+    let overflow = || anyhow!("4-bit frame geometry overflows address space ({width}x{height})");
+    let packed_len = packed_row.checked_mul(height).ok_or_else(overflow)?;
+    let out_len = width.checked_mul(height).ok_or_else(overflow)?;
+    // Both bounds from `guard_frame_size`, in 4-bit's packed units: what the
+    // strips can structurally cover, and what they actually supply.
+    let coverable = (frame.strip_offsets.len() as u64)
+        .saturating_mul((rows_per_strip as u64).min(height as u64))
+        .saturating_mul(packed_row as u64);
+    let available = frame.strip_bytes_total();
+    let supply = if frame.compression == Compression::None {
+        available
+    } else {
+        available.saturating_mul(MAX_DECODED_EXPANSION)
+    };
+    if packed_len as u64 > coverable.min(supply) {
+        bail!(
+            "4-bit frame declares {packed_len} packed bytes but its {} strip(s) supply only \
+             {available} and cover only {coverable} — refusing to allocate",
+            frame.strip_offsets.len()
+        );
+    }
+
     // Assemble the packed bytes, decompressing each strip into its row range.
-    let mut packed = vec![0u8; packed_row * height];
+    let mut packed: Vec<u8> = Vec::new();
+    packed
+        .try_reserve_exact(packed_len)
+        .map_err(|_| anyhow!("cannot allocate {packed_len} bytes for a {width}x{height} 4-bit frame"))?;
+    packed.resize(packed_len, 0);
     let mut rows_done = 0usize;
     for (&off, &len) in frame.strip_offsets.iter().zip(frame.strip_byte_counts.iter()) {
         if rows_done >= height {
@@ -238,7 +354,10 @@ fn decode_4bit_indices(mmap: &[u8], frame: &FrameInfo) -> Result<Vec<u8>> {
     }
 
     // Unpack nibbles → one index byte per pixel.
-    let mut out = vec![0u8; width * height];
+    let mut out: Vec<u8> = Vec::new();
+    out.try_reserve_exact(out_len)
+        .map_err(|_| anyhow!("cannot allocate {out_len} bytes for a {width}x{height} 4-bit frame"))?;
+    out.resize(out_len, 0);
     for (prow, orow) in packed.chunks_exact(packed_row).zip(out.chunks_exact_mut(width.max(1))) {
         for (x, o) in orow.iter_mut().enumerate() {
             let byte = prow[x / 2];
@@ -723,6 +842,9 @@ pub fn read_frame_f32_into(
         && frame.compression == Compression::None
         && frame.predictor == 1
     {
+        // Vet the header-declared size before sizing `out` from it (see
+        // `guard_frame_size`).
+        guard_frame_size(frame)?;
         ensure_len(out, frame.width as usize * frame.height as usize);
         let format = frame.sample_format;
         let memcpyable = format == SampleFormat::Float && file_order == ByteOrder::host();
@@ -762,6 +884,7 @@ pub fn read_plane_f32_into(
     plane: usize,
     out: &mut Vec<f32>,
 ) -> Result<()> {
+    require_wide_samples(frame, "read_plane_f32")?;
     let native = decode_native_bytes(mmap, frame, file_order)?;
     ensure_len(out, frame.width as usize * frame.height as usize);
     plane_f32_from_native(&native, frame, file_order, plane, out);
@@ -784,6 +907,7 @@ pub fn read_planes_f32_into(
     file_order: ByteOrder,
     out: &mut Vec<Vec<f32>>,
 ) -> Result<()> {
+    require_wide_samples(frame, "read_planes_f32")?;
     let native = decode_native_bytes(mmap, frame, file_order)?;
     let spp = (frame.samples_per_pixel as usize).max(1);
     let n_pixels = frame.width as usize * frame.height as usize;
@@ -793,6 +917,18 @@ pub fn read_planes_f32_into(
         plane_f32_from_native(&native, frame, file_order, p, plane_out);
     }
     Ok(())
+}
+
+/// Guard the f32 readers' precondition. They reinterpret each sample as a 4- or
+/// 8-byte wide value, so pointing one at a narrower frame walks off the end of
+/// the decoded buffer. These are public entry points and the bit depth comes
+/// from an untrusted file, so a mis-gated call must return an error — never
+/// panic, which is what the unchecked `chunk[..4]` in `sample_f32` did.
+fn require_wide_samples(frame: &FrameInfo, method: &str) -> Result<()> {
+    match frame.bits_per_sample {
+        32 | 64 => Ok(()),
+        other => bail!("{method} requires 32- or 64-bit samples, but this frame is {other}-bit"),
+    }
 }
 
 /// The conversion core shared by the f32 plane readers (`out` pre-sized).
@@ -992,8 +1128,8 @@ fn decode_native_bytes_opt<'a>(
     let sample_bytes = bytes_for_bits(frame.bits_per_sample)?;
     // Total decoded size is the same under either interleaving — only the
     // per-strip split differs (see `strip_dest_lens`).
-    let total_len =
-        frame.width as usize * frame.height as usize * frame.samples_per_pixel.max(1) as usize * sample_bytes;
+    // Checked: these factors all come from the file (see `FrameInfo::decoded_len`).
+    let total_len = frame.decoded_len()?;
 
     // Fast path: a single uncompressed strip that already covers the whole
     // image can be read straight out of the memory map — no intermediate copy.
@@ -1022,7 +1158,13 @@ fn decode_native_bytes_opt<'a>(
     // image height doesn't divide evenly.
     let compression = frame.compression;
     let n_pixels = frame.width as usize * frame.height as usize;
-    let mut native = vec![0u8; total_len];
+
+    guard_frame_size(frame)?;
+    let mut native: Vec<u8> = Vec::new();
+    native
+        .try_reserve_exact(total_len)
+        .map_err(|_| anyhow!("cannot allocate {total_len} bytes for a {}x{} frame", frame.width, frame.height))?;
+    native.resize(total_len, 0);
 
     // Carve `native` into per-strip destination slices (disjoint row ranges).
     // The plan's lengths sum to exactly `total_len`, so taking at most one per
@@ -1303,7 +1445,18 @@ fn undo_predictor(
 /// (`sample_bytes == 4`) and f64 (`sample_bytes == 8`).
 fn undo_float_predictor(data: &mut [u8], row_bytes: usize, stride: usize, sample_bytes: usize, file_order: ByteOrder) {
     let wc = row_bytes / sample_bytes; // float values per row
-    let mut scratch = vec![0u8; row_bytes];
+    // `row_bytes` is `width * stride * sample_bytes` — the one size in this file
+    // with no `height` factor, so it is *not* bounded by `decoded_len`. It stays
+    // safe only because `validate_frames` rejects a zero-height frame, which
+    // makes `row_bytes <= decoded_len` and so already-vetted. Size it from what
+    // we were actually handed rather than trusting that chain: a scratch buffer
+    // wider than one row of `data` can never be needed, and the process must not
+    // die allocating a buffer for rows that do not exist.
+    let scratch_len = row_bytes.min(data.len());
+    let mut scratch = vec![0u8; scratch_len];
+    if scratch_len < row_bytes {
+        return; // no whole row to transform; `chunks_exact_mut` would yield none
+    }
     for row in data.chunks_exact_mut(row_bytes) {
         for i in stride..row_bytes {
             row[i] = row[i].wrapping_add(row[i - stride]);

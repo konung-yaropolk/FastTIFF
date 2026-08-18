@@ -39,7 +39,7 @@ impl Viewer {
         let mut outcome = SyncOutcome::default();
         let Some(loaded) = &mut self.stack else { return outcome };
 
-        let n_channels = loaded.channel_settings.len();
+        let n_channels = loaded.display.settings.len();
         if n_channels == 0 {
             return outcome;
         }
@@ -47,7 +47,7 @@ impl Viewer {
         // Per-channel GPU texture kind (R8Uint / R16Uint / R32F), picked from the
         // source format at load time — drives both texture allocation and the
         // decode path below.
-        let kinds: Vec<ChannelKind> = loaded.channel_settings.iter().map(|s| s.kind).collect();
+        let kinds: Vec<ChannelKind> = loaded.display.settings.iter().map(|s| s.kind).collect();
 
         if let Some(first) = loaded.tiff.frames.first() {
             renderer.ensure_size(first.width, first.height, &kinds);
@@ -55,7 +55,7 @@ impl Viewer {
 
         if !loaded.luts_uploaded {
             for c in 0..n_channels {
-                renderer.upload_lut(c, &loaded.tiff.meta.channel_display[c].lut);
+                renderer.upload_lut(c, &loaded.display.luts[c]);
             }
             loaded.luts_uploaded = true;
         }
@@ -81,7 +81,8 @@ impl Viewer {
         // to sample; the two integer formats share one sampler.
         const SCALE_8BIT: f32 = 257.0;
         let uniforms: Vec<ChannelUniform> = loaded
-            .channel_settings
+            .display
+            .settings
             .iter()
             .map(|s| {
                 let scale = if s.kind == ChannelKind::Int8 { SCALE_8BIT } else { 1.0 };
@@ -111,7 +112,7 @@ fn sync_movie(
     // the frame moves *or* the enabled set changes; an enabled-set change also
     // bumps the prefetch generation so an in-flight prefetch under the old set
     // is recognized as stale.
-    let enabled: Vec<bool> = loaded.channel_settings.iter().map(|s| s.enabled).collect();
+    let enabled: Vec<bool> = loaded.display.settings.iter().map(|s| s.enabled).collect();
     if loaded.last_enabled != enabled {
         loaded.prefetch_gen = loaded.prefetch_gen.wrapping_add(1);
     }
@@ -191,7 +192,7 @@ fn upload(renderer: &mut Renderer, channel: usize, width: u32, height: u32, data
 /// the depth and `time` stays 0.
 fn sync_volume(loaded: &mut Stack, view: &mut crate::viewer::VolumeView, renderer: &mut Renderer) -> bool {
     let mut needs_repaint = false;
-    let is_4d = loaded.tiff.meta.slices > 1;
+    let is_4d = loaded.display.dims.slices > 1;
     let time = if is_4d { loaded.frame_index } else { 0 };
 
     if view.built_frame != Some(time) {
@@ -243,8 +244,8 @@ fn sync_volume(loaded: &mut Stack, view: &mut crate::viewer::VolumeView, rendere
     // Bounded by MAX_CHANNELS, so it lives on the stack — this runs every 3D
     // frame and has no business calling the allocator.
     let mut windows = [(0.0f32, 0.0f32, false, false); MAX_CHANNELS];
-    let n = loaded.channel_settings.len().min(MAX_CHANNELS);
-    for (slot, s) in windows.iter_mut().zip(&loaded.channel_settings) {
+    let n = loaded.display.settings.len().min(MAX_CHANNELS);
+    for (slot, s) in windows.iter_mut().zip(&loaded.display.settings) {
         let float = s.kind == ChannelKind::Float;
         let (lo, hi) = if float { (s.min, s.max) } else { (s.min / 65535.0, s.max / 65535.0) };
         *slot = (lo, hi, float, s.enabled);
@@ -268,15 +269,15 @@ fn sync_volume(loaded: &mut Stack, view: &mut crate::viewer::VolumeView, rendere
 pub fn build_jobs(loaded: &Stack, frame_index: usize, enabled: &[bool], kinds: &[ChannelKind]) -> Vec<ChannelJob> {
     let Some((width, height)) = loaded.dimensions() else { return Vec::new() };
     let meta = &loaded.tiff.meta;
-    (0..loaded.channel_settings.len())
+    (0..loaded.display.settings.len())
         .filter(|&c| enabled.get(c).copied().unwrap_or(false))
         .map(|c| {
-            let (ifd_idx, plane) = if loaded.rgb {
+            let (ifd_idx, plane) = if loaded.display.rgb {
                 (frame_index * meta.slices, c)
             } else {
                 (frame_index * meta.slices * meta.channels + c, 0)
             };
-            ChannelJob { channel: c, ifd_idx, plane, kind: kinds[c], rgb: loaded.rgb, width, height }
+            ChannelJob { channel: c, ifd_idx, plane, kind: kinds[c], rgb: loaded.display.rgb, width, height }
         })
         .collect()
 }
@@ -286,11 +287,11 @@ pub fn build_jobs(loaded: &Stack, frame_index: usize, enabled: &[bool], kinds: &
 /// channels/frames swap is honored, `time` is the 4D timepoint to build.
 pub fn plan_volume(loaded: &Stack, max_dim: u32, time: usize) -> VolumePlan {
     VolumePlan {
-        kinds: loaded.channel_settings.iter().map(|s| s.kind).collect(),
-        rgb: loaded.rgb,
-        channels: loaded.tiff.meta.channels,
-        slices: loaded.tiff.meta.slices,
-        frames: loaded.tiff.meta.frames,
+        kinds: loaded.display.settings.iter().map(|s| s.kind).collect(),
+        rgb: loaded.display.rgb,
+        channels: loaded.display.dims.channels,
+        slices: loaded.display.dims.slices,
+        frames: loaded.display.dims.frames,
         time,
         max_dim,
     }

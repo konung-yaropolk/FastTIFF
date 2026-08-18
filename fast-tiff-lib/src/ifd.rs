@@ -140,7 +140,12 @@ impl RawIfdEntry {
         }
         let offset = usize::try_from(self.offset(order))
             .map_err(|_| anyhow!("IFD entry tag {} offset exceeds address space", self.tag))?;
-        file.get(offset..offset + len)
+        // `checked_add`: both terms come from the file, and the sum overflowing
+        // would panic in a debug build before `get` ever ran.
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| anyhow!("IFD entry tag {} offset+length overflows", self.tag))?;
+        file.get(offset..end)
             .ok_or_else(|| anyhow!("IFD entry tag {} points outside file bounds", self.tag))
     }
 
@@ -161,7 +166,11 @@ impl RawIfdEntry {
         let bytes = self.owned_bytes(file, order)?;
         let sz = type_size(self.field_type)
             .ok_or_else(|| anyhow!("unsupported TIFF field type {}", self.field_type))?;
-        let mut out = Vec::with_capacity(self.count as usize);
+        // Size from the bytes we actually resolved, not the file's declared
+        // `count`: the two agree for a well-formed entry, but `count` is
+        // attacker-controlled and would otherwise reserve 8 bytes per claimed
+        // element before a single one is read.
+        let mut out = Vec::with_capacity(bytes.len() / sz.max(1));
         for chunk in bytes.chunks_exact(sz) {
             let v = match sz {
                 1 => chunk[0] as u64,
@@ -251,8 +260,17 @@ pub fn read_ifd(file: &[u8], offset: usize, order: ByteOrder, flavor: TiffFlavor
         TiffFlavor::Classic => (2usize, 12usize, 4usize),
         TiffFlavor::Big => (8, 20, 8),
     };
+    // Every `offset + len` below uses `checked_add`: the offsets come from the
+    // file, and an overflowing sum panics in debug builds instead of falling
+    // through to the `get` bounds check.
+    let at = |base: usize, len: usize| -> Result<std::ops::Range<usize>> {
+        let end = base
+            .checked_add(len)
+            .ok_or_else(|| anyhow!("IFD at {offset} declares an offset that overflows"))?;
+        Ok(base..end)
+    };
     let count_bytes = file
-        .get(offset..offset + count_len)
+        .get(at(offset, count_len)?)
         .ok_or_else(|| anyhow!("IFD offset {} out of bounds", offset))?;
     let entry_count = match flavor {
         TiffFlavor::Classic => order.u16(count_bytes) as u64,
@@ -266,7 +284,7 @@ pub fn read_ifd(file: &[u8], offset: usize, order: ByteOrder, flavor: TiffFlavor
         .checked_mul(entry_len)
         .ok_or_else(|| anyhow!("IFD at {} declares an absurd entry count", offset))?;
     let entries_bytes = file
-        .get(entries_start..entries_start + entries_len)
+        .get(at(entries_start, entries_len)?)
         .ok_or_else(|| anyhow!("IFD at {} truncated (entry table out of bounds)", offset))?;
 
     let mut entries = Vec::with_capacity(entry_count);
@@ -293,9 +311,11 @@ pub fn read_ifd(file: &[u8], offset: usize, order: ByteOrder, flavor: TiffFlavor
         });
     }
 
-    let next_offset_pos = entries_start + entries_len;
+    let next_offset_pos = entries_start
+        .checked_add(entries_len)
+        .ok_or_else(|| anyhow!("IFD at {offset} declares an offset that overflows"))?;
     let next_bytes = file
-        .get(next_offset_pos..next_offset_pos + next_len)
+        .get(at(next_offset_pos, next_len)?)
         .ok_or_else(|| anyhow!("IFD at {} truncated (missing next-IFD offset)", offset))?;
     let next_offset = match flavor {
         TiffFlavor::Classic => order.u32(next_bytes) as u64,

@@ -93,6 +93,38 @@ Tiled TIFFs and pyramidal / mixed-size stacks (every frame must share frame 0's
 geometry — this is enforced with a clear error at `open`). A 64-bit target is
 assumed: offset arithmetic uses `usize`.
 
+### Robustness against malformed input
+
+Every input is untrusted, so for **any** bytes at all the only outcomes are `Ok`
+or `Err`. Specifically, a malformed or hostile file must never panic, never
+abort, and never allocate unboundedly — an oversized `vec![0u8; n]` calls
+`abort()`, which no caller can catch, so it would take the host process down.
+
+Header fields are attacker-controlled, and `width × height × samples_per_pixel ×
+bytes_per_sample` is easy to inflate, so sizes are constrained on three sides
+before anything is allocated:
+
+- **Checked arithmetic.** `FrameInfo::decoded_len` is the single place the frame
+  size is computed, and it cannot wrap.
+- **Index-time validation.** `open` rejects empty images and any strip that
+  falls outside the file, so every `FrameInfo` a caller can reach is already
+  sane, and the strip totals below are bounded by the file.
+- **Two size bounds at decode.** What the declared strips can structurally
+  *cover* (`strips × rows_per_strip × row bytes`), and what they actually
+  *supply* — exact for uncompressed data, with codec headroom for compressed.
+  Both are needed: `rows_per_strip` is itself file-declared, so the structural
+  bound alone is satisfiable by any frame claiming one enormous strip.
+- **Fallible allocation.** What survives the bounds is allocated with
+  `try_reserve`, so a genuinely large frame on a memory-starved machine returns
+  an error instead of aborting.
+
+This is enforced two ways. [`tests/malformed_robustness.rs`](tests/malformed_robustness.rs)
+pins the known cases — truncation at every prefix, single-byte corruption at
+every offset, a seeded mutation sweep, hostile metadata, and inflated
+geometry — and runs in ordinary CI on every platform. [`fuzz/`](fuzz/) adds
+`cargo-fuzz` targets over `from_bytes` and every decoder that explore for new
+ones; see [`fuzz/README.md`](fuzz/README.md).
+
 ### Compared with other TIFF libraries
 
 How the format coverage lines up against the readers/writers this crate is

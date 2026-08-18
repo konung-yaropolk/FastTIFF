@@ -65,11 +65,11 @@ fn opens_an_imagej_hyperstack_with_derived_channel_settings() {
 
     let (w, h) = stack.dimensions().expect("dimensions");
     assert!(w > 0 && h > 0);
-    assert!(!stack.channel_settings.is_empty(), "every open stack gets channel settings");
+    assert!(!stack.display.settings.is_empty(), "every open stack gets channel settings");
 
     // 16-bit unsigned planes take the R16Uint path, and each channel starts
     // enabled with a contrast window that sits inside its slider track.
-    for (c, s) in stack.channel_settings.iter().enumerate() {
+    for (c, s) in stack.display.settings.iter().enumerate() {
         assert_eq!(s.kind, ChannelKind::Int16, "channel {c}");
         assert!(s.enabled, "channel {c} should start enabled");
         let (lo, hi) = s.bounds;
@@ -79,7 +79,7 @@ fn opens_an_imagej_hyperstack_with_derived_channel_settings() {
     }
 
     // A display LUT exists for every channel the settings cover.
-    assert!(stack.tiff.meta.channel_display.len() >= stack.channel_settings.len());
+    assert!(stack.tiff.meta.channel_display.len() >= stack.display.settings.len());
 }
 
 #[test]
@@ -87,10 +87,10 @@ fn rgb_stack_becomes_three_display_channels() {
     let Some(path) = fixture("tff_u8_spp3_p2_none.tif") else { return };
     let stack = open_stack(path, false).expect("rgb should open");
 
-    assert!(stack.rgb, "a 3-sample photometric-RGB frame should set the rgb flag");
-    assert_eq!(stack.channel_settings.len(), 3, "R/G/B become three display channels");
+    assert!(stack.display.rgb, "a 3-sample photometric-RGB frame should set the rgb flag");
+    assert_eq!(stack.display.settings.len(), 3, "R/G/B become three display channels");
     // 8-bit unsigned uploads raw, without the CPU widening pass.
-    assert!(stack.channel_settings.iter().all(|s| s.kind == ChannelKind::Int8));
+    assert!(stack.display.settings.iter().all(|s| s.kind == ChannelKind::Int8));
     // The channels/time guess and the pseudocolor toggle are meaningless here.
     assert!(!pseudocolor_applicable(&stack));
     assert!(!gray_lut_applicable(&stack));
@@ -101,7 +101,7 @@ fn float_stack_windows_in_its_own_units() {
     let Some(path) = fixture("tff_f32_spp1_p2_none-le.tif") else { return };
     let stack = open_stack(path, false).expect("float should open");
 
-    let s = stack.channel_settings.first().expect("one channel");
+    let s = stack.display.settings.first().expect("one channel");
     assert_eq!(s.kind, ChannelKind::Float, "32-bit float takes the R32F path");
     // Contrast is defined over the data's actual range, not an assumed
     // 0..65535 integer scale (matching how ImageJ treats float images).
@@ -115,29 +115,43 @@ fn dimension_override_conserves_the_plane_count() {
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("hyperstack should open");
 
-    let planes = {
-        let m = &viewer.stack.as_ref().unwrap().tiff.meta;
-        m.channels * m.slices * m.frames
-    };
-    let gen_before = viewer.volume.generation;
-
-    // Swap the channel and time roles, as the dimension-order dropdown does.
-    let (c, z, f) = {
+    // The file's own labels, and the interpretation currently in effect. These
+    // are deliberately two different things.
+    let file_dims = {
         let m = &viewer.stack.as_ref().unwrap().tiff.meta;
         (m.channels, m.slices, m.frames)
     };
-    viewer.set_dimension_order(f, z, c);
+    let shown = viewer.stack.as_ref().unwrap().display.dims;
+    let planes = shown.channels * shown.slices * shown.frames;
+    let gen_before = viewer.volume.generation;
+
+    // Swap the channel and time roles, as the dimension-order dropdown does.
+    viewer.set_dimension_order(shown.frames, shown.slices, shown.channels);
 
     let stack = viewer.stack.as_ref().unwrap();
-    assert_eq!(stack.tiff.meta.channels, f);
-    assert_eq!(stack.tiff.meta.frames, c);
+    let after = stack.display.dims;
+    assert_eq!(after.channels, shown.frames);
+    assert_eq!(after.frames, shown.channels);
     assert_eq!(
-        stack.tiff.meta.channels * stack.tiff.meta.slices * stack.tiff.meta.frames,
+        after.channels * after.slices * after.frames,
         planes,
         "reassigning axes must not invent or drop planes"
     );
+
+    // The point of keeping display state out of the metadata: reinterpreting
+    // the axes must leave the *file's* record of them untouched, so the
+    // metadata panel can still answer "what did the file actually say?".
+    let m = &stack.tiff.meta;
+    assert_eq!(
+        (m.channels, m.slices, m.frames),
+        file_dims,
+        "a display-side override must not rewrite the parsed metadata"
+    );
+
     // Channel settings and LUTs were rebuilt to match the new channel count...
-    assert_eq!(stack.channel_settings.len(), f.min(fast_tiff_viewer::MAX_CHANNELS));
+    let shown_now = fast_tiff_viewer::Display::shown_channels(after.channels);
+    assert_eq!(stack.display.settings.len(), shown_now);
+    assert_eq!(stack.display.luts.len(), shown_now, "one LUT per shown channel");
     // ...and the volume was invalidated, since the depth axis just changed.
     assert_ne!(viewer.volume.generation, gen_before, "volume should be invalidated");
     assert_eq!(viewer.volume.built_frame, None);
@@ -252,4 +266,62 @@ fn falling_behind_latches_parallel_decode_only_in_auto() {
     let Some(again) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
     load(&mut viewer, again).expect("reopen");
     assert!(!viewer.decode_parallel, "a new stack starts from the serial path again");
+}
+
+/// The regression this whole split exists to prevent: cycling the LUT selector
+/// must leave the file's own colours recoverable.
+///
+/// When display state was written back into `tiff.meta`, choosing any LUT
+/// destroyed the file's — which is why a separate rescue copy had to be added
+/// the moment the selector gained a "Built-in" entry. With the two kept apart,
+/// "go back to what the file said" is just reading metadata that was never
+/// touched.
+#[test]
+fn cycling_luts_never_disturbs_the_parsed_metadata() {
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let mut viewer = Viewer::new();
+    load(&mut viewer, path).expect("open");
+    // Collapse to a single channel so the LUT selector applies.
+    let dims = viewer.stack.as_ref().unwrap().display.dims;
+    viewer.set_dimension_order(1, dims.slices, dims.channels * dims.frames);
+    if !fast_tiff_viewer::channels::gray_lut_applicable(viewer.stack.as_ref().unwrap()) {
+        return;
+    }
+
+    // Snapshot what the file said, before touching a single control.
+    let before: Vec<_> = viewer
+        .stack
+        .as_ref()
+        .unwrap()
+        .tiff
+        .meta
+        .channel_display
+        .iter()
+        .map(|d| d.lut)
+        .collect();
+
+    // Walk every selector entry, then come back to index 0.
+    let options = fast_tiff_viewer::channels::gray_lut_count(&viewer.stack.as_ref().unwrap().display);
+    for sel in 0..options {
+        viewer.set_gray_lut(sel);
+    }
+    viewer.set_gray_lut(0);
+
+    let stack = viewer.stack.as_ref().unwrap();
+    let after: Vec<_> = stack.tiff.meta.channel_display.iter().map(|d| d.lut).collect();
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "the parsed metadata must survive display changes intact"
+    );
+    for (i, (b, a)) in before.iter().zip(after.iter()).enumerate() {
+        assert!(b == a, "channel {i}: the file's LUT was overwritten by a display choice");
+    }
+
+    // And the rendered LUT is back to whatever index 0 means for this stack.
+    let expected = fast_tiff_viewer::channels::gray_lut_sel_lut(&stack.display, 0);
+    assert!(
+        stack.display.lut(0) == Some(&expected),
+        "selecting index 0 should restore that entry's LUT"
+    );
 }

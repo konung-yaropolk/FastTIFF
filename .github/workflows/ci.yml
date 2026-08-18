@@ -122,3 +122,54 @@ jobs:
 
       - name: Run tests (glow backend)
         run: cargo test --workspace --no-default-features --features FastTIFF/renderer-glow
+
+  # `fast-tiff-lib` parses completely untrusted files, so a malformed TIFF must
+  # never panic, abort (an oversized allocation calls abort(), which no caller
+  # can catch), or exhaust memory. `tests/malformed_robustness.rs` pins the
+  # cases we already know about and runs everywhere; this job adds the part
+  # that *explores*, which needs nightly + libFuzzer and so only runs here.
+  #
+  # A short, fixed budget per target: enough to catch a regression that makes
+  # the seed corpus crash immediately, without turning CI into a fuzzing farm.
+  # Real campaigns are run by hand (see fast-tiff-lib/fuzz/README.md).
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target\nfast-tiff-lib/fuzz -> fast-tiff-lib/fuzz/target"
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # The corpus directory goes first — libFuzzer writes discoveries into it
+      # and treats later directories as read-only, which keeps the committed
+      # seeds pristine. -rss_limit_mb turns runaway memory into a reported crash
+      # rather than letting the runner OOM-kill the job with no artifact.
+      - name: Fuzz the indexer
+        working-directory: fast-tiff-lib
+        run: |
+          mkdir -p fuzz/corpus/tiff_open
+          cargo fuzz run tiff_open fuzz/corpus/tiff_open fuzz/seeds -- -max_total_time=120 -rss_limit_mb=2048 -malloc_limit_mb=512
+
+      - name: Fuzz the decoders
+        working-directory: fast-tiff-lib
+        run: |
+          mkdir -p fuzz/corpus/tiff_decode
+          cargo fuzz run tiff_decode fuzz/corpus/tiff_decode fuzz/seeds -- -max_total_time=180 -rss_limit_mb=2048 -malloc_limit_mb=512
+
+      # A crashing input is the whole point — keep it when one is found.
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fast-tiff-lib/fuzz/artifacts/
+          if-no-files-found: ignore
