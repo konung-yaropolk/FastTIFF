@@ -2,3 +2,9 @@
 pkg/
 target/
 dist/
+
+# Favicons copied from FastTIFF/icon/ for local serving (the deploy workflow
+# does the same into dist/). The originals are the source of truth.
+icon.svg
+icon32.png
+icon256.png

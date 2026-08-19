@@ -69,6 +69,9 @@ jobs:
           mkdir -p dist
           cp index.html dist/
           cp -r pkg dist/pkg
+          # Favicons come from the app's own icon set, so the tab icon and the
+          # desktop build can never drift apart.
+          cp ../FastTIFF/icon/{icon.svg,icon32.png,icon256.png} dist/
           # A small demo stack, so the page is usable without your own file.
           mkdir -p dist/samples
           cp ../fast-tiff-lib/tests/fixtures/ij_u16_spp1_p6_hyperstack.tif \

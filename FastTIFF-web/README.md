@@ -76,8 +76,13 @@ Then serve the folder — `index.html` loads `./pkg/` relatively, so any static
 server works and the site is happy at any subpath:
 
 ```bash
+cp ../FastTIFF/icon/icon.svg ../FastTIFF/icon/icon32.png ../FastTIFF/icon/icon256.png .
 python -m http.server 4200
 ```
+
+The `cp` is only for the favicons — they live in `FastTIFF/icon/` so the tab
+icon and the desktop build share one source, and the deploy workflow copies
+them the same way. Skip it and you just get a default icon.
 
 ## Controls
 
