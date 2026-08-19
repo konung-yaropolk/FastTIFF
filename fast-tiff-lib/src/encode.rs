@@ -31,7 +31,7 @@
 use crate::ifd::TiffFlavor;
 use crate::index::{
     Compression, TAG_BITS_PER_SAMPLE, TAG_COMPRESSION, TAG_IMAGE_DESCRIPTION, TAG_IMAGE_LENGTH,
-    TAG_IMAGE_WIDTH, TAG_PHOTOMETRIC, TAG_PLANAR_CONFIG, TAG_PREDICTOR, TAG_ROWS_PER_STRIP,
+    TAG_IMAGE_WIDTH, TAG_INK_SET, TAG_PHOTOMETRIC, TAG_PLANAR_CONFIG, TAG_PREDICTOR, TAG_ROWS_PER_STRIP,
     TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS,
     TAG_X_RESOLUTION, TAG_Y_RESOLUTION,
 };
@@ -137,6 +137,7 @@ pub struct WriterOptions {
     sample_type: SampleType,
     samples_per_pixel: u16,
     planar: bool,
+    cmyk: bool,
     compression: Compression,
     compression_level: Option<i32>,
     predictor: bool,
@@ -155,6 +156,7 @@ impl WriterOptions {
             sample_type,
             samples_per_pixel: 1,
             planar: false,
+            cmyk: false,
             compression: Compression::None,
             compression_level: None,
             predictor: false,
@@ -200,6 +202,28 @@ impl WriterOptions {
     /// separate planes.
     pub fn planar(mut self, on: bool) -> Self {
         self.planar = on;
+        self
+    }
+
+    /// Tag the frames as **CMYK** (`PhotometricInterpretation=5`, "Separated",
+    /// with `InkSet=1`) instead of letting the sample count pick between
+    /// grayscale and RGB.
+    ///
+    /// This changes only the *labelling*: the samples you pass are written
+    /// through untouched, in C, M, Y, K order, and are interpreted as ink
+    /// coverage rather than light. No conversion happens on the way out — if
+    /// you have RGB values, convert them yourself first.
+    ///
+    /// Requires 4 or more samples per pixel and an unsigned 8- or 16-bit sample
+    /// type, which is exactly what the reader's `FrameInfo::is_cmyk` accepts;
+    /// anything else is rejected when the writer is constructed rather than
+    /// producing a file this crate would refuse to convert. Samples past the
+    /// fourth are declared in `ExtraSamples`, as they are for RGB.
+    ///
+    /// Without this, 3-or-more samples are tagged RGB, so a 4-sample write
+    /// would claim to be RGB-plus-alpha.
+    pub fn cmyk(mut self, on: bool) -> Self {
+        self.cmyk = on;
         self
     }
 
@@ -301,6 +325,9 @@ pub struct TiffWriter<W: Write + Seek> {
     /// (`PlanarConfiguration=2`). Already normalized: never true for `spp == 1`,
     /// where the two layouts are byte-identical.
     planar: bool,
+    /// True when frames are tagged Separated (CMYK) rather than letting the
+    /// sample count choose grayscale or RGB. Validated at construction.
+    cmyk: bool,
     compression: Compression,
     compression_level: Option<i32>,
     force_bigtiff: bool,
@@ -353,6 +380,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             sample_type,
             samples_per_pixel,
             planar,
+            cmyk,
             compression,
             compression_level,
             predictor,
@@ -371,6 +399,17 @@ impl<W: Write + Seek> TiffWriter<W> {
         }
         if let Compression::Other(code) = compression {
             bail!("cannot write unsupported compression scheme {code} (use None/Lzw/PackBits/Deflate/Zstd)");
+        }
+        // Reject a CMYK request the reader would not accept back, rather than
+        // writing a file that opens but refuses to convert. These are the same
+        // conditions `FrameInfo::is_cmyk` checks.
+        if cmyk {
+            if samples_per_pixel < 4 {
+                bail!("cmyk() needs at least 4 samples per pixel (C, M, Y, K); got {samples_per_pixel}");
+            }
+            if !matches!(sample_type, SampleType::U8 | SampleType::U16) {
+                bail!("cmyk() is defined for unsigned 8- or 16-bit samples; got {sample_type:?}");
+            }
         }
         // Predictor 2 for integers (any width), Predictor 3 for floats —
         // matching what libtiff chooses for the same data.
@@ -435,6 +474,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             sample_type,
             spp,
             planar,
+            cmyk,
             compression,
             compression_level,
             force_bigtiff,
@@ -741,10 +781,16 @@ impl<W: Write + Seek> TiffWriter<W> {
             Compression::Zstd => 50000, // libtiff/GDAL registered extension
             Compression::Other(code) => code, // rejected at construction
         };
-        // 3+ samples is RGB (photometric 2) in either interleaving; everything
-        // else is BlackIsZero grayscale — mirroring what the reader's `is_rgb`
-        // keys on.
-        let photometric: u16 = if spp >= 3 { 2 } else { 1 };
+        // Separated when asked for; otherwise 3+ samples is RGB (photometric 2)
+        // in either interleaving, and everything else is BlackIsZero grayscale
+        // — mirroring what the reader's `is_rgb` keys on.
+        let photometric: u16 = if self.cmyk {
+            5
+        } else if spp >= 3 {
+            2
+        } else {
+            1
+        };
 
         let mut entries = Vec::with_capacity(12);
         entries.push(Entry::long(TAG_IMAGE_WIDTH, self.width));
@@ -790,10 +836,21 @@ impl<W: Write + Seek> TiffWriter<W> {
         if self.predictor_tag != 1 {
             entries.push(Entry::short(TAG_PREDICTOR, self.predictor_tag));
         }
+        // InkSet (tag 332) names which inks a Separated image holds. Written
+        // explicitly even though 1 is the spec default, so the file says what
+        // it means rather than relying on a reader applying the default.
+        if photometric == 5 {
+            entries.push(Entry::short(TAG_INK_SET, 1));
+        }
         // Samples beyond what the photometric interpretation accounts for
-        // (3 for RGB, 1 for grayscale) must be declared in ExtraSamples per
-        // TIFF6; value 0 = unspecified data (not premultiplied alpha).
-        let base_samples: usize = if photometric == 2 { 3 } else { 1 };
+        // (4 for CMYK, 3 for RGB, 1 for grayscale) must be declared in
+        // ExtraSamples per TIFF6; value 0 = unspecified data (not
+        // premultiplied alpha).
+        let base_samples: usize = match photometric {
+            5 => 4,
+            2 => 3,
+            _ => 1,
+        };
         if spp as usize > base_samples {
             entries.push(Entry::shorts(TAG_EXTRA_SAMPLES, &vec![0u16; spp as usize - base_samples]));
         }

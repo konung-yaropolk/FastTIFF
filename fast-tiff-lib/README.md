@@ -81,6 +81,26 @@ the *writer*; the down-conversion is only in the decode-to-display readers.)
   This is **sample-format agnostic** — it applies to unsigned, signed, and
   float grayscale alike (8/16/32/64-bit). 16-bit- and 8-bit-scaled ColorMaps are
   both handled.
+- **CMYK (`PhotometricInterpretation=5`, "Separated")**, 8- and 16-bit
+  unsigned, chunky or planar, under any supported codec.
+
+  Separated files store *ink coverage*, not light: more ink means a darker
+  pixel. `read_planes_rgb_u8` / `read_planes_rgb_u16` (and the single-component
+  `read_plane_rgb_*`) convert the four plates into **three** RGB planes using
+  `component = (1 - ink) x (1 - black)`, matching Pillow and libtiff. Gate on
+  `FrameInfo::is_cmyk()`, which additionally requires `InkSet=1` — the tag is
+  usually absent, and 1 is its spec default, but `InkSet=2` means some *other*
+  set of inks (hi-fi printing adds orange/green/violet plates) that must not be
+  read as C, M, Y, K.
+
+  The conversion runs after the plane gather, so chunky/planar and every codec
+  and predictor come out the same. **The raw readers are unaffected**:
+  `read_planes_u8` and friends still return one plane per sample, so the four
+  ink plates remain available unchanged. 32-bit and float Separated frames are
+  deliberately excluded — the wide-sample readers auto-range each plane
+  independently, which would rescale the four plates against four different
+  ranges before combining them.
+
 - **ImageJ's contiguous big-stack layout**: ImageJ writes its own >4 GiB
   stacks as a classic TIFF with a *single* IFD, `images=N` in the
   description, and the remaining frames appended as raw contiguous data.
@@ -266,8 +286,9 @@ pub struct FrameInfo {
     pub sample_format: SampleFormat,   // UnsignedInt | SignedInt | Float
     pub compression: Compression,      // None | Lzw | PackBits | Deflate | Other(u16)
     pub predictor: u16,                // 1 = none, 2 = horizontal differencing
-    pub photometric: u16,              // 2 = RGB, 3 = palette (indexed)
+    pub photometric: u16,              // 2 = RGB, 3 = palette, 5 = separated (CMYK)
     pub planar_config: u16,            // 1 = chunky, 2 = planar
+    pub ink_set: u16,                  // tag 332; 1 = CMYK (the default), 2 = other inks
     pub strip_offsets: Vec<u64>,
     pub strip_byte_counts: Vec<u64>,
     pub rows_per_strip: u32,
@@ -277,6 +298,8 @@ pub struct FrameInfo {
 `frame.is_rgb()` is true for an RGB frame whose samples are color components you
 can split out; `frame.is_planar()` says which interleaving they're stored in.
 The plane readers below handle both, so callers rarely need to check.
+`frame.is_cmyk()` is true for a Separated frame the converting readers can
+handle — see the CMYK note above for exactly what that requires.
 
 ### Decoding
 
@@ -318,6 +341,15 @@ fn read_plane_f32(mmap, frame, order, plane: usize) -> Result<Vec<f32>>;
 fn read_planes_u16(mmap, frame, order, float_range) -> Result<Vec<Vec<u16>>>;
 fn read_planes_u8(mmap, frame, order) -> Result<Vec<Vec<u8>>>;
 fn read_planes_f32(mmap, frame, order) -> Result<Vec<Vec<f32>>>;
+
+// CMYK only (`frame.is_cmyk()`; anything else is an error, never a silent
+// misread). Gathers the four ink plates and returns THREE converted RGB
+// planes, in the source's own width. The raw readers above are unchanged on
+// the same frame -- they still give you the four plates.
+fn read_planes_rgb_u8(mmap, frame, order) -> Result<Vec<Vec<u8>>>;
+fn read_planes_rgb_u16(mmap, frame, order) -> Result<Vec<Vec<u16>>>;
+fn read_plane_rgb_u8(mmap, frame, order, component: usize) -> Result<Vec<u8>>;
+fn read_plane_rgb_u16(mmap, frame, order, component: usize) -> Result<Vec<u16>>;
 ```
 
 Every reader above also has a **`*_into` variant** (`read_frame_u16_into(...,
@@ -399,8 +431,13 @@ writer.finish()?; // writes the IFD chain; the file isn't valid without it
 
 - **Samples:** `SampleType::{U8, I8, U16, I16, U32, I32, F32, U64, I64, F64}` —
   TIFF unsigned/signed/float at 8/16/32/64 bits.
-- **Layout:** grayscale planes (`samples_per_pixel(1)`, default) or RGB
-  (`samples_per_pixel(3)`, tagged photometric=RGB), interleaved per pixel by
+- **Layout:** grayscale planes (`samples_per_pixel(1)`, default), RGB
+  (`samples_per_pixel(3)`, tagged photometric=RGB), or CMYK
+  (`samples_per_pixel(4).cmyk(true)`, tagged photometric=Separated with
+  `InkSet=1` — the samples are written through as ink coverage, in C, M, Y, K
+  order, with no conversion; `cmyk()` is rejected for anything the reader would
+  not take back, i.e. fewer than 4 samples or a non-unsigned/non-8-or-16-bit
+  sample type). Any of these interleaved per pixel by
   default or as separate sample planes with `planar(true)`
   (`PlanarConfiguration=2`). **The frame buffer you pass matches the file
   layout** — chunky is `RGB RGB RGB…`, planar is `RRR… GGG… BBB…` — and both are

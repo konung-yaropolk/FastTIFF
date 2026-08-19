@@ -82,6 +82,30 @@ def tff(name: str, dtype: str, pages: int, spp: int = 1, **kwargs):
         print(f"SKIP {name}: {e}", file=sys.stderr)
 
 
+def tff_planar(name: str, dtype: str, pages: int, spp: int = 4, **kwargs):
+    """Write one planar (PlanarConfiguration=2) fixture.
+
+    tifffile reads the sample axis positionally: a page shaped (Y, X, S) is
+    chunky, and forcing planarconfig on it makes tifffile reinterpret the axes
+    as (S, Y, X) rather than transpose them -- which silently produces an
+    11-sample 4x23 image instead of a 4-sample 23x11 one. So the array is built
+    plane-major here instead.
+
+    Reshaping the flat buffer (rather than transposing it) is deliberate: it
+    leaves plane `pl` holding the contiguous run of flat sample indices
+    [pl*H*W, (pl+1)*H*W) within its page, which is exactly what the Rust
+    checker predicts once it sees PlanarConfiguration=2 on the frame.
+    """
+    path = os.path.join(OUT, name)
+    arr = flat(dtype, pages, spp).reshape(pages, spp, H, W)
+    kwargs.setdefault("photometric", "separated")
+    try:
+        tifffile.imwrite(path, arr, metadata=None, planarconfig="separate", **kwargs)
+        written.append(name)
+    except Exception as e:
+        print(f"SKIP {name}: {e}", file=sys.stderr)
+
+
 # --- 1. Baselines: every dtype, uncompressed, little-endian, 2 pages ---
 for dt in ["u8", "i8", "u16", "i16", "u32", "i32", "f32"]:
     tff(f"tff_{dt}_spp1_p2_none-le.tif", dt, 2)
@@ -142,6 +166,18 @@ except Exception as e:
 # --- 8. Tiled file: fast-tiff-lib must refuse it with a clear error ---
 tff("err_u16_spp1_p1_tiled.tif", "u16", 1, tile=(16, 16))
 
+# --- 8b. CMYK / Separated (photometric=5). Ink coverage, not light: the
+# --- reader must both hand back the four raw plates unchanged AND offer the
+# --- converted RGB. Chunky, planar and compressed all included, since the
+# --- conversion runs after the plane gather and must not care which it was.
+tff("tff_u8_spp4_p1_cmyk.tif", "u8", 1, spp=4, photometric="separated")
+tff("tff_u8_spp4_p1_cmyk-lzw.tif", "u8", 1, spp=4, photometric="separated",
+    compression="lzw")
+tff_planar("tff_u8_spp4_p2_cmyk-planar.tif", "u8", 2, spp=4)
+tff("tff_u16_spp4_p1_cmyk.tif", "u16", 1, spp=4, photometric="separated")
+tff("tff_u16_spp4_p1_cmyk-zip-pred2.tif", "u16", 1, spp=4,
+    photometric="separated", compression="zlib", predictor=2)
+
 # --- 9. Pillow fixtures: genuine libtiff-encoded compressed streams ---
 try:
     from PIL import Image
@@ -160,6 +196,8 @@ try:
     pil("pil_u8_spp1_p1_pb.tif", "L", "u8", 1, "packbits")
     pil("pil_u8_spp3_p1_zip.tif", "RGB", "u8", 3, "tiff_adobe_deflate")
     pil("pil_u16_spp1_p1_lzw.tif", "I;16", "u16", 1, "tiff_lzw")
+    # Pillow CMYK goes through the real libtiff separated-image encoder.
+    pil("pil_u8_spp4_p1_cmyk-lzw.tif", "CMYK", "u8", 4, "tiff_lzw")
 except ImportError:
     print("SKIP pil fixtures: Pillow not installed", file=sys.stderr)
 

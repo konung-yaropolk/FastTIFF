@@ -266,6 +266,10 @@ it can be used in projects that couldn't take a GPL dependency.
 - Multi-frame grayscale, multi-channel composite, and RGB TIFFs (chunky or
   planar) in 8-bit, 16-bit, and 32-bit (integer or float) - 32-bit and float
   data is auto-ranged into the display, RGB is split into R/G/B planes.
+- CMYK (Separated) TIFFs, 8- and 16-bit: the four ink plates are converted to
+  RGB for display, since ink subtracts from white where the compositing shader
+  adds. The status bar says `CMYK->RGB` so it is clear the three channels shown
+  are derived rather than stored.
 - ImageJ `ImageDescription` parsing (channels/slices/frames, mode,
   min/max, unit, frame interval, linear calibration `c0`/`c1`, `fps`) —
   solid, well-documented format.

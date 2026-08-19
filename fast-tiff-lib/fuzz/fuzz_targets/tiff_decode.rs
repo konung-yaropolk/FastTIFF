@@ -41,6 +41,18 @@ fuzz_target!(|data: &[u8]| {
     let _ = fast_tiff_lib::read_planes_u8(bytes, frame, order);
     let _ = fast_tiff_lib::read_planes_f32(bytes, frame, order);
 
+    // CMYK converting readers. Called unconditionally: the point is that a
+    // frame the mutator has turned into a *near*-CMYK one (photometric 5 with
+    // an odd sample count, a truncated plate, a bogus InkSet) comes back as an
+    // error rather than a panic. They are cheap to call on a non-CMYK frame,
+    // since the gate rejects before any decoding happens.
+    let _ = fast_tiff_lib::read_planes_rgb_u8(bytes, frame, order);
+    let _ = fast_tiff_lib::read_planes_rgb_u16(bytes, frame, order);
+    for plane in [0usize, 2, 5] {
+        let _ = fast_tiff_lib::read_plane_rgb_u8(bytes, frame, order, plane);
+        let _ = fast_tiff_lib::read_plane_rgb_u16(bytes, frame, order, plane);
+    }
+
     // Buffer-reusing variants take a different branch than the allocating ones.
     let mut buf16 = Vec::new();
     let _ = fast_tiff_lib::read_frame_u16_into(bytes, frame, order, None, &mut buf16);

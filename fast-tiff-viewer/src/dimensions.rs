@@ -120,6 +120,44 @@ pub fn setup_rgb(loaded: &mut Stack) {
     loaded.luts_uploaded = false;
 }
 
+/// Reconfigures a freshly-loaded CMYK (Separated) stack: its four ink planes
+/// become **three** red/green/blue display channels, converted on decode by
+/// [`fast_tiff_lib::read_planes_rgb_u8`] and friends.
+///
+/// Why convert rather than show four ink channels: the compositing shader is
+/// *additive* (`color += lut[value]` per channel), which is exactly right for
+/// RGB and exactly wrong for CMYK, where inks *subtract* from white. Four ink
+/// ramps blended additively would produce nonsense. Converting to RGB first
+/// means the existing, proven RGB display path renders a Separated file
+/// correctly with no shader involvement at all.
+///
+/// The trade is that the four ink measurements collapse to three display
+/// values and the K plate is no longer separately visible. The raw ink planes
+/// remain available from the library (`read_planes_u8`/`read_planes_u16` still
+/// return one plane per sample), so a future "show separations" mode has
+/// everything it needs.
+pub fn setup_cmyk(loaded: &mut Stack) {
+    // Both flags: `rgb` drives the plane-of-one-IFD decode addressing shared
+    // with real RGB, `cmyk` records that these channels are derived.
+    loaded.display.rgb = true;
+    loaded.display.cmyk = true;
+    loaded.display.mode = fast_tiff_lib::DisplayMode::Color;
+    loaded.display.luts = (0..3).map(fast_tiff_lib::default_composite_lut).collect(); // R, G, B
+    // The conversion outputs in the source's own width: 8-bit inks give 8-bit
+    // components (the zero-widening R8Uint upload), 16-bit gives 16.
+    let kind = if loaded.tiff.frames.first().is_some_and(|f| f.bits_per_sample == 8) {
+        ChannelKind::Int8
+    } else {
+        ChannelKind::Int16
+    };
+    loaded.display.settings = (0..3)
+        .map(|_| ChannelSettings { min: 0.0, max: 65535.0, enabled: true, bounds: (0.0, 65535.0), kind })
+        .collect();
+    loaded.frame_index = 0;
+    loaded.last_uploaded = None;
+    loaded.luts_uploaded = false;
+}
+
 /// Applies a manual dimension-order change from the dropdown: reassigns the
 /// channels / Z-slices / time-frames roles to the given counts (the product
 /// stays the stack's plane count — the selector only offers permutations).

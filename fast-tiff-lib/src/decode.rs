@@ -1485,3 +1485,134 @@ fn undo_float_predictor(data: &mut [u8], row_bytes: usize, stride: usize, sample
 #[cfg(test)]
 #[path = "decode_tests.rs"]
 mod tests;
+// ---- CMYK (Separated) -> RGB ------------------------------------------------
+//
+// A Separated image stores *ink coverage*, not light: 0 means no ink, so the
+// paper shows through. Display needs the opposite convention, and the standard
+// conversion with no colour management applied is
+//
+//     R = (1 - C)(1 - K)     G = (1 - M)(1 - K)     B = (1 - Y)(1 - K)
+//
+// over values normalized to 0..1. (Verified component-for-component against
+// Pillow's `CMYK -> RGB`, including mixed-ink values where the tempting
+// `255 - C - K` form diverges.)
+//
+// These are separate entry points rather than a change to `read_plane(s)_*`,
+// which are documented to return exactly one plane *per sample*, in sample
+// order, and are relied on for that. Reinterpreting four inks as three colours
+// is a different operation and says so in its name.
+//
+// The conversion runs on already-gathered planes, so chunky and planar frames,
+// every codec, and the predictor undo all come along unchanged.
+
+/// One ink pair -> one display component, in 0..=1 float space.
+#[inline]
+fn ink_to_component(ink: f32, black: f32) -> f32 {
+    (1.0 - ink) * (1.0 - black)
+}
+
+/// Decode a CMYK frame's **three RGB planes** (red, green, blue), in one
+/// decompression pass.
+///
+/// Requires [`FrameInfo::is_cmyk`]; anything else is an error rather than a
+/// silent misreading. Samples past the fourth — an alpha channel, or spot
+/// colours in a file that also carries the four process inks — take no part in
+/// the composite, matching what a viewer can meaningfully show.
+///
+/// Returns 3 planes for a 4-plus-sample frame, so the usual "one plane per
+/// sample" expectation deliberately does *not* hold here.
+pub fn read_planes_rgb_u8(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Vec<Vec<u8>>> {
+    require_cmyk(frame, "read_planes_rgb_u8")?;
+    let inks = read_planes_u8(mmap, frame, file_order)?;
+    let (c, m, y, k) = four_inks(&inks, "read_planes_rgb_u8")?;
+    let n = c.len();
+    let mut rgb = vec![vec![0u8; n], vec![0u8; n], vec![0u8; n]];
+    for i in 0..n {
+        let black = k[i] as f32 / 255.0;
+        for (plane, ink) in rgb.iter_mut().zip([c[i], m[i], y[i]]) {
+            plane[i] = (ink_to_component(ink as f32 / 255.0, black) * 255.0).round() as u8;
+        }
+    }
+    Ok(rgb)
+}
+
+/// [`read_planes_rgb_u8`]'s 16-bit sibling: the same three RGB planes, in the
+/// 0..=65535 space the rest of the crate's `u16` readers use.
+///
+/// An 8-bit CMYK frame is widened the same way [`read_planes_u16`] widens 8-bit
+/// samples, so a caller on the 16-bit path gets consistent units either way.
+pub fn read_planes_rgb_u16(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Vec<Vec<u16>>> {
+    require_cmyk(frame, "read_planes_rgb_u16")?;
+    let inks = read_planes_u16(mmap, frame, file_order, None)?;
+    let (c, m, y, k) = four_inks(&inks, "read_planes_rgb_u16")?;
+    let n = c.len();
+    let mut rgb = vec![vec![0u16; n], vec![0u16; n], vec![0u16; n]];
+    const FULL: f32 = u16::MAX as f32;
+    for i in 0..n {
+        let black = k[i] as f32 / FULL;
+        for (plane, ink) in rgb.iter_mut().zip([c[i], m[i], y[i]]) {
+            plane[i] = (ink_to_component(ink as f32 / FULL, black) * FULL).round() as u16;
+        }
+    }
+    Ok(rgb)
+}
+
+/// One converted RGB plane of a CMYK frame — `0` red, `1` green, `2` blue.
+///
+/// All four inks have to be read to produce any one of them, so prefer
+/// [`read_planes_rgb_u8`] when more than one is wanted. Out-of-range indices
+/// clamp to blue, matching the per-sample readers' behaviour rather than
+/// panicking.
+pub fn read_plane_rgb_u8(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder, plane: usize) -> Result<Vec<u8>> {
+    let mut planes = read_planes_rgb_u8(mmap, frame, file_order)?;
+    Ok(std::mem::take(&mut planes[plane.min(2)]))
+}
+
+/// [`read_plane_rgb_u8`] in 16-bit units.
+pub fn read_plane_rgb_u16(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder, plane: usize) -> Result<Vec<u16>> {
+    let mut planes = read_planes_rgb_u16(mmap, frame, file_order)?;
+    Ok(std::mem::take(&mut planes[plane.min(2)]))
+}
+
+/// Gate the CMYK readers on a frame the formula is actually defined for.
+fn require_cmyk(frame: &FrameInfo, method: &str) -> Result<()> {
+    if frame.is_cmyk() {
+        return Ok(());
+    }
+    bail!(
+        "{method} requires a CMYK frame (PhotometricInterpretation=5, InkSet=1, 4+ unsigned \
+         8- or 16-bit samples); this frame is photometric={}, ink_set={}, {} sample(s)/px, \
+         {}-bit {:?}",
+        frame.photometric,
+        frame.ink_set,
+        frame.samples_per_pixel,
+        frame.bits_per_sample,
+        frame.sample_format,
+    );
+}
+
+/// The four plates of a CMYK frame, borrowed in C, M, Y, K order.
+type InkPlanes<'a, T> = (&'a [T], &'a [T], &'a [T], &'a [T]);
+
+/// Borrow the four process-ink planes out of a gather. `is_cmyk` already
+/// guarantees four samples were declared; this re-checks what the gather
+/// actually produced rather than indexing on that promise.
+///
+/// The equal-length check matters as much as the count: the conversion walks
+/// all four planes by one index, so a short plane would be an out-of-bounds
+/// panic on an untrusted file rather than an error. These are public entry
+/// points reached by the fuzz target, and a panic across a library boundary is
+/// a denial of service for anyone embedding this.
+fn four_inks<'a, T>(planes: &'a [Vec<T>], method: &str) -> Result<InkPlanes<'a, T>> {
+    if planes.len() < 4 {
+        bail!("{method}: expected 4 ink planes, decoded {}", planes.len());
+    }
+    let n = planes[0].len();
+    if let Some(bad) = planes[..4].iter().position(|p| p.len() != n) {
+        bail!(
+            "{method}: ink planes disagree on length (plane 0 has {n}, plane {bad} has {})",
+            planes[bad].len()
+        );
+    }
+    Ok((&planes[0], &planes[1], &planes[2], &planes[3]))
+}
