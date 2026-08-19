@@ -84,7 +84,7 @@ pub fn read_frame_u16<'a>(
     file_order: ByteOrder,
     float_range: Option<(f32, f32)>,
 ) -> Result<Cow<'a, [u16]>> {
-    let n_samples = frame.width as usize * frame.height as usize * frame.samples_per_pixel as usize;
+    let n_samples = frame.sample_count()?;
 
     // --- Fast path: uncompressed, single strip, native 16-bit, native byte order ---
     // Signed-int frames are excluded: they need the +32768 offset applied
@@ -140,7 +140,7 @@ pub fn read_frame_u16_into(
         // afterwards, so the size must be vetted first — otherwise the `resize`
         // below aborts before the strip shortfall is ever noticed.
         guard_frame_size(frame)?;
-        ensure_len(out, frame.width as usize * frame.height as usize);
+        ensure_len(out, frame.pixel_count()?);
         let signed = frame.sample_format == SampleFormat::SignedInt;
         let flip = if signed { 0x8000u16 } else { 0 };
         let memcpyable = !signed && file_order == ByteOrder::host();
@@ -413,8 +413,8 @@ fn for_each_raw_strip(
     sample_bytes: usize,
     mut f: impl FnMut(&[u8], usize, usize),
 ) -> Result<()> {
-    let spp = (frame.samples_per_pixel as usize).max(1);
-    let total_samples = frame.width as usize * frame.height as usize * spp;
+    // `sample_count` already folds in the `.max(1)` on samples_per_pixel.
+    let total_samples = frame.sample_count()?;
     let mut sample_pos = 0usize;
     for ((&offset, &len), expected) in frame
         .strip_offsets
@@ -476,7 +476,7 @@ pub fn read_plane_u16_into(
     out: &mut Vec<u16>,
 ) -> Result<()> {
     let native = decode_native_bytes(mmap, frame, file_order)?;
-    ensure_len(out, frame.width as usize * frame.height as usize);
+    ensure_len(out, frame.pixel_count()?);
     plane_u16_from_native(&native, frame, file_order, float_range, plane, out)
 }
 
@@ -515,7 +515,7 @@ pub fn read_planes_u16_into(
     out: &mut Vec<Vec<u16>>,
 ) -> Result<()> {
     let spp = (frame.samples_per_pixel as usize).max(1);
-    let n_pixels = frame.width as usize * frame.height as usize;
+    let n_pixels = frame.pixel_count()?;
     // Chunky multi-sample with Predictor 2: fuse the predictor undo into the
     // per-plane gather (each sample channel differences independently, so a
     // plane is just a running sum along each row) — one pass per plane over
@@ -552,7 +552,10 @@ fn plane_layout(frame: &FrameInfo, plane: usize) -> (usize, usize) {
     let spp = (frame.samples_per_pixel as usize).max(1);
     let plane = plane.min(spp - 1);
     if frame.is_planar() {
-        (plane * frame.width as usize * frame.height as usize, 1)
+        // Saturating, not checked: this returns a bare tuple, and a saturated
+        // offset simply fails the bounds check downstream. Wrapping would
+        // silently point *into* the buffer instead.
+        (plane.saturating_mul(frame.width as usize).saturating_mul(frame.height as usize), 1)
     } else {
         (plane, spp)
     }
@@ -608,7 +611,7 @@ fn plane_u16_from_native(
     out: &mut [u16],
 ) -> Result<()> {
     let (base, stride) = plane_layout(frame, plane);
-    let n_pixels = frame.width as usize * frame.height as usize;
+    let n_pixels = frame.pixel_count()?;
     let signed = frame.sample_format == SampleFormat::SignedInt;
     debug_assert_eq!(out.len(), n_pixels);
 
@@ -725,7 +728,7 @@ pub fn read_plane_u8_into(
         return Ok(());
     }
     let native = decode_native_bytes(mmap, frame, file_order)?;
-    ensure_len(out, frame.width as usize * frame.height as usize);
+    ensure_len(out, frame.pixel_count()?);
     plane_u8_from_native(&native, frame, plane, out)
 }
 
@@ -747,7 +750,7 @@ pub fn read_planes_u8_into(
     out: &mut Vec<Vec<u8>>,
 ) -> Result<()> {
     let spp = (frame.samples_per_pixel as usize).max(1);
-    let n_pixels = frame.width as usize * frame.height as usize;
+    let n_pixels = frame.pixel_count()?;
     // Same predictor-2 fusion as the u16 planes path (see there), raw bytes.
     let fuse = spp > 1 && !frame.is_planar() && frame.predictor == 2 && frame.bits_per_sample == 8;
     let native = decode_native_bytes_opt(mmap, frame, file_order, !fuse)?;
@@ -800,7 +803,7 @@ pub fn read_frame_f32<'a>(
     frame: &FrameInfo,
     file_order: ByteOrder,
 ) -> Result<Cow<'a, [f32]>> {
-    let n_pixels = frame.width as usize * frame.height as usize;
+    let n_pixels = frame.pixel_count()?;
 
     if frame.compression == Compression::None
         && frame.bits_per_sample == 32
@@ -845,7 +848,7 @@ pub fn read_frame_f32_into(
         // Vet the header-declared size before sizing `out` from it (see
         // `guard_frame_size`).
         guard_frame_size(frame)?;
-        ensure_len(out, frame.width as usize * frame.height as usize);
+        ensure_len(out, frame.pixel_count()?);
         let format = frame.sample_format;
         let memcpyable = format == SampleFormat::Float && file_order == ByteOrder::host();
         return for_each_raw_strip(mmap, frame, 4, |src, start, n| {
@@ -886,7 +889,7 @@ pub fn read_plane_f32_into(
 ) -> Result<()> {
     require_wide_samples(frame, "read_plane_f32")?;
     let native = decode_native_bytes(mmap, frame, file_order)?;
-    ensure_len(out, frame.width as usize * frame.height as usize);
+    ensure_len(out, frame.pixel_count()?);
     plane_f32_from_native(&native, frame, file_order, plane, out);
     Ok(())
 }
@@ -910,7 +913,7 @@ pub fn read_planes_f32_into(
     require_wide_samples(frame, "read_planes_f32")?;
     let native = decode_native_bytes(mmap, frame, file_order)?;
     let spp = (frame.samples_per_pixel as usize).max(1);
-    let n_pixels = frame.width as usize * frame.height as usize;
+    let n_pixels = frame.pixel_count()?;
     out.resize_with(spp, Vec::new);
     for (p, plane_out) in out.iter_mut().enumerate() {
         ensure_len(plane_out, n_pixels);
@@ -936,7 +939,9 @@ fn require_wide_samples(frame: &FrameInfo, method: &str) -> Result<()> {
 /// take the unchanged 4-byte path.
 fn plane_f32_from_native(native: &[u8], frame: &FrameInfo, file_order: ByteOrder, plane: usize, out: &mut [f32]) {
     let (base, stride) = plane_layout(frame, plane);
-    let n_pixels = frame.width as usize * frame.height as usize;
+    // `out` was sized by the caller from the checked count, so its length is
+    // the pixel count — no need to recompute it from the file's own numbers.
+    let n_pixels = out.len();
     let format = frame.sample_format;
     let sb = if frame.bits_per_sample == 64 { 8 } else { 4 };
     if should_parallelize(n_pixels) {
@@ -1022,7 +1027,7 @@ pub fn frame_float_minmax(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder)
     }
     let sb = if frame.bits_per_sample == 64 { 8 } else { 4 };
     let native = decode_native_bytes(mmap, frame, file_order)?;
-    let n_samples = frame.width as usize * frame.height as usize * frame.samples_per_pixel as usize;
+    let n_samples = frame.sample_count()?;
     // Fold directly over the decoded bytes — no width*height*sb temporary.
     let mut lo = f32::INFINITY;
     let mut hi = f32::NEG_INFINITY;
@@ -1157,7 +1162,7 @@ fn decode_native_bytes_opt<'a>(
     // strip may legitimately have fewer rows than `rows_per_strip` when the
     // image height doesn't divide evenly.
     let compression = frame.compression;
-    let n_pixels = frame.width as usize * frame.height as usize;
+    let n_pixels = frame.pixel_count()?;
 
     guard_frame_size(frame)?;
     let mut native: Vec<u8> = Vec::new();

@@ -70,6 +70,29 @@ $env:PATH = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\T
 (`-s none` is *not* a workaround — dropping the sanitizer breaks sancov linkage
 on MSVC with `unresolved external symbol __start___sancov_pcs`.)
 
+## Reproducing a CI crash
+
+The `fuzz` job uploads a `fuzz-artifacts` bundle whenever a target dies — grab
+it from the failed run's **Summary → Artifacts** and you have the exact bytes.
+
+Then replay it. Note the flags:
+
+```sh
+RUSTFLAGS="-C debug-assertions -C overflow-checks" cargo test -p fast-tiff-lib
+```
+
+**`cargo fuzz` builds with `debug-assertions` and `overflow-checks` on, even in
+release.** A plain `cargo test` (debug *or* release) will not reproduce an
+arithmetic-overflow crash: release silently wraps, so the run comes back green
+on an input that reliably kills CI. This is the single easiest way to waste an
+afternoon here.
+
+Once you have a crashing input, drop it in `../tests/fuzz-regressions/`. That
+directory is replayed by `tests/fuzz_regressions.rs` through the same reader
+sequence as the `tiff_decode` target, on stable and on every platform, as part
+of the ordinary `cargo test` run — so the bug stays fixed even for contributors
+who never run the fuzzer.
+
 ## Seeds
 
 `fuzz/seeds/` holds ~19 small, valid TIFFs covering every branch the reader has

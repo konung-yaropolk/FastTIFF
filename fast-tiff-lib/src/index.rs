@@ -136,6 +136,39 @@ impl FrameInfo {
         }
     }
 
+    /// Pixels in this frame — `width * height` — with **checked** arithmetic.
+    ///
+    /// Both factors come from the file. The product can't exceed `usize` on a
+    /// 64-bit target, but it can on a 32-bit one, so this is checked for the
+    /// same reason [`FrameInfo::decoded_len`] is: a wrapped-small count drives
+    /// buffer carving that then reads past the allocation.
+    pub fn pixel_count(&self) -> Result<usize> {
+        (self.width as usize)
+            .checked_mul(self.height as usize)
+            .ok_or_else(|| anyhow!("frame geometry overflows address space: {}x{}", self.width, self.height))
+    }
+
+    /// Samples in this frame — `width * height * samples_per_pixel` — with
+    /// **checked** arithmetic.
+    ///
+    /// Unlike [`FrameInfo::pixel_count`] this overflows on 64-bit too: a TIFF
+    /// declaring `2147483648 x 2147483648 x 4` lands exactly one past
+    /// `usize::MAX`. Reach for this rather than multiplying by hand — the
+    /// decoders run it *before* any other validation, so it is the first thing
+    /// a malformed frame touches.
+    pub fn sample_count(&self) -> Result<usize> {
+        self.pixel_count()?
+            .checked_mul(self.samples_per_pixel.max(1) as usize)
+            .ok_or_else(|| {
+                anyhow!(
+                    "frame geometry overflows address space: {}x{} x {} sample(s)/px",
+                    self.width,
+                    self.height,
+                    self.samples_per_pixel.max(1)
+                )
+            })
+    }
+
     /// Byte length of this frame fully decoded — `width * height *
     /// samples_per_pixel * sample_bytes` — computed with **checked** arithmetic.
     ///
