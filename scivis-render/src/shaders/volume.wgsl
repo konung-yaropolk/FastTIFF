@@ -23,7 +23,7 @@
 const SURFACE_GRAY: f32 = 0.6;
 const SURFACE_CONTRAST: f32 = 0.85;
 
-// data = (window.x, window.y, enabled, unused); packed in a vec4 so the uniform
+// data = (window.x, window.y, enabled, albedo_t); packed in a vec4 so the uniform
 // array element is 16-byte aligned.
 struct VolChannel {
     data: vec4<f32>,
@@ -137,6 +137,11 @@ fn lut_col(t: f32, idx: i32) -> vec3<f32> {
 fn enabled(idx: i32) -> f32 {
     return P.channels[idx].data.z;
 }
+// Where to sample this channel's LUT for the isosurface albedo. Not always the
+// top entry: a LUT that peaks early and ends dark would paint a black surface.
+fn albedo_t(idx: i32) -> f32 {
+    return P.channels[idx].data.w;
+}
 
 // World point -> volume texcoord, with Y and Z flipped so the volume matches the
 // 2D movie: image row 0 at the top (Y), movie frame 0 nearest the default camera (Z).
@@ -164,12 +169,12 @@ fn field_col(tc: vec3<f32>) -> vec4<f32> {
     let fade = edge_fade(tc, vec3<f32>(textureDimensions(vol0)));
     var f = 0.0;
     var col = vec3<f32>(0.0);
-    if (enabled(0) > 0.5) { let t = norm_ch(raw0(tc), 0) * fade; if (t > f) { f = t; col = lut_col(1.0, 0); } }
-    if (nc > 1 && enabled(1) > 0.5) { let t = norm_ch(raw1(tc), 1) * fade; if (t > f) { f = t; col = lut_col(1.0, 1); } }
-    if (nc > 2 && enabled(2) > 0.5) { let t = norm_ch(raw2(tc), 2) * fade; if (t > f) { f = t; col = lut_col(1.0, 2); } }
-    if (nc > 3 && enabled(3) > 0.5) { let t = norm_ch(raw3(tc), 3) * fade; if (t > f) { f = t; col = lut_col(1.0, 3); } }
-    if (nc > 4 && enabled(4) > 0.5) { let t = norm_ch(raw4(tc), 4) * fade; if (t > f) { f = t; col = lut_col(1.0, 4); } }
-    if (nc > 5 && enabled(5) > 0.5) { let t = norm_ch(raw5(tc), 5) * fade; if (t > f) { f = t; col = lut_col(1.0, 5); } }
+    if (enabled(0) > 0.5) { let t = norm_ch(raw0(tc), 0) * fade; if (t > f) { f = t; col = lut_col(albedo_t(0), 0); } }
+    if (nc > 1 && enabled(1) > 0.5) { let t = norm_ch(raw1(tc), 1) * fade; if (t > f) { f = t; col = lut_col(albedo_t(1), 1); } }
+    if (nc > 2 && enabled(2) > 0.5) { let t = norm_ch(raw2(tc), 2) * fade; if (t > f) { f = t; col = lut_col(albedo_t(2), 2); } }
+    if (nc > 3 && enabled(3) > 0.5) { let t = norm_ch(raw3(tc), 3) * fade; if (t > f) { f = t; col = lut_col(albedo_t(3), 3); } }
+    if (nc > 4 && enabled(4) > 0.5) { let t = norm_ch(raw4(tc), 4) * fade; if (t > f) { f = t; col = lut_col(albedo_t(4), 4); } }
+    if (nc > 5 && enabled(5) > 0.5) { let t = norm_ch(raw5(tc), 5) * fade; if (t > f) { f = t; col = lut_col(albedo_t(5), 5); } }
     return vec4<f32>(col, f);
 }
 

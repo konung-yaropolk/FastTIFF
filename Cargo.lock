@@ -2507,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "scivis-render"
-version = "0.9.7"
+version = "0.10.3"
 dependencies = [
  "bytemuck",
  "glow",

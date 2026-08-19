@@ -52,6 +52,22 @@ pub const MAX_CHANNELS: usize = 6;
 /// intensity (0 = `lut[0]`, 255 = `lut[255]`).
 pub type Lut = [[u8; 3]; 256];
 
+/// Where along `lut` its brightest entry sits, as a 0..1 sample position —
+/// what [`VolumeParams::albedo_t`] wants.
+///
+/// For an ordinary ramp this is 1.0 (the top entry), so nothing changes. It
+/// differs only for a LUT that peaks early and falls away, which is exactly the
+/// case that made the isosurface render black.
+pub fn brightest_lut_t(lut: &Lut) -> f32 {
+    let brightest = lut
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, c)| c[0] as u32 + c[1] as u32 + c[2] as u32)
+        .map(|(i, _)| i)
+        .unwrap_or(255);
+    brightest as f32 / 255.0
+}
+
 /// How a channel's pixels are stored in its GPU texture. Picked per channel from
 /// the source format so each gets the cheapest upload, while the shader stays
 /// uniform (the two integer kinds share one `usampler2D`/`texture_2d<u32>` — the
@@ -151,6 +167,18 @@ pub struct VolumeParams {
     pub enabled: [f32; MAX_CHANNELS],
     /// Per-channel: 1.0 if the channel's data is in the float texture, else 0.0.
     pub is_float: [f32; MAX_CHANNELS],
+    /// Per-channel LUT position (0..1) to take the **isosurface albedo** from.
+    ///
+    /// Surface mode colours the whole surface with one fixed colour rather than
+    /// the colour at the crossing value, so raising the threshold doesn't also
+    /// darken the surface. That fixed colour must be a *bright* point on the
+    /// LUT: sampling the top entry looks right for an ordinary ramp but renders
+    /// a black surface for any LUT that ends dark — a contrast-stretched
+    /// palette, say, which maxes out partway along and blacks out the rest.
+    ///
+    /// [`brightest_lut_t`] computes the right value; `1.0` reproduces the old
+    /// top-entry behaviour. Ignored by MIP and alpha DVR.
+    pub albedo_t: [f32; MAX_CHANNELS],
     /// Ray-march compositing mode (see [`VolumeRender::shader_mode`]): 0 = MIP,
     /// 1 = alpha DVR, 2 = isosurface. The sample count is derived in-shader from
     /// the voxel size.

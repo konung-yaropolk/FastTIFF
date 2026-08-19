@@ -86,7 +86,7 @@ struct ParamsGpu {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct VolParamsGpu {
-    /// Per channel: `(window.min, window.max, enabled, unused)`.
+    /// Per channel: `(window.min, window.max, enabled, isosurface albedo t)`.
     channels: [[f32; 4]; MAX_CHANNELS],
     cam_eye: [f32; 4],
     cam_forward: [f32; 4],
@@ -408,7 +408,7 @@ impl ImageRenderResources {
             modes: [p.num_channels, p.render_mode, self.volume_interp_mode, 0],
         };
         for c in 0..MAX_CHANNELS {
-            gpu.channels[c] = [p.windows[c * 2], p.windows[c * 2 + 1], p.enabled[c], 0.0];
+            gpu.channels[c] = [p.windows[c * 2], p.windows[c * 2 + 1], p.enabled[c], p.albedo_t[c]];
         }
         self.queue.write_buffer(&self.volume_uniform_buffer, 0, bytemuck::bytes_of(&gpu));
     }

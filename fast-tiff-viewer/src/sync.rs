@@ -11,7 +11,7 @@
 //! Only compiled with a GPU backend selected; without one the rest of the crate
 //! still provides the full CPU-side model.
 
-use crate::camera::{build_volume_params, volume_camera};
+use crate::camera::{build_volume_params, volume_camera, VolumeChannel};
 use crate::prefetch::{decode_jobs, ChannelJob, Decoded, PrefetchResult};
 use crate::stack::Stack;
 use crate::viewer::{ViewMode, Viewer};
@@ -243,12 +243,21 @@ fn sync_volume(loaded: &mut Stack, view: &mut crate::viewer::VolumeView, rendere
     // are unorm-normalized — see scivis_render::VolumeKind).
     // Bounded by MAX_CHANNELS, so it lives on the stack — this runs every 3D
     // frame and has no business calling the allocator.
-    let mut windows = [(0.0f32, 0.0f32, false, false); MAX_CHANNELS];
+    let blank = VolumeChannel { min: 0.0, max: 0.0, is_float: false, enabled: false, albedo_t: 1.0 };
+    let mut windows = [blank; MAX_CHANNELS];
     let n = loaded.display.settings.len().min(MAX_CHANNELS);
-    for (slot, s) in windows.iter_mut().zip(&loaded.display.settings) {
-        let float = s.kind == ChannelKind::Float;
-        let (lo, hi) = if float { (s.min, s.max) } else { (s.min / 65535.0, s.max / 65535.0) };
-        *slot = (lo, hi, float, s.enabled);
+    for (c, (slot, s)) in windows.iter_mut().zip(&loaded.display.settings).enumerate() {
+        let is_float = s.kind == ChannelKind::Float;
+        let (min, max) = if is_float { (s.min, s.max) } else { (s.min / 65535.0, s.max / 65535.0) };
+        // The isosurface paints one fixed colour, taken from the LUT's
+        // brightest point rather than its top entry — a contrast-stretched
+        // palette ends black, and sampling the top would render nothing at all.
+        let albedo_t = loaded
+            .display
+            .luts
+            .get(c)
+            .map_or(1.0, scivis_render::brightest_lut_t);
+        *slot = VolumeChannel { min, max, is_float, enabled: s.enabled, albedo_t };
     }
     let windows = &windows[..n];
 

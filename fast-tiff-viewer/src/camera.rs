@@ -450,6 +450,21 @@ pub fn volume_camera(cam: &CameraState, scale: [f32; 3], dims: (u32, u32, u32)) 
     VolumeCamera { eye, forward, right, up, tan_half_fov: TAN_HALF_FOV, box_he }
 }
 
+/// One channel's contribution to the ray-march uniforms.
+#[derive(Clone, Copy, Debug)]
+pub struct VolumeChannel {
+    /// Window low/high, in the sampled texture's units: raw for a float
+    /// channel, else the 0..65535 display window divided by 65535 (U8 and U16
+    /// volumes are both unorm-normalized — see [`scivis_render::VolumeKind`]).
+    pub min: f32,
+    pub max: f32,
+    pub is_float: bool,
+    pub enabled: bool,
+    /// Where to sample this channel's LUT for the isosurface albedo — see
+    /// [`scivis_render::brightest_lut_t`].
+    pub albedo_t: f32,
+}
+
 /// Assemble the ray-march uniforms from the camera, the per-channel windows,
 /// and the volume's render settings.
 ///
@@ -459,7 +474,7 @@ pub fn volume_camera(cam: &CameraState, scale: [f32; 3], dims: (u32, u32, u32)) 
 /// — see [`scivis_render::VolumeKind`]).
 pub fn build_volume_params(
     cam: &VolumeCamera,
-    channels: &[(f32, f32, bool, bool)],
+    channels: &[VolumeChannel],
     aspect: f32,
     render: VolumeRender,
     density: f32,
@@ -469,17 +484,22 @@ pub fn build_volume_params(
     let mut windows = [0.0f32; MAX_CHANNELS * 2];
     let mut enabled = [0.0f32; MAX_CHANNELS];
     let mut is_float = [0.0f32; MAX_CHANNELS];
-    for (c, &(lo, hi, float, on)) in channels.iter().take(MAX_CHANNELS).enumerate() {
-        windows[c * 2] = lo;
-        windows[c * 2 + 1] = hi;
-        enabled[c] = if on { 1.0 } else { 0.0 };
-        is_float[c] = if float { 1.0 } else { 0.0 };
+    // 1.0 is the LUT's top entry — the right albedo for any channel that isn't
+    // present, and the value an ordinary ramp computes anyway.
+    let mut albedo_t = [1.0f32; MAX_CHANNELS];
+    for (c, ch) in channels.iter().take(MAX_CHANNELS).enumerate() {
+        windows[c * 2] = ch.min;
+        windows[c * 2 + 1] = ch.max;
+        enabled[c] = if ch.enabled { 1.0 } else { 0.0 };
+        is_float[c] = if ch.is_float { 1.0 } else { 0.0 };
+        albedo_t[c] = ch.albedo_t;
     }
     VolumeParams {
         num_channels: n as i32,
         windows,
         enabled,
         is_float,
+        albedo_t,
         render_mode: render.shader_mode(),
         density,
         iso,

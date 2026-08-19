@@ -137,3 +137,47 @@ fn a_plain_grayscale_file_gains_no_spurious_builtin_option() {
     assert!(stack.display.builtin_lut.is_none(), "no ColorMap, so no Built-in option");
     assert_eq!(gray_lut_sel_name(&stack.display, 0), "Grayscale");
 }
+
+/// The isosurface paints one fixed colour for the whole surface, so raising the
+/// threshold doesn't also darken it. Taking that colour from the LUT's *top*
+/// entry works for an ordinary ramp but renders a completely black — i.e.
+/// invisible — surface for a contrast-stretched palette, whose top entry is
+/// black because the map peaks partway along and blacks out the unused tail.
+#[test]
+fn isosurface_albedo_lands_on_a_visible_part_of_the_lut() {
+    let stack = open(palette_tiff(16, 8, 87));
+    let lut = stack.display.luts[0];
+    assert_eq!(lut[255], [0, 0, 0], "this palette really does end black");
+
+    let t = scivis_render::brightest_lut_t(&lut);
+    let sampled = lut[(t * 255.0).round() as usize];
+    assert!(
+        sampled.iter().any(|&c| c > 0),
+        "albedo sampled at t={t} gives {sampled:?} — a black surface is invisible"
+    );
+    assert_eq!(sampled, [255, 255, 255], "it should land on the ramp's peak");
+}
+
+#[test]
+fn an_ordinary_ramp_still_uses_its_top_entry() {
+    // The fix must not move the albedo for the files that already worked.
+    for lut in [fast_tiff_lib::grayscale_lut(), fast_tiff_lib::default_composite_lut(0)] {
+        assert_eq!(scivis_render::brightest_lut_t(&lut), 1.0, "a rising ramp peaks at the top");
+    }
+}
+
+#[test]
+fn volume_params_carry_the_albedo_per_channel() {
+    // End-to-end: the value actually reaches the uniform the shader reads.
+    use fast_tiff_viewer::camera::{build_volume_params, volume_camera, VolumeChannel};
+    let stack = open(palette_tiff(16, 8, 87));
+    let albedo = scivis_render::brightest_lut_t(&stack.display.luts[0]);
+    assert!(albedo < 1.0, "the stretched palette peaks before its top entry");
+
+    let cam = volume_camera(&Default::default(), [1.0, 1.0, 1.0], (16, 8, 4));
+    let ch = [VolumeChannel { min: 0.0, max: 1.0, is_float: false, enabled: true, albedo_t: albedo }];
+    let params = build_volume_params(&cam, &ch, 1.0, scivis_render::VolumeRender::Surface, 100.0, 0.1);
+    assert_eq!(params.albedo_t[0], albedo);
+    // Absent channels keep the top entry, which is what an unused slot wants.
+    assert_eq!(params.albedo_t[1], 1.0);
+}

@@ -206,6 +206,10 @@ uniform vec3 box_he;         // volume box half-extents (scaled dims)
 uniform vec2 ch_window[6];   // per-channel min, max in sampled-texture units
 uniform float ch_enabled[6];
 uniform float ch_is_float[6];
+// Where to sample each channel's LUT for the isosurface albedo. Not always
+// the top entry: a LUT that peaks early and ends dark (a contrast-stretched
+// palette) would otherwise paint a black surface.
+uniform float ch_albedo[6];
 uniform int num_channels;
 uniform int u_mode;          // 0 = MIP, 1 = alpha DVR, 2 = isosurface
 uniform float u_density;     // alpha-DVR opacity scale (higher = more solid)
@@ -313,12 +317,12 @@ vec3 vol_coord(vec3 p) {
 float field_col(vec3 tc, out vec3 col) {
     float f = 0.0;
     col = vec3(0.0);
-    if (ch_enabled[0] > 0.5)                     { float t = norm_ch(raw0(tc), 0); if (t > f) { f = t; col = lut_col(1.0, 0); } }
-    if (num_channels > 1 && ch_enabled[1] > 0.5) { float t = norm_ch(raw1(tc), 1); if (t > f) { f = t; col = lut_col(1.0, 1); } }
-    if (num_channels > 2 && ch_enabled[2] > 0.5) { float t = norm_ch(raw2(tc), 2); if (t > f) { f = t; col = lut_col(1.0, 2); } }
-    if (num_channels > 3 && ch_enabled[3] > 0.5) { float t = norm_ch(raw3(tc), 3); if (t > f) { f = t; col = lut_col(1.0, 3); } }
-    if (num_channels > 4 && ch_enabled[4] > 0.5) { float t = norm_ch(raw4(tc), 4); if (t > f) { f = t; col = lut_col(1.0, 4); } }
-    if (num_channels > 5 && ch_enabled[5] > 0.5) { float t = norm_ch(raw5(tc), 5); if (t > f) { f = t; col = lut_col(1.0, 5); } }
+    if (ch_enabled[0] > 0.5)                     { float t = norm_ch(raw0(tc), 0); if (t > f) { f = t; col = lut_col(ch_albedo[0], 0); } }
+    if (num_channels > 1 && ch_enabled[1] > 0.5) { float t = norm_ch(raw1(tc), 1); if (t > f) { f = t; col = lut_col(ch_albedo[1], 1); } }
+    if (num_channels > 2 && ch_enabled[2] > 0.5) { float t = norm_ch(raw2(tc), 2); if (t > f) { f = t; col = lut_col(ch_albedo[2], 2); } }
+    if (num_channels > 3 && ch_enabled[3] > 0.5) { float t = norm_ch(raw3(tc), 3); if (t > f) { f = t; col = lut_col(ch_albedo[3], 3); } }
+    if (num_channels > 4 && ch_enabled[4] > 0.5) { float t = norm_ch(raw4(tc), 4); if (t > f) { f = t; col = lut_col(ch_albedo[4], 4); } }
+    if (num_channels > 5 && ch_enabled[5] > 0.5) { float t = norm_ch(raw5(tc), 5); if (t > f) { f = t; col = lut_col(ch_albedo[5], 5); } }
     return f;
 }
 
@@ -516,6 +520,7 @@ struct VolumeGl {
     u_window: Option<glow::NativeUniformLocation>,
     u_enabled: Option<glow::NativeUniformLocation>,
     u_is_float: Option<glow::NativeUniformLocation>,
+    u_albedo: Option<glow::NativeUniformLocation>,
     u_num_channels: Option<glow::NativeUniformLocation>,
     u_mode: Option<glow::NativeUniformLocation>,
     u_density: Option<glow::NativeUniformLocation>,
@@ -548,6 +553,7 @@ impl VolumeGl {
             u_window: gl.get_uniform_location(program, "ch_window"),
             u_enabled: gl.get_uniform_location(program, "ch_enabled"),
             u_is_float: gl.get_uniform_location(program, "ch_is_float"),
+            u_albedo: gl.get_uniform_location(program, "ch_albedo"),
             u_num_channels: gl.get_uniform_location(program, "num_channels"),
             u_mode: gl.get_uniform_location(program, "u_mode"),
             u_density: gl.get_uniform_location(program, "u_density"),
@@ -753,6 +759,7 @@ impl ImageRenderResources {
             gl.uniform_2_f32_slice(v.u_window.as_ref(), &p.windows);
             gl.uniform_1_f32_slice(v.u_enabled.as_ref(), &p.enabled);
             gl.uniform_1_f32_slice(v.u_is_float.as_ref(), &p.is_float);
+            gl.uniform_1_f32_slice(v.u_albedo.as_ref(), &p.albedo_t);
             gl.uniform_1_i32(v.u_num_channels.as_ref(), p.num_channels);
             gl.uniform_1_i32(v.u_mode.as_ref(), p.render_mode);
             gl.uniform_1_f32(v.u_density.as_ref(), p.density);
