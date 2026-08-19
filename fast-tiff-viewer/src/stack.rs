@@ -7,7 +7,7 @@
 //! free instead of reimplementing them.
 
 use crate::channels::{build_channel_settings, refresh_pseudocolor};
-use crate::dimensions::{apply_resolved_dimensions, setup_rgb};
+use crate::dimensions::{apply_resolved_dimensions, setup_cmyk, setup_rgb};
 use crate::display::Display;
 use crate::prefetch::Prefetcher;
 use crate::volume::VolumeBuilder;
@@ -135,6 +135,12 @@ impl Stack {
         // become red/green/blue display channels.
         if stack.tiff.frames.first().is_some_and(|f| f.is_rgb()) {
             setup_rgb(&mut stack);
+        }
+        // CMYK (Separated) frames become three converted RGB channels. Checked
+        // separately from `is_rgb` rather than folded into it: `is_rgb` means
+        // photometric=2, and these planes are derived, not stored.
+        if stack.tiff.frames.first().is_some_and(|f| f.is_cmyk()) {
+            setup_cmyk(&mut stack);
         }
         // Palette (indexed) images: the ColorMap is already installed as the
         // channel LUT by the lib; flag it so the fixed identity contrast window

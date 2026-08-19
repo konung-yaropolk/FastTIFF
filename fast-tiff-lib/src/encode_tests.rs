@@ -84,6 +84,7 @@ fn parse_frames(bytes: &[u8]) -> (Vec<FrameInfo>, ByteOrder) {
             predictor,
             photometric,
             planar_config: 1,
+            ink_set: 1,
             strip_offsets: strip_offsets.into_iter().map(u64::from).collect(),
             strip_byte_counts: strip_byte_counts.into_iter().map(u64::from).collect(),
             rows_per_strip,

@@ -85,6 +85,7 @@ fn frame_geometry_overflow_is_an_error_not_a_panic() {
         predictor: 1,
         photometric: 1,
         planar_config: 1,
+        ink_set: 1,
         strip_offsets: vec![8],
         strip_byte_counts: vec![16],
         rows_per_strip: 1,

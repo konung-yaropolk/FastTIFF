@@ -202,11 +202,20 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Sta
                     kv(
                         ui,
                         "Samples/pixel",
-                        match (f.is_rgb(), f.is_planar()) {
-                            (true, false) => format!("{} (chunky RGB)", f.samples_per_pixel),
-                            (true, true) => format!("{} (planar RGB)", f.samples_per_pixel),
-                            (false, true) => format!("{} (planar)", f.samples_per_pixel),
-                            (false, false) => f.samples_per_pixel.to_string(),
+                        {
+                            let model = if f.is_rgb() {
+                                Some("RGB")
+                            } else if f.is_cmyk() {
+                                Some("CMYK")
+                            } else {
+                                None
+                            };
+                            match (model, f.is_planar()) {
+                                (Some(m), false) => format!("{} (chunky {m})", f.samples_per_pixel),
+                                (Some(m), true) => format!("{} (planar {m})", f.samples_per_pixel),
+                                (None, true) => format!("{} (planar)", f.samples_per_pixel),
+                                (None, false) => f.samples_per_pixel.to_string(),
+                            }
                         },
                     );
                     let photometric = match f.photometric {
@@ -214,6 +223,12 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Sta
                         1 => "1 (BlackIsZero)".into(),
                         2 => "2 (RGB)".into(),
                         3 => "3 (palette)".into(),
+                        // Separated. InkSet says *which* inks; only set 1 is
+                        // CMYK, and only that one the viewer converts. Anything
+                        // else stays raw ink planes, so label it honestly
+                        // rather than calling every separated file CMYK.
+                        5 if f.ink_set == 1 => "5 (CMYK)".into(),
+                        5 => format!("5 (separated, InkSet {})", f.ink_set),
                         other => format!("{other}"),
                     };
                     kv(ui, "Photometric", photometric);

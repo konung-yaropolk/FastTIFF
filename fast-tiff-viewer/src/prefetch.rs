@@ -54,9 +54,15 @@ fn decode_channel(
     plane: usize,
     rgb: bool,
 ) -> anyhow::Result<Decoded> {
+    // CMYK frames read through the converting reader, which turns the four ink
+    // planes into an R/G/B triple. `plane` indexes the *converted* triple here,
+    // not the file's samples.
+    let cmyk = frame.is_cmyk();
     Ok(match kind {
         ChannelKind::Int8 => {
-            if rgb {
+            if cmyk {
+                Decoded::U8(fast_tiff_lib::read_plane_rgb_u8(mmap, frame, order, plane)?)
+            } else if rgb {
                 Decoded::U8(fast_tiff_lib::read_plane_u8(mmap, frame, order, plane)?)
             } else {
                 Decoded::U8(fast_tiff_lib::read_frame_u8(mmap, frame, order)?.into_owned())
@@ -64,7 +70,9 @@ fn decode_channel(
         }
         ChannelKind::Float => Decoded::F32(fast_tiff_lib::read_frame_f32(mmap, frame, order)?.into_owned()),
         ChannelKind::Int16 => {
-            if rgb {
+            if cmyk {
+                Decoded::U16(fast_tiff_lib::read_plane_rgb_u16(mmap, frame, order, plane)?)
+            } else if rgb {
                 Decoded::U16(fast_tiff_lib::read_plane_u16(mmap, frame, order, None, plane)?)
             } else {
                 Decoded::U16(fast_tiff_lib::read_frame_u16(mmap, frame, order, None)?.into_owned())
@@ -97,13 +105,26 @@ pub fn decode_jobs(
         let frame = frames
             .get(jobs[0].ifd_idx)
             .ok_or_else(|| anyhow::anyhow!("frame {} out of range", jobs[0].ifd_idx))?;
+        // CMYK shares this batching: one decompression pass yields all four ink
+        // planes, which convert to the R/G/B triple together. Doing it per
+        // channel would decompress the same strips three times *and* redo the
+        // conversion each time.
+        let cmyk = frame.is_cmyk();
         return match jobs[0].kind {
             ChannelKind::Int8 => {
-                let mut planes = fast_tiff_lib::read_planes_u8(mmap, frame, order)?;
+                let mut planes = if cmyk {
+                    fast_tiff_lib::read_planes_rgb_u8(mmap, frame, order)?
+                } else {
+                    fast_tiff_lib::read_planes_u8(mmap, frame, order)?
+                };
                 jobs.iter().map(|j| Ok(Decoded::U8(take_plane(&mut planes, j.plane)?))).collect()
             }
             _ => {
-                let mut planes = fast_tiff_lib::read_planes_u16(mmap, frame, order, None)?;
+                let mut planes = if cmyk {
+                    fast_tiff_lib::read_planes_rgb_u16(mmap, frame, order)?
+                } else {
+                    fast_tiff_lib::read_planes_u16(mmap, frame, order, None)?
+                };
                 jobs.iter().map(|j| Ok(Decoded::U16(take_plane(&mut planes, j.plane)?))).collect()
             }
         };

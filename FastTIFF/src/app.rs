@@ -698,7 +698,19 @@ impl eframe::App for ViewerApp {
                             .on_hover_text("Zoom (Ctrl+scroll to change)");
                     }
                     ui.separator();
-                    let channels_desc = if loaded.display.rgb {
+                    let channels_desc = if loaded.display.cmyk {
+                        // Say what was read *and* what is shown: the file holds
+                        // four ink plates, the viewer shows three converted
+                        // components, and a printing user will want to know the
+                        // K plate is folded in rather than dropped.
+                        //
+                        // ASCII arrow on purpose: the bundled font has
+                        // no U+2192, so a real arrow renders as a tofu
+                        // box. The multiplication sign already on this
+                        // status line IS in the font, which makes that
+                        // gap easy to assume away.
+                        "CMYK->RGB".to_string()
+                    } else if loaded.display.rgb {
                         "RGB".to_string()
                     } else {
                         format!("{} channel(s)", dims.channels)

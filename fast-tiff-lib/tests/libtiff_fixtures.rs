@@ -26,7 +26,7 @@
 
 use fast_tiff_lib::{
     read_frame_f32, read_frame_u16, read_frame_u8, read_plane_f32, read_plane_u16, read_plane_u8,
-    DisplayMode, TiffStack,
+    read_planes_rgb_u16, read_planes_rgb_u8, read_planes_u16, read_planes_u8, DisplayMode, TiffStack,
 };
 use std::path::{Path, PathBuf};
 
@@ -72,12 +72,23 @@ fn check_pixels(stack: &TiffStack, dtype: &str, spp: usize, pages: usize, name: 
     let frame_samples = (W * H * spp) as u64;
     for (p, frame) in stack.frames.iter().enumerate() {
         let base = p as u64 * frame_samples;
-        // For chunky multi-sample frames the readers deinterleave per plane;
-        // plane `pl`'s i-th value is global sample index base + i*spp + pl.
         let planes: usize = if spp > 1 { spp } else { 1 };
         for pl in 0..planes {
             let n_pixels = W * H;
-            let g_of = |i: usize| base + (i * spp + pl) as u64;
+            // Where plane `pl`'s i-th value sits in the flat sample sequence
+            // depends on how the file stores samples. Chunky interleaves them,
+            // so the plane strides by `spp`. Planar keeps each plane whole, one
+            // after another, so the plane is a contiguous run. For spp == 1 the
+            // two coincide. Reading this off the frame rather than the filename
+            // keeps the fixture matrix able to hold both layouts.
+            let is_planar = frame.is_planar();
+            let g_of = |i: usize| {
+                if is_planar {
+                    base + (pl * n_pixels + i) as u64
+                } else {
+                    base + (i * spp + pl) as u64
+                }
+            };
             match dtype {
                 "u8" => {
                     let got: Vec<u8> = if spp > 1 {
@@ -176,6 +187,82 @@ fn every_fixture_decodes_correctly() {
                 stack.description.as_deref().is_some_and(|d| d.contains("ImageJ=")),
                 "{name}: raw description exposed"
             );
+        }
+    }
+}
+
+/// The reference CMYK conversion, on normalised inks: ink subtracts from the
+/// paper, and the black plate subtracts from whatever the coloured inks left.
+fn reference_component(ink: f32, black: f32, full: f32) -> f32 {
+    (1.0 - ink / full) * (1.0 - black / full) * full
+}
+
+/// The CMYK fixtures again, this time through the *converting* readers.
+///
+/// The swatch tests in `tests/cmyk.rs` pin the formula itself against Pillow on
+/// hand-built files. What this adds is that the same answer comes out of every
+/// real-encoder variant: chunky and planar, LZW and Deflate-with-predictor,
+/// 8-bit and 16-bit, tifffile and libtiff. A conversion that quietly depended
+/// on the strip layout, or that ran before the predictor undo, would pass the
+/// swatch tests and fail here.
+///
+/// It also pins a detail that every real file depends on: neither tifffile nor
+/// Pillow writes the InkSet tag at all, so these frames are recognised as CMYK
+/// only because the reader applies the spec default of 1. Drop that default and
+/// every Separated file in the wild stops converting.
+#[test]
+fn cmyk_fixtures_convert_through_the_rgb_readers() {
+    let dir = fixtures_dir();
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("fixtures dir {} missing: {e}", dir.display()))
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tif") && n.contains("cmyk"))
+        .collect();
+    assert!(
+        names.len() >= 5,
+        "expected the CMYK fixtures, found {} - rerun tests/fixtures/generate_fixtures.py",
+        names.len()
+    );
+
+    for name in &names {
+        let stack = TiffStack::open(dir.join(name))
+            .unwrap_or_else(|e| panic!("{name}: failed to open: {e:#}"));
+        for (p, frame) in stack.frames.iter().enumerate() {
+            assert!(frame.is_cmyk(), "{name}: page {p} should be recognised as CMYK");
+            let n = W * H;
+
+            if frame.bits_per_sample == 8 {
+                let raw = read_planes_u8(&stack.data, frame, stack.byte_order).unwrap();
+                let rgb = read_planes_rgb_u8(&stack.data, frame, stack.byte_order).unwrap();
+                assert_eq!(rgb.len(), 3, "{name}: page {p}");
+                for i in 0..n {
+                    let k = raw[3][i] as f32;
+                    for c in 0..3 {
+                        let want = reference_component(raw[c][i] as f32, k, 255.0);
+                        let got = rgb[c][i] as f32;
+                        assert!(
+                            (got - want).abs() <= 1.0,
+                            "{name}: page {p} px {i} component {c}: got {got}, want {want}"
+                        );
+                    }
+                }
+            } else {
+                let raw = read_planes_u16(&stack.data, frame, stack.byte_order, None).unwrap();
+                let rgb = read_planes_rgb_u16(&stack.data, frame, stack.byte_order).unwrap();
+                assert_eq!(rgb.len(), 3, "{name}: page {p}");
+                for i in 0..n {
+                    let k = raw[3][i] as f32;
+                    for c in 0..3 {
+                        let want = reference_component(raw[c][i] as f32, k, 65535.0);
+                        let got = rgb[c][i] as f32;
+                        assert!(
+                            (got - want).abs() <= 2.0,
+                            "{name}: page {p} px {i} component {c}: got {got}, want {want}"
+                        );
+                    }
+                }
+            }
         }
     }
 }

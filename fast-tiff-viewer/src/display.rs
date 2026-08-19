@@ -68,6 +68,13 @@ pub struct Display {
     /// planes rather than separate IFDs. Flips how a display channel maps to
     /// file data.
     pub rgb: bool,
+    /// True when the stack is CMYK (Separated) and is being shown through the
+    /// ink->RGB conversion. [`rgb`](Self::rgb) is *also* set — the display
+    /// channels are sample planes of one IFD either way, which is what the
+    /// decode addressing keys on — so this exists purely so the UI can say
+    /// "CMYK" rather than "RGB", and so a reader of this struct can tell that
+    /// the three channels are derived rather than stored.
+    pub cmyk: bool,
     /// True for a palette-color (indexed) stack: pixels are ColorMap indices,
     /// so the contrast window is pinned to an identity map and a frontend
     /// should suppress the contrast slider.
@@ -98,6 +105,7 @@ impl Default for Display {
             luts: Vec::new(),
             builtin_lut: None,
             rgb: false,
+            cmyk: false,
             palette: false,
             triple_axis_warning: false,
             has_z_axis: false,

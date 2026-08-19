@@ -32,6 +32,11 @@ pub(crate) const TAG_SAMPLE_FORMAT: u16 = 339;
 /// ColorMap (tag 320): the palette for a PhotometricInterpretation=3 (indexed)
 /// image — `3 * 2^BitsPerSample` SHORT values, all reds then greens then blues.
 const TAG_COLOR_MAP: u16 = 320;
+/// InkSet (tag 332): which inks a Separated (PhotometricInterpretation=5) image
+/// was separated into. 1 = CMYK in that component order; 2 = anything else,
+/// including hi-fi sets like CMYK+orange+green whose order is described only by
+/// `InkNames`. Only `1` may be interpreted with the CMYK formula.
+pub(crate) const TAG_INK_SET: u16 = 332;
 
 /// Ceiling on how many frames one file may index.
 ///
@@ -82,14 +87,22 @@ pub struct FrameInfo {
     pub sample_format: SampleFormat,
     pub compression: Compression,
     pub predictor: u16, // 1 = none, 2 = horizontal differencing
-    /// PhotometricInterpretation (tag 262): 2 = RGB, others treated as a
-    /// single-plane grayscale/whatever. Used to decide whether a frame's
-    /// multiple samples are color components to deinterleave.
+    /// PhotometricInterpretation (tag 262): 2 = RGB, 3 = palette,
+    /// 5 = Separated (CMYK and other ink sets — see [`FrameInfo::ink_set`]),
+    /// others treated as a single-plane grayscale/whatever. Used to decide
+    /// whether a frame's multiple samples are color components to
+    /// deinterleave, and how to interpret them once they are.
     pub photometric: u16,
     /// PlanarConfiguration (tag 284): 1 = chunky (samples interleaved per
     /// pixel, the default), 2 = planar (each sample stored as its own whole
     /// plane, one after another). Both are decoded; see `FrameInfo::is_planar`.
     pub planar_config: u16,
+    /// InkSet (tag 332), meaningful only for a Separated image
+    /// (`photometric == 5`): `1` = the four process inks in C, M, Y, K order,
+    /// `2` = some other ink set. Defaults to 1 per TIFF6, which is also the
+    /// right default for the overwhelmingly common CMYK case. See
+    /// [`FrameInfo::is_cmyk`].
+    pub ink_set: u16,
     pub strip_offsets: Vec<u64>,
     pub strip_byte_counts: Vec<u64>,
     pub rows_per_strip: u32,
@@ -120,6 +133,37 @@ impl FrameInfo {
     /// decode, so both ride the same 8-bit-index display path.
     pub fn is_palette(&self) -> bool {
         self.photometric == 3 && self.samples_per_pixel == 1 && matches!(self.bits_per_sample, 4 | 8)
+    }
+
+    /// True for a CMYK frame this crate can convert for display: a Separated
+    /// image (PhotometricInterpretation=5) separated into the four *process*
+    /// inks, at a width the conversion is defined for.
+    ///
+    /// Deliberately narrow, because every clause rules out a file the CMYK
+    /// formula would silently mangle:
+    ///
+    /// - `ink_set == 1` — TIFF6 §16 lets a Separated image use any ink set. A
+    ///   hi-fi separation (CMYK + orange + green, say) is `InkSet = 2` and its
+    ///   component order is described only by `InkNames`, so treating sample 0
+    ///   as cyan would be a guess. Those fall through to the generic
+    ///   multi-sample path, where each ink is simply its own channel.
+    /// - `samples_per_pixel >= 4` — fewer than four samples cannot be CMYK, and
+    ///   `photometric` and `SamplesPerPixel` are independent untrusted tags, so
+    ///   a file may well claim 5-with-1. Extra samples beyond the fourth (alpha,
+    ///   or spot colours) are ignored by the conversion.
+    /// - unsigned 8- or 16-bit — the only depths separated images occur in.
+    ///   Anything else keeps its raw per-ink planes rather than being forced
+    ///   through a formula defined on normalized ink coverage.
+    ///
+    /// Note this says nothing about *photometric* being trustworthy in general:
+    /// it is the gate for [`crate::read_planes_rgb_u8`] and friends, which are
+    /// the only readers that reinterpret samples rather than returning them.
+    pub fn is_cmyk(&self) -> bool {
+        self.photometric == 5
+            && self.ink_set == 1
+            && self.samples_per_pixel >= 4
+            && self.sample_format == SampleFormat::UnsignedInt
+            && matches!(self.bits_per_sample, 8 | 16)
     }
 
     /// Bytes one sample occupies at this frame's bit depth, or an error for a
@@ -618,6 +662,7 @@ fn frame_info_from_entries(
     let mut predictor = 1u16;
     let mut photometric = 1u16; // default: BlackIsZero grayscale
     let mut planar_config = 1u16; // default: chunky / interleaved
+    let mut ink_set = 1u16; // default per TIFF6 §16: CMYK
     let mut rows_per_strip = u32::MAX; // default: whole image is one strip
     let mut strip_offsets = None;
     let mut strip_byte_counts = None;
@@ -637,6 +682,7 @@ fn frame_info_from_entries(
             TAG_STRIP_BYTE_COUNTS => strip_byte_counts = Some(e.as_u64_array(file, order)?),
             TAG_PHOTOMETRIC => photometric = e.as_u32(file, order)? as u16,
             TAG_PLANAR_CONFIG => planar_config = e.as_u32(file, order)? as u16,
+            TAG_INK_SET => ink_set = e.as_u32(file, order)? as u16,
             _ => {}
         }
     }
@@ -676,6 +722,7 @@ fn frame_info_from_entries(
         predictor,
         photometric,
         planar_config,
+        ink_set,
         strip_offsets,
         strip_byte_counts,
         rows_per_strip,
