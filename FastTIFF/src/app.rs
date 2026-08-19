@@ -674,6 +674,9 @@ impl eframe::App for ViewerApp {
                 }
                 if let Some(loaded) = &self.core.stack {
                     let meta = &loaded.tiff.meta;
+                    // What the viewer is actually showing, which is not the
+                    // file's raw claim whenever an axis was reclassified.
+                    let dims = loaded.display.dims;
                     // Reflect a toggle click made earlier in this same toolbar
                     // (the 2D/3D buttons run before this), so the layout updates
                     // on the click frame rather than one frame later.
@@ -682,7 +685,7 @@ impl eframe::App for ViewerApp {
                     // frame counter/time are only meaningful when the stack also
                     // has a separate time axis (the channels+Z+time case, where
                     // `slices > 1`); otherwise hide them.
-                    let hide_frame_info = in_3d && meta.slices <= 1;
+                    let hide_frame_info = in_3d && dims.slices <= 1;
 
                     // Zoom is a 2D-only concept — hidden entirely in 3D.
                     if !in_3d {
@@ -698,7 +701,7 @@ impl eframe::App for ViewerApp {
                     let channels_desc = if loaded.display.rgb {
                         "RGB".to_string()
                     } else {
-                        format!("{} channel(s)", meta.channels)
+                        format!("{} channel(s)", dims.channels)
                     };
                     let bits = loaded.tiff.frames.first().map(|f| f.bits_per_sample).unwrap_or(0);
                     ui.label(format!(
@@ -711,14 +714,14 @@ impl eframe::App for ViewerApp {
 
                     if !hide_frame_info {
                         ui.separator();
-                        let frame_digits = meta.frames.to_string().len();
+                        let frame_digits = dims.frames.to_string().len();
                         ui.label(
-                            RichText::new(format!("Frame {:>frame_digits$} / {}", loaded.frame_index + 1, meta.frames))
+                            RichText::new(format!("Frame {:>frame_digits$} / {}", loaded.frame_index + 1, dims.frames))
                                 .monospace(),
                         );
                         if let Some(interval) = meta.frame_interval_s {
                             ui.separator();
-                            let max_time = meta.frames.saturating_sub(1) as f64 * interval;
+                            let max_time = dims.frames.saturating_sub(1) as f64 * interval;
                             let time_width = format!("{max_time:.3}").len();
                             let current_time = loaded.frame_index as f64 * interval;
                             ui.label(RichText::new(format!("t = {current_time:>time_width$.3}s")).monospace());

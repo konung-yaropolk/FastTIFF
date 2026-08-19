@@ -268,14 +268,18 @@ fn sync_volume(loaded: &mut Stack, view: &mut crate::viewer::VolumeView, rendere
 /// `xyczt` plane order (channel fastest, then Z — frozen at slice 0 — then time).
 pub fn build_jobs(loaded: &Stack, frame_index: usize, enabled: &[bool], kinds: &[ChannelKind]) -> Vec<ChannelJob> {
     let Some((width, height)) = loaded.dimensions() else { return Vec::new() };
-    let meta = &loaded.tiff.meta;
+    // The *resolved* interpretation, never `tiff.meta`. Resolving is precisely
+    // the act of reclassifying a mislabeled axis — a file claiming
+    // `channels = 100` that is really a 100-frame movie — so the raw metadata
+    // gives the wrong stride and addresses planes past the end of the chain.
+    let dims = &loaded.display.dims;
     (0..loaded.display.settings.len())
         .filter(|&c| enabled.get(c).copied().unwrap_or(false))
         .map(|c| {
             let (ifd_idx, plane) = if loaded.display.rgb {
-                (frame_index * meta.slices, c)
+                (frame_index * dims.slices, c)
             } else {
-                (frame_index * meta.slices * meta.channels + c, 0)
+                (frame_index * dims.slices * dims.channels + c, 0)
             };
             ChannelJob { channel: c, ifd_idx, plane, kind: kinds[c], rgb: loaded.display.rgb, width, height }
         })

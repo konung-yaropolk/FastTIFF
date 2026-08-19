@@ -290,14 +290,14 @@ impl Viewer {
     }
 
     pub fn can_show_volume(&self) -> bool {
-        self.stack.as_ref().is_some_and(|s| s.tiff.meta.frames >= 2)
+        self.stack.as_ref().is_some_and(|s| s.display.dims.frames >= 2)
     }
 
     /// Whether the stack has a time axis *separate* from the volume's depth —
     /// i.e. playback still means something in the 3D view. False for an ordinary
     /// 3D stack, where the frame axis *is* the depth.
     pub fn is_4d(&self) -> bool {
-        self.stack.as_ref().is_some_and(|s| s.tiff.meta.slices > 1)
+        self.stack.as_ref().is_some_and(|s| s.display.dims.slices > 1)
     }
 
     /// Advance looped playback to match `now` (the frontend's monotonic clock, in
