@@ -141,11 +141,20 @@ impl Stack {
         // is kept and its slider can be hidden.
         stack.display.palette = stack.tiff.frames.first().is_some_and(|f| f.is_palette());
         // Remember the file's own LUT (a single-channel image carrying a
-        // ColorMap / ImageJ LUT) so the LUT selector can offer a "Built-in LUT"
+        // ColorMap / ImageJ LUT) so the LUT selector can offer a "Built-in"
         // option that restores it. Captured now, before pseudocolor could touch
         // it (it won't, for an explicit-LUT channel, but capture first anyway).
-        stack.display.builtin_lut = (stack.tiff.meta.has_explicit_luts
-            && stack.display.channel_count() == 1)
+        //
+        // `has_explicit_luts` alone is not the right test: it is only set for a
+        // *coloured* map, and a palette image's ColorMap is just as much its
+        // display transfer when it happens to be grey. Contrast-stretched
+        // indexed exports are exactly that — a grayscale ramp that maps index
+        // 16 to grey 46 and blacks out the unused tail. Dropping it left the
+        // user stuck: picking any colormap replaced the ramp with the generic
+        // linear one, the image went dark, and with the contrast slider
+        // suppressed for palette stacks there was no way back.
+        let has_own_lut = stack.tiff.meta.has_explicit_luts || stack.display.palette;
+        stack.display.builtin_lut = (has_own_lut && stack.display.channel_count() == 1)
             .then(|| stack.tiff.meta.channel_display[0].lut);
         refresh_pseudocolor(&mut stack, apply_pseudocolor);
 

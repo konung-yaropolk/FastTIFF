@@ -1193,6 +1193,11 @@ impl eframe::App for ViewerApp {
                         });
                     }
                 }
+                // No `else`: a palette (indexed) image shows no contrast row at
+                // all. Its pixels are colour-table indices rather than
+                // intensities — index 37 isn't brighter than 12, the map
+                // decides — so there is no window to adjust. Changing the table
+                // is the LUT selector's job.
             }
             if let Some(status) = &current_status {
                 // The triple-axis note explains that 2D freezes Z at its first
