@@ -1,9 +1,14 @@
-//! The pop-up windows: 3D render settings and the file-metadata viewer.
-//! Split from `app.rs`.
+//! The pop-up windows: 3D render settings, the file-metadata viewer, and the
+//! channel histogram. Split from `app.rs`.
+//!
+//! All three are opened through [`super::scale::unscaled`], so they keep their
+//! native size on the web build where the surrounding chrome is enlarged.
 
+use super::scale::unscaled;
 use super::*;
 
 use fast_tiff_viewer::camera::{NavMode, OrbitPoint};
+use fast_tiff_viewer::histogram::{fill_alpha, fill_tint, Histogram, BINS};
 use crate::render;
 use egui::RichText;
 
@@ -28,6 +33,7 @@ pub(super) fn render_settings_window(
     reset_position: &mut bool,
     loaded: Option<&Stack>,
 ) {
+    unscaled(ctx, |ctx| {
     egui::Window::new("3D render settings")
         .open(open)
         .resizable(false)
@@ -150,10 +156,12 @@ pub(super) fn render_settings_window(
                 }
             });
         });
+    });
 }
 
 pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Stack) {
     let tiff = &loaded.tiff;
+    unscaled(ctx, |ctx| {
     egui::Window::new("File metadata")
         .open(open)
         .resizable(true)
@@ -344,6 +352,7 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Sta
                 }
             });
         });
+    });
 }
 
 /// `1234567` -> `"1.2 MiB (1234567 bytes)"`.
@@ -360,4 +369,227 @@ pub(super) fn human_bytes(n: u64) -> String {
     } else {
         format!("{:.1} {} ({n} bytes)", v, UNITS[u])
     }
+}
+
+/// Histogram plot height when the window opens, and the floor it can be
+/// dragged down to — both in multiples of the body text height.
+///
+/// Relative rather than fixed point counts because [`unscaled`] resizes a
+/// pop-up by scaling its *style*: a hard-coded length would keep the enlarged
+/// chrome's scale while the text around it shrank back to native, and the plot
+/// would come out half again too tall for its own window.
+const PLOT_TEXT_HEIGHTS: f32 = 9.0;
+const MIN_PLOT_TEXT_HEIGHTS: f32 = 3.0;
+
+/// How much of its fill and outline a curve keeps where the channel's contrast
+/// window clips it away.
+///
+/// Faded rather than hidden: what a window is throwing away is exactly what you
+/// need to see to judge whether it is set right — a tail cut off here is
+/// detail crushed to black or blown to white in the image. Dim enough to read
+/// as excluded at a glance, present enough to count.
+const CLIPPED_FILL: f32 = 0.3;
+const CLIPPED_STROKE_ALPHA: u8 = 70;
+
+/// The channel-histogram pop-up: the intensity distribution of the frame on
+/// screen, with the contrast sliders directly beneath it.
+///
+/// The two belong together — a contrast window is a choice about where the data
+/// actually is, and until now that choice was made blind. The plot is drawn
+/// across exactly the span the sliders below it cover (see
+/// [`contrast_controls`]), so a handle sits above the part of the distribution
+/// it clips.
+///
+/// `hists` is computed by the caller and cached; this only draws.
+pub(super) fn histogram_window(
+    ctx: &egui::Context,
+    open: &mut bool,
+    loaded: &mut Stack,
+    hists: &[Histogram],
+    log_scale: &mut bool,
+) {
+    unscaled(ctx, |ctx| {
+        // Opening size only — `Resize` remembers whatever the user drags it to
+        // afterwards. The height is the plot at its default size plus what the
+        // controls need: `Stacked` spends two lines per channel, plus two more
+        // for the hint and log-scale lines. Without this a six-channel stack
+        // would open with its plot already squeezed onto the minimum.
+        let (row_h, text_h) = {
+            let style = ctx.global_style();
+            let font = style.text_styles[&egui::TextStyle::Body].clone();
+            let text_h = ctx.fonts_mut(|f| f.row_height(&font));
+            (style.spacing.interact_size.y + style.spacing.item_spacing.y, text_h)
+        };
+        let rows = loaded.display.settings.len().max(1) as f32 * 2.0 + 2.0;
+        egui::Window::new("Histogram")
+            .open(open)
+            .resizable(true)
+            // An explicit size, rather than auto-sizing to content: the plot
+            // claims whatever vertical space is left over, so the window needs a
+            // height of its own for it to claim. Dragging the corner then grows
+            // the plot instead of the empty space around it.
+            .default_size([420.0 / super::scale::UI_SCALE, text_h * PLOT_TEXT_HEIGHTS + row_h * rows])
+            .show(ctx, |ui| {
+                // How tall everything *below* the plot is depends on the channel
+                // count, and it is drawn after the plot has to be sized. Rather
+                // than guess, reuse the height it came to last frame — one
+                // frame of lag while a resize handle is being dragged, which is
+                // invisible, and no circular dependency between the two.
+                let id = ui.id().with("controls_h");
+                let controls_h = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+                let plot_h =
+                    (ui.available_height() - controls_h).max(text_h * MIN_PLOT_TEXT_HEIGHTS);
+
+                // Reserve the plot's rect now and paint into it further down,
+                // once the sliders have reported the span to align with. Nothing
+                // else draws there, so the out-of-order painting is invisible.
+                let (plot, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), plot_h),
+                    egui::Sense::hover(),
+                );
+
+                let controls_top = ui.cursor().top();
+                // Every slider spans the same range the plot is binned over, so
+                // a handle's x means the same thing as a point on the curve
+                // above it — which is what lets the plot fade exactly where the
+                // handle sits.
+                let axis = fast_tiff_viewer::histogram::shared_track(loaded);
+                let track = contrast_controls(ui, loaded, ContrastLayout::Stacked, Some(axis));
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.checkbox(log_scale, "Log scale").on_hover_text(
+                        "Plot log(1 + count). Microscopy frames are mostly background, \
+                         and one enormous bin at the dark end flattens everything else \
+                         into the axis on a linear plot.",
+                    );
+                    if let Some(h) = hists.first() {
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!("{} bins · {} px sampled", BINS, h.counted))
+                                .small()
+                                .weak(),
+                        );
+                    }
+                });
+
+                ui.data_mut(|d| d.insert_temp(id, ui.cursor().top() - controls_top));
+
+                // Align the plot with the sliders when there are any; a palette
+                // stack draws no slider, so fall back to the full width.
+                let span = track.unwrap_or_else(|| plot.x_range());
+                let area = egui::Rect::from_x_y_ranges(span, plot.y_range());
+                draw_plot(ui, area, hists, &loaded.display, *log_scale);
+            });
+    });
+}
+
+/// Paint every channel's histogram over one set of axes.
+fn draw_plot(
+    ui: &egui::Ui,
+    area: egui::Rect,
+    hists: &[Histogram],
+    display: &fast_tiff_viewer::Display,
+    log_scale: bool,
+) {
+    let painter = ui.painter_at(area);
+    painter.rect_filled(area, 2.0, ui.visuals().extreme_bg_color);
+
+    if hists.is_empty() {
+        painter.text(
+            area.center(),
+            egui::Align2::CENTER_CENTER,
+            "No frame to histogram",
+            egui::FontId::proportional(12.0),
+            ui.visuals().weak_text_color(),
+        );
+        return;
+    }
+
+    // Every plot shares these axes, so they stack; thin them accordingly.
+    let alpha = fill_alpha(hists.len());
+    // One vertical scale for all channels, matching the one horizontal one.
+    // Per-channel scaling would stretch every curve to full height and erase
+    // exactly the comparison the shared axis was introduced to show — that this
+    // channel is concentrated and that one spread thin.
+    let peak = hists.iter().map(|h| h.peak).max().unwrap_or(0).max(1) as f32;
+    // Log compresses the tall background bin so the rest of the distribution is
+    // visible. Normalising by the *scaled* peak keeps the tallest bar at full
+    // height either way, so switching modes rescales rather than shrinks.
+    let height = |v: f32| if log_scale { (1.0 + v * 1000.0).ln() / 1000.0_f32.ln_1p() } else { v };
+
+    for h in hists {
+        let [r, g, b] = display.lut(h.channel).map(fill_tint).unwrap_or([200, 200, 200]);
+        let solid = egui::Color32::from_rgb(r, g, b);
+        let fill = egui::Color32::from_rgba_unmultiplied(r, g, b, alpha);
+        let dim_fill =
+            egui::Color32::from_rgba_unmultiplied(r, g, b, (alpha as f32 * CLIPPED_FILL) as u8);
+        let dim_stroke = egui::Color32::from_rgba_unmultiplied(r, g, b, CLIPPED_STROKE_ALPHA);
+        let bar_w = area.width() / BINS as f32;
+
+        // One mesh of `BINS` quads rather than `BINS` separate rect shapes, and
+        // one polyline across the tops. A filled *polygon* would be the obvious
+        // choice, but epaint's closed-path fill assumes convexity and a
+        // histogram is the opposite of convex — the tops would web over.
+        let mut mesh = egui::epaint::Mesh::default();
+        let mut dim_mesh = egui::epaint::Mesh::default();
+        let mut top: Vec<egui::Pos2> = Vec::with_capacity(BINS);
+        for i in 0..BINS {
+            let x = area.left() + i as f32 * bar_w;
+            let y = area.bottom() - height(h.bins[i] as f32 / peak) * area.height();
+            let bar =
+                egui::Rect::from_min_max(egui::pos2(x, y), egui::pos2(x + bar_w, area.bottom()));
+            mesh.add_colored_rect(bar, fill);
+            dim_mesh.add_colored_rect(bar, dim_fill);
+            top.push(egui::pos2(x + bar_w * 0.5, y));
+        }
+
+        // The part of this channel the contrast window keeps, as a span of the
+        // plot. Both are on the same axis (the window's sliders are given the
+        // shared track), so this lands exactly under the channel's handles.
+        let span = (h.hi - h.lo).max(f32::EPSILON);
+        let x_of = |v: f32| area.left() + ((v - h.lo) / span).clamp(0.0, 1.0) * area.width();
+        let (win_min, win_max) = display
+            .settings
+            .get(h.channel)
+            .map(|s| (s.min, s.max))
+            .unwrap_or((h.lo, h.hi));
+        let kept = egui::Rect::from_x_y_ranges(
+            egui::Rangef::new(x_of(win_min), x_of(win_max)),
+            area.y_range(),
+        );
+
+        // Draw the curve three times under different clips rather than
+        // recolouring bin by bin: the boundary then falls exactly on the handle
+        // even when it lands mid-bin, and the kept and clipped parts never
+        // overlap, so neither is composited on top of the other.
+        painter.with_clip_rect(kept).add(egui::Shape::mesh(mesh));
+        painter
+            .with_clip_rect(kept)
+            .add(egui::Shape::line(top.clone(), egui::Stroke::new(1.0, solid)));
+        for tail in [
+            egui::Rect::from_x_y_ranges(
+                egui::Rangef::new(area.left(), kept.left()),
+                area.y_range(),
+            ),
+            egui::Rect::from_x_y_ranges(
+                egui::Rangef::new(kept.right(), area.right()),
+                area.y_range(),
+            ),
+        ] {
+            if tail.width() <= 0.0 {
+                continue;
+            }
+            let p = painter.with_clip_rect(tail);
+            p.add(egui::Shape::mesh(dim_mesh.clone()));
+            p.add(egui::Shape::line(top.clone(), egui::Stroke::new(1.0, dim_stroke)));
+        }
+    }
+
+    painter.rect_stroke(
+        area,
+        2.0,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
 }

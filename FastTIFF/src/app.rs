@@ -14,15 +14,15 @@
 //! privacy, so the split adds no `pub` surface beyond `pub(super)`):
 //!   * `camera`  — egui input → the core camera
 //!   * `overlay` — the 3D coordinate-box overlay, drawn with the egui painter
+//!   * `scale`   — how large the chrome is drawn (the web build runs bigger)
 //!   * `widgets` — the contrast range slider + value formatting
-//!   * `windows` — the render-settings and file-metadata pop-ups
+//!   * `windows` — the render-settings, metadata and histogram pop-ups
 
 use crate::render::{self, Render};
 use egui::{Color32, RichText};
 use fast_tiff_viewer::channels::{
-    channel_tint, gray_lut_applicable, gray_lut_count, gray_lut_sel_name,
-    gray_lut_sel_tint,
-    pseudocolor_applicable, ui_tint,
+    gray_lut_applicable, gray_lut_count, gray_lut_sel_name, gray_lut_sel_tint,
+    pseudocolor_applicable,
 };
 use fast_tiff_viewer::{DecodeMode, Stack, ViewMode, Viewer};
 use std::path::PathBuf;
@@ -30,11 +30,29 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 mod camera;
 mod overlay;
+mod scale;
 mod widgets;
 mod windows;
 
-use widgets::{format_calibrated, range_slider, MIN_CONTRAST_SLIDER_W};
-use windows::{metadata_window, render_settings_window};
+use scale::UI_SCALE;
+use widgets::{contrast_controls, histogram_button, ContrastLayout};
+use windows::{histogram_window, metadata_window, render_settings_window};
+
+/// Install the chrome defaults both hosts share, before the first frame.
+///
+/// Small enough to inline at each entry point, but the two would then be free to
+/// drift — and "the desktop app and the web app look different" is exactly the
+/// bug this crate exists to prevent. Anything that styles the app as a whole
+/// belongs here.
+pub fn install_chrome(ctx: &egui::Context) {
+    // Dark by default rather than following the system theme: this is an image
+    // viewer, and a light chrome throws stray light onto the canvas, skewing how
+    // dim structures in a microscopy stack read. The user can still switch it in
+    // egui's own settings.
+    ctx.set_theme(egui::ThemePreference::Dark);
+    // Bigger on the web than on the desktop — see `scale`.
+    ctx.set_zoom_factor(UI_SCALE);
+}
 
 /// Turn a core LUT tint (raw RGB, or `None` for "plain grayscale — use the
 /// default color") into an egui color. The *decision* is display logic and
@@ -112,6 +130,55 @@ fn initial_fit_zoom(ctx: &egui::Context, img_w: f32, img_h: f32, chrome_h: f32) 
         }
     }
     Some(ZOOM_LEVELS[0]) // even the smallest level overflows — open there and pan
+}
+
+/// Longest the histogram may lag the frame on screen while the movie plays.
+///
+/// Rebuilding decodes the frame a second time — `sync` has already decoded it
+/// for the GPU, but into buffers it does not keep — so an open histogram window
+/// would otherwise double the per-frame decode cost of playback, which is
+/// plainly visible on a large compressed stack. Nobody reads a distribution
+/// redrawn thirty times a second anyway; a few updates per second still looks
+/// live and costs a bounded amount no matter how fast the movie runs.
+const HIST_PLAYBACK_INTERVAL: f64 = 0.25;
+
+/// The channel histograms on display, and the state they were computed from.
+///
+/// Building these decodes every channel of the frame, which is far too much to
+/// redo per repaint, so they are held until something the plot is a *function
+/// of* moves: the frame, the plane interpretation (`prefetch_gen` bumps on a
+/// dimension-order change), or a channel's track — the axis the bins are laid
+/// out on. Contrast is deliberately not in the key: the handles slide along the
+/// distribution rather than changing it, which is the whole reason for showing
+/// the two together.
+struct HistCache {
+    frame: usize,
+    generation: u64,
+    bounds: Vec<(f32, f32)>,
+    hists: Vec<fast_tiff_viewer::Histogram>,
+}
+
+/// The prompt shown while nothing is loaded.
+///
+/// The browser build adds a line the desktop has no need of. A page that
+/// accepts a dropped file is indistinguishable, from the outside, from one
+/// that uploads it — and for microscopy data, which is routinely unpublished
+/// and sometimes clinical, that ambiguity is a real reason not to try the
+/// tool at all. The drop target is the one place the reassurance arrives
+/// before the question does; the README says as much, but nobody reads it
+/// first.
+///
+/// `cfg!` rather than `#[cfg]` so both wordings compile and are checked on
+/// every target: the shared lines are written once and cannot drift apart.
+fn welcome_text() -> String {
+    let mut text = String::from("Drag and drop a TIFF here, \nor click \"Open TIFF...\" above.\n");
+    if cfg!(target_arch = "wasm32") {
+        text.push_str(
+            "Everything is processed locally in your browser — no file is ever uploaded to a server.\n",
+        );
+    }
+    text.push_str("\n\n\nScroll — navigate frames\nShift + Scroll — fast navigate\nCtrl + Scroll — zoom");
+    text
 }
 
 /// A file the user asked to open, however it arrived.
@@ -221,6 +288,22 @@ pub struct ViewerApp {
     show_metadata: bool,
     /// Whether the 3D render-settings pop-up is open.
     show_render_settings: bool,
+    /// Whether the channel-histogram pop-up is open.
+    show_histogram: bool,
+    /// Plot log(1 + count) in the histogram. A preference, so it outlives both
+    /// the window being closed and the file being changed.
+    ///
+    /// On by default. A 16-bit microscopy frame is mostly background sitting in
+    /// the bottom percent of a 0..65535 track, so a linear plot is one spike at
+    /// the left edge and a flat line — which reads as a broken widget rather
+    /// than as data. Log shows the distribution that is actually there; the
+    /// checkbox is right under the plot for anyone who wants true counts.
+    hist_log: bool,
+    /// The histograms currently plotted, and what they describe. `None` until
+    /// the window is first opened.
+    hist: Option<HistCache>,
+    /// `input.time` when `hist` was last rebuilt, for the playback throttle.
+    hist_built_at: f64,
 
     // --- 3D input preferences (persist across files) ------------------------
     /// Overlay: draw the volume's bounding box with x/y/z coordinate ticks.
@@ -246,6 +329,10 @@ impl ViewerApp {
             last_title: None,
             show_metadata: false,
             show_render_settings: false,
+            show_histogram: false,
+            hist_log: true,
+            hist: None,
+            hist_built_at: f64::NEG_INFINITY,
             show_coord_box: false,
             move_speed: 1.0,
             scroll_speed: 1.0,
@@ -275,10 +362,53 @@ impl ViewerApp {
         self.view.pan = egui::Vec2::ZERO;
         self.view.pending_initial_fit = true;
         self.view.resize_to_zoom = false;
-        // Close any pop-up windows left over from the previous file — their
-        // contents (metadata, 3D settings) describe that stack.
+        // Close everything left open for the previous file — the pop-ups
+        // describe that stack, and the channels panel is sized and populated
+        // for its channel count. Resetting the panel wholesale also disarms a
+        // toggle caught in flight, whose remembered height belongs to a layout
+        // that no longer exists and would resize the window by a stale delta.
+        self.panel = PanelLayout::default();
         self.show_metadata = false;
         self.show_render_settings = false;
+        self.show_histogram = false;
+        // The cached histograms describe the *previous* stack, and a new one
+        // starts at frame 0 generation 0 — exactly the key the old cache holds,
+        // so staleness alone would not catch it.
+        self.hist = None;
+    }
+
+    /// Rebuild the cached histograms if what they describe has moved. Called
+    /// only while the window is open, so a closed window costs nothing.
+    ///
+    /// `now` is `input.time`, for the playback throttle (see
+    /// [`HIST_PLAYBACK_INTERVAL`]). Scrubbing by hand is never throttled: those
+    /// are one frame at a time, and a histogram that ignored the frame you just
+    /// moved to would be worse than useless.
+    fn refresh_histograms(&mut self, now: f64) {
+        let playing = self.core.playback.playing;
+        let Some(loaded) = &self.core.stack else {
+            self.hist = None;
+            return;
+        };
+        let bounds: Vec<(f32, f32)> = loaded.display.settings.iter().map(|s| s.bounds).collect();
+        let fresh = self.hist.as_ref().is_some_and(|c| {
+            c.frame == loaded.frame_index && c.generation == loaded.prefetch_gen && c.bounds == bounds
+        });
+        if fresh {
+            return;
+        }
+        // Playback repaints continuously, so a skipped rebuild is picked up on
+        // its own a moment later — no repaint needs scheduling here.
+        if playing && self.hist.is_some() && now - self.hist_built_at < HIST_PLAYBACK_INTERVAL {
+            return;
+        }
+        self.hist = Some(HistCache {
+            frame: loaded.frame_index,
+            generation: loaded.prefetch_gen,
+            bounds,
+            hists: fast_tiff_viewer::histogram::frame_histograms(loaded),
+        });
+        self.hist_built_at = now;
     }
 
     /// Drain anything the async picker produced since the last frame. A no-op
@@ -776,6 +906,7 @@ impl eframe::App for ViewerApp {
         let mut playback_fps = self.core.playback.fps;
         let mut decode_mode = self.core.decode_mode;
         let mut metadata_toggle = false;
+        let mut histogram_toggle = false;
         let current_status = self.core.status.clone();
 
         let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
@@ -898,8 +1029,15 @@ impl eframe::App for ViewerApp {
 
             if panel_expanded {
                 ui.separator();
-                ui.horizontal(|ui| {
-                    // Whether a control group already sits in this row — each
+                // Wrapping, not clipping: this row holds up to six independent
+                // control groups, and which of them are present depends on the
+                // file. Narrow the window — or open the web build, whose chrome
+                // is drawn half again as large — and the tail of the row used to
+                // simply vanish past the edge with nothing to indicate it was
+                // there. Wrapping spends panel height, which the layout has, to
+                // buy back reachability, which it did not.
+                ui.horizontal_wrapped(|ui| {
+                    // Whether a control group already sits in the row — each
                     // optional group below draws its leading separator only if
                     // so, so hiding a group never leaves an orphaned separator.
                     let mut row_has_items = false;
@@ -1052,21 +1190,28 @@ impl eframe::App for ViewerApp {
                                 ui.selectable_value(&mut decode_mode, DecodeMode::Threaded, "Threaded")
                                     .on_hover_text("Always multi-threaded for large frames (spreads across cores)");
                             });
+                        row_has_items = true;
                     }
 
-                    // File-metadata pop-up toggle, pushed to the row's right edge.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .button(RichText::new("( i )").size(12.0))
-                            .on_hover_text("See metadata")
-                            .clicked()
-                        {
-                            metadata_toggle = true;
-                        }
-                        // Layout is right-to-left, so this lands to the button's
-                        // left — separating it from the controls before it.
+                    // The two pop-up toggles. They flow with the rest of the
+                    // row rather than being pinned to its right edge: once the
+                    // row can wrap there is no single right edge to pin to, and
+                    // a button that jumps to the end of whichever line happens
+                    // to be last is harder to find than one that simply follows
+                    // the controls.
+                    if row_has_items {
                         ui.separator();
-                    });
+                    }
+                    if ui
+                        .button(RichText::new("( i )").size(12.0))
+                        .on_hover_text("See metadata")
+                        .clicked()
+                    {
+                        metadata_toggle = true;
+                    }
+                    if histogram_button(ui).clicked() {
+                        histogram_toggle = true;
+                    }
                 });
                 if !loaded.display.rgb {
                     ui.label(
@@ -1079,137 +1224,7 @@ impl eframe::App for ViewerApp {
                     );
                 }
 
-                let calibration = loaded.tiff.meta.calibration;
-                let rgb = loaded.display.rgb;
-                // A palette channel's window is a fixed index→LUT identity, so
-                // there's nothing to adjust — its contrast slider is suppressed.
-                let palette = loaded.display.palette;
-                // Tint for the single-channel contrast slider: the low (dark) end
-                // of its chosen color LUT (grayscale/black → None → the default
-                // selection color). Snapshot here, before the mutable borrow of
-                // `channel_settings` below.
-                let single_tint = (loaded.display.settings.len() == 1)
-                    .then(|| tint_color(loaded.display.lut(0).and_then(ui_tint)))
-                    .flatten();
-                if loaded.display.settings.len() > 1 {
-                    ui.separator();
-                    // Hold Shift while dragging one channel's slider to move every
-                    // channel's window by the same amount. Snapshot the values
-                    // first so we can detect which one moved and by how much.
-                    let shift = ui.input(|i| i.modifiers.shift);
-                    let before: Vec<(f32, f32)> =
-                        loaded.display.settings.iter().map(|s| (s.min, s.max)).collect();
-                    // Per-channel slider tints from each channel's display LUT —
-                    // colored only for composite/RGB or pseudocolor stacks, `None`
-                    // (default color) for plain grayscale.
-                    let tints: Vec<Option<Color32>> = loaded
-                        .tiff
-                        .meta
-                        .channel_display
-                        .iter()
-                        .map(|cd| tint_color(channel_tint(&cd.lut)))
-                        .collect();
-                    // One row per channel — checkbox in line with its slider —
-                    // stacked vertically.
-                    for (c, settings) in loaded.display.settings.iter_mut().enumerate() {
-                        ui.horizontal(|ui| {
-                            let label = if rgb {
-                                // Sample planes past RGBA have no conventional
-                                // letter — number them instead.
-                                ["R", "G", "B", "A"]
-                                    .get(c)
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| format!("S{}", c + 1))
-                            } else {
-                                format!("Ch {}", c + 1)
-                            };
-                            // Fixed-width checkbox so every slider starts at the
-                            // same x regardless of label length.
-                            let check = ui.add_sized(
-                                egui::vec2(48.0, 18.0),
-                                egui::Checkbox::new(&mut settings.enabled, label),
-                            );
-                            // Samples past RGB start off (see `setup_rgb`) — say
-                            // why, on the row it applies to.
-                            if rgb && c >= 3 {
-                                check.on_hover_text(
-                                    "Extra sample plane beyond RGB (TIFF ExtraSamples). Usually alpha, \
-                                     but writers also put real data here — a (4, H, W) array saved by \
-                                     tifffile lands as RGB + this. Off by default because compositing \
-                                     an opaque alpha plane washes the image out; enable it to see the \
-                                     data.",
-                                );
-                            }
-                            let value = format!(
-                                "{} – {}",
-                                format_calibrated(calibration, settings.min),
-                                format_calibrated(calibration, settings.max),
-                            );
-                            // Reserve room for the value text on the right; the
-                            // slider fills what's left of the row.
-                            let slider_w = (ui.available_width() - 120.0).max(MIN_CONTRAST_SLIDER_W);
-                            let (lo, hi) = settings.bounds;
-                            let tint = tints.get(c).copied().flatten();
-                            range_slider(ui, c as u64, &mut settings.min, &mut settings.max, lo, hi, slider_w, tint);
-                            ui.label(RichText::new(value).small());
-                        });
-                    }
-                    // Shift-sync: if a slider moved this frame, apply the same
-                    // delta to every other channel (clamped to its own bounds).
-                    if shift {
-                        let moved = loaded.display.settings.iter().enumerate().find_map(|(c, s)| {
-                            let (bmin, bmax) = before[c];
-                            let (dmin, dmax) = (s.min - bmin, s.max - bmax);
-                            if dmin != 0.0 || dmax != 0.0 {
-                                Some((c, dmin, dmax))
-                            } else {
-                                None
-                            }
-                        });
-                        if let Some((src, dmin, dmax)) = moved {
-                            for (i, s) in loaded.display.settings.iter_mut().enumerate() {
-                                if i == src {
-                                    continue;
-                                }
-                                s.min = (s.min + dmin).clamp(s.bounds.0, s.bounds.1);
-                                s.max = (s.max + dmax).clamp(s.bounds.0, s.bounds.1);
-                                if s.min > s.max {
-                                    s.min = s.max;
-                                }
-                            }
-                        }
-                    }
-                    ui.label(
-                        RichText::new("Hold Shift while dragging to adjust all channels together.")
-                            .small()
-                            .weak(),
-                    );
-                } else if !palette {
-                    if let Some(settings) = loaded.display.settings.first_mut() {
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label("Contrast:");
-                            let value = format!(
-                                "{} – {}",
-                                format_calibrated(calibration, settings.min),
-                                format_calibrated(calibration, settings.max),
-                            );
-                            // Reserve room for the value text on the right; the
-                            // slider fills what's left of the row.
-                            let slider_w = (ui.available_width() - 120.0).max(MIN_CONTRAST_SLIDER_W);
-                            let (lo, hi) = settings.bounds;
-                            // Tinted when a color LUT/colormap is chosen, else `None`
-                            // (plain grayscale → the default selection color).
-                            range_slider(ui, 0, &mut settings.min, &mut settings.max, lo, hi, slider_w, single_tint);
-                            ui.label(RichText::new(value).small());
-                        });
-                    }
-                }
-                // No `else`: a palette (indexed) image shows no contrast row at
-                // all. Its pixels are colour-table indices rather than
-                // intensities — index 37 isn't brighter than 12, the map
-                // decides — so there is no window to adjust. Changing the table
-                // is the LUT selector's job.
+                contrast_controls(ui, loaded, ContrastLayout::Inline, None);
             }
             if let Some(status) = &current_status {
                 // The triple-axis note explains that 2D freezes Z at its first
@@ -1235,6 +1250,21 @@ impl eframe::App for ViewerApp {
                 Some(loaded) => metadata_window(ui.ctx(), &mut self.show_metadata, loaded),
                 None => self.show_metadata = false,
             }
+        }
+        if histogram_toggle {
+            self.show_histogram = !self.show_histogram;
+        }
+        if self.show_histogram {
+            self.refresh_histograms(ui.input(|i| i.time));
+            // Split the borrows by field: the window edits the stack's contrast
+            // while reading the cached plots computed from it.
+            let mut open = true;
+            if let (Some(loaded), Some(cache)) = (self.core.stack.as_mut(), self.hist.as_ref()) {
+                histogram_window(ui.ctx(), &mut open, loaded, &cache.hists, &mut self.hist_log);
+            } else {
+                open = false;
+            }
+            self.show_histogram = open;
         }
         if render_settings_toggle {
             self.show_render_settings = !self.show_render_settings;
@@ -1342,7 +1372,7 @@ impl eframe::App for ViewerApp {
             .show_inside(ui, |ui| {
             if self.core.stack.is_none() {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Drag and drop a TIFF here, \nor click \"Open TIFF...\" above.\n\n\n\nScroll — navigate frames\nShift + Scroll — fast navigate\nCtrl + Scroll — zoom");
+                    ui.label(welcome_text());
                 });
                 return;
             }

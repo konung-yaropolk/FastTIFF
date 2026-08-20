@@ -61,7 +61,7 @@ fn every_frame_maps_to_an_ifd_that_exists() {
     // Computing the stride from the raw metadata gives `frame * 10`, which is
     // in range only for frame 0 — the "stuck on the first frame" symptom.
     for frame in 0..n {
-        for job in fast_tiff_viewer::sync::build_jobs(&stack, frame, &enabled, &kinds) {
+        for job in fast_tiff_viewer::prefetch::build_jobs(&stack, frame, &enabled, &kinds) {
             assert!(
                 job.ifd_idx < stack.tiff.frames.len(),
                 "frame {frame} -> IFD {} but the file has only {} planes",
@@ -82,7 +82,7 @@ fn every_frame_actually_decodes() {
 
     let mut first_pixels = Vec::new();
     for frame in 0..stack.frame_count() {
-        let jobs = fast_tiff_viewer::sync::build_jobs(&stack, frame, &enabled, &kinds);
+        let jobs = fast_tiff_viewer::prefetch::build_jobs(&stack, frame, &enabled, &kinds);
         let decoded = fast_tiff_viewer::prefetch::decode_jobs(
             &stack.tiff.data,
             &stack.tiff.frames,

@@ -33,8 +33,8 @@ Needs a current browser with WebGPU or WebGL2 (Chrome/Edge 113+, Firefox 141+).
 both hosts construct the same app. All this crate does is hand eframe a canvas
 instead of a window.
 
-What actually differs between the two hosts is 25 `#[cfg(target_arch = "wasm32")]`
-sites across ~2,600 lines of shared UI, and every one of them is about the
+What actually differs between the two hosts is 31 `#[cfg(target_arch = "wasm32")]`
+sites across ~3,100 lines of shared UI, and every one of them is about the
 *host* rather than the viewer:
 
 | | Desktop | Web |
@@ -43,9 +43,33 @@ sites across ~2,600 lines of shared UI, and every one of them is about the
 | Opening a file | blocking dialog, argv, Apple Events → a path | async picker / drop → bytes |
 | GPU option hook | `render::tune_native_options` | `render::tune_web_options` |
 | Extra files at once | launched as sibling processes | n/a |
+| Interface scale | native (`app::scale::UI_SCALE` = 1.0) | **150%**, pop-ups excepted |
+| Empty-viewport prompt | drop/open + scroll hints | the same, plus the local-processing line |
 
 Both routes to a file meet at one `Opened` enum, so everything downstream —
 loading, fit, resetting the chrome — is shared.
+
+## Why the web build is drawn larger
+
+`install_chrome` sets egui's zoom factor to 1.5 here and 1.0 natively. The
+desktop window is sized to the image and read at arm's length; a canvas is one
+element on a page, competing with the browser's own furniture, and the same
+widgets come out noticeably small. Zoom factor scales `pixels_per_point`, so
+fonts, padding, hit targets and line widths all grow together — the layout is
+enlarged rather than stretched.
+
+**Pop-up windows opt out.** The 3D settings, file metadata and histogram windows
+are dense and already sized to be a tight fit; half again as large pushes them
+past the bottom of a laptop viewport, which is the one place a browser cannot
+simply be resized. `app::scale::unscaled` scales the global style by the
+reciprocal for the duration of the window, which cancels the zoom exactly —
+title bar included, since `Window` takes those metrics from the context. Note
+that this scales the *style*, so anything a pop-up sizes in literal points has
+to be expressed relative to the text (see `PLOT_TEXT_HEIGHTS`) or it will keep
+the enlarged scale while the text around it shrinks back.
+
+The panel's control row wraps to as many lines as it needs, which is what keeps
+the enlarged chrome usable in a narrow window.
 
 ## Two web builds, one core
 

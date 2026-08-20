@@ -25,6 +25,7 @@
 //! exactly match what's wanted; any mismatch falls back to inline decode, so a
 //! stale prefetch can cost a little work but can never show the wrong frame.
 
+use crate::stack::Stack;
 use scivis_render::ChannelKind;
 use fast_tiff_lib::{ByteOrder, FrameInfo};
 use std::path::PathBuf;
@@ -160,6 +161,37 @@ pub struct ChannelJob {
     pub rgb: bool,
     pub width: u32,
     pub height: u32,
+}
+
+/// The per-channel decode jobs for `frame_index`'s enabled channels, used to
+/// decode inline, to ask the prefetch worker for the next frame, and to
+/// histogram what is on screen.
+///
+/// This is the single definition of *which plane is which channel*, which is
+/// why it lives next to `ChannelJob` rather than in the GPU-gated `sync`
+/// module: every reader of pixel data must agree on the addressing, including
+/// the ones that never touch a GPU. Maps each
+/// display channel to its IFD/plane: for RGB, all channels are sample planes of
+/// one IFD per frame; otherwise each channel is its own IFD in ImageJ's default
+/// `xyczt` plane order (channel fastest, then Z — frozen at slice 0 — then time).
+pub fn build_jobs(loaded: &Stack, frame_index: usize, enabled: &[bool], kinds: &[ChannelKind]) -> Vec<ChannelJob> {
+    let Some((width, height)) = loaded.dimensions() else { return Vec::new() };
+    // The *resolved* interpretation, never `tiff.meta`. Resolving is precisely
+    // the act of reclassifying a mislabeled axis — a file claiming
+    // `channels = 100` that is really a 100-frame movie — so the raw metadata
+    // gives the wrong stride and addresses planes past the end of the chain.
+    let dims = &loaded.display.dims;
+    (0..loaded.display.settings.len())
+        .filter(|&c| enabled.get(c).copied().unwrap_or(false))
+        .map(|c| {
+            let (ifd_idx, plane) = if loaded.display.rgb {
+                (frame_index * dims.slices, c)
+            } else {
+                (frame_index * dims.slices * dims.channels + c, 0)
+            };
+            ChannelJob { channel: c, ifd_idx, plane, kind: kinds[c], rgb: loaded.display.rgb, width, height }
+        })
+        .collect()
 }
 
 /// One decoded channel of a completed prefetch.

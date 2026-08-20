@@ -29,9 +29,11 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<WebHandle, JsVa
             canvas,
             web_options,
             Box::new(|cc| {
-                // Dark by default, as on the desktop: a light chrome throws
-                // stray light onto the canvas and skews how dim structures read.
-                cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
+                // Theme + interface scale. The same call the desktop binary
+                // makes — it is what decides that the web build draws its
+                // chrome at 150%, so the difference lives in the shared crate
+                // rather than here.
+                fasttiff::install_chrome(&cc.egui_ctx);
                 let render = fasttiff::render::init(cc);
                 // No initial path — a browser has no argv and no filesystem;
                 // files arrive from the picker or a drop.

@@ -12,7 +12,7 @@
 //! still provides the full CPU-side model.
 
 use crate::camera::{build_volume_params, volume_camera, VolumeChannel};
-use crate::prefetch::{decode_jobs, ChannelJob, Decoded, PrefetchResult};
+use crate::prefetch::{build_jobs, decode_jobs, ChannelJob, Decoded, PrefetchResult};
 use crate::stack::Stack;
 use crate::viewer::{ViewMode, Viewer};
 use crate::volume::VolumePlan;
@@ -268,31 +268,6 @@ fn sync_volume(loaded: &mut Stack, view: &mut crate::viewer::VolumeView, rendere
     let params = build_volume_params(&cam, windows, view.aspect, view.render, view.density, view.iso);
     renderer.set_volume_params(params);
     needs_repaint
-}
-
-/// The per-channel decode jobs for `frame_index`'s enabled channels, used both
-/// to decode inline and to ask the prefetch worker for the next frame. Maps each
-/// display channel to its IFD/plane: for RGB, all channels are sample planes of
-/// one IFD per frame; otherwise each channel is its own IFD in ImageJ's default
-/// `xyczt` plane order (channel fastest, then Z — frozen at slice 0 — then time).
-pub fn build_jobs(loaded: &Stack, frame_index: usize, enabled: &[bool], kinds: &[ChannelKind]) -> Vec<ChannelJob> {
-    let Some((width, height)) = loaded.dimensions() else { return Vec::new() };
-    // The *resolved* interpretation, never `tiff.meta`. Resolving is precisely
-    // the act of reclassifying a mislabeled axis — a file claiming
-    // `channels = 100` that is really a 100-frame movie — so the raw metadata
-    // gives the wrong stride and addresses planes past the end of the chain.
-    let dims = &loaded.display.dims;
-    (0..loaded.display.settings.len())
-        .filter(|&c| enabled.get(c).copied().unwrap_or(false))
-        .map(|c| {
-            let (ifd_idx, plane) = if loaded.display.rgb {
-                (frame_index * dims.slices, c)
-            } else {
-                (frame_index * dims.slices * dims.channels + c, 0)
-            };
-            ChannelJob { channel: c, ifd_idx, plane, kind: kinds[c], rgb: loaded.display.rgb, width, height }
-        })
-        .collect()
 }
 
 /// Snapshot everything the volume builder needs (see [`VolumePlan`]): the

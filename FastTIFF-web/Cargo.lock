@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.10.3"
+version = "1.11.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-lib"
-version = "0.10.2"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.10.3"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "0.10.1"
+version = "1.11.0"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",
@@ -2591,7 +2591,7 @@ dependencies = [
 
 [[package]]
 name = "scivis-render"
-version = "0.9.7"
+version = "0.10.3"
 dependencies = [
  "bytemuck",
  "half",
