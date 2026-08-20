@@ -44,7 +44,7 @@ fn open_stack(path: PathBuf) -> anyhow::Result<Stack> {
 /// Decode `frame` with exactly the channels in `enabled` switched on.
 fn decode(stack: &Stack, frame: usize, enabled: &[bool]) -> Vec<Decoded> {
     let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind).collect();
-    let jobs = fast_tiff_viewer::sync::build_jobs(stack, frame, enabled, &kinds);
+    let jobs = fast_tiff_viewer::prefetch::build_jobs(stack, frame, enabled, &kinds);
     fast_tiff_viewer::prefetch::decode_jobs(&stack.tiff.data, &stack.tiff.frames, stack.tiff.byte_order, &jobs)
         .unwrap_or_else(|e| panic!("frame {frame} failed to decode: {e:#}"))
 }

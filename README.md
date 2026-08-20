@@ -281,6 +281,15 @@ it can be used in projects that couldn't take a GPL dependency.
   play button for looped playback (uses `fps=` from metadata, else 30 fps).
 - Per-channel enable/disable + a two-handle contrast range slider; the
   values shown are calibrated (`c0 + c1·raw`) when the file has calibration.
+- A **histogram** window (the bar-chart button in the panel) plotting the
+  current frame's intensity distribution, one filled curve per channel in that
+  channel's own LUT colour, all on a shared axis so a dim channel visibly sits
+  left of a bright one. The same contrast sliders sit beneath it, each one
+  full-width under its channel's name and window values, so a slider spans
+  exactly the part of the plot it clips — and the parts each channel's window
+  throws away are drawn faded, so you can see what a setting is costing you.
+  Resizable — the plot takes whatever height the window is given. Log scaling is on by default: a 16-bit frame is
+  mostly background, and linear puts all of it in one bin at the edge.
 - Z-slice selector when `slices > 1` (the scrubber itself always drives
   the time/frame axis).
 - Zoom (Ctrl+scroll) and pan (drag) of the 2D image, with the window sized
