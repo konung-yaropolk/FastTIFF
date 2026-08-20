@@ -576,7 +576,7 @@ fn draw_plot(
         painter.with_clip_rect(kept).add(egui::Shape::mesh(mesh));
         painter
             .with_clip_rect(kept)
-            .add(egui::Shape::line(top.clone(), egui::Stroke::new(1.0, solid)));
+            .add(egui::Shape::line(top.clone(), egui::Stroke::new(1.0_f32, solid)));
         for tail in [
             egui::Rect::from_x_y_ranges(
                 egui::Rangef::new(area.left(), kept.left()),
@@ -592,7 +592,7 @@ fn draw_plot(
             }
             let p = painter.with_clip_rect(tail);
             p.add(egui::Shape::mesh(dim_mesh.clone()));
-            p.add(egui::Shape::line(top.clone(), egui::Stroke::new(1.0, dim_stroke)));
+            p.add(egui::Shape::line(top.clone(), egui::Stroke::new(1.0_f32, dim_stroke)));
         }
     }
 
