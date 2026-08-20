@@ -1,10 +1,10 @@
 # FastTIFF - a lightning-fast multi-frame 2D- and 3D-viewer with ImageJ-compatible GPU-rendering
 
+[![Try it online](https://img.shields.io/badge/Try%20it-FastTIFF%20Online-5b9dd9?logo=googlechrome&logoColor=white)](https://konung-yaropolk.github.io/FastTIFF/)
 [![Release](https://img.shields.io/github/v/release/konung-yaropolk/FastTIFF?label=release)](https://github.com/konung-yaropolk/FastTIFF/releases)
 [![License](https://img.shields.io/badge/license-%20%20GNU%20GPLv3%20-green)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/release.yml?label=build)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
 [![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/ci.yml)
-[![Try it online](https://img.shields.io/badge/Try%20it-FastTIFF%20Online-5b9dd9?logo=googlechrome&logoColor=white)](https://konung-yaropolk.github.io/FastTIFF/)
 
 
 [![FastTIFF](https://github.com/user-attachments/assets/b935b2fa-86cc-4edf-ab5a-255a1aa73e4d)](https://github.com/konung-yaropolk/FastTIFF/releases)  
