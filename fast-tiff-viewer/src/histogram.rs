@@ -61,9 +61,10 @@ pub fn frame_histograms(stack: &Stack) -> Vec<Histogram> {
     if n == 0 {
         return Vec::new();
     }
-    // Every channel, including the ones the user has unticked: the point of the
-    // histogram is to decide *whether* to show a channel, so hiding a hidden
-    // channel's distribution would defeat it.
+    // Every channel, including any the user has switched off. A frontend that
+    // only plots the enabled ones can then honour a checkbox by redrawing
+    // instead of decoding the frame again, which is what makes toggling one
+    // feel instant.
     let enabled = vec![true; n];
     let kinds: Vec<ChannelKind> = stack.display.settings.iter().map(|s| s.kind).collect();
     let (lo, hi) = shared_track(stack);

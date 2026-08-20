@@ -288,8 +288,10 @@ it can be used in projects that couldn't take a GPL dependency.
   full-width under its channel's name and window values, so a slider spans
   exactly the part of the plot it clips — and the parts each channel's window
   throws away are drawn faded, so you can see what a setting is costing you.
-  Resizable — the plot takes whatever height the window is given. Log scaling is on by default: a 16-bit frame is
-  mostly background, and linear puts all of it in one bin at the edge.
+  Unticking a channel takes its curve off the plot and greys out its slider, in
+  both the panel and the window. Resizable — the plot takes whatever height the
+  window is given. Log scaling is on by default: a 16-bit frame is mostly
+  background, and linear puts all of it in one bin at the edge.
 - Z-slice selector when `slices > 1` (the scrubber itself always drives
   the time/frame axis).
 - Zoom (Ctrl+scroll) and pan (drag) of the 2D image, with the window sized

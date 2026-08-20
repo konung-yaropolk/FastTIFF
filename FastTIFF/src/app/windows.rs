@@ -463,14 +463,7 @@ pub(super) fn histogram_window(
                          and one enormous bin at the dark end flattens everything else \
                          into the axis on a linear plot.",
                     );
-                    if let Some(h) = hists.first() {
-                        ui.separator();
-                        ui.label(
-                            RichText::new(format!("{} bins · {} px sampled", BINS, h.counted))
-                                .small()
-                                .weak(),
-                        );
-                    }
+                    ui.separator();
                 });
 
                 ui.data_mut(|d| d.insert_temp(id, ui.cursor().top() - controls_top));
@@ -495,30 +488,47 @@ fn draw_plot(
     let painter = ui.painter_at(area);
     painter.rect_filled(area, 2.0, ui.visuals().extreme_bg_color);
 
-    if hists.is_empty() {
+    // Only the channels still switched on. Unticking one takes its curve off
+    // the plot, matching the image, where it stops being composited. The
+    // histograms are computed for every channel regardless, so this is a
+    // redraw rather than another decode — toggling is instant.
+    let shown: Vec<&Histogram> = hists
+        .iter()
+        .filter(|h| display.settings.get(h.channel).is_none_or(|s| s.enabled))
+        .collect();
+
+    if shown.is_empty() {
         painter.text(
             area.center(),
             egui::Align2::CENTER_CENTER,
-            "No frame to histogram",
+            if hists.is_empty() { "No frame to histogram" } else { "Every channel is switched off" },
             egui::FontId::proportional(12.0),
             ui.visuals().weak_text_color(),
+        );
+        painter.rect_stroke(
+            area,
+            2.0,
+            ui.visuals().widgets.noninteractive.bg_stroke,
+            egui::StrokeKind::Inside,
         );
         return;
     }
 
-    // Every plot shares these axes, so they stack; thin them accordingly.
-    let alpha = fill_alpha(hists.len());
+    // The curves that remain share these axes, so they stack; thin them
+    // accordingly. Counting only what is drawn means hiding a channel makes the
+    // rest more solid, rather than leaving a gap in the budget.
+    let alpha = fill_alpha(shown.len());
     // One vertical scale for all channels, matching the one horizontal one.
     // Per-channel scaling would stretch every curve to full height and erase
     // exactly the comparison the shared axis was introduced to show — that this
     // channel is concentrated and that one spread thin.
-    let peak = hists.iter().map(|h| h.peak).max().unwrap_or(0).max(1) as f32;
+    let peak = shown.iter().map(|h| h.peak).max().unwrap_or(0).max(1) as f32;
     // Log compresses the tall background bin so the rest of the distribution is
     // visible. Normalising by the *scaled* peak keeps the tallest bar at full
     // height either way, so switching modes rescales rather than shrinks.
     let height = |v: f32| if log_scale { (1.0 + v * 1000.0).ln() / 1000.0_f32.ln_1p() } else { v };
 
-    for h in hists {
+    for h in shown {
         let [r, g, b] = display.lut(h.channel).map(fill_tint).unwrap_or([200, 200, 200]);
         let solid = egui::Color32::from_rgb(r, g, b);
         let fill = egui::Color32::from_rgba_unmultiplied(r, g, b, alpha);

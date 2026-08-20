@@ -4,7 +4,7 @@
 
 use super::tint_color;
 use egui::{Color32, RichText};
-use fast_tiff_viewer::channels::{channel_tint, ui_tint};
+use fast_tiff_viewer::channels::{channel_tint, shift_sync, ui_tint};
 use fast_tiff_viewer::Stack;
 
 /// Formats a raw sample value for display, applying the stack's linear
@@ -31,6 +31,18 @@ pub(super) const MIN_CONTRAST_SLIDER_W: f32 = 60.0;
 /// window's value text, which is drawn after the slider.
 const VALUE_RESERVE: f32 = 120.0;
 
+/// How much of their colour a switched-off channel's bar and handles keep.
+///
+/// Split rather than one blanket fade — which is all `Ui::disable` offers, and
+/// why the slider paints itself instead of relying on it. The bar recedes so
+/// the enabled channels read first, while the handles stay at full strength:
+/// they mark where this channel's window sits, which is exactly what you look
+/// at before deciding whether to switch it back on. Nothing depends on the
+/// slider *looking* dead — it takes no input either way, and the unticked
+/// checkbox already says so.
+const DISABLED_BAR_OPACITY: f32 = 0.25;
+const DISABLED_HANDLE_OPACITY: f32 = 1.0;
+
 /// Radius of a range slider's draggable handles.
 ///
 /// A handle is centred *on* the value it marks, so at either end of the track
@@ -46,6 +58,14 @@ const HANDLE_RADIUS: f32 = 6.0;
 /// with the channel's display color (composite/RGB or pseudocolor); otherwise
 /// the default selection color is used.
 ///
+/// `enabled` is the channel's own on/off state, not the surrounding `Ui`'s:
+/// a switched-off channel's slider takes no input and dims its handles, but
+/// keeps most of the colour in its bar. Blanket-fading the whole widget (what
+/// `Ui::disable` does) washed the bar out along with everything else, and that
+/// bar is the one part still worth reading — it says where that channel's
+/// window sits, which is what you want to see before deciding to switch it back
+/// on. The handles are what you cannot drag, so those are what look inert.
+///
 /// Returns the rect the track was drawn in, so a caller can align something
 /// above it — the histogram window plots each channel across exactly the span
 /// its own slider covers.
@@ -58,6 +78,7 @@ pub(super) fn range_slider(
     hi: f32,
     width: f32,
     tint: Option<Color32>,
+    enabled: bool,
 ) -> egui::Rect {
     // Defensive: keep the handles inside the track and ordered, even if the
     // values were pushed out of range elsewhere (e.g. by the shift-sync).
@@ -81,37 +102,106 @@ pub(super) fn range_slider(
         egui::pos2(x_of(*min), track_y - 2.0),
         egui::pos2(x_of(*max), track_y + 2.0),
     );
-    ui.painter().rect_filled(sel, 2.0, tint.unwrap_or(visuals.selection.bg_fill));
+    let bar = tint.unwrap_or(visuals.selection.bg_fill);
+    let bar = if enabled { bar } else { bar.gamma_multiply(DISABLED_BAR_OPACITY) };
+    ui.painter().rect_filled(sel, 2.0, bar);
 
     let radius = HANDLE_RADIUS;
-    // min handle.
-    {
-        let id = ui.id().with((salt, "range_min"));
-        let hit = egui::Rect::from_center_size(egui::pos2(x_of(*min), track_y), egui::vec2(radius * 2.5, height));
-        let resp = ui.interact(hit, id, egui::Sense::drag());
-        if resp.dragged() {
-            if let Some(p) = resp.interact_pointer_pos() {
-                *min = v_of(p.x).min(*max);
+
+    // Which handle the in-flight drag is moving — see `dragged_handle`. Held
+    // for the whole drag, so the handle you grabbed keeps being the one that
+    // moves and pushes the other along; being pushed never makes a handle the
+    // dragged one, so it cannot steal the drag from underneath.
+    let drag_id = ui.id().with((salt, "range_drag"));
+
+    let mut dragging = false;
+    for is_max in [false, true] {
+        let mut active = false;
+        if enabled {
+            let id = ui.id().with((salt, if is_max { "range_max" } else { "range_min" }));
+            let at = if is_max { *max } else { *min };
+            let hit = egui::Rect::from_center_size(
+                egui::pos2(x_of(at), track_y),
+                egui::vec2(radius * 2.5, height),
+            );
+            let resp = ui.interact(hit, id, egui::Sense::drag());
+            dragging |= resp.dragged();
+            if resp.dragged() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let v = v_of(p.x);
+                    let held = ui.data(|d| d.get_temp::<bool>(drag_id));
+                    if let Some(moving) = dragged_handle(*min, *max, v, held, is_max) {
+                        ui.data_mut(|d| d.insert_temp(drag_id, moving));
+                        // The handle being dragged goes exactly where the
+                        // pointer is, and shoves the other along ahead of it
+                        // instead of stopping against it. Reversing leaves the
+                        // pushed one where it was pushed to, so a pair driven
+                        // to one end can be opened back up from there.
+                        if moving {
+                            *max = v;
+                            *min = (*min).min(*max);
+                        } else {
+                            *min = v;
+                            *max = (*max).max(*min);
+                        }
+                    }
+                }
             }
+            active = resp.dragged() || resp.hovered();
         }
-        let col = handle_color(&visuals, resp.dragged() || resp.hovered());
-        ui.painter().circle_filled(egui::pos2(x_of(*min), track_y), radius, col);
+        let col = handle_color(&visuals, active);
+        let col = if enabled { col } else { col.gamma_multiply(DISABLED_HANDLE_OPACITY) };
+        // Read the value back rather than reusing `at`: this handle may have
+        // just moved, and painting the pre-drag position lags it by a frame.
+        let at = if is_max { *max } else { *min };
+        ui.painter().circle_filled(egui::pos2(x_of(at), track_y), radius, col);
     }
-    // max handle.
-    {
-        let id = ui.id().with((salt, "range_max"));
-        let hit = egui::Rect::from_center_size(egui::pos2(x_of(*max), track_y), egui::vec2(radius * 2.5, height));
-        let resp = ui.interact(hit, id, egui::Sense::drag());
-        if resp.dragged() {
-            if let Some(p) = resp.interact_pointer_pos() {
-                *max = v_of(p.x).max(*min);
-            }
-        }
-        let col = handle_color(&visuals, resp.dragged() || resp.hovered());
-        ui.painter().circle_filled(egui::pos2(x_of(*max), track_y), radius, col);
+
+    // The committed handle only means anything while a drag is actually
+    // happening, so drop it the moment none is. Clearing on `drag_stopped`
+    // instead would hang the whole thing on catching one edge event: miss it
+    // — the pointer leaves the window, the app loses focus, the release lands
+    // on a frame the widget is not drawn — and the choice leaks into the next
+    // drag, which then moves the handle you did not grab.
+    if !dragging {
+        ui.data_mut(|d| d.remove::<bool>(drag_id));
     }
 
     rect
+}
+
+/// Which handle a drag is moving: `Some(true)` for max, `Some(false)` for min,
+/// or `None` while it cannot yet be told.
+///
+/// `grabbed` is the handle the pointer caught, `held` the choice already made
+/// earlier in this same drag (`None` on its first frame).
+///
+/// Once a drag has committed to a handle it keeps it for the rest of the drag,
+/// which is what makes the moving handle *push* the other rather than stop
+/// against it or hand over to it. The only decision is therefore the first one:
+///
+/// * apart — the handle you grabbed;
+/// * stacked — the side the pointer is on, since at a shared value a pointer to
+///   the right can only mean max and one to the left only min, whichever widget
+///   happened to win the grab. Without this a stack is a trap: the grabbed
+///   handle may be the one with nowhere to go, and the pair never separates;
+/// * stacked with the pointer still exactly on the pair — `None`. There is no
+///   direction to read yet, so nothing moves and nothing is committed; the next
+///   frame that the pointer is off the shared value decides.
+fn dragged_handle(min: f32, max: f32, v: f32, held: Option<bool>, grabbed: bool) -> Option<bool> {
+    if held.is_some() {
+        return held;
+    }
+    if min == max {
+        return if v > max {
+            Some(true)
+        } else if v < min {
+            Some(false)
+        } else {
+            None
+        };
+    }
+    Some(grabbed)
 }
 
 pub(super) fn handle_color(visuals: &egui::Visuals, active: bool) -> Color32 {
@@ -144,7 +234,10 @@ enum RowHead<'a> {
     Caption(&'a str),
 }
 
-fn draw_head(ui: &mut egui::Ui, head: RowHead<'_>) {
+/// Draw a row's head. Returns whether the channel it governs is switched on —
+/// the head itself always stays live, since for a disabled channel it is the
+/// only way back.
+fn draw_head(ui: &mut egui::Ui, head: RowHead<'_>) -> bool {
     match head {
         RowHead::Toggle { label, enabled, hover } => {
             // Fixed-width checkbox so every inline slider starts at the same x
@@ -154,9 +247,11 @@ fn draw_head(ui: &mut egui::Ui, head: RowHead<'_>) {
             if let Some(hover) = hover {
                 check.on_hover_text(hover);
             }
+            *enabled
         }
         RowHead::Caption(text) => {
             ui.label(text);
+            true
         }
     }
 }
@@ -185,22 +280,32 @@ fn contrast_row(
         ContrastLayout::Inline => {
             let mut track = egui::Rangef::NOTHING;
             ui.horizontal(|ui| {
-                draw_head(ui, head);
+                let live = draw_head(ui, head);
+                // A switched-off channel is not being composited, so its window
+                // is not in effect. The slider handles that itself (it dims its
+                // handles but keeps its bar readable); the values it reports
+                // grey out wholesale, since a number for a window that is not
+                // applied is just noise.
                 // Reserve room for the value text on the right; the slider
                 // fills what is left of the row.
                 let w = (ui.available_width() - VALUE_RESERVE).max(MIN_CONTRAST_SLIDER_W);
-                track = range_slider(ui, salt, min, max, lo, hi, w, tint).x_range();
-                ui.label(RichText::new(value).small());
+                track = range_slider(ui, salt, min, max, lo, hi, w, tint, live).x_range();
+                ui.add_enabled_ui(live, |ui| {
+                    ui.label(RichText::new(value).small());
+                });
             });
             track
         }
         ContrastLayout::Stacked => {
+            let mut live = true;
             ui.horizontal(|ui| {
-                draw_head(ui, head);
+                live = draw_head(ui, head);
                 // Values pushed to the far right, so the head and the numbers
                 // read as end labels on the slider spanning the line below.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(value).small());
+                    ui.add_enabled_ui(live, |ui| {
+                        ui.label(RichText::new(value).small());
+                    });
                 });
             });
             // Inset by a handle's radius at each end: the slider runs the full
@@ -211,7 +316,7 @@ fn contrast_row(
             ui.horizontal(|ui| {
                 ui.add_space(HANDLE_RADIUS);
                 let w = (ui.available_width() - HANDLE_RADIUS).max(MIN_CONTRAST_SLIDER_W);
-                track = range_slider(ui, salt, min, max, lo, hi, w, tint).x_range();
+                track = range_slider(ui, salt, min, max, lo, hi, w, tint, live).x_range();
             });
             // Separate this channel's slider from the next one's head, which
             // would otherwise sit tight against it and read as one block.
@@ -311,30 +416,10 @@ pub(super) fn contrast_controls(
                 tints.get(c).copied().flatten(),
             ));
         }
-        // Shift-sync: if a slider moved this frame, apply the same
-        // delta to every other channel (clamped to its own bounds).
+        // Shift-sync: if a slider moved this frame, carry the same delta to
+        // every other enabled channel.
         if shift {
-            let moved = loaded.display.settings.iter().enumerate().find_map(|(c, s)| {
-                let (bmin, bmax) = before[c];
-                let (dmin, dmax) = (s.min - bmin, s.max - bmax);
-                if dmin != 0.0 || dmax != 0.0 {
-                    Some((c, dmin, dmax))
-                } else {
-                    None
-                }
-            });
-            if let Some((src, dmin, dmax)) = moved {
-                for (i, s) in loaded.display.settings.iter_mut().enumerate() {
-                    if i == src {
-                        continue;
-                    }
-                    s.min = (s.min + dmin).clamp(s.bounds.0, s.bounds.1);
-                    s.max = (s.max + dmax).clamp(s.bounds.0, s.bounds.1);
-                    if s.min > s.max {
-                        s.min = s.max;
-                    }
-                }
-            }
+            shift_sync(&mut loaded.display.settings, &before);
         }
         ui.label(
             RichText::new("Hold Shift while dragging to adjust all channels together.")
@@ -374,7 +459,7 @@ pub(super) fn contrast_controls(
 /// in the panel is worse than a dozen lines of painting.
 pub(super) fn histogram_button(ui: &mut egui::Ui) -> egui::Response {
     let resp = ui
-        .add_sized(egui::vec2(24.0, 20.0), egui::Button::new(""))
+        .add_sized(egui::vec2(24.0, 18.0), egui::Button::new(""))
         .on_hover_text("Channel histogram and contrast");
     let color = ui.style().interact(&resp).fg_stroke.color;
     let r = resp.rect.shrink2(egui::vec2(6.0, 5.0));
@@ -392,3 +477,7 @@ pub(super) fn histogram_button(ui: &mut egui::Ui) -> egui::Response {
     }
     resp
 }
+
+#[cfg(test)]
+#[path = "widgets_tests.rs"]
+mod tests;

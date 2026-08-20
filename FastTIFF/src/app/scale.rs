@@ -15,7 +15,7 @@
 /// scales fonts, padding, hit targets and line widths together, rather than
 /// just enlarging text into a layout built for smaller text.
 #[cfg(target_arch = "wasm32")]
-pub const UI_SCALE: f32 = 1.5;
+pub const UI_SCALE: f32 = 1.35;
 #[cfg(not(target_arch = "wasm32"))]
 pub const UI_SCALE: f32 = 1.0;
 

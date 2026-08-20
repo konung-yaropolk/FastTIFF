@@ -50,6 +50,41 @@ pub fn first_frame_float_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32
     fast_tiff_lib::frame_float_minmax(&tiff.data, frame, tiff.byte_order).ok()?
 }
 
+/// Apply a Shift-drag's delta from one channel's contrast handles to all the
+/// others.
+///
+/// `before` is every channel's `(min, max)` as of the start of the frame, same
+/// order as `settings`. Whichever channel differs now is the one the user
+/// dragged, and each *enabled* other channel moves by the same amount, clamped
+/// to its own bounds.
+///
+/// Switched-off channels are deliberately left alone. A frontend shows their
+/// handles as inert and takes no input on them, so dragging a neighbour would
+/// otherwise be the one way to move a control that is meant to be untouchable —
+/// and it would do it invisibly, since that channel is not on screen for the
+/// result to show up in.
+///
+/// A no-op when nothing moved, so a caller can run it unconditionally on any
+/// frame the modifier is held.
+pub fn shift_sync(settings: &mut [ChannelSettings], before: &[(f32, f32)]) {
+    let moved = settings.iter().enumerate().find_map(|(c, s)| {
+        let (bmin, bmax) = before.get(c).copied()?;
+        let (dmin, dmax) = (s.min - bmin, s.max - bmax);
+        (dmin != 0.0 || dmax != 0.0).then_some((c, dmin, dmax))
+    });
+    let Some((src, dmin, dmax)) = moved else { return };
+    for (i, s) in settings.iter_mut().enumerate() {
+        if i == src || !s.enabled {
+            continue;
+        }
+        s.min = (s.min + dmin).clamp(s.bounds.0, s.bounds.1);
+        s.max = (s.max + dmax).clamp(s.bounds.0, s.bounds.1);
+        if s.min > s.max {
+            s.min = s.max;
+        }
+    }
+}
+
 /// The contrast range-slider's track bounds: the channel's data min/max
 /// (when known) unioned with the current display `window`, so both handles
 /// always land on the track and the user has a little headroom to widen the

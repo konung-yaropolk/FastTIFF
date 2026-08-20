@@ -174,7 +174,7 @@ fn welcome_text() -> String {
     let mut text = String::from("Drag and drop a TIFF here, \nor click \"Open TIFF...\" above.\n");
     if cfg!(target_arch = "wasm32") {
         text.push_str(
-            "Everything is processed locally in your browser — no file is ever uploaded to a server.\n",
+            "\n\nEverything is processed locally in your browser — \nno file is ever uploaded to a server.\n",
         );
     }
     text.push_str("\n\n\nScroll — navigate frames\nShift + Scroll — fast navigate\nCtrl + Scroll — zoom");
