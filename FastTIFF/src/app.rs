@@ -1242,7 +1242,7 @@ impl eframe::App for ViewerApp {
                     ui.label(
                         RichText::new(
                             "Channels are guessed automatically (6 or fewer = channels, more = time); \
-                             use this if that guess is wrong for this file.",
+                             use Dimension order if that guess is wrong for this file.",
                         )
                         .small()
                         .weak(),
