@@ -776,6 +776,13 @@ impl ImageRenderResources {
     /// texture (float texture a 1x1 dummy); a `Float` channel gets a full-size
     /// R32F float texture (integer texture a 1x1 dummy); channels past
     /// `kinds.len()` are unused (both 1x1). No-op when nothing changed.
+    /// Largest per-axis 2D-texture dimension the driver supports. Frames beyond
+    /// it cannot be uploaded, so the app subsamples to fit; see
+    /// `fast_tiff_viewer::sync::fit_stride`.
+    pub fn max_2d_texture_size(&self) -> u32 {
+        unsafe { self.gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE).max(0) as u32 }
+    }
+
     pub fn ensure_size(&mut self, width: u32, height: u32, kinds: &[ChannelKind]) {
         let mut want = [KIND_UNUSED; MAX_CHANNELS];
         for (c, slot) in want.iter_mut().enumerate() {

@@ -167,7 +167,7 @@ fn stride(len: usize) -> usize {
 /// dark-current floor, and letting those set the ends leaves everything of
 /// interest squeezed into the middle. Throwing away a third of a percent at
 /// each end costs a handful of outliers and buys the rest of the histogram.
-const AUTO_SATURATION: f64 = 0.0035;
+pub const AUTO_SATURATION: f64 = 0.0035;
 
 /// A contrast window fitted to where this channel of data actually is: the
 /// narrowest span that keeps all but [`AUTO_SATURATION`] of the samples at each

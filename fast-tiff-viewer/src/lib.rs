@@ -43,6 +43,7 @@ pub mod dimensions;
 pub mod display;
 pub mod histogram;
 pub mod prefetch;
+pub mod roi;
 pub mod stack;
 pub mod viewer;
 pub mod volume;

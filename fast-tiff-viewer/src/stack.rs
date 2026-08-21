@@ -49,11 +49,54 @@ pub struct ChannelSettings {
     pub kind: ChannelKind,
 }
 
+/// A decoded frame held in memory so windows of it can be re-cut cheaply.
+///
+/// Keyed by everything that would make the pixels wrong to reuse: which frame
+/// they came from, and which channels were decoded (a disabled channel is not
+/// decoded at all, so enabling one has to fetch it).
+pub struct FrameSource {
+    pub frame: usize,
+    pub enabled: Vec<bool>,
+    /// `(display channel, decoded plane)` for every channel that was enabled.
+    pub planes: Vec<(usize, crate::prefetch::Decoded)>,
+}
+
+impl FrameSource {
+    /// The decoded plane for `channel`, if it was decoded.
+    pub fn plane(&self, channel: usize) -> Option<&crate::prefetch::Decoded> {
+        self.planes.iter().find(|(c, _)| *c == channel).map(|(_, d)| d)
+    }
+}
+
 /// An open TIFF stack plus everything the viewer derives from it.
 pub struct Stack {
     pub tiff: TiffStack,
     pub path: PathBuf,
     pub frame_index: usize,
+    /// Subsampling applied on the way to the GPU: `1` when what is on screen is
+    /// the file's own resolution, higher when the view had to be coarsened to
+    /// fit a texture.
+    ///
+    /// Recorded here rather than kept inside the upload because it changes what
+    /// the user is looking at, and a viewer that quietly showed a reduced image
+    /// as if it were the data would be lying. The frontend reads this to say
+    /// so. On a frame bigger than one texture it falls to 1 as you zoom in,
+    /// which is the signal that you are now seeing real pixels.
+    pub gpu_stride: u32,
+    /// The window of the frame currently on the GPU, when only a window of it
+    /// is. `None` means the whole frame is resident — the ordinary case.
+    pub roi: Option<crate::roi::Roi>,
+    /// The decoded frame that [`roi`](Self::roi) is cut from.
+    ///
+    /// Kept so that panning and zooming re-cut an image already in memory
+    /// instead of decoding it again. That is the difference between a viewer
+    /// you can explore a gigapixel mosaic with and one where every drag costs
+    /// what opening the file did — for the file that motivated this, the better
+    /// part of a minute.
+    ///
+    /// Only ever populated for frames too large to upload whole, so the ordinary
+    /// case carries no extra memory at all.
+    pub roi_source: Option<FrameSource>,
     pub last_uploaded: Option<usize>,
     /// The per-channel `enabled` flags as of the last GPU upload. A disabled
     /// channel is skipped during upload (the shader multiplies it out anyway),
@@ -128,6 +171,11 @@ impl Stack {
             path,
             display: Display::default(),
             frame_index: 0,
+            // Corrected on the first sync, once a renderer is on hand to say
+            // what this device can hold.
+            gpu_stride: 1,
+            roi: None,
+            roi_source: None,
             last_uploaded: None,
             last_enabled: Vec::new(),
             luts_uploaded: false,

@@ -879,6 +879,23 @@ impl eframe::App for ViewerApp {
                         channels_desc,
                     ));
 
+                    // Say so when the picture on screen is not the picture in
+                    // the file. This only appears for frames past the GPU
+                    // texture limit, which is rare and enormous — but silently
+                    // showing a reduced image as if it were the data would be
+                    // the kind of wrong a viewer must never be.
+                    if loaded.gpu_stride > 1 {
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!("1/{} scale", loaded.gpu_stride))
+                                .color(Color32::from_rgb(230, 170, 60)),
+                        )
+                        .on_hover_text(format!(
+                            "This frame is larger than one GPU texture can hold, so it is                              shown subsampled {}x on each axis. Pixel values and measurements                              read from it are sampled, not exact.",
+                            loaded.gpu_stride
+                        ));
+                    }
+
                     if !hide_frame_info {
                         ui.separator();
                         let frame_digits = dims.frames.to_string().len();

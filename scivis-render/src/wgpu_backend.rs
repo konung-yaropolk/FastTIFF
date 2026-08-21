@@ -429,6 +429,16 @@ impl ImageRenderResources {
     /// R32F float texture (integer texture a 1x1 dummy); channels past
     /// `kinds.len()` are unused (both 1x1). Rebuilds the bind group when anything
     /// changed; no-op otherwise.
+    /// Largest per-axis 2D-texture dimension the device supports.
+    ///
+    /// Frames wider or taller than this cannot be uploaded at all — `wgpu`
+    /// rejects the texture and, since errors are fatal by default, takes the
+    /// process with it. The app subsamples to fit rather than letting that
+    /// happen; see `fast_tiff_viewer::sync::fit_stride`.
+    pub fn max_2d_texture_size(&self) -> u32 {
+        self.device.limits().max_texture_dimension_2d
+    }
+
     pub fn ensure_size(&mut self, width: u32, height: u32, kinds: &[ChannelKind]) {
         let mut want = [KIND_UNUSED; MAX_CHANNELS];
         for (c, slot) in want.iter_mut().enumerate() {

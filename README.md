@@ -296,6 +296,21 @@ it can be used in projects that couldn't take a GPL dependency.
   the time/frame axis).
 - Zoom (Ctrl+scroll) and pan (drag) of the 2D image, with the window sized
   to fit on open.
+- **Frames larger than one GPU texture, at full resolution** — every GPU caps a
+  texture at 16384 or 32768 pixels per axis, and mosaics run well past it
+  (Hubble's Andromeda is 40000 x 12788). Such a frame is shown through a
+  *window*: the part you are looking at is kept on the GPU at whatever
+  resolution the current zoom asks for, and re-cut as you pan. Zoomed out that
+  is a coarse overview of the whole frame, flagged `1/N scale` in the toolbar;
+  zoom in and the flag disappears, because you are then looking at the file's
+  own pixels.
+
+  Panning re-cuts from the decoded frame held in memory, which costs a strided
+  copy rather than another decode — the difference between exploring a
+  gigapixel mosaic and waiting out a full decode on every drag. The price is
+  holding that frame: about 1.5 GB for Andromeda. Past 2 GB decoded the viewer
+  keeps the coarse whole-frame view instead, which needs no cache at all, on
+  the grounds that a blurry picture beats an out-of-memory kill.
 
 ## 3D volume view
 
