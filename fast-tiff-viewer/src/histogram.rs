@@ -157,6 +157,75 @@ fn stride(len: usize) -> usize {
     (len / SAMPLE_BUDGET).max(1)
 }
 
+/// Fraction of one channel of samples that the auto window may clip off each
+/// end, 0.35% — the same saturation ImageJ applies for its own Auto button, so
+/// a stack looks here the way it looks there.
+///
+/// Some clipping is the entire point. The full data range is what the slider
+/// already spans, so a window fitted to the exact min and max would be the
+/// no-op the Reset button gives you. Real frames carry a few hot pixels and a
+/// dark-current floor, and letting those set the ends leaves everything of
+/// interest squeezed into the middle. Throwing away a third of a percent at
+/// each end costs a handful of outliers and buys the rest of the histogram.
+const AUTO_SATURATION: f64 = 0.0035;
+
+/// A contrast window fitted to where this channel of data actually is: the
+/// narrowest span that keeps all but [`AUTO_SATURATION`] of the samples at each
+/// end, in the same units as [`Histogram::lo`]/[`Histogram::hi`] and therefore
+/// as [`crate::ChannelSettings::min`]/`max`.
+///
+/// `None` when nothing was counted, which is the one case with no defensible
+/// answer — an empty frame, or a decode that failed. Callers should leave the
+/// window alone rather than substituting something.
+///
+/// The result is never empty: a channel of one single value still yields a
+/// one-bin-wide window rather than a zero-width one that would divide by zero
+/// downstream and blank the image.
+pub fn auto_window(hist: &Histogram) -> Option<(f32, f32)> {
+    if hist.counted == 0 {
+        return None;
+    }
+    // Ceil, so even a tiny frame clips at least one sample and Auto does
+    // something visible; `budget` counts samples that may be discarded.
+    let budget = (hist.counted as f64 * AUTO_SATURATION).ceil() as u64;
+
+    // Walk in from each end until more than `budget` samples have been passed.
+    // The bin that breaks the budget is kept: it holds the first sample that is
+    // not spare, so cutting it would clip more than asked for.
+    let mut acc = 0u64;
+    let mut lo_bin = 0usize;
+    for (i, &c) in hist.bins.iter().enumerate() {
+        acc += c as u64;
+        if acc > budget {
+            lo_bin = i;
+            break;
+        }
+    }
+    acc = 0;
+    let mut hi_bin = BINS - 1;
+    for (i, &c) in hist.bins.iter().enumerate().rev() {
+        acc += c as u64;
+        if acc > budget {
+            hi_bin = i;
+            break;
+        }
+    }
+    // Both ends chewing through the same lone spike can cross the walks over
+    // each other. Collapse to the single bin they agree on instead of returning
+    // a backwards range.
+    if hi_bin < lo_bin {
+        hi_bin = lo_bin;
+    }
+
+    let width = (hist.hi - hist.lo) / BINS as f32;
+    let lo = hist.lo + lo_bin as f32 * width;
+    // The upper edge of `hi_bin`, not its lower one: the bin covers values up
+    // to there, and a window ending at its start would clip the very samples
+    // that earned it a place.
+    let hi = hist.lo + (hi_bin + 1) as f32 * width;
+    Some((lo, hi.max(lo + width)))
+}
+
 /// Fill colour for a channel's histogram: the brightest colour that channel is
 /// drawn in, so a plot is matched to its channel by eye without a legend.
 ///

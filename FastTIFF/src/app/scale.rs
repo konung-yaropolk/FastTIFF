@@ -37,7 +37,10 @@ pub const UI_SCALE: f32 = 1.0;
 /// gets the title bar and frame padding too — `Window` takes those from the
 /// context when it opens.
 ///
-/// A no-op on the desktop, where the scale is already 1.
+/// A no-op on the desktop, where the scale is already 1 — and unreachable
+/// there too, since a desktop pop-up is its own window rather than something
+/// drawn inside the scaled canvas (see [`super::dialog`]).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(super) fn unscaled<R>(ctx: &egui::Context, show: impl FnOnce(&egui::Context) -> R) -> R {
     if UI_SCALE == 1.0 {
         return show(ctx);

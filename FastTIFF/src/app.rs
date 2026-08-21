@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 mod camera;
+mod dialog;
 mod overlay;
 mod scale;
 mod widgets;
@@ -362,15 +363,35 @@ impl ViewerApp {
         self.view.pan = egui::Vec2::ZERO;
         self.view.pending_initial_fit = true;
         self.view.resize_to_zoom = false;
-        // Close everything left open for the previous file — the pop-ups
-        // describe that stack, and the channels panel is sized and populated
-        // for its channel count. Resetting the panel wholesale also disarms a
-        // toggle caught in flight, whose remembered height belongs to a layout
-        // that no longer exists and would resize the window by a stale delta.
+        // The channels panel is sized and populated for the previous file's
+        // channel count, so it is rebuilt wholesale. That also disarms a toggle
+        // caught in flight, whose remembered height belongs to a layout that no
+        // longer exists and would resize the window by a stale delta.
         self.panel = PanelLayout::default();
-        self.show_metadata = false;
-        self.show_render_settings = false;
-        self.show_histogram = false;
+        // The pop-ups, though, stay up on the desktop. Each is its own window
+        // there, and what it shows is "the open file" rather than one
+        // particular file — every one of them is rebuilt from the live stack
+        // each frame, so leaving them open simply repoints them at the new one.
+        // That is the behaviour worth having when comparing files: park the
+        // histogram on a second monitor and step through a folder, rather than
+        // reopening it after every load.
+        //
+        // In the browser they are windows *inside* the canvas, laid over the
+        // image and sized for the channel count that is going away, so there
+        // they still close.
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.show_metadata = false;
+            self.show_render_settings = false;
+            self.show_histogram = false;
+        }
+        // Except the 3D settings, which are reachable only through a button the
+        // toolbar hides for a stack with no volume. Leaving that window up over
+        // a single-frame file would strand it: closed, it cannot be reopened.
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.core.can_show_volume() {
+            self.show_render_settings = false;
+        }
         // The cached histograms describe the *previous* stack, and a new one
         // starts at frame 0 generation 0 — exactly the key the old cache holds,
         // so staleness alone would not catch it.
@@ -744,6 +765,9 @@ impl eframe::App for ViewerApp {
         // closure via these locals (applied after) so the closure never needs a
         // second borrow of `self`.
         let current_view_mode = self.core.view_mode;
+        // Read before the toolbar closure, which would otherwise need a second
+        // borrow of `self` to ask.
+        let can_show_volume = self.core.can_show_volume();
         let mut mode_request: Option<ViewMode> = None;
         let mut open_requested = false;
         let mut render_settings_toggle = false;
@@ -753,41 +777,42 @@ impl eframe::App for ViewerApp {
                 if ui.button("Open TIFF...").clicked() {
                     open_requested = true;
                 }
-                // 2D/3D switch, right next to Open. 3D needs at least two frames
-                // to build a volume; disabled otherwise.
-                if let Some(loaded) = &self.core.stack {
-                    let can_3d = loaded.display.dims.frames >= 2;
+                // 2D/3D switch, right next to Open, and the render-settings
+                // button beside it. Both need a volume to act on, which needs at
+                // least two frames to stack into one.
+                //
+                // Hidden rather than greyed out when there is none. A disabled
+                // control is a promise that it will work under some condition
+                // the user can reach, and offers a tooltip to say which; these
+                // cannot become available for the open file no matter what is
+                // clicked, so a permanently dead 2D/3D pair next to Open reads
+                // as breakage. The toolbar is also short enough that the gap is
+                // no loss. The file-info group below supplies the trailing
+                // separator, so this block owns only its own leading ones.
+                if can_show_volume {
                     ui.separator();
-                    ui.add_enabled_ui(can_3d, |ui| {
-                        if ui
-                            .selectable_label(current_view_mode == ViewMode::Movie, "2D")
-                            .on_hover_text("Movie (2D) view")
-                            .clicked()
-                        {
-                            mode_request = Some(ViewMode::Movie);
-                        }
-                        if ui
-                            .selectable_label(current_view_mode == ViewMode::Volume, "3D")
-                            .on_hover_text("Volume (3D) view — drag to rotate, scroll to zoom")
-                            .clicked()
-                        {
-                            mode_request = Some(ViewMode::Volume);
-                        }
-                    });
-                    // 3D render-settings button, next to the toggle. The file-info
-                    // group below adds the trailing separator. Disabled together
-                    // with the 2D/3D toggle: without a third dimension to show,
-                    // the 3D render settings have nothing to apply to.
+                    if ui
+                        .selectable_label(current_view_mode == ViewMode::Movie, "2D")
+                        .on_hover_text("Movie (2D) view")
+                        .clicked()
+                    {
+                        mode_request = Some(ViewMode::Movie);
+                    }
+                    if ui
+                        .selectable_label(current_view_mode == ViewMode::Volume, "3D")
+                        .on_hover_text("Volume (3D) view — drag to rotate, scroll to zoom")
+                        .clicked()
+                    {
+                        mode_request = Some(ViewMode::Volume);
+                    }
                     ui.separator();
-                    ui.add_enabled_ui(can_3d, |ui| {
-                        if ui
-                            .button(RichText::new("⚙").size(16.0))
-                            .on_hover_text("3D render settings")
-                            .clicked()
-                        {
-                            render_settings_toggle = true;
-                        }
-                    });
+                    if ui
+                        .button(RichText::new("⚙").size(16.0))
+                        .on_hover_text("3D render settings")
+                        .clicked()
+                    {
+                        render_settings_toggle = true;
+                    }
                 }
                 if self.core.stack.is_none() {
                     // Nothing open yet: show the version + active render backend
@@ -1202,15 +1227,15 @@ impl eframe::App for ViewerApp {
                     if row_has_items {
                         ui.separator();
                     }
+                    if histogram_button(ui).clicked() {
+                        histogram_toggle = true;
+                    }
                     if ui
                         .button(RichText::new("( i )").size(12.0))
                         .on_hover_text("See metadata")
                         .clicked()
                     {
                         metadata_toggle = true;
-                    }
-                    if histogram_button(ui).clicked() {
-                        histogram_toggle = true;
                     }
                 });
                 if !loaded.display.rgb {
