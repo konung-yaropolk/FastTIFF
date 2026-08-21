@@ -26,6 +26,19 @@ pub struct ChannelSettings {
     /// include any metadata window) at load time so both handles always sit
     /// somewhere on the track.
     pub bounds: (f32, f32),
+    /// The window this channel started with, in the same units as
+    /// [`min`](Self::min)/[`max`](Self::max) — what the file asked for, or what
+    /// was derived for it when no window was declared.
+    ///
+    /// Kept per channel rather than as a snapshot held elsewhere because every
+    /// path that rebuilds the settings builds whole `ChannelSettings` values:
+    /// opening a file, reinterpreting a mislabeled axis, switching an RGB or
+    /// CMYK stack onto its component channels. A separate list would have to be
+    /// re-seeded at each of those, and any one that was missed would leave a
+    /// stale window paired with the wrong channel — or a list of the wrong
+    /// length. As a field it cannot drift: whatever constructs a channel states
+    /// where it began.
+    pub initial: (f32, f32),
     /// Which GPU texture format this channel uploads to (picked from the source
     /// pixel format): `Int8` (R8Uint, raw 8-bit — zero-copy), `Float` (R32F, raw
     /// float, window/level on the GPU), or `Int16` (R16Uint — the default, incl.

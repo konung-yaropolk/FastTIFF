@@ -4,7 +4,7 @@ use fast_tiff_viewer::channels::shift_sync;
 use fast_tiff_viewer::{ChannelKind, ChannelSettings};
 
 fn ch(min: f32, max: f32, bounds: (f32, f32), enabled: bool) -> ChannelSettings {
-    ChannelSettings { min, max, enabled, bounds, kind: ChannelKind::Int16 }
+    ChannelSettings { min, max, enabled, bounds, initial: (min, max), kind: ChannelKind::Int16 }
 }
 
 fn snapshot(settings: &[ChannelSettings]) -> Vec<(f32, f32)> {

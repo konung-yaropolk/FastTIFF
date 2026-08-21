@@ -3,6 +3,7 @@
 //! tables, and the pseudocolor toggle. Split from `app.rs`.
 
 use crate::display::Display;
+use crate::histogram::{auto_window, Histogram};
 use crate::stack::{ChannelSettings, Stack};
 use fast_tiff_lib::TiffStack;
 use scivis_render::{ChannelKind, Lut};
@@ -263,7 +264,14 @@ pub fn build_channel_settings(tiff: &TiffStack, channels: usize) -> Vec<ChannelS
             if frame.is_some_and(|f| f.is_palette()) {
                 const W: f32 = 257.0; // the 8-bit → 0..65535 widening sync_gpu undoes
                 let (lo, hi) = (-0.5 * W, 255.5 * W);
-                return ChannelSettings { min: lo, max: hi, enabled: true, bounds: (lo, hi), kind: ChannelKind::Int8 };
+                return ChannelSettings {
+                    min: lo,
+                    max: hi,
+                    enabled: true,
+                    bounds: (lo, hi),
+                    initial: (lo, hi),
+                    kind: ChannelKind::Int8,
+                };
             }
             // 32- and 64-bit IEEE floats both go to the R32F GPU path (64-bit is
             // downcast to f32 on decode). Integer data of every width — including
@@ -288,7 +296,7 @@ pub fn build_channel_settings(tiff: &TiffStack, channels: usize) -> Vec<ChannelS
                     .or(data)
                     .unwrap_or((0.0, 1.0));
                 let bounds = slider_bounds((lo, hi), data);
-                ChannelSettings { min: lo, max: hi, enabled: true, bounds, kind: ChannelKind::Float }
+                ChannelSettings { min: lo, max: hi, enabled: true, bounds, initial: (lo, hi), kind: ChannelKind::Float }
             } else {
                 let data = first_frame_minmax(tiff, c);
                 let (min, max) = meta_range
@@ -303,10 +311,70 @@ pub fn build_channel_settings(tiff: &TiffStack, channels: usize) -> Vec<ChannelS
                 // for an 8-bit (R8Uint) channel `sync_gpu` rescales them to the
                 // 0..255 the texture actually holds.
                 let kind = if is_u8 { ChannelKind::Int8 } else { ChannelKind::Int16 };
-                ChannelSettings { min, max, enabled: true, bounds, kind }
+                ChannelSettings { min, max, enabled: true, bounds, initial: (min, max), kind }
             }
         })
         .collect()
+}
+
+/// Fit every contrast window to where its data actually is, using histograms
+/// already computed for the frame on screen.
+///
+/// Reads the histograms rather than rescanning the pixels: they describe the
+/// frame the user is looking at and are already in hand, so Auto costs nothing
+/// and — more importantly — agrees with the plot it is clicked underneath.
+/// [`build_channel_settings`] instead scans frame 0 at load, which is the right
+/// choice there and the wrong one here: on a stack whose brightness drifts,
+/// seeding from frame 0 is a reasonable default, but auto-ing to it while
+/// looking at frame 900 would be visibly wrong.
+///
+/// A channel with no histogram, or one whose histogram counted nothing, keeps
+/// the window it had. Palette stacks are skipped entirely: their window is a
+/// pinned index-to-LUT identity, not a contrast choice, and moving it would
+/// remap every colour.
+pub fn auto_contrast(loaded: &mut Stack, hists: &[Histogram]) {
+    if loaded.display.palette {
+        return;
+    }
+    for h in hists {
+        let Some(s) = loaded.display.settings.get_mut(h.channel) else { continue };
+        let Some((lo, hi)) = auto_window(h) else { continue };
+        // The histogram spans the union of every channel track, so a window
+        // fitted on it can reach past this one. Clamping keeps both handles
+        // somewhere the slider can actually draw them.
+        s.min = lo.clamp(s.bounds.0, s.bounds.1);
+        s.max = hi.clamp(s.bounds.0, s.bounds.1);
+        // Both ends landing on the same side of the track would leave an empty
+        // window, which divides by zero on the way to the shader. Fall back to
+        // showing everything, which is at least a picture.
+        if s.max <= s.min {
+            (s.min, s.max) = s.bounds;
+        }
+    }
+}
+
+/// Put every contrast window back where it was when the file was opened — the
+/// undo for any amount of dragging, and for [`auto_contrast`].
+///
+/// The window the file asked for, not the full slider track. Those differ
+/// whenever a file declares a display range narrower than its data, which is
+/// the normal case for anything saved out of ImageJ: opening the window to the
+/// full track would "reset" such a file to something it has never been shown
+/// as. Restoring what it opened with is the state the user is actually trying
+/// to get back to, and it costs nothing to remember — see
+/// [`ChannelSettings::initial`].
+///
+/// Reopening a *different* interpretation of the same file — a dimension-order
+/// change, for instance — rebuilds the settings and with them the window this
+/// returns to, which is right: the starting point is whatever the current
+/// reading of the file starts from.
+pub fn reset_contrast(loaded: &mut Stack) {
+    if loaded.display.palette {
+        return;
+    }
+    for s in loaded.display.settings.iter_mut() {
+        (s.min, s.max) = s.initial;
+    }
 }
 
 /// Whether the "apply pseudocolor" option is meaningful for this stack: only

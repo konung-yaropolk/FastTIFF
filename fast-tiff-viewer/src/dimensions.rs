@@ -112,6 +112,7 @@ pub fn setup_rgb(loaded: &mut Stack) {
             max: 65535.0,
             enabled,
             bounds: (0.0, 65535.0),
+            initial: (0.0, 65535.0),
             kind,
         })
         .collect();
@@ -151,7 +152,14 @@ pub fn setup_cmyk(loaded: &mut Stack) {
         ChannelKind::Int16
     };
     loaded.display.settings = (0..3)
-        .map(|_| ChannelSettings { min: 0.0, max: 65535.0, enabled: true, bounds: (0.0, 65535.0), kind })
+        .map(|_| ChannelSettings {
+            min: 0.0,
+            max: 65535.0,
+            enabled: true,
+            bounds: (0.0, 65535.0),
+            initial: (0.0, 65535.0),
+            kind,
+        })
         .collect();
     loaded.frame_index = 0;
     loaded.last_uploaded = None;
