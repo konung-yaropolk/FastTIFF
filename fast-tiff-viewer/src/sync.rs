@@ -12,10 +12,11 @@
 //! still provides the full CPU-side model.
 
 use crate::camera::{build_volume_params, volume_camera, VolumeChannel};
-use crate::prefetch::{build_jobs, decode_jobs, ChannelJob, Decoded, PrefetchResult};
-use crate::roi::{self, Roi, MAX_SOURCE_BYTES};
-use crate::stack::{FrameSource, Stack};
-use crate::viewer::{ViewMode, Viewer};
+use crate::prefetch::{build_jobs, decode_jobs, decode_jobs_region, ChannelJob, Decoded, PrefetchResult};
+use crate::bandcache;
+use crate::roi::{self, Roi};
+use crate::stack::Stack;
+use crate::viewer::{DecodeMode, ViewMode, Viewer};
 use crate::volume::VolumePlan;
 use crate::Renderer;
 use scivis_render::{ChannelKind, ChannelUniform, MAX_CHANNELS};
@@ -57,6 +58,7 @@ impl Viewer {
         // to it. For everything that fits a texture this is the whole frame at
         // full resolution, exactly as before; only a frame past the device limit
         // gets a window.
+        let (frame_w, frame_h) = loaded.tiff.frames.first().map_or((0, 0), |f| (f.width, f.height));
         let target = plan_residency(loaded, renderer, &kinds, uv_offset, uv_scale);
         if let Some(roi) = target {
             let (tw, th) = roi.texture_size();
@@ -77,7 +79,16 @@ impl Viewer {
 
         // Push the decode-parallelism choice to fast-tiff-lib: Auto follows the
         // playback-keeping-up latch, Serial/Threaded force it off/on.
-        fast_tiff_lib::set_parallel_decode(self.decode_mode.parallel(self.decode_parallel));
+        // A frame too large for one texture is decoded a band at a time, with
+        // the user waiting on each one — a second of wall clock that threads cut
+        // to a fraction. `Auto` is otherwise driven by the playback latch, which
+        // never fires here because nobody plays back a gigapixel stack; an
+        // explicit Serial is still honoured, since that is a deliberate choice
+        // about CPU use.
+        let windowed = target.is_some_and(|r| !covers_whole_frame(&r, frame_w, frame_h));
+        let parallel = self.decode_mode.parallel(self.decode_parallel)
+            || (windowed && self.decode_mode == DecodeMode::Auto);
+        fast_tiff_lib::set_parallel_decode(parallel);
 
         if let Some(roi) = target {
             let read_ahead = self.playback.playing && !self.decode_parallel;
@@ -147,27 +158,15 @@ fn plan_residency(
     let bytes_per_texel: usize = kinds.iter().map(|k| gpu_bytes_per_texel(*k)).sum();
 
     // The ordinary case: it fits, so keep doing exactly what was done before.
-    if w <= max_axis && h <= max_axis {
-        loaded.roi_source = None;
+    // Nothing below this line runs for an image of ordinary size — no planning,
+    // no cropping, no extra copy — which is what keeps the machinery for huge
+    // frames from costing anything on the frames that do not need it.
+    if !roi::needs_window(w, h, max_axis) {
         loaded.gpu_stride = 1;
         return Some(Roi::full(w, h));
     }
 
-    // Can the decoded frame be held? Windows are re-cut from it on every pan,
-    // and re-decoding instead would cost what opening the file did.
-    let source_bytes = (w as usize)
-        .saturating_mul(h as usize)
-        .saturating_mul(kinds.iter().map(cpu_bytes_per_sample).sum::<usize>());
-    let can_hold = source_bytes <= MAX_SOURCE_BYTES;
-
-    let plan = if can_hold {
-        roi::plan(w, h, uv_offset, uv_scale, max_axis, bytes_per_texel)
-    } else {
-        // No cache, so plan for the whole frame: it serves every view, and is
-        // therefore uploaded once.
-        loaded.roi_source = None;
-        roi::plan(w, h, [0.0, 0.0], [1.0, 1.0], max_axis, bytes_per_texel)
-    };
+    let plan = roi::plan(w, h, uv_offset, uv_scale, max_axis, bytes_per_texel);
 
     // Keep what is already resident if it still covers the view — that is what
     // stops an ordinary pan from touching the GPU at all.
@@ -188,14 +187,7 @@ fn gpu_bytes_per_texel(kind: ChannelKind) -> usize {
     }
 }
 
-/// Bytes one sample of a channel occupies in the decoded plane held in memory.
-fn cpu_bytes_per_sample(kind: &ChannelKind) -> usize {
-    match kind {
-        ChannelKind::Int8 => 1,
-        ChannelKind::Int16 => 2,
-        ChannelKind::Float => 4,
-    }
-}
+
 
 /// 2D path: decode and upload this frame's enabled channels (from the prefetch
 /// worker when its result matches, else inline), then queue the read-ahead for
@@ -226,52 +218,46 @@ fn sync_movie(
         let want_gen = loaded.prefetch_gen;
         let jobs = build_jobs(loaded, frame_index, &enabled, kinds);
 
-        // Re-cut from the frame already in memory when it is the right one.
-        // This is the whole point of holding it: panning a gigapixel mosaic
-        // becomes a strided copy rather than another decode.
-        let reusable = loaded
-            .roi_source
-            .as_ref()
-            .is_some_and(|c| c.frame == frame_index && c.enabled == enabled);
-
-        if reusable {
-            let source = loaded.roi_source.as_ref().expect("checked just above");
-            for job in &jobs {
-                if let Some(data) = source.plane(job.channel) {
-                    upload(renderer, job.channel, fw, fh, &roi, data);
-                }
+        if partial {
+            // Decode only the strips the window covers, a band at a time. This
+            // is what keeps a gigapixel frame affordable: the cost follows what
+            // is on screen, and neither the frame nor the window has to be held
+            // whole in memory.
+            //
+            // The prefetcher is bypassed here — it decodes whole frames, which
+            // is exactly the work being avoided, and a stack of frames this
+            // large is not something anyone plays back anyway.
+            if let Err(e) = upload_windowed(loaded, renderer, &jobs, kinds, &roi, fw, fh) {
+                result = Err(e);
             }
         } else {
-            // Use a prefetched frame if one is ready and matches exactly
-            // (generation, frame index, and channel layout); otherwise decode
-            // inline. A mismatch only costs a little redundant work — it can
-            // never upload the wrong frame.
-            let mut fresh: Option<Vec<(usize, Decoded)>> = None;
+            // The whole frame is wanted, so take the ordinary path — including
+            // the prefetched frame when one is ready and matches exactly
+            // (generation, frame index, and channel layout). A mismatch only
+            // costs a little redundant work; it can never upload the wrong
+            // frame.
+            let mut used_prefetch = false;
             if let Some(p) = &loaded.prefetch {
                 if let Some(ready) = p.take_matching(want_gen, frame_index) {
                     if prefetch_matches(&ready, &jobs) {
-                        fresh = Some(ready.channels.into_iter().map(|c| (c.channel, c.data)).collect());
+                        for ch in &ready.channels {
+                            upload(renderer, ch.channel, ch.width, ch.height, &roi, &ch.data);
+                        }
+                        used_prefetch = true;
                     }
                 }
             }
-            if fresh.is_none() {
+            if !used_prefetch {
                 // One call decodes every enabled channel; RGB planes share a
                 // single decompression pass inside `decode_jobs`.
                 match decode_jobs(&loaded.tiff.data, &loaded.tiff.frames, loaded.tiff.byte_order, &jobs) {
                     Ok(decoded) => {
-                        fresh = Some(jobs.iter().map(|j| j.channel).zip(decoded).collect());
+                        for (job, data) in jobs.iter().zip(&decoded) {
+                            upload(renderer, job.channel, job.width, job.height, &roi, data);
+                        }
                     }
                     Err(e) => result = Err(e),
                 }
-            }
-            if let Some(planes) = fresh {
-                for (channel, data) in &planes {
-                    upload(renderer, *channel, fw, fh, &roi, data);
-                }
-                // Hold the decoded frame only when windows are being cut from
-                // it. For a frame that fits whole there is nothing to re-cut,
-                // and holding it would be pure memory for no gain.
-                loaded.roi_source = partial.then(|| FrameSource { frame: frame_index, enabled: enabled.clone(), planes });
             }
         }
         loaded.roi = Some(roi);
@@ -317,11 +303,213 @@ fn upload(renderer: &mut Renderer, channel: usize, width: u32, height: u32, roi:
         return;
     }
     let (tw, th) = roi.texture_size();
+    upload_texture(renderer, channel, tw, th, &cut(data, width, height, roi));
+}
+
+/// Write an already-sized plane to its texture.
+fn upload_texture(renderer: &mut Renderer, channel: usize, w: u32, h: u32, data: &Decoded) {
     match data {
-        Decoded::U8(v) => renderer.upload_channel_u8(channel, tw, th, &roi::extract(v, width, height, roi)),
-        Decoded::U16(v) => renderer.upload_channel_u16(channel, tw, th, &roi::extract(v, width, height, roi)),
-        Decoded::F32(v) => renderer.upload_channel_f32(channel, tw, th, &roi::extract(v, width, height, roi)),
+        Decoded::U8(v) => renderer.upload_channel_u8(channel, w, h, v),
+        Decoded::U16(v) => renderer.upload_channel_u16(channel, w, h, v),
+        Decoded::F32(v) => renderer.upload_channel_f32(channel, w, h, v),
     }
+}
+
+/// Cut a window out of a decoded plane, whatever its format.
+fn cut(data: &Decoded, width: u32, height: u32, roi: &Roi) -> Decoded {
+    match data {
+        Decoded::U8(v) => Decoded::U8(roi::extract(v, width, height, roi)),
+        Decoded::U16(v) => Decoded::U16(roi::extract(v, width, height, roi)),
+        Decoded::F32(v) => Decoded::F32(roi::extract(v, width, height, roi)),
+    }
+}
+
+/// An all-zero plane of `n` samples in `kind`'s format.
+fn empty_plane(kind: ChannelKind, n: usize) -> Decoded {
+    match kind {
+        ChannelKind::Int8 => Decoded::U8(vec![0; n]),
+        ChannelKind::Int16 => Decoded::U16(vec![0; n]),
+        ChannelKind::Float => Decoded::F32(vec![0.0; n]),
+    }
+}
+
+/// Copy `src` into `dst` starting at sample `at`. Mismatched formats cannot
+/// happen — both come from the same channel — so a mismatch is simply ignored
+/// rather than given an error path nothing can reach.
+fn blit(dst: &mut Decoded, src: &Decoded, at: usize) {
+    match (dst, src) {
+        (Decoded::U8(d), Decoded::U8(s)) => copy_into(d, s, at),
+        (Decoded::U16(d), Decoded::U16(s)) => copy_into(d, s, at),
+        (Decoded::F32(d), Decoded::F32(s)) => copy_into(d, s, at),
+        _ => {}
+    }
+}
+
+fn copy_into<T: Copy>(dst: &mut [T], src: &[T], at: usize) {
+    let end = (at + src.len()).min(dst.len());
+    if at < end {
+        dst[at..end].copy_from_slice(&src[..end - at]);
+    }
+}
+
+/// Cut `roi` out of the frame and upload each channel, band by band.
+///
+/// Bands come off a fixed grid rather than being carved out of the window (see
+/// [`crate::bandcache`]), which is what lets a moving view re-use what it
+/// already decompressed: pan sideways and every band hits, pan vertically and
+/// all but the newly exposed edge does.
+///
+/// Peak memory is a band, not the frame — the reason the overview of a
+/// gigapixel mosaic does not need gigabytes.
+fn upload_windowed(
+    loaded: &mut Stack,
+    renderer: &mut Renderer,
+    jobs: &[ChannelJob],
+    kinds: &[ChannelKind],
+    roi: &Roi,
+    frame_w: u32,
+    frame_h: u32,
+) -> anyhow::Result<()> {
+    let (tw, th) = roi.texture_size();
+    let stride = roi.stride.max(1);
+    let frame_index = loaded.frame_index;
+    let channels: Vec<usize> = jobs.iter().map(|j| j.channel).collect();
+
+    let mut planes: Vec<Decoded> = jobs
+        .iter()
+        .map(|j| {
+            let kind = kinds.get(j.channel).copied().unwrap_or(ChannelKind::Int16);
+            empty_plane(kind, tw as usize * th as usize)
+        })
+        .collect();
+
+    let per_sample: usize = jobs
+        .iter()
+        .map(|j| gpu_bytes_per_texel(kinds.get(j.channel).copied().unwrap_or(ChannelKind::Int16)))
+        .sum();
+    let rows_per_band = bandcache::band_rows(frame_w, per_sample.max(1));
+    let grid = bandcache::bands_covering(roi.y..roi.y + roi.h, rows_per_band);
+
+    // Caching only pays when a later view can hit it. A window spanning more
+    // bands than the cache holds — the zoomed-out overview, which covers every
+    // row and never moves — would evict each band before it could be re-used,
+    // so it is decoded and dropped instead.
+    let span_bytes = (grid.end - grid.start) as usize
+        * rows_per_band as usize
+        * frame_w as usize
+        * per_sample.max(1);
+    let worth_caching = span_bytes <= bandcache::MAX_CACHE_BYTES;
+
+    // The columns the window wants. On a tiled frame these narrow the decode to
+    // the intersecting tile columns; on a stripped one a strip cannot be split,
+    // so the crop hands back the full width and this has no effect.
+    let want_cols = roi.x..roi.x + roi.w;
+    let probe = loaded.tiff.frames.get(jobs.first().map_or(0, |j| j.ifd_idx));
+
+    for band in grid {
+        let rows = bandcache::band_range(band, rows_per_band, frame_h);
+        if rows.is_empty() {
+            continue;
+        }
+        // Texel rows of the window that this band supplies. `roi.y` is aligned
+        // to the stride and the grid is not, so the first texel at or after the
+        // band start is found by rounding up.
+        let t0 = rows.start.saturating_sub(roi.y).div_ceil(stride);
+        let t1 = rows.end.saturating_sub(roi.y).div_ceil(stride).min(th);
+        if t0 >= t1 {
+            continue;
+        }
+
+        // What the file will actually hand over for this band — asked without
+        // decoding, because the answer is the cache key. Keying on the *request*
+        // would miss every time the window moved by a pixel; keying on what
+        // comes back means two windows sharing tiles share cache entries.
+        let region = match probe {
+            Some(f) => f.crop(want_cols.clone(), rows.clone())?,
+            None => continue,
+        };
+        let cols = (region.cols.start, region.cols.end);
+        let cut_w = region.frame.width;
+
+        if loaded.bands.get(frame_index, &channels, band, cols).is_none() {
+            let (decoded, got_cols, got_rows) = decode_jobs_region(
+                &loaded.tiff.data,
+                &loaded.tiff.frames,
+                loaded.tiff.byte_order,
+                jobs,
+                want_cols.clone(),
+                rows.clone(),
+            )?;
+            debug_assert_eq!((got_cols.start, got_cols.end), cols, "probe and decode disagree");
+            // A band is keyed by its grid slot, so what is stored has to be the
+            // slot's rows. The crop snaps outward to strip or tile boundaries,
+            // so trim back to the grid before storing, or the next hit would be
+            // offset by up to a whole piece.
+            let trimmed = trim_to(decoded, cut_w, &got_rows, &rows);
+            if worth_caching {
+                loaded.bands.put(frame_index, channels.clone(), band, cols, trimmed);
+            } else {
+                blit_band(&mut planes, &trimmed, roi, cut_w, region.cols.start, &rows, t0, t1, tw, stride);
+                continue;
+            }
+        }
+        let Some(band_planes) = loaded.bands.get(frame_index, &channels, band, cols) else { continue };
+        blit_band(&mut planes, band_planes, roi, cut_w, region.cols.start, &rows, t0, t1, tw, stride);
+    }
+
+    for (job, plane) in jobs.iter().zip(&planes) {
+        upload_texture(renderer, job.channel, tw, th, plane);
+    }
+    Ok(())
+}
+
+/// Cut texel rows `t0..t1` of the window out of one band and place them.
+#[expect(clippy::too_many_arguments, reason = "all of it is one geometric mapping")]
+fn blit_band(
+    planes: &mut [Decoded],
+    band: &[Decoded],
+    roi: &Roi,
+    band_w: u32,
+    col0: u32,
+    rows: &std::ops::Range<u32>,
+    t0: u32,
+    t1: u32,
+    tw: u32,
+    stride: u32,
+) {
+    let first = roi.y + t0 * stride;
+    // The band holds columns from `col0`, so the window's x is relative to it.
+    let sub = Roi {
+        x: roi.x.saturating_sub(col0),
+        y: first - rows.start,
+        w: roi.w,
+        h: (t1 - t0 - 1) * stride + 1,
+        stride,
+    };
+    let band_h = rows.end - rows.start;
+    let frame_w = band_w;
+    for (plane, data) in planes.iter_mut().zip(band) {
+        blit(plane, &cut(data, frame_w, band_h, &sub), (t0 * tw) as usize);
+    }
+}
+
+/// Trim decoded planes covering `actual` down to `want`, which it contains.
+///
+/// By value, so the usual case — the strips happening to line up with the grid
+/// — hands the planes straight back rather than copying a band to prove it did
+/// not need copying.
+fn trim_to(
+    decoded: Vec<Decoded>,
+    width: u32,
+    actual: &std::ops::Range<u32>,
+    want: &std::ops::Range<u32>,
+) -> Vec<Decoded> {
+    if actual == want {
+        return decoded;
+    }
+    let keep = Roi { x: 0, y: want.start - actual.start, w: width, h: want.end - want.start, stride: 1 };
+    let h = actual.end - actual.start;
+    decoded.iter().map(|d| cut(d, width, h, &keep)).collect()
 }
 
 /// 3D path: make sure the volume textures hold the current timepoint, then push

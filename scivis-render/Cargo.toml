@@ -1,6 +1,6 @@
 [package]
 name = "scivis-render"
-version = "0.10.3"
+version = "0.15.0"
 edition = "2021"
 description = "Scientific visualization on the GPU: per-channel window/level + LUT compositing of multi-channel image stacks in 2D, and volume ray-marching in 3D, on wgpu or OpenGL. No GUI toolkit, no file format — you bring the pixels."
 license = "MPL-2.0"

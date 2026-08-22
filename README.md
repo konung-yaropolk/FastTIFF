@@ -305,12 +305,31 @@ it can be used in projects that couldn't take a GPL dependency.
   zoom in and the flag disappears, because you are then looking at the file's
   own pixels.
 
-  Panning re-cuts from the decoded frame held in memory, which costs a strided
-  copy rather than another decode — the difference between exploring a
-  gigapixel mosaic and waiting out a full decode on every drag. The price is
-  holding that frame: about 1.5 GB for Andromeda. Past 2 GB decoded the viewer
-  keeps the coarse whole-frame view instead, which needs no cache at all, on
-  the grounds that a blurry picture beats an out-of-memory kill.
+  Nothing is held in memory to make that work. Moving the window decodes only
+  the *strips* it covers (`FrameInfo::crop_rows`), a band at a time, so both
+  the time and the peak memory follow what is on screen rather than the size of
+  the file — tenths of a second and a couple of hundred megabytes for a window
+  of Andromeda, against 4 seconds and 1.5 GB for the whole frame. Files far
+  larger than RAM are no different in kind.
+
+  Bands come off a grid fixed to the frame rather than to the window, and the
+  last few are kept (capped, a few hundred MB), so moving the view re-uses what
+  it already decompressed: pan sideways and the rows on screen do not change at
+  all, so nothing is decoded again; pan vertically and everything but the newly
+  exposed edge is re-used. The grid is independent of zoom, so zooming over one
+  spot re-uses its bands too.
+
+  A **tiled** TIFF does better still. A strip spans the whole image width, so a
+  narrow window of a wide mosaic decodes about ten times what it displays — the
+  file's layout, not the reader's doing. A tile is bounded on both axes, so the
+  window narrows in both: on the same 40000 x 12788 mosaic a 3840 x 2200 window
+  costs 153 ms and 37 MB decoded, against 824 ms and 264 MB from the stripped
+  original. Tiled files open natively, so converting a large image to tiles is
+  worth it if you plan to explore it.
+
+  None of this machinery runs for an image that fits a texture, which is very
+  nearly all of them: those take the same path they always did, decoded and
+  uploaded whole, with no planning, cropping or extra copy.
 
 ## 3D volume view
 

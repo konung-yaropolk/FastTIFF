@@ -20,4 +20,4 @@ pub use metadata::{
     color_ramp_lut, colormap_to_lut, composite_color, default_composite_lut, default_lut_for, grayscale_lut,
     resolve_dimensions, ChannelDisplay, DisplayMode, MetadataFormat, ResolvedDimensions, StackMeta, StackMetaWrite,
 };
-pub use index::{Compression, FrameInfo, SampleFormat, TiffStack};
+pub use index::{Compression, FrameInfo, Region, RowBand, SampleFormat, TiffStack};

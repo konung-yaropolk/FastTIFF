@@ -49,25 +49,6 @@ pub struct ChannelSettings {
     pub kind: ChannelKind,
 }
 
-/// A decoded frame held in memory so windows of it can be re-cut cheaply.
-///
-/// Keyed by everything that would make the pixels wrong to reuse: which frame
-/// they came from, and which channels were decoded (a disabled channel is not
-/// decoded at all, so enabling one has to fetch it).
-pub struct FrameSource {
-    pub frame: usize,
-    pub enabled: Vec<bool>,
-    /// `(display channel, decoded plane)` for every channel that was enabled.
-    pub planes: Vec<(usize, crate::prefetch::Decoded)>,
-}
-
-impl FrameSource {
-    /// The decoded plane for `channel`, if it was decoded.
-    pub fn plane(&self, channel: usize) -> Option<&crate::prefetch::Decoded> {
-        self.planes.iter().find(|(c, _)| *c == channel).map(|(_, d)| d)
-    }
-}
-
 /// An open TIFF stack plus everything the viewer derives from it.
 pub struct Stack {
     pub tiff: TiffStack,
@@ -86,17 +67,13 @@ pub struct Stack {
     /// The window of the frame currently on the GPU, when only a window of it
     /// is. `None` means the whole frame is resident — the ordinary case.
     pub roi: Option<crate::roi::Roi>,
-    /// The decoded frame that [`roi`](Self::roi) is cut from.
+    /// Decoded strip bands, so moving the window re-uses what has already been
+    /// decompressed instead of decompressing it again.
     ///
-    /// Kept so that panning and zooming re-cut an image already in memory
-    /// instead of decoding it again. That is the difference between a viewer
-    /// you can explore a gigapixel mosaic with and one where every drag costs
-    /// what opening the file did — for the file that motivated this, the better
-    /// part of a minute.
-    ///
-    /// Only ever populated for frames too large to upload whole, so the ordinary
-    /// case carries no extra memory at all.
-    pub roi_source: Option<FrameSource>,
+    /// Only ever filled for frames too large to upload whole; an ordinary image
+    /// never puts anything in it. See [`crate::bandcache`].
+    pub bands: crate::bandcache::BandCache,
+
     pub last_uploaded: Option<usize>,
     /// The per-channel `enabled` flags as of the last GPU upload. A disabled
     /// channel is skipped during upload (the shader multiplies it out anyway),
@@ -175,7 +152,7 @@ impl Stack {
             // what this device can hold.
             gpu_stride: 1,
             roi: None,
-            roi_source: None,
+            bands: Default::default(),
             last_uploaded: None,
             last_enabled: Vec::new(),
             luts_uploaded: false,

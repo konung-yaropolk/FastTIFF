@@ -163,8 +163,54 @@ try:
 except Exception as e:
     print(f"SKIP ij fixture: {e}", file=sys.stderr)
 
-# --- 8. Tiled file: fast-tiff-lib must refuse it with a clear error ---
-tff("err_u16_spp1_p1_tiled.tif", "u16", 1, tile=(16, 16))
+# --- 8. Tiled files. A tile is bounded on both axes, unlike a strip, which is
+# --- what lets a window of a huge image be read without touching the rest of
+# --- its rows. Tiles are stored full-size and padded at the right and bottom
+# --- edges, so 23x11 in 16x16 tiles exercises padding on both axes at once.
+tff("tff_u16_spp1_p1_tiled.tif", "u16", 1, tile=(16, 16))
+tff("tff_u8_spp3_p1_tiled-lzw-pred2.tif", "u8", 1, spp=3, tile=(16, 16),
+    compression="lzw", predictor=2)
+tff("tff_f32_spp1_p1_tiled-zip-pred3.tif", "f32", 1, tile=(16, 16),
+    compression="zlib", predictor=3)
+
+
+# --- 8a. Tiled files with a grid more than one tile deep, which the fixture
+# --- matrix above cannot express (its frames are 11 rows, shorter than a tile).
+# --- Verified by tests/tiled.rs instead; the `tld_` prefix is what tells
+# --- libtiff_fixtures.rs to leave them alone.
+TW, TH = 100, 70  # 7 x 5 tiles of 16, with both edges partial
+
+
+def tld(name: str, dtype: str, spp: int = 1, planar: bool = False, **kwargs):
+    """A tiled fixture on its own, larger geometry.
+
+    Planar needs the sample axis *first*: tifffile reads axes positionally, so
+    handing it (Y, X, S) and asking for separate planes makes it reinterpret the
+    shape rather than transpose it -- which silently produces a 70-sample 3x100
+    image instead of a 3-sample 100x70 one.
+    """
+    path = os.path.join(OUT, name)
+    g = np.arange(TH * TW * spp, dtype=np.int64)
+    a = ((g * 7 + 13) % 256) if dtype == "u8" else ((g * 131 + 17) % 65536)
+    a = a.astype(np.uint8 if dtype == "u8" else np.uint16)
+    if planar:
+        arr = a.reshape(spp, TH, TW)
+        kwargs["planarconfig"] = "separate"
+    else:
+        arr = a.reshape((TH, TW, spp) if spp > 1 else (TH, TW))
+    if spp > 1:
+        kwargs.setdefault("photometric", "rgb")
+    try:
+        tifffile.imwrite(path, arr, metadata=None, tile=(16, 16), **kwargs)
+        written.append(name)
+    except Exception as e:
+        print(f"SKIP {name}: {e}", file=sys.stderr)
+
+
+tld("tld_u16_spp1_p1_grid.tif", "u16")
+tld("tld_u16_spp1_p1_grid-lzw.tif", "u16", compression="lzw")
+tld("tld_u8_spp3_p1_grid-pred2.tif", "u8", spp=3, compression="zlib", predictor=2)
+tld("tld_u8_spp3_p1_grid-planar.tif", "u8", spp=3, planar=True)
 
 # --- 8b. CMYK / Separated (photometric=5). Ink coverage, not light: the
 # --- reader must both hand back the four raw plates unchanged AND offer the

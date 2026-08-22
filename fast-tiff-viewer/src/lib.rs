@@ -36,6 +36,7 @@
 //!   synchronous fallbacks are already the paths taken when a worker fails to
 //!   spawn, so nothing else changes.
 
+pub mod bandcache;
 pub mod camera;
 pub mod channels;
 pub mod colormap;

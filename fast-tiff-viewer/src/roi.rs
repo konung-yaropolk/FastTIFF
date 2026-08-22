@@ -39,21 +39,6 @@
 /// the rest of the app.
 pub const MAX_ROI_BYTES: usize = 512 << 20;
 
-/// Bytes of *decoded frame* worth holding in memory so windows can be re-cut
-/// from it.
-///
-/// Windows are cut on every pan, and cutting from memory is a strided copy
-/// while the alternative is decoding the frame again — for the file that
-/// motivated this, the better part of a minute per drag. So the frame is worth
-/// holding, up to a point.
-///
-/// Past that point the honest answer is a coarse view of the whole frame
-/// instead: it needs no cache at all, because a window covering everything
-/// serves every view and is therefore uploaded exactly once. Better a blurry
-/// picture than an out-of-memory kill on a machine that cannot spare the
-/// gigabytes.
-pub const MAX_SOURCE_BYTES: usize = 2 << 30;
-
 /// How much bigger than the visible region the resident window is made, when
 /// there is texture budget spare.
 ///
@@ -62,6 +47,18 @@ pub const MAX_SOURCE_BYTES: usize = 2 << 30;
 /// the window is twice the visible extent on each axis, so panning stays inside
 /// it for most of a screen's movement in any direction.
 const MARGIN: u32 = 2;
+
+/// Whether a frame needs any of this at all.
+///
+/// The answer is no for very nearly every image, and that is the point. A frame
+/// the device can hold takes the path it always did — decoded whole, uploaded
+/// whole, no planning, no cropping, not one extra copy — so the machinery for
+/// gigapixel mosaics costs nothing on the images that do not need it. Only a
+/// frame past the per-axis texture limit, which cannot become a texture at all,
+/// is worth paying for a window.
+pub fn needs_window(width: u32, height: u32, max_axis: u32) -> bool {
+    width > max_axis || height > max_axis
+}
 
 /// A window of source pixels resident on the GPU: the rect `(x, y, w, h)` in
 /// image pixels, sampled every `stride`.

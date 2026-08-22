@@ -361,3 +361,22 @@ fn every_planned_window_cuts_to_exactly_its_texture() {
         }
     }
 }
+
+/// The guard that keeps all of this from costing anything on ordinary images.
+///
+/// A frame the device can hold takes the original path — decoded whole,
+/// uploaded whole, no window planned and no copy made. Only a frame past the
+/// texture limit pays. Worth pinning rather than leaving implicit, because the
+/// cost of getting it wrong is a slower viewer for everyone in exchange for a
+/// feature almost nobody needs.
+#[test]
+fn only_frames_past_the_texture_limit_need_a_window() {
+    use fast_tiff_viewer::roi::needs_window;
+    for (w, h) in [(1u32, 1u32), (512, 512), (4096, 4096), (16_384, 16_384)] {
+        assert!(!needs_window(w, h, 16_384), "{w}x{h} fits a 16k device and must not be windowed");
+    }
+    assert!(needs_window(16_385, 16_384, 16_384), "one texel over on either axis is over");
+    assert!(needs_window(16_384, 16_385, 16_384));
+    assert!(needs_window(40_000, 12_788, 32_768), "the mosaic this exists for");
+    assert!(!needs_window(40_000, 12_788, 65_536), "...but not on a device that could hold it");
+}

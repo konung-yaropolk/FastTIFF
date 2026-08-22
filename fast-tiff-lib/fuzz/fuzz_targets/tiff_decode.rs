@@ -53,6 +53,44 @@ fuzz_target!(|data: &[u8]| {
         let _ = fast_tiff_lib::read_plane_rgb_u16(bytes, frame, order, plane);
     }
 
+    // Row bands. `crop_rows` builds a `FrameInfo` the indexer never produced —
+    // a spliced strip table over a shrunken height — and then hands it to every
+    // reader above. That makes it a way to reach the decoders with geometry the
+    // open path would have rejected, so the bands get the same treatment as the
+    // frames they came from.
+    // Two-axis crops, which on a tiled frame splice a *grid* rather than a run
+    // — a different way to build a strip table the open path never saw.
+    // The last of each set is backwards on purpose — built rather than written
+    // as a literal, which the lints reject as a mistake. Here it is the input a
+    // caller produces from an inverted drag, and it must not panic.
+    let bad_cols = std::ops::Range { start: 9u32, end: 2 };
+    let bad_rows = std::ops::Range { start: 7u32, end: 3 };
+    let backwards_band = std::ops::Range { start: 7u32, end: 2 };
+    for (cols, rows) in [(0u32..1, 0u32..1), (0..u32::MAX, 0..u32::MAX), (2..9, 3..7), (bad_cols, bad_rows)] {
+        if let Ok(region) = frame.crop(cols, rows) {
+            let r = &region.frame;
+            let _ = fast_tiff_lib::read_planes_u8(bytes, r, order);
+            let _ = fast_tiff_lib::read_planes_u16(bytes, r, order, None);
+            let _ = fast_tiff_lib::read_frame_f32(bytes, r, order);
+        }
+    }
+
+    for rows in [0u32..1, 0..u32::MAX, 3..9, u32::MAX - 1..u32::MAX, backwards_band] {
+        if let Ok(band) = frame.crop_rows(rows) {
+            let b = &band.frame;
+            let _ = fast_tiff_lib::read_planes_u8(bytes, b, order);
+            let _ = fast_tiff_lib::read_planes_u16(bytes, b, order, None);
+            let _ = fast_tiff_lib::read_planes_f32(bytes, b, order);
+            let _ = fast_tiff_lib::read_frame_u16(bytes, b, order, None);
+            let _ = fast_tiff_lib::read_planes_rgb_u8(bytes, b, order);
+            // A band of a band: nothing forbids it, and the second crop works
+            // from a table this crate wrote rather than one a file did.
+            if let Ok(inner) = b.crop_rows(0..2) {
+                let _ = fast_tiff_lib::read_planes_u8(bytes, &inner.frame, order);
+            }
+        }
+    }
+
     // Buffer-reusing variants take a different branch than the allocating ones.
     let mut buf16 = Vec::new();
     let _ = fast_tiff_lib::read_frame_u16_into(bytes, frame, order, None, &mut buf16);

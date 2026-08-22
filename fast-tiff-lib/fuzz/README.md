@@ -21,7 +21,9 @@ nightly toolchain.
   (ImageJ `key=value` + binary block, OME-XML). Fast, so it explores the parser
   deeply.
 - **`tiff_decode`** — everything `tiff_open` does, then pulls pixels through
-  *every* public reader, the CMYK converting ones included. This is the one that exercises the size arithmetic
+  *every* public reader, the CMYK converting ones included, and through row
+  bands (`FrameInfo::crop_rows`) — which reach those same readers with a
+  spliced strip table the open path never validated. This is the one that exercises the size arithmetic
   (`width × height × samples_per_pixel × bytes_per_sample` from file-declared
   values), the per-codec strip paths, the predictor undo, and the chunky/planar
   plane gathers.
@@ -95,11 +97,11 @@ who never run the fuzzer.
 
 ## Seeds
 
-`fuzz/seeds/` holds ~22 small, valid TIFFs covering every branch the reader has
+`fuzz/seeds/` holds ~26 small, valid TIFFs covering every branch the reader has
 a dedicated path for: both byte orders, BigTIFF, each codec (LZW / Deflate /
 PackBits), both predictors, multi-strip, multi-page, chunky and planar RGB,
-chunky and planar CMYK in 8- and 16-bit, 8-bit and 4-bit palettes, and both
-metadata dialects. Good seeds are the
+chunky and planar CMYK in 8- and 16-bit, tiled images (chunky, planar and
+predictor-differenced), 8-bit and 4-bit palettes, and both metadata dialects. Good seeds are the
 difference between a fuzzer that explores the parser and one that spends its
 life failing the magic-number check — start every campaign from them.
 
