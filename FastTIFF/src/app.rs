@@ -1507,6 +1507,10 @@ impl eframe::App for ViewerApp {
                 let inv = egui::vec2(1.0 / img_px.x.max(1.0), 1.0 / img_px.y.max(1.0));
                 self.core.uv_offset = ((visible.min - origin) * inv).into();
                 self.core.uv_scale = (visible.size() * inv).into();
+                // How much room there is to draw it, which is what decides how
+                // finely an over-large image needs to be sampled.
+                let ppp = ui.ctx().pixels_per_point();
+                self.core.viewport_px = (visible.size() * ppp).into();
                 ui.painter()
                     .with_clip_rect(panel_rect)
                     .add(render::paint_callback(&self.render, visible));

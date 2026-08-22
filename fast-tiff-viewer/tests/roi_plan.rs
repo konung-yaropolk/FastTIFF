@@ -17,9 +17,13 @@
 
 use fast_tiff_viewer::roi::{extract, plan, Roi, MAX_ROI_BYTES};
 
+/// A viewport large enough that it never drives the stride — so the tests below
+/// exercise the texture-budget path unless they say otherwise.
+const HUGE_PANEL: [f32; 2] = [100_000.0, 100_000.0];
+
 /// Shorthand: the window to upload for a view.
 fn resident(w: u32, h: u32, off: [f32; 2], scale: [f32; 2], max_axis: u32, bpt: usize) -> Roi {
-    plan(w, h, off, scale, max_axis, bpt).resident
+    plan(w, h, off, scale, HUGE_PANEL, max_axis, bpt).resident
 }
 
 /// The file this feature exists for, and a common device limit.
@@ -73,11 +77,11 @@ fn zoomed_out_the_giant_mosaic_becomes_a_coarse_overview() {
 fn a_small_pan_is_served_by_the_window_already_resident() {
     let (w, h) = ANDROMEDA;
     let scale = [2000.0 / w as f32, 1200.0 / h as f32];
-    let before = plan(w, h, [0.5, 0.4], scale, 32_768, RGB8).resident;
+    let before = plan(w, h, [0.5, 0.4], scale, HUGE_PANEL, 32_768, RGB8).resident;
     // Pan by a quarter of the visible width. What matters is whether the window
     // already on the GPU still covers what the new view *needs* — not whether
     // it matches the new margined window, which moves with every pixel of pan.
-    let after = plan(w, h, [0.5 + scale[0] * 0.25, 0.4], scale, 32_768, RGB8);
+    let after = plan(w, h, [0.5 + scale[0] * 0.25, 0.4], scale, HUGE_PANEL, 32_768, RGB8);
     assert!(before.serves(&after.required), "{before:?} should already cover {:?}", after.required);
 }
 
@@ -87,8 +91,8 @@ fn a_small_pan_is_served_by_the_window_already_resident() {
 fn a_large_pan_needs_a_new_window() {
     let (w, h) = ANDROMEDA;
     let scale = [2000.0 / w as f32, 1200.0 / h as f32];
-    let before = plan(w, h, [0.1, 0.4], scale, 32_768, RGB8).resident;
-    let after = plan(w, h, [0.8, 0.4], scale, 32_768, RGB8);
+    let before = plan(w, h, [0.1, 0.4], scale, HUGE_PANEL, 32_768, RGB8).resident;
+    let after = plan(w, h, [0.8, 0.4], scale, HUGE_PANEL, 32_768, RGB8);
     assert!(
         !before.serves(&after.required),
         "a pan across the frame cannot be served from {before:?}"
@@ -119,8 +123,8 @@ fn a_coarse_window_does_not_serve_a_view_that_wants_full_resolution() {
 #[test]
 fn zooming_in_asks_for_a_finer_window_than_the_overview() {
     let (w, h) = ANDROMEDA;
-    let overview = plan(w, h, WHOLE.0, WHOLE.1, 32_768, RGB8).resident;
-    let zoomed = plan(w, h, [0.5, 0.4], [2000.0 / w as f32, 1200.0 / h as f32], 32_768, RGB8);
+    let overview = plan(w, h, WHOLE.0, WHOLE.1, HUGE_PANEL, 32_768, RGB8).resident;
+    let zoomed = plan(w, h, [0.5, 0.4], [2000.0 / w as f32, 1200.0 / h as f32], HUGE_PANEL, 32_768, RGB8);
     assert!(overview.stride > zoomed.required.stride, "zooming in should sharpen");
     assert!(!overview.serves(&zoomed.required), "the overview must not satisfy a zoomed-in view");
 }
@@ -379,4 +383,117 @@ fn only_frames_past_the_texture_limit_need_a_window() {
     assert!(needs_window(16_384, 16_385, 16_384));
     assert!(needs_window(40_000, 12_788, 32_768), "the mosaic this exists for");
     assert!(!needs_window(40_000, 12_788, 65_536), "...but not on a device that could hold it");
+}
+
+// ---------------------------------------------------------------------------
+// Sampling no finer than the display can show
+// ---------------------------------------------------------------------------
+
+/// A typical panel, in physical pixels.
+const PANEL: [f32; 2] = [1900.0, 1000.0];
+
+/// The whole point: showing a 40000-pixel mosaic on a 1900-pixel panel should
+/// not build a texture with twenty thousand columns. Detail the display cannot
+/// draw is invisible, and paid for on every zoom step.
+#[test]
+fn a_zoomed_out_view_is_sampled_for_the_screen_not_the_file() {
+    let (w, h) = ANDROMEDA;
+    let r = plan(w, h, WHOLE.0, WHOLE.1, PANEL, 32_768, RGB8).resident;
+    let (tw, th) = r.texture_size();
+
+    assert!(r.stride >= 8, "40000 pixels on a 1900-pixel panel needs heavy subsampling, got {r:?}");
+    assert!(tw <= 4_000, "texture is {tw} wide for a {} pixel panel", PANEL[0]);
+    let mb = (tw as f64 * th as f64 * RGB8 as f64) / 1e6;
+    assert!(mb < 32.0, "{mb:.0} MB of texture for an overview is far too much");
+}
+
+/// ...but never *coarser* than the screen: the texture has to keep at least one
+/// sample per pixel drawn, or the image looks soft.
+#[test]
+fn the_texture_always_has_at_least_a_sample_per_screen_pixel() {
+    let (w, h) = ANDROMEDA;
+    for &zoom in &[0.05f32, 0.1, 0.25, 0.5, 1.0, 2.0] {
+        let vw = (PANEL[0] / zoom).min(w as f32);
+        let vh = (PANEL[1] / zoom).min(h as f32);
+        let uv_scale = [vw / w as f32, vh / h as f32];
+        let uv_off = [(0.5 - uv_scale[0] / 2.0).max(0.0), (0.5 - uv_scale[1] / 2.0).max(0.0)];
+        let r = plan(w, h, uv_off, uv_scale, PANEL, 32_768, RGB8).resident;
+
+        // Texels covering the visible span, against the pixels drawing it.
+        //
+        // Past 100% zoom the file itself runs out: magnifying 950 source pixels
+        // across 1900 screen pixels cannot yield 1900 texels, and stride 1 is
+        // already everything there is. So the bar is the lesser of what the
+        // screen can draw and what the image actually holds.
+        let visible_texels = vw / r.stride as f32;
+        let want = vw.min(PANEL[0]);
+        assert!(
+            visible_texels >= want * 0.9,
+            "zoom {zoom}: {visible_texels:.0} texels where {want:.0} were available — too soft ({r:?})"
+        );
+    }
+}
+
+/// Zooming must cross only a handful of sampling levels. A stride free to take
+/// any value changes on nearly every step, and each change re-decodes the
+/// window — which is the stall this exists to prevent.
+#[test]
+fn zooming_crosses_only_a_few_sampling_levels() {
+    let (w, h) = ANDROMEDA;
+    let mut strides = Vec::new();
+    for i in 0..40 {
+        let zoom = 0.05 * 1.12f32.powi(i); // a smooth sweep from fit to ~4x
+        let vw = (PANEL[0] / zoom).min(w as f32);
+        let vh = (PANEL[1] / zoom).min(h as f32);
+        let uv_scale = [vw / w as f32, vh / h as f32];
+        let uv_off = [(0.5 - uv_scale[0] / 2.0).max(0.0), (0.5 - uv_scale[1] / 2.0).max(0.0)];
+        strides.push(plan(w, h, uv_off, uv_scale, PANEL, 32_768, RGB8).resident.stride);
+    }
+    strides.dedup();
+    assert!(
+        strides.len() <= 8,
+        "40 zoom steps produced {} distinct sampling levels ({strides:?}) — each one re-decodes",
+        strides.len()
+    );
+    assert!(strides.iter().all(|s| s.is_power_of_two()), "levels should be powers of two: {strides:?}");
+    // And they only ever get finer as you zoom in.
+    assert!(strides.windows(2).all(|w| w[0] >= w[1]), "zooming in should not coarsen: {strides:?}");
+}
+
+/// No texture across the whole zoom range may be large enough to stall on.
+#[test]
+fn no_zoom_level_builds_a_huge_texture() {
+    let (w, h) = ANDROMEDA;
+    for i in 0..40 {
+        let zoom = 0.05 * 1.12f32.powi(i);
+        let vw = (PANEL[0] / zoom).min(w as f32);
+        let vh = (PANEL[1] / zoom).min(h as f32);
+        let uv_scale = [vw / w as f32, vh / h as f32];
+        let uv_off = [(0.5 - uv_scale[0] / 2.0).max(0.0), (0.5 - uv_scale[1] / 2.0).max(0.0)];
+        let r = plan(w, h, uv_off, uv_scale, PANEL, 32_768, RGB8).resident;
+        let (tw, th) = r.texture_size();
+        let mb = (tw as f64 * th as f64 * RGB8 as f64) / 1e6;
+        assert!(mb < 96.0, "zoom {zoom:.3} builds {mb:.0} MB ({tw}x{th}, {r:?})");
+    }
+}
+
+/// A frontend that has not said how big it is still gets a correct picture —
+/// just a wastefully detailed one, bounded by the texture budget as before.
+#[test]
+fn an_unknown_viewport_falls_back_to_the_budget() {
+    let (w, h) = ANDROMEDA;
+    // The last is the interesting one: a sub-pixel width is not "unknown" but
+    // is still nonsense, and taken at face value it asks for a stride of tens
+    // of thousands — a 1x1 texture that would flash the moment the viewport
+    // became real. Nonsense in, ordinary picture out.
+    for panel in [[0.0f32, 0.0], [f32::NAN, 10.0], [-5.0, 5.0], [0.5, 1000.0]] {
+        let r = plan(w, h, WHOLE.0, WHOLE.1, panel, 32_768, RGB8).resident;
+        assert!(r.stride >= 1);
+        let (tw, th) = r.texture_size();
+        assert!(tw <= 32_768 && th <= 32_768, "still has to fit the device: {r:?}");
+        assert!(
+            tw > 16 && th > 16,
+            "a nonsense viewport {panel:?} collapsed the texture to {tw}x{th}"
+        );
+    }
 }

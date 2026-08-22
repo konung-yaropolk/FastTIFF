@@ -131,6 +131,15 @@ width and says so in the returned range.
 Both snap **outward** to piece boundaries, and report what they actually cover,
 which is what a caller must index against.
 
+`FrameInfo::crop_rows_step(rows, step)` goes further for a view that is being
+*subsampled* anyway: it keeps every `step`th strip and skips the rest, so a
+1/8-scale view of a frame decompresses an eighth of it rather than all of it and
+discards seven rows in eight. The result is again an ordinary `FrameInfo`, whose
+rows are contiguous even though their sources were not — `SampledBand::pieces`,
+`rows_per_piece` and `decoded_row_of(source_row)` say which source row each
+decoded row came from. Stripped frames only; a tiled frame narrows with `crop`
+instead, because stepping over a tile grid would skip columns as well as rows.
+
 ### Not supported
 
 Pyramidal / mixed-size stacks (every frame must share frame 0's geometry — this

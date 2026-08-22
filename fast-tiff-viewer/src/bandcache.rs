@@ -32,6 +32,11 @@ use std::ops::Range;
 /// case that has to hit.
 pub const MAX_CACHE_BYTES: usize = 384 << 20;
 
+/// Bytes the interface thread's cache keeps once a background worker has taken
+/// over window decoding — enough for one band, so a cold build is not made
+/// worse, but not a second full cache standing idle.
+pub const IDLE_CACHE_BYTES: usize = TARGET_BAND_BYTES;
+
 /// Bytes a single band should come to, before rounding to a power-of-two row
 /// count. Small enough that the grid is fine-grained for vertical panning,
 /// large enough that per-band overhead stays lost against the decode.
@@ -86,10 +91,16 @@ struct Entry {
 /// Deliberately a plain vector: it holds a handful of entries, a linear scan of
 /// which is nothing next to decompressing one of them, and the ordering *is* the
 /// recency information.
-#[derive(Default)]
 pub struct BandCache {
     entries: Vec<Entry>,
     bytes: usize,
+    budget: usize,
+}
+
+impl Default for BandCache {
+    fn default() -> Self {
+        Self { entries: Vec::new(), bytes: 0, budget: MAX_CACHE_BYTES }
+    }
 }
 
 impl BandCache {
@@ -126,7 +137,7 @@ impl BandCache {
         planes: Vec<Decoded>,
     ) {
         let bytes: usize = planes.iter().map(plane_bytes).sum();
-        if bytes > MAX_CACHE_BYTES {
+        if bytes > self.budget {
             return;
         }
         self.entries.retain(|e| {
@@ -135,7 +146,25 @@ impl BandCache {
         self.bytes = self.entries.iter().map(|e| e.bytes).sum();
         self.entries.push(Entry { frame, channels, band, cols, planes, bytes });
         self.bytes += bytes;
-        while self.bytes > MAX_CACHE_BYTES && !self.entries.is_empty() {
+        self.evict();
+    }
+
+    /// Change how much this cache may hold, evicting down to the new figure.
+    ///
+    /// Window decoding moves to a background thread once one is running, and
+    /// that thread caches its own bands. The copy on the interface thread then
+    /// serves only the cold builds — a new file, a new frame, a new channel
+    /// set — which are misses whatever it is holding. Rather than pay for two
+    /// full caches so one of them can go unread, its budget is cut when the
+    /// worker starts.
+    pub fn set_budget(&mut self, bytes: usize) {
+        self.budget = bytes;
+        self.evict();
+    }
+
+    /// Drop least-recently-used bands until the total is back within budget.
+    fn evict(&mut self) {
+        while self.bytes > self.budget && !self.entries.is_empty() {
             let dropped = self.entries.remove(0);
             self.bytes -= dropped.bytes;
         }

@@ -48,6 +48,7 @@ pub mod roi;
 pub mod stack;
 pub mod viewer;
 pub mod volume;
+pub mod window;
 
 #[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
 pub mod sync;

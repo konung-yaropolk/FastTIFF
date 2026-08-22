@@ -312,6 +312,18 @@ it can be used in projects that couldn't take a GPL dependency.
   of Andromeda, against 4 seconds and 1.5 GB for the whole frame. Files far
   larger than RAM are no different in kind.
 
+  How finely it is sampled follows the **display**, not the file: showing a
+  40000-pixel mosaic on a 1900-pixel panel keeps about 1/16 of the pixels,
+  because the rest cannot be drawn. Sampling to the texture budget instead — as
+  it did at first — built a 384 MB texture to draw 1900 columns, and rebuilt it
+  on every zoom step. The sampling levels are powers of two, so a zoom from fit
+  to 1:1 crosses five of them rather than changing continuously.
+
+  A coarse view skips whole **strips**: at 1/8 sampling only every eighth row
+  is kept, so seven strips in eight are never decompressed at all
+  (`FrameInfo::crop_rows_step`). Decompressing them and throwing the rows away
+  is what made the zoomed-out view the slowest one to build, which is backwards.
+
   Bands come off a grid fixed to the frame rather than to the window, and the
   last few are kept (capped, a few hundred MB), so moving the view re-uses what
   it already decompressed: pan sideways and the rows on screen do not change at
@@ -326,6 +338,16 @@ it can be used in projects that couldn't take a GPL dependency.
   costs 153 ms and 37 MB decoded, against 824 ms and 264 MB from the stripped
   original. Tiled files open natively, so converting a large image to tiles is
   worth it if you plan to explore it.
+
+  Re-cutting the window happens on a **background thread**, and the window
+  already on screen keeps being drawn — stretched — until the new one lands. A
+  zoom crosses a sampling level every few notches, and building the next window
+  is tenths of a second at best, so doing it inline stopped the program
+  repeatedly during exactly the gesture where that is most obvious: a 14-notch
+  zoom of Andromeda stalled for 2.25 seconds at a stretch. Off-thread the same
+  sweep does not stall at all; the picture goes soft for a moment instead. Only
+  the first view of a file is waited for, because there is nothing yet to keep
+  showing.
 
   None of this machinery runs for an image that fits a texture, which is very
   nearly all of them: those take the same path they always did, decoded and

@@ -148,6 +148,54 @@ pub struct RowBand {
     pub rows: std::ops::Range<u32>,
 }
 
+/// A frame sampled every `step` pieces — rows that are contiguous in the result
+/// but spaced out in the original.
+#[derive(Clone, Debug)]
+pub struct SampledBand {
+    /// The sampled pieces, decodable by every reader in this crate.
+    pub frame: FrameInfo,
+    /// Source row that decoded row 0 came from.
+    pub first_row: u32,
+    /// Rows in one piece — decoded rows arrive in runs of this many.
+    pub rows_per_piece: u32,
+    /// Pieces taken.
+    pub pieces: u32,
+    /// Pieces skipped between the ones taken; 1 means none were.
+    pub step: u32,
+}
+
+impl SampledBand {
+    /// Where `source_row` landed in the decoded result, if it was sampled.
+    ///
+    /// Only rows inside a piece that was *taken* are present — the ones in the
+    /// skipped pieces are simply not there, which is what makes the decode
+    /// cheap.
+    ///
+    /// Being in a piece that was taken is necessary but not sufficient: the
+    /// last piece of a frame is usually short, holding fewer than
+    /// `rows_per_piece` rows, and if that is the piece taken then the rows past
+    /// its end were never in the file. Answering with an index the result does
+    /// not have would send a caller reading off the end of the decoded plane,
+    /// so the answer is checked against the frame that was actually built.
+    pub fn decoded_row_of(&self, source_row: u32) -> Option<u32> {
+        let per = self.rows_per_piece.max(1);
+        let offset = source_row.checked_sub(self.first_row)?;
+        let piece = offset / per;
+        if !piece.is_multiple_of(self.step.max(1)) {
+            return None; // fell in a piece that was stepped over
+        }
+        let taken = piece / self.step.max(1);
+        if taken >= self.pieces {
+            return None;
+        }
+        // Checked rather than saturating: `rows_per_piece` comes from the
+        // file's own `RowsPerStrip`, so a hostile one can make this overflow,
+        // and a saturated index is still an index the result does not have.
+        let row = taken.checked_mul(per)?.checked_add(offset % per)?;
+        (row < self.frame.height).then_some(row)
+    }
+}
+
 /// A rectangular piece of a frame: the tiles or strips covering some rows and
 /// columns, as a frame in its own right.
 ///
@@ -276,6 +324,101 @@ impl FrameInfo {
         } else {
             1
         }
+    }
+
+    /// Every `step`-th piece from the one covering `rows.start`, enough of them
+    /// to reach `rows.end`.
+    ///
+    /// For sampling a frame coarsely. Showing a 40000-pixel mosaic on a
+    /// 1900-pixel panel needs roughly every sixteenth row — and with two rows to
+    /// a strip, seven strips in every eight contain nothing that will be drawn,
+    /// yet a contiguous crop decompresses all of them. Stepping over them makes
+    /// the decode proportional to what is sampled rather than to what is
+    /// spanned, which on that file is eight times less work.
+    ///
+    /// The decoded rows are **not** contiguous in the original: row `k` of the
+    /// result is source row `first_row + (k / rows_per_piece) * step *
+    /// rows_per_piece + (k % rows_per_piece)`. Callers that sample every
+    /// `step * rows_per_piece`-th source row can ignore that and simply read
+    /// every `rows_per_piece`-th decoded row, which is the case this exists for
+    /// — see [`SampledBand::decoded_row_of`].
+    ///
+    /// `step` of 1 is exactly [`crop_rows`](Self::crop_rows).
+    pub fn crop_rows_step(&self, rows: std::ops::Range<u32>, step: u32) -> Result<SampledBand> {
+        let step = step.max(1);
+        let per_piece = if self.is_tiled() {
+            self.tile_size.map_or(1, |(_, h)| h.max(1))
+        } else {
+            self.rows_per_strip.max(1)
+        };
+        if step == 1 {
+            let band = self.crop_rows(rows)?;
+            let first_row = band.rows.start;
+            let pieces = band.len().div_ceil(per_piece).max(1);
+            return Ok(SampledBand { frame: band.frame, first_row, rows_per_piece: per_piece, pieces, step });
+        }
+        // Stepping over a tile grid would skip columns as well as rows, since a
+        // tile row is `across` consecutive entries. Not wrong to want, but not
+        // what this expresses — a tiled frame narrows by cropping instead.
+        if self.is_tiled() {
+            bail!("crop_rows_step is for stripped frames; a tiled frame narrows with crop()");
+        }
+
+        let per_plane = self.height.div_ceil(per_piece) as usize;
+        let planes = self.piece_planes();
+        let want = self.piece_count();
+        if self.strip_offsets.len() < want || self.strip_byte_counts.len() < want {
+            bail!(
+                "strip table has {} offsets / {} byte counts, need {want}",
+                self.strip_offsets.len(),
+                self.strip_byte_counts.len()
+            );
+        }
+
+        let start = rows.start.min(self.height.saturating_sub(1));
+        let end = rows.end.clamp(start + 1, self.height.max(1));
+        let first = (start / per_piece) as usize;
+        // Pieces from `first`, every `step`, until one starts at or after `end`.
+        let last_needed = (end - 1) / per_piece;
+        let pieces = ((last_needed as usize).saturating_sub(first) / step as usize) + 1;
+        let pieces = pieces.min(per_plane.saturating_sub(first)).max(1);
+
+        let mut offsets = Vec::with_capacity(planes * pieces);
+        let mut counts = Vec::with_capacity(planes * pieces);
+        for p in 0..planes {
+            let base = p * per_plane;
+            for i in 0..pieces {
+                let idx = base + first + i * step as usize;
+                if idx >= base + per_plane {
+                    break;
+                }
+                offsets.push(self.strip_offsets[idx]);
+                counts.push(self.strip_byte_counts[idx]);
+            }
+        }
+        let taken = offsets.len() / planes.max(1);
+
+        let mut frame = self.clone();
+        // The pieces sit back to back in the result, so its height is however
+        // many rows they hold — the gaps between them in the original are not
+        // represented, which is the whole point.
+        //
+        // The last piece of a frame is usually short, and if that one is taken
+        // the result is shorter than `taken * per_piece`. Claiming the round
+        // number would size the decode for rows the file does not have, and the
+        // reader would rightly refuse a frame whose strips fall short of it.
+        let last_idx = (first + (taken.saturating_sub(1)) * step as usize) as u32;
+        let last_rows = per_piece.min(self.height.saturating_sub(last_idx.saturating_mul(per_piece)));
+        frame.height = (taken as u32).saturating_sub(1).saturating_mul(per_piece) + last_rows.max(1);
+        frame.strip_offsets = offsets;
+        frame.strip_byte_counts = counts;
+        Ok(SampledBand {
+            frame,
+            first_row: first as u32 * per_piece,
+            rows_per_piece: per_piece,
+            pieces: taken as u32,
+            step,
+        })
     }
 
     /// A view of just the pieces covering `cols` x `rows` — the same frame

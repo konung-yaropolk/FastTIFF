@@ -11,7 +11,9 @@
 //! all of this would be memory spent to no effect. The first tests here are
 //! about that, not about the LRU.
 
-use fast_tiff_viewer::bandcache::{band_range, band_rows, bands_covering, BandCache, MAX_CACHE_BYTES};
+use fast_tiff_viewer::bandcache::{
+    band_range, band_rows, bands_covering, BandCache, IDLE_CACHE_BYTES, MAX_CACHE_BYTES,
+};
 use fast_tiff_viewer::prefetch::Decoded;
 
 /// The mosaic this exists for: 40000 wide, three 8-bit channels.
@@ -224,6 +226,38 @@ fn an_oversized_band_is_declined_without_evicting_anything() {
     assert_eq!(c.bytes(), before, "the oversized band should have been declined");
     assert!(c.get(0, &[0], 0, ALL).is_some(), "and the existing one kept");
     assert!(c.get(0, &[0], 1, ALL).is_none());
+}
+
+/// Once a background worker is decoding windows it keeps bands of its own, and
+/// this copy stops being asked for anything but cold builds. Cutting its budget
+/// is what stops the two caches costing twice the memory for one cache's worth
+/// of use — and cutting it has to take effect on what is already held, not just
+/// on what arrives next.
+#[test]
+fn a_reduced_budget_evicts_down_to_it_at_once() {
+    let mut c = BandCache::default();
+    let each = MAX_CACHE_BYTES / 8;
+    for band in 0..6 {
+        c.put(0, vec![0], band, ALL, plane(each));
+    }
+    assert!(c.bytes() > IDLE_CACHE_BYTES, "the setup has to start over the new budget");
+
+    c.set_budget(IDLE_CACHE_BYTES);
+    assert!(c.bytes() <= IDLE_CACHE_BYTES, "still holding {} bytes", c.bytes());
+    // And it stays cut: further bands do not push it back up.
+    c.put(0, vec![0], 99, ALL, plane(each));
+    assert!(c.bytes() <= IDLE_CACHE_BYTES, "the budget did not stick");
+}
+
+/// The reduced budget is still a working cache, not a disabled one: a cold
+/// build decodes band by band, and those bands have to stay put long enough for
+/// the build to finish.
+#[test]
+fn the_reduced_budget_still_holds_a_band() {
+    let mut c = BandCache::default();
+    c.set_budget(IDLE_CACHE_BYTES);
+    c.put(0, vec![0], 0, ALL, plane(IDLE_CACHE_BYTES));
+    assert!(c.get(0, &[0], 0, ALL).is_some(), "a band exactly the budget should fit");
 }
 
 #[test]

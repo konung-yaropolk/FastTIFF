@@ -11,12 +11,13 @@
 //! Only compiled with a GPU backend selected; without one the rest of the crate
 //! still provides the full CPU-side model.
 
-use crate::camera::{build_volume_params, volume_camera, VolumeChannel};
-use crate::prefetch::{build_jobs, decode_jobs, decode_jobs_region, ChannelJob, Decoded, PrefetchResult};
 use crate::bandcache;
-use crate::roi::{self, Roi};
+use crate::camera::{build_volume_params, volume_camera, VolumeChannel};
+use crate::prefetch::{build_jobs, decode_jobs, ChannelJob, Decoded, PrefetchResult};
+use crate::roi::{self, Roi, Serving};
 use crate::stack::Stack;
 use crate::viewer::{DecodeMode, ViewMode, Viewer};
+use crate::window;
 use crate::volume::VolumePlan;
 use crate::Renderer;
 use scivis_render::{ChannelKind, ChannelUniform, MAX_CHANNELS};
@@ -42,6 +43,7 @@ impl Viewer {
         // Read before the stack is borrowed mutably: residency depends on which
         // part of the image is on screen, which is the frontend's business.
         let (uv_offset, uv_scale) = (self.uv_offset, self.uv_scale);
+        let viewport = self.viewport_px;
         let Some(loaded) = &mut self.stack else { return outcome };
 
         let n_channels = loaded.display.settings.len();
@@ -59,9 +61,12 @@ impl Viewer {
         // full resolution, exactly as before; only a frame past the device limit
         // gets a window.
         let (frame_w, frame_h) = loaded.tiff.frames.first().map_or((0, 0), |f| (f.width, f.height));
-        let target = plan_residency(loaded, renderer, &kinds, uv_offset, uv_scale);
-        if let Some(roi) = target {
-            let (tw, th) = roi.texture_size();
+        let target = plan_residency(loaded, renderer, &kinds, uv_offset, uv_scale, viewport);
+        // Size the textures to what is being *shown*, not to what is being
+        // prepared: resizing now would blank the picture for as long as the new
+        // window takes to build, which is the stall this avoids.
+        if let Some(r) = target {
+            let (tw, th) = r.show.texture_size();
             renderer.ensure_size(tw, th, &kinds);
         }
 
@@ -85,15 +90,16 @@ impl Viewer {
         // never fires here because nobody plays back a gigapixel stack; an
         // explicit Serial is still honoured, since that is a deliberate choice
         // about CPU use.
-        let windowed = target.is_some_and(|r| !covers_whole_frame(&r, frame_w, frame_h));
+        let windowed = target.is_some_and(|r| !window::covers_whole_frame(&r.show, frame_w, frame_h));
         let parallel = self.decode_mode.parallel(self.decode_parallel)
             || (windowed && self.decode_mode == DecodeMode::Auto);
         fast_tiff_lib::set_parallel_decode(parallel);
 
-        if let Some(roi) = target {
+        if let Some(r) = target {
             let read_ahead = self.playback.playing && !self.decode_parallel;
-            if let Err(e) = sync_movie(loaded, renderer, &kinds, read_ahead, roi) {
-                self.status = Some(format!("Failed to decode frame: {e:#}"));
+            match sync_movie(loaded, renderer, &kinds, read_ahead, r) {
+                Ok(pending) => outcome.needs_repaint |= pending,
+                Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
             }
         }
 
@@ -121,7 +127,7 @@ impl Viewer {
         // The frontend asked in units of the whole image; the shader has to be
         // told where that lands on whatever is actually resident.
         let (off, scale) = match (target, loaded.tiff.frames.first()) {
-            (Some(roi), Some(f)) => roi.map_uv(f.width, f.height, uv_offset, uv_scale),
+            (Some(r), Some(f)) => r.show.map_uv(f.width, f.height, uv_offset, uv_scale),
             _ => (uv_offset, uv_scale),
         };
         renderer.set_params(&uniforms, n_channels as u32, off, scale);
@@ -148,7 +154,8 @@ fn plan_residency(
     kinds: &[ChannelKind],
     uv_offset: [f32; 2],
     uv_scale: [f32; 2],
-) -> Option<Roi> {
+    viewport: [f32; 2],
+) -> Option<Serving> {
     let first = loaded.tiff.frames.first()?;
     let (w, h) = (first.width, first.height);
     let max_axis = renderer.max_2d_texture_size();
@@ -163,19 +170,16 @@ fn plan_residency(
     // frames from costing anything on the frames that do not need it.
     if !roi::needs_window(w, h, max_axis) {
         loaded.gpu_stride = 1;
-        return Some(Roi::full(w, h));
+        let full = Roi::full(w, h);
+        return Some(Serving { show: full, want: full, ready: true });
     }
 
-    let plan = roi::plan(w, h, uv_offset, uv_scale, max_axis, bytes_per_texel);
-
-    // Keep what is already resident if it still covers the view — that is what
-    // stops an ordinary pan from touching the GPU at all.
-    let target = match loaded.roi {
-        Some(current) if current.serves(&plan.required) => current,
-        _ => plan.resident,
-    };
-    loaded.gpu_stride = target.stride;
-    Some(target)
+    let plan = roi::plan(w, h, uv_offset, uv_scale, viewport, max_axis, bytes_per_texel);
+    // Which of the three cases applies is decided in `roi`, away from the GPU,
+    // so it can be tested without one.
+    let serving = roi::serve(loaded.roi, &plan);
+    loaded.gpu_stride = serving.show.stride;
+    Some(serving)
 }
 
 /// Bytes one texel of a channel occupies in VRAM.
@@ -197,8 +201,9 @@ fn sync_movie(
     renderer: &mut Renderer,
     kinds: &[ChannelKind],
     read_ahead: bool,
-    roi: Roi,
-) -> anyhow::Result<()> {
+    plan: Serving,
+) -> anyhow::Result<bool> {
+    let roi = plan.show;
     // Skip disabled channels (the shader multiplies them out). Re-upload when
     // the frame moves *or* the enabled set changes; an enabled-set change also
     // bumps the prefetch generation so an in-flight prefetch under the old set
@@ -213,7 +218,7 @@ fn sync_movie(
     // A window smaller than the frame has to be re-cut when the view leaves it,
     // as well as when the frame or the channel set changes.
     let window_moved = loaded.roi != Some(roi);
-    let partial = !covers_whole_frame(&roi, fw, fh);
+    let partial = !window::covers_whole_frame(&roi, fw, fh);
     if loaded.last_uploaded != Some(frame_index) || loaded.last_enabled != enabled || window_moved {
         let want_gen = loaded.prefetch_gen;
         let jobs = build_jobs(loaded, frame_index, &enabled, kinds);
@@ -227,8 +232,15 @@ fn sync_movie(
             // The prefetcher is bypassed here — it decodes whole frames, which
             // is exactly the work being avoided, and a stack of frames this
             // large is not something anyone plays back anyway.
-            if let Err(e) = upload_windowed(loaded, renderer, &jobs, kinds, &roi, fw, fh) {
-                result = Err(e);
+            let Stack { tiff, bands, .. } = &mut *loaded;
+            match window::assemble(tiff, bands, &jobs, kinds, &roi, frame_index) {
+                Ok(built) => {
+                    let (tw, th) = roi.texture_size();
+                    for (job, plane) in jobs.iter().zip(&built) {
+                        upload_texture(renderer, job.channel, tw, th, plane);
+                    }
+                }
+                Err(e) => result = Err(e),
             }
         } else {
             // The whole frame is wanted, so take the ordinary path — including
@@ -279,13 +291,67 @@ fn sync_movie(
         }
     }
     loaded.last_enabled = enabled;
-    result
-}
 
-/// Whether a window is the entire frame, in which case no view can ever leave
-/// it and nothing needs re-cutting.
-fn covers_whole_frame(roi: &Roi, width: u32, height: u32) -> bool {
-    roi.x == 0 && roi.y == 0 && roi.w >= width && roi.h >= height && roi.stride == 1
+    // A finer window was asked for and what is on screen is the older, coarser
+    // one. Take the finished article if it has landed, otherwise ask for it and
+    // keep drawing until it does.
+    let mut pending = false;
+    if !plan.ready && plan.want != plan.show {
+        let frame_index = loaded.frame_index;
+        let jobs = build_jobs(loaded, frame_index, &loaded.last_enabled, kinds);
+        let channels: Vec<usize> = jobs.iter().map(|j| j.channel).collect();
+
+        // Spawn on first need rather than at load: a thread and a second map of
+        // the file are only worth it for a frame too large to upload whole,
+        // which is a small minority of what gets opened.
+        if loaded.window_worker.is_none() {
+            loaded.window_worker = window::WindowWorker::new(loaded.path.clone());
+            if loaded.window_worker.is_some() {
+                // The worker keeps its own bands, and from here on it is the
+                // one decoding windows. Holding a second full cache here would
+                // be memory for a thread that has stopped asking.
+                loaded.bands.set_budget(bandcache::IDLE_CACHE_BYTES);
+            }
+        }
+
+        let ready = loaded
+            .window_worker
+            .as_ref()
+            .and_then(|w| w.take_matching(frame_index, &plan.want, &channels));
+        match ready {
+            Some(built) => {
+                let (tw, th) = plan.want.texture_size();
+                renderer.ensure_size(tw, th, kinds);
+                for (channel, plane) in built.channels.iter().zip(&built.planes) {
+                    upload_texture(renderer, *channel, tw, th, plane);
+                }
+                loaded.roi = Some(plan.want);
+                loaded.last_uploaded = Some(frame_index);
+            }
+            None => match &loaded.window_worker {
+                Some(worker) => {
+                    worker.request(frame_index, plan.want, jobs, kinds.to_vec());
+                    // Keep the frames coming until it lands; nothing else would
+                    // wake the interface once the user stops moving.
+                    pending = true;
+                }
+                None => {
+                    // No worker — no threads, or the file cannot be reopened.
+                    // Take the stall rather than never sharpening.
+                    let Stack { tiff, bands, .. } = &mut *loaded;
+                    if let Ok(built) = window::assemble(tiff, bands, &jobs, kinds, &plan.want, frame_index) {
+                        let (tw, th) = plan.want.texture_size();
+                        renderer.ensure_size(tw, th, kinds);
+                        for (job, plane) in jobs.iter().zip(&built) {
+                            upload_texture(renderer, job.channel, tw, th, plane);
+                        }
+                        loaded.roi = Some(plan.want);
+                    }
+                }
+            },
+        }
+    }
+    result.map(|()| pending)
 }
 
 /// Send one channel's window to whichever texture its format lives in.
@@ -294,7 +360,7 @@ fn covers_whole_frame(roi: &Roi, width: u32, height: u32) -> bool {
 /// straight to the GPU with no copy, which is what it did before any of this
 /// existed. Only a real window pays for the cut.
 fn upload(renderer: &mut Renderer, channel: usize, width: u32, height: u32, roi: &Roi, data: &Decoded) {
-    if covers_whole_frame(roi, width, height) {
+    if window::covers_whole_frame(roi, width, height) {
         match data {
             Decoded::U8(v) => renderer.upload_channel_u8(channel, width, height, v),
             Decoded::U16(v) => renderer.upload_channel_u16(channel, width, height, v),
@@ -303,7 +369,7 @@ fn upload(renderer: &mut Renderer, channel: usize, width: u32, height: u32, roi:
         return;
     }
     let (tw, th) = roi.texture_size();
-    upload_texture(renderer, channel, tw, th, &cut(data, width, height, roi));
+    upload_texture(renderer, channel, tw, th, &window::cut(data, width, height, roi));
 }
 
 /// Write an already-sized plane to its texture.
@@ -313,203 +379,6 @@ fn upload_texture(renderer: &mut Renderer, channel: usize, w: u32, h: u32, data:
         Decoded::U16(v) => renderer.upload_channel_u16(channel, w, h, v),
         Decoded::F32(v) => renderer.upload_channel_f32(channel, w, h, v),
     }
-}
-
-/// Cut a window out of a decoded plane, whatever its format.
-fn cut(data: &Decoded, width: u32, height: u32, roi: &Roi) -> Decoded {
-    match data {
-        Decoded::U8(v) => Decoded::U8(roi::extract(v, width, height, roi)),
-        Decoded::U16(v) => Decoded::U16(roi::extract(v, width, height, roi)),
-        Decoded::F32(v) => Decoded::F32(roi::extract(v, width, height, roi)),
-    }
-}
-
-/// An all-zero plane of `n` samples in `kind`'s format.
-fn empty_plane(kind: ChannelKind, n: usize) -> Decoded {
-    match kind {
-        ChannelKind::Int8 => Decoded::U8(vec![0; n]),
-        ChannelKind::Int16 => Decoded::U16(vec![0; n]),
-        ChannelKind::Float => Decoded::F32(vec![0.0; n]),
-    }
-}
-
-/// Copy `src` into `dst` starting at sample `at`. Mismatched formats cannot
-/// happen — both come from the same channel — so a mismatch is simply ignored
-/// rather than given an error path nothing can reach.
-fn blit(dst: &mut Decoded, src: &Decoded, at: usize) {
-    match (dst, src) {
-        (Decoded::U8(d), Decoded::U8(s)) => copy_into(d, s, at),
-        (Decoded::U16(d), Decoded::U16(s)) => copy_into(d, s, at),
-        (Decoded::F32(d), Decoded::F32(s)) => copy_into(d, s, at),
-        _ => {}
-    }
-}
-
-fn copy_into<T: Copy>(dst: &mut [T], src: &[T], at: usize) {
-    let end = (at + src.len()).min(dst.len());
-    if at < end {
-        dst[at..end].copy_from_slice(&src[..end - at]);
-    }
-}
-
-/// Cut `roi` out of the frame and upload each channel, band by band.
-///
-/// Bands come off a fixed grid rather than being carved out of the window (see
-/// [`crate::bandcache`]), which is what lets a moving view re-use what it
-/// already decompressed: pan sideways and every band hits, pan vertically and
-/// all but the newly exposed edge does.
-///
-/// Peak memory is a band, not the frame — the reason the overview of a
-/// gigapixel mosaic does not need gigabytes.
-fn upload_windowed(
-    loaded: &mut Stack,
-    renderer: &mut Renderer,
-    jobs: &[ChannelJob],
-    kinds: &[ChannelKind],
-    roi: &Roi,
-    frame_w: u32,
-    frame_h: u32,
-) -> anyhow::Result<()> {
-    let (tw, th) = roi.texture_size();
-    let stride = roi.stride.max(1);
-    let frame_index = loaded.frame_index;
-    let channels: Vec<usize> = jobs.iter().map(|j| j.channel).collect();
-
-    let mut planes: Vec<Decoded> = jobs
-        .iter()
-        .map(|j| {
-            let kind = kinds.get(j.channel).copied().unwrap_or(ChannelKind::Int16);
-            empty_plane(kind, tw as usize * th as usize)
-        })
-        .collect();
-
-    let per_sample: usize = jobs
-        .iter()
-        .map(|j| gpu_bytes_per_texel(kinds.get(j.channel).copied().unwrap_or(ChannelKind::Int16)))
-        .sum();
-    let rows_per_band = bandcache::band_rows(frame_w, per_sample.max(1));
-    let grid = bandcache::bands_covering(roi.y..roi.y + roi.h, rows_per_band);
-
-    // Caching only pays when a later view can hit it. A window spanning more
-    // bands than the cache holds — the zoomed-out overview, which covers every
-    // row and never moves — would evict each band before it could be re-used,
-    // so it is decoded and dropped instead.
-    let span_bytes = (grid.end - grid.start) as usize
-        * rows_per_band as usize
-        * frame_w as usize
-        * per_sample.max(1);
-    let worth_caching = span_bytes <= bandcache::MAX_CACHE_BYTES;
-
-    // The columns the window wants. On a tiled frame these narrow the decode to
-    // the intersecting tile columns; on a stripped one a strip cannot be split,
-    // so the crop hands back the full width and this has no effect.
-    let want_cols = roi.x..roi.x + roi.w;
-    let probe = loaded.tiff.frames.get(jobs.first().map_or(0, |j| j.ifd_idx));
-
-    for band in grid {
-        let rows = bandcache::band_range(band, rows_per_band, frame_h);
-        if rows.is_empty() {
-            continue;
-        }
-        // Texel rows of the window that this band supplies. `roi.y` is aligned
-        // to the stride and the grid is not, so the first texel at or after the
-        // band start is found by rounding up.
-        let t0 = rows.start.saturating_sub(roi.y).div_ceil(stride);
-        let t1 = rows.end.saturating_sub(roi.y).div_ceil(stride).min(th);
-        if t0 >= t1 {
-            continue;
-        }
-
-        // What the file will actually hand over for this band — asked without
-        // decoding, because the answer is the cache key. Keying on the *request*
-        // would miss every time the window moved by a pixel; keying on what
-        // comes back means two windows sharing tiles share cache entries.
-        let region = match probe {
-            Some(f) => f.crop(want_cols.clone(), rows.clone())?,
-            None => continue,
-        };
-        let cols = (region.cols.start, region.cols.end);
-        let cut_w = region.frame.width;
-
-        if loaded.bands.get(frame_index, &channels, band, cols).is_none() {
-            let (decoded, got_cols, got_rows) = decode_jobs_region(
-                &loaded.tiff.data,
-                &loaded.tiff.frames,
-                loaded.tiff.byte_order,
-                jobs,
-                want_cols.clone(),
-                rows.clone(),
-            )?;
-            debug_assert_eq!((got_cols.start, got_cols.end), cols, "probe and decode disagree");
-            // A band is keyed by its grid slot, so what is stored has to be the
-            // slot's rows. The crop snaps outward to strip or tile boundaries,
-            // so trim back to the grid before storing, or the next hit would be
-            // offset by up to a whole piece.
-            let trimmed = trim_to(decoded, cut_w, &got_rows, &rows);
-            if worth_caching {
-                loaded.bands.put(frame_index, channels.clone(), band, cols, trimmed);
-            } else {
-                blit_band(&mut planes, &trimmed, roi, cut_w, region.cols.start, &rows, t0, t1, tw, stride);
-                continue;
-            }
-        }
-        let Some(band_planes) = loaded.bands.get(frame_index, &channels, band, cols) else { continue };
-        blit_band(&mut planes, band_planes, roi, cut_w, region.cols.start, &rows, t0, t1, tw, stride);
-    }
-
-    for (job, plane) in jobs.iter().zip(&planes) {
-        upload_texture(renderer, job.channel, tw, th, plane);
-    }
-    Ok(())
-}
-
-/// Cut texel rows `t0..t1` of the window out of one band and place them.
-#[expect(clippy::too_many_arguments, reason = "all of it is one geometric mapping")]
-fn blit_band(
-    planes: &mut [Decoded],
-    band: &[Decoded],
-    roi: &Roi,
-    band_w: u32,
-    col0: u32,
-    rows: &std::ops::Range<u32>,
-    t0: u32,
-    t1: u32,
-    tw: u32,
-    stride: u32,
-) {
-    let first = roi.y + t0 * stride;
-    // The band holds columns from `col0`, so the window's x is relative to it.
-    let sub = Roi {
-        x: roi.x.saturating_sub(col0),
-        y: first - rows.start,
-        w: roi.w,
-        h: (t1 - t0 - 1) * stride + 1,
-        stride,
-    };
-    let band_h = rows.end - rows.start;
-    let frame_w = band_w;
-    for (plane, data) in planes.iter_mut().zip(band) {
-        blit(plane, &cut(data, frame_w, band_h, &sub), (t0 * tw) as usize);
-    }
-}
-
-/// Trim decoded planes covering `actual` down to `want`, which it contains.
-///
-/// By value, so the usual case — the strips happening to line up with the grid
-/// — hands the planes straight back rather than copying a band to prove it did
-/// not need copying.
-fn trim_to(
-    decoded: Vec<Decoded>,
-    width: u32,
-    actual: &std::ops::Range<u32>,
-    want: &std::ops::Range<u32>,
-) -> Vec<Decoded> {
-    if actual == want {
-        return decoded;
-    }
-    let keep = Roi { x: 0, y: want.start - actual.start, w: width, h: want.end - want.start, stride: 1 };
-    let h = actual.end - actual.start;
-    decoded.iter().map(|d| cut(d, width, h, &keep)).collect()
 }
 
 /// 3D path: make sure the volume textures hold the current timepoint, then push

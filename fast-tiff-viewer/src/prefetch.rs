@@ -309,6 +309,56 @@ pub fn decode_jobs_region(
     Ok((decode_jobs(mmap, &band_frames, order, &band_jobs)?, cols, rows))
 }
 
+/// Decode only the pieces a coarse view actually samples.
+///
+/// At stride `step * rows_per_piece` a contiguous crop decompresses every piece
+/// it spans, and at a coarse zoom most of them hold nothing that will be drawn.
+/// This takes every `step`-th piece instead, so the work follows what is
+/// sampled. Returns the planes and the band description, which says where each
+/// decoded row came from.
+///
+/// Stripped frames only — a tiled frame narrows by cropping columns instead.
+pub fn decode_jobs_stepped(
+    mmap: &[u8],
+    frames: &[FrameInfo],
+    order: ByteOrder,
+    jobs: &[ChannelJob],
+    rows: std::ops::Range<u32>,
+    step: u32,
+) -> anyhow::Result<(Vec<Decoded>, fast_tiff_lib::SampledBand)> {
+    let mut band_frames: Vec<FrameInfo> = Vec::new();
+    let mut seen: Vec<(usize, usize)> = Vec::new();
+    let mut band_jobs: Vec<ChannelJob> = Vec::with_capacity(jobs.len());
+    let mut covered: Option<fast_tiff_lib::SampledBand> = None;
+
+    for job in jobs {
+        let idx = match seen.iter().find(|(orig, _)| *orig == job.ifd_idx) {
+            Some((_, mapped)) => *mapped,
+            None => {
+                let frame = frames
+                    .get(job.ifd_idx)
+                    .ok_or_else(|| anyhow::anyhow!("frame {} out of range", job.ifd_idx))?;
+                let band = frame.crop_rows_step(rows.clone(), step)?;
+                if let Some(r) = &covered {
+                    if r.first_row != band.first_row || r.pieces != band.pieces {
+                        anyhow::bail!("frames disagree on strip layout");
+                    }
+                }
+                band_frames.push(band.frame.clone());
+                covered.get_or_insert(band);
+                seen.push((job.ifd_idx, band_frames.len() - 1));
+                band_frames.len() - 1
+            }
+        };
+        let mut mapped = job.clone();
+        mapped.ifd_idx = idx;
+        band_jobs.push(mapped);
+    }
+
+    let band = covered.ok_or_else(|| anyhow::anyhow!("nothing to decode"))?;
+    Ok((decode_jobs(mmap, &band_frames, order, &band_jobs)?, band))
+}
+
 /// One decoded channel of a completed prefetch.
 pub struct DecodedChannel {
     pub channel: usize,

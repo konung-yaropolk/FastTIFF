@@ -91,6 +91,29 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
+    // Sampled bands: the same spliced table, but keeping only every `step`th
+    // strip. The pieces it keeps are chosen from the file's own `RowsPerStrip`,
+    // so a hostile one decides both how many pieces there are and how tall the
+    // last is — and `decoded_row_of` has to stay inside the frame it built
+    // whatever they say.
+    let backwards_step = std::ops::Range { start: 6u32, end: 1 };
+    for rows in [0u32..1, 0..u32::MAX, 3..9, u32::MAX - 1..u32::MAX, backwards_step] {
+        for step in [0u32, 1, 2, 7, u32::MAX] {
+            let Ok(band) = frame.crop_rows_step(rows.clone(), step) else { continue };
+            let b = &band.frame;
+            let _ = fast_tiff_lib::read_planes_u8(bytes, b, order);
+            let _ = fast_tiff_lib::read_planes_u16(bytes, b, order, None);
+            let _ = fast_tiff_lib::read_planes_f32(bytes, b, order);
+            let _ = fast_tiff_lib::read_planes_rgb_u8(bytes, b, order);
+            // Every row it claims to hold must land inside the frame it built.
+            for probe in [0u32, 1, band.first_row, band.first_row.wrapping_add(1), u32::MAX] {
+                if let Some(row) = band.decoded_row_of(probe) {
+                    assert!(row < b.height, "decoded_row_of({probe}) = {row} of {}", b.height);
+                }
+            }
+        }
+    }
+
     // Buffer-reusing variants take a different branch than the allocating ones.
     let mut buf16 = Vec::new();
     let _ = fast_tiff_lib::read_frame_u16_into(bytes, frame, order, None, &mut buf16);

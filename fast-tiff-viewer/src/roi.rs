@@ -88,6 +88,53 @@ pub struct Residency {
     pub required: Roi,
 }
 
+/// What to draw now, and what to be preparing.
+///
+/// `show` is on the GPU (or can be put there at once); `want` is what the view
+/// actually calls for. They differ only while a finer window is being built,
+/// and that gap is the entire point — it is what lets the picture stay up
+/// instead of the program stopping until the new window is ready.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Serving {
+    /// The window to draw from.
+    pub show: Roi,
+    /// The window the view really wants. Equal to `show` when there is nothing
+    /// better to prepare.
+    pub want: Roi,
+    /// Whether `show` can be produced now. `false` means it is already on the
+    /// GPU and `want` should be built in the background.
+    pub ready: bool,
+}
+
+/// Decide what to draw, given what is resident and what the view now calls for.
+///
+/// Three cases, in order of how little work they need:
+///
+/// 1. What is resident [`serves`](Roi::serves) the view outright — the common
+///    result of a small pan. Nothing is decoded and the GPU is not touched.
+/// 2. It covers the same ground at the wrong resolution — a zoom. It is kept on
+///    screen, scaled, while the sharper window is built off-thread. Soft for a
+///    moment beats stopped for a moment, and stopped is what this costs if the
+///    two cases are merged: a zoom would then blank and wait like case 3.
+/// 3. Nothing usable is resident — the first view of a file, or a jump clear
+///    across it. There is no picture to keep showing, so this one is waited
+///    for.
+///
+/// Pure, and separate from the GPU for that reason: which case applies decides
+/// whether zooming a gigapixel image stalls, and that should be checkable
+/// without a display.
+pub fn serve(current: Option<Roi>, plan: &Residency) -> Serving {
+    if let Some(show) = current {
+        if show.serves(&plan.required) {
+            return Serving { show, want: show, ready: true };
+        }
+        if show.covers_area_of(&plan.required) {
+            return Serving { show, want: plan.resident, ready: false };
+        }
+    }
+    Serving { show: plan.resident, want: plan.resident, ready: true }
+}
+
 impl Roi {
     /// The whole frame at full resolution — what every frame small enough to
     /// upload outright uses.
@@ -114,6 +161,21 @@ impl Roi {
     pub fn serves(&self, other: &Roi) -> bool {
         self.stride == other.stride
             && self.x <= other.x
+            && self.y <= other.y
+            && self.x + self.w >= other.x + other.w
+            && self.y + self.h >= other.y + other.h
+    }
+
+    /// Whether this window covers all of `other`'s area, at whatever
+    /// resolution.
+    ///
+    /// Weaker than [`serves`](Self::serves), which also demands the right
+    /// resolution. This is the question "can I keep showing what I have while a
+    /// better one is prepared" — a coarser window covering the same ground
+    /// looks soft but is otherwise right, where one that does not cover it
+    /// shows the edge of the data.
+    pub fn covers_area_of(&self, other: &Roi) -> bool {
+        self.x <= other.x
             && self.y <= other.y
             && self.x + self.w >= other.x + other.w
             && self.y + self.h >= other.y + other.h
@@ -155,6 +217,7 @@ pub fn plan(
     height: u32,
     uv_offset: [f32; 2],
     uv_scale: [f32; 2],
+    viewport: [f32; 2],
     max_axis: u32,
     bytes_per_texel: usize,
 ) -> Residency {
@@ -168,12 +231,23 @@ pub fn plan(
     // Resolution follows what is on screen, not the size of the file: a view of
     // 2000 pixels gets stride 1 whether the frame is 4000 wide or 400000.
     //
-    // Start from the coarsest bound either axis implies and walk up. Starting
-    // at 1 would be correct but can take a very long walk on a frame that needs
-    // a stride in the thousands, and the bound is exact to within a texel or
-    // two — the grid alignment can push the requirement one texel past what
-    // pure division suggests, which is why this still has to check.
-    let mut stride = vw.div_ceil(max_axis).max(vh.div_ceil(max_axis)).max(1);
+    // The floor is what the *display* can resolve. Keeping more detail than the
+    // monitor has pixels for is invisible and not free: showing a 40000-pixel
+    // mosaic on a 1900-pixel panel at stride 1 would mean decoding, subsampling
+    // and uploading a hundred times what is drawn, and paying it again on every
+    // zoom step. Below that floor the texture is bounded by the viewport rather
+    // than by the file, which is what keeps a gigapixel image as cheap to look
+    // at as any other.
+    //
+    // Start from the coarsest bound anything implies and walk up. Starting at 1
+    // would be correct but can take a very long walk on a frame needing a
+    // stride in the thousands, and the bounds are exact only to within a texel
+    // or two — grid alignment can push the requirement past what pure division
+    // suggests, which is why this still has to check.
+    let mut stride = display_stride(vw, vh, viewport)
+        .max(vw.div_ceil(max_axis))
+        .max(vh.div_ceil(max_axis))
+        .max(1);
     loop {
         let fits_device =
             needed_texels(vx, vw, stride) <= max_axis && needed_texels(vy, vh, stride) <= max_axis;
@@ -210,6 +284,33 @@ fn needed_texels(v: u32, len: u32, stride: u32) -> u32 {
     let t0 = v / stride;
     let t1 = (v + len).div_ceil(stride);
     (t1 - t0).max(1)
+}
+
+/// The coarsest sampling that still gives the display at least one source
+/// sample per pixel it can draw.
+///
+/// Rounded **down** to a power of two, for two reasons. Down, so the texture
+/// keeps slightly more detail than the screen strictly needs and never looks
+/// soft. A power of two, so zooming crosses only a handful of levels — a stride
+/// free to take any value changes on nearly every zoom step, and each change
+/// re-decodes the window, which is precisely the stall this is meant to avoid.
+///
+/// `viewport` of zero means the frontend has not said how large it is; the
+/// result is then 1 and residency falls back to being bounded by the texture
+/// budget alone, which is correct if wasteful.
+fn display_stride(vw: u32, vh: u32, viewport: [f32; 2]) -> u32 {
+    let (pw, ph) = (viewport[0], viewport[1]);
+    if !(pw.is_finite() && ph.is_finite()) || pw < 1.0 || ph < 1.0 {
+        return 1;
+    }
+    // Source pixels per screen pixel, on the axis that needs the most.
+    let ratio = (vw as f32 / pw).max(vh as f32 / ph);
+    if !ratio.is_finite() || ratio < 2.0 {
+        return 1;
+    }
+    // Largest power of two not exceeding the ratio.
+    let n = ratio as u32;
+    1u32 << (u32::BITS - 1 - n.leading_zeros())
 }
 
 /// Build a rect from two per-axis `(start texel, texel count)` results.
