@@ -42,7 +42,7 @@ fn plan(resident: Roi, required: Roi) -> Residency {
 #[test]
 fn the_first_window_is_built_synchronously() {
     let want = roi(0, 0, W, H, 8);
-    let s = roi::serve(None, &plan(want, roi(0, 0, W, H, 8)));
+    let s = roi::serve(None, None, &plan(want, roi(0, 0, W, H, 8)));
     assert_eq!(s.show, want);
     assert_eq!(s.want, want, "nothing better to prepare");
     assert!(s.ready, "with nothing on screen there is nothing to fall back on");
@@ -56,7 +56,7 @@ fn a_pan_inside_the_resident_window_asks_for_nothing() {
     let required = roi(4_500, 2_200, 3_840, 2_160, 1);
     // A fresh plan would centre a new window on the view — irrelevant, because
     // what is resident already covers it at the right resolution.
-    let s = roi::serve(Some(current), &plan(roi(3_000, 1_000, 8_000, 4_000, 1), required));
+    let s = roi::serve(Some(current), None, &plan(roi(3_000, 1_000, 8_000, 4_000, 1), required));
     assert_eq!(s.show, current);
     assert_eq!(
         s.want, current,
@@ -73,7 +73,7 @@ fn a_pan_inside_the_resident_window_asks_for_nothing() {
 fn zooming_in_keeps_the_coarse_window_up_while_a_finer_one_is_built() {
     let current = roi(0, 0, W, H, 8); // the whole frame, coarse
     let finer = roi(10_000, 4_000, 8_000, 4_000, 1);
-    let s = roi::serve(Some(current), &plan(finer, roi(11_000, 4_500, 3_840, 2_160, 1)));
+    let s = roi::serve(Some(current), None, &plan(finer, roi(11_000, 4_500, 3_840, 2_160, 1)));
 
     assert_eq!(s.show, current, "the picture must not be blanked while the finer one is cut");
     assert_eq!(s.want, finer, "and the finer one must actually be asked for");
@@ -88,16 +88,31 @@ fn zooming_in_keeps_the_coarse_window_up_while_a_finer_one_is_built() {
 #[test]
 fn not_ready_always_names_something_to_build() {
     let cases = [
-        (Some(roi(0, 0, W, H, 8)), roi(0, 0, W, H, 1), roi(0, 0, W, H, 1)),
+        (Some(roi(0, 0, W, H, 8)), None, roi(0, 0, W, H, 1), roi(0, 0, W, H, 1)),
         (
             Some(roi(0, 0, W, H, 4)),
+            None,
             roi(2_000, 1_000, 9_000, 5_000, 1),
             roi(3_000, 2_000, 3_840, 2_160, 1),
         ),
-        (Some(roi(0, 0, W, H, 1)), roi(0, 0, W, H, 4), roi(0, 0, W, H, 4)),
+        (Some(roi(0, 0, W, H, 1)), None, roi(0, 0, W, H, 4), roi(0, 0, W, H, 4)),
+        // The overview path: one where it is what was planned (so it must not
+        // be offered) and one where it is not.
+        (
+            Some(roi(10_000, 4_000, 8_000, 4_000, 1)),
+            Some(roi(0, 0, W, H, 16)),
+            roi(0, 0, W, H, 16),
+            roi(0, 0, W, H, 16),
+        ),
+        (
+            Some(roi(0, 0, 8_000, 4_000, 1)),
+            Some(roi(0, 0, W, H, 16)),
+            roi(30_000, 8_000, 8_000, 4_000, 1),
+            roi(31_000, 8_500, 3_840, 2_160, 1),
+        ),
     ];
-    for (current, resident, required) in cases {
-        let s = roi::serve(current, &plan(resident, required));
+    for (current, overview, resident, required) in cases {
+        let s = roi::serve(current, overview, &plan(resident, required));
         if s.ready {
             assert_eq!(s.show, s.want, "a ready plan has nothing outstanding");
         } else {
@@ -107,25 +122,35 @@ fn not_ready_always_names_something_to_build() {
     }
 }
 
-/// A jump clear across the image. Keeping the old window would draw the edge of
-/// the data — blank where the picture should be — so this one is waited for even
-/// though something is on screen.
+/// A jump clear across the image with *no* overview held. Keeping the old window
+/// would draw the edge of the data — blank where the picture should be — so this
+/// one is waited for even though something is on screen.
+///
+/// With an overview this becomes case 3 instead; see
+/// [`a_jump_across_the_image_falls_back_to_the_overview`]. What this pins is
+/// that case 4 still fires when there is nothing to fall back on, which is what
+/// an overview wrongly believed to be present would break.
 #[test]
 fn a_jump_outside_the_resident_window_is_not_covered_up() {
     let current = roi(0, 0, 8_000, 4_000, 1);
     let elsewhere = roi(30_000, 8_000, 8_000, 4_000, 1);
-    let s = roi::serve(Some(current), &plan(elsewhere, roi(31_000, 8_500, 3_840, 2_160, 1)));
+    let s = roi::serve(Some(current), None, &plan(elsewhere, roi(31_000, 8_500, 3_840, 2_160, 1)));
     assert_eq!(s.show, elsewhere, "showing `current` would display blank pixels");
     assert!(s.ready);
 }
 
-/// Zooming *out* past the resident window. It is finer than needed but does not
-/// cover the new view, so it cannot be stretched over it.
+/// Zooming *out* past the resident window with no overview held. It is finer
+/// than needed but does not cover the new view, so it cannot be stretched over
+/// it and there is nothing else to show.
+///
+/// This is the case the overview exists to remove — see
+/// [`a_jump_across_the_image_falls_back_to_the_overview`] — but without one the
+/// answer must still be to build it now rather than show something wrong.
 #[test]
 fn zooming_out_beyond_the_resident_window_is_built_now() {
     let current = roi(10_000, 4_000, 8_000, 4_000, 1);
     let whole = roi(0, 0, W, H, 8);
-    let s = roi::serve(Some(current), &plan(whole, whole));
+    let s = roi::serve(Some(current), None, &plan(whole, whole));
     assert_eq!(s.show, whole);
     assert!(s.ready);
 }
@@ -136,9 +161,98 @@ fn zooming_out_beyond_the_resident_window_is_built_now() {
 #[test]
 fn a_sharper_window_than_needed_is_kept_on_screen() {
     let current = roi(0, 0, W, H, 2);
-    let s = roi::serve(Some(current), &plan(roi(0, 0, W, H, 4), roi(0, 0, W, H, 4)));
+    let s = roi::serve(Some(current), None, &plan(roi(0, 0, W, H, 4), roi(0, 0, W, H, 4)));
     assert_eq!(s.show, current, "what is up is already better than asked for");
     assert!(!s.ready, "but the cheaper window is still worth having");
+}
+
+/// Zooming out, or jumping across the image, with a coarse overview held. The
+/// resident window covers too little ground to be stretched over the new view,
+/// but the overview covers everything — so the picture stays up, correct if
+/// coarse, while the properly-sampled window is built off-thread.
+///
+/// This is the 0.75-second zoom-out stall, removed.
+#[test]
+fn a_jump_across_the_image_falls_back_to_the_overview() {
+    let current = roi(0, 0, 8_000, 4_000, 1);
+    let overview = roi(0, 0, W, H, 16);
+    let elsewhere = roi(30_000, 8_000, 8_000, 4_000, 1);
+    let s = roi::serve(
+        Some(current),
+        Some(overview),
+        &plan(elsewhere, roi(31_000, 8_500, 3_840, 2_160, 1)),
+    );
+    assert_eq!(s.show, overview, "the overview covers the new view; the fine window does not");
+    assert_eq!(s.want, elsewhere, "and the properly-sampled window is still asked for");
+    assert!(!s.ready, "showing the overview costs an upload, not a decode");
+}
+
+/// Zoomed fully out, the planned window *is* the overview — there is nothing
+/// better to prepare. Offering it as a fallback here would return `show ==
+/// want` with `ready: false`: the caller queues no build, requests no repaint,
+/// and the image stays coarse for ever with nothing on its way.
+///
+/// So this must fall through to the last case and be reported ready, leaving
+/// the upload path to notice it already holds those pixels.
+#[test]
+fn the_overview_is_not_offered_when_it_is_what_was_planned() {
+    let overview = roi(0, 0, W, H, 16);
+    let s = roi::serve(
+        Some(roi(10_000, 4_000, 8_000, 4_000, 1)),
+        Some(overview),
+        &plan(overview, overview),
+    );
+    assert_eq!(s.show, overview);
+    assert_eq!(s.want, overview);
+    assert!(s.ready, "nothing to build means ready, or nothing ever gets built");
+    assert_eq!(s.show, s.want, "a ready plan has nothing outstanding");
+}
+
+/// The overview is the fallback of last resort, not a preference. A resident
+/// window that can serve the view — or that covers it at a finer sampling —
+/// must win, or every pan and every zoom would drop the picture to the
+/// overview's coarse sampling first and climb back up.
+#[test]
+fn an_overview_never_preempts_a_resident_window() {
+    let overview = roi(0, 0, W, H, 16);
+
+    // Case 1: resident serves outright.
+    let current = roi(4_000, 2_000, 8_000, 4_000, 1);
+    let s = roi::serve(
+        Some(current),
+        Some(overview),
+        &plan(roi(3_000, 1_000, 8_000, 4_000, 1), roi(4_500, 2_200, 3_840, 2_160, 1)),
+    );
+    assert_eq!(s.show, current, "an overview must not displace a window that already serves");
+    assert!(s.ready);
+
+    // Case 2: resident covers the ground, at the wrong sampling.
+    let coarse = roi(0, 0, W, H, 8);
+    let finer = roi(10_000, 4_000, 8_000, 4_000, 1);
+    let s = roi::serve(
+        Some(coarse),
+        Some(overview),
+        &plan(finer, roi(11_000, 4_500, 3_840, 2_160, 1)),
+    );
+    assert_eq!(s.show, coarse, "stride 8 covers this view; dropping to the overview's 16 is worse");
+    assert_eq!(s.want, finer);
+    assert!(!s.ready);
+}
+
+/// An overview that does not cover the view is no use — the same rule the
+/// resident window is held to. It always does cover, being the whole frame, but
+/// nothing in `serve` may assume that.
+#[test]
+fn an_overview_that_does_not_cover_the_view_is_not_offered() {
+    let partial = roi(0, 0, W / 2, H, 16);
+    let elsewhere = roi(30_000, 8_000, 8_000, 4_000, 1);
+    let s = roi::serve(
+        Some(roi(0, 0, 8_000, 4_000, 1)),
+        Some(partial),
+        &plan(elsewhere, roi(31_000, 8_500, 3_840, 2_160, 1)),
+    );
+    assert_eq!(s.show, elsewhere, "half the frame cannot stand in for the other half");
+    assert!(s.ready);
 }
 
 // ---------------------------------------------------------------------------

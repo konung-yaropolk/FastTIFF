@@ -345,9 +345,20 @@ it can be used in projects that couldn't take a GPL dependency.
   is tenths of a second at best, so doing it inline stopped the program
   repeatedly during exactly the gesture where that is most obvious: a 14-notch
   zoom of Andromeda stalled for 2.25 seconds at a stretch. Off-thread the same
-  sweep does not stall at all; the picture goes soft for a moment instead. Only
-  the first view of a file is waited for, because there is nothing yet to keep
-  showing.
+  sweep does not stall at all; the picture goes soft for a moment instead.
+
+  That covers zooming *in*, where the window on screen still covers the ground
+  the view wants. Zooming out, or jumping across the image at full resolution,
+  it does not — a window of one corner cannot be stretched over the whole frame
+  — so there would be nothing to draw and the rebuild would have to be waited
+  for. What is kept instead is the **fit view**: the whole frame at a coarse
+  sampling, decoded once when the file opens (which happens anyway) and held in
+  RAM, about 5 MB for Andromeda. Leaving the resident window then costs an
+  upload rather than a decode, and the picture stays correct — coarse, but the
+  right pixels, not the resident window smeared past its edge. A 14-notch zoom
+  out stalled for 0.75 seconds at a stretch before; it no longer stalls at all.
+  Only the very first view of a file is waited for, because until then there is
+  nothing to keep showing.
 
   None of this machinery runs for an image that fits a texture, which is very
   nearly all of them: those take the same path they always did, decoded and

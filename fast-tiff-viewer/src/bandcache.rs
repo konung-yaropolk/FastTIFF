@@ -136,7 +136,7 @@ impl BandCache {
         cols: (u32, u32),
         planes: Vec<Decoded>,
     ) {
-        let bytes: usize = planes.iter().map(plane_bytes).sum();
+        let bytes: usize = planes.iter().map(Decoded::bytes).sum();
         if bytes > self.budget {
             return;
         }
@@ -193,10 +193,3 @@ impl BandCache {
     }
 }
 
-fn plane_bytes(p: &Decoded) -> usize {
-    match p {
-        Decoded::U8(v) => v.len(),
-        Decoded::U16(v) => v.len() * 2,
-        Decoded::F32(v) => v.len() * 4,
-    }
-}

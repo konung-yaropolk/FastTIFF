@@ -106,29 +106,50 @@ pub struct Serving {
     pub ready: bool,
 }
 
-/// Decide what to draw, given what is resident and what the view now calls for.
+/// Decide what to draw, given what is resident, what coarse overview is held,
+/// and what the view now calls for.
 ///
-/// Three cases, in order of how little work they need:
+/// Four cases, in order of how little work they need:
 ///
 /// 1. What is resident [`serves`](Roi::serves) the view outright — the common
 ///    result of a small pan. Nothing is decoded and the GPU is not touched.
-/// 2. It covers the same ground at the wrong resolution — a zoom. It is kept on
-///    screen, scaled, while the sharper window is built off-thread. Soft for a
-///    moment beats stopped for a moment, and stopped is what this costs if the
-///    two cases are merged: a zoom would then blank and wait like case 3.
-/// 3. Nothing usable is resident — the first view of a file, or a jump clear
-///    across it. There is no picture to keep showing, so this one is waited
-///    for.
+/// 2. It covers the same ground at the wrong resolution — a zoom in. It is kept
+///    on screen, scaled, while the sharper window is built off-thread. Soft for
+///    a moment beats stopped for a moment, and stopped is what this costs if
+///    the two cases are merged: a zoom would then blank and wait like case 4.
+/// 3. It does not cover the view at all, but the retained overview does — a
+///    zoom *out*, or a jump clear across the image at full resolution. A fine
+///    window covers too little ground to be stretched over a wider view, so
+///    without this case there is nothing to draw and the rebuild has to be
+///    waited for. The overview is already decoded, so showing it costs an
+///    upload rather than a decode.
+/// 4. Nothing usable at all — the first view of a file. There is no picture to
+///    keep showing, so this one is waited for.
+///
+/// `overview` must already have been checked against the current frame, channel
+/// set and formats by the caller. A stale one reaching here is worse than none:
+/// it would steer `show` at a window nobody holds the pixels for.
+///
+/// The `show != plan.resident` guard on case 3 is what keeps the fit-to-window
+/// view out of it. Zoomed fully out the planned window *is* the overview, and
+/// there is nothing better to prepare; returning `ready: false` there would
+/// leave `want == show`, so the caller would queue no build and request no
+/// repaint, and the picture would stay coarse for ever.
 ///
 /// Pure, and separate from the GPU for that reason: which case applies decides
 /// whether zooming a gigapixel image stalls, and that should be checkable
 /// without a display.
-pub fn serve(current: Option<Roi>, plan: &Residency) -> Serving {
+pub fn serve(current: Option<Roi>, overview: Option<Roi>, plan: &Residency) -> Serving {
     if let Some(show) = current {
         if show.serves(&plan.required) {
             return Serving { show, want: show, ready: true };
         }
         if show.covers_area_of(&plan.required) {
+            return Serving { show, want: plan.resident, ready: false };
+        }
+    }
+    if let Some(show) = overview {
+        if show != plan.resident && show.covers_area_of(&plan.required) {
             return Serving { show, want: plan.resident, ready: false };
         }
     }
@@ -394,26 +415,83 @@ fn axis_window(v: u32, len: u32, n: u32, stride: u32, max_texels: u32, margin: u
 /// here are fatal — the very thing this module exists to prevent.
 pub fn extract<T: Copy + Default>(src: &[T], width: u32, height: u32, roi: &Roi) -> Vec<T> {
     let (tw, th) = roi.texture_size();
-    let want = tw as usize * th as usize;
+    extract_sampled(
+        src,
+        width,
+        height,
+        &Sampling {
+            x: roi.x,
+            y: roi.y,
+            cols: tw,
+            rows: th,
+            x_step: roi.stride,
+            y_step: roi.stride,
+        },
+    )
+}
+
+/// A rectangle of a buffer whose two axes are sampled at **different** rates.
+///
+/// [`Roi`] cannot express this: its one `stride` is both the column spacing and
+/// the row spacing, which is right for an ordinary frame buffer and wrong for
+/// one whose rows came from a *stepped* decode. There, whole strips between the
+/// rows that were kept were never decompressed, so the surviving rows sit one
+/// strip-height apart in the buffer — while their columns were not sampled at
+/// all and are still every pixel.
+///
+/// Naming the two separately is the point. Conflating them is not a crash or an
+/// error but a picture built from the right pixels in the wrong columns, which
+/// reads as plausible image data with banding, and that is exactly the bug this
+/// type exists to make impossible to write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sampling {
+    /// First column of `src` to read.
+    pub x: u32,
+    /// First row of `src` to read.
+    pub y: u32,
+    /// Columns to produce.
+    pub cols: u32,
+    /// Rows to produce.
+    pub rows: u32,
+    /// Source columns between one output column and the next.
+    pub x_step: u32,
+    /// Source rows between one output row and the next.
+    pub y_step: u32,
+}
+
+/// Read `cols` x `rows` samples out of `src`, advancing `x_step` per column and
+/// `y_step` per row.
+///
+/// Anything the source runs short of comes back as `T::default()`, so the result
+/// is always exactly `cols * rows` and every row starts at the same column — a
+/// short source leaves a black edge rather than a sheared picture.
+pub fn extract_sampled<T: Copy + Default>(
+    src: &[T],
+    width: u32,
+    height: u32,
+    s: &Sampling,
+) -> Vec<T> {
+    let (cols, rows) = (s.cols as usize, s.rows as usize);
+    let want = cols * rows;
     let (w, h) = (width as usize, height as usize);
-    let stride = roi.stride.max(1) as usize;
+    let (xs, ys) = (s.x_step.max(1) as usize, s.y_step.max(1) as usize);
     let mut out: Vec<T> = Vec::with_capacity(want);
 
-    for ty in 0..th as usize {
-        let sy = roi.y as usize + ty * stride;
+    for ty in 0..rows {
+        let sy = s.y as usize + ty * ys;
         if sy >= h {
             break;
         }
-        let start = sy * w + roi.x as usize;
+        let start = sy * w + s.x as usize;
         // The last sample this row contributes, so the slice covers exactly the
         // texels wanted and `step_by` does the rest.
-        let end = (start + (tw as usize - 1) * stride + 1).min(src.len());
+        let end = (start + cols.saturating_sub(1) * xs + 1).min(src.len());
         let Some(row) = src.get(start..end) else { break };
         let before = out.len();
-        out.extend(row.iter().step_by(stride).copied());
+        out.extend(row.iter().step_by(xs).copied());
         // A row that ran short leaves a ragged edge; square it off so every row
         // starts at the same column.
-        out.resize(before + tw as usize, T::default());
+        out.resize(before + cols, T::default());
     }
     out.resize(want, T::default());
     out

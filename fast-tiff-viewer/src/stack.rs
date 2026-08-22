@@ -77,6 +77,14 @@ pub struct Stack {
     /// Only ever filled for frames too large to upload whole; an ordinary image
     /// never puts anything in it. See [`crate::bandcache`].
     pub bands: crate::bandcache::BandCache,
+    /// The whole frame at a coarse sampling, decoded and held in RAM — what a
+    /// view leaving the resident window falls back to, so it can show correct
+    /// pixels at once instead of stopping while a new window is cut.
+    ///
+    /// `None` until a frame-spanning window has been built for this file, which
+    /// the opening fit-to-window view does anyway. Never invalidated where its
+    /// inputs change; validated at every use. See [`crate::window::Overview`].
+    pub overview: Option<crate::window::Overview>,
 
     pub last_uploaded: Option<usize>,
     /// The per-channel `enabled` flags as of the last GPU upload. A disabled
@@ -156,6 +164,7 @@ impl Stack {
             // what this device can hold.
             gpu_stride: 1,
             roi: None,
+            overview: None,
             window_worker: None,
             bands: Default::default(),
             last_uploaded: None,

@@ -18,8 +18,24 @@ use scivis_render::ChannelKind;
 
 /// Whether a window is the entire frame at full resolution, in which case no
 /// view can leave it and nothing needs re-cutting.
+///
+/// Note the `stride == 1`: this is "the whole picture, every pixel", the test
+/// for whether any windowing is needed at all. For "spans the whole frame at
+/// whatever sampling", which is a different and weaker question, see
+/// [`spans_whole_frame`].
 pub fn covers_whole_frame(roi: &Roi, width: u32, height: u32) -> bool {
     roi.x == 0 && roi.y == 0 && roi.w >= width && roi.h >= height && roi.stride == 1
+}
+
+/// Whether a window spans the whole frame at *any* sampling.
+///
+/// Deliberately not [`covers_whole_frame`], which also demands `stride == 1`. A
+/// fit-to-window view of a gigapixel mosaic spans the frame at a stride of 16
+/// or more and fails that test, so using it to decide what is worth retaining
+/// as an overview would retain nothing at all — and would do so silently, since
+/// every other test would still pass.
+pub fn spans_whole_frame(roi: &Roi, width: u32, height: u32) -> bool {
+    roi.x == 0 && roi.y == 0 && roi.w >= width && roi.h >= height
 }
 
 /// How many strips to step over when sampling at `stride`, or `None` when
@@ -51,6 +67,16 @@ pub fn cut(data: &Decoded, width: u32, height: u32, roi: &Roi) -> Decoded {
         Decoded::U8(v) => Decoded::U8(roi::extract(v, width, height, roi)),
         Decoded::U16(v) => Decoded::U16(roi::extract(v, width, height, roi)),
         Decoded::F32(v) => Decoded::F32(roi::extract(v, width, height, roi)),
+    }
+}
+
+/// [`cut`], for a buffer whose rows are spaced differently from its columns.
+/// See [`roi::Sampling`] for why that happens.
+fn cut_sampled(data: &Decoded, width: u32, height: u32, s: &roi::Sampling) -> Decoded {
+    match data {
+        Decoded::U8(v) => Decoded::U8(roi::extract_sampled(v, width, height, s)),
+        Decoded::U16(v) => Decoded::U16(roi::extract_sampled(v, width, height, s)),
+        Decoded::F32(v) => Decoded::F32(roi::extract_sampled(v, width, height, s)),
     }
 }
 
@@ -224,20 +250,34 @@ pub fn assemble(
                 first_sampled..rows.end,
                 step,
             )?;
-            // Sampled rows now sit `rows_per_piece` apart in the decoded buffer
-            // rather than `stride`, starting wherever the first one fell inside
-            // its strip.
+            // The two axes are now sampled at different rates, and this is the
+            // only place in the viewer where that is true. Skipping strips
+            // removed rows from the buffer, so what survives sits
+            // `rows_per_piece` apart rather than `stride` apart — but nothing
+            // touched the columns, which are still every pixel and must be
+            // sampled at `stride` on the way into the texture.
+            //
+            // Using one spacing for both is not an error anyone would see as
+            // one: it builds a picture out of the right pixels taken from the
+            // wrong columns, which looks like the image with horizontal
+            // banding. Hence [`roi::Sampling`], which will not let the two be
+            // written as the same number by accident.
             let per = sampled.rows_per_piece.max(1);
             let off = first_sampled.saturating_sub(sampled.first_row);
-            let sub = Roi {
+            let sub = roi::Sampling {
                 x: roi.x.saturating_sub(region.cols.start),
                 y: off,
-                w: roi.w,
-                h: (t1 - t0 - 1) * per + 1,
-                stride: per,
+                cols: tw,
+                rows: t1 - t0,
+                x_step: stride,
+                y_step: per,
             };
             for (plane, data) in planes.iter_mut().zip(&band_planes) {
-                blit(plane, &cut(data, cut_w, sampled.frame.height, &sub), (t0 * tw) as usize);
+                blit(
+                    plane,
+                    &cut_sampled(data, cut_w, sampled.frame.height, &sub),
+                    (t0 * tw) as usize,
+                );
             }
             continue;
         }
@@ -283,6 +323,117 @@ pub struct Built {
     /// whether it is still the right answer when it arrives.
     pub channels: Vec<usize>,
     pub planes: Vec<Decoded>,
+}
+
+/// The most RAM a retained overview may occupy.
+///
+/// An overview is a planned resident window, so [`roi::MAX_ROI_BYTES`] already
+/// bounds it — at 512 MB, which is far too much to hold for the life of a file.
+/// This is sized instead at ten times the ~6 MB a fit view of a gigapixel
+/// mosaic costs on an ordinary panel, which leaves room for a HiDPI one and
+/// refuses the combinations (4K, several float channels) where holding it would
+/// cost more than the stall it saves.
+pub const OVERVIEW_MAX_BYTES: usize = 64 << 20;
+
+/// A frame-spanning window kept in RAM, with everything needed to tell whether
+/// it still describes the stack as it is now.
+///
+/// The point of retaining one is that a view leaving the resident window has
+/// *correct* pixels to show at once — coarse, but the right picture — instead of
+/// the interface stopping while a new window is cut. Zooming out is the case
+/// that needs it: a fine window covers too little ground to be stretched over a
+/// wider view, so without a fallback there is nothing to draw and the rebuild
+/// has to be waited for.
+///
+/// Validated where it is *used*, never invalidated where its inputs are written
+/// — the same contract as [`WindowWorker::take_matching`], and for the same
+/// reason: which frame is showing, which channels are on, and what format each
+/// one is in are written from a dozen places across two crates, and a scheme
+/// that has to remember them all is a scheme that will eventually forget one.
+/// Forgetting here means showing pixels from another frame or another channel
+/// mapping, so it is not allowed to depend on remembering.
+pub struct Overview {
+    /// The window itself.
+    pub built: Built,
+    /// `Stack::prefetch_gen` when this was captured — the decode-plan
+    /// generation, which moves whenever the channel-to-IFD mapping does.
+    pub gen: u64,
+    /// The per-channel enabled flags at capture.
+    ///
+    /// Kept separately from `gen` rather than folded into it, because the
+    /// generation bump for a channel toggle happens *after* residency is
+    /// planned: at planning time the two disagree, and the stale one is the
+    /// generation.
+    pub enabled: Vec<bool>,
+    /// The texture format of each display channel at capture. A `Decoded::U16`
+    /// plane uploaded to a channel that has since become `Int8` is not a wrong
+    /// picture but a failed validation, which takes the process with it.
+    pub kinds: Vec<ChannelKind>,
+}
+
+impl Overview {
+    /// Retain `built` as the overview, or decline it.
+    ///
+    /// Declined when it does not span the frame — a window of part of the frame
+    /// cannot serve a view of another part — or when its planes are past
+    /// [`OVERVIEW_MAX_BYTES`].
+    pub fn capture(
+        built: Built,
+        width: u32,
+        height: u32,
+        gen: u64,
+        enabled: &[bool],
+        kinds: &[ChannelKind],
+    ) -> Option<Overview> {
+        if !spans_whole_frame(&built.roi, width, height) {
+            return None;
+        }
+        let bytes: usize = built.planes.iter().map(Decoded::bytes).sum();
+        if bytes > OVERVIEW_MAX_BYTES {
+            return None;
+        }
+        Some(Overview { built, gen, enabled: enabled.to_vec(), kinds: kinds.to_vec() })
+    }
+
+    /// Bytes the retained planes occupy.
+    pub fn bytes(&self) -> usize {
+        self.built.planes.iter().map(Decoded::bytes).sum()
+    }
+
+    /// Whether this still describes the stack as it is now — the same frame,
+    /// the same decode plan, the same channels on, in the same formats.
+    pub fn matches(
+        &self,
+        frame_index: usize,
+        gen: u64,
+        enabled: &[bool],
+        kinds: &[ChannelKind],
+    ) -> bool {
+        self.built.frame_index == frame_index
+            && self.gen == gen
+            && self.enabled == enabled
+            && self.kinds == kinds
+    }
+
+    /// Whether these planes can be uploaded as they stand for `roi`.
+    ///
+    /// Stricter than [`matches`](Self::matches): the planes were cut to one
+    /// window's texture size, so they are the right bytes only for that exact
+    /// window and that exact channel list. A mismatch is a buffer that does not
+    /// fit the texture it is going into.
+    pub fn can_upload(
+        &self,
+        roi: &Roi,
+        frame_index: usize,
+        gen: u64,
+        enabled: &[bool],
+        kinds: &[ChannelKind],
+        channels: &[usize],
+    ) -> bool {
+        self.matches(frame_index, gen, enabled, kinds)
+            && self.built.roi == *roi
+            && self.built.channels == channels
+    }
 }
 
 #[cfg(feature = "threads")]

@@ -45,6 +45,20 @@ pub enum Decoded {
     F32(Vec<f32>),
 }
 
+impl Decoded {
+    /// Bytes these samples occupy — what they cost to hold, and what they cost
+    /// to upload. Not the sample *count*: an `F32` plane is four times the
+    /// bytes of a `U8` plane of the same length, and anything budgeting memory
+    /// against a count under-counts it fourfold.
+    pub fn bytes(&self) -> usize {
+        match self {
+            Decoded::U8(v) => v.len(),
+            Decoded::U16(v) => v.len() * 2,
+            Decoded::F32(v) => v.len() * 4,
+        }
+    }
+}
+
 /// Decode one channel of a frame into owned pixels.
 /// `plane`/`rgb` select the RGB-plane deinterleave; otherwise the whole image.
 fn decode_channel(

@@ -78,6 +78,10 @@ impl Viewer {
         }
 
         if self.view_mode == ViewMode::Volume {
+            // Nothing will consult the overview until the 2D view comes back,
+            // and a volume build wants every byte it can get. Same argument as
+            // cutting the band-cache budget once the window worker starts.
+            loaded.overview = None;
             outcome.needs_repaint = sync_volume(loaded, &mut self.volume, renderer);
             return outcome;
         }
@@ -126,8 +130,15 @@ impl Viewer {
             .collect();
         // The frontend asked in units of the whole image; the shader has to be
         // told where that lands on whatever is actually resident.
-        let (off, scale) = match (target, loaded.tiff.frames.first()) {
-            (Some(r), Some(f)) => r.show.map_uv(f.width, f.height, uv_offset, uv_scale),
+        //
+        // `loaded.roi` rather than `target.show`, because a finer window may
+        // have landed from the worker during the call just made — every path
+        // that uploads writes `loaded.roi` in the same breath, so it is what the
+        // textures hold, and mapping from the window that was merely *planned*
+        // would draw one frame with the wrong corner of the image.
+        let shown = loaded.roi.or_else(|| target.map(|r| r.show));
+        let (off, scale) = match (shown, loaded.tiff.frames.first()) {
+            (Some(r), Some(f)) => r.map_uv(f.width, f.height, uv_offset, uv_scale),
             _ => (uv_offset, uv_scale),
         };
         renderer.set_params(&uniforms, n_channels as u32, off, scale);
@@ -175,9 +186,29 @@ fn plan_residency(
     }
 
     let plan = roi::plan(w, h, uv_offset, uv_scale, viewport, max_axis, bytes_per_texel);
-    // Which of the three cases applies is decided in `roi`, away from the GPU,
+
+    // Check the overview here rather than where it is uploaded. If a stale one
+    // were allowed through, it would steer `show` at a window whose pixels
+    // nobody holds — and the upload site, finding nothing to upload, would fall
+    // through to assembling that frame-spanning window synchronously, which is
+    // slower than the case this exists to avoid. Dropped rather than merely
+    // skipped, since a stale overview will never become fresh again and the
+    // memory is better returned.
+    let frame_index = loaded.frame_index;
+    let gen = loaded.prefetch_gen;
+    let enabled: Vec<bool> = loaded.display.settings.iter().map(|s| s.enabled).collect();
+    let overview = match &loaded.overview {
+        Some(o) if o.matches(frame_index, gen, &enabled, kinds) => Some(o.built.roi),
+        Some(_) => {
+            loaded.overview = None;
+            None
+        }
+        None => None,
+    };
+
+    // Which of the four cases applies is decided in `roi`, away from the GPU,
     // so it can be tested without one.
-    let serving = roi::serve(loaded.roi, &plan);
+    let serving = roi::serve(loaded.roi, overview, &plan);
     loaded.gpu_stride = serving.show.stride;
     Some(serving)
 }
@@ -223,7 +254,24 @@ fn sync_movie(
         let want_gen = loaded.prefetch_gen;
         let jobs = build_jobs(loaded, frame_index, &enabled, kinds);
 
-        if partial {
+        let channels: Vec<usize> = jobs.iter().map(|j| j.channel).collect();
+        // The window asked for is the overview already held, cut to exactly
+        // this texture size. Upload it and skip the decode — this is the arm
+        // that makes zooming out cost an upload instead of a rebuild, and
+        // without it `show` being the coarse whole-frame window would send the
+        // interface thread off to assemble that window synchronously, which is
+        // more work than not having an overview at all.
+        let from_overview = loaded
+            .overview
+            .as_ref()
+            .is_some_and(|o| o.can_upload(&roi, frame_index, want_gen, &enabled, kinds, &channels));
+        if from_overview {
+            let (tw, th) = roi.texture_size();
+            let o = loaded.overview.as_ref().expect("checked");
+            for (channel, plane) in o.built.channels.iter().zip(&o.built.planes) {
+                upload_texture(renderer, *channel, tw, th, plane);
+            }
+        } else if partial {
             // Decode only the strips the window covers, a band at a time. This
             // is what keeps a gigapixel frame affordable: the cost follows what
             // is on screen, and neither the frame nor the window has to be held
@@ -232,13 +280,20 @@ fn sync_movie(
             // The prefetcher is bypassed here — it decodes whole frames, which
             // is exactly the work being avoided, and a stack of frames this
             // large is not something anyone plays back anyway.
-            let Stack { tiff, bands, .. } = &mut *loaded;
-            match window::assemble(tiff, bands, &jobs, kinds, &roi, frame_index) {
-                Ok(built) => {
+            let assembled = {
+                let Stack { tiff, bands, .. } = &mut *loaded;
+                window::assemble(tiff, bands, &jobs, kinds, &roi, frame_index)
+            };
+            match assembled {
+                Ok(planes) => {
                     let (tw, th) = roi.texture_size();
-                    for (job, plane) in jobs.iter().zip(&built) {
+                    for (job, plane) in jobs.iter().zip(&planes) {
                         upload_texture(renderer, job.channel, tw, th, plane);
                     }
+                    // If that was the whole frame, keep it: it is what the next
+                    // view leaving its window will fall back on.
+                    let built = window::Built { frame_index, roi, channels, planes };
+                    capture_overview(loaded, built, fw, fh, &enabled, kinds);
                 }
                 Err(e) => result = Err(e),
             }
@@ -290,7 +345,7 @@ fn sync_movie(
             }
         }
     }
-    loaded.last_enabled = enabled;
+    loaded.last_enabled.clone_from(&enabled);
 
     // A finer window was asked for and what is on screen is the older, coarser
     // one. Take the finished article if it has landed, otherwise ask for it and
@@ -298,7 +353,7 @@ fn sync_movie(
     let mut pending = false;
     if !plan.ready && plan.want != plan.show {
         let frame_index = loaded.frame_index;
-        let jobs = build_jobs(loaded, frame_index, &loaded.last_enabled, kinds);
+        let jobs = build_jobs(loaded, frame_index, &enabled, kinds);
         let channels: Vec<usize> = jobs.iter().map(|j| j.channel).collect();
 
         // Spawn on first need rather than at load: a thread and a second map of
@@ -327,6 +382,7 @@ fn sync_movie(
                 }
                 loaded.roi = Some(plan.want);
                 loaded.last_uploaded = Some(frame_index);
+                capture_overview(loaded, built, fw, fh, &enabled, kinds);
             }
             None => match &loaded.window_worker {
                 Some(worker) => {
@@ -338,20 +394,66 @@ fn sync_movie(
                 None => {
                     // No worker — no threads, or the file cannot be reopened.
                     // Take the stall rather than never sharpening.
-                    let Stack { tiff, bands, .. } = &mut *loaded;
-                    if let Ok(built) = window::assemble(tiff, bands, &jobs, kinds, &plan.want, frame_index) {
+                    let assembled = {
+                        let Stack { tiff, bands, .. } = &mut *loaded;
+                        window::assemble(tiff, bands, &jobs, kinds, &plan.want, frame_index)
+                    };
+                    if let Ok(planes) = assembled {
                         let (tw, th) = plan.want.texture_size();
                         renderer.ensure_size(tw, th, kinds);
-                        for (job, plane) in jobs.iter().zip(&built) {
+                        for (job, plane) in jobs.iter().zip(&planes) {
                             upload_texture(renderer, job.channel, tw, th, plane);
                         }
                         loaded.roi = Some(plan.want);
+                        // Its twin above sets this; leaving it out here means
+                        // the next sync re-decodes a window already uploaded.
+                        loaded.last_uploaded = Some(frame_index);
+                        let built = window::Built {
+                            frame_index,
+                            roi: plan.want,
+                            channels: channels.clone(),
+                            planes,
+                        };
+                        capture_overview(loaded, built, fw, fh, &enabled, kinds);
                     }
                 }
             },
         }
     }
     result.map(|()| pending)
+}
+
+/// Keep a frame-spanning build as the overview, so a view leaving the resident
+/// window has correct pixels to show at once.
+///
+/// Moves the planes rather than copying them: [`Decoded`] is deliberately not
+/// `Clone`, and copying tens of megabytes on the very path this exists to speed
+/// up would give back most of what it saves.
+///
+/// A build that does not span the frame, or is too large to hold, leaves
+/// whatever is already there — an older, coarser overview is still usable, and
+/// it is checked against the current frame and channel set on every read
+/// anyway.
+fn capture_overview(
+    loaded: &mut Stack,
+    built: window::Built,
+    fw: u32,
+    fh: u32,
+    enabled: &[bool],
+    kinds: &[ChannelKind],
+) {
+    let gen = loaded.prefetch_gen;
+    if let Some(o) = window::Overview::capture(built, fw, fh, gen, enabled, kinds) {
+        let (tw, th) = o.built.roi.texture_size();
+        log::debug!(
+            "overview retained: {}x{} at 1/{}, {} MB",
+            tw,
+            th,
+            o.built.roi.stride,
+            o.bytes() / (1 << 20)
+        );
+        loaded.overview = Some(o);
+    }
 }
 
 /// Send one channel's window to whichever texture its format lives in.
