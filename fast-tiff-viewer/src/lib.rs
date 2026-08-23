@@ -36,6 +36,7 @@
 //!   synchronous fallbacks are already the paths taken when a worker fails to
 //!   spawn, so nothing else changes.
 
+pub mod bandcache;
 pub mod camera;
 pub mod channels;
 pub mod colormap;
@@ -43,9 +44,11 @@ pub mod dimensions;
 pub mod display;
 pub mod histogram;
 pub mod prefetch;
+pub mod roi;
 pub mod stack;
 pub mod viewer;
 pub mod volume;
+pub mod window;
 
 #[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
 pub mod sync;

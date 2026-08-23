@@ -296,6 +296,92 @@ it can be used in projects that couldn't take a GPL dependency.
   the time/frame axis).
 - Zoom (Ctrl+scroll) and pan (drag) of the 2D image, with the window sized
   to fit on open.
+- **Frames larger than one GPU texture, at full resolution** — every GPU caps a
+  texture at 16384 or 32768 pixels per axis, and mosaics run well past it
+  (Hubble's Andromeda is 40000 x 12788). Such a frame is shown through a
+  *window*: the part you are looking at is kept on the GPU, and re-cut as you
+  pan. Zoomed out that is a reduced view of the whole frame, flagged
+  `1/N scale` in the toolbar; zoom in and the flag disappears, because you are
+  then looking at the file's own pixels.
+
+  A **Large image** selector appears in the panel for these frames, choosing
+  between two ways of spending your machine on the problem:
+
+  - **Tiled** (default) trades CPU for RAM. Only the region on screen is
+    loaded, at exactly the resolution the zoom calls for and no finer, so
+    memory follows the viewport rather than the file — which is why it is the
+    default: a frame of any size opens. Every zoom step is then a fresh decode
+    of the region, which is where the stutter comes from, and the coarse levels
+    it picks when zoomed out alias more.
+  - **Preload** trades RAM for smoothness. One reduced copy of the whole frame
+    — the finest that fits, usually 1/2 or 1/4 — is decoded once and kept, and
+    full resolution is cut for whatever is on screen. There are only ever those
+    two levels, so a zoom crosses one boundary instead of a dozen, panning and
+    zooming out decode nothing at all, and the reduced view aliases far less:
+    point-sampling every second pixel of a stitched mosaic moirés where every
+    sixteenth does. Costs up to 512 MB held for the life of the file, so it is
+    worth choosing when you know the file fits that.
+
+  The rest of this section describes the machinery both share.
+
+  Nothing is held in memory to make that work. Moving the window decodes only
+  the *strips* it covers (`FrameInfo::crop_rows`), a band at a time, so both
+  the time and the peak memory follow what is on screen rather than the size of
+  the file — tenths of a second and a couple of hundred megabytes for a window
+  of Andromeda, against 4 seconds and 1.5 GB for the whole frame. Files far
+  larger than RAM are no different in kind.
+
+  How finely it is sampled follows the **display**, not the file: showing a
+  40000-pixel mosaic on a 1900-pixel panel keeps about 1/16 of the pixels,
+  because the rest cannot be drawn. Sampling to the texture budget instead — as
+  it did at first — built a 384 MB texture to draw 1900 columns, and rebuilt it
+  on every zoom step. The sampling levels are powers of two, so a zoom from fit
+  to 1:1 crosses five of them rather than changing continuously.
+
+  A coarse view skips whole **strips**: at 1/8 sampling only every eighth row
+  is kept, so seven strips in eight are never decompressed at all
+  (`FrameInfo::crop_rows_step`). Decompressing them and throwing the rows away
+  is what made the zoomed-out view the slowest one to build, which is backwards.
+
+  Bands come off a grid fixed to the frame rather than to the window, and the
+  last few are kept (capped, a few hundred MB), so moving the view re-uses what
+  it already decompressed: pan sideways and the rows on screen do not change at
+  all, so nothing is decoded again; pan vertically and everything but the newly
+  exposed edge is re-used. The grid is independent of zoom, so zooming over one
+  spot re-uses its bands too.
+
+  A **tiled** TIFF does better still. A strip spans the whole image width, so a
+  narrow window of a wide mosaic decodes about ten times what it displays — the
+  file's layout, not the reader's doing. A tile is bounded on both axes, so the
+  window narrows in both: on the same 40000 x 12788 mosaic a 3840 x 2200 window
+  costs 153 ms and 37 MB decoded, against 824 ms and 264 MB from the stripped
+  original. Tiled files open natively, so converting a large image to tiles is
+  worth it if you plan to explore it.
+
+  Re-cutting the window happens on a **background thread**, and the window
+  already on screen keeps being drawn — stretched — until the new one lands. A
+  zoom crosses a sampling level every few notches, and building the next window
+  is tenths of a second at best, so doing it inline stopped the program
+  repeatedly during exactly the gesture where that is most obvious: a 14-notch
+  zoom of Andromeda stalled for 2.25 seconds at a stretch. Off-thread the same
+  sweep does not stall at all; the picture goes soft for a moment instead.
+
+  That covers zooming *in*, where the window on screen still covers the ground
+  the view wants. Zooming out, or jumping across the image at full resolution,
+  it does not — a window of one corner cannot be stretched over the whole frame
+  — so there would be nothing to draw and the rebuild would have to be waited
+  for. What is kept instead is the **fit view**: the whole frame at a coarse
+  sampling, decoded once when the file opens (which happens anyway) and held in
+  RAM, about 5 MB for Andromeda. Leaving the resident window then costs an
+  upload rather than a decode, and the picture stays correct — coarse, but the
+  right pixels, not the resident window smeared past its edge. A 14-notch zoom
+  out stalled for 0.75 seconds at a stretch before; it no longer stalls at all.
+  Only the very first view of a file is waited for, because until then there is
+  nothing to keep showing.
+
+  None of this machinery runs for an image that fits a texture, which is very
+  nearly all of them: those take the same path they always did, decoded and
+  uploaded whole, with no planning, cropping or extra copy.
 
 ## 3D volume view
 

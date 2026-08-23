@@ -54,6 +54,46 @@ pub struct Stack {
     pub tiff: TiffStack,
     pub path: PathBuf,
     pub frame_index: usize,
+    /// Subsampling applied on the way to the GPU: `1` when what is on screen is
+    /// the file's own resolution, higher when the view had to be coarsened to
+    /// fit a texture.
+    ///
+    /// Recorded here rather than kept inside the upload because it changes what
+    /// the user is looking at, and a viewer that quietly showed a reduced image
+    /// as if it were the data would be lying. The frontend reads this to say
+    /// so. On a frame bigger than one texture it falls to 1 as you zoom in,
+    /// which is the signal that you are now seeing real pixels.
+    pub gpu_stride: u32,
+    /// The window of the frame currently on the GPU, when only a window of it
+    /// is. `None` means the whole frame is resident — the ordinary case.
+    pub roi: Option<crate::roi::Roi>,
+    /// Whether this frame is past the device's per-axis texture limit, and so
+    /// can only be shown through a window at all.
+    ///
+    /// Set during [`crate::sync`], because it depends on the device. A frontend
+    /// reads it to decide whether the large-image controls are worth showing —
+    /// for every ordinary image they are not, and an option that does nothing
+    /// is worse than no option.
+    pub over_texture_limit: bool,
+    /// Builds windows off the interface thread, so zooming does not stop the
+    /// program while a finer one is prepared. `None` when the thread could not
+    /// start, or in a build without threads; windows are then built inline.
+    pub window_worker: Option<crate::window::WindowWorker>,
+    /// Decoded strip bands, so moving the window re-uses what has already been
+    /// decompressed instead of decompressing it again.
+    ///
+    /// Only ever filled for frames too large to upload whole; an ordinary image
+    /// never puts anything in it. See [`crate::bandcache`].
+    pub bands: crate::bandcache::BandCache,
+    /// The whole frame at a coarse sampling, decoded and held in RAM — what a
+    /// view leaving the resident window falls back to, so it can show correct
+    /// pixels at once instead of stopping while a new window is cut.
+    ///
+    /// `None` until a frame-spanning window has been built for this file, which
+    /// the opening fit-to-window view does anyway. Never invalidated where its
+    /// inputs change; validated at every use. See [`crate::window::Overview`].
+    pub overview: Option<crate::window::Overview>,
+
     pub last_uploaded: Option<usize>,
     /// The per-channel `enabled` flags as of the last GPU upload. A disabled
     /// channel is skipped during upload (the shader multiplies it out anyway),
@@ -128,6 +168,14 @@ impl Stack {
             path,
             display: Display::default(),
             frame_index: 0,
+            // Corrected on the first sync, once a renderer is on hand to say
+            // what this device can hold.
+            gpu_stride: 1,
+            roi: None,
+            over_texture_limit: false,
+            overview: None,
+            window_worker: None,
+            bands: Default::default(),
             last_uploaded: None,
             last_enabled: Vec::new(),
             luts_uploaded: false,

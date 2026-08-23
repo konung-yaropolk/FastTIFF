@@ -107,11 +107,44 @@ the *writer*; the down-conversion is only in the decode-to-display readers.)
   `open` detects this and expands it into N virtual frames (clamped to what
   the file actually contains), each on the zero-copy fast path.
 
+- **Tiled TIFFs** (`TileWidth`/`TileLength`/`TileOffsets`/`TileByteCounts`),
+  chunky or planar, under every codec and predictor. Tiles are stored full size
+  and padded at the right and bottom edges, and the predictor runs *inside* each
+  tile, both of which are handled — get either wrong and the image decodes
+  cleanly with every row after the first tile column shifted.
+
+  Worth preferring for large images. A strip spans the full image width, so
+  reading any pixel of one costs the whole width; a tile is bounded on both
+  axes. On a 40000 x 12788 mosaic, a 3840 x 2200 window costs **153 ms and
+  37 MB** decoded from a tiled file against **824 ms and 264 MB** from the same
+  image stored in strips.
+
+### Reading part of a frame
+
+`FrameInfo::crop_rows(rows)` and `FrameInfo::crop(cols, rows)` return the frame
+cropped to the pieces covering a band or a rectangle — an ordinary `FrameInfo`,
+so every reader, codec and predictor applies to it unchanged and the decode
+costs what the piece costs rather than what the file does. Columns only narrow
+for a tiled frame; a strip cannot be split, so a stripped frame keeps its full
+width and says so in the returned range.
+
+Both snap **outward** to piece boundaries, and report what they actually cover,
+which is what a caller must index against.
+
+`FrameInfo::crop_rows_step(rows, step)` goes further for a view that is being
+*subsampled* anyway: it keeps every `step`th strip and skips the rest, so a
+1/8-scale view of a frame decompresses an eighth of it rather than all of it and
+discards seven rows in eight. The result is again an ordinary `FrameInfo`, whose
+rows are contiguous even though their sources were not — `SampledBand::pieces`,
+`rows_per_piece` and `decoded_row_of(source_row)` say which source row each
+decoded row came from. Stripped frames only; a tiled frame narrows with `crop`
+instead, because stepping over a tile grid would skip columns as well as rows.
+
 ### Not supported
 
-Tiled TIFFs and pyramidal / mixed-size stacks (every frame must share frame 0's
-geometry — this is enforced with a clear error at `open`). A 64-bit target is
-assumed: offset arithmetic uses `usize`.
+Pyramidal / mixed-size stacks (every frame must share frame 0's geometry — this
+is enforced with a clear error at `open`). A 64-bit target is assumed: offset
+arithmetic uses `usize`.
 
 ### Robustness against malformed input
 
@@ -288,6 +321,9 @@ pub struct FrameInfo {
     pub predictor: u16,                // 1 = none, 2 = horizontal differencing
     pub photometric: u16,              // 2 = RGB, 3 = palette, 5 = separated (CMYK)
     pub planar_config: u16,            // 1 = chunky, 2 = planar
+    pub tile_size: Option<(u32, u32)>, // Some(w, h) for a tiled image; the tile
+                                       // table is carried in strip_offsets/
+                                       // strip_byte_counts
     pub ink_set: u16,                  // tag 332; 1 = CMYK (the default), 2 = other inks
     pub strip_offsets: Vec<u64>,
     pub strip_byte_counts: Vec<u64>,

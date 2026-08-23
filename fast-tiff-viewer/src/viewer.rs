@@ -171,6 +171,10 @@ pub struct Viewer {
     pub apply_pseudocolor: bool,
     /// User's decode-parallelism preference (persists across files).
     pub decode_mode: DecodeMode,
+    /// How frames past the GPU's texture limit are kept on screen (persists
+    /// across files). Only consulted for such frames; see
+    /// [`crate::roi::LargeImageMode`].
+    pub large_image_mode: crate::roi::LargeImageMode,
     /// Latched once playback falls behind in `Auto` mode. Reset per stack.
     pub decode_parallel: bool,
     /// The visible UV sub-rect of the 2D image (`offset`, `scale`), computed by
@@ -180,6 +184,18 @@ pub struct Viewer {
     /// the framebuffer (squashing the image instead of zooming).
     pub uv_offset: [f32; 2],
     pub uv_scale: [f32; 2],
+    /// Size in physical pixels of the area the image is drawn into.
+    ///
+    /// Set alongside [`uv_offset`](Self::uv_offset)/[`uv_scale`](Self::uv_scale)
+    /// — it is the other half of the same question. Those say *which* part of
+    /// the image is on screen; this says how much room there is to draw it, and
+    /// together they decide how finely the image needs to be sampled. Without
+    /// it a huge image is sampled as finely as the texture budget allows, which
+    /// can be a hundred times more detail than the display can show, paid for
+    /// on every zoom step.
+    ///
+    /// Zero means "unknown", and residency falls back to the texture budget.
+    pub viewport_px: [f32; 2],
     pub playback: Playback,
     pub volume: VolumeView,
 }

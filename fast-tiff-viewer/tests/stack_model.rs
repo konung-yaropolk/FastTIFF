@@ -109,6 +109,60 @@ fn float_stack_windows_in_its_own_units() {
     assert!(s.min <= s.max);
 }
 
+/// Reassigning the axes changes which IFD each display channel reads. The
+/// decoded-band cache is keyed by *display channel* — it has to be, because
+/// that is what keeps a sideways pan hitting — so after a reassignment every
+/// band it holds describes the wrong plane, and reusing one splices pixels from
+/// the old interpretation into the new picture.
+///
+/// Only reachable on a frame too large to upload whole, which is the only case
+/// that fills the cache at all; but there it is a wrong image rather than a slow
+/// one, so the cache is dropped whenever the mapping moves.
+#[test]
+fn reassigning_the_axes_drops_everything_decoded_under_the_old_mapping() {
+    use fast_tiff_viewer::prefetch::Decoded;
+    use fast_tiff_viewer::roi::Roi;
+    use fast_tiff_viewer::window::{Built, Overview, OVERVIEW_MAX_BYTES};
+
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let mut viewer = Viewer::new();
+    load(&mut viewer, path).expect("hyperstack should open");
+
+    // Stand in for what a windowed decode leaves behind: a band and a retained
+    // overview, both held under display channel 0 of frame 0.
+    let stack = viewer.stack.as_mut().unwrap();
+    let (w, h) = (stack.tiff.frames[0].width, stack.tiff.frames[0].height);
+    let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind).collect();
+    let enabled: Vec<bool> = stack.display.settings.iter().map(|s| s.enabled).collect();
+
+    stack.bands.put(0, vec![0], 0, (0, 4096), vec![Decoded::U16(vec![7; 1024])]);
+    assert!(stack.bands.get(0, &[0], 0, (0, 4096)).is_some(), "the setup has to be cached");
+
+    let whole = Roi { x: 0, y: 0, w, h, stride: 4 };
+    let built = Built {
+        frame_index: 0,
+        roi: whole,
+        channels: vec![0],
+        planes: vec![Decoded::U16(vec![7; 64])],
+    };
+    stack.overview = Overview::capture(built, w, h, stack.prefetch_gen, &enabled, &kinds, OVERVIEW_MAX_BYTES);
+    assert!(stack.overview.is_some(), "the setup has to retain an overview");
+
+    let shown = viewer.stack.as_ref().unwrap().display.dims;
+    viewer.set_dimension_order(shown.frames, shown.slices, shown.channels);
+
+    let stack = viewer.stack.as_mut().unwrap();
+    assert!(
+        stack.bands.get(0, &[0], 0, (0, 4096)).is_none(),
+        "channel 0 now reads a different IFD, so the band held for it is the wrong plane"
+    );
+    assert!(stack.bands.is_empty(), "nothing decoded under the old mapping may survive");
+    assert!(
+        stack.overview.is_none(),
+        "the overview was decoded through the old channel-to-IFD mapping too"
+    );
+}
+
 #[test]
 fn dimension_override_conserves_the_plane_count() {
     let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };

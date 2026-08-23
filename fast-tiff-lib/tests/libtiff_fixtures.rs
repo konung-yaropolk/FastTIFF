@@ -159,6 +159,13 @@ fn every_fixture_decodes_correctly() {
         let spp: usize = tokens[2].strip_prefix("spp").unwrap().parse().unwrap();
         let pages: usize = tokens[3].strip_prefix('p').unwrap().parse().unwrap();
 
+        // `tld_` fixtures are tiled on a geometry of their own — a grid more
+        // than one tile deep, which this matrix cannot express because its
+        // frames are shorter than a tile. `tests/tiled.rs` verifies them.
+        if gen == "tld" {
+            continue;
+        }
+
         if gen == "err" {
             assert!(
                 TiffStack::open(&path).is_err(),

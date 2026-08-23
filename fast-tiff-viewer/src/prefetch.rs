@@ -45,6 +45,20 @@ pub enum Decoded {
     F32(Vec<f32>),
 }
 
+impl Decoded {
+    /// Bytes these samples occupy — what they cost to hold, and what they cost
+    /// to upload. Not the sample *count*: an `F32` plane is four times the
+    /// bytes of a `U8` plane of the same length, and anything budgeting memory
+    /// against a count under-counts it fourfold.
+    pub fn bytes(&self) -> usize {
+        match self {
+            Decoded::U8(v) => v.len(),
+            Decoded::U16(v) => v.len() * 2,
+            Decoded::F32(v) => v.len() * 4,
+        }
+    }
+}
+
 /// Decode one channel of a frame into owned pixels.
 /// `plane`/`rgb` select the RGB-plane deinterleave; otherwise the whole image.
 fn decode_channel(
@@ -192,6 +206,171 @@ pub fn build_jobs(loaded: &Stack, frame_index: usize, enabled: &[bool], kinds: &
             ChannelJob { channel: c, ifd_idx, plane, kind: kinds[c], rgb: loaded.display.rgb, width, height }
         })
         .collect()
+}
+
+/// Decode only the strips covering `rows`, for every job.
+///
+/// The reason this exists rather than decoding the frame and slicing it: on a
+/// frame too large to upload whole, the viewer only ever shows a window, and
+/// decoding the rest is the dominant cost of moving that window. Cropping first
+/// makes the cost proportional to what is on screen — on a 40000 x 12788
+/// mosaic, tenths of a second instead of seconds, and no need to hold the
+/// decoded frame in memory at all.
+///
+/// Returns the decoded planes in `jobs` order together with the rows they
+/// actually cover, which is snapped outward to strip boundaries because a strip
+/// is the smallest thing that can be decompressed. Callers must index the
+/// planes against *that* range, not the one they asked for.
+pub fn decode_jobs_rows(
+    mmap: &[u8],
+    frames: &[FrameInfo],
+    order: ByteOrder,
+    jobs: &[ChannelJob],
+    rows: std::ops::Range<u32>,
+) -> anyhow::Result<(Vec<Decoded>, std::ops::Range<u32>)> {
+    // Crop each referenced IFD once and renumber the jobs onto the cropped
+    // set. Jobs that shared an IFD still share one, which is what keeps RGB
+    // planes on a single decompression pass.
+    let mut band_frames: Vec<FrameInfo> = Vec::new();
+    let mut seen: Vec<(usize, usize)> = Vec::new();
+    let mut band_jobs: Vec<ChannelJob> = Vec::with_capacity(jobs.len());
+    let mut covered: Option<std::ops::Range<u32>> = None;
+
+    for job in jobs {
+        let idx = match seen.iter().find(|(orig, _)| *orig == job.ifd_idx) {
+            Some((_, mapped)) => *mapped,
+            None => {
+                let frame = frames
+                    .get(job.ifd_idx)
+                    .ok_or_else(|| anyhow::anyhow!("frame {} out of range", job.ifd_idx))?;
+                let band = frame.crop_rows(rows.clone())?;
+                // Every frame in a stack shares frame 0's geometry, so the
+                // bands line up; take the first and hold the rest to it.
+                match &covered {
+                    Some(r) if *r != band.rows => anyhow::bail!(
+                        "frame {} cropped to {:?}, expected {:?} — frames disagree on strip layout",
+                        job.ifd_idx,
+                        band.rows,
+                        r
+                    ),
+                    Some(_) => {}
+                    None => covered = Some(band.rows.clone()),
+                }
+                band_frames.push(band.frame);
+                seen.push((job.ifd_idx, band_frames.len() - 1));
+                band_frames.len() - 1
+            }
+        };
+        let mut mapped = job.clone();
+        mapped.ifd_idx = idx;
+        band_jobs.push(mapped);
+    }
+
+    let covered = covered.ok_or_else(|| anyhow::anyhow!("nothing to decode"))?;
+    Ok((decode_jobs(mmap, &band_frames, order, &band_jobs)?, covered))
+}
+
+/// Decode only the pieces covering `cols` x `rows`, for every job.
+///
+/// The two-axis sibling of [`decode_jobs_rows`]. On a **tiled** frame the
+/// columns narrow too, so reading a window costs the window; on a stripped one
+/// a strip spans the full width and cannot be split, so the columns are ignored
+/// and this behaves exactly like the row version. Callers get the region back
+/// and index against that rather than what they asked for.
+pub fn decode_jobs_region(
+    mmap: &[u8],
+    frames: &[FrameInfo],
+    order: ByteOrder,
+    jobs: &[ChannelJob],
+    cols: std::ops::Range<u32>,
+    rows: std::ops::Range<u32>,
+) -> anyhow::Result<(Vec<Decoded>, std::ops::Range<u32>, std::ops::Range<u32>)> {
+    let mut band_frames: Vec<FrameInfo> = Vec::new();
+    let mut seen: Vec<(usize, usize)> = Vec::new();
+    let mut band_jobs: Vec<ChannelJob> = Vec::with_capacity(jobs.len());
+    let mut covered: Option<(std::ops::Range<u32>, std::ops::Range<u32>)> = None;
+
+    for job in jobs {
+        let idx = match seen.iter().find(|(orig, _)| *orig == job.ifd_idx) {
+            Some((_, mapped)) => *mapped,
+            None => {
+                let frame = frames
+                    .get(job.ifd_idx)
+                    .ok_or_else(|| anyhow::anyhow!("frame {} out of range", job.ifd_idx))?;
+                let region = frame.crop(cols.clone(), rows.clone())?;
+                let got = (region.cols.clone(), region.rows.clone());
+                match &covered {
+                    Some(r) if *r != got => anyhow::bail!(
+                        "frame {} cropped to {:?}, expected {:?} — frames disagree on layout",
+                        job.ifd_idx,
+                        got,
+                        r
+                    ),
+                    Some(_) => {}
+                    None => covered = Some(got),
+                }
+                band_frames.push(region.frame);
+                seen.push((job.ifd_idx, band_frames.len() - 1));
+                band_frames.len() - 1
+            }
+        };
+        let mut mapped = job.clone();
+        mapped.ifd_idx = idx;
+        band_jobs.push(mapped);
+    }
+
+    let (cols, rows) = covered.ok_or_else(|| anyhow::anyhow!("nothing to decode"))?;
+    Ok((decode_jobs(mmap, &band_frames, order, &band_jobs)?, cols, rows))
+}
+
+/// Decode only the pieces a coarse view actually samples.
+///
+/// At stride `step * rows_per_piece` a contiguous crop decompresses every piece
+/// it spans, and at a coarse zoom most of them hold nothing that will be drawn.
+/// This takes every `step`-th piece instead, so the work follows what is
+/// sampled. Returns the planes and the band description, which says where each
+/// decoded row came from.
+///
+/// Stripped frames only — a tiled frame narrows by cropping columns instead.
+pub fn decode_jobs_stepped(
+    mmap: &[u8],
+    frames: &[FrameInfo],
+    order: ByteOrder,
+    jobs: &[ChannelJob],
+    rows: std::ops::Range<u32>,
+    step: u32,
+) -> anyhow::Result<(Vec<Decoded>, fast_tiff_lib::SampledBand)> {
+    let mut band_frames: Vec<FrameInfo> = Vec::new();
+    let mut seen: Vec<(usize, usize)> = Vec::new();
+    let mut band_jobs: Vec<ChannelJob> = Vec::with_capacity(jobs.len());
+    let mut covered: Option<fast_tiff_lib::SampledBand> = None;
+
+    for job in jobs {
+        let idx = match seen.iter().find(|(orig, _)| *orig == job.ifd_idx) {
+            Some((_, mapped)) => *mapped,
+            None => {
+                let frame = frames
+                    .get(job.ifd_idx)
+                    .ok_or_else(|| anyhow::anyhow!("frame {} out of range", job.ifd_idx))?;
+                let band = frame.crop_rows_step(rows.clone(), step)?;
+                if let Some(r) = &covered {
+                    if r.first_row != band.first_row || r.pieces != band.pieces {
+                        anyhow::bail!("frames disagree on strip layout");
+                    }
+                }
+                band_frames.push(band.frame.clone());
+                covered.get_or_insert(band);
+                seen.push((job.ifd_idx, band_frames.len() - 1));
+                band_frames.len() - 1
+            }
+        };
+        let mut mapped = job.clone();
+        mapped.ifd_idx = idx;
+        band_jobs.push(mapped);
+    }
+
+    let band = covered.ok_or_else(|| anyhow::anyhow!("nothing to decode"))?;
+    Ok((decode_jobs(mmap, &band_frames, order, &band_jobs)?, band))
 }
 
 /// One decoded channel of a completed prefetch.

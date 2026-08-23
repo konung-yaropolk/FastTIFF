@@ -53,6 +53,19 @@ pub fn apply_resolved_dimensions(loaded: &mut Stack, resolved: fast_tiff_lib::Re
     loaded.frame_index = 0;
     loaded.last_uploaded = None;
     loaded.luts_uploaded = false;
+    // Which IFD each display channel reads just changed, and the decoded-band
+    // cache is keyed by *display channel*, not by IFD — so every band it holds
+    // now describes the wrong plane. Keeping them would splice pixels from the
+    // old interpretation into the next window, which is worse than the decode
+    // they save: a wrong picture rather than a slow one. Only ever non-empty
+    // for a frame too large to upload whole, so this costs nothing for an
+    // ordinary image.
+    loaded.bands.clear();
+    // Same argument for the retained overview: its planes were decoded through
+    // the old channel-to-IFD mapping. It is checked against `prefetch_gen` on
+    // every read as well, so this is belt and braces — but it returns the
+    // memory now rather than at the next sync.
+    loaded.overview = None;
 }
 
 /// Which sample planes of an `spp`-sample RGB frame get a display channel, and

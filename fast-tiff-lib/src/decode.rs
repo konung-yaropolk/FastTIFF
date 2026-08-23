@@ -522,7 +522,12 @@ pub fn read_planes_u16_into(
     // untouched native bytes, instead of a full read-modify-write undo pass
     // followed by the gathers. Planar frames row up differently (one sample
     // per row position, spp planes of rows), so they take the general path.
-    let fuse = spp > 1 && !frame.is_planar() && frame.predictor == 2 && matches!(frame.bits_per_sample, 8 | 16);
+    // Not for a tiled frame: the fusion walks whole image rows, while a tiled
+    // frame's predictor runs inside each tile. Fusing would difference straight
+    // across the seam between tile columns, which shows up as every tile after
+    // the first being offset by its neighbour's last pixel.
+    let fuse = spp > 1 && !frame.is_planar() && frame.predictor == 2 && matches!(frame.bits_per_sample, 8 | 16)
+        && !frame.is_tiled();
     let native = decode_native_bytes_opt(mmap, frame, file_order, !fuse)?;
     out.resize_with(spp, Vec::new);
     for (p, plane_out) in out.iter_mut().enumerate() {
@@ -752,7 +757,11 @@ pub fn read_planes_u8_into(
     let spp = (frame.samples_per_pixel as usize).max(1);
     let n_pixels = frame.pixel_count()?;
     // Same predictor-2 fusion as the u16 planes path (see there), raw bytes.
-    let fuse = spp > 1 && !frame.is_planar() && frame.predictor == 2 && frame.bits_per_sample == 8;
+    // Not for a tiled frame: the fusion walks whole image rows, while a tiled
+    // frame's predictor runs inside each tile. Fusing would difference straight
+    // across the seam between tile columns, which shows up as every tile after
+    // the first being offset by its neighbour's last pixel.
+    let fuse = spp > 1 && !frame.is_planar() && frame.predictor == 2 && frame.bits_per_sample == 8 && !frame.is_tiled();
     let native = decode_native_bytes_opt(mmap, frame, file_order, !fuse)?;
     out.resize_with(spp, Vec::new);
     for (p, plane_out) in out.iter_mut().enumerate() {
@@ -1140,6 +1149,10 @@ fn decode_native_bytes_opt<'a>(
     // image can be read straight out of the memory map — no intermediate copy.
     // (The 16-bit/native-order case is borrowed even more cheaply as `u16` by
     // `read_frame_u16`; this covers 8-bit, 32-bit, RGB and byte-swapped data.)
+    if frame.is_tiled() {
+        return Ok(Cow::Owned(assemble_tiles(mmap, frame, file_order, undo_pred)?));
+    }
+
     if frame.compression == Compression::None
         && frame.strip_offsets.len() == 1
         && frame.strip_byte_counts.first().copied().unwrap_or(0) as usize >= total_len
@@ -1228,6 +1241,155 @@ fn decode_native_bytes_opt<'a>(
     } else {
         Ok(Cow::Owned(native))
     }
+}
+
+/// Assemble a tiled frame.
+///
+/// Strips can be decompressed straight into the output because a strip's rows
+/// are contiguous there. A tile's are not — it is a rectangle, so its rows land
+/// `width` apart — so each tile is decompressed into a scratch buffer and then
+/// copied in row by row. That extra copy is the price of tiles, and it buys the
+/// thing strips cannot offer: reading a window of a huge image without touching
+/// the rest of its rows.
+///
+/// Two details separate a working tiled reader from a subtly broken one:
+///
+/// - **edge tiles are stored full-size.** TIFF6 pads the tiles hanging off the
+///   right and bottom edges rather than trimming them, so a tile always
+///   decompresses to `tile_w * tile_h` samples and only part of it is copied.
+///   Assume trimming and every row after the first tile column is shifted.
+/// - **the predictor runs inside the tile**, over the tile's own width,
+///   including that padding — so it has to be undone per tile, before the copy,
+///   not on the assembled frame. It is undone here by handing the shared
+///   routine a tile-shaped frame, which keeps one implementation of the
+///   per-bit-depth differencing rather than a second one that can drift.
+fn assemble_tiles(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+    undo_pred: bool,
+) -> Result<Vec<u8>> {
+    let sample_bytes = bytes_for_bits(frame.bits_per_sample)?;
+    let total_len = frame.decoded_len()?;
+    let (across, down, tile_w, tile_h) =
+        frame.tile_grid().ok_or_else(|| anyhow!("assemble_tiles called on a stripped frame"))?;
+
+    let spp = (frame.samples_per_pixel as usize).max(1);
+    let planar = frame.is_planar();
+    let n_planes = if planar { spp } else { 1 };
+    // Samples per pixel *within one plane*: a planar plane holds one.
+    let per_px = if planar { 1 } else { spp };
+
+    let dst_row_bytes = (frame.width as usize).saturating_mul(per_px).saturating_mul(sample_bytes);
+    let tile_row_bytes = (tile_w as usize).saturating_mul(per_px).saturating_mul(sample_bytes);
+    let tile_bytes = tile_row_bytes.saturating_mul(tile_h as usize);
+    let plane_bytes = dst_row_bytes.saturating_mul(frame.height as usize);
+    if tile_bytes == 0 || plane_bytes == 0 {
+        bail!("degenerate tile geometry: {tile_w}x{tile_h} tiles in a {}x{} frame", frame.width, frame.height);
+    }
+
+    // The tile table has to describe the grid before any of it can be indexed.
+    let want = frame.piece_count();
+    if frame.strip_offsets.len() < want || frame.strip_byte_counts.len() < want {
+        bail!(
+            "tile table has {} offsets / {} byte counts, need {want} for {across}x{down} tiles              across {n_planes} plane(s)",
+            frame.strip_offsets.len(),
+            frame.strip_byte_counts.len()
+        );
+    }
+
+    guard_frame_size(frame)?;
+    // ...and guard the *padded* rectangle the tiles actually cover, which is
+    // what gets allocated and decompressed. The image size does not bound it:
+    // tile dimensions are their own file-declared tags, so a 40x36 image may
+    // claim 65535x65535 tiles, and a scratch buffer for one of those is twelve
+    // gigabytes. Reusing the frame guard here is deliberate — its input-supply
+    // bound (decoded bytes against compressed bytes present) is exactly the
+    // check that catches this, and one implementation cannot drift from itself.
+    let mut padded = frame.clone();
+    padded.width = across.saturating_mul(tile_w);
+    padded.height = down.saturating_mul(tile_h);
+    padded.tile_size = None;
+    padded.rows_per_strip = tile_h;
+    guard_frame_size(&padded).map_err(|e| {
+        anyhow!("{tile_w}x{tile_h} tiles over a {}x{} frame: {e}", frame.width, frame.height)
+    })?;
+
+    let mut native: Vec<u8> = Vec::new();
+    native
+        .try_reserve_exact(total_len)
+        .map_err(|_| anyhow!("cannot allocate {total_len} bytes for a {}x{} frame", frame.width, frame.height))?;
+    native.resize(total_len, 0);
+
+    // A tile-shaped view of the frame, purely so the predictor undo — which
+    // walks rows of `width` — can be pointed at a tile.
+    let mut tile_frame = frame.clone();
+    tile_frame.width = tile_w;
+    tile_frame.height = tile_h;
+    tile_frame.tile_size = None;
+
+    let compression = frame.compression;
+    let parallel = compression != Compression::None && want > 1 && should_parallelize(frame.pixel_count()?);
+
+    for (plane, plane_dst) in native.chunks_mut(plane_bytes).enumerate().take(n_planes) {
+        // One band per tile row: every tile in a row writes into it, at
+        // disjoint columns, so bands can be filled independently.
+        let bands: Vec<(usize, &mut [u8])> =
+            plane_dst.chunks_mut(tile_h as usize * dst_row_bytes).enumerate().collect();
+
+        let fill = |(ty, band): (usize, &mut [u8])| -> Result<()> {
+            // Fallibly: `vec![0; n]` aborts the process when the allocator says
+            // no, and an abort cannot be caught by an embedder.
+            let mut scratch: Vec<u8> = Vec::new();
+            scratch
+                .try_reserve_exact(tile_bytes)
+                .map_err(|_| anyhow!("cannot allocate {tile_bytes} bytes for a {tile_w}x{tile_h} tile"))?;
+            scratch.resize(tile_bytes, 0);
+            for tx in 0..across as usize {
+                let index = plane * (across as usize * down as usize) + ty * across as usize + tx;
+                let (offset, len) = (frame.strip_offsets[index], frame.strip_byte_counts[index]);
+                let src = mmap
+                    .get(offset as usize..(offset as usize).saturating_add(len as usize))
+                    .ok_or_else(|| anyhow!("tile {index} at offset {offset} (len {len}) out of file bounds"))?;
+                // Zero first: a tile whose data runs short leaves the rest of
+                // its rectangle blank rather than showing the previous tile.
+                scratch.fill(0);
+                if decompress_into(src, compression, &mut scratch)? == 0 {
+                    bail!("tile {index} decoded to nothing ({len} bytes at offset {offset})");
+                }
+                let tile = if undo_pred && frame.predictor != 1 {
+                    Cow::Owned(undo_predictor(std::mem::take(&mut scratch), &tile_frame, sample_bytes, file_order)?)
+                } else {
+                    Cow::Borrowed(&scratch[..])
+                };
+
+                // Copy the part of the tile that lies inside the image.
+                let x_off = tx * tile_row_bytes;
+                let keep = tile_row_bytes.min(dst_row_bytes.saturating_sub(x_off));
+                if keep == 0 {
+                    continue;
+                }
+                for r in 0..tile_h as usize {
+                    let Some(dst_row) = band.get_mut(r * dst_row_bytes..) else { break };
+                    let Some(dst) = dst_row.get_mut(x_off..x_off + keep) else { break };
+                    dst.copy_from_slice(&tile[r * tile_row_bytes..r * tile_row_bytes + keep]);
+                }
+                if let Cow::Owned(buf) = tile {
+                    scratch = buf; // reuse the allocation for the next tile
+                    scratch.resize(tile_bytes, 0);
+                }
+            }
+            Ok(())
+        };
+
+        if parallel {
+            bands.into_par_iter().try_for_each(fill)?;
+        } else {
+            bands.into_iter().try_for_each(fill)?;
+        }
+    }
+
+    Ok(native)
 }
 
 /// Decompress one strip **directly into its destination slice** (the strip's

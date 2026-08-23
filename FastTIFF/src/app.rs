@@ -24,6 +24,7 @@ use fast_tiff_viewer::channels::{
     gray_lut_applicable, gray_lut_count, gray_lut_sel_name, gray_lut_sel_tint,
     pseudocolor_applicable,
 };
+use fast_tiff_viewer::roi::LargeImageMode;
 use fast_tiff_viewer::{DecodeMode, Stack, ViewMode, Viewer};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -879,6 +880,23 @@ impl eframe::App for ViewerApp {
                         channels_desc,
                     ));
 
+                    // Say so when the picture on screen is not the picture in
+                    // the file. This only appears for frames past the GPU
+                    // texture limit, which is rare and enormous — but silently
+                    // showing a reduced image as if it were the data would be
+                    // the kind of wrong a viewer must never be.
+                    if loaded.gpu_stride > 1 {
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!("1/{} scale", loaded.gpu_stride))
+                                .color(Color32::from_rgb(230, 170, 60)),
+                        )
+                        .on_hover_text(format!(
+                            "This frame is larger than one GPU texture can hold, so it is                              shown subsampled {}x on each axis. Pixel values and measurements                              read from it are sampled, not exact.",
+                            loaded.gpu_stride
+                        ));
+                    }
+
                     if !hide_frame_info {
                         ui.separator();
                         let frame_digits = dims.frames.to_string().len();
@@ -930,6 +948,7 @@ impl eframe::App for ViewerApp {
         let mut scroll_step: i32 = 0;
         let mut playback_fps = self.core.playback.fps;
         let mut decode_mode = self.core.decode_mode;
+        let mut large_image_mode = self.core.large_image_mode;
         let mut metadata_toggle = false;
         let mut histogram_toggle = false;
         let current_status = self.core.status.clone();
@@ -1218,6 +1237,45 @@ impl eframe::App for ViewerApp {
                         row_has_items = true;
                     }
 
+                    // How a frame too large to become a texture is kept on
+                    // screen. Only for such frames — for every ordinary image
+                    // both settings do exactly the same thing, and an option
+                    // that changes nothing is worse than no option. The flag is
+                    // set during the GPU sync, since only there is the device's
+                    // texture limit known.
+                    if loaded.over_texture_limit {
+                        if row_has_items {
+                            ui.separator();
+                        }
+                        ui.label("Large image:");
+                        egui::ComboBox::from_id_salt("large_image_mode")
+                            .selected_text(match large_image_mode {
+                                LargeImageMode::Preload => "Preload",
+                                LargeImageMode::Tiled => "Tiled",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut large_image_mode, LargeImageMode::Tiled, "Tiled")
+                                    .on_hover_text(
+                                        "Load only the region on screen, at whatever resolution the zoom \
+                                         calls for. Uses far less memory, but every zoom step decodes afresh, \
+                                         so zooming costs CPU and can stutter.",
+                                    );
+                                ui.selectable_value(&mut large_image_mode, LargeImageMode::Preload, "Preload")
+                                    .on_hover_text(
+                                        "Keep one reduced copy of the whole image in memory, plus full \
+                                         resolution for whatever is on screen. Smooth to pan and zoom, and \
+                                         less moiré when zoomed out, at the cost of the memory that copy \
+                                         occupies.",
+                                    );
+                            })
+                            .response
+                            .on_hover_text(
+                                "This image is larger than the graphics card can hold as one texture, \
+                                 so only part of it is resident at a time.",
+                            );
+                        row_has_items = true;
+                    }
+
                     // The two pop-up toggles. They flow with the rest of the
                     // row rather than being pinned to its right edge: once the
                     // row can wrap there is no single right edge to pin to, and
@@ -1267,6 +1325,7 @@ impl eframe::App for ViewerApp {
 
         self.core.playback.fps = playback_fps;
         self.core.decode_mode = decode_mode;
+        self.core.large_image_mode = large_image_mode;
         if metadata_toggle {
             self.show_metadata = !self.show_metadata;
         }
@@ -1490,6 +1549,10 @@ impl eframe::App for ViewerApp {
                 let inv = egui::vec2(1.0 / img_px.x.max(1.0), 1.0 / img_px.y.max(1.0));
                 self.core.uv_offset = ((visible.min - origin) * inv).into();
                 self.core.uv_scale = (visible.size() * inv).into();
+                // How much room there is to draw it, which is what decides how
+                // finely an over-large image needs to be sampled.
+                let ppp = ui.ctx().pixels_per_point();
+                self.core.viewport_px = (visible.size() * ppp).into();
                 ui.painter()
                     .with_clip_rect(panel_rect)
                     .add(render::paint_callback(&self.render, visible));

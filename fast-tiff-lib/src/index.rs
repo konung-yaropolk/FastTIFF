@@ -37,6 +37,16 @@ const TAG_COLOR_MAP: u16 = 320;
 /// including hi-fi sets like CMYK+orange+green whose order is described only by
 /// `InkNames`. Only `1` may be interpreted with the CMYK formula.
 pub(crate) const TAG_INK_SET: u16 = 332;
+/// TileWidth (322) / TileLength (323): the size of one tile in a tiled image.
+/// Both must be multiples of 16 per TIFF6; readers that insist on it reject
+/// files libtiff itself will happily open, so this only requires them non-zero.
+const TAG_TILE_WIDTH: u16 = 322;
+const TAG_TILE_LENGTH: u16 = 323;
+/// TileOffsets (324) / TileByteCounts (325): the tile table, the exact
+/// counterpart of StripOffsets/StripByteCounts. Tiles run left to right, top to
+/// bottom, and for a planar image the whole grid repeats once per plane.
+const TAG_TILE_OFFSETS: u16 = 324;
+const TAG_TILE_BYTE_COUNTS: u16 = 325;
 
 /// Ceiling on how many frames one file may index.
 ///
@@ -97,6 +107,21 @@ pub struct FrameInfo {
     /// pixel, the default), 2 = planar (each sample stored as its own whole
     /// plane, one after another). Both are decoded; see `FrameInfo::is_planar`.
     pub planar_config: u16,
+    /// Tile size `(width, length)` for a tiled image, `None` for a stripped one.
+    ///
+    /// Tiles and strips are the same idea — an independently compressed piece of
+    /// the image — differing in shape, and the tile table is carried in
+    /// [`strip_offsets`](Self::strip_offsets) / [`strip_byte_counts`](Self::strip_byte_counts)
+    /// so that everything which only cares about "where are the pieces" needs no
+    /// second code path.
+    ///
+    /// The difference that matters is *what a piece covers*. A strip spans the
+    /// full image width, so reading any pixel of it costs the whole width; a
+    /// tile is bounded on both axes, so a window of a huge image can be read
+    /// without touching the rest of its rows. That is the entire reason to
+    /// prefer tiles for large images, and why [`FrameInfo::crop`] can narrow
+    /// columns for a tiled frame and not for a stripped one.
+    pub tile_size: Option<(u32, u32)>,
     /// InkSet (tag 332), meaningful only for a Separated image
     /// (`photometric == 5`): `1` = the four process inks in C, M, Y, K order,
     /// `2` = some other ink set. Defaults to 1 per TIFF6, which is also the
@@ -106,6 +131,98 @@ pub struct FrameInfo {
     pub strip_offsets: Vec<u64>,
     pub strip_byte_counts: Vec<u64>,
     pub rows_per_strip: u32,
+}
+
+/// A horizontal band of a frame: the strips covering some rows, as a frame in
+/// its own right.
+///
+/// [`rows`](Self::rows) is the band's position in the original frame, snapped
+/// outward to strip boundaries — a caller asking for rows 1000..1100 of a file
+/// with 16 rows per strip gets 992..1104, and must offset into the decoded
+/// planes accordingly.
+#[derive(Clone, Debug)]
+pub struct RowBand {
+    /// The band, decodable by every reader in this crate.
+    pub frame: FrameInfo,
+    /// Which rows of the original frame it holds.
+    pub rows: std::ops::Range<u32>,
+}
+
+/// A frame sampled every `step` pieces — rows that are contiguous in the result
+/// but spaced out in the original.
+#[derive(Clone, Debug)]
+pub struct SampledBand {
+    /// The sampled pieces, decodable by every reader in this crate.
+    pub frame: FrameInfo,
+    /// Source row that decoded row 0 came from.
+    pub first_row: u32,
+    /// Rows in one piece — decoded rows arrive in runs of this many.
+    pub rows_per_piece: u32,
+    /// Pieces taken.
+    pub pieces: u32,
+    /// Pieces skipped between the ones taken; 1 means none were.
+    pub step: u32,
+}
+
+impl SampledBand {
+    /// Where `source_row` landed in the decoded result, if it was sampled.
+    ///
+    /// Only rows inside a piece that was *taken* are present — the ones in the
+    /// skipped pieces are simply not there, which is what makes the decode
+    /// cheap.
+    ///
+    /// Being in a piece that was taken is necessary but not sufficient: the
+    /// last piece of a frame is usually short, holding fewer than
+    /// `rows_per_piece` rows, and if that is the piece taken then the rows past
+    /// its end were never in the file. Answering with an index the result does
+    /// not have would send a caller reading off the end of the decoded plane,
+    /// so the answer is checked against the frame that was actually built.
+    pub fn decoded_row_of(&self, source_row: u32) -> Option<u32> {
+        let per = self.rows_per_piece.max(1);
+        let offset = source_row.checked_sub(self.first_row)?;
+        let piece = offset / per;
+        if !piece.is_multiple_of(self.step.max(1)) {
+            return None; // fell in a piece that was stepped over
+        }
+        let taken = piece / self.step.max(1);
+        if taken >= self.pieces {
+            return None;
+        }
+        // Checked rather than saturating: `rows_per_piece` comes from the
+        // file's own `RowsPerStrip`, so a hostile one can make this overflow,
+        // and a saturated index is still an index the result does not have.
+        let row = taken.checked_mul(per)?.checked_add(offset % per)?;
+        (row < self.frame.height).then_some(row)
+    }
+}
+
+/// A rectangular piece of a frame: the tiles or strips covering some rows and
+/// columns, as a frame in its own right.
+///
+/// [`rows`](Self::rows) and [`cols`](Self::cols) give its position in the
+/// original, snapped outward to whatever the file's compression unit is — tile
+/// boundaries for a tiled frame, strip boundaries and the full width for a
+/// stripped one, because a strip cannot be narrowed.
+#[derive(Clone, Debug)]
+pub struct Region {
+    /// The piece, decodable by every reader in this crate.
+    pub frame: FrameInfo,
+    /// Which rows of the original it holds.
+    pub rows: std::ops::Range<u32>,
+    /// Which columns of the original it holds.
+    pub cols: std::ops::Range<u32>,
+}
+
+impl RowBand {
+    /// How many rows the band holds.
+    pub fn len(&self) -> u32 {
+        self.rows.end - self.rows.start
+    }
+
+    /// Whether the band holds no rows, which `crop_rows` never returns.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl FrameInfo {
@@ -164,6 +281,288 @@ impl FrameInfo {
             && self.samples_per_pixel >= 4
             && self.sample_format == SampleFormat::UnsignedInt
             && matches!(self.bits_per_sample, 8 | 16)
+    }
+
+    /// Whether this frame is stored as tiles rather than strips.
+    pub fn is_tiled(&self) -> bool {
+        self.tile_size.is_some()
+    }
+
+    /// The tile grid: `(across, down)` tiles, and the tile size. `None` for a
+    /// stripped frame.
+    ///
+    /// Edge tiles are *not* trimmed: TIFF6 stores every tile at the full tile
+    /// size and pads the ones hanging off the right or bottom edge, so the grid
+    /// covers at least the image and usually a little more. Assuming otherwise
+    /// is the classic way to read a tiled file with every row shifted.
+    pub fn tile_grid(&self) -> Option<(u32, u32, u32, u32)> {
+        let (tw, th) = self.tile_size?;
+        let (tw, th) = (tw.max(1), th.max(1));
+        Some((self.width.div_ceil(tw).max(1), self.height.div_ceil(th).max(1), tw, th))
+    }
+
+    /// Pieces of compressed data one plane is divided into — tiles for a tiled
+    /// frame, strips otherwise.
+    pub(crate) fn pieces_per_plane(&self) -> usize {
+        match self.tile_grid() {
+            Some((across, down, _, _)) => across as usize * down as usize,
+            None => (self.height.div_ceil(self.rows_per_strip.max(1))).max(1) as usize,
+        }
+    }
+
+    /// Total compression units the frame should have: every piece of every
+    /// plane. What the strip or tile table has to be long enough to describe.
+    pub(crate) fn piece_count(&self) -> usize {
+        self.pieces_per_plane().saturating_mul(self.piece_planes())
+    }
+
+    /// How many independent planes the pieces are grouped into: one per sample
+    /// for a planar frame, one in total otherwise.
+    pub(crate) fn piece_planes(&self) -> usize {
+        if self.is_planar() {
+            (self.samples_per_pixel as usize).max(1)
+        } else {
+            1
+        }
+    }
+
+    /// Every `step`-th piece from the one covering `rows.start`, enough of them
+    /// to reach `rows.end`.
+    ///
+    /// For sampling a frame coarsely. Showing a 40000-pixel mosaic on a
+    /// 1900-pixel panel needs roughly every sixteenth row — and with two rows to
+    /// a strip, seven strips in every eight contain nothing that will be drawn,
+    /// yet a contiguous crop decompresses all of them. Stepping over them makes
+    /// the decode proportional to what is sampled rather than to what is
+    /// spanned, which on that file is eight times less work.
+    ///
+    /// The decoded rows are **not** contiguous in the original: row `k` of the
+    /// result is source row `first_row + (k / rows_per_piece) * step *
+    /// rows_per_piece + (k % rows_per_piece)`. Callers that sample every
+    /// `step * rows_per_piece`-th source row can ignore that and simply read
+    /// every `rows_per_piece`-th decoded row, which is the case this exists for
+    /// — see [`SampledBand::decoded_row_of`].
+    ///
+    /// `step` of 1 is exactly [`crop_rows`](Self::crop_rows).
+    pub fn crop_rows_step(&self, rows: std::ops::Range<u32>, step: u32) -> Result<SampledBand> {
+        let step = step.max(1);
+        let per_piece = if self.is_tiled() {
+            self.tile_size.map_or(1, |(_, h)| h.max(1))
+        } else {
+            self.rows_per_strip.max(1)
+        };
+        if step == 1 {
+            let band = self.crop_rows(rows)?;
+            let first_row = band.rows.start;
+            let pieces = band.len().div_ceil(per_piece).max(1);
+            return Ok(SampledBand { frame: band.frame, first_row, rows_per_piece: per_piece, pieces, step });
+        }
+        // Stepping over a tile grid would skip columns as well as rows, since a
+        // tile row is `across` consecutive entries. Not wrong to want, but not
+        // what this expresses — a tiled frame narrows by cropping instead.
+        if self.is_tiled() {
+            bail!("crop_rows_step is for stripped frames; a tiled frame narrows with crop()");
+        }
+
+        let per_plane = self.height.div_ceil(per_piece) as usize;
+        let planes = self.piece_planes();
+        let want = self.piece_count();
+        if self.strip_offsets.len() < want || self.strip_byte_counts.len() < want {
+            bail!(
+                "strip table has {} offsets / {} byte counts, need {want}",
+                self.strip_offsets.len(),
+                self.strip_byte_counts.len()
+            );
+        }
+
+        let start = rows.start.min(self.height.saturating_sub(1));
+        let end = rows.end.clamp(start + 1, self.height.max(1));
+        let first = (start / per_piece) as usize;
+        // Pieces from `first`, every `step`, until one starts at or after `end`.
+        let last_needed = (end - 1) / per_piece;
+        let pieces = ((last_needed as usize).saturating_sub(first) / step as usize) + 1;
+        let pieces = pieces.min(per_plane.saturating_sub(first)).max(1);
+
+        let mut offsets = Vec::with_capacity(planes * pieces);
+        let mut counts = Vec::with_capacity(planes * pieces);
+        for p in 0..planes {
+            let base = p * per_plane;
+            for i in 0..pieces {
+                let idx = base + first + i * step as usize;
+                if idx >= base + per_plane {
+                    break;
+                }
+                offsets.push(self.strip_offsets[idx]);
+                counts.push(self.strip_byte_counts[idx]);
+            }
+        }
+        let taken = offsets.len() / planes.max(1);
+
+        let mut frame = self.clone();
+        // The pieces sit back to back in the result, so its height is however
+        // many rows they hold — the gaps between them in the original are not
+        // represented, which is the whole point.
+        //
+        // The last piece of a frame is usually short, and if that one is taken
+        // the result is shorter than `taken * per_piece`. Claiming the round
+        // number would size the decode for rows the file does not have, and the
+        // reader would rightly refuse a frame whose strips fall short of it.
+        let last_idx = (first + (taken.saturating_sub(1)) * step as usize) as u32;
+        let last_rows = per_piece.min(self.height.saturating_sub(last_idx.saturating_mul(per_piece)));
+        frame.height = (taken as u32).saturating_sub(1).saturating_mul(per_piece) + last_rows.max(1);
+        frame.strip_offsets = offsets;
+        frame.strip_byte_counts = counts;
+        Ok(SampledBand {
+            frame,
+            first_row: first as u32 * per_piece,
+            rows_per_piece: per_piece,
+            pieces: taken as u32,
+            step,
+        })
+    }
+
+    /// A view of just the pieces covering `cols` x `rows` — the same frame
+    /// cropped to a rectangle.
+    ///
+    /// The columns are only honoured for a **tiled** frame. A strip spans the
+    /// full image width and is compressed as one unit, so there is no way to
+    /// read part of one: for a stripped frame the request narrows the rows and
+    /// the returned [`Region::cols`] says the full width was kept. That is the
+    /// whole practical difference between the two layouts, and the reason a
+    /// tiled file is worth preferring for images too large to hold — a window
+    /// of one costs the window, where a window of a stripped file costs its
+    /// full-width rows.
+    ///
+    /// As with [`crop_rows`](Self::crop_rows), the result is an ordinary
+    /// [`FrameInfo`], so every reader, codec and predictor applies to it
+    /// unchanged; and it is snapped *outward*, so the caller must index against
+    /// the returned ranges rather than the ones it asked for.
+    pub fn crop(
+        &self,
+        cols: std::ops::Range<u32>,
+        rows: std::ops::Range<u32>,
+    ) -> Result<Region> {
+        let Some((across, down, tw, th)) = self.tile_grid() else {
+            // Stripped: rows only, full width.
+            let band = self.crop_rows(rows)?;
+            let _ = cols;
+            return Ok(Region { rows: band.rows, cols: 0..self.width, frame: band.frame });
+        };
+
+        let span = |req: std::ops::Range<u32>, size: u32, n: u32, count: u32| {
+            let start = req.start.min(size.saturating_sub(1));
+            let end = req.end.clamp(start + 1, size.max(1));
+            let first = (start / n).min(count - 1);
+            let last = end.div_ceil(n).clamp(first + 1, count);
+            first..last
+        };
+        let tx = span(cols, self.width, tw, across);
+        let ty = span(rows, self.height, th, down);
+
+        let planes = self.piece_planes();
+        let want = self.piece_count();
+        if self.strip_offsets.len() < want || self.strip_byte_counts.len() < want {
+            bail!(
+                "tile table has {} offsets / {} byte counts, need {want} for {across}x{down} tiles                  across {planes} plane(s)",
+                self.strip_offsets.len(),
+                self.strip_byte_counts.len()
+            );
+        }
+
+        // Take the sub-rectangle of the grid out of each plane's run of tiles.
+        let (nx, ny) = ((tx.end - tx.start) as usize, (ty.end - ty.start) as usize);
+        let mut offsets = Vec::with_capacity(planes * nx * ny);
+        let mut counts = Vec::with_capacity(planes * nx * ny);
+        for p in 0..planes {
+            let plane_base = p * across as usize * down as usize;
+            for row in ty.clone() {
+                let row_base = plane_base + row as usize * across as usize;
+                let from = row_base + tx.start as usize;
+                offsets.extend_from_slice(&self.strip_offsets[from..from + nx]);
+                counts.extend_from_slice(&self.strip_byte_counts[from..from + nx]);
+            }
+        }
+
+        let x0 = tx.start * tw;
+        let y0 = ty.start * th;
+        let x1 = (tx.end * tw).min(self.width);
+        let y1 = (ty.end * th).min(self.height);
+        let mut frame = self.clone();
+        frame.width = x1 - x0;
+        frame.height = y1 - y0;
+        frame.strip_offsets = offsets;
+        frame.strip_byte_counts = counts;
+        Ok(Region { frame, rows: y0..y1, cols: x0..x1 })
+    }
+
+    /// A view of just the strips covering `rows` — the same frame cropped to a
+    /// horizontal band.
+    ///
+    /// The point is that *every* reader then works on it unchanged. The band is
+    /// an ordinary [`FrameInfo`] with a smaller `height` and a slice of the
+    /// strip table, so the codecs, the predictor undo, the chunky/planar
+    /// gathers and the CMYK conversion all apply to it exactly as they do to a
+    /// whole frame — and decoding costs what the band costs, not what the file
+    /// costs. That is what makes a 40000 x 12788 mosaic explorable without
+    /// holding it all in memory.
+    ///
+    /// Strips are the unit of compression, so the band is snapped *outward* to
+    /// strip boundaries; the returned [`RowBand::rows`] says which rows it
+    /// really covers, which is what a caller must index against. Predictors do
+    /// not stand in the way: TIFF differences each row from the one before it
+    /// within a row, never across rows, so a strip decodes correctly on its own.
+    ///
+    /// Errors if the strip table is too short to describe the frame — an
+    /// untrusted file may say anything, and a band cut from a table that does
+    /// not add up would silently read the wrong pixels.
+    pub fn crop_rows(&self, rows: std::ops::Range<u32>) -> Result<RowBand> {
+        // A tiled frame keeps a grid rather than a run of strips, so the slice
+        // below would take the wrong pieces. Ask for every column instead and
+        // let `crop` walk the grid.
+        if self.is_tiled() {
+            let region = self.crop(0..self.width, rows)?;
+            return Ok(RowBand { frame: region.frame, rows: region.rows });
+        }
+        let rps = self.rows_per_strip.max(1);
+        let start = rows.start.min(self.height);
+        let end = rows.end.clamp(start, self.height);
+        // An empty request still has to yield a decodable frame; give it the
+        // single strip containing `start` rather than a zero-height band.
+        let first = start / rps;
+        let last = end.max(start + 1).div_ceil(rps).max(first + 1);
+
+        let per_plane = (self.height.div_ceil(rps)) as usize;
+        let planes = if self.is_planar() { (self.samples_per_pixel as usize).max(1) } else { 1 };
+        let (first, last) = (first as usize, (last as usize).min(per_plane));
+        if first >= last {
+            bail!("row band {start}..{end} selects no strips of a {}-row frame", self.height);
+        }
+        // The strip table has to actually describe the frame before a slice of
+        // it can mean anything.
+        let want = planes * per_plane;
+        if self.strip_offsets.len() < want || self.strip_byte_counts.len() < want {
+            bail!(
+                "strip table describes {} offsets / {} byte counts, need {want} for {planes} plane(s)                  of {per_plane} strip(s)",
+                self.strip_offsets.len(),
+                self.strip_byte_counts.len()
+            );
+        }
+
+        let mut offsets = Vec::with_capacity(planes * (last - first));
+        let mut counts = Vec::with_capacity(planes * (last - first));
+        for p in 0..planes {
+            let base = p * per_plane;
+            offsets.extend_from_slice(&self.strip_offsets[base + first..base + last]);
+            counts.extend_from_slice(&self.strip_byte_counts[base + first..base + last]);
+        }
+
+        let y0 = first as u32 * rps;
+        let y1 = ((last as u32) * rps).min(self.height);
+        let mut frame = self.clone();
+        frame.height = y1 - y0;
+        frame.strip_offsets = offsets;
+        frame.strip_byte_counts = counts;
+        Ok(RowBand { frame, rows: y0..y1 })
     }
 
     /// Bytes one sample occupies at this frame's bit depth, or an error for a
@@ -666,6 +1065,10 @@ fn frame_info_from_entries(
     let mut rows_per_strip = u32::MAX; // default: whole image is one strip
     let mut strip_offsets = None;
     let mut strip_byte_counts = None;
+    let mut tile_offsets = None;
+    let mut tile_byte_counts = None;
+    let mut tile_width = None;
+    let mut tile_length = None;
 
     for e in entries {
         match e.tag {
@@ -680,6 +1083,10 @@ fn frame_info_from_entries(
             // u64 accessors: BigTIFF stores these as LONG8 past 4 GiB.
             TAG_STRIP_OFFSETS => strip_offsets = Some(e.as_u64_array(file, order)?),
             TAG_STRIP_BYTE_COUNTS => strip_byte_counts = Some(e.as_u64_array(file, order)?),
+            TAG_TILE_OFFSETS => tile_offsets = Some(e.as_u64_array(file, order)?),
+            TAG_TILE_BYTE_COUNTS => tile_byte_counts = Some(e.as_u64_array(file, order)?),
+            TAG_TILE_WIDTH => tile_width = Some(e.as_u32(file, order)?),
+            TAG_TILE_LENGTH => tile_length = Some(e.as_u32(file, order)?),
             TAG_PHOTOMETRIC => photometric = e.as_u32(file, order)? as u16,
             TAG_PLANAR_CONFIG => planar_config = e.as_u32(file, order)? as u16,
             TAG_INK_SET => ink_set = e.as_u32(file, order)? as u16,
@@ -689,13 +1096,40 @@ fn frame_info_from_entries(
 
     let width = width.ok_or_else(|| anyhow!("IFD missing ImageWidth"))?;
     let height = height.ok_or_else(|| anyhow!("IFD missing ImageLength"))?;
-    let strip_offsets =
-        strip_offsets.ok_or_else(|| anyhow!("IFD missing StripOffsets (tiled TIFFs not supported)"))?;
-    let strip_byte_counts =
-        strip_byte_counts.ok_or_else(|| anyhow!("IFD missing StripByteCounts"))?;
+    // A tiled image carries the same information under different tags. Folding
+    // it into the strip fields here is what lets everything downstream — the
+    // bounds checks, the size guards, the parallel decompression — apply to
+    // tiles unchanged; `tile_size` is what tells the parts that must know
+    // apart. Tiles win if both are somehow present, since a file declaring
+    // TileOffsets is a tiled file whatever else it says.
+    let tile_size = match (tile_width, tile_length) {
+        (Some(w), Some(h)) if w > 0 && h > 0 && tile_offsets.is_some() => Some((w, h)),
+        _ => None,
+    };
+    let (strip_offsets, strip_byte_counts) = match tile_size {
+        Some(_) => (
+            tile_offsets.ok_or_else(|| anyhow!("IFD missing TileOffsets"))?,
+            tile_byte_counts.ok_or_else(|| anyhow!("IFD missing TileByteCounts"))?,
+        ),
+        None => (
+            strip_offsets.ok_or_else(|| {
+                if tile_offsets.is_some() {
+                    anyhow!("IFD has TileOffsets but no usable TileWidth/TileLength")
+                } else {
+                    anyhow!("IFD missing StripOffsets")
+                }
+            })?,
+            strip_byte_counts.ok_or_else(|| anyhow!("IFD missing StripByteCounts"))?,
+        ),
+    };
 
     if rows_per_strip == u32::MAX {
         rows_per_strip = height;
+    }
+    if let Some((_, tile_h)) = tile_size {
+        // A tiled image has no RowsPerStrip. Reporting the tile height keeps
+        // anything that reasons in rows-per-unit-of-compression correct.
+        rows_per_strip = tile_h;
     }
 
     let sample_format = match sample_format_raw {
@@ -722,6 +1156,7 @@ fn frame_info_from_entries(
         predictor,
         photometric,
         planar_config,
+        tile_size,
         ink_set,
         strip_offsets,
         strip_byte_counts,
