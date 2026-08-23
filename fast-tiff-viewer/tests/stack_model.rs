@@ -122,7 +122,7 @@ fn float_stack_windows_in_its_own_units() {
 fn reassigning_the_axes_drops_everything_decoded_under_the_old_mapping() {
     use fast_tiff_viewer::prefetch::Decoded;
     use fast_tiff_viewer::roi::Roi;
-    use fast_tiff_viewer::window::{Built, Overview};
+    use fast_tiff_viewer::window::{Built, Overview, OVERVIEW_MAX_BYTES};
 
     let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
     let mut viewer = Viewer::new();
@@ -145,7 +145,7 @@ fn reassigning_the_axes_drops_everything_decoded_under_the_old_mapping() {
         channels: vec![0],
         planes: vec![Decoded::U16(vec![7; 64])],
     };
-    stack.overview = Overview::capture(built, w, h, stack.prefetch_gen, &enabled, &kinds);
+    stack.overview = Overview::capture(built, w, h, stack.prefetch_gen, &enabled, &kinds, OVERVIEW_MAX_BYTES);
     assert!(stack.overview.is_some(), "the setup has to retain an overview");
 
     let shown = viewer.stack.as_ref().unwrap().display.dims;

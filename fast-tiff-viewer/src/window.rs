@@ -335,6 +335,14 @@ pub struct Built {
 /// cost more than the stall it saves.
 pub const OVERVIEW_MAX_BYTES: usize = 64 << 20;
 
+/// The retention budget for `mode` — see [`Overview::capture`].
+pub fn overview_budget(mode: roi::LargeImageMode) -> usize {
+    match mode {
+        roi::LargeImageMode::Preload => roi::MAX_PRELOAD_BYTES,
+        roi::LargeImageMode::Tiled => OVERVIEW_MAX_BYTES,
+    }
+}
+
 /// A frame-spanning window kept in RAM, with everything needed to tell whether
 /// it still describes the stack as it is now.
 ///
@@ -376,7 +384,15 @@ impl Overview {
     ///
     /// Declined when it does not span the frame — a window of part of the frame
     /// cannot serve a view of another part — or when its planes are past
-    /// [`OVERVIEW_MAX_BYTES`].
+    /// `budget`.
+    ///
+    /// The budget is the mode's, not a constant, and the difference is the
+    /// difference between the two modes. Under
+    /// [`LargeImageMode::Tiled`](roi::LargeImageMode::Tiled) an overview is a
+    /// lucky by-product of a fit-to-window view, worth keeping only while it is
+    /// small ([`OVERVIEW_MAX_BYTES`]). Under
+    /// [`Preload`](roi::LargeImageMode::Preload) it *is* the mode, and refusing
+    /// it would leave the planner asking every frame for a level nothing holds.
     pub fn capture(
         built: Built,
         width: u32,
@@ -384,12 +400,13 @@ impl Overview {
         gen: u64,
         enabled: &[bool],
         kinds: &[ChannelKind],
+        budget: usize,
     ) -> Option<Overview> {
         if !spans_whole_frame(&built.roi, width, height) {
             return None;
         }
         let bytes: usize = built.planes.iter().map(Decoded::bytes).sum();
-        if bytes > OVERVIEW_MAX_BYTES {
+        if bytes > budget {
             return None;
         }
         Some(Overview { built, gen, enabled: enabled.to_vec(), kinds: kinds.to_vec() })

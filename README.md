@@ -299,11 +299,30 @@ it can be used in projects that couldn't take a GPL dependency.
 - **Frames larger than one GPU texture, at full resolution** — every GPU caps a
   texture at 16384 or 32768 pixels per axis, and mosaics run well past it
   (Hubble's Andromeda is 40000 x 12788). Such a frame is shown through a
-  *window*: the part you are looking at is kept on the GPU at whatever
-  resolution the current zoom asks for, and re-cut as you pan. Zoomed out that
-  is a coarse overview of the whole frame, flagged `1/N scale` in the toolbar;
-  zoom in and the flag disappears, because you are then looking at the file's
-  own pixels.
+  *window*: the part you are looking at is kept on the GPU, and re-cut as you
+  pan. Zoomed out that is a reduced view of the whole frame, flagged
+  `1/N scale` in the toolbar; zoom in and the flag disappears, because you are
+  then looking at the file's own pixels.
+
+  A **Large image** selector appears in the panel for these frames, choosing
+  between two ways of spending your machine on the problem:
+
+  - **Tiled** (default) trades CPU for RAM. Only the region on screen is
+    loaded, at exactly the resolution the zoom calls for and no finer, so
+    memory follows the viewport rather than the file — which is why it is the
+    default: a frame of any size opens. Every zoom step is then a fresh decode
+    of the region, which is where the stutter comes from, and the coarse levels
+    it picks when zoomed out alias more.
+  - **Preload** trades RAM for smoothness. One reduced copy of the whole frame
+    — the finest that fits, usually 1/2 or 1/4 — is decoded once and kept, and
+    full resolution is cut for whatever is on screen. There are only ever those
+    two levels, so a zoom crosses one boundary instead of a dozen, panning and
+    zooming out decode nothing at all, and the reduced view aliases far less:
+    point-sampling every second pixel of a stitched mosaic moirés where every
+    sixteenth does. Costs up to 512 MB held for the life of the file, so it is
+    worth choosing when you know the file fits that.
+
+  The rest of this section describes the machinery both share.
 
   Nothing is held in memory to make that work. Moving the window decodes only
   the *strips* it covers (`FrameInfo::crop_rows`), a band at a time, so both

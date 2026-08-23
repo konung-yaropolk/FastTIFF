@@ -67,6 +67,14 @@ pub struct Stack {
     /// The window of the frame currently on the GPU, when only a window of it
     /// is. `None` means the whole frame is resident — the ordinary case.
     pub roi: Option<crate::roi::Roi>,
+    /// Whether this frame is past the device's per-axis texture limit, and so
+    /// can only be shown through a window at all.
+    ///
+    /// Set during [`crate::sync`], because it depends on the device. A frontend
+    /// reads it to decide whether the large-image controls are worth showing —
+    /// for every ordinary image they are not, and an option that does nothing
+    /// is worse than no option.
+    pub over_texture_limit: bool,
     /// Builds windows off the interface thread, so zooming does not stop the
     /// program while a finer one is prepared. `None` when the thread could not
     /// start, or in a build without threads; windows are then built inline.
@@ -164,6 +172,7 @@ impl Stack {
             // what this device can hold.
             gpu_stride: 1,
             roi: None,
+            over_texture_limit: false,
             overview: None,
             window_worker: None,
             bands: Default::default(),

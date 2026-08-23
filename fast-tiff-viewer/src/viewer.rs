@@ -171,6 +171,10 @@ pub struct Viewer {
     pub apply_pseudocolor: bool,
     /// User's decode-parallelism preference (persists across files).
     pub decode_mode: DecodeMode,
+    /// How frames past the GPU's texture limit are kept on screen (persists
+    /// across files). Only consulted for such frames; see
+    /// [`crate::roi::LargeImageMode`].
+    pub large_image_mode: crate::roi::LargeImageMode,
     /// Latched once playback falls behind in `Auto` mode. Reset per stack.
     pub decode_parallel: bool,
     /// The visible UV sub-rect of the 2D image (`offset`, `scale`), computed by

@@ -39,6 +39,118 @@
 /// the rest of the app.
 pub const MAX_ROI_BYTES: usize = 512 << 20;
 
+/// How an over-large frame is kept on screen.
+///
+/// Both schemes show a window of the frame — the frame cannot become a texture
+/// whole either way. They differ in *which* windows they are willing to build,
+/// and that is the whole trade.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LargeImageMode {
+    /// Two levels and no others: one coarse copy of the whole frame, built once
+    /// and kept, plus a full-resolution crop of whatever is being looked at.
+    ///
+    /// Zooming therefore crosses a single boundary rather than a dozen, and the
+    /// coarse level is decoded once for the life of the file instead of being
+    /// rebuilt at every intermediate resolution. Two things follow. Panning and
+    /// zooming out never decode at all — the retained level already spans the
+    /// frame, so it serves any view. And the coarse level is the *finest* one
+    /// that fits, usually half scale, where point-sampling a regular structure
+    /// aliases far less than the eighth or sixteenth scale a continuous scheme
+    /// picks for the same view.
+    ///
+    /// Paid for in RAM: that level is held for as long as the file is open, up
+    /// to [`MAX_PRELOAD_BYTES`].
+    Preload,
+    /// Resolution follows the zoom continuously: every view gets a window at
+    /// whatever sampling the display can actually resolve, and no more.
+    ///
+    /// Holds far less — only the window being looked at, plus a small retained
+    /// overview — and never spends detail the screen cannot show. The cost is
+    /// that a zoom gesture crosses many sampling levels and each one is a fresh
+    /// decode of the region, so zooming is where the CPU goes; and the coarse
+    /// levels it picks when zoomed out alias more than a half-scale copy would.
+    ///
+    /// The default, because it is the one that cannot fail on the images this
+    /// path exists for. Its memory follows the viewport rather than the file,
+    /// so a frame of any size opens; `Preload` holds a reduced copy of the
+    /// whole frame, and on a large enough file the finest level that fits is
+    /// still hundreds of megabytes to hold for as long as the file is open.
+    /// Smoothness is worth choosing, but not by default and not silently.
+    #[default]
+    Tiled,
+}
+
+/// What the device can hold, and how the user wants it spent.
+///
+/// The three travel together because no one of them decides anything alone:
+/// the texture limit and the per-texel cost jointly bound a window, and the
+/// mode decides which windows are allowed to be considered in the first place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Budget {
+    /// The device's per-axis 2D texture limit.
+    pub max_axis: u32,
+    /// Summed per-texel cost of the resident channels, in bytes. A channel's
+    /// cost depends on its format, so three 8-bit channels and three float ones
+    /// differ fourfold for the same picture.
+    pub bytes_per_texel: usize,
+    pub mode: LargeImageMode,
+}
+
+impl Budget {
+    pub fn new(max_axis: u32, bytes_per_texel: usize, mode: LargeImageMode) -> Self {
+        Budget { max_axis, bytes_per_texel, mode }
+    }
+}
+
+/// Bytes the preloaded coarse level may occupy, in RAM and again in VRAM.
+///
+/// This is [`LargeImageMode::Preload`]'s side of the bargain, so it is
+/// deliberately generous where [`crate::window::OVERVIEW_MAX_BYTES`] — which
+/// bounds the overview that `Tiled` retains incidentally — is deliberately not.
+/// It also has to agree with what [`overview_stride`] plans: a level the
+/// planner chooses but the retainer then refuses would be rebuilt on every
+/// frame, which is worse than either mode.
+#[cfg(not(target_arch = "wasm32"))]
+pub const MAX_PRELOAD_BYTES: usize = 512 << 20;
+/// Smaller in a browser, where the whole file is already resident in a 32-bit
+/// address space and a half-gigabyte plane on top of it would abort the module.
+#[cfg(target_arch = "wasm32")]
+pub const MAX_PRELOAD_BYTES: usize = 96 << 20;
+
+/// The sampling of the preloaded coarse level: the *finest* power-of-two
+/// sampling at which the whole frame fits both the device's texture limit and
+/// [`MAX_PRELOAD_BYTES`].
+///
+/// Finest rather than coarsest because aliasing is the thing being avoided.
+/// Point-sampling every second pixel of a regular structure — a sensor grid, a
+/// stitched mosaic's seams — is visibly moiré-free next to sampling every
+/// sixteenth, and a level twice as fine costs four times the memory, which is
+/// what the budget is for.
+///
+/// Powers of two only, so the level is a clean 1/2, 1/4, 1/8 of the original.
+pub fn overview_stride(
+    width: u32,
+    height: u32,
+    max_axis: u32,
+    bytes_per_texel: usize,
+) -> u32 {
+    let max_axis = max_axis.max(2);
+    let bytes_per_texel = bytes_per_texel.max(1);
+    let mut stride = 2;
+    loop {
+        let (tw, th) = (width.div_ceil(stride).max(1), height.div_ceil(stride).max(1));
+        let fits = tw <= max_axis
+            && th <= max_axis
+            && (tw as usize) * (th as usize) * bytes_per_texel <= MAX_PRELOAD_BYTES;
+        // The guard is for a frame so large that no sampling fits; there is
+        // nothing coarser left to try, and doubling for ever would hang.
+        if fits || stride >= 1 << 16 {
+            return stride;
+        }
+        stride *= 2;
+    }
+}
+
 /// How much bigger than the visible region the resident window is made, when
 /// there is texture budget spare.
 ///
@@ -230,24 +342,34 @@ impl Roi {
 /// Plan residency for a view showing the image-normalised range
 /// `uv_offset .. uv_offset + uv_scale` of a `width` x `height` frame.
 ///
-/// `max_axis` is the device's per-axis texture limit and `bytes_per_texel` the
-/// summed per-texel cost of the resident channels. The result always fits both
-/// limits and always covers the visible region.
+/// The result always fits everything [`Budget`] bounds and always covers the
+/// visible region.
 pub fn plan(
     width: u32,
     height: u32,
     uv_offset: [f32; 2],
     uv_scale: [f32; 2],
     viewport: [f32; 2],
-    max_axis: u32,
-    bytes_per_texel: usize,
+    budget: Budget,
 ) -> Residency {
+    let Budget { max_axis, bytes_per_texel, mode } = budget;
     let (width, height) = (width.max(1), height.max(1));
     // A device that cannot hold a 2x2 texture cannot run this renderer at all;
     // the floor keeps the arithmetic below from having to model that case.
     let max_axis = max_axis.max(2);
     let bytes_per_texel = bytes_per_texel.max(1);
     let (vx, vy, vw, vh) = visible_rect(width, height, uv_offset, uv_scale);
+
+    if mode == LargeImageMode::Preload {
+        return plan_preloaded(
+            width,
+            height,
+            (vx, vy, vw, vh),
+            viewport,
+            max_axis,
+            bytes_per_texel,
+        );
+    }
 
     // Resolution follows what is on screen, not the size of the file: a view of
     // 2000 pixels gets stride 1 whether the frame is 4000 wide or 400000.
@@ -294,6 +416,63 @@ pub fn plan(
         // Both texel counts fall as the stride grows, so this terminates.
         stride += 1;
     }
+}
+
+/// [`LargeImageMode::Preload`]'s planner: the coarse whole-frame level, or a
+/// full-resolution crop, and nothing in between.
+///
+/// The choice is simply whether the display can resolve the file's own pixels.
+/// If it can — the view is zoomed in far enough that a source pixel is worth at
+/// least half a screen pixel — the crop is worth building. If it cannot, the
+/// retained level already spans the frame and serves the view with no decode at
+/// all, which is the entire point of the mode.
+///
+/// Falls back to the coarse level whenever the crop will not fit, rather than
+/// walking the stride up as `Tiled` does. Walking is what introduces the
+/// intermediate levels this mode exists to avoid.
+fn plan_preloaded(
+    width: u32,
+    height: u32,
+    visible: (u32, u32, u32, u32),
+    viewport: [f32; 2],
+    max_axis: u32,
+    bytes_per_texel: usize,
+) -> Residency {
+    let (vx, vy, vw, vh) = visible;
+    let coarse = {
+        let stride = overview_stride(width, height, max_axis, bytes_per_texel);
+        // Deliberately the whole frame, not a window of it: a level that spans
+        // everything serves every view, so panning and zooming out never
+        // re-cut it and it is decoded exactly once.
+        let r = Roi { x: 0, y: 0, w: width, h: height, stride };
+        Residency { resident: r, required: r }
+    };
+
+    if display_stride(vw, vh, viewport) > 1 {
+        return coarse;
+    }
+
+    // Zoomed in far enough to want the file's own resolution. Try it with the
+    // pan margin, then without it, then give up and stay coarse.
+    let fits_axes =
+        needed_texels(vx, vw, 1) <= max_axis && needed_texels(vy, vh, 1) <= max_axis;
+    if fits_axes {
+        let required = roi(
+            axis_window(vx, vw, width, 1, max_axis, 1),
+            axis_window(vy, vh, height, 1, max_axis, 1),
+            1,
+            width,
+            height,
+        );
+        for margin in [MARGIN, 1] {
+            let rx = axis_window(vx, vw, width, 1, max_axis, margin);
+            let ry = axis_window(vy, vh, height, 1, max_axis, margin);
+            if (rx.1 as usize) * (ry.1 as usize) * bytes_per_texel <= MAX_ROI_BYTES {
+                return Residency { resident: roi(rx, ry, 1, width, height), required };
+            }
+        }
+    }
+    coarse
 }
 
 /// Texels needed to cover `v .. v+len` at `stride`, on the aligned grid.

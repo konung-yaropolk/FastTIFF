@@ -44,7 +44,7 @@ fn built(r: Roi, bytes: usize) -> Built {
 }
 
 fn capture(r: Roi, bytes: usize) -> Option<Overview> {
-    Overview::capture(built(r, bytes), W, H, 0, &[true], &[ChannelKind::Int8])
+    Overview::capture(built(r, bytes), W, H, 0, &[true], &[ChannelKind::Int8], OVERVIEW_MAX_BYTES)
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ fn the_cap_counts_bytes_rather_than_samples() {
         planes: vec![Decoded::F32(vec![0.0; samples])],
     };
     assert!(
-        Overview::capture(float, W, H, 0, &[true], &[ChannelKind::Float]).is_none(),
+        Overview::capture(float, W, H, 0, &[true], &[ChannelKind::Float], OVERVIEW_MAX_BYTES).is_none(),
         "{samples} float samples is {} bytes, past the cap",
         samples * 4
     );

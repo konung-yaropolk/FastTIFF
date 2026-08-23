@@ -61,7 +61,9 @@ impl Viewer {
         // full resolution, exactly as before; only a frame past the device limit
         // gets a window.
         let (frame_w, frame_h) = loaded.tiff.frames.first().map_or((0, 0), |f| (f.width, f.height));
-        let target = plan_residency(loaded, renderer, &kinds, uv_offset, uv_scale, viewport);
+        let large_mode = self.large_image_mode;
+        let target =
+            plan_residency(loaded, renderer, &kinds, uv_offset, uv_scale, viewport, large_mode);
         // Size the textures to what is being *shown*, not to what is being
         // prepared: resizing now would blank the picture for as long as the new
         // window takes to build, which is the stall this avoids.
@@ -101,7 +103,7 @@ impl Viewer {
 
         if let Some(r) = target {
             let read_ahead = self.playback.playing && !self.decode_parallel;
-            match sync_movie(loaded, renderer, &kinds, read_ahead, r) {
+            match sync_movie(loaded, renderer, &kinds, read_ahead, r, large_mode) {
                 Ok(pending) => outcome.needs_repaint |= pending,
                 Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
             }
@@ -166,6 +168,7 @@ fn plan_residency(
     uv_offset: [f32; 2],
     uv_scale: [f32; 2],
     viewport: [f32; 2],
+    mode: roi::LargeImageMode,
 ) -> Option<Serving> {
     let first = loaded.tiff.frames.first()?;
     let (w, h) = (first.width, first.height);
@@ -179,13 +182,15 @@ fn plan_residency(
     // Nothing below this line runs for an image of ordinary size — no planning,
     // no cropping, no extra copy — which is what keeps the machinery for huge
     // frames from costing anything on the frames that do not need it.
-    if !roi::needs_window(w, h, max_axis) {
+    loaded.over_texture_limit = roi::needs_window(w, h, max_axis);
+    if !loaded.over_texture_limit {
         loaded.gpu_stride = 1;
         let full = Roi::full(w, h);
         return Some(Serving { show: full, want: full, ready: true });
     }
 
-    let plan = roi::plan(w, h, uv_offset, uv_scale, viewport, max_axis, bytes_per_texel);
+    let budget = roi::Budget::new(max_axis, bytes_per_texel, mode);
+    let plan = roi::plan(w, h, uv_offset, uv_scale, viewport, budget);
 
     // Check the overview here rather than where it is uploaded. If a stale one
     // were allowed through, it would steer `show` at a window whose pixels
@@ -233,6 +238,7 @@ fn sync_movie(
     kinds: &[ChannelKind],
     read_ahead: bool,
     plan: Serving,
+    mode: roi::LargeImageMode,
 ) -> anyhow::Result<bool> {
     let roi = plan.show;
     // Skip disabled channels (the shader multiplies them out). Re-upload when
@@ -293,7 +299,7 @@ fn sync_movie(
                     // If that was the whole frame, keep it: it is what the next
                     // view leaving its window will fall back on.
                     let built = window::Built { frame_index, roi, channels, planes };
-                    capture_overview(loaded, built, fw, fh, &enabled, kinds);
+                    capture_overview(loaded, built, fw, fh, &enabled, kinds, mode);
                 }
                 Err(e) => result = Err(e),
             }
@@ -382,7 +388,7 @@ fn sync_movie(
                 }
                 loaded.roi = Some(plan.want);
                 loaded.last_uploaded = Some(frame_index);
-                capture_overview(loaded, built, fw, fh, &enabled, kinds);
+                capture_overview(loaded, built, fw, fh, &enabled, kinds, mode);
             }
             None => match &loaded.window_worker {
                 Some(worker) => {
@@ -414,7 +420,7 @@ fn sync_movie(
                             channels: channels.clone(),
                             planes,
                         };
-                        capture_overview(loaded, built, fw, fh, &enabled, kinds);
+                        capture_overview(loaded, built, fw, fh, &enabled, kinds, mode);
                     }
                 }
             },
@@ -441,9 +447,11 @@ fn capture_overview(
     fh: u32,
     enabled: &[bool],
     kinds: &[ChannelKind],
+    mode: roi::LargeImageMode,
 ) {
     let gen = loaded.prefetch_gen;
-    if let Some(o) = window::Overview::capture(built, fw, fh, gen, enabled, kinds) {
+    let budget = window::overview_budget(mode);
+    if let Some(o) = window::Overview::capture(built, fw, fh, gen, enabled, kinds, budget) {
         let (tw, th) = o.built.roi.texture_size();
         log::debug!(
             "overview retained: {}x{} at 1/{}, {} MB",
@@ -598,3 +606,4 @@ pub fn prefetch_matches(result: &PrefetchResult, jobs: &[ChannelJob]) -> bool {
             ch.channel == job.channel && ch.kind == job.kind && ch.width == job.width && ch.height == job.height
         })
 }
+
