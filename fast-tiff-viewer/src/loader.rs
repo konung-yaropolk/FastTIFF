@@ -114,17 +114,30 @@ mod threaded {
     impl Loading {
         /// Start `source` loading on its own thread.
         ///
-        /// `None` when the thread will not spawn, which the caller should treat
-        /// as "load it here instead" rather than as a failure to open — a
-        /// frozen interface is much better than no picture.
-        pub fn spawn(source: LoadSource, apply_pseudocolor: bool) -> Option<Self> {
+        /// On failure the source is handed **back**, so the caller can load it
+        /// here instead. A frozen interface is much better than a file that
+        /// silently does not open.
+        ///
+        /// Handing it back takes a little care: `spawn` consumes the closure,
+        /// and the closure owns the source, so a failed spawn drops it. Holding
+        /// it jointly is what keeps it reachable — the worker takes it on the
+        /// way in, and if the worker never runs it is still there to take back.
+        pub fn spawn(
+            source: LoadSource,
+            apply_pseudocolor: bool,
+        ) -> Result<Self, Option<LoadSource>> {
             let name = source.name();
             let (tx, rx) = channel();
             let stage = Arc::new(Mutex::new(LoadStage::Reading));
             let stage_worker = Arc::clone(&stage);
-            std::thread::Builder::new()
+            let held = Arc::new(Mutex::new(Some(source)));
+            let held_worker = Arc::clone(&held);
+            let spawned = std::thread::Builder::new()
                 .name("fasttiff-load".to_owned())
                 .spawn(move || {
+                    let Some(source) = held_worker.lock().ok().and_then(|mut h| h.take()) else {
+                        return;
+                    };
                     let result = source.load(apply_pseudocolor, &mut |s| {
                         if let Ok(mut slot) = stage_worker.lock() {
                             *slot = s;
@@ -134,9 +147,13 @@ mod threaded {
                     // (another file was opened over it); dropping the result is
                     // then exactly right.
                     let _ = tx.send(result);
-                })
-                .ok()?;
-            Some(Loading { rx, stage, name })
+                });
+            match spawned {
+                Ok(_handle) => Ok(Loading { rx, stage, name }),
+                // The worker never ran, so the source it would have taken is
+                // still here.
+                Err(_) => Err(held.lock().ok().and_then(|mut h| h.take())),
+            }
         }
 
         /// How far it has got, for a progress readout.

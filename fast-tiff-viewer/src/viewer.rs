@@ -176,6 +176,15 @@ pub struct Viewer {
     /// rather than removing one and then providing another.
     #[cfg(feature = "threads")]
     pub loading: Option<crate::loader::Loading>,
+    /// Set when a load lands, cleared by [`poll_open`](Self::poll_open).
+    ///
+    /// The signal is the same whether the load ran on a worker or here on this
+    /// thread, which is the point: a frontend resets the chrome for the new
+    /// file on one event, and does not have to know which way the file arrived.
+    /// Getting that wrong is what once left the browser build — which has no
+    /// threads, so it always loads inline — opening every image at 100%,
+    /// because the "a file arrived" signal only ever came from the worker path.
+    load_landed: bool,
     /// How frames past the GPU's texture limit are kept on screen (persists
     /// across files). Only consulted for such frames; see
     /// [`crate::roi::LargeImageMode`].
@@ -239,21 +248,23 @@ impl Viewer {
     /// Slower to respond is a great deal better than not opening the file.
     pub fn begin_open(&mut self, source: crate::loader::LoadSource) {
         #[cfg(feature = "threads")]
-        {
-            if let Some(loading) = crate::loader::Loading::spawn(source, self.apply_pseudocolor) {
+        let source = match crate::loader::Loading::spawn(source, self.apply_pseudocolor) {
+            Ok(loading) => {
                 self.loading = Some(loading);
                 return;
             }
-            // Spawn failed. `source` was moved into the attempt, so there is
-            // nothing left to fall back *with*; report it rather than fail
-            // silently, and let the user try again.
-            self.status = Some("Could not start the loader thread".to_owned());
-        }
-        #[cfg(not(feature = "threads"))]
-        {
-            let opened = source.load(self.apply_pseudocolor, &mut |_| {});
-            let _ = self.adopt(opened);
-        }
+            // No thread to be had. Load it here — slower to respond is far
+            // better than not opening the file.
+            Err(Some(source)) => source,
+            Err(None) => {
+                self.status = Some("Could not start the loader".to_owned());
+                self.load_landed = true;
+                return;
+            }
+        };
+        let opened = source.load(self.apply_pseudocolor, &mut |_| {});
+        let _ = self.adopt(opened);
+        self.load_landed = true;
     }
 
     /// Take delivery of a finished load, if one has finished this frame.
@@ -263,15 +274,14 @@ impl Viewer {
     /// previous file.
     pub fn poll_open(&mut self) -> bool {
         #[cfg(feature = "threads")]
-        {
-            let Some(loading) = self.loading.as_mut() else { return false };
-            let Some(result) = loading.take() else { return false };
-            self.loading = None;
-            let _ = self.adopt(result);
-            true
+        if let Some(loading) = self.loading.as_mut() {
+            if let Some(result) = loading.take() {
+                self.loading = None;
+                let _ = self.adopt(result);
+                self.load_landed = true;
+            }
         }
-        #[cfg(not(feature = "threads"))]
-        false
+        std::mem::take(&mut self.load_landed)
     }
 
     /// How far the in-flight open has got, or `None` when nothing is loading.
