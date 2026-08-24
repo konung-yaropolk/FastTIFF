@@ -13,6 +13,7 @@
 //! Supporting clusters live in child modules (which share this module's
 //! privacy, so the split adds no `pub` surface beyond `pub(super)`):
 //!   * `camera`  — egui input → the core camera
+//!   * `minimap` — the 2D navigator: where the view sits in the whole frame
 //!   * `overlay` — the 3D coordinate-box overlay, drawn with the egui painter
 //!   * `scale`   — how large the chrome is drawn (the web build runs bigger)
 //!   * `widgets` — the contrast range slider + value formatting
@@ -31,6 +32,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 mod camera;
 mod dialog;
+mod minimap;
 mod overlay;
 mod scale;
 mod widgets;
@@ -92,6 +94,59 @@ const MIN_WINDOW: f32 = 256.0;
 const FAST_SCROLL_RATE: f64 = 0.1;
 const FAST_SCROLL_GLIDE_RATE: f64 = 5.5;
 
+/// The frame's size in real units, e.g. `"512×512 µm"`, or `None` when the
+/// file carries no pixel calibration.
+///
+/// Both axes are shown even when they are equal: a reader cannot otherwise
+/// tell a square field from a rounded one, and anisotropic pixels are common
+/// enough in microscopy that collapsing them would be a lie half the time.
+///
+/// Only rendered when both axes and a unit are present. A number without its
+/// unit is not information — it is a number that will be read as whichever
+/// unit the reader expects, which for this field is exactly the mistake worth
+/// preventing.
+///
+/// Takes the three metadata values rather than the record they come from:
+/// `StackMeta` is `#[non_exhaustive]` and cannot be built outside its own
+/// crate, so a signature that asked for one would put this beyond reach of a
+/// test — and formatting a measurement for a reader is exactly the kind of
+/// thing that should have one.
+fn physical_size(
+    pixel_width: Option<f64>,
+    pixel_height: Option<f64>,
+    unit: Option<&str>,
+    px_w: u32,
+    px_h: u32,
+) -> Option<String> {
+    let (pw, ph) = (pixel_width?, pixel_height?);
+    let unit = unit.filter(|u| !u.is_empty())?;
+    if !(pw.is_finite() && ph.is_finite() && pw > 0.0 && ph > 0.0) {
+        return None;
+    }
+    let (w, h) = (pw * px_w as f64, ph * px_h as f64);
+    Some(format!("{} × {} {unit}", trim_num(w), trim_num(h)))
+}
+
+/// A measurement rounded for reading: enough places to distinguish neighbouring
+/// values, with trailing zeros dropped so a round number looks round.
+fn trim_num(v: f64) -> String {
+    let places = if v >= 100.0 {
+        0
+    } else if v >= 10.0 {
+        1
+    } else if v >= 1.0 {
+        2
+    } else {
+        3
+    };
+    let s = format!("{v:.places$}");
+    if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        s
+    }
+}
+
 /// How close a fit factor must be to a fixed level before it counts as that
 /// level rather than being inserted next to it.
 ///
@@ -133,6 +188,14 @@ fn stepped_zoom(current: f32, dir: i32, fit: Option<f32>) -> f32 {
         .unwrap_or(0);
     let next = (nearest as i32 + dir).clamp(0, levels.len() as i32 - 1) as usize;
     levels[next]
+}
+
+/// The range a continuous zoom — a pinch — may take: the ends of this image's
+/// ladder. The stepped path cannot leave the ladder, so this is what keeps a
+/// pinch from running off to a scale no wheel notch could ever return from.
+fn zoom_bounds(fit: Option<f32>) -> (f32, f32) {
+    let ladder = zoom_ladder(fit);
+    (ladder[0], ladder[ladder.len() - 1])
 }
 
 /// The zoom at which an `img_w` x `img_h` image exactly fits `avail`, capped at
@@ -408,11 +471,27 @@ impl ViewerApp {
     /// the previous one. The core records any failure in `core.status`, which
     /// the bottom bar shows, and keeps the old stack loaded.
     fn apply_opened(&mut self, opened: Opened) {
-        let _ = match opened {
+        // Started, not done: opening walks the whole IFD chain and then decodes
+        // a frame per channel to find its display range, which on a large stack
+        // is seconds. Doing that here would be seconds of a window that does not
+        // repaint or respond. The core runs it on a thread and this returns at
+        // once; `finish_open` picks the result up when it lands.
+        //
+        // The chrome is deliberately *not* reset here. It still describes the
+        // file on screen, and that file stays on screen and usable for as long
+        // as the new one takes to arrive.
+        self.core.begin_open(match opened {
             #[cfg(not(target_arch = "wasm32"))]
-            Opened::Path(path) => self.core.open(path),
-            Opened::Bytes(bytes, name) => self.core.load_bytes(bytes, PathBuf::from(name)),
-        };
+            Opened::Path(path) => fast_tiff_viewer::LoadSource::Path(path),
+            Opened::Bytes(bytes, name) => {
+                fast_tiff_viewer::LoadSource::Bytes(bytes, PathBuf::from(name))
+            }
+        });
+    }
+
+    /// Reset everything that described the previous file, once a load has
+    /// landed. The other half of [`apply_opened`](Self::apply_opened).
+    fn finish_open(&mut self) {
         // Start at 1:1; on native the next frame computes a fit-to-screen zoom
         // and sizes the window once. On the web `pending_initial_fit` is
         // consumed by the canvas layout instead.
@@ -771,6 +850,16 @@ impl eframe::App for ViewerApp {
             }
         }
         self.drain_pending_open();
+        // Take delivery of a load that finished since the last frame, and keep
+        // frames coming while one is still running — the worker cannot wake the
+        // interface by itself, and without this the progress readout would only
+        // move when the mouse did.
+        if self.core.poll_open() {
+            self.finish_open();
+        }
+        if self.core.load_stage().is_some() {
+            ui.ctx().request_repaint();
+        }
 
         // Collect zoom input before panels consume events.
         // `zoom_delta()` is the correct API: egui routes Ctrl+scroll into
@@ -792,6 +881,38 @@ impl eframe::App for ViewerApp {
             (from_scroll + from_keys).clamp(-1, 1)
         });
 
+        // Pinch and two-finger pan, taken before the stepped path and in place
+        // of it.
+        //
+        // A pinch is continuous, and the fixed ladder cannot express one: at
+        // whole levels a slow pinch does nothing at all until it suddenly jumps
+        // a step. So a gesture zooms freely between the ends of the ladder
+        // instead, and the wheel keeps the rungs.
+        //
+        // The stepped path has to stand down while a gesture is live, because
+        // `zoom_delta()` folds pinch in — left alone, one pinch would drive
+        // both and the zoom would run away.
+        let touch = ui.input(|i| i.multi_touch());
+        let pinching = touch.is_some();
+        if let Some(t) = touch {
+            if self.core.stack.is_some() && self.core.view_mode == ViewMode::Movie {
+                let old_zoom = self.view.zoom;
+                let (lo, hi) = zoom_bounds(self.view.fit_zoom);
+                let new_zoom = (old_zoom * t.zoom_delta).clamp(lo, hi);
+                // Anchored between the fingers, so the picture stays under them
+                // — the touch equivalent of keeping the point under the cursor
+                // put — and translated by however far they slid, so a pinch can
+                // pan and zoom at once the way it does everywhere else.
+                let p = (t.center_pos - self.view.image_origin) / old_zoom;
+                self.view.pan = self.view.panel_rect.min - (t.center_pos - p * new_zoom)
+                    - t.translation_delta;
+                self.view.zoom = new_zoom;
+                // Deliberately no `resize_to_zoom`: a gesture runs for many
+                // frames, and resizing the window under the fingers on each of
+                // them makes the thing being touched move away from the touch.
+            }
+        }
+
         // Apply the zoom value *before* the panels are drawn, so the image
         // redraws at the new zoom in this very frame. (Doing it after the
         // central panel meant the change only showed once a window resize
@@ -799,7 +920,7 @@ impl eframe::App for ViewerApp {
         // where the window no longer resizes, appeared frozen.) The window
         // resize and optional reposition are handled later, once the chrome
         // height is known. Cursor-centering uses last frame's cached geometry.
-        if zoom_step != 0 && self.core.stack.is_some() && self.core.view_mode == ViewMode::Movie {
+        if zoom_step != 0 && !pinching && self.core.stack.is_some() && self.core.view_mode == ViewMode::Movie {
             let old_zoom = self.view.zoom;
             let new_zoom = stepped_zoom(old_zoom, zoom_step, self.view.fit_zoom);
             if (new_zoom - old_zoom).abs() > f32::EPSILON {
@@ -929,13 +1050,30 @@ impl eframe::App for ViewerApp {
                         format!("{} channel(s)", dims.channels)
                     };
                     let bits = loaded.tiff.frames.first().map(|f| f.bits_per_sample).unwrap_or(0);
-                    ui.label(format!(
-                        "{}×{} px, {}-bit, {}",
-                        loaded.tiff.frames.first().map(|f| f.width).unwrap_or(0),
-                        loaded.tiff.frames.first().map(|f| f.height).unwrap_or(0),
-                        bits,
-                        channels_desc,
-                    ));
+                    let (px_w, px_h) = loaded
+                        .tiff
+                        .frames
+                        .first()
+                        .map_or((0, 0), |f| (f.width, f.height));
+                    ui.label(format!("{px_w}×{px_h} px, {bits}-bit, {channels_desc}"));
+                    // The same frame in real units, when the file says how big a
+                    // pixel is. Next to the pixel count rather than replacing it:
+                    // the two answer different questions — how much data there is
+                    // against how much specimen it covers — and a micrograph is
+                    // routinely discussed in both.
+                    if let Some(physical) = physical_size(
+                        meta.pixel_width,
+                        meta.pixel_height,
+                        meta.unit.as_deref(),
+                        px_w,
+                        px_h,
+                    ) {
+                        ui.separator();
+                        ui.label(physical).on_hover_text(
+                            "Physical size, from the pixel calibration in the file's metadata \
+                             (OME PhysicalSize, or the TIFF resolution tags).",
+                        );
+                    }
 
                     // Say so when the picture on screen is not the picture in
                     // the file. This only appears for frames past the GPU
@@ -1010,9 +1148,43 @@ impl eframe::App for ViewerApp {
         let mut histogram_toggle = false;
         let current_status = self.core.status.clone();
 
+        let load_stage = self.core.load_stage();
+        let loading_name = self.core.loading_name();
         let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
+            // Above everything else in the panel, and shown whether or not a
+            // stack is already open: the previous file stays usable while the
+            // next one loads, so this has to sit alongside a working set of
+            // controls rather than replacing them.
+            if let Some(stage) = load_stage {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    match stage.fraction() {
+                        // Countable work — say how much is left.
+                        Some(f) => {
+                            ui.add(
+                                egui::ProgressBar::new(f)
+                                    .desired_width(160.0)
+                                    .show_percentage(),
+                            );
+                        }
+                        // Walking the IFD chain has no knowable length, so a
+                        // bar would have to invent a number. A spinner says
+                        // "working" without claiming to know how much is left.
+                        None => {
+                            ui.add(egui::Spinner::new().size(14.0));
+                        }
+                    }
+                    ui.label(stage.label());
+                    if let Some(name) = &loading_name {
+                        ui.label(RichText::new(name).weak());
+                    }
+                });
+                ui.separator();
+            }
             let Some(loaded) = &mut self.core.stack else {
-                ui.label("Open a TIFF stack to begin.");
+                if load_stage.is_none() {
+                    ui.label("Open a TIFF stack to begin.");
+                }
                 return;
             };
             ui.add_space(4.0);
@@ -1616,8 +1788,10 @@ impl eframe::App for ViewerApp {
             );
             let pannable = overflow.x > 0.0 || overflow.y > 0.0;
 
-            // Drag to pan when the image overflows the panel.
-            if pannable && response.dragged() {
+            // Drag to pan when the image overflows the panel. Not during a
+            // gesture: egui synthesises a pointer from the first touch, so a
+            // two-finger pan arrives here as well and would be applied twice.
+            if pannable && response.dragged() && !pinching {
                 self.view.pan -= response.drag_delta();
             }
             self.view.pan.x = self.view.pan.x.clamp(0.0, overflow.x);
@@ -1650,6 +1824,17 @@ impl eframe::App for ViewerApp {
                     .with_clip_rect(panel_rect)
                     .add(render::paint_callback(&self.render, visible));
             }
+
+            // Where the view sits in the frame, once that stops being obvious.
+            // Drawn after the image so it is over it, and clipped to the panel
+            // like everything else here.
+            minimap::draw(
+                &ui.painter().with_clip_rect(panel_rect),
+                ui.visuals(),
+                panel_rect,
+                full_rect,
+                visible,
+            );
 
             response.on_hover_cursor(if pannable {
                 egui::CursorIcon::Grab
@@ -1745,3 +1930,7 @@ impl eframe::App for ViewerApp {
 #[cfg(test)]
 #[path = "app/zoom_tests.rs"]
 mod zoom_tests;
+
+#[cfg(test)]
+#[path = "app/readout_tests.rs"]
+mod readout_tests;

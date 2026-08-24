@@ -171,6 +171,11 @@ pub struct Viewer {
     pub apply_pseudocolor: bool,
     /// User's decode-parallelism preference (persists across files).
     pub decode_mode: DecodeMode,
+    /// A file being opened on a worker thread, if one is. The previous stack
+    /// stays on screen and usable until it lands — an open replaces a picture
+    /// rather than removing one and then providing another.
+    #[cfg(feature = "threads")]
+    pub loading: Option<crate::loader::Loading>,
     /// How frames past the GPU's texture limit are kept on screen (persists
     /// across files). Only consulted for such frames; see
     /// [`crate::roi::LargeImageMode`].
@@ -221,6 +226,74 @@ impl Viewer {
     pub fn open(&mut self, path: PathBuf) -> anyhow::Result<()> {
         let opened = Stack::open(path, self.apply_pseudocolor);
         self.adopt(opened)
+    }
+
+    /// Start opening `source`, off this thread where that is possible.
+    ///
+    /// Returns immediately. [`poll_open`](Self::poll_open) reports when it
+    /// lands; until then [`load_stage`](Self::load_stage) says how far it has
+    /// got, and the previously open stack is still there to look at.
+    ///
+    /// Without threads to spawn — a browser, or a failed spawn — this falls
+    /// back to loading here and now, which blocks exactly as it always did.
+    /// Slower to respond is a great deal better than not opening the file.
+    pub fn begin_open(&mut self, source: crate::loader::LoadSource) {
+        #[cfg(feature = "threads")]
+        {
+            if let Some(loading) = crate::loader::Loading::spawn(source, self.apply_pseudocolor) {
+                self.loading = Some(loading);
+                return;
+            }
+            // Spawn failed. `source` was moved into the attempt, so there is
+            // nothing left to fall back *with*; report it rather than fail
+            // silently, and let the user try again.
+            self.status = Some("Could not start the loader thread".to_owned());
+        }
+        #[cfg(not(feature = "threads"))]
+        {
+            let opened = source.load(self.apply_pseudocolor, &mut |_| {});
+            let _ = self.adopt(opened);
+        }
+    }
+
+    /// Take delivery of a finished load, if one has finished this frame.
+    ///
+    /// Returns `true` when a stack was installed or an error recorded — the
+    /// signal for a frontend to reset whatever it had arranged around the
+    /// previous file.
+    pub fn poll_open(&mut self) -> bool {
+        #[cfg(feature = "threads")]
+        {
+            let Some(loading) = self.loading.as_mut() else { return false };
+            let Some(result) = loading.take() else { return false };
+            self.loading = None;
+            let _ = self.adopt(result);
+            true
+        }
+        #[cfg(not(feature = "threads"))]
+        false
+    }
+
+    /// How far the in-flight open has got, or `None` when nothing is loading.
+    pub fn load_stage(&self) -> Option<crate::loader::LoadStage> {
+        #[cfg(feature = "threads")]
+        {
+            self.loading.as_ref().map(|l| l.stage())
+        }
+        #[cfg(not(feature = "threads"))]
+        None
+    }
+
+    /// The name of the file being opened, while one is.
+    pub fn loading_name(&self) -> Option<String> {
+        #[cfg(feature = "threads")]
+        {
+            self.loading.as_ref().map(|l| {
+                l.name().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+            })
+        }
+        #[cfg(not(feature = "threads"))]
+        None
     }
 
     /// Load a stack from bytes already in memory — the browser's entry point,

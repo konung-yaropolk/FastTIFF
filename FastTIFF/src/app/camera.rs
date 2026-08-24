@@ -6,6 +6,14 @@
 use super::*;
 use fast_tiff_viewer::camera::{CameraState, NavMode, FLY_UNITS_PER_SEC, KEY_ROT};
 
+/// Vertical-drag units one whole pinch is worth.
+///
+/// `dolly` is written for a mouse, where the input is a distance in points; a
+/// pinch gives a *ratio* instead. This converts one into the other, and its
+/// value is simply what makes a comfortable two-finger pinch move about as far
+/// as the equivalent drag would.
+const PINCH_DOLLY: f32 = 260.0;
+
 impl ViewerApp {
     /// Apply this frame's mouse/keyboard to the 3D camera per the active nav mode.
     /// Returns whether the camera is actively moving (so the caller keeps
@@ -55,8 +63,13 @@ impl ViewerApp {
             (i.modifiers.alt, i.modifiers.shift, wheel, wasd, i.key_down(egui::Key::Space), arrows)
         });
 
+        // A gesture, if one is running. Two fingers pan and pinch; one finger
+        // arrives as an ordinary drag and orbits through the mouse paths below,
+        // which is the mapping every 3D viewer on a tablet uses.
+        let touch = ui.input(|i| i.multi_touch()).filter(|t| t.num_touches >= 2);
+
         let d = response.drag_delta();
-        let moved = d != egui::Vec2::ZERO;
+        let moved = d != egui::Vec2::ZERO && touch.is_none();
         let drag_l = response.dragged_by(egui::PointerButton::Primary);
         let drag_m = response.dragged_by(egui::PointerButton::Middle);
         let drag_r = response.dragged_by(egui::PointerButton::Secondary);
@@ -65,6 +78,29 @@ impl ViewerApp {
         let start_r = response.drag_started_by(egui::PointerButton::Secondary);
 
         let cam: &mut CameraState = &mut self.core.volume.cam;
+
+        // Gesture first, and to the exclusion of the drag paths: egui
+        // synthesises a pointer from the first touch, so without `moved` being
+        // suppressed above a two-finger pan would also orbit.
+        //
+        // Deliberately the same two fingers for both pan and dolly rather than
+        // a mode switch — pinching to close in on something while sliding it
+        // into view is one motion of the hand, and splitting it across two
+        // gestures is what makes touch 3D feel like driving a mouse badly.
+        if let Some(t) = touch {
+            if t.translation_delta != egui::Vec2::ZERO {
+                cam.pan(t.translation_delta.x, t.translation_delta.y, right, up, pan_speed);
+                animating = true;
+            }
+            // A pinch open means "bring it closer". `dolly` takes the vertical
+            // drag convention (down is out), so the ratio is turned into a
+            // signed amount in those units.
+            let pinch = t.zoom_delta;
+            if (pinch - 1.0).abs() > 0.001 {
+                cam.dolly(-(pinch - 1.0) * PINCH_DOLLY);
+                animating = true;
+            }
+        }
 
         // Mouse drag → orbit / pan / dolly, mapped per navigation style. Orbit
         // modes re-pivot to where the focal axis enters the volume when the orbit

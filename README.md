@@ -295,7 +295,24 @@ it can be used in projects that couldn't take a GPL dependency.
 - Z-slice selector when `slices > 1` (the scrubber itself always drives
   the time/frame axis).
 - Zoom (Ctrl+scroll) and pan (drag) of the 2D image, with the window sized
-  to fit on open.
+  to fit on open. **Pinch to zoom and two fingers to pan** on a touch screen,
+  in both the 2D and 3D views — a pinch zooms continuously rather than in
+  fixed steps, since a gesture is continuous.
+- A **navigator** in the corner of the 2D view once the whole frame no longer
+  fits: two nested rectangles, the frame and the part of it on screen, in the
+  manner of ImageJ's. At 800% on a mosaic every screenful looks like every
+  other, and this is what says which one you are looking at.
+- **Physical size** in the toolbar next to the pixel count, when the file says
+  how big a pixel is (OME `PhysicalSize`, or the TIFF resolution tags). Both
+  axes always, since anisotropic pixels are common enough that collapsing them
+  would be a lie half the time.
+- **Opening does not block the interface.** Walking the IFD chain and measuring
+  each channel's display range takes seconds on a large stack, and it happens
+  on a worker thread with a progress readout in the panel — a counted bar for
+  the channel scans, whose length is known, and a spinner for the index walk,
+  whose length is not. The file already open stays on screen and usable until
+  the new one lands. (A browser has no threads to spawn, so there the load
+  still blocks.)
 - **Frames larger than one GPU texture, at full resolution** — every GPU caps a
   texture at 16384 or 32768 pixels per axis, and mosaics run well past it
   (Hubble's Andromeda is 40000 x 12788). Such a frame is shown through a

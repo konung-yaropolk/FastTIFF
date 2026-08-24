@@ -247,8 +247,34 @@ pub fn gray_lut_sel_tint(display: &Display, sel: usize) -> Option<[u8; 3]> {
 /// display window — and never writes to it; the result is owned by
 /// [`Display::settings`](crate::display::Display::settings).
 pub fn build_channel_settings(tiff: &TiffStack, channels: usize) -> Vec<ChannelSettings> {
-    (0..Display::shown_channels(channels))
+    build_channel_settings_reporting(tiff, channels, &mut |_, _| {})
+}
+
+/// [`build_channel_settings`], reporting `(done, total)` as each channel's scan
+/// finishes.
+///
+/// This is the slow half of opening a file — every channel decodes a frame to
+/// find its display range — and the only part of an open whose length is known
+/// in advance, so it is the part a progress bar can be honest about.
+pub fn build_channel_settings_reporting(
+    tiff: &TiffStack,
+    channels: usize,
+    on_channel: &mut dyn FnMut(usize, usize),
+) -> Vec<ChannelSettings> {
+    let total = Display::shown_channels(channels);
+    on_channel(0, total);
+    (0..total)
         .map(|c| {
+            let settings = build_one(tiff, c);
+            on_channel(c + 1, total);
+            settings
+        })
+        .collect()
+}
+
+/// One channel's contrast window and upload format.
+fn build_one(tiff: &TiffStack, c: usize) -> ChannelSettings {
+    {
             // The metadata may describe fewer channels than we're showing (a
             // dimension override can raise the count), so fall back to "no
             // suggested window" rather than indexing past it.
@@ -313,8 +339,7 @@ pub fn build_channel_settings(tiff: &TiffStack, channels: usize) -> Vec<ChannelS
                 let kind = if is_u8 { ChannelKind::Int8 } else { ChannelKind::Int16 };
                 ChannelSettings { min, max, enabled: true, bounds, initial: (min, max), kind }
             }
-        })
-        .collect()
+    }
 }
 
 /// Fit every contrast window to where its data actually is, using histograms

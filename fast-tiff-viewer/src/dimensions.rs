@@ -2,7 +2,7 @@
 //! channel/Z/time roles to a loaded stack, RGB plane setup, and the derived
 //! status line. Split from `app.rs`.
 
-use crate::channels::build_channel_settings;
+use crate::channels::build_channel_settings_reporting;
 use crate::display::Dims;
 use crate::stack::{ChannelSettings, Stack};
 use scivis_render::{ChannelKind, MAX_CHANNELS};
@@ -16,7 +16,7 @@ pub fn compute_status(dims: Dims, triple_axis_warning: bool) -> Option<String> {
         Some(format!(
             "Warning: this file has channels, Z-slices, and time frames all present at once \
              ({} channel(s) × {} Z-slice(s) × {} frame(s)). Z isn't shown as a separate axis here \
-             — only the first Z-slice is used; scrubbing covers channels × time only.",
+             — only the first Z-slice is used; to see the whole picture, use 3D view.",
             dims.channels, dims.slices, dims.frames
         ))
     } else if dims.channels > MAX_CHANNELS {
@@ -36,6 +36,17 @@ pub fn compute_status(dims: Dims, triple_axis_warning: bool) -> Option<String> {
 /// swap can't drift out of sync with `open_file` the way `self.status`
 /// previously did.
 pub fn apply_resolved_dimensions(loaded: &mut Stack, resolved: fast_tiff_lib::ResolvedDimensions) {
+    apply_resolved_dimensions_reporting(loaded, resolved, &mut |_, _| {});
+}
+
+/// [`apply_resolved_dimensions`], reporting the per-channel contrast scans as
+/// they finish — the slow part of opening a file, and the only part whose
+/// length is known ahead of time.
+pub fn apply_resolved_dimensions_reporting(
+    loaded: &mut Stack,
+    resolved: fast_tiff_lib::ResolvedDimensions,
+    on_channel: &mut dyn FnMut(usize, usize),
+) {
     // Note what is *not* here: `loaded.tiff.meta` is left exactly as parsed.
     // The interpretation is ours, not the file's, so it lives in `display` —
     // which is what keeps "what did the file actually say?" answerable after
@@ -49,7 +60,8 @@ pub fn apply_resolved_dimensions(loaded: &mut Stack, resolved: fast_tiff_lib::Re
     loaded.display.mode = loaded.tiff.meta.mode;
     let shown = crate::display::Display::shown_channels(resolved.channels);
     loaded.display.reseed_luts(&loaded.tiff.meta, shown);
-    loaded.display.settings = build_channel_settings(&loaded.tiff, resolved.channels);
+    loaded.display.settings =
+        build_channel_settings_reporting(&loaded.tiff, resolved.channels, on_channel);
     loaded.frame_index = 0;
     loaded.last_uploaded = None;
     loaded.luts_uploaded = false;
