@@ -192,7 +192,7 @@ intended second one):
         │
   FastTIFF          the egui UI (lib) + the native binary
         │
-  FastTIFF-web      a browser host around the same UI (~57 lines)
+  FastTIFF-web      a browser host around the same UI
 ```
 
 `FastTIFF` is a lib + bin: the library half holds the egui interface, and both

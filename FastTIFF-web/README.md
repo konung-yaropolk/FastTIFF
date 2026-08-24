@@ -45,9 +45,24 @@ sites across ~3,100 lines of shared UI, and every one of them is about the
 | Extra files at once | launched as sibling processes | n/a |
 | Interface scale | native (`app::scale::UI_SCALE` = 1.0) | **150%**, pop-ups excepted |
 | Empty-viewport prompt | drop/open + scroll hints | the same, plus the local-processing line |
+| Opening zoom | window resized to the image, at a fixed level | image fitted to the canvas, at whatever factor that takes |
 
 Both routes to a file meet at one `Opened` enum, so everything downstream —
 loading, fit, resetting the chrome — is shared.
+
+## Why the opening zoom is not a round number
+
+The desktop build resizes its window around the image, so it can always open at
+one of the fixed zoom levels — 100%, 50%, 25%. A canvas has no window to
+resize, so the image is fitted to the canvas instead, and the factor that takes
+is whatever the two aspect ratios happen to demand: 53.91%, say. Snapping that
+to the nearest fixed level would either crop a sliver off the image or leave a
+margin you did not ask for.
+
+The exact factor is then inserted into that image's zoom ladder
+(`app::zoom_ladder`) for as long as the file is open, so wheeling out returns to
+the fitted view rather than stepping past it to 50%. It is dropped on the next
+open, since it describes one picture in one canvas.
 
 ## Why the web build is drawn larger
 

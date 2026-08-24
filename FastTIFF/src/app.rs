@@ -92,10 +92,38 @@ const MIN_WINDOW: f32 = 256.0;
 const FAST_SCROLL_RATE: f64 = 0.1;
 const FAST_SCROLL_GLIDE_RATE: f64 = 5.5;
 
+/// How close a fit factor must be to a fixed level before it counts as that
+/// level rather than being inserted next to it.
+///
+/// Two steps a percent apart are one step as far as the eye and the wheel are
+/// concerned, and the pair would cost a wheel notch to cross for no visible
+/// change. 2% is below what anyone can see in a zoom and well above the
+/// rounding in the table.
+const FIT_SNAP: f32 = 0.02;
+
+/// The zoom levels in effect: the fixed ladder, plus this image's exact
+/// fit-to-window factor when it has one and it is not already on the ladder.
+///
+/// Inserted in order rather than appended, so stepping through it is monotonic.
+fn zoom_ladder(fit: Option<f32>) -> Vec<f32> {
+    let mut levels = ZOOM_LEVELS.to_vec();
+    if let Some(f) = fit.filter(|f| f.is_finite() && *f > 0.0) {
+        if !levels.iter().any(|z| (z - f).abs() <= f * FIT_SNAP) {
+            levels.insert(levels.partition_point(|z| *z < f), f);
+        }
+    }
+    levels
+}
+
 /// The next zoom level in `dir` (+1 = in, −1 = out) from whichever level is
-/// nearest `current`, clamped to the ends of `ZOOM_LEVELS`.
-fn stepped_zoom(current: f32, dir: i32) -> f32 {
-    let nearest = ZOOM_LEVELS
+/// nearest `current`, clamped to the ends of the ladder.
+///
+/// `fit` is the open image's fit-to-window factor, which joins the ladder for
+/// as long as that image is open — so zooming back out lands on the fitted view
+/// instead of stepping past it to the nearest fixed level.
+fn stepped_zoom(current: f32, dir: i32, fit: Option<f32>) -> f32 {
+    let levels = zoom_ladder(fit);
+    let nearest = levels
         .iter()
         .enumerate()
         .min_by(|(_, a), (_, b)| {
@@ -103,8 +131,27 @@ fn stepped_zoom(current: f32, dir: i32) -> f32 {
         })
         .map(|(i, _)| i)
         .unwrap_or(0);
-    let next = (nearest as i32 + dir).clamp(0, ZOOM_LEVELS.len() as i32 - 1) as usize;
-    ZOOM_LEVELS[next]
+    let next = (nearest as i32 + dir).clamp(0, levels.len() as i32 - 1) as usize;
+    levels[next]
+}
+
+/// The zoom at which an `img_w` x `img_h` image exactly fits `avail`, capped at
+/// 1:1 so a small image is not magnified into a blur.
+///
+/// `None` while the area is not yet known — a canvas has no size on the frame
+/// before it is first laid out — so the caller waits rather than fitting to
+/// nothing.
+///
+/// Web-only, as the desktop build sizes its window to the image instead
+/// ([`initial_fit_zoom`] is that path's opposite number), but compiled under
+/// `test` on every target so the guards above stay covered.
+#[cfg(any(target_arch = "wasm32", test))]
+fn fit_to_panel(img_w: f32, img_h: f32, avail: egui::Vec2) -> Option<f32> {
+    if !(img_w >= 1.0 && img_h >= 1.0 && avail.x >= 1.0 && avail.y >= 1.0) {
+        return None;
+    }
+    let z = (avail.x / img_w).min(avail.y / img_h).min(1.0);
+    z.is_finite().then_some(z).filter(|z| *z > 0.0)
 }
 
 /// The usable desktop area for the window, i.e. the monitor size minus headroom
@@ -216,6 +263,14 @@ struct View2d {
     /// sizes the window once. Deferred because the chrome height and monitor
     /// size aren't known at open time.
     pending_initial_fit: bool,
+    /// The exact zoom at which the open image fits the view, once computed, and
+    /// an extra rung on this image's zoom ladder (see [`zoom_ladder`]).
+    ///
+    /// Per image, so it is cleared on open: it is a property of this picture in
+    /// this window, and carrying a previous file's factor over would leave a
+    /// rung that fits nothing. `None` on the desktop, where the window is
+    /// resized to the image and the opening zoom is a fixed level already.
+    fit_zoom: Option<f32>,
     /// Set when something (initial fit, or a zoom step) wants the window resized
     /// to match `zoom` this frame. Applied once, then cleared.
     resize_to_zoom: bool,
@@ -236,6 +291,7 @@ impl Default for View2d {
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             pending_initial_fit: false,
+            fit_zoom: None,
             resize_to_zoom: false,
             zoom_reposition: None,
             scroll_accum: 0.0,
@@ -363,6 +419,7 @@ impl ViewerApp {
         self.view.zoom = 1.0;
         self.view.pan = egui::Vec2::ZERO;
         self.view.pending_initial_fit = true;
+        self.view.fit_zoom = None;
         self.view.resize_to_zoom = false;
         // The channels panel is sized and populated for the previous file's
         // channel count, so it is rebuilt wholesale. That also disarms a toggle
@@ -744,7 +801,7 @@ impl eframe::App for ViewerApp {
         // height is known. Cursor-centering uses last frame's cached geometry.
         if zoom_step != 0 && self.core.stack.is_some() && self.core.view_mode == ViewMode::Movie {
             let old_zoom = self.view.zoom;
-            let new_zoom = stepped_zoom(old_zoom, zoom_step);
+            let new_zoom = stepped_zoom(old_zoom, zoom_step, self.view.fit_zoom);
             if (new_zoom - old_zoom).abs() > f32::EPSILON {
                 let cursor = ui
                     .ctx()
@@ -1466,6 +1523,42 @@ impl eframe::App for ViewerApp {
                 ui.allocate_exact_size(available, egui::Sense::click_and_drag());
             self.view.panel_rect = panel_rect;
 
+            // Fit the image to the canvas on open. The browser has no window to
+            // resize around the picture the way the desktop build does, so
+            // without this a gigapixel mosaic opens at 1:1 and shows one corner
+            // of itself.
+            //
+            // Fitted to the canvas *exactly*, not to the nearest fixed level: a
+            // 4:3 image in a 16:9 canvas has no fixed level that fills it, so
+            // snapping would either crop a sliver or leave a visible margin.
+            // The exact factor then joins this image's zoom ladder, so scrolling
+            // back out returns to the fitted view instead of stepping past it —
+            // which is the whole reason it has to be a rung and not a one-off.
+            //
+            // Held back until the 2D view is the one on screen: in 3D the zoom
+            // is unused, and consuming the flag there would leave the image
+            // unfitted when the user came back to 2D.
+            #[cfg(target_arch = "wasm32")]
+            if self.view.pending_initial_fit && self.core.view_mode == ViewMode::Movie {
+                let dims = self
+                    .core
+                    .stack
+                    .as_ref()
+                    .and_then(|l| l.tiff.frames.first())
+                    .map(|f| (f.width as f32, f.height as f32));
+                match dims.and_then(|(iw, ih)| fit_to_panel(iw, ih, available)) {
+                    Some(z) => {
+                        self.view.zoom = z;
+                        self.view.fit_zoom = Some(z);
+                        self.view.pan = egui::Vec2::ZERO;
+                        self.view.pending_initial_fit = false;
+                    }
+                    // No canvas size yet — it has not been laid out. Come back
+                    // next frame rather than fitting to nothing.
+                    None => ui.ctx().request_repaint(),
+                }
+            }
+
             // 3D volume view: drive the camera per the active nav mode and paint
             // the GPU ray-march. The 2D pan/UV/scrub path below is bypassed. This
             // runs before the `loaded` borrow so it can call `&mut self` methods.
@@ -1649,3 +1742,6 @@ impl eframe::App for ViewerApp {
     }
 }
 
+#[cfg(test)]
+#[path = "app/zoom_tests.rs"]
+mod zoom_tests;
