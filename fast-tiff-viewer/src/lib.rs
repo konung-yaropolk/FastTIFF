@@ -43,6 +43,7 @@ pub mod colormap;
 pub mod dimensions;
 pub mod display;
 pub mod histogram;
+pub mod loader;
 pub mod prefetch;
 pub mod roi;
 pub mod stack;
@@ -67,6 +68,7 @@ pub type Renderer = backend::ImageRenderResources;
 
 pub use display::{Dims, Display};
 pub use histogram::Histogram;
+pub use loader::{LoadSource, LoadStage};
 pub use stack::{ChannelSettings, Stack};
 pub use viewer::{DecodeMode, Playback, ViewMode, Viewer, VolumeView, DEFAULT_FPS};
 

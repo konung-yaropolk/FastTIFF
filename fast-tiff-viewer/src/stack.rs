@@ -7,7 +7,8 @@
 //! free instead of reimplementing them.
 
 use crate::channels::{build_channel_settings, refresh_pseudocolor};
-use crate::dimensions::{apply_resolved_dimensions, setup_cmyk, setup_rgb};
+use crate::loader::LoadStage;
+use crate::dimensions::{apply_resolved_dimensions_reporting, setup_cmyk, setup_rgb};
 use crate::display::Display;
 use crate::prefetch::Prefetcher;
 use crate::volume::VolumeBuilder;
@@ -133,7 +134,24 @@ impl Stack {
     /// [`crate::channels::pseudocolor_applicable`]).
     #[cfg(feature = "mmap")]
     pub fn open(path: PathBuf, apply_pseudocolor: bool) -> anyhow::Result<Self> {
-        Self::from_tiff(TiffStack::open(&path)?, path, apply_pseudocolor)
+        Self::open_reporting(path, apply_pseudocolor, &mut |_| {})
+    }
+
+    /// [`open`](Self::open), reporting how far it has got.
+    ///
+    /// Opening is two costs: indexing the IFD chain, whose length is not known
+    /// until it has been walked, and then one contrast scan per channel, which
+    /// is countable. `on_stage` therefore sees an unquantified `Reading`
+    /// followed by a counted `Contrast`, which is as honest as the work allows.
+    #[cfg(feature = "mmap")]
+    pub fn open_reporting(
+        path: PathBuf,
+        apply_pseudocolor: bool,
+        on_stage: &mut dyn FnMut(LoadStage),
+    ) -> anyhow::Result<Self> {
+        on_stage(LoadStage::Reading);
+        let tiff = TiffStack::open(&path)?;
+        Self::from_tiff_reporting(tiff, path, apply_pseudocolor, on_stage)
     }
 
     /// Same, for a stack already in memory. `name` is only a label — it fills
@@ -141,12 +159,30 @@ impl Stack {
     /// workers have something to reopen — so a browser can pass the picked
     /// file's name and nothing will try to touch the filesystem.
     pub fn from_bytes(bytes: Vec<u8>, name: PathBuf, apply_pseudocolor: bool) -> anyhow::Result<Self> {
-        Self::from_tiff(TiffStack::from_bytes(bytes)?, name, apply_pseudocolor)
+        Self::from_bytes_reporting(bytes, name, apply_pseudocolor, &mut |_| {})
+    }
+
+    /// [`from_bytes`](Self::from_bytes), reporting progress — see
+    /// [`open_reporting`](Self::open_reporting).
+    pub fn from_bytes_reporting(
+        bytes: Vec<u8>,
+        name: PathBuf,
+        apply_pseudocolor: bool,
+        on_stage: &mut dyn FnMut(LoadStage),
+    ) -> anyhow::Result<Self> {
+        on_stage(LoadStage::Reading);
+        let tiff = TiffStack::from_bytes(bytes)?;
+        Self::from_tiff_reporting(tiff, name, apply_pseudocolor, on_stage)
     }
 
     /// The shared tail of both constructors: derive the display model from an
     /// already-indexed stack.
-    fn from_tiff(tiff: TiffStack, path: PathBuf, apply_pseudocolor: bool) -> anyhow::Result<Self> {
+    fn from_tiff_reporting(
+        tiff: TiffStack,
+        path: PathBuf,
+        apply_pseudocolor: bool,
+        on_stage: &mut dyn FnMut(LoadStage),
+    ) -> anyhow::Result<Self> {
         // Spin up the read-ahead worker: decode-ahead for compressed stacks,
         // page-touch for uncompressed (see the `prefetch` field).
         // Only the read-ahead worker cares, and it only exists with `mmap`.
@@ -190,7 +226,11 @@ impl Stack {
             stack.tiff.meta.slices,
             stack.tiff.meta.frames,
         );
-        apply_resolved_dimensions(&mut stack, fast_tiff_lib::resolve_dimensions(c, z, f));
+        apply_resolved_dimensions_reporting(
+            &mut stack,
+            fast_tiff_lib::resolve_dimensions(c, z, f),
+            &mut |done, total| on_stage(LoadStage::Contrast { done, total }),
+        );
         stack.display.has_z_axis = stack.display.dims.slices > 1;
         // Chunky RGB overrides the channel layout: the sample planes of each IFD
         // become red/green/blue display channels.
