@@ -20,15 +20,20 @@ const PANEL_FRACTION: f32 = 0.2;
 /// Gap between the map and the corner of the canvas.
 const MARGIN: f32 = 10.0;
 
-/// Below this the map is not drawn: the view covers all but a rounding error of
-/// the frame, so the inner rectangle would sit on top of the outer one.
-const WHOLE_IMAGE: f32 = 0.999;
-
 /// Draw the navigator into the top-left of `panel`, given where the whole image
 /// would be (`full`) and which part of it is on screen (`visible`).
 ///
 /// Both rects are in screen space, so this needs no knowledge of zoom, pan or
 /// UVs — it is the same geometry the image was just drawn from, scaled down.
+///
+/// **The caller decides whether to draw at all.** It already has to work out
+/// whether the image overflows the panel, to know whether dragging should pan,
+/// and that answer carries a tolerance for the sub-pixel disagreement between
+/// a window's size and the panel inside it. Asking the same question a second
+/// time here, from the rects and with a different tolerance, is what made the
+/// map appear over images that visibly fitted: the two answers differed by a
+/// fraction of a pixel. One question, asked once, in the place that already
+/// needs it.
 pub(super) fn draw(
     painter: &egui::Painter,
     visuals: &egui::Visuals,
@@ -46,7 +51,10 @@ pub(super) fn draw(
     }
     // The visible fraction of the frame on each axis.
     let (sx, sy) = (visible.width() / fw, visible.height() / fh);
-    if sx >= WHOLE_IMAGE && sy >= WHOLE_IMAGE {
+    // Defensive only — the caller has already decided this is worth drawing.
+    // An exactly-covering view would put the inner rectangle on top of the
+    // outer one, which says nothing while covering a corner of the image.
+    if visible.contains_rect(full) {
         return;
     }
 

@@ -346,6 +346,14 @@ struct View2d {
     image_origin: egui::Pos2,
     /// The central panel's rect, from the last frame.
     panel_rect: egui::Rect,
+    /// Whether the image overflowed the panel on the *previous* frame.
+    ///
+    /// A zoom step changes the image's size immediately but the window that
+    /// holds it only on the frame after, so between the two the image genuinely
+    /// overflows a panel that is about to grow to fit it. Requiring the
+    /// overflow to survive a frame is what stops the navigator blinking on
+    /// during a zoom between two views that both fit.
+    was_pannable: bool,
 }
 
 impl Default for View2d {
@@ -360,6 +368,7 @@ impl Default for View2d {
             scroll_accum: 0.0,
             image_origin: egui::Pos2::ZERO,
             panel_rect: egui::Rect::ZERO,
+            was_pannable: false,
         }
     }
 }
@@ -499,6 +508,9 @@ impl ViewerApp {
         self.view.pan = egui::Vec2::ZERO;
         self.view.pending_initial_fit = true;
         self.view.fit_zoom = None;
+        // A new file starts with no history of overflowing, or the navigator
+        // would draw on its first frame from the previous file's answer.
+        self.view.was_pannable = false;
         self.view.resize_to_zoom = false;
         // The channels panel is sized and populated for the previous file's
         // channel count, so it is rebuilt wholesale. That also disarms a toggle
@@ -1828,13 +1840,28 @@ impl eframe::App for ViewerApp {
             // Where the view sits in the frame, once that stops being obvious.
             // Drawn after the image so it is over it, and clipped to the panel
             // like everything else here.
-            minimap::draw(
-                &ui.painter().with_clip_rect(panel_rect),
-                ui.visuals(),
-                panel_rect,
-                full_rect,
-                visible,
-            );
+            //
+            // Gated on the same `pannable` the drag handler uses, so "the image
+            // is bigger than the panel" has one answer rather than two that
+            // disagree by a rounding error — and on that answer having held for
+            // a frame, so a zoom's momentary overflow does not flash it up.
+            //
+            // Also not while an opening fit is still pending: the zoom is then
+            // a placeholder about to be replaced, and on a large image that
+            // placeholder overflows — so the navigator would appear for the
+            // frame or two before the picture settles.
+            let settled = !self.view.pending_initial_fit;
+            let steady_pannable = pannable && self.view.was_pannable && settled;
+            self.view.was_pannable = pannable && settled;
+            if steady_pannable {
+                minimap::draw(
+                    &ui.painter().with_clip_rect(panel_rect),
+                    ui.visuals(),
+                    panel_rect,
+                    full_rect,
+                    visible,
+                );
+            }
 
             response.on_hover_cursor(if pannable {
                 egui::CursorIcon::Grab
