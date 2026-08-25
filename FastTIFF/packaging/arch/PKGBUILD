@@ -58,5 +58,15 @@ package() {
         install -Dm644 "FastTIFF/icon/icon${s}.png" \
             "$pkgdir/usr/share/icons/hicolor/${s}x${s}/apps/fasttiff.png"
     done
+    # The TIFF *document* icon, under mimetypes/ rather than apps/. XDG has no
+    # per-application document icon: a file manager looks up one icon per MIME
+    # type, shared by every handler, so this is `image-tiff` — the standard name
+    # for image/tiff. It goes into hicolor, the fallback theme of last resort, so
+    # any real desktop theme that defines image-tiff still wins; this only gives
+    # TIFFs an icon on a system that had none.
+    for s in 16 32 48 64 128 256; do
+        install -Dm644 "FastTIFF/icon/icon-image-tiff${s}.png" \
+            "$pkgdir/usr/share/icons/hicolor/${s}x${s}/mimetypes/image-tiff.png"
+    done
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

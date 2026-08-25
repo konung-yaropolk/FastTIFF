@@ -54,6 +54,12 @@ modules:
       - install -Dm644 FastTIFF/icon/icon48.png /app/share/icons/hicolor/48x48/apps/io.github.konung_yaropolk.FastTIFF.png
       - install -Dm644 FastTIFF/icon/icon32.png /app/share/icons/hicolor/32x32/apps/io.github.konung_yaropolk.FastTIFF.png
       - install -Dm644 FastTIFF/packaging/flatpak/io.github.konung_yaropolk.FastTIFF.metainfo.xml /app/share/metainfo/io.github.konung_yaropolk.FastTIFF.metainfo.xml
+    # No TIFF document icon here, unlike the .deb/.rpm/PKGBUILD, which drop one
+    # at hicolor/*/mimetypes/image-tiff.png. Flatpak only exports icons from
+    # `apps/` that are named after the app ID, so an `image-tiff.png` would stay
+    # inside the sandbox where no host file manager ever looks. That is the
+    # sandbox working as intended — an app cannot repaint a system-wide MIME
+    # type — so there is nothing to fix, only something to know.
     sources:
       # The whole repo (build-dir/repo live outside it in CI, so no recursion).
       - type: dir

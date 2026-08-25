@@ -61,7 +61,12 @@ Name: "assoc"; Description: "Associate .tif / .tiff with FastTIFF (adds it to ""
 Source: "..\..\..\FastTIFF.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; Bundle the icon into the install folder so the file-type association can point
 ; DefaultIcon at a standalone .ico (rather than the exe's embedded resource).
-Source: "..\..\icon\icon.ico"; DestDir: "{app}"; DestName: "FastTIFF.ico"; Flags: ignoreversion
+;
+; The *document* icon, not the application one: what Explorer draws on a .tif
+; file should say "a TIFF that FastTIFF opens", where the app icon says "the
+; FastTIFF program". Documents and the program that opens them are different
+; things and get different pictures, the way every other viewer does it.
+Source: "..\..\icon\icon-image-tiff.ico"; DestDir: "{app}"; DestName: "FastTIFF-tiff.ico"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\FastTIFF"; Filename: "{app}\{#MyAppExeName}"
@@ -70,8 +75,8 @@ Name: "{autodesktop}\FastTIFF"; Filename: "{app}\{#MyAppExeName}"; Tasks: deskto
 
 [Registry]
 ; Register a ProgID (FastTIFF.tiff) for FastTIFF's TIFF handling: its
-; DefaultIcon gives .tif/.tiff files FastTIFF's icon, and its open command is
-; how it launches them. Listing that ProgID under each extension's
+; DefaultIcon gives .tif/.tiff files the TIFF *document* icon, and its open
+; command is how it launches them. Listing that ProgID under each extension's
 ; OpenWithProgids adds FastTIFF to Explorer's "Open with" list *without* seizing
 ; the default handler — Windows 10+ reserves default-app changes for the user's
 ; own choice (Settings / "Open with > Always"), and the file icon only actually
@@ -79,7 +84,7 @@ Name: "{autodesktop}\FastTIFF"; Filename: "{app}\{#MyAppExeName}"; Tasks: deskto
 ; uninstall: uninsdeletekey drops the whole ProgID tree, uninsdeletevalue removes
 ; just our entries from the system-owned .tif/.tiff keys.
 Root: HKCU; Subkey: "Software\Classes\FastTIFF.tiff"; ValueType: string; ValueName: ""; ValueData: "TIFF Image"; Flags: uninsdeletekey; Tasks: assoc
-Root: HKCU; Subkey: "Software\Classes\FastTIFF.tiff\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\FastTIFF.ico"; Tasks: assoc
+Root: HKCU; Subkey: "Software\Classes\FastTIFF.tiff\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\FastTIFF-tiff.ico"; Tasks: assoc
 Root: HKCU; Subkey: "Software\Classes\FastTIFF.tiff\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: assoc
 Root: HKCU; Subkey: "Software\Classes\.tif\OpenWithProgids"; ValueType: string; ValueName: "FastTIFF.tiff"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCU; Subkey: "Software\Classes\.tiff\OpenWithProgids"; ValueType: string; ValueName: "FastTIFF.tiff"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc

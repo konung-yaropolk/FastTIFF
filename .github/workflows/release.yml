@@ -488,22 +488,32 @@ jobs:
           cp "target/${{ matrix.target }}/release/FastTIFF" "$APP/Contents/MacOS/FastTIFF"
           chmod +x "$APP/Contents/MacOS/FastTIFF"
 
-          # --- icon: assemble the iconset from committed PNGs, then pack .icns ---
+          # --- icons: assemble iconsets from committed PNGs, then pack .icns ---
+          # Two of them. `icon*.png` is the application, shown in the Dock and
+          # in Finder for the .app itself; `icon-image-tiff*.png` is the
+          # document, shown on every .tif file the app owns. macOS keeps those
+          # separate (CFBundleIconFile vs the document type's
+          # CFBundleTypeIconFile), and so should we — one says "this program",
+          # the other says "a file this program opens".
           ICO="FastTIFF/icon"
-          ICONSET="FastTIFF.iconset"
-          rm -rf "$ICONSET"; mkdir -p "$ICONSET"
-          cp "$ICO/icon16.png"   "$ICONSET/icon_16x16.png"
-          cp "$ICO/icon32.png"   "$ICONSET/icon_16x16@2x.png"
-          cp "$ICO/icon32.png"   "$ICONSET/icon_32x32.png"
-          cp "$ICO/icon64.png"   "$ICONSET/icon_32x32@2x.png"
-          cp "$ICO/icon128.png"  "$ICONSET/icon_128x128.png"
-          cp "$ICO/icon256.png"  "$ICONSET/icon_128x128@2x.png"
-          cp "$ICO/icon256.png"  "$ICONSET/icon_256x256.png"
-          cp "$ICO/icon512.png"  "$ICONSET/icon_256x256@2x.png"
-          cp "$ICO/icon512.png"  "$ICONSET/icon_512x512.png"
-          cp "$ICO/icon1024.png" "$ICONSET/icon_512x512@2x.png"
-          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/FastTIFF.icns"
-          rm -rf "$ICONSET"
+          make_icns() {
+            prefix="$1"; out="$2"
+            iconset="$(mktemp -d)/icon.iconset"; mkdir -p "$iconset"
+            cp "$ICO/${prefix}16.png"   "$iconset/icon_16x16.png"
+            cp "$ICO/${prefix}32.png"   "$iconset/icon_16x16@2x.png"
+            cp "$ICO/${prefix}32.png"   "$iconset/icon_32x32.png"
+            cp "$ICO/${prefix}64.png"   "$iconset/icon_32x32@2x.png"
+            cp "$ICO/${prefix}128.png"  "$iconset/icon_128x128.png"
+            cp "$ICO/${prefix}256.png"  "$iconset/icon_128x128@2x.png"
+            cp "$ICO/${prefix}256.png"  "$iconset/icon_256x256.png"
+            cp "$ICO/${prefix}512.png"  "$iconset/icon_256x256@2x.png"
+            cp "$ICO/${prefix}512.png"  "$iconset/icon_512x512.png"
+            cp "$ICO/${prefix}1024.png" "$iconset/icon_512x512@2x.png"
+            iconutil -c icns "$iconset" -o "$out"
+            rm -rf "$iconset"
+          }
+          make_icns "icon"            "$APP/Contents/Resources/FastTIFF.icns"
+          make_icns "icon-image-tiff" "$APP/Contents/Resources/FastTIFF-tiff.icns"
 
           # --- Info.plist ---
           PLIST="$APP/Contents/Info.plist"
@@ -539,6 +549,9 @@ jobs:
           add ":CFBundleDocumentTypes:0"                      dict
           add ":CFBundleDocumentTypes:0:CFBundleTypeName"     string  "TIFF image"
           add ":CFBundleDocumentTypes:0:CFBundleTypeRole"     string  "Viewer"
+          # The document icon Finder draws on .tif files FastTIFF handles. Named
+          # without its extension, as CFBundleTypeIconFile expects.
+          add ":CFBundleDocumentTypes:0:CFBundleTypeIconFile" string  "FastTIFF-tiff"
           add ":CFBundleDocumentTypes:0:LSHandlerRank"        string  "Default"
           add ":CFBundleDocumentTypes:0:LSItemContentTypes"   array
           add ":CFBundleDocumentTypes:0:LSItemContentTypes:0" string  "public.tiff"
