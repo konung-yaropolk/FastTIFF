@@ -1161,7 +1161,12 @@ impl eframe::App for ViewerApp {
                         ui.separator();
                         // Up to 2 decimals, trailing zeros trimmed: 3.1%, 33.3%,
                         // 100%, 3200% — so the fractional small zooms read correctly.
-                        let pct = format!("{:.2}", self.view.zoom * 100.0);
+                        //
+                        // The level being glided *to*, not the value part-way
+                        // there: the number is what the wheel selected, and
+                        // running it through the intermediate frames turns a
+                        // readout into a blur nobody can read.
+                        let pct = format!("{:.2}", self.view.zoom_settled() * 100.0);
                         let pct = pct.trim_end_matches('0').trim_end_matches('.');
                         ui.label(RichText::new(format!("{pct}%")).monospace())
                             .on_hover_text("Zoom (Ctrl+scroll to change)");
