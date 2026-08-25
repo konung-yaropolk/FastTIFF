@@ -375,6 +375,62 @@ mod worker {
         panic!("the window never arrived, so nothing was proved about keeping it");
     }
 
+    /// The point of asking "can this serve the view?" rather than "is this the
+    /// window I asked for?".
+    ///
+    /// A gesture re-plans every frame, so the rectangle wanted drifts
+    /// continuously and no window built against an earlier frame is ever equal
+    /// to the current one. Under equality the worker's output was thrown away
+    /// almost every time: measured over one zoom in and out of a 40000x12788
+    /// mosaic, 15 windows were built and 4 ever reached the screen, and every
+    /// one of the other 11 covered the view that discarded it.
+    #[test]
+    fn a_window_larger_than_needed_still_serves() {
+        let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else { return };
+        let tiff = TiffStack::open(&path).unwrap();
+        let jobs = jobs_for(&tiff);
+        let built_for = roi(0, 0, 96, 64, 1);
+
+        let worker = WindowWorker::new(path).expect("worker should start");
+        worker.request(0, built_for, jobs, vec![ChannelKind::Int16]);
+
+        // The view has moved on to something smaller and inside it — which is
+        // what a zoom does between the request and its answer.
+        let now_needs = roi(16, 16, 48, 32, 1);
+        assert!(built_for.serves(&now_needs), "the test is only meaningful if it covers");
+        let got = wait_for(&worker, 0, &now_needs, &[0]).expect("a covering window should serve");
+        assert_eq!(got.roi, built_for, "and it arrives as the window that was actually built");
+    }
+
+    /// Still refused when it genuinely cannot serve: a window that does not
+    /// cover the ground, or covers it at the wrong sampling, would draw the
+    /// edge of the data or the wrong resolution.
+    #[test]
+    fn a_window_that_cannot_serve_is_still_refused() {
+        let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else { return };
+        let tiff = TiffStack::open(&path).unwrap();
+        let jobs = jobs_for(&tiff);
+        let built_for = roi(0, 0, 48, 32, 1);
+
+        let worker = WindowWorker::new(path).expect("worker should start");
+        worker.request(0, built_for, jobs, vec![ChannelKind::Int16]);
+
+        for _ in 0..600 {
+            // Off to one side: not covered.
+            assert!(worker.take_matching(0, &roi(52, 0, 40, 32, 1), &[0]).is_none(), "not covered");
+            // Same ground, finer sampling than the built window holds.
+            assert!(
+                worker.take_matching(0, &roi(0, 0, 48, 32, 2), &[0]).is_none(),
+                "a different stride is a different picture"
+            );
+            if worker.take_matching(0, &built_for, &[0]).is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the window never arrived, so nothing was proved");
+    }
+
     /// The worker takes the newest request and drops what it has been overtaken
     /// by. A zoom produces a request per frame; answering all of them would put
     /// the worker further behind the longer the user keeps moving.

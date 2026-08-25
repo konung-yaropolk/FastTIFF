@@ -186,7 +186,7 @@ fn plan_residency(
     if !loaded.over_texture_limit {
         loaded.gpu_stride = 1;
         let full = Roi::full(w, h);
-        return Some(Serving { show: full, want: full, ready: true });
+        return Some(Serving { show: full, want: full, required: full, ready: true });
     }
 
     let budget = roi::Budget::new(max_axis, bytes_per_texel, mode);
@@ -375,24 +375,42 @@ fn sync_movie(
             }
         }
 
+        // Asked against what the view *needs*, not against the rectangle that
+        // was requested: the request moves with every frame of a gesture, so
+        // insisting the answer match it threw away most of what was built.
         let ready = loaded
             .window_worker
             .as_ref()
-            .and_then(|w| w.take_matching(frame_index, &plan.want, &channels));
+            .and_then(|w| w.take_matching(frame_index, &plan.required, &channels));
         match ready {
             Some(built) => {
-                let (tw, th) = plan.want.texture_size();
+                // The built window's own geometry, which may be a little larger
+                // than what is now wanted — that is what made it usable.
+                let roi = built.roi;
+                let (tw, th) = roi.texture_size();
                 renderer.ensure_size(tw, th, kinds);
                 for (channel, plane) in built.channels.iter().zip(&built.planes) {
                     upload_texture(renderer, *channel, tw, th, plane);
                 }
-                loaded.roi = Some(plan.want);
+                loaded.roi = Some(roi);
                 loaded.last_uploaded = Some(frame_index);
+                loaded.pending_window = None;
                 capture_overview(loaded, built, fw, fh, &enabled, kinds, mode);
             }
             None => match &loaded.window_worker {
                 Some(worker) => {
-                    worker.request(frame_index, plan.want, jobs, kinds.to_vec());
+                    // Only ask when what is already being built would not do.
+                    // A gesture re-plans every frame, so without this the queue
+                    // fills with near-identical requests — 240 of them for 19
+                    // distinct windows, measured — and the worker spends the
+                    // whole gesture starting over.
+                    let in_flight = loaded.pending_window.as_ref().is_some_and(|(f, r, ch)| {
+                        *f == frame_index && ch == &channels && r.serves(&plan.required)
+                    });
+                    if !in_flight {
+                        worker.request(frame_index, plan.want, jobs, kinds.to_vec());
+                        loaded.pending_window = Some((frame_index, plan.want, channels.clone()));
+                    }
                     // Keep the frames coming until it lands; nothing else would
                     // wake the interface once the user stops moving.
                     pending = true;

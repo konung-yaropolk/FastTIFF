@@ -94,6 +94,14 @@ pub struct Stack {
     /// the opening fit-to-window view does anyway. Never invalidated where its
     /// inputs change; validated at every use. See [`crate::window::Overview`].
     pub overview: Option<crate::window::Overview>,
+    /// The window the background worker is currently building, if any, with the
+    /// frame and channel set it was asked for.
+    ///
+    /// Only so the same window is not asked for again on the next frame. A pan
+    /// or zoom re-plans every frame, so the rectangle wanted drifts continuously
+    /// even while the worker is part-way through one that would serve every one
+    /// of those frames.
+    pub pending_window: Option<(usize, crate::roi::Roi, Vec<usize>)>,
 
     pub last_uploaded: Option<usize>,
     /// The per-channel `enabled` flags as of the last GPU upload. A disabled
@@ -210,6 +218,7 @@ impl Stack {
             roi: None,
             over_texture_limit: false,
             overview: None,
+            pending_window: None,
             window_worker: None,
             bands: Default::default(),
             last_uploaded: None,
