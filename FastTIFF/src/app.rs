@@ -156,6 +156,44 @@ fn trim_num(v: f64) -> String {
 /// rounding in the table.
 const FIT_SNAP: f32 = 0.02;
 
+/// Time constant of the glide a zoom step takes to its new level.
+///
+/// The approach is exponential, so a step is about 63% done after this long.
+/// With [`ZOOM_GLIDE_SNAP`] ending it, one rung of the ladder takes about
+/// 130 ms and the longest run across the whole ladder about 190 ms — long
+/// enough to read as movement rather than a jump, short enough that a second
+/// notch never feels held up. Slower starts to feel like the program is
+/// deciding whether to obey.
+const ZOOM_GLIDE_TAU: f32 = 0.035;
+
+/// How close to the target ends the glide. A ratio, not a difference, because
+/// zoom is geometric.
+///
+/// One percent, which is well under [`FIT_SNAP`]'s two — already described
+/// there as below what anyone can see in a zoom. Chasing the last percent is
+/// pure latency: an exponential approach spends as long covering it as it did
+/// covering the first three quarters.
+const ZOOM_GLIDE_SNAP: f32 = 0.01;
+
+/// Longest frame the glide will integrate. A hitch — a slow decode, a window
+/// drag — must not be turned into one enormous zoom jump on the frame after.
+const ZOOM_GLIDE_MAX_DT: f32 = 1.0 / 20.0;
+
+/// A zoom step in flight: the level being glided to, and the point it turns
+/// about.
+///
+/// Only the *drawn* zoom is animated. Everything the window does — resizing to
+/// the image, keeping the cursor's point on the same desktop spot — is decided
+/// once from the target, exactly as it was when the zoom snapped, so the window
+/// still moves once per step rather than sixty times.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ZoomGlide {
+    /// The ladder rung being approached.
+    target: f32,
+    /// Screen point held fixed while the picture scales about it.
+    anchor: egui::Pos2,
+}
+
 /// The zoom levels in effect: the fixed ladder, plus this image's exact
 /// fit-to-window factor when it has one and it is not already on the ladder.
 ///
@@ -340,6 +378,8 @@ struct View2d {
     /// A pending (zoom, anchor) so a zoom step can keep the point under the
     /// cursor put, applied once the new layout is known.
     zoom_reposition: Option<(f32, egui::Pos2)>,
+    /// A zoom step being glided out, if one is in flight. See [`ZoomGlide`].
+    zoom_glide: Option<ZoomGlide>,
     /// Sub-notch wheel deltas accumulated until they add up to a frame step.
     scroll_accum: f32,
     /// Top-left of the drawn image in screen space, from the last frame.
@@ -356,6 +396,51 @@ struct View2d {
     was_pannable: bool,
 }
 
+impl View2d {
+    /// The zoom the picture is heading for: the glide's target while one is in
+    /// flight, otherwise what is on screen.
+    ///
+    /// Everything outside the drawing itself asks this rather than [`Self::zoom`]
+    /// — the window size, the reposition, the next step off the ladder — so a
+    /// glide changes when the picture arrives, never where it is going.
+    fn zoom_settled(&self) -> f32 {
+        self.zoom_glide.map_or(self.zoom, |g| g.target)
+    }
+
+    /// Scale the picture about `anchor`, keeping whatever sits under that point
+    /// under it. The pan is expressed against the previous frame's cached
+    /// geometry, which is what the stepped path used before it animated.
+    fn zoom_about(&mut self, anchor: egui::Pos2, new_zoom: f32) {
+        let p = (anchor - self.image_origin) / self.zoom;
+        self.pan = self.panel_rect.min - (anchor - p * new_zoom);
+        self.zoom = new_zoom;
+    }
+
+    /// Advance a glide by `dt`, returning whether one is still running.
+    ///
+    /// Exponential approach, integrated in the logarithm so the picture changes
+    /// by the same *ratio* every frame: zoom is geometric, and interpolating it
+    /// linearly would crawl at the bottom of a step and race at the top.
+    fn advance_zoom_glide(&mut self, dt: f32) -> bool {
+        let Some(glide) = self.zoom_glide else { return false };
+        let dt = dt.clamp(0.0, ZOOM_GLIDE_MAX_DT);
+        let from = self.zoom;
+        if !(from > 0.0 && glide.target > 0.0) {
+            self.zoom_glide = None;
+            return false;
+        }
+        let alpha = 1.0 - (-dt / ZOOM_GLIDE_TAU).exp();
+        let next = (from.ln() + (glide.target.ln() - from.ln()) * alpha).exp();
+        let arrived = !next.is_finite() || (next / glide.target - 1.0).abs() <= ZOOM_GLIDE_SNAP;
+        let new_zoom = if arrived { glide.target } else { next };
+        self.zoom_about(glide.anchor, new_zoom);
+        if arrived {
+            self.zoom_glide = None;
+        }
+        !arrived
+    }
+}
+
 impl Default for View2d {
     fn default() -> Self {
         View2d {
@@ -365,6 +450,7 @@ impl Default for View2d {
             fit_zoom: None,
             resize_to_zoom: false,
             zoom_reposition: None,
+            zoom_glide: None,
             scroll_accum: 0.0,
             image_origin: egui::Pos2::ZERO,
             panel_rect: egui::Rect::ZERO,
@@ -512,6 +598,10 @@ impl ViewerApp {
         // would draw on its first frame from the previous file's answer.
         self.view.was_pannable = false;
         self.view.resize_to_zoom = false;
+        // A glide belongs to the picture that was on screen; carrying one into
+        // a new file would slide the fresh image away from the zoom it just
+        // opened at.
+        self.view.zoom_glide = None;
         // The channels panel is sized and populated for the previous file's
         // channel count, so it is rebuilt wholesale. That also disarms a toggle
         // caught in flight, whose remembered height belongs to a layout that no
@@ -705,12 +795,17 @@ impl ViewerApp {
             let target_window = if maximized {
                 None
             } else {
+                // The zoom being glided to, so the window is the right size for
+                // the destination while the picture is still on its way there.
+                // Sizing to the animated value instead would resize the window
+                // on every frame of every step.
+                let settled = self.view.zoom_settled();
                 let window_scale = match monitor_work_area(ui.ctx()) {
                     Some(m) => {
                         let fit = (m.x / img_w).min((m.y - chrome_height).max(1.0) / img_h);
-                        self.view.zoom.min(fit)
+                        settled.min(fit)
                     }
-                    None => self.view.zoom,
+                    None => settled,
                 };
                 let w = (img_w * window_scale).round().max(MIN_WINDOW);
                 let h = (img_h * window_scale + chrome_height).round().max(MIN_WINDOW);
@@ -723,7 +818,7 @@ impl ViewerApp {
             // desktop spot.
             let mut reposition: Option<egui::Pos2> = None;
             if let Some((old_zoom, cursor)) = self.view.zoom_reposition.take() {
-                let new_zoom = self.view.zoom;
+                let new_zoom = self.view.zoom_settled();
                 let fits = monitor_work_area(ui.ctx())
                     .map(|m| img_w * new_zoom <= m.x && img_h * new_zoom + chrome_height <= m.y)
                     .unwrap_or(true);
@@ -919,6 +1014,9 @@ impl eframe::App for ViewerApp {
                 self.view.pan = self.view.panel_rect.min - (t.center_pos - p * new_zoom)
                     - t.translation_delta;
                 self.view.zoom = new_zoom;
+                // A pinch is already continuous; a glide underneath it would be
+                // two things steering the same value.
+                self.view.zoom_glide = None;
                 // Deliberately no `resize_to_zoom`: a gesture runs for many
                 // frames, and resizing the window under the fingers on each of
                 // them makes the thing being touched move away from the touch.
@@ -933,24 +1031,49 @@ impl eframe::App for ViewerApp {
         // resize and optional reposition are handled later, once the chrome
         // height is known. Cursor-centering uses last frame's cached geometry.
         if zoom_step != 0 && !pinching && self.core.stack.is_some() && self.core.view_mode == ViewMode::Movie {
+            // Stepped off wherever the picture is *heading*, not where it has
+            // got to, so a second notch during a glide advances a second rung
+            // instead of re-deciding the first one.
             let old_zoom = self.view.zoom;
-            let new_zoom = stepped_zoom(old_zoom, zoom_step, self.view.fit_zoom);
-            if (new_zoom - old_zoom).abs() > f32::EPSILON {
+            let from = self.view.zoom_settled();
+            let new_zoom = stepped_zoom(from, zoom_step, self.view.fit_zoom);
+            if (new_zoom - from).abs() > f32::EPSILON {
                 let cursor = ui
                     .ctx()
                     .input(|i| i.pointer.latest_pos())
                     .filter(|p| self.view.panel_rect.contains(*p))
                     .unwrap_or_else(|| self.view.panel_rect.center());
-                // The native-pixel point under the cursor, kept fixed by pan
-                // (used when the image overflows; re-clamped to 0 when it fits,
-                // where the window move below handles the centering instead).
-                let p = (cursor - self.view.image_origin) / old_zoom;
-                self.view.pan = self.view.panel_rect.min - (cursor - p * new_zoom);
-                self.view.zoom = new_zoom;
+                // The picture glides to the new rung about the cursor; the
+                // window is told about the destination now, so it still resizes
+                // and repositions once per step rather than once per frame.
+                self.view.zoom_glide = Some(ZoomGlide { target: new_zoom, anchor: cursor });
                 self.view.resize_to_zoom = true;
                 self.view.zoom_reposition = Some((old_zoom, cursor));
             }
         }
+
+        // Advance the glide, in this same frame as the step that started it, so
+        // the picture is already moving on the frame the wheel turned.
+        if self.view.zoom_glide.is_some() {
+            if pinching || self.core.stack.is_none() || self.core.view_mode != ViewMode::Movie {
+                // A pinch drives the zoom directly and a 3D view has none;
+                // either way the glide has nothing left to say.
+                self.view.zoom_glide = None;
+            } else {
+                let dt = ui.input(|i| i.stable_dt);
+                if self.view.advance_zoom_glide(dt) {
+                    // Nothing else would ask for the next frame once the wheel
+                    // stops turning.
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+
+        // Tell the residency planner whether the view is still moving, so it
+        // does not start decoding a window for a zoom about to be left behind.
+        // Read *after* the advance, so the frame a glide lands on plans at once
+        // rather than waiting one more.
+        self.core.view_moving = self.view.zoom_glide.is_some() || pinching;
 
         // 2D/3D view toggle + the 3D-settings button are set inside the toolbar
         // closure via these locals (applied after) so the closure never needs a
