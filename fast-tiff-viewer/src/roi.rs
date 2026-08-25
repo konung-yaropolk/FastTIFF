@@ -213,6 +213,16 @@ pub struct Serving {
     /// The window the view really wants. Equal to `show` when there is nothing
     /// better to prepare.
     pub want: Roi,
+    /// The least that would serve this view — [`Residency::required`], carried
+    /// through so the caller can ask "is this good enough?" rather than "is
+    /// this identical?".
+    ///
+    /// The distinction decides whether background work is usable. `want` is
+    /// recomputed from the pan and zoom every frame, so during a gesture it is
+    /// a different rectangle each time and a window built against an earlier
+    /// one never equals the current one. Checked against `required` instead,
+    /// that same window is usually still perfectly good.
+    pub required: Roi,
     /// Whether `show` can be produced now. `false` means it is already on the
     /// GPU and `want` should be built in the background.
     pub ready: bool,
@@ -254,18 +264,18 @@ pub struct Serving {
 pub fn serve(current: Option<Roi>, overview: Option<Roi>, plan: &Residency) -> Serving {
     if let Some(show) = current {
         if show.serves(&plan.required) {
-            return Serving { show, want: show, ready: true };
+            return Serving { show, want: show, required: plan.required, ready: true };
         }
         if show.covers_area_of(&plan.required) {
-            return Serving { show, want: plan.resident, ready: false };
+            return Serving { show, want: plan.resident, required: plan.required, ready: false };
         }
     }
     if let Some(show) = overview {
         if show != plan.resident && show.covers_area_of(&plan.required) {
-            return Serving { show, want: plan.resident, ready: false };
+            return Serving { show, want: plan.resident, required: plan.required, ready: false };
         }
     }
-    Serving { show: plan.resident, want: plan.resident, ready: true }
+    Serving { show: plan.resident, want: plan.resident, required: plan.required, ready: true }
 }
 
 impl Roi {

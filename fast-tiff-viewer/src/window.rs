@@ -533,16 +533,32 @@ impl WindowWorker {
         let _ = self.tx.send(Job { frame_index, roi, jobs, kinds });
     }
 
-    /// Take a finished window if it is the one now wanted, leaving anything
-    /// else in place — a result for a view already moved on from is not worth
-    /// uploading, but nor is it worth discarding a result that has not been
-    /// asked about yet.
-    pub fn take_matching(&self, frame_index: usize, roi: &Roi, channels: &[usize]) -> Option<Built> {
+    /// Take a finished window if it can serve a view needing `required`,
+    /// leaving anything else in place.
+    ///
+    /// The test is [`Roi::serves`] — right sampling, covers the ground — and
+    /// deliberately *not* equality with the window that was asked for. The
+    /// window asked for is recomputed from the pan and zoom every frame, so
+    /// during a gesture no two frames ask for the same rectangle; demanding the
+    /// answer match the question meant that by the time a window was built the
+    /// question had changed and the work was thrown away. Measured on a
+    /// 40000x12788 mosaic, one zoom in and out: 15 windows built, 4 ever shown,
+    /// and every one of the other 11 would have served the view that discarded
+    /// it.
+    ///
+    /// A result that has not been asked about is still not discarded — the view
+    /// may be about to want it, and building it again is the expensive thing.
+    pub fn take_matching(
+        &self,
+        frame_index: usize,
+        required: &Roi,
+        channels: &[usize],
+    ) -> Option<Built> {
         let mut slot = self.result.lock().ok()?;
-        let matches = slot
-            .as_ref()
-            .is_some_and(|b| b.frame_index == frame_index && b.roi == *roi && b.channels == channels);
-        if matches {
+        let usable = slot.as_ref().is_some_and(|b| {
+            b.frame_index == frame_index && b.channels == channels && b.roi.serves(required)
+        });
+        if usable {
             slot.take()
         } else {
             None
