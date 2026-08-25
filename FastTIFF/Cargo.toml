@@ -1,6 +1,6 @@
 [package]
 name = "FastTIFF"
-version = "1.16.2"
+version = "1.16.3"
 edition = "2021"
 description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering."
 license = "GPL-3.0-only"
@@ -119,6 +119,22 @@ assets = [
     ["icon/icon64.png", "usr/share/icons/hicolor/64x64/apps/fasttiff.png", "644"],
     ["icon/icon128.png", "usr/share/icons/hicolor/128x128/apps/fasttiff.png", "644"],
     ["icon/icon256.png", "usr/share/icons/hicolor/256x256/apps/fasttiff.png", "644"],
+    # The TIFF *document* icon, under `mimetypes/` rather than `apps/`. Unlike
+    # Windows and macOS, XDG has no notion of "the icon this application's
+    # documents get" — a file manager looks up one icon per MIME type, shared by
+    # every handler. So this is `image-tiff`, the standard name for image/tiff.
+    #
+    # Installed into **hicolor**, which is the fallback theme of last resort:
+    # any real desktop theme (Adwaita, Papirus, Breeze) already defines
+    # image-tiff and keeps winning. The effect is therefore to give TIFFs a
+    # sensible icon on a system that had none, not to repaint them on a system
+    # that did.
+    ["icon/icon-image-tiff16.png", "usr/share/icons/hicolor/16x16/mimetypes/image-tiff.png", "644"],
+    ["icon/icon-image-tiff32.png", "usr/share/icons/hicolor/32x32/mimetypes/image-tiff.png", "644"],
+    ["icon/icon-image-tiff48.png", "usr/share/icons/hicolor/48x48/mimetypes/image-tiff.png", "644"],
+    ["icon/icon-image-tiff64.png", "usr/share/icons/hicolor/64x64/mimetypes/image-tiff.png", "644"],
+    ["icon/icon-image-tiff128.png", "usr/share/icons/hicolor/128x128/mimetypes/image-tiff.png", "644"],
+    ["icon/icon-image-tiff256.png", "usr/share/icons/hicolor/256x256/mimetypes/image-tiff.png", "644"],
 ]
 
 # `cargo generate-rpm` packaging (Fedora/RHEL/openSUSE) — the RPM counterpart to
@@ -154,4 +170,11 @@ assets = [
     { source = "FastTIFF/icon/icon64.png", dest = "/usr/share/icons/hicolor/64x64/apps/fasttiff.png", mode = "644" },
     { source = "FastTIFF/icon/icon128.png", dest = "/usr/share/icons/hicolor/128x128/apps/fasttiff.png", mode = "644" },
     { source = "FastTIFF/icon/icon256.png", dest = "/usr/share/icons/hicolor/256x256/apps/fasttiff.png", mode = "644" },
+    # The TIFF document icon — see the note on the .deb assets above.
+    { source = "FastTIFF/icon/icon-image-tiff16.png", dest = "/usr/share/icons/hicolor/16x16/mimetypes/image-tiff.png", mode = "644" },
+    { source = "FastTIFF/icon/icon-image-tiff32.png", dest = "/usr/share/icons/hicolor/32x32/mimetypes/image-tiff.png", mode = "644" },
+    { source = "FastTIFF/icon/icon-image-tiff48.png", dest = "/usr/share/icons/hicolor/48x48/mimetypes/image-tiff.png", mode = "644" },
+    { source = "FastTIFF/icon/icon-image-tiff64.png", dest = "/usr/share/icons/hicolor/64x64/mimetypes/image-tiff.png", mode = "644" },
+    { source = "FastTIFF/icon/icon-image-tiff128.png", dest = "/usr/share/icons/hicolor/128x128/mimetypes/image-tiff.png", mode = "644" },
+    { source = "FastTIFF/icon/icon-image-tiff256.png", dest = "/usr/share/icons/hicolor/256x256/mimetypes/image-tiff.png", mode = "644" },
 ]

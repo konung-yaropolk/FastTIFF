@@ -8,15 +8,14 @@
 
 
 [![FastTIFF](https://github.com/user-attachments/assets/b935b2fa-86cc-4edf-ab5a-255a1aa73e4d)](https://github.com/konung-yaropolk/FastTIFF/releases)  
-A fast multi-frame TIFF stack viewer for huge ImageJ hyperstacks: a horizontal
-scrubber instead of ImageJ's slice slider, GPU-side LUT/contrast rendering,
-and (for the common uncompressed case) zero CPU-side image processing per
+A fast multi-frame TIFF stack viewer optimized for fast viewing huge hyperstacks: movie playback, 3D volumetric reconstruction, GPU-side rendering,
+and zero CPU-side image processing per
 frame change.
 
-Open a stack via the "Open TIFF..." button or by dragging a `.tif`/`.tiff`
-file onto the window. Scrub with the bottom slider, the mouse wheel while
-hovering over the image (one frame per notch; hold **Shift** for fast
-continuous scrolling), or the left/right arrow keys.
+**Key Features**
+- **Memory-Mapped Lazy Loading**: Instead of loading an entire massive file into RAM, the desktop build memory-maps the file. This means a 20 GB TIFF stack can open instantly, and the system only loads the specific frames you are currently viewing.
+- **Zero-Copy Rendering**: For common uncompressed files, it processes frames with zero CPU-side image processing or allocation, simply reading directly from the mapped bytes.  Advanced GPU Rendering: It utilizes wgpu (DirectX 12, Vulkan, Metal) to offload tasks to the GPU. This includes applying Look-Up Tables (LUTs), adjusting contrast, and generating ray-marched 3D volume views from 2D stacks in real-time.
+- **Web Accessibility**: The browser version runs the exact same Rust decoder and GPU renderer natively in your browser. Files are processed completely locally—meaning sensitive scientific data never leaves your machine.  
 
 
 
