@@ -14,7 +14,7 @@
 /// Longest side of the map, in points, and the fraction of the panel it may
 /// take. Whichever is smaller wins, so it stays legible on a large canvas and
 /// gets out of the way on a small one.
-const MAX_SIDE: f32 = 132.0;
+const MAX_SIDE: f32 = 128.0;
 const PANEL_FRACTION: f32 = 0.2;
 
 /// Gap between the map and the corner of the canvas.
@@ -71,13 +71,17 @@ pub(super) fn draw(
 
     // Where the view sits inside it, clamped so a view dragged past the edge
     // mid-gesture cannot draw the inner box outside the outer one.
+    // Width and height are clamped to a minimum of 3.0 points.
     let inner = egui::Rect::from_min_size(
         outer.min
             + egui::vec2(
                 ((visible.min.x - full.min.x) / fw).clamp(0.0, 1.0) * outer.width(),
                 ((visible.min.y - full.min.y) / fh).clamp(0.0, 1.0) * outer.height(),
             ),
-        egui::vec2(sx.clamp(0.0, 1.0) * outer.width(), sy.clamp(0.0, 1.0) * outer.height()),
+        egui::vec2(
+            (sx.clamp(0.0, 1.0) * outer.width()).max(3.0),
+            (sy.clamp(0.0, 1.0) * outer.height()).max(3.0),
+        ),
     )
     .intersect(outer);
 
