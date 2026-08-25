@@ -8,8 +8,7 @@
 
 
 [![FastTIFF](https://github.com/user-attachments/assets/b935b2fa-86cc-4edf-ab5a-255a1aa73e4d)](https://github.com/konung-yaropolk/FastTIFF/releases)  
-A fast multi-frame TIFF stack viewer for huge ImageJ hyperstacks: a horizontal
-scrubber instead of ImageJ's slice slider, 3D-volumetric reconstruction, GPU-side rendering,
+A fast multi-frame TIFF stack viewer optimized for fast viewing huge hyperstacks: movie playback, 3D volumetric reconstruction, GPU-side rendering,
 and zero CPU-side image processing per
 frame change.
 
