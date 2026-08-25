@@ -295,7 +295,11 @@ it can be used in projects that couldn't take a GPL dependency.
 - Z-slice selector when `slices > 1` (the scrubber itself always drives
   the time/frame axis).
 - Zoom (Ctrl+scroll) and pan (drag) of the 2D image, with the window sized
-  to fit on open. **Pinch to zoom and two fingers to pan** on a touch screen,
+  to fit on open. A wheel notch **glides** to the next level over about a tenth
+  of a second, about the point under the cursor, rather than jumping — long
+  enough to see which way the picture moved, short enough that a second notch
+  never queues up behind the first. Turning the wheel again mid-glide advances
+  another rung rather than restarting the same one. **Pinch to zoom and two fingers to pan** on a touch screen,
   in both the 2D and 3D views — a pinch zooms continuously rather than in
   fixed steps, since a gesture is continuous.
 - A **navigator** in the corner of the 2D view once the whole frame no longer

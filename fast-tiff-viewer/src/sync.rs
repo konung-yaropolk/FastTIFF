@@ -103,7 +103,8 @@ impl Viewer {
 
         if let Some(r) = target {
             let read_ahead = self.playback.playing && !self.decode_parallel;
-            match sync_movie(loaded, renderer, &kinds, read_ahead, r, large_mode) {
+            let moving = self.view_moving;
+            match sync_movie(loaded, renderer, &kinds, read_ahead, r, large_mode, moving) {
                 Ok(pending) => outcome.needs_repaint |= pending,
                 Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
             }
@@ -239,6 +240,7 @@ fn sync_movie(
     read_ahead: bool,
     plan: Serving,
     mode: roi::LargeImageMode,
+    view_moving: bool,
 ) -> anyhow::Result<bool> {
     let roi = plan.show;
     // Skip disabled channels (the shader multiplies them out). Re-upload when
@@ -407,7 +409,13 @@ fn sync_movie(
                     let in_flight = loaded.pending_window.as_ref().is_some_and(|(f, r, ch)| {
                         *f == frame_index && ch == &channels && r.serves(&plan.required)
                     });
-                    if !in_flight {
+                    // While the view is still moving, whatever were started now
+                    // would be planned against a zoom that has moved on before
+                    // it finished. An animated step passes through every
+                    // sampling level between the two rungs, and is at each of
+                    // them for a few frames; only the one it lands on is worth
+                    // decoding.
+                    if !in_flight && !view_moving {
                         worker.request(frame_index, plan.want, jobs, kinds.to_vec());
                         loaded.pending_window = Some((frame_index, plan.want, channels.clone()));
                     }

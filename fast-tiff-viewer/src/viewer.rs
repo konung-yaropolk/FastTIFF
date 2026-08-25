@@ -210,6 +210,18 @@ pub struct Viewer {
     ///
     /// Zero means "unknown", and residency falls back to the texture budget.
     pub viewport_px: [f32; 2],
+    /// Whether the view is still moving under an animation or gesture, so any
+    /// window started now would be planned against a zoom that has already
+    /// changed by the time it is decoded.
+    ///
+    /// Set by the frontend while it is gliding a zoom step out or a pinch is
+    /// live. Windows already finished are still taken — a better picture is
+    /// always worth having — but no new one is started until the view settles.
+    /// Without this an animated zoom decodes at every sampling level it passes
+    /// through on the way, which is work the user never sees: the view is only
+    /// at each of them for a few frames, and the level it is heading for is the
+    /// only one that will still be wanted.
+    pub view_moving: bool,
     pub playback: Playback,
     pub volume: VolumeView,
 }
