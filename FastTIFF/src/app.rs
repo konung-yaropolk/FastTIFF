@@ -31,6 +31,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 mod camera;
+mod kinetic;
+mod scroll;
 mod dialog;
 mod minimap;
 mod overlay;
@@ -386,6 +388,9 @@ struct View2d {
     image_origin: egui::Pos2,
     /// The central panel's rect, from the last frame.
     panel_rect: egui::Rect,
+    /// Inertia for swipe-panning, so the view keeps moving for a moment after
+    /// the fingers leave the trackpad. See [`kinetic`].
+    pan_glide: kinetic::Glide,
     /// Whether the image overflowed the panel on the *previous* frame.
     ///
     /// A zoom step changes the image's size immediately but the window that
@@ -455,6 +460,7 @@ impl Default for View2d {
             image_origin: egui::Pos2::ZERO,
             panel_rect: egui::Rect::ZERO,
             was_pannable: false,
+            pan_glide: kinetic::Glide::default(),
         }
     }
 }
@@ -597,6 +603,8 @@ impl ViewerApp {
         // A new file starts with no history of overflowing, or the navigator
         // would draw on its first frame from the previous file's answer.
         self.view.was_pannable = false;
+        // Momentum from the last picture means nothing in this one.
+        self.view.pan_glide.stop();
         self.view.resize_to_zoom = false;
         // A glide belongs to the picture that was on screen; carrying one into
         // a new file would slide the fresh image away from the zoom it just
@@ -1932,6 +1940,9 @@ impl eframe::App for ViewerApp {
             // gesture: egui synthesises a pointer from the first touch, so a
             // two-finger pan arrives here as well and would be applied twice.
             if pannable && response.dragged() && !pinching {
+                // Taking hold of the picture ends any glide: the hand on it now
+                // decides where it goes.
+                self.view.pan_glide.stop();
                 self.view.pan -= response.drag_delta();
             }
             self.view.pan.x = self.view.pan.x.clamp(0.0, overflow.x);
@@ -2007,6 +2018,7 @@ impl eframe::App for ViewerApp {
             //     so one notch sums to ~10% while keeping the smooth glide feel.
             // egui remaps Shift+wheel to horizontal scrolling, so the smoothed
             // delta lands on `.x` with the same sign — `x + y` recovers it.
+            let mut pan_swipe = egui::Vec2::ZERO;
             if ui.rect_contains_pointer(panel_rect) {
                 let shift = ui.input(|i| i.modifiers.shift);
                 if shift {
@@ -2031,19 +2043,11 @@ impl eframe::App for ViewerApp {
                         scroll_step = steps as i32;
                     }
                 } else {
-                    // Pixels of touchpad scroll that count as one frame step.
-                    const POINTS_PER_FRAME: f32 = 50.0;
-                    let notches = ui.input(|i| {
-                        i.events.iter().fold(0.0_f32, |acc, e| match e {
-                            egui::Event::MouseWheel { unit, delta, modifiers, .. } if !modifiers.ctrl => {
-                                acc + match unit {
-                                    egui::MouseWheelUnit::Point => delta.y / POINTS_PER_FRAME,
-                                    _ => delta.y, // Line / Page: one frame per unit
-                                }
-                            }
-                            _ => acc,
-                        })
-                    });
+                    // Which device sent this, and therefore what it means —
+                    // see `scroll`.
+                    let scroll::Wheel { swipe, notches } =
+                        ui.input(|i| scroll::classify(&i.events, pannable));
+                    pan_swipe = swipe;
                     // egui scroll is +y up; we scrub the next frame on scroll-down.
                     self.view.scroll_accum -= notches;
                     let steps = self.view.scroll_accum.trunc();
@@ -2052,6 +2056,42 @@ impl eframe::App for ViewerApp {
                 }
             } else {
                 self.view.scroll_accum = 0.0;
+            }
+
+            // Move the field of view by swipe, and keep moving for a moment
+            // after the swipe stops. Deliberately outside the hover test above:
+            // a flick that carries the pointer off the image should still
+            // coast, and stopping dead at the edge of the panel would feel like
+            // the picture had hit something.
+            //
+            // The sign matches dragging — the picture follows the fingers —
+            // because they are the same gesture done two ways, and having them
+            // disagree would be worse than either choice.
+            let dt = ui.input(|i| i.stable_dt);
+            if !pannable {
+                self.view.pan_glide.stop();
+            }
+            let motion = if pan_swipe == egui::Vec2::ZERO {
+                self.view.pan_glide.coast(dt)
+            } else {
+                self.view.pan_glide.push(pan_swipe, dt)
+            };
+            if motion != egui::Vec2::ZERO {
+                let want = self.view.pan - motion;
+                self.view.pan.x = want.x.clamp(0.0, overflow.x);
+                self.view.pan.y = want.y.clamp(0.0, overflow.y);
+                // Clamped means that axis ran into the edge of the image. Stop
+                // it there: a glide left wound up against a bound would spring
+                // forward again the moment the bound moved.
+                self.view.pan_glide.stop_axes(
+                    (self.view.pan.x - want.x).abs() > 0.01,
+                    (self.view.pan.y - want.y).abs() > 0.01,
+                );
+            }
+            // A coast is motion with no input behind it, so nothing else will
+            // ask for the next frame.
+            if self.view.pan_glide.is_moving() {
+                ui.ctx().request_repaint();
             }
         });
 

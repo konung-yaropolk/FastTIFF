@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "1.16.1"
+version = "1.16.2"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",
