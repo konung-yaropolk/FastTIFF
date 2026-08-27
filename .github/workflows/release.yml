@@ -24,7 +24,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -50,7 +50,7 @@ jobs:
         run: cp target/release/FastTIFF.exe "FastTIFF.exe"
 
       - name: Attach exe to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: FastTIFF.exe
           # to give versioned name:
@@ -74,7 +74,7 @@ jobs:
           & $iscc "/DMyAppVersion=$ver" FastTIFF\packaging\windows\fasttiff.iss
 
       - name: Attach installer to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: FastTIFF-setup.exe
 
@@ -95,7 +95,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -139,7 +139,7 @@ jobs:
         run: cp target/debian/*.deb "FastTIFF-${{ matrix.arch }}.deb"
 
       - name: Attach .deb to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: FastTIFF-*.deb
 
@@ -161,7 +161,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -199,7 +199,7 @@ jobs:
         run: cp target/generate-rpm/*.rpm "FastTIFF-${{ matrix.arch }}.rpm"
 
       - name: Attach .rpm to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: FastTIFF-*.rpm
 
@@ -226,7 +226,7 @@ jobs:
             gtk3 libglvnd libxkbcommon libx11 libxcursor libxi libxrandr wayland fontconfig
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Build exactly the released commit: pin the git source to the tag.
       # pkgver() in the PKGBUILD derives the version number from Cargo.toml.
@@ -249,7 +249,7 @@ jobs:
         run: cp /home/builder/*.pkg.tar.zst FastTIFF-x86_64.pkg.tar.zst
 
       - name: Attach package to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: FastTIFF-x86_64.pkg.tar.zst
 
@@ -274,7 +274,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install flatpak + builder + generator deps
         run: |
@@ -327,7 +327,7 @@ jobs:
           echo "FLATPAK_NAME=FastTIFF-${{ matrix.arch }}.flatpak" >> "$GITHUB_ENV"
 
       - name: Attach .flatpak to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ env.FLATPAK_NAME }}
 
@@ -348,7 +348,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -410,7 +410,7 @@ jobs:
           echo "APPIMAGE_NAME=$OUTPUT" >> "$GITHUB_ENV"
 
       - name: Attach AppImage to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ env.APPIMAGE_NAME }}
 
@@ -435,7 +435,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -586,6 +586,6 @@ jobs:
           echo "DMG_NAME=$DMG" >> "$GITHUB_ENV"
 
       - name: Attach DMG to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ env.DMG_NAME }}
