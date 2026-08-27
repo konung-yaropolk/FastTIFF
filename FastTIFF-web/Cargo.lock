@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.16.3"
+version = "1.16.4"
 dependencies = [
  "anyhow",
  "eframe",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "1.16.2"
+version = "1.16.4"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",
