@@ -41,7 +41,7 @@ backend-glow = ["dep:glow", "dep:bytemuck"]
 # Cargo unifies them automatically while the majors match; a host on a different
 # major would get a type mismatch at the `new()` call, not a subtle bug.
 wgpu = { version = "29", optional = true }
-glow = { version = "0.17", optional = true }
+glow = { version = "0.18", optional = true }
 # f32 -> f16 for the wgpu volume textures (R16Float); already in wgpu's tree.
 half = { version = "2", optional = true }
 bytemuck = { version = "1.25", optional = true }
