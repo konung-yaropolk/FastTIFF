@@ -158,6 +158,35 @@ fn trim_num(v: f64) -> String {
 /// rounding in the table.
 const FIT_SNAP: f32 = 0.02;
 
+/// Whether the window's size is the window manager's to decide, not ours.
+///
+/// True when maximized *or* full screen. Both were meant to be covered by the
+/// "leave the window alone" rule, but only `maximized` was ever asked about —
+/// and on macOS the green button goes full screen rather than maximizing, so
+/// every zoom step out shrank a full-screen window out from under the picture.
+///
+/// `unwrap_or(false)` on each: a backend that does not report one of them
+/// leaves the window resizable, which is the behaviour it had before either
+/// flag existed.
+///
+/// **Known gap, and it is egui's, not ours.** On macOS `maximized` is read only
+/// when the window is created and never refreshed — `egui-winit` skips the
+/// runtime query on that platform to avoid a deadlock (its `lib.rs`, guarded by
+/// `is_init || !cfg!(target_os = "macos")`; egui issue #3494). So a macOS window
+/// *zoomed* rather than made full screen — Option-green, a double-clicked title
+/// bar, Window > Zoom, or macOS 15 edge tiling — reports neither flag, and a
+/// zoom step out will still resize it. `fullscreen` has no such gate and is
+/// refreshed every frame on every platform, which is why the green button (full
+/// screen, the usual case) is covered. Detecting the zoomed case would mean
+/// guessing from the window's size against the monitor's, and the app's own
+/// sizing cap (`monitor_work_area`, 95% x 90%) sits too close to what a zoomed
+/// window actually measures to tell the two apart reliably.
+fn window_size_is_not_ours(ctx: &egui::Context) -> bool {
+    let (maximized, fullscreen) =
+        ctx.input(|i| (i.viewport().maximized, i.viewport().fullscreen));
+    maximized.unwrap_or(false) || fullscreen.unwrap_or(false)
+}
+
 /// Time constant of the glide a zoom step takes to its new level.
 ///
 /// The approach is exponential, so a step is about 63% done after this long.
@@ -743,7 +772,8 @@ impl ViewerApp {
         // Panel expand/collapse: grow (or shrink) the window height by the
         // panel's own height change, so the image and toolbar above stay put
         // and the panel "drops down" from its position. One-shot, triggered
-        // only by the toggle. Skipped when the window is maximized — there the
+        // only by the toggle. Skipped when the window manager owns the size
+        // (maximized or full screen) — there the
         // image just letterboxes into the space the panel takes. We stay armed
         // until the height actually changes (the toggle frame still reports the
         // old height), repainting meanwhile so the next frame lands.
@@ -751,8 +781,7 @@ impl ViewerApp {
             let delta = bottom_bar_height - self.panel.old_h;
             if delta.abs() > 0.5 {
                 self.panel.grow_armed = false;
-                let maximized = ui.ctx().input(|i| i.viewport().maximized).unwrap_or(false);
-                if !maximized {
+                if !window_size_is_not_ours(ui.ctx()) {
                     let cur = ui.ctx().content_rect().size();
                     let h = (cur.y + delta).round().max(200.0);
                     ui.ctx()
@@ -790,17 +819,19 @@ impl ViewerApp {
                 }
             }
 
-            // When maximized, the window is left completely alone on zoom — the
-            // image just zooms/pans/letterboxes inside it (handled by the
-            // central panel's UV transform).
-            let maximized = ui.ctx().input(|i| i.viewport().maximized).unwrap_or(false);
+            // When the window manager owns the size — maximized or full screen —
+            // the window is left completely alone on zoom, and the image just
+            // zooms/pans/letterboxes inside it (handled by the central panel's
+            // UV transform).
+            let size_is_fixed = window_size_is_not_ours(ui.ctx());
 
             // The target window inner size for the current zoom: the image scaled
             // uniformly, clamped to fit the monitor and to the minimum size. Once
             // it hits the minimum the window stops shrinking and the image just
             // letterboxes. Computed once so the reposition decision and the
-            // actual resize agree. `None` when maximized (window left alone).
-            let target_window = if maximized {
+            // actual resize agree. `None` when the window manager owns the size
+            // (window left alone).
+            let target_window = if size_is_fixed {
                 None
             } else {
                 // The zoom being glided to, so the window is the right size for
@@ -857,8 +888,9 @@ impl ViewerApp {
                 // Follow the cursor when zooming *in* and the window grows (but
                 // not on the first step out of a letterboxed state), or when
                 // zooming *out* while the image still fills the window. Once it's
-                // letterboxing at the minimum size, or maximized, it stays put.
-                let follow = !maximized
+                // letterboxing at the minimum size, or the window manager owns
+                // the size, it stays put.
+                let follow = !size_is_fixed
                     && fits
                     && ((new_zoom > old_zoom && grew && !was_letterboxing)
                         || (new_zoom < old_zoom && !letterboxing));
@@ -870,7 +902,8 @@ impl ViewerApp {
                 }
             }
 
-            // Apply a pending resize (one-shot), unless maximized.
+            // Apply a pending resize (one-shot), unless the window manager owns
+            // the size.
             if self.view.resize_to_zoom {
                 if let Some(size) = target_window {
                     let (w, h) = (size.x, size.y);

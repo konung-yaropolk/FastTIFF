@@ -20,6 +20,22 @@ const PANEL_FRACTION: f32 = 0.2;
 /// Gap between the map and the corner of the canvas.
 const MARGIN: f32 = 10.0;
 
+/// Stroke widths of the two rectangles, both drawn *inside* their own bounds.
+///
+/// Named because the view box's minimum size is derived from its own stroke:
+/// the two are the same measurement, and letting them drift apart is how the
+/// box ends up thinner than the line drawing it.
+const OUTER_STROKE: f32 = 1.0;
+const INNER_STROKE: f32 = 1.5;
+
+/// Smallest the view box may be drawn, on either axis.
+///
+/// Its own stroke on both sides plus a pixel of fill between them, so that at
+/// any zoom it still reads as a small rectangle rather than a thick dot. Zoomed
+/// far enough in, the true fraction of the frame on screen is a small part of
+/// one pixel, and something has to be drawn.
+const MIN_VIEW_BOX: f32 = 2.0 * INNER_STROKE + 1.0;
+
 /// Draw the navigator into the top-left of `panel`, given where the whole image
 /// would be (`full`) and which part of it is on screen (`visible`).
 ///
@@ -49,8 +65,6 @@ pub(super) fn draw(
     if !fw.is_finite() || !fh.is_finite() || fw < 1.0 || fh < 1.0 || !visible.is_positive() {
         return;
     }
-    // The visible fraction of the frame on each axis.
-    let (sx, sy) = (visible.width() / fw, visible.height() / fh);
     // Defensive only — the caller has already decided this is worth drawing.
     // An exactly-covering view would put the inner rectangle on top of the
     // outer one, which says nothing while covering a corner of the image.
@@ -69,21 +83,7 @@ pub(super) fn draw(
         return;
     }
 
-    // Where the view sits inside it, clamped so a view dragged past the edge
-    // mid-gesture cannot draw the inner box outside the outer one.
-    // Width and height are clamped to a minimum size.
-    let inner = egui::Rect::from_min_size(
-        outer.min
-            + egui::vec2(
-                ((visible.min.x - full.min.x) / fw).clamp(0.0, 1.0) * outer.width(),
-                ((visible.min.y - full.min.y) / fh).clamp(0.0, 1.0) * outer.height(),
-            ),
-        egui::vec2(
-            (sx.clamp(0.0, 1.0) * outer.width()).max(4.0),
-            (sy.clamp(0.0, 1.0) * outer.height()).max(4.0),
-        ),
-    )
-    .intersect(outer);
+    let inner = view_box(outer, full, visible);
 
     // Ink opposite the interface background, so the map reads in either theme.
     // A backdrop behind it as well, because the map sits over the *image*, which
@@ -92,10 +92,70 @@ pub(super) fn draw(
     let backdrop = opposite.gamma_multiply(0.45);
 
     painter.rect_filled(outer, 2.0, backdrop);
-    painter.rect_stroke(outer, 2.0, egui::Stroke::new(1.0, ink), egui::StrokeKind::Inside);
+    painter.rect_stroke(outer, 2.0, egui::Stroke::new(OUTER_STROKE, ink), egui::StrokeKind::Inside);
     // The view box is the thing being read, so it is the heavier of the two.
     painter.rect_filled(inner, 1.0, ink.gamma_multiply(0.25));
-    painter.rect_stroke(inner, 1.0, egui::Stroke::new(1.5, ink), egui::StrokeKind::Inside);
+    painter.rect_stroke(inner, 1.0, egui::Stroke::new(INNER_STROKE, ink), egui::StrokeKind::Inside);
+}
+
+/// Where the view box goes inside the frame box: the same fraction of `outer`
+/// that `visible` is of `full`, kept whole and kept inside.
+///
+/// Two rules, and the second is the one that was missing.
+///
+/// It is never smaller than [`MIN_VIEW_BOX`], because zoomed far enough in the
+/// true fraction is a sliver of a pixel and a box that small is not a box.
+///
+/// And when that minimum pushes it past an edge it is **slid** back inside, not
+/// trimmed to fit. Trimming is the obvious thing — intersect with `outer` and be
+/// done — and it breaks precisely where the navigator is most needed: zoomed in
+/// near an edge of the image, the box is already at its minimum, so intersecting
+/// shaves it thinner than its own outline. It merges into the frame's border,
+/// and a little further out it disappears into it altogether.
+///
+/// The room it is slid within is `outer` less the frame's own stroke, so the two
+/// outlines never share ink at all. Stopping at `outer` itself would be within
+/// the letter of "overlap by no more than the line thickness", but only just:
+/// the rectangles are drawn with rounded corners, and epaint widens a corner
+/// radius to at least the stroke width, so a box flush into a corner puts about
+/// a third of a point of its outline *outside* the frame's arc — the same
+/// "partially goes outside" in miniature. A stroke's worth of clearance costs
+/// under 1% of the map's width in positional accuracy and removes the question.
+fn view_box(outer: egui::Rect, full: egui::Rect, visible: egui::Rect) -> egui::Rect {
+    let (fw, fh) = (full.width(), full.height());
+    // The room inside the frame's outline.
+    //
+    // The inset is capped at half the map on either axis, so a map smaller than
+    // its own border collapses to a point at its centre rather than turning
+    // inside out — an unguarded subtraction gives a negative extent, and a
+    // rectangle of negative width is one epaint will tessellate happily and
+    // wrongly. Reachable: the map is a fifth of the panel's shorter side, so a
+    // small enough window gets one only a couple of points tall.
+    let inset = OUTER_STROKE.min(outer.width() * 0.5).min(outer.height() * 0.5).max(0.0);
+    let room = outer.shrink(inset);
+    let size = egui::vec2(
+        (visible.width() / fw).clamp(0.0, 1.0) * room.width(),
+        (visible.height() / fh).clamp(0.0, 1.0) * room.height(),
+    );
+    // `max` then `min`, never `clamp`: on a frame so long and thin that `room`
+    // is itself under the minimum on one axis, `clamp` would be handed a low
+    // bound above its high one and panic.
+    let size = egui::vec2(
+        size.x.max(MIN_VIEW_BOX).min(room.width()),
+        size.y.max(MIN_VIEW_BOX).min(room.height()),
+    );
+    let at = egui::vec2(
+        ((visible.min.x - full.min.x) / fw).clamp(0.0, 1.0) * room.width(),
+        ((visible.min.y - full.min.y) / fh).clamp(0.0, 1.0) * room.height(),
+    );
+    // The upper bounds are floored at `room.min` for the same reason.
+    egui::Rect::from_min_size(
+        egui::pos2(
+            (room.min.x + at.x).clamp(room.min.x, (room.max.x - size.x).max(room.min.x)),
+            (room.min.y + at.y).clamp(room.min.y, (room.max.y - size.y).max(room.min.y)),
+        ),
+        size,
+    )
 }
 
 /// `(ink, opposite)` — black on a light interface and white on a dark one,
@@ -115,3 +175,7 @@ fn contrasting_ink(visuals: &egui::Visuals) -> (egui::Color32, egui::Color32) {
         (egui::Color32::BLACK, egui::Color32::WHITE)
     }
 }
+
+#[cfg(test)]
+#[path = "minimap_tests.rs"]
+mod minimap_tests;
