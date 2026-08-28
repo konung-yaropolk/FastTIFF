@@ -80,11 +80,27 @@ pub struct Playback {
     /// means renders are slower than the target fps (frames dropping — one core
     /// is saturated). Drives the `Auto` decode latch.
     pub demand_ema: f32,
+    /// Set by the frontend while the scrubber is held.
+    ///
+    /// Playback is *suspended*, not stopped: [`playing`](Self::playing) stays
+    /// set so releasing resumes without the user pressing play again. Both the
+    /// clock and the scrubber write the frame index, so with the clock still
+    /// running a held scrubber and playback take turns — which is seen as the
+    /// picture flickering between the frame being scrubbed to and the next one
+    /// along.
+    pub scrubbing: bool,
 }
 
 impl Default for Playback {
     fn default() -> Self {
-        Playback { playing: false, fps: DEFAULT_FPS, last_time: None, accumulator: 0.0, demand_ema: 1.0 }
+        Playback {
+            playing: false,
+            fps: DEFAULT_FPS,
+            last_time: None,
+            accumulator: 0.0,
+            demand_ema: 1.0,
+            scrubbing: false,
+        }
     }
 }
 
@@ -342,7 +358,11 @@ impl Viewer {
                 self.volume.invalidate();
                 // Always start a newly-opened file in the 2D movie view.
                 self.view_mode = ViewMode::Movie;
-                self.status = compute_status(stack.display.dims, stack.display.triple_axis_warning);
+                self.status = compute_status(
+                    stack.display.dims,
+                    stack.display.triple_axis_warning,
+                    stack.display.plane_mismatch,
+                );
                 // New stack: re-evaluate decode parallelism from scratch (its
                 // per-frame decode cost is different).
                 self.decode_parallel = false;
@@ -364,7 +384,11 @@ impl Viewer {
             // The swap rebuilds channel_display from `mode`, so re-apply the
             // pseudocolor preference on top of the fresh LUTs.
             refresh_pseudocolor(stack, self.apply_pseudocolor);
-            self.status = compute_status(stack.display.dims, stack.display.triple_axis_warning);
+            self.status = compute_status(
+                    stack.display.dims,
+                    stack.display.triple_axis_warning,
+                    stack.display.plane_mismatch,
+                );
         }
         // The frame axis (volume depth) just changed.
         self.volume.invalidate();
@@ -418,6 +442,17 @@ impl Viewer {
     /// Call once per rendered frame while playing; the frontend is responsible
     /// for scheduling the next repaint (at `1.0 / fps`).
     pub fn tick_playback(&mut self, now: f64) -> usize {
+        // Scrubber held: suspend, do not stop. `playing` is left set so release
+        // resumes on its own, and the clock baseline is dropped so that release
+        // does not then pay back every frame that "should" have played during
+        // the drag in one burst — the point of holding it is to look at one
+        // frame, and being thrown forward on letting go is the same surprise
+        // from the other side.
+        if self.playback.scrubbing {
+            self.playback.last_time = None;
+            self.playback.accumulator = 0.0;
+            return 0;
+        }
         let Some(stack) = &mut self.stack else {
             self.playback.last_time = None;
             self.playback.accumulator = 0.0;

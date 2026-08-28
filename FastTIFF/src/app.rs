@@ -1320,6 +1320,9 @@ impl eframe::App for ViewerApp {
         let pseudocolor_on = self.core.apply_pseudocolor;
         let mut toggle_requested = false;
         let mut play_toggle_requested = false;
+        // Whether the scrubber is being held this frame; applied after the panel
+        // closure, which cannot reach `self.core` while it holds the stack.
+        let mut scrubber_held = false;
         // A requested dimension-role reassignment: (channels, slices, frames).
         let mut dimension_override: Option<(usize, usize, usize)> = None;
         let mut pseudocolor_toggle: Option<bool> = None;
@@ -1442,11 +1445,17 @@ impl eframe::App for ViewerApp {
                         let remaining = ui.available_width();
                         if has_multiple_frames {
                             ui.spacing_mut().slider_width = remaining.max(40.0);
-                            ui.add(
+                            let scrub = ui.add(
                                 egui::Slider::new(&mut loaded.frame_index, 0..=max_frame)
                                     .show_value(false)
                                     .trailing_fill(true),
                             );
+                            // Held, not merely dragged: the frame under the
+                            // pointer should hold still from the moment it is
+                            // grabbed, before any movement, since that is
+                            // already the frame being looked at.
+                            scrubber_held =
+                                scrub.is_pointer_button_down_on() || scrub.dragged();
                         } else {
                             // Single-frame stack: there's nothing to scrub, so draw
                             // a flat, handleless track instead of a slider parked at
@@ -1826,6 +1835,12 @@ impl eframe::App for ViewerApp {
         // Looped playback: the core advances by real elapsed time so the movie
         // runs at the file's `fps` (or the default) regardless of render
         // cadence. All we add is the repaint scheduling.
+        //
+        // A held scrubber suspends the advance without clearing `playing`, so
+        // the frame being scrubbed to is the only one written and the movie
+        // picks up again on release. Without it the clock and the scrubber
+        // write the frame index in turn and the picture flickers between them.
+        self.core.playback.scrubbing = scrubber_held;
         self.core.tick_playback(ui.input(|i| i.time));
         if self.core.playback.playing {
             // Ask for the next repaint at the playback rate rather than

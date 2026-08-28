@@ -7,12 +7,88 @@ use crate::display::Dims;
 use crate::stack::{ChannelSettings, Stack};
 use scivis_render::{ChannelKind, MAX_CHANNELS};
 
+/// The number of IFDs `dims` addresses: one past the highest index
+/// [`crate::prefetch::build_jobs`] can produce for it.
+///
+/// Mirrors that function's arithmetic deliberately — the whole purpose of
+/// knowing this is to stop it asking for a plane the file does not have, so a
+/// second, independent formula here would be a second thing to get wrong.
+/// Chunky RGB addresses one IFD per frame (its channels are sample planes of
+/// that IFD); everything else gives each channel its own.
+pub fn planes_addressed(dims: Dims, rgb: bool) -> usize {
+    let (c, z, f) = (dims.channels.max(1), dims.slices.max(1), dims.frames.max(1));
+    if rgb {
+        (f - 1).saturating_mul(z).saturating_add(1)
+    } else {
+        (f - 1).saturating_mul(z).saturating_mul(c).saturating_add(c)
+    }
+}
+
+/// Cut `dims` down until every plane it addresses is one the file actually has.
+///
+/// Returns `(declared, available)` when it had to cut, so the caller can say so;
+/// `None` when the metadata and the file already agreed.
+///
+/// A file can describe more planes than it contains, and the metadata is not
+/// necessarily wrong to do so — a multi-file OME set gives every file the *whole*
+/// dataset's dimensions and points at its siblings, so one file of a two-channel
+/// pair declares twice the planes it holds. Trusting the declaration means
+/// addressing IFDs past the end of the chain, which is a decode error on every
+/// frame the scrubber reaches.
+///
+/// Time is cut first, because it is the slowest-varying axis in the order these
+/// planes are addressed in and a file that is short is short at the end. Only if
+/// a single frame still does not fit — fewer IFDs in the whole file than there
+/// are channels — are the channels cut too, and Z never needs cutting because at
+/// one frame it drops out of the arithmetic entirely.
+pub fn clamp_to_available(dims: &mut Dims, rgb: bool, available: usize) -> Option<(usize, usize)> {
+    let declared = planes_addressed(*dims, rgb);
+    if available == 0 || declared <= available {
+        return None;
+    }
+    let (c, z) = (dims.channels.max(1), dims.slices.max(1));
+    if rgb {
+        // (f - 1) * z + 1 <= available
+        dims.frames = (available - 1) / z + 1;
+    } else if available < c {
+        // Not even one frame's worth of channels. Keep a frame, drop channels.
+        dims.frames = 1;
+        dims.channels = available;
+    } else {
+        // (f - 1) * z * c + c <= available
+        dims.frames = (available - c) / (z * c) + 1;
+    }
+    dims.frames = dims.frames.max(1);
+    dims.channels = dims.channels.max(1);
+    // Belt and braces: the formulas above are exact, but they are arithmetic on
+    // numbers a file chose, and being wrong here puts the decode error back.
+    if planes_addressed(*dims, rgb) > available {
+        dims.frames = 1;
+        dims.slices = 1;
+        dims.channels = dims.channels.min(available).max(1);
+    }
+    Some((declared, available))
+}
+
 /// The status note shown at the top of the window, derived from the
 /// stack's current (resolved) dimensions. Shared between the initial load
 /// and the manual dimension-order override so the two can't drift out of
 /// sync with each other.
-pub fn compute_status(dims: Dims, triple_axis_warning: bool) -> Option<String> {
-    if triple_axis_warning {
+pub fn compute_status(
+    dims: Dims,
+    triple_axis_warning: bool,
+    plane_mismatch: Option<(usize, usize)>,
+) -> Option<String> {
+    // Ahead of the others: those describe how the file has been *interpreted*,
+    // this one says the file disagrees with itself. Whatever is on screen is
+    // built from an arrangement the metadata does not actually back up, and the
+    // reader should know that before anything else.
+    if let Some((declared, available)) = plane_mismatch {
+        Some(format!(
+            "Warning: this file's metadata describes {declared} image plane(s) but the file              contains {available}. Showing {} channel(s) × {} Z-slice(s) × {} frame(s), which is              what fits — the rest may live in a companion file (a multi-file OME set gives every              file the whole dataset's dimensions), or the file may be truncated.",
+            dims.channels, dims.slices, dims.frames
+        ))
+    } else if triple_axis_warning {
         Some(format!(
             "Warning: this file has channels, Z-slices, and time frames all present at once \
              ({} channel(s) × {} Z-slice(s) × {} frame(s)). Z isn't shown as a separate axis here \
@@ -51,11 +127,29 @@ pub fn apply_resolved_dimensions_reporting(
     // The interpretation is ours, not the file's, so it lives in `display` —
     // which is what keeps "what did the file actually say?" answerable after
     // the user reassigns the axes (see `crate::display`).
-    loaded.display.dims = Dims {
+    let mut dims = Dims {
         channels: resolved.channels,
         slices: resolved.slices,
         frames: resolved.frames,
     };
+    // Chunky RGB and CMYK put their channels in one IFD's sample planes, which
+    // changes how many IFDs a given shape addresses. Asked of the frame rather
+    // than of `display.rgb`, because on a fresh load `setup_rgb` has not run
+    // yet — it runs after this.
+    let shares_an_ifd = loaded
+        .tiff
+        .frames
+        .first()
+        .is_some_and(|f| f.is_rgb() || f.is_cmyk());
+    loaded.display.plane_mismatch =
+        clamp_to_available(&mut dims, shares_an_ifd, loaded.tiff.frames.len());
+    let resolved = fast_tiff_lib::ResolvedDimensions {
+        channels: dims.channels,
+        slices: dims.slices,
+        frames: dims.frames,
+        ..resolved
+    };
+    loaded.display.dims = dims;
     loaded.display.triple_axis_warning = resolved.triple_axis_warning;
     loaded.display.mode = loaded.tiff.meta.mode;
     let shown = crate::display::Display::shown_channels(resolved.channels);

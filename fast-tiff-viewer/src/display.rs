@@ -83,6 +83,15 @@ pub struct Display {
     /// Z is then frozen at its first slice. Describes the file, so it survives a
     /// manual dimension-order change (which never touches Z).
     pub triple_axis_warning: bool,
+    /// Set when the file's metadata described more image planes than the file
+    /// contains, as `(declared, available)`. The dimensions above have been cut
+    /// down to what fits; this is what was claimed before that.
+    ///
+    /// Not necessarily a broken file: a multi-file OME set gives every file the
+    /// whole dataset's dimensions and points at its siblings. Either way the
+    /// reader is looking at an arrangement the metadata does not back up, so it
+    /// is said out loud rather than quietly corrected.
+    pub plane_mismatch: Option<(usize, usize)>,
     /// Whether the file had a real Z axis (`slices > 1`) **as loaded**.
     /// Deliberately a load-time snapshot: an override that assigns 1 to Z must
     /// not collapse the three-way c/z/t choice to a two-way c/t swap and strand
@@ -98,6 +107,7 @@ impl Default for Display {
     fn default() -> Self {
         Display {
             dims: Dims::default(),
+            plane_mismatch: None,
             // Grayscale until the file (or RGB setup) says otherwise — the same
             // conservative default `fast-tiff-lib` uses for a missing `mode=`.
             mode: DisplayMode::Grayscale,

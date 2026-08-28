@@ -379,3 +379,183 @@ fn cycling_luts_never_disturbs_the_parsed_metadata() {
         "selecting index 0 should restore that entry's LUT"
     );
 }
+
+/// Holding the scrubber during playback must stop the clock writing the frame
+/// index, because the scrubber is writing it too.
+///
+/// Both are writers, and with the clock still running they take turns: the
+/// scrubber puts the dragged frame in, the next tick advances past it, the
+/// scrubber puts it back. On screen that is the picture flickering between the
+/// frame being scrubbed to and the one after it.
+#[test]
+fn holding_the_scrubber_stops_playback_advancing() {
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let mut viewer = Viewer::new();
+    load(&mut viewer, path).expect("open");
+    let n = viewer.stack.as_ref().unwrap().frame_count();
+    if n < 2 {
+        return;
+    }
+
+    viewer.playback.playing = true;
+    viewer.playback.fps = 10.0;
+    viewer.tick_playback(0.0);
+
+    // Grab the scrubber and put the view on a particular frame, as the slider
+    // widget does by writing straight into the stack.
+    viewer.playback.scrubbing = true;
+    viewer.stack.as_mut().unwrap().frame_index = 3 % n;
+
+    // Time passes — plenty of it, several frames' worth at this rate — and the
+    // frame the user is holding does not move.
+    for i in 1..=20 {
+        let stepped = viewer.tick_playback(i as f64 * 0.05);
+        assert_eq!(stepped, 0, "playback advanced while the scrubber was held");
+        assert_eq!(
+            viewer.stack.as_ref().unwrap().frame_index,
+            3 % n,
+            "the held frame changed under the pointer at tick {i}"
+        );
+    }
+}
+
+/// Suspended, not stopped: the user did not press pause, so letting go has to
+/// resume on its own.
+#[test]
+fn releasing_the_scrubber_resumes_playback() {
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let mut viewer = Viewer::new();
+    load(&mut viewer, path).expect("open");
+    let n = viewer.stack.as_ref().unwrap().frame_count();
+    if n < 2 {
+        return;
+    }
+
+    viewer.playback.playing = true;
+    viewer.playback.fps = 10.0;
+    viewer.tick_playback(0.0);
+
+    viewer.playback.scrubbing = true;
+    viewer.stack.as_mut().unwrap().frame_index = 2 % n;
+    viewer.tick_playback(1.0);
+    assert!(viewer.playback.playing, "holding the scrubber must not clear `playing`");
+
+    // Let go, and it runs again from where it was left.
+    viewer.playback.scrubbing = false;
+    viewer.tick_playback(1.0); // re-seeds the clock
+    let stepped = viewer.tick_playback(1.3);
+    assert_eq!(stepped, 3, "0.3 s at 10 fps is three frames");
+    assert_eq!(viewer.stack.as_ref().unwrap().frame_index, (2 + 3) % n);
+}
+
+/// Letting go must not pay back the frames that would have played during the
+/// drag. Holding the scrubber for ten seconds and releasing should carry on
+/// from the frame under the pointer, not leap a hundred frames forward.
+///
+/// This is what dropping the clock baseline while held is for: without it the
+/// first tick after release sees the whole drag as elapsed time and spends it
+/// all at once.
+#[test]
+fn releasing_the_scrubber_does_not_replay_the_time_it_was_held() {
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let mut viewer = Viewer::new();
+    load(&mut viewer, path).expect("open");
+    let n = viewer.stack.as_ref().unwrap().frame_count();
+    if n < 2 {
+        return;
+    }
+
+    viewer.playback.playing = true;
+    viewer.playback.fps = 30.0;
+    viewer.tick_playback(0.0);
+
+    viewer.playback.scrubbing = true;
+    viewer.stack.as_mut().unwrap().frame_index = 1 % n;
+    // Held for ten seconds — three hundred frames at this rate.
+    for i in 1..=100 {
+        viewer.tick_playback(i as f64 * 0.1);
+    }
+    viewer.playback.scrubbing = false;
+
+    // The first tick after release seeds the clock and must not step at all.
+    let stepped = viewer.tick_playback(10.1);
+    assert_eq!(stepped, 0, "released and immediately leapt {stepped} frames");
+    assert_eq!(viewer.stack.as_ref().unwrap().frame_index, 1 % n);
+}
+
+/// The flag is about the *clock*, not about being open. With nothing playing,
+/// holding the scrubber changes nothing that was not already still.
+#[test]
+fn holding_the_scrubber_while_paused_changes_nothing() {
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let mut viewer = Viewer::new();
+    load(&mut viewer, path).expect("open");
+    if viewer.stack.as_ref().unwrap().frame_count() < 2 {
+        return;
+    }
+
+    viewer.playback.playing = false;
+    viewer.playback.scrubbing = true;
+    assert_eq!(viewer.tick_playback(0.0), 0);
+    assert_eq!(viewer.tick_playback(5.0), 0);
+    assert!(!viewer.playback.playing, "it must not start playing on its own");
+}
+
+/// Nothing about ordinary playback changed: with the scrubber untouched the
+/// clock behaves exactly as it did.
+#[test]
+fn playback_is_unchanged_when_the_scrubber_is_not_held() {
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let mut viewer = Viewer::new();
+    load(&mut viewer, path).expect("open");
+    let n = viewer.stack.as_ref().unwrap().frame_count();
+    if n < 2 {
+        return;
+    }
+
+    viewer.playback.playing = true;
+    viewer.playback.fps = 10.0;
+    assert!(!viewer.playback.scrubbing, "the default must be `not held`");
+    assert_eq!(viewer.tick_playback(0.0), 0);
+    assert_eq!(viewer.tick_playback(0.025), 0);
+    assert_eq!(viewer.tick_playback(0.1), 1);
+    assert_eq!(viewer.tick_playback(0.6), 5);
+}
+
+/// The fractional-frame carry is part of the clock, so it goes too.
+///
+/// The accumulator holds the sub-frame remainder between ticks, so that a rate
+/// that does not divide the render cadence neither loses nor gains time over a
+/// long playback. Carried across a hold it is a fragment of time from before
+/// the drag, spent after it: the first advance on release comes up to a whole
+/// frame early. Small, but it is the same class of error as the burst — time
+/// that elapsed while the user was holding still, paid out afterwards.
+#[test]
+fn releasing_the_scrubber_does_not_carry_a_stale_fraction() {
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let mut viewer = Viewer::new();
+    load(&mut viewer, path).expect("open");
+    if viewer.stack.as_ref().unwrap().frame_count() < 2 {
+        return;
+    }
+
+    viewer.playback.playing = true;
+    viewer.playback.fps = 10.0;
+    viewer.tick_playback(0.0);
+    // Half a frame of carry, and no step yet.
+    assert_eq!(viewer.tick_playback(0.05), 0);
+    assert!(viewer.playback.accumulator > 0.4, "the setup needs a real carry");
+
+    viewer.playback.scrubbing = true;
+    viewer.tick_playback(0.1);
+    viewer.playback.scrubbing = false;
+
+    // Another half-frame after release. On its own that is not a frame; only a
+    // carry smuggled across the hold would make it one.
+    viewer.tick_playback(1.0);
+    assert_eq!(
+        viewer.tick_playback(1.05),
+        0,
+        "a fraction of a frame from before the drag was spent after it"
+    );
+}
