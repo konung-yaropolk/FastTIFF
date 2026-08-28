@@ -181,6 +181,10 @@ const FIT_SNAP: f32 = 0.02;
 /// guessing from the window's size against the monitor's, and the app's own
 /// sizing cap (`monitor_work_area`, 95% x 90%) sits too close to what a zoomed
 /// window actually measures to tell the two apart reliably.
+///
+/// Native only, like [`monitor_work_area`]: the browser build has no window of
+/// its own to resize.
+#[cfg(not(target_arch = "wasm32"))]
 fn window_size_is_not_ours(ctx: &egui::Context) -> bool {
     let (maximized, fullscreen) =
         ctx.input(|i| (i.viewport().maximized, i.viewport().fullscreen));

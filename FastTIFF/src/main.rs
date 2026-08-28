@@ -7,18 +7,24 @@ use fasttiff::{app, render};
 use fasttiff::macos_open;
 use fasttiff::process;
 
-/// Decode the bundled 256×256 PNG into the RGBA image `ViewportBuilder::with_icon`
-/// wants. Baked into the binary with `include_bytes!`, so it needs no icon file
-/// at runtime; winit / the OS downscales it for each context (title bar, taskbar,
-/// alt-tab). Returns `None` if the embedded PNG somehow fails to decode, in which
-/// case the window just falls back to the default icon.
+/// The PNG baked into the binary for the application icon.
 ///
-/// Not compiled on macOS: winit ignores per-window icons there (the Dock icon
-/// comes from the .app bundle's .icns), so decoding it would only waste a
-/// ~256 KB RGBA allocation at startup.
+/// Bigger on macOS because that is the one platform where this image is drawn at
+/// size: it becomes the Dock icon (see [`window_icon`]), which is rendered far
+/// larger than any title bar or task switcher asks for. Everywhere else the OS
+/// only ever scales it down.
+#[cfg(target_os = "macos")]
+const ICON_PNG: &[u8] = include_bytes!("../icon/icon512.png");
 #[cfg(not(target_os = "macos"))]
+const ICON_PNG: &[u8] = include_bytes!("../icon/icon256.png");
+
+/// Decode [`ICON_PNG`] into the RGBA image `ViewportBuilder::with_icon` wants.
+///
+/// Baked into the binary, so it needs no icon file at runtime; the OS scales it
+/// for each context (title bar, taskbar, alt-tab, Dock). `None` if the embedded
+/// PNG somehow fails to decode, which only costs the icon.
 fn window_icon() -> Option<egui::IconData> {
-    let image = image::load_from_memory(include_bytes!("../icon/icon256.png")).ok()?.into_rgba8();
+    let image = image::load_from_memory(ICON_PNG).ok()?.into_rgba8();
     let (width, height) = image.dimensions();
     Some(egui::IconData { rgba: image.into_raw(), width, height })
 }
@@ -58,12 +64,19 @@ fn main() -> eframe::Result {
         // resizing and zoom-out (which letterboxes below this size).
         .with_min_inner_size([256.0, 256.0])
         .with_title("FastTIFF");
-    // Set the window icon (title bar / taskbar / task switcher) from the bundled
-    // PNG, so it isn't the egui default. Only where winit honors a per-window
-    // icon — Windows and Linux/X11; macOS uses the .app bundle .icns and is
-    // skipped entirely (see `window_icon`), so this shadowing rebind is compiled
-    // out there.
-    #[cfg(not(target_os = "macos"))]
+    // Set the application icon from the bundled PNG, so it isn't the egui
+    // default. On Windows and Linux/X11 this is the per-window icon winit sets
+    // — title bar, taskbar, task switcher.
+    //
+    // On macOS winit ignores per-window icons, so it is tempting to skip this
+    // there and let the .app bundle's .icns speak for itself. That is exactly
+    // what put the egui logo in the Dock: eframe substitutes *its own* default
+    // icon when the viewport carries none, then installs it at runtime with
+    // `NSApplication::setApplicationIconImage:`, which overrides whatever the
+    // bundle declared. Passing ours means the Dock gets ours. (Leaving the
+    // bundle to it would mean passing `IconData::default()`, which eframe reads
+    // as "no icon" and skips — but that only works for a bundled build, and
+    // leaves a bare `cargo run` iconless.)
     let viewport = match window_icon() {
         Some(icon) => viewport.with_icon(std::sync::Arc::new(icon)),
         None => viewport,
@@ -95,4 +108,48 @@ fn main() -> eframe::Result {
             Ok(Box::new(app::ViewerApp::new(initial_path, render)))
         }),
     )
+}
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+
+    /// The icon this build embeds has to actually decode, or the window and the
+    /// Dock fall back to eframe's own logo — which is the bug this replaced.
+    #[test]
+    fn the_embedded_icon_decodes() {
+        let icon = window_icon().expect("the embedded icon should decode");
+        assert!(icon.width >= 256 && icon.height >= 256, "{}x{}", icon.width, icon.height);
+        assert_eq!(icon.width, icon.height, "an app icon should be square");
+        assert_eq!(
+            icon.rgba.len(),
+            icon.width as usize * icon.height as usize * 4,
+            "RGBA buffer does not match the stated size"
+        );
+        assert!(icon.rgba.iter().any(|&b| b != 0), "the icon decoded to nothing but zeroes");
+    }
+
+    /// Both candidates, whichever this platform compiled.
+    ///
+    /// macOS embeds the 512 and every other platform the 256, so on any one
+    /// machine only one of them is reachable through `window_icon` — and a
+    /// missing or corrupt file for the *other* would not fail the build until
+    /// someone released from that platform. Checking the bytes directly covers
+    /// the macOS icon from a Windows or Linux checkout, which is the only place
+    /// the Dock bug could come back unseen.
+    #[test]
+    fn both_platform_icons_are_present_and_sound() {
+        for (name, bytes, side) in [
+            ("icon256.png", &include_bytes!("../icon/icon256.png")[..], 256u32),
+            ("icon512.png", &include_bytes!("../icon/icon512.png")[..], 512),
+        ] {
+            let image = image::load_from_memory(bytes)
+                .unwrap_or_else(|e| panic!("{name} does not decode: {e}"))
+                .into_rgba8();
+            assert_eq!(image.dimensions(), (side, side), "{name} is not {side}x{side}");
+            assert!(
+                image.pixels().any(|p| p.0[3] != 0),
+                "{name} is fully transparent, so it would show as nothing at all"
+            );
+        }
+    }
 }

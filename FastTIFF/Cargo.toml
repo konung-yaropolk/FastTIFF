@@ -53,6 +53,13 @@ anyhow = "1.0"
 rfd = "0.17"
 log = "0.4"
 env_logger = "0.11"
+# Decodes the bundled PNG into RGBA for the application icon (see `window_icon`
+# in main.rs). Needed on every native platform including macOS: eframe installs
+# the icon there at runtime with `setApplicationIconImage:`, and substitutes its
+# own default when none is given — which is how the egui logo ended up in the
+# Dock. The png codec is already in the tree via eframe/arboard, so this
+# compiles no new crates.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Threads, memory-mapped files and the C zstd codec all exist natively and none
 # of them do on wasm, so the core is pulled in bare above and topped up here.
@@ -78,13 +85,6 @@ winres = "0.1.12"
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.34", default-features = false, features = ["x11", "wayland"] }
 
-# Decodes the bundled PNG into RGBA for the window icon (see `window_icon` in
-# main.rs). Excluded on macOS, where winit ignores per-window icons (the Dock
-# icon comes from the .app bundle's .icns) — so nothing there references `image`.
-# The png codec is already in the tree via eframe/arboard, so this compiles no
-# new crates on the platforms that do use it.
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 [package.metadata.winres]
 OriginalFilename = "FastTIFF"
