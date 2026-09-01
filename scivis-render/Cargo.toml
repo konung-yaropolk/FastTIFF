@@ -50,4 +50,4 @@ bytemuck = { version = "1.25", optional = true }
 # lets `cargo test` catch shader errors offline, with no GPU and regardless of
 # which backend feature is on. naga is already in the tree via wgpu.
 [dev-dependencies]
-naga = { version = "29", features = ["wgsl-in"] }
+naga = { version = "30", features = ["wgsl-in"] }
