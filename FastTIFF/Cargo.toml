@@ -47,7 +47,7 @@ scivis-render = { path = "../scivis-render" }
 # bundled text fonts. (egui still pulls the passive `accesskit` data-types crate
 # as an unavoidable core dependency.)
 eframe = { version = "0.34", default-features = false, features = ["default_fonts"] }
-egui = "0.34"
+egui = "0.35"
 egui_extras = "0.34"
 anyhow = "1.0"
 rfd = "0.17"
