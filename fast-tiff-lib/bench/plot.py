@@ -139,6 +139,8 @@ def emphasise_subject(fig):
                    color=t.get_color(), lw=0.9, zorder=5)
         )
 
+    plt.style.use('seaborn-v0_8')
+
 
 # --------------------------------------------------------------------------
 # Data
@@ -363,6 +365,8 @@ def summary_figure(env, rows, out: Path):
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1.05)
 
+     
+
     emphasise_subject(fig)
     fig.savefig(out, bbox_inches="tight", facecolor=PAPER)
     plt.close(fig)
@@ -397,8 +401,12 @@ def scaling_figure(rows, out: Path):
                for r in readers]
     fig.legend(handles=handles, loc="lower center", ncol=len(handles),
                fontsize=9.5, bbox_to_anchor=(0.5, -0.006))
+
+     
+    
     fig.tight_layout(rect=(0, 0.03, 1, 0.975))
     emphasise_subject(fig)
+
     fig.savefig(out, bbox_inches="tight", facecolor=PAPER)
     plt.close(fig)
     return out
@@ -448,6 +456,9 @@ def run_figures(rows, out_dir: Path):
                      fontsize=8, color=MUTED, wrap=True)
 
         path = out_dir / f"{i:02d}_{slug(run)}.png"
+
+         
+
         emphasise_subject(fig)
         fig.savefig(path, bbox_inches="tight", facecolor=PAPER)
         plt.close(fig)
