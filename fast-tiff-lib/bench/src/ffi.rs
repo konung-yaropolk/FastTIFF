@@ -11,11 +11,15 @@ use std::os::raw::{c_char, c_int, c_void};
 // ---------------------------------------------------------------------------
 // libtiff (system, -ltiff) — only under `--features libtiff`
 // ---------------------------------------------------------------------------
-#[cfg(feature = "libtiff")]
+#[cfg(libtiff)]
 pub mod libtiff {
     use super::*;
 
     #[repr(C)]
+    // Named as libtiff names it: this is the opaque `TIFF` handle from
+    // <tiffio.h>, and renaming it to `Tiff` would make the bindings read
+    // differently from the header they mirror.
+    #[allow(clippy::upper_case_acronyms)]
     pub struct TIFF {
         _private: [u8; 0],
     }
