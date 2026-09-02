@@ -129,7 +129,6 @@ machine embedded as `#` comments so a results file is self-describing.
 
 ```bash
 cargo run --release -- --quick          # two frame counts; a smoke run
-cargo run --release --features libtiff  # also measure system libtiff
 TIFF_BENCH_DIR=/big/disk cargo run --release
 ```
 
@@ -141,61 +140,66 @@ deleted as the run proceeds, so only one pair exists at a time.
 
 ## Prerequisites
 
-- Rust, plus a C compiler for the vendored TinyTIFF (`cc` builds it in
-  `build.rs`).
-- **libtiff is used automatically wherever the machine has one.** No feature
-  flag, no configuration. `build.rs` searches, in order: `LIBTIFF_DIR` /
-  `LIBTIFF_LIB_DIR`, `pkg-config`, vcpkg, then the prefixes package managers
-  actually install into — MSYS2 (`clang64`, `ucrt64`, `mingw64`, ...), Homebrew
-  on both architectures, MacPorts, conda, and `/usr`. The run header and the
-  CSV both record whether it was found, so a result file is never ambiguous
-  about what it measured.
+Rust and a C compiler. Nothing else — no libtiff to install, no headers, no
+package manager, no `PATH` to arrange before running.
 
-  Only the library is needed, never the headers — the bindings in `src/ffi.rs`
-  are hand-written.
+Both C readers are vendored and built by `build.rs`: TinyTIFF from
+`vendor/tinytiff`, libtiff from `vendor/libtiff`. The two codec libraries
+libtiff needs come from source as well, through the `libz-sys` and `zstd-sys`
+crates, so the vendored build supports every codec this matrix exercises rather
+than silently degrading on the compressed half of it.
 
-  | to get one | |
-  |---|---|
-  | Linux | `apt install libtiff-dev` |
-  | macOS | `brew install libtiff` |
-  | Windows, MSYS2 | `pacman -S mingw-w64-clang-x86_64-libtiff` |
-  | Windows, vcpkg | `vcpkg install tiff:x64-windows-static-md` |
+Only the libraries are built, never their headers — the bindings in
+`src/ffi.rs` are hand-written, and the libtiff version reported in the run
+header is read out of `vendor/libtiff/libtiff.map` at build time.
 
-  On Windows an MSYS2 libtiff is a DLL import library, so its `bin` directory
-  has to be on `PATH` at run time — `build.rs` prints exactly which one. Copying
-  the single DLL next to the exe is not enough: Windows resolves libtiff's own
-  imports from the *exe's* directory, and that pulls in a dozen more. The vcpkg
-  `-static-md` triplet avoids the question entirely.
+`--features libtiff` is accepted and does nothing. It used to mean "fail the
+build if no system libtiff was found"; there is no longer anything to find.
 
-  `--features libtiff` does not enable anything; it makes *absence* a build
-  error, for CI that requires the comparison to be complete.
+### Why libtiff is vendored, and what that took
 
-### Why libtiff is not vendored, when TinyTIFF is
+It was not, for a long time, and the reason is worth keeping: **a vendored
+libtiff is only worth having if it is a complete one.** Every optional codec in
+libtiff is `#ifdef`-guarded and wires to `_notConfigured()` when its library is
+missing — it does not fail to build, it fails at run time, on the files that
+need it. Without zlib and libzstd a vendored build reads none, LZW and PackBits
+but **not Deflate or Zstd**, which is a third of this matrix. Measuring that
+would have been worse than measuring nothing, because the number would have
+looked like a libtiff result.
 
-The obvious question, since `vendor/tinytiff` sits right there. Three reasons,
-in increasing order of how much they matter:
+What changed is that both libraries are now built from source too, as ordinary
+cargo dependencies (`libz-sys` with its bundled zlib, `zstd-sys` with its
+bundled libzstd). That removes the objection, and the two that remained were
+only ever costs rather than blockers:
 
-- **Size.** TinyTIFF is 8 files and 70 KB, two `.c` files you can read in an
-  afternoon. libtiff stripped to its dependency-free core is 43 files and
-  1.5 MB — `tif_dirread.c` alone is four times all of TinyTIFF.
-- **Configuration.** libtiff generates `tif_config.h` and `tiffconf.h` from
-  CMake or autotools. Vendoring means hand-writing both, per platform, plus
-  choosing between `tif_win32.c` and `tif_unix.c`.
-- **It would not be libtiff.** Every optional codec is `#ifdef`-guarded and
-  wires to `_notConfigured()` when its library is missing. With no zlib and no
-  libzstd, a vendored build reads none, LZW and PackBits — but **not Deflate or
-  Zstd**, which is a third of this matrix. The comparison would be against a
-  stripped libtiff that nobody actually runs, which is worse than no comparison.
+- **Size.** TinyTIFF is 8 files and 70 KB; libtiff is 45 sources, of which this
+  build compiles 36 — the rest need JPEG, JBIG, LERC, LZMA or WebP, none of
+  which this matrix uses.
+- **Configuration.** libtiff generates `tif_config.h`, `tiffconf.h` and
+  `tiffvers.h` from CMake or autotools. `build.rs` writes all three directly;
+  the probing they do only matters for platforms this benchmark does not target.
 
-TinyTIFF has no codecs at all, so a vendored copy *is* TinyTIFF. libtiff's
-codecs are most of what it is.
+What it buys is that every machine measures *the same* libtiff, at a version the
+run header states exactly, with no setup step that can be skipped or done
+differently.
+
+Two details worth knowing if you touch this. `zstd-sys` is named as a direct
+dependency with `default-features = false`: as a direct dependency it turns on
+its `bindgen` feature by default, which needs libclang installed — precisely the
+kind of prerequisite this is trying to avoid — and it has to be direct anyway,
+because cargo passes a `links` crate's `DEP_*` variables only to the build
+scripts of crates that depend on it directly. And `src/ffi.rs` names both codec
+crates in `extern crate ... as _;` bindings: rustc drops a dependency nothing
+references, and drops its `#[link]` with it, which surfaces as
+`unresolved external symbol deflate` from libtiff's own objects at the end of
+the build rather than as anything about a missing crate.
 
 ## Layout
 
 ```
 bench/
 ├── Cargo.toml           # standalone package ([workspace] detaches it)
-├── build.rs             # compiles vendored TinyTIFF; links libtiff (feature)
+├── build.rs             # compiles vendored TinyTIFF and libtiff
 ├── plot.py              # bench_results.csv -> every figure
 ├── src/
 │   ├── main.rs          # CLI and the run loop
@@ -206,7 +210,9 @@ bench/
 │   ├── report.rs        # tables, summary, the single CSV
 │   ├── environment.rs   # the machine, for the header and the CSV
 │   └── ffi.rs           # hand-written bindings for the C readers
-└── vendor/tinytiff/     # TinyTIFF reader C sources (LGPL-3.0)
+└── vendor/
+    ├── tinytiff/        # TinyTIFF reader C sources (LGPL-3.0)
+    └── libtiff/         # libtiff C sources (libtiff license)
 ```
 
 `cargo test` covers the parts that are logic rather than measurement: the name

@@ -33,7 +33,7 @@ pub fn describe() -> Vec<String> {
         format!("fast-tiff-lib: {} (path dependency)", env!("FAST_TIFF_LIB_VERSION")),
         format!(
             "tiff (rust): 0.11 | TinyTIFF: vendored | libtiff: {}",
-            if cfg!(libtiff) { "linked" } else { "not found on this machine" }
+            if cfg!(libtiff) { "vendored" } else { "not built" }
         ),
     ];
 

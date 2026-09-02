@@ -22,7 +22,6 @@
 //! ```text
 //! cargo run --release                    # the matrix
 //! cargo run --release -- --quick         # smoke run, two frame counts
-//! cargo run --release --features libtiff # include system libtiff
 //! python plot.py                         # figures from bench_results.csv
 //! ```
 //!
@@ -123,9 +122,6 @@ OPTIONS
     --quick     Two frame counts instead of seven; a smoke run, still enough
                 for every chart to have a line rather than a point.
     -h, --help  This text.
-
-FEATURES
-    --features libtiff    Also measure the system libtiff (needs headers).
 
 ENVIRONMENT
     TIFF_BENCH_DIR        Where generated stacks go. The biggest runs peak

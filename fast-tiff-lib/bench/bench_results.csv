@@ -1,494 +1,494 @@
-# OS:        Windows 11 (22631) (x86_64)
-# CPU:       Intel(R) Core(TM) i9-9900 CPU @ 3.10GHz (8 physical / 16 logical cores, 3096 MHz)
-# RAM:       31.8 GiB
+# OS:        Windows 10 (19045) (x86_64)
+# CPU:       AMD Ryzen 7 5800X 8-Core Processor (8 physical / 16 logical cores, 3801 MHz)
+# RAM:       63.9 GiB
 # toolchain: rustc 1.96.0 (ac68faa20 2026-05-25)
 # fast-tiff-lib: 0.16.0 (path dependency)
-# tiff (rust): 0.11 | TinyTIFF: vendored | libtiff: linked
-# libtiff:   LIBTIFF, Version 4.5.1
+# tiff (rust): 0.11 | TinyTIFF: vendored | libtiff: vendored
+# libtiff:   LIBTIFF, Version 4.7.2 (vendored)
 family,run,format,compression,predictor,strips,bigtiff,width,height,frames,reader,ok,reason,open_us,mean_us,min_us,total_read_ms,mb_s,rel,write_mb_s
-"16x16 u16 none","16x16 u16 none / 1 frames",u16,none,false,1,false,16,16,1,raw,true,"",32.800,18.4000,18.4000,0.0184,26.537,7.6667,1.1
-"16x16 u16 none","16x16 u16 none / 1 frames",u16,none,false,1,false,16,16,1,fast-tiff,true,"",97.900,8.7000,8.7000,0.0087,56.124,3.6250,1.1
-"16x16 u16 none","16x16 u16 none / 1 frames",u16,none,false,1,false,16,16,1,fast-tiff-preload,true,"",48.400,11.4000,11.4000,0.0114,42.832,4.7500,1.1
-"16x16 u16 none","16x16 u16 none / 1 frames",u16,none,false,1,false,16,16,1,tiff-rs,true,"",144.400,13.1000,13.1000,0.0131,37.273,5.4583,1.1
-"16x16 u16 none","16x16 u16 none / 1 frames",u16,none,false,1,false,16,16,1,tinytiff,true,"",614.500,5.0000,5.0000,0.0050,97.656,2.0833,1.1
-"16x16 u16 none","16x16 u16 none / 1 frames",u16,none,false,1,false,16,16,1,libtiff,true,"",165.300,2.4000,2.4000,0.0024,203.451,1.0000,1.1
-"16x16 u16 none","16x16 u16 none / 10 frames",u16,none,false,1,false,16,16,10,raw,true,"",36.300,2.3778,1.6000,0.0285,205.352,14.2667,9.3
-"16x16 u16 none","16x16 u16 none / 10 frames",u16,none,false,1,false,16,16,10,fast-tiff,true,"",59.800,0.1667,0.1000,0.0029,2929.688,1.0000,9.3
-"16x16 u16 none","16x16 u16 none / 10 frames",u16,none,false,1,false,16,16,10,fast-tiff-preload,true,"",63.100,13.2900,13.2900,0.1329,36.741,79.7400,9.3
-"16x16 u16 none","16x16 u16 none / 10 frames",u16,none,false,1,false,16,16,10,tiff-rs,true,"",198.000,4.6667,4.2000,0.0492,104.632,28.0000,9.3
-"16x16 u16 none","16x16 u16 none / 10 frames",u16,none,false,1,false,16,16,10,tinytiff,true,"",120.900,4.6000,4.0000,0.0468,106.148,27.6000,9.3
-"16x16 u16 none","16x16 u16 none / 10 frames",u16,none,false,1,false,16,16,10,libtiff,true,"",104.700,0.2667,0.2000,0.0049,1831.055,1.6000,9.3
-"16x16 u16 none","16x16 u16 none / 100 frames",u16,none,false,1,false,16,16,100,raw,true,"",30.600,1.5600,1.4000,0.1707,313.001,11.2320,36.2
-"16x16 u16 none","16x16 u16 none / 100 frames",u16,none,false,1,false,16,16,100,fast-tiff,true,"",184.700,0.1389,0.1000,0.0222,3515.625,1.0000,36.2
-"16x16 u16 none","16x16 u16 none / 100 frames",u16,none,false,1,false,16,16,100,fast-tiff-preload,true,"",200.800,6.8590,6.8590,0.6859,71.188,49.3848,36.2
-"16x16 u16 none","16x16 u16 none / 100 frames",u16,none,false,1,false,16,16,100,tiff-rs,true,"",340.100,2.4289,2.2000,0.2530,201.031,17.4880,36.2
-"16x16 u16 none","16x16 u16 none / 100 frames",u16,none,false,1,false,16,16,100,tinytiff,true,"",139.000,2.8122,2.5000,0.3075,173.628,20.2480,36.2
-"16x16 u16 none","16x16 u16 none / 100 frames",u16,none,false,1,false,16,16,100,libtiff,true,"",77.400,0.1633,0.1000,0.0259,2989.477,1.1760,36.2
-"16x16 u16 none","16x16 u16 none / 1000 frames",u16,none,false,1,false,16,16,1000,raw,true,"",38.300,1.5964,1.5000,1.6691,305.855,11.3134,157.2
-"16x16 u16 none","16x16 u16 none / 1000 frames",u16,none,false,1,false,16,16,1000,fast-tiff,true,"",552.400,0.1411,0.0000,0.2231,3460.261,1.0000,157.2
-"16x16 u16 none","16x16 u16 none / 1000 frames",u16,none,false,1,false,16,16,1000,fast-tiff-preload,true,"",528.200,0.8971,0.8971,0.8971,544.289,6.3574,157.2
-"16x16 u16 none","16x16 u16 none / 1000 frames",u16,none,false,1,false,16,16,1000,tiff-rs,true,"",132.400,2.4550,2.2000,2.6085,198.893,17.3976,157.2
-"16x16 u16 none","16x16 u16 none / 1000 frames",u16,none,false,1,false,16,16,1000,tinytiff,true,"",163.000,2.8298,2.6000,2.8927,172.551,20.0535,157.2
-"16x16 u16 none","16x16 u16 none / 1000 frames",u16,none,false,1,false,16,16,1000,libtiff,true,"",86.000,0.1719,0.1000,0.2565,2840.680,1.2181,157.2
-"16x16 u16 none","16x16 u16 none / 10000 frames",u16,none,false,1,false,16,16,10000,raw,true,"",54.300,1.5619,1.4000,16.4374,312.624,11.2132,250.8
-"16x16 u16 none","16x16 u16 none / 10000 frames",u16,none,false,1,false,16,16,10000,fast-tiff,true,"",5070.800,0.1393,0.0000,2.3423,3505.529,1.0000,250.8
-"16x16 u16 none","16x16 u16 none / 10000 frames",u16,none,false,1,false,16,16,10000,fast-tiff-preload,true,"",4948.400,0.5949,0.5949,5.9488,820.806,4.2708,250.8
-"16x16 u16 none","16x16 u16 none / 10000 frames",u16,none,false,1,false,16,16,10000,tiff-rs,true,"",144.300,2.3668,2.0000,25.5837,206.304,16.9920,250.8
-"16x16 u16 none","16x16 u16 none / 10000 frames",u16,none,false,1,false,16,16,10000,tinytiff,true,"",130.200,2.8041,2.6000,29.4491,174.131,20.1315,250.8
-"16x16 u16 none","16x16 u16 none / 10000 frames",u16,none,false,1,false,16,16,10000,libtiff,true,"",121.400,0.1696,0.0000,2.6852,2879.771,1.2173,250.8
-"16x16 u16 none","16x16 u16 none / 100000 frames",u16,none,false,1,false,16,16,100000,raw,true,"",187.000,1.5188,1.4000,160.1070,321.481,10.6575,247.7
-"16x16 u16 none","16x16 u16 none / 100000 frames",u16,none,false,1,false,16,16,100000,fast-tiff,true,"",47770.200,0.1425,0.0000,23.8053,3426.188,1.0000,247.7
-"16x16 u16 none","16x16 u16 none / 100000 frames",u16,none,false,1,false,16,16,100000,fast-tiff-preload,true,"",49310.200,0.4786,0.4786,47.8551,1020.333,3.3579,247.7
-"16x16 u16 none","16x16 u16 none / 100000 frames",u16,none,false,1,false,16,16,100000,tiff-rs,true,"",220.300,2.3350,2.0000,249.9610,209.111,16.3846,247.7
-"16x16 u16 none","16x16 u16 none / 100000 frames",u16,none,false,1,false,16,16,100000,tinytiff,true,"",142.200,2.7360,2.5000,286.6190,178.464,19.1982,247.7
-"16x16 u16 none","16x16 u16 none / 100000 frames",u16,none,false,1,false,16,16,100000,libtiff,true,"",174.400,0.1608,0.0000,26.0747,3036.344,1.1284,247.7
-"16x16 u16 none","16x16 u16 none / 1000000 frames",u16,none,false,1,false,16,16,1000000,raw,true,"",69.600,1.5173,1.4000,1593.6715,321.818,10.9939,223.8
-"16x16 u16 none","16x16 u16 none / 1000000 frames",u16,none,false,1,false,16,16,1000000,fast-tiff,true,"",511700.600,0.1380,0.0000,228.2750,3538.028,1.0000,223.8
-"16x16 u16 none","16x16 u16 none / 1000000 frames",u16,none,false,1,false,16,16,1000000,fast-tiff-preload,true,"",509619.600,0.4394,0.4394,439.4387,1111.148,3.1841,223.8
-"16x16 u16 none","16x16 u16 none / 1000000 frames",u16,none,false,1,false,16,16,1000000,tiff-rs,true,"",211.900,2.3994,2.0000,2614.2012,203.498,17.3861,223.8
-"16x16 u16 none","16x16 u16 none / 1000000 frames",u16,none,false,1,false,16,16,1000000,tinytiff,true,"",232.700,2.7461,2.5000,2929.1141,177.808,19.8980,223.8
-"16x16 u16 none","16x16 u16 none / 1000000 frames",u16,none,false,1,false,16,16,1000000,libtiff,true,"",146.100,0.1556,0.0000,264.0202,3137.924,1.1275,223.8
-"256x256 u8 none","256x256 u8 none / 1 frames",u8,none,false,1,false,256,256,1,raw,true,"",42.500,17.2000,17.2000,0.0172,3633.721,3.0175,20.2
-"256x256 u8 none","256x256 u8 none / 1 frames",u8,none,false,1,false,256,256,1,fast-tiff,true,"",49.800,18.4000,18.4000,0.0184,3396.739,3.2281,20.2
-"256x256 u8 none","256x256 u8 none / 1 frames",u8,none,false,1,false,256,256,1,fast-tiff-preload,true,"",45.300,72.2000,72.2000,0.0722,865.651,12.6667,20.2
-"256x256 u8 none","256x256 u8 none / 1 frames",u8,none,false,1,false,256,256,1,tiff-rs,true,"",101.500,10.5000,10.5000,0.0105,5952.381,1.8421,20.2
-"256x256 u8 none","256x256 u8 none / 1 frames",u8,none,false,1,false,256,256,1,tinytiff,true,"",80.000,5.7000,5.7000,0.0057,10964.912,1.0000,20.2
-"256x256 u8 none","256x256 u8 none / 1 frames",u8,none,false,1,false,256,256,1,libtiff,true,"",68.500,12.3000,12.3000,0.0123,5081.301,2.1579,20.2
-"256x256 u8 none","256x256 u8 none / 10 frames",u8,none,false,1,false,256,256,10,raw,true,"",30.500,6.9556,5.5000,0.0755,8985.623,1.4457,381.2
-"256x256 u8 none","256x256 u8 none / 10 frames",u8,none,false,1,false,256,256,10,fast-tiff,true,"",56.100,16.6444,15.6000,0.1702,3755.007,3.4596,381.2
-"256x256 u8 none","256x256 u8 none / 10 frames",u8,none,false,1,false,256,256,10,fast-tiff-preload,true,"",56.100,121.7300,121.7300,1.2173,513.431,25.3018,381.2
-"256x256 u8 none","256x256 u8 none / 10 frames",u8,none,false,1,false,256,256,10,tiff-rs,true,"",114.800,7.1889,6.7000,0.0759,8693.972,1.4942,381.2
-"256x256 u8 none","256x256 u8 none / 10 frames",u8,none,false,1,false,256,256,10,tinytiff,true,"",87.600,4.8111,4.4000,0.0492,12990.762,1.0000,381.2
-"256x256 u8 none","256x256 u8 none / 10 frames",u8,none,false,1,false,256,256,10,libtiff,true,"",75.000,11.3111,10.5000,0.1154,5525.540,2.3510,381.2
-"256x256 u8 none","256x256 u8 none / 100 frames",u8,none,false,1,false,256,256,100,raw,true,"",30.100,8.5944,5.8000,0.9692,7272.140,0.8790,1810.8
-"256x256 u8 none","256x256 u8 none / 100 frames",u8,none,false,1,false,256,256,100,fast-tiff,true,"",135.200,18.4722,16.6000,1.8841,3383.459,1.8892,1810.8
-"256x256 u8 none","256x256 u8 none / 100 frames",u8,none,false,1,false,256,256,100,fast-tiff-preload,true,"",134.100,75.5340,75.5340,7.5534,827.442,7.7251,1810.8
-"256x256 u8 none","256x256 u8 none / 100 frames",u8,none,false,1,false,256,256,100,tiff-rs,true,"",140.900,11.8656,8.2000,1.3297,5267.347,1.2135,1810.8
-"256x256 u8 none","256x256 u8 none / 100 frames",u8,none,false,1,false,256,256,100,tinytiff,true,"",125.100,9.7778,6.7000,1.0919,6392.045,1.0000,1810.8
-"256x256 u8 none","256x256 u8 none / 100 frames",u8,none,false,1,false,256,256,100,libtiff,true,"",197.700,15.1211,13.2000,1.5598,4133.294,1.5465,1810.8
-"256x256 u8 none","256x256 u8 none / 1000 frames",u8,none,false,1,false,256,256,1000,raw,true,"",33.800,8.8953,5.2000,10.6958,7026.156,0.8953,1929.2
-"256x256 u8 none","256x256 u8 none / 1000 frames",u8,none,false,1,false,256,256,1000,fast-tiff,true,"",614.500,18.4456,16.0000,19.5192,3388.350,1.8565,1929.2
-"256x256 u8 none","256x256 u8 none / 1000 frames",u8,none,false,1,false,256,256,1000,fast-tiff-preload,true,"",533.200,75.7623,75.7623,75.7623,824.949,7.6252,1929.2
-"256x256 u8 none","256x256 u8 none / 1000 frames",u8,none,false,1,false,256,256,1000,tiff-rs,true,"",157.100,11.5743,7.4000,13.1104,5399.879,1.1649,1929.2
-"256x256 u8 none","256x256 u8 none / 1000 frames",u8,none,false,1,false,256,256,1000,tinytiff,true,"",130.200,9.9358,6.1000,11.2769,6290.398,1.0000,1929.2
-"256x256 u8 none","256x256 u8 none / 1000 frames",u8,none,false,1,false,256,256,1000,libtiff,true,"",130.600,15.8093,13.5000,16.1338,3953.361,1.5912,1929.2
-"256x256 u8 none","256x256 u8 none / 10000 frames",u8,none,false,1,false,256,256,10000,raw,true,"",39.900,9.1289,5.0000,106.4071,6846.414,0.8960,1880.1
-"256x256 u8 none","256x256 u8 none / 10000 frames",u8,none,false,1,false,256,256,10000,fast-tiff,true,"",4754.400,18.4845,17.2000,190.3587,3381.213,1.8143,1880.1
-"256x256 u8 none","256x256 u8 none / 10000 frames",u8,none,false,1,false,256,256,10000,fast-tiff-preload,true,"",5071.100,102.6317,102.6317,1026.3167,608.974,10.0733,1880.1
-"256x256 u8 none","256x256 u8 none / 10000 frames",u8,none,false,1,false,256,256,10000,tiff-rs,true,"",272.000,11.5878,10.0000,133.5600,5393.609,1.1373,1880.1
-"256x256 u8 none","256x256 u8 none / 10000 frames",u8,none,false,1,false,256,256,10000,tinytiff,true,"",171.700,10.1885,8.7000,118.3059,6134.387,1.0000,1880.1
-"256x256 u8 none","256x256 u8 none / 10000 frames",u8,none,false,1,false,256,256,10000,libtiff,true,"",148.600,16.0493,14.5000,164.0964,3894.248,1.5752,1880.1
-"256x256 u16 none","256x256 u16 none / 1 frames",u16,none,false,1,false,256,256,1,raw,true,"",30.200,22.5000,22.5000,0.0225,5555.556,2.5281,186.2
-"256x256 u16 none","256x256 u16 none / 1 frames",u16,none,false,1,false,256,256,1,fast-tiff,true,"",57.800,39.5000,39.5000,0.0395,3164.557,4.4382,186.2
-"256x256 u16 none","256x256 u16 none / 1 frames",u16,none,false,1,false,256,256,1,fast-tiff-preload,true,"",53.400,94.5000,94.5000,0.0945,1322.751,10.6180,186.2
-"256x256 u16 none","256x256 u16 none / 1 frames",u16,none,false,1,false,256,256,1,tiff-rs,true,"",111.400,16.6000,16.6000,0.0166,7530.120,1.8652,186.2
-"256x256 u16 none","256x256 u16 none / 1 frames",u16,none,false,1,false,256,256,1,tinytiff,true,"",85.300,8.9000,8.9000,0.0089,14044.944,1.0000,186.2
-"256x256 u16 none","256x256 u16 none / 1 frames",u16,none,false,1,false,256,256,1,libtiff,true,"",76.200,24.9000,24.9000,0.0249,5020.080,2.7978,186.2
-"256x256 u16 none","256x256 u16 none / 10 frames",u16,none,false,1,false,256,256,10,raw,true,"",29.000,10.1333,9.1000,0.1076,12335.526,1.1783,1355.7
-"256x256 u16 none","256x256 u16 none / 10 frames",u16,none,false,1,false,256,256,10,fast-tiff,true,"",57.600,33.6778,31.7000,0.3536,3711.646,3.9160,1355.7
-"256x256 u16 none","256x256 u16 none / 10 frames",u16,none,false,1,false,256,256,10,fast-tiff-preload,true,"",70.900,142.3800,142.3800,1.4238,877.932,16.5558,1355.7
-"256x256 u16 none","256x256 u16 none / 10 frames",u16,none,false,1,false,256,256,10,tiff-rs,true,"",122.300,13.2778,12.2000,0.1387,9414.226,1.5439,1355.7
-"256x256 u16 none","256x256 u16 none / 10 frames",u16,none,false,1,false,256,256,10,tinytiff,true,"",87.900,8.6000,7.5000,0.0876,14534.884,1.0000,1355.7
-"256x256 u16 none","256x256 u16 none / 10 frames",u16,none,false,1,false,256,256,10,libtiff,true,"",76.600,22.3222,21.4000,0.2253,5599.801,2.5956,1355.7
-"256x256 u16 none","256x256 u16 none / 100 frames",u16,none,false,1,false,256,256,100,raw,true,"",30.900,16.6578,9.8000,1.9336,7504.002,0.9744,2779.1
-"256x256 u16 none","256x256 u16 none / 100 frames",u16,none,false,1,false,256,256,100,fast-tiff,true,"",166.900,36.3678,34.5000,3.6765,3437.109,2.1273,2779.1
-"256x256 u16 none","256x256 u16 none / 100 frames",u16,none,false,1,false,256,256,100,fast-tiff-preload,true,"",133.500,83.6970,83.6970,8.3697,1493.482,4.8958,2779.1
-"256x256 u16 none","256x256 u16 none / 100 frames",u16,none,false,1,false,256,256,100,tiff-rs,true,"",153.600,20.5967,13.0000,2.2868,6068.943,1.2048,2779.1
-"256x256 u16 none","256x256 u16 none / 100 frames",u16,none,false,1,false,256,256,100,tinytiff,true,"",118.300,17.0956,9.9000,1.8952,7311.842,1.0000,2779.1
-"256x256 u16 none","256x256 u16 none / 100 frames",u16,none,false,1,false,256,256,100,libtiff,true,"",186.600,30.6822,28.1000,3.1272,4074.020,1.7947,2779.1
-"256x256 u16 none","256x256 u16 none / 1000 frames",u16,none,false,1,false,256,256,1000,raw,true,"",36.000,18.3496,9.9000,20.4518,6812.154,0.9942,3407.1
-"256x256 u16 none","256x256 u16 none / 1000 frames",u16,none,false,1,false,256,256,1000,fast-tiff,true,"",599.200,38.3026,36.2000,39.1476,3263.490,2.0753,3407.1
-"256x256 u16 none","256x256 u16 none / 1000 frames",u16,none,false,1,false,256,256,1000,fast-tiff-preload,true,"",579.600,91.3004,91.3004,91.3004,1369.107,4.9468,3407.1
-"256x256 u16 none","256x256 u16 none / 1000 frames",u16,none,false,1,false,256,256,1000,tiff-rs,true,"",158.900,21.8363,18.9000,24.1130,5724.404,1.1831,3407.1
-"256x256 u16 none","256x256 u16 none / 1000 frames",u16,none,false,1,false,256,256,1000,tinytiff,true,"",134.500,18.4566,16.2000,20.5173,6772.661,1.0000,3407.1
-"256x256 u16 none","256x256 u16 none / 1000 frames",u16,none,false,1,false,256,256,1000,libtiff,true,"",135.100,31.6847,28.3000,32.3530,3945.126,1.7167,3407.1
-"256x256 u16 none","256x256 u16 none / 10000 frames",u16,none,false,1,false,256,256,10000,raw,true,"",49.100,17.2486,9.1000,197.4533,7246.970,0.8818,3372.7
-"256x256 u16 none","256x256 u16 none / 10000 frames",u16,none,false,1,false,256,256,10000,fast-tiff,true,"",4692.600,37.8043,35.8000,385.2404,3306.500,1.9327,3372.7
-"256x256 u16 none","256x256 u16 none / 10000 frames",u16,none,false,1,false,256,256,10000,fast-tiff-preload,true,"",5099.200,120.1290,120.1290,1201.2898,1040.548,6.1415,3372.7
-"256x256 u16 none","256x256 u16 none / 10000 frames",u16,none,false,1,false,256,256,10000,tiff-rs,true,"",170.300,21.6619,18.2000,242.7067,5770.509,1.1074,3372.7
-"256x256 u16 none","256x256 u16 none / 10000 frames",u16,none,false,1,false,256,256,10000,tinytiff,true,"",173.800,19.5602,16.3000,221.5546,6390.513,1.0000,3372.7
-"256x256 u16 none","256x256 u16 none / 10000 frames",u16,none,false,1,false,256,256,10000,libtiff,true,"",238.900,33.4486,31.2000,349.6434,3737.076,1.7100,3372.7
-"256x256 u16 none rps32","256x256 u16 none rps32 / 1 frames",u16,none,false,8,false,256,256,1,raw,true,"",27.000,20.1000,20.1000,0.0201,6218.905,0.9710,187.8
-"256x256 u16 none rps32","256x256 u16 none rps32 / 1 frames",u16,none,false,8,false,256,256,1,fast-tiff,true,"",46.600,36.1000,36.1000,0.0361,3462.604,1.7440,187.8
-"256x256 u16 none rps32","256x256 u16 none rps32 / 1 frames",u16,none,false,8,false,256,256,1,fast-tiff-preload,true,"",43.500,100.6000,100.6000,0.1006,1242.545,4.8599,187.8
-"256x256 u16 none rps32","256x256 u16 none rps32 / 1 frames",u16,none,false,8,false,256,256,1,tiff-rs,true,"",108.500,28.1000,28.1000,0.0281,4448.399,1.3575,187.8
-"256x256 u16 none rps32","256x256 u16 none rps32 / 1 frames",u16,none,false,8,false,256,256,1,tinytiff,true,"",84.300,20.7000,20.7000,0.0207,6038.647,1.0000,187.8
-"256x256 u16 none rps32","256x256 u16 none rps32 / 1 frames",u16,none,false,8,false,256,256,1,libtiff,true,"",65.500,28.2000,28.2000,0.0282,4432.624,1.3623,187.8
-"256x256 u16 none rps32","256x256 u16 none rps32 / 10 frames",u16,none,false,8,false,256,256,10,raw,true,"",29.000,11.0333,9.6000,0.1186,11329.305,0.5066,995.3
-"256x256 u16 none rps32","256x256 u16 none rps32 / 10 frames",u16,none,false,8,false,256,256,10,fast-tiff,true,"",55.400,33.2111,31.5000,0.3370,3763.801,1.5250,995.3
-"256x256 u16 none rps32","256x256 u16 none rps32 / 10 frames",u16,none,false,8,false,256,256,10,fast-tiff-preload,true,"",52.500,130.7200,130.7200,1.3072,956.242,6.0024,995.3
-"256x256 u16 none rps32","256x256 u16 none rps32 / 10 frames",u16,none,false,8,false,256,256,10,tiff-rs,true,"",118.400,26.7000,24.1000,0.2702,4681.648,1.2260,995.3
-"256x256 u16 none rps32","256x256 u16 none rps32 / 10 frames",u16,none,false,8,false,256,256,10,tinytiff,true,"",100.600,21.7778,21.4000,0.2191,5739.796,1.0000,995.3
-"256x256 u16 none rps32","256x256 u16 none rps32 / 10 frames",u16,none,false,8,false,256,256,10,libtiff,true,"",68.100,28.1667,26.9000,0.2835,4437.870,1.2934,995.3
-"256x256 u16 none rps32","256x256 u16 none rps32 / 100 frames",u16,none,false,8,false,256,256,100,raw,true,"",53.800,21.3367,10.8000,2.4054,5858.460,0.6161,1544.3
-"256x256 u16 none rps32","256x256 u16 none rps32 / 100 frames",u16,none,false,8,false,256,256,100,fast-tiff,true,"",196.600,39.9078,35.6000,4.0377,3132.222,1.1524,1544.3
-"256x256 u16 none rps32","256x256 u16 none rps32 / 100 frames",u16,none,false,8,false,256,256,100,fast-tiff-preload,true,"",144.200,84.8050,84.8050,8.4805,1473.970,2.4488,1544.3
-"256x256 u16 none rps32","256x256 u16 none rps32 / 100 frames",u16,none,false,8,false,256,256,100,tiff-rs,true,"",146.900,38.3922,27.5000,4.0995,3255.868,1.1086,1544.3
-"256x256 u16 none rps32","256x256 u16 none rps32 / 100 frames",u16,none,false,8,false,256,256,100,tinytiff,true,"",153.100,34.6311,24.9000,3.7380,3609.471,1.0000,1544.3
-"256x256 u16 none rps32","256x256 u16 none rps32 / 100 frames",u16,none,false,8,false,256,256,100,libtiff,true,"",101.100,38.3389,34.0000,4.1466,3260.397,1.1071,1544.3
-"256x256 u16 none rps32","256x256 u16 none rps32 / 1000 frames",u16,none,false,8,false,256,256,1000,raw,true,"",39.900,17.5167,9.3000,20.0403,7136.061,0.5323,1317.8
-"256x256 u16 none rps32","256x256 u16 none rps32 / 1000 frames",u16,none,false,8,false,256,256,1000,fast-tiff,true,"",611.900,37.2664,35.1000,38.3896,3354.224,1.1325,1317.8
-"256x256 u16 none rps32","256x256 u16 none rps32 / 1000 frames",u16,none,false,8,false,256,256,1000,fast-tiff-preload,true,"",770.700,102.3180,102.3180,102.3180,1221.681,3.1093,1317.8
-"256x256 u16 none rps32","256x256 u16 none rps32 / 1000 frames",u16,none,false,8,false,256,256,1000,tiff-rs,true,"",167.900,37.1827,33.6000,39.7877,3361.781,1.1299,1317.8
-"256x256 u16 none rps32","256x256 u16 none rps32 / 1000 frames",u16,none,false,8,false,256,256,1000,tinytiff,true,"",199.900,32.9069,29.9000,35.6136,3798.597,1.0000,1317.8
-"256x256 u16 none rps32","256x256 u16 none rps32 / 1000 frames",u16,none,false,8,false,256,256,1000,libtiff,true,"",122.700,36.9773,33.3000,38.7890,3380.449,1.1237,1317.8
-"256x256 u16 none rps32","256x256 u16 none rps32 / 10000 frames",u16,none,false,8,false,256,256,10000,raw,true,"",46544.700,17.6789,9.1000,207.2273,7070.558,0.5072,1335.1
-"256x256 u16 none rps32","256x256 u16 none rps32 / 10000 frames",u16,none,false,8,false,256,256,10000,fast-tiff,true,"",5217.100,37.8265,35.3000,385.2648,3304.563,1.0852,1335.1
-"256x256 u16 none rps32","256x256 u16 none rps32 / 10000 frames",u16,none,false,8,false,256,256,10000,fast-tiff-preload,true,"",5266.600,127.8208,127.8208,1278.2084,977.931,3.6671,1335.1
-"256x256 u16 none rps32","256x256 u16 none rps32 / 10000 frames",u16,none,false,8,false,256,256,10000,tiff-rs,true,"",204.800,36.8669,33.9000,396.8290,3390.578,1.0577,1335.1
-"256x256 u16 none rps32","256x256 u16 none rps32 / 10000 frames",u16,none,false,8,false,256,256,10000,tinytiff,true,"",137.500,34.8562,31.2000,377.7569,3586.167,1.0000,1335.1
-"256x256 u16 none rps32","256x256 u16 none rps32 / 10000 frames",u16,none,false,8,false,256,256,10000,libtiff,true,"",167.100,38.1594,35.8000,388.1783,3275.737,1.0948,1335.1
-"256x256 f32 none","256x256 f32 none / 1 frames",f32,none,false,1,false,256,256,1,raw,true,"",44.800,29.6000,29.6000,0.0296,8445.946,2.2946,271.2
-"256x256 f32 none","256x256 f32 none / 1 frames",f32,none,false,1,false,256,256,1,fast-tiff,true,"",51.100,127.8000,127.8000,0.1278,1956.182,9.9070,271.2
-"256x256 f32 none","256x256 f32 none / 1 frames",f32,none,false,1,false,256,256,1,fast-tiff-preload,true,"",44.800,128.0000,128.0000,0.1280,1953.125,9.9225,271.2
-"256x256 f32 none","256x256 f32 none / 1 frames",f32,none,false,1,false,256,256,1,tiff-rs,true,"",105.100,26.5000,26.5000,0.0265,9433.962,2.0543,271.2
-"256x256 f32 none","256x256 f32 none / 1 frames",f32,none,false,1,false,256,256,1,tinytiff,true,"",82.100,12.9000,12.9000,0.0129,19379.845,1.0000,271.2
-"256x256 f32 none","256x256 f32 none / 1 frames",f32,none,false,1,false,256,256,1,libtiff,true,"",67.000,46.4000,46.4000,0.0464,5387.931,3.5969,271.2
-"256x256 f32 none","256x256 f32 none / 10 frames",f32,none,false,1,false,256,256,10,raw,true,"",34.800,31.7889,26.1000,0.3371,7864.383,1.2615,1602.4
-"256x256 f32 none","256x256 f32 none / 10 frames",f32,none,false,1,false,256,256,10,fast-tiff,true,"",70.600,70.8222,63.9000,0.7245,3529.965,2.8104,1602.4
-"256x256 f32 none","256x256 f32 none / 10 frames",f32,none,false,1,false,256,256,10,fast-tiff-preload,true,"",63.400,138.5900,138.5900,1.3859,1803.882,5.4996,1602.4
-"256x256 f32 none","256x256 f32 none / 10 frames",f32,none,false,1,false,256,256,10,tiff-rs,true,"",120.900,33.2222,22.9000,0.3477,7525.084,1.3183,1602.4
-"256x256 f32 none","256x256 f32 none / 10 frames",f32,none,false,1,false,256,256,10,tinytiff,true,"",90.400,25.2000,15.9000,0.2695,9920.635,1.0000,1602.4
-"256x256 f32 none","256x256 f32 none / 10 frames",f32,none,false,1,false,256,256,10,libtiff,true,"",80.700,51.9778,46.5000,0.5249,4809.748,2.0626,1602.4
-"256x256 f32 none","256x256 f32 none / 100 frames",f32,none,false,1,false,256,256,100,raw,true,"",34.600,40.0778,18.8000,4.3375,6237.871,1.1324,3641.8
-"256x256 f32 none","256x256 f32 none / 100 frames",f32,none,false,1,false,256,256,100,fast-tiff,true,"",174.900,74.5044,70.7000,7.5269,3355.505,2.1051,3641.8
-"256x256 f32 none","256x256 f32 none / 100 frames",f32,none,false,1,false,256,256,100,fast-tiff-preload,true,"",163.400,86.6790,86.6790,8.6679,2884.205,2.4491,3641.8
-"256x256 f32 none","256x256 f32 none / 100 frames",f32,none,false,1,false,256,256,100,tiff-rs,true,"",157.600,42.0722,36.7000,4.5626,5942.163,1.1887,3641.8
-"256x256 f32 none","256x256 f32 none / 100 frames",f32,none,false,1,false,256,256,100,tinytiff,true,"",130.500,35.3922,30.3000,3.7763,7063.699,1.0000,3641.8
-"256x256 f32 none","256x256 f32 none / 100 frames",f32,none,false,1,false,256,256,100,libtiff,true,"",134.700,64.1122,60.0000,6.6739,3899.412,1.8115,3641.8
-"256x256 f32 none","256x256 f32 none / 1000 frames",f32,none,false,1,false,256,256,1000,raw,true,"",32.600,34.8474,17.0000,37.2926,7174.127,0.9763,4005.2
-"256x256 f32 none","256x256 f32 none / 1000 frames",f32,none,false,1,false,256,256,1000,fast-tiff,true,"",542.600,74.1281,68.1000,75.5461,3372.540,2.0769,4005.2
-"256x256 f32 none","256x256 f32 none / 1000 frames",f32,none,false,1,false,256,256,1000,fast-tiff-preload,true,"",553.400,94.4873,94.4873,94.4873,2645.858,2.6473,4005.2
-"256x256 f32 none","256x256 f32 none / 1000 frames",f32,none,false,1,false,256,256,1000,tiff-rs,true,"",160.400,42.4483,35.8000,44.9645,5889.513,1.1893,4005.2
-"256x256 f32 none","256x256 f32 none / 1000 frames",f32,none,false,1,false,256,256,1000,tinytiff,true,"",133.600,35.6922,28.9000,38.0846,7004.327,1.0000,4005.2
-"256x256 f32 none","256x256 f32 none / 1000 frames",f32,none,false,1,false,256,256,1000,libtiff,true,"",202.400,63.8653,55.9000,65.1588,3914.487,1.7893,4005.2
-"256x256 f32 none","256x256 f32 none / 10000 frames",f32,none,false,1,false,256,256,10000,raw,true,"",51.200,38.0310,17.8000,409.9495,6573.592,0.8378,2146.8
-"256x256 f32 none","256x256 f32 none / 10000 frames",f32,none,false,1,false,256,256,10000,fast-tiff,true,"",4682.500,75.5954,69.4000,774.9867,3307.078,1.6653,2146.8
-"256x256 f32 none","256x256 f32 none / 10000 frames",f32,none,false,1,false,256,256,10000,fast-tiff-preload,true,"",5077.800,141.1537,141.1537,1411.5370,1771.119,3.1095,2146.8
-"256x256 f32 none","256x256 f32 none / 10000 frames",f32,none,false,1,false,256,256,10000,tiff-rs,true,"",154.700,45.3938,37.5000,484.6966,5507.360,1.0000,2146.8
-"256x256 f32 none","256x256 f32 none / 10000 frames",f32,none,false,1,false,256,256,10000,tinytiff,false,"open failed",0.000,0.0000,0.0000,0.0000,0.000,0.0000,2146.8
-"256x256 f32 none","256x256 f32 none / 10000 frames",f32,none,false,1,false,256,256,10000,libtiff,true,"",143.700,67.1828,61.0000,683.7584,3721.193,1.4800,2146.8
-"256x256 u16 lzw","256x256 u16 lzw / 1 frames",u16,lzw,false,1,false,256,256,1,raw,true,"",28.300,19.6000,19.6000,0.0196,6377.551,0.0480,34.5
-"256x256 u16 lzw","256x256 u16 lzw / 1 frames",u16,lzw,false,1,false,256,256,1,fast-tiff,true,"",46.700,768.1000,768.1000,0.7681,162.739,1.8821,34.5
-"256x256 u16 lzw","256x256 u16 lzw / 1 frames",u16,lzw,false,1,false,256,256,1,fast-tiff-preload,true,"",48.800,637.7000,637.7000,0.6377,196.017,1.5626,34.5
-"256x256 u16 lzw","256x256 u16 lzw / 1 frames",u16,lzw,false,1,false,256,256,1,tiff-rs,true,"",105.100,737.8000,737.8000,0.7378,169.423,1.8079,34.5
-"256x256 u16 lzw","256x256 u16 lzw / 1 frames",u16,lzw,false,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,34.5
-"256x256 u16 lzw","256x256 u16 lzw / 1 frames",u16,lzw,false,1,false,256,256,1,libtiff,true,"",79.000,408.1000,408.1000,0.4081,306.297,1.0000,34.5
-"256x256 u16 lzw","256x256 u16 lzw / 10 frames",u16,lzw,false,1,false,256,256,10,raw,true,"",29.500,12.8556,9.8000,0.1562,9723.423,0.0594,72.9
-"256x256 u16 lzw","256x256 u16 lzw / 10 frames",u16,lzw,false,1,false,256,256,10,fast-tiff,true,"",61.900,557.7111,553.3000,5.6139,224.130,2.5756,72.9
-"256x256 u16 lzw","256x256 u16 lzw / 10 frames",u16,lzw,false,1,false,256,256,10,fast-tiff-preload,true,"",71.200,216.5400,216.5400,2.1654,577.261,1.0000,72.9
-"256x256 u16 lzw","256x256 u16 lzw / 10 frames",u16,lzw,false,1,false,256,256,10,tiff-rs,true,"",142.900,744.8111,727.3000,7.6362,167.828,3.4396,72.9
-"256x256 u16 lzw","256x256 u16 lzw / 10 frames",u16,lzw,false,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,72.9
-"256x256 u16 lzw","256x256 u16 lzw / 10 frames",u16,lzw,false,1,false,256,256,10,libtiff,true,"",172.800,430.4778,403.9000,4.4437,290.375,1.9880,72.9
-"256x256 u16 lzw","256x256 u16 lzw / 100 frames",u16,lzw,false,1,false,256,256,100,raw,true,"",32.200,17.3622,10.5000,1.9097,7199.539,0.1243,75.1
-"256x256 u16 lzw","256x256 u16 lzw / 100 frames",u16,lzw,false,1,false,256,256,100,fast-tiff,true,"",212.800,557.9111,543.6000,57.2712,224.050,3.9945,75.1
-"256x256 u16 lzw","256x256 u16 lzw / 100 frames",u16,lzw,false,1,false,256,256,100,fast-tiff-preload,true,"",169.500,139.6710,139.6710,13.9671,894.960,1.0000,75.1
-"256x256 u16 lzw","256x256 u16 lzw / 100 frames",u16,lzw,false,1,false,256,256,100,tiff-rs,true,"",170.500,751.1078,730.7000,78.4959,166.421,5.3777,75.1
-"256x256 u16 lzw","256x256 u16 lzw / 100 frames",u16,lzw,false,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,75.1
-"256x256 u16 lzw","256x256 u16 lzw / 100 frames",u16,lzw,false,1,false,256,256,100,libtiff,true,"",579.300,410.3844,404.9000,41.9799,304.592,2.9382,75.1
-"256x256 u16 lzw","256x256 u16 lzw / 1000 frames",u16,lzw,false,1,false,256,256,1000,raw,true,"",34.900,17.5259,9.3000,19.4393,7132.306,0.1319,76.7
-"256x256 u16 lzw","256x256 u16 lzw / 1000 frames",u16,lzw,false,1,false,256,256,1000,fast-tiff,true,"",555.200,553.2519,541.0000,566.2181,225.937,4.1626,76.7
-"256x256 u16 lzw","256x256 u16 lzw / 1000 frames",u16,lzw,false,1,false,256,256,1000,fast-tiff-preload,true,"",561.500,132.9116,132.9116,132.9116,940.475,1.0000,76.7
-"256x256 u16 lzw","256x256 u16 lzw / 1000 frames",u16,lzw,false,1,false,256,256,1000,tiff-rs,true,"",148.800,728.9362,709.8000,747.3509,171.483,5.4844,76.7
-"256x256 u16 lzw","256x256 u16 lzw / 1000 frames",u16,lzw,false,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,76.7
-"256x256 u16 lzw","256x256 u16 lzw / 1000 frames",u16,lzw,false,1,false,256,256,1000,libtiff,true,"",137.200,404.7077,395.8000,415.3253,308.865,3.0449,76.7
-"256x256 u16 lzw","256x256 u16 lzw / 10000 frames",u16,lzw,false,1,false,256,256,10000,raw,true,"",77.500,18.4146,9.3000,407.7815,6788.076,0.0990,76.8
-"256x256 u16 lzw","256x256 u16 lzw / 10000 frames",u16,lzw,false,1,false,256,256,10000,fast-tiff,true,"",4972.400,558.4606,545.0000,5728.1432,223.830,3.0029,76.8
-"256x256 u16 lzw","256x256 u16 lzw / 10000 frames",u16,lzw,false,1,false,256,256,10000,fast-tiff-preload,true,"",5061.700,185.9712,185.9712,1859.7117,672.147,1.0000,76.8
-"256x256 u16 lzw","256x256 u16 lzw / 10000 frames",u16,lzw,false,1,false,256,256,10000,tiff-rs,true,"",169.300,733.8333,711.5000,7504.8477,170.338,3.9460,76.8
-"256x256 u16 lzw","256x256 u16 lzw / 10000 frames",u16,lzw,false,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,76.8
-"256x256 u16 lzw","256x256 u16 lzw / 10000 frames",u16,lzw,false,1,false,256,256,10000,libtiff,true,"",193.600,406.4672,398.4000,4175.3489,307.528,2.1856,76.8
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1 frames",u16,lzw,true,1,false,256,256,1,raw,true,"",28.800,21.9000,21.9000,0.0219,5707.763,0.0742,28.0
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1 frames",u16,lzw,true,1,false,256,256,1,fast-tiff,true,"",49.300,373.9000,373.9000,0.3739,334.314,1.2675,28.0
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1 frames",u16,lzw,true,1,false,256,256,1,fast-tiff-preload,true,"",54.000,386.8000,386.8000,0.3868,323.164,1.3112,28.0
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1 frames",u16,lzw,true,1,false,256,256,1,tiff-rs,true,"",123.200,475.4000,475.4000,0.4754,262.936,1.6115,28.0
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1 frames",u16,lzw,true,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,28.0
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1 frames",u16,lzw,true,1,false,256,256,1,libtiff,true,"",88.300,295.0000,295.0000,0.2950,423.729,1.0000,28.0
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10 frames",u16,lzw,true,1,false,256,256,10,raw,true,"",29.900,11.1111,9.7000,0.1171,11250.000,0.0648,93.6
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10 frames",u16,lzw,true,1,false,256,256,10,fast-tiff,true,"",56.300,300.3444,297.6000,3.0195,416.189,1.7511,93.6
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10 frames",u16,lzw,true,1,false,256,256,10,fast-tiff-preload,true,"",55.600,171.5200,171.5200,1.7152,728.778,1.0000,93.6
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10 frames",u16,lzw,true,1,false,256,256,10,tiff-rs,true,"",121.900,426.8000,424.9000,4.2895,292.877,2.4883,93.6
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10 frames",u16,lzw,true,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,93.6
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10 frames",u16,lzw,true,1,false,256,256,10,libtiff,true,"",80.400,290.0778,283.8000,2.9733,430.919,1.6912,93.6
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 100 frames",u16,lzw,true,1,false,256,256,100,raw,true,"",33.300,17.6889,10.2000,1.9525,7066.583,0.1683,108.2
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 100 frames",u16,lzw,true,1,false,256,256,100,fast-tiff,true,"",128.800,293.2567,286.5000,29.7751,426.248,2.7894,108.2
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 100 frames",u16,lzw,true,1,false,256,256,100,fast-tiff-preload,true,"",154.000,105.1310,105.1310,10.5131,1188.993,1.0000,108.2
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 100 frames",u16,lzw,true,1,false,256,256,100,tiff-rs,true,"",170.300,433.9822,426.8000,44.4076,288.030,4.1280,108.2
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 100 frames",u16,lzw,true,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,108.2
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 100 frames",u16,lzw,true,1,false,256,256,100,libtiff,true,"",133.500,286.3511,278.4000,29.6291,436.527,2.7238,108.2
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1000 frames",u16,lzw,true,1,false,256,256,1000,raw,true,"",36.200,17.9472,10.0000,20.1414,6964.866,0.1469,109.7
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1000 frames",u16,lzw,true,1,false,256,256,1000,fast-tiff,true,"",589.000,293.6131,280.7000,305.5671,425.730,2.4034,109.7
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1000 frames",u16,lzw,true,1,false,256,256,1000,fast-tiff-preload,true,"",542.900,122.1664,122.1664,122.1664,1023.195,1.0000,109.7
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1000 frames",u16,lzw,true,1,false,256,256,1000,tiff-rs,true,"",164.500,435.3993,415.7000,449.4034,287.093,3.5640,109.7
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1000 frames",u16,lzw,true,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,109.7
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1000 frames",u16,lzw,true,1,false,256,256,1000,libtiff,true,"",125.100,282.2980,278.2000,290.2405,442.794,2.3108,109.7
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10000 frames",u16,lzw,true,1,false,256,256,10000,raw,true,"",66.600,17.6270,9.0000,197.6740,7091.376,0.0896,110.5
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10000 frames",u16,lzw,true,1,false,256,256,10000,fast-tiff,true,"",4712.800,287.5049,278.8000,2965.7800,434.775,1.4610,110.5
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10000 frames",u16,lzw,true,1,false,256,256,10000,fast-tiff-preload,true,"",4697.100,196.7864,196.7864,1967.8638,635.207,1.0000,110.5
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10000 frames",u16,lzw,true,1,false,256,256,10000,tiff-rs,true,"",211.000,424.8046,415.9000,4363.8195,294.253,2.1587,110.5
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10000 frames",u16,lzw,true,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,110.5
-"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10000 frames",u16,lzw,true,1,false,256,256,10000,libtiff,true,"",147.100,282.6695,278.0000,2912.3295,442.213,1.4364,110.5
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1 frames",u16,deflate,true,1,false,256,256,1,raw,true,"",34.200,22.8000,22.8000,0.0228,5482.456,0.1701,71.7
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1 frames",u16,deflate,true,1,false,256,256,1,fast-tiff,true,"",52.700,194.9000,194.9000,0.1949,641.355,1.4545,71.7
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1 frames",u16,deflate,true,1,false,256,256,1,fast-tiff-preload,true,"",56.700,246.9000,246.9000,0.2469,506.278,1.8425,71.7
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1 frames",u16,deflate,true,1,false,256,256,1,tiff-rs,true,"",125.900,183.3000,183.3000,0.1833,681.942,1.3679,71.7
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1 frames",u16,deflate,true,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,71.7
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1 frames",u16,deflate,true,1,false,256,256,1,libtiff,true,"",89.000,134.0000,134.0000,0.1340,932.836,1.0000,71.7
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10 frames",u16,deflate,true,1,false,256,256,10,raw,true,"",29.600,11.3333,10.0000,0.1199,11029.412,0.1168,88.3
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10 frames",u16,deflate,true,1,false,256,256,10,fast-tiff,true,"",54.900,164.3111,157.2000,1.6724,760.752,1.6937,88.3
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10 frames",u16,deflate,true,1,false,256,256,10,fast-tiff-preload,true,"",62.600,142.0900,142.0900,1.4209,879.724,1.4647,88.3
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10 frames",u16,deflate,true,1,false,256,256,10,tiff-rs,true,"",130.900,162.0556,160.0000,1.6356,771.340,1.6705,88.3
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10 frames",u16,deflate,true,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,88.3
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10 frames",u16,deflate,true,1,false,256,256,10,libtiff,true,"",85.100,97.0111,95.4000,0.9804,1288.512,1.0000,88.3
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 100 frames",u16,deflate,true,1,false,256,256,100,raw,true,"",31.700,18.3000,10.2000,2.0327,6830.601,0.1859,89.0
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 100 frames",u16,deflate,true,1,false,256,256,100,fast-tiff,true,"",166.800,161.6644,148.4000,16.9422,773.207,1.6419,89.0
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 100 frames",u16,deflate,true,1,false,256,256,100,fast-tiff-preload,true,"",151.400,102.7850,102.7850,10.2785,1216.131,1.0439,89.0
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 100 frames",u16,deflate,true,1,false,256,256,100,tiff-rs,true,"",150.200,164.2767,162.9000,16.6702,760.911,1.6684,89.0
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 100 frames",u16,deflate,true,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,89.0
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 100 frames",u16,deflate,true,1,false,256,256,100,libtiff,true,"",130.700,98.4611,97.0000,9.9750,1269.537,1.0000,89.0
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1000 frames",u16,deflate,true,1,false,256,256,1000,raw,true,"",34.100,18.1076,9.5000,20.4239,6903.196,0.1920,98.0
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1000 frames",u16,deflate,true,1,false,256,256,1000,fast-tiff,true,"",613.400,155.0122,148.0000,158.7711,806.388,1.6435,98.0
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1000 frames",u16,deflate,true,1,false,256,256,1000,fast-tiff-preload,true,"",586.000,138.5540,138.5540,138.5540,902.175,1.4690,98.0
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1000 frames",u16,deflate,true,1,false,256,256,1000,tiff-rs,true,"",150.100,161.8050,155.8000,166.2746,772.535,1.7155,98.0
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1000 frames",u16,deflate,true,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,98.0
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1000 frames",u16,deflate,true,1,false,256,256,1000,libtiff,true,"",138.900,94.3184,92.8000,97.4641,1325.298,1.0000,98.0
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10000 frames",u16,deflate,true,1,false,256,256,10000,raw,true,"",75.400,17.3324,9.1000,194.1415,7211.927,0.1839,98.7
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10000 frames",u16,deflate,true,1,false,256,256,10000,fast-tiff,true,"",4839.700,150.7945,141.7000,1557.9773,828.943,1.5996,98.7
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10000 frames",u16,deflate,true,1,false,256,256,10000,fast-tiff-preload,true,"",12969.200,195.8390,195.8390,1958.3903,638.279,2.0775,98.7
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10000 frames",u16,deflate,true,1,false,256,256,10000,tiff-rs,true,"",327.900,158.9045,156.3000,1644.4456,786.636,1.6857,98.7
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10000 frames",u16,deflate,true,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,98.7
-"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10000 frames",u16,deflate,true,1,false,256,256,10000,libtiff,true,"",148.700,94.2675,92.4000,967.6067,1326.013,1.0000,98.7
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1 frames",u16,zstd,true,1,false,256,256,1,raw,true,"",28.100,21.2000,21.2000,0.0212,5896.226,0.1276,105.7
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1 frames",u16,zstd,true,1,false,256,256,1,fast-tiff,true,"",66.300,192.3000,192.3000,0.1923,650.026,1.1570,105.7
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1 frames",u16,zstd,true,1,false,256,256,1,fast-tiff-preload,true,"",51.600,247.6000,247.6000,0.2476,504.847,1.4898,105.7
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1 frames",u16,zstd,true,1,false,256,256,1,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,105.7
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1 frames",u16,zstd,true,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,105.7
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1 frames",u16,zstd,true,1,false,256,256,1,libtiff,true,"",76.400,166.2000,166.2000,0.1662,752.106,1.0000,105.7
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10 frames",u16,zstd,true,1,false,256,256,10,raw,true,"",77.900,11.3889,9.3000,0.1211,10975.610,0.0889,263.9
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10 frames",u16,zstd,true,1,false,256,256,10,fast-tiff,true,"",60.700,175.6667,163.1000,1.8086,711.575,1.3712,263.9
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10 frames",u16,zstd,true,1,false,256,256,10,fast-tiff-preload,true,"",66.500,232.6000,232.6000,2.3260,537.403,1.8156,263.9
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10 frames",u16,zstd,true,1,false,256,256,10,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,263.9
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10 frames",u16,zstd,true,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,263.9
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10 frames",u16,zstd,true,1,false,256,256,10,libtiff,true,"",96.300,128.1111,123.9000,1.2961,975.716,1.0000,263.9
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 100 frames",u16,zstd,true,1,false,256,256,100,raw,true,"",31.900,17.4722,10.2000,1.9567,7154.213,0.1338,313.4
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 100 frames",u16,zstd,true,1,false,256,256,100,fast-tiff,true,"",147.700,169.0444,160.6000,17.2961,739.451,1.2949,313.4
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 100 frames",u16,zstd,true,1,false,256,256,100,fast-tiff-preload,true,"",148.700,154.5930,154.5930,15.4593,808.575,1.1842,313.4
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 100 frames",u16,zstd,true,1,false,256,256,100,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,313.4
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 100 frames",u16,zstd,true,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,313.4
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 100 frames",u16,zstd,true,1,false,256,256,100,libtiff,true,"",89.400,130.5422,124.5000,13.2572,957.545,1.0000,313.4
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1000 frames",u16,zstd,true,1,false,256,256,1000,raw,true,"",36.000,17.7550,9.9000,20.0433,7040.270,0.1426,323.0
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1000 frames",u16,zstd,true,1,false,256,256,1000,fast-tiff,true,"",535.300,158.3129,145.1000,163.2314,789.576,1.2713,323.0
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1000 frames",u16,zstd,true,1,false,256,256,1000,fast-tiff-preload,true,"",524.300,185.0725,185.0725,185.0725,675.411,1.4861,323.0
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1000 frames",u16,zstd,true,1,false,256,256,1000,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,323.0
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1000 frames",u16,zstd,true,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,323.0
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1000 frames",u16,zstd,true,1,false,256,256,1000,libtiff,true,"",104.600,124.5332,119.8000,127.7612,1003.748,1.0000,323.0
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10000 frames",u16,zstd,true,1,false,256,256,10000,raw,true,"",40.700,17.4887,9.8000,196.6231,7147.491,0.1388,318.4
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10000 frames",u16,zstd,true,1,false,256,256,10000,fast-tiff,true,"",4959.800,159.5356,147.2000,1660.8128,783.524,1.2666,318.4
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10000 frames",u16,zstd,true,1,false,256,256,10000,fast-tiff-preload,true,"",11906.200,280.0262,280.0262,2800.2618,446.387,2.2232,318.4
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10000 frames",u16,zstd,true,1,false,256,256,10000,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,318.4
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10000 frames",u16,zstd,true,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,318.4
-"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10000 frames",u16,zstd,true,1,false,256,256,10000,libtiff,true,"",120.900,125.9546,119.2000,1319.4193,992.421,1.0000,318.4
-"256x256 u16 packbits","256x256 u16 packbits / 1 frames",u16,packbits,false,1,false,256,256,1,raw,true,"",29.200,19.8000,19.8000,0.0198,6313.131,0.5337,118.4
-"256x256 u16 packbits","256x256 u16 packbits / 1 frames",u16,packbits,false,1,false,256,256,1,fast-tiff,true,"",51.500,84.3000,84.3000,0.0843,1482.800,2.2722,118.4
-"256x256 u16 packbits","256x256 u16 packbits / 1 frames",u16,packbits,false,1,false,256,256,1,fast-tiff-preload,true,"",46.600,107.3000,107.3000,0.1073,1164.958,2.8922,118.4
-"256x256 u16 packbits","256x256 u16 packbits / 1 frames",u16,packbits,false,1,false,256,256,1,tiff-rs,true,"",109.600,4751.3000,4751.3000,4.7513,26.309,128.0674,118.4
-"256x256 u16 packbits","256x256 u16 packbits / 1 frames",u16,packbits,false,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,118.4
-"256x256 u16 packbits","256x256 u16 packbits / 1 frames",u16,packbits,false,1,false,256,256,1,libtiff,true,"",92.800,37.1000,37.1000,0.0371,3369.272,1.0000,118.4
-"256x256 u16 packbits","256x256 u16 packbits / 10 frames",u16,packbits,false,1,false,256,256,10,raw,true,"",33.200,14.1778,11.9000,0.1491,8816.614,0.3959,495.4
-"256x256 u16 packbits","256x256 u16 packbits / 10 frames",u16,packbits,false,1,false,256,256,10,fast-tiff,true,"",99.300,44.9778,43.9000,0.4770,2779.150,1.2560,495.4
-"256x256 u16 packbits","256x256 u16 packbits / 10 frames",u16,packbits,false,1,false,256,256,10,fast-tiff-preload,true,"",55.000,118.9400,118.9400,1.1894,1050.950,3.3213,495.4
-"256x256 u16 packbits","256x256 u16 packbits / 10 frames",u16,packbits,false,1,false,256,256,10,tiff-rs,true,"",132.200,4543.0000,4437.4000,45.8074,27.515,126.8601,495.4
-"256x256 u16 packbits","256x256 u16 packbits / 10 frames",u16,packbits,false,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,495.4
-"256x256 u16 packbits","256x256 u16 packbits / 10 frames",u16,packbits,false,1,false,256,256,10,libtiff,true,"",117.900,35.8111,34.6000,0.3598,3490.537,1.0000,495.4
-"256x256 u16 packbits","256x256 u16 packbits / 100 frames",u16,packbits,false,1,false,256,256,100,raw,true,"",35.200,18.4267,11.1000,2.0377,6783.647,0.4916,683.2
-"256x256 u16 packbits","256x256 u16 packbits / 100 frames",u16,packbits,false,1,false,256,256,100,fast-tiff,true,"",183.000,48.1856,43.8000,4.8984,2594.138,1.2856,683.2
-"256x256 u16 packbits","256x256 u16 packbits / 100 frames",u16,packbits,false,1,false,256,256,100,fast-tiff-preload,true,"",137.600,86.3040,86.3040,8.6304,1448.369,2.3027,683.2
-"256x256 u16 packbits","256x256 u16 packbits / 100 frames",u16,packbits,false,1,false,256,256,100,tiff-rs,true,"",162.100,4586.1133,4419.3000,462.6468,27.256,122.3616,683.2
-"256x256 u16 packbits","256x256 u16 packbits / 100 frames",u16,packbits,false,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,683.2
-"256x256 u16 packbits","256x256 u16 packbits / 100 frames",u16,packbits,false,1,false,256,256,100,libtiff,true,"",123.600,37.4800,33.7000,3.8683,3335.112,1.0000,683.2
-"256x256 u16 packbits","256x256 u16 packbits / 1000 frames",u16,packbits,false,1,false,256,256,1000,raw,true,"",33.800,17.4268,9.0000,19.5170,7172.869,0.4580,699.9
-"256x256 u16 packbits","256x256 u16 packbits / 1000 frames",u16,packbits,false,1,false,256,256,1000,fast-tiff,true,"",569.600,46.8593,44.2000,47.8834,2667.558,1.2316,699.9
-"256x256 u16 packbits","256x256 u16 packbits / 1000 frames",u16,packbits,false,1,false,256,256,1000,fast-tiff-preload,true,"",531.900,113.8564,113.8564,113.8564,1097.874,2.9925,699.9
-"256x256 u16 packbits","256x256 u16 packbits / 1000 frames",u16,packbits,false,1,false,256,256,1000,tiff-rs,true,"",160.300,4577.7667,4393.7000,4621.6537,27.306,120.3187,699.9
-"256x256 u16 packbits","256x256 u16 packbits / 1000 frames",u16,packbits,false,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,699.9
-"256x256 u16 packbits","256x256 u16 packbits / 1000 frames",u16,packbits,false,1,false,256,256,1000,libtiff,true,"",129.100,38.0470,34.7000,38.8069,3285.410,1.0000,699.9
-"256x256 u16 packbits","256x256 u16 packbits / 10000 frames",u16,packbits,false,1,false,256,256,10000,raw,true,"",38.000,19.1445,8.8000,218.9818,6529.302,0.4889,690.3
-"256x256 u16 packbits","256x256 u16 packbits / 10000 frames",u16,packbits,false,1,false,256,256,10000,fast-tiff,true,"",5232.600,47.8729,45.6000,487.9599,2611.082,1.2227,690.3
-"256x256 u16 packbits","256x256 u16 packbits / 10000 frames",u16,packbits,false,1,false,256,256,10000,fast-tiff-preload,true,"",5054.100,159.6487,159.6487,1596.4874,782.969,4.0774,690.3
-"256x256 u16 packbits","256x256 u16 packbits / 10000 frames",u16,packbits,false,1,false,256,256,10000,tiff-rs,true,"",203.700,4576.7021,4349.9000,46264.4480,27.312,116.8889,690.3
-"256x256 u16 packbits","256x256 u16 packbits / 10000 frames",u16,packbits,false,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,690.3
-"256x256 u16 packbits","256x256 u16 packbits / 10000 frames",u16,packbits,false,1,false,256,256,10000,libtiff,true,"",255.500,39.1543,34.1000,398.0076,3192.498,1.0000,690.3
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1 frames",f32,zstd,true,1,false,256,256,1,raw,true,"",27.400,29.3000,29.3000,0.0293,8532.423,0.0572,234.5
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1 frames",f32,zstd,true,1,false,256,256,1,fast-tiff,true,"",45.900,830.6000,830.6000,0.8306,300.987,1.6229,234.5
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1 frames",f32,zstd,true,1,false,256,256,1,fast-tiff-preload,true,"",51.200,886.6000,886.6000,0.8866,281.976,1.7323,234.5
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1 frames",f32,zstd,true,1,false,256,256,1,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,234.5
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1 frames",f32,zstd,true,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,234.5
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1 frames",f32,zstd,true,1,false,256,256,1,libtiff,true,"",79.600,511.8000,511.8000,0.5118,488.472,1.0000,234.5
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10 frames",f32,zstd,true,1,false,256,256,10,raw,true,"",33.900,33.3778,28.0000,0.3972,7490.013,0.1052,397.5
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10 frames",f32,zstd,true,1,false,256,256,10,fast-tiff,true,"",63.500,817.5778,787.8000,8.3818,305.781,2.5761,397.5
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10 frames",f32,zstd,true,1,false,256,256,10,fast-tiff-preload,true,"",79.400,317.3700,317.3700,3.1737,787.724,1.0000,397.5
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10 frames",f32,zstd,true,1,false,256,256,10,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,397.5
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10 frames",f32,zstd,true,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,397.5
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10 frames",f32,zstd,true,1,false,256,256,10,libtiff,true,"",78.800,510.0111,503.9000,5.1148,490.185,1.6070,397.5
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 100 frames",f32,zstd,true,1,false,256,256,100,raw,true,"",31.700,33.7989,18.8000,3.5788,7396.693,0.1560,398.3
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 100 frames",f32,zstd,true,1,false,256,256,100,fast-tiff,true,"",140.700,798.9767,784.6000,81.0233,312.900,3.6881,398.3
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 100 frames",f32,zstd,true,1,false,256,256,100,fast-tiff-preload,true,"",227.100,216.6370,216.6370,21.6637,1154.004,1.0000,398.3
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 100 frames",f32,zstd,true,1,false,256,256,100,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,398.3
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 100 frames",f32,zstd,true,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,398.3
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 100 frames",f32,zstd,true,1,false,256,256,100,libtiff,true,"",87.400,514.5244,504.2000,52.4185,485.886,2.3751,398.3
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1000 frames",f32,zstd,true,1,false,256,256,1000,raw,true,"",36.300,35.2378,19.2000,37.3729,7094.659,0.1453,424.9
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1000 frames",f32,zstd,true,1,false,256,256,1000,fast-tiff,true,"",588.800,791.0210,764.7000,806.9952,316.047,3.2618,424.9
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1000 frames",f32,zstd,true,1,false,256,256,1000,fast-tiff-preload,true,"",612.500,242.5136,242.5136,242.5136,1030.870,1.0000,424.9
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1000 frames",f32,zstd,true,1,false,256,256,1000,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,424.9
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1000 frames",f32,zstd,true,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,424.9
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1000 frames",f32,zstd,true,1,false,256,256,1000,libtiff,true,"",95.700,511.7811,490.1000,527.7201,488.490,2.1103,424.9
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10000 frames",f32,zstd,true,1,false,256,256,10000,raw,true,"",53.900,35.8100,17.7000,384.7918,6981.290,0.1137,433.8
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10000 frames",f32,zstd,true,1,false,256,256,10000,fast-tiff,true,"",4917.200,793.5913,763.5000,8107.5848,315.024,2.5188,433.8
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10000 frames",f32,zstd,true,1,false,256,256,10000,fast-tiff-preload,true,"",4972.800,315.0664,315.0664,3150.6643,793.483,1.0000,433.8
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10000 frames",f32,zstd,true,1,false,256,256,10000,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,433.8
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10000 frames",f32,zstd,true,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,433.8
-"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10000 frames",f32,zstd,true,1,false,256,256,10000,libtiff,true,"",95.800,511.9365,490.2000,5281.5998,488.342,1.6249,433.8
-"256x256 rgb8 none","256x256 rgb8 none / 1 frames",rgb8,none,false,1,false,256,256,1,raw,true,"",28.800,25.1000,25.1000,0.0251,7470.120,1.1009,52.4
-"256x256 rgb8 none","256x256 rgb8 none / 1 frames",rgb8,none,false,1,false,256,256,1,fast-tiff,true,"",52.900,156.8000,156.8000,0.1568,1195.791,6.8772,52.4
-"256x256 rgb8 none","256x256 rgb8 none / 1 frames",rgb8,none,false,1,false,256,256,1,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,52.4
-"256x256 rgb8 none","256x256 rgb8 none / 1 frames",rgb8,none,false,1,false,256,256,1,tiff-rs,true,"",110.400,22.8000,22.8000,0.0228,8223.684,1.0000,52.4
-"256x256 rgb8 none","256x256 rgb8 none / 1 frames",rgb8,none,false,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,52.4
-"256x256 rgb8 none","256x256 rgb8 none / 1 frames",rgb8,none,false,1,false,256,256,1,libtiff,true,"",70.900,36.2000,36.2000,0.0362,5179.558,1.5877,52.4
-"256x256 rgb8 none","256x256 rgb8 none / 10 frames",rgb8,none,false,1,false,256,256,10,raw,true,"",30.100,16.3222,15.0000,0.1701,11487.406,0.8443,1081.8
-"256x256 rgb8 none","256x256 rgb8 none / 10 frames",rgb8,none,false,1,false,256,256,10,fast-tiff,true,"",65.500,134.4000,121.2000,1.4184,1395.089,6.9517,1081.8
-"256x256 rgb8 none","256x256 rgb8 none / 10 frames",rgb8,none,false,1,false,256,256,10,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,1081.8
-"256x256 rgb8 none","256x256 rgb8 none / 10 frames",rgb8,none,false,1,false,256,256,10,tiff-rs,true,"",138.700,19.3333,17.4000,0.2143,9698.276,1.0000,1081.8
-"256x256 rgb8 none","256x256 rgb8 none / 10 frames",rgb8,none,false,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,1081.8
-"256x256 rgb8 none","256x256 rgb8 none / 10 frames",rgb8,none,false,1,false,256,256,10,libtiff,true,"",87.400,40.6667,38.2000,0.4095,4610.656,2.1034,1081.8
-"256x256 rgb8 none","256x256 rgb8 none / 100 frames",rgb8,none,false,1,false,256,256,100,raw,true,"",32.500,28.1789,15.2000,3.0283,6653.917,0.9276,2741.3
-"256x256 rgb8 none","256x256 rgb8 none / 100 frames",rgb8,none,false,1,false,256,256,100,fast-tiff,true,"",211.400,124.8344,121.4000,12.6251,1501.989,4.1094,2741.3
-"256x256 rgb8 none","256x256 rgb8 none / 100 frames",rgb8,none,false,1,false,256,256,100,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,2741.3
-"256x256 rgb8 none","256x256 rgb8 none / 100 frames",rgb8,none,false,1,false,256,256,100,tiff-rs,true,"",161.600,30.3778,19.6000,3.2385,6172.275,1.0000,2741.3
-"256x256 rgb8 none","256x256 rgb8 none / 100 frames",rgb8,none,false,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,2741.3
-"256x256 rgb8 none","256x256 rgb8 none / 100 frames",rgb8,none,false,1,false,256,256,100,libtiff,true,"",117.100,49.1556,46.6000,4.9818,3814.421,1.6181,2741.3
-"256x256 rgb8 none","256x256 rgb8 none / 1000 frames",rgb8,none,false,1,false,256,256,1000,raw,true,"",38.400,27.1684,13.6000,29.4754,6901.389,0.8578,4054.6
-"256x256 rgb8 none","256x256 rgb8 none / 1000 frames",rgb8,none,false,1,false,256,256,1000,fast-tiff,true,"",857.800,123.1767,118.5000,125.5650,1522.204,3.8893,4054.6
-"256x256 rgb8 none","256x256 rgb8 none / 1000 frames",rgb8,none,false,1,false,256,256,1000,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,4054.6
-"256x256 rgb8 none","256x256 rgb8 none / 1000 frames",rgb8,none,false,1,false,256,256,1000,tiff-rs,true,"",160.400,31.6709,18.6000,33.8072,5920.263,1.0000,4054.6
-"256x256 rgb8 none","256x256 rgb8 none / 1000 frames",rgb8,none,false,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,4054.6
-"256x256 rgb8 none","256x256 rgb8 none / 1000 frames",rgb8,none,false,1,false,256,256,1000,libtiff,true,"",129.100,49.3741,44.4000,50.4940,3797.537,1.5590,4054.6
-"256x256 rgb8 none","256x256 rgb8 none / 10000 frames",rgb8,none,false,1,false,256,256,10000,raw,true,"",43.900,27.3715,13.3000,303.0991,6850.180,0.8157,3135.3
-"256x256 rgb8 none","256x256 rgb8 none / 10000 frames",rgb8,none,false,1,false,256,256,10000,fast-tiff,true,"",8158.800,124.7645,121.0000,1269.7673,1502.831,3.7179,3135.3
-"256x256 rgb8 none","256x256 rgb8 none / 10000 frames",rgb8,none,false,1,false,256,256,10000,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,3135.3
-"256x256 rgb8 none","256x256 rgb8 none / 10000 frames",rgb8,none,false,1,false,256,256,10000,tiff-rs,true,"",165.200,33.5578,28.5000,362.3354,5587.376,1.0000,3135.3
-"256x256 rgb8 none","256x256 rgb8 none / 10000 frames",rgb8,none,false,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,3135.3
-"256x256 rgb8 none","256x256 rgb8 none / 10000 frames",rgb8,none,false,1,false,256,256,10000,libtiff,true,"",186.900,51.5466,46.9000,528.2510,3637.484,1.5361,3135.3
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1 frames",rgb16,deflate,true,2,false,256,256,1,raw,true,"",83.600,44.1000,44.1000,0.0441,8503.401,0.2682,112.8
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1 frames",rgb16,deflate,true,2,false,256,256,1,fast-tiff,true,"",62.200,352.4000,352.4000,0.3524,1064.132,2.1436,112.8
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1 frames",rgb16,deflate,true,2,false,256,256,1,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,112.8
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1 frames",rgb16,deflate,true,2,false,256,256,1,tiff-rs,true,"",129.200,394.8000,394.8000,0.3948,949.848,2.4015,112.8
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1 frames",rgb16,deflate,true,2,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,112.8
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1 frames",rgb16,deflate,true,2,false,256,256,1,libtiff,true,"",83.000,164.4000,164.4000,0.1644,2281.022,1.0000,112.8
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10 frames",rgb16,deflate,true,2,false,256,256,10,raw,true,"",28.500,51.7444,43.5000,0.5346,7247.155,0.3323,163.4
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10 frames",rgb16,deflate,true,2,false,256,256,10,fast-tiff,true,"",86.300,319.4889,309.9000,3.2769,1173.750,2.0518,163.4
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10 frames",rgb16,deflate,true,2,false,256,256,10,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,163.4
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10 frames",rgb16,deflate,true,2,false,256,256,10,tiff-rs,true,"",136.400,366.1667,357.5000,3.7589,1024.124,2.3516,163.4
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10 frames",rgb16,deflate,true,2,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,163.4
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10 frames",rgb16,deflate,true,2,false,256,256,10,libtiff,true,"",96.200,155.7111,154.1000,1.5715,2408.306,1.0000,163.4
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 100 frames",rgb16,deflate,true,2,false,256,256,100,raw,true,"",34.400,54.4189,42.2000,5.6265,6890.990,0.3549,174.8
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 100 frames",rgb16,deflate,true,2,false,256,256,100,fast-tiff,true,"",226.800,302.8411,300.7000,30.7567,1238.273,1.9751,174.8
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 100 frames",rgb16,deflate,true,2,false,256,256,100,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,174.8
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 100 frames",rgb16,deflate,true,2,false,256,256,100,tiff-rs,true,"",165.000,360.0844,357.7000,36.6129,1041.422,2.3485,174.8
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 100 frames",rgb16,deflate,true,2,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,174.8
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 100 frames",rgb16,deflate,true,2,false,256,256,100,libtiff,true,"",149.500,153.3267,150.5000,16.1256,2445.759,1.0000,174.8
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1000 frames",rgb16,deflate,true,2,false,256,256,1000,raw,true,"",35.100,52.6190,27.2000,54.9863,7126.703,0.3458,176.7
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1000 frames",rgb16,deflate,true,2,false,256,256,1000,fast-tiff,true,"",942.900,299.4448,292.8000,309.5131,1252.318,1.9677,176.7
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1000 frames",rgb16,deflate,true,2,false,256,256,1000,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,176.7
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1000 frames",rgb16,deflate,true,2,false,256,256,1000,tiff-rs,true,"",166.500,357.1948,349.5000,366.6798,1049.847,2.3472,176.7
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1000 frames",rgb16,deflate,true,2,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,176.7
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1000 frames",rgb16,deflate,true,2,false,256,256,1000,libtiff,true,"",135.000,152.1779,150.0000,157.2809,2464.221,1.0000,176.7
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10000 frames",rgb16,deflate,true,2,false,256,256,10000,raw,true,"",57.100,53.9752,25.2000,568.9094,6947.631,0.3542,177.9
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10000 frames",rgb16,deflate,true,2,false,256,256,10000,fast-tiff,true,"",8491.300,298.5698,292.2000,3085.5827,1255.988,1.9594,177.9
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10000 frames",rgb16,deflate,true,2,false,256,256,10000,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,177.9
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10000 frames",rgb16,deflate,true,2,false,256,256,10000,tiff-rs,true,"",184.500,356.7382,349.7000,3671.6582,1051.191,2.3412,177.9
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10000 frames",rgb16,deflate,true,2,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,177.9
-"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10000 frames",rgb16,deflate,true,2,false,256,256,10000,libtiff,true,"",192.300,152.3743,149.9000,1548.9850,2461.044,1.0000,177.9
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1 frames",u16,none,false,1,true,256,256,1,raw,true,"",28.700,21.0000,21.0000,0.0210,5952.381,1.4483,38.9
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1 frames",u16,none,false,1,true,256,256,1,fast-tiff,true,"",48.600,36.4000,36.4000,0.0364,3434.066,2.5103,38.9
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1 frames",u16,none,false,1,true,256,256,1,fast-tiff-preload,true,"",44.300,87.6000,87.6000,0.0876,1426.941,6.0414,38.9
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1 frames",u16,none,false,1,true,256,256,1,tiff-rs,true,"",107.300,14.5000,14.5000,0.0145,8620.690,1.0000,38.9
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1 frames",u16,none,false,1,true,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,38.9
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1 frames",u16,none,false,1,true,256,256,1,libtiff,true,"",70.100,24.0000,24.0000,0.0240,5208.333,1.6552,38.9
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10 frames",u16,none,false,1,true,256,256,10,raw,true,"",30.800,10.8000,9.7000,0.1160,11574.074,0.9779,676.8
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10 frames",u16,none,false,1,true,256,256,10,fast-tiff,true,"",53.800,33.7667,31.7000,0.3439,3701.876,3.0573,676.8
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10 frames",u16,none,false,1,true,256,256,10,fast-tiff-preload,true,"",50.800,133.6700,133.6700,1.3367,935.139,12.1029,676.8
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10 frames",u16,none,false,1,true,256,256,10,tiff-rs,true,"",118.500,11.0444,10.2000,0.1143,11317.907,1.0000,676.8
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10 frames",u16,none,false,1,true,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,676.8
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10 frames",u16,none,false,1,true,256,256,10,libtiff,true,"",73.700,22.9444,22.0000,0.2317,5447.942,2.0775,676.8
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 100 frames",u16,none,false,1,true,256,256,100,raw,true,"",62.000,43.5522,12.2000,5.1118,2870.118,1.9500,2517.5
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 100 frames",u16,none,false,1,true,256,256,100,fast-tiff,true,"",190.200,40.3189,36.0000,4.0979,3100.284,1.8052,2517.5
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 100 frames",u16,none,false,1,true,256,256,100,fast-tiff-preload,true,"",175.300,82.2580,82.2580,8.2258,1519.609,3.6830,2517.5
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 100 frames",u16,none,false,1,true,256,256,100,tiff-rs,true,"",145.400,22.3344,13.9000,2.4580,5596.736,1.0000,2517.5
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 100 frames",u16,none,false,1,true,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,2517.5
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 100 frames",u16,none,false,1,true,256,256,100,libtiff,true,"",132.200,31.6133,29.4000,3.2373,3954.028,1.4155,2517.5
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1000 frames",u16,none,false,1,true,256,256,1000,raw,true,"",32.600,18.7494,9.8000,21.0970,6666.864,0.8971,3195.4
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1000 frames",u16,none,false,1,true,256,256,1000,fast-tiff,true,"",583.200,38.5084,36.0000,41.2294,3246.041,1.8424,3195.4
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1000 frames",u16,none,false,1,true,256,256,1000,fast-tiff-preload,true,"",667.900,80.9897,80.9897,80.9897,1543.406,3.8749,3195.4
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1000 frames",u16,none,false,1,true,256,256,1000,tiff-rs,true,"",176.100,20.9012,18.4000,23.3014,5980.512,1.0000,3195.4
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1000 frames",u16,none,false,1,true,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,3195.4
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1000 frames",u16,none,false,1,true,256,256,1000,libtiff,true,"",131.300,32.1012,28.3000,33.4022,3893.933,1.5359,3195.4
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10000 frames",u16,none,false,1,true,256,256,10000,raw,true,"",59.300,19.0664,8.9000,218.7754,6556.024,0.8678,3326.6
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10000 frames",u16,none,false,1,true,256,256,10000,fast-tiff,true,"",5216.800,37.8747,35.7000,385.3682,3300.358,1.7238,3326.6
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10000 frames",u16,none,false,1,true,256,256,10000,fast-tiff-preload,true,"",5319.300,139.3619,139.3619,1393.6186,896.946,6.3429,3326.6
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10000 frames",u16,none,false,1,true,256,256,10000,tiff-rs,true,"",388.000,21.9713,19.2000,246.0261,5689.246,1.0000,3326.6
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10000 frames",u16,none,false,1,true,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,3326.6
-"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10000 frames",u16,none,false,1,true,256,256,10000,libtiff,true,"",169.300,32.4074,30.4000,331.6756,3857.142,1.4750,3326.6
-"2048x2048 u16 none","2048x2048 u16 none / 1 frames",u16,none,false,1,false,2048,2048,1,raw,true,"",28.500,2105.2000,2105.2000,2.1052,3800.114,0.9735,2888.3
-"2048x2048 u16 none","2048x2048 u16 none / 1 frames",u16,none,false,1,false,2048,2048,1,fast-tiff,true,"",68.900,3334.0000,3334.0000,3.3340,2399.520,1.5418,2888.3
-"2048x2048 u16 none","2048x2048 u16 none / 1 frames",u16,none,false,1,false,2048,2048,1,fast-tiff-preload,true,"",94.000,6729.3000,6729.3000,6.7293,1188.831,3.1120,2888.3
-"2048x2048 u16 none","2048x2048 u16 none / 1 frames",u16,none,false,1,false,2048,2048,1,tiff-rs,true,"",123.500,2171.1000,2171.1000,2.1711,3684.768,1.0040,2888.3
-"2048x2048 u16 none","2048x2048 u16 none / 1 frames",u16,none,false,1,false,2048,2048,1,tinytiff,true,"",124.600,2162.4000,2162.4000,2.1624,3699.593,1.0000,2888.3
-"2048x2048 u16 none","2048x2048 u16 none / 1 frames",u16,none,false,1,false,2048,2048,1,libtiff,true,"",102.500,2885.5000,2885.5000,2.8855,2772.483,1.3344,2888.3
-"2048x2048 u16 none","2048x2048 u16 none / 10 frames",u16,none,false,1,false,2048,2048,10,raw,true,"",35.000,1481.5556,1419.8000,15.7158,5399.730,1.0410,4663.3
-"2048x2048 u16 none","2048x2048 u16 none / 10 frames",u16,none,false,1,false,2048,2048,10,fast-tiff,true,"",95.900,2325.1333,2188.8000,24.2438,3440.663,1.6338,4663.3
-"2048x2048 u16 none","2048x2048 u16 none / 10 frames",u16,none,false,1,false,2048,2048,10,fast-tiff-preload,true,"",111.300,4832.0600,4832.0600,48.3206,1655.609,3.3953,4663.3
-"2048x2048 u16 none","2048x2048 u16 none / 10 frames",u16,none,false,1,false,2048,2048,10,tiff-rs,true,"",156.500,2316.4333,2184.4000,23.3605,3453.585,1.6277,4663.3
-"2048x2048 u16 none","2048x2048 u16 none / 10 frames",u16,none,false,1,false,2048,2048,10,tinytiff,true,"",138.600,1423.1556,1380.1000,15.0638,5621.311,1.0000,4663.3
-"2048x2048 u16 none","2048x2048 u16 none / 10 frames",u16,none,false,1,false,2048,2048,10,libtiff,true,"",753.600,2254.8778,2097.6000,26.0109,3547.864,1.5844,4663.3
-"2048x2048 u16 none","2048x2048 u16 none / 100 frames",u16,none,false,1,false,2048,2048,100,raw,true,"",37.600,1462.0467,1319.6000,151.3826,5471.782,0.9770,4669.9
-"2048x2048 u16 none","2048x2048 u16 none / 100 frames",u16,none,false,1,false,2048,2048,100,fast-tiff,true,"",185.900,2280.6956,2108.7000,231.4450,3507.702,1.5240,4669.9
-"2048x2048 u16 none","2048x2048 u16 none / 100 frames",u16,none,false,1,false,2048,2048,100,fast-tiff-preload,true,"",176.800,4780.1670,4780.1670,478.0167,1673.582,3.1943,4669.9
-"2048x2048 u16 none","2048x2048 u16 none / 100 frames",u16,none,false,1,false,2048,2048,100,tiff-rs,true,"",161.000,2323.4111,2225.4000,236.4806,3443.213,1.5526,4669.9
-"2048x2048 u16 none","2048x2048 u16 none / 100 frames",u16,none,false,1,false,2048,2048,100,tinytiff,true,"",188.400,1496.4911,1420.7000,153.4055,5345.839,1.0000,4669.9
-"2048x2048 u16 none","2048x2048 u16 none / 100 frames",u16,none,false,1,false,2048,2048,100,libtiff,true,"",218.100,2326.0456,2225.3000,236.1007,3439.314,1.5543,4669.9
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 1 frames",u16,none,false,32,false,2048,2048,1,raw,true,"",29.900,2141.7000,2141.7000,2.1417,3735.350,0.9580,2408.9
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 1 frames",u16,none,false,32,false,2048,2048,1,fast-tiff,true,"",96.500,3467.4000,3467.4000,3.4674,2307.204,1.5511,2408.9
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 1 frames",u16,none,false,32,false,2048,2048,1,fast-tiff-preload,true,"",85.000,9263.3000,9263.3000,9.2633,863.623,4.1437,2408.9
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 1 frames",u16,none,false,32,false,2048,2048,1,tiff-rs,true,"",163.900,2385.4000,2385.4000,2.3854,3353.735,1.0671,2408.9
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 1 frames",u16,none,false,32,false,2048,2048,1,tinytiff,true,"",110.200,2235.5000,2235.5000,2.2355,3578.618,1.0000,2408.9
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 1 frames",u16,none,false,32,false,2048,2048,1,libtiff,true,"",111.500,3570.0000,3570.0000,3.5700,2240.896,1.5970,2408.9
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 10 frames",u16,none,false,32,false,2048,2048,10,raw,true,"",33.800,1427.0778,1300.6000,15.3043,5605.861,0.9586,3485.0
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 10 frames",u16,none,false,32,false,2048,2048,10,fast-tiff,true,"",118.800,2647.7444,2503.0000,27.1972,3021.440,1.7786,3485.0
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 10 frames",u16,none,false,32,false,2048,2048,10,fast-tiff-preload,true,"",121.800,10778.8500,10778.8500,107.7885,742.194,7.2404,3485.0
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 10 frames",u16,none,false,32,false,2048,2048,10,tiff-rs,true,"",165.400,2413.9778,2257.1000,31.9900,3314.032,1.6215,3485.0
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 10 frames",u16,none,false,32,false,2048,2048,10,tinytiff,true,"",191.300,1488.7000,1403.4000,15.6152,5373.816,1.0000,3485.0
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 10 frames",u16,none,false,32,false,2048,2048,10,libtiff,true,"",215.300,2737.9111,2585.4000,28.1323,2921.936,1.8391,3485.0
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 100 frames",u16,none,false,32,false,2048,2048,100,raw,true,"",36.300,1377.4300,1299.2000,140.1974,5807.918,0.9472,3479.8
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 100 frames",u16,none,false,32,false,2048,2048,100,fast-tiff,true,"",217.400,2614.7833,2430.8000,264.6492,3059.527,1.7981,3479.8
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 100 frames",u16,none,false,32,false,2048,2048,100,fast-tiff-preload,true,"",198.700,6585.0920,6585.0920,658.5092,1214.865,4.5284,3479.8
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 100 frames",u16,none,false,32,false,2048,2048,100,tiff-rs,true,"",171.600,2265.1033,2188.9000,229.0535,3531.848,1.5577,3479.8
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 100 frames",u16,none,false,32,false,2048,2048,100,tinytiff,true,"",202.200,1454.1756,1367.1000,147.7435,5501.399,1.0000,3479.8
-"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 100 frames",u16,none,false,32,false,2048,2048,100,libtiff,true,"",154.800,2651.8267,2544.2000,268.4392,3016.788,1.8236,3479.8
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 1 frames",u16,zstd,true,32,false,2048,2048,1,raw,true,"",31.200,2117.1000,2117.1000,2.1171,3778.754,0.2907,404.1
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 1 frames",u16,zstd,true,32,false,2048,2048,1,fast-tiff,true,"",83.400,11997.8000,11997.8000,11.9978,666.789,1.6476,404.1
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 1 frames",u16,zstd,true,32,false,2048,2048,1,fast-tiff-preload,true,"",151.500,16725.4000,16725.4000,16.7254,478.314,2.2969,404.1
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 1 frames",u16,zstd,true,32,false,2048,2048,1,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,404.1
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 1 frames",u16,zstd,true,32,false,2048,2048,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,404.1
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 1 frames",u16,zstd,true,32,false,2048,2048,1,libtiff,true,"",159.500,7281.8000,7281.8000,7.2818,1098.629,1.0000,404.1
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 10 frames",u16,zstd,true,32,false,2048,2048,10,raw,true,"",32.500,1383.5222,1335.3000,14.7068,5782.343,0.2080,391.3
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 10 frames",u16,zstd,true,32,false,2048,2048,10,fast-tiff,true,"",95.700,11380.1222,10757.8000,114.8753,702.980,1.7108,391.3
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 10 frames",u16,zstd,true,32,false,2048,2048,10,fast-tiff-preload,true,"",121.500,9007.0400,9007.0400,90.0704,888.194,1.3540,391.3
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 10 frames",u16,zstd,true,32,false,2048,2048,10,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,391.3
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 10 frames",u16,zstd,true,32,false,2048,2048,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,391.3
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 10 frames",u16,zstd,true,32,false,2048,2048,10,libtiff,true,"",91.200,6652.0222,6394.9000,67.2437,1202.642,1.0000,391.3
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 100 frames",u16,zstd,true,32,false,2048,2048,100,raw,true,"",34.200,1376.1933,1276.3000,141.1542,5813.137,0.2105,413.2
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 100 frames",u16,zstd,true,32,false,2048,2048,100,fast-tiff,true,"",215.000,11400.6667,10774.2000,1150.6517,701.713,1.7442,413.2
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 100 frames",u16,zstd,true,32,false,2048,2048,100,fast-tiff-preload,true,"",191.400,7947.8840,7947.8840,794.7884,1006.557,1.2159,413.2
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 100 frames",u16,zstd,true,32,false,2048,2048,100,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,413.2
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 100 frames",u16,zstd,true,32,false,2048,2048,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,413.2
-"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 100 frames",u16,zstd,true,32,false,2048,2048,100,libtiff,true,"",97.500,6536.4978,6275.3000,657.7765,1223.897,1.0000,413.2
+"16x16 u16 none","16x16 u16 none / 1 frames",u16,none,false,1,false,16,16,1,raw,true,"",22.400,14.2000,14.2000,0.0142,34.386,28.4000,1.4
+"16x16 u16 none","16x16 u16 none / 1 frames",u16,none,false,1,false,16,16,1,fast-tiff,true,"",40.500,4.3000,4.3000,0.0043,113.554,8.6000,1.4
+"16x16 u16 none","16x16 u16 none / 1 frames",u16,none,false,1,false,16,16,1,fast-tiff-preload,true,"",39.400,3.9000,3.9000,0.0039,125.200,7.8000,1.4
+"16x16 u16 none","16x16 u16 none / 1 frames",u16,none,false,1,false,16,16,1,tiff-rs,true,"",115.200,7.5000,7.5000,0.0075,65.104,15.0000,1.4
+"16x16 u16 none","16x16 u16 none / 1 frames",u16,none,false,1,false,16,16,1,tinytiff,true,"",496.300,5.7000,5.7000,0.0057,85.663,11.4000,1.4
+"16x16 u16 none","16x16 u16 none / 1 frames",u16,none,false,1,false,16,16,1,libtiff,true,"",86.300,0.5000,0.5000,0.0005,976.562,1.0000,1.4
+"16x16 u16 none","16x16 u16 none / 10 frames",u16,none,false,1,false,16,16,10,raw,true,"",23.700,2.1667,1.4000,0.0273,225.361,17.7273,14.7
+"16x16 u16 none","16x16 u16 none / 10 frames",u16,none,false,1,false,16,16,10,fast-tiff,true,"",46.300,0.2667,0.2000,0.0037,1831.055,2.1818,14.7
+"16x16 u16 none","16x16 u16 none / 10 frames",u16,none,false,1,false,16,16,10,fast-tiff-preload,true,"",44.500,6.1800,6.1800,0.0618,79.010,50.5636,14.7
+"16x16 u16 none","16x16 u16 none / 10 frames",u16,none,false,1,false,16,16,10,tiff-rs,true,"",107.800,2.3222,2.0000,0.0268,210.265,19.0000,14.7
+"16x16 u16 none","16x16 u16 none / 10 frames",u16,none,false,1,false,16,16,10,tinytiff,true,"",74.600,2.4556,2.2000,0.0248,198.848,20.0909,14.7
+"16x16 u16 none","16x16 u16 none / 10 frames",u16,none,false,1,false,16,16,10,libtiff,true,"",59.900,0.1222,0.1000,0.0027,3995.028,1.0000,14.7
+"16x16 u16 none","16x16 u16 none / 100 frames",u16,none,false,1,false,16,16,100,raw,true,"",25.900,1.4667,1.4000,0.1602,332.919,12.6923,89.1
+"16x16 u16 none","16x16 u16 none / 100 frames",u16,none,false,1,false,16,16,100,fast-tiff,true,"",76.700,0.1156,0.0000,0.0184,4225.511,1.0000,89.1
+"16x16 u16 none","16x16 u16 none / 100 frames",u16,none,false,1,false,16,16,100,fast-tiff-preload,true,"",77.900,2.1990,2.1990,0.2199,222.047,19.0298,89.1
+"16x16 u16 none","16x16 u16 none / 100 frames",u16,none,false,1,false,16,16,100,tiff-rs,true,"",110.100,1.9878,1.9000,0.2081,245.642,17.2019,89.1
+"16x16 u16 none","16x16 u16 none / 100 frames",u16,none,false,1,false,16,16,100,tinytiff,true,"",80.000,2.3822,2.2000,0.2397,204.969,20.6154,89.1
+"16x16 u16 none","16x16 u16 none / 100 frames",u16,none,false,1,false,16,16,100,libtiff,true,"",62.300,0.1167,0.0000,0.0191,4185.268,1.0096,89.1
+"16x16 u16 none","16x16 u16 none / 1000 frames",u16,none,false,1,false,16,16,1000,raw,true,"",25.700,1.4593,1.4000,1.4829,334.592,12.5444,227.5
+"16x16 u16 none","16x16 u16 none / 1000 frames",u16,none,false,1,false,16,16,1000,fast-tiff,true,"",336.800,0.1163,0.0000,0.1989,4197.260,1.0000,227.5
+"16x16 u16 none","16x16 u16 none / 1000 frames",u16,none,false,1,false,16,16,1000,fast-tiff-preload,true,"",338.200,0.8915,0.8915,0.8915,547.708,7.6633,227.5
+"16x16 u16 none","16x16 u16 none / 1000 frames",u16,none,false,1,false,16,16,1000,tiff-rs,true,"",114.000,2.0058,1.9000,2.0228,243.437,17.2416,227.5
+"16x16 u16 none","16x16 u16 none / 1000 frames",u16,none,false,1,false,16,16,1000,tinytiff,true,"",105.400,2.3964,2.2000,2.4195,203.752,20.5998,227.5
+"16x16 u16 none","16x16 u16 none / 1000 frames",u16,none,false,1,false,16,16,1000,libtiff,true,"",70.400,0.1230,0.0000,0.1917,3969.766,1.0573,227.5
+"16x16 u16 none","16x16 u16 none / 10000 frames",u16,none,false,1,false,16,16,10000,raw,true,"",30.800,1.4697,1.4000,15.2520,332.237,12.2021,269.8
+"16x16 u16 none","16x16 u16 none / 10000 frames",u16,none,false,1,false,16,16,10000,fast-tiff,true,"",3767.600,0.1204,0.0000,2.0067,4053.996,1.0000,269.8
+"16x16 u16 none","16x16 u16 none / 10000 frames",u16,none,false,1,false,16,16,10000,fast-tiff-preload,true,"",3664.800,0.5153,0.5153,5.1531,947.549,4.2784,269.8
+"16x16 u16 none","16x16 u16 none / 10000 frames",u16,none,false,1,false,16,16,10000,tiff-rs,true,"",124.600,2.0296,1.8000,21.6075,240.575,16.8513,269.8
+"16x16 u16 none","16x16 u16 none / 10000 frames",u16,none,false,1,false,16,16,10000,tinytiff,true,"",125.500,2.4031,2.2000,24.9749,203.185,19.9522,269.8
+"16x16 u16 none","16x16 u16 none / 10000 frames",u16,none,false,1,false,16,16,10000,libtiff,true,"",87.500,0.1426,0.0000,2.1988,3423.332,1.1842,269.8
+"16x16 u16 none","16x16 u16 none / 100000 frames",u16,none,false,1,false,16,16,100000,raw,true,"",44.100,1.4188,1.3000,148.2906,344.150,11.5911,263.8
+"16x16 u16 none","16x16 u16 none / 100000 frames",u16,none,false,1,false,16,16,100000,fast-tiff,true,"",35265.300,0.1224,0.0000,21.1841,3989.081,1.0000,263.8
+"16x16 u16 none","16x16 u16 none / 100000 frames",u16,none,false,1,false,16,16,100000,fast-tiff-preload,true,"",33553.200,0.4276,0.4276,42.7599,1141.914,3.4933,263.8
+"16x16 u16 none","16x16 u16 none / 100000 frames",u16,none,false,1,false,16,16,100000,tiff-rs,true,"",177.300,1.9897,1.8000,205.3894,245.400,16.2554,263.8
+"16x16 u16 none","16x16 u16 none / 100000 frames",u16,none,false,1,false,16,16,100000,tinytiff,true,"",137.100,2.3838,2.2000,244.6245,204.837,19.4744,263.8
+"16x16 u16 none","16x16 u16 none / 100000 frames",u16,none,false,1,false,16,16,100000,libtiff,true,"",134.700,0.1464,0.0000,24.0253,3334.166,1.1964,263.8
+"16x16 u16 none","16x16 u16 none / 1000000 frames",u16,none,false,1,false,16,16,1000000,raw,true,"",82.300,1.4215,1.3000,1488.8163,343.489,11.2826,202.0
+"16x16 u16 none","16x16 u16 none / 1000000 frames",u16,none,false,1,false,16,16,1000000,fast-tiff,true,"",381306.900,0.1260,0.0000,220.7175,3875.456,1.0000,202.0
+"16x16 u16 none","16x16 u16 none / 1000000 frames",u16,none,false,1,false,16,16,1000000,fast-tiff-preload,true,"",513908.100,0.4426,0.4426,442.5564,1103.320,3.5125,202.0
+"16x16 u16 none","16x16 u16 none / 1000000 frames",u16,none,false,1,false,16,16,1000000,tiff-rs,true,"",185.600,2.0140,1.8000,2083.6701,242.448,15.9847,202.0
+"16x16 u16 none","16x16 u16 none / 1000000 frames",u16,none,false,1,false,16,16,1000000,tinytiff,true,"",144.400,2.3650,2.2000,2427.9537,206.464,18.7706,202.0
+"16x16 u16 none","16x16 u16 none / 1000000 frames",u16,none,false,1,false,16,16,1000000,libtiff,true,"",129.700,0.1582,0.0000,252.5191,3086.741,1.2555,202.0
+"256x256 u8 none","256x256 u8 none / 1 frames",u8,none,false,1,false,256,256,1,raw,true,"",28.900,17.4000,17.4000,0.0174,3591.954,3.4800,101.1
+"256x256 u8 none","256x256 u8 none / 1 frames",u8,none,false,1,false,256,256,1,fast-tiff,true,"",51.100,21.4000,21.4000,0.0214,2920.561,4.2800,101.1
+"256x256 u8 none","256x256 u8 none / 1 frames",u8,none,false,1,false,256,256,1,fast-tiff-preload,true,"",50.700,93.8000,93.8000,0.0938,666.311,18.7600,101.1
+"256x256 u8 none","256x256 u8 none / 1 frames",u8,none,false,1,false,256,256,1,tiff-rs,true,"",119.200,12.4000,12.4000,0.0124,5040.323,2.4800,101.1
+"256x256 u8 none","256x256 u8 none / 1 frames",u8,none,false,1,false,256,256,1,tinytiff,true,"",92.300,5.0000,5.0000,0.0050,12500.000,1.0000,101.1
+"256x256 u8 none","256x256 u8 none / 1 frames",u8,none,false,1,false,256,256,1,libtiff,true,"",79.400,13.7000,13.7000,0.0137,4562.044,2.7400,101.1
+"256x256 u8 none","256x256 u8 none / 10 frames",u8,none,false,1,false,256,256,10,raw,true,"",28.800,4.2556,3.4000,0.0497,14686.684,0.9457,734.8
+"256x256 u8 none","256x256 u8 none / 10 frames",u8,none,false,1,false,256,256,10,fast-tiff,true,"",57.800,14.9444,13.5000,0.1548,4182.156,3.3210,734.8
+"256x256 u8 none","256x256 u8 none / 10 frames",u8,none,false,1,false,256,256,10,fast-tiff-preload,true,"",57.200,91.3400,91.3400,0.9134,684.257,20.2978,734.8
+"256x256 u8 none","256x256 u8 none / 10 frames",u8,none,false,1,false,256,256,10,tiff-rs,true,"",152.700,7.0111,6.8000,0.0755,8914.422,1.5580,734.8
+"256x256 u8 none","256x256 u8 none / 10 frames",u8,none,false,1,false,256,256,10,tinytiff,true,"",81.400,4.5000,3.9000,0.0459,13888.889,1.0000,734.8
+"256x256 u8 none","256x256 u8 none / 10 frames",u8,none,false,1,false,256,256,10,libtiff,true,"",61.900,10.7444,9.7000,0.1094,5816.960,2.3877,734.8
+"256x256 u8 none","256x256 u8 none / 100 frames",u8,none,false,1,false,256,256,100,raw,true,"",79.400,16.5222,12.2000,2.0506,3782.784,2.4796,1374.1
+"256x256 u8 none","256x256 u8 none / 100 frames",u8,none,false,1,false,256,256,100,fast-tiff,true,"",237.000,28.5978,22.5000,2.9185,2185.484,4.2918,1374.1
+"256x256 u8 none","256x256 u8 none / 100 frames",u8,none,false,1,false,256,256,100,fast-tiff-preload,true,"",237.900,102.9760,102.9760,10.2976,606.938,15.4541,1374.1
+"256x256 u8 none","256x256 u8 none / 100 frames",u8,none,false,1,false,256,256,100,tiff-rs,true,"",231.900,19.8522,11.0000,2.2925,3148.262,2.9793,1374.1
+"256x256 u8 none","256x256 u8 none / 100 frames",u8,none,false,1,false,256,256,100,tinytiff,true,"",278.400,6.6633,3.5000,0.8091,9379.690,1.0000,1374.1
+"256x256 u8 none","256x256 u8 none / 100 frames",u8,none,false,1,false,256,256,100,libtiff,true,"",134.900,11.4811,10.9000,1.1649,5443.724,1.7230,1374.1
+"256x256 u8 none","256x256 u8 none / 1000 frames",u8,none,false,1,false,256,256,1000,raw,true,"",25.600,6.4190,4.4000,7.6273,9736.719,0.9022,1035.8
+"256x256 u8 none","256x256 u8 none / 1000 frames",u8,none,false,1,false,256,256,1000,fast-tiff,true,"",359.600,16.1578,14.3000,16.2731,3868.106,2.2709,1035.8
+"256x256 u8 none","256x256 u8 none / 1000 frames",u8,none,false,1,false,256,256,1000,fast-tiff-preload,true,"",355.300,69.6393,69.6393,69.6393,897.482,9.7875,1035.8
+"256x256 u8 none","256x256 u8 none / 1000 frames",u8,none,false,1,false,256,256,1000,tiff-rs,true,"",171.400,9.5941,6.5000,10.9413,6514.413,1.3484,1035.8
+"256x256 u8 none","256x256 u8 none / 1000 frames",u8,none,false,1,false,256,256,1000,tinytiff,true,"",117.700,7.1151,5.0000,8.3449,8784.121,1.0000,1035.8
+"256x256 u8 none","256x256 u8 none / 1000 frames",u8,none,false,1,false,256,256,1000,libtiff,true,"",89.700,16.0539,14.1000,16.1777,3893.138,2.2563,1035.8
+"256x256 u8 none","256x256 u8 none / 10000 frames",u8,none,false,1,false,256,256,10000,raw,true,"",43.700,7.6378,4.2000,89.4051,8182.985,0.9135,1012.9
+"256x256 u8 none","256x256 u8 none / 10000 frames",u8,none,false,1,false,256,256,10000,fast-tiff,true,"",3477.500,17.0950,15.2000,172.1659,3656.049,2.0446,1012.9
+"256x256 u8 none","256x256 u8 none / 10000 frames",u8,none,false,1,false,256,256,10000,fast-tiff-preload,true,"",3401.200,83.5744,83.5744,835.7440,747.837,9.9955,1012.9
+"256x256 u8 none","256x256 u8 none / 10000 frames",u8,none,false,1,false,256,256,10000,tiff-rs,true,"",169.500,9.9004,8.4000,113.5205,6312.898,1.1841,1012.9
+"256x256 u8 none","256x256 u8 none / 10000 frames",u8,none,false,1,false,256,256,10000,tinytiff,true,"",142.400,8.3612,7.5000,96.7833,7475.014,1.0000,1012.9
+"256x256 u8 none","256x256 u8 none / 10000 frames",u8,none,false,1,false,256,256,10000,libtiff,true,"",154.900,18.0312,16.0000,181.6706,3466.218,2.1565,1012.9
+"256x256 u16 none","256x256 u16 none / 1 frames",u16,none,false,1,false,256,256,1,raw,true,"",23.000,17.2000,17.2000,0.0172,7267.442,2.8667,235.9
+"256x256 u16 none","256x256 u16 none / 1 frames",u16,none,false,1,false,256,256,1,fast-tiff,true,"",42.100,30.6000,30.6000,0.0306,4084.967,5.1000,235.9
+"256x256 u16 none","256x256 u16 none / 1 frames",u16,none,false,1,false,256,256,1,fast-tiff-preload,true,"",41.500,83.9000,83.9000,0.0839,1489.869,13.9833,235.9
+"256x256 u16 none","256x256 u16 none / 1 frames",u16,none,false,1,false,256,256,1,tiff-rs,true,"",97.500,14.3000,14.3000,0.0143,8741.259,2.3833,235.9
+"256x256 u16 none","256x256 u16 none / 1 frames",u16,none,false,1,false,256,256,1,tinytiff,true,"",76.000,6.0000,6.0000,0.0060,20833.333,1.0000,235.9
+"256x256 u16 none","256x256 u16 none / 1 frames",u16,none,false,1,false,256,256,1,libtiff,true,"",64.100,21.1000,21.1000,0.0211,5924.171,3.5167,235.9
+"256x256 u16 none","256x256 u16 none / 10 frames",u16,none,false,1,false,256,256,10,raw,true,"",28.000,5.4333,4.1000,0.0608,23006.135,1.0584,1262.4
+"256x256 u16 none","256x256 u16 none / 10 frames",u16,none,false,1,false,256,256,10,fast-tiff,true,"",48.200,25.4889,23.4000,0.2618,4904.098,4.9654,1262.4
+"256x256 u16 none","256x256 u16 none / 10 frames",u16,none,false,1,false,256,256,10,fast-tiff-preload,true,"",46.800,102.8500,102.8500,1.0285,1215.362,20.0357,1262.4
+"256x256 u16 none","256x256 u16 none / 10 frames",u16,none,false,1,false,256,256,10,tiff-rs,true,"",106.100,11.1000,8.5000,0.1163,11261.261,2.1623,1262.4
+"256x256 u16 none","256x256 u16 none / 10 frames",u16,none,false,1,false,256,256,10,tinytiff,true,"",76.300,5.1333,4.7000,0.0523,24350.649,1.0000,1262.4
+"256x256 u16 none","256x256 u16 none / 10 frames",u16,none,false,1,false,256,256,10,libtiff,true,"",62.400,22.4444,19.9000,0.2296,5569.307,4.3723,1262.4
+"256x256 u16 none","256x256 u16 none / 100 frames",u16,none,false,1,false,256,256,100,raw,true,"",24.700,11.0756,7.7000,1.2701,11286.116,1.0281,2843.3
+"256x256 u16 none","256x256 u16 none / 100 frames",u16,none,false,1,false,256,256,100,fast-tiff,true,"",114.600,31.7022,28.9000,3.1990,3942.941,2.9427,2843.3
+"256x256 u16 none","256x256 u16 none / 100 frames",u16,none,false,1,false,256,256,100,fast-tiff-preload,true,"",79.500,72.6240,72.6240,7.2624,1721.194,6.7411,2843.3
+"256x256 u16 none","256x256 u16 none / 100 frames",u16,none,false,1,false,256,256,100,tiff-rs,true,"",114.900,15.7300,11.1000,1.7508,7946.599,1.4601,2843.3
+"256x256 u16 none","256x256 u16 none / 100 frames",u16,none,false,1,false,256,256,100,tinytiff,true,"",94.100,10.7733,5.8000,1.2400,11602.723,1.0000,2843.3
+"256x256 u16 none","256x256 u16 none / 100 frames",u16,none,false,1,false,256,256,100,libtiff,true,"",79.800,23.8311,21.6000,2.4046,5245.244,2.2120,2843.3
+"256x256 u16 none","256x256 u16 none / 1000 frames",u16,none,false,1,false,256,256,1000,raw,true,"",25.900,11.7777,7.2000,13.5662,10613.308,0.9068,2624.0
+"256x256 u16 none","256x256 u16 none / 1000 frames",u16,none,false,1,false,256,256,1000,fast-tiff,true,"",362.300,33.6281,30.3000,33.8165,3717.128,2.5891,2624.0
+"256x256 u16 none","256x256 u16 none / 1000 frames",u16,none,false,1,false,256,256,1000,fast-tiff-preload,true,"",360.500,82.0747,82.0747,82.0747,1523.003,6.3191,2624.0
+"256x256 u16 none","256x256 u16 none / 1000 frames",u16,none,false,1,false,256,256,1000,tiff-rs,true,"",167.900,17.7323,15.3000,19.6852,7049.270,1.3653,2624.0
+"256x256 u16 none","256x256 u16 none / 1000 frames",u16,none,false,1,false,256,256,1000,tinytiff,true,"",124.800,12.9883,11.0000,14.8193,9624.022,1.0000,2624.0
+"256x256 u16 none","256x256 u16 none / 1000 frames",u16,none,false,1,false,256,256,1000,libtiff,true,"",96.500,32.6209,29.2000,32.8724,3831.900,2.5116,2624.0
+"256x256 u16 none","256x256 u16 none / 10000 frames",u16,none,false,1,false,256,256,10000,raw,true,"",44.200,14.2251,7.5000,162.4865,8787.257,0.9321,2592.5
+"256x256 u16 none","256x256 u16 none / 10000 frames",u16,none,false,1,false,256,256,10000,fast-tiff,true,"",123870.600,35.4468,26.2000,357.7235,3526.410,2.3226,2592.5
+"256x256 u16 none","256x256 u16 none / 10000 frames",u16,none,false,1,false,256,256,10000,fast-tiff-preload,true,"",221675.100,100.7200,100.7200,1007.1996,1241.065,6.5996,2592.5
+"256x256 u16 none","256x256 u16 none / 10000 frames",u16,none,false,1,false,256,256,10000,tiff-rs,true,"",118534.800,18.6254,11.8000,207.3315,6711.265,1.2204,2592.5
+"256x256 u16 none","256x256 u16 none / 10000 frames",u16,none,false,1,false,256,256,10000,tinytiff,true,"",326100.300,15.2614,8.2000,172.9520,8190.587,1.0000,2592.5
+"256x256 u16 none","256x256 u16 none / 10000 frames",u16,none,false,1,false,256,256,10000,libtiff,true,"",192.300,36.5571,30.1000,374.4787,3419.311,2.3954,2592.5
+"256x256 u16 none rps32","256x256 u16 none rps32 / 1 frames",u16,none,false,8,false,256,256,1,raw,true,"",22.400,26.8000,26.8000,0.0268,4664.179,1.5581,173.5
+"256x256 u16 none rps32","256x256 u16 none rps32 / 1 frames",u16,none,false,8,false,256,256,1,fast-tiff,true,"",40.000,26.4000,26.4000,0.0264,4734.848,1.5349,173.5
+"256x256 u16 none rps32","256x256 u16 none rps32 / 1 frames",u16,none,false,8,false,256,256,1,fast-tiff-preload,true,"",39.400,123.1000,123.1000,0.1231,1015.435,7.1570,173.5
+"256x256 u16 none rps32","256x256 u16 none rps32 / 1 frames",u16,none,false,8,false,256,256,1,tiff-rs,true,"",106.200,26.6000,26.6000,0.0266,4699.248,1.5465,173.5
+"256x256 u16 none rps32","256x256 u16 none rps32 / 1 frames",u16,none,false,8,false,256,256,1,tinytiff,true,"",82.900,17.2000,17.2000,0.0172,7267.442,1.0000,173.5
+"256x256 u16 none rps32","256x256 u16 none rps32 / 1 frames",u16,none,false,8,false,256,256,1,libtiff,true,"",60.700,24.8000,24.8000,0.0248,5040.323,1.4419,173.5
+"256x256 u16 none rps32","256x256 u16 none rps32 / 10 frames",u16,none,false,8,false,256,256,10,raw,true,"",23.600,5.0667,4.2000,0.0561,24671.053,0.2770,836.9
+"256x256 u16 none rps32","256x256 u16 none rps32 / 10 frames",u16,none,false,8,false,256,256,10,fast-tiff,true,"",44.600,24.3000,23.3000,0.2485,5144.033,1.3287,836.9
+"256x256 u16 none rps32","256x256 u16 none rps32 / 10 frames",u16,none,false,8,false,256,256,10,fast-tiff-preload,true,"",42.400,104.0300,104.0300,1.0403,1201.576,5.6882,836.9
+"256x256 u16 none rps32","256x256 u16 none rps32 / 10 frames",u16,none,false,8,false,256,256,10,tiff-rs,true,"",178.700,24.2111,22.1000,0.2494,5162.919,1.3238,836.9
+"256x256 u16 none rps32","256x256 u16 none rps32 / 10 frames",u16,none,false,8,false,256,256,10,tinytiff,true,"",86.300,18.2889,17.5000,0.1843,6834.751,1.0000,836.9
+"256x256 u16 none rps32","256x256 u16 none rps32 / 10 frames",u16,none,false,8,false,256,256,10,libtiff,true,"",59.800,22.4222,20.9000,0.2282,5574.827,1.2260,836.9
+"256x256 u16 none rps32","256x256 u16 none rps32 / 100 frames",u16,none,false,8,false,256,256,100,raw,true,"",25.100,12.8311,9.0000,1.4710,9741.947,0.5094,1203.1
+"256x256 u16 none rps32","256x256 u16 none rps32 / 100 frames",u16,none,false,8,false,256,256,100,fast-tiff,true,"",129.800,35.6444,32.1000,3.6017,3506.858,1.4151,1203.1
+"256x256 u16 none rps32","256x256 u16 none rps32 / 100 frames",u16,none,false,8,false,256,256,100,fast-tiff-preload,true,"",91.800,74.1730,74.1730,7.4173,1685.249,2.9447,1203.1
+"256x256 u16 none rps32","256x256 u16 none rps32 / 100 frames",u16,none,false,8,false,256,256,100,tiff-rs,true,"",139.600,28.6700,23.0000,3.0634,4359.958,1.1382,1203.1
+"256x256 u16 none rps32","256x256 u16 none rps32 / 100 frames",u16,none,false,8,false,256,256,100,tinytiff,true,"",116.300,25.1889,19.3000,2.6862,4962.506,1.0000,1203.1
+"256x256 u16 none rps32","256x256 u16 none rps32 / 100 frames",u16,none,false,8,false,256,256,100,libtiff,true,"",84.800,28.1911,25.7000,2.8441,4434.022,1.1192,1203.1
+"256x256 u16 none rps32","256x256 u16 none rps32 / 1000 frames",u16,none,false,8,false,256,256,1000,raw,true,"",27.400,12.1371,7.4000,13.9835,10298.991,0.4564,946.9
+"256x256 u16 none rps32","256x256 u16 none rps32 / 1000 frames",u16,none,false,8,false,256,256,1000,fast-tiff,true,"",134407.900,33.8860,27.3000,34.1710,3688.839,1.2743,946.9
+"256x256 u16 none rps32","256x256 u16 none rps32 / 1000 frames",u16,none,false,8,false,256,256,1000,fast-tiff-preload,true,"",393.000,89.2810,89.2810,89.2810,1400.074,3.3574,946.9
+"256x256 u16 none rps32","256x256 u16 none rps32 / 1000 frames",u16,none,false,8,false,256,256,1000,tiff-rs,true,"",182.800,31.0526,22.6000,32.9954,4025.434,1.1677,946.9
+"256x256 u16 none rps32","256x256 u16 none rps32 / 1000 frames",u16,none,false,8,false,256,256,1000,tinytiff,true,"",125.800,26.5924,23.7000,28.5196,4700.583,1.0000,946.9
+"256x256 u16 none rps32","256x256 u16 none rps32 / 1000 frames",u16,none,false,8,false,256,256,1000,libtiff,true,"",236.500,37.6267,32.8000,37.8450,3322.112,1.4149,946.9
+"256x256 u16 none rps32","256x256 u16 none rps32 / 10000 frames",u16,none,false,8,false,256,256,10000,raw,true,"",50.000,14.5462,7.5000,281.2625,8593.283,0.4920,211.0
+"256x256 u16 none rps32","256x256 u16 none rps32 / 10000 frames",u16,none,false,8,false,256,256,10000,fast-tiff,true,"",177973.100,35.4288,27.2000,356.7223,3528.203,1.1983,211.0
+"256x256 u16 none rps32","256x256 u16 none rps32 / 10000 frames",u16,none,false,8,false,256,256,10000,fast-tiff-preload,true,"",341447.400,121.9087,121.9087,1219.0869,1025.358,4.1232,211.0
+"256x256 u16 none rps32","256x256 u16 none rps32 / 10000 frames",u16,none,false,8,false,256,256,10000,tiff-rs,true,"",179.400,32.4778,23.2000,343.3610,3848.782,1.0985,211.0
+"256x256 u16 none rps32","256x256 u16 none rps32 / 10000 frames",u16,none,false,8,false,256,256,10000,tinytiff,true,"",152.400,29.5662,19.9000,317.1943,4227.796,1.0000,211.0
+"256x256 u16 none rps32","256x256 u16 none rps32 / 10000 frames",u16,none,false,8,false,256,256,10000,libtiff,true,"",329268.800,36.3840,33.6000,372.1803,3435.577,1.2306,211.0
+"256x256 f32 none","256x256 f32 none / 1 frames",f32,none,false,1,false,256,256,1,raw,true,"",26.700,22.6000,22.6000,0.0226,11061.947,2.5682,334.7
+"256x256 f32 none","256x256 f32 none / 1 frames",f32,none,false,1,false,256,256,1,fast-tiff,true,"",49.200,66.1000,66.1000,0.0661,3782.148,7.5114,334.7
+"256x256 f32 none","256x256 f32 none / 1 frames",f32,none,false,1,false,256,256,1,fast-tiff-preload,true,"",40.200,118.8000,118.8000,0.1188,2104.377,13.5000,334.7
+"256x256 f32 none","256x256 f32 none / 1 frames",f32,none,false,1,false,256,256,1,tiff-rs,true,"",97.800,29.5000,29.5000,0.0295,8474.576,3.3523,334.7
+"256x256 f32 none","256x256 f32 none / 1 frames",f32,none,false,1,false,256,256,1,tinytiff,true,"",78.100,8.8000,8.8000,0.0088,28409.091,1.0000,334.7
+"256x256 f32 none","256x256 f32 none / 1 frames",f32,none,false,1,false,256,256,1,libtiff,true,"",65.800,42.0000,42.0000,0.0420,5952.381,4.7727,334.7
+"256x256 f32 none","256x256 f32 none / 10 frames",f32,none,false,1,false,256,256,10,raw,true,"",23.100,21.9444,18.9000,0.2352,11392.405,1.3509,2193.4
+"256x256 f32 none","256x256 f32 none / 10 frames",f32,none,false,1,false,256,256,10,fast-tiff,true,"",53.500,54.4333,51.8000,0.5567,4592.774,3.3509,2193.4
+"256x256 f32 none","256x256 f32 none / 10 frames",f32,none,false,1,false,256,256,10,fast-tiff-preload,true,"",49.300,130.2400,130.2400,1.3024,1919.533,8.0175,2193.4
+"256x256 f32 none","256x256 f32 none / 10 frames",f32,none,false,1,false,256,256,10,tiff-rs,true,"",133.500,28.4000,16.9000,0.2989,8802.817,1.7483,2193.4
+"256x256 f32 none","256x256 f32 none / 10 frames",f32,none,false,1,false,256,256,10,tinytiff,true,"",82.700,16.2444,8.0000,0.1783,15389.877,1.0000,2193.4
+"256x256 f32 none","256x256 f32 none / 10 frames",f32,none,false,1,false,256,256,10,libtiff,true,"",69.800,43.0333,39.0000,0.4343,5809.450,2.6491,2193.4
+"256x256 f32 none","256x256 f32 none / 100 frames",f32,none,false,1,false,256,256,100,raw,true,"",24.000,24.0033,16.1000,2.5625,10415.220,0.8939,3437.5
+"256x256 f32 none","256x256 f32 none / 100 frames",f32,none,false,1,false,256,256,100,fast-tiff,true,"",100.600,62.6600,56.8000,6.3018,3989.786,2.3335,3437.5
+"256x256 f32 none","256x256 f32 none / 100 frames",f32,none,false,1,false,256,256,100,fast-tiff-preload,true,"",81.000,93.4790,93.4790,9.3479,2674.397,3.4812,3437.5
+"256x256 f32 none","256x256 f32 none / 100 frames",f32,none,false,1,false,256,256,100,tiff-rs,true,"",120.400,33.7422,27.1000,3.5423,7409.115,1.2566,3437.5
+"256x256 f32 none","256x256 f32 none / 100 frames",f32,none,false,1,false,256,256,100,tinytiff,true,"",97.700,26.8522,21.1000,2.8391,9310.216,1.0000,3437.5
+"256x256 f32 none","256x256 f32 none / 100 frames",f32,none,false,1,false,256,256,100,libtiff,true,"",90.300,66.6933,51.8000,6.7281,3748.501,2.4837,3437.5
+"256x256 f32 none","256x256 f32 none / 1000 frames",f32,none,false,1,false,256,256,1000,raw,true,"",27.800,25.2558,14.4000,27.1448,9898.725,0.7431,3404.5
+"256x256 f32 none","256x256 f32 none / 1000 frames",f32,none,false,1,false,256,256,1000,fast-tiff,true,"",62135.000,68.5511,49.4000,69.0206,3646.914,2.0170,3404.5
+"256x256 f32 none","256x256 f32 none / 1000 frames",f32,none,false,1,false,256,256,1000,fast-tiff-preload,true,"",380.700,95.1913,95.1913,95.1913,2626.290,2.8008,3404.5
+"256x256 f32 none","256x256 f32 none / 1000 frames",f32,none,false,1,false,256,256,1000,tiff-rs,true,"",174.700,35.3189,20.3000,36.8260,7078.365,1.0392,3404.5
+"256x256 f32 none","256x256 f32 none / 1000 frames",f32,none,false,1,false,256,256,1000,tinytiff,true,"",155.600,33.9868,25.9000,35.6009,7355.802,1.0000,3404.5
+"256x256 f32 none","256x256 f32 none / 1000 frames",f32,none,false,1,false,256,256,1000,libtiff,true,"",176.200,72.0902,67.3000,72.7687,3467.877,2.1211,3404.5
+"256x256 f32 none","256x256 f32 none / 10000 frames",f32,none,false,1,false,256,256,10000,raw,true,"",7638.300,30.1854,12.2000,325.0237,8282.162,0.8209,1869.0
+"256x256 f32 none","256x256 f32 none / 10000 frames",f32,none,false,1,false,256,256,10000,fast-tiff,true,"",92827.400,70.4317,54.6000,708.1507,3549.536,1.9153,1869.0
+"256x256 f32 none","256x256 f32 none / 10000 frames",f32,none,false,1,false,256,256,10000,fast-tiff-preload,true,"",220275.900,118.6544,118.6544,1186.5444,2106.959,3.2267,1869.0
+"256x256 f32 none","256x256 f32 none / 10000 frames",f32,none,false,1,false,256,256,10000,tiff-rs,true,"",102366.100,36.7725,13.8000,388.4491,6798.555,1.0000,1869.0
+"256x256 f32 none","256x256 f32 none / 10000 frames",f32,none,false,1,false,256,256,10000,tinytiff,false,"open failed",0.000,0.0000,0.0000,0.0000,0.000,0.0000,1869.0
+"256x256 f32 none","256x256 f32 none / 10000 frames",f32,none,false,1,false,256,256,10000,libtiff,true,"",222687.600,74.7894,67.9000,765.5710,3342.721,2.0338,1869.0
+"256x256 u16 lzw","256x256 u16 lzw / 1 frames",u16,lzw,false,1,false,256,256,1,raw,true,"",21.700,20.0000,20.0000,0.0200,6250.000,0.0762,50.4
+"256x256 u16 lzw","256x256 u16 lzw / 1 frames",u16,lzw,false,1,false,256,256,1,fast-tiff,true,"",41.100,538.5000,538.5000,0.5385,232.126,2.0506,50.4
+"256x256 u16 lzw","256x256 u16 lzw / 1 frames",u16,lzw,false,1,false,256,256,1,fast-tiff-preload,true,"",41.700,559.3000,559.3000,0.5593,223.494,2.1299,50.4
+"256x256 u16 lzw","256x256 u16 lzw / 1 frames",u16,lzw,false,1,false,256,256,1,tiff-rs,true,"",98.800,594.5000,594.5000,0.5945,210.261,2.2639,50.4
+"256x256 u16 lzw","256x256 u16 lzw / 1 frames",u16,lzw,false,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,50.4
+"256x256 u16 lzw","256x256 u16 lzw / 1 frames",u16,lzw,false,1,false,256,256,1,libtiff,true,"",80.400,262.6000,262.6000,0.2626,476.009,1.0000,50.4
+"256x256 u16 lzw","256x256 u16 lzw / 10 frames",u16,lzw,false,1,false,256,256,10,raw,true,"",28.500,6.8111,5.4000,0.0764,18352.365,0.0378,86.4
+"256x256 u16 lzw","256x256 u16 lzw / 10 frames",u16,lzw,false,1,false,256,256,10,fast-tiff,true,"",56.800,564.1667,503.0000,5.7129,221.566,3.1277,86.4
+"256x256 u16 lzw","256x256 u16 lzw / 10 frames",u16,lzw,false,1,false,256,256,10,fast-tiff-preload,true,"",46.800,180.3800,180.3800,1.8038,692.981,1.0000,86.4
+"256x256 u16 lzw","256x256 u16 lzw / 10 frames",u16,lzw,false,1,false,256,256,10,tiff-rs,true,"",109.500,626.5667,562.1000,6.3601,199.500,3.4736,86.4
+"256x256 u16 lzw","256x256 u16 lzw / 10 frames",u16,lzw,false,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,86.4
+"256x256 u16 lzw","256x256 u16 lzw / 10 frames",u16,lzw,false,1,false,256,256,10,libtiff,true,"",75.000,247.7000,242.9000,2.4881,504.643,1.3732,86.4
+"256x256 u16 lzw","256x256 u16 lzw / 100 frames",u16,lzw,false,1,false,256,256,100,raw,true,"",29.100,12.8244,7.7000,1.4912,9747.011,0.1056,99.1
+"256x256 u16 lzw","256x256 u16 lzw / 100 frames",u16,lzw,false,1,false,256,256,100,fast-tiff,true,"",95.900,499.1500,492.4000,50.0627,250.426,4.1104,99.1
+"256x256 u16 lzw","256x256 u16 lzw / 100 frames",u16,lzw,false,1,false,256,256,100,fast-tiff-preload,true,"",85.500,121.4350,121.4350,12.1435,1029.357,1.0000,99.1
+"256x256 u16 lzw","256x256 u16 lzw / 100 frames",u16,lzw,false,1,false,256,256,100,tiff-rs,true,"",125.700,584.4178,571.3000,58.8322,213.888,4.8126,99.1
+"256x256 u16 lzw","256x256 u16 lzw / 100 frames",u16,lzw,false,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,99.1
+"256x256 u16 lzw","256x256 u16 lzw / 100 frames",u16,lzw,false,1,false,256,256,100,libtiff,true,"",93.700,248.2722,239.7000,24.9769,503.480,2.0445,99.1
+"256x256 u16 lzw","256x256 u16 lzw / 1000 frames",u16,lzw,false,1,false,256,256,1000,raw,true,"",26.200,12.0773,7.3000,13.9655,10349.967,0.1045,97.2
+"256x256 u16 lzw","256x256 u16 lzw / 1000 frames",u16,lzw,false,1,false,256,256,1000,fast-tiff,true,"",373.600,502.5714,493.6000,505.0641,248.721,4.3495,97.2
+"256x256 u16 lzw","256x256 u16 lzw / 1000 frames",u16,lzw,false,1,false,256,256,1000,fast-tiff-preload,true,"",382.100,115.5464,115.5464,115.5464,1081.816,1.0000,97.2
+"256x256 u16 lzw","256x256 u16 lzw / 1000 frames",u16,lzw,false,1,false,256,256,1000,tiff-rs,true,"",159.700,577.7236,570.8000,580.1323,216.366,4.9999,97.2
+"256x256 u16 lzw","256x256 u16 lzw / 1000 frames",u16,lzw,false,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,97.2
+"256x256 u16 lzw","256x256 u16 lzw / 1000 frames",u16,lzw,false,1,false,256,256,1000,libtiff,true,"",144.200,247.0399,240.7000,247.6288,505.991,2.1380,97.2
+"256x256 u16 lzw","256x256 u16 lzw / 10000 frames",u16,lzw,false,1,false,256,256,10000,raw,true,"",4840.700,14.5480,6.1000,288.0465,8592.259,0.0900,56.3
+"256x256 u16 lzw","256x256 u16 lzw / 10000 frames",u16,lzw,false,1,false,256,256,10000,fast-tiff,true,"",228145.300,503.1687,494.9000,5050.8873,248.426,3.1136,56.3
+"256x256 u16 lzw","256x256 u16 lzw / 10000 frames",u16,lzw,false,1,false,256,256,10000,fast-tiff-preload,true,"",3681.000,161.6057,161.6056,1616.0565,773.488,1.0000,56.3
+"256x256 u16 lzw","256x256 u16 lzw / 10000 frames",u16,lzw,false,1,false,256,256,10000,tiff-rs,true,"",167.500,582.5250,571.5000,5847.2942,214.583,3.6046,56.3
+"256x256 u16 lzw","256x256 u16 lzw / 10000 frames",u16,lzw,false,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,56.3
+"256x256 u16 lzw","256x256 u16 lzw / 10000 frames",u16,lzw,false,1,false,256,256,10000,libtiff,true,"",188.900,245.1165,240.7000,2459.4929,509.962,1.5168,56.3
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1 frames",u16,lzw,true,1,false,256,256,1,raw,true,"",24.800,16.1000,16.1000,0.0161,7763.975,0.0597,51.8
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1 frames",u16,lzw,true,1,false,256,256,1,fast-tiff,true,"",41.800,301.4000,301.4000,0.3014,414.731,1.1180,51.8
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1 frames",u16,lzw,true,1,false,256,256,1,fast-tiff-preload,true,"",41.000,340.9000,340.9000,0.3409,366.676,1.2645,51.8
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1 frames",u16,lzw,true,1,false,256,256,1,tiff-rs,true,"",105.900,395.1000,395.1000,0.3951,316.376,1.4655,51.8
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1 frames",u16,lzw,true,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,51.8
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1 frames",u16,lzw,true,1,false,256,256,1,libtiff,true,"",81.900,269.6000,269.6000,0.2696,463.650,1.0000,51.8
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10 frames",u16,lzw,true,1,false,256,256,10,raw,true,"",23.000,5.4000,4.2000,0.0596,23148.148,0.0436,106.9
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10 frames",u16,lzw,true,1,false,256,256,10,fast-tiff,true,"",45.100,281.6111,257.6000,2.8895,443.875,2.2731,106.9
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10 frames",u16,lzw,true,1,false,256,256,10,fast-tiff-preload,true,"",68.000,123.8900,123.8900,1.2389,1008.960,1.0000,106.9
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10 frames",u16,lzw,true,1,false,256,256,10,tiff-rs,true,"",115.800,393.3889,374.5000,3.9491,317.752,3.1753,106.9
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10 frames",u16,lzw,true,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,106.9
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10 frames",u16,lzw,true,1,false,256,256,10,libtiff,true,"",90.700,259.6111,255.1000,2.6059,481.489,2.0955,106.9
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 100 frames",u16,lzw,true,1,false,256,256,100,raw,true,"",24.100,12.0367,7.7000,1.3851,10384.935,0.1290,129.3
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 100 frames",u16,lzw,true,1,false,256,256,100,fast-tiff,true,"",99.800,253.1389,250.3000,25.4359,493.800,2.7120,129.3
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 100 frames",u16,lzw,true,1,false,256,256,100,fast-tiff-preload,true,"",86.000,93.3390,93.3390,9.3339,1339.204,1.0000,129.3
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 100 frames",u16,lzw,true,1,false,256,256,100,tiff-rs,true,"",134.400,360.9122,357.1000,36.2756,346.345,3.8667,129.3
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 100 frames",u16,lzw,true,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,129.3
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 100 frames",u16,lzw,true,1,false,256,256,100,libtiff,true,"",96.800,238.4433,235.9000,23.9373,524.234,2.5546,129.3
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1000 frames",u16,lzw,true,1,false,256,256,1000,raw,true,"",25.600,14.2386,7.3000,15.9009,8778.980,0.1427,130.5
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1000 frames",u16,lzw,true,1,false,256,256,1000,fast-tiff,true,"",15700.400,251.6561,246.8000,252.7039,496.710,2.5219,130.5
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1000 frames",u16,lzw,true,1,false,256,256,1000,fast-tiff-preload,true,"",362.900,99.7872,99.7872,99.7872,1252.666,1.0000,130.5
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1000 frames",u16,lzw,true,1,false,256,256,1000,tiff-rs,true,"",183.700,359.2146,355.0000,360.4021,347.981,3.5998,130.5
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1000 frames",u16,lzw,true,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,130.5
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 1000 frames",u16,lzw,true,1,false,256,256,1000,libtiff,true,"",121.600,237.0876,234.3000,237.7942,527.231,2.3759,130.5
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10000 frames",u16,lzw,true,1,false,256,256,10000,raw,true,"",3907.800,14.2570,6.3000,265.3161,8767.596,0.0885,118.8
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10000 frames",u16,lzw,true,1,false,256,256,10000,fast-tiff,true,"",162301.900,254.4923,248.5000,2552.2399,491.174,1.5801,118.8
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10000 frames",u16,lzw,true,1,false,256,256,10000,fast-tiff-preload,true,"",3634.300,161.0628,161.0628,1610.6281,776.095,1.0000,118.8
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10000 frames",u16,lzw,true,1,false,256,256,10000,tiff-rs,true,"",172.000,360.3833,354.7000,3622.3330,346.853,2.2375,118.8
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10000 frames",u16,lzw,true,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,118.8
+"256x256 u16 lzw+pred","256x256 u16 lzw+pred / 10000 frames",u16,lzw,true,1,false,256,256,10000,libtiff,true,"",170.400,240.4217,235.3000,2412.2303,519.920,1.4927,118.8
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1 frames",u16,deflate,true,1,false,256,256,1,raw,true,"",22.800,14.8000,14.8000,0.0148,8445.946,0.0877,60.2
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1 frames",u16,deflate,true,1,false,256,256,1,fast-tiff,true,"",48.600,175.7000,175.7000,0.1757,711.440,1.0415,60.2
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1 frames",u16,deflate,true,1,false,256,256,1,fast-tiff-preload,true,"",42.800,221.1000,221.1000,0.2211,565.355,1.3106,60.2
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1 frames",u16,deflate,true,1,false,256,256,1,tiff-rs,true,"",105.800,168.7000,168.7000,0.1687,740.960,1.0000,60.2
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1 frames",u16,deflate,true,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,60.2
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1 frames",u16,deflate,true,1,false,256,256,1,libtiff,true,"",79.500,195.6000,195.6000,0.1956,639.059,1.1595,60.2
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10 frames",u16,deflate,true,1,false,256,256,10,raw,true,"",23.400,8.0778,6.7000,0.0878,15474.553,0.0729,105.3
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10 frames",u16,deflate,true,1,false,256,256,10,fast-tiff,true,"",47.100,143.7333,129.6000,1.4714,869.666,1.2977,105.3
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10 frames",u16,deflate,true,1,false,256,256,10,fast-tiff-preload,true,"",47.000,110.7600,110.7600,1.1076,1128.566,1.0000,105.3
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10 frames",u16,deflate,true,1,false,256,256,10,tiff-rs,true,"",109.700,149.0111,144.5000,1.5044,838.864,1.3454,105.3
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10 frames",u16,deflate,true,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,105.3
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10 frames",u16,deflate,true,1,false,256,256,10,libtiff,true,"",74.400,175.2778,171.5000,1.7689,713.154,1.5825,105.3
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 100 frames",u16,deflate,true,1,false,256,256,100,raw,true,"",24.100,11.7333,6.9000,1.3347,10653.409,0.1302,110.1
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 100 frames",u16,deflate,true,1,false,256,256,100,fast-tiff,true,"",84.300,149.5722,140.1000,15.3803,835.717,1.6603,110.1
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 100 frames",u16,deflate,true,1,false,256,256,100,fast-tiff-preload,true,"",107.800,90.0870,90.0870,9.0087,1387.548,1.0000,110.1
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 100 frames",u16,deflate,true,1,false,256,256,100,tiff-rs,true,"",229.800,182.2878,135.2000,19.0108,685.729,2.0235,110.1
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 100 frames",u16,deflate,true,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,110.1
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 100 frames",u16,deflate,true,1,false,256,256,100,libtiff,true,"",99.100,173.7022,171.6000,17.4246,719.622,1.9282,110.1
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1000 frames",u16,deflate,true,1,false,256,256,1000,raw,true,"",26.700,15.3952,8.2000,17.1547,8119.402,0.1342,109.5
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1000 frames",u16,deflate,true,1,false,256,256,1000,fast-tiff,true,"",462.200,137.2932,125.8000,137.9271,910.460,1.1967,109.5
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1000 frames",u16,deflate,true,1,false,256,256,1000,fast-tiff-preload,true,"",391.100,114.7258,114.7258,114.7258,1089.554,1.0000,109.5
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1000 frames",u16,deflate,true,1,false,256,256,1000,tiff-rs,true,"",157.300,144.7108,134.7000,146.6816,863.792,1.2614,109.5
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1000 frames",u16,deflate,true,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,109.5
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 1000 frames",u16,deflate,true,1,false,256,256,1000,libtiff,true,"",137.800,170.0381,167.1000,170.5293,735.129,1.4821,109.5
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10000 frames",u16,deflate,true,1,false,256,256,10000,raw,true,"",28.300,14.2364,7.3000,280.5147,8780.303,0.1027,104.7
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10000 frames",u16,deflate,true,1,false,256,256,10000,fast-tiff,true,"",58746.400,138.6427,129.6000,1389.6602,901.598,1.0000,104.7
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10000 frames",u16,deflate,true,1,false,256,256,10000,fast-tiff-preload,true,"",3607.900,170.1830,170.1830,1701.8298,734.504,1.2275,104.7
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10000 frames",u16,deflate,true,1,false,256,256,10000,tiff-rs,true,"",159.000,143.9464,134.5000,1447.9586,868.379,1.0383,104.7
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10000 frames",u16,deflate,true,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,104.7
+"256x256 u16 deflate+pred","256x256 u16 deflate+pred / 10000 frames",u16,deflate,true,1,false,256,256,10000,libtiff,true,"",139.500,170.7436,167.2000,1712.2410,732.092,1.2315,104.7
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1 frames",u16,zstd,true,1,false,256,256,1,raw,true,"",27.300,16.1000,16.1000,0.0161,7763.975,0.0987,139.5
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1 frames",u16,zstd,true,1,false,256,256,1,fast-tiff,true,"",41.100,216.6000,216.6000,0.2166,577.101,1.3280,139.5
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1 frames",u16,zstd,true,1,false,256,256,1,fast-tiff-preload,true,"",46.100,234.0000,234.0000,0.2340,534.188,1.4347,139.5
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1 frames",u16,zstd,true,1,false,256,256,1,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,139.5
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1 frames",u16,zstd,true,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,139.5
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1 frames",u16,zstd,true,1,false,256,256,1,libtiff,true,"",85.100,163.1000,163.1000,0.1631,766.401,1.0000,139.5
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10 frames",u16,zstd,true,1,false,256,256,10,raw,true,"",25.600,7.5333,6.3000,0.0796,16592.920,0.0467,324.1
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10 frames",u16,zstd,true,1,false,256,256,10,fast-tiff,true,"",53.500,168.5444,161.6000,1.7041,741.644,1.0441,324.1
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10 frames",u16,zstd,true,1,false,256,256,10,fast-tiff-preload,true,"",53.000,161.4200,161.4200,1.6142,774.377,1.0000,324.1
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10 frames",u16,zstd,true,1,false,256,256,10,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,324.1
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10 frames",u16,zstd,true,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,324.1
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10 frames",u16,zstd,true,1,false,256,256,10,libtiff,true,"",88.900,161.4444,157.6000,1.6533,774.260,1.0002,324.1
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 100 frames",u16,zstd,true,1,false,256,256,100,raw,true,"",29.800,10.2244,7.6000,1.1812,12225.603,0.0728,376.8
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 100 frames",u16,zstd,true,1,false,256,256,100,fast-tiff,true,"",85.600,164.0678,155.6000,16.5754,761.880,1.1686,376.8
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 100 frames",u16,zstd,true,1,false,256,256,100,fast-tiff-preload,true,"",90.100,140.4000,140.4000,14.0400,890.313,1.0000,376.8
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 100 frames",u16,zstd,true,1,false,256,256,100,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,376.8
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 100 frames",u16,zstd,true,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,376.8
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 100 frames",u16,zstd,true,1,false,256,256,100,libtiff,true,"",81.200,157.2978,150.6000,15.8505,794.671,1.1204,376.8
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1000 frames",u16,zstd,true,1,false,256,256,1000,raw,true,"",28.400,12.1496,7.1000,13.9668,10288.442,0.0743,363.0
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1000 frames",u16,zstd,true,1,false,256,256,1000,fast-tiff,true,"",364.000,165.2564,156.3000,166.4813,756.400,1.0109,363.0
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1000 frames",u16,zstd,true,1,false,256,256,1000,fast-tiff-preload,true,"",403.000,163.4789,163.4789,163.4789,764.625,1.0000,363.0
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1000 frames",u16,zstd,true,1,false,256,256,1000,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,363.0
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1000 frames",u16,zstd,true,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,363.0
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 1000 frames",u16,zstd,true,1,false,256,256,1000,libtiff,true,"",88.600,164.4599,152.9000,173.3339,760.064,1.0060,363.0
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10000 frames",u16,zstd,true,1,false,256,256,10000,raw,true,"",16165.200,14.4857,5.5000,253.9296,8629.213,0.0900,322.9
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10000 frames",u16,zstd,true,1,false,256,256,10000,fast-tiff,true,"",4076.900,164.8994,153.8000,1681.7807,758.038,1.0241,322.9
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10000 frames",u16,zstd,true,1,false,256,256,10000,fast-tiff-preload,true,"",3506.900,255.5020,255.5020,2555.0196,489.233,1.5868,322.9
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10000 frames",u16,zstd,true,1,false,256,256,10000,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,322.9
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10000 frames",u16,zstd,true,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,322.9
+"256x256 u16 zstd+pred","256x256 u16 zstd+pred / 10000 frames",u16,zstd,true,1,false,256,256,10000,libtiff,true,"",108.400,161.0144,150.1000,1636.4071,776.328,1.0000,322.9
+"256x256 u16 packbits","256x256 u16 packbits / 1 frames",u16,packbits,false,1,false,256,256,1,raw,true,"",22.900,17.8000,17.8000,0.0178,7022.472,0.6593,130.1
+"256x256 u16 packbits","256x256 u16 packbits / 1 frames",u16,packbits,false,1,false,256,256,1,fast-tiff,true,"",39.900,50.2000,50.2000,0.0502,2490.040,1.8593,130.1
+"256x256 u16 packbits","256x256 u16 packbits / 1 frames",u16,packbits,false,1,false,256,256,1,fast-tiff-preload,true,"",42.400,98.7000,98.7000,0.0987,1266.464,3.6556,130.1
+"256x256 u16 packbits","256x256 u16 packbits / 1 frames",u16,packbits,false,1,false,256,256,1,tiff-rs,true,"",98.600,4327.1000,4327.1000,4.3271,28.888,160.2630,130.1
+"256x256 u16 packbits","256x256 u16 packbits / 1 frames",u16,packbits,false,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,130.1
+"256x256 u16 packbits","256x256 u16 packbits / 1 frames",u16,packbits,false,1,false,256,256,1,libtiff,true,"",70.500,27.0000,27.0000,0.0270,4629.630,1.0000,130.1
+"256x256 u16 packbits","256x256 u16 packbits / 10 frames",u16,packbits,false,1,false,256,256,10,raw,true,"",27.700,6.6444,5.4000,0.0725,18812.709,0.2694,563.1
+"256x256 u16 packbits","256x256 u16 packbits / 10 frames",u16,packbits,false,1,false,256,256,10,fast-tiff,true,"",54.500,37.3111,33.1000,0.3877,3350.208,1.5126,563.1
+"256x256 u16 packbits","256x256 u16 packbits / 10 frames",u16,packbits,false,1,false,256,256,10,fast-tiff-preload,true,"",44.800,101.4200,101.4200,1.0142,1232.499,4.1116,563.1
+"256x256 u16 packbits","256x256 u16 packbits / 10 frames",u16,packbits,false,1,false,256,256,10,tiff-rs,true,"",106.500,4225.4889,4197.0000,42.3041,29.582,171.3036,563.1
+"256x256 u16 packbits","256x256 u16 packbits / 10 frames",u16,packbits,false,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,563.1
+"256x256 u16 packbits","256x256 u16 packbits / 10 frames",u16,packbits,false,1,false,256,256,10,libtiff,true,"",68.200,24.6667,24.0000,0.2497,5067.568,1.0000,563.1
+"256x256 u16 packbits","256x256 u16 packbits / 100 frames",u16,packbits,false,1,false,256,256,100,raw,true,"",24.900,10.9233,6.4000,1.2501,11443.393,0.3011,839.1
+"256x256 u16 packbits","256x256 u16 packbits / 100 frames",u16,packbits,false,1,false,256,256,100,fast-tiff,true,"",85.600,45.2344,40.6000,4.5671,2763.381,1.2470,839.1
+"256x256 u16 packbits","256x256 u16 packbits / 100 frames",u16,packbits,false,1,false,256,256,100,fast-tiff-preload,true,"",88.600,81.3280,81.3280,8.1328,1536.986,2.2420,839.1
+"256x256 u16 packbits","256x256 u16 packbits / 100 frames",u16,packbits,false,1,false,256,256,100,tiff-rs,true,"",139.600,4309.0000,4212.8000,432.2993,29.009,118.7852,839.1
+"256x256 u16 packbits","256x256 u16 packbits / 100 frames",u16,packbits,false,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,839.1
+"256x256 u16 packbits","256x256 u16 packbits / 100 frames",u16,packbits,false,1,false,256,256,100,libtiff,true,"",94.800,36.2756,31.5000,3.6713,3445.847,1.0000,839.1
+"256x256 u16 packbits","256x256 u16 packbits / 1000 frames",u16,packbits,false,1,false,256,256,1000,raw,true,"",26.700,11.9328,7.2000,13.8342,10475.348,0.2716,801.5
+"256x256 u16 packbits","256x256 u16 packbits / 1000 frames",u16,packbits,false,1,false,256,256,1000,fast-tiff,true,"",362.000,46.7160,43.2000,47.0505,2675.743,1.0632,801.5
+"256x256 u16 packbits","256x256 u16 packbits / 1000 frames",u16,packbits,false,1,false,256,256,1000,fast-tiff-preload,true,"",106629.300,91.2586,91.2586,91.2586,1369.734,2.0768,801.5
+"256x256 u16 packbits","256x256 u16 packbits / 1000 frames",u16,packbits,false,1,false,256,256,1000,tiff-rs,true,"",147.100,4350.4886,4244.4000,4358.7464,28.732,99.0075,801.5
+"256x256 u16 packbits","256x256 u16 packbits / 1000 frames",u16,packbits,false,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,801.5
+"256x256 u16 packbits","256x256 u16 packbits / 1000 frames",u16,packbits,false,1,false,256,256,1000,libtiff,true,"",128.000,43.9410,40.3000,44.2802,2844.724,1.0000,801.5
+"256x256 u16 packbits","256x256 u16 packbits / 10000 frames",u16,packbits,false,1,false,256,256,10000,raw,true,"",54.000,14.4238,7.5000,280.0565,8666.205,0.3262,100.1
+"256x256 u16 packbits","256x256 u16 packbits / 10000 frames",u16,packbits,false,1,false,256,256,10000,fast-tiff,true,"",127221.200,48.1495,38.0000,484.9282,2596.082,1.0890,100.1
+"256x256 u16 packbits","256x256 u16 packbits / 10000 frames",u16,packbits,false,1,false,256,256,10000,fast-tiff-preload,true,"",356460.400,148.5612,148.5612,1485.6119,841.404,3.3599,100.1
+"256x256 u16 packbits","256x256 u16 packbits / 10000 frames",u16,packbits,false,1,false,256,256,10000,tiff-rs,true,"",118494.500,4311.7965,4127.1000,43191.1020,28.990,97.5159,100.1
+"256x256 u16 packbits","256x256 u16 packbits / 10000 frames",u16,packbits,false,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,100.1
+"256x256 u16 packbits","256x256 u16 packbits / 10000 frames",u16,packbits,false,1,false,256,256,10000,libtiff,true,"",184.400,44.2163,39.8000,445.3052,2827.010,1.0000,100.1
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1 frames",f32,zstd,true,1,false,256,256,1,raw,true,"",27.400,23.5000,23.5000,0.0235,10638.298,0.0414,202.3
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1 frames",f32,zstd,true,1,false,256,256,1,fast-tiff,true,"",47.300,856.8000,856.8000,0.8568,291.783,1.5079,202.3
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1 frames",f32,zstd,true,1,false,256,256,1,fast-tiff-preload,true,"",52.200,904.1000,904.1000,0.9041,276.518,1.5912,202.3
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1 frames",f32,zstd,true,1,false,256,256,1,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,202.3
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1 frames",f32,zstd,true,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,202.3
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1 frames",f32,zstd,true,1,false,256,256,1,libtiff,true,"",91.300,568.2000,568.2000,0.5682,439.986,1.0000,202.3
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10 frames",f32,zstd,true,1,false,256,256,10,raw,true,"",22.200,24.0556,17.9000,0.2584,10392.610,0.0903,386.6
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10 frames",f32,zstd,true,1,false,256,256,10,fast-tiff,true,"",49.000,648.7556,643.3000,6.5232,385.353,2.4345,386.6
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10 frames",f32,zstd,true,1,false,256,256,10,fast-tiff-preload,true,"",51.600,266.4800,266.4800,2.6648,938.157,1.0000,386.6
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10 frames",f32,zstd,true,1,false,256,256,10,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,386.6
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10 frames",f32,zstd,true,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,386.6
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10 frames",f32,zstd,true,1,false,256,256,10,libtiff,true,"",93.600,506.6667,444.4000,5.1261,493.421,1.9013,386.6
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 100 frames",f32,zstd,true,1,false,256,256,100,raw,true,"",24.300,23.4100,12.1000,2.5093,10679.197,0.1440,450.0
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 100 frames",f32,zstd,true,1,false,256,256,100,fast-tiff,true,"",87.800,641.5244,633.7000,64.2877,389.697,3.9450,450.0
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 100 frames",f32,zstd,true,1,false,256,256,100,fast-tiff-preload,true,"",103.900,162.6190,162.6190,16.2619,1537.336,1.0000,450.0
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 100 frames",f32,zstd,true,1,false,256,256,100,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,450.0
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 100 frames",f32,zstd,true,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,450.0
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 100 frames",f32,zstd,true,1,false,256,256,100,libtiff,true,"",91.500,445.8289,436.6000,44.9770,560.753,2.7416,450.0
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1000 frames",f32,zstd,true,1,false,256,256,1000,raw,true,"",30.800,27.7444,13.9000,155.3418,9010.813,0.1410,499.4
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1000 frames",f32,zstd,true,1,false,256,256,1000,fast-tiff,true,"",450.300,647.2606,633.4000,650.6502,386.243,3.2883,499.4
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1000 frames",f32,zstd,true,1,false,256,256,1000,fast-tiff-preload,true,"",423.300,196.8380,196.8380,196.8380,1270.080,1.0000,499.4
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1000 frames",f32,zstd,true,1,false,256,256,1000,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,499.4
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1000 frames",f32,zstd,true,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,499.4
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 1000 frames",f32,zstd,true,1,false,256,256,1000,libtiff,true,"",110.100,450.8323,436.6000,457.1737,554.530,2.2904,499.4
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10000 frames",f32,zstd,true,1,false,256,256,10000,raw,true,"",4045.800,28.9070,11.8000,411.2474,8648.421,0.1039,456.3
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10000 frames",f32,zstd,true,1,false,256,256,10000,fast-tiff,true,"",4257.900,644.0243,632.1000,6482.9511,388.184,2.3156,456.3
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10000 frames",f32,zstd,true,1,false,256,256,10000,fast-tiff-preload,true,"",3729.200,278.1223,278.1223,2781.2227,898.885,1.0000,456.3
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10000 frames",f32,zstd,true,1,false,256,256,10000,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,456.3
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10000 frames",f32,zstd,true,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,456.3
+"256x256 f32 zstd+pred","256x256 f32 zstd+pred / 10000 frames",f32,zstd,true,1,false,256,256,10000,libtiff,true,"",111.400,445.2172,433.4000,4485.3274,561.524,1.6008,456.3
+"256x256 rgb8 none","256x256 rgb8 none / 1 frames",rgb8,none,false,1,false,256,256,1,raw,true,"",22.600,17.8000,17.8000,0.0178,10533.708,1.1634,329.0
+"256x256 rgb8 none","256x256 rgb8 none / 1 frames",rgb8,none,false,1,false,256,256,1,fast-tiff,true,"",40.500,119.3000,119.3000,0.1193,1571.668,7.7974,329.0
+"256x256 rgb8 none","256x256 rgb8 none / 1 frames",rgb8,none,false,1,false,256,256,1,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,329.0
+"256x256 rgb8 none","256x256 rgb8 none / 1 frames",rgb8,none,false,1,false,256,256,1,tiff-rs,true,"",104.700,15.3000,15.3000,0.0153,12254.902,1.0000,329.0
+"256x256 rgb8 none","256x256 rgb8 none / 1 frames",rgb8,none,false,1,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,329.0
+"256x256 rgb8 none","256x256 rgb8 none / 1 frames",rgb8,none,false,1,false,256,256,1,libtiff,true,"",68.400,30.2000,30.2000,0.0302,6208.609,1.9739,329.0
+"256x256 rgb8 none","256x256 rgb8 none / 10 frames",rgb8,none,false,1,false,256,256,10,raw,true,"",28.000,9.0556,6.4000,0.0966,20705.521,0.8308,1639.1
+"256x256 rgb8 none","256x256 rgb8 none / 10 frames",rgb8,none,false,1,false,256,256,10,fast-tiff,true,"",52.900,89.6333,86.9000,0.9099,2091.856,8.2232,1639.1
+"256x256 rgb8 none","256x256 rgb8 none / 10 frames",rgb8,none,false,1,false,256,256,10,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,1639.1
+"256x256 rgb8 none","256x256 rgb8 none / 10 frames",rgb8,none,false,1,false,256,256,10,tiff-rs,true,"",103.800,10.9000,10.1000,0.1136,17201.835,1.0000,1639.1
+"256x256 rgb8 none","256x256 rgb8 none / 10 frames",rgb8,none,false,1,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,1639.1
+"256x256 rgb8 none","256x256 rgb8 none / 10 frames",rgb8,none,false,1,false,256,256,10,libtiff,true,"",112.700,34.9111,29.5000,0.3600,5370.783,3.2029,1639.1
+"256x256 rgb8 none","256x256 rgb8 none / 100 frames",rgb8,none,false,1,false,256,256,100,raw,true,"",24.600,17.6256,10.1000,1.9319,10637.963,0.7646,3357.5
+"256x256 rgb8 none","256x256 rgb8 none / 100 frames",rgb8,none,false,1,false,256,256,100,fast-tiff,true,"",114.600,103.4478,95.0000,10.4029,1812.509,4.4875,3357.5
+"256x256 rgb8 none","256x256 rgb8 none / 100 frames",rgb8,none,false,1,false,256,256,100,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,3357.5
+"256x256 rgb8 none","256x256 rgb8 none / 100 frames",rgb8,none,false,1,false,256,256,100,tiff-rs,true,"",112.500,23.0522,15.2000,2.4622,8133.706,1.0000,3357.5
+"256x256 rgb8 none","256x256 rgb8 none / 100 frames",rgb8,none,false,1,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,3357.5
+"256x256 rgb8 none","256x256 rgb8 none / 100 frames",rgb8,none,false,1,false,256,256,100,libtiff,true,"",84.000,41.7033,38.3000,4.2254,4496.043,1.8091,3357.5
+"256x256 rgb8 none","256x256 rgb8 none / 1000 frames",rgb8,none,false,1,false,256,256,1000,raw,true,"",27.900,18.8110,11.7000,20.4895,9967.572,0.7244,3710.2
+"256x256 rgb8 none","256x256 rgb8 none / 1000 frames",rgb8,none,false,1,false,256,256,1000,fast-tiff,true,"",570.500,108.6609,98.5000,109.1256,1725.552,4.1843,3710.2
+"256x256 rgb8 none","256x256 rgb8 none / 1000 frames",rgb8,none,false,1,false,256,256,1000,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,3710.2
+"256x256 rgb8 none","256x256 rgb8 none / 1000 frames",rgb8,none,false,1,false,256,256,1000,tiff-rs,true,"",163.800,25.9684,15.2000,27.8386,7220.302,1.0000,3710.2
+"256x256 rgb8 none","256x256 rgb8 none / 1000 frames",rgb8,none,false,1,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,3710.2
+"256x256 rgb8 none","256x256 rgb8 none / 1000 frames",rgb8,none,false,1,false,256,256,1000,libtiff,true,"",120.500,48.5003,43.0000,50.7862,3865.953,1.8677,3710.2
+"256x256 rgb8 none","256x256 rgb8 none / 10000 frames",rgb8,none,false,1,false,256,256,10000,raw,true,"",29.200,21.9513,11.3000,343.6441,8541.622,0.8016,3434.2
+"256x256 rgb8 none","256x256 rgb8 none / 10000 frames",rgb8,none,false,1,false,256,256,10000,fast-tiff,true,"",117572.600,112.8972,95.8000,1138.2493,1660.803,4.1227,3434.2
+"256x256 rgb8 none","256x256 rgb8 none / 10000 frames",rgb8,none,false,1,false,256,256,10000,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,3434.2
+"256x256 rgb8 none","256x256 rgb8 none / 10000 frames",rgb8,none,false,1,false,256,256,10000,tiff-rs,true,"",109603.200,27.3845,13.5000,293.4248,6846.945,1.0000,3434.2
+"256x256 rgb8 none","256x256 rgb8 none / 10000 frames",rgb8,none,false,1,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,3434.2
+"256x256 rgb8 none","256x256 rgb8 none / 10000 frames",rgb8,none,false,1,false,256,256,10000,libtiff,true,"",216142.900,51.7483,47.2000,527.3989,3623.310,1.8897,3434.2
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1 frames",rgb16,deflate,true,2,false,256,256,1,raw,true,"",28.300,26.8000,26.8000,0.0268,13992.537,0.0759,117.3
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1 frames",rgb16,deflate,true,2,false,256,256,1,fast-tiff,true,"",43.400,394.5000,394.5000,0.3945,950.570,1.1176,117.3
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1 frames",rgb16,deflate,true,2,false,256,256,1,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,117.3
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1 frames",rgb16,deflate,true,2,false,256,256,1,tiff-rs,true,"",142.100,353.0000,353.0000,0.3530,1062.323,1.0000,117.3
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1 frames",rgb16,deflate,true,2,false,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,117.3
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1 frames",rgb16,deflate,true,2,false,256,256,1,libtiff,true,"",94.900,417.4000,417.4000,0.4174,898.419,1.1824,117.3
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10 frames",rgb16,deflate,true,2,false,256,256,10,raw,true,"",27.900,36.4333,29.5000,0.3808,10292.772,0.1420,168.9
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10 frames",rgb16,deflate,true,2,false,256,256,10,fast-tiff,true,"",77.200,292.8333,286.7000,2.9917,1280.592,1.1416,168.9
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10 frames",rgb16,deflate,true,2,false,256,256,10,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,168.9
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10 frames",rgb16,deflate,true,2,false,256,256,10,tiff-rs,true,"",141.300,256.5222,253.5000,2.6212,1461.862,1.0000,168.9
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10 frames",rgb16,deflate,true,2,false,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,168.9
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10 frames",rgb16,deflate,true,2,false,256,256,10,libtiff,true,"",78.700,318.3444,312.1000,3.2076,1177.969,1.2410,168.9
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 100 frames",rgb16,deflate,true,2,false,256,256,100,raw,true,"",24.500,36.9344,29.1000,3.8396,10153.124,0.1610,191.0
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 100 frames",rgb16,deflate,true,2,false,256,256,100,fast-tiff,true,"",114.300,229.4022,227.9000,23.0905,1634.683,1.0000,191.0
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 100 frames",rgb16,deflate,true,2,false,256,256,100,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,191.0
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 100 frames",rgb16,deflate,true,2,false,256,256,100,tiff-rs,true,"",116.900,250.1356,248.9000,25.0929,1499.187,1.0904,191.0
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 100 frames",rgb16,deflate,true,2,false,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,191.0
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 100 frames",rgb16,deflate,true,2,false,256,256,100,libtiff,true,"",82.000,310.8200,309.7000,31.1493,1206.486,1.3549,191.0
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1000 frames",rgb16,deflate,true,2,false,256,256,1000,raw,true,"",25.700,43.6467,28.0000,45.2743,8591.721,0.1888,193.3
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1000 frames",rgb16,deflate,true,2,false,256,256,1000,fast-tiff,true,"",674.800,231.1292,228.2000,232.5434,1622.469,1.0000,193.3
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1000 frames",rgb16,deflate,true,2,false,256,256,1000,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,193.3
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1000 frames",rgb16,deflate,true,2,false,256,256,1000,tiff-rs,true,"",161.400,253.6333,250.5000,255.4342,1478.512,1.0974,193.3
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1000 frames",rgb16,deflate,true,2,false,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,193.3
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 1000 frames",rgb16,deflate,true,2,false,256,256,1000,libtiff,true,"",128.100,311.4321,308.8000,311.8687,1204.115,1.3474,193.3
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10000 frames",rgb16,deflate,true,2,false,256,256,10000,raw,true,"",994.300,44.4000,18.6000,563.3949,8445.954,0.1894,176.5
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10000 frames",rgb16,deflate,true,2,false,256,256,10000,fast-tiff,true,"",7334.000,234.4061,231.3000,2354.7962,1599.788,1.0000,176.5
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10000 frames",rgb16,deflate,true,2,false,256,256,10000,fast-tiff-preload,false,"preload_frames_* is single-plane",0.000,0.0000,0.0000,0.0000,0.000,0.0000,176.5
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10000 frames",rgb16,deflate,true,2,false,256,256,10000,tiff-rs,true,"",173.600,254.8119,251.3000,2560.8406,1471.674,1.0871,176.5
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10000 frames",rgb16,deflate,true,2,false,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,176.5
+"256x256 rgb16 deflate+pred","256x256 rgb16 deflate+pred / 10000 frames",rgb16,deflate,true,2,false,256,256,10000,libtiff,true,"",150.500,313.0730,310.5000,3137.8913,1197.804,1.3356,176.5
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1 frames",u16,none,false,1,true,256,256,1,raw,true,"",26.600,17.7000,17.7000,0.0177,7062.147,1.0793,219.1
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1 frames",u16,none,false,1,true,256,256,1,fast-tiff,true,"",47.500,31.7000,31.7000,0.0317,3943.218,1.9329,219.1
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1 frames",u16,none,false,1,true,256,256,1,fast-tiff-preload,true,"",46.400,102.4000,102.4000,0.1024,1220.703,6.2439,219.1
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1 frames",u16,none,false,1,true,256,256,1,tiff-rs,true,"",121.000,16.4000,16.4000,0.0164,7621.951,1.0000,219.1
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1 frames",u16,none,false,1,true,256,256,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,219.1
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1 frames",u16,none,false,1,true,256,256,1,libtiff,true,"",70.300,21.7000,21.7000,0.0217,5760.369,1.3232,219.1
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10 frames",u16,none,false,1,true,256,256,10,raw,true,"",28.400,6.0444,4.3000,0.0659,20680.147,0.5360,1422.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10 frames",u16,none,false,1,true,256,256,10,fast-tiff,true,"",46.300,23.5667,22.4000,0.2418,5304.102,2.0897,1422.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10 frames",u16,none,false,1,true,256,256,10,fast-tiff-preload,true,"",44.800,106.6600,106.6600,1.0666,1171.948,9.4575,1422.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10 frames",u16,none,false,1,true,256,256,10,tiff-rs,true,"",136.400,11.2778,10.5000,0.1175,11083.744,1.0000,1422.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10 frames",u16,none,false,1,true,256,256,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,1422.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10 frames",u16,none,false,1,true,256,256,10,libtiff,true,"",68.100,20.6111,20.1000,0.2087,6064.690,1.8276,1422.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 100 frames",u16,none,false,1,true,256,256,100,raw,true,"",23.700,10.8322,7.2000,1.2422,11539.645,0.7635,2751.3
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 100 frames",u16,none,false,1,true,256,256,100,fast-tiff,true,"",88.600,31.9978,28.4000,3.2250,3906.521,2.2555,2751.3
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 100 frames",u16,none,false,1,true,256,256,100,fast-tiff-preload,true,"",80.400,76.0020,76.0020,7.6002,1644.694,5.3573,2751.3
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 100 frames",u16,none,false,1,true,256,256,100,tiff-rs,true,"",119.800,14.1867,10.5000,1.5812,8811.090,1.0000,2751.3
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 100 frames",u16,none,false,1,true,256,256,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,2751.3
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 100 frames",u16,none,false,1,true,256,256,100,libtiff,true,"",86.000,26.8456,23.8000,2.7309,4656.264,1.8923,2751.3
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1000 frames",u16,none,false,1,true,256,256,1000,raw,true,"",25.900,11.8327,7.0000,13.6516,10563.975,0.6920,2617.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1000 frames",u16,none,false,1,true,256,256,1000,fast-tiff,true,"",386.900,33.8048,30.5000,34.0198,3697.702,1.9769,2617.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1000 frames",u16,none,false,1,true,256,256,1000,fast-tiff-preload,true,"",384.600,74.4459,74.4459,74.4459,1679.072,4.3537,2617.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1000 frames",u16,none,false,1,true,256,256,1000,tiff-rs,true,"",174.000,17.0996,15.2000,19.0441,7310.132,1.0000,2617.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1000 frames",u16,none,false,1,true,256,256,1000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,2617.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 1000 frames",u16,none,false,1,true,256,256,1000,libtiff,true,"",115.300,32.7698,29.1000,32.9756,3814.490,1.9164,2617.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10000 frames",u16,none,false,1,true,256,256,10000,raw,true,"",29.300,14.7326,7.6000,163.8651,8484.598,0.8084,2419.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10000 frames",u16,none,false,1,true,256,256,10000,fast-tiff,true,"",64248.200,34.5848,23.9000,347.8914,3614.300,1.8976,2419.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10000 frames",u16,none,false,1,true,256,256,10000,fast-tiff-preload,true,"",224018.300,116.8588,116.8588,1168.5879,1069.667,6.4119,2419.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10000 frames",u16,none,false,1,true,256,256,10000,tiff-rs,true,"",109223.100,18.2252,9.7000,203.1386,6858.619,1.0000,2419.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10000 frames",u16,none,false,1,true,256,256,10000,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,2419.9
+"256x256 u16 none bigtiff","256x256 u16 none bigtiff / 10000 frames",u16,none,false,1,true,256,256,10000,libtiff,true,"",219855.300,36.2478,32.6000,366.4408,3448.484,1.9889,2419.9
+"2048x2048 u16 none","2048x2048 u16 none / 1 frames",u16,none,false,1,false,2048,2048,1,raw,true,"",23.900,1311.0000,1311.0000,1.3110,6102.212,0.9199,3691.6
+"2048x2048 u16 none","2048x2048 u16 none / 1 frames",u16,none,false,1,false,2048,2048,1,fast-tiff,true,"",68.400,3252.8000,3252.8000,3.2528,2459.420,2.2823,3691.6
+"2048x2048 u16 none","2048x2048 u16 none / 1 frames",u16,none,false,1,false,2048,2048,1,fast-tiff-preload,true,"",52.300,6287.9000,6287.9000,6.2879,1272.285,4.4119,3691.6
+"2048x2048 u16 none","2048x2048 u16 none / 1 frames",u16,none,false,1,false,2048,2048,1,tiff-rs,true,"",111.100,1597.7000,1597.7000,1.5977,5007.198,1.1210,3691.6
+"2048x2048 u16 none","2048x2048 u16 none / 1 frames",u16,none,false,1,false,2048,2048,1,tinytiff,true,"",96.300,1425.2000,1425.2000,1.4252,5613.247,1.0000,3691.6
+"2048x2048 u16 none","2048x2048 u16 none / 1 frames",u16,none,false,1,false,2048,2048,1,libtiff,true,"",85.700,2447.5000,2447.5000,2.4475,3268.641,1.7173,3691.6
+"2048x2048 u16 none","2048x2048 u16 none / 10 frames",u16,none,false,1,false,2048,2048,10,raw,true,"",25.900,913.1222,884.4000,9.8134,8761.149,0.8354,4936.5
+"2048x2048 u16 none","2048x2048 u16 none / 10 frames",u16,none,false,1,false,2048,2048,10,fast-tiff,true,"",136.100,2454.1667,2280.7000,25.3733,3259.762,2.2452,4936.5
+"2048x2048 u16 none","2048x2048 u16 none / 10 frames",u16,none,false,1,false,2048,2048,10,fast-tiff-preload,true,"",130.900,4434.8800,4434.8800,44.3488,1803.882,4.0572,4936.5
+"2048x2048 u16 none","2048x2048 u16 none / 10 frames",u16,none,false,1,false,2048,2048,10,tiff-rs,true,"",167.300,1992.7000,1588.3000,22.0311,4014.653,1.8230,4936.5
+"2048x2048 u16 none","2048x2048 u16 none / 10 frames",u16,none,false,1,false,2048,2048,10,tinytiff,true,"",431.400,1093.0778,1073.4000,11.8174,7318.784,1.0000,4936.5
+"2048x2048 u16 none","2048x2048 u16 none / 10 frames",u16,none,false,1,false,2048,2048,10,libtiff,true,"",170.900,2507.9000,2348.4000,25.7562,3189.920,2.2943,4936.5
+"2048x2048 u16 none","2048x2048 u16 none / 100 frames",u16,none,false,1,false,2048,2048,100,raw,true,"",34.800,918.9844,893.2000,94.7972,8705.262,0.9518,4795.3
+"2048x2048 u16 none","2048x2048 u16 none / 100 frames",u16,none,false,1,false,2048,2048,100,fast-tiff,true,"",176.600,2438.3089,2291.3000,246.4311,3280.962,2.5254,4795.3
+"2048x2048 u16 none","2048x2048 u16 none / 100 frames",u16,none,false,1,false,2048,2048,100,fast-tiff-preload,true,"",210592.600,4388.9240,4388.9240,438.8924,1822.770,4.5457,4795.3
+"2048x2048 u16 none","2048x2048 u16 none / 100 frames",u16,none,false,1,false,2048,2048,100,tiff-rs,true,"",99319.900,1897.4589,1764.6000,190.8901,4216.165,1.9653,4795.3
+"2048x2048 u16 none","2048x2048 u16 none / 100 frames",u16,none,false,1,false,2048,2048,100,tinytiff,true,"",329923.400,965.5011,739.5000,98.1873,8285.853,1.0000,4795.3
+"2048x2048 u16 none","2048x2048 u16 none / 100 frames",u16,none,false,1,false,2048,2048,100,libtiff,true,"",221713.500,2446.4733,2212.9000,248.7508,3270.013,2.5339,4795.3
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 1 frames",u16,none,false,32,false,2048,2048,1,raw,true,"",24.500,1644.9000,1644.9000,1.6449,4863.518,0.9259,3040.9
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 1 frames",u16,none,false,32,false,2048,2048,1,fast-tiff,true,"",63.500,3402.5000,3402.5000,3.4025,2351.212,1.9153,3040.9
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 1 frames",u16,none,false,32,false,2048,2048,1,fast-tiff-preload,true,"",52.100,10631.5000,10631.5000,10.6315,752.481,5.9845,3040.9
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 1 frames",u16,none,false,32,false,2048,2048,1,tiff-rs,true,"",129.800,1776.5000,1776.5000,1.7765,4503.237,1.0000,3040.9
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 1 frames",u16,none,false,32,false,2048,2048,1,tinytiff,true,"",116.600,1910.7000,1910.7000,1.9107,4186.947,1.0755,3040.9
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 1 frames",u16,none,false,32,false,2048,2048,1,libtiff,true,"",94.500,2819.2000,2819.2000,2.8192,2837.684,1.5869,3040.9
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 10 frames",u16,none,false,32,false,2048,2048,10,raw,true,"",24.100,920.0889,866.1000,9.9459,8694.812,0.8817,3418.4
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 10 frames",u16,none,false,32,false,2048,2048,10,fast-tiff,true,"",141.700,2223.6444,2193.2000,23.3933,3597.697,2.1308,3418.4
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 10 frames",u16,none,false,32,false,2048,2048,10,fast-tiff-preload,true,"",129.400,6597.6700,6597.6700,65.9767,1212.549,6.3222,3418.4
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 10 frames",u16,none,false,32,false,2048,2048,10,tiff-rs,true,"",175.000,1930.7778,1857.7000,19.4246,4143.408,1.8502,3418.4
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 10 frames",u16,none,false,32,false,2048,2048,10,tinytiff,true,"",160.500,1043.5778,973.1000,11.3301,7665.936,1.0000,3418.4
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 10 frames",u16,none,false,32,false,2048,2048,10,libtiff,true,"",152.800,2256.6333,2193.0000,23.3707,3545.104,2.1624,3418.4
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 100 frames",u16,none,false,32,false,2048,2048,100,raw,true,"",31.700,928.8511,905.1000,95.1052,8612.790,0.8947,3374.9
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 100 frames",u16,none,false,32,false,2048,2048,100,fast-tiff,true,"",25980.000,2256.7267,2173.5000,227.6562,3544.957,2.1737,3374.9
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 100 frames",u16,none,false,32,false,2048,2048,100,fast-tiff-preload,true,"",215727.400,6424.8280,6424.8280,642.4828,1245.170,6.1883,3374.9
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 100 frames",u16,none,false,32,false,2048,2048,100,tiff-rs,true,"",103697.800,2111.0856,1873.1000,235.4645,3789.520,2.0334,3374.9
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 100 frames",u16,none,false,32,false,2048,2048,100,tinytiff,true,"",351112.400,1038.2167,891.9000,112.6071,7705.521,1.0000,3374.9
+"2048x2048 u16 none rps64","2048x2048 u16 none rps64 / 100 frames",u16,none,false,32,false,2048,2048,100,libtiff,true,"",215589.600,2435.2478,2198.5000,247.1950,3285.087,2.3456,3374.9
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 1 frames",u16,zstd,true,32,false,2048,2048,1,raw,true,"",28.000,1719.8000,1719.8000,1.7198,4651.704,0.1833,513.7
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 1 frames",u16,zstd,true,32,false,2048,2048,1,fast-tiff,true,"",50.200,13184.0000,13184.0000,13.1840,606.796,1.4050,513.7
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 1 frames",u16,zstd,true,32,false,2048,2048,1,fast-tiff-preload,true,"",68.500,16783.6000,16783.6000,16.7836,476.656,1.7886,513.7
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 1 frames",u16,zstd,true,32,false,2048,2048,1,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,513.7
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 1 frames",u16,zstd,true,32,false,2048,2048,1,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,513.7
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 1 frames",u16,zstd,true,32,false,2048,2048,1,libtiff,true,"",84.000,9383.5000,9383.5000,9.3835,852.560,1.0000,513.7
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 10 frames",u16,zstd,true,32,false,2048,2048,10,raw,true,"",28.700,1070.9333,1045.3000,11.7525,7470.120,0.1244,499.8
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 10 frames",u16,zstd,true,32,false,2048,2048,10,fast-tiff,true,"",150.200,12501.9778,12448.2000,126.3221,639.899,1.4518,499.8
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 10 frames",u16,zstd,true,32,false,2048,2048,10,fast-tiff-preload,true,"",148.400,9513.5800,9513.5800,95.1358,840.903,1.1048,499.8
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 10 frames",u16,zstd,true,32,false,2048,2048,10,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,499.8
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 10 frames",u16,zstd,true,32,false,2048,2048,10,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,499.8
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 10 frames",u16,zstd,true,32,false,2048,2048,10,libtiff,true,"",102.500,8611.0778,8545.9000,87.1970,929.036,1.0000,499.8
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 100 frames",u16,zstd,true,32,false,2048,2048,100,raw,true,"",26.000,924.6011,903.6000,205.0257,8652.380,0.1077,451.5
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 100 frames",u16,zstd,true,32,false,2048,2048,100,fast-tiff,true,"",218.500,11897.9822,11612.7000,1221.9792,672.383,1.3859,451.5
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 100 frames",u16,zstd,true,32,false,2048,2048,100,fast-tiff-preload,true,"",185.200,8585.0420,8585.0420,858.5042,931.853,1.0000,451.5
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 100 frames",u16,zstd,true,32,false,2048,2048,100,tiff-rs,false,"unsupported error: compression method ZSTD is unsupported",0.000,0.0000,0.0000,0.0000,0.000,0.0000,451.5
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 100 frames",u16,zstd,true,32,false,2048,2048,100,tinytiff,false,"uncompressed single-sample classic TIFF only",0.000,0.0000,0.0000,0.0000,0.000,0.0000,451.5
+"2048x2048 u16 zstd+pred","2048x2048 u16 zstd+pred / 100 frames",u16,zstd,true,32,false,2048,2048,100,libtiff,true,"",265.800,8604.5533,8509.9000,867.7922,929.740,1.0023,451.5
