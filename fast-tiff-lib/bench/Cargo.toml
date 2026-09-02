@@ -4,14 +4,20 @@
 #   * fast-tiff-lib   (Rust, this repo, memory-mapped)  -- per-frame + preload
 #   * tiff            (Rust, crates.io, pure Rust)      -- reference decoder
 #   * TinyTIFF        (C, vendored, via FFI)            -- uncompressed only
-#   * libtiff         (C, system library, via FFI)      -- optional feature
+#   * libtiff         (C, vendored, via FFI)            -- the reference C impl
 #   * RAW fread       (lower-bound baseline)
 #
 # Methodology follows jkriege2/TinyTIFF's speedtest: per-frame timing, the
 # slowest REMOVE_SLOWEST_PERCENT trimmed before averaging, warm page cache.
 #
-# `--features libtiff` needs a system libtiff (Linux: libtiff-dev). Everything
-# else builds anywhere a C compiler exists (for the vendored TinyTIFF).
+# libtiff is vendored and built from source, like TinyTIFF, so the comparison is
+# always present and always the same libtiff on every machine. What once made
+# that a bad trade was the codecs: stripped of zlib and libzstd, libtiff cannot
+# read Deflate or Zstd, which is a third of this matrix, and measuring a crippled
+# build would have been worse than measuring none. Both now come from source too
+# (`libz-sys`, `zstd-sys`), so the vendored build is a complete one.
+#
+# The whole benchmark therefore needs nothing installed but a C compiler.
 
 [package]
 name = "tiff_read_bench"
@@ -24,6 +30,10 @@ build = "build.rs"
 
 [features]
 default = []
+# Kept only so an existing `--features libtiff` invocation still works. libtiff
+# is now vendored and always built, so the flag turns nothing on; it used to
+# mean "fail the build if no system libtiff was found", and there is no longer
+# anything to find.
 libtiff = []
 
 [dependencies]
@@ -31,6 +41,23 @@ fast-tiff-lib = { path = ".." }
 tiff = "0.11"
 anyhow = "1"
 sysinfo = "0.30"
+
+# The C codec libraries the vendored libtiff links against. Both build their
+# library from source bundled in the crate, so neither needs anything installed.
+#
+# Named here as *direct* dependencies for a reason beyond using them: cargo
+# passes a `links` crate's `DEP_<NAME>_*` variables only to the build scripts of
+# crates that depend on it directly. `zstd-sys` already arrives through
+# fast-tiff-lib, but transitively, so its include path would not reach our
+# build.rs — and libtiff's tif_zstd.c cannot compile without it.
+# `static` builds the bundled zlib rather than looking for a system one.
+libz-sys = { version = "1", features = ["static"] }
+# Defaults off: a *direct* dependency on zstd-sys turns on its `bindgen`
+# feature, which needs libclang installed — exactly the kind of prerequisite
+# this crate is trying not to have. Nothing here calls into it from Rust; it
+# is named only so its include path reaches build.rs, and cargo unions this
+# with whatever `zstd` already asked for.
+zstd-sys = { version = "2", default-features = false }
 
 [build-dependencies]
 cc = "1"

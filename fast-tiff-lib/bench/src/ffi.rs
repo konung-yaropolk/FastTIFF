@@ -9,13 +9,29 @@
 use std::os::raw::{c_char, c_int, c_void};
 
 // ---------------------------------------------------------------------------
-// libtiff (system, -ltiff) — only under `--features libtiff`
+// libtiff (vendored, built from source by build.rs)
 // ---------------------------------------------------------------------------
-#[cfg(feature = "libtiff")]
+
+// The codec libraries libtiff's Deflate and Zstd paths call into. Both are
+// built from source by their `-sys` crate; neither is called from Rust here.
+//
+// The `as _` bindings are load-bearing. rustc drops a dependency nothing
+// references, and drops its `#[link]` directive with it — which shows up not as
+// an unused-crate warning but as `unresolved external symbol deflate` from
+// libtiff's own object files, at the very end of the build. Naming them keeps
+// the libraries in the link.
+extern crate libz_sys as _;
+extern crate zstd_sys as _;
+
+#[cfg(libtiff)]
 pub mod libtiff {
     use super::*;
 
     #[repr(C)]
+    // Named as libtiff names it: this is the opaque `TIFF` handle from
+    // <tiffio.h>, and renaming it to `Tiff` would make the bindings read
+    // differently from the header they mirror.
+    #[allow(clippy::upper_case_acronyms)]
     pub struct TIFF {
         _private: [u8; 0],
     }
