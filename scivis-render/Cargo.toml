@@ -40,7 +40,7 @@ backend-glow = ["dep:glow", "dep:bytemuck"]
 # windowing layer uses — egui-wgpu 0.34 → wgpu 29, egui_glow 0.34 → glow 0.17.
 # Cargo unifies them automatically while the majors match; a host on a different
 # major would get a type mismatch at the `new()` call, not a subtle bug.
-wgpu = { version = "29", optional = true }
+wgpu = { version = "30", optional = true }
 glow = { version = "0.17", optional = true }
 # f32 -> f16 for the wgpu volume textures (R16Float); already in wgpu's tree.
 half = { version = "2", optional = true }
