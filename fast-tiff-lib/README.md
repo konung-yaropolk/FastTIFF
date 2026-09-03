@@ -17,6 +17,8 @@ It's the decode/parsing engine behind [FastTIFF](https://github.com/konung-yarop
 split out so it can be used on its own. No GUI, no GPU — just file → pixels +
 metadata (and back).
 
+Note, the API is unstable yet so updates may include breaking changes.
+
 ## What it does
 
 - **Memory-maps** the file and walks the whole IFD chain, treating each IFD as
