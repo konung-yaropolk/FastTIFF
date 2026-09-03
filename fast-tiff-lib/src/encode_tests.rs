@@ -113,7 +113,7 @@ fn header_and_chain_structure() {
     assert_eq!(frames[0].compression, Compression::None);
     // Uncompressed default: the whole frame as one strip.
     assert_eq!(frames[0].strip_offsets.len(), 1);
-    assert_eq!(frames[1].strip_byte_counts, vec![4]);
+    assert_eq!(&frames[1].strip_byte_counts[..], &[4]);
 }
 
 #[test]

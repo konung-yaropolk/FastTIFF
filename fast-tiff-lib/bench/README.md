@@ -61,6 +61,13 @@ Two rules keep it honest, and both are enforced in `src/measure.rs`:
 - **Open is timed separately from reads.** A reader that indexes the whole IFD
   chain up front pays at open and reads quickly after; one that walks lazily
   pays per frame. Summing them hides the trade, and the trade is the point.
+- **Every reader's indexing is timed somewhere.** For the lazy readers the walk
+  to the next directory is timed *with the frame that needs it*. It used to sit
+  outside both timers, which put a real and large cost in no column at all: on a
+  10 000-frame stack libtiff spends **13.6 us per frame** in
+  `TIFFReadDirectory`, against the **0.20 us per frame** fast-tiff-lib reports
+  at open for the same chain. Unmeasured, that made the reader that indexes
+  honestly look like the slow one on every chart that mentions indexing.
 
 Decode parallelism is off for the per-frame readers — steady-state single-frame
 latency, which is the viewer's scrubbing regime. The preload reader turns it on
@@ -117,13 +124,19 @@ machine embedded as `#` comments so a results file is self-describing.
   looks poor on tiny ones, where batch setup dominates.
 - **Windows note.** Forcing owned buffers penalises the mmap design: every
   first touch of a mapped page soft-faults, which costs more on Windows than a
-  buffered read into a reused buffer. The viewer's real path uploads straight
-  from the borrow, so these are a *lower bound* on the real-world advantage for
-  uncompressed scrubbing. On Linux the fault cost is far smaller.
+  buffered read into a reused buffer. On an uncompressed 256x256 u16 frame that
+  is 29 of the 37 us — read the same frames twice and the second pass takes
+  7.4. The viewer's real path uploads straight from the borrow and can absorb
+  the faults on a background thread (`TiffStack::prefetch_frame`), so these are
+  a *lower bound* on the real-world advantage for uncompressed scrubbing. On
+  Linux the fault cost is far smaller.
 - **The open/read trade is the interesting part of the sweep.** fast-tiff-lib
   indexes the whole IFD chain at open and then reads frames far faster; a lazy
-  reader pays as it goes. Open once and read many — the viewer's workload —
-  amortises the indexing. A single sequential pass over a huge stack may not.
+  reader pays as it goes, now visibly, in its per-frame column. Open once and
+  read many — the viewer's workload — amortises the indexing, and random access
+  is where it pays off most: seeking to an arbitrary frame of a 10 000-frame
+  stack costs 1.1 us against libtiff's 14.1 us, because `TIFFSetDirectory`
+  walks the chain and an index does not.
 
 ## Options
 

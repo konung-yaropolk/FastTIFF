@@ -370,3 +370,85 @@ fn the_valid_seed_still_decodes() {
     assert_eq!(px[1], 4000);
     assert_eq!(px[15], 15 * 4000);
 }
+
+// ---- IFD chain cycles ----
+//
+// A looping chain has to be rejected rather than walked forever. The check is
+// Brent's cycle detection over the same forward walk that builds the index —
+// it replaced a `HashSet` of every offset seen, which cost a hash insert per
+// frame and tens of megabytes on a large stack for a check that only ever
+// fires on a malformed file. Different algorithm, same guarantee, so it is
+// worth pinning all three shapes: a self-loop, a cycle through the head, and a
+// cycle the head is *not* part of (the case that needs the tortoise to walk
+// into the loop before it can meet the hare).
+
+/// Offset of the first IFD, and of its next-IFD pointer, in a `build_tiff` file.
+fn ifd_offsets(buf: &[u8]) -> (u32, usize) {
+    let ifd_off = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+    (ifd_off, buf.len() - 4)
+}
+
+/// Append `n` more copies of the file's single IFD, then link the chain
+/// according to `next`: entry `i` of `next` is the index of the IFD that IFD
+/// `i` points at. Index 0 is the original.
+fn chain_ifds(mut buf: Vec<u8>, copies: usize, next: &[usize]) -> Vec<u8> {
+    let (ifd_off, _) = ifd_offsets(&buf);
+    let block = buf[ifd_off as usize..].to_vec();
+    let mut offsets = vec![ifd_off];
+    for _ in 0..copies {
+        offsets.push(buf.len() as u32);
+        buf.extend_from_slice(&block);
+    }
+    for (i, &target) in next.iter().enumerate() {
+        // The next-IFD pointer is the last 4 bytes of each IFD block.
+        let ptr = offsets[i] as usize + block.len() - 4;
+        buf[ptr..ptr + 4].copy_from_slice(&offsets[target].to_le_bytes());
+    }
+    buf
+}
+
+#[test]
+fn self_referential_ifd_chain_is_rejected() {
+    let mut buf = valid_tiff();
+    let (ifd_off, next_ptr) = ifd_offsets(&buf);
+    buf[next_ptr..next_ptr + 4].copy_from_slice(&ifd_off.to_le_bytes());
+    let err = match TiffStack::from_bytes(buf) {
+        Ok(_) => panic!("a looping IFD chain was accepted"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("loops back"), "expected a loop error, got: {err}");
+}
+
+#[test]
+fn ifd_chain_cycle_through_the_first_directory_is_rejected() {
+    // 0 -> 1 -> 0
+    let buf = chain_ifds(valid_tiff(), 1, &[1, 0]);
+    let err = match TiffStack::from_bytes(buf) {
+        Ok(_) => panic!("a looping IFD chain was accepted"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("loops back"), "expected a loop error, got: {err}");
+}
+
+#[test]
+fn ifd_chain_cycle_the_head_is_not_part_of_is_rejected() {
+    // 0 -> 1 -> 2 -> 1: the first directory is outside the loop.
+    let buf = chain_ifds(valid_tiff(), 2, &[1, 2, 1]);
+    let err = match TiffStack::from_bytes(buf) {
+        Ok(_) => panic!("a looping IFD chain was accepted"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("loops back"), "expected a loop error, got: {err}");
+}
+
+#[test]
+fn a_long_acyclic_chain_is_not_mistaken_for_a_loop() {
+    // The counterpart the cycle check must not break: 40 distinct directories
+    // ending in 0. Brent's resets its reference offset at powers of two, so a
+    // chain long enough to cross several of those is the shape to check.
+    let n = 40usize;
+    let next: Vec<usize> = (1..=n).collect(); // 0->1, 1->2, ..., last->0 (end)
+    let buf = chain_ifds(valid_tiff(), n, &next[..n]);
+    let stack = TiffStack::from_bytes(buf).expect("a chain of distinct IFDs must open");
+    assert_eq!(stack.frames.len(), n + 1);
+}

@@ -163,14 +163,37 @@ impl RawIfdEntry {
 
     /// Interpret as an array of u64 (widens BYTE/SHORT/LONG; reads LONG8).
     pub fn as_u64_array(&self, file: &[u8], order: ByteOrder) -> Result<Vec<u64>> {
-        let bytes = self.owned_bytes(file, order)?;
+        let mut out = Vec::new();
+        self.read_u64_array(file, order, &mut out)?;
+        Ok(out)
+    }
+
+    /// [`as_u64_array`](Self::as_u64_array) into a caller-owned buffer, and
+    /// without copying the source bytes first.
+    ///
+    /// StripOffsets and StripByteCounts are read once per frame, so opening a
+    /// large stack runs this twice per frame. The `owned_bytes` route it
+    /// replaces allocated a `Vec<u8>` copy of the field before decoding a
+    /// single element — two heap allocations per array where none is needed,
+    /// since the field either sits inline in the entry or is already a slice
+    /// of the mapping.
+    pub fn read_u64_array(&self, file: &[u8], order: ByteOrder, out: &mut Vec<u64>) -> Result<()> {
         let sz = type_size(self.field_type)
             .ok_or_else(|| anyhow!("unsupported TIFF field type {}", self.field_type))?;
+        let len = self
+            .data_len()
+            .ok_or_else(|| anyhow!("unsupported TIFF field type {}", self.field_type))?;
+        let bytes: &[u8] = if len <= self.flavor.inline_capacity() {
+            &self.value_or_offset[..len]
+        } else {
+            self.raw_bytes(file, order)?
+        };
+        out.clear();
         // Size from the bytes we actually resolved, not the file's declared
         // `count`: the two agree for a well-formed entry, but `count` is
         // attacker-controlled and would otherwise reserve 8 bytes per claimed
         // element before a single one is read.
-        let mut out = Vec::with_capacity(bytes.len() / sz.max(1));
+        out.reserve(bytes.len() / sz.max(1));
         for chunk in bytes.chunks_exact(sz) {
             let v = match sz {
                 1 => chunk[0] as u64,
@@ -181,7 +204,7 @@ impl RawIfdEntry {
             };
             out.push(v);
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Interpret as an array of u32 (fails if any value exceeds u32).
@@ -256,6 +279,26 @@ pub struct ParsedIfd {
 /// Read the IFD at `offset` (header-relative, i.e. absolute file offset),
 /// in the layout `flavor` dictates.
 pub fn read_ifd(file: &[u8], offset: usize, order: ByteOrder, flavor: TiffFlavor) -> Result<ParsedIfd> {
+    let mut entries = Vec::new();
+    let next_offset = read_ifd_into(file, offset, order, flavor, &mut entries)?;
+    Ok(ParsedIfd { entries, next_offset })
+}
+
+/// [`read_ifd`] into an entry buffer the caller owns, returning the next IFD's
+/// offset (0 = end of chain).
+///
+/// Walking a stack parses one IFD per frame, and a fresh `Vec` per IFD is a
+/// heap allocation and free for every frame in the file — on a million-frame
+/// stack that costs more than the parsing does. A caller walking a chain passes
+/// the same buffer every time; it is cleared, never reallocated after the first
+/// few IFDs.
+pub fn read_ifd_into(
+    file: &[u8],
+    offset: usize,
+    order: ByteOrder,
+    flavor: TiffFlavor,
+    entries: &mut Vec<RawIfdEntry>,
+) -> Result<u64> {
     let (count_len, entry_len, next_len) = match flavor {
         TiffFlavor::Classic => (2usize, 12usize, 4usize),
         TiffFlavor::Big => (8, 20, 8),
@@ -287,7 +330,8 @@ pub fn read_ifd(file: &[u8], offset: usize, order: ByteOrder, flavor: TiffFlavor
         .get(at(entries_start, entries_len)?)
         .ok_or_else(|| anyhow!("IFD at {} truncated (entry table out of bounds)", offset))?;
 
-    let mut entries = Vec::with_capacity(entry_count);
+    entries.clear();
+    entries.reserve(entry_count);
     for chunk in entries_bytes.chunks_exact(entry_len) {
         let tag = order.u16(&chunk[0..2]);
         let field_type = order.u16(&chunk[2..4]);
@@ -322,9 +366,36 @@ pub fn read_ifd(file: &[u8], offset: usize, order: ByteOrder, flavor: TiffFlavor
         TiffFlavor::Big => order.u64(next_bytes),
     };
 
-    Ok(ParsedIfd {
-        entries,
-        next_offset,
+    Ok(next_offset)
+}
+
+/// The chain link out of the IFD at `offset`, without parsing its entries.
+///
+/// Cheap enough to be worth having separately: the cycle check needs to know
+/// where the chain goes, not what is in the directory.
+pub fn next_ifd_offset(
+    file: &[u8],
+    offset: usize,
+    order: ByteOrder,
+    flavor: TiffFlavor,
+) -> Option<u64> {
+    let (count_len, entry_len, next_len) = match flavor {
+        TiffFlavor::Classic => (2usize, 12usize, 4usize),
+        TiffFlavor::Big => (8, 20, 8),
+    };
+    let count_bytes = file.get(offset..offset.checked_add(count_len)?)?;
+    let entry_count = usize::try_from(match flavor {
+        TiffFlavor::Classic => order.u16(count_bytes) as u64,
+        TiffFlavor::Big => order.u64(count_bytes),
+    })
+    .ok()?;
+    let pos = offset
+        .checked_add(count_len)?
+        .checked_add(entry_count.checked_mul(entry_len)?)?;
+    let next_bytes = file.get(pos..pos.checked_add(next_len)?)?;
+    Some(match flavor {
+        TiffFlavor::Classic => order.u32(next_bytes) as u64,
+        TiffFlavor::Big => order.u64(next_bytes),
     })
 }
 

@@ -288,6 +288,17 @@ Code that named the type (`let m: &Mmap = &stack.mmap`) has to match on `Bytes`
 or go through the deref. Nothing else moved, and `TiffStack::open` is unchanged
 on a default build.
 
+#### Migrating from 0.16.0 and earlier
+
+`FrameInfo::strip_offsets` and `strip_byte_counts` are [`Strips`] rather than
+`Vec<u64>`. Reading them is unchanged — `Strips` derefs to `&[u64]` — so this
+only affects code that constructs a `FrameInfo` by hand, which needs `.into()`:
+
+```diff
+- strip_offsets: vec![0],
++ strip_offsets: vec![0].into(),
+```
+
 ### `Bytes`
 
 Where the file's bytes live. It derefs to `&[u8]`, so it's passed straight to
@@ -325,11 +336,19 @@ pub struct FrameInfo {
                                        // table is carried in strip_offsets/
                                        // strip_byte_counts
     pub ink_set: u16,                  // tag 332; 1 = CMYK (the default), 2 = other inks
-    pub strip_offsets: Vec<u64>,
-    pub strip_byte_counts: Vec<u64>,
+    pub strip_offsets: Strips,         // derefs to &[u64]
+    pub strip_byte_counts: Strips,
     pub rows_per_strip: u32,
 }
 ```
+
+[`Strips`] holds a frame's strip (or tile) offsets. It derefs to `&[u64]`, so
+`len()`, indexing, `iter()` and `par_iter()` all read exactly as they did for
+the `Vec<u64>` it replaced; only code that *builds* one needs `.into()`. The
+reason it exists is that nearly every frame is a single strip, and a `Vec` for
+one element is a heap allocation per frame that lives as long as the stack —
+two of them. Keeping the single-strip case inline took opening a 100 000-frame
+stack from 49 ms to 20 ms.
 
 `frame.is_rgb()` is true for an RGB frame whose samples are color components you
 can split out; `frame.is_planar()` says which interleaving they're stored in.

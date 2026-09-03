@@ -764,11 +764,13 @@ pub fn read_planes_u8_into(
     let fuse = spp > 1 && !frame.is_planar() && frame.predictor == 2 && frame.bits_per_sample == 8 && !frame.is_tiled();
     let native = decode_native_bytes_opt(mmap, frame, file_order, !fuse)?;
     out.resize_with(spp, Vec::new);
-    for (p, plane_out) in out.iter_mut().enumerate() {
+    for plane_out in out.iter_mut() {
         ensure_len(plane_out, n_pixels);
-        if fuse {
-            let width = frame.width as usize;
-            let row_samples = width * spp;
+    }
+    if fuse {
+        let width = frame.width as usize;
+        let row_samples = width * spp;
+        for (p, plane_out) in out.iter_mut().enumerate() {
             let plane = p.min(spp - 1);
             for (row_idx, out_row) in plane_out.chunks_mut(width.max(1)).enumerate() {
                 let row_base = row_idx * row_samples;
@@ -778,11 +780,127 @@ pub fn read_planes_u8_into(
                     *o = acc;
                 }
             }
-        } else {
+        }
+    } else if spp > 1 && !frame.is_planar() && frame.bits_per_sample == 8 {
+        // Chunky: split every plane in one pass over the source (see
+        // `deinterleave_u8`) instead of one strided pass per plane.
+        deinterleave_u8(&native, spp, out)?;
+    } else {
+        for (p, plane_out) in out.iter_mut().enumerate() {
             plane_u8_from_native(&native, frame, p, plane_out)?;
         }
     }
     Ok(())
+}
+
+/// Split a chunky 8-bit frame into one plane per sample, reading the source
+/// **once**.
+///
+/// The per-plane gather it replaces walked the whole frame once per sample,
+/// each pass touching every cache line to take one byte in `spp` — three reads
+/// of a 192 KB RGB frame to produce 192 KB of output, at about 4.6 GB/s. One
+/// pass gets 6.7, and on x86 a `pshufb` de-interleave gets 27: for a 256x256
+/// RGB8 frame, 85 us down to 14.5.
+fn deinterleave_u8(native: &[u8], spp: usize, out: &mut [Vec<u8>]) -> Result<()> {
+    let n = out.first().map_or(0, |p| p.len());
+    if n == 0 || spp == 0 {
+        return Ok(());
+    }
+    let need = n
+        .checked_mul(spp)
+        .ok_or_else(|| anyhow!("frame size overflows"))?;
+    let src = native
+        .get(..need)
+        .ok_or_else(|| anyhow!("plane data out of file bounds"))?;
+
+    #[cfg(target_arch = "x86_64")]
+    if spp == 3 && out.len() >= 3 && std::arch::is_x86_feature_detected!("ssse3") {
+        let (a, rest) = out.split_at_mut(1);
+        let (b, c) = rest.split_at_mut(1);
+        // SAFETY: SSSE3 is confirmed present just above, and the three
+        // destinations are distinct slices of `n` bytes each while `src` holds
+        // exactly `n * 3` — which is what `deinterleave_rgb8_ssse3` requires.
+        unsafe { deinterleave_rgb8_ssse3(src, &mut a[0], &mut b[0], &mut c[0]) };
+        return Ok(());
+    }
+
+    for (i, px) in src.chunks_exact(spp).enumerate() {
+        for (o, &v) in out.iter_mut().zip(px.iter()) {
+            o[i] = v;
+        }
+    }
+    Ok(())
+}
+
+/// `pshufb` de-interleave of chunky RGB8: 48 source bytes -> 16 each of R, G, B.
+///
+/// Each output register is assembled from all three input registers, since a
+/// 16-byte window of RGB triples straddles them; `_mm_shuffle_epi8` zeroes the
+/// lanes a given input does not supply, so the three shuffles OR together
+/// cleanly.
+///
+/// # Safety
+/// The caller must have confirmed SSSE3 at run time. `r`, `g` and `b` must all
+/// be `n` bytes and `src` exactly `3 * n`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn deinterleave_rgb8_ssse3(src: &[u8], r: &mut [u8], g: &mut [u8], b: &mut [u8]) {
+    use std::arch::x86_64::*;
+    let n = r.len();
+    debug_assert_eq!(src.len(), n * 3);
+    debug_assert_eq!(g.len(), n);
+    debug_assert_eq!(b.len(), n);
+
+    // A 16-pixel window spans 48 source bytes, i.e. all three input registers,
+    // and each channel takes a different count from each (R: 6/5/5, G: 5/6/5,
+    // B: 5/5/6) at different lane positions — so the masks are written out
+    // rather than derived. A mask byte with its high bit set zeroes that lane,
+    // which is what lets the three shuffles OR together; a byte of 16 would
+    // *not* zero it, it would select lane 0.
+    const Z: i8 = -1;
+    #[rustfmt::skip]
+    let (mr, mg, mb) = (
+        [
+            _mm_setr_epi8(0, 3, 6, 9, 12, 15, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z),
+            _mm_setr_epi8(Z, Z, Z, Z, Z, Z, 2, 5, 8, 11, 14, Z, Z, Z, Z, Z),
+            _mm_setr_epi8(Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, 1, 4, 7, 10, 13),
+        ],
+        [
+            _mm_setr_epi8(1, 4, 7, 10, 13, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z),
+            _mm_setr_epi8(Z, Z, Z, Z, Z, 0, 3, 6, 9, 12, 15, Z, Z, Z, Z, Z),
+            _mm_setr_epi8(Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, 2, 5, 8, 11, 14),
+        ],
+        [
+            _mm_setr_epi8(2, 5, 8, 11, 14, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z),
+            _mm_setr_epi8(Z, Z, Z, Z, Z, 1, 4, 7, 10, 13, Z, Z, Z, Z, Z, Z),
+            _mm_setr_epi8(Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, 0, 3, 6, 9, 12, 15),
+        ],
+    );
+
+    let mut i = 0usize;
+    while i + 16 <= n {
+        let p = src.as_ptr().add(i * 3) as *const __m128i;
+        let x0 = _mm_loadu_si128(p);
+        let x1 = _mm_loadu_si128(p.add(1));
+        let x2 = _mm_loadu_si128(p.add(2));
+        let pick = |m: &[__m128i; 3]| {
+            _mm_or_si128(
+                _mm_or_si128(_mm_shuffle_epi8(x0, m[0]), _mm_shuffle_epi8(x1, m[1])),
+                _mm_shuffle_epi8(x2, m[2]),
+            )
+        };
+        _mm_storeu_si128(r.as_mut_ptr().add(i) as *mut __m128i, pick(&mr));
+        _mm_storeu_si128(g.as_mut_ptr().add(i) as *mut __m128i, pick(&mg));
+        _mm_storeu_si128(b.as_mut_ptr().add(i) as *mut __m128i, pick(&mb));
+        i += 16;
+    }
+    // Tail: fewer than 16 pixels left.
+    while i < n {
+        r[i] = src[i * 3];
+        g[i] = src[i * 3 + 1];
+        b[i] = src[i * 3 + 2];
+        i += 1;
+    }
 }
 
 /// The gather core shared by the u8 plane readers (`out` pre-sized).
@@ -791,8 +909,44 @@ fn plane_u8_from_native(native: &[u8], frame: &FrameInfo, plane: usize, out: &mu
         bail!("read_plane_u8 requires 8-bit samples, got {}", frame.bits_per_sample);
     }
     let (base, stride) = plane_layout(frame, plane);
-    for (i, o) in out.iter_mut().enumerate() {
-        *o = native[base + i * stride];
+    gather_u8(native, base, stride, out)
+}
+
+/// Copy every `stride`-th byte from `native[base..]` into `out`.
+///
+/// Written as a bounded slice plus `step_by` rather than `native[base + i *
+/// stride]` per sample. The indexed form leaves a bounds check (and its panic
+/// path) inside the loop unless the optimiser can prove the range, which it
+/// only manages when the surrounding code happens to inline a certain way — so
+/// the same source compiled twice was measured at both 88 and 168 us for one
+/// 256x256 RGB frame, flipping on edits elsewhere in the crate. Bounding the
+/// source once takes the check out of the loop and pins the fast form.
+#[inline]
+fn gather_u8(native: &[u8], base: usize, stride: usize, out: &mut [u8]) -> Result<()> {
+    if out.is_empty() {
+        return Ok(());
+    }
+    if stride == 1 {
+        let end = base
+            .checked_add(out.len())
+            .ok_or_else(|| anyhow!("plane offset overflows"))?;
+        let src = native
+            .get(base..end)
+            .ok_or_else(|| anyhow!("plane data out of bounds"))?;
+        out.copy_from_slice(src);
+        return Ok(());
+    }
+    // Exactly the span the gather reads: the last sample is the only one whose
+    // whole pixel need not be present.
+    let end = (out.len() - 1)
+        .checked_mul(stride)
+        .and_then(|n| n.checked_add(base + 1))
+        .ok_or_else(|| anyhow!("plane offset overflows"))?;
+    let src = native
+        .get(base..end)
+        .ok_or_else(|| anyhow!("plane data out of bounds"))?;
+    for (o, &b) in out.iter_mut().zip(src.iter().step_by(stride)) {
+        *o = b;
     }
     Ok(())
 }
@@ -1206,20 +1360,35 @@ fn decode_native_bytes_opt<'a>(
         mmap.get(offset as usize..(offset + len) as usize)
             .ok_or_else(|| anyhow!("strip at offset {offset} (len {len}) out of file bounds"))
     };
+    // Undo the predictor per strip, right here, rather than in a second pass
+    // over the assembled frame: the strip's rows are still in cache from the
+    // decompression that just wrote them, while a whole-frame pass reads and
+    // rewrites every byte again — and, when strips decompress in parallel, it
+    // runs the undo on one core after all of them. Legal because differencing
+    // resets at every row and a strip holds a whole number of rows.
+    let fuse_pred = undo_pred && frame.predictor != 1;
+    let decode_strip = |offset: u64, len: u64, dest: &mut [u8]| -> Result<usize> {
+        let n = decompress_into(strip_src(offset, len)?, compression, dest)?;
+        if fuse_pred {
+            undo_predictor_in_place(dest, frame, sample_bytes, file_order)?;
+        }
+        Ok(n)
+    };
+
     let written: usize = if parallel {
         frame
             .strip_offsets
             .par_iter()
             .zip(frame.strip_byte_counts.par_iter())
             .zip(dests.par_iter_mut())
-            .map(|((&offset, &len), dest)| decompress_into(strip_src(offset, len)?, compression, dest))
+            .map(|((&offset, &len), dest)| decode_strip(offset, len, dest))
             .try_reduce(|| 0, |a, b| Ok(a + b))?
     } else {
         let mut total = 0usize;
         for ((&offset, &len), dest) in
             frame.strip_offsets.iter().zip(frame.strip_byte_counts.iter()).zip(dests.iter_mut())
         {
-            total += decompress_into(strip_src(offset, len)?, compression, dest)?;
+            total += decode_strip(offset, len, dest)?;
         }
         total
     };
@@ -1236,11 +1405,7 @@ fn decode_native_bytes_opt<'a>(
         );
     }
 
-    if undo_pred {
-        Ok(Cow::Owned(undo_predictor(native, frame, sample_bytes, file_order)?))
-    } else {
-        Ok(Cow::Owned(native))
-    }
+    Ok(Cow::Owned(native))
 }
 
 /// Assemble a tiled frame.
@@ -1392,6 +1557,81 @@ fn assemble_tiles(
     Ok(native)
 }
 
+thread_local! {
+    /// One scratch row for the floating-point predictor undo, kept across
+    /// calls (see `undo_float_predictor`).
+    static FLOAT_PRED_ROW: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Inflate one Deflate strip with a **reused** zlib state.
+///
+/// Constructing a `ZlibDecoder` per strip allocates and initialises zlib's
+/// window and Huffman tables every time, which on a 128 KiB strip costs more
+/// than half the decode: 47 us fresh against 20 us reused.
+///
+/// Its own function, not an arm of `decompress_into`: a `thread_local!` with a
+/// non-const initialiser expands to a lazy-init path plus destructor
+/// registration, and having two of those inline in the codec `match` showed up
+/// as a several-percent slowdown in the *LZW* arm, which touches neither.
+fn inflate_into(raw: &[u8], dest: &mut [u8]) -> Result<usize> {
+    thread_local! {
+        static INFLATE: std::cell::RefCell<flate2::Decompress> =
+            std::cell::RefCell::new(flate2::Decompress::new(true));
+    }
+    INFLATE.with(|cell| {
+        let mut d = cell.borrow_mut();
+        d.reset(true);
+        let mut written = 0usize;
+        while written < dest.len() {
+            let (before_in, before_out) = (d.total_in(), d.total_out());
+            let status = d
+                .decompress(
+                    &raw[before_in as usize..],
+                    &mut dest[written..],
+                    flate2::FlushDecompress::Finish,
+                )
+                .map_err(|e| anyhow!("Deflate decode failed: {e}"))?;
+            written = d.total_out() as usize;
+            if status == flate2::Status::StreamEnd {
+                break;
+            }
+            // No forward progress: truncated or corrupt input. Stop with what
+            // we have, exactly as the streaming reader did on EOF.
+            if d.total_in() == before_in && d.total_out() == before_out {
+                break;
+            }
+        }
+        Ok(written)
+    })
+}
+
+/// Decompress one ZSTD strip with a **reused** decompression context, for the
+/// same reason as [`inflate_into`] — and it matters more here: a fresh context
+/// per strip cost 40% of a 256x256 frame and 17% of a 2048x2048 one.
+#[cfg(feature = "codec-zstd")]
+fn zstd_into(raw: &[u8], dest: &mut [u8]) -> Result<usize> {
+    thread_local! {
+        static ZSTD: std::cell::RefCell<zstd::bulk::Decompressor<'static>> =
+            std::cell::RefCell::new(zstd::bulk::Decompressor::new().expect("ZSTD context"));
+    }
+    ZSTD.with(|cell| {
+        let mut d = cell.borrow_mut();
+        match d.decompress_to_buffer(raw, dest) {
+            Ok(n) => Ok(n),
+            // One-shot decompression fails rather than truncating when the
+            // frame declares more than `dest` holds — which a padded strip
+            // legitimately does. Fall back to the streaming decoder, which
+            // stops at the cap. Rare enough that redoing the work costs less
+            // than never taking the fast path.
+            Err(_) => {
+                let dec = zstd::stream::read::Decoder::new(raw)
+                    .map_err(|e| anyhow!("ZSTD decode failed: {e}"))?;
+                read_all_into(dec, dest).map_err(|e| anyhow!("ZSTD decode failed: {e}"))
+            }
+        }
+    })
+}
+
 /// Decompress one strip **directly into its destination slice** (the strip's
 /// rows x row bytes), returning how many bytes were written. Writing into the
 /// caller's pre-carved slice is what makes frame assembly single-pass — no
@@ -1431,15 +1671,10 @@ fn decompress_into(raw: &[u8], compression: Compression, dest: &mut [u8]) -> Res
             }
             Ok(out_pos)
         }
-        Compression::Deflate => {
-            read_all_into(flate2::read::ZlibDecoder::new(raw), dest).map_err(|e| anyhow!("Deflate decode failed: {e}"))
-        }
+        Compression::Deflate => inflate_into(raw, dest),
         Compression::PackBits => Ok(packbits_decode_into(raw, dest)),
         #[cfg(feature = "codec-zstd")]
-        Compression::Zstd => {
-            let dec = zstd::stream::read::Decoder::new(raw).map_err(|e| anyhow!("ZSTD decode failed: {e}"))?;
-            read_all_into(dec, dest).map_err(|e| anyhow!("ZSTD decode failed: {e}"))
-        }
+        Compression::Zstd => zstd_into(raw, dest),
         // Without the codec the tag is still recognized — the file just can't be
         // decoded here. Saying so beats the generic "unsupported scheme" arm,
         // which would leave a wasm user guessing why a file that opens natively
@@ -1516,12 +1751,90 @@ fn packbits_decode(input: &[u8], expected_len: usize) -> Vec<u8> {
 /// running this once on the full concatenated buffer (rather than per-strip
 /// before concatenating) gives the same result, since differencing resets at
 /// every row regardless of which strip it came from.
+/// The one operation [`hor_acc_native`] needs from a sample type.
+trait WrappingAdd: Copy + bytemuck::Pod {
+    fn wadd(self, other: Self) -> Self;
+}
+
+macro_rules! impl_wrapping_add {
+    ($($t:ty),*) => {$(
+        impl WrappingAdd for $t {
+            #[inline(always)]
+            fn wadd(self, other: Self) -> Self {
+                self.wrapping_add(other)
+            }
+        }
+    )*};
+}
+impl_wrapping_add!(u16, u32, u64);
+
+/// Undo horizontal differencing over samples in their **native machine
+/// representation**, for a file whose byte order matches the host's.
+///
+/// The byte-wise fallback in [`undo_predictor`] loads two bytes, assembles an
+/// integer, adds, splits the result and stores two bytes — for every sample.
+/// When a little-endian file is read on a little-endian host, which is very
+/// nearly every file, the bytes already *are* the sample, so one load, one add
+/// and one store will do. This is what libtiff's `horAcc16` does, and it is
+/// worth about 3x on frames large enough for the predictor to dominate: a
+/// 2048x2048 u16 frame spends more time undoing the predictor than it does in
+/// the codec, so this is the difference between winning and losing that run.
+///
+/// Returns `false` when the fast path does not apply — a foreign byte order, or
+/// a buffer not aligned for the wider type. The caller then runs the byte-wise
+/// loop, which has no alignment requirement. (In practice the allocator returns
+/// blocks aligned well past 8 bytes, but a `Vec<u8>` makes no such promise and
+/// a misaligned cast is UB, so it is checked rather than assumed.)
+fn hor_acc_native<T: WrappingAdd>(
+    data: &mut [u8],
+    row_bytes: usize,
+    row_samples: usize,
+    stride: usize,
+    file_order: ByteOrder,
+) -> bool {
+    if file_order != ByteOrder::host() {
+        return false;
+    }
+    // Whole rows only. A trailing partial row is left untouched, exactly as
+    // `chunks_exact_mut` leaves it on the byte-wise path.
+    let whole = data.len() - data.len() % row_bytes;
+    let Ok(samples) = bytemuck::try_cast_slice_mut::<u8, T>(&mut data[..whole]) else {
+        return false;
+    };
+    for row in samples.chunks_exact_mut(row_samples) {
+        // Serial by nature — each sample depends on the one `stride` back — so
+        // this cannot vectorize. The gain is in the per-step cost, not in width.
+        for i in stride..row_samples {
+            row[i] = row[i].wadd(row[i - stride]);
+        }
+    }
+    true
+}
+
 fn undo_predictor(
     mut data: Vec<u8>,
     frame: &FrameInfo,
     sample_bytes: usize,
     file_order: ByteOrder,
 ) -> Result<Vec<u8>> {
+    undo_predictor_in_place(&mut data, frame, sample_bytes, file_order)?;
+    Ok(data)
+}
+
+/// [`undo_predictor`] over a buffer the caller already owns.
+///
+/// Split out so the general decode path can undo the predictor **per strip**,
+/// immediately after that strip decompresses, while its rows are still in
+/// cache. Differencing resets at every row and a strip always holds a whole
+/// number of rows, so strip-at-a-time and whole-frame give identical results —
+/// but the whole-frame pass re-reads and rewrites the entire buffer from DRAM,
+/// which on a 2048x2048 frame costs more than the codec does.
+fn undo_predictor_in_place(
+    data: &mut [u8],
+    frame: &FrameInfo,
+    sample_bytes: usize,
+    file_order: ByteOrder,
+) -> Result<()> {
     // Distance (in samples) to the pixel left of this one: `spp` when samples
     // interleave per pixel, 1 when each plane is stored whole. Rows follow the
     // same split — a planar frame has `height * spp` rows of `width` samples,
@@ -1531,11 +1844,11 @@ fn undo_predictor(
     let row_samples = frame.width as usize * stride;
     let row_bytes = row_samples * sample_bytes;
     if row_bytes == 0 {
-        return Ok(data); // zero-width frame: nothing to difference
+        return Ok(()); // zero-width frame: nothing to difference
     }
 
     match (frame.predictor, sample_bytes) {
-        (1, _) => return Ok(data),
+        (1, _) => return Ok(()),
         (2, 1) => {
             for row in data.chunks_exact_mut(row_bytes) {
                 for i in stride..row_samples {
@@ -1544,62 +1857,65 @@ fn undo_predictor(
             }
         }
         (2, 2) => {
-            for row in data.chunks_exact_mut(row_bytes) {
-                for i in stride..row_samples {
-                    let prev_off = (i - stride) * 2;
-                    let cur_off = i * 2;
-                    let prev = file_order.u16(&row[prev_off..prev_off + 2]);
-                    let delta = file_order.u16(&row[cur_off..cur_off + 2]);
-                    let val = prev.wrapping_add(delta);
-                    let bytes = match file_order {
-                        ByteOrder::Little => val.to_le_bytes(),
-                        ByteOrder::Big => val.to_be_bytes(),
-                    };
-                    row[cur_off] = bytes[0];
-                    row[cur_off + 1] = bytes[1];
+            if !hor_acc_native::<u16>(data, row_bytes, row_samples, stride, file_order) {
+                for row in data.chunks_exact_mut(row_bytes) {
+                    for i in stride..row_samples {
+                        let (prev_off, cur_off) = ((i - stride) * 2, i * 2);
+                        let prev = file_order.u16(&row[prev_off..prev_off + 2]);
+                        let delta = file_order.u16(&row[cur_off..cur_off + 2]);
+                        let val = prev.wrapping_add(delta);
+                        let bytes = match file_order {
+                            ByteOrder::Little => val.to_le_bytes(),
+                            ByteOrder::Big => val.to_be_bytes(),
+                        };
+                        row[cur_off] = bytes[0];
+                        row[cur_off + 1] = bytes[1];
+                    }
                 }
             }
         }
         (2, 4) => {
             // 32-bit integer horizontal differencing (libtiff writes these).
-            for row in data.chunks_exact_mut(row_bytes) {
-                for i in stride..row_samples {
-                    let prev_off = (i - stride) * 4;
-                    let cur_off = i * 4;
-                    let prev = file_order.u32(&row[prev_off..prev_off + 4]);
-                    let delta = file_order.u32(&row[cur_off..cur_off + 4]);
-                    let val = prev.wrapping_add(delta);
-                    let bytes = match file_order {
-                        ByteOrder::Little => val.to_le_bytes(),
-                        ByteOrder::Big => val.to_be_bytes(),
-                    };
-                    row[cur_off..cur_off + 4].copy_from_slice(&bytes);
+            if !hor_acc_native::<u32>(data, row_bytes, row_samples, stride, file_order) {
+                for row in data.chunks_exact_mut(row_bytes) {
+                    for i in stride..row_samples {
+                        let (prev_off, cur_off) = ((i - stride) * 4, i * 4);
+                        let prev = file_order.u32(&row[prev_off..prev_off + 4]);
+                        let delta = file_order.u32(&row[cur_off..cur_off + 4]);
+                        let val = prev.wrapping_add(delta);
+                        let bytes = match file_order {
+                            ByteOrder::Little => val.to_le_bytes(),
+                            ByteOrder::Big => val.to_be_bytes(),
+                        };
+                        row[cur_off..cur_off + 4].copy_from_slice(&bytes);
+                    }
                 }
             }
         }
         (2, 8) => {
             // 64-bit integer horizontal differencing.
-            for row in data.chunks_exact_mut(row_bytes) {
-                for i in stride..row_samples {
-                    let prev_off = (i - stride) * 8;
-                    let cur_off = i * 8;
-                    let prev = file_order.u64(&row[prev_off..prev_off + 8]);
-                    let delta = file_order.u64(&row[cur_off..cur_off + 8]);
-                    let val = prev.wrapping_add(delta);
-                    let bytes = match file_order {
-                        ByteOrder::Little => val.to_le_bytes(),
-                        ByteOrder::Big => val.to_be_bytes(),
-                    };
-                    row[cur_off..cur_off + 8].copy_from_slice(&bytes);
+            if !hor_acc_native::<u64>(data, row_bytes, row_samples, stride, file_order) {
+                for row in data.chunks_exact_mut(row_bytes) {
+                    for i in stride..row_samples {
+                        let (prev_off, cur_off) = ((i - stride) * 8, i * 8);
+                        let prev = file_order.u64(&row[prev_off..prev_off + 8]);
+                        let delta = file_order.u64(&row[cur_off..cur_off + 8]);
+                        let val = prev.wrapping_add(delta);
+                        let bytes = match file_order {
+                            ByteOrder::Little => val.to_le_bytes(),
+                            ByteOrder::Big => val.to_be_bytes(),
+                        };
+                        row[cur_off..cur_off + 8].copy_from_slice(&bytes);
+                    }
                 }
             }
         }
-        (3, 4) | (3, 8) => undo_float_predictor(&mut data, row_bytes, stride, sample_bytes, file_order),
+        (3, 4) | (3, 8) => undo_float_predictor(data, row_bytes, stride, sample_bytes, file_order),
         (2, other) => bail!("predictor 2 undo not implemented for {other}-byte samples"),
         (3, other) => bail!("floating-point predictor requires 32- or 64-bit samples, got {other}-byte"),
         (other, _) => bail!("unsupported TIFF predictor: {other}"),
     }
-    Ok(std::mem::take(&mut data))
+    Ok(())
 }
 
 /// Undo TIFF Predictor 3 (TIFF TechNote 3 floating-point horizontal
@@ -1620,28 +1936,38 @@ fn undo_float_predictor(data: &mut [u8], row_bytes: usize, stride: usize, sample
     // wider than one row of `data` can never be needed, and the process must not
     // die allocating a buffer for rows that do not exist.
     let scratch_len = row_bytes.min(data.len());
-    let mut scratch = vec![0u8; scratch_len];
     if scratch_len < row_bytes {
         return; // no whole row to transform; `chunks_exact_mut` would yield none
     }
-    for row in data.chunks_exact_mut(row_bytes) {
-        for i in stride..row_bytes {
-            row[i] = row[i].wrapping_add(row[i - stride]);
+    // One scratch row per thread, not per call. The predictor undo runs once
+    // per strip now that it is fused into the decompression loop, so a fresh
+    // `vec![0u8; row_bytes]` here would be an allocation per strip per frame —
+    // 32 of them on a 2048x2048 frame where there used to be one.
+    FLOAT_PRED_ROW.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        if scratch.len() < scratch_len {
+            scratch.resize(scratch_len, 0);
         }
-        for v in 0..wc {
-            // Gather this value's bytes, most-significant plane first.
-            for p in 0..sample_bytes {
-                // Plane `p` holds significance (sample_bytes-1-p): plane 0 = MSB.
-                let byte = row[p * wc + v];
-                let dst = match file_order {
-                    ByteOrder::Little => sample_bytes - 1 - p, // little-endian: MSB last
-                    ByteOrder::Big => p,                       // big-endian: MSB first
-                };
-                scratch[v * sample_bytes + dst] = byte;
+        let scratch = &mut scratch[..scratch_len];
+        for row in data.chunks_exact_mut(row_bytes) {
+            for i in stride..row_bytes {
+                row[i] = row[i].wrapping_add(row[i - stride]);
             }
+            for v in 0..wc {
+                // Gather this value's bytes, most-significant plane first.
+                for p in 0..sample_bytes {
+                    // Plane `p` holds significance (sample_bytes-1-p): plane 0 = MSB.
+                    let byte = row[p * wc + v];
+                    let dst = match file_order {
+                        ByteOrder::Little => sample_bytes - 1 - p, // little-endian: MSB last
+                        ByteOrder::Big => p,                       // big-endian: MSB first
+                    };
+                    scratch[v * sample_bytes + dst] = byte;
+                }
+            }
+            row.copy_from_slice(scratch);
         }
-        row.copy_from_slice(&scratch);
-    }
+    });
 }
 
 #[cfg(test)]

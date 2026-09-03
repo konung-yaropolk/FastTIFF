@@ -130,8 +130,8 @@ fn absurd_tile_dimensions_are_refused_before_allocating() {
         planar_config: 1,
         tile_size: Some((65_535, 65_535)),
         ink_set: 1,
-        strip_offsets: vec![8],
-        strip_byte_counts: vec![16],
+        strip_offsets: vec![8].into(),
+        strip_byte_counts: vec![16].into(),
         rows_per_strip: 65_535,
     };
     let data = vec![0u8; 256];
@@ -161,8 +161,8 @@ fn frame_geometry_overflow_is_an_error_not_a_panic() {
         planar_config: 1,
         tile_size: None,
         ink_set: 1,
-        strip_offsets: vec![8],
-        strip_byte_counts: vec![16],
+        strip_offsets: vec![8].into(),
+        strip_byte_counts: vec![16].into(),
         rows_per_strip: 1,
     };
     assert!(frame.pixel_count().is_ok(), "w*h alone still fits on 64-bit");
