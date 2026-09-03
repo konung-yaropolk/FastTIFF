@@ -3,12 +3,15 @@
 //! then runs it through `TiffStack::open` and checks every value against
 //! what we put in. This is the test that actually exercises offset
 //! arithmetic, not just type-checking.
-//! Requires the `mmap` feature: every case here writes a temp file and opens it
-//! through `TiffStack::open`. The filesystem-free path is covered by
-//! `from_bytes.rs`, which runs in both configurations.
-#![cfg(feature = "mmap")]
+//! Runs in both feature configurations: each case writes a temp file (or reads
+//! a fixture) and opens it through `common::open_tiff`, which maps the file
+//! when `mmap` is on and reads its bytes through `TiffStack::from_bytes` when
+//! it is off. These used to be gated off entirely without `mmap`, which cost
+//! the wasm-shaped build every test here and said nothing about it.
 
-use fast_tiff_lib::TiffStack;
+mod common;
+use common::open_tiff;
+
 use std::io::Write;
 
 /// Minimal stand-in for `tempfile::tempdir()` — avoids pulling in a
@@ -233,7 +236,7 @@ fn opens_multi_frame_stack_and_reads_correct_pixels() {
     let path = unique_temp_path("synthetic.tif");
     std::fs::write(&path, &bytes).unwrap();
 
-    let stack = TiffStack::open(&path).expect("should parse synthetic TIFF");
+    let stack = open_tiff(&path).expect("should parse synthetic TIFF");
 
     assert_eq!(stack.frames.len(), 3, "should walk all 3 IFDs in the chain");
     assert_eq!(stack.meta.channels, 1);
@@ -265,7 +268,7 @@ fn infers_frame_count_when_dimension_tags_absent() {
     let path = unique_temp_path("plain.tif");
     std::fs::write(&path, &bytes).unwrap();
 
-    let stack = TiffStack::open(&path).unwrap();
+    let stack = open_tiff(&path).unwrap();
     assert_eq!(stack.frames.len(), 5);
     assert_eq!(stack.meta.frames, 5);
     assert_eq!(stack.meta.channels, 1);
@@ -288,7 +291,7 @@ fn ignores_non_imagej_description_text() {
     let path = unique_temp_path("non_imagej.tif");
     std::fs::write(&path, &bytes).unwrap();
 
-    let stack = TiffStack::open(&path).unwrap();
+    let stack = open_tiff(&path).unwrap();
     assert_eq!(stack.frames.len(), 6);
     assert_eq!(
         stack.meta.channels, 1,
@@ -333,7 +336,7 @@ fn supplements_missing_range_and_luts_from_ij_metadata() {
     let path = unique_temp_path("composite.tif");
     std::fs::write(&path, &bytes).unwrap();
 
-    let stack = TiffStack::open(&path).unwrap();
+    let stack = open_tiff(&path).unwrap();
     // ImageDescription had no min=/max=, so the binary ranges fill in.
     assert_eq!(stack.meta.channel_display[0].range, Some((50.0, 500.0)));
     assert_eq!(stack.meta.channel_display[1].range, Some((60.0, 600.0)));
@@ -366,7 +369,7 @@ fn ij_metadata_does_not_override_an_explicit_range() {
     let path = unique_temp_path("composite_explicit_range.tif");
     std::fs::write(&path, &bytes).unwrap();
 
-    let stack = TiffStack::open(&path).unwrap();
+    let stack = open_tiff(&path).unwrap();
     // The explicit 270 window wins over the block's 50..500 / 60..600.
     assert_eq!(stack.meta.channel_display[0].range, Some((100.0, 200.0)));
     assert_eq!(stack.meta.channel_display[1].range, Some((100.0, 200.0)));
@@ -409,7 +412,7 @@ fn rejects_stale_lut_block_with_mismatched_channel_count() {
     let path = unique_temp_path("stale_lut.tif");
     std::fs::write(&path, &bytes).unwrap();
 
-    let stack = TiffStack::open(&path).unwrap();
+    let stack = open_tiff(&path).unwrap();
     assert_eq!(stack.meta.channels, 1);
     // Default grayscale LUT: identity ramp, not the stale red.
     assert_eq!(stack.meta.channel_display[0].lut[128], [128, 128, 128]);
@@ -504,7 +507,7 @@ fn palette_tiff_installs_colormap_as_channel_lut() {
     let path = unique_temp_path("palette.tif");
     std::fs::write(&path, &bytes).unwrap();
 
-    let stack = TiffStack::open(&path).expect("palette TIFF should open");
+    let stack = open_tiff(&path).expect("palette TIFF should open");
     let frame = &stack.frames[0];
     assert_eq!(frame.photometric, 3);
     assert!(frame.is_palette(), "frame should be detected as palette");
@@ -545,7 +548,7 @@ fn colormap_on_16bit_grayscale_becomes_display_lut() {
     let path = unique_temp_path("lut16.tif");
     std::fs::write(&path, &bytes).unwrap();
 
-    let stack = TiffStack::open(&path).expect("16-bit LUT TIFF should open");
+    let stack = open_tiff(&path).expect("16-bit LUT TIFF should open");
     let frame = &stack.frames[0];
     assert_eq!(frame.photometric, 1);
     assert_eq!(frame.bits_per_sample, 16);
@@ -581,7 +584,7 @@ fn colormap_applies_to_signed_and_float() {
         .collect();
     let path = unique_temp_path("lut_i16.tif");
     std::fs::write(&path, build_colormap_tiff(2, 2, &signed, 16, 1, 2, &colors)).unwrap();
-    let stack = TiffStack::open(&path).unwrap();
+    let stack = open_tiff(&path).unwrap();
     assert_eq!(
         stack.frames[0].sample_format,
         fast_tiff_lib::SampleFormat::SignedInt
@@ -598,7 +601,7 @@ fn colormap_applies_to_signed_and_float() {
         .collect();
     let path = unique_temp_path("lut_f32.tif");
     std::fs::write(&path, build_colormap_tiff(2, 2, &floats, 32, 1, 3, &colors)).unwrap();
-    let stack = TiffStack::open(&path).unwrap();
+    let stack = open_tiff(&path).unwrap();
     assert_eq!(
         stack.frames[0].sample_format,
         fast_tiff_lib::SampleFormat::Float
@@ -625,7 +628,7 @@ fn four_bit_palette_unpacks_and_colors() {
     let path = unique_temp_path("palette4.tif");
     std::fs::write(&path, build_colormap_tiff(4, 2, &packed, 4, 3, 1, &colors)).unwrap();
 
-    let stack = TiffStack::open(&path).expect("4-bit palette should open");
+    let stack = open_tiff(&path).expect("4-bit palette should open");
     let frame = &stack.frames[0];
     assert_eq!(frame.bits_per_sample, 4);
     assert!(frame.is_palette(), "4-bit photometric=3 is a palette");
@@ -696,7 +699,7 @@ fn opens_rgb8_tiff_and_deinterleaves_planes() {
     let path = unique_temp_path("rgb8.tif");
     std::fs::write(&path, &bytes).unwrap();
 
-    let stack = TiffStack::open(&path).expect("should parse RGB8 TIFF");
+    let stack = open_tiff(&path).expect("should parse RGB8 TIFF");
     let frame = &stack.frames[0];
     assert_eq!(frame.samples_per_pixel, 3);
     assert_eq!(frame.photometric, 2);
@@ -829,7 +832,7 @@ fn planar_rgb8_decodes_same_planes_as_chunky() {
         .map(|p| pixels.iter().map(|px| [px.0, px.1, px.2][p]).collect())
         .collect();
 
-    let chunky = TiffStack::open({
+    let chunky = open_tiff({
         let path = unique_temp_path("chunky_rgb8.tif");
         std::fs::write(&path, build_rgb8_tiff(w, h, &pixels)).unwrap();
         path
@@ -844,7 +847,7 @@ fn planar_rgb8_decodes_same_planes_as_chunky() {
             build_planar_tiff(w, h, 8, 1, &planes, rows_per_strip),
         )
         .unwrap();
-        let stack = TiffStack::open(&path).expect("planar RGB8 should parse");
+        let stack = open_tiff(&path).expect("planar RGB8 should parse");
 
         let frame = &stack.frames[0];
         assert_eq!(frame.samples_per_pixel, 3);
@@ -901,7 +904,7 @@ fn opens_planar_float64_tiff() {
     let path = unique_temp_path("planar_f64.tif");
     // sample_format 3 = IEEE float.
     std::fs::write(&path, build_planar_tiff(w, h, 64, 3, &planes, h)).unwrap();
-    let stack = TiffStack::open(&path).expect("planar float64 should parse");
+    let stack = open_tiff(&path).expect("planar float64 should parse");
 
     let frame = &stack.frames[0];
     assert_eq!(frame.samples_per_pixel, 4);
@@ -979,7 +982,7 @@ fn rejects_non_uniform_frame_sizes() {
     let path = unique_temp_path("mismatched.tif");
     std::fs::write(&path, &bytes).unwrap();
 
-    match TiffStack::open(&path) {
+    match open_tiff(&path) {
         Ok(_) => panic!("mismatched frame sizes should fail to open"),
         Err(e) => {
             let msg = format!("{e:#}");
@@ -996,6 +999,6 @@ fn accepts_uniform_frame_sizes() {
     let path = unique_temp_path("uniform.tif");
     std::fs::write(&path, &bytes).unwrap();
 
-    let stack = TiffStack::open(&path).expect("uniform frames should open");
+    let stack = open_tiff(&path).expect("uniform frames should open");
     assert_eq!(stack.frames.len(), 3);
 }

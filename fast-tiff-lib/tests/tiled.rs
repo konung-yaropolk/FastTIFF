@@ -20,10 +20,13 @@
 //! shorter than a single tile. Hence a file of their own, and the `tld_` prefix
 //! that tells `libtiff_fixtures.rs` to leave them to this.
 //!
-//! Requires the `mmap` feature, like the rest of the fixture tests.
-#![cfg(feature = "mmap")]
+//! Runs in both feature configurations, like the rest of the fixture tests:
+//! `common::open_tiff` maps the file when `mmap` is on and reads its bytes when
+//! it is off.
 
-use fast_tiff_lib::TiffStack;
+mod common;
+use common::open_tiff;
+
 use std::path::{Path, PathBuf};
 
 const W: usize = 100;
@@ -48,7 +51,7 @@ fn expect_u16(g: usize) -> u16 {
 /// Check every plane of a tiled fixture against the formula.
 fn check(name: &str, spp: usize, sixteen_bit: bool) {
     let Some(path) = fixture(name) else { return };
-    let stack = TiffStack::open(&path).unwrap_or_else(|e| panic!("{name}: failed to open: {e:#}"));
+    let stack = open_tiff(&path).unwrap_or_else(|e| panic!("{name}: failed to open: {e}"));
     let frame = &stack.frames[0];
 
     assert!(frame.is_tiled(), "{name}: should be recognised as tiled");
@@ -123,7 +126,7 @@ fn a_tiled_frame_crops_on_both_axes() {
     let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else {
         return;
     };
-    let stack = TiffStack::open(&path).unwrap();
+    let stack = open_tiff(&path).unwrap();
     let frame = &stack.frames[0];
     let full = fast_tiff_lib::read_planes_u16(&stack.data, frame, stack.byte_order, None).unwrap();
 
@@ -165,7 +168,7 @@ fn cropping_to_everything_keeps_the_frame_intact() {
     let Some(path) = fixture("tld_u16_spp1_p1_grid-lzw.tif") else {
         return;
     };
-    let stack = TiffStack::open(&path).unwrap();
+    let stack = open_tiff(&path).unwrap();
     let frame = &stack.frames[0];
     let region = frame.crop(0..frame.width, 0..frame.height).unwrap();
     assert_eq!(region.cols, 0..frame.width);
@@ -191,7 +194,7 @@ fn a_tile_table_that_does_not_describe_the_grid_is_refused() {
     let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else {
         return;
     };
-    let stack = TiffStack::open(&path).unwrap();
+    let stack = open_tiff(&path).unwrap();
     let mut frame = stack.frames[0].clone();
     frame.strip_offsets.truncate(frame.strip_offsets.len() - 1);
     let err = fast_tiff_lib::read_planes_u16(&stack.data, &frame, stack.byte_order, None)

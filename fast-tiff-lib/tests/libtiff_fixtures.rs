@@ -19,10 +19,14 @@
 //!
 //! Filename grammar: `{gen}_{dtype}_spp{s}_p{pages}_{info}.tif`; prefix
 //! `err_` = the file must fail to open, `ij_` = ImageJ metadata checks.
-//! Requires the `mmap` feature: every case here writes a temp file and opens it
-//! through `TiffStack::open`. The filesystem-free path is covered by
-//! `from_bytes.rs`, which runs in both configurations.
-#![cfg(feature = "mmap")]
+//! Runs in both feature configurations: each case writes a temp file (or reads
+//! a fixture) and opens it through `common::open_tiff`, which maps the file
+//! when `mmap` is on and reads its bytes through `TiffStack::from_bytes` when
+//! it is off. These used to be gated off entirely without `mmap`, which cost
+//! the wasm-shaped build every test here and said nothing about it.
+
+mod common;
+use common::open_tiff;
 
 use fast_tiff_lib::{
     read_frame_f32, read_frame_u16, read_frame_u8, read_plane_f32, read_plane_u16, read_plane_u8,
@@ -177,14 +181,13 @@ fn every_fixture_decodes_correctly() {
 
         if gen == "err" {
             assert!(
-                TiffStack::open(&path).is_err(),
+                open_tiff(&path).is_err(),
                 "{name}: unsupported layout must be refused with an error"
             );
             continue;
         }
 
-        let stack =
-            TiffStack::open(&path).unwrap_or_else(|e| panic!("{name}: failed to open: {e:#}"));
+        let stack = open_tiff(&path).unwrap_or_else(|e| panic!("{name}: failed to open: {e}"));
         check_pixels(&stack, dtype, spp, pages, name);
 
         if gen == "ij" {
@@ -245,8 +248,8 @@ fn cmyk_fixtures_convert_through_the_rgb_readers() {
     );
 
     for name in &names {
-        let stack = TiffStack::open(dir.join(name))
-            .unwrap_or_else(|e| panic!("{name}: failed to open: {e:#}"));
+        let stack =
+            open_tiff(dir.join(name)).unwrap_or_else(|e| panic!("{name}: failed to open: {e}"));
         for (p, frame) in stack.frames.iter().enumerate() {
             assert!(
                 frame.is_cmyk(),

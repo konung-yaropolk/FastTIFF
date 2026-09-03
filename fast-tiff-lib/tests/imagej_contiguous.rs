@@ -3,12 +3,16 @@
 //! The reader must expand it into N virtual frames (this is what "opens but
 //! scrubbing does nothing" looked like before). Files are hand-built here —
 //! our own writer (correctly) never produces this layout.
-//! Requires the `mmap` feature: every case here writes a temp file and opens it
-//! through `TiffStack::open`. The filesystem-free path is covered by
-//! `from_bytes.rs`, which runs in both configurations.
-#![cfg(feature = "mmap")]
+//! Runs in both feature configurations: each case writes a temp file (or reads
+//! a fixture) and opens it through `common::open_tiff`, which maps the file
+//! when `mmap` is on and reads its bytes through `TiffStack::from_bytes` when
+//! it is off. These used to be gated off entirely without `mmap`, which cost
+//! the wasm-shaped build every test here and said nothing about it.
 
-use fast_tiff_lib::{read_frame_u16, TiffStack};
+mod common;
+use common::open_tiff;
+
+use fast_tiff_lib::read_frame_u16;
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -99,7 +103,7 @@ fn single_ifd_contiguous_stack_expands_to_virtual_frames() {
     let _cleanup = Cleanup(path.clone());
     std::fs::write(&path, build_imagej_contiguous(3, 3)).unwrap();
 
-    let stack = TiffStack::open(&path).unwrap();
+    let stack = open_tiff(&path).unwrap();
     assert_eq!(
         stack.frames.len(),
         3,
@@ -135,7 +139,7 @@ fn truncated_contiguous_stack_clamps_to_available_frames() {
     let _cleanup = Cleanup(path.clone());
     std::fs::write(&path, build_imagej_contiguous(5, 3)).unwrap();
 
-    let stack = TiffStack::open(&path).unwrap();
+    let stack = open_tiff(&path).unwrap();
     // The IFD region sits after frame 3's data, so its bytes are counted as
     // "available" space — but never more frames than the description claims,
     // and every synthesized frame must decode within the file.
@@ -160,7 +164,7 @@ fn multi_ifd_files_are_not_touched_by_the_expansion() {
     w.write_frame_u16(&[5, 6, 7, 8]).unwrap();
     w.finish().unwrap();
 
-    let stack = TiffStack::open(&path).unwrap();
+    let stack = open_tiff(&path).unwrap();
     assert_eq!(stack.frames.len(), 2);
     let got = read_frame_u16(&stack.data, &stack.frames[1], stack.byte_order, None).unwrap();
     assert_eq!(got.as_ref(), &[5, 6, 7, 8]);

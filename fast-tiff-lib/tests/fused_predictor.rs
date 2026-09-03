@@ -18,7 +18,7 @@
 //!
 //! Deliberately built on `TiffStack::from_bytes` and hand-made `FrameInfo`s, so
 //! this suite runs in the `--no-default-features` (wasm-shaped) configuration
-//! too, where the `mmap`-gated integration tests do not.
+//! too, alongside the rest of the integration suites.
 
 use fast_tiff_lib::index::{Compression as IndexCompression, FrameInfo, SampleFormat, Strips};
 use fast_tiff_lib::{ByteOrder, Compression, SampleType, TiffStack, TiffWriter, WriterOptions};
