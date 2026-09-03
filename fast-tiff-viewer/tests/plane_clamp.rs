@@ -21,7 +21,11 @@ use fast_tiff_viewer::dimensions::{clamp_to_available, compute_status, planes_ad
 use fast_tiff_viewer::Dims;
 
 fn dims(channels: usize, slices: usize, frames: usize) -> Dims {
-    Dims { channels, slices, frames }
+    Dims {
+        channels,
+        slices,
+        frames,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +71,10 @@ fn the_two_file_ome_set_is_cut_to_the_half_it_holds() {
         "still addresses {} planes of 20: {d:?}",
         planes_addressed(d, false)
     );
-    assert_eq!(d.channels, 2, "the channels are real; it is the length that is not");
+    assert_eq!(
+        d.channels, 2,
+        "the channels are real; it is the length that is not"
+    );
     assert_eq!(d.frames, 10);
 }
 
@@ -85,7 +92,11 @@ fn a_file_that_holds_what_it_declares_is_left_alone() {
     ] {
         let mut d = dims(c, z, f);
         let before = d;
-        assert_eq!(clamp_to_available(&mut d, rgb, available), None, "{before:?} vs {available}");
+        assert_eq!(
+            clamp_to_available(&mut d, rgb, available),
+            None,
+            "{before:?} vs {available}"
+        );
         assert_eq!(d, before, "it was changed anyway: {before:?} -> {d:?}");
     }
 }
@@ -106,9 +117,15 @@ fn nothing_ever_addresses_a_plane_the_file_lacks() {
 
                         let needs = planes_addressed(d, rgb);
                         assert!(needs <= available, "{case}: still needs {needs} -> {d:?}");
-                        assert!(d.channels >= 1 && d.slices >= 1 && d.frames >= 1, "{case}: {d:?}");
+                        assert!(
+                            d.channels >= 1 && d.slices >= 1 && d.frames >= 1,
+                            "{case}: {d:?}"
+                        );
                         // Only cut when it had to, and never grown.
-                        assert!(d.channels <= c && d.slices <= z && d.frames <= f, "{case}: {d:?}");
+                        assert!(
+                            d.channels <= c && d.slices <= z && d.frames <= f,
+                            "{case}: {d:?}"
+                        );
                         if told.is_none() {
                             assert_eq!(d, dims(c, z, f), "{case}: cut without saying so");
                         }
@@ -177,8 +194,14 @@ fn the_mismatch_is_reported_with_both_numbers() {
     let note = compute_status(dims(2, 1, 10), false, Some((40, 20)))
         .expect("a mismatch must produce a note");
     assert!(note.contains("40"), "should say what was declared: {note}");
-    assert!(note.contains("20"), "should say what the file holds: {note}");
-    assert!(note.to_lowercase().contains("warning"), "should read as a warning: {note}");
+    assert!(
+        note.contains("20"),
+        "should say what the file holds: {note}"
+    );
+    assert!(
+        note.to_lowercase().contains("warning"),
+        "should read as a warning: {note}"
+    );
 }
 
 /// It outranks the interpretation notes: those say how the file was read, this
@@ -186,10 +209,17 @@ fn the_mismatch_is_reported_with_both_numbers() {
 #[test]
 fn the_mismatch_outranks_the_other_notes() {
     let both = compute_status(dims(2, 3, 10), true, Some((40, 20))).expect("some note");
-    assert!(both.contains("40"), "the triple-axis note displaced it: {both}");
+    assert!(
+        both.contains("40"),
+        "the triple-axis note displaced it: {both}"
+    );
 
     // And with no mismatch the other notes still come through unchanged.
     let triple = compute_status(dims(2, 3, 10), true, None).expect("some note");
     assert!(triple.contains("Z-slice"), "{triple}");
-    assert_eq!(compute_status(dims(1, 1, 10), false, None), None, "a plain stack says nothing");
+    assert_eq!(
+        compute_status(dims(1, 1, 10), false, None),
+        None,
+        "a plain stack says nothing"
+    );
 }

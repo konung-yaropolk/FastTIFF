@@ -11,9 +11,12 @@
 /// shader error is a failing test rather than a blank canvas at startup.
 fn validate(src: &str, name: &str) {
     let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name}: parse: {e}"));
-    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-        .validate(&module)
-        .unwrap_or_else(|e| panic!("{name}: validate: {e:?}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|e| panic!("{name}: validate: {e:?}"));
 }
 
 #[test]
@@ -23,5 +26,8 @@ fn volume_shader_is_valid() {
 
 #[test]
 fn composite_shader_is_valid() {
-    validate(include_str!("../src/shaders/composite.wgsl"), "composite.wgsl");
+    validate(
+        include_str!("../src/shaders/composite.wgsl"),
+        "composite.wgsl",
+    );
 }

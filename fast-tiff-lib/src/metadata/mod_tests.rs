@@ -4,7 +4,11 @@ fn check(c: usize, z: usize, f: usize, expected: ResolvedDimensions, label: &str
     let got = resolve_dimensions(c, z, f);
     assert_eq!(got, expected, "{label}: resolve_dimensions({c}, {z}, {f})");
     // Invariant: reclassifying axes must never invent or drop planes.
-    assert_eq!(got.channels * got.slices * got.frames, c * z * f, "{label}: product changed");
+    assert_eq!(
+        got.channels * got.slices * got.frames,
+        c * z * f,
+        "{label}: product changed"
+    );
 }
 
 #[test]
@@ -14,14 +18,24 @@ fn fixes_mislabeled_large_channel_count() {
         100,
         1,
         1,
-        ResolvedDimensions { channels: 1, slices: 1, frames: 100, triple_axis_warning: false },
+        ResolvedDimensions {
+            channels: 1,
+            slices: 1,
+            frames: 100,
+            triple_axis_warning: false,
+        },
         "mislabeled channels=100",
     );
     check(
         100,
         1,
         7,
-        ResolvedDimensions { channels: 1, slices: 1, frames: 700, triple_axis_warning: false },
+        ResolvedDimensions {
+            channels: 1,
+            slices: 1,
+            frames: 700,
+            triple_axis_warning: false,
+        },
         "mislabeled channels=100, real frames also present",
     );
 }
@@ -32,14 +46,24 @@ fn leaves_normal_stacks_untouched() {
         2,
         1,
         350,
-        ResolvedDimensions { channels: 2, slices: 1, frames: 350, triple_axis_warning: false },
+        ResolvedDimensions {
+            channels: 2,
+            slices: 1,
+            frames: 350,
+            triple_axis_warning: false,
+        },
         "normal 2-channel timelapse",
     );
     check(
         1,
         1,
         1,
-        ResolvedDimensions { channels: 1, slices: 1, frames: 1, triple_axis_warning: false },
+        ResolvedDimensions {
+            channels: 1,
+            slices: 1,
+            frames: 1,
+            triple_axis_warning: false,
+        },
         "single image",
     );
 }
@@ -50,14 +74,24 @@ fn folds_z_into_time() {
         1,
         50,
         1,
-        ResolvedDimensions { channels: 1, slices: 1, frames: 50, triple_axis_warning: false },
+        ResolvedDimensions {
+            channels: 1,
+            slices: 1,
+            frames: 50,
+            triple_axis_warning: false,
+        },
         "pure z-stack becomes a 50-frame series",
     );
     check(
         2,
         3,
         1,
-        ResolvedDimensions { channels: 2, slices: 1, frames: 3, triple_axis_warning: false },
+        ResolvedDimensions {
+            channels: 2,
+            slices: 1,
+            frames: 3,
+            triple_axis_warning: false,
+        },
         "2-channel z-stack: z folds into frames",
     );
 }
@@ -68,7 +102,12 @@ fn detects_swapped_channel_and_time_roles() {
         500,
         1,
         2,
-        ResolvedDimensions { channels: 2, slices: 1, frames: 500, triple_axis_warning: false },
+        ResolvedDimensions {
+            channels: 2,
+            slices: 1,
+            frames: 500,
+            triple_axis_warning: false,
+        },
         "swapped roles recovered",
     );
 }
@@ -79,7 +118,12 @@ fn warns_on_genuine_triple_axis_stack() {
         3,
         10,
         20,
-        ResolvedDimensions { channels: 3, slices: 10, frames: 20, triple_axis_warning: true },
+        ResolvedDimensions {
+            channels: 3,
+            slices: 10,
+            frames: 20,
+            triple_axis_warning: true,
+        },
         "channels + Z + time all present",
     );
 }
@@ -90,14 +134,24 @@ fn channel_size_boundary_is_inclusive_at_cutoff() {
         6,
         1,
         100,
-        ResolvedDimensions { channels: 6, slices: 1, frames: 100, triple_axis_warning: false },
+        ResolvedDimensions {
+            channels: 6,
+            slices: 1,
+            frames: 100,
+            triple_axis_warning: false,
+        },
         "exactly at the cutoff (6) counts as channel-sized",
     );
     check(
         7,
         1,
         100,
-        ResolvedDimensions { channels: 1, slices: 1, frames: 700, triple_axis_warning: false },
+        ResolvedDimensions {
+            channels: 1,
+            slices: 1,
+            frames: 700,
+            triple_axis_warning: false,
+        },
         "one past the cutoff does not count as channel-sized",
     );
 }
@@ -120,13 +174,19 @@ fn voxel_scale_reports_raw_calibration() {
 #[test]
 fn detect_classifies_each_dialect() {
     assert_eq!(detect(None), MetadataFormat::None);
-    assert_eq!(detect(Some("ImageJ=1.54f\nchannels=2\n")), MetadataFormat::ImageJ);
+    assert_eq!(
+        detect(Some("ImageJ=1.54f\nchannels=2\n")),
+        MetadataFormat::ImageJ
+    );
     assert_eq!(
         detect(Some("<?xml version=\"1.0\"?><OME xmlns=\"http://www.openmicroscopy.org/Schemas/OME/2016-06\"/>")),
         MetadataFormat::Ome
     );
     // Free-form text in someone else's TIFF isn't mistaken for a known dialect.
-    assert_eq!(detect(Some("Made with SomeMicroscope v3")), MetadataFormat::None);
+    assert_eq!(
+        detect(Some("Made with SomeMicroscope v3")),
+        MetadataFormat::None
+    );
 }
 
 #[test]

@@ -73,7 +73,9 @@ pub fn shift_sync(settings: &mut [ChannelSettings], before: &[(f32, f32)]) {
         let (dmin, dmax) = (s.min - bmin, s.max - bmax);
         (dmin != 0.0 || dmax != 0.0).then_some((c, dmin, dmax))
     });
-    let Some((src, dmin, dmax)) = moved else { return };
+    let Some((src, dmin, dmax)) = moved else {
+        return;
+    };
     for (i, s) in settings.iter_mut().enumerate() {
         if i == src || !s.enabled {
             continue;
@@ -275,70 +277,88 @@ pub fn build_channel_settings_reporting(
 /// One channel's contrast window and upload format.
 fn build_one(tiff: &TiffStack, c: usize) -> ChannelSettings {
     {
-            // The metadata may describe fewer channels than we're showing (a
-            // dimension override can raise the count), so fall back to "no
-            // suggested window" rather than indexing past it.
-            let meta_range = tiff.meta.channel_display.get(c).and_then(|d| d.range);
-            let frame = tiff.frames.get(c);
-            // Palette (indexed) channel: pixels are direct ColorMap indices, and
-            // the ColorMap is already this channel's LUT. Pin the window to a
-            // texel-centered identity so index i maps to LUT entry i exactly —
-            // t = (i + 0.5)/256 lands on texel i's center, so even a linearly
-            // filtered LUT returns entry i with no blend into a neighbour. The
-            // window is in the 0..65535 UI space that `sync_gpu` divides by 257
-            // for the 8-bit texture, so -0.5 and 255.5 in index space are:
-            if frame.is_some_and(|f| f.is_palette()) {
-                const W: f32 = 257.0; // the 8-bit → 0..65535 widening sync_gpu undoes
-                let (lo, hi) = (-0.5 * W, 255.5 * W);
-                return ChannelSettings {
-                    min: lo,
-                    max: hi,
-                    enabled: true,
-                    bounds: (lo, hi),
-                    initial: (lo, hi),
-                    kind: ChannelKind::Int8,
-                };
-            }
-            // 32- and 64-bit IEEE floats both go to the R32F GPU path (64-bit is
-            // downcast to f32 on decode). Integer data of every width — including
-            // 64-bit int — takes the u16-rescale path below instead.
-            let is_float = frame.is_some_and(|f| {
-                f.sample_format == fast_tiff_lib::SampleFormat::Float
-                    && (f.bits_per_sample == 32 || f.bits_per_sample == 64)
-            });
-            // Unsigned single-sample 8-bit uploads raw (R8Uint) instead of being
-            // widened to 16-bit on the CPU each frame. 4-bit indices decode to
-            // one byte each, so they ride the same R8Uint path.
-            let is_u8 = frame.is_some_and(|f| {
-                matches!(f.bits_per_sample, 4 | 8)
-                    && f.sample_format == fast_tiff_lib::SampleFormat::UnsignedInt
-                    && f.samples_per_pixel == 1
-            });
+        // The metadata may describe fewer channels than we're showing (a
+        // dimension override can raise the count), so fall back to "no
+        // suggested window" rather than indexing past it.
+        let meta_range = tiff.meta.channel_display.get(c).and_then(|d| d.range);
+        let frame = tiff.frames.get(c);
+        // Palette (indexed) channel: pixels are direct ColorMap indices, and
+        // the ColorMap is already this channel's LUT. Pin the window to a
+        // texel-centered identity so index i maps to LUT entry i exactly —
+        // t = (i + 0.5)/256 lands on texel i's center, so even a linearly
+        // filtered LUT returns entry i with no blend into a neighbour. The
+        // window is in the 0..65535 UI space that `sync_gpu` divides by 257
+        // for the 8-bit texture, so -0.5 and 255.5 in index space are:
+        if frame.is_some_and(|f| f.is_palette()) {
+            const W: f32 = 257.0; // the 8-bit → 0..65535 widening sync_gpu undoes
+            let (lo, hi) = (-0.5 * W, 255.5 * W);
+            return ChannelSettings {
+                min: lo,
+                max: hi,
+                enabled: true,
+                bounds: (lo, hi),
+                initial: (lo, hi),
+                kind: ChannelKind::Int8,
+            };
+        }
+        // 32- and 64-bit IEEE floats both go to the R32F GPU path (64-bit is
+        // downcast to f32 on decode). Integer data of every width — including
+        // 64-bit int — takes the u16-rescale path below instead.
+        let is_float = frame.is_some_and(|f| {
+            f.sample_format == fast_tiff_lib::SampleFormat::Float
+                && (f.bits_per_sample == 32 || f.bits_per_sample == 64)
+        });
+        // Unsigned single-sample 8-bit uploads raw (R8Uint) instead of being
+        // widened to 16-bit on the CPU each frame. 4-bit indices decode to
+        // one byte each, so they ride the same R8Uint path.
+        let is_u8 = frame.is_some_and(|f| {
+            matches!(f.bits_per_sample, 4 | 8)
+                && f.sample_format == fast_tiff_lib::SampleFormat::UnsignedInt
+                && f.samples_per_pixel == 1
+        });
 
-            if is_float {
-                let data = first_frame_float_minmax(tiff, c);
-                let (lo, hi) = meta_range
-                    .map(|(lo, hi)| (lo as f32, hi as f32))
-                    .or(data)
-                    .unwrap_or((0.0, 1.0));
-                let bounds = slider_bounds((lo, hi), data);
-                ChannelSettings { min: lo, max: hi, enabled: true, bounds, initial: (lo, hi), kind: ChannelKind::Float }
-            } else {
-                let data = first_frame_minmax(tiff, c);
-                let (min, max) = meta_range
-                    .map(|(lo, hi)| (lo as f32, hi as f32))
-                    // No display range in metadata at all (not even
-                    // ImageDescription min=/max=) — fall back to the actual
-                    // min/max of channel c's first frame.
-                    .or(data)
-                    .unwrap_or((0.0, 65535.0));
-                let bounds = slider_bounds((min, max), data);
-                // min/max stay in the widened 0..65535 space (slider unchanged);
-                // for an 8-bit (R8Uint) channel `sync_gpu` rescales them to the
-                // 0..255 the texture actually holds.
-                let kind = if is_u8 { ChannelKind::Int8 } else { ChannelKind::Int16 };
-                ChannelSettings { min, max, enabled: true, bounds, initial: (min, max), kind }
+        if is_float {
+            let data = first_frame_float_minmax(tiff, c);
+            let (lo, hi) = meta_range
+                .map(|(lo, hi)| (lo as f32, hi as f32))
+                .or(data)
+                .unwrap_or((0.0, 1.0));
+            let bounds = slider_bounds((lo, hi), data);
+            ChannelSettings {
+                min: lo,
+                max: hi,
+                enabled: true,
+                bounds,
+                initial: (lo, hi),
+                kind: ChannelKind::Float,
             }
+        } else {
+            let data = first_frame_minmax(tiff, c);
+            let (min, max) = meta_range
+                .map(|(lo, hi)| (lo as f32, hi as f32))
+                // No display range in metadata at all (not even
+                // ImageDescription min=/max=) — fall back to the actual
+                // min/max of channel c's first frame.
+                .or(data)
+                .unwrap_or((0.0, 65535.0));
+            let bounds = slider_bounds((min, max), data);
+            // min/max stay in the widened 0..65535 space (slider unchanged);
+            // for an 8-bit (R8Uint) channel `sync_gpu` rescales them to the
+            // 0..255 the texture actually holds.
+            let kind = if is_u8 {
+                ChannelKind::Int8
+            } else {
+                ChannelKind::Int16
+            };
+            ChannelSettings {
+                min,
+                max,
+                enabled: true,
+                bounds,
+                initial: (min, max),
+                kind,
+            }
+        }
     }
 }
 
@@ -362,8 +382,12 @@ pub fn auto_contrast(loaded: &mut Stack, hists: &[Histogram]) {
         return;
     }
     for h in hists {
-        let Some(s) = loaded.display.settings.get_mut(h.channel) else { continue };
-        let Some((lo, hi)) = auto_window(h) else { continue };
+        let Some(s) = loaded.display.settings.get_mut(h.channel) else {
+            continue;
+        };
+        let Some((lo, hi)) = auto_window(h) else {
+            continue;
+        };
         // The histogram spans the union of every channel track, so a window
         // fitted on it can reach past this one. Clamping keeps both handles
         // somewhere the slider can actually draw them.

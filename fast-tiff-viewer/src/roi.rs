@@ -98,7 +98,11 @@ pub struct Budget {
 
 impl Budget {
     pub fn new(max_axis: u32, bytes_per_texel: usize, mode: LargeImageMode) -> Self {
-        Budget { max_axis, bytes_per_texel, mode }
+        Budget {
+            max_axis,
+            bytes_per_texel,
+            mode,
+        }
     }
 }
 
@@ -128,17 +132,15 @@ pub const MAX_PRELOAD_BYTES: usize = 96 << 20;
 /// what the budget is for.
 ///
 /// Powers of two only, so the level is a clean 1/2, 1/4, 1/8 of the original.
-pub fn overview_stride(
-    width: u32,
-    height: u32,
-    max_axis: u32,
-    bytes_per_texel: usize,
-) -> u32 {
+pub fn overview_stride(width: u32, height: u32, max_axis: u32, bytes_per_texel: usize) -> u32 {
     let max_axis = max_axis.max(2);
     let bytes_per_texel = bytes_per_texel.max(1);
     let mut stride = 2;
     loop {
-        let (tw, th) = (width.div_ceil(stride).max(1), height.div_ceil(stride).max(1));
+        let (tw, th) = (
+            width.div_ceil(stride).max(1),
+            height.div_ceil(stride).max(1),
+        );
         let fits = tw <= max_axis
             && th <= max_axis
             && (tw as usize) * (th as usize) * bytes_per_texel <= MAX_PRELOAD_BYTES;
@@ -264,30 +266,59 @@ pub struct Serving {
 pub fn serve(current: Option<Roi>, overview: Option<Roi>, plan: &Residency) -> Serving {
     if let Some(show) = current {
         if show.serves(&plan.required) {
-            return Serving { show, want: show, required: plan.required, ready: true };
+            return Serving {
+                show,
+                want: show,
+                required: plan.required,
+                ready: true,
+            };
         }
         if show.covers_area_of(&plan.required) {
-            return Serving { show, want: plan.resident, required: plan.required, ready: false };
+            return Serving {
+                show,
+                want: plan.resident,
+                required: plan.required,
+                ready: false,
+            };
         }
     }
     if let Some(show) = overview {
         if show != plan.resident && show.covers_area_of(&plan.required) {
-            return Serving { show, want: plan.resident, required: plan.required, ready: false };
+            return Serving {
+                show,
+                want: plan.resident,
+                required: plan.required,
+                ready: false,
+            };
         }
     }
-    Serving { show: plan.resident, want: plan.resident, required: plan.required, ready: true }
+    Serving {
+        show: plan.resident,
+        want: plan.resident,
+        required: plan.required,
+        ready: true,
+    }
 }
 
 impl Roi {
     /// The whole frame at full resolution — what every frame small enough to
     /// upload outright uses.
     pub fn full(width: u32, height: u32) -> Self {
-        Roi { x: 0, y: 0, w: width.max(1), h: height.max(1), stride: 1 }
+        Roi {
+            x: 0,
+            y: 0,
+            w: width.max(1),
+            h: height.max(1),
+            stride: 1,
+        }
     }
 
     /// Texture dimensions this window uploads to.
     pub fn texture_size(&self) -> (u32, u32) {
-        (self.w.div_ceil(self.stride).max(1), self.h.div_ceil(self.stride).max(1))
+        (
+            self.w.div_ceil(self.stride).max(1),
+            self.h.div_ceil(self.stride).max(1),
+        )
     }
 
     /// Image-pixel span the texture covers, which is the rect rounded *up* to
@@ -343,7 +374,10 @@ impl Roi {
         let (sx, sy) = (span_x.max(1) as f32, span_y.max(1) as f32);
         let (w, h) = (width.max(1) as f32, height.max(1) as f32);
         (
-            [(uv_offset[0] * w - self.x as f32) / sx, (uv_offset[1] * h - self.y as f32) / sy],
+            [
+                (uv_offset[0] * w - self.x as f32) / sx,
+                (uv_offset[1] * h - self.y as f32) / sy,
+            ],
             [uv_scale[0] * w / sx, uv_scale[1] * h / sy],
         )
     }
@@ -362,7 +396,11 @@ pub fn plan(
     viewport: [f32; 2],
     budget: Budget,
 ) -> Residency {
-    let Budget { max_axis, bytes_per_texel, mode } = budget;
+    let Budget {
+        max_axis,
+        bytes_per_texel,
+        mode,
+    } = budget;
     let (width, height) = (width.max(1), height.max(1));
     // A device that cannot hold a 2x2 texture cannot run this renderer at all;
     // the floor keeps the arithmetic below from having to model that case.
@@ -454,8 +492,17 @@ fn plan_preloaded(
         // Deliberately the whole frame, not a window of it: a level that spans
         // everything serves every view, so panning and zooming out never
         // re-cut it and it is decoded exactly once.
-        let r = Roi { x: 0, y: 0, w: width, h: height, stride };
-        Residency { resident: r, required: r }
+        let r = Roi {
+            x: 0,
+            y: 0,
+            w: width,
+            h: height,
+            stride,
+        };
+        Residency {
+            resident: r,
+            required: r,
+        }
     };
 
     if display_stride(vw, vh, viewport) > 1 {
@@ -464,8 +511,7 @@ fn plan_preloaded(
 
     // Zoomed in far enough to want the file's own resolution. Try it with the
     // pan margin, then without it, then give up and stay coarse.
-    let fits_axes =
-        needed_texels(vx, vw, 1) <= max_axis && needed_texels(vy, vh, 1) <= max_axis;
+    let fits_axes = needed_texels(vx, vw, 1) <= max_axis && needed_texels(vy, vh, 1) <= max_axis;
     if fits_axes {
         let required = roi(
             axis_window(vx, vw, width, 1, max_axis, 1),
@@ -478,7 +524,10 @@ fn plan_preloaded(
             let rx = axis_window(vx, vw, width, 1, max_axis, margin);
             let ry = axis_window(vy, vh, height, 1, max_axis, margin);
             if (rx.1 as usize) * (ry.1 as usize) * bytes_per_texel <= MAX_ROI_BYTES {
-                return Residency { resident: roi(rx, ry, 1, width, height), required };
+                return Residency {
+                    resident: roi(rx, ry, 1, width, height),
+                    required,
+                };
             }
         }
     }
@@ -561,7 +610,12 @@ fn visible_rect(
     let y0 = (px(uv_offset[1], height).floor() as u32).min(height - 1);
     let x1 = px(uv_offset[0] + uv_scale[0], width).ceil() as u32;
     let y1 = px(uv_offset[1] + uv_scale[1], height).ceil() as u32;
-    (x0, y0, x1.saturating_sub(x0).clamp(1, width - x0), y1.saturating_sub(y0).clamp(1, height - y0))
+    (
+        x0,
+        y0,
+        x1.saturating_sub(x0).clamp(1, width - x0),
+        y1.saturating_sub(y0).clamp(1, height - y0),
+    )
 }
 
 /// One axis, entirely in texels: the texel range covering `v .. v+len`, grown
@@ -675,7 +729,9 @@ pub fn extract_sampled<T: Copy + Default>(
         // The last sample this row contributes, so the slice covers exactly the
         // texels wanted and `step_by` does the rest.
         let end = (start + cols.saturating_sub(1) * xs + 1).min(src.len());
-        let Some(row) = src.get(start..end) else { break };
+        let Some(row) = src.get(start..end) else {
+            break;
+        };
         let before = out.len();
         out.extend(row.iter().step_by(xs).copied());
         // A row that ran short leaves a ragged edge; square it off so every row

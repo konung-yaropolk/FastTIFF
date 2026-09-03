@@ -69,8 +69,12 @@ pub fn frame_histograms(stack: &Stack) -> Vec<Histogram> {
     let kinds: Vec<ChannelKind> = stack.display.settings.iter().map(|s| s.kind).collect();
     let (lo, hi) = shared_track(stack);
     let jobs = build_jobs(stack, stack.frame_index, &enabled, &kinds);
-    let Ok(decoded) = decode_jobs(&stack.tiff.data, &stack.tiff.frames, stack.tiff.byte_order, &jobs)
-    else {
+    let Ok(decoded) = decode_jobs(
+        &stack.tiff.data,
+        &stack.tiff.frames,
+        stack.tiff.byte_order,
+        &jobs,
+    ) else {
         return Vec::new();
     };
     jobs.iter()
@@ -145,7 +149,14 @@ fn bin(channel: usize, data: &Decoded, lo: f32, hi: f32) -> Histogram {
     }
 
     let peak = bins.iter().copied().max().unwrap_or(0);
-    Histogram { channel, bins, lo, hi, peak, counted }
+    Histogram {
+        channel,
+        bins,
+        lo,
+        hi,
+        peak,
+        counted,
+    }
 }
 
 /// Step between sampled pixels so a frame contributes at most

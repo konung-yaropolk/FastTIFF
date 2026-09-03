@@ -41,8 +41,14 @@ fn decode_ij_escapes(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '\\' && chars.peek() == Some(&'u') {
             chars.next(); // consume 'u'
-            let hex: String = (0..4).map_while(|_| chars.next_if(|d| d.is_ascii_hexdigit())).collect();
-            match u32::from_str_radix(&hex, 16).ok().filter(|_| hex.len() == 4).and_then(char::from_u32) {
+            let hex: String = (0..4)
+                .map_while(|_| chars.next_if(|d| d.is_ascii_hexdigit()))
+                .collect();
+            match u32::from_str_radix(&hex, 16)
+                .ok()
+                .filter(|_| hex.len() == 4)
+                .and_then(char::from_u32)
+            {
                 Some(ch) => out.push(ch),
                 None => {
                     out.push('\\');
@@ -75,7 +81,9 @@ pub(crate) fn images_count(description: &str) -> Option<usize> {
     if !description.contains("ImageJ=") {
         return None;
     }
-    parse_description(description).get("images").and_then(|s| s.parse().ok())
+    parse_description(description)
+        .get("images")
+        .and_then(|s| s.parse().ok())
 }
 
 /// Parse ImageJ metadata (the `key=value` description + the optional binary
@@ -146,7 +154,10 @@ pub fn parse(
     let fps = get_f64("fps").filter(|f| *f > 0.0);
 
     let mut channel_display: Vec<ChannelDisplay> = (0..channels)
-        .map(|c| ChannelDisplay { lut: default_lut_for(mode, c), range: global_range })
+        .map(|c| ChannelDisplay {
+            lut: default_lut_for(mode, c),
+            range: global_range,
+        })
         .collect();
 
     // Supplement the above from the binary IJMetadata block. A correctly-formed
@@ -225,7 +236,12 @@ pub(crate) fn serialize(planes: usize, meta: &StackMetaWrite) -> Result<String> 
     if frames > 1 {
         s += &format!("frames={frames}\n");
     }
-    if [meta.channels > 1, meta.slices > 1, frames > 1].iter().filter(|&&b| b).count() >= 2 {
+    if [meta.channels > 1, meta.slices > 1, frames > 1]
+        .iter()
+        .filter(|&&b| b)
+        .count()
+        >= 2
+    {
         s += "hyperstack=true\n";
     }
     if meta.channels > 1 || meta.mode != DisplayMode::Grayscale {

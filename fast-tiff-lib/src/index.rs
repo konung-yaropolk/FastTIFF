@@ -8,7 +8,6 @@
 use crate::ifd::{self, ByteOrder, RawIfdEntry, TiffFlavor};
 use crate::metadata::{self, StackMeta};
 use anyhow::{anyhow, bail, Result};
-use std::collections::HashSet;
 #[cfg(feature = "mmap")]
 use {memmap2::Mmap, std::fs::File, std::path::Path};
 
@@ -87,6 +86,101 @@ pub enum Compression {
     Other(u16),
 }
 
+/// A frame's strip (or tile) offsets, or its byte counts.
+///
+/// Nearly every frame in a scientific stack is a single strip, and a
+/// `Vec<u64>` holding one element means a heap allocation per frame that lives
+/// as long as the stack does — two of them, offsets and counts. A
+/// million-frame stack therefore keeps two million tiny allocations alive, and
+/// building and freeing them costs more than parsing the directories they came
+/// from: 0.117 us per frame against 0.012 for the inline form. Opening such a
+/// stack is dominated by heap traffic, not by TIFF.
+///
+/// Derefs to `[u64]`, so every reader — `len`, indexing, `iter`, `par_iter` —
+/// is unchanged.
+#[derive(Clone, Debug, Default, Eq)]
+pub enum Strips {
+    /// No strips declared. Rejected later by `validate_frames`, but
+    /// representable so parsing does not have to allocate to say "none".
+    #[default]
+    None,
+    /// The overwhelmingly common case: one strip covering the whole frame.
+    One(u64),
+    /// A multi-strip or tiled frame.
+    Many(Vec<u64>),
+}
+
+/// Equal when the *contents* are equal, whatever shape holds them.
+///
+/// The derived comparison would call `One(5)` and `Many(vec![5])` different,
+/// which is a trap for a type whose whole point is that it has two spellings
+/// for the same one-element list. Everything the crate builds goes through
+/// `From`, which normalises — but `Many` is a public variant, so a caller can
+/// spell it the other way, and `tests/row_bands.rs` really does `assert_eq!`
+/// two of these against each other.
+impl PartialEq for Strips {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Strips {
+    /// Shorten to the first `n` entries, as `Vec::truncate` does.
+    pub fn truncate(&mut self, n: usize) {
+        if n >= self.len() {
+            return;
+        }
+        *self = match self {
+            Strips::Many(v) => {
+                v.truncate(n);
+                std::mem::take(v).into()
+            }
+            _ => Strips::None,
+        };
+    }
+}
+
+impl std::ops::Deref for Strips {
+    type Target = [u64];
+    #[inline]
+    fn deref(&self) -> &[u64] {
+        match self {
+            Strips::None => &[],
+            Strips::One(v) => std::slice::from_ref(v),
+            Strips::Many(v) => v,
+        }
+    }
+}
+
+impl From<&[u64]> for Strips {
+    #[inline]
+    fn from(v: &[u64]) -> Self {
+        match v {
+            [] => Strips::None,
+            [one] => Strips::One(*one),
+            many => Strips::Many(many.to_vec()),
+        }
+    }
+}
+
+impl From<Vec<u64>> for Strips {
+    #[inline]
+    fn from(v: Vec<u64>) -> Self {
+        match v.len() {
+            0 => Strips::None,
+            1 => Strips::One(v[0]),
+            _ => Strips::Many(v),
+        }
+    }
+}
+
+impl FromIterator<u64> for Strips {
+    fn from_iter<I: IntoIterator<Item = u64>>(iter: I) -> Self {
+        Vec::from_iter(iter).into()
+    }
+}
+
 /// Everything needed to locate and decode one plane (one IFD) in the file.
 #[derive(Clone, Debug)]
 pub struct FrameInfo {
@@ -128,8 +222,8 @@ pub struct FrameInfo {
     /// right default for the overwhelmingly common CMYK case. See
     /// [`FrameInfo::is_cmyk`].
     pub ink_set: u16,
-    pub strip_offsets: Vec<u64>,
-    pub strip_byte_counts: Vec<u64>,
+    pub strip_offsets: Strips,
+    pub strip_byte_counts: Strips,
     pub rows_per_strip: u32,
 }
 
@@ -249,7 +343,9 @@ impl FrameInfo {
     /// show it as a gray level. 4-bit indices are unpacked to one byte each on
     /// decode, so both ride the same 8-bit-index display path.
     pub fn is_palette(&self) -> bool {
-        self.photometric == 3 && self.samples_per_pixel == 1 && matches!(self.bits_per_sample, 4 | 8)
+        self.photometric == 3
+            && self.samples_per_pixel == 1
+            && matches!(self.bits_per_sample, 4 | 8)
     }
 
     /// True for a CMYK frame this crate can convert for display: a Separated
@@ -298,7 +394,12 @@ impl FrameInfo {
     pub fn tile_grid(&self) -> Option<(u32, u32, u32, u32)> {
         let (tw, th) = self.tile_size?;
         let (tw, th) = (tw.max(1), th.max(1));
-        Some((self.width.div_ceil(tw).max(1), self.height.div_ceil(th).max(1), tw, th))
+        Some((
+            self.width.div_ceil(tw).max(1),
+            self.height.div_ceil(th).max(1),
+            tw,
+            th,
+        ))
     }
 
     /// Pieces of compressed data one plane is divided into — tiles for a tiled
@@ -355,7 +456,13 @@ impl FrameInfo {
             let band = self.crop_rows(rows)?;
             let first_row = band.rows.start;
             let pieces = band.len().div_ceil(per_piece).max(1);
-            return Ok(SampledBand { frame: band.frame, first_row, rows_per_piece: per_piece, pieces, step });
+            return Ok(SampledBand {
+                frame: band.frame,
+                first_row,
+                rows_per_piece: per_piece,
+                pieces,
+                step,
+            });
         }
         // Stepping over a tile grid would skip columns as well as rows, since a
         // tile row is `across` consecutive entries. Not wrong to want, but not
@@ -408,10 +515,14 @@ impl FrameInfo {
         // number would size the decode for rows the file does not have, and the
         // reader would rightly refuse a frame whose strips fall short of it.
         let last_idx = (first + (taken.saturating_sub(1)) * step as usize) as u32;
-        let last_rows = per_piece.min(self.height.saturating_sub(last_idx.saturating_mul(per_piece)));
-        frame.height = (taken as u32).saturating_sub(1).saturating_mul(per_piece) + last_rows.max(1);
-        frame.strip_offsets = offsets;
-        frame.strip_byte_counts = counts;
+        let last_rows = per_piece.min(
+            self.height
+                .saturating_sub(last_idx.saturating_mul(per_piece)),
+        );
+        frame.height =
+            (taken as u32).saturating_sub(1).saturating_mul(per_piece) + last_rows.max(1);
+        frame.strip_offsets = offsets.into();
+        frame.strip_byte_counts = counts.into();
         Ok(SampledBand {
             frame,
             first_row: first as u32 * per_piece,
@@ -437,16 +548,16 @@ impl FrameInfo {
     /// [`FrameInfo`], so every reader, codec and predictor applies to it
     /// unchanged; and it is snapped *outward*, so the caller must index against
     /// the returned ranges rather than the ones it asked for.
-    pub fn crop(
-        &self,
-        cols: std::ops::Range<u32>,
-        rows: std::ops::Range<u32>,
-    ) -> Result<Region> {
+    pub fn crop(&self, cols: std::ops::Range<u32>, rows: std::ops::Range<u32>) -> Result<Region> {
         let Some((across, down, tw, th)) = self.tile_grid() else {
             // Stripped: rows only, full width.
             let band = self.crop_rows(rows)?;
             let _ = cols;
-            return Ok(Region { rows: band.rows, cols: 0..self.width, frame: band.frame });
+            return Ok(Region {
+                rows: band.rows,
+                cols: 0..self.width,
+                frame: band.frame,
+            });
         };
 
         let span = |req: std::ops::Range<u32>, size: u32, n: u32, count: u32| {
@@ -490,9 +601,13 @@ impl FrameInfo {
         let mut frame = self.clone();
         frame.width = x1 - x0;
         frame.height = y1 - y0;
-        frame.strip_offsets = offsets;
-        frame.strip_byte_counts = counts;
-        Ok(Region { frame, rows: y0..y1, cols: x0..x1 })
+        frame.strip_offsets = offsets.into();
+        frame.strip_byte_counts = counts.into();
+        Ok(Region {
+            frame,
+            rows: y0..y1,
+            cols: x0..x1,
+        })
     }
 
     /// A view of just the strips covering `rows` — the same frame cropped to a
@@ -521,7 +636,10 @@ impl FrameInfo {
         // let `crop` walk the grid.
         if self.is_tiled() {
             let region = self.crop(0..self.width, rows)?;
-            return Ok(RowBand { frame: region.frame, rows: region.rows });
+            return Ok(RowBand {
+                frame: region.frame,
+                rows: region.rows,
+            });
         }
         let rps = self.rows_per_strip.max(1);
         let start = rows.start.min(self.height);
@@ -532,10 +650,17 @@ impl FrameInfo {
         let last = end.max(start + 1).div_ceil(rps).max(first + 1);
 
         let per_plane = (self.height.div_ceil(rps)) as usize;
-        let planes = if self.is_planar() { (self.samples_per_pixel as usize).max(1) } else { 1 };
+        let planes = if self.is_planar() {
+            (self.samples_per_pixel as usize).max(1)
+        } else {
+            1
+        };
         let (first, last) = (first as usize, (last as usize).min(per_plane));
         if first >= last {
-            bail!("row band {start}..{end} selects no strips of a {}-row frame", self.height);
+            bail!(
+                "row band {start}..{end} selects no strips of a {}-row frame",
+                self.height
+            );
         }
         // The strip table has to actually describe the frame before a slice of
         // it can mean anything.
@@ -560,9 +685,12 @@ impl FrameInfo {
         let y1 = ((last as u32) * rps).min(self.height);
         let mut frame = self.clone();
         frame.height = y1 - y0;
-        frame.strip_offsets = offsets;
-        frame.strip_byte_counts = counts;
-        Ok(RowBand { frame, rows: y0..y1 })
+        frame.strip_offsets = offsets.into();
+        frame.strip_byte_counts = counts.into();
+        Ok(RowBand {
+            frame,
+            rows: y0..y1,
+        })
     }
 
     /// Bytes one sample occupies at this frame's bit depth, or an error for a
@@ -588,7 +716,13 @@ impl FrameInfo {
     pub fn pixel_count(&self) -> Result<usize> {
         (self.width as usize)
             .checked_mul(self.height as usize)
-            .ok_or_else(|| anyhow!("frame geometry overflows address space: {}x{}", self.width, self.height))
+            .ok_or_else(|| {
+                anyhow!(
+                    "frame geometry overflows address space: {}x{}",
+                    self.width,
+                    self.height
+                )
+            })
     }
 
     /// Samples in this frame — `width * height * samples_per_pixel` — with
@@ -665,8 +799,14 @@ impl FrameInfo {
     /// case where a "row" is one sample plane's worth.
     pub(crate) fn strip_coverable_bytes(&self) -> Result<u64> {
         let sample_bytes = self.sample_bytes()? as u64;
-        let per_row_samples = if self.is_planar() { 1 } else { self.samples_per_pixel.max(1) as u64 };
-        let row_bytes = (self.width as u64).saturating_mul(per_row_samples).saturating_mul(sample_bytes);
+        let per_row_samples = if self.is_planar() {
+            1
+        } else {
+            self.samples_per_pixel.max(1) as u64
+        };
+        let row_bytes = (self.width as u64)
+            .saturating_mul(per_row_samples)
+            .saturating_mul(sample_bytes);
         let rows_per_strip = (self.rows_per_strip as u64).max(1).min(self.height as u64);
         Ok((self.strip_offsets.len() as u64)
             .saturating_mul(rows_per_strip)
@@ -775,18 +915,32 @@ impl TiffStack {
 
         let mut offset = usize::try_from(first_ifd)
             .map_err(|_| anyhow!("first IFD offset exceeds address space"))?;
-        let mut visited = HashSet::new();
         let mut first = true;
+        // Cycle detection, Brent's algorithm: one comparison per IFD and no
+        // memory, in place of a `HashSet` of every offset seen. That set cost a
+        // hash insert per frame and, on a stack near `MAX_FRAMES`, tens of
+        // megabytes of table — for a check that fires only on a malformed file.
+        // Brent's finds any cycle from a single forward walk, which is the walk
+        // we are already doing.
+        //
+        // It needs up to ~2x the cycle length to notice, where the set noticed
+        // on the first repeat. So a cycle longer than half of `MAX_FRAMES`
+        // trips the frame-count bail below instead of this one — a different
+        // error message for a file with half a million looping directories,
+        // which is bounded either way and not worth a hash table per frame.
+        let mut tortoise = offset;
+        let mut power = 1usize;
+        let mut lam = 0usize;
+        // One entry buffer for the whole chain (see `ifd::read_ifd_into`).
+        let mut entries: Vec<ifd::RawIfdEntry> = Vec::new();
+        let mut strip_scratch: Vec<u64> = Vec::new();
 
         while offset != 0 {
-            if !visited.insert(offset) {
-                bail!("malformed TIFF: IFD chain loops back to offset {offset}");
-            }
-            let parsed = ifd::read_ifd(mmap, offset, order, flavor)?;
-            let frame = frame_info_from_entries(&parsed.entries, mmap, order)?;
+            let next_offset = ifd::read_ifd_into(mmap, offset, order, flavor, &mut entries)?;
+            let frame = frame_info_from_entries(&entries, mmap, order, &mut strip_scratch)?;
 
             if first {
-                for e in &parsed.entries {
+                for e in &entries {
                     match e.tag {
                         TAG_IMAGE_DESCRIPTION => {
                             description = e.as_ascii(mmap, order).ok();
@@ -820,8 +974,19 @@ impl TiffStack {
                      into gigabytes of frame index)"
                 );
             }
-            offset = usize::try_from(parsed.next_offset)
+            offset = usize::try_from(next_offset)
                 .map_err(|_| anyhow!("next-IFD offset exceeds address space"))?;
+            if offset != 0 {
+                if offset == tortoise {
+                    bail!("malformed TIFF: IFD chain loops back to offset {offset}");
+                }
+                lam += 1;
+                if lam == power {
+                    tortoise = offset;
+                    power *= 2;
+                    lam = 0;
+                }
+            }
         }
 
         if frames.is_empty() {
@@ -835,10 +1000,17 @@ impl TiffStack {
         // pyramidal TIFF, or an appended thumbnail page — would otherwise be
         // silently mis-rendered. Catch it here with a clear error instead.
         let f0 = &frames[0];
-        let f0_shape = (f0.width, f0.height, f0.bits_per_sample, f0.samples_per_pixel);
-        if let Some((i, f)) = frames.iter().enumerate().find(|(_, f)| {
-            (f.width, f.height, f.bits_per_sample, f.samples_per_pixel) != f0_shape
-        }) {
+        let f0_shape = (
+            f0.width,
+            f0.height,
+            f0.bits_per_sample,
+            f0.samples_per_pixel,
+        );
+        if let Some((i, f)) = frames
+            .iter()
+            .enumerate()
+            .find(|(_, f)| (f.width, f.height, f.bits_per_sample, f.samples_per_pixel) != f0_shape)
+        {
             bail!(
                 "TIFF frames are not uniform: frame 0 is {}x{} ({}-bit, {} sample(s)/px) but \
                  frame {} is {}x{} ({}-bit, {} sample(s)/px). This looks like a pyramidal or \
@@ -863,7 +1035,10 @@ impl TiffStack {
         // the same). Only the unambiguous case qualifies: a single
         // uncompressed, predictor-free IFD whose strip data is contiguous.
         if frames.len() == 1 {
-            if let Some(n) = description.as_deref().and_then(metadata::imagej::images_count) {
+            if let Some(n) = description
+                .as_deref()
+                .and_then(metadata::imagej::images_count)
+            {
                 if n > 1 {
                     expand_imagej_contiguous(&mut frames, n, mmap.len());
                 }
@@ -939,7 +1114,11 @@ impl TiffStack {
 fn validate_frames(frames: &[FrameInfo], file_len: usize) -> Result<()> {
     for (i, f) in frames.iter().enumerate() {
         if f.width == 0 || f.height == 0 {
-            bail!("frame {i} declares an empty image ({}x{})", f.width, f.height);
+            bail!(
+                "frame {i} declares an empty image ({}x{})",
+                f.width,
+                f.height
+            );
         }
         // Overflow guard. `decoded_len` is what every downstream allocation is
         // sized from, so proving it here means it cannot wrap there.
@@ -1011,8 +1190,8 @@ fn expand_imagej_contiguous(frames: &mut Vec<FrameInfo>, n: usize, file_len: usi
     let template = frames[0].clone();
     *frames = (0..n)
         .map(|i| FrameInfo {
-            strip_offsets: vec![base + i * frame_bytes],
-            strip_byte_counts: vec![frame_bytes],
+            strip_offsets: Strips::One(base + i * frame_bytes),
+            strip_byte_counts: Strips::One(frame_bytes),
             rows_per_strip: template.height,
             ..template.clone()
         })
@@ -1028,10 +1207,16 @@ impl TiffStack {
     /// performance hint — safe to skip, safe to repeat.
     pub fn prefetch_frame(&self, frame: &FrameInfo) {
         const PAGE: usize = 4096;
-        for (&off, &len) in frame.strip_offsets.iter().zip(frame.strip_byte_counts.iter()) {
+        for (&off, &len) in frame
+            .strip_offsets
+            .iter()
+            .zip(frame.strip_byte_counts.iter())
+        {
             let start = off as usize;
             let end = start.saturating_add(len as usize).min(self.data.len());
-            let Some(strip) = self.data.get(start..end) else { continue };
+            let Some(strip) = self.data.get(start..end) else {
+                continue;
+            };
             let mut i = 0;
             while i < strip.len() {
                 std::hint::black_box(strip[i]);
@@ -1048,6 +1233,10 @@ fn frame_info_from_entries(
     entries: &[RawIfdEntry],
     file: &[u8],
     order: ByteOrder,
+    // Reused across the whole chain: reading a strip array into a fresh `Vec`
+    // and converting it would allocate and free once per frame even for the
+    // single-strip case this exists to avoid.
+    scratch: &mut Vec<u64>,
 ) -> Result<FrameInfo> {
     let mut width = None;
     let mut height = None;
@@ -1081,10 +1270,22 @@ fn frame_info_from_entries(
             TAG_PREDICTOR => predictor = e.as_u32(file, order)? as u16,
             TAG_ROWS_PER_STRIP => rows_per_strip = e.as_u32(file, order)?,
             // u64 accessors: BigTIFF stores these as LONG8 past 4 GiB.
-            TAG_STRIP_OFFSETS => strip_offsets = Some(e.as_u64_array(file, order)?),
-            TAG_STRIP_BYTE_COUNTS => strip_byte_counts = Some(e.as_u64_array(file, order)?),
-            TAG_TILE_OFFSETS => tile_offsets = Some(e.as_u64_array(file, order)?),
-            TAG_TILE_BYTE_COUNTS => tile_byte_counts = Some(e.as_u64_array(file, order)?),
+            TAG_STRIP_OFFSETS => {
+                e.read_u64_array(file, order, scratch)?;
+                strip_offsets = Some(Strips::from(&scratch[..]));
+            }
+            TAG_STRIP_BYTE_COUNTS => {
+                e.read_u64_array(file, order, scratch)?;
+                strip_byte_counts = Some(Strips::from(&scratch[..]));
+            }
+            TAG_TILE_OFFSETS => {
+                e.read_u64_array(file, order, scratch)?;
+                tile_offsets = Some(Strips::from(&scratch[..]));
+            }
+            TAG_TILE_BYTE_COUNTS => {
+                e.read_u64_array(file, order, scratch)?;
+                tile_byte_counts = Some(Strips::from(&scratch[..]));
+            }
             TAG_TILE_WIDTH => tile_width = Some(e.as_u32(file, order)?),
             TAG_TILE_LENGTH => tile_length = Some(e.as_u32(file, order)?),
             TAG_PHOTOMETRIC => photometric = e.as_u32(file, order)? as u16,

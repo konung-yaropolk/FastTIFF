@@ -45,7 +45,10 @@ fn the_first_window_is_built_synchronously() {
     let s = roi::serve(None, None, &plan(want, roi(0, 0, W, H, 8)));
     assert_eq!(s.show, want);
     assert_eq!(s.want, want, "nothing better to prepare");
-    assert!(s.ready, "with nothing on screen there is nothing to fall back on");
+    assert!(
+        s.ready,
+        "with nothing on screen there is nothing to fall back on"
+    );
 }
 
 /// A small pan inside the margin: the resident window still serves, so the GPU
@@ -56,7 +59,11 @@ fn a_pan_inside_the_resident_window_asks_for_nothing() {
     let required = roi(4_500, 2_200, 3_840, 2_160, 1);
     // A fresh plan would centre a new window on the view — irrelevant, because
     // what is resident already covers it at the right resolution.
-    let s = roi::serve(Some(current), None, &plan(roi(3_000, 1_000, 8_000, 4_000, 1), required));
+    let s = roi::serve(
+        Some(current),
+        None,
+        &plan(roi(3_000, 1_000, 8_000, 4_000, 1), required),
+    );
     assert_eq!(s.show, current);
     assert_eq!(
         s.want, current,
@@ -73,11 +80,24 @@ fn a_pan_inside_the_resident_window_asks_for_nothing() {
 fn zooming_in_keeps_the_coarse_window_up_while_a_finer_one_is_built() {
     let current = roi(0, 0, W, H, 8); // the whole frame, coarse
     let finer = roi(10_000, 4_000, 8_000, 4_000, 1);
-    let s = roi::serve(Some(current), None, &plan(finer, roi(11_000, 4_500, 3_840, 2_160, 1)));
+    let s = roi::serve(
+        Some(current),
+        None,
+        &plan(finer, roi(11_000, 4_500, 3_840, 2_160, 1)),
+    );
 
-    assert_eq!(s.show, current, "the picture must not be blanked while the finer one is cut");
-    assert_eq!(s.want, finer, "and the finer one must actually be asked for");
-    assert!(!s.ready, "not ready means: draw `show`, build `want` off-thread");
+    assert_eq!(
+        s.show, current,
+        "the picture must not be blanked while the finer one is cut"
+    );
+    assert_eq!(
+        s.want, finer,
+        "and the finer one must actually be asked for"
+    );
+    assert!(
+        !s.ready,
+        "not ready means: draw `show`, build `want` off-thread"
+    );
     assert_ne!(s.show, s.want, "the caller only builds when these differ");
 }
 
@@ -88,14 +108,24 @@ fn zooming_in_keeps_the_coarse_window_up_while_a_finer_one_is_built() {
 #[test]
 fn not_ready_always_names_something_to_build() {
     let cases = [
-        (Some(roi(0, 0, W, H, 8)), None, roi(0, 0, W, H, 1), roi(0, 0, W, H, 1)),
+        (
+            Some(roi(0, 0, W, H, 8)),
+            None,
+            roi(0, 0, W, H, 1),
+            roi(0, 0, W, H, 1),
+        ),
         (
             Some(roi(0, 0, W, H, 4)),
             None,
             roi(2_000, 1_000, 9_000, 5_000, 1),
             roi(3_000, 2_000, 3_840, 2_160, 1),
         ),
-        (Some(roi(0, 0, W, H, 1)), None, roi(0, 0, W, H, 4), roi(0, 0, W, H, 4)),
+        (
+            Some(roi(0, 0, W, H, 1)),
+            None,
+            roi(0, 0, W, H, 4),
+            roi(0, 0, W, H, 4),
+        ),
         // The overview path: one where it is what was planned (so it must not
         // be offered) and one where it is not.
         (
@@ -116,8 +146,14 @@ fn not_ready_always_names_something_to_build() {
         if s.ready {
             assert_eq!(s.show, s.want, "a ready plan has nothing outstanding");
         } else {
-            assert_ne!(s.show, s.want, "an unready plan must name the window to build");
-            assert_eq!(s.want, resident, "and it is the planned window, margin and all");
+            assert_ne!(
+                s.show, s.want,
+                "an unready plan must name the window to build"
+            );
+            assert_eq!(
+                s.want, resident,
+                "and it is the planned window, margin and all"
+            );
         }
     }
 }
@@ -134,8 +170,15 @@ fn not_ready_always_names_something_to_build() {
 fn a_jump_outside_the_resident_window_is_not_covered_up() {
     let current = roi(0, 0, 8_000, 4_000, 1);
     let elsewhere = roi(30_000, 8_000, 8_000, 4_000, 1);
-    let s = roi::serve(Some(current), None, &plan(elsewhere, roi(31_000, 8_500, 3_840, 2_160, 1)));
-    assert_eq!(s.show, elsewhere, "showing `current` would display blank pixels");
+    let s = roi::serve(
+        Some(current),
+        None,
+        &plan(elsewhere, roi(31_000, 8_500, 3_840, 2_160, 1)),
+    );
+    assert_eq!(
+        s.show, elsewhere,
+        "showing `current` would display blank pixels"
+    );
     assert!(s.ready);
 }
 
@@ -161,8 +204,15 @@ fn zooming_out_beyond_the_resident_window_is_built_now() {
 #[test]
 fn a_sharper_window_than_needed_is_kept_on_screen() {
     let current = roi(0, 0, W, H, 2);
-    let s = roi::serve(Some(current), None, &plan(roi(0, 0, W, H, 4), roi(0, 0, W, H, 4)));
-    assert_eq!(s.show, current, "what is up is already better than asked for");
+    let s = roi::serve(
+        Some(current),
+        None,
+        &plan(roi(0, 0, W, H, 4), roi(0, 0, W, H, 4)),
+    );
+    assert_eq!(
+        s.show, current,
+        "what is up is already better than asked for"
+    );
     assert!(!s.ready, "but the cheaper window is still worth having");
 }
 
@@ -182,9 +232,18 @@ fn a_jump_across_the_image_falls_back_to_the_overview() {
         Some(overview),
         &plan(elsewhere, roi(31_000, 8_500, 3_840, 2_160, 1)),
     );
-    assert_eq!(s.show, overview, "the overview covers the new view; the fine window does not");
-    assert_eq!(s.want, elsewhere, "and the properly-sampled window is still asked for");
-    assert!(!s.ready, "showing the overview costs an upload, not a decode");
+    assert_eq!(
+        s.show, overview,
+        "the overview covers the new view; the fine window does not"
+    );
+    assert_eq!(
+        s.want, elsewhere,
+        "and the properly-sampled window is still asked for"
+    );
+    assert!(
+        !s.ready,
+        "showing the overview costs an upload, not a decode"
+    );
 }
 
 /// Zoomed fully out, the planned window *is* the overview — there is nothing
@@ -204,7 +263,10 @@ fn the_overview_is_not_offered_when_it_is_what_was_planned() {
     );
     assert_eq!(s.show, overview);
     assert_eq!(s.want, overview);
-    assert!(s.ready, "nothing to build means ready, or nothing ever gets built");
+    assert!(
+        s.ready,
+        "nothing to build means ready, or nothing ever gets built"
+    );
     assert_eq!(s.show, s.want, "a ready plan has nothing outstanding");
 }
 
@@ -221,9 +283,15 @@ fn an_overview_never_preempts_a_resident_window() {
     let s = roi::serve(
         Some(current),
         Some(overview),
-        &plan(roi(3_000, 1_000, 8_000, 4_000, 1), roi(4_500, 2_200, 3_840, 2_160, 1)),
+        &plan(
+            roi(3_000, 1_000, 8_000, 4_000, 1),
+            roi(4_500, 2_200, 3_840, 2_160, 1),
+        ),
     );
-    assert_eq!(s.show, current, "an overview must not displace a window that already serves");
+    assert_eq!(
+        s.show, current,
+        "an overview must not displace a window that already serves"
+    );
     assert!(s.ready);
 
     // Case 2: resident covers the ground, at the wrong sampling.
@@ -234,7 +302,10 @@ fn an_overview_never_preempts_a_resident_window() {
         Some(overview),
         &plan(finer, roi(11_000, 4_500, 3_840, 2_160, 1)),
     );
-    assert_eq!(s.show, coarse, "stride 8 covers this view; dropping to the overview's 16 is worse");
+    assert_eq!(
+        s.show, coarse,
+        "stride 8 covers this view; dropping to the overview's 16 is worse"
+    );
     assert_eq!(s.want, finer);
     assert!(!s.ready);
 }
@@ -251,7 +322,10 @@ fn an_overview_that_does_not_cover_the_view_is_not_offered() {
         Some(partial),
         &plan(elsewhere, roi(31_000, 8_500, 3_840, 2_160, 1)),
     );
-    assert_eq!(s.show, elsewhere, "half the frame cannot stand in for the other half");
+    assert_eq!(
+        s.show, elsewhere,
+        "half the frame cannot stand in for the other half"
+    );
     assert!(s.ready);
 }
 
@@ -318,7 +392,9 @@ mod worker {
     /// stall for an invisible wrong picture.
     #[test]
     fn the_worker_builds_what_the_inline_path_would_have() {
-        let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else { return };
+        let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else {
+            return;
+        };
         let tiff = TiffStack::open(&path).unwrap();
         let jobs = jobs_for(&tiff);
         let kinds = vec![ChannelKind::Int16];
@@ -353,7 +429,9 @@ mod worker {
     /// it again.
     #[test]
     fn a_window_survives_being_asked_for_with_the_wrong_key() {
-        let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else { return };
+        let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else {
+            return;
+        };
         let tiff = TiffStack::open(&path).unwrap();
         let jobs = jobs_for(&tiff);
         let want = roi(16, 16, 48, 32, 1);
@@ -362,9 +440,20 @@ mod worker {
         worker.request(0, want, jobs, vec![ChannelKind::Int16]);
 
         for _ in 0..600 {
-            assert!(worker.take_matching(1, &want, &[0]).is_none(), "wrong frame");
-            assert!(worker.take_matching(0, &roi(0, 0, 48, 32, 1), &[0]).is_none(), "wrong rect");
-            assert!(worker.take_matching(0, &want, &[0, 1]).is_none(), "wrong channel set");
+            assert!(
+                worker.take_matching(1, &want, &[0]).is_none(),
+                "wrong frame"
+            );
+            assert!(
+                worker
+                    .take_matching(0, &roi(0, 0, 48, 32, 1), &[0])
+                    .is_none(),
+                "wrong rect"
+            );
+            assert!(
+                worker.take_matching(0, &want, &[0, 1]).is_none(),
+                "wrong channel set"
+            );
             // Every wrong key above has been refused; the right one must still
             // find the window there.
             if worker.take_matching(0, &want, &[0]).is_some() {
@@ -386,7 +475,9 @@ mod worker {
     /// one of the other 11 covered the view that discarded it.
     #[test]
     fn a_window_larger_than_needed_still_serves() {
-        let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else { return };
+        let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else {
+            return;
+        };
         let tiff = TiffStack::open(&path).unwrap();
         let jobs = jobs_for(&tiff);
         let built_for = roi(0, 0, 96, 64, 1);
@@ -397,9 +488,15 @@ mod worker {
         // The view has moved on to something smaller and inside it — which is
         // what a zoom does between the request and its answer.
         let now_needs = roi(16, 16, 48, 32, 1);
-        assert!(built_for.serves(&now_needs), "the test is only meaningful if it covers");
+        assert!(
+            built_for.serves(&now_needs),
+            "the test is only meaningful if it covers"
+        );
         let got = wait_for(&worker, 0, &now_needs, &[0]).expect("a covering window should serve");
-        assert_eq!(got.roi, built_for, "and it arrives as the window that was actually built");
+        assert_eq!(
+            got.roi, built_for,
+            "and it arrives as the window that was actually built"
+        );
     }
 
     /// Still refused when it genuinely cannot serve: a window that does not
@@ -407,7 +504,9 @@ mod worker {
     /// edge of the data or the wrong resolution.
     #[test]
     fn a_window_that_cannot_serve_is_still_refused() {
-        let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else { return };
+        let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else {
+            return;
+        };
         let tiff = TiffStack::open(&path).unwrap();
         let jobs = jobs_for(&tiff);
         let built_for = roi(0, 0, 48, 32, 1);
@@ -417,10 +516,17 @@ mod worker {
 
         for _ in 0..600 {
             // Off to one side: not covered.
-            assert!(worker.take_matching(0, &roi(52, 0, 40, 32, 1), &[0]).is_none(), "not covered");
+            assert!(
+                worker
+                    .take_matching(0, &roi(52, 0, 40, 32, 1), &[0])
+                    .is_none(),
+                "not covered"
+            );
             // Same ground, finer sampling than the built window holds.
             assert!(
-                worker.take_matching(0, &roi(0, 0, 48, 32, 2), &[0]).is_none(),
+                worker
+                    .take_matching(0, &roi(0, 0, 48, 32, 2), &[0])
+                    .is_none(),
                 "a different stride is a different picture"
             );
             if worker.take_matching(0, &built_for, &[0]).is_some() {
@@ -436,7 +542,9 @@ mod worker {
     /// the worker further behind the longer the user keeps moving.
     #[test]
     fn a_burst_of_requests_settles_on_the_last_one() {
-        let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else { return };
+        let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else {
+            return;
+        };
         let tiff = TiffStack::open(&path).unwrap();
         let jobs = jobs_for(&tiff);
         let kinds = vec![ChannelKind::Int16];

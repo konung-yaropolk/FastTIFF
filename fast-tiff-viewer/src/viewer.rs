@@ -244,7 +244,10 @@ pub struct Viewer {
 
 impl Viewer {
     pub fn new() -> Self {
-        Viewer { uv_scale: [1.0, 1.0], ..Default::default() }
+        Viewer {
+            uv_scale: [1.0, 1.0],
+            ..Default::default()
+        }
     }
 
     /// Open `path`, replacing whatever was loaded. On success every derived
@@ -327,7 +330,10 @@ impl Viewer {
         #[cfg(feature = "threads")]
         {
             self.loading.as_ref().map(|l| {
-                l.name().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+                l.name()
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
             })
         }
         #[cfg(not(feature = "threads"))]
@@ -348,7 +354,10 @@ impl Viewer {
     fn adopt(&mut self, opened: anyhow::Result<Stack>) -> anyhow::Result<()> {
         match opened {
             Ok(stack) => {
-                self.playback = Playback { fps: stack.tiff.meta.fps.unwrap_or(DEFAULT_FPS), ..Default::default() };
+                self.playback = Playback {
+                    fps: stack.tiff.meta.fps.unwrap_or(DEFAULT_FPS),
+                    ..Default::default()
+                };
                 // 3D defaults for the new stack: per-axis voxel scale from the
                 // pixel calibration (X/YResolution) + Z spacing (else 1:1:1), a
                 // fresh orbit, and an invalidated volume so entering 3D uploads
@@ -385,10 +394,10 @@ impl Viewer {
             // pseudocolor preference on top of the fresh LUTs.
             refresh_pseudocolor(stack, self.apply_pseudocolor);
             self.status = compute_status(
-                    stack.display.dims,
-                    stack.display.triple_axis_warning,
-                    stack.display.plane_mismatch,
-                );
+                stack.display.dims,
+                stack.display.triple_axis_warning,
+                stack.display.plane_mismatch,
+            );
         }
         // The frame axis (volume depth) just changed.
         self.volume.invalidate();
@@ -425,14 +434,18 @@ impl Viewer {
     }
 
     pub fn can_show_volume(&self) -> bool {
-        self.stack.as_ref().is_some_and(|s| s.display.dims.frames >= 2)
+        self.stack
+            .as_ref()
+            .is_some_and(|s| s.display.dims.frames >= 2)
     }
 
     /// Whether the stack has a time axis *separate* from the volume's depth —
     /// i.e. playback still means something in the 3D view. False for an ordinary
     /// 3D stack, where the frame axis *is* the depth.
     pub fn is_4d(&self) -> bool {
-        self.stack.as_ref().is_some_and(|s| s.display.dims.slices > 1)
+        self.stack
+            .as_ref()
+            .is_some_and(|s| s.display.dims.slices > 1)
     }
 
     /// Advance looped playback to match `now` (the frontend's monotonic clock, in

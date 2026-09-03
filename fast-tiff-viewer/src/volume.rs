@@ -17,10 +17,10 @@
 
 use crate::prefetch::{decode_jobs, ChannelJob, Decoded};
 use fast_tiff_lib::TiffStack;
-use scivis_render::{ChannelKind, VolumeKind, MAX_CHANNELS};
-use std::path::PathBuf;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
+use scivis_render::{ChannelKind, VolumeKind, MAX_CHANNELS};
+use std::path::PathBuf;
 #[cfg(feature = "threads")]
 use std::sync::mpsc::{channel, Receiver, Sender};
 #[cfg(feature = "threads")]
@@ -81,7 +81,11 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
     let channels = plan.channels.max(1);
     let is_4d = slices > 1;
     // Depth axis: Z at the current timepoint (4D) or the whole frame axis.
-    let depth = if is_4d { slices as u32 } else { plan.frames.max(1) as u32 };
+    let depth = if is_4d {
+        slices as u32
+    } else {
+        plan.frames.max(1) as u32
+    };
     let time = if is_4d { plan.time } else { 0 };
     let n = plan.kinds.len().min(MAX_CHANNELS);
     if w == 0 || h == 0 || depth < 2 || n == 0 {
@@ -137,7 +141,13 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
         .collect();
     let mut tasks: Vec<(u32, Vec<&mut [u8]>)> = Vec::with_capacity(od as usize);
     for oz in 0..od {
-        tasks.push((oz, chunk_iters.iter_mut().map(|it| it.next().expect("slab per slice")).collect()));
+        tasks.push((
+            oz,
+            chunk_iters
+                .iter_mut()
+                .map(|it| it.next().expect("slab per slice"))
+                .collect(),
+        ));
     }
     drop(chunk_iters);
 
@@ -161,7 +171,15 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
                 } else {
                     (t * slices * channels + z * channels + c, 0)
                 };
-                ChannelJob { channel: c, ifd_idx, plane, kind: ckinds[c], rgb: plan.rgb, width: w, height: h }
+                ChannelJob {
+                    channel: c,
+                    ifd_idx,
+                    plane,
+                    kind: ckinds[c],
+                    rgb: plan.rgb,
+                    width: w,
+                    height: h,
+                }
             })
             .collect();
         let decoded = decode_jobs(&tiff.data, &tiff.frames, tiff.byte_order, &jobs)?;
@@ -180,14 +198,21 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
         return None;
     }
 
-    let channels_out: Vec<(VolumeKind, Vec<u8>)> = vkinds.iter().map(|(k, _)| *k).zip(bufs).collect();
+    let channels_out: Vec<(VolumeKind, Vec<u8>)> =
+        vkinds.iter().map(|(k, _)| *k).zip(bufs).collect();
     Some((ow, oh, od, channels_out))
 }
 
 /// Point-sample one decoded slice into `dst` at `stride` (sx, sy), writing each
 /// sample's native-endian bytes (matches the GPU upload's pixel type). `dims` is
 /// the source (w, h); `out` is the destination (ow, oh).
-fn downsample_slice<T: bytemuck::Pod>(src: &[T], dims: (u32, u32), stride: (u32, u32), out: (u32, u32), dst: &mut [u8]) {
+fn downsample_slice<T: bytemuck::Pod>(
+    src: &[T],
+    dims: (u32, u32),
+    stride: (u32, u32),
+    out: (u32, u32),
+    dst: &mut [u8],
+) {
     let (w, h) = dims;
     let (sx, sy) = stride;
     let (ow, oh) = out;
@@ -268,7 +293,11 @@ impl VolumeBuilder {
                 Err(e) => log::warn!("volume builder: can't open {}: {e:#}", path.display()),
             })
             .ok()?;
-        Some(Self { tx, result, _handle: handle })
+        Some(Self {
+            tx,
+            result,
+            _handle: handle,
+        })
     }
 
     /// Queue a build. Returns `false` when the worker is gone (its file open
@@ -306,7 +335,11 @@ fn worker_loop(stack: TiffStack, rx: Receiver<Request>, result: Arc<Mutex<Option
         }
         let volume = build_volume(&stack, &req.plan);
         if let Ok(mut slot) = result.lock() {
-            *slot = Some(BuiltReply { generation: req.generation, time: req.plan.time, volume });
+            *slot = Some(BuiltReply {
+                generation: req.generation,
+                time: req.plan.time,
+                volume,
+            });
         }
     }
 }

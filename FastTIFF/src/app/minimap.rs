@@ -92,10 +92,20 @@ pub(super) fn draw(
     let backdrop = opposite.gamma_multiply(0.45);
 
     painter.rect_filled(outer, 2.0, backdrop);
-    painter.rect_stroke(outer, 2.0, egui::Stroke::new(OUTER_STROKE, ink), egui::StrokeKind::Inside);
+    painter.rect_stroke(
+        outer,
+        2.0,
+        egui::Stroke::new(OUTER_STROKE, ink),
+        egui::StrokeKind::Inside,
+    );
     // The view box is the thing being read, so it is the heavier of the two.
     painter.rect_filled(inner, 1.0, ink.gamma_multiply(0.25));
-    painter.rect_stroke(inner, 1.0, egui::Stroke::new(INNER_STROKE, ink), egui::StrokeKind::Inside);
+    painter.rect_stroke(
+        inner,
+        1.0,
+        egui::Stroke::new(INNER_STROKE, ink),
+        egui::StrokeKind::Inside,
+    );
 }
 
 /// Where the view box goes inside the frame box: the same fraction of `outer`
@@ -131,7 +141,10 @@ fn view_box(outer: egui::Rect, full: egui::Rect, visible: egui::Rect) -> egui::R
     // rectangle of negative width is one epaint will tessellate happily and
     // wrongly. Reachable: the map is a fifth of the panel's shorter side, so a
     // small enough window gets one only a couple of points tall.
-    let inset = OUTER_STROKE.min(outer.width() * 0.5).min(outer.height() * 0.5).max(0.0);
+    let inset = OUTER_STROKE
+        .min(outer.width() * 0.5)
+        .min(outer.height() * 0.5)
+        .max(0.0);
     let room = outer.shrink(inset);
     let size = egui::vec2(
         (visible.width() / fw).clamp(0.0, 1.0) * room.width(),

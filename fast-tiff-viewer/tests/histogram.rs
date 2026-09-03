@@ -29,8 +29,8 @@ fn flat_u16_stack(frames: usize, w: u32, h: u32, base: u16, step: u16) -> Vec<u8
 /// `values[c]` — three constants far apart in intensity, so where each channel's
 /// spike lands is unambiguous.
 fn multichannel_u16_stack(values: &[u16], w: u32, h: u32) -> Vec<u8> {
-    let opts = WriterOptions::new(w, h, SampleType::U16)
-        .metadata(StackMetaWrite::new(values.len(), 1));
+    let opts =
+        WriterOptions::new(w, h, SampleType::U16).metadata(StackMetaWrite::new(values.len(), 1));
     let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
     for &v in values {
         let bytes: Vec<u8> = (0..w * h).flat_map(|_| v.to_le_bytes()).collect();
@@ -81,8 +81,13 @@ fn bins_span_the_slider_track_for_a_single_channel_stack() {
     // And the spike lands where that mapping says it should.
     let (lo, hi) = settings.bounds;
     let expected = (((4000.0 - lo) / (hi - lo) * BINS as f32) as usize).min(BINS - 1);
-    let occupied: Vec<usize> =
-        h.bins.iter().enumerate().filter(|(_, &b)| b > 0).map(|(i, _)| i).collect();
+    let occupied: Vec<usize> = h
+        .bins
+        .iter()
+        .enumerate()
+        .filter(|(_, &b)| b > 0)
+        .map(|(i, _)| i)
+        .collect();
     assert_eq!(occupied, vec![expected]);
 }
 
@@ -92,12 +97,18 @@ fn eight_bit_channels_are_widened_onto_the_slider_axis() {
     // widened 0..65535 space. Binning the raw values against that track would
     // pile every pixel of a full-range ramp into bin 0.
     let stack = load(ramp_u8_stack());
-    assert_eq!(stack.display.settings[0].kind, fast_tiff_viewer::ChannelKind::Int8);
+    assert_eq!(
+        stack.display.settings[0].kind,
+        fast_tiff_viewer::ChannelKind::Int8
+    );
     let h = &frame_histograms(&stack)[0];
     assert_eq!(h.counted, 256 * 4);
     // A 0..=255 ramp over a 0..=255-derived track fills the plot, not one bin.
     let occupied = h.bins.iter().filter(|&&b| b > 0).count();
-    assert!(occupied > BINS / 2, "ramp collapsed into {occupied} bin(s) — not widened?");
+    assert!(
+        occupied > BINS / 2,
+        "ramp collapsed into {occupied} bin(s) — not widened?"
+    );
 }
 
 #[test]
@@ -107,10 +118,13 @@ fn the_histogram_follows_the_current_frame() {
     let first = frame_histograms(&stack)[0].clone();
     stack.frame_index = 2;
     let third = frame_histograms(&stack)[0].clone();
-    let spike = |h: &fast_tiff_viewer::Histogram| {
-        h.bins.iter().position(|&b| b > 0).expect("a spike")
-    };
-    assert_ne!(spike(&first), spike(&third), "histogram ignored the frame index");
+    let spike =
+        |h: &fast_tiff_viewer::Histogram| h.bins.iter().position(|&b| b > 0).expect("a spike");
+    assert_ne!(
+        spike(&first),
+        spike(&third),
+        "histogram ignored the frame index"
+    );
 }
 
 #[test]
@@ -124,10 +138,20 @@ fn peak_is_the_tallest_bin() {
 #[test]
 fn overlay_alpha_thins_as_channels_are_added_but_stays_visible() {
     let a: Vec<u8> = (1..=6).map(fill_alpha).collect();
-    assert!(a.windows(2).all(|w| w[0] >= w[1]), "alpha must not rise with channel count: {a:?}");
-    assert!(a[0] > a[5], "six channels should be thinner than one: {a:?}");
+    assert!(
+        a.windows(2).all(|w| w[0] >= w[1]),
+        "alpha must not rise with channel count: {a:?}"
+    );
+    assert!(
+        a[0] > a[5],
+        "six channels should be thinner than one: {a:?}"
+    );
     assert!(a[5] >= 40, "six channels faded to {} — invisible", a[5]);
-    assert!(a[0] < 160, "a single channel at {} is not translucent", a[0]);
+    assert!(
+        a[0] < 160,
+        "a single channel at {} is not translucent",
+        a[0]
+    );
     // Degenerate input must not divide by zero or panic.
     assert!(fill_alpha(0) > 0);
 }
@@ -155,7 +179,10 @@ fn channels_share_one_axis_and_land_at_different_places_on_it() {
 
     // One axis for all of them.
     let axis = (hists[0].lo, hists[0].hi);
-    assert!(hists.iter().all(|h| (h.lo, h.hi) == axis), "channels binned on different axes");
+    assert!(
+        hists.iter().all(|h| (h.lo, h.hi) == axis),
+        "channels binned on different axes"
+    );
     assert_eq!(axis, fast_tiff_viewer::histogram::shared_track(&stack));
 
     // And on that axis the three spikes are ordered dim -> bright, distinctly.
@@ -163,7 +190,10 @@ fn channels_share_one_axis_and_land_at_different_places_on_it() {
         .iter()
         .map(|h| h.bins.iter().position(|&b| b > 0).expect("a spike"))
         .collect();
-    assert!(spikes[0] < spikes[1] && spikes[1] < spikes[2], "spikes not ordered: {spikes:?}");
+    assert!(
+        spikes[0] < spikes[1] && spikes[1] < spikes[2],
+        "spikes not ordered: {spikes:?}"
+    );
     assert!(
         spikes[2] - spikes[0] > BINS / 4,
         "spikes {spikes:?} are bunched together — are they on a shared axis?"
@@ -175,7 +205,11 @@ fn the_shared_track_covers_every_channels_bounds() {
     let stack = load(multichannel_u16_stack(&[4_000, 30_000, 60_000], 16, 16));
     let (lo, hi) = fast_tiff_viewer::histogram::shared_track(&stack);
     for s in &stack.display.settings {
-        assert!(s.bounds.0 >= lo && s.bounds.1 <= hi, "{:?} escapes the track {lo}..{hi}", s.bounds);
+        assert!(
+            s.bounds.0 >= lo && s.bounds.1 <= hi,
+            "{:?} escapes the track {lo}..{hi}",
+            s.bounds
+        );
     }
     // Nothing falls off either end of that track.
     for h in frame_histograms(&stack) {
@@ -195,8 +229,15 @@ fn fill_tint_stays_visible_for_luts_with_a_dark_top_entry() {
         let v = (i * 255 / 139) as u8;
         *e = [v, v, v];
     }
-    assert_eq!(stretched[255], [0, 0, 0], "fixture should have a black top entry");
-    assert!(bright(fill_tint(&stretched)) >= 64, "picked an invisible colour");
+    assert_eq!(
+        stretched[255],
+        [0, 0, 0],
+        "fixture should have a black top entry"
+    );
+    assert!(
+        bright(fill_tint(&stretched)) >= 64,
+        "picked an invisible colour"
+    );
 
     // An all-black table is legal and must still yield something drawable.
     assert!(bright(fill_tint(&[[0, 0, 0]; 256])) >= 64);

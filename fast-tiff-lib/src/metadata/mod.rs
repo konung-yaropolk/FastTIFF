@@ -101,7 +101,10 @@ impl StackMeta {
             mode: DisplayMode::Grayscale,
             unit: None,
             frame_interval_s: None,
-            channel_display: vec![ChannelDisplay { lut: grayscale_lut(), range: None }],
+            channel_display: vec![ChannelDisplay {
+                lut: grayscale_lut(),
+                range: None,
+            }],
             calibration: None,
             fps: None,
             spacing: None,
@@ -156,8 +159,13 @@ pub fn parse(
         MetadataFormat::Ome => {
             // OME-XML: fall back to the neutral inferred meta if the XML turns
             // out to be malformed, rather than failing the whole open.
-            ome::parse(description.unwrap_or_default(), total_ifds, x_resolution, y_resolution)
-                .unwrap_or_else(|| StackMeta::inferred(total_ifds, MetadataFormat::None))
+            ome::parse(
+                description.unwrap_or_default(),
+                total_ifds,
+                x_resolution,
+                y_resolution,
+            )
+            .unwrap_or_else(|| StackMeta::inferred(total_ifds, MetadataFormat::None))
         }
         MetadataFormat::ImageJ => imagej::parse(
             description,
@@ -182,7 +190,9 @@ pub fn parse(
 /// OME-TIFF's description is XML in the OME namespace (ImageJ never emits XML),
 /// so the check is unambiguous.
 pub fn detect(description: Option<&str>) -> MetadataFormat {
-    let Some(desc) = description else { return MetadataFormat::None };
+    let Some(desc) = description else {
+        return MetadataFormat::None;
+    };
     let trimmed = desc.trim_start();
     let looks_ome = trimmed.contains("<OME")
         || (trimmed.starts_with("<?xml") && desc.contains("openmicroscopy.org"));
@@ -198,7 +208,9 @@ pub fn detect(description: Option<&str>) -> MetadataFormat {
 /// TIFF XResolution/YResolution (pixels per unit) → pixel size (`1 / res`),
 /// filtering out the useless (non-finite / non-positive) values.
 pub(crate) fn resolution_to_pixel(resolution: Option<f64>) -> Option<f64> {
-    resolution.filter(|r| r.is_finite() && *r > 0.0).map(|r| 1.0 / r)
+    resolution
+        .filter(|r| r.is_finite() && *r > 0.0)
+        .map(|r| 1.0 / r)
 }
 
 // ---- write side ----
@@ -324,7 +336,11 @@ impl StackMetaWrite {
     /// dialects that carry per-channel color (OME); the ImageJ dialect ignores
     /// it (its colors follow [`mode`](Self::mode)).
     pub fn channel(mut self, name: impl Into<String>, color: [u8; 3]) -> Self {
-        self.channel_info.push(ChannelWrite { name: Some(name.into()), color: Some(color), lut: None });
+        self.channel_info.push(ChannelWrite {
+            name: Some(name.into()),
+            color: Some(color),
+            lut: None,
+        });
         self
     }
 
@@ -335,7 +351,11 @@ impl StackMetaWrite {
     /// images). Only the ImageJ metadata format writes it. Each `channel_lut`
     /// call appends one channel, in order; pair with one call per channel.
     pub fn channel_lut(mut self, lut: [[u8; 3]; 256]) -> Self {
-        self.channel_info.push(ChannelWrite { name: None, color: None, lut: Some(lut) });
+        self.channel_info.push(ChannelWrite {
+            name: None,
+            color: None,
+            lut: Some(lut),
+        });
         self
     }
 
@@ -559,11 +579,21 @@ pub fn colormap_to_lut(colormap: &[u32]) -> Option<[[u8; 3]; 256]> {
         return None;
     }
     let scaled_16bit = colormap.iter().any(|&v| v > 255);
-    let to_u8 = |v: u32| if scaled_16bit { (v >> 8) as u8 } else { v as u8 };
+    let to_u8 = |v: u32| {
+        if scaled_16bit {
+            (v >> 8) as u8
+        } else {
+            v as u8
+        }
+    };
     let mut lut = [[0u8; 3]; 256];
     for (i, entry) in lut.iter_mut().enumerate() {
         let src = i.min(n - 1); // pad the tail with the last real entry
-        *entry = [to_u8(colormap[src]), to_u8(colormap[n + src]), to_u8(colormap[2 * n + src])];
+        *entry = [
+            to_u8(colormap[src]),
+            to_u8(colormap[n + src]),
+            to_u8(colormap[2 * n + src]),
+        ];
     }
     Some(lut)
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::index::Strips;
 
 #[test]
 fn packbits_literal_run() {
@@ -31,8 +32,8 @@ fn make_frame(width: u32, height: u32, predictor: u16) -> FrameInfo {
         planar_config: 1,
         tile_size: None,
         ink_set: 1,
-        strip_offsets: vec![0],
-        strip_byte_counts: vec![(width * height * 2) as u64],
+        strip_offsets: vec![0].into(),
+        strip_byte_counts: vec![(width * height * 2) as u64].into(),
         rows_per_strip: height,
     }
 }
@@ -112,8 +113,8 @@ fn float_frame(width: u32, height: u32) -> FrameInfo {
         planar_config: 1,
         tile_size: None,
         ink_set: 1,
-        strip_offsets: vec![0],
-        strip_byte_counts: vec![(width * height * 4) as u64],
+        strip_offsets: vec![0].into(),
+        strip_byte_counts: vec![(width * height * 4) as u64].into(),
         rows_per_strip: height,
     }
 }
@@ -168,7 +169,7 @@ fn rgb8_deinterleaves_into_color_planes() {
     frame.bits_per_sample = 8;
     frame.samples_per_pixel = 3;
     frame.photometric = 2;
-    frame.strip_byte_counts = vec![6];
+    frame.strip_byte_counts = vec![6].into();
     let file: Vec<u8> = vec![10, 20, 30, 40, 50, 60];
 
     let up = |b: u8| ((b as u16) << 8) | b as u16;
@@ -188,7 +189,7 @@ fn rgb8_plane_u8_keeps_raw_bytes() {
     frame.bits_per_sample = 8;
     frame.samples_per_pixel = 3;
     frame.photometric = 2;
-    frame.strip_byte_counts = vec![6];
+    frame.strip_byte_counts = vec![6].into();
     let file: Vec<u8> = vec![10, 20, 30, 40, 50, 60];
 
     let red = read_plane_u8(&file, &frame, ByteOrder::Little, 0).unwrap();
@@ -206,7 +207,7 @@ fn unsigned_int32_rescales_into_texture_range() {
     let mut frame = make_frame(2, 1, 1);
     frame.bits_per_sample = 32;
     frame.sample_format = SampleFormat::UnsignedInt;
-    frame.strip_byte_counts = vec![8];
+    frame.strip_byte_counts = vec![8].into();
     let values: [u32; 2] = [0, 1000];
     let mut file = Vec::new();
     for v in values {
@@ -250,7 +251,10 @@ fn frame_float_minmax_matches_actual_data() {
 fn frame_float_minmax_is_none_for_integer_frames() {
     let frame = make_frame(2, 2, 1);
     let file = vec![0u8; 8];
-    assert_eq!(frame_float_minmax(&file, &frame, ByteOrder::Little).unwrap(), None);
+    assert_eq!(
+        frame_float_minmax(&file, &frame, ByteOrder::Little).unwrap(),
+        None
+    );
 }
 
 /// The actual bug: two strips, each independently LZW-compressed (a
@@ -298,15 +302,20 @@ fn multi_strip_lzw_decodes_past_the_first_strip() {
         planar_config: 1,
         tile_size: None,
         ink_set: 1,
-        strip_offsets: vec![0, bottom_offset],
-        strip_byte_counts: vec![top_compressed.len() as u64, bottom_compressed.len() as u64],
+        strip_offsets: vec![0, bottom_offset].into(),
+        strip_byte_counts: vec![top_compressed.len() as u64, bottom_compressed.len() as u64].into(),
         rows_per_strip: rows_per_strip as u32,
     };
 
-    let pixels = read_frame_u16(&fake_file, &frame, ByteOrder::Little, None).expect("decode failed");
+    let pixels =
+        read_frame_u16(&fake_file, &frame, ByteOrder::Little, None).expect("decode failed");
     let mut expected = top.clone();
     expected.extend_from_slice(&bottom);
-    assert_eq!(&*pixels, expected.as_slice(), "bottom strip's pixels are missing or wrong");
+    assert_eq!(
+        &*pixels,
+        expected.as_slice(),
+        "bottom strip's pixels are missing or wrong"
+    );
 }
 
 /// `read_planes_*` (one decompression pass for all planes) must produce
@@ -318,7 +327,7 @@ fn read_planes_matches_per_plane_reads() {
     frame.bits_per_sample = 8;
     frame.samples_per_pixel = 3;
     frame.photometric = 2;
-    frame.strip_byte_counts = vec![6];
+    frame.strip_byte_counts = vec![6].into();
     let file: Vec<u8> = vec![10, 20, 30, 40, 50, 60];
 
     let planes8 = read_planes_u8(&file, &frame, ByteOrder::Little).unwrap();
@@ -326,7 +335,11 @@ fn read_planes_matches_per_plane_reads() {
     assert_eq!(planes8.len(), 3);
     assert_eq!(planes16.len(), 3);
     for p in 0..3 {
-        assert_eq!(planes8[p], read_plane_u8(&file, &frame, ByteOrder::Little, p).unwrap(), "u8 plane {p}");
+        assert_eq!(
+            planes8[p],
+            read_plane_u8(&file, &frame, ByteOrder::Little, p).unwrap(),
+            "u8 plane {p}"
+        );
         assert_eq!(
             planes16[p],
             read_plane_u16(&file, &frame, ByteOrder::Little, None, p).unwrap(),
@@ -339,7 +352,10 @@ fn read_planes_matches_per_plane_reads() {
     let file: Vec<u8> = (0..8).collect();
     let planes = read_planes_u16(&file, &frame, ByteOrder::Little, None).unwrap();
     assert_eq!(planes.len(), 1);
-    assert_eq!(planes[0], read_plane_u16(&file, &frame, ByteOrder::Little, None, 0).unwrap());
+    assert_eq!(
+        planes[0],
+        read_plane_u16(&file, &frame, ByteOrder::Little, None, 0).unwrap()
+    );
 }
 
 /// A planar frame's rows hold one sample each, so Predictor 2 differences with
@@ -357,7 +373,7 @@ fn planar_predictor2_differences_per_plane_row() {
     frame.bits_per_sample = 8;
     frame.samples_per_pixel = 2;
     frame.planar_config = 2;
-    frame.strip_byte_counts = vec![12];
+    frame.strip_byte_counts = vec![12].into();
 
     // Horizontal-difference each 3-sample row independently.
     let mut differenced = original;
@@ -378,7 +394,10 @@ fn planar_predictor2_differences_per_plane_row() {
         read_plane_u16(&file, &plain, ByteOrder::Little, None, 1).unwrap(),
         original[6..].iter().map(|&b| up(b)).collect::<Vec<_>>()
     );
-    assert_eq!(read_plane_u8(&file, &plain, ByteOrder::Little, 0).unwrap(), original[..6].to_vec());
+    assert_eq!(
+        read_plane_u8(&file, &plain, ByteOrder::Little, 0).unwrap(),
+        original[..6].to_vec()
+    );
 }
 
 /// The `_into` variants (reused caller buffers, direct strip paths) must be
@@ -406,13 +425,17 @@ fn into_apis_match_vec_apis() {
                 ByteOrder::Big => file.extend_from_slice(&v.to_be_bytes()),
             }
         }
-        frame.strip_offsets = vec![0, 16];
-        frame.strip_byte_counts = vec![16, 16];
+        frame.strip_offsets = vec![0, 16].into();
+        frame.strip_byte_counts = vec![16, 16].into();
 
         let expected = read_frame_u16(&file, &frame, order, None).unwrap();
         let mut out = vec![9u16; 3]; // wrong-sized, pre-filled: must be fixed up
         read_frame_u16_into(&file, &frame, order, None, &mut out).unwrap();
-        assert_eq!(out.as_slice(), expected.as_ref(), "u16 order={order:?} signed={signed}");
+        assert_eq!(
+            out.as_slice(),
+            expected.as_ref(),
+            "u16 order={order:?} signed={signed}"
+        );
         // Second call reuses the buffer and must still be identical.
         read_frame_u16_into(&file, &frame, order, None, &mut out).unwrap();
         assert_eq!(out.as_slice(), expected.as_ref());
@@ -424,8 +447,8 @@ fn into_apis_match_vec_apis() {
     frame.rows_per_strip = 2;
     let mut file: Vec<u8> = (1..=8).collect();
     file.push(0xEE); // pad
-    frame.strip_offsets = vec![0, 9];
-    frame.strip_byte_counts = vec![9, 9]; // 8 data + 1 pad each
+    frame.strip_offsets = vec![0, 9].into();
+    frame.strip_byte_counts = vec![9, 9].into(); // 8 data + 1 pad each
     file.extend(11..=18u8);
     file.push(0xEE);
     let expected = read_frame_u8(&file, &frame, ByteOrder::Little).unwrap();
@@ -449,14 +472,20 @@ fn into_apis_match_vec_apis() {
     frame.bits_per_sample = 8;
     frame.samples_per_pixel = 3;
     frame.photometric = 2;
-    frame.strip_byte_counts = vec![6];
+    frame.strip_byte_counts = vec![6].into();
     let file: Vec<u8> = vec![10, 20, 30, 40, 50, 60];
     let mut planes = Vec::new();
     read_planes_u8_into(&file, &frame, ByteOrder::Little, &mut planes).unwrap();
-    assert_eq!(planes, read_planes_u8(&file, &frame, ByteOrder::Little).unwrap());
+    assert_eq!(
+        planes,
+        read_planes_u8(&file, &frame, ByteOrder::Little).unwrap()
+    );
     let mut plane1 = Vec::new();
     read_plane_u16_into(&file, &frame, ByteOrder::Little, None, 1, &mut plane1).unwrap();
-    assert_eq!(plane1, read_plane_u16(&file, &frame, ByteOrder::Little, None, 1).unwrap());
+    assert_eq!(
+        plane1,
+        read_plane_u16(&file, &frame, ByteOrder::Little, None, 1).unwrap()
+    );
 }
 
 /// Some writers pad strips (e.g. to even byte counts). The padding must be
@@ -478,11 +507,196 @@ fn padded_strip_byte_counts_dont_shift_rows() {
     let mut frame = make_frame(4, 4, 1);
     frame.bits_per_sample = 8;
     frame.rows_per_strip = 2;
-    frame.strip_offsets = vec![0, bottom_offset];
-    frame.strip_byte_counts = vec![9, 9]; // 8 data bytes + 1 pad each
+    frame.strip_offsets = vec![0, bottom_offset].into();
+    frame.strip_byte_counts = vec![9, 9].into(); // 8 data bytes + 1 pad each
 
     let pixels = read_frame_u8(&file, &frame, ByteOrder::Little).unwrap();
     let mut expected = top.to_vec();
     expected.extend_from_slice(&bottom);
-    assert_eq!(pixels.as_ref(), expected.as_slice(), "pad bytes leaked into the pixel data");
+    assert_eq!(
+        pixels.as_ref(),
+        expected.as_slice(),
+        "pad bytes leaked into the pixel data"
+    );
+}
+
+/// The `pshufb` de-interleave must agree with the plain one byte for byte, at
+/// every length — including the ones that exercise the 16-pixel tail.
+///
+/// This is not hypothetical: the first version of the masks was written as a
+/// clever offset formula and silently produced wrong G and B planes, because a
+/// shuffle index of 16 selects lane 0 rather than zeroing the lane. Only a
+/// comparison against the scalar path catches that.
+#[test]
+fn simd_deinterleave_matches_the_scalar_path() {
+    for n in [0usize, 1, 3, 15, 16, 17, 31, 32, 33, 100, 256, 1000] {
+        let src: Vec<u8> = (0..n * 3).map(|i| ((i * 37 + i / 5) % 256) as u8).collect();
+
+        // Scalar reference, written out here rather than reused so a change to
+        // the library's fallback cannot quietly redefine what "correct" means.
+        let mut want: Vec<Vec<u8>> = vec![vec![0u8; n]; 3];
+        for i in 0..n {
+            for (p, plane) in want.iter_mut().enumerate() {
+                plane[i] = src[i * 3 + p];
+            }
+        }
+
+        let mut got: Vec<Vec<u8>> = vec![vec![0u8; n]; 3];
+        deinterleave_u8(&src, 3, &mut got).unwrap();
+        assert_eq!(got, want, "de-interleave disagrees at n = {n}");
+    }
+}
+
+/// Four samples per pixel (RGBA) has no SIMD path; it must still come out right.
+#[test]
+fn deinterleave_handles_sample_counts_without_a_simd_path() {
+    let n = 40usize;
+    for spp in [2usize, 4, 5] {
+        let src: Vec<u8> = (0..n * spp).map(|i| (i % 251) as u8).collect();
+        let mut got: Vec<Vec<u8>> = vec![vec![0u8; n]; spp];
+        deinterleave_u8(&src, spp, &mut got).unwrap();
+        for (p, plane) in got.iter().enumerate() {
+            for (i, &v) in plane.iter().enumerate() {
+                assert_eq!(v, src[i * spp + p], "spp {spp}, plane {p}, pixel {i}");
+            }
+        }
+    }
+}
+
+/// A source too short for the declared planes is an error, not a panic.
+#[test]
+fn deinterleave_rejects_a_short_source() {
+    let src = vec![0u8; 3 * 10 - 1];
+    let mut got: Vec<Vec<u8>> = vec![vec![0u8; 10]; 3];
+    assert!(deinterleave_u8(&src, 3, &mut got).is_err());
+}
+
+/// `Strips` has two spellings for a one-element list, and they must compare
+/// equal. The derived `PartialEq` did not: it called `One(5)` and
+/// `Many(vec![5])` different, which would have made an `assert_eq!` between two
+/// frames' strip lists depend on how each was constructed rather than on what
+/// they hold.
+#[test]
+fn strips_compare_by_content_not_representation() {
+    assert_eq!(Strips::One(5), Strips::Many(vec![5]));
+    assert_eq!(Strips::Many(vec![5]), Strips::One(5));
+    assert_eq!(Strips::None, Strips::Many(vec![]));
+    assert_eq!(Strips::from(vec![7u64]), Strips::Many(vec![7]));
+    assert_ne!(Strips::One(5), Strips::One(6));
+    assert_ne!(Strips::One(5), Strips::Many(vec![5, 5]));
+    assert_ne!(Strips::None, Strips::One(0));
+
+    // And the deref view stays the source of truth for both spellings.
+    assert_eq!(&Strips::One(9)[..], &[9]);
+    assert_eq!(&Strips::Many(vec![9])[..], &[9]);
+}
+
+/// Truncation normalises: shortening a multi-strip list to one entry must give
+/// something that still compares equal to the single-strip spelling.
+#[test]
+fn strips_truncate_keeps_the_right_prefix() {
+    let mut s = Strips::from(vec![10u64, 20, 30, 40]);
+    s.truncate(6); // longer than the list: no change
+    assert_eq!(&s[..], &[10, 20, 30, 40]);
+    s.truncate(2);
+    assert_eq!(&s[..], &[10, 20]);
+    s.truncate(1);
+    assert_eq!(s, Strips::One(10));
+    s.truncate(0);
+    assert_eq!(s, Strips::None);
+    assert!(s.is_empty());
+}
+
+/// The chunky 8-bit plane split, checked against a straightforward reference
+/// across widths that do and do not land on the SIMD block boundary (16
+/// pixels), several sample counts, and both predictors.
+///
+/// `read_planes_u8_into` now splits every plane in one pass — with a `pshufb`
+/// path for RGB — where it used to gather each plane separately. The shapes
+/// that break such a rewrite are the ragged ones: a width of 1, widths either
+/// side of 16, and sample counts with no SIMD path at all. Comparing against a
+/// reference built the obvious way is what makes those meaningful.
+#[test]
+fn chunky_u8_plane_split_matches_a_reference_at_every_shape() {
+    for &(w, h) in &[
+        (1u32, 1u32),
+        (15, 2),
+        (16, 2),
+        (17, 3),
+        (33, 1),
+        (64, 5),
+        (100, 7),
+    ] {
+        for &spp in &[2u16, 3, 4, 5] {
+            for &pred in &[1u16, 2] {
+                let n = (w * h) as usize;
+                let total = n * spp as usize;
+                let mut frame = make_frame(w, h, pred);
+                frame.bits_per_sample = 8;
+                frame.samples_per_pixel = spp;
+                frame.photometric = 2;
+                frame.strip_byte_counts = vec![total as u64].into();
+                let file: Vec<u8> = (0..total)
+                    .map(|i| ((i * 31 + i / 7 + 5) % 256) as u8)
+                    .collect();
+
+                // Reference: undo the predictor row-wise on the interleaved
+                // buffer, then pick out every spp-th byte.
+                let mut und = file.clone();
+                if pred == 2 {
+                    let row = (w as usize) * spp as usize;
+                    for r in 0..h as usize {
+                        for k in spp as usize..row {
+                            und[r * row + k] =
+                                und[r * row + k].wrapping_add(und[r * row + k - spp as usize]);
+                        }
+                    }
+                }
+                let want: Vec<Vec<u8>> = (0..spp as usize)
+                    .map(|p| (0..n).map(|i| und[i * spp as usize + p]).collect())
+                    .collect();
+
+                let got = read_planes_u8(&file, &frame, ByteOrder::Little).unwrap();
+                assert_eq!(got.len(), spp as usize, "{w}x{h} spp{spp} pred{pred}");
+                assert_eq!(got, want, "planes {w}x{h} spp{spp} pred{pred}");
+
+                // The single-plane entry point must agree with the batch one.
+                for (p, want_plane) in want.iter().enumerate() {
+                    let single = read_plane_u8(&file, &frame, ByteOrder::Little, p).unwrap();
+                    assert_eq!(
+                        &single, want_plane,
+                        "single {w}x{h} spp{spp} pred{pred} plane{p}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Planar frames must keep taking the per-plane path: their samples are already
+/// contiguous, so the de-interleave the chunky path uses would be wrong.
+#[test]
+fn planar_u8_planes_are_read_contiguously() {
+    for &(w, h) in &[(1u32, 1u32), (17, 3), (64, 5)] {
+        let spp = 3usize;
+        let n = (w * h) as usize;
+        let total = n * spp;
+        let mut frame = make_frame(w, h, 1);
+        frame.bits_per_sample = 8;
+        frame.samples_per_pixel = spp as u16;
+        frame.photometric = 2;
+        frame.planar_config = 2;
+        frame.strip_byte_counts = vec![total as u64].into();
+        let file: Vec<u8> = (0..total).map(|i| ((i * 17 + 3) % 256) as u8).collect();
+
+        let got = read_planes_u8(&file, &frame, ByteOrder::Little).unwrap();
+        for p in 0..spp {
+            let want: Vec<u8> = file[p * n..(p + 1) * n].to_vec();
+            assert_eq!(got[p], want, "planar {w}x{h} plane {p}");
+            assert_eq!(
+                read_plane_u8(&file, &frame, ByteOrder::Little, p).unwrap(),
+                want
+            );
+        }
+    }
 }

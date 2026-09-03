@@ -21,7 +21,14 @@ use fast_tiff_lib::TiffStack;
 
 /// Little-endian classic TIFF: `w`x`h`, `bits`-deep, `spp` samples/px,
 /// `compression`, with `pixel_bytes` as its single strip.
-fn build_tiff(w: u32, h: u32, bits: u16, spp: u16, compression: u16, pixel_bytes: &[u8]) -> Vec<u8> {
+fn build_tiff(
+    w: u32,
+    h: u32,
+    bits: u16,
+    spp: u16,
+    compression: u16,
+    pixel_bytes: &[u8],
+) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(b"II");
     buf.extend_from_slice(&42u16.to_le_bytes());
@@ -36,15 +43,15 @@ fn build_tiff(w: u32, h: u32, bits: u16, spp: u16, compression: u16, pixel_bytes
 
     // (tag, type, count, value) — SHORTs are stored inline in the low 2 bytes.
     let entries: Vec<(u16, u16, u32, u32)> = vec![
-        (256, 4, 1, w),              // ImageWidth
-        (257, 4, 1, h),              // ImageLength
-        (258, 3, 1, bits as u32),    // BitsPerSample
+        (256, 4, 1, w),           // ImageWidth
+        (257, 4, 1, h),           // ImageLength
+        (258, 3, 1, bits as u32), // BitsPerSample
         (259, 3, 1, compression as u32),
-        (262, 3, 1, 1),              // Photometric = BlackIsZero
-        (273, 4, 1, strip_off),      // StripOffsets
-        (277, 3, 1, spp as u32),     // SamplesPerPixel
-        (278, 4, 1, h),              // RowsPerStrip
-        (279, 4, 1, strip_len),      // StripByteCounts
+        (262, 3, 1, 1),          // Photometric = BlackIsZero
+        (273, 4, 1, strip_off),  // StripOffsets
+        (277, 3, 1, spp as u32), // SamplesPerPixel
+        (278, 4, 1, h),          // RowsPerStrip
+        (279, 4, 1, strip_len),  // StripByteCounts
     ];
     buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     for (tag, ty, count, val) in &entries {
@@ -174,14 +181,18 @@ fn tiny_file_declaring_huge_dimensions_is_rejected() {
             bytes.len()
         );
         // Must not panic. Must not abort (an abort kills this process outright).
-        assert!(exercise_catching(&bytes).is_ok(), "{label}: panicked on malformed input");
+        assert!(
+            exercise_catching(&bytes).is_ok(),
+            "{label}: panicked on malformed input"
+        );
 
         // And whatever the file claims, no decode may succeed — there is nowhere
         // near enough data behind it.
         if let Ok(stack) = TiffStack::from_bytes(bytes.clone()) {
             if let Some(frame) = stack.frames.first() {
                 assert!(
-                    fast_tiff_lib::read_frame_u16(&stack.data, frame, stack.byte_order, None).is_err(),
+                    fast_tiff_lib::read_frame_u16(&stack.data, frame, stack.byte_order, None)
+                        .is_err(),
                     "{label}: decoded pixels that cannot exist in a {}-byte file",
                     bytes.len()
                 );
@@ -204,10 +215,10 @@ fn tiny_file_declaring_huge_dimensions_is_rejected() {
 fn compressed_frame_with_inflated_rows_per_strip_is_rejected_fast() {
     let start = std::time::Instant::now();
     for (w, h, compression) in [
-        (4u32, 0x3FFF_FFFFu32, 5u16),   // LZW
-        (4, 0x3FFF_FFFF, 8),            // Deflate
-        (4, 0x3FFF_FFFF, 32773),        // PackBits
-        (0x0FFF_FFFF, 64, 5),           // wide rather than tall
+        (4u32, 0x3FFF_FFFFu32, 5u16), // LZW
+        (4, 0x3FFF_FFFF, 8),          // Deflate
+        (4, 0x3FFF_FFFF, 32773),      // PackBits
+        (0x0FFF_FFFF, 64, 5),         // wide rather than tall
     ] {
         // RowsPerStrip == height, so `strips x rows x row_bytes` == the full
         // frame and the structural check alone would wave it through.
@@ -215,10 +226,14 @@ fn compressed_frame_with_inflated_rows_per_strip_is_rejected_fast() {
         // Patch RowsPerStrip (tag 278) from `h` to u32::MAX for good measure.
         patch_long_tag(&mut bytes, 278, u32::MAX);
 
-        assert!(exercise_catching(&bytes).is_ok(), "panicked on {w}x{h} compression={compression}");
+        assert!(
+            exercise_catching(&bytes).is_ok(),
+            "panicked on {w}x{h} compression={compression}"
+        );
         let stack = TiffStack::from_bytes(bytes).expect("header itself is well-formed");
-        let err = fast_tiff_lib::read_frame_u16(&stack.data, &stack.frames[0], stack.byte_order, None)
-            .expect_err("a 130-byte file cannot supply a multi-gigabyte frame");
+        let err =
+            fast_tiff_lib::read_frame_u16(&stack.data, &stack.frames[0], stack.byte_order, None)
+                .expect_err("a 130-byte file cannot supply a multi-gigabyte frame");
         let msg = err.to_string();
         assert!(
             msg.contains("refusing to allocate") || msg.contains("beyond any real codec"),
@@ -285,7 +300,8 @@ fn hostile_metadata_dimensions_are_clamped() {
         // The file has exactly one plane, so no honest reading of it has more
         // than one channel — and `channel_display` must stay in step with the
         // reported count, since callers index it by channel.
-        let stack = TiffStack::from_bytes(bytes).expect("a valid image with odd metadata still opens");
+        let stack =
+            TiffStack::from_bytes(bytes).expect("a valid image with odd metadata still opens");
         assert!(
             stack.meta.channels <= stack.frames.len(),
             "channels ({}) exceeds the {} plane(s) in the file",
@@ -364,9 +380,194 @@ fn the_valid_seed_still_decodes() {
     let stack = TiffStack::from_bytes(valid_tiff()).expect("seed must open");
     let frame = &stack.frames[0];
     assert_eq!((frame.width, frame.height), (4, 4));
-    let px = fast_tiff_lib::read_frame_u16(&stack.data, frame, stack.byte_order, None).expect("seed must decode");
+    let px = fast_tiff_lib::read_frame_u16(&stack.data, frame, stack.byte_order, None)
+        .expect("seed must decode");
     assert_eq!(px.len(), 16);
     assert_eq!(px[0], 0);
     assert_eq!(px[1], 4000);
     assert_eq!(px[15], 15 * 4000);
+}
+
+// ---- IFD chain cycles ----
+//
+// A looping chain has to be rejected rather than walked forever. The check is
+// Brent's cycle detection over the same forward walk that builds the index —
+// it replaced a `HashSet` of every offset seen, which cost a hash insert per
+// frame and tens of megabytes on a large stack for a check that only ever
+// fires on a malformed file. Different algorithm, same guarantee, so it is
+// worth pinning all three shapes: a self-loop, a cycle through the head, and a
+// cycle the head is *not* part of (the case that needs the tortoise to walk
+// into the loop before it can meet the hare).
+
+/// Offset of the first IFD, and of its next-IFD pointer, in a `build_tiff` file.
+fn ifd_offsets(buf: &[u8]) -> (u32, usize) {
+    let ifd_off = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+    (ifd_off, buf.len() - 4)
+}
+
+/// Append `n` more copies of the file's single IFD, then link the chain
+/// according to `next`: entry `i` of `next` is the index of the IFD that IFD
+/// `i` points at. Index 0 is the original.
+fn chain_ifds(mut buf: Vec<u8>, copies: usize, next: &[usize]) -> Vec<u8> {
+    let (ifd_off, _) = ifd_offsets(&buf);
+    let block = buf[ifd_off as usize..].to_vec();
+    let mut offsets = vec![ifd_off];
+    for _ in 0..copies {
+        offsets.push(buf.len() as u32);
+        buf.extend_from_slice(&block);
+    }
+    for (i, &target) in next.iter().enumerate() {
+        // The next-IFD pointer is the last 4 bytes of each IFD block.
+        let ptr = offsets[i] as usize + block.len() - 4;
+        buf[ptr..ptr + 4].copy_from_slice(&offsets[target].to_le_bytes());
+    }
+    buf
+}
+
+#[test]
+fn self_referential_ifd_chain_is_rejected() {
+    let mut buf = valid_tiff();
+    let (ifd_off, next_ptr) = ifd_offsets(&buf);
+    buf[next_ptr..next_ptr + 4].copy_from_slice(&ifd_off.to_le_bytes());
+    let err = match TiffStack::from_bytes(buf) {
+        Ok(_) => panic!("a looping IFD chain was accepted"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains("loops back"),
+        "expected a loop error, got: {err}"
+    );
+}
+
+#[test]
+fn ifd_chain_cycle_through_the_first_directory_is_rejected() {
+    // 0 -> 1 -> 0
+    let buf = chain_ifds(valid_tiff(), 1, &[1, 0]);
+    let err = match TiffStack::from_bytes(buf) {
+        Ok(_) => panic!("a looping IFD chain was accepted"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains("loops back"),
+        "expected a loop error, got: {err}"
+    );
+}
+
+#[test]
+fn ifd_chain_cycle_the_head_is_not_part_of_is_rejected() {
+    // 0 -> 1 -> 2 -> 1: the first directory is outside the loop.
+    let buf = chain_ifds(valid_tiff(), 2, &[1, 2, 1]);
+    let err = match TiffStack::from_bytes(buf) {
+        Ok(_) => panic!("a looping IFD chain was accepted"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains("loops back"),
+        "expected a loop error, got: {err}"
+    );
+}
+
+#[test]
+fn a_long_acyclic_chain_is_not_mistaken_for_a_loop() {
+    // The counterpart the cycle check must not break: 40 distinct directories
+    // ending in 0. Brent's resets its reference offset at powers of two, so a
+    // chain long enough to cross several of those is the shape to check.
+    let n = 40usize;
+    let next: Vec<usize> = (1..=n).collect(); // 0->1, 1->2, ..., last->0 (end)
+    let buf = chain_ifds(valid_tiff(), n, &next[..n]);
+    let stack = TiffStack::from_bytes(buf).expect("a chain of distinct IFDs must open");
+    assert_eq!(stack.frames.len(), n + 1);
+}
+
+// ---- reused codec state must not leak between frames ----
+//
+// The Deflate and ZSTD paths keep a decompression context in a thread_local and
+// reset it per strip, rather than constructing a fresh one each time. That is
+// worth real time (a fresh ZSTD context per strip cost 40% of a 256x256 frame),
+// but it introduces a failure mode a fresh context cannot have: state surviving
+// a corrupt or truncated stream and silently corrupting the NEXT frame, which
+// is valid. Nothing else in the suite decodes a broken frame and a good one
+// through the same context.
+
+use fast_tiff_lib::{Compression, SampleType, TiffWriter, WriterOptions};
+use std::io::Cursor;
+
+/// `frames` identical 64x64 u16 frames, in memory.
+fn compressed_stack(comp: Compression, predictor: bool, frames: usize) -> Vec<u8> {
+    let (w, h) = (64u32, 64u32);
+    let px: Vec<u8> = (0..(w * h) as usize)
+        .flat_map(|i| {
+            let (x, y) = (i % w as usize, i / w as usize);
+            let v = (((x / 8 + y / 8) as u16).wrapping_mul(1031)).wrapping_add((x ^ y) as u16);
+            v.to_le_bytes()
+        })
+        .collect();
+    let opts = WriterOptions::new(w, h, SampleType::U16)
+        .compression(comp)
+        .predictor(predictor);
+    let mut wr = TiffWriter::new(Cursor::new(Vec::new()), opts).expect("writer");
+    for _ in 0..frames {
+        wr.write_frame_bytes(&px).expect("write frame");
+    }
+    wr.finish().expect("finish").into_inner()
+}
+
+fn frame_checksum(stack: &TiffStack, i: usize) -> Option<u64> {
+    let mut out: Vec<u16> = Vec::new();
+    fast_tiff_lib::read_frame_u16_into(
+        &stack.data,
+        &stack.frames[i],
+        stack.byte_order,
+        None,
+        &mut out,
+    )
+    .ok()?;
+    Some(
+        out.iter()
+            .fold(0u64, |a, &v| a.wrapping_mul(31).wrapping_add(v as u64)),
+    )
+}
+
+#[test]
+fn a_corrupt_strip_does_not_corrupt_the_next_frame() {
+    let cases: &[(&str, Compression, bool)] = &[
+        ("deflate", Compression::Deflate, false),
+        ("deflate+pred", Compression::Deflate, true),
+        ("lzw", Compression::Lzw, false),
+        #[cfg(feature = "codec-zstd")]
+        ("zstd", Compression::Zstd, false),
+        #[cfg(feature = "codec-zstd")]
+        ("zstd+pred", Compression::Zstd, true),
+    ];
+
+    for &(name, comp, pred) in cases {
+        let n = 6usize;
+        let clean_bytes = compressed_stack(comp, pred, n);
+        let clean = TiffStack::from_bytes(clean_bytes.clone()).expect(name);
+        let want = frame_checksum(&clean, 0).unwrap_or_else(|| panic!("{name}: clean frame 0"));
+
+        // Mangle the middle third of frame 2's compressed stream. Offsets and
+        // lengths are untouched, so the index still parses and only the codec
+        // sees the damage.
+        let mut bytes = clean_bytes;
+        let off = clean.frames[2].strip_offsets[0] as usize;
+        let len = clean.frames[2].strip_byte_counts[0] as usize;
+        for b in bytes[off + len / 3..(off + 2 * len / 3).min(off + len)].iter_mut() {
+            *b ^= 0xA5;
+        }
+
+        let dirty = TiffStack::from_bytes(bytes).expect(name);
+        // Frame 2 may error or decode to different pixels — either is fine.
+        let _ = frame_checksum(&dirty, 2);
+        // Every OTHER frame must still be byte-for-byte what it was.
+        for i in (0..n).filter(|&i| i != 2) {
+            let got = frame_checksum(&dirty, i).unwrap_or_else(|| {
+                panic!("{name}: frame {i} failed to decode after a corrupt frame")
+            });
+            assert_eq!(
+                got, want,
+                "{name}: frame {i} decoded differently after a corrupt frame"
+            );
+        }
+    }
 }

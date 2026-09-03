@@ -99,7 +99,11 @@ pub struct BandCache {
 
 impl Default for BandCache {
     fn default() -> Self {
-        Self { entries: Vec::new(), bytes: 0, budget: MAX_CACHE_BYTES }
+        Self {
+            entries: Vec::new(),
+            bytes: 0,
+            budget: MAX_CACHE_BYTES,
+        }
     }
 }
 
@@ -144,7 +148,14 @@ impl BandCache {
             !(e.band == band && e.cols == cols && e.frame == frame && e.channels == channels)
         });
         self.bytes = self.entries.iter().map(|e| e.bytes).sum();
-        self.entries.push(Entry { frame, channels, band, cols, planes, bytes });
+        self.entries.push(Entry {
+            frame,
+            channels,
+            band,
+            cols,
+            planes,
+            bytes,
+        });
         self.bytes += bytes;
         self.evict();
     }
@@ -192,4 +203,3 @@ impl BandCache {
         self.entries.is_empty()
     }
 }
-

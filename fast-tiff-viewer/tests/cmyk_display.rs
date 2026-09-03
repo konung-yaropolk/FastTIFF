@@ -45,8 +45,13 @@ fn open_stack(path: PathBuf) -> anyhow::Result<Stack> {
 fn decode(stack: &Stack, frame: usize, enabled: &[bool]) -> Vec<Decoded> {
     let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind).collect();
     let jobs = fast_tiff_viewer::prefetch::build_jobs(stack, frame, enabled, &kinds);
-    fast_tiff_viewer::prefetch::decode_jobs(&stack.tiff.data, &stack.tiff.frames, stack.tiff.byte_order, &jobs)
-        .unwrap_or_else(|e| panic!("frame {frame} failed to decode: {e:#}"))
+    fast_tiff_viewer::prefetch::decode_jobs(
+        &stack.tiff.data,
+        &stack.tiff.frames,
+        stack.tiff.byte_order,
+        &jobs,
+    )
+    .unwrap_or_else(|e| panic!("frame {frame} failed to decode: {e:#}"))
 }
 
 fn as_u8(d: &Decoded) -> &Vec<u8> {
@@ -62,7 +67,11 @@ fn as_u8(d: &Decoded) -> &Vec<u8> {
 fn reference_rgb(stack: &Stack, frame: usize) -> Vec<[u8; 3]> {
     let f = &stack.tiff.frames[frame];
     let raw = fast_tiff_lib::read_planes_u8(&stack.tiff.data, f, stack.tiff.byte_order).unwrap();
-    assert_eq!(raw.len(), 4, "the raw reader must still yield one plane per ink");
+    assert_eq!(
+        raw.len(),
+        4,
+        "the raw reader must still yield one plane per ink"
+    );
     (0..W * H)
         .map(|i| {
             let k = raw[3][i] as f32 / 255.0;
@@ -74,10 +83,15 @@ fn reference_rgb(stack: &Stack, frame: usize) -> Vec<[u8; 3]> {
 
 #[test]
 fn cmyk_stack_becomes_three_converted_display_channels() {
-    let Some(path) = fixture("tff_u8_spp4_p1_cmyk.tif") else { return };
+    let Some(path) = fixture("tff_u8_spp4_p1_cmyk.tif") else {
+        return;
+    };
     let stack = open_stack(path).expect("cmyk should open");
 
-    assert!(stack.display.cmyk, "a Separated frame should set the cmyk flag");
+    assert!(
+        stack.display.cmyk,
+        "a Separated frame should set the cmyk flag"
+    );
     assert!(
         stack.display.rgb,
         "cmyk also sets rgb: the display channels are sample planes of one IFD either way, \
@@ -88,30 +102,48 @@ fn cmyk_stack_becomes_three_converted_display_channels() {
         3,
         "four inks become three components, not four channels"
     );
-    assert!(stack.display.settings.iter().all(|s| s.kind == ChannelKind::Int8));
-    assert!(stack.display.settings.iter().all(|s| s.enabled), "all three start visible");
+    assert!(stack
+        .display
+        .settings
+        .iter()
+        .all(|s| s.kind == ChannelKind::Int8));
+    assert!(
+        stack.display.settings.iter().all(|s| s.enabled),
+        "all three start visible"
+    );
 }
 
 /// 16-bit inks must stay 16-bit through the conversion rather than being
 /// narrowed to fit the 8-bit upload path.
 #[test]
 fn sixteen_bit_cmyk_keeps_its_width() {
-    let Some(path) = fixture("tff_u16_spp4_p1_cmyk.tif") else { return };
+    let Some(path) = fixture("tff_u16_spp4_p1_cmyk.tif") else {
+        return;
+    };
     let stack = open_stack(path).expect("16-bit cmyk should open");
     assert!(stack.display.cmyk);
     assert_eq!(stack.display.settings.len(), 3);
-    assert!(stack.display.settings.iter().all(|s| s.kind == ChannelKind::Int16));
+    assert!(stack
+        .display
+        .settings
+        .iter()
+        .all(|s| s.kind == ChannelKind::Int16));
 
     let decoded = decode(&stack, 0, &[true, true, true]);
     assert_eq!(decoded.len(), 3);
-    assert!(matches!(decoded[0], Decoded::U16(_)), "16-bit source must decode to 16-bit");
+    assert!(
+        matches!(decoded[0], Decoded::U16(_)),
+        "16-bit source must decode to 16-bit"
+    );
 }
 
 /// The batched path: several channels visible, so one decompression pass feeds
 /// the whole conversion. This is the common case.
 #[test]
 fn batched_decode_yields_converted_components() {
-    let Some(path) = fixture("tff_u8_spp4_p1_cmyk.tif") else { return };
+    let Some(path) = fixture("tff_u8_spp4_p1_cmyk.tif") else {
+        return;
+    };
     let stack = open_stack(path).expect("cmyk should open");
     let want = reference_rgb(&stack, 0);
 
@@ -136,7 +168,9 @@ fn batched_decode_yields_converted_components() {
 ///, independently-reachable route to the same pixels, and it has to agree.
 #[test]
 fn single_channel_decode_matches_the_batched_result() {
-    let Some(path) = fixture("tff_u8_spp4_p1_cmyk.tif") else { return };
+    let Some(path) = fixture("tff_u8_spp4_p1_cmyk.tif") else {
+        return;
+    };
     let stack = open_stack(path).expect("cmyk should open");
     let batched = decode(&stack, 0, &[true, true, true]);
 
@@ -144,7 +178,11 @@ fn single_channel_decode_matches_the_batched_result() {
         let mut enabled = [false; 3];
         enabled[c] = true;
         let alone = decode(&stack, 0, &enabled);
-        assert_eq!(alone.len(), 1, "exactly one job when one channel is visible");
+        assert_eq!(
+            alone.len(),
+            1,
+            "exactly one job when one channel is visible"
+        );
         assert_eq!(
             as_u8(&alone[0]),
             as_u8(&batched[c]),
@@ -158,7 +196,9 @@ fn single_channel_decode_matches_the_batched_result() {
 /// a chunky one would — and every page must decode, not just the first.
 #[test]
 fn planar_cmyk_decodes_every_page() {
-    let Some(path) = fixture("tff_u8_spp4_p2_cmyk-planar.tif") else { return };
+    let Some(path) = fixture("tff_u8_spp4_p2_cmyk-planar.tif") else {
+        return;
+    };
     let stack = open_stack(path).expect("planar cmyk should open");
     assert!(stack.display.cmyk);
     assert!(stack.tiff.frames[0].is_planar());
@@ -189,9 +229,14 @@ fn planar_cmyk_decodes_every_page() {
 /// viewer actually consults rather than asserting on a file.
 #[test]
 fn the_viewer_only_converts_what_the_library_calls_cmyk() {
-    let Some(path) = fixture("tff_u8_spp3_p2_none.tif") else { return };
+    let Some(path) = fixture("tff_u8_spp3_p2_none.tif") else {
+        return;
+    };
     let stack = open_stack(path).expect("rgb should open");
-    assert!(!stack.tiff.frames[0].is_cmyk(), "a photometric-2 RGB frame is not CMYK");
+    assert!(
+        !stack.tiff.frames[0].is_cmyk(),
+        "a photometric-2 RGB frame is not CMYK"
+    );
     assert!(!stack.display.cmyk, "and must not be flagged as such");
     assert!(stack.display.rgb, "it is still ordinary RGB");
 }

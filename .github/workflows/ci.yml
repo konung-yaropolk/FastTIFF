@@ -46,8 +46,10 @@ jobs:
         run: cargo build -p FastTIFF --no-default-features --features renderer-glow
 
       # fast-tiff-lib without memmap or the C zstd codec — the shape the wasm
-      # build uses. The `open`-based integration tests are gated off here, so
-      # `tests/from_bytes.rs` is what keeps the filesystem-free path honest.
+      # build uses. This runs the *same* suite as the default build: the
+      # `open`-based integration tests used to be gated off here, which
+      # silently cost this step every one of them (a test binary with zero
+      # tests still prints `ok`); they now go through `tests/common::open_tiff`.
       - name: Test lib with no default features (wasm-shaped)
         run: cargo test -p fast-tiff-lib --no-default-features
 

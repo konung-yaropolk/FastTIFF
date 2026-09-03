@@ -15,7 +15,10 @@ fn basis_is_orthonormal() {
         let (f, r, u) = volume_basis(yaw, pitch);
         for v in [f, r, u] {
             let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-            assert!((len - 1.0).abs() < 1e-4, "not unit length at ({yaw}, {pitch}): {len}");
+            assert!(
+                (len - 1.0).abs() < 1e-4,
+                "not unit length at ({yaw}, {pitch}): {len}"
+            );
         }
         let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
         assert!(dot(f, r).abs() < 1e-4, "forward·right at ({yaw}, {pitch})");
@@ -29,7 +32,10 @@ fn pitch_is_clamped_away_from_the_pole() {
     // Straight up would make `cross(forward, world_up)` degenerate.
     let (f, r, u) = volume_basis(0.0, 100.0);
     for v in [f, r, u] {
-        assert!(v.iter().all(|c| c.is_finite()), "non-finite basis at extreme pitch");
+        assert!(
+            v.iter().all(|c| c.is_finite()),
+            "non-finite basis at extreme pitch"
+        );
     }
 }
 
@@ -40,7 +46,10 @@ fn focal_box_entry_hits_misses_and_insides() {
     let t = focal_box_entry([0.0, 0.0, 2.0], [0.0, 0.0, -1.0], he).expect("should hit");
     assert!((t - 1.5).abs() < 1e-4, "expected 1.5, got {t}");
     // Eye inside the box: entry distance is 0.
-    assert_eq!(focal_box_entry([0.0, 0.0, 0.0], [0.0, 0.0, -1.0], he), Some(0.0));
+    assert_eq!(
+        focal_box_entry([0.0, 0.0, 0.0], [0.0, 0.0, -1.0], he),
+        Some(0.0)
+    );
     // Aimed away from the box entirely.
     assert_eq!(focal_box_entry([0.0, 0.0, 2.0], [0.0, 0.0, 1.0], he), None);
     // Parallel to a slab and outside it.
@@ -49,7 +58,12 @@ fn focal_box_entry_hits_misses_and_insides() {
 
 #[test]
 fn orbit_eye_sits_at_distance_from_the_pivot() {
-    let cam = CameraState { nav: NavMode::Cad, dist: 3.0, target: [0.0, 0.0, 0.0], ..Default::default() };
+    let cam = CameraState {
+        nav: NavMode::Cad,
+        dist: 3.0,
+        target: [0.0, 0.0, 0.0],
+        ..Default::default()
+    };
     let (forward, _, _) = cam.basis();
     let eye = cam.eye(forward);
     assert!((dist2(eye, cam.target).sqrt() - 3.0).abs() < 1e-4);
@@ -59,19 +73,30 @@ fn orbit_eye_sits_at_distance_from_the_pivot() {
 fn nav_switch_keeps_the_eye_put() {
     // The orbit and fly modes store the eye differently; switching must not move
     // it, or the view visibly jumps.
-    let mut cam = CameraState { nav: NavMode::Cad, dist: 2.5, target: [0.3, -0.2, 0.1], ..Default::default() };
+    let mut cam = CameraState {
+        nav: NavMode::Cad,
+        dist: 2.5,
+        target: [0.3, -0.2, 0.1],
+        ..Default::default()
+    };
     let (forward, _, _) = cam.basis();
     let before = cam.eye(forward);
 
     cam.nav = NavMode::WasdFly;
     cam.sync_for_nav(/* was_fly */ false);
     let after = cam.eye(cam.basis().0);
-    assert!(dist2(before, after) < 1e-8, "orbit -> fly moved the eye: {before:?} -> {after:?}");
+    assert!(
+        dist2(before, after) < 1e-8,
+        "orbit -> fly moved the eye: {before:?} -> {after:?}"
+    );
 
     cam.nav = NavMode::Cad;
     cam.sync_for_nav(/* was_fly */ true);
     let back = cam.eye(cam.basis().0);
-    assert!(dist2(before, back) < 1e-6, "fly -> orbit moved the eye: {before:?} -> {back:?}");
+    assert!(
+        dist2(before, back) < 1e-6,
+        "fly -> orbit moved the eye: {before:?} -> {back:?}"
+    );
 }
 
 #[test]
@@ -79,7 +104,11 @@ fn orbiting_the_volume_center_preserves_the_pivot_radius() {
     // The volume-center orbit rotates the target about the origin, so its
     // distance from the origin is invariant — that's what keeps an off-center
     // framing from snapping back to center.
-    let mut cam = CameraState { orbit_point: OrbitPoint::VolumeCenter, target: [0.4, 0.1, -0.2], ..Default::default() };
+    let mut cam = CameraState {
+        orbit_point: OrbitPoint::VolumeCenter,
+        target: [0.4, 0.1, -0.2],
+        ..Default::default()
+    };
     let r0 = dist2(cam.target, [0.0; 3]).sqrt();
     for _ in 0..20 {
         cam.orbit_drag(7.0, -3.0);
@@ -104,5 +133,9 @@ fn box_half_extents_normalize_the_longest_scaled_axis() {
 fn degenerate_dimensions_stay_finite() {
     let cam = CameraState::default();
     let v = volume_camera(&cam, [0.0, 0.0, 0.0], (0, 0, 0));
-    assert!(v.box_he.iter().all(|c| c.is_finite() && *c > 0.0), "{:?}", v.box_he);
+    assert!(
+        v.box_he.iter().all(|c| c.is_finite() && *c > 0.0),
+        "{:?}",
+        v.box_he
+    );
 }

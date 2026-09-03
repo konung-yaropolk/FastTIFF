@@ -267,7 +267,7 @@ def scaling_series(rows, family, rid, key="mean_us"):
     return [p[0] for p in pts], [p[1] for p in pts]
 
 
-def panel_scaling(ax, rows, readers, family, key, ylabel, title):
+def panel_scaling(ax, rows, readers, family, key, ylabel, title, note=None):
     """The swept reading: how a number moves as the stack gets longer."""
     drawn = False
     for rid in readers:
@@ -292,6 +292,12 @@ def panel_scaling(ax, rows, readers, family, key, ylabel, title):
     if not drawn:
         ax.text(0.5, 0.5, "not enough frame counts\n(run without --quick)",
                 ha="center", va="center", transform=ax.transAxes, color=MUTED, fontsize=9)
+    elif note:
+        # Read on its own, a rising open-cost curve looks like a defeat. It is
+        # half of a trade: the readers that stay flat here have not skipped the
+        # indexing, they do it per frame instead, where it is now timed.
+        ax.text(0.02, 0.97, note, transform=ax.transAxes, ha="left", va="top",
+                fontsize=8, color=MUTED, linespacing=1.35, zorder=5)
     return drawn
 
 
@@ -333,7 +339,10 @@ def summary_figure(env, rows, out: Path):
                   f"Per-frame cost as the stack grows\n{sweep_family}")
     panel_scaling(fig.add_subplot(grid[1, 1]), rows, readers, sweep_family,
                   "open_us", "microseconds to open + index",
-                  f"Cost paid once, at open\n{sweep_family}")
+                  f"Cost paid once, at open\n{sweep_family}",
+                  note="a flat line here is not free indexing:\n"
+                       "the lazy readers pay it per frame instead,\n"
+                       "in the panel on the left")
 
     # Footer: the machine on the left, what the writer managed on the right.
     ax = fig.add_subplot(grid[2, :])

@@ -113,13 +113,17 @@ fn header_and_chain_structure() {
     assert_eq!(frames[0].compression, Compression::None);
     // Uncompressed default: the whole frame as one strip.
     assert_eq!(frames[0].strip_offsets.len(), 1);
-    assert_eq!(frames[1].strip_byte_counts, vec![4]);
+    assert_eq!(&frames[1].strip_byte_counts[..], &[4]);
 }
 
 #[test]
 fn uncompressed_u16_is_the_readers_zero_copy_layout() {
     let pixels: Vec<u16> = (0..12).map(|v| v * 1000).collect();
-    let mut w = TiffWriter::new(Cursor::new(Vec::new()), WriterOptions::new(4, 3, SampleType::U16)).unwrap();
+    let mut w = TiffWriter::new(
+        Cursor::new(Vec::new()),
+        WriterOptions::new(4, 3, SampleType::U16),
+    )
+    .unwrap();
     w.write_frame_u16(&pixels).unwrap();
     let bytes = w.finish().unwrap().into_inner();
 
@@ -143,6 +147,11 @@ fn all_codecs_roundtrip_with_and_without_predictor() {
 
     // ZSTD only when its codec is compiled in — the pure-Rust codecs must still
     // be exercised in a `--no-default-features` (wasm-shaped) build.
+    // `mut` only when the ZSTD push below is compiled in; without the
+    // attribute this is the one warning in the `--no-default-features` build,
+    // which is exactly the configuration that should stay clean so a real new
+    // warning there is visible.
+    #[cfg_attr(not(feature = "codec-zstd"), allow(unused_mut))]
     let mut codecs = vec![
         Compression::None,
         Compression::Lzw,
@@ -192,15 +201,28 @@ fn chunky_rgb8_reads_back_per_plane() {
     let opts = WriterOptions::new(2, 1, SampleType::U8).samples_per_pixel(3);
     let bytes = write_stack(opts, &[vec![10, 20, 30, 40, 50, 60]]);
     let (frames, order) = parse_frames(&bytes);
-    assert!(frames[0].is_rgb(), "spp=3 chunky must be tagged photometric=RGB");
-    assert_eq!(read_plane_u8(&bytes, &frames[0], order, 0).unwrap(), vec![10, 40]);
-    assert_eq!(read_plane_u8(&bytes, &frames[0], order, 2).unwrap(), vec![30, 60]);
+    assert!(
+        frames[0].is_rgb(),
+        "spp=3 chunky must be tagged photometric=RGB"
+    );
+    assert_eq!(
+        read_plane_u8(&bytes, &frames[0], order, 0).unwrap(),
+        vec![10, 40]
+    );
+    assert_eq!(
+        read_plane_u8(&bytes, &frames[0], order, 2).unwrap(),
+        vec![30, 60]
+    );
 }
 
 #[test]
 fn f32_frames_roundtrip_bit_exact() {
     let pixels: Vec<f32> = vec![-0.5, 0.0, 1.25, 1e-7, 3.4e38, -2.5];
-    let mut w = TiffWriter::new(Cursor::new(Vec::new()), WriterOptions::new(3, 2, SampleType::F32)).unwrap();
+    let mut w = TiffWriter::new(
+        Cursor::new(Vec::new()),
+        WriterOptions::new(3, 2, SampleType::F32),
+    )
+    .unwrap();
     w.write_frame_f32(&pixels).unwrap();
     let bytes = w.finish().unwrap().into_inner();
     let (frames, order) = parse_frames(&bytes);
@@ -238,16 +260,36 @@ fn imagej_description_lands_on_first_ifd_only() {
 
     let (order, flavor, first) = ifd::read_header(&bytes).unwrap();
     let ifd0 = ifd::read_ifd(&bytes, first as usize, order, flavor).unwrap();
-    let desc_entry = ifd0.entries.iter().find(|e| e.tag == 270).expect("first IFD carries tag 270");
+    let desc_entry = ifd0
+        .entries
+        .iter()
+        .find(|e| e.tag == 270)
+        .expect("first IFD carries tag 270");
     let desc = desc_entry.as_ascii(&bytes, order).unwrap();
     for expected in [
-        "ImageJ=", "images=4", "channels=2", "frames=2", "mode=composite", "unit=um",
-        "fps=12.5", "min=10", "max=200", "cf=0", "c0=2", "c1=0.5",
+        "ImageJ=",
+        "images=4",
+        "channels=2",
+        "frames=2",
+        "mode=composite",
+        "unit=um",
+        "fps=12.5",
+        "min=10",
+        "max=200",
+        "cf=0",
+        "c0=2",
+        "c1=0.5",
     ] {
-        assert!(desc.contains(expected), "description missing {expected:?}:\n{desc}");
+        assert!(
+            desc.contains(expected),
+            "description missing {expected:?}:\n{desc}"
+        );
     }
     let ifd1 = ifd::read_ifd(&bytes, ifd0.next_offset as usize, order, flavor).unwrap();
-    assert!(ifd1.entries.iter().all(|e| e.tag != 270), "later IFDs must not repeat the description");
+    assert!(
+        ifd1.entries.iter().all(|e| e.tag != 270),
+        "later IFDs must not repeat the description"
+    );
 }
 
 #[test]
@@ -340,7 +382,11 @@ fn f64_frames_downcast_to_f32() {
     // underflows to 0. The reader exposes 64-bit data through the same f32 GPU
     // path as 32-bit float, so the decode is exactly `v as f32`.
     let pixels: Vec<f64> = vec![0.1, 1.0 / 3.0, 1e300, -1e-300, 2.5, -7.25];
-    let mut w = TiffWriter::new(Cursor::new(Vec::new()), WriterOptions::new(3, 2, SampleType::F64)).unwrap();
+    let mut w = TiffWriter::new(
+        Cursor::new(Vec::new()),
+        WriterOptions::new(3, 2, SampleType::F64),
+    )
+    .unwrap();
     w.write_frame_f64(&pixels).unwrap();
     let bytes = w.finish().unwrap().into_inner();
     let (frames, order) = parse_frames(&bytes);
@@ -390,7 +436,10 @@ fn predictor_roundtrips_64bit_int_and_float() {
         .predictor(true);
     let bytes = write_stack(opts, &[data]);
     let (frames, order) = parse_frames(&bytes);
-    assert_eq!(frames[0].predictor, 2, "64-bit integer data gets predictor 2");
+    assert_eq!(
+        frames[0].predictor, 2,
+        "64-bit integer data gets predictor 2"
+    );
     let decoded = read_frame_f32(&bytes, &frames[0], order).unwrap();
     let expected: Vec<f32> = ints.iter().map(|&v| v as f32).collect();
     assert_eq!(decoded.as_ref(), &expected[..]);
@@ -417,7 +466,10 @@ fn predictor_roundtrips_64bit_int_and_float() {
 fn unknown_predictor_errors_instead_of_garbage() {
     // A frame claiming predictor 9: the reader must refuse, not decode wrong.
     let pixels: Vec<u16> = vec![1, 2, 3, 4];
-    let bytes = write_stack(WriterOptions::new(2, 2, SampleType::U16), &[le_bytes_u16(&pixels)]);
+    let bytes = write_stack(
+        WriterOptions::new(2, 2, SampleType::U16),
+        &[le_bytes_u16(&pixels)],
+    );
     let (mut frames, order) = parse_frames(&bytes);
     frames[0].predictor = 9;
     assert!(read_frame_u16(&bytes, &frames[0], order, None).is_err());
@@ -435,9 +487,18 @@ fn description_carries_spacing_loop_and_extra_keys() {
     let bytes = write_stack(opts, &[vec![0], vec![1]]);
     let (order, flavor, first) = ifd::read_header(&bytes).unwrap();
     let ifd0 = ifd::read_ifd(&bytes, first as usize, order, flavor).unwrap();
-    let desc = ifd0.entries.iter().find(|e| e.tag == 270).unwrap().as_ascii(&bytes, order).unwrap();
+    let desc = ifd0
+        .entries
+        .iter()
+        .find(|e| e.tag == 270)
+        .unwrap()
+        .as_ascii(&bytes, order)
+        .unwrap();
     for expected in ["spacing=1.5", "loop=true", "vunit=V", "tunit=s", "slices=2"] {
-        assert!(desc.contains(expected), "description missing {expected:?}:\n{desc}");
+        assert!(
+            desc.contains(expected),
+            "description missing {expected:?}:\n{desc}"
+        );
     }
 }
 
@@ -447,11 +508,18 @@ fn classic_stays_classic_and_forced_bigtiff_roundtrips() {
 
     // Default small file: classic header (magic 42), 8 zero pad bytes after
     // it (data starts at 16 under both flavors), and normal decode.
-    let bytes = write_stack(WriterOptions::new(4, 3, SampleType::U16), &[le_bytes_u16(&pixels)]);
+    let bytes = write_stack(
+        WriterOptions::new(4, 3, SampleType::U16),
+        &[le_bytes_u16(&pixels)],
+    );
     let (order, flavor, _) = ifd::read_header(&bytes).unwrap();
     assert_eq!(order.u16(&bytes[2..4]), 42);
     assert_eq!(flavor, crate::ifd::TiffFlavor::Classic);
-    assert_eq!(&bytes[8..16], &[0u8; 8], "classic keeps the reserved bytes as legal padding");
+    assert_eq!(
+        &bytes[8..16],
+        &[0u8; 8],
+        "classic keeps the reserved bytes as legal padding"
+    );
 
     // Forced BigTIFF: magic 43, 8-byte offsets, LONG8 strip locations — and
     // the same pixels decode back through the flavor-aware parser.
@@ -482,6 +550,7 @@ fn classic_stays_classic_and_forced_bigtiff_roundtrips() {
 fn compression_level_knob_roundtrips() {
     let pixels: Vec<u16> = (0..8 * 4).map(|i| (i as u16 * 37) % 500).collect();
     let data = le_bytes_u16(&pixels);
+    #[cfg_attr(not(feature = "codec-zstd"), allow(unused_mut))]
     let mut cases = vec![(Compression::Deflate, 1), (Compression::Deflate, 9)];
     #[cfg(feature = "codec-zstd")]
     cases.extend([(Compression::Zstd, 1), (Compression::Zstd, 19)]);
@@ -492,7 +561,11 @@ fn compression_level_knob_roundtrips() {
         let bytes = write_stack(opts, std::slice::from_ref(&data));
         let (frames, order) = parse_frames(&bytes);
         let decoded = read_frame_u16(&bytes, &frames[0], order, None).unwrap();
-        assert_eq!(decoded.as_ref(), &pixels[..], "{compression:?} level {level}");
+        assert_eq!(
+            decoded.as_ref(),
+            &pixels[..],
+            "{compression:?} level {level}"
+        );
     }
 }
 
@@ -506,12 +579,23 @@ fn four_sample_chunky_declares_extra_samples() {
 
     let (order, flavor, first) = ifd::read_header(&bytes).unwrap();
     let ifd0 = ifd::read_ifd(&bytes, first as usize, order, flavor).unwrap();
-    let extra = ifd0.entries.iter().find(|e| e.tag == 338).expect("ExtraSamples tag present");
-    assert_eq!(extra.as_u32_array(&bytes, order).unwrap(), vec![0], "one unspecified extra sample");
+    let extra = ifd0
+        .entries
+        .iter()
+        .find(|e| e.tag == 338)
+        .expect("ExtraSamples tag present");
+    assert_eq!(
+        extra.as_u32_array(&bytes, order).unwrap(),
+        vec![0],
+        "one unspecified extra sample"
+    );
 
     // And the 4th plane still reads back.
     let (frames, order) = parse_frames(&bytes);
-    assert_eq!(read_plane_u8(&bytes, &frames[0], order, 3).unwrap(), vec![4, 8]);
+    assert_eq!(
+        read_plane_u8(&bytes, &frames[0], order, 3).unwrap(),
+        vec![4, 8]
+    );
 }
 
 #[test]
@@ -531,7 +615,8 @@ fn rejects_nul_and_newline_in_metadata_strings() {
     // '=' in an extra key would parse back as the wrong key.
     assert!(TiffWriter::new(
         Cursor::new(Vec::new()),
-        WriterOptions::new(1, 1, SampleType::U8).metadata(StackMetaWrite::new(1, 1).extra("a=b", "c"))
+        WriterOptions::new(1, 1, SampleType::U8)
+            .metadata(StackMetaWrite::new(1, 1).extra("a=b", "c"))
     )
     .is_err());
 }
@@ -539,7 +624,11 @@ fn rejects_nul_and_newline_in_metadata_strings() {
 #[test]
 fn rejects_invalid_configurations_and_data() {
     // Wrong frame length.
-    let mut w = TiffWriter::new(Cursor::new(Vec::new()), WriterOptions::new(4, 4, SampleType::U16)).unwrap();
+    let mut w = TiffWriter::new(
+        Cursor::new(Vec::new()),
+        WriterOptions::new(4, 4, SampleType::U16),
+    )
+    .unwrap();
     assert!(w.write_frame_bytes(&[0u8; 3]).is_err());
     // Typed method on the wrong sample type.
     assert!(w.write_frame_u8(&[0u8; 32]).is_err());
@@ -558,7 +647,11 @@ fn rejects_invalid_configurations_and_data() {
     )
     .is_err());
     // Zero frames.
-    let w = TiffWriter::new(Cursor::new(Vec::new()), WriterOptions::new(2, 2, SampleType::U8)).unwrap();
+    let w = TiffWriter::new(
+        Cursor::new(Vec::new()),
+        WriterOptions::new(2, 2, SampleType::U8),
+    )
+    .unwrap();
     assert!(w.finish().is_err());
     // Plane count not divisible by channels x slices.
     let mut w = TiffWriter::new(

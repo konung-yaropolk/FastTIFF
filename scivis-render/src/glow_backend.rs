@@ -15,7 +15,9 @@
 //! bound framebuffer) for the target rect — that setup is the host's job, and
 //! this backend deliberately does not second-guess it.
 
-use crate::{ChannelKind, ChannelUniform, Lut, VolumeInterp, VolumeKind, VolumeParams, MAX_CHANNELS};
+use crate::{
+    ChannelKind, ChannelUniform, Lut, VolumeInterp, VolumeKind, VolumeParams, MAX_CHANNELS,
+};
 use glow::HasContext as _;
 use std::sync::Arc;
 
@@ -577,8 +579,10 @@ impl ImageRenderResources {
             let channel_ftextures = std::array::from_fn(|_| create_float_texture(gl, 1, 1));
             let lut_texture = create_lut_texture(gl);
 
-            let u_ch_tex = std::array::from_fn(|c| gl.get_uniform_location(program, &format!("ch{c}_tex")));
-            let u_ch_ftex = std::array::from_fn(|c| gl.get_uniform_location(program, &format!("ch{c}_ftex")));
+            let u_ch_tex =
+                std::array::from_fn(|c| gl.get_uniform_location(program, &format!("ch{c}_tex")));
+            let u_ch_ftex =
+                std::array::from_fn(|c| gl.get_uniform_location(program, &format!("ch{c}_ftex")));
 
             Self {
                 gl: Arc::clone(&ctx),
@@ -670,7 +674,11 @@ impl ImageRenderResources {
                             );
                             // Shrink the unused sibling texture to a 1x1x1 dummy.
                             gl.bind_texture(glow::TEXTURE_3D, Some(dummy_tex));
-                            let dummy_kind = if *kind == VolumeKind::F32 { VolumeKind::U8 } else { VolumeKind::F32 };
+                            let dummy_kind = if *kind == VolumeKind::F32 {
+                                VolumeKind::U8
+                            } else {
+                                VolumeKind::F32
+                            };
                             alloc_volume_dummy(gl, dummy_kind);
                             v.kinds[c] = Some(*kind);
                         }
@@ -707,7 +715,11 @@ impl ImageRenderResources {
         self.volume.interp_mode = mode;
         for c in 0..MAX_CHANNELS {
             if let Some(kind) = self.volume.kinds[c] {
-                let tex = if kind == VolumeKind::F32 { self.volume.tex_float[c] } else { self.volume.tex_unorm[c] };
+                let tex = if kind == VolumeKind::F32 {
+                    self.volume.tex_float[c]
+                } else {
+                    self.volume.tex_unorm[c]
+                };
                 unsafe {
                     self.gl.bind_texture(glow::TEXTURE_3D, Some(tex));
                     set_volume_filter(&self.gl, gl_interp, kind);
@@ -750,7 +762,12 @@ impl ImageRenderResources {
             }
 
             gl.uniform_3_f32(v.u_eye.as_ref(), p.eye[0], p.eye[1], p.eye[2]);
-            gl.uniform_3_f32(v.u_forward.as_ref(), p.forward[0], p.forward[1], p.forward[2]);
+            gl.uniform_3_f32(
+                v.u_forward.as_ref(),
+                p.forward[0],
+                p.forward[1],
+                p.forward[2],
+            );
             gl.uniform_3_f32(v.u_right.as_ref(), p.right[0], p.right[1], p.right[2]);
             gl.uniform_3_f32(v.u_up.as_ref(), p.up[0], p.up[1], p.up[2]);
             gl.uniform_1_f32(v.u_tan.as_ref(), p.tan_half_fov);
@@ -808,7 +825,11 @@ impl ImageRenderResources {
                     _ => alloc_int(gl, 1, 1, false),
                 }
                 // Float texture: full size for a float channel, else 1x1 dummy.
-                let (fw, fh) = if want[c] == KIND_FLOAT { (width, height) } else { (1, 1) };
+                let (fw, fh) = if want[c] == KIND_FLOAT {
+                    (width, height)
+                } else {
+                    (1, 1)
+                };
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_ftextures[c]));
                 alloc_float(gl, fw, fh);
             }
@@ -982,7 +1003,11 @@ impl ImageRenderResources {
             gl.uniform_1_f32_slice(self.u_enabled.as_ref(), &self.enabled);
             gl.uniform_1_f32_slice(self.u_is_float.as_ref(), &self.is_float);
             gl.uniform_1_i32(self.u_num_channels.as_ref(), self.num_channels);
-            gl.uniform_2_f32(self.u_uv_offset.as_ref(), self.uv_offset[0], self.uv_offset[1]);
+            gl.uniform_2_f32(
+                self.u_uv_offset.as_ref(),
+                self.uv_offset[0],
+                self.uv_offset[1],
+            );
             gl.uniform_2_f32(self.u_uv_scale.as_ref(), self.uv_scale[0], self.uv_scale[1]);
 
             // The image is opaque (alpha 1); draw straight, no blending.
@@ -1049,10 +1074,26 @@ unsafe fn create_float_texture(gl: &glow::Context, width: u32, height: u32) -> g
 }
 
 unsafe fn set_nearest_clamp(gl: &glow::Context) {
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MIN_FILTER,
+        glow::NEAREST as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MAG_FILTER,
+        glow::NEAREST as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_WRAP_S,
+        glow::CLAMP_TO_EDGE as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_WRAP_T,
+        glow::CLAMP_TO_EDGE as i32,
+    );
 }
 
 /// Allocate a 1x1x1 dummy for the currently-bound 3D texture in `kind`'s format
@@ -1063,7 +1104,18 @@ unsafe fn alloc_volume_dummy(gl: &glow::Context, kind: VolumeKind) {
         VolumeKind::U16 => (glow::R16, glow::RED, glow::UNSIGNED_SHORT),
         VolumeKind::F32 => (glow::R32F, glow::RED, glow::FLOAT),
     };
-    gl.tex_image_3d(glow::TEXTURE_3D, 0, internal as i32, 1, 1, 1, 0, fmt, ty, glow::PixelUnpackData::Slice(None));
+    gl.tex_image_3d(
+        glow::TEXTURE_3D,
+        0,
+        internal as i32,
+        1,
+        1,
+        1,
+        0,
+        fmt,
+        ty,
+        glow::PixelUnpackData::Slice(None),
+    );
 }
 
 /// Create a 3D texture (clamped, NEAREST) with a 1x1x1 dummy allocation.
@@ -1071,7 +1123,11 @@ unsafe fn alloc_volume_dummy(gl: &glow::Context, kind: VolumeKind) {
 unsafe fn create_volume_texture(gl: &glow::Context, is_float: bool) -> glow::NativeTexture {
     let tex = gl.create_texture().expect("create volume texture");
     gl.bind_texture(glow::TEXTURE_3D, Some(tex));
-    let kind = if is_float { VolumeKind::F32 } else { VolumeKind::U8 };
+    let kind = if is_float {
+        VolumeKind::F32
+    } else {
+        VolumeKind::U8
+    };
     set_volume_filter(gl, glow::NEAREST as i32, kind);
     alloc_volume_dummy(gl, kind);
     tex
@@ -1087,19 +1143,51 @@ unsafe fn create_volume_texture(gl: &glow::Context, is_float: bool) -> glow::Nat
 unsafe fn set_volume_filter(gl: &glow::Context, gl_interp: i32, _kind: VolumeKind) {
     gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_MIN_FILTER, gl_interp);
     gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_MAG_FILTER, gl_interp);
-    gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_BORDER as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_BORDER as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_WRAP_R, glow::CLAMP_TO_BORDER as i32);
-    gl.tex_parameter_f32_slice(glow::TEXTURE_3D, glow::TEXTURE_BORDER_COLOR, &[0.0, 0.0, 0.0, 0.0]);
+    gl.tex_parameter_i32(
+        glow::TEXTURE_3D,
+        glow::TEXTURE_WRAP_S,
+        glow::CLAMP_TO_BORDER as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_3D,
+        glow::TEXTURE_WRAP_T,
+        glow::CLAMP_TO_BORDER as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_3D,
+        glow::TEXTURE_WRAP_R,
+        glow::CLAMP_TO_BORDER as i32,
+    );
+    gl.tex_parameter_f32_slice(
+        glow::TEXTURE_3D,
+        glow::TEXTURE_BORDER_COLOR,
+        &[0.0, 0.0, 0.0, 0.0],
+    );
 }
 
 unsafe fn create_lut_texture(gl: &glow::Context) -> glow::NativeTexture {
     let tex = gl.create_texture().expect("create LUT texture");
     gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MIN_FILTER,
+        glow::LINEAR as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MAG_FILTER,
+        glow::LINEAR as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_WRAP_S,
+        glow::CLAMP_TO_EDGE as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_WRAP_T,
+        glow::CLAMP_TO_EDGE as i32,
+    );
     gl.tex_image_2d(
         glow::TEXTURE_2D,
         0,
@@ -1122,7 +1210,10 @@ unsafe fn link_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> glow::
     gl.attach_shader(program, fs);
     gl.link_program(program);
     if !gl.get_program_link_status(program) {
-        panic!("FastTIFF shader link failed: {}", gl.get_program_info_log(program));
+        panic!(
+            "FastTIFF shader link failed: {}",
+            gl.get_program_info_log(program)
+        );
     }
     gl.detach_shader(program, vs);
     gl.detach_shader(program, fs);
@@ -1136,8 +1227,15 @@ unsafe fn compile_shader(gl: &glow::Context, kind: u32, src: &str) -> glow::Nati
     gl.shader_source(shader, src);
     gl.compile_shader(shader);
     if !gl.get_shader_compile_status(shader) {
-        let which = if kind == glow::VERTEX_SHADER { "vertex" } else { "fragment" };
-        panic!("FastTIFF {which} shader compile failed: {}", gl.get_shader_info_log(shader));
+        let which = if kind == glow::VERTEX_SHADER {
+            "vertex"
+        } else {
+            "fragment"
+        };
+        panic!(
+            "FastTIFF {which} shader compile failed: {}",
+            gl.get_shader_info_log(shader)
+        );
     }
     shader
 }

@@ -33,9 +33,15 @@ fn input_is_passed_through_untouched() {
 #[test]
 fn a_flick_coasts_on_and_then_stops() {
     let (_, coasted, frames) = flick(egui::vec2(0.0, -20.0), 1.0 / 60.0, 8);
-    assert!(coasted.y < 0.0, "the coast should continue in the same direction");
+    assert!(
+        coasted.y < 0.0,
+        "the coast should continue in the same direction"
+    );
     assert!(frames > 1, "a flick should glide for more than one frame");
-    assert!(frames < 120, "a glide should be over inside two seconds, was {frames} frames");
+    assert!(
+        frames < 120,
+        "a glide should be over inside two seconds, was {frames} frames"
+    );
 }
 
 #[test]
@@ -53,8 +59,12 @@ fn the_glide_never_outruns_the_gesture() {
 
 #[test]
 fn it_keeps_the_direction_it_was_given() {
-    let cases =
-        [egui::vec2(30.0, 0.0), egui::vec2(-30.0, 0.0), egui::vec2(0.0, 25.0), egui::vec2(11.0, -9.0)];
+    let cases = [
+        egui::vec2(30.0, 0.0),
+        egui::vec2(-30.0, 0.0),
+        egui::vec2(0.0, 25.0),
+        egui::vec2(11.0, -9.0),
+    ];
     for d in cases {
         let (_, coasted, _) = flick(d, 1.0 / 60.0, 10);
         assert!(coasted.x * d.x >= 0.0, "x reversed for {d:?}: {coasted:?}");
@@ -113,5 +123,8 @@ fn a_degenerate_frame_time_is_survivable() {
     }
     assert_eq!(g.coast(0.0), egui::Vec2::ZERO);
     assert_eq!(g.coast(f32::NAN), egui::Vec2::ZERO);
-    assert!(g.is_moving(), "a bad frame should not silently end the glide");
+    assert!(
+        g.is_moving(),
+        "a bad frame should not silently end the glide"
+    );
 }

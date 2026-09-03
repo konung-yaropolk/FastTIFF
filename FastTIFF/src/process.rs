@@ -18,7 +18,10 @@ pub fn open_in_new_process(path: &Path) {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {
-            log::error!("can't locate current executable to open {}: {e}", path.display());
+            log::error!(
+                "can't locate current executable to open {}: {e}",
+                path.display()
+            );
             return;
         }
     };

@@ -18,7 +18,11 @@ fn without_a_fit_the_ladder_is_the_fixed_one() {
     assert_eq!(zoom_ladder(None), ZOOM_LEVELS.to_vec());
     // A nonsense factor is ignored rather than poisoning the ladder.
     for bad in [f32::NAN, f32::INFINITY, 0.0, -0.5] {
-        assert_eq!(zoom_ladder(Some(bad)), ZOOM_LEVELS.to_vec(), "{bad} was inserted");
+        assert_eq!(
+            zoom_ladder(Some(bad)),
+            ZOOM_LEVELS.to_vec(),
+            "{bad} was inserted"
+        );
     }
 }
 
@@ -26,8 +30,14 @@ fn without_a_fit_the_ladder_is_the_fixed_one() {
 fn a_fit_between_two_levels_becomes_a_rung_in_order() {
     let ladder = zoom_ladder(Some(0.287));
     assert_eq!(ladder.len(), ZOOM_LEVELS.len() + 1);
-    assert!(ladder.windows(2).all(|w| w[0] < w[1]), "ladder not sorted: {ladder:?}");
-    let at = ladder.iter().position(|z| *z == 0.287).expect("the fit is a rung");
+    assert!(
+        ladder.windows(2).all(|w| w[0] < w[1]),
+        "ladder not sorted: {ladder:?}"
+    );
+    let at = ladder
+        .iter()
+        .position(|z| *z == 0.287)
+        .expect("the fit is a rung");
     assert_eq!((ladder[at - 1], ladder[at + 1]), (0.25, 0.333));
 }
 
@@ -35,7 +45,11 @@ fn a_fit_between_two_levels_becomes_a_rung_in_order() {
 fn a_fit_that_is_already_a_level_adds_nothing() {
     // Exactly on one, and near enough to one to be indistinguishable.
     for f in [0.5, 0.501, 0.4995, 1.0] {
-        assert_eq!(zoom_ladder(Some(f)).len(), ZOOM_LEVELS.len(), "{f} duplicated a level");
+        assert_eq!(
+            zoom_ladder(Some(f)).len(),
+            ZOOM_LEVELS.len(),
+            "{f} duplicated a level"
+        );
     }
     // Just outside the snap tolerance, so it does earn its own rung.
     assert_eq!(zoom_ladder(Some(0.52)).len(), ZOOM_LEVELS.len() + 1);
@@ -48,7 +62,11 @@ fn zooming_out_from_the_fit_and_back_returns_to_it() {
     let fit = 0.287;
     let inned = stepped_zoom(fit, 1, Some(fit));
     assert!(inned > fit, "zooming in did not move: {inned}");
-    assert_eq!(stepped_zoom(inned, -1, Some(fit)), fit, "did not come back to the fit");
+    assert_eq!(
+        stepped_zoom(inned, -1, Some(fit)),
+        fit,
+        "did not come back to the fit"
+    );
 
     let outed = stepped_zoom(fit, -1, Some(fit));
     assert!(outed < fit, "zooming out did not move: {outed}");
@@ -62,7 +80,11 @@ fn a_fit_below_every_level_becomes_the_new_floor() {
     let fit = 0.004;
     let ladder = zoom_ladder(Some(fit));
     assert_eq!(ladder[0], fit);
-    assert_eq!(stepped_zoom(fit, -1, Some(fit)), fit, "zoom-out should clamp at the fit");
+    assert_eq!(
+        stepped_zoom(fit, -1, Some(fit)),
+        fit,
+        "zoom-out should clamp at the fit"
+    );
     assert!(stepped_zoom(fit, 1, Some(fit)) > fit);
 }
 
@@ -84,7 +106,10 @@ fn the_fit_fills_the_shorter_axis_and_never_magnifies() {
     assert!((z - 0.4).abs() < 1e-6, "{z}");
     // A small image is left at 1:1 rather than blown up — nearest sampling
     // makes a magnified thumbnail a block of squares, not a bigger picture.
-    assert_eq!(fit_to_panel(100.0, 80.0, egui::vec2(1600.0, 900.0)), Some(1.0));
+    assert_eq!(
+        fit_to_panel(100.0, 80.0, egui::vec2(1600.0, 900.0)),
+        Some(1.0)
+    );
 }
 
 #[test]
@@ -105,7 +130,10 @@ fn gliding(from: f32, target: f32) -> View2d {
         zoom: from,
         panel_rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 800.0)),
         image_origin: egui::pos2(0.0, 0.0),
-        zoom_glide: Some(ZoomGlide { target, anchor: egui::pos2(500.0, 400.0) }),
+        zoom_glide: Some(ZoomGlide {
+            target,
+            anchor: egui::pos2(500.0, 400.0),
+        }),
         ..Default::default()
     }
 }
@@ -132,8 +160,14 @@ fn a_glide_reaches_its_target_and_stops() {
     let seen = run(&mut v, 1.0 / 60.0);
     assert_eq!(v.zoom, 4.0, "a glide must land on the rung, not near it");
     assert!(v.zoom_glide.is_none(), "and must not still be running");
-    assert!(!v.advance_zoom_glide(1.0 / 60.0), "nor restart when advanced again");
-    assert!(seen.len() > 2, "it should take more than a frame, or it is not an animation");
+    assert!(
+        !v.advance_zoom_glide(1.0 / 60.0),
+        "nor restart when advanced again"
+    );
+    assert!(
+        seen.len() > 2,
+        "it should take more than a frame, or it is not an animation"
+    );
 }
 
 /// Fast enough not to be in the way. At 60 Hz a step should be visually done
@@ -161,10 +195,16 @@ fn a_glide_never_overshoots_or_backtracks() {
         let up = to > from;
         for w in seen.windows(2) {
             if up {
-                assert!(w[1] >= w[0] - 1e-6, "{from} -> {to} went backwards: {seen:?}");
+                assert!(
+                    w[1] >= w[0] - 1e-6,
+                    "{from} -> {to} went backwards: {seen:?}"
+                );
                 assert!(w[1] <= to + 1e-6, "{from} -> {to} overshot: {seen:?}");
             } else {
-                assert!(w[1] <= w[0] + 1e-6, "{from} -> {to} went backwards: {seen:?}");
+                assert!(
+                    w[1] <= w[0] + 1e-6,
+                    "{from} -> {to} went backwards: {seen:?}"
+                );
                 assert!(w[1] >= to - 1e-6, "{from} -> {to} overshot: {seen:?}");
             }
         }
@@ -200,7 +240,10 @@ fn a_glide_follows_the_clock_rather_than_the_frame_rate() {
 fn one_very_long_frame_does_not_swallow_the_whole_glide() {
     let mut v = gliding(1.0, 8.0);
     v.advance_zoom_glide(2.0);
-    assert!(v.zoom < 8.0, "a two-second frame jumped straight to the target");
+    assert!(
+        v.zoom < 8.0,
+        "a two-second frame jumped straight to the target"
+    );
     assert!(v.zoom_glide.is_some(), "and ended the glide with it");
 }
 
@@ -239,11 +282,22 @@ fn the_settled_zoom_is_the_destination_while_gliding() {
     let mut v = gliding(1.0, 4.0);
     assert_eq!(v.zoom_settled(), 4.0, "mid-glide it is the target");
     run(&mut v, 1.0 / 60.0);
-    assert_eq!(v.zoom_settled(), 4.0, "and afterwards it is simply the zoom");
+    assert_eq!(
+        v.zoom_settled(),
+        4.0,
+        "and afterwards it is simply the zoom"
+    );
     assert_eq!(v.zoom, 4.0);
 
-    let still = View2d { zoom: 2.5, ..Default::default() };
-    assert_eq!(still.zoom_settled(), 2.5, "with no glide it is what is on screen");
+    let still = View2d {
+        zoom: 2.5,
+        ..Default::default()
+    };
+    assert_eq!(
+        still.zoom_settled(),
+        2.5,
+        "with no glide it is what is on screen"
+    );
 }
 
 /// Stepping again mid-glide must advance from the destination, or a fast flick
@@ -254,7 +308,10 @@ fn a_second_step_mid_glide_advances_another_rung() {
     v.advance_zoom_glide(1.0 / 60.0);
     assert!(v.zoom_glide.is_some(), "still gliding");
     let next = stepped_zoom(v.zoom_settled(), 1, None);
-    assert!(next > 2.0, "a second notch should pass the rung being approached, got {next}");
+    assert!(
+        next > 2.0,
+        "a second notch should pass the rung being approached, got {next}"
+    );
 }
 
 /// A glide asked to go where it already is finishes rather than spinning, and a
@@ -267,10 +324,16 @@ fn a_degenerate_glide_ends_immediately() {
 
     for bad in [0.0f32, -1.0] {
         let mut v = gliding(bad, 2.0);
-        assert!(!v.advance_zoom_glide(1.0 / 60.0), "zoom {bad} should not glide");
+        assert!(
+            !v.advance_zoom_glide(1.0 / 60.0),
+            "zoom {bad} should not glide"
+        );
         assert!(v.zoom_glide.is_none());
         let mut v = gliding(1.0, bad);
-        assert!(!v.advance_zoom_glide(1.0 / 60.0), "target {bad} should not glide");
+        assert!(
+            !v.advance_zoom_glide(1.0 / 60.0),
+            "target {bad} should not glide"
+        );
         assert!(v.zoom_glide.is_none());
     }
 }
@@ -305,7 +368,11 @@ fn zooming_in_and_out_are_mirror_images() {
 
     let up = remaining(1.0, 8.0);
     let down = remaining(8.0, 1.0);
-    assert_eq!(up.len(), down.len(), "in and out took different numbers of frames");
+    assert_eq!(
+        up.len(),
+        down.len(),
+        "in and out took different numbers of frames"
+    );
     for (i, (a, b)) in up.iter().zip(&down).enumerate() {
         assert!(
             (a - b).abs() < 1e-4,
@@ -322,8 +389,14 @@ fn zooming_in_and_out_are_mirror_images() {
         .filter(|w| w[0] > 1e-3 && w[1] > 1e-3)
         .map(|w| w[1] / w[0])
         .collect();
-    assert!(ratios.len() >= 3, "too few frames to say anything about the decay");
+    assert!(
+        ratios.len() >= 3,
+        "too few frames to say anything about the decay"
+    );
     let lo = ratios.iter().cloned().fold(f32::INFINITY, f32::min);
     let hi = ratios.iter().cloned().fold(0.0f32, f32::max);
-    assert!(hi - lo < 0.01, "the per-frame decay is not constant: {ratios:?}");
+    assert!(
+        hi - lo < 0.01,
+        "the per-frame decay is not constant: {ratios:?}"
+    );
 }

@@ -24,7 +24,9 @@ use std::io::Cursor;
 fn spiked_u16_stack(w: u32, h: u32, bulk: u16, outliers: usize) -> Vec<u8> {
     let opts = WriterOptions::new(w, h, SampleType::U16).metadata(StackMetaWrite::new(1, 1));
     let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
-    writer.write_frame_bytes(&spiked_frame(w, h, bulk, outliers)).unwrap();
+    writer
+        .write_frame_bytes(&spiked_frame(w, h, bulk, outliers))
+        .unwrap();
     writer.finish().unwrap().into_inner()
 }
 
@@ -43,10 +45,13 @@ fn spiked_frame(w: u32, h: u32, bulk: u16, outliers: usize) -> Vec<u8> {
 /// A multi-frame version: frame `f` has its bulk at `bulks[f]`, with the same
 /// extremes in every frame so the track is identical across them.
 fn drifting_u16_stack(bulks: &[u16], w: u32, h: u32, outliers: usize) -> Vec<u8> {
-    let opts = WriterOptions::new(w, h, SampleType::U16).metadata(StackMetaWrite::new(1, bulks.len()));
+    let opts =
+        WriterOptions::new(w, h, SampleType::U16).metadata(StackMetaWrite::new(1, bulks.len()));
     let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
     for &b in bulks {
-        writer.write_frame_bytes(&spiked_frame(w, h, b, outliers)).unwrap();
+        writer
+            .write_frame_bytes(&spiked_frame(w, h, b, outliers))
+            .unwrap();
     }
     writer.finish().unwrap().into_inner()
 }
@@ -81,8 +86,15 @@ fn split_u16_stack(per_frame: &[&[(u16, u16)]], w: u32, h: u32) -> Vec<u8> {
     let n = (w * h) as usize;
     for frame in per_frame {
         for &(a, b) in *frame {
-            let px: Vec<u8> =
-                (0..n).flat_map(|i| if i < n / 2 { a.to_le_bytes() } else { b.to_le_bytes() }).collect();
+            let px: Vec<u8> = (0..n)
+                .flat_map(|i| {
+                    if i < n / 2 {
+                        a.to_le_bytes()
+                    } else {
+                        b.to_le_bytes()
+                    }
+                })
+                .collect();
             writer.write_frame_bytes(&px).unwrap();
         }
     }
@@ -98,7 +110,9 @@ fn windowed_u16_stack(w: u32, h: u32, bulk: u16, outliers: usize, window: (f64, 
     let meta = StackMetaWrite::new(1, 1).range(window.0, window.1);
     let opts = WriterOptions::new(w, h, SampleType::U16).metadata(meta);
     let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
-    writer.write_frame_bytes(&spiked_frame(w, h, bulk, outliers)).unwrap();
+    writer
+        .write_frame_bytes(&spiked_frame(w, h, bulk, outliers))
+        .unwrap();
     writer.finish().unwrap().into_inner()
 }
 
@@ -106,7 +120,13 @@ fn windowed_u16_stack(w: u32, h: u32, bulk: u16, outliers: usize, window: (f64, 
 /// own branch when the settings are built — they keep their window in the
 /// source units instead of being rescaled onto 0..=65535 — so an integer stack
 /// says nothing about whether that branch remembers where it started.
-fn windowed_f32_stack(w: u32, h: u32, bulk: f32, extremes: (f32, f32), window: (f64, f64)) -> Vec<u8> {
+fn windowed_f32_stack(
+    w: u32,
+    h: u32,
+    bulk: f32,
+    extremes: (f32, f32),
+    window: (f64, f64),
+) -> Vec<u8> {
     let meta = StackMetaWrite::new(1, 1).range(window.0, window.1);
     let opts = WriterOptions::new(w, h, SampleType::F32).metadata(meta);
     let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
@@ -137,15 +157,27 @@ fn auto_window_discards_the_outliers_and_keeps_the_bulk() {
     assert_eq!(hists.len(), 1);
 
     let (lo, hi) = auto_window(&hists[0]).expect("a counted histogram has a window");
-    assert!(lo > 0.0, "the dark spike at 0 should have been clipped, got lo={lo}");
-    assert!(hi < u16::MAX as f32, "the bright spike at 65535 should have been clipped, got hi={hi}");
-    assert!(lo <= 30_000.0 && 30_000.0 <= hi, "the bulk at 30000 must stay inside {lo}..{hi}");
+    assert!(
+        lo > 0.0,
+        "the dark spike at 0 should have been clipped, got lo={lo}"
+    );
+    assert!(
+        hi < u16::MAX as f32,
+        "the bright spike at 65535 should have been clipped, got hi={hi}"
+    );
+    assert!(
+        lo <= 30_000.0 && 30_000.0 <= hi,
+        "the bulk at 30000 must stay inside {lo}..{hi}"
+    );
 
     // One bin either side at most: the bulk is a single spike, so anything
     // wider means the walk overshot rather than stopping at the first bin that
     // broke the budget.
     let bin = (u16::MAX as f32) / BINS as f32;
-    assert!(hi - lo <= 2.0 * bin, "window {lo}..{hi} is wider than the spike that earned it");
+    assert!(
+        hi - lo <= 2.0 * bin,
+        "window {lo}..{hi} is wider than the spike that earned it"
+    );
 }
 
 /// The budget has to be large enough to actually reach the outliers. With more
@@ -160,7 +192,10 @@ fn outliers_too_numerous_to_be_noise_are_kept() {
     let (lo, hi) = auto_window(&hists[0]).unwrap();
     let bin = (u16::MAX as f32) / BINS as f32;
     assert!(lo < bin, "the low spike is too big to discard, got lo={lo}");
-    assert!(hi > u16::MAX as f32 - bin, "the high spike is too big to discard, got hi={hi}");
+    assert!(
+        hi > u16::MAX as f32 - bin,
+        "the high spike is too big to discard, got hi={hi}"
+    );
 }
 
 /// A frame of one single value has no spread to fit. The window must still come
@@ -172,14 +207,24 @@ fn a_single_valued_frame_yields_a_non_empty_window() {
     let hists = frame_histograms(&stack);
     let (lo, hi) = auto_window(&hists[0]).unwrap();
     assert!(hi > lo, "window {lo}..{hi} must not be empty");
-    assert!(lo <= 1234.0 && 1234.0 <= hi, "the one value present must be inside {lo}..{hi}");
+    assert!(
+        lo <= 1234.0 && 1234.0 <= hi,
+        "the one value present must be inside {lo}..{hi}"
+    );
 }
 
 /// A histogram that counted nothing has no defensible answer, so Auto declines
 /// rather than inventing one.
 #[test]
 fn an_empty_histogram_has_no_auto_window() {
-    let empty = Histogram { channel: 0, bins: vec![0; BINS], lo: 0.0, hi: 65535.0, peak: 0, counted: 0 };
+    let empty = Histogram {
+        channel: 0,
+        bins: vec![0; BINS],
+        lo: 0.0,
+        hi: 65535.0,
+        peak: 0,
+        counted: 0,
+    };
     assert!(auto_window(&empty).is_none());
 }
 
@@ -197,7 +242,10 @@ fn auto_narrows_the_window_and_reset_restores_it() {
         "auto should have narrowed {:?} well inside {bounds:?}",
         (s.min, s.max)
     );
-    assert!(s.min >= bounds.0 && s.max <= bounds.1, "both handles must stay on the track");
+    assert!(
+        s.min >= bounds.0 && s.max <= bounds.1,
+        "both handles must stay on the track"
+    );
 
     reset_contrast(&mut stack);
     let s = &stack.display.settings[0];
@@ -213,7 +261,10 @@ fn reset_recovers_from_an_arbitrary_window() {
     stack.display.settings[0].max = 12_346.0;
 
     reset_contrast(&mut stack);
-    assert_eq!((stack.display.settings[0].min, stack.display.settings[0].max), initial);
+    assert_eq!(
+        (stack.display.settings[0].min, stack.display.settings[0].max),
+        initial
+    );
 }
 
 /// The same, for a float stack. Float channels keep their contrast window in
@@ -231,8 +282,16 @@ fn reset_returns_to_the_file_window_for_float_channels_too() {
         (declared.0 as f64, declared.1 as f64),
     ));
     let s = &stack.display.settings[0];
-    assert_eq!(s.kind, fast_tiff_viewer::ChannelKind::Float, "this must exercise the float branch");
-    assert_eq!((s.min, s.max), declared, "float windows stay in the data units");
+    assert_eq!(
+        s.kind,
+        fast_tiff_viewer::ChannelKind::Float,
+        "this must exercise the float branch"
+    );
+    assert_eq!(
+        (s.min, s.max),
+        declared,
+        "float windows stay in the data units"
+    );
     let bounds = s.bounds;
     assert!(
         bounds.0 < declared.0 && bounds.1 > declared.1,
@@ -244,8 +303,16 @@ fn reset_returns_to_the_file_window_for_float_channels_too() {
     reset_contrast(&mut stack);
 
     let s = &stack.display.settings[0];
-    assert_eq!((s.min, s.max), declared, "reset should restore the file window");
-    assert_ne!((s.min, s.max), bounds, "reset should NOT open the window to the full track");
+    assert_eq!(
+        (s.min, s.max),
+        declared,
+        "reset should restore the file window"
+    );
+    assert_ne!(
+        (s.min, s.max),
+        bounds,
+        "reset should NOT open the window to the full track"
+    );
 }
 
 /// What Reset means, on the only kind of file where the two candidate meanings
@@ -258,10 +325,19 @@ fn reset_returns_to_the_file_window_for_float_channels_too() {
 #[test]
 fn reset_returns_to_the_file_window_not_the_full_track() {
     let declared = (10_000.0f32, 40_000.0f32);
-    let mut stack =
-        load(windowed_u16_stack(W, H, 30_000, OUTLIERS, (declared.0 as f64, declared.1 as f64)));
+    let mut stack = load(windowed_u16_stack(
+        W,
+        H,
+        30_000,
+        OUTLIERS,
+        (declared.0 as f64, declared.1 as f64),
+    ));
     let s = &stack.display.settings[0];
-    assert_eq!((s.min, s.max), declared, "the file window should be what the stack opens with");
+    assert_eq!(
+        (s.min, s.max),
+        declared,
+        "the file window should be what the stack opens with"
+    );
     assert_eq!(s.initial, declared);
     let bounds = s.bounds;
     assert!(
@@ -275,8 +351,16 @@ fn reset_returns_to_the_file_window_not_the_full_track() {
     reset_contrast(&mut stack);
 
     let s = &stack.display.settings[0];
-    assert_eq!((s.min, s.max), declared, "reset should restore the file window");
-    assert_ne!((s.min, s.max), bounds, "reset should NOT open the window to the full track");
+    assert_eq!(
+        (s.min, s.max),
+        declared,
+        "reset should restore the file window"
+    );
+    assert_ne!(
+        (s.min, s.max),
+        bounds,
+        "reset should NOT open the window to the full track"
+    );
 }
 
 /// The documented reason Auto reads histograms instead of rescanning frame 0:
@@ -285,14 +369,21 @@ fn reset_returns_to_the_file_window_not_the_full_track() {
 #[test]
 fn auto_fits_the_frame_on_screen_not_frame_zero() {
     let mut stack = load(drifting_u16_stack(&[10_000, 50_000], W, H, OUTLIERS));
-    assert!(stack.display.dims.frames >= 2, "need both frames addressable");
+    assert!(
+        stack.display.dims.frames >= 2,
+        "need both frames addressable"
+    );
 
     stack.frame_index = 1;
     let hists = frame_histograms(&stack);
     auto_contrast(&mut stack, &hists);
 
     let s = &stack.display.settings[0];
-    assert!(s.min <= 50_000.0 && 50_000.0 <= s.max, "frame 1 sits at 50000, window is {:?}", (s.min, s.max));
+    assert!(
+        s.min <= 50_000.0 && 50_000.0 <= s.max,
+        "frame 1 sits at 50000, window is {:?}",
+        (s.min, s.max)
+    );
     assert!(
         !(s.min <= 10_000.0 && 10_000.0 <= s.max),
         "frame 0 at 10000 should be outside the window fitted to frame 1, got {:?}",
@@ -316,13 +407,26 @@ fn palette_windows_are_left_alone_by_both() {
     // A distinguishable window tests the contract instead of the coincidence.
     stack.display.settings[0].min = -128.5;
     stack.display.settings[0].max = 65_407.5;
-    let before: Vec<(f32, f32)> = stack.display.settings.iter().map(|s| (s.min, s.max)).collect();
+    let before: Vec<(f32, f32)> = stack
+        .display
+        .settings
+        .iter()
+        .map(|s| (s.min, s.max))
+        .collect();
 
     auto_contrast(&mut stack, &hists);
     reset_contrast(&mut stack);
 
-    let after: Vec<(f32, f32)> = stack.display.settings.iter().map(|s| (s.min, s.max)).collect();
-    assert_eq!(before, after, "a palette window is an identity mapping, not a contrast choice");
+    let after: Vec<(f32, f32)> = stack
+        .display
+        .settings
+        .iter()
+        .map(|s| (s.min, s.max))
+        .collect();
+    assert_eq!(
+        before, after,
+        "a palette window is an identity mapping, not a contrast choice"
+    );
 }
 
 /// The histogram spans the union of *every* channel's track, so a window fitted
@@ -339,10 +443,21 @@ fn palette_windows_are_left_alone_by_both() {
 /// channel back up rather than leaving it showing nothing.
 #[test]
 fn a_window_fitted_past_the_track_is_pulled_back_onto_it() {
-    let mut stack = load(composite_u16_stack(&[&[1_000, 60_000], &[60_000, 60_000]], W, H));
-    assert_eq!(stack.display.settings.len(), 2, "should resolve as two channels");
+    let mut stack = load(composite_u16_stack(
+        &[&[1_000, 60_000], &[60_000, 60_000]],
+        W,
+        H,
+    ));
+    assert_eq!(
+        stack.display.settings.len(),
+        2,
+        "should resolve as two channels"
+    );
     let bounds = stack.display.settings[0].bounds;
-    assert!(bounds.1 < 60_000.0, "channel 0 track should be too narrow for 60000, got {bounds:?}");
+    assert!(
+        bounds.1 < 60_000.0,
+        "channel 0 track should be too narrow for 60000, got {bounds:?}"
+    );
 
     stack.frame_index = 1;
     let hists = frame_histograms(&stack);
@@ -369,20 +484,36 @@ fn a_window_fitted_past_the_track_is_pulled_back_onto_it() {
 #[test]
 fn the_low_handle_is_clamped_without_the_window_collapsing() {
     let mut stack = load(split_u16_stack(
-        &[&[(50_000, 60_000), (0, 65_535)], &[(0, 55_000), (0, 65_535)]],
+        &[
+            &[(50_000, 60_000), (0, 65_535)],
+            &[(0, 55_000), (0, 65_535)],
+        ],
         W,
         H,
     ));
     let bounds = stack.display.settings[0].bounds;
-    assert!(bounds.0 > 1_000.0, "channel 0 track should start well above zero, got {bounds:?}");
+    assert!(
+        bounds.0 > 1_000.0,
+        "channel 0 track should start well above zero, got {bounds:?}"
+    );
 
     stack.frame_index = 1;
     let hists = frame_histograms(&stack);
     auto_contrast(&mut stack, &hists);
 
     let s = &stack.display.settings[0];
-    assert!(s.min >= bounds.0, "the low handle fell off the track: {} < {}", s.min, bounds.0);
-    assert!(s.max <= bounds.1, "the high handle fell off the track: {} > {}", s.max, bounds.1);
+    assert!(
+        s.min >= bounds.0,
+        "the low handle fell off the track: {} < {}",
+        s.min,
+        bounds.0
+    );
+    assert!(
+        s.max <= bounds.1,
+        "the high handle fell off the track: {} > {}",
+        s.max,
+        bounds.1
+    );
     assert!(
         s.max > s.min && (s.min, s.max) != bounds,
         "this case should clamp one handle, not collapse to the fallback: {:?}",
@@ -396,8 +527,18 @@ fn the_low_handle_is_clamped_without_the_window_collapsing() {
 #[test]
 fn channels_without_a_histogram_keep_their_window() {
     let mut stack = load(spiked_u16_stack(W, H, 30_000, OUTLIERS));
-    let before: Vec<(f32, f32)> = stack.display.settings.iter().map(|s| (s.min, s.max)).collect();
+    let before: Vec<(f32, f32)> = stack
+        .display
+        .settings
+        .iter()
+        .map(|s| (s.min, s.max))
+        .collect();
     auto_contrast(&mut stack, &[]);
-    let after: Vec<(f32, f32)> = stack.display.settings.iter().map(|s| (s.min, s.max)).collect();
+    let after: Vec<(f32, f32)> = stack
+        .display
+        .settings
+        .iter()
+        .map(|s| (s.min, s.max))
+        .collect();
     assert_eq!(before, after);
 }

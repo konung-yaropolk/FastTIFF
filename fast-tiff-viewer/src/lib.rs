@@ -76,4 +76,6 @@ pub use viewer::{DecodeMode, Playback, ViewMode, Viewer, VolumeView, DEFAULT_FPS
 // path; reach for `fast_tiff_lib` / `scivis_render` directly when you need
 // something more specific.
 pub use fast_tiff_lib::{self, TiffStack};
-pub use scivis_render::{self, ChannelKind, Lut, VolumeInterp, VolumeKind, VolumeRender, MAX_CHANNELS};
+pub use scivis_render::{
+    self, ChannelKind, Lut, VolumeInterp, VolumeKind, VolumeRender, MAX_CHANNELS,
+};

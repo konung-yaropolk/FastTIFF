@@ -19,7 +19,9 @@ fn mislabeled_stack(n: usize, w: u32, h: u32) -> Vec<u8> {
     let opts = WriterOptions::new(w, h, SampleType::U16).metadata(StackMetaWrite::new(n, 1));
     let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
     for f in 0..n {
-        let px: Vec<u16> = (0..w * h).map(|i| (i as u16).wrapping_add(f as u16 * 101)).collect();
+        let px: Vec<u16> = (0..w * h)
+            .map(|i| (i as u16).wrapping_add(f as u16 * 101))
+            .collect();
         let bytes: Vec<u8> = px.iter().flat_map(|v| v.to_le_bytes()).collect();
         writer.write_frame_bytes(&bytes).unwrap();
     }
@@ -92,14 +94,21 @@ fn every_frame_actually_decodes() {
         .unwrap_or_else(|e| panic!("frame {frame} failed to decode: {e:#}"));
         match &decoded[0] {
             fast_tiff_viewer::prefetch::Decoded::U16(v) => first_pixels.push(v[0]),
-            other => panic!("unexpected decode kind for frame {frame}: {:?}", std::mem::discriminant(other)),
+            other => panic!(
+                "unexpected decode kind for frame {frame}: {:?}",
+                std::mem::discriminant(other)
+            ),
         }
     }
     // Each written frame was offset by 101, so no two frames share a first pixel.
     let mut seen = first_pixels.clone();
     seen.sort_unstable();
     seen.dedup();
-    assert_eq!(seen.len(), first_pixels.len(), "frames decoded to duplicate pixels: {first_pixels:?}");
+    assert_eq!(
+        seen.len(),
+        first_pixels.len(),
+        "frames decoded to duplicate pixels: {first_pixels:?}"
+    );
 }
 
 #[test]
@@ -108,7 +117,12 @@ fn volume_and_playback_gates_follow_the_resolved_view() {
     // off the raw metadata it looks like a single frame with ten channels,
     // which would disable the 3D toggle outright.
     let mut viewer = Viewer::new();
-    viewer.load_bytes(mislabeled_stack(10, 4, 3), "mislabeled.tif".into()).unwrap();
-    assert!(viewer.can_show_volume(), "ten planes are enough to build a volume");
+    viewer
+        .load_bytes(mislabeled_stack(10, 4, 3), "mislabeled.tif".into())
+        .unwrap();
+    assert!(
+        viewer.can_show_volume(),
+        "ten planes are enough to build a volume"
+    );
     assert!(!viewer.is_4d(), "there is no separate time axis here");
 }

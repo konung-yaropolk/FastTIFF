@@ -44,7 +44,13 @@ const POINTS_PER_FRAME: f32 = 50.0;
 pub(super) fn classify(events: &[egui::Event], pannable: bool) -> Wheel {
     let mut out = Wheel::default();
     for event in events {
-        let egui::Event::MouseWheel { unit, delta, modifiers, .. } = event else {
+        let egui::Event::MouseWheel {
+            unit,
+            delta,
+            modifiers,
+            ..
+        } = event
+        else {
             continue;
         };
         if modifiers.ctrl {

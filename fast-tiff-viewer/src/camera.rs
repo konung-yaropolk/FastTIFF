@@ -136,7 +136,11 @@ impl CameraState {
         self.target = [0.0, 0.0, 0.0];
         // Free-fly eye starts where the orbit eye would be, looking at the origin.
         let (forward, _, _) = volume_basis(self.yaw, self.pitch);
-        self.fly_pos = [-forward[0] * self.dist, -forward[1] * self.dist, -forward[2] * self.dist];
+        self.fly_pos = [
+            -forward[0] * self.dist,
+            -forward[1] * self.dist,
+            -forward[2] * self.dist,
+        ];
     }
 
     /// The orthonormal camera basis (`forward`, `right`, `up`) for the current
@@ -199,7 +203,11 @@ impl CameraState {
         let t = focal_box_entry(eye, forward, self.box_he).unwrap_or_else(|| {
             (-(eye[0] * forward[0] + eye[1] * forward[1] + eye[2] * forward[2])).max(0.0)
         });
-        self.target = [eye[0] + forward[0] * t, eye[1] + forward[1] * t, eye[2] + forward[2] * t];
+        self.target = [
+            eye[0] + forward[0] * t,
+            eye[1] + forward[1] * t,
+            eye[2] + forward[2] * t,
+        ];
         // Radius = eye->pivot distance, so the eye doesn't move (t = 0 inside).
         self.dist = vol_dist_clamped(t);
     }
@@ -256,7 +264,11 @@ impl CameraState {
         self.orbit(dx, dy);
         let (fwd, _, _) = self.basis();
         let dist = vol_dist_clamped(self.dist);
-        self.target = [eye[0] + fwd[0] * dist, eye[1] + fwd[1] * dist, eye[2] + fwd[2] * dist];
+        self.target = [
+            eye[0] + fwd[0] * dist,
+            eye[1] + fwd[1] * dist,
+            eye[2] + fwd[2] * dist,
+        ];
     }
 
     /// Orbit the free-fly eye around the current pivot (used by the free-fly
@@ -365,12 +377,22 @@ pub struct VolumeCamera {
 const TAN_HALF_FOV: f32 = 0.414_213_57; // tan(22.5°)
 
 pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 /// Translate `base` by motion `mv` = (strafe, up, forward) relative to the look
 /// basis (`forward`/`right`, with world-Y as up).
-pub fn translate3(base: [f32; 3], forward: [f32; 3], right: [f32; 3], mv: [f32; 3], speed: f32) -> [f32; 3] {
+pub fn translate3(
+    base: [f32; 3],
+    forward: [f32; 3],
+    right: [f32; 3],
+    mv: [f32; 3],
+    speed: f32,
+) -> [f32; 3] {
     [
         base[0] + (forward[0] * mv[2] + right[0] * mv[0]) * speed,
         base[1] + (forward[1] * mv[2] + right[1] * mv[0]) * speed + mv[1] * speed,
@@ -440,14 +462,25 @@ pub fn volume_camera(cam: &CameraState, scale: [f32; 3], dims: (u32, u32, u32)) 
     let (forward, right, up) = volume_basis(cam.yaw, cam.pitch);
     let eye = cam.eye(forward);
 
-    let phys = [dims.0 as f32 * scale[0], dims.1 as f32 * scale[1], dims.2 as f32 * scale[2]];
+    let phys = [
+        dims.0 as f32 * scale[0],
+        dims.1 as f32 * scale[1],
+        dims.2 as f32 * scale[2],
+    ];
     let m = phys[0].max(phys[1]).max(phys[2]).max(1e-6);
     let box_he = [
         (0.5 * phys[0] / m).max(1e-3),
         (0.5 * phys[1] / m).max(1e-3),
         (0.5 * phys[2] / m).max(1e-3),
     ];
-    VolumeCamera { eye, forward, right, up, tan_half_fov: TAN_HALF_FOV, box_he }
+    VolumeCamera {
+        eye,
+        forward,
+        right,
+        up,
+        tan_half_fov: TAN_HALF_FOV,
+        box_he,
+    }
 }
 
 /// One channel's contribution to the ray-march uniforms.

@@ -97,8 +97,14 @@ fn a_tiny_view_box_against_the_edge_keeps_its_size() {
     // Slid flush against the corner of the room inside the frame's outline —
     // not past it, and not onto the outline.
     let r = room();
-    assert!((b.max.x - r.max.x).abs() < 1e-3, "should sit against the right edge: {b:?}");
-    assert!((b.max.y - r.max.y).abs() < 1e-3, "should sit against the bottom edge: {b:?}");
+    assert!(
+        (b.max.x - r.max.x).abs() < 1e-3,
+        "should sit against the right edge: {b:?}"
+    );
+    assert!(
+        (b.max.y - r.max.y).abs() < 1e-3,
+        "should sit against the bottom edge: {b:?}"
+    );
 }
 
 /// The two outlines never share ink. Both are drawn *inside* their own
@@ -122,7 +128,10 @@ fn the_view_box_never_reaches_the_frame_outline() {
                 (b.max.x - (o.max.x - OUTER_STROKE), "right"),
                 (b.max.y - (o.max.y - OUTER_STROKE), "bottom"),
             ] {
-                assert!(into <= 1e-3, "{side} side reaches {into} into the frame outline: {case}");
+                assert!(
+                    into <= 1e-3,
+                    "{side} side reaches {into} into the frame outline: {case}"
+                );
             }
         }
     }
@@ -161,14 +170,23 @@ fn the_box_tracks_the_view_across_the_map() {
     let mut last = f32::NEG_INFINITY;
     for u in [0.0f32, 0.2, 0.4, 0.6, 0.8, 1.0] {
         let b = view_box(o, full(), visible(u, 0.0, 0.1));
-        assert!(b.min.x >= last - 1e-3, "moving the view right moved the box left at u={u}");
+        assert!(
+            b.min.x >= last - 1e-3,
+            "moving the view right moved the box left at u={u}"
+        );
         last = b.min.x;
     }
     let r = room();
     let leftmost = view_box(o, full(), visible(0.0, 0.0, 0.1));
     let rightmost = view_box(o, full(), visible(0.9, 0.0, 0.1));
-    assert!((leftmost.min.x - r.min.x).abs() < 1e-3, "should start flush left");
-    assert!((rightmost.max.x - r.max.x).abs() < 1e-3, "should end flush right");
+    assert!(
+        (leftmost.min.x - r.min.x).abs() < 1e-3,
+        "should start flush left"
+    );
+    assert!(
+        (rightmost.max.x - r.max.x).abs() < 1e-3,
+        "should end flush right"
+    );
 }
 
 /// A map narrower than the minimum on one axis — a very long, thin image — must
@@ -178,7 +196,10 @@ fn the_box_tracks_the_view_across_the_map() {
 fn a_map_thinner_than_the_minimum_does_not_panic() {
     let thin = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(128.0, 2.0));
     let b = view_box(thin, full(), visible(0.5, 0.5, 0.001));
-    assert!(b.height() <= thin.height() + 1e-3, "cannot be taller than the map: {b:?}");
+    assert!(
+        b.height() <= thin.height() + 1e-3,
+        "cannot be taller than the map: {b:?}"
+    );
     assert!(thin.contains_rect(b), "{b:?} is not inside {thin:?}");
 }
 
@@ -193,8 +214,17 @@ fn a_map_smaller_than_its_own_border_yields_nothing_negative() {
         let tiny = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(side, side));
         let b = view_box(tiny, full(), visible(0.5, 0.5, 0.001));
         assert!(b.width() >= 0.0, "negative width on a {side}pt map: {b:?}");
-        assert!(b.height() >= 0.0, "negative height on a {side}pt map: {b:?}");
-        assert!(b.min.x >= tiny.min.x - 1e-3 && b.max.x <= tiny.max.x + 1e-3, "{b:?} left {tiny:?}");
-        assert!(b.min.y >= tiny.min.y - 1e-3 && b.max.y <= tiny.max.y + 1e-3, "{b:?} left {tiny:?}");
+        assert!(
+            b.height() >= 0.0,
+            "negative height on a {side}pt map: {b:?}"
+        );
+        assert!(
+            b.min.x >= tiny.min.x - 1e-3 && b.max.x <= tiny.max.x + 1e-3,
+            "{b:?} left {tiny:?}"
+        );
+        assert!(
+            b.min.y >= tiny.min.y - 1e-3 && b.max.y <= tiny.max.y + 1e-3,
+            "{b:?} left {tiny:?}"
+        );
     }
 }

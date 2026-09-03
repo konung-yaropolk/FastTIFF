@@ -52,13 +52,28 @@ pub fn parse(
 
     // Per-channel colors: OME `Color` is a signed int32 RGBA (R in the high
     // byte). A non-gray color makes the stack composite.
-    let colors: Vec<Option<[u8; 3]>> = channels.iter().map(|a| a.get("Color").and_then(|s| parse_color(s))).collect();
-    let any_colored = colors.iter().flatten().any(|c| c[0] != c[1] || c[1] != c[2]);
-    let mode = if any_colored { DisplayMode::Composite } else { DisplayMode::Grayscale };
+    let colors: Vec<Option<[u8; 3]>> = channels
+        .iter()
+        .map(|a| a.get("Color").and_then(|s| parse_color(s)))
+        .collect();
+    let any_colored = colors
+        .iter()
+        .flatten()
+        .any(|c| c[0] != c[1] || c[1] != c[2]);
+    let mode = if any_colored {
+        DisplayMode::Composite
+    } else {
+        DisplayMode::Grayscale
+    };
 
     let channel_display: Vec<ChannelDisplay> = (0..size_c)
         .map(|c| {
-            let lut = colors.get(c).copied().flatten().map(color_ramp_lut).unwrap_or_else(|| default_lut_for(mode, c));
+            let lut = colors
+                .get(c)
+                .copied()
+                .flatten()
+                .map(color_ramp_lut)
+                .unwrap_or_else(|| default_lut_for(mode, c));
             ChannelDisplay { lut, range: None } // OME core carries no display window
         })
         .collect();
@@ -148,14 +163,22 @@ fn ome_color(rgb: [u8; 3]) -> i32 {
 
 /// Serialize `meta` as a minimal OME-XML `ImageDescription`. `planes` gives the
 /// derived `SizeT`; `geom` supplies frame size + pixel type for `<Pixels>`.
-pub(crate) fn serialize(planes: usize, meta: &StackMetaWrite, geom: &WriteGeometry) -> Result<String> {
+pub(crate) fn serialize(
+    planes: usize,
+    meta: &StackMetaWrite,
+    geom: &WriteGeometry,
+) -> Result<String> {
     let size_t = meta.derive_frames(planes)?;
     let size_c = meta.channels;
     let size_z = meta.slices;
 
     // Samples per OME channel: an RGB frame is one OME channel carrying all the
     // samples; a grayscale multichannel stack is one sample per channel.
-    let channel_spp = if size_c <= 1 { geom.samples_per_pixel } else { (geom.samples_per_pixel / size_c).max(1) };
+    let channel_spp = if size_c <= 1 {
+        geom.samples_per_pixel
+    } else {
+        (geom.samples_per_pixel / size_c).max(1)
+    };
 
     let mut s = String::new();
     s += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
@@ -175,13 +198,22 @@ pub(crate) fn serialize(planes: usize, meta: &StackMetaWrite, geom: &WriteGeomet
 
     let unit = meta.unit.as_deref().unwrap_or(DEFAULT_UNIT);
     if let Some(pw) = meta.pixel_width {
-        s += &format!(" PhysicalSizeX=\"{pw}\" PhysicalSizeXUnit=\"{}\"", xml_escape(unit));
+        s += &format!(
+            " PhysicalSizeX=\"{pw}\" PhysicalSizeXUnit=\"{}\"",
+            xml_escape(unit)
+        );
     }
     if let Some(ph) = meta.pixel_height {
-        s += &format!(" PhysicalSizeY=\"{ph}\" PhysicalSizeYUnit=\"{}\"", xml_escape(unit));
+        s += &format!(
+            " PhysicalSizeY=\"{ph}\" PhysicalSizeYUnit=\"{}\"",
+            xml_escape(unit)
+        );
     }
     if let Some(pz) = meta.spacing {
-        s += &format!(" PhysicalSizeZ=\"{pz}\" PhysicalSizeZUnit=\"{}\"", xml_escape(unit));
+        s += &format!(
+            " PhysicalSizeZ=\"{pz}\" PhysicalSizeZUnit=\"{}\"",
+            xml_escape(unit)
+        );
     }
     if let Some(ti) = meta.frame_interval_s {
         s += &format!(" TimeIncrement=\"{ti}\" TimeIncrementUnit=\"s\"");
@@ -197,7 +229,9 @@ pub(crate) fn serialize(planes: usize, meta: &StackMetaWrite, geom: &WriteGeomet
         }
         // Explicit per-channel color, else the composite palette when the stack
         // is colored; grayscale stacks write no Color.
-        let color = info.and_then(|i| i.color).or_else(|| colored.then(|| composite_color(c)));
+        let color = info
+            .and_then(|i| i.color)
+            .or_else(|| colored.then(|| composite_color(c)));
         if let Some(rgb) = color {
             s += &format!(" Color=\"{}\"", ome_color(rgb));
         }

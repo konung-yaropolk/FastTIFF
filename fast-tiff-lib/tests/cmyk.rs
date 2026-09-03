@@ -67,7 +67,12 @@ struct Layout {
 
 impl Default for Layout {
     fn default() -> Self {
-        Layout { bits: 8, planar: 1, ink_set: 1, sample_format: UNSIGNED }
+        Layout {
+            bits: 8,
+            planar: 1,
+            ink_set: 1,
+            sample_format: UNSIGNED,
+        }
     }
 }
 
@@ -82,7 +87,10 @@ impl Layout {
         Layout { ink_set, ..self }
     }
     fn format(self, sample_format: u16) -> Self {
-        Layout { sample_format, ..self }
+        Layout {
+            sample_format,
+            ..self
+        }
     }
 }
 
@@ -92,10 +100,18 @@ impl Layout {
 /// the tests that vary depth do not check pixels, only whether the frame is
 /// recognised as CMYK.
 fn build_cmyk_tiff(inks: &[Vec<u16>], layout: Layout) -> Vec<u8> {
-    let Layout { bits, planar, ink_set, sample_format } = layout;
+    let Layout {
+        bits,
+        planar,
+        ink_set,
+        sample_format,
+    } = layout;
     let spp = inks.len() as u16;
     let px = inks[0].len();
-    assert!(inks.iter().all(|p| p.len() == px), "every ink plane must be the same length");
+    assert!(
+        inks.iter().all(|p| p.len() == px),
+        "every ink plane must be the same length"
+    );
 
     let mut buf = Vec::new();
     buf.extend_from_slice(b"II");
@@ -192,16 +208,16 @@ fn build_cmyk_tiff(inks: &[Vec<u16>], layout: Layout) -> Vec<u8> {
 /// `(128, 64, 32, 64)` the additive form yields `(63, 127, 159)`, nowhere near
 /// the correct `(95, 143, 167)`.
 const SWATCHES: [([u16; 4], [u8; 3]); 10] = [
-    ([0, 0, 0, 0], [255, 255, 255]),        // no ink -> paper white
-    ([255, 0, 0, 0], [0, 255, 255]),        // cyan
-    ([0, 255, 0, 0], [255, 0, 255]),        // magenta
-    ([0, 0, 255, 0], [255, 255, 0]),        // yellow
-    ([0, 0, 0, 255], [0, 0, 0]),            // full black plate
-    ([255, 255, 0, 0], [0, 0, 255]),        // cyan + magenta -> blue
-    ([0, 0, 0, 128], [127, 127, 127]),      // half black -> mid gray
-    ([128, 0, 0, 0], [127, 255, 255]),      // half cyan
-    ([128, 64, 32, 64], [95, 143, 167]),    // mixed inks over partial black
-    ([64, 128, 192, 32], [167, 111, 55]),   // ...and again, different mix
+    ([0, 0, 0, 0], [255, 255, 255]),      // no ink -> paper white
+    ([255, 0, 0, 0], [0, 255, 255]),      // cyan
+    ([0, 255, 0, 0], [255, 0, 255]),      // magenta
+    ([0, 0, 255, 0], [255, 255, 0]),      // yellow
+    ([0, 0, 0, 255], [0, 0, 0]),          // full black plate
+    ([255, 255, 0, 0], [0, 0, 255]),      // cyan + magenta -> blue
+    ([0, 0, 0, 128], [127, 127, 127]),    // half black -> mid gray
+    ([128, 0, 0, 0], [127, 255, 255]),    // half cyan
+    ([128, 64, 32, 64], [95, 143, 167]),  // mixed inks over partial black
+    ([64, 128, 192, 32], [167, 111, 55]), // ...and again, different mix
 ];
 
 /// Transposes [`SWATCHES`] into four ink planes, scaled to `bits` width.
@@ -213,20 +229,31 @@ fn swatch_planes(bits: u16) -> Vec<Vec<u16>> {
 }
 
 fn assert_swatches(planes: &[Vec<u8>], label: &str) {
-    assert_eq!(planes.len(), 3, "{label}: four inks must convert to three components");
+    assert_eq!(
+        planes.len(),
+        3,
+        "{label}: four inks must convert to three components"
+    );
     for (x, (cmyk, want)) in SWATCHES.iter().enumerate() {
         let got = [planes[0][x], planes[1][x], planes[2][x]];
-        let close = got.iter().zip(want).all(|(a, b)| (*a as i16 - *b as i16).abs() <= 1);
+        let close = got
+            .iter()
+            .zip(want)
+            .all(|(a, b)| (*a as i16 - *b as i16).abs() <= 1);
         assert!(close, "{label}: CMYK{cmyk:?}: got {got:?}, want {want:?}");
     }
 }
 
 #[test]
 fn cmyk_chunky_8bit_converts_to_rgb() {
-    let stack = TiffStack::from_bytes(build_cmyk_tiff(&swatch_planes(8), Layout::default())).unwrap();
+    let stack =
+        TiffStack::from_bytes(build_cmyk_tiff(&swatch_planes(8), Layout::default())).unwrap();
     let frame = &stack.frames[0];
     assert!(frame.is_cmyk());
-    assert!(!frame.is_rgb(), "CMYK must not masquerade as photometric=2 RGB");
+    assert!(
+        !frame.is_rgb(),
+        "CMYK must not masquerade as photometric=2 RGB"
+    );
     let planes = fast_tiff_lib::read_planes_rgb_u8(&stack.data, frame, stack.byte_order).unwrap();
     assert_swatches(&planes, "chunky 8-bit");
 }
@@ -237,11 +264,18 @@ fn cmyk_chunky_8bit_converts_to_rgb() {
 /// re-deriving the layout itself and needing a second implementation.
 #[test]
 fn cmyk_planar_matches_chunky() {
-    let chunky = TiffStack::from_bytes(build_cmyk_tiff(&swatch_planes(8), Layout::default())).unwrap();
-    let planar = TiffStack::from_bytes(build_cmyk_tiff(&swatch_planes(8), Layout::default().planar())).unwrap();
+    let chunky =
+        TiffStack::from_bytes(build_cmyk_tiff(&swatch_planes(8), Layout::default())).unwrap();
+    let planar = TiffStack::from_bytes(build_cmyk_tiff(
+        &swatch_planes(8),
+        Layout::default().planar(),
+    ))
+    .unwrap();
     assert!(planar.frames[0].is_planar());
-    let a = fast_tiff_lib::read_planes_rgb_u8(&chunky.data, &chunky.frames[0], chunky.byte_order).unwrap();
-    let b = fast_tiff_lib::read_planes_rgb_u8(&planar.data, &planar.frames[0], planar.byte_order).unwrap();
+    let a = fast_tiff_lib::read_planes_rgb_u8(&chunky.data, &chunky.frames[0], chunky.byte_order)
+        .unwrap();
+    let b = fast_tiff_lib::read_planes_rgb_u8(&planar.data, &planar.frames[0], planar.byte_order)
+        .unwrap();
     assert_eq!(a, b, "planar and chunky CMYK must decode identically");
     assert_swatches(&b, "planar 8-bit");
 }
@@ -255,8 +289,12 @@ fn cmyk_16bit_converts_to_rgb() {
         let stack = TiffStack::from_bytes(build_cmyk_tiff(&swatch_planes(16), layout)).unwrap();
         let frame = &stack.frames[0];
         assert!(frame.is_cmyk(), "{label}");
-        let planes = fast_tiff_lib::read_planes_rgb_u16(&stack.data, frame, stack.byte_order).unwrap();
-        let narrowed: Vec<Vec<u8>> = planes.iter().map(|p| p.iter().map(|v| (v >> 8) as u8).collect()).collect();
+        let planes =
+            fast_tiff_lib::read_planes_rgb_u16(&stack.data, frame, stack.byte_order).unwrap();
+        let narrowed: Vec<Vec<u8>> = planes
+            .iter()
+            .map(|p| p.iter().map(|v| (v >> 8) as u8).collect())
+            .collect();
         assert_swatches(&narrowed, label);
     }
 }
@@ -266,20 +304,32 @@ fn cmyk_16bit_converts_to_rgb() {
 /// when only a single channel is ticked, and the two must not disagree.
 #[test]
 fn single_plane_reads_match_the_batched_read() {
-    let stack = TiffStack::from_bytes(build_cmyk_tiff(&swatch_planes(8), Layout::default())).unwrap();
+    let stack =
+        TiffStack::from_bytes(build_cmyk_tiff(&swatch_planes(8), Layout::default())).unwrap();
     let frame = &stack.frames[0];
     let batched = fast_tiff_lib::read_planes_rgb_u8(&stack.data, frame, stack.byte_order).unwrap();
     for (c, want) in batched.iter().enumerate() {
-        let one = fast_tiff_lib::read_plane_rgb_u8(&stack.data, frame, stack.byte_order, c).unwrap();
-        assert_eq!(&one, want, "component {c} differs between the single and batched reads");
+        let one =
+            fast_tiff_lib::read_plane_rgb_u8(&stack.data, frame, stack.byte_order, c).unwrap();
+        assert_eq!(
+            &one, want,
+            "component {c} differs between the single and batched reads"
+        );
     }
 
-    let wide = TiffStack::from_bytes(build_cmyk_tiff(&swatch_planes(16), Layout::default().bits(16))).unwrap();
+    let wide = TiffStack::from_bytes(build_cmyk_tiff(
+        &swatch_planes(16),
+        Layout::default().bits(16),
+    ))
+    .unwrap();
     let wf = &wide.frames[0];
     let batched16 = fast_tiff_lib::read_planes_rgb_u16(&wide.data, wf, wide.byte_order).unwrap();
     for (c, want) in batched16.iter().enumerate() {
         let one = fast_tiff_lib::read_plane_rgb_u16(&wide.data, wf, wide.byte_order, c).unwrap();
-        assert_eq!(&one, want, "16-bit component {c} differs between the single and batched reads");
+        assert_eq!(
+            &one, want,
+            "16-bit component {c} differs between the single and batched reads"
+        );
     }
 }
 
@@ -304,7 +354,11 @@ fn cmyk_with_extra_sample_still_converts() {
 /// fail the CMYK test and fall through to the raw per-ink path.
 #[test]
 fn separated_with_non_cmyk_inkset_is_not_converted() {
-    let stack = TiffStack::from_bytes(build_cmyk_tiff(&swatch_planes(8), Layout::default().ink_set(2))).unwrap();
+    let stack = TiffStack::from_bytes(build_cmyk_tiff(
+        &swatch_planes(8),
+        Layout::default().ink_set(2),
+    ))
+    .unwrap();
     let frame = &stack.frames[0];
     assert_eq!(frame.photometric, 5);
     assert_eq!(frame.ink_set, 2);
@@ -313,11 +367,16 @@ fn separated_with_non_cmyk_inkset_is_not_converted() {
     let err = fast_tiff_lib::read_planes_rgb_u8(&stack.data, frame, stack.byte_order)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("requires a CMYK frame"), "unhelpful error: {err}");
+    assert!(
+        err.contains("requires a CMYK frame"),
+        "unhelpful error: {err}"
+    );
 
     // ...but the inks themselves still read, so nothing is lost.
     assert_eq!(
-        fast_tiff_lib::read_planes_u8(&stack.data, frame, stack.byte_order).unwrap().len(),
+        fast_tiff_lib::read_planes_u8(&stack.data, frame, stack.byte_order)
+            .unwrap()
+            .len(),
         4
     );
 }
@@ -345,7 +404,10 @@ fn cmyk_gate_rejects_depths_and_formats_the_conversion_cannot_handle() {
         let err = fast_tiff_lib::read_planes_rgb_u8(&stack.data, frame, stack.byte_order)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("requires a CMYK frame"), "{label}: unhelpful error: {err}");
+        assert!(
+            err.contains("requires a CMYK frame"),
+            "{label}: unhelpful error: {err}"
+        );
     }
 }
 
@@ -356,12 +418,17 @@ fn cmyk_gate_rejects_depths_and_formats_the_conversion_cannot_handle() {
 /// leaked into the raw path and every existing caller changed behaviour.
 #[test]
 fn raw_readers_still_return_untouched_ink_planes() {
-    let stack = TiffStack::from_bytes(build_cmyk_tiff(&swatch_planes(8), Layout::default())).unwrap();
+    let stack =
+        TiffStack::from_bytes(build_cmyk_tiff(&swatch_planes(8), Layout::default())).unwrap();
     let frame = &stack.frames[0];
     assert!(frame.is_cmyk());
 
     let raw = fast_tiff_lib::read_planes_u8(&stack.data, frame, stack.byte_order).unwrap();
-    assert_eq!(raw.len(), 4, "raw reader must still be one plane per sample");
+    assert_eq!(
+        raw.len(),
+        4,
+        "raw reader must still be one plane per sample"
+    );
     for (i, plane) in raw.iter().enumerate() {
         let want: Vec<u8> = SWATCHES.iter().map(|(cmyk, _)| cmyk[i] as u8).collect();
         assert_eq!(plane, &want, "ink plane {i} was modified");
@@ -388,7 +455,10 @@ fn converting_readers_refuse_frames_with_too_few_inks() {
     let err = fast_tiff_lib::read_planes_rgb_u8(&stack.data, frame, stack.byte_order)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("requires a CMYK frame") && err.contains("3 sample"), "unhelpful error: {err}");
+    assert!(
+        err.contains("requires a CMYK frame") && err.contains("3 sample"),
+        "unhelpful error: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -434,7 +504,11 @@ fn written_cmyk_reads_back_as_cmyk() {
         // outside reader that does not apply the TIFF6 default would otherwise
         // have nothing to go on.
         let (count, value) = ifd_tag(&bytes, TAG_INK_SET).expect("InkSet should be written");
-        assert_eq!((count, value & 0xffff), (1, 1), "InkSet should be a single SHORT of value 1");
+        assert_eq!(
+            (count, value & 0xffff),
+            (1, 1),
+            "InkSet should be a single SHORT of value 1"
+        );
 
         let stack = TiffStack::from_bytes(bytes).unwrap();
         let frame = &stack.frames[0];
@@ -442,7 +516,10 @@ fn written_cmyk_reads_back_as_cmyk() {
         assert_eq!(frame.photometric, 5, "{label}: must be tagged Separated");
         assert_eq!(frame.ink_set, 1, "{label}");
         assert_eq!(frame.is_planar(), planar, "{label}");
-        assert!(frame.is_cmyk(), "{label}: what we wrote must satisfy the reader gate");
+        assert!(
+            frame.is_cmyk(),
+            "{label}: what we wrote must satisfy the reader gate"
+        );
 
         // The plates come back byte-identical...
         let raw = fast_tiff_lib::read_planes_u8(&stack.data, frame, stack.byte_order).unwrap();
@@ -482,7 +559,8 @@ fn written_cmyk_declares_extra_samples_against_four_inks() {
     assert!(frame.is_cmyk());
 
     // Read tag 338 straight out of the file: exactly one extra sample.
-    let (count, _) = ifd_tag(&bytes, TAG_EXTRA_SAMPLES).expect("ExtraSamples tag should be present");
+    let (count, _) =
+        ifd_tag(&bytes, TAG_EXTRA_SAMPLES).expect("ExtraSamples tag should be present");
     assert_eq!(count, 1, "5 samples - 4 inks = 1 extra, not 2");
 }
 
@@ -516,17 +594,23 @@ fn cmyk_writer_rejects_what_the_reader_would_refuse() {
     let cases: [(&str, WriterOptions, &str); 3] = [
         (
             "too few samples",
-            WriterOptions::new(4, 1, SampleType::U8).samples_per_pixel(3).cmyk(true),
+            WriterOptions::new(4, 1, SampleType::U8)
+                .samples_per_pixel(3)
+                .cmyk(true),
             "at least 4 samples",
         ),
         (
             "float samples",
-            WriterOptions::new(4, 1, SampleType::F32).samples_per_pixel(4).cmyk(true),
+            WriterOptions::new(4, 1, SampleType::F32)
+                .samples_per_pixel(4)
+                .cmyk(true),
             "unsigned 8- or 16-bit",
         ),
         (
             "signed samples",
-            WriterOptions::new(4, 1, SampleType::I16).samples_per_pixel(4).cmyk(true),
+            WriterOptions::new(4, 1, SampleType::I16)
+                .samples_per_pixel(4)
+                .cmyk(true),
             "unsigned 8- or 16-bit",
         ),
     ];

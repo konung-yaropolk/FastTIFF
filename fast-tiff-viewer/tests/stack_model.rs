@@ -60,12 +60,17 @@ fn load(viewer: &mut Viewer, path: PathBuf) -> anyhow::Result<()> {
 
 #[test]
 fn opens_an_imagej_hyperstack_with_derived_channel_settings() {
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let stack = open_stack(path, false).expect("hyperstack should open");
 
     let (w, h) = stack.dimensions().expect("dimensions");
     assert!(w > 0 && h > 0);
-    assert!(!stack.display.settings.is_empty(), "every open stack gets channel settings");
+    assert!(
+        !stack.display.settings.is_empty(),
+        "every open stack gets channel settings"
+    );
 
     // 16-bit unsigned planes take the R16Uint path, and each channel starts
     // enabled with a contrast window that sits inside its slider track.
@@ -74,7 +79,12 @@ fn opens_an_imagej_hyperstack_with_derived_channel_settings() {
         assert!(s.enabled, "channel {c} should start enabled");
         let (lo, hi) = s.bounds;
         assert!(hi > lo, "channel {c}: degenerate slider track {lo}..{hi}");
-        assert!(s.min >= lo && s.max <= hi, "channel {c}: window {}..{} outside track {lo}..{hi}", s.min, s.max);
+        assert!(
+            s.min >= lo && s.max <= hi,
+            "channel {c}: window {}..{} outside track {lo}..{hi}",
+            s.min,
+            s.max
+        );
         assert!(s.min <= s.max, "channel {c}: inverted window");
     }
 
@@ -84,13 +94,26 @@ fn opens_an_imagej_hyperstack_with_derived_channel_settings() {
 
 #[test]
 fn rgb_stack_becomes_three_display_channels() {
-    let Some(path) = fixture("tff_u8_spp3_p2_none.tif") else { return };
+    let Some(path) = fixture("tff_u8_spp3_p2_none.tif") else {
+        return;
+    };
     let stack = open_stack(path, false).expect("rgb should open");
 
-    assert!(stack.display.rgb, "a 3-sample photometric-RGB frame should set the rgb flag");
-    assert_eq!(stack.display.settings.len(), 3, "R/G/B become three display channels");
+    assert!(
+        stack.display.rgb,
+        "a 3-sample photometric-RGB frame should set the rgb flag"
+    );
+    assert_eq!(
+        stack.display.settings.len(),
+        3,
+        "R/G/B become three display channels"
+    );
     // 8-bit unsigned uploads raw, without the CPU widening pass.
-    assert!(stack.display.settings.iter().all(|s| s.kind == ChannelKind::Int8));
+    assert!(stack
+        .display
+        .settings
+        .iter()
+        .all(|s| s.kind == ChannelKind::Int8));
     // The channels/time guess and the pseudocolor toggle are meaningless here.
     assert!(!pseudocolor_applicable(&stack));
     assert!(!gray_lut_applicable(&stack));
@@ -98,14 +121,24 @@ fn rgb_stack_becomes_three_display_channels() {
 
 #[test]
 fn float_stack_windows_in_its_own_units() {
-    let Some(path) = fixture("tff_f32_spp1_p2_none-le.tif") else { return };
+    let Some(path) = fixture("tff_f32_spp1_p2_none-le.tif") else {
+        return;
+    };
     let stack = open_stack(path, false).expect("float should open");
 
     let s = stack.display.settings.first().expect("one channel");
-    assert_eq!(s.kind, ChannelKind::Float, "32-bit float takes the R32F path");
+    assert_eq!(
+        s.kind,
+        ChannelKind::Float,
+        "32-bit float takes the R32F path"
+    );
     // Contrast is defined over the data's actual range, not an assumed
     // 0..65535 integer scale (matching how ImageJ treats float images).
-    assert!(s.bounds.1 <= 65535.0 || s.bounds.0 < 0.0, "float bounds look integer-shaped: {:?}", s.bounds);
+    assert!(
+        s.bounds.1 <= 65535.0 || s.bounds.0 < 0.0,
+        "float bounds look integer-shaped: {:?}",
+        s.bounds
+    );
     assert!(s.min <= s.max);
 }
 
@@ -124,7 +157,9 @@ fn reassigning_the_axes_drops_everything_decoded_under_the_old_mapping() {
     use fast_tiff_viewer::roi::Roi;
     use fast_tiff_viewer::window::{Built, Overview, OVERVIEW_MAX_BYTES};
 
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("hyperstack should open");
 
@@ -135,18 +170,40 @@ fn reassigning_the_axes_drops_everything_decoded_under_the_old_mapping() {
     let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind).collect();
     let enabled: Vec<bool> = stack.display.settings.iter().map(|s| s.enabled).collect();
 
-    stack.bands.put(0, vec![0], 0, (0, 4096), vec![Decoded::U16(vec![7; 1024])]);
-    assert!(stack.bands.get(0, &[0], 0, (0, 4096)).is_some(), "the setup has to be cached");
+    stack
+        .bands
+        .put(0, vec![0], 0, (0, 4096), vec![Decoded::U16(vec![7; 1024])]);
+    assert!(
+        stack.bands.get(0, &[0], 0, (0, 4096)).is_some(),
+        "the setup has to be cached"
+    );
 
-    let whole = Roi { x: 0, y: 0, w, h, stride: 4 };
+    let whole = Roi {
+        x: 0,
+        y: 0,
+        w,
+        h,
+        stride: 4,
+    };
     let built = Built {
         frame_index: 0,
         roi: whole,
         channels: vec![0],
         planes: vec![Decoded::U16(vec![7; 64])],
     };
-    stack.overview = Overview::capture(built, w, h, stack.prefetch_gen, &enabled, &kinds, OVERVIEW_MAX_BYTES);
-    assert!(stack.overview.is_some(), "the setup has to retain an overview");
+    stack.overview = Overview::capture(
+        built,
+        w,
+        h,
+        stack.prefetch_gen,
+        &enabled,
+        &kinds,
+        OVERVIEW_MAX_BYTES,
+    );
+    assert!(
+        stack.overview.is_some(),
+        "the setup has to retain an overview"
+    );
 
     let shown = viewer.stack.as_ref().unwrap().display.dims;
     viewer.set_dimension_order(shown.frames, shown.slices, shown.channels);
@@ -156,7 +213,10 @@ fn reassigning_the_axes_drops_everything_decoded_under_the_old_mapping() {
         stack.bands.get(0, &[0], 0, (0, 4096)).is_none(),
         "channel 0 now reads a different IFD, so the band held for it is the wrong plane"
     );
-    assert!(stack.bands.is_empty(), "nothing decoded under the old mapping may survive");
+    assert!(
+        stack.bands.is_empty(),
+        "nothing decoded under the old mapping may survive"
+    );
     assert!(
         stack.overview.is_none(),
         "the overview was decoded through the old channel-to-IFD mapping too"
@@ -165,7 +225,9 @@ fn reassigning_the_axes_drops_everything_decoded_under_the_old_mapping() {
 
 #[test]
 fn dimension_override_conserves_the_plane_count() {
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("hyperstack should open");
 
@@ -205,15 +267,24 @@ fn dimension_override_conserves_the_plane_count() {
     // Channel settings and LUTs were rebuilt to match the new channel count...
     let shown_now = fast_tiff_viewer::Display::shown_channels(after.channels);
     assert_eq!(stack.display.settings.len(), shown_now);
-    assert_eq!(stack.display.luts.len(), shown_now, "one LUT per shown channel");
+    assert_eq!(
+        stack.display.luts.len(),
+        shown_now,
+        "one LUT per shown channel"
+    );
     // ...and the volume was invalidated, since the depth axis just changed.
-    assert_ne!(viewer.volume.generation, gen_before, "volume should be invalidated");
+    assert_ne!(
+        viewer.volume.generation, gen_before,
+        "volume should be invalidated"
+    );
     assert_eq!(viewer.volume.built_frame, None);
 }
 
 #[test]
 fn pseudocolor_tints_channels_and_reverts() {
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
 
@@ -232,12 +303,20 @@ fn pseudocolor_tints_channels_and_reverts() {
         .iter()
         .filter(|cd| channel_tint(&cd.lut).is_some())
         .count();
-    assert!(tinted > 0, "pseudocolor should give at least one channel a non-gray LUT");
+    assert!(
+        tinted > 0,
+        "pseudocolor should give at least one channel a non-gray LUT"
+    );
 
     viewer.set_pseudocolor(false);
     let stack = viewer.stack.as_ref().unwrap();
     assert!(
-        stack.tiff.meta.channel_display.iter().all(|cd| channel_tint(&cd.lut).is_none()),
+        stack
+            .tiff
+            .meta
+            .channel_display
+            .iter()
+            .all(|cd| channel_tint(&cd.lut).is_none()),
         "turning pseudocolor off should restore plain grayscale LUTs"
     );
     // Either way the LUTs must be re-uploaded on the next sync.
@@ -246,7 +325,9 @@ fn pseudocolor_tints_channels_and_reverts() {
 
 #[test]
 fn a_failed_open_keeps_the_current_stack() {
-    let Some(good) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(good) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let mut viewer = Viewer::new();
     load(&mut viewer, good).expect("open");
     assert!(viewer.stack.is_some());
@@ -254,13 +335,22 @@ fn a_failed_open_keeps_the_current_stack() {
     // Dropping a corrupt/nonexistent file must not close the good image.
     let err = load(&mut viewer, PathBuf::from("definitely-not-a-file.tif"));
     assert!(err.is_err());
-    assert!(viewer.stack.is_some(), "a failed open must not drop the loaded stack");
-    assert!(viewer.status.as_deref().unwrap_or("").contains("Failed to open"));
+    assert!(
+        viewer.stack.is_some(),
+        "a failed open must not drop the loaded stack"
+    );
+    assert!(viewer
+        .status
+        .as_deref()
+        .unwrap_or("")
+        .contains("Failed to open"));
 }
 
 #[test]
 fn playback_advances_by_real_elapsed_time() {
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
     let n = viewer.stack.as_ref().unwrap().frame_count();
@@ -294,7 +384,9 @@ fn playback_advances_by_real_elapsed_time() {
 
 #[test]
 fn falling_behind_latches_parallel_decode_only_in_auto() {
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
     if viewer.stack.as_ref().unwrap().frame_count() < 2 {
@@ -308,18 +400,29 @@ fn falling_behind_latches_parallel_decode_only_in_auto() {
     for i in 0..40 {
         viewer.tick_playback(i as f64 * 0.1);
     }
-    assert!(!viewer.decode_parallel, "Serial must never latch parallel decode");
+    assert!(
+        !viewer.decode_parallel,
+        "Serial must never latch parallel decode"
+    );
 
     viewer.decode_mode = fast_tiff_viewer::DecodeMode::Auto;
     for i in 40..80 {
         viewer.tick_playback(i as f64 * 0.1);
     }
-    assert!(viewer.decode_parallel, "Auto should latch parallel decode once playback falls behind");
+    assert!(
+        viewer.decode_parallel,
+        "Auto should latch parallel decode once playback falls behind"
+    );
 
     // Opening a new stack re-evaluates it from scratch.
-    let Some(again) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(again) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     load(&mut viewer, again).expect("reopen");
-    assert!(!viewer.decode_parallel, "a new stack starts from the serial path again");
+    assert!(
+        !viewer.decode_parallel,
+        "a new stack starts from the serial path again"
+    );
 }
 
 /// The regression this whole split exists to prevent: cycling the LUT selector
@@ -332,7 +435,9 @@ fn falling_behind_latches_parallel_decode_only_in_auto() {
 /// touched.
 #[test]
 fn cycling_luts_never_disturbs_the_parsed_metadata() {
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
     // Collapse to a single channel so the LUT selector applies.
@@ -355,21 +460,31 @@ fn cycling_luts_never_disturbs_the_parsed_metadata() {
         .collect();
 
     // Walk every selector entry, then come back to index 0.
-    let options = fast_tiff_viewer::channels::gray_lut_count(&viewer.stack.as_ref().unwrap().display);
+    let options =
+        fast_tiff_viewer::channels::gray_lut_count(&viewer.stack.as_ref().unwrap().display);
     for sel in 0..options {
         viewer.set_gray_lut(sel);
     }
     viewer.set_gray_lut(0);
 
     let stack = viewer.stack.as_ref().unwrap();
-    let after: Vec<_> = stack.tiff.meta.channel_display.iter().map(|d| d.lut).collect();
+    let after: Vec<_> = stack
+        .tiff
+        .meta
+        .channel_display
+        .iter()
+        .map(|d| d.lut)
+        .collect();
     assert_eq!(
         before.len(),
         after.len(),
         "the parsed metadata must survive display changes intact"
     );
     for (i, (b, a)) in before.iter().zip(after.iter()).enumerate() {
-        assert!(b == a, "channel {i}: the file's LUT was overwritten by a display choice");
+        assert!(
+            b == a,
+            "channel {i}: the file's LUT was overwritten by a display choice"
+        );
     }
 
     // And the rendered LUT is back to whatever index 0 means for this stack.
@@ -389,7 +504,9 @@ fn cycling_luts_never_disturbs_the_parsed_metadata() {
 /// frame being scrubbed to and the one after it.
 #[test]
 fn holding_the_scrubber_stops_playback_advancing() {
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
     let n = viewer.stack.as_ref().unwrap().frame_count();
@@ -423,7 +540,9 @@ fn holding_the_scrubber_stops_playback_advancing() {
 /// resume on its own.
 #[test]
 fn releasing_the_scrubber_resumes_playback() {
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
     let n = viewer.stack.as_ref().unwrap().frame_count();
@@ -438,7 +557,10 @@ fn releasing_the_scrubber_resumes_playback() {
     viewer.playback.scrubbing = true;
     viewer.stack.as_mut().unwrap().frame_index = 2 % n;
     viewer.tick_playback(1.0);
-    assert!(viewer.playback.playing, "holding the scrubber must not clear `playing`");
+    assert!(
+        viewer.playback.playing,
+        "holding the scrubber must not clear `playing`"
+    );
 
     // Let go, and it runs again from where it was left.
     viewer.playback.scrubbing = false;
@@ -457,7 +579,9 @@ fn releasing_the_scrubber_resumes_playback() {
 /// all at once.
 #[test]
 fn releasing_the_scrubber_does_not_replay_the_time_it_was_held() {
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
     let n = viewer.stack.as_ref().unwrap().frame_count();
@@ -479,7 +603,10 @@ fn releasing_the_scrubber_does_not_replay_the_time_it_was_held() {
 
     // The first tick after release seeds the clock and must not step at all.
     let stepped = viewer.tick_playback(10.1);
-    assert_eq!(stepped, 0, "released and immediately leapt {stepped} frames");
+    assert_eq!(
+        stepped, 0,
+        "released and immediately leapt {stepped} frames"
+    );
     assert_eq!(viewer.stack.as_ref().unwrap().frame_index, 1 % n);
 }
 
@@ -487,7 +614,9 @@ fn releasing_the_scrubber_does_not_replay_the_time_it_was_held() {
 /// holding the scrubber changes nothing that was not already still.
 #[test]
 fn holding_the_scrubber_while_paused_changes_nothing() {
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
     if viewer.stack.as_ref().unwrap().frame_count() < 2 {
@@ -498,14 +627,19 @@ fn holding_the_scrubber_while_paused_changes_nothing() {
     viewer.playback.scrubbing = true;
     assert_eq!(viewer.tick_playback(0.0), 0);
     assert_eq!(viewer.tick_playback(5.0), 0);
-    assert!(!viewer.playback.playing, "it must not start playing on its own");
+    assert!(
+        !viewer.playback.playing,
+        "it must not start playing on its own"
+    );
 }
 
 /// Nothing about ordinary playback changed: with the scrubber untouched the
 /// clock behaves exactly as it did.
 #[test]
 fn playback_is_unchanged_when_the_scrubber_is_not_held() {
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
     let n = viewer.stack.as_ref().unwrap().frame_count();
@@ -532,7 +666,9 @@ fn playback_is_unchanged_when_the_scrubber_is_not_held() {
 /// that elapsed while the user was holding still, paid out afterwards.
 #[test]
 fn releasing_the_scrubber_does_not_carry_a_stale_fraction() {
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else { return };
+    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
+        return;
+    };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
     if viewer.stack.as_ref().unwrap().frame_count() < 2 {
@@ -544,7 +680,10 @@ fn releasing_the_scrubber_does_not_carry_a_stale_fraction() {
     viewer.tick_playback(0.0);
     // Half a frame of carry, and no step yet.
     assert_eq!(viewer.tick_playback(0.05), 0);
-    assert!(viewer.playback.accumulator > 0.4, "the setup needs a real carry");
+    assert!(
+        viewer.playback.accumulator > 0.4,
+        "the setup needs a real carry"
+    );
 
     viewer.playback.scrubbing = true;
     viewer.tick_playback(0.1);

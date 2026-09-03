@@ -12,9 +12,13 @@ impl ViewerApp {
     /// Draw the coordinate box for the current volume view into `painter` (which
     /// the caller has clipped to the volume rect). No-op without a loaded stack.
     pub(super) fn draw_coord_box(&self, painter: &egui::Painter, rect: egui::Rect) {
-        let Some(loaded) = &self.core.stack else { return };
+        let Some(loaded) = &self.core.stack else {
+            return;
+        };
         let f0 = loaded.tiff.frames.first();
-        let (Some(w), Some(h)) = (f0.map(|f| f.width), f0.map(|f| f.height)) else { return };
+        let (Some(w), Some(h)) = (f0.map(|f| f.width), f0.map(|f| f.height)) else {
+            return;
+        };
         let dims = (w, h, loaded.volume_depth());
 
         // Rebuild the exact camera the shader used this frame (box half-extents
@@ -22,7 +26,15 @@ impl ViewerApp {
         let cam = volume_camera(&self.core.volume.cam, self.core.volume.scale, dims);
 
         let unit = loaded.tiff.meta.unit.as_deref().filter(|u| !u.is_empty());
-        draw_box(painter, rect, &cam, self.core.volume.aspect, dims, self.core.volume.scale, unit);
+        draw_box(
+            painter,
+            rect,
+            &cam,
+            self.core.volume.aspect,
+            dims,
+            self.core.volume.scale,
+            unit,
+        );
     }
 }
 
@@ -55,7 +67,11 @@ fn corner(he: [f32; 3], i: usize) -> [f32; 3] {
 }
 
 fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
 }
 
 /// A "nice" tick step (1 / 2 / 5 × 10^k) giving roughly `target` intervals
@@ -88,9 +104,26 @@ fn step_decimals(step: f32) -> usize {
 
 /// Draw `text` with a 1px dark halo (so it stays legible over bright volume
 /// pixels), returning nothing.
-fn label(painter: &egui::Painter, pos: egui::Pos2, align: egui::Align2, text: &str, font: &egui::FontId) {
-    for off in [egui::vec2(1.0, 1.0), egui::vec2(-1.0, 1.0), egui::vec2(1.0, -1.0), egui::vec2(-1.0, -1.0)] {
-        painter.text(pos + off, align, text, font.clone(), egui::Color32::from_black_alpha(180));
+fn label(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    align: egui::Align2,
+    text: &str,
+    font: &egui::FontId,
+) {
+    for off in [
+        egui::vec2(1.0, 1.0),
+        egui::vec2(-1.0, 1.0),
+        egui::vec2(1.0, -1.0),
+        egui::vec2(-1.0, -1.0),
+    ] {
+        painter.text(
+            pos + off,
+            align,
+            text,
+            font.clone(),
+            egui::Color32::from_black_alpha(180),
+        );
     }
     painter.text(pos, align, text, font.clone(), egui::Color32::WHITE);
 }
@@ -107,7 +140,10 @@ fn draw_box(
 ) {
     let he = cam.box_he;
     let corners: [[f32; 3]; 8] = std::array::from_fn(|i| corner(he, i));
-    let proj: Vec<Option<egui::Pos2>> = corners.iter().map(|&c| project(cam, aspect, rect, c)).collect();
+    let proj: Vec<Option<egui::Pos2>> = corners
+        .iter()
+        .map(|&c| project(cam, aspect, rect, c))
+        .collect();
 
     // 12 edges: corner pairs differing in exactly one axis bit. Skip an edge if
     // either endpoint is behind the camera (rare — only when zoomed inside).
@@ -130,7 +166,11 @@ fn draw_box(
         sum += p.to_vec2();
         n += 1.0;
     }
-    let centroid = if n > 0.0 { (sum / n).to_pos2() } else { rect.center() };
+    let centroid = if n > 0.0 {
+        (sum / n).to_pos2()
+    } else {
+        rect.center()
+    };
     let outward = |p: egui::Pos2, perp: egui::Vec2| -> egui::Vec2 {
         if (p - centroid).dot(perp) < 0.0 {
             -perp
@@ -151,15 +191,22 @@ fn draw_box(
     // calibrated length). Only the final tick carries the unit, to avoid
     // crowding — matching the ImageJ 3D Viewer's axis labels.
     let suffix: &str = match unit {
-            Some(u) => u,
-            None => "px",
-        };
-    let axes: [(usize, String, u32, f32); 3] =
-        [(1, format!("x, {suffix}"), dims.0, scale[0]), (2, format!("y, {suffix}"), dims.1, scale[1]), (4, format!("z, {suffix}"), dims.2, scale[2])];
+        Some(u) => u,
+        None => "px",
+    };
+    let axes: [(usize, String, u32, f32); 3] = [
+        (1, format!("x, {suffix}"), dims.0, scale[0]),
+        (2, format!("y, {suffix}"), dims.1, scale[1]),
+        (4, format!("z, {suffix}"), dims.2, scale[2]),
+    ];
 
     for (end_idx, ax_label, npix, sc) in axes {
         let calibrated = unit.is_some();
-        let extent = if calibrated { npix as f32 * sc } else { npix as f32 };
+        let extent = if calibrated {
+            npix as f32 * sc
+        } else {
+            npix as f32
+        };
         if extent <= 0.0 || !extent.is_finite() {
             continue;
         }
@@ -179,15 +226,29 @@ fn draw_box(
         for k in 1..=count {
             let value = k as f32 * step;
             let world = lerp3(corners[0], corners[end_idx], value / extent);
-            let Some(p) = project(cam, aspect, rect, world) else { continue };
+            let Some(p) = project(cam, aspect, rect, world) else {
+                continue;
+            };
             painter.line_segment([p - perp * 3.0, p + perp * 3.0], stroke);
             let text = format!("{value:.dec$}");
-            label(painter, p + outward(p, perp) * 9.0, egui::Align2::CENTER_CENTER, &text, &font);
+            label(
+                painter,
+                p + outward(p, perp) * 9.0,
+                egui::Align2::CENTER_CENTER,
+                &text,
+                &font,
+            );
         }
 
         // Axis letter beyond the far corner.
         if let Some(p) = proj[end_idx] {
-            label(painter, p + outward(p, perp) * 18.0, egui::Align2::CENTER_CENTER, &ax_label, &font);
+            label(
+                painter,
+                p + outward(p, perp) * 18.0,
+                egui::Align2::CENTER_CENTER,
+                &ax_label,
+                &font,
+            );
         }
     }
 }

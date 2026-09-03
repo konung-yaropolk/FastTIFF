@@ -25,7 +25,13 @@ const H: u32 = 51;
 
 /// A single-frame stack whose pixel values are a known function of position, so
 /// a band can be checked against where it claims to come from.
-fn build(rows_per_strip: u32, compression: Compression, predictor: bool, planar: bool, spp: u16) -> Vec<u8> {
+fn build(
+    rows_per_strip: u32,
+    compression: Compression,
+    predictor: bool,
+    planar: bool,
+    spp: u16,
+) -> Vec<u8> {
     let opts = WriterOptions::new(W, H, SampleType::U8)
         .samples_per_pixel(spp)
         .planar(planar)
@@ -55,7 +61,11 @@ fn check(bytes: Vec<u8>, want_rows: std::ops::Range<u32>, label: &str) {
         "{label}: band {:?} does not cover the requested {want_rows:?}",
         band.rows
     );
-    assert_eq!(band.frame.height, band.len(), "{label}: height must match the row range");
+    assert_eq!(
+        band.frame.height,
+        band.len(),
+        "{label}: height must match the row range"
+    );
     assert_eq!(cut.len(), full.len(), "{label}: plane count");
 
     let w = W as usize;
@@ -77,7 +87,11 @@ fn check(bytes: Vec<u8>, want_rows: std::ops::Range<u32>, label: &str) {
 
 #[test]
 fn a_band_matches_the_same_rows_of_the_whole_frame() {
-    check(build(1, Compression::None, false, false, 1), 10..20, "uncompressed, 1 row per strip");
+    check(
+        build(1, Compression::None, false, false, 1),
+        10..20,
+        "uncompressed, 1 row per strip",
+    );
 }
 
 /// Every codec, because the band is cut from the *strip table* and each codec
@@ -100,8 +114,16 @@ fn bands_work_under_every_codec() {
 /// were not so, a band would come out with its contrast progressively wrong.
 #[test]
 fn bands_work_under_the_horizontal_predictor() {
-    check(build(4, Compression::Lzw, true, false, 1), 12..30, "lzw + predictor, gray");
-    check(build(4, Compression::Deflate, true, false, 3), 12..30, "deflate + predictor, rgb");
+    check(
+        build(4, Compression::Lzw, true, false, 1),
+        12..30,
+        "lzw + predictor, gray",
+    );
+    check(
+        build(4, Compression::Deflate, true, false, 3),
+        12..30,
+        "deflate + predictor, rgb",
+    );
 }
 
 /// Planar frames keep one run of strips per sample plane, so a band has to take
@@ -110,13 +132,25 @@ fn bands_work_under_the_horizontal_predictor() {
 /// are the wrong colour.
 #[test]
 fn bands_take_the_matching_strips_from_every_plane() {
-    check(build(4, Compression::None, false, true, 3), 12..30, "planar rgb");
-    check(build(3, Compression::Lzw, true, true, 3), 9..27, "planar rgb, lzw + predictor");
+    check(
+        build(4, Compression::None, false, true, 3),
+        12..30,
+        "planar rgb",
+    );
+    check(
+        build(3, Compression::Lzw, true, true, 3),
+        9..27,
+        "planar rgb, lzw + predictor",
+    );
 }
 
 #[test]
 fn bands_work_for_chunky_multi_sample_frames() {
-    check(build(5, Compression::Lzw, false, false, 3), 7..29, "chunky rgb");
+    check(
+        build(5, Compression::Lzw, false, false, 3),
+        7..29,
+        "chunky rgb",
+    );
 }
 
 /// A request that does not land on strip boundaries is widened to them, and the
@@ -126,7 +160,11 @@ fn bands_work_for_chunky_multi_sample_frames() {
 fn a_request_is_snapped_outward_to_strip_boundaries() {
     let stack = TiffStack::from_bytes(build(8, Compression::None, false, false, 1)).unwrap();
     let band = stack.frames[0].crop_rows(10..20).unwrap();
-    assert_eq!(band.rows, 8..24, "rows 10..20 live in the strips covering 8..24");
+    assert_eq!(
+        band.rows,
+        8..24,
+        "rows 10..20 live in the strips covering 8..24"
+    );
     assert_eq!(band.frame.height, 16);
 }
 
@@ -138,7 +176,11 @@ fn a_band_at_the_end_stops_at_the_last_row() {
     let band = stack.frames[0].crop_rows(H - 3..H).unwrap();
     assert_eq!(band.rows.end, H, "the band cannot run past the frame");
     assert_eq!(band.frame.height, band.len());
-    check(build(8, Compression::None, false, false, 1), H - 3..H, "final short strip");
+    check(
+        build(8, Compression::None, false, false, 1),
+        H - 3..H,
+        "final short strip",
+    );
 }
 
 /// Asking past the end, or for nothing at all, still has to produce something
@@ -152,7 +194,9 @@ fn degenerate_requests_still_yield_a_decodable_band() {
     // frontend produces when a drag inverts, and it must not be a panic.
     let backwards = std::ops::Range { start: 20, end: 5 };
     for rows in [0..0, H..H, H + 100..H + 200, backwards] {
-        let band = frame.crop_rows(rows.clone()).unwrap_or_else(|e| panic!("{rows:?}: {e:#}"));
+        let band = frame
+            .crop_rows(rows.clone())
+            .unwrap_or_else(|e| panic!("{rows:?}: {e:#}"));
         assert!(!band.is_empty(), "{rows:?} produced an empty band");
         assert_eq!(band.frame.height, band.len());
         let cut = fast_tiff_lib::read_planes_u8(&stack.data, &band.frame, stack.byte_order)
@@ -188,7 +232,10 @@ fn a_strip_table_that_does_not_describe_the_frame_is_refused() {
 
     let mut frame = stack.frames[0].clone();
     frame.strip_byte_counts.truncate(full - 1);
-    assert!(frame.crop_rows(0..H).is_err(), "a short byte-count table is just as wrong");
+    assert!(
+        frame.crop_rows(0..H).is_err(),
+        "a short byte-count table is just as wrong"
+    );
 }
 
 /// Bands compose with the rest of the crate: a band of a CMYK frame converts
@@ -200,20 +247,30 @@ fn a_band_of_a_cmyk_frame_still_converts() {
         .cmyk(true)
         .rows_per_strip(4);
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
-    let px: Vec<u8> = (0..(W * H) as usize * 4).map(|i| (i * 7 + 13) as u8).collect();
+    let px: Vec<u8> = (0..(W * H) as usize * 4)
+        .map(|i| (i * 7 + 13) as u8)
+        .collect();
     w.write_frame_u8(&px).unwrap();
     let stack = TiffStack::from_bytes(w.finish().unwrap().into_inner()).unwrap();
 
     let frame = &stack.frames[0];
     assert!(frame.is_cmyk());
     let band = frame.crop_rows(8..20).unwrap();
-    assert!(band.frame.is_cmyk(), "a band keeps the frame's photometric identity");
+    assert!(
+        band.frame.is_cmyk(),
+        "a band keeps the frame's photometric identity"
+    );
 
     let full = fast_tiff_lib::read_planes_rgb_u8(&stack.data, frame, stack.byte_order).unwrap();
-    let cut = fast_tiff_lib::read_planes_rgb_u8(&stack.data, &band.frame, stack.byte_order).unwrap();
+    let cut =
+        fast_tiff_lib::read_planes_rgb_u8(&stack.data, &band.frame, stack.byte_order).unwrap();
     let from = band.rows.start as usize * W as usize;
     for (c, (cut_plane, full_plane)) in cut.iter().zip(&full).enumerate() {
-        assert_eq!(cut_plane, &full_plane[from..from + cut_plane.len()], "component {c}");
+        assert_eq!(
+            cut_plane,
+            &full_plane[from..from + cut_plane.len()],
+            "component {c}"
+        );
     }
 }
 
@@ -246,7 +303,10 @@ fn a_stepped_band_holds_the_rows_of_the_strips_it_took() {
             }
             let got = &cut[0][(piece * 2 + r) * w..(piece * 2 + r) * w + w];
             let want = &full[0][src_row * w..src_row * w + w];
-            assert_eq!(got, want, "piece {piece} row {r} should be source row {src_row}");
+            assert_eq!(
+                got, want,
+                "piece {piece} row {r} should be source row {src_row}"
+            );
         }
     }
 }
@@ -260,12 +320,20 @@ fn decoded_row_of_finds_sampled_rows_and_refuses_skipped_ones() {
     // Strips 0, 4, 8... were taken; each holds 2 rows.
     assert_eq!(band.decoded_row_of(0), Some(0));
     assert_eq!(band.decoded_row_of(1), Some(1));
-    assert_eq!(band.decoded_row_of(8), Some(2), "the second strip taken follows the first");
+    assert_eq!(
+        band.decoded_row_of(8),
+        Some(2),
+        "the second strip taken follows the first"
+    );
     assert_eq!(band.decoded_row_of(9), Some(3));
     assert_eq!(band.decoded_row_of(16), Some(4));
     // Rows in the strips that were stepped over simply are not there.
     for skipped in [2, 3, 4, 5, 6, 7, 10, 11] {
-        assert_eq!(band.decoded_row_of(skipped), None, "row {skipped} was in a skipped strip");
+        assert_eq!(
+            band.decoded_row_of(skipped),
+            None,
+            "row {skipped} was in a skipped strip"
+        );
     }
 }
 
@@ -283,7 +351,11 @@ fn decoded_row_of_stays_inside_the_frame_it_built() {
     // Step 5 over 26 strips takes strips 0, 5, 10, 15, 20, 25 — and 25 is the
     // short one, holding only row 50.
     let band = stack.frames[0].crop_rows_step(0..H, 5).unwrap();
-    assert_eq!(band.decoded_row_of(50), Some(band.frame.height - 1), "the short strip's one row");
+    assert_eq!(
+        band.decoded_row_of(50),
+        Some(band.frame.height - 1),
+        "the short strip's one row"
+    );
 
     // Every answer, for every row anyone might ask about, has to be one the
     // decoded frame actually has.
@@ -296,7 +368,11 @@ fn decoded_row_of_stays_inside_the_frame_it_built() {
             );
         }
     }
-    assert_eq!(band.decoded_row_of(51), None, "past the end of the short strip that was taken");
+    assert_eq!(
+        band.decoded_row_of(51),
+        None,
+        "past the end of the short strip that was taken"
+    );
 }
 
 /// The shape the fuzzer actually found: a frame claiming more rows per strip
@@ -316,7 +392,10 @@ fn a_frame_claiming_more_rows_per_strip_than_it_has() {
 
     for step in [1u32, 2, 3] {
         let band = frame.crop_rows_step(0..1, step).unwrap();
-        assert_eq!(band.frame.height, 1, "step {step}: the file only has one row");
+        assert_eq!(
+            band.frame.height, 1,
+            "step {step}: the file only has one row"
+        );
         assert_eq!(band.decoded_row_of(0), Some(0), "step {step}");
         assert_eq!(
             band.decoded_row_of(1),
@@ -333,7 +412,12 @@ fn stepping_decodes_proportionally_fewer_strips() {
     let frame = &stack.frames[0];
     let all = frame.crop_rows(0..H).unwrap().frame.strip_offsets.len();
     for step in [2u32, 4, 8] {
-        let taken = frame.crop_rows_step(0..H, step).unwrap().frame.strip_offsets.len();
+        let taken = frame
+            .crop_rows_step(0..H, step)
+            .unwrap()
+            .frame
+            .strip_offsets
+            .len();
         assert!(
             taken <= all.div_ceil(step as usize) + 1,
             "step {step}: took {taken} of {all} strips, expected about {}",

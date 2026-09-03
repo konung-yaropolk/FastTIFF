@@ -60,7 +60,14 @@ impl ViewerApp {
                 i.key_down(egui::Key::ArrowUp),
                 i.key_down(egui::Key::ArrowDown),
             ];
-            (i.modifiers.alt, i.modifiers.shift, wheel, wasd, i.key_down(egui::Key::Space), arrows)
+            (
+                i.modifiers.alt,
+                i.modifiers.shift,
+                wheel,
+                wasd,
+                i.key_down(egui::Key::Space),
+                arrows,
+            )
         });
 
         // A gesture, if one is running. Two fingers pan and pinch; one finger
@@ -89,7 +96,13 @@ impl ViewerApp {
         // gestures is what makes touch 3D feel like driving a mouse badly.
         if let Some(t) = touch {
             if t.translation_delta != egui::Vec2::ZERO {
-                cam.pan(t.translation_delta.x, t.translation_delta.y, right, up, pan_speed);
+                cam.pan(
+                    t.translation_delta.x,
+                    t.translation_delta.y,
+                    right,
+                    up,
+                    pan_speed,
+                );
                 animating = true;
             }
             // A pinch open means "bring it closer". `dolly` takes the vertical

@@ -178,6 +178,10 @@ fn tiff_rs_inner(path: &Path, run: &Run) -> Result<Measured> {
     for i in 0..run.frames {
         let t = Instant::now();
         let img = dec.read_image()?;
+        // Timed with the frame, as for libtiff — see the note there.
+        if i + 1 < run.frames {
+            dec.next_image()?;
+        }
         per_frame_us.push(t.elapsed().as_secs_f64() * 1e6);
         checksum = match img {
             DecodingResult::U8(v) => checksum.wrapping_add(checksum_bytes(&v)),
@@ -185,9 +189,6 @@ fn tiff_rs_inner(path: &Path, run: &Run) -> Result<Measured> {
             DecodingResult::F32(v) => checksum.wrapping_add(checksum_f32(&v)),
             _ => return Err(anyhow!("unexpected sample type from the tiff crate")),
         };
-        if i + 1 < run.frames {
-            dec.next_image()?;
-        }
     }
     Ok(Measured { reader: Reader::TiffRs, per_frame_us, bytes_per_frame: bpf, checksum, open_us })
 }
@@ -224,18 +225,18 @@ fn tinytiff(path: &Path, run: &Run) -> Result<Outcome> {
         loop {
             let t = Instant::now();
             let ok = TinyTIFFReader_getSampleData(tiff, buf.as_mut_ptr() as *mut c_void, 0);
-            let dt = t.elapsed().as_secs_f64() * 1e6;
             if ok == 0 {
                 TinyTIFFReader_close(tiff);
                 return Ok(unsupported(Reader::TinyTiff, format!("read failed at frame {seen}")));
             }
-            per_frame_us.push(dt);
-            checksum = checksum.wrapping_add(checksum_bytes(&buf));
+            // Advance timed with the frame, as for libtiff — see the note there.
             seen += 1;
-            if seen >= run.frames
+            let done = seen >= run.frames
                 || TinyTIFFReader_hasNext(tiff) == 0
-                || TinyTIFFReader_readNext(tiff) == 0
-            {
+                || TinyTIFFReader_readNext(tiff) == 0;
+            per_frame_us.push(t.elapsed().as_secs_f64() * 1e6);
+            checksum = checksum.wrapping_add(checksum_bytes(&buf));
+            if done {
                 break;
             }
         }
@@ -292,9 +293,18 @@ fn libtiff(path: &Path, run: &Run) -> Outcome {
                 }
                 off += got as usize;
             }
+            // The walk to the next directory is timed with the frame that
+            // needs it. A lazy reader parses one IFD per frame and an eager one
+            // parses them all at open; leaving this outside the timer put
+            // libtiff's share of that work in neither column — 13.6 us per
+            // frame on a 10k-frame stack, against 0.2 us that fast-tiff-lib
+            // reports at open, which made the honest reader look like the slow
+            // one on every chart that mentions indexing.
+            let advance = f + 1 < run.frames;
+            let ok = !advance || TIFFReadDirectory(tif) != 0;
             per_frame_us.push(t.elapsed().as_secs_f64() * 1e6);
             checksum = checksum.wrapping_add(checksum_bytes(&buf[..off.min(bpf)]));
-            if f + 1 < run.frames && TIFFReadDirectory(tif) == 0 {
+            if !ok {
                 TIFFClose(tif);
                 return unsupported(Reader::LibTiff, format!("out of directories at frame {f}"));
             }

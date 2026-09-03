@@ -5,19 +5,28 @@ use super::*;
 
 #[test]
 fn plain_path() {
-    assert_eq!(file_url_to_path(b"file:///Users/me/scan.tif"), Some(PathBuf::from("/Users/me/scan.tif")));
+    assert_eq!(
+        file_url_to_path(b"file:///Users/me/scan.tif"),
+        Some(PathBuf::from("/Users/me/scan.tif"))
+    );
 }
 
 #[test]
 fn percent_encoded_spaces_and_unicode() {
     // "/Users/me/My Scan é.tif"
     let url = b"file:///Users/me/My%20Scan%20%C3%A9.tif";
-    assert_eq!(file_url_to_path(url), Some(PathBuf::from("/Users/me/My Scan é.tif")));
+    assert_eq!(
+        file_url_to_path(url),
+        Some(PathBuf::from("/Users/me/My Scan é.tif"))
+    );
 }
 
 #[test]
 fn localhost_authority_is_stripped() {
-    assert_eq!(file_url_to_path(b"file://localhost/tmp/a.tiff"), Some(PathBuf::from("/tmp/a.tiff")));
+    assert_eq!(
+        file_url_to_path(b"file://localhost/tmp/a.tiff"),
+        Some(PathBuf::from("/tmp/a.tiff"))
+    );
 }
 
 #[test]

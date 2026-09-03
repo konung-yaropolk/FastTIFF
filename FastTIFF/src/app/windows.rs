@@ -8,10 +8,10 @@
 
 use super::*;
 
-use fast_tiff_viewer::camera::{NavMode, OrbitPoint};
-use fast_tiff_viewer::histogram::{fill_alpha, fill_tint, Histogram, BINS};
 use crate::render;
 use egui::RichText;
+use fast_tiff_viewer::camera::{NavMode, OrbitPoint};
+use fast_tiff_viewer::histogram::{fill_alpha, fill_tint, Histogram, BINS};
 
 /// The 3D render-settings pop-up: rendering method (+ alpha density), per-axis
 /// voxel scale (x:y:z), interpolation, navigation style, and a camera-reset
@@ -63,8 +63,9 @@ pub(super) fn render_settings_window(
         ui.add_enabled_ui(*render_mode == render::VolumeRender::Surface, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Threshold");
-                ui.add(egui::Slider::new(iso, 0.01..=1.0))
-                    .on_hover_text("Isosurface level in windowed units (higher = only brighter voxels)");
+                ui.add(egui::Slider::new(iso, 0.01..=1.0)).on_hover_text(
+                    "Isosurface level in windowed units (higher = only brighter voxels)",
+                );
             });
         });
 
@@ -85,7 +86,9 @@ pub(super) fn render_settings_window(
             ui.horizontal(|ui| {
                 if ui
                     .button("Reset from metadata")
-                    .on_hover_text("Re-seed x:y:z from the file's pixel calibration + spacing (else 1:1:1)")
+                    .on_hover_text(
+                        "Re-seed x:y:z from the file's pixel calibration + spacing (else 1:1:1)",
+                    )
                     .clicked()
                 {
                     *scale = loaded.tiff.meta.voxel_scale();
@@ -110,8 +113,14 @@ pub(super) fn render_settings_window(
         ui.separator();
         ui.label(RichText::new("Navigation").strong());
         ui.horizontal_wrapped(|ui| {
-            for mode in [NavMode::Cad, NavMode::Blender, NavMode::Maya, NavMode::WasdFly] {
-                ui.selectable_value(nav, mode, mode.label()).on_hover_text(mode.help());
+            for mode in [
+                NavMode::Cad,
+                NavMode::Blender,
+                NavMode::Maya,
+                NavMode::WasdFly,
+            ] {
+                ui.selectable_value(nav, mode, mode.label())
+                    .on_hover_text(mode.help());
             }
         });
         // Controls hint for the selected mode.
@@ -128,7 +137,11 @@ pub(super) fn render_settings_window(
             ui.label("Scroll speed");
             ui.add(egui::Slider::new(scroll_speed, 0.1..=10.0).logarithmic(true))
                 .on_hover_text("Mouse-wheel fly speed (× the default)");
-            if ui.small_button("Reset").on_hover_text("Restore both speeds to 1×").clicked() {
+            if ui
+                .small_button("Reset")
+                .on_hover_text("Restore both speeds to 1×")
+                .clicked()
+            {
                 *move_speed = 1.0;
                 *scroll_speed = 1.0;
             }
@@ -136,7 +149,9 @@ pub(super) fn render_settings_window(
         // What an orbit drag rotates around.
         ui.label("Orbiting point:");
         ui.radio_value(orbit_point, OrbitPoint::VolumeCenter, "Volume center")
-            .on_hover_text("Rotate around the volume's center — a turntable that re-centers the box");
+            .on_hover_text(
+                "Rotate around the volume's center — a turntable that re-centers the box",
+            );
         ui.radio_value(orbit_point, OrbitPoint::ScreenCenter, "Screen center")
             .on_hover_text("Rotate around whatever the view center is aimed at");
 
@@ -178,42 +193,49 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Sta
         }
 
         ui.heading("File");
-        egui::Grid::new("meta_file").num_columns(2).striped(true).show(ui, |ui| {
-            kv(ui, "Size", human_bytes(tiff.data.len() as u64));
-            let container = match tiff.flavor {
-                fast_tiff_lib::TiffFlavor::Classic => "classic TIFF",
-                fast_tiff_lib::TiffFlavor::Big => "BigTIFF",
-            };
-            kv(ui, "Container", container);
-            let order = match tiff.byte_order {
-                fast_tiff_lib::ByteOrder::Little => "little-endian (II)",
-                fast_tiff_lib::ByteOrder::Big => "big-endian (MM)",
-            };
-            kv(ui, "Byte order", order);
-            kv(ui, "Planes (IFDs)", tiff.frames.len().to_string());
-            let meta_format = match tiff.meta.source_format {
-                fast_tiff_lib::MetadataFormat::ImageJ => "ImageJ",
-                fast_tiff_lib::MetadataFormat::Ome => "OME-XML",
-                _ => "—",
-            };
-            kv(ui, "Metadata", meta_format);
-        });
+        egui::Grid::new("meta_file")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
+                kv(ui, "Size", human_bytes(tiff.data.len() as u64));
+                let container = match tiff.flavor {
+                    fast_tiff_lib::TiffFlavor::Classic => "classic TIFF",
+                    fast_tiff_lib::TiffFlavor::Big => "BigTIFF",
+                };
+                kv(ui, "Container", container);
+                let order = match tiff.byte_order {
+                    fast_tiff_lib::ByteOrder::Little => "little-endian (II)",
+                    fast_tiff_lib::ByteOrder::Big => "big-endian (MM)",
+                };
+                kv(ui, "Byte order", order);
+                kv(ui, "Planes (IFDs)", tiff.frames.len().to_string());
+                let meta_format = match tiff.meta.source_format {
+                    fast_tiff_lib::MetadataFormat::ImageJ => "ImageJ",
+                    fast_tiff_lib::MetadataFormat::Ome => "OME-XML",
+                    _ => "—",
+                };
+                kv(ui, "Metadata", meta_format);
+            });
 
         if let Some(f) = tiff.frames.first() {
             ui.add_space(12.0);
             ui.heading("Frame format");
-            egui::Grid::new("meta_frame").num_columns(2).striped(true).show(ui, |ui| {
-                kv(ui, "Dimensions", format!("{} x {} px", f.width, f.height));
-                let format = match f.sample_format {
-                    fast_tiff_lib::SampleFormat::UnsignedInt => "unsigned integer",
-                    fast_tiff_lib::SampleFormat::SignedInt => "signed integer",
-                    fast_tiff_lib::SampleFormat::Float => "IEEE float",
-                };
-                kv(ui, "Pixel type", format!("{}-bit {format}", f.bits_per_sample));
-                kv(
-                    ui,
-                    "Samples/pixel",
-                    {
+            egui::Grid::new("meta_frame")
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    kv(ui, "Dimensions", format!("{} x {} px", f.width, f.height));
+                    let format = match f.sample_format {
+                        fast_tiff_lib::SampleFormat::UnsignedInt => "unsigned integer",
+                        fast_tiff_lib::SampleFormat::SignedInt => "signed integer",
+                        fast_tiff_lib::SampleFormat::Float => "IEEE float",
+                    };
+                    kv(
+                        ui,
+                        "Pixel type",
+                        format!("{}-bit {format}", f.bits_per_sample),
+                    );
+                    kv(ui, "Samples/pixel", {
                         let model = if f.is_rgb() {
                             Some("RGB")
                         } else if f.is_cmyk() {
@@ -227,49 +249,52 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Sta
                             (None, true) => format!("{} (planar)", f.samples_per_pixel),
                             (None, false) => f.samples_per_pixel.to_string(),
                         }
-                    },
-                );
-                let photometric = match f.photometric {
-                    0 => "0 (WhiteIsZero)".into(),
-                    1 => "1 (BlackIsZero)".into(),
-                    2 => "2 (RGB)".into(),
-                    3 => "3 (palette)".into(),
-                    // Separated. InkSet says *which* inks; only set 1 is
-                    // CMYK, and only that one the viewer converts. Anything
-                    // else stays raw ink planes, so label it honestly
-                    // rather than calling every separated file CMYK.
-                    5 if f.ink_set == 1 => "5 (CMYK)".into(),
-                    5 => format!("5 (separated, InkSet {})", f.ink_set),
-                    other => format!("{other}"),
-                };
-                kv(ui, "Photometric", photometric);
-                let compression = match f.compression {
-                    fast_tiff_lib::Compression::None => "uncompressed".into(),
-                    fast_tiff_lib::Compression::Lzw => "LZW".into(),
-                    fast_tiff_lib::Compression::PackBits => "PackBits".into(),
-                    fast_tiff_lib::Compression::Deflate => "Deflate (zip)".into(),
-                    fast_tiff_lib::Compression::Zstd => "ZSTD".into(),
-                    other => format!("{other:?}"),
-                };
-                kv(ui, "Compression", compression);
-                let predictor = match f.predictor {
-                    1 => "none".into(),
-                    2 => "2 (horizontal differencing)".into(),
-                    3 => "3 (floating-point)".into(),
-                    other => format!("{other}"),
-                };
-                kv(ui, "Predictor", predictor);
-                kv(
-                    ui,
-                    "Strips/frame",
-                    format!("{} ({} rows/strip)", f.strip_offsets.len(), f.rows_per_strip),
-                );
-                let bpf = f.width as u64
-                    * f.height as u64
-                    * f.samples_per_pixel as u64
-                    * (f.bits_per_sample as u64 / 8);
-                kv(ui, "Decoded frame", human_bytes(bpf));
-            });
+                    });
+                    let photometric = match f.photometric {
+                        0 => "0 (WhiteIsZero)".into(),
+                        1 => "1 (BlackIsZero)".into(),
+                        2 => "2 (RGB)".into(),
+                        3 => "3 (palette)".into(),
+                        // Separated. InkSet says *which* inks; only set 1 is
+                        // CMYK, and only that one the viewer converts. Anything
+                        // else stays raw ink planes, so label it honestly
+                        // rather than calling every separated file CMYK.
+                        5 if f.ink_set == 1 => "5 (CMYK)".into(),
+                        5 => format!("5 (separated, InkSet {})", f.ink_set),
+                        other => format!("{other}"),
+                    };
+                    kv(ui, "Photometric", photometric);
+                    let compression = match f.compression {
+                        fast_tiff_lib::Compression::None => "uncompressed".into(),
+                        fast_tiff_lib::Compression::Lzw => "LZW".into(),
+                        fast_tiff_lib::Compression::PackBits => "PackBits".into(),
+                        fast_tiff_lib::Compression::Deflate => "Deflate (zip)".into(),
+                        fast_tiff_lib::Compression::Zstd => "ZSTD".into(),
+                        other => format!("{other:?}"),
+                    };
+                    kv(ui, "Compression", compression);
+                    let predictor = match f.predictor {
+                        1 => "none".into(),
+                        2 => "2 (horizontal differencing)".into(),
+                        3 => "3 (floating-point)".into(),
+                        other => format!("{other}"),
+                    };
+                    kv(ui, "Predictor", predictor);
+                    kv(
+                        ui,
+                        "Strips/frame",
+                        format!(
+                            "{} ({} rows/strip)",
+                            f.strip_offsets.len(),
+                            f.rows_per_strip
+                        ),
+                    );
+                    let bpf = f.width as u64
+                        * f.height as u64
+                        * f.samples_per_pixel as u64
+                        * (f.bits_per_sample as u64 / 8);
+                    kv(ui, "Decoded frame", human_bytes(bpf));
+                });
         }
 
         ui.add_space(12.0);
@@ -294,66 +319,69 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Sta
         ui.add_space(12.0);
         ui.heading("ImageJ metadata");
         let meta = &tiff.meta;
-        egui::Grid::new("meta_ij").num_columns(2).striped(true).show(ui, |ui| {
-            kv(
-                ui,
-                "Dimensions",
-                format!(
-                    "{} channel(s) x {} slice(s) x {} frame(s)",
-                    meta.channels, meta.slices, meta.frames
-                ),
-            );
-            // Everything in this panel is the *file's* own metadata, left
-            // exactly as parsed. The viewer's interpretation is separate
-            // (see `fast_tiff_viewer::display`) and routinely differs — a
-            // mislabeled `channels=100` is really a frame count, and the
-            // user can reassign the axes by hand. Show that only when the
-            // two disagree, so the panel stays quiet for ordinary files.
-            let shown = loaded.display.dims;
-            if (shown.channels, shown.slices, shown.frames)
-                != (meta.channels, meta.slices, meta.frames)
-            {
+        egui::Grid::new("meta_ij")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
                 kv(
                     ui,
-                    "Shown as",
+                    "Dimensions",
                     format!(
                         "{} channel(s) x {} slice(s) x {} frame(s)",
-                        shown.channels, shown.slices, shown.frames
+                        meta.channels, meta.slices, meta.frames
                     ),
                 );
-            }
-            let mode = match meta.mode {
-                fast_tiff_lib::DisplayMode::Grayscale => "grayscale",
-                fast_tiff_lib::DisplayMode::Composite => "composite",
-                fast_tiff_lib::DisplayMode::Color => "color",
-            };
-            kv(ui, "Display mode", mode);
-            if let Some(unit) = &meta.unit {
-                kv(ui, "Unit", unit.clone());
-            }
-            if let Some(fi) = meta.frame_interval_s {
-                kv(ui, "Frame interval", format!("{fi} s"));
-            }
-            if let Some(fps) = meta.fps {
-                kv(ui, "Playback fps", fps.to_string());
-            }
-            if let Some(spacing) = meta.spacing {
-                kv(ui, "Z spacing", spacing.to_string());
-            }
-            if let Some(looped) = meta.loop_playback {
-                kv(ui, "Loop playback", looped.to_string());
-            }
-            if let Some((c0, c1)) = meta.calibration {
-                kv(ui, "Calibration", format!("value = {c0} + {c1} x raw"));
-            }
-            for (i, cd) in meta.channel_display.iter().enumerate() {
-                let range = match cd.range {
-                    Some((lo, hi)) => format!("{lo} .. {hi}"),
-                    None => "auto-contrast".into(),
+                // Everything in this panel is the *file's* own metadata, left
+                // exactly as parsed. The viewer's interpretation is separate
+                // (see `fast_tiff_viewer::display`) and routinely differs — a
+                // mislabeled `channels=100` is really a frame count, and the
+                // user can reassign the axes by hand. Show that only when the
+                // two disagree, so the panel stays quiet for ordinary files.
+                let shown = loaded.display.dims;
+                if (shown.channels, shown.slices, shown.frames)
+                    != (meta.channels, meta.slices, meta.frames)
+                {
+                    kv(
+                        ui,
+                        "Shown as",
+                        format!(
+                            "{} channel(s) x {} slice(s) x {} frame(s)",
+                            shown.channels, shown.slices, shown.frames
+                        ),
+                    );
+                }
+                let mode = match meta.mode {
+                    fast_tiff_lib::DisplayMode::Grayscale => "grayscale",
+                    fast_tiff_lib::DisplayMode::Composite => "composite",
+                    fast_tiff_lib::DisplayMode::Color => "color",
                 };
-                kv(ui, &format!("Ch {} display range", i + 1), range);
-            }
-        });
+                kv(ui, "Display mode", mode);
+                if let Some(unit) = &meta.unit {
+                    kv(ui, "Unit", unit.clone());
+                }
+                if let Some(fi) = meta.frame_interval_s {
+                    kv(ui, "Frame interval", format!("{fi} s"));
+                }
+                if let Some(fps) = meta.fps {
+                    kv(ui, "Playback fps", fps.to_string());
+                }
+                if let Some(spacing) = meta.spacing {
+                    kv(ui, "Z spacing", spacing.to_string());
+                }
+                if let Some(looped) = meta.loop_playback {
+                    kv(ui, "Loop playback", looped.to_string());
+                }
+                if let Some((c0, c1)) = meta.calibration {
+                    kv(ui, "Calibration", format!("value = {c0} + {c1} x raw"));
+                }
+                for (i, cd) in meta.channel_display.iter().enumerate() {
+                    let range = match cd.range {
+                        Some((lo, hi)) => format!("{lo} .. {hi}"),
+                        None => "auto-contrast".into(),
+                    };
+                    kv(ui, &format!("Ch {} display range", i + 1), range);
+                }
+            });
     });
 }
 
@@ -428,7 +456,10 @@ pub(super) fn histogram_window(
         let style = ctx.global_style();
         let font = style.text_styles[&egui::TextStyle::Body].clone();
         let text_h = ctx.fonts_mut(|f| f.row_height(&font));
-        (style.spacing.interact_size.y + style.spacing.item_spacing.y, text_h)
+        (
+            style.spacing.interact_size.y + style.spacing.item_spacing.y,
+            text_h,
+        )
     };
     let rows = loaded.display.settings.len().max(1) as f32 * 2.0 + 2.0;
     let spec = dialog::Dialog {
@@ -456,8 +487,7 @@ pub(super) fn histogram_window(
         // invisible, and no circular dependency between the two.
         let id = ui.id().with("controls_h");
         let controls_h = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
-        let plot_h =
-            (ui.available_height() - controls_h).max(text_h * MIN_PLOT_TEXT_HEIGHTS);
+        let plot_h = (ui.available_height() - controls_h).max(text_h * MIN_PLOT_TEXT_HEIGHTS);
 
         // Reserve the plot's rect now and paint into it further down,
         // once the sliders have reported the span to align with. Nothing
@@ -531,7 +561,11 @@ fn draw_plot(
         painter.text(
             area.center(),
             egui::Align2::CENTER_CENTER,
-            if hists.is_empty() { "No frame to histogram" } else { "Every channel is switched off" },
+            if hists.is_empty() {
+                "No frame to histogram"
+            } else {
+                "Every channel is switched off"
+            },
             egui::FontId::proportional(12.0),
             ui.visuals().weak_text_color(),
         );
@@ -556,10 +590,19 @@ fn draw_plot(
     // Log compresses the tall background bin so the rest of the distribution is
     // visible. Normalising by the *scaled* peak keeps the tallest bar at full
     // height either way, so switching modes rescales rather than shrinks.
-    let height = |v: f32| if log_scale { (1.0 + v * 1000.0).ln() / 1000.0_f32.ln_1p() } else { v };
+    let height = |v: f32| {
+        if log_scale {
+            (1.0 + v * 1000.0).ln() / 1000.0_f32.ln_1p()
+        } else {
+            v
+        }
+    };
 
     for h in shown {
-        let [r, g, b] = display.lut(h.channel).map(fill_tint).unwrap_or([200, 200, 200]);
+        let [r, g, b] = display
+            .lut(h.channel)
+            .map(fill_tint)
+            .unwrap_or([200, 200, 200]);
         let solid = egui::Color32::from_rgb(r, g, b);
         let fill = egui::Color32::from_rgba_unmultiplied(r, g, b, alpha);
         let dim_fill =
@@ -604,9 +647,10 @@ fn draw_plot(
         // even when it lands mid-bin, and the kept and clipped parts never
         // overlap, so neither is composited on top of the other.
         painter.with_clip_rect(kept).add(egui::Shape::mesh(mesh));
-        painter
-            .with_clip_rect(kept)
-            .add(egui::Shape::line(top.clone(), egui::Stroke::new(1.0_f32, solid)));
+        painter.with_clip_rect(kept).add(egui::Shape::line(
+            top.clone(),
+            egui::Stroke::new(1.0_f32, solid),
+        ));
         for tail in [
             egui::Rect::from_x_y_ranges(
                 egui::Rangef::new(area.left(), kept.left()),
@@ -622,7 +666,10 @@ fn draw_plot(
             }
             let p = painter.with_clip_rect(tail);
             p.add(egui::Shape::mesh(dim_mesh.clone()));
-            p.add(egui::Shape::line(top.clone(), egui::Stroke::new(1.0_f32, dim_stroke)));
+            p.add(egui::Shape::line(
+                top.clone(),
+                egui::Stroke::new(1.0_f32, dim_stroke),
+            ));
         }
     }
 

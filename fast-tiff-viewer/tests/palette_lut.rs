@@ -52,7 +52,11 @@ fn palette_tiff(w: u32, h: u32, top: u32) -> Vec<u8> {
 
     // ColorMap: all reds, then greens, then blues — 16-bit, so <<8.
     let grey = |i: u32| -> u16 {
-        let v = if i <= top { (i * 255 / top).min(255) } else { 0 };
+        let v = if i <= top {
+            (i * 255 / top).min(255)
+        } else {
+            0
+        };
         (v as u16) << 8
     };
     for _ in 0..3 {
@@ -60,7 +64,11 @@ fn palette_tiff(w: u32, h: u32, top: u32) -> Vec<u8> {
             out.extend_from_slice(&grey(i).to_le_bytes());
         }
     }
-    assert_eq!(out.len() as u32, px_off, "pixel data must start where the IFD says");
+    assert_eq!(
+        out.len() as u32,
+        px_off,
+        "pixel data must start where the IFD says"
+    );
     out.extend((0..w * h).map(|i| (i % (top + 1)) as u8));
     out
 }
@@ -74,10 +82,20 @@ fn the_fixture_really_is_a_stretched_grayscale_palette() {
     // Guards the premise: if this stopped being a non-identity grey ramp, the
     // tests below would pass without proving anything.
     let stack = open(palette_tiff(16, 8, 87));
-    assert!(stack.display.palette, "photometric=3 should be recognised as palette");
+    assert!(
+        stack.display.palette,
+        "photometric=3 should be recognised as palette"
+    );
     let lut = stack.tiff.meta.channel_display[0].lut;
-    assert!(lut.iter().all(|p| p[0] == p[1] && p[1] == p[2]), "ramp is grayscale");
-    assert_ne!(lut, fast_tiff_lib::grayscale_lut(), "but it is NOT the identity ramp");
+    assert!(
+        lut.iter().all(|p| p[0] == p[1] && p[1] == p[2]),
+        "ramp is grayscale"
+    );
+    assert_ne!(
+        lut,
+        fast_tiff_lib::grayscale_lut(),
+        "but it is NOT the identity ramp"
+    );
     assert_eq!(lut[16][0], 46, "index 16 stretches to grey 46");
     assert_eq!(lut[128][0], 0, "past the stretched range it goes black");
 }
@@ -103,15 +121,25 @@ fn switching_colormap_and_back_restores_the_file_ramp() {
     // The reported bug: pick a colormap, go back, and the image is left dark
     // with no way to recover.
     let mut viewer = Viewer::new();
-    viewer.load_bytes(palette_tiff(16, 8, 87), "palette.tif".into()).unwrap();
+    viewer
+        .load_bytes(palette_tiff(16, 8, 87), "palette.tif".into())
+        .unwrap();
     let original = viewer.stack.as_ref().unwrap().display.luts[0];
-    assert_ne!(original, fast_tiff_lib::grayscale_lut(), "loads through the file's ramp");
+    assert_ne!(
+        original,
+        fast_tiff_lib::grayscale_lut(),
+        "loads through the file's ramp"
+    );
 
     let n = gray_lut_count(&viewer.stack.as_ref().unwrap().display);
     // Walk every option, then come back to "Built-in" each time.
     for sel in 1..n {
         viewer.set_gray_lut(sel);
-        assert_ne!(viewer.stack.as_ref().unwrap().display.luts[0], original, "option {sel} should change the display");
+        assert_ne!(
+            viewer.stack.as_ref().unwrap().display.luts[0],
+            original,
+            "option {sel} should change the display"
+        );
         viewer.set_gray_lut(0);
         assert_eq!(
             viewer.stack.as_ref().unwrap().display.luts[0],
@@ -131,10 +159,14 @@ fn a_plain_grayscale_file_gains_no_spurious_builtin_option() {
     let opts = WriterOptions::new(w, h, SampleType::U8);
     let mut wr = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
     wr.write_frame_bytes(&vec![7u8; (w * h) as usize]).unwrap();
-    let stack = Stack::from_bytes(wr.finish().unwrap().into_inner(), "plain.tif".into(), false).unwrap();
+    let stack =
+        Stack::from_bytes(wr.finish().unwrap().into_inner(), "plain.tif".into(), false).unwrap();
 
     assert!(!stack.display.palette);
-    assert!(stack.display.builtin_lut.is_none(), "no ColorMap, so no Built-in option");
+    assert!(
+        stack.display.builtin_lut.is_none(),
+        "no ColorMap, so no Built-in option"
+    );
     assert_eq!(gray_lut_sel_name(&stack.display, 0), "Grayscale");
 }
 
@@ -155,14 +187,25 @@ fn isosurface_albedo_lands_on_a_visible_part_of_the_lut() {
         sampled.iter().any(|&c| c > 0),
         "albedo sampled at t={t} gives {sampled:?} — a black surface is invisible"
     );
-    assert_eq!(sampled, [255, 255, 255], "it should land on the ramp's peak");
+    assert_eq!(
+        sampled,
+        [255, 255, 255],
+        "it should land on the ramp's peak"
+    );
 }
 
 #[test]
 fn an_ordinary_ramp_still_uses_its_top_entry() {
     // The fix must not move the albedo for the files that already worked.
-    for lut in [fast_tiff_lib::grayscale_lut(), fast_tiff_lib::default_composite_lut(0)] {
-        assert_eq!(scivis_render::brightest_lut_t(&lut), 1.0, "a rising ramp peaks at the top");
+    for lut in [
+        fast_tiff_lib::grayscale_lut(),
+        fast_tiff_lib::default_composite_lut(0),
+    ] {
+        assert_eq!(
+            scivis_render::brightest_lut_t(&lut),
+            1.0,
+            "a rising ramp peaks at the top"
+        );
     }
 }
 
@@ -172,11 +215,27 @@ fn volume_params_carry_the_albedo_per_channel() {
     use fast_tiff_viewer::camera::{build_volume_params, volume_camera, VolumeChannel};
     let stack = open(palette_tiff(16, 8, 87));
     let albedo = scivis_render::brightest_lut_t(&stack.display.luts[0]);
-    assert!(albedo < 1.0, "the stretched palette peaks before its top entry");
+    assert!(
+        albedo < 1.0,
+        "the stretched palette peaks before its top entry"
+    );
 
     let cam = volume_camera(&Default::default(), [1.0, 1.0, 1.0], (16, 8, 4));
-    let ch = [VolumeChannel { min: 0.0, max: 1.0, is_float: false, enabled: true, albedo_t: albedo }];
-    let params = build_volume_params(&cam, &ch, 1.0, scivis_render::VolumeRender::Surface, 100.0, 0.1);
+    let ch = [VolumeChannel {
+        min: 0.0,
+        max: 1.0,
+        is_float: false,
+        enabled: true,
+        albedo_t: albedo,
+    }];
+    let params = build_volume_params(
+        &cam,
+        &ch,
+        1.0,
+        scivis_render::VolumeRender::Surface,
+        100.0,
+        0.1,
+    );
     assert_eq!(params.albedo_t[0], albedo);
     // Absent channels keep the top entry, which is what an unused slot wants.
     assert_eq!(params.albedo_t[1], 1.0);

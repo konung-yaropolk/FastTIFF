@@ -20,7 +20,10 @@ pub fn planes_addressed(dims: Dims, rgb: bool) -> usize {
     if rgb {
         (f - 1).saturating_mul(z).saturating_add(1)
     } else {
-        (f - 1).saturating_mul(z).saturating_mul(c).saturating_add(c)
+        (f - 1)
+            .saturating_mul(z)
+            .saturating_mul(c)
+            .saturating_add(c)
     }
 }
 
@@ -202,24 +205,28 @@ pub fn rgb_channel_plan(spp: usize) -> Vec<bool> {
 /// Off-by-default is the only setting that's harmless for both: the channel row
 /// is visible, and one click shows it.
 pub fn setup_rgb(loaded: &mut Stack) {
-    let spp = loaded.tiff.frames.first().map(|f| f.samples_per_pixel as usize).unwrap_or(3);
+    let spp = loaded
+        .tiff
+        .frames
+        .first()
+        .map(|f| f.samples_per_pixel as usize)
+        .unwrap_or(3);
     let plan = rgb_channel_plan(spp);
     let planes = plan.len();
     loaded.display.rgb = true;
     loaded.display.mode = fast_tiff_lib::DisplayMode::Color;
     // 0 = red, 1 = green, 2 = blue, then the composite palette for any extras.
-    loaded.display.luts = (0..planes).map(fast_tiff_lib::default_composite_lut).collect();
+    loaded.display.luts = (0..planes)
+        .map(fast_tiff_lib::default_composite_lut)
+        .collect();
     // Unsigned 8-bit RGB deinterleaves into raw u8 planes (`read_plane_u8`) and
     // rides the R8Uint path — half the texture memory + upload of widening each
     // plane to u16. Deeper or signed RGB still widens to u16 via `read_plane_u16`.
     // The window stays in 0..65535 either way; `sync_gpu` rescales it to 0..255
     // for an 8-bit (Int8) channel.
-    let kind = if loaded
-        .tiff
-        .frames
-        .first()
-        .is_some_and(|f| f.bits_per_sample == 8 && f.sample_format == fast_tiff_lib::SampleFormat::UnsignedInt)
-    {
+    let kind = if loaded.tiff.frames.first().is_some_and(|f| {
+        f.bits_per_sample == 8 && f.sample_format == fast_tiff_lib::SampleFormat::UnsignedInt
+    }) {
         ChannelKind::Int8
     } else {
         ChannelKind::Int16
@@ -263,9 +270,14 @@ pub fn setup_cmyk(loaded: &mut Stack) {
     loaded.display.cmyk = true;
     loaded.display.mode = fast_tiff_lib::DisplayMode::Color;
     loaded.display.luts = (0..3).map(fast_tiff_lib::default_composite_lut).collect(); // R, G, B
-    // The conversion outputs in the source's own width: 8-bit inks give 8-bit
-    // components (the zero-widening R8Uint upload), 16-bit gives 16.
-    let kind = if loaded.tiff.frames.first().is_some_and(|f| f.bits_per_sample == 8) {
+                                                                                      // The conversion outputs in the source's own width: 8-bit inks give 8-bit
+                                                                                      // components (the zero-widening R8Uint upload), 16-bit gives 16.
+    let kind = if loaded
+        .tiff
+        .frames
+        .first()
+        .is_some_and(|f| f.bits_per_sample == 8)
+    {
         ChannelKind::Int8
     } else {
         ChannelKind::Int16
