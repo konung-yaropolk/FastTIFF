@@ -147,6 +147,11 @@ fn all_codecs_roundtrip_with_and_without_predictor() {
 
     // ZSTD only when its codec is compiled in — the pure-Rust codecs must still
     // be exercised in a `--no-default-features` (wasm-shaped) build.
+    // `mut` only when the ZSTD push below is compiled in; without the
+    // attribute this is the one warning in the `--no-default-features` build,
+    // which is exactly the configuration that should stay clean so a real new
+    // warning there is visible.
+    #[cfg_attr(not(feature = "codec-zstd"), allow(unused_mut))]
     let mut codecs = vec![
         Compression::None,
         Compression::Lzw,
@@ -545,6 +550,7 @@ fn classic_stays_classic_and_forced_bigtiff_roundtrips() {
 fn compression_level_knob_roundtrips() {
     let pixels: Vec<u16> = (0..8 * 4).map(|i| (i as u16 * 37) % 500).collect();
     let data = le_bytes_u16(&pixels);
+    #[cfg_attr(not(feature = "codec-zstd"), allow(unused_mut))]
     let mut cases = vec![(Compression::Deflate, 1), (Compression::Deflate, 9)];
     #[cfg(feature = "codec-zstd")]
     cases.extend([(Compression::Zstd, 1), (Compression::Zstd, 19)]);

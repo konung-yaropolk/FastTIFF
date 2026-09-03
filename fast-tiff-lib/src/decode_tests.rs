@@ -1,4 +1,5 @@
 use super::*;
+use crate::index::Strips;
 
 #[test]
 fn packbits_literal_run() {
@@ -568,4 +569,134 @@ fn deinterleave_rejects_a_short_source() {
     let src = vec![0u8; 3 * 10 - 1];
     let mut got: Vec<Vec<u8>> = vec![vec![0u8; 10]; 3];
     assert!(deinterleave_u8(&src, 3, &mut got).is_err());
+}
+
+/// `Strips` has two spellings for a one-element list, and they must compare
+/// equal. The derived `PartialEq` did not: it called `One(5)` and
+/// `Many(vec![5])` different, which would have made an `assert_eq!` between two
+/// frames' strip lists depend on how each was constructed rather than on what
+/// they hold.
+#[test]
+fn strips_compare_by_content_not_representation() {
+    assert_eq!(Strips::One(5), Strips::Many(vec![5]));
+    assert_eq!(Strips::Many(vec![5]), Strips::One(5));
+    assert_eq!(Strips::None, Strips::Many(vec![]));
+    assert_eq!(Strips::from(vec![7u64]), Strips::Many(vec![7]));
+    assert_ne!(Strips::One(5), Strips::One(6));
+    assert_ne!(Strips::One(5), Strips::Many(vec![5, 5]));
+    assert_ne!(Strips::None, Strips::One(0));
+
+    // And the deref view stays the source of truth for both spellings.
+    assert_eq!(&Strips::One(9)[..], &[9]);
+    assert_eq!(&Strips::Many(vec![9])[..], &[9]);
+}
+
+/// Truncation normalises: shortening a multi-strip list to one entry must give
+/// something that still compares equal to the single-strip spelling.
+#[test]
+fn strips_truncate_keeps_the_right_prefix() {
+    let mut s = Strips::from(vec![10u64, 20, 30, 40]);
+    s.truncate(6); // longer than the list: no change
+    assert_eq!(&s[..], &[10, 20, 30, 40]);
+    s.truncate(2);
+    assert_eq!(&s[..], &[10, 20]);
+    s.truncate(1);
+    assert_eq!(s, Strips::One(10));
+    s.truncate(0);
+    assert_eq!(s, Strips::None);
+    assert!(s.is_empty());
+}
+
+/// The chunky 8-bit plane split, checked against a straightforward reference
+/// across widths that do and do not land on the SIMD block boundary (16
+/// pixels), several sample counts, and both predictors.
+///
+/// `read_planes_u8_into` now splits every plane in one pass — with a `pshufb`
+/// path for RGB — where it used to gather each plane separately. The shapes
+/// that break such a rewrite are the ragged ones: a width of 1, widths either
+/// side of 16, and sample counts with no SIMD path at all. Comparing against a
+/// reference built the obvious way is what makes those meaningful.
+#[test]
+fn chunky_u8_plane_split_matches_a_reference_at_every_shape() {
+    for &(w, h) in &[
+        (1u32, 1u32),
+        (15, 2),
+        (16, 2),
+        (17, 3),
+        (33, 1),
+        (64, 5),
+        (100, 7),
+    ] {
+        for &spp in &[2u16, 3, 4, 5] {
+            for &pred in &[1u16, 2] {
+                let n = (w * h) as usize;
+                let total = n * spp as usize;
+                let mut frame = make_frame(w, h, pred);
+                frame.bits_per_sample = 8;
+                frame.samples_per_pixel = spp;
+                frame.photometric = 2;
+                frame.strip_byte_counts = vec![total as u64].into();
+                let file: Vec<u8> = (0..total)
+                    .map(|i| ((i * 31 + i / 7 + 5) % 256) as u8)
+                    .collect();
+
+                // Reference: undo the predictor row-wise on the interleaved
+                // buffer, then pick out every spp-th byte.
+                let mut und = file.clone();
+                if pred == 2 {
+                    let row = (w as usize) * spp as usize;
+                    for r in 0..h as usize {
+                        for k in spp as usize..row {
+                            und[r * row + k] =
+                                und[r * row + k].wrapping_add(und[r * row + k - spp as usize]);
+                        }
+                    }
+                }
+                let want: Vec<Vec<u8>> = (0..spp as usize)
+                    .map(|p| (0..n).map(|i| und[i * spp as usize + p]).collect())
+                    .collect();
+
+                let got = read_planes_u8(&file, &frame, ByteOrder::Little).unwrap();
+                assert_eq!(got.len(), spp as usize, "{w}x{h} spp{spp} pred{pred}");
+                assert_eq!(got, want, "planes {w}x{h} spp{spp} pred{pred}");
+
+                // The single-plane entry point must agree with the batch one.
+                for (p, want_plane) in want.iter().enumerate() {
+                    let single = read_plane_u8(&file, &frame, ByteOrder::Little, p).unwrap();
+                    assert_eq!(
+                        &single, want_plane,
+                        "single {w}x{h} spp{spp} pred{pred} plane{p}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Planar frames must keep taking the per-plane path: their samples are already
+/// contiguous, so the de-interleave the chunky path uses would be wrong.
+#[test]
+fn planar_u8_planes_are_read_contiguously() {
+    for &(w, h) in &[(1u32, 1u32), (17, 3), (64, 5)] {
+        let spp = 3usize;
+        let n = (w * h) as usize;
+        let total = n * spp;
+        let mut frame = make_frame(w, h, 1);
+        frame.bits_per_sample = 8;
+        frame.samples_per_pixel = spp as u16;
+        frame.photometric = 2;
+        frame.planar_config = 2;
+        frame.strip_byte_counts = vec![total as u64].into();
+        let file: Vec<u8> = (0..total).map(|i| ((i * 17 + 3) % 256) as u8).collect();
+
+        let got = read_planes_u8(&file, &frame, ByteOrder::Little).unwrap();
+        for p in 0..spp {
+            let want: Vec<u8> = file[p * n..(p + 1) * n].to_vec();
+            assert_eq!(got[p], want, "planar {w}x{h} plane {p}");
+            assert_eq!(
+                read_plane_u8(&file, &frame, ByteOrder::Little, p).unwrap(),
+                want
+            );
+        }
+    }
 }

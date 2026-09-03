@@ -178,6 +178,13 @@ impl RawIfdEntry {
     /// since the field either sits inline in the entry or is already a slice
     /// of the mapping.
     pub fn read_u64_array(&self, file: &[u8], order: ByteOrder, out: &mut Vec<u64>) -> Result<()> {
+        // Cleared before anything fallible, not after: on an error the caller's
+        // buffer must not still hold the *previous* entry's array. Every caller
+        // today propagates the error and abandons the frame, so nothing reads
+        // it — but a reused buffer that keeps stale data on failure is the kind
+        // of thing that only becomes a bug once someone adds a caller that
+        // recovers.
+        out.clear();
         let sz = type_size(self.field_type)
             .ok_or_else(|| anyhow!("unsupported TIFF field type {}", self.field_type))?;
         let len = self
@@ -188,7 +195,6 @@ impl RawIfdEntry {
         } else {
             self.raw_bytes(file, order)?
         };
-        out.clear();
         // Size from the bytes we actually resolved, not the file's declared
         // `count`: the two agree for a well-formed entry, but `count` is
         // attacker-controlled and would otherwise reserve 8 bytes per claimed

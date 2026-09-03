@@ -478,3 +478,96 @@ fn a_long_acyclic_chain_is_not_mistaken_for_a_loop() {
     let stack = TiffStack::from_bytes(buf).expect("a chain of distinct IFDs must open");
     assert_eq!(stack.frames.len(), n + 1);
 }
+
+// ---- reused codec state must not leak between frames ----
+//
+// The Deflate and ZSTD paths keep a decompression context in a thread_local and
+// reset it per strip, rather than constructing a fresh one each time. That is
+// worth real time (a fresh ZSTD context per strip cost 40% of a 256x256 frame),
+// but it introduces a failure mode a fresh context cannot have: state surviving
+// a corrupt or truncated stream and silently corrupting the NEXT frame, which
+// is valid. Nothing else in the suite decodes a broken frame and a good one
+// through the same context.
+
+use fast_tiff_lib::{Compression, SampleType, TiffWriter, WriterOptions};
+use std::io::Cursor;
+
+/// `frames` identical 64x64 u16 frames, in memory.
+fn compressed_stack(comp: Compression, predictor: bool, frames: usize) -> Vec<u8> {
+    let (w, h) = (64u32, 64u32);
+    let px: Vec<u8> = (0..(w * h) as usize)
+        .flat_map(|i| {
+            let (x, y) = (i % w as usize, i / w as usize);
+            let v = (((x / 8 + y / 8) as u16).wrapping_mul(1031)).wrapping_add((x ^ y) as u16);
+            v.to_le_bytes()
+        })
+        .collect();
+    let opts = WriterOptions::new(w, h, SampleType::U16)
+        .compression(comp)
+        .predictor(predictor);
+    let mut wr = TiffWriter::new(Cursor::new(Vec::new()), opts).expect("writer");
+    for _ in 0..frames {
+        wr.write_frame_bytes(&px).expect("write frame");
+    }
+    wr.finish().expect("finish").into_inner()
+}
+
+fn frame_checksum(stack: &TiffStack, i: usize) -> Option<u64> {
+    let mut out: Vec<u16> = Vec::new();
+    fast_tiff_lib::read_frame_u16_into(
+        &stack.data,
+        &stack.frames[i],
+        stack.byte_order,
+        None,
+        &mut out,
+    )
+    .ok()?;
+    Some(
+        out.iter()
+            .fold(0u64, |a, &v| a.wrapping_mul(31).wrapping_add(v as u64)),
+    )
+}
+
+#[test]
+fn a_corrupt_strip_does_not_corrupt_the_next_frame() {
+    let cases: &[(&str, Compression, bool)] = &[
+        ("deflate", Compression::Deflate, false),
+        ("deflate+pred", Compression::Deflate, true),
+        ("lzw", Compression::Lzw, false),
+        #[cfg(feature = "codec-zstd")]
+        ("zstd", Compression::Zstd, false),
+        #[cfg(feature = "codec-zstd")]
+        ("zstd+pred", Compression::Zstd, true),
+    ];
+
+    for &(name, comp, pred) in cases {
+        let n = 6usize;
+        let clean_bytes = compressed_stack(comp, pred, n);
+        let clean = TiffStack::from_bytes(clean_bytes.clone()).expect(name);
+        let want = frame_checksum(&clean, 0).unwrap_or_else(|| panic!("{name}: clean frame 0"));
+
+        // Mangle the middle third of frame 2's compressed stream. Offsets and
+        // lengths are untouched, so the index still parses and only the codec
+        // sees the damage.
+        let mut bytes = clean_bytes;
+        let off = clean.frames[2].strip_offsets[0] as usize;
+        let len = clean.frames[2].strip_byte_counts[0] as usize;
+        for b in bytes[off + len / 3..(off + 2 * len / 3).min(off + len)].iter_mut() {
+            *b ^= 0xA5;
+        }
+
+        let dirty = TiffStack::from_bytes(bytes).expect(name);
+        // Frame 2 may error or decode to different pixels — either is fine.
+        let _ = frame_checksum(&dirty, 2);
+        // Every OTHER frame must still be byte-for-byte what it was.
+        for i in (0..n).filter(|&i| i != 2) {
+            let got = frame_checksum(&dirty, i).unwrap_or_else(|| {
+                panic!("{name}: frame {i} failed to decode after a corrupt frame")
+            });
+            assert_eq!(
+                got, want,
+                "{name}: frame {i} decoded differently after a corrupt frame"
+            );
+        }
+    }
+}

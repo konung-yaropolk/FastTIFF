@@ -1831,6 +1831,11 @@ fn decompress_into(raw: &[u8], compression: Compression, dest: &mut [u8]) -> Res
 }
 
 /// Read from `r` until `dest` is full or the stream ends; returns bytes read.
+///
+/// Only the ZSTD fallback still streams: Deflate now inflates through a reused
+/// state (see [`inflate_into`]), so without this gate the wasm build — which
+/// has no `codec-zstd` — warns that the function is dead.
+#[cfg(feature = "codec-zstd")]
 fn read_all_into(mut r: impl std::io::Read, dest: &mut [u8]) -> std::io::Result<usize> {
     let mut filled = 0;
     while filled < dest.len() {

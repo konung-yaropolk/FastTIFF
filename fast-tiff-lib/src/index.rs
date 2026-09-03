@@ -98,7 +98,7 @@ pub enum Compression {
 ///
 /// Derefs to `[u64]`, so every reader — `len`, indexing, `iter`, `par_iter` —
 /// is unchanged.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Eq)]
 pub enum Strips {
     /// No strips declared. Rejected later by `validate_frames`, but
     /// representable so parsing does not have to allocate to say "none".
@@ -108,6 +108,21 @@ pub enum Strips {
     One(u64),
     /// A multi-strip or tiled frame.
     Many(Vec<u64>),
+}
+
+/// Equal when the *contents* are equal, whatever shape holds them.
+///
+/// The derived comparison would call `One(5)` and `Many(vec![5])` different,
+/// which is a trap for a type whose whole point is that it has two spellings
+/// for the same one-element list. Everything the crate builds goes through
+/// `From`, which normalises — but `Many` is a public variant, so a caller can
+/// spell it the other way, and `tests/row_bands.rs` really does `assert_eq!`
+/// two of these against each other.
+impl PartialEq for Strips {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
 }
 
 impl Strips {
@@ -907,6 +922,12 @@ impl TiffStack {
         // megabytes of table — for a check that fires only on a malformed file.
         // Brent's finds any cycle from a single forward walk, which is the walk
         // we are already doing.
+        //
+        // It needs up to ~2x the cycle length to notice, where the set noticed
+        // on the first repeat. So a cycle longer than half of `MAX_FRAMES`
+        // trips the frame-count bail below instead of this one — a different
+        // error message for a file with half a million looping directories,
+        // which is bounded either way and not worth a hash table per frame.
         let mut tortoise = offset;
         let mut power = 1usize;
         let mut lam = 0usize;
