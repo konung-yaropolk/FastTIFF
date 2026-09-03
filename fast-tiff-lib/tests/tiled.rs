@@ -30,7 +30,10 @@ const W: usize = 100;
 const H: usize = 70;
 
 fn fixture(name: &str) -> Option<PathBuf> {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join(name);
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name);
     p.exists().then_some(p)
 }
 
@@ -51,7 +54,11 @@ fn check(name: &str, spp: usize, sixteen_bit: bool) {
     assert!(frame.is_tiled(), "{name}: should be recognised as tiled");
     assert_eq!(frame.tile_size, Some((16, 16)), "{name}: tile size");
     let (across, down, tw, th) = frame.tile_grid().expect("tiled");
-    assert_eq!((across, down, tw, th), (7, 5, 16, 16), "{name}: 100x70 in 16s is a 7x5 grid");
+    assert_eq!(
+        (across, down, tw, th),
+        (7, 5, 16, 16),
+        "{name}: 100x70 in 16s is a 7x5 grid"
+    );
     assert_eq!(frame.width as usize, W);
     assert_eq!(frame.height as usize, H);
 
@@ -61,7 +68,8 @@ fn check(name: &str, spp: usize, sixteen_bit: bool) {
     let g_of = |p: usize, i: usize| if planar { p * W * H + i } else { i * spp + p };
 
     if sixteen_bit {
-        let planes = fast_tiff_lib::read_planes_u16(&stack.data, frame, stack.byte_order, None).unwrap();
+        let planes =
+            fast_tiff_lib::read_planes_u16(&stack.data, frame, stack.byte_order, None).unwrap();
         assert_eq!(planes.len(), spp, "{name}: plane count");
         for (p, plane) in planes.iter().enumerate() {
             assert_eq!(plane.len(), W * H, "{name}: plane {p} size");
@@ -112,15 +120,23 @@ fn a_planar_tile_grid_decodes() {
 /// full-width rows.
 #[test]
 fn a_tiled_frame_crops_on_both_axes() {
-    let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else { return };
+    let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else {
+        return;
+    };
     let stack = TiffStack::open(&path).unwrap();
     let frame = &stack.frames[0];
     let full = fast_tiff_lib::read_planes_u16(&stack.data, frame, stack.byte_order, None).unwrap();
 
     // A window in the middle, deliberately not on tile boundaries.
     let region = frame.crop(20..50, 20..50).unwrap();
-    assert!(region.cols.start <= 20 && region.cols.end >= 50, "columns must cover the request");
-    assert!(region.rows.start <= 20 && region.rows.end >= 50, "rows must cover the request");
+    assert!(
+        region.cols.start <= 20 && region.cols.end >= 50,
+        "columns must cover the request"
+    );
+    assert!(
+        region.rows.start <= 20 && region.rows.end >= 50,
+        "rows must cover the request"
+    );
     assert_eq!(region.cols.start % 16, 0, "snapped to the tile grid");
     assert_eq!(region.rows.start % 16, 0);
     assert!(
@@ -130,7 +146,8 @@ fn a_tiled_frame_crops_on_both_axes() {
         frame.width
     );
 
-    let cut = fast_tiff_lib::read_planes_u16(&stack.data, &region.frame, stack.byte_order, None).unwrap();
+    let cut =
+        fast_tiff_lib::read_planes_u16(&stack.data, &region.frame, stack.byte_order, None).unwrap();
     let cw = region.frame.width as usize;
     for y in 0..region.frame.height as usize {
         let src = (region.rows.start as usize + y) * W + region.cols.start as usize;
@@ -145,17 +162,24 @@ fn a_tiled_frame_crops_on_both_axes() {
 /// A crop of the whole image is the whole image, and must not lose the tiling.
 #[test]
 fn cropping_to_everything_keeps_the_frame_intact() {
-    let Some(path) = fixture("tld_u16_spp1_p1_grid-lzw.tif") else { return };
+    let Some(path) = fixture("tld_u16_spp1_p1_grid-lzw.tif") else {
+        return;
+    };
     let stack = TiffStack::open(&path).unwrap();
     let frame = &stack.frames[0];
     let region = frame.crop(0..frame.width, 0..frame.height).unwrap();
     assert_eq!(region.cols, 0..frame.width);
     assert_eq!(region.rows, 0..frame.height);
     assert!(region.frame.is_tiled());
-    assert_eq!(region.frame.strip_offsets.len(), frame.strip_offsets.len(), "all tiles kept");
+    assert_eq!(
+        region.frame.strip_offsets.len(),
+        frame.strip_offsets.len(),
+        "all tiles kept"
+    );
 
     let a = fast_tiff_lib::read_planes_u16(&stack.data, frame, stack.byte_order, None).unwrap();
-    let b = fast_tiff_lib::read_planes_u16(&stack.data, &region.frame, stack.byte_order, None).unwrap();
+    let b =
+        fast_tiff_lib::read_planes_u16(&stack.data, &region.frame, stack.byte_order, None).unwrap();
     assert_eq!(a, b);
 }
 
@@ -164,7 +188,9 @@ fn cropping_to_everything_keeps_the_frame_intact() {
 /// they can disagree.
 #[test]
 fn a_tile_table_that_does_not_describe_the_grid_is_refused() {
-    let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else { return };
+    let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else {
+        return;
+    };
     let stack = TiffStack::open(&path).unwrap();
     let mut frame = stack.frames[0].clone();
     frame.strip_offsets.truncate(frame.strip_offsets.len() - 1);

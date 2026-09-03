@@ -35,7 +35,10 @@ fn parses_pixels_core_and_channels() {
     assert_eq!(meta.channel_display.len(), 2);
     // Color="16711935" = 0x00FF00FF → green channel: LUT tops out green-dominant.
     let top = meta.channel_display[1].lut[255];
-    assert!(top[1] > top[0] && top[1] > top[2], "GFP channel should ramp toward green, got {top:?}");
+    assert!(
+        top[1] > top[0] && top[1] > top[2],
+        "GFP channel should ramp toward green, got {top:?}"
+    );
 }
 
 #[test]
@@ -71,11 +74,20 @@ fn serialize_round_trips_through_parse() {
         .frame_interval_s(2.0)
         .channel("DAPI", [0, 0, 255])
         .channel("GFP", [0, 255, 0]);
-    let geom = WriteGeometry { width: 512, height: 512, samples_per_pixel: 1, ome_pixel_type: "uint16" };
+    let geom = WriteGeometry {
+        width: 512,
+        height: 512,
+        samples_per_pixel: 1,
+        ome_pixel_type: "uint16",
+    };
 
     // 12 planes = 2 channels x 3 slices x 2 frames.
     let xml = serialize(12, &write, &geom).unwrap();
-    assert_eq!(crate::metadata::detect(Some(&xml)), MetadataFormat::Ome, "output must be detected as OME");
+    assert_eq!(
+        crate::metadata::detect(Some(&xml)),
+        MetadataFormat::Ome,
+        "output must be detected as OME"
+    );
 
     let meta = parse(&xml, 12, None, None).expect("round-trip parse");
     assert_eq!((meta.channels, meta.slices, meta.frames), (2, 3, 2));
@@ -86,15 +98,28 @@ fn serialize_round_trips_through_parse() {
     assert_eq!(meta.mode, DisplayMode::Composite);
     // The DAPI (blue) channel's color survives the round-trip.
     let dapi_top = meta.channel_display[0].lut[255];
-    assert!(dapi_top[2] > dapi_top[0] && dapi_top[2] > dapi_top[1], "DAPI should ramp toward blue, got {dapi_top:?}");
+    assert!(
+        dapi_top[2] > dapi_top[0] && dapi_top[2] > dapi_top[1],
+        "DAPI should ramp toward blue, got {dapi_top:?}"
+    );
 }
 
 #[test]
 fn serialize_escapes_special_characters_in_names() {
-    let write = StackMetaWrite::new(1, 1).mode(DisplayMode::Composite).channel("A & B <\"x\">", [255, 0, 0]);
-    let geom = WriteGeometry { width: 2, height: 2, samples_per_pixel: 1, ome_pixel_type: "uint8" };
+    let write = StackMetaWrite::new(1, 1)
+        .mode(DisplayMode::Composite)
+        .channel("A & B <\"x\">", [255, 0, 0]);
+    let geom = WriteGeometry {
+        width: 2,
+        height: 2,
+        samples_per_pixel: 1,
+        ome_pixel_type: "uint8",
+    };
     let xml = serialize(1, &write, &geom).unwrap();
-    assert!(xml.contains("A &amp; B &lt;&quot;x&quot;&gt;"), "special chars must be escaped: {xml}");
+    assert!(
+        xml.contains("A &amp; B &lt;&quot;x&quot;&gt;"),
+        "special chars must be escaped: {xml}"
+    );
     // And it must still parse back cleanly (quick-xml unescapes on read).
     assert!(parse(&xml, 1, None, None).is_some());
 }

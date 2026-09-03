@@ -55,7 +55,10 @@ struct AEDesc {
 
 impl AEDesc {
     const fn null() -> Self {
-        AEDesc { descriptor_type: 0, data_handle: std::ptr::null_mut() }
+        AEDesc {
+            descriptor_type: 0,
+            data_handle: std::ptr::null_mut(),
+        }
     }
 }
 
@@ -74,7 +77,12 @@ extern "C" {
         is_sys_handler: u8,
     ) -> i16;
 
-    fn AEGetParamDesc(apple_event: *const AEDesc, keyword: u32, desired_type: u32, result: *mut AEDesc) -> i16;
+    fn AEGetParamDesc(
+        apple_event: *const AEDesc,
+        keyword: u32,
+        desired_type: u32,
+        result: *mut AEDesc,
+    ) -> i16;
 
     fn AECountItems(list: *const AEDesc, count: *mut c_long) -> i16;
 
@@ -114,7 +122,11 @@ extern "C" {
         object: *const c_void,
         suspension_behavior: isize,
     );
-    fn CFStringCreateWithCString(alloc: *const c_void, c_str: *const c_char, encoding: u32) -> *const c_void;
+    fn CFStringCreateWithCString(
+        alloc: *const c_void,
+        c_str: *const c_char,
+        encoding: u32,
+    ) -> *const c_void;
 }
 
 const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
@@ -130,7 +142,12 @@ extern "C" {
     fn objc_getClass(name: *const c_char) -> *mut c_void;
     fn object_getClass(obj: *mut c_void) -> *mut c_void;
     fn sel_registerName(name: *const c_char) -> *const c_void;
-    fn class_addMethod(cls: *mut c_void, name: *const c_void, imp: *mut c_void, types: *const c_char) -> u8;
+    fn class_addMethod(
+        cls: *mut c_void,
+        name: *const c_void,
+        imp: *mut c_void,
+        types: *const c_char,
+    ) -> u8;
 }
 
 /// `[obj sel]` returning an object pointer.
@@ -276,7 +293,12 @@ unsafe fn inject_open_urls_method() {
 
 /// The injected `application:openURLs:` implementation. `urls` is an
 /// `NSArray<NSURL *>`.
-extern "C" fn handle_open_urls(_this: *mut c_void, _cmd: *const c_void, _app: *mut c_void, urls: *mut c_void) {
+extern "C" fn handle_open_urls(
+    _this: *mut c_void,
+    _cmd: *const c_void,
+    _app: *mut c_void,
+    urls: *mut c_void,
+) {
     // SAFETY: AppKit passes a valid NSArray for the duration of this call.
     deliver(unsafe { ns_urls_to_paths(urls) });
 }
@@ -323,7 +345,13 @@ fn install_ae_handler() {
     // SAFETY: a plain Apple Event Manager registration; the handler is a
     // 'static `extern "C"` fn, and no arguments outlive the call.
     let err = unsafe {
-        AEInstallEventHandler(fourcc(b"aevt"), fourcc(b"odoc"), handle_open_documents, std::ptr::null_mut(), 0)
+        AEInstallEventHandler(
+            fourcc(b"aevt"),
+            fourcc(b"odoc"),
+            handle_open_documents,
+            std::ptr::null_mut(),
+            0,
+        )
     };
     if err != 0 {
         log::error!("macOS: failed to install open-file handler (AE error {err})");
@@ -331,7 +359,11 @@ fn install_ae_handler() {
 }
 
 /// C callback: runs on the main thread when Finder asks us to open documents.
-extern "C" fn handle_open_documents(event: *const AEDesc, _reply: *mut AEDesc, _refcon: *mut c_void) -> i16 {
+extern "C" fn handle_open_documents(
+    event: *const AEDesc,
+    _reply: *mut AEDesc,
+    _refcon: *mut c_void,
+) -> i16 {
     // SAFETY: `event` is a valid AppleEvent for the lifetime of this call.
     deliver(unsafe { extract_paths(event) });
     0 // noErr
@@ -392,7 +424,9 @@ fn file_url_to_path(bytes: &[u8]) -> Option<PathBuf> {
     // ("file:///p" -> "/p"; "file://localhost/p" -> "/p").
     let rest = s.strip_prefix("file://")?;
     let path = &rest[rest.find('/')?..];
-    Some(PathBuf::from(OsString::from_vec(percent_decode(path.as_bytes()))))
+    Some(PathBuf::from(OsString::from_vec(percent_decode(
+        path.as_bytes(),
+    ))))
 }
 
 /// Decode `%XX` escapes in a URL path. `+` is left as-is (file URLs don't use

@@ -30,15 +30,25 @@ fn ctrl_wheel(unit: egui::MouseWheelUnit, delta: egui::Vec2) -> egui::Event {
 fn a_mouse_wheel_always_scrubs_frames() {
     // Zoomed in or not, a wheel steps frames — one notch, one frame.
     for pannable in [false, true] {
-        let out = classify(&[wheel(egui::MouseWheelUnit::Line, egui::vec2(0.0, -1.0))], pannable);
+        let out = classify(
+            &[wheel(egui::MouseWheelUnit::Line, egui::vec2(0.0, -1.0))],
+            pannable,
+        );
         assert_eq!(out.notches, -1.0, "pannable={pannable}");
-        assert_eq!(out.swipe, egui::Vec2::ZERO, "a wheel must never pan (pannable={pannable})");
+        assert_eq!(
+            out.swipe,
+            egui::Vec2::ZERO,
+            "a wheel must never pan (pannable={pannable})"
+        );
     }
 }
 
 #[test]
 fn a_paging_wheel_scrubs_too() {
-    let out = classify(&[wheel(egui::MouseWheelUnit::Page, egui::vec2(0.0, 2.0))], true);
+    let out = classify(
+        &[wheel(egui::MouseWheelUnit::Page, egui::vec2(0.0, 2.0))],
+        true,
+    );
     assert_eq!(out.notches, 2.0);
     assert_eq!(out.swipe, egui::Vec2::ZERO);
 }
@@ -47,7 +57,10 @@ fn a_paging_wheel_scrubs_too() {
 fn a_trackpad_pans_when_there_is_something_to_pan() {
     let d = egui::vec2(-14.0, 33.0);
     let out = classify(&[wheel(egui::MouseWheelUnit::Point, d)], true);
-    assert_eq!(out.swipe, d, "the swipe should pass through at full precision");
+    assert_eq!(
+        out.swipe, d,
+        "the swipe should pass through at full precision"
+    );
     assert_eq!(out.notches, 0.0, "panning must not also scrub");
 }
 
@@ -55,20 +68,33 @@ fn a_trackpad_pans_when_there_is_something_to_pan() {
 fn a_trackpad_scrubs_when_the_image_already_fits() {
     // Panning an image with no overflow would do nothing, so the gesture is
     // better spent on frames than wasted.
-    let out = classify(&[wheel(egui::MouseWheelUnit::Point, egui::vec2(0.0, -100.0))], false);
+    let out = classify(
+        &[wheel(egui::MouseWheelUnit::Point, egui::vec2(0.0, -100.0))],
+        false,
+    );
     assert_eq!(out.swipe, egui::Vec2::ZERO);
-    assert!(out.notches < 0.0, "should have scrubbed, got {}", out.notches);
+    assert!(
+        out.notches < 0.0,
+        "should have scrubbed, got {}",
+        out.notches
+    );
 }
 
 #[test]
 fn horizontal_trackpad_movement_pans_and_never_scrubs() {
     // Sideways is meaningless as a frame step; it is the axis a wheel does not
     // have and the reason panning by trackpad is worth doing.
-    let out = classify(&[wheel(egui::MouseWheelUnit::Point, egui::vec2(40.0, 0.0))], true);
+    let out = classify(
+        &[wheel(egui::MouseWheelUnit::Point, egui::vec2(40.0, 0.0))],
+        true,
+    );
     assert_eq!(out.swipe, egui::vec2(40.0, 0.0));
     assert_eq!(out.notches, 0.0);
     // And with nothing to pan it contributes no frame steps either.
-    let out = classify(&[wheel(egui::MouseWheelUnit::Point, egui::vec2(40.0, 0.0))], false);
+    let out = classify(
+        &[wheel(egui::MouseWheelUnit::Point, egui::vec2(40.0, 0.0))],
+        false,
+    );
     assert_eq!(out.notches, 0.0, "sideways scroll should not step frames");
 }
 
@@ -76,7 +102,11 @@ fn horizontal_trackpad_movement_pans_and_never_scrubs() {
 fn ctrl_scroll_is_left_for_the_zoom_handler() {
     for unit in [egui::MouseWheelUnit::Line, egui::MouseWheelUnit::Point] {
         let out = classify(&[ctrl_wheel(unit, egui::vec2(0.0, -30.0))], true);
-        assert_eq!(out, Wheel::default(), "ctrl+scroll should be ignored here ({unit:?})");
+        assert_eq!(
+            out,
+            Wheel::default(),
+            "ctrl+scroll should be ignored here ({unit:?})"
+        );
     }
 }
 
@@ -97,7 +127,10 @@ fn a_frames_events_accumulate() {
 #[test]
 fn unrelated_events_are_ignored() {
     let out = classify(
-        &[egui::Event::PointerMoved(egui::pos2(1.0, 2.0)), egui::Event::Zoom(1.2)],
+        &[
+            egui::Event::PointerMoved(egui::pos2(1.0, 2.0)),
+            egui::Event::Zoom(1.2),
+        ],
         true,
     );
     assert_eq!(out, Wheel::default());

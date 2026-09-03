@@ -25,9 +25,9 @@ pub mod render;
 
 // Native-only host integrations: launching sibling processes for extra files,
 // and the macOS Apple Event that delivers "Open With" documents.
-#[cfg(not(target_arch = "wasm32"))]
-pub mod process;
 #[cfg(all(target_os = "macos", not(target_arch = "wasm32")))]
 pub mod macos_open;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod process;
 
 pub use app::{install_chrome, ViewerApp};

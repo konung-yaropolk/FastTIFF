@@ -20,7 +20,14 @@ const PANEL: [f32; 2] = [1920.0, 1080.0];
 const WHOLE: ([f32; 2], [f32; 2]) = ([0.0, 0.0], [1.0, 1.0]);
 
 fn preload(w: u32, h: u32, off: [f32; 2], scale: [f32; 2], panel: [f32; 2]) -> Residency {
-    plan(w, h, off, scale, panel, Budget::new(MAX_AXIS, RGB8, Preload))
+    plan(
+        w,
+        h,
+        off,
+        scale,
+        panel,
+        Budget::new(MAX_AXIS, RGB8, Preload),
+    )
 }
 
 /// A view of `px` source pixels wide, centred.
@@ -53,7 +60,10 @@ fn the_coarse_level_respects_both_budgets() {
         for bpt in [1usize, 3, 8, 24] {
             let s = overview_stride(w, h, MAX_AXIS, bpt);
             let (tw, th) = (w.div_ceil(s), h.div_ceil(s));
-            assert!(tw <= MAX_AXIS && th <= MAX_AXIS, "{w}x{h} bpt {bpt}: {tw}x{th} axis");
+            assert!(
+                tw <= MAX_AXIS && th <= MAX_AXIS,
+                "{w}x{h} bpt {bpt}: {tw}x{th} axis"
+            );
             assert!(
                 (tw as usize) * (th as usize) * bpt <= MAX_PRELOAD_BYTES,
                 "{w}x{h} bpt {bpt}: over the RAM budget"
@@ -68,7 +78,10 @@ fn zoomed_out_the_whole_frame_is_resident_at_the_coarse_level() {
     let r = preload(w, h, WHOLE.0, WHOLE.1, PANEL).resident;
     // Spanning the frame is what lets it serve every view without re-cutting.
     assert_eq!((r.x, r.y), (0, 0));
-    assert!(r.w >= w && r.h >= h, "coarse level does not span the frame: {r:?}");
+    assert!(
+        r.w >= w && r.h >= h,
+        "coarse level does not span the frame: {r:?}"
+    );
     assert_eq!(r.stride, overview_stride(w, h, MAX_AXIS, RGB8));
 }
 
@@ -78,7 +91,10 @@ fn zoomed_in_it_is_the_files_own_resolution() {
     let (off, scale) = view_of(w, h, 1500.0);
     let r = preload(w, h, off, scale, PANEL).resident;
     assert_eq!(r.stride, 1, "a 1500px view on a 1920px panel should be 1:1");
-    assert!(r.w < w, "a full-resolution view should be a crop, not the frame");
+    assert!(
+        r.w < w,
+        "a full-resolution view should be a crop, not the frame"
+    );
 }
 
 #[test]
@@ -113,7 +129,11 @@ fn the_continuous_scheme_really_does_use_more_levels() {
     let mut px = w as f32;
     while px > 200.0 {
         let (off, scale) = view_of(w, h, px);
-        seen.insert(plan(w, h, off, scale, PANEL, Budget::new(MAX_AXIS, RGB8, Tiled)).resident.stride);
+        seen.insert(
+            plan(w, h, off, scale, PANEL, Budget::new(MAX_AXIS, RGB8, Tiled))
+                .resident
+                .stride,
+        );
         px *= 0.9;
     }
     assert!(seen.len() > 2, "Tiled produced only {:?}", seen);
@@ -135,7 +155,10 @@ fn every_planned_window_fits_the_device_and_covers_the_view() {
                 let scale = [sx, sy];
                 let p = preload(w, h, off, scale, panel);
                 let (tw, th) = p.resident.texture_size();
-                assert!(tw <= MAX_AXIS && th <= MAX_AXIS, "{tw}x{th} at px {px} panel {panel:?}");
+                assert!(
+                    tw <= MAX_AXIS && th <= MAX_AXIS,
+                    "{tw}x{th} at px {px} panel {panel:?}"
+                );
 
                 // Covers the visible region, in source pixels.
                 let (vx0, vy0) = (off[0] * w as f32, off[1] * h as f32);
@@ -158,7 +181,15 @@ fn every_planned_window_fits_the_device_and_covers_the_view() {
 fn a_frame_that_fits_is_untouched_by_the_mode() {
     // Neither mode should do anything at all to an ordinary image.
     for mode in [Preload, Tiled] {
-        let r = plan(2048, 1024, WHOLE.0, WHOLE.1, PANEL, Budget::new(MAX_AXIS, RGB8, mode)).resident;
+        let r = plan(
+            2048,
+            1024,
+            WHOLE.0,
+            WHOLE.1,
+            PANEL,
+            Budget::new(MAX_AXIS, RGB8, mode),
+        )
+        .resident;
         assert_eq!(r.stride, 1);
         assert_eq!((r.x, r.y, r.w, r.h), (0, 0, 2048, 1024));
     }

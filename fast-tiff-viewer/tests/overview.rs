@@ -40,11 +40,24 @@ fn roi(x: u32, y: u32, w: u32, h: u32, stride: u32) -> Roi {
 
 /// A build of `roi` holding `bytes` bytes across one 8-bit channel.
 fn built(r: Roi, bytes: usize) -> Built {
-    Built { frame_index: 0, roi: r, channels: vec![0], planes: vec![Decoded::U8(vec![0; bytes])] }
+    Built {
+        frame_index: 0,
+        roi: r,
+        channels: vec![0],
+        planes: vec![Decoded::U8(vec![0; bytes])],
+    }
 }
 
 fn capture(r: Roi, bytes: usize) -> Option<Overview> {
-    Overview::capture(built(r, bytes), W, H, 0, &[true], &[ChannelKind::Int8], OVERVIEW_MAX_BYTES)
+    Overview::capture(
+        built(r, bytes),
+        W,
+        H,
+        0,
+        &[true],
+        &[ChannelKind::Int8],
+        OVERVIEW_MAX_BYTES,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +78,10 @@ fn a_coarse_whole_frame_window_is_retained() {
         !covers_whole_frame(&coarse, W, H),
         "...but not at full resolution, which is why the two predicates are different"
     );
-    assert!(capture(coarse, 4096).is_some(), "a coarse fit view is exactly what is worth keeping");
+    assert!(
+        capture(coarse, 4096).is_some(),
+        "a coarse fit view is exactly what is worth keeping"
+    );
 }
 
 /// A window of part of the frame cannot stand in for a view of another part, so
@@ -73,13 +89,19 @@ fn a_coarse_whole_frame_window_is_retained() {
 #[test]
 fn a_window_short_of_the_frame_is_not_retained() {
     for short in [
-        roi(0, 0, W / 2, H, 16),      // narrow
-        roi(0, 0, W, H / 2, 16),      // short
-        roi(100, 0, W, H, 16),        // offset, so it misses the left edge
-        roi(0, 100, W, H, 16),        // offset, so it misses the top
+        roi(0, 0, W / 2, H, 16), // narrow
+        roi(0, 0, W, H / 2, 16), // short
+        roi(100, 0, W, H, 16),   // offset, so it misses the left edge
+        roi(0, 100, W, H, 16),   // offset, so it misses the top
     ] {
-        assert!(!spans_whole_frame(&short, W, H), "{short:?} does not span the frame");
-        assert!(capture(short, 4096).is_none(), "{short:?} should not be retained");
+        assert!(
+            !spans_whole_frame(&short, W, H),
+            "{short:?} does not span the frame"
+        );
+        assert!(
+            capture(short, 4096).is_none(),
+            "{short:?} should not be retained"
+        );
     }
 }
 
@@ -89,8 +111,14 @@ fn a_window_short_of_the_frame_is_not_retained() {
 #[test]
 fn an_overview_over_the_cap_is_not_retained() {
     let whole = roi(0, 0, W, H, 16);
-    assert!(capture(whole, OVERVIEW_MAX_BYTES).is_some(), "exactly the cap should fit");
-    assert!(capture(whole, OVERVIEW_MAX_BYTES + 1).is_none(), "one byte over should not");
+    assert!(
+        capture(whole, OVERVIEW_MAX_BYTES).is_some(),
+        "exactly the cap should fit"
+    );
+    assert!(
+        capture(whole, OVERVIEW_MAX_BYTES + 1).is_none(),
+        "one byte over should not"
+    );
 }
 
 /// The cap counts bytes, not samples. A float plane is four bytes per sample, so
@@ -106,7 +134,16 @@ fn the_cap_counts_bytes_rather_than_samples() {
         planes: vec![Decoded::F32(vec![0.0; samples])],
     };
     assert!(
-        Overview::capture(float, W, H, 0, &[true], &[ChannelKind::Float], OVERVIEW_MAX_BYTES).is_none(),
+        Overview::capture(
+            float,
+            W,
+            H,
+            0,
+            &[true],
+            &[ChannelKind::Float],
+            OVERVIEW_MAX_BYTES
+        )
+        .is_none(),
         "{samples} float samples is {} bytes, past the cap",
         samples * 4
     );
@@ -133,7 +170,14 @@ fn fresh() -> Overview {
 fn an_unchanged_stack_can_use_its_overview() {
     let o = fresh();
     assert!(o.matches(0, 0, &[true], &[ChannelKind::Int8]));
-    assert!(o.can_upload(&roi(0, 0, W, H, 16), 0, 0, &[true], &[ChannelKind::Int8], &[0]));
+    assert!(o.can_upload(
+        &roi(0, 0, W, H, 16),
+        0,
+        0,
+        &[true],
+        &[ChannelKind::Int8],
+        &[0]
+    ));
 }
 
 /// These are one frame's pixels. Shown for another they are simply the wrong
@@ -142,7 +186,14 @@ fn an_unchanged_stack_can_use_its_overview() {
 fn an_overview_for_another_frame_is_not_used() {
     let o = fresh();
     assert!(!o.matches(1, 0, &[true], &[ChannelKind::Int8]));
-    assert!(!o.can_upload(&roi(0, 0, W, H, 16), 1, 0, &[true], &[ChannelKind::Int8], &[0]));
+    assert!(!o.can_upload(
+        &roi(0, 0, W, H, 16),
+        1,
+        0,
+        &[true],
+        &[ChannelKind::Int8],
+        &[0]
+    ));
 }
 
 /// A channel toggled on has no pixels in an overview decoded without it, and
@@ -155,8 +206,14 @@ fn an_overview_for_another_frame_is_not_used() {
 #[test]
 fn an_overview_under_another_enabled_set_is_not_used() {
     let o = fresh();
-    assert!(!o.matches(0, 0, &[false], &[ChannelKind::Int8]), "the channel was turned off");
-    assert!(!o.matches(0, 0, &[true, true], &[ChannelKind::Int8]), "a channel appeared");
+    assert!(
+        !o.matches(0, 0, &[false], &[ChannelKind::Int8]),
+        "the channel was turned off"
+    );
+    assert!(
+        !o.matches(0, 0, &[true, true], &[ChannelKind::Int8]),
+        "a channel appeared"
+    );
 }
 
 /// Reassigning the axes changes which IFD each display channel reads, without
@@ -167,7 +224,14 @@ fn an_overview_under_another_enabled_set_is_not_used() {
 fn an_overview_from_an_older_decode_plan_is_not_used() {
     let o = fresh();
     assert!(!o.matches(0, 1, &[true], &[ChannelKind::Int8]));
-    assert!(!o.can_upload(&roi(0, 0, W, H, 16), 0, 1, &[true], &[ChannelKind::Int8], &[0]));
+    assert!(!o.can_upload(
+        &roi(0, 0, W, H, 16),
+        0,
+        1,
+        &[true],
+        &[ChannelKind::Int8],
+        &[0]
+    ));
 }
 
 /// The one that is worse than a wrong picture. Each plane's `Decoded` variant
@@ -179,7 +243,14 @@ fn an_overview_whose_channel_formats_changed_is_not_used() {
     let o = fresh();
     assert!(!o.matches(0, 0, &[true], &[ChannelKind::Int16]));
     assert!(!o.matches(0, 0, &[true], &[ChannelKind::Float]));
-    assert!(!o.can_upload(&roi(0, 0, W, H, 16), 0, 0, &[true], &[ChannelKind::Int16], &[0]));
+    assert!(!o.can_upload(
+        &roi(0, 0, W, H, 16),
+        0,
+        0,
+        &[true],
+        &[ChannelKind::Int16],
+        &[0]
+    ));
 }
 
 /// The planes were cut to one window's texture size, so they are the right bytes
@@ -192,7 +263,10 @@ fn the_overview_is_only_uploaded_for_the_window_asked_for() {
     let right = roi(0, 0, W, H, 16);
     let k = [ChannelKind::Int8];
 
-    assert!(o.can_upload(&right, 0, 0, &[true], &k, &[0]), "the window it was cut for");
+    assert!(
+        o.can_upload(&right, 0, 0, &[true], &k, &[0]),
+        "the window it was cut for"
+    );
     assert!(
         !o.can_upload(&roi(0, 0, W, H, 8), 0, 0, &[true], &k, &[0]),
         "a different stride is a different texture size"

@@ -2,10 +2,10 @@
 
 // The UI lives in the library half of this crate so the web build can reuse
 // it; see `src/lib.rs`. This file is only the native host.
-use fasttiff::{app, render};
 #[cfg(target_os = "macos")]
 use fasttiff::macos_open;
 use fasttiff::process;
+use fasttiff::{app, render};
 
 /// The PNG baked into the binary for the application icon.
 ///
@@ -26,7 +26,11 @@ const ICON_PNG: &[u8] = include_bytes!("../icon/icon256.png");
 fn window_icon() -> Option<egui::IconData> {
     let image = image::load_from_memory(ICON_PNG).ok()?.into_rgba8();
     let (width, height) = image.dimensions();
-    Some(egui::IconData { rgba: image.into_raw(), width, height })
+    Some(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
 }
 
 fn main() -> eframe::Result {
@@ -54,8 +58,10 @@ fn main() -> eframe::Result {
     // dragged onto the .exe / its shortcut. Selecting several files at once
     // passes them all to a single invocation — open the first here and launch
     // each of the rest in its own process so they all appear side by side.
-    let files: Vec<std::path::PathBuf> =
-        std::env::args_os().skip(1).map(std::path::PathBuf::from).collect();
+    let files: Vec<std::path::PathBuf> = std::env::args_os()
+        .skip(1)
+        .map(std::path::PathBuf::from)
+        .collect();
     let initial_path = process::open_all(&files).cloned();
 
     let viewport = egui::ViewportBuilder::default()
@@ -118,14 +124,22 @@ mod icon_tests {
     #[test]
     fn the_embedded_icon_decodes() {
         let icon = window_icon().expect("the embedded icon should decode");
-        assert!(icon.width >= 256 && icon.height >= 256, "{}x{}", icon.width, icon.height);
+        assert!(
+            icon.width >= 256 && icon.height >= 256,
+            "{}x{}",
+            icon.width,
+            icon.height
+        );
         assert_eq!(icon.width, icon.height, "an app icon should be square");
         assert_eq!(
             icon.rgba.len(),
             icon.width as usize * icon.height as usize * 4,
             "RGBA buffer does not match the stated size"
         );
-        assert!(icon.rgba.iter().any(|&b| b != 0), "the icon decoded to nothing but zeroes");
+        assert!(
+            icon.rgba.iter().any(|&b| b != 0),
+            "the icon decoded to nothing but zeroes"
+        );
     }
 
     /// Both candidates, whichever this platform compiled.
@@ -139,13 +153,25 @@ mod icon_tests {
     #[test]
     fn both_platform_icons_are_present_and_sound() {
         for (name, bytes, side) in [
-            ("icon256.png", &include_bytes!("../icon/icon256.png")[..], 256u32),
-            ("icon512.png", &include_bytes!("../icon/icon512.png")[..], 512),
+            (
+                "icon256.png",
+                &include_bytes!("../icon/icon256.png")[..],
+                256u32,
+            ),
+            (
+                "icon512.png",
+                &include_bytes!("../icon/icon512.png")[..],
+                512,
+            ),
         ] {
             let image = image::load_from_memory(bytes)
                 .unwrap_or_else(|e| panic!("{name} does not decode: {e}"))
                 .into_rgba8();
-            assert_eq!(image.dimensions(), (side, side), "{name} is not {side}x{side}");
+            assert_eq!(
+                image.dimensions(),
+                (side, side),
+                "{name} is not {side}x{side}"
+            );
             assert!(
                 image.pixels().any(|p| p.0[3] != 0),
                 "{name} is fully transparent, so it would show as nothing at all"

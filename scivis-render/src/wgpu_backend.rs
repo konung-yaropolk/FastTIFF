@@ -22,7 +22,9 @@
 //! must run before [`ImageRenderResources::paint_volume`] — under egui_wgpu
 //! that's `prepare` then `paint`, elsewhere just call them in order.
 
-use crate::{ChannelKind, ChannelUniform, Lut, VolumeInterp, VolumeKind, VolumeParams, MAX_CHANNELS};
+use crate::{
+    ChannelKind, ChannelUniform, Lut, VolumeInterp, VolumeKind, VolumeParams, MAX_CHANNELS,
+};
 use std::num::NonZeroU64;
 
 const LUT_WIDTH: u32 = 256;
@@ -225,12 +227,18 @@ impl ImageRenderResources {
         });
 
         // 1x1 placeholder textures to start; resized via `ensure_size`.
-        let channel_textures =
-            std::array::from_fn(|i| {
-                create_int_texture(device, 1, 1, wgpu::TextureFormat::R16Uint, &format!("FastTIFFchannel {i}"))
-            });
-        let channel_ftextures =
-            std::array::from_fn(|i| create_float_texture(device, 1, 1, &format!("FastTIFFchannel-f {i}")));
+        let channel_textures = std::array::from_fn(|i| {
+            create_int_texture(
+                device,
+                1,
+                1,
+                wgpu::TextureFormat::R16Uint,
+                &format!("FastTIFFchannel {i}"),
+            )
+        });
+        let channel_ftextures = std::array::from_fn(|i| {
+            create_float_texture(device, 1, 1, &format!("FastTIFFchannel-f {i}"))
+        });
         let lut_texture = create_lut_texture(device);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("FastTIFFlut sampler"),
@@ -251,9 +259,16 @@ impl ImageRenderResources {
             &sampler,
         );
 
-        let (volume_pipeline, volume_bind_group_layout, volume_bind_group, volume_uniform_buffer, volume_textures) =
-            create_volume_resources(device, target_format, &lut_texture, &sampler);
-        let volume_unorm16 = device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM);
+        let (
+            volume_pipeline,
+            volume_bind_group_layout,
+            volume_bind_group,
+            volume_uniform_buffer,
+            volume_textures,
+        ) = create_volume_resources(device, target_format, &lut_texture, &sampler);
+        let volume_unorm16 = device
+            .features()
+            .contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM);
 
         Self {
             device: gpu.clone(),
@@ -299,7 +314,11 @@ impl ImageRenderResources {
         let mut rebind = false;
         for c in 0..MAX_CHANNELS {
             let entry = channels.get(c);
-            let (want_w, want_h, want_d) = if entry.is_some() { (w, h, d) } else { (1, 1, 1) };
+            let (want_w, want_h, want_d) = if entry.is_some() {
+                (w, h, d)
+            } else {
+                (1, 1, 1)
+            };
             let want = wgpu::Extent3d {
                 width: want_w,
                 height: want_h,
@@ -309,12 +328,28 @@ impl ImageRenderResources {
                 Some((kind, _)) => self.volume_format(*kind),
                 None => wgpu::TextureFormat::R16Float,
             };
-            if self.volume_textures[c].size() != want || self.volume_textures[c].format() != want_fmt {
-                self.volume_textures[c] =
-                    create_volume_texture(device, want_w, want_h, want_d, want_fmt, &format!("FastTIFFvol {c}"));
+            if self.volume_textures[c].size() != want
+                || self.volume_textures[c].format() != want_fmt
+            {
+                self.volume_textures[c] = create_volume_texture(
+                    device,
+                    want_w,
+                    want_h,
+                    want_d,
+                    want_fmt,
+                    &format!("FastTIFFvol {c}"),
+                );
                 rebind = true;
                 if entry.is_none() {
-                    write_volume_region(&self.queue, &self.volume_textures[c], 1, 1, 0, 1, &[0u8, 0u8]);
+                    write_volume_region(
+                        &self.queue,
+                        &self.volume_textures[c],
+                        1,
+                        1,
+                        0,
+                        1,
+                        &[0u8, 0u8],
+                    );
                 }
             }
             if let Some((kind, bytes)) = entry {
@@ -336,7 +371,9 @@ impl ImageRenderResources {
     /// The texture format a volume channel of `kind` uses on this device.
     fn volume_format(&self, kind: VolumeKind) -> wgpu::TextureFormat {
         match kind {
-            VolumeKind::U8 | VolumeKind::U16 if self.volume_unorm16 => wgpu::TextureFormat::R16Unorm,
+            VolumeKind::U8 | VolumeKind::U16 if self.volume_unorm16 => {
+                wgpu::TextureFormat::R16Unorm
+            }
             _ => wgpu::TextureFormat::R16Float,
         }
     }
@@ -346,7 +383,13 @@ impl ImageRenderResources {
     /// other combination converts z-slab by z-slab into a reused buffer, so the
     /// transient allocation is bounded by `VOLUME_UPLOAD_CHUNK_BYTES` instead of
     /// a second full-volume copy.
-    fn upload_volume_channel(&self, c: usize, dims: (u32, u32, u32), kind: VolumeKind, bytes: &[u8]) {
+    fn upload_volume_channel(
+        &self,
+        c: usize,
+        dims: (u32, u32, u32),
+        kind: VolumeKind,
+        bytes: &[u8],
+    ) {
         let queue = &self.queue;
         let (w, h, d) = dims;
         let texture = &self.volume_textures[c];
@@ -362,7 +405,8 @@ impl ImageRenderResources {
             VolumeKind::U16 => 2,
             VolumeKind::F32 => 4,
         };
-        let slices_per_chunk = (VOLUME_UPLOAD_CHUNK_BYTES / (slice_texels * 2).max(1)).clamp(1, d as usize);
+        let slices_per_chunk =
+            (VOLUME_UPLOAD_CHUNK_BYTES / (slice_texels * 2).max(1)).clamp(1, d as usize);
         let mut buf: Vec<u16> = Vec::with_capacity(slices_per_chunk * slice_texels);
         let mut z0 = 0usize;
         while z0 < d as usize {
@@ -370,7 +414,15 @@ impl ImageRenderResources {
             let src = &bytes[z0 * slice_texels * src_bps..(z0 + zn) * slice_texels * src_bps];
             buf.clear();
             convert_volume_texels(kind, unorm, src, &mut buf);
-            write_volume_region(queue, texture, w, h, z0 as u32, zn as u32, bytemuck::cast_slice(&buf));
+            write_volume_region(
+                queue,
+                texture,
+                w,
+                h,
+                z0 as u32,
+                zn as u32,
+                bytemuck::cast_slice(&buf),
+            );
             z0 += zn;
         }
     }
@@ -408,9 +460,15 @@ impl ImageRenderResources {
             modes: [p.num_channels, p.render_mode, self.volume_interp_mode, 0],
         };
         for c in 0..MAX_CHANNELS {
-            gpu.channels[c] = [p.windows[c * 2], p.windows[c * 2 + 1], p.enabled[c], p.albedo_t[c]];
+            gpu.channels[c] = [
+                p.windows[c * 2],
+                p.windows[c * 2 + 1],
+                p.enabled[c],
+                p.albedo_t[c],
+            ];
         }
-        self.queue.write_buffer(&self.volume_uniform_buffer, 0, bytemuck::bytes_of(&gpu));
+        self.queue
+            .write_buffer(&self.volume_uniform_buffer, 0, bytemuck::bytes_of(&gpu));
     }
 
     /// Ray-march the current volume. `prepare` has already written the uniform.
@@ -458,13 +516,21 @@ impl ImageRenderResources {
             // R8Uint or R16Uint at full size for an integer channel, else a 1x1
             // R16Uint dummy. Both are sampled through the same `texture_2d<u32>`.
             match want[c] {
-                KIND_INT8 => create_int_texture(device, width, height, wgpu::TextureFormat::R8Uint, &label),
-                KIND_INT16 => create_int_texture(device, width, height, wgpu::TextureFormat::R16Uint, &label),
+                KIND_INT8 => {
+                    create_int_texture(device, width, height, wgpu::TextureFormat::R8Uint, &label)
+                }
+                KIND_INT16 => {
+                    create_int_texture(device, width, height, wgpu::TextureFormat::R16Uint, &label)
+                }
                 _ => create_int_texture(device, 1, 1, wgpu::TextureFormat::R16Uint, &label),
             }
         });
         self.channel_ftextures = std::array::from_fn(|c| {
-            let (w, h) = if want[c] == KIND_FLOAT { (width, height) } else { (1, 1) };
+            let (w, h) = if want[c] == KIND_FLOAT {
+                (width, height)
+            } else {
+                (1, 1)
+            };
             create_float_texture(device, w, h, &format!("FastTIFFchannel-f {c}"))
         });
         self.bind_group = build_bind_group(
@@ -625,7 +691,8 @@ impl ImageRenderResources {
                 is_float: if c.is_float { 1.0 } else { 0.0 },
             };
         }
-        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&gpu));
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&gpu));
     }
 
     pub fn paint(&self, render_pass: &mut wgpu::RenderPass<'_>) {
@@ -686,7 +753,12 @@ fn create_int_texture(
     })
 }
 
-fn create_float_texture(device: &wgpu::Device, width: u32, height: u32, label: &str) -> wgpu::Texture {
+fn create_float_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    label: &str,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -783,7 +855,13 @@ fn create_volume_resources(
     target_format: wgpu::TextureFormat,
     lut_texture: &wgpu::Texture,
     sampler: &wgpu::Sampler,
-) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::BindGroup, wgpu::Buffer, [wgpu::Texture; MAX_CHANNELS]) {
+) -> (
+    wgpu::RenderPipeline,
+    wgpu::BindGroupLayout,
+    wgpu::BindGroup,
+    wgpu::Buffer,
+    [wgpu::Texture; MAX_CHANNELS],
+) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("FastTIFFvolume shader"),
         source: wgpu::ShaderSource::Wgsl(include_str!("shaders/volume.wgsl").into()),
@@ -858,9 +936,23 @@ fn create_volume_resources(
     });
 
     let textures = std::array::from_fn(|c| {
-        create_volume_texture(device, 1, 1, 1, wgpu::TextureFormat::R16Float, &format!("FastTIFFvol {c}"))
+        create_volume_texture(
+            device,
+            1,
+            1,
+            1,
+            wgpu::TextureFormat::R16Float,
+            &format!("FastTIFFvol {c}"),
+        )
     });
-    let bind_group = build_volume_bind_group(device, &layout, &uniform_buffer, &textures, lut_texture, sampler);
+    let bind_group = build_volume_bind_group(
+        device,
+        &layout,
+        &uniform_buffer,
+        &textures,
+        lut_texture,
+        sampler,
+    );
 
     (pipeline, layout, bind_group, uniform_buffer, textures)
 }
@@ -909,7 +1001,15 @@ const VOLUME_UPLOAD_CHUNK_BYTES: usize = 32 << 20;
 
 /// Write a z-slab of 16-bit texels (`data` = `w*h*d` texels starting at `z0`)
 /// into a 3D texture.
-fn write_volume_region(queue: &wgpu::Queue, texture: &wgpu::Texture, w: u32, h: u32, z0: u32, d: u32, data: &[u8]) {
+fn write_volume_region(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    w: u32,
+    h: u32,
+    z0: u32,
+    d: u32,
+    data: &[u8],
+) {
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture,
@@ -941,12 +1041,16 @@ fn convert_volume_texels(kind: VolumeKind, unorm: bool, bytes: &[u8], out: &mut 
     use half::f16;
     match kind {
         VolumeKind::U8 if unorm => out.extend(bytes.iter().map(|&b| b as u16 * 257)),
-        VolumeKind::U8 => out.extend(bytes.iter().map(|&b| f16::from_f32(b as f32 / 255.0).to_bits())),
-        VolumeKind::U16 => out.extend(
+        VolumeKind::U8 => out.extend(
             bytes
-                .chunks_exact(2)
-                .map(|c| f16::from_f32(u16::from_ne_bytes([c[0], c[1]]) as f32 / 65535.0).to_bits()),
+                .iter()
+                .map(|&b| f16::from_f32(b as f32 / 255.0).to_bits()),
         ),
+        VolumeKind::U16 => {
+            out.extend(bytes.chunks_exact(2).map(|c| {
+                f16::from_f32(u16::from_ne_bytes([c[0], c[1]]) as f32 / 65535.0).to_bits()
+            }))
+        }
         VolumeKind::F32 => out.extend(
             bytes
                 .chunks_exact(4)

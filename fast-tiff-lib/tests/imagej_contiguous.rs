@@ -16,7 +16,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 fn unique_temp_path(name: &str) -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("fast_tiff_ijcontig_{}_{}_{}", std::process::id(), n, name))
+    std::env::temp_dir().join(format!(
+        "fast_tiff_ijcontig_{}_{}_{}",
+        std::process::id(),
+        n,
+        name
+    ))
 }
 
 struct Cleanup(PathBuf);
@@ -57,27 +62,26 @@ fn build_imagej_contiguous(images_claimed: usize, frames_in_file: usize) -> Vec<
 
     // The single IFD, entries in ascending tag order.
     let ifd_offset = file.len() as u32;
-    let entry =
-        |tag: u16, ftype: u16, count: u32, value: u32| -> Vec<u8> {
-            let mut e = Vec::with_capacity(12);
-            e.extend_from_slice(&tag.to_le_bytes());
-            e.extend_from_slice(&ftype.to_le_bytes());
-            e.extend_from_slice(&count.to_le_bytes());
-            e.extend_from_slice(&value.to_le_bytes());
-            e
-        };
+    let entry = |tag: u16, ftype: u16, count: u32, value: u32| -> Vec<u8> {
+        let mut e = Vec::with_capacity(12);
+        e.extend_from_slice(&tag.to_le_bytes());
+        e.extend_from_slice(&ftype.to_le_bytes());
+        e.extend_from_slice(&count.to_le_bytes());
+        e.extend_from_slice(&value.to_le_bytes());
+        e
+    };
     let entries = [
-        entry(256, 4, 1, w),                              // ImageWidth
-        entry(257, 4, 1, h),                              // ImageLength
-        entry(258, 3, 1, 16),                             // BitsPerSample
-        entry(259, 3, 1, 1),                              // Compression: none
-        entry(262, 3, 1, 1),                              // Photometric: BlackIsZero
-        entry(270, 2, desc.len() as u32, desc_offset),    // ImageDescription
-        entry(273, 4, 1, data_start),                     // StripOffsets
-        entry(277, 3, 1, 1),                              // SamplesPerPixel
-        entry(278, 4, 1, h),                              // RowsPerStrip
-        entry(279, 4, 1, frame_bytes as u32),             // StripByteCounts (frame 0 only)
-        entry(339, 3, 1, 1),                              // SampleFormat: unsigned
+        entry(256, 4, 1, w),                           // ImageWidth
+        entry(257, 4, 1, h),                           // ImageLength
+        entry(258, 3, 1, 16),                          // BitsPerSample
+        entry(259, 3, 1, 1),                           // Compression: none
+        entry(262, 3, 1, 1),                           // Photometric: BlackIsZero
+        entry(270, 2, desc.len() as u32, desc_offset), // ImageDescription
+        entry(273, 4, 1, data_start),                  // StripOffsets
+        entry(277, 3, 1, 1),                           // SamplesPerPixel
+        entry(278, 4, 1, h),                           // RowsPerStrip
+        entry(279, 4, 1, frame_bytes as u32),          // StripByteCounts (frame 0 only)
+        entry(339, 3, 1, 1),                           // SampleFormat: unsigned
     ];
     file.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     for e in &entries {
@@ -96,14 +100,30 @@ fn single_ifd_contiguous_stack_expands_to_virtual_frames() {
     std::fs::write(&path, build_imagej_contiguous(3, 3)).unwrap();
 
     let stack = TiffStack::open(&path).unwrap();
-    assert_eq!(stack.frames.len(), 3, "images=3 must expand to 3 virtual frames");
+    assert_eq!(
+        stack.frames.len(),
+        3,
+        "images=3 must expand to 3 virtual frames"
+    );
     assert_eq!(stack.meta.frames, 3);
     for i in 0..3u16 {
-        let got = read_frame_u16(&stack.data, &stack.frames[i as usize], stack.byte_order, None).unwrap();
-        assert_eq!(got.as_ref(), &[i * 100, i * 100 + 1, i * 100 + 2, i * 100 + 3]);
+        let got = read_frame_u16(
+            &stack.data,
+            &stack.frames[i as usize],
+            stack.byte_order,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            got.as_ref(),
+            &[i * 100, i * 100 + 1, i * 100 + 2, i * 100 + 3]
+        );
         // Virtual frames are single uncompressed native strips: zero-copy.
         #[cfg(target_endian = "little")]
-        assert!(matches!(got, Cow::Borrowed(_)), "virtual frame {i} should be zero-copy");
+        assert!(
+            matches!(got, Cow::Borrowed(_)),
+            "virtual frame {i} should be zero-copy"
+        );
     }
 }
 

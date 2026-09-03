@@ -22,8 +22,12 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 /// The `tiff_decode` fuzz target's call sequence, verbatim. Keep the two in
 /// step: a reader added there should be added here.
 fn exercise(data: &[u8]) {
-    let Ok(stack) = fast_tiff_lib::TiffStack::from_bytes(data.to_vec()) else { return };
-    let Some(frame) = stack.frames.first() else { return };
+    let Ok(stack) = fast_tiff_lib::TiffStack::from_bytes(data.to_vec()) else {
+        return;
+    };
+    let Some(frame) = stack.frames.first() else {
+        return;
+    };
     let order = stack.byte_order;
     let b = &stack.data;
 
@@ -55,10 +59,24 @@ fn exercise(data: &[u8]) {
     // The last of each set is backwards on purpose — built rather than written
     // as a literal, which the lints reject as a mistake. Here it is the input a
     // caller produces from an inverted drag, and it must not panic.
-    let bad_cols = std::ops::Range { start: 9u32, end: 2 };
-    let bad_rows = std::ops::Range { start: 7u32, end: 3 };
-    let backwards_band = std::ops::Range { start: 7u32, end: 2 };
-    for (cols, rows) in [(0u32..1, 0u32..1), (0..u32::MAX, 0..u32::MAX), (2..9, 3..7), (bad_cols, bad_rows)] {
+    let bad_cols = std::ops::Range {
+        start: 9u32,
+        end: 2,
+    };
+    let bad_rows = std::ops::Range {
+        start: 7u32,
+        end: 3,
+    };
+    let backwards_band = std::ops::Range {
+        start: 7u32,
+        end: 2,
+    };
+    for (cols, rows) in [
+        (0u32..1, 0u32..1),
+        (0..u32::MAX, 0..u32::MAX),
+        (2..9, 3..7),
+        (bad_cols, bad_rows),
+    ] {
         if let Ok(region) = frame.crop(cols, rows) {
             let r = &region.frame;
             let _ = fast_tiff_lib::read_planes_u8(b, r, order);
@@ -66,7 +84,13 @@ fn exercise(data: &[u8]) {
             let _ = fast_tiff_lib::read_frame_f32(b, r, order);
         }
     }
-    for rows in [0u32..1, 0..u32::MAX, 3..9, u32::MAX - 1..u32::MAX, backwards_band] {
+    for rows in [
+        0u32..1,
+        0..u32::MAX,
+        3..9,
+        u32::MAX - 1..u32::MAX,
+        backwards_band,
+    ] {
         if let Ok(band) = frame.crop_rows(rows) {
             let f = &band.frame;
             let _ = fast_tiff_lib::read_planes_u8(b, f, order);
@@ -94,7 +118,10 @@ fn known_crashes_no_longer_panic() {
         let started = std::time::Instant::now();
         let r = catch_unwind(AssertUnwindSafe(|| exercise(&data)));
         let took = started.elapsed();
-        assert!(r.is_ok(), "{name} panicked — the Ok-or-Err contract is broken again");
+        assert!(
+            r.is_ok(),
+            "{name} panicked — the Ok-or-Err contract is broken again"
+        );
         // Some of these are *slow* units rather than crashes: a kilobyte of
         // input that once kept a reader busy for minutes, which for a library
         // taking untrusted bytes is a denial of service whether or not it ever
@@ -165,15 +192,26 @@ fn frame_geometry_overflow_is_an_error_not_a_panic() {
         strip_byte_counts: vec![16].into(),
         rows_per_strip: 1,
     };
-    assert!(frame.pixel_count().is_ok(), "w*h alone still fits on 64-bit");
+    assert!(
+        frame.pixel_count().is_ok(),
+        "w*h alone still fits on 64-bit"
+    );
     let err = frame.sample_count().expect_err("w*h*spp must overflow");
-    assert!(err.to_string().contains("overflows address space"), "got: {err}");
+    assert!(
+        err.to_string().contains("overflows address space"),
+        "got: {err}"
+    );
     assert!(frame.decoded_len().is_err(), "and so must the byte length");
 
     // The reader has to surface that as an error, not trap on the multiply.
     let data = vec![0u8; 64];
     let r = catch_unwind(AssertUnwindSafe(|| {
-        fast_tiff_lib::read_frame_u16(&data, &frame, fast_tiff_lib::ByteOrder::Little, None).is_err()
+        fast_tiff_lib::read_frame_u16(&data, &frame, fast_tiff_lib::ByteOrder::Little, None)
+            .is_err()
     }));
-    assert_eq!(r.ok(), Some(true), "read_frame_u16 must return Err, not panic");
+    assert_eq!(
+        r.ok(),
+        Some(true),
+        "read_frame_u16 must return Err, not panic"
+    );
 }

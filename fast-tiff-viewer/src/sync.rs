@@ -17,8 +17,8 @@ use crate::prefetch::{build_jobs, decode_jobs, ChannelJob, Decoded, PrefetchResu
 use crate::roi::{self, Roi, Serving};
 use crate::stack::Stack;
 use crate::viewer::{DecodeMode, ViewMode, Viewer};
-use crate::window;
 use crate::volume::VolumePlan;
+use crate::window;
 use crate::Renderer;
 use scivis_render::{ChannelKind, ChannelUniform, MAX_CHANNELS};
 
@@ -44,7 +44,9 @@ impl Viewer {
         // part of the image is on screen, which is the frontend's business.
         let (uv_offset, uv_scale) = (self.uv_offset, self.uv_scale);
         let viewport = self.viewport_px;
-        let Some(loaded) = &mut self.stack else { return outcome };
+        let Some(loaded) = &mut self.stack else {
+            return outcome;
+        };
 
         let n_channels = loaded.display.settings.len();
         if n_channels == 0 {
@@ -60,10 +62,15 @@ impl Viewer {
         // to it. For everything that fits a texture this is the whole frame at
         // full resolution, exactly as before; only a frame past the device limit
         // gets a window.
-        let (frame_w, frame_h) = loaded.tiff.frames.first().map_or((0, 0), |f| (f.width, f.height));
+        let (frame_w, frame_h) = loaded
+            .tiff
+            .frames
+            .first()
+            .map_or((0, 0), |f| (f.width, f.height));
         let large_mode = self.large_image_mode;
-        let target =
-            plan_residency(loaded, renderer, &kinds, uv_offset, uv_scale, viewport, large_mode);
+        let target = plan_residency(
+            loaded, renderer, &kinds, uv_offset, uv_scale, viewport, large_mode,
+        );
         // Size the textures to what is being *shown*, not to what is being
         // prepared: resizing now would blank the picture for as long as the new
         // window takes to build, which is the stall this avoids.
@@ -96,7 +103,8 @@ impl Viewer {
         // never fires here because nobody plays back a gigapixel stack; an
         // explicit Serial is still honoured, since that is a deliberate choice
         // about CPU use.
-        let windowed = target.is_some_and(|r| !window::covers_whole_frame(&r.show, frame_w, frame_h));
+        let windowed =
+            target.is_some_and(|r| !window::covers_whole_frame(&r.show, frame_w, frame_h));
         let parallel = self.decode_mode.parallel(self.decode_parallel)
             || (windowed && self.decode_mode == DecodeMode::Auto);
         fast_tiff_lib::set_parallel_decode(parallel);
@@ -122,7 +130,11 @@ impl Viewer {
             .settings
             .iter()
             .map(|s| {
-                let scale = if s.kind == ChannelKind::Int8 { SCALE_8BIT } else { 1.0 };
+                let scale = if s.kind == ChannelKind::Int8 {
+                    SCALE_8BIT
+                } else {
+                    1.0
+                };
                 ChannelUniform {
                     min: s.min / scale,
                     max: s.max / scale,
@@ -187,7 +199,12 @@ fn plan_residency(
     if !loaded.over_texture_limit {
         loaded.gpu_stride = 1;
         let full = Roi::full(w, h);
-        return Some(Serving { show: full, want: full, required: full, ready: true });
+        return Some(Serving {
+            show: full,
+            want: full,
+            required: full,
+            ready: true,
+        });
     }
 
     let budget = roi::Budget::new(max_axis, bytes_per_texel, mode);
@@ -228,8 +245,6 @@ fn gpu_bytes_per_texel(kind: ChannelKind) -> usize {
     }
 }
 
-
-
 /// 2D path: decode and upload this frame's enabled channels (from the prefetch
 /// worker when its result matches, else inline), then queue the read-ahead for
 /// the next frame when `read_ahead` is set.
@@ -253,7 +268,11 @@ fn sync_movie(
     }
     let mut result = Ok(());
     let frame_index = loaded.frame_index;
-    let (fw, fh) = loaded.tiff.frames.first().map_or((0, 0), |f| (f.width, f.height));
+    let (fw, fh) = loaded
+        .tiff
+        .frames
+        .first()
+        .map_or((0, 0), |f| (f.width, f.height));
     // A window smaller than the frame has to be re-cut when the view leaves it,
     // as well as when the frame or the channel set changes.
     let window_moved = loaded.roi != Some(roi);
@@ -300,7 +319,12 @@ fn sync_movie(
                     }
                     // If that was the whole frame, keep it: it is what the next
                     // view leaving its window will fall back on.
-                    let built = window::Built { frame_index, roi, channels, planes };
+                    let built = window::Built {
+                        frame_index,
+                        roi,
+                        channels,
+                        planes,
+                    };
                     capture_overview(loaded, built, fw, fh, &enabled, kinds, mode);
                 }
                 Err(e) => result = Err(e),
@@ -325,7 +349,12 @@ fn sync_movie(
             if !used_prefetch {
                 // One call decodes every enabled channel; RGB planes share a
                 // single decompression pass inside `decode_jobs`.
-                match decode_jobs(&loaded.tiff.data, &loaded.tiff.frames, loaded.tiff.byte_order, &jobs) {
+                match decode_jobs(
+                    &loaded.tiff.data,
+                    &loaded.tiff.frames,
+                    loaded.tiff.byte_order,
+                    &jobs,
+                ) {
                     Ok(decoded) => {
                         for (job, data) in jobs.iter().zip(&decoded) {
                             upload(renderer, job.channel, job.width, job.height, &roi, data);
@@ -495,7 +524,14 @@ fn capture_overview(
 /// The common case — the whole frame, full resolution — hands the decoded plane
 /// straight to the GPU with no copy, which is what it did before any of this
 /// existed. Only a real window pays for the cut.
-fn upload(renderer: &mut Renderer, channel: usize, width: u32, height: u32, roi: &Roi, data: &Decoded) {
+fn upload(
+    renderer: &mut Renderer,
+    channel: usize,
+    width: u32,
+    height: u32,
+    roi: &Roi,
+    data: &Decoded,
+) {
     if window::covers_whole_frame(roi, width, height) {
         match data {
             Decoded::U8(v) => renderer.upload_channel_u8(channel, width, height, v),
@@ -505,7 +541,13 @@ fn upload(renderer: &mut Renderer, channel: usize, width: u32, height: u32, roi:
         return;
     }
     let (tw, th) = roi.texture_size();
-    upload_texture(renderer, channel, tw, th, &window::cut(data, width, height, roi));
+    upload_texture(
+        renderer,
+        channel,
+        tw,
+        th,
+        &window::cut(data, width, height, roi),
+    );
 }
 
 /// Write an already-sized plane to its texture.
@@ -528,7 +570,11 @@ fn upload_texture(renderer: &mut Renderer, channel: usize, w: u32, h: u32, data:
 /// case (`slices > 1`) the volume depth is Z at the current frame_index (time),
 /// so playback animates the volume through time; otherwise the frame axis *is*
 /// the depth and `time` stays 0.
-fn sync_volume(loaded: &mut Stack, view: &mut crate::viewer::VolumeView, renderer: &mut Renderer) -> bool {
+fn sync_volume(
+    loaded: &mut Stack,
+    view: &mut crate::viewer::VolumeView,
+    renderer: &mut Renderer,
+) -> bool {
     let mut needs_repaint = false;
     let is_4d = loaded.display.dims.slices > 1;
     let time = if is_4d { loaded.frame_index } else { 0 };
@@ -581,12 +627,22 @@ fn sync_volume(loaded: &mut Stack, view: &mut crate::viewer::VolumeView, rendere
     // are unorm-normalized — see scivis_render::VolumeKind).
     // Bounded by MAX_CHANNELS, so it lives on the stack — this runs every 3D
     // frame and has no business calling the allocator.
-    let blank = VolumeChannel { min: 0.0, max: 0.0, is_float: false, enabled: false, albedo_t: 1.0 };
+    let blank = VolumeChannel {
+        min: 0.0,
+        max: 0.0,
+        is_float: false,
+        enabled: false,
+        albedo_t: 1.0,
+    };
     let mut windows = [blank; MAX_CHANNELS];
     let n = loaded.display.settings.len().min(MAX_CHANNELS);
     for (c, (slot, s)) in windows.iter_mut().zip(&loaded.display.settings).enumerate() {
         let is_float = s.kind == ChannelKind::Float;
-        let (min, max) = if is_float { (s.min, s.max) } else { (s.min / 65535.0, s.max / 65535.0) };
+        let (min, max) = if is_float {
+            (s.min, s.max)
+        } else {
+            (s.min / 65535.0, s.max / 65535.0)
+        };
         // The isosurface paints one fixed colour, taken from the LUT's
         // brightest point rather than its top entry — a contrast-stretched
         // palette ends black, and sampling the top would render nothing at all.
@@ -595,7 +651,13 @@ fn sync_volume(loaded: &mut Stack, view: &mut crate::viewer::VolumeView, rendere
             .luts
             .get(c)
             .map_or(1.0, scivis_render::brightest_lut_t);
-        *slot = VolumeChannel { min, max, is_float, enabled: s.enabled, albedo_t };
+        *slot = VolumeChannel {
+            min,
+            max,
+            is_float,
+            enabled: s.enabled,
+            albedo_t,
+        };
     }
     let windows = &windows[..n];
 
@@ -603,7 +665,14 @@ fn sync_volume(loaded: &mut Stack, view: &mut crate::viewer::VolumeView, rendere
     let cam = volume_camera(&view.cam, view.scale, (w, h, loaded.volume_depth()));
     // Cache the box extents so the orbit re-pivot can ray-cast the box.
     view.cam.box_he = cam.box_he;
-    let params = build_volume_params(&cam, windows, view.aspect, view.render, view.density, view.iso);
+    let params = build_volume_params(
+        &cam,
+        windows,
+        view.aspect,
+        view.render,
+        view.density,
+        view.iso,
+    );
     renderer.set_volume_params(params);
     needs_repaint
 }
@@ -629,7 +698,9 @@ pub fn plan_volume(loaded: &Stack, max_dim: u32, time: usize) -> VolumePlan {
 pub fn prefetch_matches(result: &PrefetchResult, jobs: &[ChannelJob]) -> bool {
     result.channels.len() == jobs.len()
         && result.channels.iter().zip(jobs).all(|(ch, job)| {
-            ch.channel == job.channel && ch.kind == job.kind && ch.width == job.width && ch.height == job.height
+            ch.channel == job.channel
+                && ch.kind == job.kind
+                && ch.width == job.width
+                && ch.height == job.height
         })
 }
-

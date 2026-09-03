@@ -39,7 +39,11 @@ pub struct Dims {
 
 impl Default for Dims {
     fn default() -> Self {
-        Dims { channels: 1, slices: 1, frames: 1 }
+        Dims {
+            channels: 1,
+            slices: 1,
+            frames: 1,
+        }
     }
 }
 

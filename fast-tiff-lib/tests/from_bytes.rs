@@ -5,9 +5,7 @@
 //! Everything here writes a stack in memory and reads it straight back, with no
 //! temp file anywhere.
 
-use fast_tiff_lib::{
-    read_frame_u16, Compression, SampleType, TiffStack, WriterOptions,
-};
+use fast_tiff_lib::{read_frame_u16, Compression, SampleType, TiffStack, WriterOptions};
 use std::io::Cursor;
 
 /// Write `frames` of 16-bit pixels into an in-memory TIFF.
@@ -46,7 +44,12 @@ fn round_trips_a_multi_frame_stack_with_no_filesystem() {
 fn pure_rust_codecs_decode_from_bytes() {
     let (w, h) = (9u32, 4u32);
     let pixels: Vec<u16> = (0..w * h).map(|i| (i as u16 * 61) % 900).collect();
-    for compression in [Compression::None, Compression::Lzw, Compression::Deflate, Compression::PackBits] {
+    for compression in [
+        Compression::None,
+        Compression::Lzw,
+        Compression::Deflate,
+        Compression::PackBits,
+    ] {
         let bytes = write(w, h, std::slice::from_ref(&pixels), compression);
         let stack = TiffStack::from_bytes(bytes).unwrap();
         let got = read_frame_u16(&stack.data, &stack.frames[0], stack.byte_order, None).unwrap();

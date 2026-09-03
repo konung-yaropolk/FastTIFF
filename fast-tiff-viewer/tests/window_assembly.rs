@@ -38,7 +38,9 @@ fn write(rows_per_strip: u32) -> Vec<u8> {
         .samples_per_pixel(1)
         .rows_per_strip(rows_per_strip);
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
-    let px: Vec<u16> = (0..(W * H) as usize).map(|i| (i * 131 + 17) as u16).collect();
+    let px: Vec<u16> = (0..(W * H) as usize)
+        .map(|i| (i * 131 + 17) as u16)
+        .collect();
     w.write_frame_u16(&px).unwrap();
     w.finish().unwrap().into_inner()
 }
@@ -73,7 +75,11 @@ fn expected(full: &[u16], roi: &Roi) -> Vec<u16> {
         for tx in 0..tw {
             let sx = roi.x + tx * roi.stride;
             let sy = roi.y + ty * roi.stride;
-            out.push(if sx < W && sy < H { full[(sy * W + sx) as usize] } else { 0 });
+            out.push(if sx < W && sy < H {
+                full[(sy * W + sx) as usize]
+            } else {
+                0
+            });
         }
     }
     out
@@ -82,16 +88,20 @@ fn expected(full: &[u16], roi: &Roi) -> Vec<u16> {
 fn check(rows_per_strip: u32, roi: Roi) {
     let bytes = write(rows_per_strip);
     let stack = TiffStack::from_bytes(bytes).unwrap();
-    let full = fast_tiff_lib::read_planes_u16(&stack.data, &stack.frames[0], stack.byte_order, None)
-        .unwrap();
+    let full =
+        fast_tiff_lib::read_planes_u16(&stack.data, &stack.frames[0], stack.byte_order, None)
+            .unwrap();
     let jobs = job(&stack);
     let mut bands = BandCache::default();
-    let got =
-        window::assemble(&stack, &mut bands, &jobs, &[ChannelKind::Int16], &roi, 0).unwrap();
+    let got = window::assemble(&stack, &mut bands, &jobs, &[ChannelKind::Int16], &roi, 0).unwrap();
 
     let want = expected(&full[0], &roi);
     let got = u16s(&got[0]);
-    assert_eq!(got.len(), want.len(), "rows_per_strip {rows_per_strip}, {roi:?}: texture size");
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "rows_per_strip {rows_per_strip}, {roi:?}: texture size"
+    );
 
     if got != want.as_slice() {
         let (tw, _) = roi.texture_size();
@@ -112,8 +122,26 @@ fn check(rows_per_strip: u32, roi: Roi) {
 #[test]
 fn a_full_resolution_window_holds_the_frame_it_covers() {
     for rps in [1, 2, 4, 8] {
-        check(rps, Roi { x: 0, y: 0, w: W, h: H, stride: 1 });
-        check(rps, Roi { x: 8, y: 12, w: 32, h: 40, stride: 1 });
+        check(
+            rps,
+            Roi {
+                x: 0,
+                y: 0,
+                w: W,
+                h: H,
+                stride: 1,
+            },
+        );
+        check(
+            rps,
+            Roi {
+                x: 8,
+                y: 12,
+                w: 32,
+                h: 40,
+                stride: 1,
+            },
+        );
     }
 }
 
@@ -123,8 +151,26 @@ fn a_full_resolution_window_holds_the_frame_it_covers() {
 fn a_window_sampled_within_its_strips_holds_the_right_rows() {
     // rows_per_strip 8 with stride 2 or 4: `step_for` declines, ordinary path.
     for stride in [2, 4] {
-        check(8, Roi { x: 0, y: 0, w: W, h: H, stride });
-        check(8, Roi { x: 4, y: 8, w: 48, h: 64, stride });
+        check(
+            8,
+            Roi {
+                x: 0,
+                y: 0,
+                w: W,
+                h: H,
+                stride,
+            },
+        );
+        check(
+            8,
+            Roi {
+                x: 4,
+                y: 8,
+                w: 48,
+                h: 64,
+                stride,
+            },
+        );
     }
 }
 
@@ -136,23 +182,65 @@ fn a_window_sampled_within_its_strips_holds_the_right_rows() {
 fn a_window_sampled_across_whole_strips_holds_the_right_rows() {
     // rows_per_strip 2, strides 4/8/16 -> step 2/4/8.
     for stride in [4, 8, 16] {
-        check(2, Roi { x: 0, y: 0, w: W, h: H, stride });
+        check(
+            2,
+            Roi {
+                x: 0,
+                y: 0,
+                w: W,
+                h: H,
+                stride,
+            },
+        );
     }
     // rows_per_strip 4, strides 8/16 -> step 2/4.
     for stride in [8, 16] {
-        check(4, Roi { x: 0, y: 0, w: W, h: H, stride });
+        check(
+            4,
+            Roi {
+                x: 0,
+                y: 0,
+                w: W,
+                h: H,
+                stride,
+            },
+        );
     }
     // And the same, off the origin, so the first sampled row does not fall at
     // the start of its strip.
-    check(2, Roi { x: 5, y: 6, w: 48, h: 80, stride: 4 });
-    check(4, Roi { x: 5, y: 10, w: 48, h: 80, stride: 8 });
+    check(
+        2,
+        Roi {
+            x: 5,
+            y: 6,
+            w: 48,
+            h: 80,
+            stride: 4,
+        },
+    );
+    check(
+        4,
+        Roi {
+            x: 5,
+            y: 10,
+            w: 48,
+            h: 80,
+            stride: 8,
+        },
+    );
 }
 
 /// The two paths must agree with each other, not merely each with the oracle —
 /// the same window at the same stride is the same picture however it was read.
 #[test]
 fn the_stepped_and_contiguous_paths_agree() {
-    let roi = Roi { x: 0, y: 0, w: W, h: H, stride: 8 };
+    let roi = Roi {
+        x: 0,
+        y: 0,
+        w: W,
+        h: H,
+        stride: 8,
+    };
 
     // rows_per_strip 8 makes `step_for` decline (stride == per); rows_per_strip
     // 2 makes it take the stepped path. Same file content either way.
@@ -165,5 +253,8 @@ fn the_stepped_and_contiguous_paths_agree() {
             window::assemble(&stack, &mut bands, &jobs, &[ChannelKind::Int16], &roi, 0).unwrap();
         planes.push(u16s(&got[0]).to_vec());
     }
-    assert_eq!(planes[0], planes[1], "the contiguous and stepped reads disagree");
+    assert_eq!(
+        planes[0], planes[1],
+        "the contiguous and stepped reads disagree"
+    );
 }

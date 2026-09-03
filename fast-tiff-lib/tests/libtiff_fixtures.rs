@@ -26,7 +26,8 @@
 
 use fast_tiff_lib::{
     read_frame_f32, read_frame_u16, read_frame_u8, read_plane_f32, read_plane_u16, read_plane_u8,
-    read_planes_rgb_u16, read_planes_rgb_u8, read_planes_u16, read_planes_u8, DisplayMode, TiffStack,
+    read_planes_rgb_u16, read_planes_rgb_u8, read_planes_u16, read_planes_u8, DisplayMode,
+    TiffStack,
 };
 use std::path::{Path, PathBuf};
 
@@ -63,7 +64,9 @@ fn expect_f32(g: u64) -> f32 {
 }
 
 fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
 }
 
 /// Verify every page of one fixture against the formula for `dtype`.
@@ -94,7 +97,9 @@ fn check_pixels(stack: &TiffStack, dtype: &str, spp: usize, pages: usize, name: 
                     let got: Vec<u8> = if spp > 1 {
                         read_plane_u8(&stack.data, frame, stack.byte_order, pl).unwrap()
                     } else {
-                        read_frame_u8(&stack.data, frame, stack.byte_order).unwrap().into_owned()
+                        read_frame_u8(&stack.data, frame, stack.byte_order)
+                            .unwrap()
+                            .into_owned()
                     };
                     let want: Vec<u8> = (0..n_pixels).map(|i| expect_u8(g_of(i))).collect();
                     assert_eq!(got, want, "{name}: page {p} plane {pl}");
@@ -108,7 +113,9 @@ fn check_pixels(stack: &TiffStack, dtype: &str, spp: usize, pages: usize, name: 
                     let got: Vec<u16> = if spp > 1 {
                         read_plane_u16(&stack.data, frame, stack.byte_order, None, pl).unwrap()
                     } else {
-                        read_frame_u16(&stack.data, frame, stack.byte_order, None).unwrap().into_owned()
+                        read_frame_u16(&stack.data, frame, stack.byte_order, None)
+                            .unwrap()
+                            .into_owned()
                     };
                     let want: Vec<u16> = (0..n_pixels).map(|i| expect_u16(g_of(i))).collect();
                     assert_eq!(got, want, "{name}: page {p} plane {pl}");
@@ -117,7 +124,9 @@ fn check_pixels(stack: &TiffStack, dtype: &str, spp: usize, pages: usize, name: 
                     let got: Vec<f32> = if spp > 1 {
                         read_plane_f32(&stack.data, frame, stack.byte_order, pl).unwrap()
                     } else {
-                        read_frame_f32(&stack.data, frame, stack.byte_order).unwrap().into_owned()
+                        read_frame_f32(&stack.data, frame, stack.byte_order)
+                            .unwrap()
+                            .into_owned()
                     };
                     let f = match dtype {
                         "u32" => expect_u32_as_f32,
@@ -174,8 +183,8 @@ fn every_fixture_decodes_correctly() {
             continue;
         }
 
-        let stack = TiffStack::open(&path)
-            .unwrap_or_else(|e| panic!("{name}: failed to open: {e:#}"));
+        let stack =
+            TiffStack::open(&path).unwrap_or_else(|e| panic!("{name}: failed to open: {e:#}"));
         check_pixels(&stack, dtype, spp, pages, name);
 
         if gen == "ij" {
@@ -191,7 +200,10 @@ fn every_fixture_decodes_correctly() {
             assert_eq!(meta.spacing, Some(0.5), "{name}: spacing");
             assert_eq!(meta.loop_playback, Some(false), "{name}: loop");
             assert!(
-                stack.description.as_deref().is_some_and(|d| d.contains("ImageJ=")),
+                stack
+                    .description
+                    .as_deref()
+                    .is_some_and(|d| d.contains("ImageJ=")),
                 "{name}: raw description exposed"
             );
         }
@@ -236,7 +248,10 @@ fn cmyk_fixtures_convert_through_the_rgb_readers() {
         let stack = TiffStack::open(dir.join(name))
             .unwrap_or_else(|e| panic!("{name}: failed to open: {e:#}"));
         for (p, frame) in stack.frames.iter().enumerate() {
-            assert!(frame.is_cmyk(), "{name}: page {p} should be recognised as CMYK");
+            assert!(
+                frame.is_cmyk(),
+                "{name}: page {p} should be recognised as CMYK"
+            );
             let n = W * H;
 
             if frame.bits_per_sample == 8 {

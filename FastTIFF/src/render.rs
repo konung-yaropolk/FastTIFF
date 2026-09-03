@@ -61,7 +61,11 @@ pub type Render = Arc<Mutex<ImageRenderResources>>;
 /// browser build is always wgpu.
 #[cfg(all(feature = "renderer-glow", not(target_arch = "wasm32")))]
 pub const RENDERER: eframe::Renderer = eframe::Renderer::Glow;
-#[cfg(all(feature = "renderer-wgpu", not(feature = "renderer-glow"), not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "renderer-wgpu",
+    not(feature = "renderer-glow"),
+    not(target_arch = "wasm32")
+))]
 pub const RENDERER: eframe::Renderer = eframe::Renderer::Wgpu;
 
 // --- glow ------------------------------------------------------------------
@@ -106,7 +110,10 @@ mod glue {
                 draw(&r, painter.gl());
             }
         });
-        egui::Shape::Callback(egui::PaintCallback { rect, callback: Arc::new(callback) })
+        egui::Shape::Callback(egui::PaintCallback {
+            rect,
+            callback: Arc::new(callback),
+        })
     }
 
     /// Backend hook for `eframe::NativeOptions`; the glow backend needs none.
@@ -141,7 +148,9 @@ mod glue {
     pub fn paint_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
         egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(
             rect,
-            ImagePaintCallback { resources: render.clone() },
+            ImagePaintCallback {
+                resources: render.clone(),
+            },
         ))
     }
 
@@ -149,7 +158,9 @@ mod glue {
     pub fn paint_volume_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
         egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(
             rect,
-            VolumePaintCallback { resources: render.clone() },
+            VolumePaintCallback {
+                resources: render.clone(),
+            },
         ))
     }
 
@@ -257,8 +268,8 @@ mod glue {
     }
 }
 
-pub use glue::{init, paint_callback, paint_volume_callback};
 #[cfg(not(target_arch = "wasm32"))]
 pub use glue::tune_native_options;
 #[cfg(target_arch = "wasm32")]
 pub use glue::tune_web_options;
+pub use glue::{init, paint_callback, paint_volume_callback};

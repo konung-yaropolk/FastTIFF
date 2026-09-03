@@ -122,13 +122,22 @@ fn trim_to(
     if actual == want {
         return decoded;
     }
-    let keep = Roi { x: 0, y: want.start - actual.start, w: width, h: want.end - want.start, stride: 1 };
+    let keep = Roi {
+        x: 0,
+        y: want.start - actual.start,
+        w: width,
+        h: want.end - want.start,
+        stride: 1,
+    };
     let h = actual.end - actual.start;
     decoded.iter().map(|d| cut(d, width, h, &keep)).collect()
 }
 
 /// Cut texel rows `t0..t1` of the window out of one contiguously decoded band.
-#[expect(clippy::too_many_arguments, reason = "all of it is one geometric mapping")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "all of it is one geometric mapping"
+)]
 fn blit_band(
     planes: &mut [Decoded],
     band: &[Decoded],
@@ -184,11 +193,13 @@ pub fn assemble(
 
     let per_sample: usize = jobs
         .iter()
-        .map(|j| match kinds.get(j.channel).copied().unwrap_or(ChannelKind::Int16) {
-            ChannelKind::Int8 => 1usize,
-            ChannelKind::Int16 => 2,
-            ChannelKind::Float => 4,
-        })
+        .map(
+            |j| match kinds.get(j.channel).copied().unwrap_or(ChannelKind::Int16) {
+                ChannelKind::Int8 => 1usize,
+                ChannelKind::Int16 => 2,
+                ChannelKind::Float => 4,
+            },
+        )
         .sum();
     let rows_per_band = bandcache::band_rows(frame_w, per_sample.max(1));
     let grid = bandcache::bands_covering(roi.y..roi.y + roi.h, rows_per_band);
@@ -291,7 +302,11 @@ pub fn assemble(
                 want_cols.clone(),
                 rows.clone(),
             )?;
-            debug_assert_eq!((got_cols.start, got_cols.end), cols, "probe and decode disagree");
+            debug_assert_eq!(
+                (got_cols.start, got_cols.end),
+                cols,
+                "probe and decode disagree"
+            );
             // A band is keyed by its grid slot, so what is stored has to be the
             // slot's rows. The crop snaps outward to piece boundaries, so trim
             // back to the grid, or the next hit would be offset by up to a whole
@@ -300,12 +315,36 @@ pub fn assemble(
             if worth_caching {
                 bands.put(frame_index, channels.clone(), band, cols, trimmed);
             } else {
-                blit_band(&mut planes, &trimmed, roi, cut_w, region.cols.start, &rows, t0, t1, tw, stride);
+                blit_band(
+                    &mut planes,
+                    &trimmed,
+                    roi,
+                    cut_w,
+                    region.cols.start,
+                    &rows,
+                    t0,
+                    t1,
+                    tw,
+                    stride,
+                );
                 continue;
             }
         }
-        let Some(band_planes) = bands.get(frame_index, &channels, band, cols) else { continue };
-        blit_band(&mut planes, band_planes, roi, cut_w, region.cols.start, &rows, t0, t1, tw, stride);
+        let Some(band_planes) = bands.get(frame_index, &channels, band, cols) else {
+            continue;
+        };
+        blit_band(
+            &mut planes,
+            band_planes,
+            roi,
+            cut_w,
+            region.cols.start,
+            &rows,
+            t0,
+            t1,
+            tw,
+            stride,
+        );
     }
 
     Ok(planes)
@@ -409,7 +448,12 @@ impl Overview {
         if bytes > budget {
             return None;
         }
-        Some(Overview { built, gen, enabled: enabled.to_vec(), kinds: kinds.to_vec() })
+        Some(Overview {
+            built,
+            gen,
+            enabled: enabled.to_vec(),
+            kinds: kinds.to_vec(),
+        })
     }
 
     /// Bytes the retained planes occupy.
@@ -508,7 +552,14 @@ impl WindowWorker {
                     while let Ok(newer) = rx.try_recv() {
                         job = newer;
                     }
-                    match assemble(&tiff, &mut bands, &job.jobs, &job.kinds, &job.roi, job.frame_index) {
+                    match assemble(
+                        &tiff,
+                        &mut bands,
+                        &job.jobs,
+                        &job.kinds,
+                        &job.roi,
+                        job.frame_index,
+                    ) {
                         Ok(planes) => {
                             let built = Built {
                                 frame_index: job.frame_index,
@@ -525,12 +576,27 @@ impl WindowWorker {
                 }
             })
             .ok()?;
-        Some(Self { tx, result, _handle: handle })
+        Some(Self {
+            tx,
+            result,
+            _handle: handle,
+        })
     }
 
     /// Ask for a window. Fire and forget; superseded requests are skipped.
-    pub fn request(&self, frame_index: usize, roi: Roi, jobs: Vec<ChannelJob>, kinds: Vec<ChannelKind>) {
-        let _ = self.tx.send(Job { frame_index, roi, jobs, kinds });
+    pub fn request(
+        &self,
+        frame_index: usize,
+        roi: Roi,
+        jobs: Vec<ChannelJob>,
+        kinds: Vec<ChannelKind>,
+    ) {
+        let _ = self.tx.send(Job {
+            frame_index,
+            roi,
+            jobs,
+            kinds,
+        });
     }
 
     /// Take a finished window if it can serve a view needing `required`,
@@ -575,10 +641,21 @@ impl WindowWorker {
     pub fn new(_path: std::path::PathBuf) -> Option<Self> {
         None
     }
-    pub fn request(&self, _frame_index: usize, _roi: Roi, _jobs: Vec<ChannelJob>, _kinds: Vec<ChannelKind>) {
+    pub fn request(
+        &self,
+        _frame_index: usize,
+        _roi: Roi,
+        _jobs: Vec<ChannelJob>,
+        _kinds: Vec<ChannelKind>,
+    ) {
         match self.0 {}
     }
-    pub fn take_matching(&self, _frame_index: usize, _roi: &Roi, _channels: &[usize]) -> Option<Built> {
+    pub fn take_matching(
+        &self,
+        _frame_index: usize,
+        _roi: &Roi,
+        _channels: &[usize],
+    ) -> Option<Built> {
         match self.0 {}
     }
 }

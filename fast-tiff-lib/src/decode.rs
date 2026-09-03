@@ -34,7 +34,6 @@ const PARALLEL_MIN_PIXELS: usize = 1024 * 1024;
 /// that motivated these guards.
 const MAX_DECODED_EXPANSION: u64 = 1 << 18;
 
-
 /// Process-wide hint: split large decodes across cores when `true`, run them
 /// serially when `false` (the default). Parallel decode spreads load across
 /// cores but uses *more total CPU* (rayon overhead), so it's only worth it when
@@ -116,7 +115,13 @@ pub fn read_frame_u16<'a>(
     // --- General path: decode plane 0 (the whole image for single-sample
     // frames). Multi-sample (RGB) frames are deinterleaved per-plane by
     // `read_plane_u16`, which callers use directly. ---
-    Ok(Cow::Owned(read_plane_u16(mmap, frame, file_order, float_range, 0)?))
+    Ok(Cow::Owned(read_plane_u16(
+        mmap,
+        frame,
+        file_order,
+        float_range,
+        0,
+    )?))
 }
 
 /// [`read_frame_u16`] into a caller-provided buffer, reusing its allocation.
@@ -175,7 +180,11 @@ pub fn read_frame_u16_into(
 /// the per-frame hot path — the caller scales the window/level into 0..255 units
 /// instead (dividing by 257). Only valid for `bits_per_sample == 8`,
 /// `samples_per_pixel == 1`, `UnsignedInt`; callers gate on that.
-pub fn read_frame_u8<'a>(mmap: &'a [u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Cow<'a, [u8]>> {
+pub fn read_frame_u8<'a>(
+    mmap: &'a [u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+) -> Result<Cow<'a, [u8]>> {
     if frame.bits_per_sample == 4 {
         return Ok(Cow::Owned(decode_4bit_indices(mmap, frame)?));
     }
@@ -185,7 +194,12 @@ pub fn read_frame_u8<'a>(mmap: &'a [u8], frame: &FrameInfo, file_order: ByteOrde
 /// [`read_frame_u8`] into a caller-provided buffer, reusing its allocation.
 /// For uncompressed predictor-free frames the strips are copied straight from
 /// the mapping into `out` — no intermediate buffer, no per-frame allocation.
-pub fn read_frame_u8_into(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder, out: &mut Vec<u8>) -> Result<()> {
+pub fn read_frame_u8_into(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     if frame.bits_per_sample == 4 {
         let indices = decode_4bit_indices(mmap, frame)?;
         ensure_len(out, indices.len());
@@ -332,12 +346,16 @@ fn decode_4bit_indices(mmap: &[u8], frame: &FrameInfo) -> Result<Vec<u8>> {
 
     // Assemble the packed bytes, decompressing each strip into its row range.
     let mut packed: Vec<u8> = Vec::new();
-    packed
-        .try_reserve_exact(packed_len)
-        .map_err(|_| anyhow!("cannot allocate {packed_len} bytes for a {width}x{height} 4-bit frame"))?;
+    packed.try_reserve_exact(packed_len).map_err(|_| {
+        anyhow!("cannot allocate {packed_len} bytes for a {width}x{height} 4-bit frame")
+    })?;
     packed.resize(packed_len, 0);
     let mut rows_done = 0usize;
-    for (&off, &len) in frame.strip_offsets.iter().zip(frame.strip_byte_counts.iter()) {
+    for (&off, &len) in frame
+        .strip_offsets
+        .iter()
+        .zip(frame.strip_byte_counts.iter())
+    {
         if rows_done >= height {
             break;
         }
@@ -355,10 +373,14 @@ fn decode_4bit_indices(mmap: &[u8], frame: &FrameInfo) -> Result<Vec<u8>> {
 
     // Unpack nibbles → one index byte per pixel.
     let mut out: Vec<u8> = Vec::new();
-    out.try_reserve_exact(out_len)
-        .map_err(|_| anyhow!("cannot allocate {out_len} bytes for a {width}x{height} 4-bit frame"))?;
+    out.try_reserve_exact(out_len).map_err(|_| {
+        anyhow!("cannot allocate {out_len} bytes for a {width}x{height} 4-bit frame")
+    })?;
     out.resize(out_len, 0);
-    for (prow, orow) in packed.chunks_exact(packed_row).zip(out.chunks_exact_mut(width.max(1))) {
+    for (prow, orow) in packed
+        .chunks_exact(packed_row)
+        .zip(out.chunks_exact_mut(width.max(1)))
+    {
         for (x, o) in orow.iter_mut().enumerate() {
             let byte = prow[x / 2];
             *o = if x % 2 == 0 { byte >> 4 } else { byte & 0x0f };
@@ -526,7 +548,10 @@ pub fn read_planes_u16_into(
     // frame's predictor runs inside each tile. Fusing would difference straight
     // across the seam between tile columns, which shows up as every tile after
     // the first being offset by its neighbour's last pixel.
-    let fuse = spp > 1 && !frame.is_planar() && frame.predictor == 2 && matches!(frame.bits_per_sample, 8 | 16)
+    let fuse = spp > 1
+        && !frame.is_planar()
+        && frame.predictor == 2
+        && matches!(frame.bits_per_sample, 8 | 16)
         && !frame.is_tiled();
     let native = decode_native_bytes_opt(mmap, frame, file_order, !fuse)?;
     out.resize_with(spp, Vec::new);
@@ -560,7 +585,12 @@ fn plane_layout(frame: &FrameInfo, plane: usize) -> (usize, usize) {
         // Saturating, not checked: this returns a bare tuple, and a saturated
         // offset simply fails the bounds check downstream. Wrapping would
         // silently point *into* the buffer instead.
-        (plane.saturating_mul(frame.width as usize).saturating_mul(frame.height as usize), 1)
+        (
+            plane
+                .saturating_mul(frame.width as usize)
+                .saturating_mul(frame.height as usize),
+            1,
+        )
     } else {
         (plane, spp)
     }
@@ -569,7 +599,13 @@ fn plane_layout(frame: &FrameInfo, plane: usize) -> (usize, usize) {
 /// Fused Predictor-2 undo + deinterleave for one 8/16-bit plane of a chunky
 /// frame: accumulate the per-row running sum for this sample channel while
 /// gathering it, writing display-space u16 (widened for 8-bit sources).
-fn plane_u16_fused_pred2(native: &[u8], frame: &FrameInfo, file_order: ByteOrder, plane: usize, out: &mut [u16]) {
+fn plane_u16_fused_pred2(
+    native: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+    plane: usize,
+    out: &mut [u16],
+) {
     let spp = (frame.samples_per_pixel as usize).max(1);
     let plane = plane.min(spp - 1);
     let width = frame.width as usize;
@@ -675,20 +711,26 @@ fn plane_u16_from_native(
             let floats: Vec<f32> = if parallel {
                 (0..n_pixels)
                     .into_par_iter()
-                    .map(|i| wide_sample_f32(&native[(base + i * stride) * sb..], file_order, format, sb))
+                    .map(|i| {
+                        wide_sample_f32(&native[(base + i * stride) * sb..], file_order, format, sb)
+                    })
                     .collect()
             } else {
                 (0..n_pixels)
-                    .map(|i| wide_sample_f32(&native[(base + i * stride) * sb..], file_order, format, sb))
+                    .map(|i| {
+                        wide_sample_f32(&native[(base + i * stride) * sb..], file_order, format, sb)
+                    })
                     .collect()
             };
             let (lo, hi) = float_range.unwrap_or_else(|| minmax_f32(&floats));
             let span = (hi - lo).max(f32::EPSILON);
             if parallel {
-                out.par_iter_mut().zip(floats.par_iter()).for_each(|(o, &v)| {
-                    let t = ((v - lo) / span).clamp(0.0, 1.0);
-                    *o = (t * 65535.0).round() as u16;
-                });
+                out.par_iter_mut()
+                    .zip(floats.par_iter())
+                    .for_each(|(o, &v)| {
+                        let t = ((v - lo) / span).clamp(0.0, 1.0);
+                        *o = (t * 65535.0).round() as u16;
+                    });
             } else {
                 for (o, &v) in out.iter_mut().zip(floats.iter()) {
                     let t = ((v - lo) / span).clamp(0.0, 1.0);
@@ -711,7 +753,12 @@ fn plane_u16_from_native(
 /// Always allocates: a chunky plane is a strided gather, so unlike
 /// [`read_frame_u8`] there's no zero-copy borrow. Only valid for unsigned 8-bit
 /// frames (`bits_per_sample == 8`); callers gate on that.
-pub fn read_plane_u8(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder, plane: usize) -> Result<Vec<u8>> {
+pub fn read_plane_u8(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+    plane: usize,
+) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     read_plane_u8_into(mmap, frame, file_order, plane, &mut out)?;
     Ok(out)
@@ -741,7 +788,11 @@ pub fn read_plane_u8_into(
 /// decompression pass — the u8 sibling of [`read_planes_u16`], ~3x cheaper
 /// than three [`read_plane_u8`] calls on compressed chunky RGB. Same validity
 /// rules as the per-plane call (unsigned 8-bit frames).
-pub fn read_planes_u8(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Vec<Vec<u8>>> {
+pub fn read_planes_u8(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+) -> Result<Vec<Vec<u8>>> {
     let mut out = Vec::new();
     read_planes_u8_into(mmap, frame, file_order, &mut out)?;
     Ok(out)
@@ -761,7 +812,11 @@ pub fn read_planes_u8_into(
     // frame's predictor runs inside each tile. Fusing would difference straight
     // across the seam between tile columns, which shows up as every tile after
     // the first being offset by its neighbour's last pixel.
-    let fuse = spp > 1 && !frame.is_planar() && frame.predictor == 2 && frame.bits_per_sample == 8 && !frame.is_tiled();
+    let fuse = spp > 1
+        && !frame.is_planar()
+        && frame.predictor == 2
+        && frame.bits_per_sample == 8
+        && !frame.is_tiled();
     let native = decode_native_bytes_opt(mmap, frame, file_order, !fuse)?;
     out.resize_with(spp, Vec::new);
     for plane_out in out.iter_mut() {
@@ -904,9 +959,17 @@ unsafe fn deinterleave_rgb8_ssse3(src: &[u8], r: &mut [u8], g: &mut [u8], b: &mu
 }
 
 /// The gather core shared by the u8 plane readers (`out` pre-sized).
-fn plane_u8_from_native(native: &[u8], frame: &FrameInfo, plane: usize, out: &mut [u8]) -> Result<()> {
+fn plane_u8_from_native(
+    native: &[u8],
+    frame: &FrameInfo,
+    plane: usize,
+    out: &mut [u8],
+) -> Result<()> {
     if frame.bits_per_sample != 8 {
-        bail!("read_plane_u8 requires 8-bit samples, got {}", frame.bits_per_sample);
+        bail!(
+            "read_plane_u8 requires 8-bit samples, got {}",
+            frame.bits_per_sample
+        );
     }
     let (base, stride) = plane_layout(frame, plane);
     gather_u8(native, base, stride, out)
@@ -1060,7 +1123,11 @@ pub fn read_plane_f32_into(
 /// Decode **all** sample planes as raw `f32` with a single decompression pass
 /// — the float sibling of [`read_planes_u16`]. Same validity rules as the
 /// per-plane call (32-bit data).
-pub fn read_planes_f32(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Vec<Vec<f32>>> {
+pub fn read_planes_f32(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+) -> Result<Vec<Vec<f32>>> {
     let mut out = Vec::new();
     read_planes_f32_into(mmap, frame, file_order, &mut out)?;
     Ok(out)
@@ -1100,7 +1167,13 @@ fn require_wide_samples(frame: &FrameInfo, method: &str) -> Result<()> {
 /// The conversion core shared by the f32 plane readers (`out` pre-sized).
 /// 64-bit sources (f64 / i64 / u64) are downcast to f32 here; 32-bit sources
 /// take the unchanged 4-byte path.
-fn plane_f32_from_native(native: &[u8], frame: &FrameInfo, file_order: ByteOrder, plane: usize, out: &mut [f32]) {
+fn plane_f32_from_native(
+    native: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+    plane: usize,
+    out: &mut [f32],
+) {
     let (base, stride) = plane_layout(frame, plane);
     // `out` was sized by the caller from the checked count, so its length is
     // the pixel count — no need to recompute it from the file's own numbers.
@@ -1108,9 +1181,9 @@ fn plane_f32_from_native(native: &[u8], frame: &FrameInfo, file_order: ByteOrder
     let format = frame.sample_format;
     let sb = if frame.bits_per_sample == 64 { 8 } else { 4 };
     if should_parallelize(n_pixels) {
-        out.par_iter_mut()
-            .enumerate()
-            .for_each(|(i, o)| *o = wide_sample_f32(&native[(base + i * stride) * sb..], file_order, format, sb));
+        out.par_iter_mut().enumerate().for_each(|(i, o)| {
+            *o = wide_sample_f32(&native[(base + i * stride) * sb..], file_order, format, sb)
+        });
     } else {
         for (i, o) in out.iter_mut().enumerate() {
             *o = wide_sample_f32(&native[(base + i * stride) * sb..], file_order, format, sb);
@@ -1133,14 +1206,19 @@ fn plane_f32_from_native(native: &[u8], frame: &FrameInfo, file_order: ByteOrder
 ///
 /// Note the memory cost: this holds the entire decoded stack at once
 /// (`frames * width * height * 2` bytes).
-pub fn preload_frames_u16(stack: &TiffStack, float_range: Option<(f32, f32)>) -> Result<Vec<Vec<u16>>> {
+pub fn preload_frames_u16(
+    stack: &TiffStack,
+    float_range: Option<(f32, f32)>,
+) -> Result<Vec<Vec<u16>>> {
     // Parallel across frames on native; serial on wasm, which has no threads.
     #[cfg(not(target_arch = "wasm32"))]
     let frames = stack.frames.par_iter();
     #[cfg(target_arch = "wasm32")]
     let frames = stack.frames.iter();
     frames
-        .map(|frame| Ok(read_frame_u16(&stack.data, frame, stack.byte_order, float_range)?.into_owned()))
+        .map(|frame| {
+            Ok(read_frame_u16(&stack.data, frame, stack.byte_order, float_range)?.into_owned())
+        })
         .collect()
 }
 
@@ -1182,7 +1260,11 @@ pub fn preload_frames_u8(stack: &TiffStack) -> Result<Vec<Vec<u8>>> {
 /// auto-ranges a 32-bit image to its own data instead of assuming a fixed
 /// scale. `None` for non-32-bit frames (8/16-bit use their native integer
 /// min/max instead).
-pub fn frame_float_minmax(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Option<(f32, f32)>> {
+pub fn frame_float_minmax(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+) -> Result<Option<(f32, f32)>> {
     // Only the wide (32/64-bit) formats auto-range this way; 8/16-bit use their
     // native integer min/max instead.
     if frame.bits_per_sample != 32 && frame.bits_per_sample != 64 {
@@ -1244,7 +1326,12 @@ fn sample_f32_64(chunk: &[u8], file_order: ByteOrder, format: SampleFormat) -> f
 /// free in practice; keeping the two readers separate leaves the 32-bit hot
 /// loops byte-for-byte unchanged.
 #[inline]
-fn wide_sample_f32(chunk: &[u8], file_order: ByteOrder, format: SampleFormat, sample_bytes: usize) -> f32 {
+fn wide_sample_f32(
+    chunk: &[u8],
+    file_order: ByteOrder,
+    format: SampleFormat,
+    sample_bytes: usize,
+) -> f32 {
     if sample_bytes == 8 {
         sample_f32_64(chunk, file_order, format)
     } else {
@@ -1280,7 +1367,11 @@ fn minmax_f32(values: &[f32]) -> (f32, f32) {
 /// decoder stops there, silently truncating the result to roughly strip
 /// 1's worth of data. For a typical 2-strip image that's exactly "only the
 /// top half is shown" — this is what that bug looked like in practice.
-fn decode_native_bytes<'a>(mmap: &'a [u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Cow<'a, [u8]>> {
+fn decode_native_bytes<'a>(
+    mmap: &'a [u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+) -> Result<Cow<'a, [u8]>> {
     decode_native_bytes_opt(mmap, frame, file_order, true)
 }
 
@@ -1304,7 +1395,9 @@ fn decode_native_bytes_opt<'a>(
     // (The 16-bit/native-order case is borrowed even more cheaply as `u16` by
     // `read_frame_u16`; this covers 8-bit, 32-bit, RGB and byte-swapped data.)
     if frame.is_tiled() {
-        return Ok(Cow::Owned(assemble_tiles(mmap, frame, file_order, undo_pred)?));
+        return Ok(Cow::Owned(assemble_tiles(
+            mmap, frame, file_order, undo_pred,
+        )?));
     }
 
     if frame.compression == Compression::None
@@ -1317,7 +1410,12 @@ fn decode_native_bytes_opt<'a>(
             .ok_or_else(|| anyhow!("strip data out of file bounds"))?;
         return if undo_pred && frame.predictor != 1 {
             // Predictor undo mutates in place, so it needs an owned copy.
-            Ok(Cow::Owned(undo_predictor(slice.to_vec(), frame, sample_bytes, file_order)?))
+            Ok(Cow::Owned(undo_predictor(
+                slice.to_vec(),
+                frame,
+                sample_bytes,
+                file_order,
+            )?))
         } else {
             Ok(Cow::Borrowed(slice))
         };
@@ -1333,9 +1431,13 @@ fn decode_native_bytes_opt<'a>(
 
     guard_frame_size(frame)?;
     let mut native: Vec<u8> = Vec::new();
-    native
-        .try_reserve_exact(total_len)
-        .map_err(|_| anyhow!("cannot allocate {total_len} bytes for a {}x{} frame", frame.width, frame.height))?;
+    native.try_reserve_exact(total_len).map_err(|_| {
+        anyhow!(
+            "cannot allocate {total_len} bytes for a {}x{} frame",
+            frame.width,
+            frame.height
+        )
+    })?;
     native.resize(total_len, 0);
 
     // Carve `native` into per-strip destination slices (disjoint row ranges).
@@ -1343,7 +1445,10 @@ fn decode_native_bytes_opt<'a>(
     // declared strip can never overrun the buffer.
     let mut dests: Vec<&mut [u8]> = Vec::with_capacity(frame.strip_offsets.len());
     let mut rest: &mut [u8] = &mut native;
-    for len in strip_dest_lens(frame, sample_bytes).into_iter().take(frame.strip_offsets.len()) {
+    for len in strip_dest_lens(frame, sample_bytes)
+        .into_iter()
+        .take(frame.strip_offsets.len())
+    {
         let (dest, tail) = rest.split_at_mut(len);
         dests.push(dest);
         rest = tail;
@@ -1354,8 +1459,9 @@ fn decode_native_bytes_opt<'a>(
     // row span comes from its index, so the map is pure). Small/medium frames
     // stay serial: the fork-join overhead would otherwise cost more total CPU
     // than it saves during fast playback.
-    let parallel =
-        compression != Compression::None && frame.strip_offsets.len() > 1 && should_parallelize(n_pixels);
+    let parallel = compression != Compression::None
+        && frame.strip_offsets.len() > 1
+        && should_parallelize(n_pixels);
     let strip_src = |offset: u64, len: u64| -> Result<&[u8]> {
         mmap.get(offset as usize..(offset + len) as usize)
             .ok_or_else(|| anyhow!("strip at offset {offset} (len {len}) out of file bounds"))
@@ -1385,8 +1491,11 @@ fn decode_native_bytes_opt<'a>(
             .try_reduce(|| 0, |a, b| Ok(a + b))?
     } else {
         let mut total = 0usize;
-        for ((&offset, &len), dest) in
-            frame.strip_offsets.iter().zip(frame.strip_byte_counts.iter()).zip(dests.iter_mut())
+        for ((&offset, &len), dest) in frame
+            .strip_offsets
+            .iter()
+            .zip(frame.strip_byte_counts.iter())
+            .zip(dests.iter_mut())
         {
             total += decode_strip(offset, len, dest)?;
         }
@@ -1436,8 +1545,9 @@ fn assemble_tiles(
 ) -> Result<Vec<u8>> {
     let sample_bytes = bytes_for_bits(frame.bits_per_sample)?;
     let total_len = frame.decoded_len()?;
-    let (across, down, tile_w, tile_h) =
-        frame.tile_grid().ok_or_else(|| anyhow!("assemble_tiles called on a stripped frame"))?;
+    let (across, down, tile_w, tile_h) = frame
+        .tile_grid()
+        .ok_or_else(|| anyhow!("assemble_tiles called on a stripped frame"))?;
 
     let spp = (frame.samples_per_pixel as usize).max(1);
     let planar = frame.is_planar();
@@ -1445,12 +1555,20 @@ fn assemble_tiles(
     // Samples per pixel *within one plane*: a planar plane holds one.
     let per_px = if planar { 1 } else { spp };
 
-    let dst_row_bytes = (frame.width as usize).saturating_mul(per_px).saturating_mul(sample_bytes);
-    let tile_row_bytes = (tile_w as usize).saturating_mul(per_px).saturating_mul(sample_bytes);
+    let dst_row_bytes = (frame.width as usize)
+        .saturating_mul(per_px)
+        .saturating_mul(sample_bytes);
+    let tile_row_bytes = (tile_w as usize)
+        .saturating_mul(per_px)
+        .saturating_mul(sample_bytes);
     let tile_bytes = tile_row_bytes.saturating_mul(tile_h as usize);
     let plane_bytes = dst_row_bytes.saturating_mul(frame.height as usize);
     if tile_bytes == 0 || plane_bytes == 0 {
-        bail!("degenerate tile geometry: {tile_w}x{tile_h} tiles in a {}x{} frame", frame.width, frame.height);
+        bail!(
+            "degenerate tile geometry: {tile_w}x{tile_h} tiles in a {}x{} frame",
+            frame.width,
+            frame.height
+        );
     }
 
     // The tile table has to describe the grid before any of it can be indexed.
@@ -1477,13 +1595,21 @@ fn assemble_tiles(
     padded.tile_size = None;
     padded.rows_per_strip = tile_h;
     guard_frame_size(&padded).map_err(|e| {
-        anyhow!("{tile_w}x{tile_h} tiles over a {}x{} frame: {e}", frame.width, frame.height)
+        anyhow!(
+            "{tile_w}x{tile_h} tiles over a {}x{} frame: {e}",
+            frame.width,
+            frame.height
+        )
     })?;
 
     let mut native: Vec<u8> = Vec::new();
-    native
-        .try_reserve_exact(total_len)
-        .map_err(|_| anyhow!("cannot allocate {total_len} bytes for a {}x{} frame", frame.width, frame.height))?;
+    native.try_reserve_exact(total_len).map_err(|_| {
+        anyhow!(
+            "cannot allocate {total_len} bytes for a {}x{} frame",
+            frame.width,
+            frame.height
+        )
+    })?;
     native.resize(total_len, 0);
 
     // A tile-shaped view of the frame, purely so the predictor undo — which
@@ -1494,28 +1620,33 @@ fn assemble_tiles(
     tile_frame.tile_size = None;
 
     let compression = frame.compression;
-    let parallel = compression != Compression::None && want > 1 && should_parallelize(frame.pixel_count()?);
+    let parallel =
+        compression != Compression::None && want > 1 && should_parallelize(frame.pixel_count()?);
 
     for (plane, plane_dst) in native.chunks_mut(plane_bytes).enumerate().take(n_planes) {
         // One band per tile row: every tile in a row writes into it, at
         // disjoint columns, so bands can be filled independently.
-        let bands: Vec<(usize, &mut [u8])> =
-            plane_dst.chunks_mut(tile_h as usize * dst_row_bytes).enumerate().collect();
+        let bands: Vec<(usize, &mut [u8])> = plane_dst
+            .chunks_mut(tile_h as usize * dst_row_bytes)
+            .enumerate()
+            .collect();
 
         let fill = |(ty, band): (usize, &mut [u8])| -> Result<()> {
             // Fallibly: `vec![0; n]` aborts the process when the allocator says
             // no, and an abort cannot be caught by an embedder.
             let mut scratch: Vec<u8> = Vec::new();
-            scratch
-                .try_reserve_exact(tile_bytes)
-                .map_err(|_| anyhow!("cannot allocate {tile_bytes} bytes for a {tile_w}x{tile_h} tile"))?;
+            scratch.try_reserve_exact(tile_bytes).map_err(|_| {
+                anyhow!("cannot allocate {tile_bytes} bytes for a {tile_w}x{tile_h} tile")
+            })?;
             scratch.resize(tile_bytes, 0);
             for tx in 0..across as usize {
                 let index = plane * (across as usize * down as usize) + ty * across as usize + tx;
                 let (offset, len) = (frame.strip_offsets[index], frame.strip_byte_counts[index]);
                 let src = mmap
                     .get(offset as usize..(offset as usize).saturating_add(len as usize))
-                    .ok_or_else(|| anyhow!("tile {index} at offset {offset} (len {len}) out of file bounds"))?;
+                    .ok_or_else(|| {
+                        anyhow!("tile {index} at offset {offset} (len {len}) out of file bounds")
+                    })?;
                 // Zero first: a tile whose data runs short leaves the rest of
                 // its rectangle blank rather than showing the previous tile.
                 scratch.fill(0);
@@ -1523,7 +1654,12 @@ fn assemble_tiles(
                     bail!("tile {index} decoded to nothing ({len} bytes at offset {offset})");
                 }
                 let tile = if undo_pred && frame.predictor != 1 {
-                    Cow::Owned(undo_predictor(std::mem::take(&mut scratch), &tile_frame, sample_bytes, file_order)?)
+                    Cow::Owned(undo_predictor(
+                        std::mem::take(&mut scratch),
+                        &tile_frame,
+                        sample_bytes,
+                        file_order,
+                    )?)
                 } else {
                     Cow::Borrowed(&scratch[..])
                 };
@@ -1535,8 +1671,12 @@ fn assemble_tiles(
                     continue;
                 }
                 for r in 0..tile_h as usize {
-                    let Some(dst_row) = band.get_mut(r * dst_row_bytes..) else { break };
-                    let Some(dst) = dst_row.get_mut(x_off..x_off + keep) else { break };
+                    let Some(dst_row) = band.get_mut(r * dst_row_bytes..) else {
+                        break;
+                    };
+                    let Some(dst) = dst_row.get_mut(x_off..x_off + keep) else {
+                        break;
+                    };
                     dst.copy_from_slice(&tile[r * tile_row_bytes..r * tile_row_bytes + keep]);
                 }
                 if let Cow::Owned(buf) = tile {
@@ -1650,7 +1790,8 @@ fn decompress_into(raw: &[u8], compression: Compression, dest: &mut [u8]) -> Res
             Ok(n)
         }
         Compression::Lzw => {
-            let mut decoder = weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+            let mut decoder =
+                weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
             let mut in_pos = 0;
             let mut out_pos = 0;
             loop {
@@ -1661,7 +1802,8 @@ fn decompress_into(raw: &[u8], compression: Compression, dest: &mut [u8]) -> Res
                     Ok(weezl::LzwStatus::Done) => break,
                     Ok(weezl::LzwStatus::Ok) => {
                         // Cap reached, or no forward progress possible.
-                        if out_pos == dest.len() || (res.consumed_in == 0 && res.consumed_out == 0) {
+                        if out_pos == dest.len() || (res.consumed_in == 0 && res.consumed_out == 0)
+                        {
                             break;
                         }
                     }
@@ -1912,7 +2054,9 @@ fn undo_predictor_in_place(
         }
         (3, 4) | (3, 8) => undo_float_predictor(data, row_bytes, stride, sample_bytes, file_order),
         (2, other) => bail!("predictor 2 undo not implemented for {other}-byte samples"),
-        (3, other) => bail!("floating-point predictor requires 32- or 64-bit samples, got {other}-byte"),
+        (3, other) => {
+            bail!("floating-point predictor requires 32- or 64-bit samples, got {other}-byte")
+        }
         (other, _) => bail!("unsupported TIFF predictor: {other}"),
     }
     Ok(())
@@ -1926,15 +2070,21 @@ fn undo_predictor_in_place(
 /// regardless of the file's byte order — and store
 /// the value in `file_order` for the normal downstream reads. Handles both f32
 /// (`sample_bytes == 4`) and f64 (`sample_bytes == 8`).
-fn undo_float_predictor(data: &mut [u8], row_bytes: usize, stride: usize, sample_bytes: usize, file_order: ByteOrder) {
+fn undo_float_predictor(
+    data: &mut [u8],
+    row_bytes: usize,
+    stride: usize,
+    sample_bytes: usize,
+    file_order: ByteOrder,
+) {
     let wc = row_bytes / sample_bytes; // float values per row
-    // `row_bytes` is `width * stride * sample_bytes` — the one size in this file
-    // with no `height` factor, so it is *not* bounded by `decoded_len`. It stays
-    // safe only because `validate_frames` rejects a zero-height frame, which
-    // makes `row_bytes <= decoded_len` and so already-vetted. Size it from what
-    // we were actually handed rather than trusting that chain: a scratch buffer
-    // wider than one row of `data` can never be needed, and the process must not
-    // die allocating a buffer for rows that do not exist.
+                                       // `row_bytes` is `width * stride * sample_bytes` — the one size in this file
+                                       // with no `height` factor, so it is *not* bounded by `decoded_len`. It stays
+                                       // safe only because `validate_frames` rejects a zero-height frame, which
+                                       // makes `row_bytes <= decoded_len` and so already-vetted. Size it from what
+                                       // we were actually handed rather than trusting that chain: a scratch buffer
+                                       // wider than one row of `data` can never be needed, and the process must not
+                                       // die allocating a buffer for rows that do not exist.
     let scratch_len = row_bytes.min(data.len());
     if scratch_len < row_bytes {
         return; // no whole row to transform; `chunks_exact_mut` would yield none
@@ -2009,7 +2159,11 @@ fn ink_to_component(ink: f32, black: f32) -> f32 {
 ///
 /// Returns 3 planes for a 4-plus-sample frame, so the usual "one plane per
 /// sample" expectation deliberately does *not* hold here.
-pub fn read_planes_rgb_u8(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Vec<Vec<u8>>> {
+pub fn read_planes_rgb_u8(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+) -> Result<Vec<Vec<u8>>> {
     require_cmyk(frame, "read_planes_rgb_u8")?;
     let inks = read_planes_u8(mmap, frame, file_order)?;
     let (c, m, y, k) = four_inks(&inks, "read_planes_rgb_u8")?;
@@ -2029,7 +2183,11 @@ pub fn read_planes_rgb_u8(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder)
 ///
 /// An 8-bit CMYK frame is widened the same way [`read_planes_u16`] widens 8-bit
 /// samples, so a caller on the 16-bit path gets consistent units either way.
-pub fn read_planes_rgb_u16(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder) -> Result<Vec<Vec<u16>>> {
+pub fn read_planes_rgb_u16(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+) -> Result<Vec<Vec<u16>>> {
     require_cmyk(frame, "read_planes_rgb_u16")?;
     let inks = read_planes_u16(mmap, frame, file_order, None)?;
     let (c, m, y, k) = four_inks(&inks, "read_planes_rgb_u16")?;
@@ -2051,13 +2209,23 @@ pub fn read_planes_rgb_u16(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder
 /// [`read_planes_rgb_u8`] when more than one is wanted. Out-of-range indices
 /// clamp to blue, matching the per-sample readers' behaviour rather than
 /// panicking.
-pub fn read_plane_rgb_u8(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder, plane: usize) -> Result<Vec<u8>> {
+pub fn read_plane_rgb_u8(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+    plane: usize,
+) -> Result<Vec<u8>> {
     let mut planes = read_planes_rgb_u8(mmap, frame, file_order)?;
     Ok(std::mem::take(&mut planes[plane.min(2)]))
 }
 
 /// [`read_plane_rgb_u8`] in 16-bit units.
-pub fn read_plane_rgb_u16(mmap: &[u8], frame: &FrameInfo, file_order: ByteOrder, plane: usize) -> Result<Vec<u16>> {
+pub fn read_plane_rgb_u16(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+    plane: usize,
+) -> Result<Vec<u16>> {
     let mut planes = read_planes_rgb_u16(mmap, frame, file_order)?;
     Ok(std::mem::take(&mut planes[plane.min(2)]))
 }

@@ -328,7 +328,9 @@ impl FrameInfo {
     /// show it as a gray level. 4-bit indices are unpacked to one byte each on
     /// decode, so both ride the same 8-bit-index display path.
     pub fn is_palette(&self) -> bool {
-        self.photometric == 3 && self.samples_per_pixel == 1 && matches!(self.bits_per_sample, 4 | 8)
+        self.photometric == 3
+            && self.samples_per_pixel == 1
+            && matches!(self.bits_per_sample, 4 | 8)
     }
 
     /// True for a CMYK frame this crate can convert for display: a Separated
@@ -377,7 +379,12 @@ impl FrameInfo {
     pub fn tile_grid(&self) -> Option<(u32, u32, u32, u32)> {
         let (tw, th) = self.tile_size?;
         let (tw, th) = (tw.max(1), th.max(1));
-        Some((self.width.div_ceil(tw).max(1), self.height.div_ceil(th).max(1), tw, th))
+        Some((
+            self.width.div_ceil(tw).max(1),
+            self.height.div_ceil(th).max(1),
+            tw,
+            th,
+        ))
     }
 
     /// Pieces of compressed data one plane is divided into — tiles for a tiled
@@ -434,7 +441,13 @@ impl FrameInfo {
             let band = self.crop_rows(rows)?;
             let first_row = band.rows.start;
             let pieces = band.len().div_ceil(per_piece).max(1);
-            return Ok(SampledBand { frame: band.frame, first_row, rows_per_piece: per_piece, pieces, step });
+            return Ok(SampledBand {
+                frame: band.frame,
+                first_row,
+                rows_per_piece: per_piece,
+                pieces,
+                step,
+            });
         }
         // Stepping over a tile grid would skip columns as well as rows, since a
         // tile row is `across` consecutive entries. Not wrong to want, but not
@@ -487,8 +500,12 @@ impl FrameInfo {
         // number would size the decode for rows the file does not have, and the
         // reader would rightly refuse a frame whose strips fall short of it.
         let last_idx = (first + (taken.saturating_sub(1)) * step as usize) as u32;
-        let last_rows = per_piece.min(self.height.saturating_sub(last_idx.saturating_mul(per_piece)));
-        frame.height = (taken as u32).saturating_sub(1).saturating_mul(per_piece) + last_rows.max(1);
+        let last_rows = per_piece.min(
+            self.height
+                .saturating_sub(last_idx.saturating_mul(per_piece)),
+        );
+        frame.height =
+            (taken as u32).saturating_sub(1).saturating_mul(per_piece) + last_rows.max(1);
         frame.strip_offsets = offsets.into();
         frame.strip_byte_counts = counts.into();
         Ok(SampledBand {
@@ -516,16 +533,16 @@ impl FrameInfo {
     /// [`FrameInfo`], so every reader, codec and predictor applies to it
     /// unchanged; and it is snapped *outward*, so the caller must index against
     /// the returned ranges rather than the ones it asked for.
-    pub fn crop(
-        &self,
-        cols: std::ops::Range<u32>,
-        rows: std::ops::Range<u32>,
-    ) -> Result<Region> {
+    pub fn crop(&self, cols: std::ops::Range<u32>, rows: std::ops::Range<u32>) -> Result<Region> {
         let Some((across, down, tw, th)) = self.tile_grid() else {
             // Stripped: rows only, full width.
             let band = self.crop_rows(rows)?;
             let _ = cols;
-            return Ok(Region { rows: band.rows, cols: 0..self.width, frame: band.frame });
+            return Ok(Region {
+                rows: band.rows,
+                cols: 0..self.width,
+                frame: band.frame,
+            });
         };
 
         let span = |req: std::ops::Range<u32>, size: u32, n: u32, count: u32| {
@@ -571,7 +588,11 @@ impl FrameInfo {
         frame.height = y1 - y0;
         frame.strip_offsets = offsets.into();
         frame.strip_byte_counts = counts.into();
-        Ok(Region { frame, rows: y0..y1, cols: x0..x1 })
+        Ok(Region {
+            frame,
+            rows: y0..y1,
+            cols: x0..x1,
+        })
     }
 
     /// A view of just the strips covering `rows` — the same frame cropped to a
@@ -600,7 +621,10 @@ impl FrameInfo {
         // let `crop` walk the grid.
         if self.is_tiled() {
             let region = self.crop(0..self.width, rows)?;
-            return Ok(RowBand { frame: region.frame, rows: region.rows });
+            return Ok(RowBand {
+                frame: region.frame,
+                rows: region.rows,
+            });
         }
         let rps = self.rows_per_strip.max(1);
         let start = rows.start.min(self.height);
@@ -611,10 +635,17 @@ impl FrameInfo {
         let last = end.max(start + 1).div_ceil(rps).max(first + 1);
 
         let per_plane = (self.height.div_ceil(rps)) as usize;
-        let planes = if self.is_planar() { (self.samples_per_pixel as usize).max(1) } else { 1 };
+        let planes = if self.is_planar() {
+            (self.samples_per_pixel as usize).max(1)
+        } else {
+            1
+        };
         let (first, last) = (first as usize, (last as usize).min(per_plane));
         if first >= last {
-            bail!("row band {start}..{end} selects no strips of a {}-row frame", self.height);
+            bail!(
+                "row band {start}..{end} selects no strips of a {}-row frame",
+                self.height
+            );
         }
         // The strip table has to actually describe the frame before a slice of
         // it can mean anything.
@@ -641,7 +672,10 @@ impl FrameInfo {
         frame.height = y1 - y0;
         frame.strip_offsets = offsets.into();
         frame.strip_byte_counts = counts.into();
-        Ok(RowBand { frame, rows: y0..y1 })
+        Ok(RowBand {
+            frame,
+            rows: y0..y1,
+        })
     }
 
     /// Bytes one sample occupies at this frame's bit depth, or an error for a
@@ -667,7 +701,13 @@ impl FrameInfo {
     pub fn pixel_count(&self) -> Result<usize> {
         (self.width as usize)
             .checked_mul(self.height as usize)
-            .ok_or_else(|| anyhow!("frame geometry overflows address space: {}x{}", self.width, self.height))
+            .ok_or_else(|| {
+                anyhow!(
+                    "frame geometry overflows address space: {}x{}",
+                    self.width,
+                    self.height
+                )
+            })
     }
 
     /// Samples in this frame — `width * height * samples_per_pixel` — with
@@ -744,8 +784,14 @@ impl FrameInfo {
     /// case where a "row" is one sample plane's worth.
     pub(crate) fn strip_coverable_bytes(&self) -> Result<u64> {
         let sample_bytes = self.sample_bytes()? as u64;
-        let per_row_samples = if self.is_planar() { 1 } else { self.samples_per_pixel.max(1) as u64 };
-        let row_bytes = (self.width as u64).saturating_mul(per_row_samples).saturating_mul(sample_bytes);
+        let per_row_samples = if self.is_planar() {
+            1
+        } else {
+            self.samples_per_pixel.max(1) as u64
+        };
+        let row_bytes = (self.width as u64)
+            .saturating_mul(per_row_samples)
+            .saturating_mul(sample_bytes);
         let rows_per_strip = (self.rows_per_strip as u64).max(1).min(self.height as u64);
         Ok((self.strip_offsets.len() as u64)
             .saturating_mul(rows_per_strip)
@@ -933,10 +979,17 @@ impl TiffStack {
         // pyramidal TIFF, or an appended thumbnail page — would otherwise be
         // silently mis-rendered. Catch it here with a clear error instead.
         let f0 = &frames[0];
-        let f0_shape = (f0.width, f0.height, f0.bits_per_sample, f0.samples_per_pixel);
-        if let Some((i, f)) = frames.iter().enumerate().find(|(_, f)| {
-            (f.width, f.height, f.bits_per_sample, f.samples_per_pixel) != f0_shape
-        }) {
+        let f0_shape = (
+            f0.width,
+            f0.height,
+            f0.bits_per_sample,
+            f0.samples_per_pixel,
+        );
+        if let Some((i, f)) = frames
+            .iter()
+            .enumerate()
+            .find(|(_, f)| (f.width, f.height, f.bits_per_sample, f.samples_per_pixel) != f0_shape)
+        {
             bail!(
                 "TIFF frames are not uniform: frame 0 is {}x{} ({}-bit, {} sample(s)/px) but \
                  frame {} is {}x{} ({}-bit, {} sample(s)/px). This looks like a pyramidal or \
@@ -961,7 +1014,10 @@ impl TiffStack {
         // the same). Only the unambiguous case qualifies: a single
         // uncompressed, predictor-free IFD whose strip data is contiguous.
         if frames.len() == 1 {
-            if let Some(n) = description.as_deref().and_then(metadata::imagej::images_count) {
+            if let Some(n) = description
+                .as_deref()
+                .and_then(metadata::imagej::images_count)
+            {
                 if n > 1 {
                     expand_imagej_contiguous(&mut frames, n, mmap.len());
                 }
@@ -1037,7 +1093,11 @@ impl TiffStack {
 fn validate_frames(frames: &[FrameInfo], file_len: usize) -> Result<()> {
     for (i, f) in frames.iter().enumerate() {
         if f.width == 0 || f.height == 0 {
-            bail!("frame {i} declares an empty image ({}x{})", f.width, f.height);
+            bail!(
+                "frame {i} declares an empty image ({}x{})",
+                f.width,
+                f.height
+            );
         }
         // Overflow guard. `decoded_len` is what every downstream allocation is
         // sized from, so proving it here means it cannot wrap there.
@@ -1126,10 +1186,16 @@ impl TiffStack {
     /// performance hint — safe to skip, safe to repeat.
     pub fn prefetch_frame(&self, frame: &FrameInfo) {
         const PAGE: usize = 4096;
-        for (&off, &len) in frame.strip_offsets.iter().zip(frame.strip_byte_counts.iter()) {
+        for (&off, &len) in frame
+            .strip_offsets
+            .iter()
+            .zip(frame.strip_byte_counts.iter())
+        {
             let start = off as usize;
             let end = start.saturating_add(len as usize).min(self.data.len());
-            let Some(strip) = self.data.get(start..end) else { continue };
+            let Some(strip) = self.data.get(start..end) else {
+                continue;
+            };
             let mut i = 0;
             while i < strip.len() {
                 std::hint::black_box(strip[i]);

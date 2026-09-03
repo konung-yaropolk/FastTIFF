@@ -26,11 +26,11 @@
 //! stale prefetch can cost a little work but can never show the wrong frame.
 
 use crate::stack::Stack;
-use scivis_render::ChannelKind;
-use fast_tiff_lib::{ByteOrder, FrameInfo};
-use std::path::PathBuf;
 #[cfg(feature = "threads")]
 use fast_tiff_lib::TiffStack;
+use fast_tiff_lib::{ByteOrder, FrameInfo};
+use scivis_render::ChannelKind;
+use std::path::PathBuf;
 #[cfg(feature = "threads")]
 use std::sync::mpsc::{channel, Receiver, Sender};
 #[cfg(feature = "threads")]
@@ -83,12 +83,18 @@ fn decode_channel(
                 Decoded::U8(fast_tiff_lib::read_frame_u8(mmap, frame, order)?.into_owned())
             }
         }
-        ChannelKind::Float => Decoded::F32(fast_tiff_lib::read_frame_f32(mmap, frame, order)?.into_owned()),
+        ChannelKind::Float => {
+            Decoded::F32(fast_tiff_lib::read_frame_f32(mmap, frame, order)?.into_owned())
+        }
         ChannelKind::Int16 => {
             if cmyk {
-                Decoded::U16(fast_tiff_lib::read_plane_rgb_u16(mmap, frame, order, plane)?)
+                Decoded::U16(fast_tiff_lib::read_plane_rgb_u16(
+                    mmap, frame, order, plane,
+                )?)
             } else if rgb {
-                Decoded::U16(fast_tiff_lib::read_plane_u16(mmap, frame, order, None, plane)?)
+                Decoded::U16(fast_tiff_lib::read_plane_u16(
+                    mmap, frame, order, None, plane,
+                )?)
             } else {
                 Decoded::U16(fast_tiff_lib::read_frame_u16(mmap, frame, order, None)?.into_owned())
             }
@@ -132,7 +138,9 @@ pub fn decode_jobs(
                 } else {
                     fast_tiff_lib::read_planes_u8(mmap, frame, order)?
                 };
-                jobs.iter().map(|j| Ok(Decoded::U8(take_plane(&mut planes, j.plane)?))).collect()
+                jobs.iter()
+                    .map(|j| Ok(Decoded::U8(take_plane(&mut planes, j.plane)?)))
+                    .collect()
             }
             _ => {
                 let mut planes = if cmyk {
@@ -140,7 +148,9 @@ pub fn decode_jobs(
                 } else {
                     fast_tiff_lib::read_planes_u16(mmap, frame, order, None)?
                 };
-                jobs.iter().map(|j| Ok(Decoded::U16(take_plane(&mut planes, j.plane)?))).collect()
+                jobs.iter()
+                    .map(|j| Ok(Decoded::U16(take_plane(&mut planes, j.plane)?)))
+                    .collect()
             }
         };
     }
@@ -159,7 +169,10 @@ pub fn decode_jobs(
 /// display channels map to distinct planes by construction).
 fn take_plane<T>(planes: &mut [Vec<T>], plane: usize) -> anyhow::Result<Vec<T>> {
     if plane >= planes.len() {
-        anyhow::bail!("sample plane {plane} out of range ({} planes)", planes.len());
+        anyhow::bail!(
+            "sample plane {plane} out of range ({} planes)",
+            planes.len()
+        );
     }
     Ok(std::mem::take(&mut planes[plane]))
 }
@@ -188,8 +201,15 @@ pub struct ChannelJob {
 /// display channel to its IFD/plane: for RGB, all channels are sample planes of
 /// one IFD per frame; otherwise each channel is its own IFD in ImageJ's default
 /// `xyczt` plane order (channel fastest, then Z — frozen at slice 0 — then time).
-pub fn build_jobs(loaded: &Stack, frame_index: usize, enabled: &[bool], kinds: &[ChannelKind]) -> Vec<ChannelJob> {
-    let Some((width, height)) = loaded.dimensions() else { return Vec::new() };
+pub fn build_jobs(
+    loaded: &Stack,
+    frame_index: usize,
+    enabled: &[bool],
+    kinds: &[ChannelKind],
+) -> Vec<ChannelJob> {
+    let Some((width, height)) = loaded.dimensions() else {
+        return Vec::new();
+    };
     // The *resolved* interpretation, never `tiff.meta`. Resolving is precisely
     // the act of reclassifying a mislabeled axis — a file claiming
     // `channels = 100` that is really a 100-frame movie — so the raw metadata
@@ -203,7 +223,15 @@ pub fn build_jobs(loaded: &Stack, frame_index: usize, enabled: &[bool], kinds: &
             } else {
                 (frame_index * dims.slices * dims.channels + c, 0)
             };
-            ChannelJob { channel: c, ifd_idx, plane, kind: kinds[c], rgb: loaded.display.rgb, width, height }
+            ChannelJob {
+                channel: c,
+                ifd_idx,
+                plane,
+                kind: kinds[c],
+                rgb: loaded.display.rgb,
+                width,
+                height,
+            }
         })
         .collect()
 }
@@ -320,7 +348,11 @@ pub fn decode_jobs_region(
     }
 
     let (cols, rows) = covered.ok_or_else(|| anyhow::anyhow!("nothing to decode"))?;
-    Ok((decode_jobs(mmap, &band_frames, order, &band_jobs)?, cols, rows))
+    Ok((
+        decode_jobs(mmap, &band_frames, order, &band_jobs)?,
+        cols,
+        rows,
+    ))
 }
 
 /// Decode only the pieces a coarse view actually samples.
@@ -449,14 +481,22 @@ impl Prefetcher {
                 }
             })
             .ok()?;
-        Some(Self { tx, result, _handle: handle })
+        Some(Self {
+            tx,
+            result,
+            _handle: handle,
+        })
     }
 
     /// Ask the worker to decode `frame_index`'s `jobs`. Fire-and-forget; the
     /// worker drains to the most recent request, so superseded predictions are
     /// skipped.
     pub fn request(&self, generation: u64, frame_index: usize, jobs: Vec<ChannelJob>) {
-        let _ = self.tx.send(Request { generation, frame_index, jobs });
+        let _ = self.tx.send(Request {
+            generation,
+            frame_index,
+            jobs,
+        });
     }
 
     /// Take the prefetched result iff it matches `(generation, frame_index)`;

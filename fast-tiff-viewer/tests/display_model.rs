@@ -36,5 +36,9 @@ fn rgb_extra_samples_get_channels_but_start_disabled() {
     // ...up to the shader's channel limit, past which samples are dropped.
     let many = rgb_channel_plan(MAX_CHANNELS + 3);
     assert_eq!(many.len(), MAX_CHANNELS);
-    assert_eq!(many.iter().filter(|&&on| on).count(), 3, "only R/G/B start on");
+    assert_eq!(
+        many.iter().filter(|&&on| on).count(),
+        3,
+        "only R/G/B start on"
+    );
 }

@@ -4,7 +4,14 @@ use fast_tiff_viewer::channels::shift_sync;
 use fast_tiff_viewer::{ChannelKind, ChannelSettings};
 
 fn ch(min: f32, max: f32, bounds: (f32, f32), enabled: bool) -> ChannelSettings {
-    ChannelSettings { min, max, enabled, bounds, initial: (min, max), kind: ChannelKind::Int16 }
+    ChannelSettings {
+        min,
+        max,
+        enabled,
+        bounds,
+        initial: (min, max),
+        kind: ChannelKind::Int16,
+    }
 }
 
 fn snapshot(settings: &[ChannelSettings]) -> Vec<(f32, f32)> {
@@ -44,8 +51,16 @@ fn a_switched_off_channel_does_not_move() {
     settings[0].max += 50.0;
     shift_sync(&mut settings, &before);
 
-    assert_eq!((settings[1].min, settings[1].max), (300.0, 400.0), "disabled channel moved");
-    assert_eq!((settings[2].min, settings[2].max), (550.0, 650.0), "enabled channel did not move");
+    assert_eq!(
+        (settings[1].min, settings[1].max),
+        (300.0, 400.0),
+        "disabled channel moved"
+    );
+    assert_eq!(
+        (settings[2].min, settings[2].max),
+        (550.0, 650.0),
+        "enabled channel did not move"
+    );
 }
 
 #[test]

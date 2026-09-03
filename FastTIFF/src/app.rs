@@ -31,12 +31,12 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 mod camera;
-mod kinetic;
-mod scroll;
 mod dialog;
+mod kinetic;
 mod minimap;
 mod overlay;
 mod scale;
+mod scroll;
 mod widgets;
 mod windows;
 
@@ -74,8 +74,8 @@ fn tint_color(tint: Option<[u8; 3]>) -> Option<Color32> {
 /// with 150% as the one fractional step for finer control. The stored values
 /// are rounded to the percentages shown in the UI (e.g. 0.333 reads as 33.3%).
 const ZOOM_LEVELS: [f32; 21] = [
-    0.031, 0.042, 0.063, 0.083, 0.125, 0.167, 0.25, 0.333, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0,
-    6.0, 8.0, 12.0, 16.0, 24.0, 32.0,
+    0.031, 0.042, 0.063, 0.083, 0.125, 0.167, 0.25, 0.333, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+    8.0, 12.0, 16.0, 24.0, 32.0,
 ];
 
 /// Smallest the window is ever sized to (inner size, points). Zooming out past
@@ -186,8 +186,7 @@ const FIT_SNAP: f32 = 0.02;
 /// its own to resize.
 #[cfg(not(target_arch = "wasm32"))]
 fn window_size_is_not_ours(ctx: &egui::Context) -> bool {
-    let (maximized, fullscreen) =
-        ctx.input(|i| (i.viewport().maximized, i.viewport().fullscreen));
+    let (maximized, fullscreen) = ctx.input(|i| (i.viewport().maximized, i.viewport().fullscreen));
     maximized.unwrap_or(false) || fullscreen.unwrap_or(false)
 }
 
@@ -255,7 +254,10 @@ fn stepped_zoom(current: f32, dir: i32, fit: Option<f32>) -> f32 {
         .iter()
         .enumerate()
         .min_by(|(_, a), (_, b)| {
-            (**a - current).abs().partial_cmp(&(**b - current).abs()).unwrap()
+            (**a - current)
+                .abs()
+                .partial_cmp(&(**b - current).abs())
+                .unwrap()
         })
         .map(|(i, _)| i)
         .unwrap_or(0);
@@ -362,7 +364,9 @@ fn welcome_text() -> String {
             "\n\nEverything is processed locally in your browser — \nno file is ever uploaded to a server.\n",
         );
     }
-    text.push_str("\n\n\nScroll — navigate frames\nShift + Scroll — fast navigate\nCtrl + Scroll — zoom");
+    text.push_str(
+        "\n\n\nScroll — navigate frames\nShift + Scroll — fast navigate\nCtrl + Scroll — zoom",
+    );
     text
 }
 
@@ -460,7 +464,9 @@ impl View2d {
     /// by the same *ratio* every frame: zoom is geometric, and interpolating it
     /// linearly would crawl at the bottom of a step and race at the top.
     fn advance_zoom_glide(&mut self, dt: f32) -> bool {
-        let Some(glide) = self.zoom_glide else { return false };
+        let Some(glide) = self.zoom_glide else {
+            return false;
+        };
         let dt = dt.clamp(0.0, ZOOM_GLIDE_MAX_DT);
         let from = self.zoom;
         if !(from > 0.0 && glide.target > 0.0) {
@@ -693,7 +699,9 @@ impl ViewerApp {
         };
         let bounds: Vec<(f32, f32)> = loaded.display.settings.iter().map(|s| s.bounds).collect();
         let fresh = self.hist.as_ref().is_some_and(|c| {
-            c.frame == loaded.frame_index && c.generation == loaded.prefetch_gen && c.bounds == bounds
+            c.frame == loaded.frame_index
+                && c.generation == loaded.prefetch_gen
+                && c.bounds == bounds
         });
         if fresh {
             return;
@@ -730,7 +738,10 @@ impl ViewerApp {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let _ = ctx;
-            if let Some(paths) = rfd::FileDialog::new().add_filter("TIFF", &["tif", "tiff"]).pick_files() {
+            if let Some(paths) = rfd::FileDialog::new()
+                .add_filter("TIFF", &["tif", "tiff"])
+                .pick_files()
+            {
                 if let Some(first) = crate::process::open_all(&paths) {
                     self.apply_opened(Opened::Path(first.clone()));
                 }
@@ -741,8 +752,10 @@ impl ViewerApp {
             let tx = self.open_tx.clone();
             let ctx = ctx.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Some(handle) =
-                    rfd::AsyncFileDialog::new().add_filter("TIFF", &["tif", "tiff"]).pick_file().await
+                if let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("TIFF", &["tif", "tiff"])
+                    .pick_file()
+                    .await
                 {
                     let name = handle.file_name();
                     let _ = tx.send(Opened::Bytes(handle.read().await, name));
@@ -789,7 +802,10 @@ impl ViewerApp {
                     let cur = ui.ctx().content_rect().size();
                     let h = (cur.y + delta).round().max(200.0);
                     ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(cur.x.round(), h)));
+                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                            cur.x.round(),
+                            h,
+                        )));
                 }
             } else {
                 ui.ctx().request_repaint();
@@ -819,7 +835,8 @@ impl ViewerApp {
                     // window first gets focus/input). Poll a few times a second
                     // rather than spinning `request_repaint` every frame, which
                     // would peg a CPU core while the app sits idle on load.
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(100));
                 }
             }
 
@@ -851,7 +868,9 @@ impl ViewerApp {
                     None => settled,
                 };
                 let w = (img_w * window_scale).round().max(MIN_WINDOW);
-                let h = (img_h * window_scale + chrome_height).round().max(MIN_WINDOW);
+                let h = (img_h * window_scale + chrome_height)
+                    .round()
+                    .max(MIN_WINDOW);
                 Some(egui::vec2(w, h))
             };
 
@@ -868,14 +887,17 @@ impl ViewerApp {
                 // Whether the window grew vs. the previous frame (zoom-in case),
                 // and whether the image is now letterboxed inside the window
                 // (smaller than the content on either axis).
-                let cur_inner = ui.ctx().input(|i| i.viewport().inner_rect.map(|r| r.size()));
+                let cur_inner = ui
+                    .ctx()
+                    .input(|i| i.viewport().inner_rect.map(|r| r.size()));
                 let grew = match (target_window, cur_inner) {
                     (Some(t), Some(c)) => t.x > c.x + 0.5 || t.y > c.y + 0.5,
                     _ => true,
                 };
                 let letterboxing = match target_window {
                     Some(t) => {
-                        img_w * new_zoom < t.x - 0.5 || img_h * new_zoom < (t.y - chrome_height) - 0.5
+                        img_w * new_zoom < t.x - 0.5
+                            || img_h * new_zoom < (t.y - chrome_height) - 0.5
                     }
                     None => false,
                 };
@@ -885,7 +907,8 @@ impl ViewerApp {
                 // the one reposition on the letterboxed → first-fitted step.
                 let was_letterboxing = match cur_inner {
                     Some(c) => {
-                        img_w * old_zoom < c.x - 0.5 || img_h * old_zoom < (c.y - chrome_height) - 0.5
+                        img_w * old_zoom < c.x - 0.5
+                            || img_h * old_zoom < (c.y - chrome_height) - 0.5
                     }
                     None => false,
                 };
@@ -899,9 +922,11 @@ impl ViewerApp {
                     && ((new_zoom > old_zoom && grew && !was_letterboxing)
                         || (new_zoom < old_zoom && !letterboxing));
                 if follow {
-                    if let Some(outer) = ui.ctx().input(|i| i.viewport().outer_rect.map(|r| r.min)) {
+                    if let Some(outer) = ui.ctx().input(|i| i.viewport().outer_rect.map(|r| r.min))
+                    {
                         let ratio = new_zoom / old_zoom;
-                        reposition = Some(outer + (cursor - self.view.panel_rect.min) * (1.0 - ratio));
+                        reposition =
+                            Some(outer + (cursor - self.view.panel_rect.min) * (1.0 - ratio));
                     }
                 }
             }
@@ -911,7 +936,8 @@ impl ViewerApp {
             if self.view.resize_to_zoom {
                 if let Some(size) = target_window {
                     let (w, h) = (size.x, size.y);
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
 
                     // Keep the window fully on the desktop. The target position is
                     // the cursor-zoom move (or the current position when none).
@@ -922,14 +948,20 @@ impl ViewerApp {
                     // covered by a taskbar whether that's docked at the top or
                     // the bottom (egui doesn't report which).
                     let info = ui.ctx().input(|i| {
-                        (i.viewport().outer_rect, i.viewport().inner_rect, i.viewport().monitor_size)
+                        (
+                            i.viewport().outer_rect,
+                            i.viewport().inner_rect,
+                            i.viewport().monitor_size,
+                        )
                     });
                     if let (Some(outer), Some(inner), Some(monitor)) = info {
                         let decoration = outer.size() - inner.size();
                         let new_outer = egui::vec2(w, h) + decoration;
                         let target = reposition.unwrap_or(outer.min);
                         let max_x = (monitor.x - new_outer.x).max(0.0);
-                        let usable_bottom = monitor_work_area(ui.ctx()).map(|wa| wa.y).unwrap_or(monitor.y);
+                        let usable_bottom = monitor_work_area(ui.ctx())
+                            .map(|wa| wa.y)
+                            .unwrap_or(monitor.y);
                         let y = if target.y + new_outer.y > usable_bottom {
                             ((monitor.y - new_outer.y) * 0.5).max(0.0)
                         } else {
@@ -937,10 +969,12 @@ impl ViewerApp {
                         };
                         let clamped = egui::pos2(target.x.clamp(0.0, max_x), y);
                         if (clamped - outer.min).length() > 0.5 {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(clamped));
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::OuterPosition(clamped));
                         }
                     } else if let Some(pos) = reposition {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
                     }
                 }
                 self.view.resize_to_zoom = false;
@@ -950,18 +984,21 @@ impl ViewerApp {
         // Window title: loaded filename, or the app name when nothing is open.
         let desired_title = match &self.core.stack {
             Some(loaded) => {
-                let name = loaded.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let name = loaded
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 format!("{name} — FastTIFF")
             }
             None => "FastTIFF".to_string(),
         };
         if self.last_title.as_deref() != Some(desired_title.as_str()) {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(desired_title.clone()));
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Title(desired_title.clone()));
             self.last_title = Some(desired_title);
         }
-
     }
-
 }
 
 impl eframe::App for ViewerApp {
@@ -971,8 +1008,13 @@ impl eframe::App for ViewerApp {
         // own processes; in a browser the drop event carries the bytes instead.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let dropped: Vec<PathBuf> =
-                ui.ctx().input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+            let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .collect()
+            });
             if let Some(first) = crate::process::open_all(&dropped) {
                 self.apply_opened(Opened::Path(first.clone()));
             }
@@ -994,7 +1036,11 @@ impl eframe::App for ViewerApp {
                 i.raw
                     .dropped_files
                     .iter()
-                    .filter_map(|f| f.bytes.as_ref().map(|b| Opened::Bytes(b.to_vec(), f.name.clone())))
+                    .filter_map(|f| {
+                        f.bytes
+                            .as_ref()
+                            .map(|b| Opened::Bytes(b.to_vec(), f.name.clone()))
+                    })
                     .collect()
             });
             for d in dropped {
@@ -1019,7 +1065,13 @@ impl eframe::App for ViewerApp {
         // smooth_delta while Ctrl is held would always be zero.
         let zoom_step: i32 = ui.input(|i| {
             let d = i.zoom_delta();
-            let from_scroll = if d > 1.05 { 1 } else if d < 0.95 { -1 } else { 0 };
+            let from_scroll = if d > 1.05 {
+                1
+            } else if d < 0.95 {
+                -1
+            } else {
+                0
+            };
             let from_keys = if i.modifiers.ctrl
                 && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
             {
@@ -1056,8 +1108,8 @@ impl eframe::App for ViewerApp {
                 // put — and translated by however far they slid, so a pinch can
                 // pan and zoom at once the way it does everywhere else.
                 let p = (t.center_pos - self.view.image_origin) / old_zoom;
-                self.view.pan = self.view.panel_rect.min - (t.center_pos - p * new_zoom)
-                    - t.translation_delta;
+                self.view.pan =
+                    self.view.panel_rect.min - (t.center_pos - p * new_zoom) - t.translation_delta;
                 self.view.zoom = new_zoom;
                 // A pinch is already continuous; a glide underneath it would be
                 // two things steering the same value.
@@ -1075,7 +1127,11 @@ impl eframe::App for ViewerApp {
         // where the window no longer resizes, appeared frozen.) The window
         // resize and optional reposition are handled later, once the chrome
         // height is known. Cursor-centering uses last frame's cached geometry.
-        if zoom_step != 0 && !pinching && self.core.stack.is_some() && self.core.view_mode == ViewMode::Movie {
+        if zoom_step != 0
+            && !pinching
+            && self.core.stack.is_some()
+            && self.core.view_mode == ViewMode::Movie
+        {
             // Stepped off wherever the picture is *heading*, not where it has
             // got to, so a second notch during a glide advances a second rung
             // instead of re-deciding the first one.
@@ -1091,7 +1147,10 @@ impl eframe::App for ViewerApp {
                 // The picture glides to the new rung about the cursor; the
                 // window is told about the destination now, so it still resizes
                 // and repositions once per step rather than once per frame.
-                self.view.zoom_glide = Some(ZoomGlide { target: new_zoom, anchor: cursor });
+                self.view.zoom_glide = Some(ZoomGlide {
+                    target: new_zoom,
+                    anchor: cursor,
+                });
                 self.view.resize_to_zoom = true;
                 self.view.zoom_reposition = Some((old_zoom, cursor));
             }
@@ -1304,7 +1363,11 @@ impl eframe::App for ViewerApp {
             // separate time axis, `slices > 1`), where playing animates the
             // volume through time.
             if mode == ViewMode::Volume {
-                let is_4d = self.core.stack.as_ref().is_some_and(|l| l.display.dims.slices > 1);
+                let is_4d = self
+                    .core
+                    .stack
+                    .as_ref()
+                    .is_some_and(|l| l.display.dims.slices > 1);
                 if !is_4d {
                     self.core.playback.playing = false;
                     self.core.playback.last_time = None;
@@ -1767,7 +1830,13 @@ impl eframe::App for ViewerApp {
             // while reading the cached plots computed from it.
             let mut open = true;
             if let (Some(loaded), Some(cache)) = (self.core.stack.as_mut(), self.hist.as_ref()) {
-                histogram_window(ui.ctx(), &mut open, loaded, &cache.hists, &mut self.hist_log);
+                histogram_window(
+                    ui.ctx(),
+                    &mut open,
+                    loaded,
+                    &cache.hists,
+                    &mut self.hist_log,
+                );
             } else {
                 open = false;
             }
@@ -1849,7 +1918,8 @@ impl eframe::App for ViewerApp {
             // repaints as soon as it's ready, so we still render as fast as we
             // can when behind (and the core's demand estimate still detects it).
             let fps = self.core.playback.fps.max(0.1);
-            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(1.0 / fps));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(1.0 / fps));
         }
 
         // Reassigning the axes also refreshes LUTs + status and invalidates the
@@ -1866,7 +1936,11 @@ impl eframe::App for ViewerApp {
         // a multi-frame layout. (Runs before the central panel so the click
         // frame already renders 2D.)
         if self.core.view_mode == ViewMode::Volume
-            && self.core.stack.as_ref().is_some_and(|l| l.display.dims.frames < 2)
+            && self
+                .core
+                .stack
+                .as_ref()
+                .is_some_and(|l| l.display.dims.frames < 2)
         {
             self.core.view_mode = ViewMode::Movie;
             self.core.playback.playing = false;
@@ -1883,269 +1957,287 @@ impl eframe::App for ViewerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().inner_margin(egui::Margin::ZERO))
             .show_inside(ui, |ui| {
-            if self.core.stack.is_none() {
-                ui.centered_and_justified(|ui| {
-                    ui.label(welcome_text());
-                });
-                return;
-            }
-
-            let available = ui.available_size();
-            let (panel_rect, response) =
-                ui.allocate_exact_size(available, egui::Sense::click_and_drag());
-            self.view.panel_rect = panel_rect;
-
-            // Fit the image to the canvas on open. The browser has no window to
-            // resize around the picture the way the desktop build does, so
-            // without this a gigapixel mosaic opens at 1:1 and shows one corner
-            // of itself.
-            //
-            // Fitted to the canvas *exactly*, not to the nearest fixed level: a
-            // 4:3 image in a 16:9 canvas has no fixed level that fills it, so
-            // snapping would either crop a sliver or leave a visible margin.
-            // The exact factor then joins this image's zoom ladder, so scrolling
-            // back out returns to the fitted view instead of stepping past it —
-            // which is the whole reason it has to be a rung and not a one-off.
-            //
-            // Held back until the 2D view is the one on screen: in 3D the zoom
-            // is unused, and consuming the flag there would leave the image
-            // unfitted when the user came back to 2D.
-            #[cfg(target_arch = "wasm32")]
-            if self.view.pending_initial_fit && self.core.view_mode == ViewMode::Movie {
-                let dims = self
-                    .core
-                    .stack
-                    .as_ref()
-                    .and_then(|l| l.tiff.frames.first())
-                    .map(|f| (f.width as f32, f.height as f32));
-                match dims.and_then(|(iw, ih)| fit_to_panel(iw, ih, available)) {
-                    Some(z) => {
-                        self.view.zoom = z;
-                        self.view.fit_zoom = Some(z);
-                        self.view.pan = egui::Vec2::ZERO;
-                        self.view.pending_initial_fit = false;
-                    }
-                    // No canvas size yet — it has not been laid out. Come back
-                    // next frame rather than fitting to nothing.
-                    None => ui.ctx().request_repaint(),
-                }
-            }
-
-            // 3D volume view: drive the camera per the active nav mode and paint
-            // the GPU ray-march. The 2D pan/UV/scrub path below is bypassed. This
-            // runs before the `loaded` borrow so it can call `&mut self` methods.
-            if self.core.view_mode == ViewMode::Volume {
-                self.core.volume.aspect = (panel_rect.width() / panel_rect.height().max(1.0)).clamp(0.1, 10.0);
-
-                // Until the first volume is built, show a black loading screen so
-                // the heavy decode doesn't freeze on the previous view (`sync_gpu`
-                // defers the initial build until after this frame paints).
-                if self.core.volume.built_frame.is_none() {
-                    ui.painter().rect_filled(panel_rect, 0.0, egui::Color32::BLACK);
-                    ui.painter().text(
-                        panel_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "Loading 3D…",
-                        egui::FontId::proportional(16.0),
-                        egui::Color32::from_gray(150),
-                    );
-                    ui.ctx().request_repaint();
+                if self.core.stack.is_none() {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(welcome_text());
+                    });
                     return;
                 }
 
-                let animating = self.drive_volume_camera(ui, &response, panel_rect);
-                response.on_hover_cursor(egui::CursorIcon::Crosshair);
-                ui.painter()
-                    .with_clip_rect(panel_rect)
-                    .add(render::paint_volume_callback(&self.render, panel_rect));
-                // Coordinate-box overlay, drawn on top of the ray-march with the
-                // 2D painter (aligned via the same camera; see `overlay`).
-                if self.show_coord_box {
-                    let painter = ui.painter().with_clip_rect(panel_rect);
-                    self.draw_coord_box(&painter, panel_rect);
+                let available = ui.available_size();
+                let (panel_rect, response) =
+                    ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+                self.view.panel_rect = panel_rect;
+
+                // Fit the image to the canvas on open. The browser has no window to
+                // resize around the picture the way the desktop build does, so
+                // without this a gigapixel mosaic opens at 1:1 and shows one corner
+                // of itself.
+                //
+                // Fitted to the canvas *exactly*, not to the nearest fixed level: a
+                // 4:3 image in a 16:9 canvas has no fixed level that fills it, so
+                // snapping would either crop a sliver or leave a visible margin.
+                // The exact factor then joins this image's zoom ladder, so scrolling
+                // back out returns to the fitted view instead of stepping past it —
+                // which is the whole reason it has to be a rung and not a one-off.
+                //
+                // Held back until the 2D view is the one on screen: in 3D the zoom
+                // is unused, and consuming the flag there would leave the image
+                // unfitted when the user came back to 2D.
+                #[cfg(target_arch = "wasm32")]
+                if self.view.pending_initial_fit && self.core.view_mode == ViewMode::Movie {
+                    let dims = self
+                        .core
+                        .stack
+                        .as_ref()
+                        .and_then(|l| l.tiff.frames.first())
+                        .map(|f| (f.width as f32, f.height as f32));
+                    match dims.and_then(|(iw, ih)| fit_to_panel(iw, ih, available)) {
+                        Some(z) => {
+                            self.view.zoom = z;
+                            self.view.fit_zoom = Some(z);
+                            self.view.pan = egui::Vec2::ZERO;
+                            self.view.pending_initial_fit = false;
+                        }
+                        // No canvas size yet — it has not been laid out. Come back
+                        // next frame rather than fitting to nothing.
+                        None => ui.ctx().request_repaint(),
+                    }
                 }
-                // Keep repainting while a drag or held key keeps the camera moving.
-                if animating {
-                    ui.ctx().request_repaint();
+
+                // 3D volume view: drive the camera per the active nav mode and paint
+                // the GPU ray-march. The 2D pan/UV/scrub path below is bypassed. This
+                // runs before the `loaded` borrow so it can call `&mut self` methods.
+                if self.core.view_mode == ViewMode::Volume {
+                    self.core.volume.aspect =
+                        (panel_rect.width() / panel_rect.height().max(1.0)).clamp(0.1, 10.0);
+
+                    // Until the first volume is built, show a black loading screen so
+                    // the heavy decode doesn't freeze on the previous view (`sync_gpu`
+                    // defers the initial build until after this frame paints).
+                    if self.core.volume.built_frame.is_none() {
+                        ui.painter()
+                            .rect_filled(panel_rect, 0.0, egui::Color32::BLACK);
+                        ui.painter().text(
+                            panel_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Loading 3D…",
+                            egui::FontId::proportional(16.0),
+                            egui::Color32::from_gray(150),
+                        );
+                        ui.ctx().request_repaint();
+                        return;
+                    }
+
+                    let animating = self.drive_volume_camera(ui, &response, panel_rect);
+                    response.on_hover_cursor(egui::CursorIcon::Crosshair);
+                    ui.painter()
+                        .with_clip_rect(panel_rect)
+                        .add(render::paint_volume_callback(&self.render, panel_rect));
+                    // Coordinate-box overlay, drawn on top of the ray-march with the
+                    // 2D painter (aligned via the same camera; see `overlay`).
+                    if self.show_coord_box {
+                        let painter = ui.painter().with_clip_rect(panel_rect);
+                        self.draw_coord_box(&painter, panel_rect);
+                    }
+                    // Keep repainting while a drag or held key keeps the camera moving.
+                    if animating {
+                        ui.ctx().request_repaint();
+                    }
+                    return;
                 }
-                return;
-            }
 
-            let Some(loaded) = &self.core.stack else { return };
-            let (Some(w), Some(h)) = (
-                loaded.tiff.frames.first().map(|f| f.width),
-                loaded.tiff.frames.first().map(|f| f.height),
-            ) else {
-                return;
-            };
+                let Some(loaded) = &self.core.stack else {
+                    return;
+                };
+                let (Some(w), Some(h)) = (
+                    loaded.tiff.frames.first().map(|f| f.width),
+                    loaded.tiff.frames.first().map(|f| f.height),
+                ) else {
+                    return;
+                };
 
-            let img_px = egui::vec2(w as f32 * self.view.zoom, h as f32 * self.view.zoom);
-            // A 1px tolerance so sub-pixel rounding between the window size and
-            // the panel's available area doesn't register as a pannable overflow.
-            let overflow = egui::vec2(
-                (img_px.x - available.x - 1.0).max(0.0),
-                (img_px.y - available.y - 1.0).max(0.0),
-            );
-            let pannable = overflow.x > 0.0 || overflow.y > 0.0;
-
-            // Drag to pan when the image overflows the panel. Not during a
-            // gesture: egui synthesises a pointer from the first touch, so a
-            // two-finger pan arrives here as well and would be applied twice.
-            if pannable && response.dragged() && !pinching {
-                // Taking hold of the picture ends any glide: the hand on it now
-                // decides where it goes.
-                self.view.pan_glide.stop();
-                self.view.pan -= response.drag_delta();
-            }
-            self.view.pan.x = self.view.pan.x.clamp(0.0, overflow.x);
-            self.view.pan.y = self.view.pan.y.clamp(0.0, overflow.y);
-
-            // Where the image's top-left *would* be if drawn full-size: scrolled
-            // by `pan` on an overflowing axis, centered on an axis that fits.
-            // (Cached for cursor-centered zoom; may lie outside the panel.)
-            let origin = egui::pos2(
-                if overflow.x > 0.0 { panel_rect.min.x - self.view.pan.x } else { panel_rect.min.x + (available.x - img_px.x) * 0.5 },
-                if overflow.y > 0.0 { panel_rect.min.y - self.view.pan.y } else { panel_rect.min.y + (available.y - img_px.y) * 0.5 },
-            );
-            self.view.image_origin = origin;
-
-            // Render into the on-screen *visible* rectangle only, and pan/zoom
-            // via UVs. Drawing into an oversized rect doesn't work: the callback
-            // viewport is clamped to the framebuffer, which would just squash the
-            // whole image back to fit instead of zooming.
-            let full_rect = egui::Rect::from_min_size(origin, img_px);
-            let visible = full_rect.intersect(panel_rect);
-            if visible.is_positive() {
-                let inv = egui::vec2(1.0 / img_px.x.max(1.0), 1.0 / img_px.y.max(1.0));
-                self.core.uv_offset = ((visible.min - origin) * inv).into();
-                self.core.uv_scale = (visible.size() * inv).into();
-                // How much room there is to draw it, which is what decides how
-                // finely an over-large image needs to be sampled.
-                let ppp = ui.ctx().pixels_per_point();
-                self.core.viewport_px = (visible.size() * ppp).into();
-                ui.painter()
-                    .with_clip_rect(panel_rect)
-                    .add(render::paint_callback(&self.render, visible));
-            }
-
-            // Where the view sits in the frame, once that stops being obvious.
-            // Drawn after the image so it is over it, and clipped to the panel
-            // like everything else here.
-            //
-            // Gated on the same `pannable` the drag handler uses, so "the image
-            // is bigger than the panel" has one answer rather than two that
-            // disagree by a rounding error — and on that answer having held for
-            // a frame, so a zoom's momentary overflow does not flash it up.
-            //
-            // Also not while an opening fit is still pending: the zoom is then
-            // a placeholder about to be replaced, and on a large image that
-            // placeholder overflows — so the navigator would appear for the
-            // frame or two before the picture settles.
-            let settled = !self.view.pending_initial_fit;
-            let steady_pannable = pannable && self.view.was_pannable && settled;
-            self.view.was_pannable = pannable && settled;
-            if steady_pannable {
-                minimap::draw(
-                    &ui.painter().with_clip_rect(panel_rect),
-                    ui.visuals(),
-                    panel_rect,
-                    full_rect,
-                    visible,
+                let img_px = egui::vec2(w as f32 * self.view.zoom, h as f32 * self.view.zoom);
+                // A 1px tolerance so sub-pixel rounding between the window size and
+                // the panel's available area doesn't register as a pannable overflow.
+                let overflow = egui::vec2(
+                    (img_px.x - available.x - 1.0).max(0.0),
+                    (img_px.y - available.y - 1.0).max(0.0),
                 );
-            }
+                let pannable = overflow.x > 0.0 || overflow.y > 0.0;
 
-            response.on_hover_cursor(if pannable {
-                egui::CursorIcon::Grab
-            } else {
-                egui::CursorIcon::Crosshair
-            });
+                // Drag to pan when the image overflows the panel. Not during a
+                // gesture: egui synthesises a pointer from the first touch, so a
+                // two-finger pan arrives here as well and would be applied twice.
+                if pannable && response.dragged() && !pinching {
+                    // Taking hold of the picture ends any glide: the hand on it now
+                    // decides where it goes.
+                    self.view.pan_glide.stop();
+                    self.view.pan -= response.drag_delta();
+                }
+                self.view.pan.x = self.view.pan.x.clamp(0.0, overflow.x);
+                self.view.pan.y = self.view.pan.y.clamp(0.0, overflow.y);
 
-            // Scrub frames by scrolling over the image (Ctrl+scroll is zoom, so
-            // it's excluded). Two modes:
-            //   • normal — discrete wheel *events*, so one mouse notch is exactly
-            //     one frame (touchpad pixels accumulate to ~one notch);
-            //   • Shift (fast-scroll) — ride the smoothed glide, advancing a
-            //     ~10%-of-stack step at `FAST_SCROLL_GLIDE_RATE` per second (time-
-            //     scaled, so single- and multi-channel stacks scroll the same),
-            //     so one notch sums to ~10% while keeping the smooth glide feel.
-            // egui remaps Shift+wheel to horizontal scrolling, so the smoothed
-            // delta lands on `.x` with the same sign — `x + y` recovers it.
-            let mut pan_swipe = egui::Vec2::ZERO;
-            if ui.rect_contains_pointer(panel_rect) {
-                let shift = ui.input(|i| i.modifiers.shift);
-                if shift {
-                    let (glide, dt) = ui.input(|i| {
-                        let s = i.smooth_scroll_delta;
-                        (s.x + s.y, i.stable_dt)
-                    });
-                    if glide != 0.0 {
-                        // ~10% of the stack per notch, spread across the glide.
-                        let n_frames = self.core.stack.as_ref().map(|l| l.display.dims.frames).unwrap_or(1);
-                        let fast_step = (n_frames as f64 * FAST_SCROLL_RATE).max(1.0);
-                        // glide < 0 is scroll-down → advance frames. Advance at a
-                        // fixed rate *per second* (scaled by the frame time), so
-                        // the jump depends only on the glide's real-time duration
-                        // — identical for single- and multi-channel stacks despite
-                        // their different render speeds. Fractions accumulate so
-                        // short stacks still move.
-                        let dir = if glide < 0.0 { 1.0 } else { -1.0 };
-                        self.view.scroll_accum += (dir * fast_step * FAST_SCROLL_GLIDE_RATE * dt as f64) as f32;
+                // Where the image's top-left *would* be if drawn full-size: scrolled
+                // by `pan` on an overflowing axis, centered on an axis that fits.
+                // (Cached for cursor-centered zoom; may lie outside the panel.)
+                let origin = egui::pos2(
+                    if overflow.x > 0.0 {
+                        panel_rect.min.x - self.view.pan.x
+                    } else {
+                        panel_rect.min.x + (available.x - img_px.x) * 0.5
+                    },
+                    if overflow.y > 0.0 {
+                        panel_rect.min.y - self.view.pan.y
+                    } else {
+                        panel_rect.min.y + (available.y - img_px.y) * 0.5
+                    },
+                );
+                self.view.image_origin = origin;
+
+                // Render into the on-screen *visible* rectangle only, and pan/zoom
+                // via UVs. Drawing into an oversized rect doesn't work: the callback
+                // viewport is clamped to the framebuffer, which would just squash the
+                // whole image back to fit instead of zooming.
+                let full_rect = egui::Rect::from_min_size(origin, img_px);
+                let visible = full_rect.intersect(panel_rect);
+                if visible.is_positive() {
+                    let inv = egui::vec2(1.0 / img_px.x.max(1.0), 1.0 / img_px.y.max(1.0));
+                    self.core.uv_offset = ((visible.min - origin) * inv).into();
+                    self.core.uv_scale = (visible.size() * inv).into();
+                    // How much room there is to draw it, which is what decides how
+                    // finely an over-large image needs to be sampled.
+                    let ppp = ui.ctx().pixels_per_point();
+                    self.core.viewport_px = (visible.size() * ppp).into();
+                    ui.painter()
+                        .with_clip_rect(panel_rect)
+                        .add(render::paint_callback(&self.render, visible));
+                }
+
+                // Where the view sits in the frame, once that stops being obvious.
+                // Drawn after the image so it is over it, and clipped to the panel
+                // like everything else here.
+                //
+                // Gated on the same `pannable` the drag handler uses, so "the image
+                // is bigger than the panel" has one answer rather than two that
+                // disagree by a rounding error — and on that answer having held for
+                // a frame, so a zoom's momentary overflow does not flash it up.
+                //
+                // Also not while an opening fit is still pending: the zoom is then
+                // a placeholder about to be replaced, and on a large image that
+                // placeholder overflows — so the navigator would appear for the
+                // frame or two before the picture settles.
+                let settled = !self.view.pending_initial_fit;
+                let steady_pannable = pannable && self.view.was_pannable && settled;
+                self.view.was_pannable = pannable && settled;
+                if steady_pannable {
+                    minimap::draw(
+                        &ui.painter().with_clip_rect(panel_rect),
+                        ui.visuals(),
+                        panel_rect,
+                        full_rect,
+                        visible,
+                    );
+                }
+
+                response.on_hover_cursor(if pannable {
+                    egui::CursorIcon::Grab
+                } else {
+                    egui::CursorIcon::Crosshair
+                });
+
+                // Scrub frames by scrolling over the image (Ctrl+scroll is zoom, so
+                // it's excluded). Two modes:
+                //   • normal — discrete wheel *events*, so one mouse notch is exactly
+                //     one frame (touchpad pixels accumulate to ~one notch);
+                //   • Shift (fast-scroll) — ride the smoothed glide, advancing a
+                //     ~10%-of-stack step at `FAST_SCROLL_GLIDE_RATE` per second (time-
+                //     scaled, so single- and multi-channel stacks scroll the same),
+                //     so one notch sums to ~10% while keeping the smooth glide feel.
+                // egui remaps Shift+wheel to horizontal scrolling, so the smoothed
+                // delta lands on `.x` with the same sign — `x + y` recovers it.
+                let mut pan_swipe = egui::Vec2::ZERO;
+                if ui.rect_contains_pointer(panel_rect) {
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    if shift {
+                        let (glide, dt) = ui.input(|i| {
+                            let s = i.smooth_scroll_delta;
+                            (s.x + s.y, i.stable_dt)
+                        });
+                        if glide != 0.0 {
+                            // ~10% of the stack per notch, spread across the glide.
+                            let n_frames = self
+                                .core
+                                .stack
+                                .as_ref()
+                                .map(|l| l.display.dims.frames)
+                                .unwrap_or(1);
+                            let fast_step = (n_frames as f64 * FAST_SCROLL_RATE).max(1.0);
+                            // glide < 0 is scroll-down → advance frames. Advance at a
+                            // fixed rate *per second* (scaled by the frame time), so
+                            // the jump depends only on the glide's real-time duration
+                            // — identical for single- and multi-channel stacks despite
+                            // their different render speeds. Fractions accumulate so
+                            // short stacks still move.
+                            let dir = if glide < 0.0 { 1.0 } else { -1.0 };
+                            self.view.scroll_accum +=
+                                (dir * fast_step * FAST_SCROLL_GLIDE_RATE * dt as f64) as f32;
+                            let steps = self.view.scroll_accum.trunc();
+                            self.view.scroll_accum -= steps;
+                            scroll_step = steps as i32;
+                        }
+                    } else {
+                        // Which device sent this, and therefore what it means —
+                        // see `scroll`.
+                        let scroll::Wheel { swipe, notches } =
+                            ui.input(|i| scroll::classify(&i.events, pannable));
+                        pan_swipe = swipe;
+                        // egui scroll is +y up; we scrub the next frame on scroll-down.
+                        self.view.scroll_accum -= notches;
                         let steps = self.view.scroll_accum.trunc();
                         self.view.scroll_accum -= steps;
                         scroll_step = steps as i32;
                     }
                 } else {
-                    // Which device sent this, and therefore what it means —
-                    // see `scroll`.
-                    let scroll::Wheel { swipe, notches } =
-                        ui.input(|i| scroll::classify(&i.events, pannable));
-                    pan_swipe = swipe;
-                    // egui scroll is +y up; we scrub the next frame on scroll-down.
-                    self.view.scroll_accum -= notches;
-                    let steps = self.view.scroll_accum.trunc();
-                    self.view.scroll_accum -= steps;
-                    scroll_step = steps as i32;
+                    self.view.scroll_accum = 0.0;
                 }
-            } else {
-                self.view.scroll_accum = 0.0;
-            }
 
-            // Move the field of view by swipe, and keep moving for a moment
-            // after the swipe stops. Deliberately outside the hover test above:
-            // a flick that carries the pointer off the image should still
-            // coast, and stopping dead at the edge of the panel would feel like
-            // the picture had hit something.
-            //
-            // The sign matches dragging — the picture follows the fingers —
-            // because they are the same gesture done two ways, and having them
-            // disagree would be worse than either choice.
-            let dt = ui.input(|i| i.stable_dt);
-            if !pannable {
-                self.view.pan_glide.stop();
-            }
-            let motion = if pan_swipe == egui::Vec2::ZERO {
-                self.view.pan_glide.coast(dt)
-            } else {
-                self.view.pan_glide.push(pan_swipe, dt)
-            };
-            if motion != egui::Vec2::ZERO {
-                let want = self.view.pan - motion;
-                self.view.pan.x = want.x.clamp(0.0, overflow.x);
-                self.view.pan.y = want.y.clamp(0.0, overflow.y);
-                // Clamped means that axis ran into the edge of the image. Stop
-                // it there: a glide left wound up against a bound would spring
-                // forward again the moment the bound moved.
-                self.view.pan_glide.stop_axes(
-                    (self.view.pan.x - want.x).abs() > 0.01,
-                    (self.view.pan.y - want.y).abs() > 0.01,
-                );
-            }
-            // A coast is motion with no input behind it, so nothing else will
-            // ask for the next frame.
-            if self.view.pan_glide.is_moving() {
-                ui.ctx().request_repaint();
-            }
-        });
+                // Move the field of view by swipe, and keep moving for a moment
+                // after the swipe stops. Deliberately outside the hover test above:
+                // a flick that carries the pointer off the image should still
+                // coast, and stopping dead at the edge of the panel would feel like
+                // the picture had hit something.
+                //
+                // The sign matches dragging — the picture follows the fingers —
+                // because they are the same gesture done two ways, and having them
+                // disagree would be worse than either choice.
+                let dt = ui.input(|i| i.stable_dt);
+                if !pannable {
+                    self.view.pan_glide.stop();
+                }
+                let motion = if pan_swipe == egui::Vec2::ZERO {
+                    self.view.pan_glide.coast(dt)
+                } else {
+                    self.view.pan_glide.push(pan_swipe, dt)
+                };
+                if motion != egui::Vec2::ZERO {
+                    let want = self.view.pan - motion;
+                    self.view.pan.x = want.x.clamp(0.0, overflow.x);
+                    self.view.pan.y = want.y.clamp(0.0, overflow.y);
+                    // Clamped means that axis ran into the edge of the image. Stop
+                    // it there: a glide left wound up against a bound would spring
+                    // forward again the moment the bound moved.
+                    self.view.pan_glide.stop_axes(
+                        (self.view.pan.x - want.x).abs() > 0.01,
+                        (self.view.pan.y - want.y).abs() > 0.01,
+                    );
+                }
+                // A coast is motion with no input behind it, so nothing else will
+                // ask for the next frame.
+                if self.view.pan_glide.is_moving() {
+                    ui.ctx().request_repaint();
+                }
+            });
 
         if scroll_step != 0 {
             if let Some(loaded) = &mut self.core.stack {

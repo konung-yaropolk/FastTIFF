@@ -200,7 +200,11 @@ impl RawIfdEntry {
                 2 => order.u16(chunk) as u64,
                 4 => order.u32(chunk) as u64,
                 8 => order.u64(chunk),
-                _ => bail!("tag {} has non-integer field type {}", self.tag, self.field_type),
+                _ => bail!(
+                    "tag {} has non-integer field type {}",
+                    self.tag,
+                    self.field_type
+                ),
             };
             out.push(v);
         }
@@ -233,7 +237,11 @@ impl RawIfdEntry {
                 2 => order.u16(&self.value_or_offset[0..2]) as u64,
                 4 => order.u32(&self.value_or_offset[0..4]) as u64,
                 8 => order.u64(&self.value_or_offset),
-                _ => bail!("tag {} has non-integer field type {}", self.tag, self.field_type),
+                _ => bail!(
+                    "tag {} has non-integer field type {}",
+                    self.tag,
+                    self.field_type
+                ),
             };
             return u32::try_from(v)
                 .map_err(|_| anyhow!("tag {} value {v} does not fit in 32 bits", self.tag));
@@ -248,7 +256,11 @@ impl RawIfdEntry {
     /// tags like XResolution/YResolution. Reads the first pair only.
     pub fn as_rational(&self, file: &[u8], order: ByteOrder) -> Result<f64> {
         if self.field_type != 5 {
-            bail!("tag {} is not a RATIONAL (field type {})", self.tag, self.field_type);
+            bail!(
+                "tag {} is not a RATIONAL (field type {})",
+                self.tag,
+                self.field_type
+            );
         }
         let bytes = self.owned_bytes(file, order)?;
         let pair = bytes
@@ -278,10 +290,18 @@ pub struct ParsedIfd {
 
 /// Read the IFD at `offset` (header-relative, i.e. absolute file offset),
 /// in the layout `flavor` dictates.
-pub fn read_ifd(file: &[u8], offset: usize, order: ByteOrder, flavor: TiffFlavor) -> Result<ParsedIfd> {
+pub fn read_ifd(
+    file: &[u8],
+    offset: usize,
+    order: ByteOrder,
+    flavor: TiffFlavor,
+) -> Result<ParsedIfd> {
     let mut entries = Vec::new();
     let next_offset = read_ifd_into(file, offset, order, flavor, &mut entries)?;
-    Ok(ParsedIfd { entries, next_offset })
+    Ok(ParsedIfd {
+        entries,
+        next_offset,
+    })
 }
 
 /// [`read_ifd`] into an entry buffer the caller owns, returning the next IFD's
@@ -403,7 +423,10 @@ pub fn next_ifd_offset(
 /// magic 43), and the first IFD's absolute offset.
 pub fn read_header(file: &[u8]) -> Result<(ByteOrder, TiffFlavor, u64)> {
     if file.len() < 8 {
-        bail!("file too small to be a TIFF (need at least 8 bytes, got {})", file.len());
+        bail!(
+            "file too small to be a TIFF (need at least 8 bytes, got {})",
+            file.len()
+        );
     }
     let order = match &file[0..2] {
         b"II" => ByteOrder::Little,
@@ -417,7 +440,10 @@ pub fn read_header(file: &[u8]) -> Result<(ByteOrder, TiffFlavor, u64)> {
             // BigTIFF: u16 offset size (always 8), u16 reserved (always 0),
             // then the u64 first-IFD offset.
             if file.len() < 16 {
-                bail!("file too small to be a BigTIFF (need at least 16 bytes, got {})", file.len());
+                bail!(
+                    "file too small to be a BigTIFF (need at least 16 bytes, got {})",
+                    file.len()
+                );
             }
             let offset_size = order.u16(&file[4..6]);
             let reserved = order.u16(&file[6..8]);

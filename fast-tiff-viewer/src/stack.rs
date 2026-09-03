@@ -7,9 +7,9 @@
 //! free instead of reimplementing them.
 
 use crate::channels::{build_channel_settings, refresh_pseudocolor};
-use crate::loader::LoadStage;
 use crate::dimensions::{apply_resolved_dimensions_reporting, setup_cmyk, setup_rgb};
 use crate::display::Display;
+use crate::loader::LoadStage;
 use crate::prefetch::Prefetcher;
 use crate::volume::VolumeBuilder;
 use fast_tiff_lib::TiffStack;
@@ -166,7 +166,11 @@ impl Stack {
     /// the `path` field so a frontend can show a filename and the background
     /// workers have something to reopen — so a browser can pass the picked
     /// file's name and nothing will try to touch the filesystem.
-    pub fn from_bytes(bytes: Vec<u8>, name: PathBuf, apply_pseudocolor: bool) -> anyhow::Result<Self> {
+    pub fn from_bytes(
+        bytes: Vec<u8>,
+        name: PathBuf,
+        apply_pseudocolor: bool,
+    ) -> anyhow::Result<Self> {
         Self::from_bytes_reporting(bytes, name, apply_pseudocolor, &mut |_| {})
     }
 

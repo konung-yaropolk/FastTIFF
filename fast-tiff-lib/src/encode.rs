@@ -31,9 +31,9 @@
 use crate::ifd::TiffFlavor;
 use crate::index::{
     Compression, TAG_BITS_PER_SAMPLE, TAG_COMPRESSION, TAG_IMAGE_DESCRIPTION, TAG_IMAGE_LENGTH,
-    TAG_IMAGE_WIDTH, TAG_INK_SET, TAG_PHOTOMETRIC, TAG_PLANAR_CONFIG, TAG_PREDICTOR, TAG_ROWS_PER_STRIP,
-    TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS,
-    TAG_X_RESOLUTION, TAG_Y_RESOLUTION,
+    TAG_IMAGE_WIDTH, TAG_INK_SET, TAG_PHOTOMETRIC, TAG_PLANAR_CONFIG, TAG_PREDICTOR,
+    TAG_ROWS_PER_STRIP, TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS,
+    TAG_STRIP_OFFSETS, TAG_X_RESOLUTION, TAG_Y_RESOLUTION,
 };
 use crate::metadata::{self, MetadataFormat, StackMetaWrite, WriteGeometry};
 use anyhow::{anyhow, bail, Result};
@@ -545,7 +545,10 @@ impl<W: Write + Seek> TiffWriter<W> {
         // reader's `strip_dest_lens` expects on the way back in.
         let strip_len = self.rows_per_strip as usize * self.row_bytes;
         let plane_bytes = self.plane_bytes;
-        let mut strips = FrameStrips { offsets: Vec::new(), byte_counts: Vec::new() };
+        let mut strips = FrameStrips {
+            offsets: Vec::new(),
+            byte_counts: Vec::new(),
+        };
 
         if self.compression == Compression::None {
             // Raw strips stream straight from the (possibly borrowed) frame
@@ -557,8 +560,10 @@ impl<W: Write + Seek> TiffWriter<W> {
                 }
             }
         } else {
-            let chunks: Vec<&[u8]> =
-                processed.chunks(plane_bytes).flat_map(|plane| plane.chunks(strip_len)).collect();
+            let chunks: Vec<&[u8]> = processed
+                .chunks(plane_bytes)
+                .flat_map(|plane| plane.chunks(strip_len))
+                .collect();
             let compression = self.compression;
             let level = self.compression_level;
             let row_bytes = self.row_bytes;
@@ -567,17 +572,18 @@ impl<W: Write + Seek> TiffWriter<W> {
             // under the same process-wide hint + size floor as decoding
             // (`set_parallel_decode`), so the host has one threading switch.
             let n_pixels = self.width as usize * self.height as usize;
-            let compressed: Vec<Vec<u8>> = if chunks.len() > 1 && crate::decode::should_parallelize(n_pixels) {
-                chunks
-                    .par_iter()
-                    .map(|c| compress_strip(c, compression, row_bytes, level))
-                    .collect::<Result<_>>()?
-            } else {
-                chunks
-                    .iter()
-                    .map(|c| compress_strip(c, compression, row_bytes, level))
-                    .collect::<Result<_>>()?
-            };
+            let compressed: Vec<Vec<u8>> =
+                if chunks.len() > 1 && crate::decode::should_parallelize(n_pixels) {
+                    chunks
+                        .par_iter()
+                        .map(|c| compress_strip(c, compression, row_bytes, level))
+                        .collect::<Result<_>>()?
+                } else {
+                    chunks
+                        .iter()
+                        .map(|c| compress_strip(c, compression, row_bytes, level))
+                        .collect::<Result<_>>()?
+                };
             for strip in &compressed {
                 self.push_strip_bytes(strip, &mut strips)?;
             }
@@ -630,7 +636,12 @@ impl<W: Write + Seek> TiffWriter<W> {
                     samples_per_pixel: self.spp,
                     ome_pixel_type: self.sample_type.ome_pixel_type(),
                 };
-                Some(metadata::serialize_description(self.metadata_format, meta, self.frames.len(), &geom)?)
+                Some(metadata::serialize_description(
+                    self.metadata_format,
+                    meta,
+                    self.frames.len(),
+                    &geom,
+                )?)
             }
             (None, Some(text)) => Some(text.clone()),
             (None, None) => None,
@@ -659,7 +670,11 @@ impl<W: Write + Seek> TiffWriter<W> {
             (0..self.frames.len())
                 .map(|i| {
                     // First-IFD-only metadata: the description and the binary LUT block.
-                    let (desc, ij) = if i == 0 { (description.as_deref(), ij_metadata.as_ref()) } else { (None, None) };
+                    let (desc, ij) = if i == 0 {
+                        (description.as_deref(), ij_metadata.as_ref())
+                    } else {
+                        (None, None)
+                    };
                     self.build_entries(i, desc, ij, big)
                 })
                 .collect()
@@ -689,7 +704,11 @@ impl<W: Write + Seek> TiffWriter<W> {
         let mut region = Vec::with_capacity((end - self.pos) as usize);
         let mut start = self.pos;
         for (i, entries) in entry_lists.iter().enumerate() {
-            let next = if i + 1 < table_offsets.len() { table_offsets[i + 1] } else { 0 };
+            let next = if i + 1 < table_offsets.len() {
+                table_offsets[i + 1]
+            } else {
+                0
+            };
             let (new_start, _) = layout_ifd(entries, start, next, flavor, Some(&mut region));
             start = new_start;
         }
@@ -795,7 +814,10 @@ impl<W: Write + Seek> TiffWriter<W> {
         let mut entries = Vec::with_capacity(12);
         entries.push(Entry::long(TAG_IMAGE_WIDTH, self.width));
         entries.push(Entry::long(TAG_IMAGE_LENGTH, self.height));
-        entries.push(Entry::shorts(TAG_BITS_PER_SAMPLE, &vec![bits; spp as usize]));
+        entries.push(Entry::shorts(
+            TAG_BITS_PER_SAMPLE,
+            &vec![bits; spp as usize],
+        ));
         entries.push(Entry::short(TAG_COMPRESSION, compression_code));
         entries.push(Entry::short(TAG_PHOTOMETRIC, photometric));
         if let Some(text) = description {
@@ -852,7 +874,10 @@ impl<W: Write + Seek> TiffWriter<W> {
             _ => 1,
         };
         if spp as usize > base_samples {
-            entries.push(Entry::shorts(TAG_EXTRA_SAMPLES, &vec![0u16; spp as usize - base_samples]));
+            entries.push(Entry::shorts(
+                TAG_EXTRA_SAMPLES,
+                &vec![0u16; spp as usize - base_samples],
+            ));
         }
         entries.push(Entry::shorts(
             TAG_SAMPLE_FORMAT,
@@ -883,24 +908,44 @@ struct Entry {
 
 impl Entry {
     fn short(tag: u16, v: u16) -> Self {
-        Entry { tag, ftype: 3, count: 1, data: v.to_le_bytes().to_vec() }
+        Entry {
+            tag,
+            ftype: 3,
+            count: 1,
+            data: v.to_le_bytes().to_vec(),
+        }
     }
     fn shorts(tag: u16, vals: &[u16]) -> Self {
         let mut data = Vec::with_capacity(vals.len() * 2);
         for v in vals {
             data.extend_from_slice(&v.to_le_bytes());
         }
-        Entry { tag, ftype: 3, count: vals.len() as u32, data }
+        Entry {
+            tag,
+            ftype: 3,
+            count: vals.len() as u32,
+            data,
+        }
     }
     fn long(tag: u16, v: u32) -> Self {
-        Entry { tag, ftype: 4, count: 1, data: v.to_le_bytes().to_vec() }
+        Entry {
+            tag,
+            ftype: 4,
+            count: 1,
+            data: v.to_le_bytes().to_vec(),
+        }
     }
     fn longs(tag: u16, vals: &[u32]) -> Self {
         let mut data = Vec::with_capacity(vals.len() * 4);
         for v in vals {
             data.extend_from_slice(&v.to_le_bytes());
         }
-        Entry { tag, ftype: 4, count: vals.len() as u32, data }
+        Entry {
+            tag,
+            ftype: 4,
+            count: vals.len() as u32,
+            data,
+        }
     }
     /// LONG8 (type 16) — BigTIFF's 64-bit unsigned, for strip locations.
     fn long8s(tag: u16, vals: &[u64]) -> Self {
@@ -908,7 +953,12 @@ impl Entry {
         for v in vals {
             data.extend_from_slice(&v.to_le_bytes());
         }
-        Entry { tag, ftype: 16, count: vals.len() as u32, data }
+        Entry {
+            tag,
+            ftype: 16,
+            count: vals.len() as u32,
+            data,
+        }
     }
     /// RATIONAL (type 5) — two u32 (numerator, denominator), for the resolution
     /// tags. Eight bytes, so it always lives in the out-of-line value region.
@@ -916,18 +966,33 @@ impl Entry {
         let mut data = Vec::with_capacity(8);
         data.extend_from_slice(&num.to_le_bytes());
         data.extend_from_slice(&den.to_le_bytes());
-        Entry { tag, ftype: 5, count: 1, data }
+        Entry {
+            tag,
+            ftype: 5,
+            count: 1,
+            data,
+        }
     }
     /// BYTE (type 1) — a raw byte blob, for the binary IJMetadata tag (50839).
     fn bytes(tag: u16, blob: &[u8]) -> Self {
-        Entry { tag, ftype: 1, count: blob.len() as u32, data: blob.to_vec() }
+        Entry {
+            tag,
+            ftype: 1,
+            count: blob.len() as u32,
+            data: blob.to_vec(),
+        }
     }
     fn ascii(tag: u16, text: &str) -> Self {
         // ASCII fields are NUL-terminated; the count includes the terminator.
         let mut data = text.as_bytes().to_vec();
         data.push(0);
         let count = data.len() as u32;
-        Entry { tag, ftype: 2, count, data }
+        Entry {
+            tag,
+            ftype: 2,
+            count,
+            data,
+        }
     }
 }
 
@@ -1035,7 +1100,8 @@ fn apply_predictor(data: &mut [u8], row_bytes: usize, stride: usize, sample_byte
             for row in data.chunks_exact_mut(row_bytes) {
                 for i in (stride..row_samples).rev() {
                     let cur = u16::from_le_bytes([row[i * 2], row[i * 2 + 1]]);
-                    let prev = u16::from_le_bytes([row[(i - stride) * 2], row[(i - stride) * 2 + 1]]);
+                    let prev =
+                        u16::from_le_bytes([row[(i - stride) * 2], row[(i - stride) * 2 + 1]]);
                     let diff = cur.wrapping_sub(prev).to_le_bytes();
                     row[i * 2] = diff[0];
                     row[i * 2 + 1] = diff[1];
@@ -1047,7 +1113,11 @@ fn apply_predictor(data: &mut [u8], row_bytes: usize, stride: usize, sample_byte
             for row in data.chunks_exact_mut(row_bytes) {
                 for i in (stride..row_samples).rev() {
                     let cur = u32::from_le_bytes(row[i * 4..i * 4 + 4].try_into().unwrap());
-                    let prev = u32::from_le_bytes(row[(i - stride) * 4..(i - stride) * 4 + 4].try_into().unwrap());
+                    let prev = u32::from_le_bytes(
+                        row[(i - stride) * 4..(i - stride) * 4 + 4]
+                            .try_into()
+                            .unwrap(),
+                    );
                     let diff = cur.wrapping_sub(prev).to_le_bytes();
                     row[i * 4..i * 4 + 4].copy_from_slice(&diff);
                 }
@@ -1058,7 +1128,11 @@ fn apply_predictor(data: &mut [u8], row_bytes: usize, stride: usize, sample_byte
             for row in data.chunks_exact_mut(row_bytes) {
                 for i in (stride..row_samples).rev() {
                     let cur = u64::from_le_bytes(row[i * 8..i * 8 + 8].try_into().unwrap());
-                    let prev = u64::from_le_bytes(row[(i - stride) * 8..(i - stride) * 8 + 8].try_into().unwrap());
+                    let prev = u64::from_le_bytes(
+                        row[(i - stride) * 8..(i - stride) * 8 + 8]
+                            .try_into()
+                            .unwrap(),
+                    );
                     let diff = cur.wrapping_sub(prev).to_le_bytes();
                     row[i * 8..i * 8 + 8].copy_from_slice(&diff);
                 }
@@ -1104,14 +1178,20 @@ pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
 /// ImageJ, etc.). `level` is the optional effort knob for the codecs that have
 /// one (Deflate 0..=9 clamped, Zstd 1..=22); `None` = the lib default
 /// (`DEFAULT_DEFLATE_LEVEL` / `DEFAULT_ZSTD_LEVEL`).
-fn compress_strip(strip: &[u8], compression: Compression, row_bytes: usize, level: Option<i32>) -> Result<Vec<u8>> {
+fn compress_strip(
+    strip: &[u8],
+    compression: Compression,
+    row_bytes: usize,
+    level: Option<i32>,
+) -> Result<Vec<u8>> {
     match compression {
         Compression::None => Ok(strip.to_vec()),
         Compression::Lzw => {
             // TIFF-flavored LZW: MSb-first with the early size switch —
             // the mirror of the decoder's `with_tiff_size_switch`.
             let mut out = Vec::with_capacity(strip.len() / 2);
-            let mut encoder = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+            let mut encoder =
+                weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
             encoder
                 .into_stream(&mut out)
                 .encode_all(strip)
@@ -1124,8 +1204,12 @@ fn compress_strip(strip: &[u8], compression: Compression, row_bytes: usize, leve
             let flate_level = flate2::Compression::new(l as u32);
             let mut encoder =
                 flate2::write::ZlibEncoder::new(Vec::with_capacity(strip.len() / 2), flate_level);
-            encoder.write_all(strip).map_err(|e| anyhow!("Deflate encode failed: {e}"))?;
-            encoder.finish().map_err(|e| anyhow!("Deflate encode failed: {e}"))
+            encoder
+                .write_all(strip)
+                .map_err(|e| anyhow!("Deflate encode failed: {e}"))?;
+            encoder
+                .finish()
+                .map_err(|e| anyhow!("Deflate encode failed: {e}"))
         }
         Compression::PackBits => Ok(packbits_encode(strip, row_bytes)),
         Compression::Zstd => {

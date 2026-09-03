@@ -104,5 +104,10 @@ fn scale_style(style: &mut egui::Style, k: f32) {
 /// scaling exactly — a margin is padding, and a point either way is invisible.
 fn scale_margin(m: egui::Margin, k: f32) -> egui::Margin {
     let f = |v: i8| (v as f32 * k).round() as i8;
-    egui::Margin { left: f(m.left), right: f(m.right), top: f(m.top), bottom: f(m.bottom) }
+    egui::Margin {
+        left: f(m.left),
+        right: f(m.right),
+        top: f(m.top),
+        bottom: f(m.bottom),
+    }
 }

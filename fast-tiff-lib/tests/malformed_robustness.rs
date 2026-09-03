@@ -21,7 +21,14 @@ use fast_tiff_lib::TiffStack;
 
 /// Little-endian classic TIFF: `w`x`h`, `bits`-deep, `spp` samples/px,
 /// `compression`, with `pixel_bytes` as its single strip.
-fn build_tiff(w: u32, h: u32, bits: u16, spp: u16, compression: u16, pixel_bytes: &[u8]) -> Vec<u8> {
+fn build_tiff(
+    w: u32,
+    h: u32,
+    bits: u16,
+    spp: u16,
+    compression: u16,
+    pixel_bytes: &[u8],
+) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(b"II");
     buf.extend_from_slice(&42u16.to_le_bytes());
@@ -36,15 +43,15 @@ fn build_tiff(w: u32, h: u32, bits: u16, spp: u16, compression: u16, pixel_bytes
 
     // (tag, type, count, value) — SHORTs are stored inline in the low 2 bytes.
     let entries: Vec<(u16, u16, u32, u32)> = vec![
-        (256, 4, 1, w),              // ImageWidth
-        (257, 4, 1, h),              // ImageLength
-        (258, 3, 1, bits as u32),    // BitsPerSample
+        (256, 4, 1, w),           // ImageWidth
+        (257, 4, 1, h),           // ImageLength
+        (258, 3, 1, bits as u32), // BitsPerSample
         (259, 3, 1, compression as u32),
-        (262, 3, 1, 1),              // Photometric = BlackIsZero
-        (273, 4, 1, strip_off),      // StripOffsets
-        (277, 3, 1, spp as u32),     // SamplesPerPixel
-        (278, 4, 1, h),              // RowsPerStrip
-        (279, 4, 1, strip_len),      // StripByteCounts
+        (262, 3, 1, 1),          // Photometric = BlackIsZero
+        (273, 4, 1, strip_off),  // StripOffsets
+        (277, 3, 1, spp as u32), // SamplesPerPixel
+        (278, 4, 1, h),          // RowsPerStrip
+        (279, 4, 1, strip_len),  // StripByteCounts
     ];
     buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     for (tag, ty, count, val) in &entries {
@@ -174,14 +181,18 @@ fn tiny_file_declaring_huge_dimensions_is_rejected() {
             bytes.len()
         );
         // Must not panic. Must not abort (an abort kills this process outright).
-        assert!(exercise_catching(&bytes).is_ok(), "{label}: panicked on malformed input");
+        assert!(
+            exercise_catching(&bytes).is_ok(),
+            "{label}: panicked on malformed input"
+        );
 
         // And whatever the file claims, no decode may succeed — there is nowhere
         // near enough data behind it.
         if let Ok(stack) = TiffStack::from_bytes(bytes.clone()) {
             if let Some(frame) = stack.frames.first() {
                 assert!(
-                    fast_tiff_lib::read_frame_u16(&stack.data, frame, stack.byte_order, None).is_err(),
+                    fast_tiff_lib::read_frame_u16(&stack.data, frame, stack.byte_order, None)
+                        .is_err(),
                     "{label}: decoded pixels that cannot exist in a {}-byte file",
                     bytes.len()
                 );
@@ -204,10 +215,10 @@ fn tiny_file_declaring_huge_dimensions_is_rejected() {
 fn compressed_frame_with_inflated_rows_per_strip_is_rejected_fast() {
     let start = std::time::Instant::now();
     for (w, h, compression) in [
-        (4u32, 0x3FFF_FFFFu32, 5u16),   // LZW
-        (4, 0x3FFF_FFFF, 8),            // Deflate
-        (4, 0x3FFF_FFFF, 32773),        // PackBits
-        (0x0FFF_FFFF, 64, 5),           // wide rather than tall
+        (4u32, 0x3FFF_FFFFu32, 5u16), // LZW
+        (4, 0x3FFF_FFFF, 8),          // Deflate
+        (4, 0x3FFF_FFFF, 32773),      // PackBits
+        (0x0FFF_FFFF, 64, 5),         // wide rather than tall
     ] {
         // RowsPerStrip == height, so `strips x rows x row_bytes` == the full
         // frame and the structural check alone would wave it through.
@@ -215,10 +226,14 @@ fn compressed_frame_with_inflated_rows_per_strip_is_rejected_fast() {
         // Patch RowsPerStrip (tag 278) from `h` to u32::MAX for good measure.
         patch_long_tag(&mut bytes, 278, u32::MAX);
 
-        assert!(exercise_catching(&bytes).is_ok(), "panicked on {w}x{h} compression={compression}");
+        assert!(
+            exercise_catching(&bytes).is_ok(),
+            "panicked on {w}x{h} compression={compression}"
+        );
         let stack = TiffStack::from_bytes(bytes).expect("header itself is well-formed");
-        let err = fast_tiff_lib::read_frame_u16(&stack.data, &stack.frames[0], stack.byte_order, None)
-            .expect_err("a 130-byte file cannot supply a multi-gigabyte frame");
+        let err =
+            fast_tiff_lib::read_frame_u16(&stack.data, &stack.frames[0], stack.byte_order, None)
+                .expect_err("a 130-byte file cannot supply a multi-gigabyte frame");
         let msg = err.to_string();
         assert!(
             msg.contains("refusing to allocate") || msg.contains("beyond any real codec"),
@@ -285,7 +300,8 @@ fn hostile_metadata_dimensions_are_clamped() {
         // The file has exactly one plane, so no honest reading of it has more
         // than one channel — and `channel_display` must stay in step with the
         // reported count, since callers index it by channel.
-        let stack = TiffStack::from_bytes(bytes).expect("a valid image with odd metadata still opens");
+        let stack =
+            TiffStack::from_bytes(bytes).expect("a valid image with odd metadata still opens");
         assert!(
             stack.meta.channels <= stack.frames.len(),
             "channels ({}) exceeds the {} plane(s) in the file",
@@ -364,7 +380,8 @@ fn the_valid_seed_still_decodes() {
     let stack = TiffStack::from_bytes(valid_tiff()).expect("seed must open");
     let frame = &stack.frames[0];
     assert_eq!((frame.width, frame.height), (4, 4));
-    let px = fast_tiff_lib::read_frame_u16(&stack.data, frame, stack.byte_order, None).expect("seed must decode");
+    let px = fast_tiff_lib::read_frame_u16(&stack.data, frame, stack.byte_order, None)
+        .expect("seed must decode");
     assert_eq!(px.len(), 16);
     assert_eq!(px[0], 0);
     assert_eq!(px[1], 4000);
@@ -416,7 +433,10 @@ fn self_referential_ifd_chain_is_rejected() {
         Ok(_) => panic!("a looping IFD chain was accepted"),
         Err(e) => e.to_string(),
     };
-    assert!(err.contains("loops back"), "expected a loop error, got: {err}");
+    assert!(
+        err.contains("loops back"),
+        "expected a loop error, got: {err}"
+    );
 }
 
 #[test]
@@ -427,7 +447,10 @@ fn ifd_chain_cycle_through_the_first_directory_is_rejected() {
         Ok(_) => panic!("a looping IFD chain was accepted"),
         Err(e) => e.to_string(),
     };
-    assert!(err.contains("loops back"), "expected a loop error, got: {err}");
+    assert!(
+        err.contains("loops back"),
+        "expected a loop error, got: {err}"
+    );
 }
 
 #[test]
@@ -438,7 +461,10 @@ fn ifd_chain_cycle_the_head_is_not_part_of_is_rejected() {
         Ok(_) => panic!("a looping IFD chain was accepted"),
         Err(e) => e.to_string(),
     };
-    assert!(err.contains("loops back"), "expected a loop error, got: {err}");
+    assert!(
+        err.contains("loops back"),
+        "expected a loop error, got: {err}"
+    );
 }
 
 #[test]

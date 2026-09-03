@@ -17,7 +17,9 @@ fn tiff_bytes(frames: usize, w: u32, h: u32) -> Vec<u8> {
     let opts = WriterOptions::new(w, h, SampleType::U16).metadata(StackMetaWrite::new(1, frames));
     let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
     for f in 0..frames {
-        let px: Vec<u16> = (0..w * h).map(|i| (i as u16).wrapping_add(f as u16 * 7)).collect();
+        let px: Vec<u16> = (0..w * h)
+            .map(|i| (i as u16).wrapping_add(f as u16 * 7))
+            .collect();
         let bytes: Vec<u8> = px.iter().flat_map(|v| v.to_le_bytes()).collect();
         writer.write_frame_bytes(&bytes).unwrap();
     }
@@ -51,9 +53,18 @@ fn open_and_count_signals(viewer: &mut Viewer, source: LoadSource) -> usize {
 #[test]
 fn an_open_signals_exactly_once() {
     let mut viewer = Viewer::new();
-    let signals = open_and_count_signals(&mut viewer, LoadSource::Bytes(tiff_bytes(3, 16, 16), "t.tif".into()));
-    assert_eq!(signals, 1, "the landing should be reported once and only once");
-    assert!(viewer.stack.is_some(), "the stack should be installed by then");
+    let signals = open_and_count_signals(
+        &mut viewer,
+        LoadSource::Bytes(tiff_bytes(3, 16, 16), "t.tif".into()),
+    );
+    assert_eq!(
+        signals, 1,
+        "the landing should be reported once and only once"
+    );
+    assert!(
+        viewer.stack.is_some(),
+        "the stack should be installed by then"
+    );
 }
 
 #[test]
@@ -61,25 +72,40 @@ fn a_failed_open_still_signals() {
     // Otherwise the frontend waits for ever for a file that is never coming,
     // and the error it recorded is never surfaced.
     let mut viewer = Viewer::new();
-    let signals = open_and_count_signals(&mut viewer, LoadSource::Bytes(b"not a tiff".to_vec(), "bad.tif".into()));
+    let signals = open_and_count_signals(
+        &mut viewer,
+        LoadSource::Bytes(b"not a tiff".to_vec(), "bad.tif".into()),
+    );
     assert_eq!(signals, 1);
     assert!(viewer.stack.is_none());
-    assert!(viewer.status.is_some(), "a failure should leave something to show");
+    assert!(
+        viewer.status.is_some(),
+        "a failure should leave something to show"
+    );
 }
 
 #[test]
 fn nothing_is_signalled_when_nothing_was_opened() {
     let mut viewer = Viewer::new();
     for _ in 0..10 {
-        assert!(!viewer.poll_open(), "an idle viewer should report no landing");
+        assert!(
+            !viewer.poll_open(),
+            "an idle viewer should report no landing"
+        );
     }
 }
 
 #[test]
 fn opening_a_second_file_signals_again() {
     let mut viewer = Viewer::new();
-    open_and_count_signals(&mut viewer, LoadSource::Bytes(tiff_bytes(2, 8, 8), "a.tif".into()));
-    let signals = open_and_count_signals(&mut viewer, LoadSource::Bytes(tiff_bytes(5, 8, 8), "b.tif".into()));
+    open_and_count_signals(
+        &mut viewer,
+        LoadSource::Bytes(tiff_bytes(2, 8, 8), "a.tif".into()),
+    );
+    let signals = open_and_count_signals(
+        &mut viewer,
+        LoadSource::Bytes(tiff_bytes(5, 8, 8), "b.tif".into()),
+    );
     assert_eq!(signals, 1, "the second open must report its landing too");
     assert_eq!(viewer.stack.as_ref().map(|s| s.frame_count()), Some(5));
 }

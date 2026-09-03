@@ -97,13 +97,18 @@ pub(super) fn range_slider(
         egui::pos2(rect.left(), track_y - 2.0),
         egui::pos2(rect.right(), track_y + 2.0),
     );
-    ui.painter().rect_filled(track, 2.0, visuals.widgets.inactive.bg_fill);
+    ui.painter()
+        .rect_filled(track, 2.0, visuals.widgets.inactive.bg_fill);
     let sel = egui::Rect::from_min_max(
         egui::pos2(x_of(*min), track_y - 2.0),
         egui::pos2(x_of(*max), track_y + 2.0),
     );
     let bar = tint.unwrap_or(visuals.selection.bg_fill);
-    let bar = if enabled { bar } else { bar.gamma_multiply(DISABLED_BAR_OPACITY) };
+    let bar = if enabled {
+        bar
+    } else {
+        bar.gamma_multiply(DISABLED_BAR_OPACITY)
+    };
     ui.painter().rect_filled(sel, 2.0, bar);
 
     let radius = HANDLE_RADIUS;
@@ -118,7 +123,9 @@ pub(super) fn range_slider(
     for is_max in [false, true] {
         let mut active = false;
         if enabled {
-            let id = ui.id().with((salt, if is_max { "range_max" } else { "range_min" }));
+            let id = ui
+                .id()
+                .with((salt, if is_max { "range_max" } else { "range_min" }));
             let at = if is_max { *max } else { *min };
             let hit = egui::Rect::from_center_size(
                 egui::pos2(x_of(at), track_y),
@@ -150,11 +157,16 @@ pub(super) fn range_slider(
             active = resp.dragged() || resp.hovered();
         }
         let col = handle_color(&visuals, active);
-        let col = if enabled { col } else { col.gamma_multiply(DISABLED_HANDLE_OPACITY) };
+        let col = if enabled {
+            col
+        } else {
+            col.gamma_multiply(DISABLED_HANDLE_OPACITY)
+        };
         // Read the value back rather than reusing `at`: this handle may have
         // just moved, and painting the pre-drag position lags it by a frame.
         let at = if is_max { *max } else { *min };
-        ui.painter().circle_filled(egui::pos2(x_of(at), track_y), radius, col);
+        ui.painter()
+            .circle_filled(egui::pos2(x_of(at), track_y), radius, col);
     }
 
     // The committed handle only means anything while a drag is actually
@@ -228,7 +240,11 @@ pub(super) enum ContrastLayout {
 /// What sits at the left of a contrast row.
 enum RowHead<'a> {
     /// A per-channel enable toggle, with optional explanatory hover text.
-    Toggle { label: String, enabled: &'a mut bool, hover: Option<&'a str> },
+    Toggle {
+        label: String,
+        enabled: &'a mut bool,
+        hover: Option<&'a str>,
+    },
     /// A plain caption, for a single-channel stack — switching off the only
     /// channel would just blank the image, so it gets no checkbox.
     Caption(&'a str),
@@ -239,11 +255,14 @@ enum RowHead<'a> {
 /// only way back.
 fn draw_head(ui: &mut egui::Ui, head: RowHead<'_>) -> bool {
     match head {
-        RowHead::Toggle { label, enabled, hover } => {
+        RowHead::Toggle {
+            label,
+            enabled,
+            hover,
+        } => {
             // Fixed-width checkbox so every inline slider starts at the same x
             // regardless of label length.
-            let check =
-                ui.add_sized(egui::vec2(48.0, 18.0), egui::Checkbox::new(enabled, label));
+            let check = ui.add_sized(egui::vec2(48.0, 18.0), egui::Checkbox::new(enabled, label));
             if let Some(hover) = hover {
                 check.on_hover_text(hover);
             }
@@ -373,8 +392,12 @@ pub(super) fn contrast_controls(
         // channel's window by the same amount. Snapshot the values
         // first so we can detect which one moved and by how much.
         let shift = ui.input(|i| i.modifiers.shift);
-        let before: Vec<(f32, f32)> =
-            loaded.display.settings.iter().map(|s| (s.min, s.max)).collect();
+        let before: Vec<(f32, f32)> = loaded
+            .display
+            .settings
+            .iter()
+            .map(|s| (s.min, s.max))
+            .collect();
         // Per-channel slider tints from each channel's display LUT —
         // colored only for composite/RGB or pseudocolor stacks, `None`
         // (default color) for plain grayscale.
@@ -410,8 +433,16 @@ pub(super) fn contrast_controls(
                 ui,
                 layout,
                 c as u64,
-                RowHead::Toggle { label, enabled: &mut settings.enabled, hover },
-                (&mut settings.min, &mut settings.max, track.unwrap_or(settings.bounds)),
+                RowHead::Toggle {
+                    label,
+                    enabled: &mut settings.enabled,
+                    hover,
+                },
+                (
+                    &mut settings.min,
+                    &mut settings.max,
+                    track.unwrap_or(settings.bounds),
+                ),
                 calibration,
                 tints.get(c).copied().flatten(),
             ));
@@ -436,7 +467,11 @@ pub(super) fn contrast_controls(
                 layout,
                 0,
                 RowHead::Caption("Contrast:"),
-                (&mut settings.min, &mut settings.max, track.unwrap_or(settings.bounds)),
+                (
+                    &mut settings.min,
+                    &mut settings.max,
+                    track.unwrap_or(settings.bounds),
+                ),
                 calibration,
                 single_tint,
             ));

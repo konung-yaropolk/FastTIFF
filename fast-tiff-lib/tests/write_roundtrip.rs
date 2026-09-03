@@ -19,7 +19,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 fn unique_temp_path(name: &str) -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("fast_tiff_write_{}_{}_{}", std::process::id(), n, name))
+    std::env::temp_dir().join(format!(
+        "fast_tiff_write_{}_{}_{}",
+        std::process::id(),
+        n,
+        name
+    ))
 }
 
 struct Cleanup(PathBuf);
@@ -54,7 +59,10 @@ fn u16_stack_roundtrips_and_scrubs_zero_copy() {
         assert_eq!(got.as_ref(), &expected[..], "frame {i}");
         // The writer's default layout IS the reader's zero-copy fast path.
         #[cfg(target_endian = "little")]
-        assert!(matches!(got, Cow::Borrowed(_)), "frame {i} should decode zero-copy");
+        assert!(
+            matches!(got, Cow::Borrowed(_)),
+            "frame {i} should decode zero-copy"
+        );
     }
 }
 
@@ -116,14 +124,18 @@ fn rgb8_stack_opens_as_rgb() {
     let _cleanup = Cleanup(path.clone());
     // 2x2 chunky RGB.
     let frame: Vec<u8> = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 10, 20, 30];
-    let mut w =
-        TiffWriter::create(&path, WriterOptions::new(2, 2, SampleType::U8).samples_per_pixel(3)).unwrap();
+    let mut w = TiffWriter::create(
+        &path,
+        WriterOptions::new(2, 2, SampleType::U8).samples_per_pixel(3),
+    )
+    .unwrap();
     w.write_frame_bytes(&frame).unwrap();
     w.finish().unwrap();
 
     let stack = TiffStack::open(&path).unwrap();
     assert!(stack.frames[0].is_rgb());
-    let red = fast_tiff_lib::read_plane_u8(&stack.data, &stack.frames[0], stack.byte_order, 0).unwrap();
+    let red =
+        fast_tiff_lib::read_plane_u8(&stack.data, &stack.frames[0], stack.byte_order, 0).unwrap();
     assert_eq!(red, vec![255, 0, 0, 10]);
 }
 
@@ -136,10 +148,12 @@ fn rgb8_stack_opens_as_rgb() {
 fn planar_rgb_roundtrips_and_matches_chunky() {
     // 4x3 RGB16: distinct values per sample so a mixed-up plane can't pass.
     let (w, h, spp) = (4usize, 3usize, 3usize);
-    let chunky: Vec<u16> =
-        (0..w * h).flat_map(|i| [i as u16, 1000 + i as u16, 2000 + i as u16]).collect();
-    let planar: Vec<u16> =
-        (0..spp).flat_map(|p| (0..w * h).map(|i| chunky[i * spp + p]).collect::<Vec<_>>()).collect();
+    let chunky: Vec<u16> = (0..w * h)
+        .flat_map(|i| [i as u16, 1000 + i as u16, 2000 + i as u16])
+        .collect();
+    let planar: Vec<u16> = (0..spp)
+        .flat_map(|p| (0..w * h).map(|i| chunky[i * spp + p]).collect::<Vec<_>>())
+        .collect();
 
     for (label, compression, predictor, rows_per_strip) in [
         ("plain", Compression::None, false, None),
@@ -177,7 +191,10 @@ fn planar_rgb_roundtrips_and_matches_chunky() {
         assert_eq!(pf.planar_config, 2, "{label}: PlanarConfiguration tag");
         assert!(pf.is_planar(), "{label}: should read back as planar");
         assert!(pf.is_rgb(), "{label}: 3 samples is still RGB");
-        assert_eq!(cf.planar_config, 1, "{label}: chunky writes no tag (default 1)");
+        assert_eq!(
+            cf.planar_config, 1,
+            "{label}: chunky writes no tag (default 1)"
+        );
         // Planar splits strips per plane, so it has `spp` times as many.
         assert_eq!(
             pf.strip_offsets.len(),
@@ -210,7 +227,10 @@ fn planar_is_ignored_for_single_sample_frames() {
     w.finish().unwrap();
 
     let stack = TiffStack::open(&path).unwrap();
-    assert_eq!(stack.frames[0].planar_config, 1, "no tag written -> chunky default");
+    assert_eq!(
+        stack.frames[0].planar_config, 1,
+        "no tag written -> chunky default"
+    );
     assert!(!stack.frames[0].is_planar());
     let got = read_frame_u16(&stack.data, &stack.frames[0], stack.byte_order, None).unwrap();
     assert_eq!(got.as_ref(), &frame[..]);
@@ -257,8 +277,14 @@ fn imagej_hyperstack_metadata_roundtrips_through_stack_meta() {
     assert_eq!(meta.channel_display[0].range, Some((100.0, 4000.0)));
     // The raw tag-270 text is exposed verbatim alongside the parsed view,
     // including keys without a parsed field (the extra() escape hatch).
-    let desc = stack.description.as_deref().expect("raw description exposed");
-    assert!(desc.contains("vunit=V"), "raw description keeps extra keys:\n{desc}");
+    let desc = stack
+        .description
+        .as_deref()
+        .expect("raw description exposed");
+    assert!(
+        desc.contains("vunit=V"),
+        "raw description keeps extra keys:\n{desc}"
+    );
 }
 
 /// Per-channel color LUTs written into the ImageJ binary metadata block must
@@ -298,8 +324,16 @@ fn imagej_channel_luts_round_trip_through_stack_meta() {
     // The colored LUTs came back and are flagged explicit (so the viewer keeps
     // them instead of applying a default).
     assert!(meta.has_explicit_luts, "colored LUTs are explicit");
-    assert_eq!(meta.channel_display[0].lut[255], [255, 0, 255], "channel 0 → magenta top");
-    assert_eq!(meta.channel_display[1].lut[255], [0, 255, 255], "channel 1 → cyan top");
+    assert_eq!(
+        meta.channel_display[0].lut[255],
+        [255, 0, 255],
+        "channel 0 → magenta top"
+    );
+    assert_eq!(
+        meta.channel_display[1].lut[255],
+        [0, 255, 255],
+        "channel 1 → cyan top"
+    );
 }
 
 /// The same neutral metadata builder, written as OME instead of ImageJ, must
@@ -340,7 +374,10 @@ fn ome_metadata_roundtrips_through_stack_meta() {
     assert_eq!(meta.frame_interval_s, Some(1.5));
     // The raw description is genuinely OME-XML, not ImageJ key=value.
     let desc = stack.description.as_deref().expect("raw description");
-    assert!(desc.contains("<OME"), "description should be OME-XML:\n{desc}");
+    assert!(
+        desc.contains("<OME"),
+        "description should be OME-XML:\n{desc}"
+    );
     // Pixels survive: each written frame decodes back to what went in.
     for (i, f) in frames.iter().enumerate() {
         let got = read_frame_u16(&stack.data, &stack.frames[i], stack.byte_order, None).unwrap();
@@ -372,7 +409,10 @@ fn forced_bigtiff_file_roundtrips_through_stack_open() {
         // BigTIFF changes only the directory layout — the zero-copy pixel
         // fast path is identical.
         #[cfg(target_endian = "little")]
-        assert!(matches!(got, Cow::Borrowed(_)), "frame {i} should decode zero-copy");
+        assert!(
+            matches!(got, Cow::Borrowed(_)),
+            "frame {i} should decode zero-copy"
+        );
     }
 }
 
@@ -399,7 +439,11 @@ fn f64_stack_opens_and_downcasts_to_f32() {
     let _cleanup = Cleanup(path.clone());
 
     let frames: Vec<Vec<f64>> = (0..2)
-        .map(|f| (0..4 * 3).map(|i| f as f64 * 10.0 + i as f64 / 3.0).collect())
+        .map(|f| {
+            (0..4 * 3)
+                .map(|i| f as f64 * 10.0 + i as f64 / 3.0)
+                .collect()
+        })
         .collect();
 
     let mut w = TiffWriter::create(&path, WriterOptions::new(4, 3, SampleType::F64)).unwrap();
@@ -417,7 +461,11 @@ fn f64_stack_opens_and_downcasts_to_f32() {
         assert_eq!(got.as_ref(), &want[..], "frame {i}");
     }
     // 64-bit float auto-ranges to its own data min/max (like 32-bit float).
-    assert!(frame_float_minmax(&stack.data, &stack.frames[0], stack.byte_order).unwrap().is_some());
+    assert!(
+        frame_float_minmax(&stack.data, &stack.frames[0], stack.byte_order)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
