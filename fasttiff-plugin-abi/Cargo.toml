@@ -1,0 +1,21 @@
+# The frozen binary contract between FastTIFF and a plugin shared library.
+#
+# MPL-2.0 and zero dependencies, for the same reasons as fasttiff-plugin-api:
+# a plugin must depend on this, so a copyleft SDK would force its licence onto
+# every plugin, and a dependency here would become part of the frozen contract.
+#
+# This crate is FROZEN. Types may gain fields at the end (every struct carries a
+# `struct_size` prologue for exactly that); nothing may be reordered, renumbered
+# or repurposed. A change that cannot be expressed that way is ABI 2, with a new
+# entry-point symbol name.
+[package]
+name = "fasttiff-plugin-abi"
+version = "0.18.0"
+edition = "2021"
+description = "The FastTIFF plugin binary interface: the extern \"C\" contract a .dll/.so plugin implements."
+license = "MPL-2.0"
+repository = "https://github.com/konung-yaropolk/FastTIFF"
+keywords = ["tiff", "plugin", "ffi", "abi", "microscopy"]
+categories = ["external-ffi-bindings", "multimedia::images"]
+
+[dependencies]

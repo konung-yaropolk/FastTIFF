@@ -868,11 +868,25 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "fast-tiff-lib",
+ "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
+ "libloading",
  "log",
  "rayon",
  "scivis-render",
 ]
+
+[[package]]
+name = "fasttiff-plugin"
+version = "0.18.0"
+dependencies = [
+ "fasttiff-plugin-abi",
+ "fasttiff-plugin-api",
+]
+
+[[package]]
+name = "fasttiff-plugin-abi"
+version = "0.18.0"
 
 [[package]]
 name = "fasttiff-plugin-api"
