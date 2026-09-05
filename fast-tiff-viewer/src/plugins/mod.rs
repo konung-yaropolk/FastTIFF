@@ -4,14 +4,15 @@
 //! the window — and because the browser build gets the built-in plugins for
 //! free that way. The app supplies only the dialog and the menu.
 //!
-//! The `.dll`/`.so` lane is not here yet. When it lands it adds entries to the
-//! same [`Registry`] and implements the same
-//! [`Plugin`](fasttiff_plugin_api::Plugin) trait, so nothing above this module
-//! learns that a plugin came from a file.
+//! A plugin loaded from a `.dll`/`.so` ends up in the same [`Registry`] behind
+//! the same [`Plugin`](fasttiff_plugin_api::Plugin) trait as a built-in one, so
+//! nothing above this module learns where a plugin came from. [`library`] is
+//! the only place that knows.
 
 pub mod builtin;
 pub mod discover;
 pub mod host;
+pub mod library;
 pub mod netpbm;
 pub mod result;
 
@@ -64,7 +65,8 @@ impl Default for Registry {
 }
 
 impl Registry {
-    /// The built-ins only. External lanes add to this.
+    /// The built-ins only. Touches no filesystem and loads no code, which is
+    /// what the tests and the browser build want.
     pub fn new() -> Self {
         let mut reg = Registry {
             entries: Vec::new(),
@@ -75,6 +77,20 @@ impl Registry {
             reg.add(p, Origin::BuiltIn);
         }
         reg.add_importer(Box::new(netpbm::Netpbm), Origin::BuiltIn);
+        reg.sort();
+        reg
+    }
+
+    /// The built-ins plus every plugin library on the search path. This is what
+    /// the application calls at startup.
+    ///
+    /// Built-ins are added first so that a library cannot displace one by
+    /// claiming its id — [`add`](Self::add) keeps the first registration and
+    /// reports the clash, and "the app's own plugin wins" is the safer of the
+    /// two answers.
+    pub fn with_installed() -> Self {
+        let mut reg = Registry::new();
+        library::load_all(&mut reg);
         reg.sort();
         reg
     }

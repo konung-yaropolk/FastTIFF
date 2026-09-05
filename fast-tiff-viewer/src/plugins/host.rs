@@ -41,6 +41,17 @@ impl<'a> StackHost<'a> {
         }
     }
 
+    /// Replace the metadata this host reports.
+    ///
+    /// The stack's own is right almost always; this exists for the cases where
+    /// the caller knows better — a document assembled from a plugin result,
+    /// which has metadata the written bytes do not carry — and for tests, which
+    /// need to state exactly what a plugin should see.
+    pub fn with_info(mut self, info: StackInfo) -> Self {
+        self.info = info;
+        self
+    }
+
     /// Wire up a cancel flag the UI can set while the run is in flight.
     pub fn with_cancel(
         mut self,

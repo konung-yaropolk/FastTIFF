@@ -108,6 +108,12 @@ pub struct ImageResult {
 }
 
 /// One plane's samples, in whichever type the result declares.
+///
+/// There is no `I16` arm, and that is not an oversight: signed 16-bit samples
+/// travel in [`PlaneData::U16`] as their raw bit pattern (`v as u16`), with the
+/// result declaring [`PixelType::I16`]. Two representations of the same sixteen
+/// bits would only invite one of them to be filled in wrongly, and the bits are
+/// what gets written to the file either way.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlaneData {
     U8(Vec<u8>),
@@ -162,7 +168,11 @@ impl ImageResult {
                     self.height
                 )));
             }
-            if p.pixel_type() != self.pixel_type {
+            // `I16` is carried in the `U16` lane as raw bits — see `PlaneData`
+            // — so that pairing is the one mismatch that is not one.
+            let declared_ok = p.pixel_type() == self.pixel_type
+                || (self.pixel_type == PixelType::I16 && p.pixel_type() == PixelType::U16);
+            if !declared_ok {
                 return Err(PluginError::failed(format!(
                     "result plane {i} is {:?} but the result declares {:?}",
                     p.pixel_type(),

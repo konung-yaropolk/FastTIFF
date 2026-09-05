@@ -62,3 +62,7 @@ rayon = { version = "1.10", optional = true }
 # at all, so it is absent there rather than present-and-empty.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 fasttiff-plugin-api = { path = "../fasttiff-plugin-api", version = "0.18.0" }
+fasttiff-plugin-abi = { path = "../fasttiff-plugin-abi", version = "0.18.0" }
+# Opening a shared library. Native only, for the same reason as above: there is
+# no `dlopen` in a browser.
+libloading = "0.8"

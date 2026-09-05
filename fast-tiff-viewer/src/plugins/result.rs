@@ -54,6 +54,21 @@ pub fn to_tiff_bytes(image: &ImageResult, info: Option<&StackInfo>) -> anyhow::R
         if let Some(s) = info.frame_interval_s {
             meta = meta.frame_interval_s(s);
         }
+        // Spacing and calibration are the whole reason an importer bothers to
+        // report metadata: without them a measurement made on the result is in
+        // pixels and frames rather than microns and seconds.
+        if let (Some(w), Some(h)) = (info.spacing.x, info.spacing.y) {
+            meta = meta.pixel_size(w, h);
+        }
+        if let Some(z) = info.spacing.z {
+            meta = meta.spacing(z);
+        }
+        if let Some((c0, c1)) = info.calibration {
+            meta = meta.calibration(c0, c1);
+        }
+        for (i, name) in info.channel_names.iter().enumerate() {
+            meta = meta.channel(name.clone(), fast_tiff_lib::metadata::composite_color(i));
+        }
     } else if image.channels > 1 {
         // A multi-channel result with nothing said about it is far more useful
         // composited than shown one channel at a time.

@@ -633,7 +633,7 @@ impl ViewerApp {
             view: View2d::default(),
             panel: PanelLayout::default(),
             #[cfg(not(target_arch = "wasm32"))]
-            plugins: fast_tiff_viewer::plugins::Registry::new(),
+            plugins: fast_tiff_viewer::plugins::Registry::with_installed(),
             #[cfg(not(target_arch = "wasm32"))]
             plugin_dialog: None,
             open_tx,
