@@ -1,0 +1,22 @@
+# The contract between FastTIFF and a plugin.
+#
+# MPL-2.0, deliberately, and not GPL like the `FastTIFF` app it plugs into: a
+# plugin has to depend on this crate, and a copyleft SDK would force every
+# plugin to adopt that licence too — which would rule out a microscope vendor
+# shipping one. MPL matches the other three library crates here.
+#
+# ZERO DEPENDENCIES, also deliberately. Everything a plugin exchanges with the
+# host is defined here, so a plugin author does not inherit fast-tiff-lib's
+# version — or anything else's — just to declare a dialog. It is what lets this
+# crate be frozen while the app moves.
+[package]
+name = "fasttiff-plugin-api"
+version = "0.1.0"
+edition = "2021"
+description = "The FastTIFF plugin contract: what a plugin declares, what the host hands it, and what it may return."
+license = "MPL-2.0"
+repository = "https://github.com/konung-yaropolk/FastTIFF"
+keywords = ["tiff", "plugin", "imaging", "microscopy"]
+categories = ["multimedia::images", "api-bindings"]
+
+[dependencies]

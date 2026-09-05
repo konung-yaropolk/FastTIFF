@@ -7,7 +7,7 @@ resolver = "2"
 #   FastTIFF          the eframe desktop frontend
 # A future wasm frontend becomes a fifth member alongside `FastTIFF`, reusing
 # the lower three unchanged.
-members = ["fast-tiff-lib", "scivis-render", "fast-tiff-viewer", "FastTIFF"]
+members = ["fast-tiff-lib", "scivis-render", "fast-tiff-viewer", "fasttiff-plugin-api", "FastTIFF"]
 # The fuzz harness is its own crate: it needs nightly + libFuzzer, so keeping it
 # out of the workspace means `cargo build/test --workspace` stays stable-only.
 # Run it with `cargo +nightly fuzz run <target>` from `fast-tiff-lib/`.
