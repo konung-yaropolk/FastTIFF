@@ -21,6 +21,7 @@ fn result(channels: usize, slices: usize, frames: usize, w: u32, h: u32) -> Imag
         frames,
         pixel_type: PixelType::F32,
         planes,
+        channel_colors: Vec::new(),
         name: "result".into(),
     }
 }
@@ -92,6 +93,7 @@ fn every_pixel_type_survives_the_round_trip() {
             frames: 1,
             pixel_type: ty,
             planes: vec![plane],
+            channel_colors: Vec::new(),
             name: "t".into(),
         };
         let stack = to_stack(&img, None, false).unwrap_or_else(|e| panic!("{ty:?}: {e:#}"));

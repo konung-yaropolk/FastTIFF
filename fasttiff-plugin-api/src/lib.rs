@@ -29,6 +29,7 @@
 //!             channels: 1, slices: 1, frames: 1,
 //!             pixel_type: PixelType::F32,
 //!             planes: vec![PlaneData::F32(px)],
+//!             channel_colors: Vec::new(),
 //!             name: "Inverted".into(),
 //!         })))
 //!     }

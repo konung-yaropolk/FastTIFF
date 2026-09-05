@@ -210,6 +210,7 @@ impl Importer for Netpbm {
                     PixelType::U16
                 },
                 planes,
+                channel_colors: Vec::new(),
                 name: name.clone(),
             },
             info: Some(StackInfo {

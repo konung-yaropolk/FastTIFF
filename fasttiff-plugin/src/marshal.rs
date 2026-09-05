@@ -475,6 +475,15 @@ unsafe fn write_image(
     if st != FtStatus::Ok {
         return st;
     }
+    // Colours before planes, so a host that refuses one has not yet copied a
+    // gigabyte of pixels.
+    for (i, color) in img.channel_colors.iter().enumerate() {
+        let rgb = (color[0] as u32) << 16 | (color[1] as u32) << 8 | color[2] as u32;
+        let st = (sink.set_channel)(sink.ctx, i as u64, FtStr::EMPTY, rgb);
+        if st != FtStatus::Ok {
+            return st;
+        }
+    }
     for p in &img.planes {
         let (ptr, len) = match p {
             PlaneData::U8(v) => (v.as_ptr() as *const core::ffi::c_void, v.len() as u64),

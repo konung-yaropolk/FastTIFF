@@ -687,6 +687,9 @@ struct ResultSink {
     /// What an importer said about the file it parsed. `None` when the plugin
     /// did not say, which is the normal case for a filter.
     info: Option<StackInfo>,
+    /// Per-channel colours, by index. Sparse: a plugin may colour some
+    /// channels and leave the rest to the host.
+    colors: std::collections::BTreeMap<u64, [u8; 3]>,
 }
 
 unsafe extern "C" fn sink_begin(
@@ -854,6 +857,27 @@ unsafe extern "C" fn sink_set_info(
     })
 }
 
+unsafe extern "C" fn sink_set_channel(
+    ctx: *mut std::ffi::c_void,
+    index: u64,
+    _name: abi::FtStr,
+    rgb: u32,
+) -> abi::FtStatus {
+    host_guard(|| {
+        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+            return abi::FtStatus::BadArgument;
+        };
+        // More channels than any real image, so a runaway loop cannot fill
+        // memory one entry at a time.
+        if index > 4096 {
+            return abi::FtStatus::OutOfRange;
+        }
+        s.colors
+            .insert(index, [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]);
+        abi::FtStatus::Ok
+    })
+}
+
 fn sink_table(sink: &mut ResultSink) -> abi::FtSink {
     abi::FtSink {
         struct_size: std::mem::size_of::<abi::FtSink>() as u32,
@@ -863,6 +887,7 @@ fn sink_table(sink: &mut ResultSink) -> abi::FtSink {
         push_plane: sink_push_plane,
         set_outcome: sink_set_outcome,
         set_info: sink_set_info,
+        set_channel: sink_set_channel,
     }
 }
 
@@ -881,6 +906,19 @@ impl ResultSink {
             abi::FtOutcomeKind::Nothing => Ok(Outcome::Nothing),
             abi::FtOutcomeKind::Message => Ok(Outcome::Message(self.text)),
             abi::FtOutcomeKind::NewDocument | abi::FtOutcomeKind::SaveToFile => {
+                // Dense, up to the highest channel the plugin coloured: the
+                // result carries a colour per channel or none at all, and a
+                // half-filled list would silently mean "black" for the rest.
+                let channel_colors = match self.colors.keys().next_back() {
+                    Some(&highest) => (0..=highest)
+                        .map(|i| {
+                            self.colors.get(&i).copied().unwrap_or_else(|| {
+                                fast_tiff_lib::metadata::composite_color(i as usize)
+                            })
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                };
                 let image = ImageResult {
                     width: self.width,
                     height: self.height,
@@ -889,6 +927,7 @@ impl ResultSink {
                     frames: self.frames,
                     pixel_type: self.pixel_type.unwrap_or(PixelType::U16),
                     planes: self.planes,
+                    channel_colors,
                     name: self.name,
                 };
                 // The plugin may simply have pushed too few planes; the host

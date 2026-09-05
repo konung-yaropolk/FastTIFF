@@ -84,6 +84,22 @@ pub fn to_tiff_bytes(image: &ImageResult, info: Option<&StackInfo>) -> anyhow::R
         meta = meta.mode(LibDisplayMode::Composite);
     }
 
+    // Per-channel colour, when the plugin asked for one. It has to go in as a
+    // full LUT rather than as `channel(name, color)`: the latter feeds the OME
+    // dialect, and what an ImageJ-format file (and this viewer) reads is the
+    // binary LUT block.
+    if !image.channel_colors.is_empty() {
+        meta = meta.mode(LibDisplayMode::Composite);
+        for c in 0..image.channels.max(1) {
+            let color = image
+                .channel_colors
+                .get(c)
+                .copied()
+                .unwrap_or_else(|| fast_tiff_lib::metadata::composite_color(c));
+            meta = meta.channel_lut(fast_tiff_lib::color_ramp_lut(color));
+        }
+    }
+
     let opts = WriterOptions::new(image.width, image.height, sample).metadata(meta);
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts)?;
     for plane in &image.planes {

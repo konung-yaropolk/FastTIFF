@@ -162,6 +162,7 @@ impl Importer for Oir {
                     PixelType::U16
                 },
                 planes: data,
+                channel_colors: Vec::new(),
                 name: name.clone(),
             },
             info: Some(StackInfo {

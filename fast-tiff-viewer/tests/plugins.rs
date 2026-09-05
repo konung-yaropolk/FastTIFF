@@ -294,6 +294,7 @@ fn a_malformed_result_is_rejected() {
         frames: 1,
         pixel_type: PixelType::F32,
         planes: vec![PlaneData::F32(vec![0.0; 4])],
+        channel_colors: Vec::new(),
         name: "ok".into(),
     };
     base.validate().expect("the well-formed case must pass");

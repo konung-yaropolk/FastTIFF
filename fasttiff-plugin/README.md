@@ -38,6 +38,7 @@ impl Plugin for Invert {
             channels: 1, slices: 1, frames: 1,
             pixel_type: PixelType::F32,
             planes: vec![PlaneData::F32(out)],
+            channel_colors: Vec::new(),
             name: format!("{}-inverted", host.stack_info().name),
         })))
     }

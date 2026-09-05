@@ -102,6 +102,16 @@ pub struct ImageResult {
     pub pixel_type: PixelType,
     /// The pixel data, one entry per plane, in `xyczt` order.
     pub planes: Vec<PlaneData>,
+    /// What colour each channel should be shown in, as RGB.
+    ///
+    /// Empty means "the host decides", which is the right default: a filter
+    /// that transformed one channel has no opinion. It matters when the
+    /// channels *mean* different things — an overlay of two conditions is
+    /// unreadable in the host's default red/green if the convention in the
+    /// field is magenta/green, and only the plugin knows that.
+    ///
+    /// Shorter than `channels` is fine; the rest fall back to the default.
+    pub channel_colors: Vec<[u8; 3]>,
     /// What to call it. The host uses it for the window title and the default
     /// filename.
     pub name: String,

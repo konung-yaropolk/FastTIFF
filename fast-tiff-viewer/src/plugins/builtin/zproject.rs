@@ -134,6 +134,7 @@ impl Plugin for ZProject {
             frames: 1,
             pixel_type: PixelType::F32,
             planes,
+            channel_colors: Vec::new(),
             name: format!("{}-{label}", host.stack_info().name),
         })))
     }

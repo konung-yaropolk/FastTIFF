@@ -547,6 +547,15 @@ pub struct FtSink {
         unit: FtStr,
         description: FtStr,
     ) -> FtStatus,
+    /// Name and colour one channel of the result, `0`-based.
+    ///
+    /// A callback rather than an array on [`FtSink::begin_image`], for the same
+    /// reason `push_plane` is one: the count is not known to this contract in
+    /// advance, and a repeated call needs no ownership rules. `rgb` is
+    /// `0x00RRGGBB`. Optional; unnamed, uncoloured channels get the host's
+    /// defaults.
+    pub set_channel:
+        unsafe extern "C" fn(ctx: *mut c_void, index: u64, name: FtStr, rgb: u32) -> FtStatus,
 }
 
 /// Where a plugin declares its dialog, one control at a time.
@@ -788,7 +797,7 @@ const _: () = {
     assert!(size_of::<FtPluginVtable>() == 8 + 3 * p);
     assert!(size_of::<FtImporterVtable>() == 8 + 4 * p);
     assert!(size_of::<FtParamSink>() == 8 + 2 * p);
-    assert!(size_of::<FtSink>() == 8 + 5 * p);
+    assert!(size_of::<FtSink>() == 8 + 6 * p);
     assert!(size_of::<FtHost>() == 8 + 12 * p);
 
     assert!(size_of::<FtStackInfo>() == 64);

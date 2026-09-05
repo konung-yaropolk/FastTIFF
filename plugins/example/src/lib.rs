@@ -116,6 +116,7 @@ impl Plugin for Invert {
             frames: 1,
             pixel_type: PixelType::F32,
             planes,
+            channel_colors: Vec::new(),
             name: format!("{}-inverted", host.stack_info().name),
         })))
     }
@@ -308,6 +309,7 @@ impl Importer for RawImport {
                     ty
                 },
                 planes,
+                channel_colors: Vec::new(),
                 name: name_of(&request.path),
             },
             // A headerless file states nothing about itself, so the dialog is
@@ -534,6 +536,7 @@ impl Plugin for Panics {
                 frames: 1,
                 pixel_type: PixelType::F32,
                 planes: vec![PlaneData::F32(buf)],
+                channel_colors: Vec::new(),
                 name: "never".into(),
             };
         }
