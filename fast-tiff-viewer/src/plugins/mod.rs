@@ -9,11 +9,12 @@
 //! nothing above this module learns where a plugin came from. [`library`] is
 //! the only place that knows.
 
+/// The plugins compiled into this build. Everything else in this module is the
+/// *interface* they are written against; nothing here reaches into it.
 pub mod builtin;
 pub mod discover;
 pub mod host;
 pub mod library;
-pub mod netpbm;
 pub mod result;
 
 pub use discover::{install_dir, is_library, search_paths, user_plugin_dir, LIBRARY_EXT};
@@ -76,7 +77,9 @@ impl Registry {
         for p in builtin::all() {
             reg.add(p, Origin::BuiltIn);
         }
-        reg.add_importer(Box::new(netpbm::Netpbm), Origin::BuiltIn);
+        for i in builtin::importers() {
+            reg.add_importer(i, Origin::BuiltIn);
+        }
         reg.sort();
         reg
     }

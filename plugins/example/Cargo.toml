@@ -21,7 +21,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-fasttiff-plugin = { path = "../fasttiff-plugin", version = "0.18.0" }
+fasttiff-plugin = { path = "../../fasttiff-plugin", version = "0.18.0" }
 
 # The host, so `tests/boundary.rs` can drive the real loader against this
 # plugin. The dependency points this way round on purpose. The test has to run
@@ -32,5 +32,5 @@ fasttiff-plugin = { path = "../fasttiff-plugin", version = "0.18.0" }
 # that impossible. It also keeps the published `fast-tiff-viewer` free of a
 # test whose dependency `cargo package` would strip.
 [dev-dependencies]
-fast-tiff-viewer = { path = "../fast-tiff-viewer" }
-fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
+fast-tiff-viewer = { path = "../../fast-tiff-viewer" }
+fasttiff-plugin-api = { path = "../../fasttiff-plugin-api" }

@@ -51,7 +51,7 @@ the folder that **Plugins ▸ Open plugin folder…** opens. Restart FastTIFF an
 is in the menu.
 
 A worked example with a filter, an importer and a dialog lives in
-[`fasttiff-plugin-example`](../fasttiff-plugin-example/src/lib.rs).
+[`plugins/example`](../plugins/example/src/lib.rs).
 
 ## The two kinds of plugin
 
