@@ -191,20 +191,29 @@ you move the slider. This viewer instead:
 
 ## Project layout
 
-Four crates, layered bottom-up. Each one below the app is free of any GUI
-toolkit, so the same engine can drive a different frontend (a wasm/web UI is the
-intended second one):
+Layered bottom-up. Each crate below the app is free of any GUI toolkit, so the
+same engine can drive a different frontend (the browser build is the second
+one):
 
 ```text
   fast-tiff-lib     file I/O, IFD index, decode, metadata
         │
   scivis-render     GPU pipelines, textures, ray-marching
         │
-  fast-tiff-viewer  stack model, channel settings, decode → GPU sync
-        │
+  fast-tiff-viewer  stack model, channel settings, decode → GPU sync,
+        │           and the plugin host
   FastTIFF          the egui UI (lib) + the native binary
         │
   FastTIFF-web      a browser host around the same UI
+```
+
+Off to one side, the plugin contract — three crates that a third party depends
+on to build a plugin, and which therefore depend on nothing of ours:
+
+```text
+  fasttiff-plugin-abi   the frozen #[repr(C)] contract. Never changes.
+  fasttiff-plugin-api   the plain-Rust traits both sides implement
+  fasttiff-plugin       the macro that generates the boundary from them
 ```
 
 `FastTIFF` is a lib + bin: the library half holds the egui interface, and both
@@ -241,6 +250,16 @@ sites.
   (zoom, pan, window sizing, which panels are open). `src/render.rs` is the sole
   file bridging the renderer to eframe — a browser frontend writes its own
   ~150-line equivalent and reuses everything else.
+- **`fasttiff-plugin-abi/`**, **`fasttiff-plugin-api/`**,
+  **`fasttiff-plugin/`** — the plugin contract, split by what may change.
+  `-abi` is the frozen binary interface (`#[repr(C)]`, `extern "C"`, zero
+  dependencies, layout pinned by tests); `-api` is the ordinary Rust traits a
+  plugin author actually writes against; `fasttiff-plugin` is the macro that
+  turns one into the other. Only `-abi` is permanent — the other two compile
+  *into* the plugin, so they can change freely. All three are MPL-2.0 rather
+  than the app's GPL: a plugin SDK that set the licence of every plugin written
+  against it would be making a decision that is not this project's to make.
+  `fasttiff-plugin-example/` is a working plugin used as the test oracle.
 
 ## The TIFF engine is a standalone crate
 
@@ -436,11 +455,55 @@ with the same per-channel LUTs and contrast as the 2D view.
   through time.
 - Runs on both the glow and wgpu backends.
 
+## Plugins
+
+FastTIFF loads plugins from shared libraries — `.dll` on Windows, `.so` on
+Linux, `.dylib` on macOS. **Plugins ▸ Open plugin folder…** opens the folder to
+put them in; they appear in the menu on the next start.
+
+Two kinds:
+
+- **Filters** run against the stack that is open. They get the image's shape in
+  file coordinates, the file's own scale (pixel size, Z step, frame interval,
+  intensity calibration, channel names), the viewer's current display state
+  (contrast window, 3D camera), and a plane-at-a-time reader — then return a new
+  document, a file to write, or a message. A plugin declares its dialog as a
+  list of typed controls and the host draws it, so there is no UI toolkit in a
+  plugin's dependency tree.
+- **Importers** read formats FastTIFF does not know. An importer declares the
+  extensions it handles, and the host adds them to the Open dialog and to
+  drag-and-drop *before the plugin has run*; opening such a file calls the
+  importer, and what it returns — pixels and the scale it read out of the file —
+  becomes an ordinary FastTIFF document.
+
+The boundary is a frozen C ABI, not Rust's, because Rust has no stable ABI: a
+plugin built next year by a different compiler must still load. Nothing crosses
+but fixed-width integers, `#[repr(C)]` structs and function pointers; every
+struct carries its own size so fields can be appended without breaking either
+side; the ABI's major version is part of the exported symbol name, so a version
+mismatch is a clean "not a plugin for this FastTIFF" instead of two binaries
+disagreeing about a struct layout mid-call. No allocator is shared — the host
+copies everything during the call that supplies it. Every enumeration crosses as
+a plain integer rather than a Rust enum, because a value from a newer plugin
+than the host has heard of has to be *data* to be checked, not undefined
+behaviour on arrival. The layouts are pinned by compile-time assertions, so they
+are checked on every target the crate builds for rather than only the one that
+happened to run the tests.
+
+Writing one is still ordinary Rust: implement a trait, call one macro. See
+[`fasttiff-plugin/README.md`](fasttiff-plugin/README.md) for the twenty-line
+version, and [`fasttiff-plugin-example/`](fasttiff-plugin-example/src/lib.rs)
+for a filter, an importer with a dialog, and a raw-binary reader.
+
+Native only — there is no `dlopen` in a browser, so the web build has no plugin
+interface rather than a disabled one.
+
 ## What it doesn't do (intentionally out of scope for a "viewer")
 
-ROIs, measurements, image processing, saving/exporting. All straightforward to
-add later on top of this structure if you want them — the render pipeline
-already separates "decode" from "display" cleanly.
+ROIs and measurements. Image processing and export are not built in either, but
+are what the [plugin interface](#plugins) exists for — the render pipeline
+separates "decode" from "display" cleanly enough that a plugin can read the
+former without disturbing the latter.
 
 ## Known caveat: plane ordering assumption
 

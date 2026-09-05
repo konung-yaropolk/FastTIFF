@@ -1,0 +1,36 @@
+# A real plugin, built the way a third party would build one.
+#
+# It exists to be loaded, not to be read: `fast-tiff-viewer`'s
+# `plugin_library.rs` opens the `.dll`/`.so` this produces and checks that the
+# `Invert` inside it gives byte-identical output to the built-in `Invert` it was
+# copied from. A plugin API that is only ever exercised by plugins compiled into
+# the host is one that has never actually crossed the boundary it exists for.
+[package]
+name = "fasttiff-plugin-example"
+version = "0.18.0"
+edition = "2021"
+description = "Example FastTIFF plugin library: an Invert filter and a raw-binary importer."
+license = "MPL-2.0"
+repository = "https://github.com/konung-yaropolk/FastTIFF"
+publish = false
+
+[lib]
+# The whole point: a loadable shared library with a C entry point. `rlib`
+# alongside it so the crate's own unit tests can link against it, which a
+# cdylib-only target cannot do.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fasttiff-plugin = { path = "../fasttiff-plugin", version = "0.18.0" }
+
+# The host, so `tests/boundary.rs` can drive the real loader against this
+# plugin. The dependency points this way round on purpose. The test has to run
+# against a plugin cargo has just rebuilt — `cargo test` does not rebuild a
+# `cdylib`, and a test that could only reach the plugin through `dlopen` would
+# quietly keep passing against a stale `.dll`, which is exactly what happened
+# once while this was being written. Living in the plugin's own crate makes
+# that impossible. It also keeps the published `fast-tiff-viewer` free of a
+# test whose dependency `cargo package` would strip.
+[dev-dependencies]
+fast-tiff-viewer = { path = "../fast-tiff-viewer" }
+fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }

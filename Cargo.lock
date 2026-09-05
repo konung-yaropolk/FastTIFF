@@ -893,6 +893,15 @@ name = "fasttiff-plugin-api"
 version = "0.18.0"
 
 [[package]]
+name = "fasttiff-plugin-example"
+version = "0.18.0"
+dependencies = [
+ "fast-tiff-viewer",
+ "fasttiff-plugin",
+ "fasttiff-plugin-api",
+]
+
+[[package]]
 name = "fax"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
