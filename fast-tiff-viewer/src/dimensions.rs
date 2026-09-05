@@ -7,6 +7,35 @@ use crate::display::Dims;
 use crate::stack::{ChannelSettings, Stack};
 use scivis_render::{ChannelKind, MAX_CHANNELS};
 
+/// Which IFD, and which sample plane inside it, holds channel `c` of slice `z`
+/// at timepoint `t`.
+///
+/// **The single definition of plane addressing.** It was previously written out
+/// twice — once in [`crate::prefetch::build_jobs`] for the 2D view and once in
+/// `crate::volume` for the ray-marched one — and the 2D copy was the `z == 0`
+/// special case of the same arithmetic while its doc comment claimed to be the
+/// general rule. That is a trap for anything that addresses planes generally: a
+/// caller asking for `z = 3` through the 2D formula silently gets slice 0's
+/// pixels rather than an error. Both call sites now come here, and the 2D one
+/// passes `z = 0` explicitly, so what it can and cannot reach is stated rather
+/// than implied.
+///
+/// The layout is ImageJ's default `xyczt` plane order: channel fastest, then Z,
+/// then time. Chunky RGB is the exception — its channels are sample *planes* of
+/// one IFD, so the channel index selects the plane and does not advance the IFD.
+///
+/// No bounds checking: `dims` describes what the metadata claims, and whether
+/// the file actually has that plane is [`planes_addressed`]'s question (for the
+/// 2D axis) or the decoder's.
+pub fn plane_index(dims: Dims, rgb: bool, c: usize, z: usize, t: usize) -> (usize, usize) {
+    let (channels, slices) = (dims.channels.max(1), dims.slices.max(1));
+    if rgb {
+        (t * slices + z, c)
+    } else {
+        (t * slices * channels + z * channels + c, 0)
+    }
+}
+
 /// The number of IFDs `dims` addresses: one past the highest index
 /// [`crate::prefetch::build_jobs`] can produce for it.
 ///

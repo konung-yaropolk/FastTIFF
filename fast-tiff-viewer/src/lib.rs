@@ -66,6 +66,7 @@ pub use scivis_render::wgpu_backend as backend;
 #[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
 pub type Renderer = backend::ImageRenderResources;
 
+pub use dimensions::{plane_index, planes_addressed};
 pub use display::{Dims, Display};
 pub use histogram::Histogram;
 pub use loader::{LoadSource, LoadStage};

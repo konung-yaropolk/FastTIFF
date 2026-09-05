@@ -126,3 +126,113 @@ fn volume_and_playback_gates_follow_the_resolved_view() {
     );
     assert!(!viewer.is_4d(), "there is no separate time axis here");
 }
+
+// ---- one definition of (c, z, t) -> (IFD, plane) ----
+//
+// The formula used to be written twice: once in `prefetch::build_jobs` for the
+// 2D view and once in `volume` for the ray-marched one. They agreed only
+// because the 2D copy was the `z == 0` case of the same arithmetic — but its
+// doc comment called itself "the single definition of which plane is which
+// channel", so anything addressing planes generally (a plugin API, say) would
+// reasonably route through it and silently receive slice 0 for every z.
+
+use fast_tiff_viewer::{plane_index, planes_addressed, Dims};
+
+fn dims(channels: usize, slices: usize, frames: usize) -> Dims {
+    Dims {
+        channels,
+        slices,
+        frames,
+    }
+}
+
+/// `xyczt`: channel fastest, then Z, then time — and every plane distinct.
+#[test]
+fn plane_index_walks_xyczt_order_without_collisions() {
+    let d = dims(3, 4, 5);
+    let mut seen = std::collections::HashSet::new();
+    let mut expected = 0usize;
+    for t in 0..d.frames {
+        for z in 0..d.slices {
+            for c in 0..d.channels {
+                let (ifd, plane) = plane_index(d, false, c, z, t);
+                assert_eq!(plane, 0, "non-RGB puts every channel in its own IFD");
+                assert_eq!(ifd, expected, "c{c} z{z} t{t} is not in xyczt order");
+                assert!(seen.insert((ifd, plane)), "c{c} z{z} t{t} collides");
+                expected += 1;
+            }
+        }
+    }
+    assert_eq!(seen.len(), d.channels * d.slices * d.frames);
+}
+
+/// Chunky RGB keeps all channels in one IFD, selecting the sample plane.
+#[test]
+fn plane_index_treats_rgb_channels_as_sample_planes() {
+    let d = dims(3, 4, 5);
+    for t in 0..d.frames {
+        for z in 0..d.slices {
+            let ifds: Vec<usize> = (0..d.channels)
+                .map(|c| {
+                    let (ifd, plane) = plane_index(d, true, c, z, t);
+                    assert_eq!(plane, c, "RGB channel {c} must select sample plane {c}");
+                    ifd
+                })
+                .collect();
+            assert!(
+                ifds.windows(2).all(|w| w[0] == w[1]),
+                "one IFD per (z, t) for RGB"
+            );
+            assert_eq!(ifds[0], t * d.slices + z);
+        }
+    }
+}
+
+/// The 2D view is the `z == 0` slice of the same function — that equivalence is
+/// what let the duplicate formula go unnoticed, so pin it rather than rely on it.
+#[test]
+fn the_2d_views_addressing_is_the_z_zero_case() {
+    for &(c, z, f) in &[(1usize, 1usize, 1usize), (3, 4, 5), (2, 1, 9), (1, 7, 3)] {
+        let d = dims(c, z, f);
+        for rgb in [false, true] {
+            for t in 0..d.frames {
+                for ch in 0..d.channels {
+                    let general = plane_index(d, rgb, ch, 0, t);
+                    let two_d = if rgb {
+                        (t * d.slices, ch)
+                    } else {
+                        (t * d.slices * d.channels + ch, 0)
+                    };
+                    assert_eq!(general, two_d, "rgb={rgb} c{ch} t{t} of {d:?}");
+                }
+            }
+        }
+    }
+}
+
+/// `planes_addressed` must be exactly one past the highest IFD the 2D view can
+/// ask for — it exists to stop that view requesting a plane the file lacks.
+#[test]
+fn planes_addressed_bounds_what_the_2d_view_reaches() {
+    for &(c, z, f) in &[
+        (1usize, 1usize, 1usize),
+        (3, 4, 5),
+        (2, 1, 9),
+        (1, 7, 3),
+        (6, 2, 11),
+    ] {
+        let d = dims(c, z, f);
+        for rgb in [false, true] {
+            let highest = (0..d.frames)
+                .flat_map(|t| (0..d.channels).map(move |ch| (ch, t)))
+                .map(|(ch, t)| plane_index(d, rgb, ch, 0, t).0)
+                .max()
+                .unwrap();
+            assert_eq!(
+                planes_addressed(d, rgb),
+                highest + 1,
+                "planes_addressed disagrees with plane_index for rgb={rgb} on {d:?}"
+            );
+        }
+    }
+}
