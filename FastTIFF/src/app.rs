@@ -35,6 +35,8 @@ mod dialog;
 mod kinetic;
 mod minimap;
 mod overlay;
+#[cfg(not(target_arch = "wasm32"))]
+mod plugins_ui;
 mod scale;
 mod scroll;
 mod widgets;
@@ -531,6 +533,13 @@ pub struct ViewerApp {
     view: View2d,
     /// The collapsible channels panel's layout bookkeeping.
     panel: PanelLayout,
+    /// Installed plugins and importers. Native only — see
+    /// `fast_tiff_viewer::plugins`.
+    #[cfg(not(target_arch = "wasm32"))]
+    plugins: fast_tiff_viewer::plugins::Registry,
+    /// The plugin whose dialog is open, and the values entered so far.
+    #[cfg(not(target_arch = "wasm32"))]
+    plugin_dialog: Option<PluginDialog>,
     /// Files opened asynchronously arrive here. Only the web picker uses it —
     /// the native dialog blocks and applies its result directly — but the
     /// channel exists on both so the drain path is shared.
@@ -576,6 +585,44 @@ pub struct ViewerApp {
     scroll_speed: f32,
 }
 
+/// Reveal a directory in the platform's file manager.
+///
+/// Best effort by design: the plugin folder's path is shown in the status bar
+/// regardless, and a desktop with no file manager — a bare window manager, a
+/// remote session — should not turn "where do plugins go?" into an error.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_in_file_manager(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(dir);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(dir);
+        c
+    };
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(dir);
+        c
+    };
+    cmd.spawn().map(|_| ())
+}
+
+/// A plugin's dialog, while it is open.
+#[cfg(not(target_arch = "wasm32"))]
+struct PluginDialog {
+    /// Index into the registry's plugin list.
+    index: usize,
+    title: String,
+    decls: Vec<fasttiff_plugin_api::ParamDecl>,
+    values: fasttiff_plugin_api::Params,
+}
+
 impl ViewerApp {
     pub fn new(initial_path: Option<PathBuf>, render: Render) -> Self {
         let (open_tx, open_rx) = channel();
@@ -585,6 +632,10 @@ impl ViewerApp {
             render,
             view: View2d::default(),
             panel: PanelLayout::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            plugins: fast_tiff_viewer::plugins::Registry::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            plugin_dialog: None,
             open_tx,
             open_rx,
             last_title: None,
@@ -620,6 +671,18 @@ impl ViewerApp {
         // The chrome is deliberately *not* reset here. It still describes the
         // file on screen, and that file stays on screen and usable for as long
         // as the new one takes to arrive.
+        // An importer plugin claims some extensions; a file it recognises is
+        // read by the plugin and handed on as TIFF bytes, so everything
+        // downstream — and every later save — sees an ordinary document.
+        #[cfg(not(target_arch = "wasm32"))]
+        let opened = match opened {
+            Opened::Path(path) => match self.import_with_plugin(&path) {
+                Some(imported) => imported,
+                None => Opened::Path(path),
+            },
+            other => other,
+        };
+
         self.core.begin_open(match opened {
             #[cfg(not(target_arch = "wasm32"))]
             Opened::Path(path) => fast_tiff_viewer::LoadSource::Path(path),
@@ -728,6 +791,192 @@ impl ViewerApp {
         }
     }
 
+    /// Begin a plugin: show its dialog, or run it at once if it declared none.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_plugin(&mut self, index: usize) {
+        let Some(loaded) = self.core.stack.as_ref() else {
+            self.core.status = Some("Open an image first".into());
+            return;
+        };
+        // The dialog may depend on what is open — how many slices there are,
+        // whether there is more than one channel — so it is asked for now
+        // rather than cached at load.
+        let host = fast_tiff_viewer::plugins::StackHost::new(loaded, self.plugin_view(loaded));
+        let Some(entry) = self.plugins.entries().get(index) else {
+            return;
+        };
+        let title = entry.info.name.clone();
+        let decls = entry.plugin.params(&host);
+
+        if decls.is_empty() {
+            self.run_plugin(index, fasttiff_plugin_api::Params::new());
+        } else {
+            let values = fasttiff_plugin_api::Params::defaults(&decls);
+            self.plugin_dialog = Some(PluginDialog {
+                index,
+                title,
+                decls,
+                values,
+            });
+        }
+    }
+
+    /// The viewer state a plugin sees, snapshotted for one run.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn plugin_view(&self, loaded: &fast_tiff_viewer::Stack) -> fasttiff_plugin_api::ViewParams {
+        let v = &self.core.volume;
+        let (forward, right, up) = v.cam.basis();
+        fast_tiff_viewer::plugins::describe_view(
+            loaded,
+            loaded.frame_index,
+            self.core.view_mode == ViewMode::Volume,
+            fast_tiff_viewer::plugins::describe_volume(
+                match v.render {
+                    fast_tiff_viewer::VolumeRender::Alpha => 1,
+                    fast_tiff_viewer::VolumeRender::Surface => 2,
+                    _ => 0,
+                },
+                v.density,
+                v.iso,
+                v.cam.eye(forward),
+                forward,
+                up,
+                right,
+            ),
+        )
+    }
+
+    /// Draw the open plugin dialog, and run the plugin when it is accepted.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_plugin_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.plugin_dialog.take() else {
+            return;
+        };
+        match plugins_ui::dialog(ctx, &dialog.title, &dialog.decls, &mut dialog.values) {
+            Some(true) => {
+                // Clamp to what the plugin declared, so `run` never sees a
+                // value it already ruled out.
+                let values = dialog.values.clamp_to(&dialog.decls);
+                self.run_plugin(dialog.index, values);
+            }
+            Some(false) => {}
+            None => self.plugin_dialog = Some(dialog),
+        }
+    }
+
+    /// Run a plugin and apply what it returned.
+    ///
+    /// Synchronous, for now: `StackHost` borrows the loaded stack, so moving
+    /// this to a worker would mean sharing the stack behind an `Arc` or
+    /// re-opening the file on the worker. Until then a long plugin blocks the
+    /// interface — which is why the trait already carries progress and cancel,
+    /// and why they are honoured here even though nothing can currently press
+    /// the button.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_plugin(&mut self, index: usize, values: fasttiff_plugin_api::Params) {
+        use fasttiff_plugin_api::Outcome;
+
+        let Some(loaded) = self.core.stack.as_ref() else {
+            self.core.status = Some("Open an image first".into());
+            return;
+        };
+        let view = self.plugin_view(loaded);
+        let mut host = fast_tiff_viewer::plugins::StackHost::new(loaded, view);
+        let Some(entry) = self.plugins.get_mut(index) else {
+            return;
+        };
+        let name = entry.info.name.clone();
+        let outcome = entry.plugin.run(&mut host, &values);
+        let messages = std::mem::take(&mut host.messages);
+        for m in &messages {
+            log::info!("{name}: {m}");
+        }
+
+        match outcome {
+            Ok(Outcome::Nothing) => {}
+            Ok(Outcome::Cancelled) => self.core.status = Some(format!("{name}: cancelled")),
+            Ok(Outcome::Message(m)) => self.core.status = Some(format!("{name}: {m}")),
+            Ok(Outcome::NewDocument(image)) => {
+                match fast_tiff_viewer::plugins::to_tiff_bytes(&image, None) {
+                    Ok(bytes) => {
+                        let label = image.name.clone();
+                        self.apply_opened(Opened::Bytes(bytes, label));
+                    }
+                    Err(e) => self.core.status = Some(format!("{name}: {e:#}")),
+                }
+            }
+            Ok(Outcome::SaveToFile { image, path }) => {
+                match fast_tiff_viewer::plugins::to_tiff_bytes(&image, None)
+                    .and_then(|b| std::fs::write(&path, b).map_err(Into::into))
+                {
+                    Ok(()) => self.core.status = Some(format!("{name}: wrote {path}")),
+                    Err(e) => self.core.status = Some(format!("{name}: {e:#}")),
+                }
+            }
+            Err(e) => self.core.status = Some(format!("{name}: {e}")),
+        }
+    }
+
+    /// Read `path` with an importer plugin, if one claims it.
+    ///
+    /// Returns the imported image as TIFF bytes, so the rest of opening — the
+    /// index, channel setup, contrast, everything — is the ordinary path and
+    /// cannot drift from it. `None` means no plugin claimed the file and the
+    /// built-in reader should have it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn import_with_plugin(&mut self, path: &std::path::Path) -> Option<Opened> {
+        // Cheap rejection first: no file is opened unless an extension matches,
+        // so the common case of a TIFF costs one string compare.
+        if !self.plugins.claims_extension(path) {
+            return None;
+        }
+        let head = fast_tiff_viewer::plugins::Registry::read_head(path);
+        let (index, _confidence) = *self.plugins.importers_for(path, &head).first()?;
+
+        let request = fasttiff_plugin_api::ImportRequest {
+            path: path.to_path_buf(),
+            params: fasttiff_plugin_api::Params::new(),
+        };
+
+        struct Host;
+        impl fasttiff_plugin_api::ImportHost for Host {
+            fn progress(&mut self, _f: f32) -> bool {
+                true
+            }
+            fn log(&mut self, m: &str) {
+                log::info!("import: {m}");
+            }
+        }
+
+        let entry = self.plugins.importer_mut(index)?;
+        let name = entry.info.name.clone();
+        let result = entry.importer.import(&request, &mut Host);
+
+        match result {
+            Ok(r) => match fast_tiff_viewer::plugins::to_tiff_bytes(&r.image, r.info.as_ref()) {
+                Ok(bytes) => {
+                    let label = r
+                        .info
+                        .as_ref()
+                        .map(|i| i.name.clone())
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| r.image.name.clone());
+                    Some(Opened::Bytes(bytes, label))
+                }
+                Err(e) => {
+                    self.core.status = Some(format!("{name}: {e:#}"));
+                    None
+                }
+            },
+            // Say which plugin declined and why, rather than falling through to
+            // the TIFF reader and reporting "not a TIFF".
+            Err(e) => {
+                self.core.status = Some(format!("{name}: {e}"));
+                None
+            }
+        }
+    }
+
     /// Show the platform's file picker.
     ///
     /// Native: a blocking dialog that can select several files — the first
@@ -738,10 +987,29 @@ impl ViewerApp {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let _ = ctx;
-            if let Some(paths) = rfd::FileDialog::new()
-                .add_filter("TIFF", &["tif", "tiff"])
-                .pick_files()
-            {
+            // Importers add their formats to the picker, so a file an installed
+            // plugin can read is selectable without the user changing the
+            // filter to "all files" and hoping.
+            let mut dialog = rfd::FileDialog::new().add_filter("TIFF", &["tif", "tiff"]);
+            let types = self.plugins.open_file_types();
+            if !types.is_empty() {
+                let mut every: Vec<&str> = vec!["tif", "tiff"];
+                for t in &types {
+                    let exts: Vec<&str> = t.extensions.iter().map(|s| s.as_str()).collect();
+                    dialog = dialog.add_filter(&t.description, &exts);
+                    every.extend(exts);
+                }
+                // A combined entry first, so "open whatever this app can read"
+                // is one click rather than a hunt through the format list.
+                dialog = rfd::FileDialog::new()
+                    .add_filter("Images FastTIFF can read", &every)
+                    .add_filter("TIFF", &["tif", "tiff"]);
+                for t in &types {
+                    let exts: Vec<&str> = t.extensions.iter().map(|s| s.as_str()).collect();
+                    dialog = dialog.add_filter(&t.description, &exts);
+                }
+            }
+            if let Some(paths) = dialog.pick_files() {
                 if let Some(first) = crate::process::open_all(&paths) {
                     self.apply_opened(Opened::Path(first.clone()));
                 }
@@ -1189,11 +1457,23 @@ impl eframe::App for ViewerApp {
         let mut mode_request: Option<ViewMode> = None;
         let mut open_requested = false;
         let mut render_settings_toggle = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut plugin_to_start: Option<usize> = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut open_plugin_folder = false;
 
         let toolbar_response = egui::Panel::top("toolbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Open TIFF...").clicked() {
+                if ui.button("Open File...").clicked() {
                     open_requested = true;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    match plugins_ui::plugins_menu(ui, &self.plugins) {
+                        plugins_ui::MenuAction::Run(i) => plugin_to_start = Some(i),
+                        plugins_ui::MenuAction::OpenPluginFolder => open_plugin_folder = true,
+                        plugins_ui::MenuAction::None => {}
+                    }
                 }
                 // 2D/3D switch, right next to Open, and the render-settings
                 // button beside it. Both need a volume to act on, which needs at
@@ -1356,6 +1636,28 @@ impl eframe::App for ViewerApp {
         });
         if open_requested {
             self.show_open_dialog(ui.ctx());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if open_plugin_folder {
+                match fast_tiff_viewer::plugins::install_dir() {
+                    Some(dir) => {
+                        self.core.status = Some(format!("Plugin folder: {}", dir.display()));
+                        // Best effort: showing the path in the status bar is the
+                        // part that must not fail, so a file manager that will
+                        // not launch is not an error.
+                        let _ = open_in_file_manager(&dir);
+                    }
+                    None => {
+                        self.core.status =
+                            Some("Could not determine a writable plugin folder".into())
+                    }
+                }
+            }
+            if let Some(index) = plugin_to_start {
+                self.start_plugin(index);
+            }
+            self.poll_plugin_dialog(ui.ctx());
         }
         if let Some(mode) = mode_request {
             self.core.view_mode = mode;

@@ -1,6 +1,6 @@
 [package]
 name = "fast-tiff-viewer"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2021"
 description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
 license = "MPL-2.0"
@@ -61,4 +61,4 @@ rayon = { version = "1.10", optional = true }
 # Wasm has no dynamic loading and the browser build does not want the interface
 # at all, so it is absent there rather than present-and-empty.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-fasttiff-plugin-api = { path = "../fasttiff-plugin-api", version = "0.1.0" }
+fasttiff-plugin-api = { path = "../fasttiff-plugin-api", version = "0.18.0" }

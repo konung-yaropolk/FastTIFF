@@ -11,7 +11,7 @@
 # crate be frozen while the app moves.
 [package]
 name = "fasttiff-plugin-api"
-version = "0.1.0"
+version = "0.18.0"
 edition = "2021"
 description = "The FastTIFF plugin contract: what a plugin declares, what the host hands it, and what it may return."
 license = "MPL-2.0"

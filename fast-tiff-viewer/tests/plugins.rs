@@ -320,3 +320,63 @@ fn a_malformed_result_is_rejected() {
     empty.width = 0;
     assert!(empty.validate().is_err(), "a zero dimension must be caught");
 }
+
+/// Every bit depth must reach a plugin through `read_plane_f32`, in the file's
+/// own units.
+///
+/// The whole existing suite used f32 stacks, so it never noticed that
+/// `read_plane_f32_into` accepts 32- and 64-bit samples only — running Invert
+/// on an imported 8-bit PPM in the actual application is what surfaced it.
+/// An 8-bit sample must arrive as 0..255, *not* widened to 16-bit the way the
+/// display path widens it: a plugin computing a mean has to get the number that
+/// is in the file.
+#[test]
+fn every_bit_depth_reaches_a_plugin_as_f32() {
+    use fast_tiff_lib::SampleType;
+
+    for (ty, raw, want) in [
+        (
+            SampleType::U8,
+            vec![0u8, 1, 128, 255],
+            vec![0.0f32, 1.0, 128.0, 255.0],
+        ),
+        (
+            SampleType::U16,
+            vec![0u8, 0, 1, 0, 0, 1, 255, 255],
+            vec![0.0f32, 1.0, 256.0, 65535.0],
+        ),
+    ] {
+        let opts = WriterOptions::new(2, 2, ty).metadata(StackMetaWrite::new(1, 1));
+        let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+        w.write_frame_bytes(&raw).unwrap();
+        let bytes = w.finish().unwrap().into_inner();
+        let s = Stack::from_bytes(bytes, "depth.tif".into(), false).unwrap();
+
+        let mut h = host(&s, 0);
+        let mut got = Vec::new();
+        h.read_plane_f32(Plane::new(0, 0, 0), &mut got)
+            .unwrap_or_else(|e| panic!("{ty:?}: {e}"));
+        assert_eq!(got, want, "{ty:?} did not arrive in the file's own units");
+    }
+}
+
+/// And the plugins themselves must run on those depths, not only on float.
+#[test]
+fn invert_runs_on_an_8_bit_stack() {
+    let opts =
+        WriterOptions::new(2, 2, fast_tiff_lib::SampleType::U8).metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    w.write_frame_bytes(&[0u8, 85, 170, 255]).unwrap();
+    let bytes = w.finish().unwrap().into_inner();
+    let s = Stack::from_bytes(bytes, "eight.tif".into(), false).unwrap();
+
+    let mut h = host(&s, 0);
+    let mut p = builtin::Invert;
+    let decls = p.params(&h);
+    let Outcome::NewDocument(img) = p.run(&mut h, &Params::defaults(&decls)).unwrap() else {
+        panic!("Invert should open a document")
+    };
+    img.validate().unwrap();
+    // Inverted about its own 0..255 range.
+    assert_eq!(planes_f32(&img)[0], &vec![255.0, 170.0, 85.0, 0.0]);
+}

@@ -12,7 +12,7 @@ use fasttiff_plugin_api::{
 
 use crate::dimensions::plane_index;
 use crate::stack::Stack;
-use fast_tiff_lib::{read_plane_f32_into, read_plane_u16_into, SampleFormat};
+use fast_tiff_lib::{read_plane_f32_into, read_plane_u16_into, read_plane_u8_into, SampleFormat};
 
 /// Everything a plugin can reach, borrowed from the viewer for one run.
 pub struct StackHost<'a> {
@@ -127,19 +127,45 @@ impl HostContext for StackHost<'_> {
     fn read_plane_f32(&mut self, plane: Plane, out: &mut Vec<f32>) -> Result<(), PluginError> {
         let (ifd, sample) = self.locate(plane)?;
         let frame = &self.stack.tiff.frames[ifd];
-        read_plane_f32_into(
-            &self.stack.tiff.data,
-            frame,
-            self.stack.tiff.byte_order,
-            sample,
-            out,
-        )
-        .map_err(|e| {
+        let data = &self.stack.tiff.data;
+        let order = self.stack.tiff.byte_order;
+        let fail = |e: anyhow::Error| {
             PluginError::failed(format!(
                 "decoding (c{}, z{}, t{}): {e:#}",
                 plane.c, plane.z, plane.t
             ))
-        })
+        };
+
+        // `read_plane_f32_into` handles 32- and 64-bit samples only, so the
+        // narrower depths are converted here. The contract says this returns
+        // the file's own values, so an 8-bit sample arrives as 0..255 and not
+        // widened to 16-bit the way the display path widens it — a plugin
+        // computing a mean must get the number that is in the file.
+        match frame.bits_per_sample {
+            32 | 64 => read_plane_f32_into(data, frame, order, sample, out).map_err(fail),
+            8 => {
+                let mut bytes = Vec::new();
+                read_plane_u8_into(data, frame, order, sample, &mut bytes).map_err(fail)?;
+                out.clear();
+                out.extend(bytes.iter().map(|&v| v as f32));
+                Ok(())
+            }
+            _ => {
+                // 16-bit (and any other narrow depth the u16 reader accepts).
+                // `read_plane_u16_into` offsets a signed sample into unsigned
+                // by flipping the sign bit; undo that so the value is the one
+                // the file states.
+                let mut raw = Vec::new();
+                read_plane_u16_into(data, frame, order, None, sample, &mut raw).map_err(fail)?;
+                out.clear();
+                if frame.sample_format == SampleFormat::SignedInt {
+                    out.extend(raw.iter().map(|&v| v as f32 - 32768.0));
+                } else {
+                    out.extend(raw.iter().map(|&v| v as f32));
+                }
+                Ok(())
+            }
+        }
     }
 
     fn progress(&mut self, fraction: f32) -> bool {
