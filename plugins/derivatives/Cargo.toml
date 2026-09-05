@@ -1,0 +1,22 @@
+# A plugin that reproduces the derivative-map step of a two-photon stimulation
+# analysis: read the acquisition's own trigger and timing out of tag 270, take
+# the positive part of the temporal derivative over each stimulus response,
+# average across epochs, and show the two stimulus conditions as one overlay.
+[package]
+name = "fasttiff-plugin-derivatives"
+version = "0.18.0"
+edition = "2021"
+description = "Stimulus-locked derivative maps from a two-photon timelapse, as a magenta/green overlay."
+license = "MPL-2.0"
+repository = "https://github.com/konung-yaropolk/FastTIFF"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fasttiff-plugin = { path = "../../fasttiff-plugin", version = "0.18.0" }
+
+[dev-dependencies]
+fast-tiff-viewer = { path = "../../fast-tiff-viewer" }
+fasttiff-plugin-api = { path = "../../fasttiff-plugin-api" }
