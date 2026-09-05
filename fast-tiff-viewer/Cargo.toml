@@ -44,8 +44,7 @@ codec-zstd = ["fast-tiff-lib/codec-zstd"]
 # version is what a published crate resolves against — without it
 # `cargo package` refuses the manifest.
 fast-tiff-lib = { path = "../fast-tiff-lib", default-features = false }
-# The plugin contract. Deliberately zero-dependency and MPL-2.0; see its manifest.
-fasttiff-plugin-api = { path = "../fasttiff-plugin-api", version = "0.1.0" }
+
 scivis-render = { path = "../scivis-render" }
 anyhow = "1.0"
 bytemuck = "1.25"
@@ -53,3 +52,13 @@ log = "0.4"
 # Parallel-across-slices 3D volume assembly. Gated with `threads` because rayon
 # needs real threads to build, let alone run.
 rayon = { version = "1.10", optional = true }
+
+# The plugin contract, native only. Target-gated rather than put behind a
+# feature: a `plugins` feature in `default` would silently vanish from the glow
+# build, which is `--no-default-features` and is the Linux release backend — the
+# binary would ship with no plugin support and CI would not notice, because that
+# step only compiles. A `cfg(not(wasm32))` dependency cannot be forgotten.
+# Wasm has no dynamic loading and the browser build does not want the interface
+# at all, so it is absent there rather than present-and-empty.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fasttiff-plugin-api = { path = "../fasttiff-plugin-api", version = "0.1.0" }

@@ -1,5 +1,5 @@
 use super::*;
-use fasttiff_plugin_api::{HostContext, Outcome, Params, PluginError};
+use fasttiff_plugin_api::{Confidence, FileType, HostContext, Outcome, Params, PluginError};
 
 struct Stub(&'static str, &'static str, &'static str);
 
@@ -93,4 +93,152 @@ fn grouping_collects_each_menu_path_once_and_covers_everything() {
             assert_eq!(&reg.entries()[*i].info, *info);
         }
     }
+}
+
+// ---- importers ----
+
+struct StubImporter(&'static str, &'static [&'static str], Confidence);
+
+impl fasttiff_plugin_api::Importer for StubImporter {
+    fn info(&self) -> PluginInfo {
+        PluginInfo::new(self.0, "Stub importer")
+    }
+    fn file_types(&self) -> Vec<FileType> {
+        vec![FileType::new("Stub", self.1)]
+    }
+    fn probe(&self, _p: &Path, _h: &[u8]) -> Confidence {
+        self.2
+    }
+    fn import(
+        &mut self,
+        _r: &fasttiff_plugin_api::ImportRequest,
+        _h: &mut dyn fasttiff_plugin_api::ImportHost,
+    ) -> Result<fasttiff_plugin_api::ImportResult, PluginError> {
+        Err(PluginError::failed("stub"))
+    }
+}
+
+#[test]
+fn the_builtin_importer_is_installed_and_offers_its_file_types() {
+    let reg = Registry::new();
+    assert!(reg.problems.is_empty(), "{:?}", reg.problems);
+    assert!(
+        reg.importers()
+            .iter()
+            .any(|e| e.info.id == "dev.fasttiff.netpbm"),
+        "the Netpbm importer should be installed"
+    );
+    let types = reg.open_file_types();
+    assert!(
+        types
+            .iter()
+            .any(|t| t.extensions.contains(&"pgm".to_string())),
+        "the Open dialog should learn about .pgm: {types:?}"
+    );
+    assert!(reg.claims_extension(Path::new("x.ppm")));
+    assert!(
+        !reg.claims_extension(Path::new("x.tif")),
+        "TIFF is the app's own job"
+    );
+}
+
+/// The signature decides which importer runs, not the extension — otherwise two
+/// plugins claiming `.tif` could never be told apart.
+#[test]
+fn importers_are_ranked_by_confidence_not_by_name() {
+    let mut reg = Registry::new();
+    reg.add_importer(
+        Box::new(StubImporter("s.maybe", &["zz"], Confidence::Maybe)),
+        Origin::Library,
+    );
+    reg.add_importer(
+        Box::new(StubImporter("s.certain", &["zz"], Confidence::Certain)),
+        Origin::Library,
+    );
+
+    let ranked = reg.importers_for(Path::new("f.zz"), b"whatever");
+    assert!(ranked.len() >= 2);
+    assert_eq!(
+        reg.importers()[ranked[0].0].info.id,
+        "s.certain",
+        "the confident importer must be offered first"
+    );
+    // And one that declines is not offered at all.
+    reg.add_importer(
+        Box::new(StubImporter("s.no", &["zz"], Confidence::No)),
+        Origin::Library,
+    );
+    let ranked = reg.importers_for(Path::new("f.zz"), b"whatever");
+    assert!(
+        !ranked
+            .iter()
+            .any(|(i, _)| reg.importers()[*i].info.id == "s.no"),
+        "an importer answering No must not be offered"
+    );
+}
+
+/// An importer with no file types could never be reached, so installing it
+/// silently would be a trap.
+#[test]
+fn an_importer_declaring_no_file_types_is_refused() {
+    struct Empty;
+    impl fasttiff_plugin_api::Importer for Empty {
+        fn info(&self) -> PluginInfo {
+            PluginInfo::new("empty.one", "Empty")
+        }
+        fn file_types(&self) -> Vec<FileType> {
+            Vec::new()
+        }
+        fn import(
+            &mut self,
+            _r: &fasttiff_plugin_api::ImportRequest,
+            _h: &mut dyn fasttiff_plugin_api::ImportHost,
+        ) -> Result<fasttiff_plugin_api::ImportResult, PluginError> {
+            Err(PluginError::failed("empty"))
+        }
+    }
+    let mut reg = Registry::new();
+    assert!(!reg.add_importer(Box::new(Empty), Origin::Library));
+    assert!(reg.problems.iter().any(|p| p.contains("no file types")));
+}
+
+#[test]
+fn duplicate_importer_ids_are_refused() {
+    let mut reg = Registry::new();
+    assert!(reg.add_importer(
+        Box::new(StubImporter("dup.id", &["q1"], Confidence::Maybe)),
+        Origin::Library
+    ));
+    assert!(!reg.add_importer(
+        Box::new(StubImporter("dup.id", &["q2"], Confidence::Maybe)),
+        Origin::Library
+    ));
+    assert!(reg.problems.iter().any(|p| p.contains("dup.id")));
+}
+
+/// A file dialog must not show the same format twice.
+#[test]
+fn open_file_types_are_deduplicated() {
+    let mut reg = Registry::new();
+    reg.add_importer(
+        Box::new(StubImporter("d.1", &["same"], Confidence::Maybe)),
+        Origin::Library,
+    );
+    reg.add_importer(
+        Box::new(StubImporter("d.2", &["same"], Confidence::Maybe)),
+        Origin::Library,
+    );
+    let types = reg.open_file_types();
+    let n = types
+        .iter()
+        .filter(|t| t.extensions == vec!["same".to_string()])
+        .count();
+    assert_eq!(n, 1, "one row per format: {types:?}");
+}
+
+/// Reading the head of a file that does not exist must not fail the caller —
+/// the probes treat an empty head as "no evidence".
+#[test]
+fn reading_the_head_of_a_missing_file_yields_nothing() {
+    assert!(Registry::read_head(Path::new("/definitely/not/here.zz")).is_empty());
 }

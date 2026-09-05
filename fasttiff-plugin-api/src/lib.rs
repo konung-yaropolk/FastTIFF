@@ -66,6 +66,7 @@
 
 pub mod host;
 pub mod image;
+pub mod import;
 pub mod meta;
 pub mod params;
 pub mod plugin;
@@ -74,6 +75,7 @@ pub use host::{HostContext, HostContextExt};
 pub use image::{
     ChannelView, ImageInfo, Lut, PixelType, Plane, ViewParams, VolumeMode, VolumeView,
 };
+pub use import::{Confidence, FileType, ImportHost, ImportRequest, ImportResult, Importer};
 pub use meta::{DisplayMode, Spacing, StackInfo};
 pub use params::{ParamDecl, ParamKind, ParamValue, Params};
 pub use plugin::{ImageResult, Outcome, PlaneData, Plugin, PluginError, PluginInfo};
