@@ -7,6 +7,27 @@ use crate::api::{
     StackInfo, ViewParams, VolumeMode, VolumeView,
 };
 
+/// Stands in for `stack_info` on a host too old to have it.
+///
+/// Answering `Unsupported` rather than filling in zeros: a plugin cannot tell
+/// "this file states no calibration" from "this host cannot tell me", and the
+/// difference decides whether a measurement is in microns or in pixels.
+unsafe extern "C" fn no_stack_info(
+    _ctx: *mut core::ffi::c_void,
+    _out: *mut FtStackInfo,
+) -> FtStatus {
+    FtStatus::Unsupported
+}
+
+/// Stands in for `stack_string` on a host too old to have it.
+unsafe extern "C" fn no_stack_string(
+    _ctx: *mut core::ffi::c_void,
+    _which: u32,
+    _index: u64,
+) -> FtStr {
+    FtStr::EMPTY
+}
+
 /// A [`HostContext`] backed by the host's C callbacks.
 pub struct CHost {
     host: FtHost,
@@ -23,18 +44,44 @@ impl CHost {
     /// `host` must point at a valid `FtHost` whose callbacks remain valid for
     /// the lifetime of the returned value.
     pub unsafe fn new(host: *const FtHost) -> Result<CHost, FtStatus> {
-        // `fits` reads only the four-byte prologue. The obvious spelling —
+        // Only the *core* is required, not the whole table. Requiring all of
+        // it would refuse a host that merely predates a callback this plugin
+        // might not even use, which is the opposite of what `struct_size` is
+        // for. Each optional callback is checked before it is called.
+        //
+        // `covers` reads only the four-byte prologue. The obvious spelling —
         // copy the table, then look at its `struct_size` — is undefined
-        // behaviour when the host is older than this plugin: the copy reads
+        // behaviour when the host is older: the copy reads
         // `size_of::<FtHost>()` bytes out of a shorter allocation, so the check
-        // that was supposed to prevent that has already been overtaken by it.
-        if !crate::abi::fits(host) {
+        // meant to prevent that has already been overtaken by it.
+        if !crate::abi::covers(host, FtHost::CORE) {
             crate::last_error::set(
-                "the host's callback table is older than this plugin's ABI expects",
+                "the host's callback table is too small to be a FastTIFF plugin host",
             );
             return Err(FtStatus::BadArgument);
         }
-        let h = *host;
+        let declared = crate::abi::declared_size(host) as usize;
+        let has_metadata = crate::abi::ft_covers!(host, FtHost, stack_string);
+
+        // Copy what the host actually has, then fill the rest with stubs.
+        //
+        // Not `zeroed()`: every field past the prologue is a function pointer,
+        // and a null function pointer is not a valid one — zeroing them is
+        // undefined behaviour whether or not they are ever called. Writing the
+        // uncovered suffix explicitly is what makes the value initialised, and
+        // it is only ever a suffix because fields are only ever appended.
+        let mut buf = core::mem::MaybeUninit::<FtHost>::uninit();
+        core::ptr::copy_nonoverlapping(
+            host.cast::<u8>(),
+            buf.as_mut_ptr().cast::<u8>(),
+            declared.min(core::mem::size_of::<FtHost>()),
+        );
+        if !has_metadata {
+            let p = buf.as_mut_ptr();
+            core::ptr::addr_of_mut!((*p).stack_info).write(no_stack_info);
+            core::ptr::addr_of_mut!((*p).stack_string).write(no_stack_string);
+        }
+        let h = buf.assume_init();
 
         let mut ii = core::mem::zeroed::<FtImageInfo>();
         ii.struct_size = core::mem::size_of::<FtImageInfo>() as u32;
@@ -73,16 +120,26 @@ impl CHost {
         // The file's own units. A plugin that measures anything is quietly
         // wrong without these, so they are read up front with everything else
         // rather than left to a callback a plugin might not know to call.
+        //
+        // A host too old to have them leaves every field `None`, which is the
+        // honest answer — the same one a file that states no calibration gives.
         let mut si = core::mem::zeroed::<FtStackInfo>();
         si.struct_size = core::mem::size_of::<FtStackInfo>() as u32;
-        let has_meta = (h.stack_info)(h.ctx, &mut si) == FtStatus::Ok;
+        let has_meta = has_metadata && (h.stack_info)(h.ctx, &mut si) == FtStatus::Ok;
         let opt = |flag: u32, v: f64| (has_meta && si.present & flag != 0).then_some(v);
         let string = |which: u32| {
+            if !has_metadata {
+                return None;
+            }
             let s = (h.stack_string)(h.ctx, which, 0).as_str().unwrap_or("");
             (!s.is_empty()).then(|| s.to_string())
         };
         let mut channel_names = Vec::new();
-        for i in 0..ii.channels.min(1024) {
+        for i in 0..if has_metadata {
+            ii.channels.min(1024)
+        } else {
+            0
+        } {
             match (h.stack_string)(h.ctx, FT_STRING_CHANNEL_NAME, i).as_str() {
                 Some(n) if !n.is_empty() => channel_names.push(n.to_string()),
                 // Names run out; the api documents the list may be short.

@@ -102,6 +102,7 @@ unsafe extern "C" fn params_shim<T: Plugin + Default>(
 ) -> FtStatus {
     guard(|| {
         if sink.is_null() {
+            crate::last_error::set("the host passed no dialog sink");
             return FtStatus::BadArgument;
         }
         let h = match CHost::new(host) {
@@ -129,7 +130,13 @@ unsafe extern "C" fn run_shim<T: Plugin + Default>(
         };
         let params = match values_from_c(values, value_count) {
             Some(p) => p,
-            None => return FtStatus::BadArgument,
+            None => {
+                crate::last_error::set(
+                    "the host's dialog values could not be read; it may be built against \
+                     a different plugin ABI",
+                );
+                return FtStatus::BadArgument;
+            }
         };
         match T::default().run(&mut h, &params) {
             Ok(o) => write_outcome(&*sink, o),
@@ -232,10 +239,15 @@ unsafe extern "C" fn import_shim<T: Importer + Default>(
                     .map(|i| i.name.clone())
                     .filter(|n| !n.is_empty())
                     .unwrap_or_else(|| r.image.name.clone());
+                // Skipped rather than failed on a host that predates it: an
+                // import without its metadata is worth having, and refusing
+                // one because the host is a version behind is not.
                 if let Some(info) = r.info.as_ref() {
-                    let st = write_stack_info(&*sink, info);
-                    if st != FtStatus::Ok {
-                        return st;
+                    if crate::abi::ft_covers!(&*sink as *const FtSink, FtSink, set_info) {
+                        let st = write_stack_info(&*sink, info);
+                        if st != FtStatus::Ok {
+                            return st;
+                        }
                     }
                 }
                 write_image(&*sink, &r.image, &name, FtOutcomeKind::NewDocument, "")
@@ -299,6 +311,7 @@ unsafe fn write_stack_info(sink: &FtSink, info: &crate::api::StackInfo) -> FtSta
 /// Push a declaration list through the host's sink, one control at a time.
 unsafe fn push_decls(sink: &FtParamSink, decls: &[ParamDecl]) -> FtStatus {
     if (sink.struct_size as usize) < core::mem::size_of::<FtParamSink>() {
+        crate::last_error::set("the host's dialog sink is older than this plugin's ABI");
         return FtStatus::BadArgument;
     }
     for d in decls {
@@ -422,7 +435,11 @@ pub unsafe fn values_from_c(values: *const FtValue, count: u64) -> Option<Params
 /// # Safety
 /// `sink` must be a valid `FtSink` for the duration of the call.
 pub unsafe fn write_outcome(sink: &FtSink, outcome: Outcome) -> FtStatus {
-    if (sink.struct_size as usize) < core::mem::size_of::<FtSink>() {
+    // Only the core is required. Refusing a host that merely predates an
+    // optional callback would fail the whole run with nothing to say — which
+    // is exactly what it did before this check was narrowed.
+    if !crate::abi::covers(sink as *const FtSink, FtSink::CORE) {
+        crate::last_error::set("the host's result sink is too small to be a FastTIFF plugin host");
         return FtStatus::BadArgument;
     }
     match outcome {
@@ -476,12 +493,16 @@ unsafe fn write_image(
         return st;
     }
     // Colours before planes, so a host that refuses one has not yet copied a
-    // gigabyte of pixels.
-    for (i, color) in img.channel_colors.iter().enumerate() {
-        let rgb = (color[0] as u32) << 16 | (color[1] as u32) << 8 | color[2] as u32;
-        let st = (sink.set_channel)(sink.ctx, i as u64, FtStr::EMPTY, rgb);
-        if st != FtStatus::Ok {
-            return st;
+    // gigabyte of pixels. Skipped entirely on a host that predates the
+    // callback — the image is still right, it just comes out in the host's
+    // default colours.
+    if crate::abi::ft_covers!(sink as *const FtSink, FtSink, set_channel) {
+        for (i, color) in img.channel_colors.iter().enumerate() {
+            let rgb = (color[0] as u32) << 16 | (color[1] as u32) << 8 | color[2] as u32;
+            let st = (sink.set_channel)(sink.ctx, i as u64, FtStr::EMPTY, rgb);
+            if st != FtStatus::Ok {
+                return st;
+            }
         }
     }
     for p in &img.planes {
@@ -497,3 +518,7 @@ unsafe fn write_image(
     }
     (sink.set_outcome)(sink.ctx, kind, FtStr::from_str(text))
 }
+
+#[cfg(test)]
+#[path = "marshal_tests.rs"]
+mod tests;

@@ -221,6 +221,56 @@ pub unsafe fn fits<T>(p: *const T) -> bool {
     !p.is_null() && declared_size(p) as usize >= core::mem::size_of::<T>()
 }
 
+/// Whether the caller's declared size reaches through a field that ends at
+/// `end` bytes — that is, whether that field is actually there.
+///
+/// This is the half of the versioning scheme that [`fits`] is not. `fits` asks
+/// "is this at least as new as me", which is the right question for a struct
+/// whose every field is read. It is the *wrong* question for a table of
+/// optional callbacks: refusing a host because it lacks a function you were
+/// not going to call turns "an older host runs a newer plugin" — the thing
+/// this contract promises — into a hard failure with nothing useful to say.
+///
+/// Use [`ft_covers!`] rather than calling this with a hand-computed offset.
+///
+/// # Safety
+/// As [`declared_size`].
+#[inline]
+pub unsafe fn covers<T>(p: *const T, end: usize) -> bool {
+    !p.is_null() && declared_size(p) as usize >= end
+}
+
+/// Whether `$p` carries `$field`, which must be pointer-sized — every field
+/// that has ever been appended to a table in this contract is a callback.
+///
+/// ```ignore
+/// if ft_covers!(sink, FtSink, set_channel) {
+///     (sink.set_channel)(sink.ctx, 0, name, rgb);
+/// }
+/// ```
+#[macro_export]
+macro_rules! ft_covers {
+    ($p:expr, $t:ty, $field:ident) => {
+        $crate::covers(
+            $p,
+            ::core::mem::offset_of!($t, $field) + ::core::mem::size_of::<*const ()>(),
+        )
+    };
+}
+
+impl FtHost {
+    /// The callbacks every version of this contract has had. A host declaring
+    /// less than this is not participating in it.
+    pub const CORE: usize = core::mem::offset_of!(FtHost, log) + core::mem::size_of::<*const ()>();
+}
+
+impl FtSink {
+    /// As [`FtHost::CORE`]: a result needs somewhere to go, and somewhere to
+    /// say what to do with it. Everything past `set_outcome` is optional.
+    pub const CORE: usize =
+        core::mem::offset_of!(FtSink, set_outcome) + core::mem::size_of::<*const ()>();
+}
+
 /// Fill a caller-supplied out-parameter, writing only as much as the caller
 /// said it allocated.
 ///

@@ -893,6 +893,15 @@ name = "fasttiff-plugin-api"
 version = "0.18.0"
 
 [[package]]
+name = "fasttiff-plugin-derivatives"
+version = "0.18.0"
+dependencies = [
+ "fast-tiff-viewer",
+ "fasttiff-plugin",
+ "fasttiff-plugin-api",
+]
+
+[[package]]
 name = "fasttiff-plugin-example"
 version = "0.18.0"
 dependencies = [
