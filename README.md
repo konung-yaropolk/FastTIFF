@@ -259,7 +259,8 @@ sites.
   *into* the plugin, so they can change freely. All three are MPL-2.0 rather
   than the app's GPL: a plugin SDK that set the licence of every plugin written
   against it would be making a decision that is not this project's to make.
-  `fasttiff-plugin-example/` is a working plugin used as the test oracle.
+  `plugins/` holds plugin *implementations* that ship as separate
+  libraries; `plugins/example/` is the one used as the test oracle.
 
 ## The TIFF engine is a standalone crate
 
@@ -492,7 +493,7 @@ happened to run the tests.
 
 Writing one is still ordinary Rust: implement a trait, call one macro. See
 [`fasttiff-plugin/README.md`](fasttiff-plugin/README.md) for the twenty-line
-version, and [`fasttiff-plugin-example/`](fasttiff-plugin-example/src/lib.rs)
+version, and [`plugins/example/`](plugins/example/src/lib.rs)
 for a filter, an importer with a dialog, and a raw-binary reader.
 
 Native only — there is no `dlopen` in a browser, so the web build has no plugin

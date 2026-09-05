@@ -20,7 +20,10 @@
 //!   failing on the first real plugin.
 //! * [`Invert`] is the oracle for the `.dll` lane: the same filter, run both
 //!   ways, must produce byte-identical output.
-//! * A vendor format ([`Netpbm`]) shows the shape an importer takes.
+//! * Two importers show the two shapes the job takes: [`Netpbm`], a documented
+//!   format implemented from its spec, and [`Oir`], a proprietary one with no
+//!   spec at all, worked out from a real acquisition and checked against the
+//!   vendor software's own export.
 //!
 //! # Adding one
 //!
@@ -31,10 +34,12 @@
 
 pub mod invert;
 pub mod netpbm;
+pub mod oir;
 pub mod zproject;
 
 pub use invert::Invert;
 pub use netpbm::Netpbm;
+pub use oir::Oir;
 pub use zproject::ZProject;
 
 use fasttiff_plugin_api::{Importer, Plugin};
@@ -50,5 +55,5 @@ pub fn all() -> Vec<Box<dyn Plugin>> {
 /// file, so it is a real decision rather than a list: the more specific format
 /// goes first.
 pub fn importers() -> Vec<Box<dyn Importer>> {
-    vec![Box::new(Netpbm)]
+    vec![Box::new(Oir), Box::new(Netpbm)]
 }

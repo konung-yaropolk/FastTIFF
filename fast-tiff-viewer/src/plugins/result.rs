@@ -69,6 +69,15 @@ pub fn to_tiff_bytes(image: &ImageResult, info: Option<&StackInfo>) -> anyhow::R
         for (i, name) in info.channel_names.iter().enumerate() {
             meta = meta.channel(name.clone(), fast_tiff_lib::metadata::composite_color(i));
         }
+        // The source file's own `ImageDescription`, carried into tag 270 of the
+        // written one. An importer that read a vendor format puts the vendor's
+        // metadata here, and this is the only thing standing between that and
+        // it being lost on conversion.
+        if let Some(d) = &info.description {
+            if !d.trim().is_empty() {
+                meta = meta.trailing(d.clone());
+            }
+        }
     } else if image.channels > 1 {
         // A multi-channel result with nothing said about it is far more useful
         // composited than shown one channel at a time.

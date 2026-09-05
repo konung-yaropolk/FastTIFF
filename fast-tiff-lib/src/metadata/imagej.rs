@@ -68,7 +68,13 @@ fn parse_description(desc: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for line in desc.lines() {
         if let Some((k, v)) = line.split_once('=') {
-            map.insert(k.trim().to_string(), v.trim().to_string());
+            // First occurrence wins. ImageJ's own keys never repeat, so this
+            // changes nothing for a plain description — but it is what makes it
+            // safe to append a source file's metadata after the block (see
+            // `StackMetaWrite::trailing`): an XML attribute that happens to be
+            // spelled `mode="..."` cannot overwrite the real `mode=composite`.
+            map.entry(k.trim().to_string())
+                .or_insert_with(|| v.trim().to_string());
         }
     }
     map
@@ -275,6 +281,15 @@ pub(crate) fn serialize(planes: usize, meta: &StackMetaWrite) -> Result<String> 
     }
     for (key, value) in &meta.extra {
         s += &format!("{key}={value}\n");
+    }
+    // The source file's own metadata, last: everything above it is structured
+    // and must win, which `parse_description` guarantees by keeping the first
+    // occurrence of a key.
+    if let Some(text) = &meta.trailing {
+        s += text;
+        if !text.ends_with('\n') {
+            s += "\n";
+        }
     }
     Ok(s)
 }
