@@ -1,5 +1,13 @@
 #![windows_subsystem = "windows"]
 
+// The Windows 7 COM import redirection. It lives in the binary crate rather
+// than the library on purpose: a linker always links every object file it is
+// given, but pulls a member out of a *library* only when a symbol is still
+// undefined — and this works by defining an import symbol before the
+// compiler-generated import library can supply it.
+#[cfg(windows)]
+mod win7_compat;
+
 // The UI lives in the library half of this crate so the web build can reuse
 // it; see `src/lib.rs`. This file is only the native host.
 #[cfg(target_os = "macos")]

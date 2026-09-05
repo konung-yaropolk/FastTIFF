@@ -3,6 +3,20 @@
 //! compiled `.exe` as a Win32 resource. On other platforms this is a no-op.
 
 fn main() {
+    // `cfg(win7)` for the Tier-3 Windows 7 targets, whose triples are
+    // `x86_64-win7-windows-msvc` and `i686-win7-windows-msvc`. There is no
+    // built-in cfg for them, and the distinction matters: `src/win7_compat.rs`
+    // redirects a COM import that only needs redirecting on a platform without
+    // `combase.dll`, and doing it anywhere else would be pure overhead.
+    println!("cargo:rustc-check-cfg=cfg(win7)");
+    println!("cargo:rerun-if-env-changed=TARGET");
+    if std::env::var("TARGET")
+        .unwrap_or_default()
+        .contains("-win7-")
+    {
+        println!("cargo:rustc-cfg=win7");
+    }
+
     // `#[cfg(windows)]` in a build script describes the **host**, because that
     // is what the script itself is compiled for — and so does the
     // `[target.'cfg(windows)'.build-dependencies]` gate that supplies `winres`.
