@@ -150,6 +150,19 @@ spin that wgpu triggers on some machines. Only the selected backend is compiled
 in - the other's dependencies are excluded entirely.
 
 
+## Deprecated Windows 7 build
+
+Install the Nightly Toolchain:
+```sh
+rustup toolchain install nightly
+rustup component add rust-src --toolchain nightly
+```
+
+Compile for specific Tier 3 (deprecated) target:
+```sh
+cargo +nightly build --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --release
+```
+
 ## Test and lint
 
 Unit Test:
