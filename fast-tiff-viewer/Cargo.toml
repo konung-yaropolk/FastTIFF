@@ -44,6 +44,8 @@ codec-zstd = ["fast-tiff-lib/codec-zstd"]
 # version is what a published crate resolves against — without it
 # `cargo package` refuses the manifest.
 fast-tiff-lib = { path = "../fast-tiff-lib", default-features = false }
+# The plugin contract. Deliberately zero-dependency and MPL-2.0; see its manifest.
+fasttiff-plugin-api = { path = "../fasttiff-plugin-api", version = "0.1.0" }
 scivis-render = { path = "../scivis-render" }
 anyhow = "1.0"
 bytemuck = "1.25"

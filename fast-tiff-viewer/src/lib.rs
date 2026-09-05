@@ -44,6 +44,7 @@ pub mod dimensions;
 pub mod display;
 pub mod histogram;
 pub mod loader;
+pub mod plugins;
 pub mod prefetch;
 pub mod roi;
 pub mod stack;

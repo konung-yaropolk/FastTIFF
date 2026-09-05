@@ -867,6 +867,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "fast-tiff-lib",
+ "fasttiff-plugin-api",
  "log",
  "rayon",
  "scivis-render",
