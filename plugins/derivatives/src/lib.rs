@@ -10,10 +10,19 @@
 //! The result is one image per step — a map of where the tissue responded to
 //! that stimulus condition.
 //!
-//! Those images are then shown as **channels of a single document**, the first
-//! magenta and the second green, which is the comparison the maps exist for:
-//! what responded to both conditions appears white, what responded to only one
-//! keeps its colour.
+//! Those images are then shown as **one RGB image**: the first map goes into
+//! red *and* blue, the second into green. Red and blue together read as
+//! magenta, so the result is the comparison the maps exist for — what responded
+//! to both conditions appears white, what responded to only one keeps its
+//! colour.
+//!
+//! Magenta and green rather than red and green is not decoration. They stay
+//! distinguishable under the common forms of colour blindness, and their
+//! overlap is white rather than a muddy yellow that is hard to tell from either
+//! parent. Building it as R, G, B — with the first map duplicated into two
+//! channels — rather than as two channels tinted magenta and green is what
+//! makes the result an ordinary RGB image that any other tool opens the same
+//! way.
 //!
 //! # Where the timing comes from
 //!
@@ -50,12 +59,32 @@ pub mod meta;
 /// part of the derivative sums noise rather than cancelling it.
 const DEFAULT_SIGMA: f64 = 2.3;
 
-/// Magenta and green, in that order.
+/// Red, green, blue — an ordinary RGB image.
 ///
-/// The convention this reproduces, and worth keeping rather than reaching for
-/// red/green: magenta and green are separable for the most common form of
-/// colour blindness, and their overlap is white rather than a muddy yellow.
-const OVERLAY_COLORS: [[u8; 3]; 2] = [[255, 0, 255], [0, 255, 0]];
+/// The colour comes from *which map goes into which channel*, not from tinting:
+/// [`rgb_planes`] puts the first map into red and blue, which reads as magenta,
+/// and the second into green.
+const RGB: [[u8; 3]; 3] = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
+
+/// Arrange the per-step maps into the channels of the output.
+///
+/// Two maps — the usual case, and what the default pattern produces — become an
+/// RGB image: `[first, second, first]`, so the first is magenta and the second
+/// green.
+///
+/// Any other number is left one map per channel with the host's default colour
+/// cycle. Duplicating into red and blue only means anything when there are
+/// exactly two things to compare, and inventing an arrangement for three would
+/// be guessing at what the comparison is.
+fn rgb_planes(maps: Vec<PlaneData>) -> (Vec<PlaneData>, Vec<[u8; 3]>) {
+    if maps.len() != 2 {
+        return (maps, Vec::new());
+    }
+    let mut it = maps.into_iter();
+    let first = it.next().expect("two maps");
+    let second = it.next().expect("two maps");
+    (vec![first.clone(), second, first], RGB.to_vec())
+}
 
 #[derive(Default)]
 pub struct Derivatives;
@@ -200,21 +229,16 @@ impl Plugin for Derivatives {
             host.stack_info().name.trim_end_matches(".tif"),
             plan.epochs
         );
+        let (planes, channel_colors) = rgb_planes(channels);
         Ok(Outcome::NewDocument(Box::new(ImageResult {
             width: info.width,
             height: info.height,
-            channels: channels.len(),
+            channels: planes.len(),
             slices: 1,
             frames: 1,
             pixel_type: PixelType::F32,
-            planes: channels,
-            // Magenta first, green second, then the host's defaults for a
-            // pattern with more than two firing steps.
-            channel_colors: OVERLAY_COLORS
-                .iter()
-                .copied()
-                .take(plan.steps.len())
-                .collect(),
+            planes,
+            channel_colors,
             name,
         })))
     }

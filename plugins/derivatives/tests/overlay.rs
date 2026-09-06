@@ -2,9 +2,9 @@
 //!
 //! The fixture is a movie where the left half brightens after one stimulus and
 //! the right half after the other. Nothing else in it changes. So the answer is
-//! unambiguous: the first channel must be bright on the left and dark on the
-//! right, the second the other way round, and getting the epoch arithmetic
-//! wrong by even one step swaps them.
+//! unambiguous: red and blue must be bright on the left and dark on the right,
+//! green the other way round, and getting the epoch arithmetic wrong by even
+//! one step swaps them.
 //!
 //! It goes through `library::register_from` rather than calling the plugin
 //! directly, because half of what is being tested is that the timing crosses
@@ -174,11 +174,16 @@ fn half(img: &ImageResult, channel: usize, left: bool) -> f32 {
     sum / n as f32
 }
 
+/// Red and blue carry the first stimulus, green the second — so the first
+/// reads as magenta and the two are separable by eye.
 #[test]
-fn each_stimulus_lands_in_its_own_channel() {
+fn the_first_stimulus_is_magenta_and_the_second_green() {
     let (img, _) = run();
-    assert_eq!(img.channels, 2, "one channel per firing step");
-    assert_eq!(img.planes.len(), 2);
+    assert_eq!(
+        img.channels, 3,
+        "an RGB image, not one channel per stimulus"
+    );
+    assert_eq!(img.planes.len(), 3);
     assert_eq!((img.width, img.height), (W, H));
     assert_eq!(
         (img.slices, img.frames),
@@ -186,42 +191,67 @@ fn each_stimulus_lands_in_its_own_channel() {
         "the result is one plane deep"
     );
 
-    let (c0_left, c0_right) = (half(&img, 0, true), half(&img, 0, false));
-    let (c1_left, c1_right) = (half(&img, 1, true), half(&img, 1, false));
+    // Red and blue are the *same* map, which is what makes it magenta rather
+    // than two things that happen to look similar.
+    assert_eq!(
+        img.planes[0], img.planes[2],
+        "red and blue must be the same map, or the first stimulus is not magenta"
+    );
+    assert_ne!(
+        img.planes[0], img.planes[1],
+        "the two stimuli produced identical maps; the fixture is not exercising them"
+    );
 
-    assert!(
-        c0_left > c0_right * 5.0,
-        "the first stimulus should have responded on the left: {c0_left} vs {c0_right}"
-    );
-    assert!(
-        c1_right > c1_left * 5.0,
-        "the second stimulus should have responded on the right: {c1_right} vs {c1_left}"
-    );
-    // Not vacuous: something actually responded.
-    assert!(c0_left > 1.0, "no response at all in the first channel");
-    assert!(c1_right > 1.0, "no response at all in the second channel");
+    for (channel, name, left_should_win) in
+        [(0, "red", true), (2, "blue", true), (1, "green", false)]
+    {
+        let (l, r) = (half(&img, channel, true), half(&img, channel, false));
+        let (win, lose) = if left_should_win { (l, r) } else { (r, l) };
+        assert!(
+            win > lose * 5.0,
+            "{name} responded on the wrong side: left {l}, right {r}"
+        );
+        assert!(win > 1.0, "no response at all in {name}");
+    }
 }
 
-/// The overlay only reads as an overlay if the colours cross the boundary.
+/// An RGB image only reads as one if the channel colours cross the boundary.
 #[test]
-fn the_channels_come_back_magenta_and_green() {
+fn the_result_is_an_ordinary_rgb_image() {
     let (img, _) = run();
     assert_eq!(
         img.channel_colors,
-        vec![[255, 0, 255], [0, 255, 0]],
-        "the overlay colours did not survive the crossing"
+        vec![[255, 0, 0], [0, 255, 0], [0, 0, 255]],
+        "the channel colours did not survive the crossing"
     );
 
     // And they survive being written into a document, which is where they turn
     // into the LUTs the display reads.
     let s = plugins::to_stack(&img, None, false).expect("open the result");
-    assert_eq!(s.display.dims.channels, 2);
+    assert_eq!(s.display.dims.channels, 3);
     let luts: Vec<[u8; 3]> = s.display.luts.iter().map(|l| l[255]).collect();
     assert_eq!(
         luts,
-        vec![[255, 0, 255], [0, 255, 0]],
-        "the written file's channel LUTs are not magenta and green"
+        vec![[255, 0, 0], [0, 255, 0], [0, 0, 255]],
+        "the written file's channel LUTs are not R, G, B"
     );
+}
+
+/// What a viewer actually shows: red and blue lit together is magenta.
+#[test]
+fn the_composite_reads_magenta_where_only_the_first_stimulus_responded() {
+    let (img, _) = run();
+    let at = |c: usize, x: usize| {
+        let PlaneData::F32(px) = &img.planes[c] else {
+            panic!("expected f32")
+        };
+        px[(H as usize / 2) * W as usize + x]
+    };
+    // A pixel well inside the left half: red and blue lit, green dark.
+    let (lx, rx) = (1usize, W as usize - 2);
+    assert!(at(0, lx) > 1.0 && at(2, lx) > 1.0 && at(1, lx) < at(0, lx) / 5.0);
+    // And well inside the right half: green lit, red and blue dark.
+    assert!(at(1, rx) > 1.0 && at(0, rx) < at(1, rx) / 5.0 && at(2, rx) < at(1, rx) / 5.0);
 }
 
 /// The epoch count is derived from the recording, not asked for.
