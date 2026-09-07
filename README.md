@@ -158,34 +158,16 @@ rustup toolchain install nightly
 rustup component add rust-src --toolchain nightly
 ```
 
-Compile for specific Tier 3 (deprecated) target:
+Compile for the Tier 3 (deprecated) target, **with the OpenGL backend**:
 ```sh
-cargo +nightly build --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --release
+cargo +nightly build --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --release --no-default-features --features renderer-glow
 ```
 
-### The `combase.dll` problem
-
-`combase.dll` arrived in Windows 8. The modern `windows`/`windows-sys` crates
-import from it, and because those are *static* imports the loader resolves them
-at process start — so a build importing one function from it does not fail when
-that function is called, it fails to start at all, naming a DLL the user has
-never heard of.
-
-`FastTIFF/src/win7_compat.rs` fixes that without patching or vendoring any
-dependency: on a `-win7-` target it defines the import symbol itself, which
-satisfies the reference before the compiler-generated import library is
-consulted, and forwards to `ole32.dll` — where the same function has always
-lived, and to which Windows 8+ forwards anyway. Today that is one function,
-`CoTaskMemFree`; every other COM entry point already resolves from `ole32`.
 
 Check a build with:
 ```sh
 FASTTIFF_EXE=target/x86_64-win7-windows-msvc/release/FastTIFF.exe cargo test -p FastTIFF --bin FastTIFF -- --ignored no_combase
 ```
-It reads the linked binary's import table and fails if anything a Windows 7
-machine cannot load is still there. Worth running after a dependency bump: a new
-`combase` import can appear at any time, and nothing else notices until someone
-on Windows 7 cannot start the program.
 
 ## Test and lint
 
