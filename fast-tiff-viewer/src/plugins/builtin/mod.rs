@@ -20,10 +20,15 @@
 //!   failing on the first real plugin.
 //! * [`Invert`] is the oracle for the `.dll` lane: the same filter, run both
 //!   ways, must produce byte-identical output.
-//! * Two importers show the two shapes the job takes: [`Netpbm`], a documented
-//!   format implemented from its spec, and [`Oir`], a proprietary one with no
+//! * [`Oir`] is the importer that earns its place: a proprietary format with no
 //!   spec at all, worked out from a real acquisition and checked against the
 //!   vendor software's own export.
+//!
+//! [`Netpbm`] is a fifth thing — a worked example of the other shape the job
+//! takes, a documented format implemented straight from its spec. It is behind
+//! the off-by-default `netpbm-example` feature: read it when writing an
+//! importer, enable it (`--features netpbm-example`) to run it, but it is not
+//! part of the product and nobody opens a `.pgm` in a TIFF viewer.
 //!
 //! # Adding one
 //!
@@ -33,11 +38,13 @@
 //! `cdylib` crate needs no changes to the plugin itself.
 
 pub mod invert;
+#[cfg(feature = "netpbm-example")]
 pub mod netpbm;
 pub mod oir;
 pub mod zproject;
 
 pub use invert::Invert;
+#[cfg(feature = "netpbm-example")]
 pub use netpbm::Netpbm;
 pub use oir::Oir;
 pub use zproject::ZProject;
@@ -55,5 +62,9 @@ pub fn all() -> Vec<Box<dyn Plugin>> {
 /// file, so it is a real decision rather than a list: the more specific format
 /// goes first.
 pub fn importers() -> Vec<Box<dyn Importer>> {
-    vec![Box::new(Oir), Box::new(Netpbm)]
+    #[allow(unused_mut)]
+    let mut v: Vec<Box<dyn Importer>> = vec![Box::new(Oir)];
+    #[cfg(feature = "netpbm-example")]
+    v.push(Box::new(Netpbm));
+    v
 }

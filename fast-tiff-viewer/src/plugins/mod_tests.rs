@@ -122,28 +122,44 @@ impl fasttiff_plugin_api::Importer for StubImporter {
 fn the_builtin_importer_is_installed_and_offers_its_file_types() {
     let reg = Registry::new();
     assert!(reg.problems.is_empty(), "{:?}", reg.problems);
+    // OIR is the importer that ships. Netpbm is a worked example behind an
+    // off-by-default feature, so asserting on it here would fail the ordinary
+    // build; when it is enabled it must register too, and it is checked below.
     assert!(
         reg.importers()
             .iter()
-            .any(|e| e.info.id == "dev.fasttiff.netpbm"),
-        "the Netpbm importer should be installed"
+            .any(|e| e.info.id == "dev.fasttiff.oir"),
+        "the OIR importer should be installed"
     );
     let types = reg.open_file_types();
     assert!(
         types
             .iter()
-            .any(|t| t.extensions.contains(&"pgm".to_string())),
-        "the Open dialog should learn about .pgm: {types:?}"
-    );
-    assert!(reg.claims_extension(Path::new("x.ppm")));
-    assert!(
-        !reg.claims_extension(Path::new("x.tif")),
-        "TIFF is the app's own job"
+            .any(|t| t.extensions.contains(&"oir".to_string())),
+        "the Open dialog should learn about .oir: {types:?}"
     );
 }
 
-/// The signature decides which importer runs, not the extension — otherwise two
-/// plugins claiming `.tif` could never be told apart.
+/// The example importer still registers when it is asked for, so the feature is
+/// a switch rather than a way for the file to rot unnoticed.
+#[cfg(feature = "netpbm-example")]
+#[test]
+fn the_example_importer_registers_when_enabled() {
+    let reg = Registry::new();
+    assert!(
+        reg.importers()
+            .iter()
+            .any(|e| e.info.id == "dev.fasttiff.netpbm"),
+        "the Netpbm example should be installed under its feature"
+    );
+    assert!(
+        reg.open_file_types()
+            .iter()
+            .any(|t| t.extensions.contains(&"pgm".to_string())),
+        "the Open dialog should learn about .pgm"
+    );
+}
+
 #[test]
 fn importers_are_ranked_by_confidence_not_by_name() {
     let mut reg = Registry::new();

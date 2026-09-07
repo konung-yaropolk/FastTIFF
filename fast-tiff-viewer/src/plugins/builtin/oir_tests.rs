@@ -253,6 +253,41 @@ fn the_sidecar_states_the_axes_and_the_plane_count_must_agree() {
     let _ = std::fs::remove_file(file);
 }
 
+/// The other half of the rule the test above states.
+///
+/// There, the plane names carried one UID and one `z` between them, said
+/// nothing about the axes, and the sidecar was believed. Here they say two
+/// channels over three slices, and a sidecar claiming a plain six-frame
+/// timelapse must not be allowed to flatten them: this is the multi-file
+/// z-stack that opened as the wrong shape without anybody noticing, because a
+/// sidecar named after another part of the acquisition described that part.
+#[test]
+fn plane_names_that_state_the_axes_outrank_a_sidecar_that_disagrees() {
+    let names: Vec<String> = (1..=3)
+        .flat_map(|z| ["uidA", "uidB"].map(move |c| format!("z{z}_0_1_{c}")))
+        .collect();
+    let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    let file = tmp("axes_from_names.oir", &stack_file(4, 4, &refs, 16));
+
+    let txt = file.with_extension("txt");
+    std::fs::write(
+        &txt,
+        "\"[Dimensions]\"	\"\"
+\"Channel Dimension\"	\"1 [Ch]\"
+",
+    )
+    .unwrap();
+    let r = import(&file).expect("import");
+    assert_eq!(
+        (r.image.channels, r.image.slices, r.image.frames),
+        (2, 3, 1),
+        "the names say 2 channels over 3 slices; the sidecar was believed instead"
+    );
+
+    let _ = std::fs::remove_file(&txt);
+    let _ = std::fs::remove_file(file);
+}
+
 #[test]
 fn sample_width_is_measured_from_the_data_rather_than_assumed() {
     let file = tmp("depth.oir", &stack_file(8, 8, &["t001_0_1_uid"], 40));

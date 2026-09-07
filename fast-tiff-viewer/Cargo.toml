@@ -20,6 +20,9 @@ include = [
 ]
 
 [features]
+# A worked example for plugin authors rather than a format this viewer needs;
+# see `plugins/builtin/mod.rs`. Off by default, compiled and tested on demand.
+netpbm-example = []
 default = ["threads", "mmap", "codec-zstd"]
 # Which GPU backend `sync` drives. Exactly one is required to use `Viewer::sync`
 # and `volume::build_volume`; with neither, the crate still provides the whole

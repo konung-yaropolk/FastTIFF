@@ -623,6 +623,22 @@ struct PluginDialog {
     values: fasttiff_plugin_api::Params,
 }
 
+/// The window title for a file an importer converted.
+///
+/// The source file's own name, extension and all, marked as converted. What
+/// reaches the viewer is TIFF bytes, so without saying so the title would claim
+/// a `.tif` that exists nowhere — and the extension is worth keeping, since
+/// which vendor format this came from is the first thing anyone asks.
+/// `fallback` — the plugin's own name for the image — covers an importer that
+/// synthesises rather than reads, where the path names no file.
+#[cfg(not(target_arch = "wasm32"))]
+fn imported_label(path: &std::path::Path, fallback: &str) -> String {
+    match path.file_name() {
+        Some(n) => format!("{} - imported", n.to_string_lossy()),
+        None => fallback.to_string(),
+    }
+}
+
 impl ViewerApp {
     pub fn new(initial_path: Option<PathBuf>, render: Render) -> Self {
         let (open_tx, open_rx) = channel();
@@ -898,10 +914,7 @@ impl ViewerApp {
             Ok(Outcome::Message(m)) => self.core.status = Some(format!("{name}: {m}")),
             Ok(Outcome::NewDocument(image)) => {
                 match fast_tiff_viewer::plugins::to_tiff_bytes(&image, None) {
-                    Ok(bytes) => {
-                        let label = image.name.clone();
-                        self.apply_opened(Opened::Bytes(bytes, label));
-                    }
+                    Ok(bytes) => self.open_new_document(&name, &image.name, bytes),
                     Err(e) => self.core.status = Some(format!("{name}: {e:#}")),
                 }
             }
@@ -914,6 +927,59 @@ impl ViewerApp {
                 }
             }
             Err(e) => self.core.status = Some(format!("{name}: {e}")),
+        }
+    }
+
+    /// Show a plugin's result as a *new document*.
+    ///
+    /// A derived image is a second thing, not a correction to the first: the
+    /// point of a projection or a derivative is to be looked at beside what it
+    /// came from. Replacing the open document — which is what this did — threw
+    /// the source away and made the comparison impossible without reopening it.
+    ///
+    /// A window per document is a process per document here: that is already
+    /// how the app opens several files at once, and it needs no window manager
+    /// of its own inside egui. The result is written to a temporary file for
+    /// the new process to open, named after the image so the new window's title
+    /// says what it is showing rather than naming a scratch file. The file is
+    /// left behind deliberately — the process that would delete it is the one
+    /// still reading it, and the OS clears the directory.
+    ///
+    /// Native-only, because everything that reaches it is: running a plugin at
+    /// all is gated the same way, there being no plugin host in the browser.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_new_document(&mut self, plugin: &str, image_name: &str, bytes: Vec<u8>) {
+        let stem: String = image_name
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || "-_. ".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let stem = stem.trim().trim_matches('.').to_string();
+        let stem = if stem.is_empty() {
+            "result".to_string()
+        } else {
+            stem
+        };
+        let dir = std::env::temp_dir().join("fasttiff-plugin-results");
+        let path = dir.join(format!("{stem}.tif"));
+        match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, &bytes)) {
+            Ok(()) => {
+                crate::process::open_in_new_process(&path);
+                self.core.status = Some(format!("{plugin}: opened {stem}.tif in a new window"));
+            }
+            // Nowhere to write is not a reason to lose the result: show it
+            // here rather than discard it.
+            Err(e) => {
+                self.core.status = Some(format!(
+                    "{plugin}: could not open a new window ({e}); showing it here"
+                ));
+                self.apply_opened(Opened::Bytes(bytes, image_name.to_string()));
+            }
         }
     }
 
@@ -955,13 +1021,13 @@ impl ViewerApp {
         match result {
             Ok(r) => match fast_tiff_viewer::plugins::to_tiff_bytes(&r.image, r.info.as_ref()) {
                 Ok(bytes) => {
-                    let label = r
+                    let fallback = r
                         .info
                         .as_ref()
                         .map(|i| i.name.clone())
                         .filter(|n| !n.is_empty())
                         .unwrap_or_else(|| r.image.name.clone());
-                    Some(Opened::Bytes(bytes, label))
+                    Some(Opened::Bytes(bytes, imported_label(path, &fallback)))
                 }
                 Err(e) => {
                     self.core.status = Some(format!("{name}: {e:#}"));
@@ -2575,3 +2641,8 @@ mod zoom_tests;
 #[cfg(test)]
 #[path = "app/readout_tests.rs"]
 mod readout_tests;
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "app/import_label_tests.rs"]
+mod import_label_tests;

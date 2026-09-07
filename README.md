@@ -176,9 +176,24 @@ Unit Test:
 cargo test --workspace
 ```
 
+Two things sit outside the workspace on purpose and so are missed by the line
+above — both are worked examples rather than parts of the app, and both are
+kept building so they cannot quietly rot:
+
+```sh
+cargo test --manifest-path plugins/example/Cargo.toml
+cargo test -p fast-tiff-viewer --features netpbm-example
+```
+
 Lint:
 ```sh
 cargo clippy --workspace --all-targets
+```
+
+The web build is a different target and has its own `#[cfg]` paths, so lint it
+separately:
+```sh
+cargo clippy --manifest-path FastTIFF-web/Cargo.toml --target wasm32-unknown-unknown --all-targets
 ```
 
 
@@ -266,7 +281,13 @@ sites.
   than the app's GPL: a plugin SDK that set the licence of every plugin written
   against it would be making a decision that is not this project's to make.
   `plugins/` holds plugin *implementations* that ship as separate
-  libraries; `plugins/example/` is the one used as the test oracle.
+  libraries. `plugins/example/` is the worked example for authors — a filter,
+  an importer with a dialog, and a raw-binary reader — and it is the oracle for
+  the one test that exercises a real library across the ABI. It is deliberately
+  *outside* the workspace, so it is built the way a third party's plugin is
+  built rather than as part of the app; that also means `cargo test
+  --workspace` does not reach it, and it has its own line in
+  [Test and lint](#test-and-lint).
 
 ## The TIFF engine is a standalone crate
 
@@ -500,7 +521,22 @@ happened to run the tests.
 Writing one is still ordinary Rust: implement a trait, call one macro. See
 [`fasttiff-plugin/README.md`](fasttiff-plugin/README.md) for the twenty-line
 version, and [`plugins/example/`](plugins/example/src/lib.rs)
-for a filter, an importer with a dialog, and a raw-binary reader.
+for a filter, an importer with a dialog, and a raw-binary reader. That crate is
+not in the workspace, so build and test it on its own:
+
+```sh
+cargo test --manifest-path plugins/example/Cargo.toml
+```
+
+A second worked example lives *inside* the viewer:
+[`plugins/builtin/netpbm.rs`](fast-tiff-viewer/src/plugins/builtin/netpbm.rs)
+reads PBM/PGM/PPM as a built-in importer. It is a demonstration rather than a
+format this viewer needs, so it is behind the off-by-default `netpbm-example`
+feature and does not ship in a normal build:
+
+```sh
+cargo test -p fast-tiff-viewer --features netpbm-example
+```
 
 Native only — there is no `dlopen` in a browser, so the web build has no plugin
 interface rather than a disabled one.
