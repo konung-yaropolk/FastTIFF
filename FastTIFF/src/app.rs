@@ -656,6 +656,12 @@ impl Default for View2d {
     }
 }
 
+/// How many frames to keep looking for the bar's height to change, once a
+/// grow has been armed. Two would do — the change lands on the frame after the
+/// one that armed it — and the third is slack for a frame that egui decides to
+/// lay out differently.
+const GROW_WAIT: u8 = 3;
+
 /// Layout bookkeeping for the collapsible channels/contrast panel, which grows
 /// and shrinks the window by its own height delta when toggled.
 #[derive(Default)]
@@ -663,12 +669,86 @@ struct PanelLayout {
     /// Channel buttons + contrast sliders are tucked under a small triangle
     /// toggle to keep the bar minimal by default.
     expanded: bool,
-    /// Set on the frame the toggle is clicked; the next frame (once the panel
-    /// has been redrawn at its new size) grows or shrinks the window by the
-    /// difference.
-    grow_armed: bool,
+    /// Frames left to wait for the bar's height to actually change, after
+    /// something asked the window to grow by the difference.
+    ///
+    /// A countdown rather than a flag, because the wait is not guaranteed to
+    /// end. The toggle needs one: the frame the click arrives still draws the
+    /// bar in its old state, so the delta only becomes visible on the next. But
+    /// a status message replaced by another of the same height changes nothing
+    /// to measure, and a flag would sit armed for a delta that never comes —
+    /// repainting every frame while it waited, which costs a core for as long
+    /// as the window is open.
+    grow_armed: u8,
     /// The panel's height *before* the toggle, for that delta.
     old_h: f32,
+    /// The bar's height as it was last drawn.
+    ///
+    /// The toggle can use the height in front of it as "before", because the
+    /// bar is still drawn in its old state on the frame the click arrives. A
+    /// status message is not: by the time this frame's height can be measured
+    /// the message is already in it, so the height to compare against is the
+    /// one from the frame before.
+    last_h: f32,
+    /// The status line the bar was last laid out with, or `None` when it drew
+    /// none. Compared as text rather than as a flag because a longer message
+    /// wraps to more lines, and that is a height change too.
+    last_status: Option<String>,
+}
+
+impl PanelLayout {
+    /// Note what the bottom bar just drew, and arm a window grow if the status
+    /// line changed its height.
+    ///
+    /// Called every frame, after the bar has been laid out. The height compared
+    /// against is the previous frame's, because unlike the panel toggle — which
+    /// is clicked on a frame the bar is still drawn in its old state — a status
+    /// message is already in the height being measured.
+    fn note_status(&mut self, drawn: Option<String>, height: f32) {
+        if self.last_status != drawn {
+            self.last_status = drawn;
+            // Not over a toggle still waiting for its own delta, which measured
+            // a height this frame has already left behind; and not before the
+            // bar has been drawn once, when there is no previous height to have
+            // grown from.
+            if self.grow_armed == 0 && self.last_h > 0.0 {
+                self.grow_armed = GROW_WAIT;
+                self.old_h = self.last_h;
+            }
+        }
+        self.last_h = height;
+    }
+
+    /// Arm a grow against the height in front of us, for a change that has not
+    /// happened yet — the panel toggle, whose new size only appears next frame.
+    fn arm_grow(&mut self, height: f32) {
+        self.grow_armed = GROW_WAIT;
+        self.old_h = height;
+    }
+
+    /// How much taller the window should get, if that is settled this frame.
+    ///
+    /// `Some` disarms. `None` means either nothing was armed or the change has
+    /// not shown up yet — [`waiting`](Self::waiting) tells those apart, and the
+    /// wait is bounded so a change that never comes stops asking for frames.
+    fn grow_delta(&mut self, height: f32) -> Option<f32> {
+        if self.grow_armed == 0 {
+            return None;
+        }
+        let delta = height - self.old_h;
+        if delta.abs() > 0.5 {
+            self.grow_armed = 0;
+            return Some(delta);
+        }
+        self.grow_armed -= 1;
+        None
+    }
+
+    /// Whether a grow is still expecting the bar's height to change, and the
+    /// caller should keep frames coming so it can see it.
+    fn waiting(&self) -> bool {
+        self.grow_armed > 0
+    }
 }
 
 pub struct ViewerApp {
@@ -1325,22 +1405,20 @@ impl ViewerApp {
         // image just letterboxes into the space the panel takes. We stay armed
         // until the height actually changes (the toggle frame still reports the
         // old height), repainting meanwhile so the next frame lands.
-        if self.panel.grow_armed {
-            let delta = bottom_bar_height - self.panel.old_h;
-            if delta.abs() > 0.5 {
-                self.panel.grow_armed = false;
-                if !window_size_is_not_ours(ui.ctx()) {
-                    let cur = ui.ctx().content_rect().size();
-                    let h = (cur.y + delta).round().max(200.0);
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                            cur.x.round(),
-                            h,
-                        )));
-                }
-            } else {
-                ui.ctx().request_repaint();
+        if let Some(delta) = self.panel.grow_delta(bottom_bar_height) {
+            if !window_size_is_not_ours(ui.ctx()) {
+                let cur = ui.ctx().content_rect().size();
+                let h = (cur.y + delta).round().max(200.0);
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                        cur.x.round(),
+                        h,
+                    )));
             }
+        } else if self.panel.waiting() {
+            // The change has not shown up yet. Keep the frames coming so the
+            // next one can see it.
+            ui.ctx().request_repaint();
         }
 
         let img_dims = self
@@ -1999,6 +2077,8 @@ impl eframe::App for ViewerApp {
             ))
         });
         let load_stage = progress.is_some();
+        // Filled in below by the bar itself, if it draws a status line.
+        let mut drawn_status: Option<String> = None;
         let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
             // Above everything else in the panel, and shown whether or not a
             // stack is already open: the previous file stays usable while the
@@ -2407,6 +2487,12 @@ impl eframe::App for ViewerApp {
                         STATUS_NOTE
                     };
                     ui.label(RichText::new(status).color(color).small());
+                    // What was *drawn*, which is not the same as what is set:
+                    // there is no bar at all without a stack, and the message
+                    // above can be suppressed. Growing the window for a line
+                    // that is not on screen would leave the height armed for a
+                    // change that never comes, repainting while it waits.
+                    drawn_status = Some(status.clone());
                 }
             }
             ui.add_space(4.0);
@@ -2477,14 +2563,28 @@ impl eframe::App for ViewerApp {
             }
         }
 
+        // A status message lands in the same bar as the panel, and pushes the
+        // image up in exactly the same way — so it gets the same answer: the
+        // window grows by the message's height instead of the canvas shrinking
+        // under it. Losing thirty pixels of canvas is enough to put an image
+        // that was fitted to the window into pan mode, which is a strange thing
+        // for "saved it" to do.
+        //
+        // Armed here rather than where the status is set, because a status can
+        // be set from anywhere — including a worker thread — and what matters
+        // is not that it changed but that the bar in front of the user is now a
+        // different height.
+        self.panel
+            .note_status(drawn_status, scrub_bar_response.response.rect.height());
+
         if toggle_requested {
             self.panel.expanded = !self.panel.expanded;
             // Remember the panel's height *before* it expands/collapses; the
             // next frame (once it's redrawn in the new state) grows or shrinks
             // the window by the difference. This frame still shows the old
             // height, so the actual delta only becomes known next frame.
-            self.panel.grow_armed = true;
-            self.panel.old_h = scrub_bar_response.response.rect.height();
+            self.panel
+                .arm_grow(scrub_bar_response.response.rect.height());
         }
 
         if play_toggle_requested {
@@ -2886,3 +2986,7 @@ mod import_label_tests;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "app/result_file_tests.rs"]
 mod result_file_tests;
+
+#[cfg(test)]
+#[path = "app/panel_grow_tests.rs"]
+mod panel_grow_tests;
