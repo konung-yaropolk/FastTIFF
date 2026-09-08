@@ -5,10 +5,17 @@ use std::path::Path;
 
 /// What the title is for: an OIR opened through the importer says so, keeping
 /// the name and the extension it was opened under.
+///
+/// The path is assembled from components rather than written out. A backslash
+/// separates directories on Windows and is an ordinary character in a file
+/// name everywhere else, so `E:\data\stack.oir` — which this used to say —
+/// names one file on one platform and a single oddly-named file on the other
+/// two. It passed where it was written and nowhere else.
 #[test]
 fn an_imported_file_keeps_its_own_name_and_extension() {
+    let path = Path::new("data").join("Alzheimer mRuby Z stack.oir");
     assert_eq!(
-        imported_label(Path::new(r"E:\data\Alzheimer mRuby Z stack.oir"), "unused"),
+        imported_label(&path, "unused"),
         "Alzheimer mRuby Z stack.oir - imported"
     );
 }

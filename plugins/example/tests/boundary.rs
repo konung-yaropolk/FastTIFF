@@ -819,14 +819,35 @@ fn a_file_that_is_not_a_plugin_is_reported_rather_than_loaded() {
     let _ = std::fs::remove_file(junk);
 }
 
-/// A real, loadable binary with no plugin entry point — the plugin folder will
-/// eventually contain one — must be turned away by the missing symbol.
+/// A real, loadable shared library with no plugin entry point — which is what
+/// lands in the plugin folder by accident — must be turned away by the missing
+/// symbol rather than by failing to load.
+///
+/// The platform's own C library, because it is the one shared library that is
+/// certainly present, certainly loadable, and certainly not a plugin.
+///
+/// Not this test binary, which was the obvious choice and the wrong one: it
+/// links the example plugin, so it *defines* `ft_plugin_v1_query`. Windows and
+/// Linux do not put an executable's symbols where `dlopen` can reach them and
+/// the test passed by accident; macOS does, and it loaded — correctly, since
+/// on that platform the binary really is a plugin.
 #[test]
 fn a_real_binary_without_the_entry_point_is_rejected_by_symbol() {
-    let not_a_plugin = std::env::current_exe().expect("current exe");
-    match library::load_library(&not_a_plugin) {
-        Ok(_) => panic!("the test binary is not a plugin and must not load as one"),
+    // Loaded by name so the platform's own loader resolves it.
+    let libc = if cfg!(windows) {
+        "kernel32.dll"
+    } else if cfg!(target_os = "macos") {
+        "libSystem.B.dylib"
+    } else {
+        "libc.so.6"
+    };
+    match library::load_library(Path::new(libc)) {
+        Ok(_) => panic!("{libc} is not a plugin and must not load as one"),
         Err(e) => assert!(
+            // Either rejection is the promise being kept: a reason rather than
+            // a crash. Which one depends on whether this system has that
+            // library under that name — a musl container has no `libc.so.6`,
+            // and then the point is only that the refusal says so.
             e.contains("could not load") || e.contains("ft_plugin_v1_query"),
             "unhelpful message: {e}"
         ),
