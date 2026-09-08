@@ -490,8 +490,7 @@ struct HistCache {
 /// `cfg!` rather than `#[cfg]` so both wordings compile and are checked on
 /// every target: the shared lines are written once and cannot drift apart.
 fn welcome_text() -> String {
-    let mut text =
-        String::from("Drag and drop a file here, \nor click \"Open File\" above.\n");
+    let mut text = String::from("Drag and drop a file here, \nor click \"Open File\" above.\n");
     if cfg!(target_arch = "wasm32") {
         text.push_str(
             "\n\nEverything is processed locally in your browser — \nno file is ever uploaded to a server.\n",
