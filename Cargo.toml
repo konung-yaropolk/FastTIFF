@@ -7,11 +7,22 @@ resolver = "2"
 #   FastTIFF          the eframe desktop frontend
 # A future wasm frontend becomes a fifth member alongside `FastTIFF`, reusing
 # the lower three unchanged.
-members = ["fast-tiff-lib", "scivis-render", "fast-tiff-viewer", "FastTIFF"]
+members = ["fast-tiff-lib", "scivis-render", "fast-tiff-viewer", "fasttiff-plugin-api", "fasttiff-plugin-abi", "fasttiff-plugin", "plugins/derivatives", "FastTIFF"]
 # The fuzz harness is its own crate: it needs nightly + libFuzzer, so keeping it
 # out of the workspace means `cargo build/test --workspace` stays stable-only.
 # Run it with `cargo +nightly fuzz run <target>` from `fast-tiff-lib/`.
-exclude = ["fast-tiff-lib/fuzz"]
+# `plugins/example` is kept as a worked example for plugin authors rather than
+# as part of the product, so it is excluded rather than a member: excluded (not
+# merely unlisted) is what lets it still be built and tested on its own.
+#
+#     cargo test --manifest-path plugins/example/Cargo.toml
+#
+# Worth knowing what that costs. Its `tests/boundary.rs` is the only thing that
+# drives the real shared-library loader against a real `.dll` and checks the
+# result against the built-in filter it was copied from — the one test that
+# crosses the plugin boundary for real. Out of `--workspace`, it no longer runs
+# in CI, so run the line above after changing anything in the plugin ABI.
+exclude = ["fast-tiff-lib/fuzz", "plugins/example"]
 
 [profile.release]
 opt-level = 3

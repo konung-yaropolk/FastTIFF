@@ -1,6 +1,6 @@
 [package]
 name = "FastTIFF"
-version = "1.17.0"
+version = "1.18.0"
 edition = "2021"
 description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering."
 license = "GPL-3.0-only"
@@ -66,6 +66,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # `rfd`'s blocking dialog and the process fan-out are likewise native-only.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 fast-tiff-viewer = { path = "../fast-tiff-viewer", features = ["threads", "mmap", "codec-zstd"] }
+# The plugin contract. Native only, like the plugin system itself.
+fasttiff-plugin-api = { path = "../fasttiff-plugin-api", version = "0.18.0" }
 # Also depended on directly (the UI names `Compression`, `SampleFormat`, …),
 # so its host-dependent features need topping up here too — otherwise the
 # C zstd codec follows the direct edge into the wasm build.

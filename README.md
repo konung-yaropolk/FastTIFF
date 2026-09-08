@@ -150,6 +150,29 @@ spin that wgpu triggers on some machines. Only the selected backend is compiled
 in - the other's dependencies are excluded entirely.
 
 
+## Deprecated Windows 7 build
+
+Install the Nightly Toolchain:
+```sh
+rustup toolchain install nightly
+rustup component add rust-src --toolchain nightly
+```
+
+Compile for the Tier 3 (deprecated) target, **with the OpenGL backend**:
+```sh
+cargo +nightly build --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --release --no-default-features --features renderer-glow
+```
+
+
+Check a build with — the path is relative to the `FastTIFF` crate, which is
+where the test process runs, hence the `..`:
+```sh
+FASTTIFF_EXE=../target/x86_64-win7-windows-msvc/release/FastTIFF.exe cargo test -p FastTIFF --bin FastTIFF -- --ignored no_combase
+```
+
+Released builds run this too — `build-windows7` in `.github/workflows/release.yml`
+attaches a `FastTIFF-win7-x86_64.exe` only if it passes.
+
 ## Test and lint
 
 Unit Test:
@@ -157,9 +180,24 @@ Unit Test:
 cargo test --workspace
 ```
 
+Two things sit outside the workspace on purpose and so are missed by the line
+above — both are worked examples rather than parts of the app, and both are
+kept building so they cannot quietly rot:
+
+```sh
+cargo test --manifest-path plugins/example/Cargo.toml
+cargo test -p fast-tiff-viewer --features netpbm-example
+```
+
 Lint:
 ```sh
 cargo clippy --workspace --all-targets
+```
+
+The web build is a different target and has its own `#[cfg]` paths, so lint it
+separately:
+```sh
+cargo clippy --manifest-path FastTIFF-web/Cargo.toml --target wasm32-unknown-unknown --all-targets
 ```
 
 
@@ -178,20 +216,29 @@ you move the slider. This viewer instead:
 
 ## Project layout
 
-Four crates, layered bottom-up. Each one below the app is free of any GUI
-toolkit, so the same engine can drive a different frontend (a wasm/web UI is the
-intended second one):
+Layered bottom-up. Each crate below the app is free of any GUI toolkit, so the
+same engine can drive a different frontend (the browser build is the second
+one):
 
 ```text
   fast-tiff-lib     file I/O, IFD index, decode, metadata
         │
   scivis-render     GPU pipelines, textures, ray-marching
         │
-  fast-tiff-viewer  stack model, channel settings, decode → GPU sync
-        │
+  fast-tiff-viewer  stack model, channel settings, decode → GPU sync,
+        │           and the plugin host
   FastTIFF          the egui UI (lib) + the native binary
         │
   FastTIFF-web      a browser host around the same UI
+```
+
+Off to one side, the plugin contract — three crates that a third party depends
+on to build a plugin, and which therefore depend on nothing of ours:
+
+```text
+  fasttiff-plugin-abi   the frozen #[repr(C)] contract. Never changes.
+  fasttiff-plugin-api   the plain-Rust traits both sides implement
+  fasttiff-plugin       the macro that generates the boundary from them
 ```
 
 `FastTIFF` is a lib + bin: the library half holds the egui interface, and both
@@ -228,6 +275,23 @@ sites.
   (zoom, pan, window sizing, which panels are open). `src/render.rs` is the sole
   file bridging the renderer to eframe — a browser frontend writes its own
   ~150-line equivalent and reuses everything else.
+- **`fasttiff-plugin-abi/`**, **`fasttiff-plugin-api/`**,
+  **`fasttiff-plugin/`** — the plugin contract, split by what may change.
+  `-abi` is the frozen binary interface (`#[repr(C)]`, `extern "C"`, zero
+  dependencies, layout pinned by tests); `-api` is the ordinary Rust traits a
+  plugin author actually writes against; `fasttiff-plugin` is the macro that
+  turns one into the other. Only `-abi` is permanent — the other two compile
+  *into* the plugin, so they can change freely. All three are MPL-2.0 rather
+  than the app's GPL: a plugin SDK that set the licence of every plugin written
+  against it would be making a decision that is not this project's to make.
+  `plugins/` holds plugin *implementations* that ship as separate
+  libraries. `plugins/example/` is the worked example for authors — a filter,
+  an importer with a dialog, and a raw-binary reader — and it is the oracle for
+  the one test that exercises a real library across the ABI. It is deliberately
+  *outside* the workspace, so it is built the way a third party's plugin is
+  built rather than as part of the app; that also means `cargo test
+  --workspace` does not reach it, and it has its own line in
+  [Test and lint](#test-and-lint).
 
 ## The TIFF engine is a standalone crate
 
@@ -423,11 +487,70 @@ with the same per-channel LUTs and contrast as the 2D view.
   through time.
 - Runs on both the glow and wgpu backends.
 
+## Plugins
+
+FastTIFF loads plugins from shared libraries — `.dll` on Windows, `.so` on
+Linux, `.dylib` on macOS. **Plugins ▸ Open plugin folder…** opens the folder to
+put them in; they appear in the menu on the next start.
+
+Two kinds:
+
+- **Filters** run against the stack that is open. They get the image's shape in
+  file coordinates, the file's own scale (pixel size, Z step, frame interval,
+  intensity calibration, channel names), the viewer's current display state
+  (contrast window, 3D camera), and a plane-at-a-time reader — then return a new
+  document, a file to write, or a message. A plugin declares its dialog as a
+  list of typed controls and the host draws it, so there is no UI toolkit in a
+  plugin's dependency tree.
+- **Importers** read formats FastTIFF does not know. An importer declares the
+  extensions it handles, and the host adds them to the Open dialog and to
+  drag-and-drop *before the plugin has run*; opening such a file calls the
+  importer, and what it returns — pixels and the scale it read out of the file —
+  becomes an ordinary FastTIFF document.
+
+The boundary is a frozen C ABI, not Rust's, because Rust has no stable ABI: a
+plugin built next year by a different compiler must still load. Nothing crosses
+but fixed-width integers, `#[repr(C)]` structs and function pointers; every
+struct carries its own size so fields can be appended without breaking either
+side; the ABI's major version is part of the exported symbol name, so a version
+mismatch is a clean "not a plugin for this FastTIFF" instead of two binaries
+disagreeing about a struct layout mid-call. No allocator is shared — the host
+copies everything during the call that supplies it. Every enumeration crosses as
+a plain integer rather than a Rust enum, because a value from a newer plugin
+than the host has heard of has to be *data* to be checked, not undefined
+behaviour on arrival. The layouts are pinned by compile-time assertions, so they
+are checked on every target the crate builds for rather than only the one that
+happened to run the tests.
+
+Writing one is still ordinary Rust: implement a trait, call one macro. See
+[`fasttiff-plugin/README.md`](fasttiff-plugin/README.md) for the twenty-line
+version, and [`plugins/example/`](plugins/example/src/lib.rs)
+for a filter, an importer with a dialog, and a raw-binary reader. That crate is
+not in the workspace, so build and test it on its own:
+
+```sh
+cargo test --manifest-path plugins/example/Cargo.toml
+```
+
+A second worked example lives *inside* the viewer:
+[`plugins/builtin/netpbm.rs`](fast-tiff-viewer/src/plugins/builtin/netpbm.rs)
+reads PBM/PGM/PPM as a built-in importer. It is a demonstration rather than a
+format this viewer needs, so it is behind the off-by-default `netpbm-example`
+feature and does not ship in a normal build:
+
+```sh
+cargo test -p fast-tiff-viewer --features netpbm-example
+```
+
+Native only — there is no `dlopen` in a browser, so the web build has no plugin
+interface rather than a disabled one.
+
 ## What it doesn't do (intentionally out of scope for a "viewer")
 
-ROIs, measurements, image processing, saving/exporting. All straightforward to
-add later on top of this structure if you want them — the render pipeline
-already separates "decode" from "display" cleanly.
+ROIs and measurements. Image processing and export are not built in either, but
+are what the [plugin interface](#plugins) exists for — the render pipeline
+separates "decode" from "display" cleanly enough that a plugin can read the
+former without disturbing the latter.
 
 ## Known caveat: plane ordering assumption
 

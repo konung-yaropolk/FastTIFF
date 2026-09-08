@@ -194,13 +194,11 @@ pub struct ChannelJob {
 /// decode inline, to ask the prefetch worker for the next frame, and to
 /// histogram what is on screen.
 ///
-/// This is the single definition of *which plane is which channel*, which is
-/// why it lives next to `ChannelJob` rather than in the GPU-gated `sync`
-/// module: every reader of pixel data must agree on the addressing, including
-/// the ones that never touch a GPU. Maps each
-/// display channel to its IFD/plane: for RGB, all channels are sample planes of
-/// one IFD per frame; otherwise each channel is its own IFD in ImageJ's default
-/// `xyczt` plane order (channel fastest, then Z — frozen at slice 0 — then time).
+/// Addressing itself lives in [`crate::dimensions::plane_index`], the single
+/// definition every reader of pixel data shares — including the ones that never
+/// touch a GPU. This function decides only *which* channels to fetch for the 2D
+/// view and at which timepoint; it asks for slice 0, because the 2D scrub axis
+/// is time and Z is a stride there.
 pub fn build_jobs(
     loaded: &Stack,
     frame_index: usize,
@@ -218,11 +216,12 @@ pub fn build_jobs(
     (0..loaded.display.settings.len())
         .filter(|&c| enabled.get(c).copied().unwrap_or(false))
         .map(|c| {
-            let (ifd_idx, plane) = if loaded.display.rgb {
-                (frame_index * dims.slices, c)
-            } else {
-                (frame_index * dims.slices * dims.channels + c, 0)
-            };
+            // z = 0 explicitly: the 2D view's scrub axis is time, and Z acts
+            // only as a stride (see `planes_addressed`). Writing the zero here
+            // rather than folding it into the arithmetic is what keeps this
+            // from reading like a general plane lookup, which it is not.
+            let (ifd_idx, plane) =
+                crate::dimensions::plane_index(*dims, loaded.display.rgb, c, 0, frame_index);
             ChannelJob {
                 channel: c,
                 ifd_idx,

@@ -44,6 +44,13 @@ pub mod dimensions;
 pub mod display;
 pub mod histogram;
 pub mod loader;
+/// Plugins. Native only: wasm cannot load a shared library, and the browser
+/// build does not want the interface — so it is absent there rather than
+/// compiled in and inert. Nothing in the decode, sync or render path refers to
+/// this module, so a native build that never opens the Plugins menu pays for it
+/// only in binary size.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod plugins;
 pub mod prefetch;
 pub mod roi;
 pub mod stack;
@@ -66,6 +73,7 @@ pub use scivis_render::wgpu_backend as backend;
 #[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
 pub type Renderer = backend::ImageRenderResources;
 
+pub use dimensions::{plane_index, planes_addressed};
 pub use display::{Dims, Display};
 pub use histogram::Histogram;
 pub use loader::{LoadSource, LoadStage};

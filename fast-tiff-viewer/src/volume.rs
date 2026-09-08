@@ -166,11 +166,17 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
         let (t, z) = if is_4d { (time, k) } else { (k, 0) };
         let jobs: Vec<ChannelJob> = (0..n)
             .map(|c| {
-                let (ifd_idx, plane) = if plan.rgb {
-                    (t * slices + z, c)
-                } else {
-                    (t * slices * channels + z * channels + c, 0)
-                };
+                let (ifd_idx, plane) = crate::dimensions::plane_index(
+                    crate::display::Dims {
+                        channels,
+                        slices,
+                        frames: plan.frames.max(1),
+                    },
+                    plan.rgb,
+                    c,
+                    z,
+                    t,
+                );
                 ChannelJob {
                     channel: c,
                     ifd_idx,

@@ -1,5 +1,30 @@
 #![windows_subsystem = "windows"]
 
+// The Windows 7 COM import redirection. It lives in the binary crate rather
+// than the library on purpose: a linker always links every object file it is
+// given, but pulls a member out of a *library* only when a symbol is still
+// undefined — and this works by defining an import symbol before the
+// compiler-generated import library can supply it.
+#[cfg(windows)]
+mod win7_compat;
+
+// Turning a silent exit into a sentence. See the module docs — on Windows this
+// process has no stderr at all, so without it a failed start says nothing.
+#[cfg(windows)]
+mod fatal;
+
+// A wgpu build cannot start on Windows 7: its backends are Direct3D 12 and
+// Vulkan, and that system has neither. Caught here rather than left to fail on
+// the user's machine, where the failure is a process that exits instantly and
+// explains nothing.
+#[cfg(all(win7, feature = "renderer-wgpu", not(feature = "renderer-glow")))]
+compile_error!(
+    "the Windows 7 target needs the OpenGL backend: build it with \
+     `--no-default-features --features renderer-glow`. The default wgpu backend \
+     uses Direct3D 12 or Vulkan, and Windows 7 has neither, so such a build \
+     finds no adapter and exits at startup without printing anything."
+);
+
 // The UI lives in the library half of this crate so the web build can reuse
 // it; see `src/lib.rs`. This file is only the native host.
 #[cfg(target_os = "macos")]
@@ -98,7 +123,12 @@ fn main() -> eframe::Result {
     // texture feature for full-precision volume textures; glow: no-op).
     render::tune_native_options(&mut native_options);
 
-    eframe::run_native(
+    // Any failure from here on is invisible on Windows without this: the
+    // process has no stderr to print a panic to.
+    #[cfg(windows)]
+    fatal::install_panic_hook();
+
+    let result = eframe::run_native(
         "FastTIFF",
         native_options,
         Box::new(|cc| {
@@ -113,7 +143,18 @@ fn main() -> eframe::Result {
             let render = render::init(cc);
             Ok(Box::new(app::ViewerApp::new(initial_path, render)))
         }),
-    )
+    );
+
+    // `main` returning `Err` prints to stderr, which a windowed Windows process
+    // does not have; say it where it can be seen.
+    #[cfg(windows)]
+    if let Err(error) = &result {
+        fatal::show(
+            "FastTIFF could not start",
+            &format!("{error}\n\n{}", fatal::GPU_HINT),
+        );
+    }
+    result
 }
 #[cfg(test)]
 mod icon_tests {

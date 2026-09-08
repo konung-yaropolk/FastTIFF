@@ -251,6 +251,7 @@ pub struct StackMetaWrite {
     pub(crate) pixel_height: Option<f64>,
     pub(crate) channel_info: Vec<ChannelWrite>,
     pub(crate) extra: Vec<(String, String)>,
+    pub(crate) trailing: Option<String>,
 }
 
 impl StackMetaWrite {
@@ -272,6 +273,7 @@ impl StackMetaWrite {
             pixel_height: None,
             channel_info: Vec::new(),
             extra: Vec::new(),
+            trailing: None,
         }
     }
 
@@ -371,6 +373,27 @@ impl StackMetaWrite {
     /// Ignored by dialects other than ImageJ.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra.push((key.into(), value.into()));
+        self
+    }
+
+    /// Free-form text appended after the `key=value` block — the source file's
+    /// own metadata, carried through into `ImageDescription`.
+    ///
+    /// This exists because converting a vendor format otherwise throws away the
+    /// acquisition record, which is the one part of a microscopy file that
+    /// cannot be reconstructed afterwards. A reader that wants the structured
+    /// values still gets them: ImageJ's format is line-based and ignores
+    /// anything that is not `key=value`, and this crate's parser takes the
+    /// *first* occurrence of a key, so text appended here can never shadow the
+    /// values above it.
+    ///
+    /// Unlike [`WriterOptions::description`](crate::WriterOptions::description),
+    /// which replaces the structured metadata entirely, this sits alongside it.
+    /// Ignored by dialects other than ImageJ; NUL bytes are stripped, since a
+    /// TIFF ASCII field cannot carry them.
+    pub fn trailing(mut self, text: impl Into<String>) -> Self {
+        let text: String = text.into();
+        self.trailing = Some(text.replace('\0', ""));
         self
     }
 
