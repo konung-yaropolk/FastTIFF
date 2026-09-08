@@ -36,11 +36,20 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      # `cargo test` does not build a `cdylib`, so without this the loader's
-      # `dlopen` smoke test skips. Building it here is what makes the real
-      # platform loader — LoadLibrary, dlopen, dyld — exercised on each OS.
-      - name: Build the example plugin library
-        run: cargo build -p fasttiff-plugin-example
+      # The example plugin is deliberately *excluded* from the workspace — it
+      # is a worked example rather than part of the product — so `-p` cannot
+      # name it and `--workspace` does not test it. Both halves are needed here
+      # and neither is optional:
+      #
+      # `cargo test` does not build a `cdylib`, so the build is what gives the
+      # `dlopen` smoke test something current to open; and the test run is the
+      # only thing in CI that crosses the C boundary for real, which is the one
+      # part of the plugin contract that has to be exercised per OS —
+      # LoadLibrary, dlopen and dyld are three different loaders.
+      - name: Build and test the example plugin across the C boundary
+        run: |
+          cargo build --manifest-path plugins/example/Cargo.toml
+          cargo test --manifest-path plugins/example/Cargo.toml
 
       - name: Run tests
         run: cargo test --workspace
@@ -102,11 +111,20 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      # `cargo test` does not build a `cdylib`, so without this the loader's
-      # `dlopen` smoke test skips. Building it here is what makes the real
-      # platform loader — LoadLibrary, dlopen, dyld — exercised on each OS.
-      - name: Build the example plugin library
-        run: cargo build -p fasttiff-plugin-example
+      # The example plugin is deliberately *excluded* from the workspace — it
+      # is a worked example rather than part of the product — so `-p` cannot
+      # name it and `--workspace` does not test it. Both halves are needed here
+      # and neither is optional:
+      #
+      # `cargo test` does not build a `cdylib`, so the build is what gives the
+      # `dlopen` smoke test something current to open; and the test run is the
+      # only thing in CI that crosses the C boundary for real, which is the one
+      # part of the plugin contract that has to be exercised per OS —
+      # LoadLibrary, dlopen and dyld are three different loaders.
+      - name: Build and test the example plugin across the C boundary
+        run: |
+          cargo build --manifest-path plugins/example/Cargo.toml
+          cargo test --manifest-path plugins/example/Cargo.toml
 
       - name: Run tests
         run: cargo test --workspace
@@ -134,11 +152,20 @@ jobs:
             libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
             libxkbcommon-dev libwayland-dev
 
-      # `cargo test` does not build a `cdylib`, so without this the loader's
-      # `dlopen` smoke test skips. Building it here is what makes the real
-      # platform loader — LoadLibrary, dlopen, dyld — exercised on each OS.
-      - name: Build the example plugin library
-        run: cargo build -p fasttiff-plugin-example
+      # The example plugin is deliberately *excluded* from the workspace — it
+      # is a worked example rather than part of the product — so `-p` cannot
+      # name it and `--workspace` does not test it. Both halves are needed here
+      # and neither is optional:
+      #
+      # `cargo test` does not build a `cdylib`, so the build is what gives the
+      # `dlopen` smoke test something current to open; and the test run is the
+      # only thing in CI that crosses the C boundary for real, which is the one
+      # part of the plugin contract that has to be exercised per OS —
+      # LoadLibrary, dlopen and dyld are three different loaders.
+      - name: Build and test the example plugin across the C boundary
+        run: |
+          cargo build --manifest-path plugins/example/Cargo.toml
+          cargo test --manifest-path plugins/example/Cargo.toml
 
       - name: Run tests (glow backend)
         run: cargo test --workspace --no-default-features --features FastTIFF/renderer-glow
