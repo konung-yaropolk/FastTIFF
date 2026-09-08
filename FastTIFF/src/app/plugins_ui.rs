@@ -24,13 +24,14 @@ pub(super) fn plugins_menu(ui: &mut egui::Ui, registry: Option<&Registry>) -> Me
     // button stays, greyed, rather than vanishing: a toolbar that loses an item
     // for the duration of a long read is a toolbar whose other buttons move
     // under the pointer while it is being read.
+    let icon = || RichText::new(super::ICON_PLUGINS).size(super::ICON_SIZE);
     let Some(registry) = registry else {
-        ui.add_enabled(false, egui::Button::new("Plugins"))
-            .on_disabled_hover_text("Busy importing a file");
+        ui.add_enabled(false, egui::Button::new(icon()))
+            .on_disabled_hover_text("Plugins — busy importing a file");
         return MenuAction::None;
     };
     let mut action = MenuAction::None;
-    ui.menu_button("Plugins", |ui| {
+    ui.menu_button(icon(), |ui| {
         if registry.is_empty() {
             ui.label(RichText::new("No plugins installed").italics());
         } else {
@@ -61,7 +62,7 @@ pub(super) fn plugins_menu(ui: &mut egui::Ui, registry: Option<&Registry>) -> Me
         // one that is working and simply has not been triggered.
         if !registry.importers().is_empty() {
             ui.separator();
-            ui.label(RichText::new("File formats").strong());
+            ui.label(RichText::new("Importable formats:").strong());
             for e in registry.importers() {
                 let exts: Vec<String> = e
                     .file_types
@@ -194,16 +195,23 @@ fn control(ui: &mut egui::Ui, d: &ParamDecl, values: &mut Params) {
                 .choice(&d.key, *default)
                 .min(options.len().saturating_sub(1));
             let shown = options.get(sel).cloned().unwrap_or_default();
-            egui::ComboBox::from_id_salt(&d.key)
-                .selected_text(shown)
-                .show_ui(ui, |ui| {
-                    for (i, o) in options.iter().enumerate() {
-                        if ui.selectable_label(i == sel, o).clicked() {
-                            sel = i;
-                            values.set(d.key.clone(), ParamValue::Choice(i));
+            // A choice of one is not a choice. It is still shown, because the
+            // value says what is about to happen — a projection dialog offering
+            // only "T (frames)" is telling you the stack has no Z to flatten —
+            // but it is not offered, so it cannot read as a decision the user
+            // failed to make.
+            ui.add_enabled_ui(options.len() > 1, |ui| {
+                egui::ComboBox::from_id_salt(&d.key)
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        for (i, o) in options.iter().enumerate() {
+                            if ui.selectable_label(i == sel, o).clicked() {
+                                sel = i;
+                                values.set(d.key.clone(), ParamValue::Choice(i));
+                            }
                         }
-                    }
-                });
+                    });
+            });
         }
         ParamKind::Text { default } => {
             label(ui, d);

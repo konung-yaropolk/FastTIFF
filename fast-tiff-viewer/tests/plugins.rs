@@ -10,8 +10,8 @@ use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::plugins::{builtin, describe_view, StackHost};
 use fast_tiff_viewer::Stack;
 use fasttiff_plugin_api::{
-    HostContext, ImageResult, Outcome, ParamValue, Params, PixelType, Plane, PlaneData, Plugin,
-    PluginError, VolumeMode, VolumeView,
+    HostContext, ImageResult, Outcome, ParamKind, ParamValue, Params, PixelType, Plane, PlaneData,
+    Plugin, PluginError, VolumeMode, VolumeView,
 };
 use std::io::Cursor;
 
@@ -170,6 +170,104 @@ fn invert_reflects_the_plane_about_its_own_range() {
     for (&o, &r) in original.iter().zip(re.iter()) {
         assert!((o - r).abs() < 1e-3);
     }
+}
+
+/// The axis selector offers only the axes the stack actually has.
+///
+/// An axis one plane deep has nothing to project — flattening it is a copy —
+/// and offering it would be offering a mistake. When only one is left the
+/// dialog draws the selector inactive rather than hiding it, so the projection
+/// still says which axis it is about to work on.
+#[test]
+fn z_project_offers_the_axes_the_stack_has() {
+    let axis_options = |s: &Stack| -> Vec<String> {
+        let h = host(s, 0);
+        let decls = builtin::ZProject.params(&h);
+        let d = decls
+            .iter()
+            .find(|d| d.key == "axis")
+            .expect("an axis selector");
+        match &d.kind {
+            ParamKind::Choice { options, .. } => options.clone(),
+            other => panic!("expected a choice, got {other:?}"),
+        }
+    };
+
+    // There is no "Z only" case to test: `resolve_dimensions` folds a
+    // single-timepoint z-stack into a movie, so a stack the viewer presents
+    // with slices > 1 always has frames > 1 as well. The code offers Z alone if
+    // it ever sees one; nothing here can build one to show it.
+    //
+    // A timelapse of one slice: nothing to project along Z.
+    assert_eq!(axis_options(&stack(2, 1, 3)), vec!["T (frames)"]);
+    // Both, Z first — the axis this plugin has always projected.
+    assert_eq!(
+        axis_options(&stack(2, 4, 3)),
+        vec!["Z (slices)", "T (frames)"]
+    );
+    // Neither: the selector still shows what it would have done, and the run
+    // refuses with a reason rather than the dialog being empty.
+    assert_eq!(axis_options(&stack(1, 1, 1)), vec!["Z (slices)"]);
+}
+
+/// Projecting T averages across time, not across slices — and it does it at
+/// every slice, because the view says which timepoint is on screen but not
+/// which slice, so there is no current one to pick and dropping the rest would
+/// be a choice made on the user's behalf.
+#[test]
+fn z_project_along_t_flattens_time_at_every_slice() {
+    let s = stack(2, 2, 3);
+    let mut h = host(&s, 0);
+    let mut p = builtin::ZProject;
+    let decls = p.params(&h);
+    let mut params = Params::defaults(&decls);
+    // Both axes are on offer here, so index 1 is T.
+    params.set("axis", ParamValue::Choice(1));
+    params.set("method", ParamValue::Choice(3)); // Sum
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params.clamp_to(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    // One plane per channel per slice, time flattened away.
+    assert_eq!((img.channels, img.slices, img.frames), (2, 2, 1));
+    let planes = planes_f32(&img);
+    assert_eq!(planes.len(), 4);
+    // Channel fastest, then Z — the plane order the contract asks for, and the
+    // one thing a nested loop gets backwards without anything looking wrong.
+    for z in 0..2 {
+        for c in 0..2 {
+            let want: f32 = (0..3).map(|t| plane_tag(c, z, t)).sum();
+            let got = planes[z * 2 + c][0];
+            assert!(
+                (got - want).abs() < 1e-3,
+                "c{c} z{z} summed the wrong planes: {got} vs {want}"
+            );
+        }
+    }
+}
+
+/// The declared range has to span the longer axis, because the declarations are
+/// made before the dialog is answered. Choosing the shorter one then has to
+/// clamp, or a Z projection would ask for slices a timelapse's frame count made
+/// look available.
+#[test]
+fn z_project_clamps_the_range_to_the_axis_that_was_chosen() {
+    let s = stack(2, 2, 5);
+    let mut h = host(&s, 0);
+    let mut p = builtin::ZProject;
+    let decls = p.params(&h);
+    let mut params = Params::defaults(&decls);
+    params.set("axis", ParamValue::Choice(0)); // Z, which is 2 deep
+    params.set("method", ParamValue::Choice(3)); // Sum
+    params.set("first", ParamValue::Int(1));
+    params.set("last", ParamValue::Int(5)); // past the end of Z
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params.clamp_to(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    // Slices 1..=2 of the timepoint on screen, not five of anything.
+    let want: f32 = (0..2).map(|z| plane_tag(0, z, 0)).sum();
+    assert!((planes_f32(&img)[0][0] - want).abs() < 1e-3);
 }
 
 /// A stack with one Z slice has nothing to project; saying so is different from

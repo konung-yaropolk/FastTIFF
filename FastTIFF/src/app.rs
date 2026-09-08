@@ -332,6 +332,19 @@ fn write_result(
 const STATUS_NOTE: Color32 = Color32::from_rgb(230, 170, 60);
 const STATUS_DONE: Color32 = Color32::from_rgb(120, 195, 120);
 
+/// The toolbar's icons, and the size they are drawn at.
+///
+/// Every one of these is checked against the bundled fonts by
+/// `icon_glyph_tests`. A character the font does not have is not a compile
+/// error and not a runtime error: it is a tofu box in the toolbar, which
+/// nothing but a person looking at the window would ever notice. `≡` and `▼`
+/// are two that look obvious and are not there.
+const ICON_OPEN: &str = "📂";
+const ICON_SAVE: &str = "💾";
+const ICON_PLUGINS: &str = "☰";
+const ICON_SETTINGS: &str = "⚙";
+const ICON_SIZE: f32 = 16.0;
+
 /// A zoom step in flight: the level being glided to, and the point it turns
 /// about.
 ///
@@ -477,7 +490,8 @@ struct HistCache {
 /// `cfg!` rather than `#[cfg]` so both wordings compile and are checked on
 /// every target: the shared lines are written once and cannot drift apart.
 fn welcome_text() -> String {
-    let mut text = String::from("Drag and drop a TIFF here, \nor click \"Open TIFF...\" above.\n");
+    let mut text =
+        String::from("Drag and drop a file here, \nor click \"Open File icon\" above.\n");
     if cfg!(target_arch = "wasm32") {
         text.push_str(
             "\n\nEverything is processed locally in your browser — \nno file is ever uploaded to a server.\n",
@@ -690,23 +704,26 @@ struct PanelLayout {
     /// the message is already in it, so the height to compare against is the
     /// one from the frame before.
     last_h: f32,
-    /// The status line the bar was last laid out with, or `None` when it drew
-    /// none. Compared as text rather than as a flag because a longer message
-    /// wraps to more lines, and that is a height change too.
-    last_status: Option<String>,
+    /// What the bar's info row was last laid out with — the progress label and
+    /// the status message, or `None` when it drew neither and the row was not
+    /// there at all.
+    ///
+    /// Compared as text rather than as a flag because a longer message wraps to
+    /// more lines, and that is a height change too.
+    last_info: Option<String>,
 }
 
 impl PanelLayout {
-    /// Note what the bottom bar just drew, and arm a window grow if the status
-    /// line changed its height.
+    /// Note what the bottom bar's info row just drew, and arm a window grow if
+    /// it changed the bar's height.
     ///
     /// Called every frame, after the bar has been laid out. The height compared
     /// against is the previous frame's, because unlike the panel toggle — which
-    /// is clicked on a frame the bar is still drawn in its old state — a status
-    /// message is already in the height being measured.
-    fn note_status(&mut self, drawn: Option<String>, height: f32) {
-        if self.last_status != drawn {
-            self.last_status = drawn;
+    /// is clicked on a frame the bar is still drawn in its old state — the row
+    /// is already in the height being measured by the time it can be noticed.
+    fn note_info_row(&mut self, drawn: Option<String>, height: f32) {
+        if self.last_info != drawn {
+            self.last_info = drawn;
             // Not over a toggle still waiting for its own delta, which measured
             // a height this frame has already left behind; and not before the
             // bar has been drawn once, when there is no previous height to have
@@ -974,6 +991,18 @@ impl ViewerApp {
         });
     }
 
+    /// Report something that finished, in the voice for it.
+    ///
+    /// The status line is amber, which is right for a dimension note or a
+    /// refusal and wrong for work that succeeded. Green is asked for by
+    /// recording the message itself rather than setting a flag beside it:
+    /// `core.status` is written from a dozen places, and a flag would still be
+    /// set once one of them replaced the text underneath it.
+    fn report_done(&mut self, message: String) {
+        self.good_status = Some(message.clone());
+        self.core.status = Some(message);
+    }
+
     /// Reset everything that described the previous file, once a load has
     /// landed. The other half of [`apply_opened`](Self::apply_opened).
     fn finish_open(&mut self) {
@@ -1201,12 +1230,7 @@ impl ViewerApp {
                 match fast_tiff_viewer::plugins::to_tiff_bytes(&image, None)
                     .and_then(|b| std::fs::write(&path, b).map_err(Into::into))
                 {
-                    Ok(()) => {
-                        // A file written is the other thing here that succeeded.
-                        let done = format!("{name}: wrote {path}");
-                        self.good_status = Some(done.clone());
-                        self.core.status = Some(done);
-                    }
+                    Ok(()) => self.report_done(format!("{name}: wrote {path}")),
                     Err(e) => self.core.status = Some(format!("{name}: {e:#}")),
                 }
             }
@@ -1257,9 +1281,7 @@ impl ViewerApp {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| format!("{stem}.tif"));
-                let done = format!("{plugin}: opened {name} in a new window");
-                self.good_status = Some(done.clone());
-                self.core.status = Some(done);
+                self.report_done(format!("{plugin}: opened {name} in a new window"));
             }
             // Nowhere to write is not a reason to lose the result: show it
             // here rather than discard it.
@@ -1598,7 +1620,7 @@ impl ViewerApp {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
-                format!("{name} — FastTIFF")
+                format!("{name} • FastTIFF")
             }
             None => "FastTIFF".to_string(),
         };
@@ -1814,9 +1836,19 @@ impl eframe::App for ViewerApp {
 
         let toolbar_response = egui::Panel::top("toolbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Open File...").clicked() {
+                if ui
+                    .button(RichText::new(ICON_OPEN).size(ICON_SIZE))
+                    .on_hover_text("Open a file…")
+                    .clicked()
+                {
                     open_requested = true;
                 }
+                // Saving is not written yet. The button is here so that the
+                // toolbar being looked at now is the one it will live in, and
+                // it says as much on hover rather than pretending to work.
+                let _ = ui
+                    .button(RichText::new(ICON_SAVE).size(ICON_SIZE))
+                    .on_hover_text("Save — not implemented yet");
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     match plugins_ui::plugins_menu(ui, self.plugins.as_ref()) {
@@ -1855,7 +1887,7 @@ impl eframe::App for ViewerApp {
                     }
                     ui.separator();
                     if ui
-                        .button(RichText::new("⚙").size(16.0))
+                        .button(RichText::new(ICON_SETTINGS).size(ICON_SIZE))
                         .on_hover_text("3D render settings")
                         .clicked()
                     {
@@ -1866,14 +1898,7 @@ impl eframe::App for ViewerApp {
                     // Nothing open yet: show the version + active render backend
                     // in the space the file info will later occupy.
                     ui.separator();
-                    ui.label(
-                        RichText::new(format!(
-                            "FastTIFF v{}, Renderer: {}",
-                            env!("CARGO_PKG_VERSION"),
-                            render::BACKEND
-                        ))
-                        .weak(),
-                    );
+                    ui.label(RichText::new("© 2026 konung_yaropolk, SciWare LLC").weak());
                 }
                 if let Some(loaded) = &self.core.stack {
                     let meta = &loaded.tiff.meta;
@@ -1992,7 +2017,7 @@ impl eframe::App for ViewerApp {
             if open_plugin_folder {
                 match fast_tiff_viewer::plugins::install_dir() {
                     Some(dir) => {
-                        self.core.status = Some(format!("Plugin folder: {}", dir.display()));
+                        self.report_done(format!("Plugin folder: {}", dir.display()));
                         // Best effort: showing the path in the status bar is the
                         // part that must not fail, so a file manager that will
                         // not launch is not an error.
@@ -2078,21 +2103,34 @@ impl eframe::App for ViewerApp {
         });
         let load_stage = progress.is_some();
         // Filled in below by the bar itself, if it draws a status line.
-        let mut drawn_status: Option<String> = None;
-        let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
-            // Above everything else in the panel, and shown whether or not a
-            // stack is already open: the previous file stays usable while the
-            // next one loads, so this has to sit alongside a working set of
-            // controls rather than replacing them.
-            if let Some((label, fraction, name)) = &progress {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
+        let mut drawn_info: Option<String> = None;
+        // The bottom line of the panel: what is running, and the last thing
+        // that happened. One row for both.
+        //
+        // The progress readout used to be a row of its own above everything
+        // else, which pushed the picture up for the length of every load — and
+        // a load is exactly when the picture is being looked at. Sharing the
+        // status line costs nothing: they are both one line of chrome saying
+        // what the program is up to, and they are rarely both interesting at
+        // once.
+        //
+        // Returns what it drew, which is what the window's height bookkeeping
+        // compares against — a row that appears has to come out of the window
+        // rather than out of the canvas.
+        let info_row = |ui: &mut egui::Ui, status: Option<(&str, bool)>| -> Option<String> {
+            if progress.is_none() && status.is_none() {
+                return None;
+            }
+            let mut key = String::new();
+            ui.separator();
+            ui.horizontal(|ui| {
+                if let Some((label, fraction, name)) = &progress {
                     match fraction {
                         // Countable work — say how much is left.
                         Some(f) => {
                             ui.add(
                                 egui::ProgressBar::new(*f)
-                                    .desired_width(160.0)
+                                    .desired_width(120.0)
                                     .show_percentage(),
                             );
                         }
@@ -2107,13 +2145,31 @@ impl eframe::App for ViewerApp {
                     if !name.is_empty() {
                         ui.label(RichText::new(name).weak());
                     }
-                });
-                ui.separator();
-            }
+                    key.push_str(label);
+                    key.push('\u{1}');
+                }
+                if let Some((status, good)) = status {
+                    let color = if good { STATUS_DONE } else { STATUS_NOTE };
+                    ui.label(RichText::new(status).color(color).small());
+                    key.push_str(status);
+                }
+            });
+            Some(key)
+        };
+        let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
             let Some(loaded) = &mut self.core.stack else {
                 if !load_stage {
-                    ui.label("Open a TIFF stack to begin.");
+                    ui.label(
+                        RichText::new(format!(
+                            "FastTIFF v{}, Renderer: {}",
+                            env!("CARGO_PKG_VERSION"),
+                            render::BACKEND
+                    )));
                 }
+                // Still worth a row with nothing open: this is where the first
+                // file's progress is reported, and where a plugin's "open an
+                // image first" lands.
+                drawn_info = info_row(ui, current_status.as_deref().map(|s| (s, status_is_good)));
                 return;
             };
             ui.add_space(4.0);
@@ -2473,28 +2529,19 @@ impl eframe::App for ViewerApp {
 
                 contrast_controls(ui, loaded, ContrastLayout::Inline, None);
             }
-            if let Some(status) = &current_status {
-                // The triple-axis note explains that 2D freezes Z at its first
-                // slice — but the 3D view *does* use Z (as the volume depth), so
-                // showing it there would be wrong. When `triple_axis_warning` is
-                // set, the status IS that note (`compute_status` short-circuits
-                // on it), so this suppresses exactly the right message.
-                if !(view_is_volume && loaded.display.triple_axis_warning) {
-                    ui.separator();
-                    let color = if status_is_good {
-                        STATUS_DONE
-                    } else {
-                        STATUS_NOTE
-                    };
-                    ui.label(RichText::new(status).color(color).small());
-                    // What was *drawn*, which is not the same as what is set:
-                    // there is no bar at all without a stack, and the message
-                    // above can be suppressed. Growing the window for a line
-                    // that is not on screen would leave the height armed for a
-                    // change that never comes, repainting while it waits.
-                    drawn_status = Some(status.clone());
-                }
-            }
+            // The triple-axis note explains that 2D freezes Z at its first
+            // slice — but the 3D view *does* use Z (as the volume depth), so
+            // showing it there would be wrong. When `triple_axis_warning` is
+            // set, the status IS that note (`compute_status` short-circuits on
+            // it), so this suppresses exactly the right message.
+            let suppressed = view_is_volume && loaded.display.triple_axis_warning;
+            drawn_info = info_row(
+                ui,
+                current_status
+                    .as_deref()
+                    .filter(|_| !suppressed)
+                    .map(|s| (s, status_is_good)),
+            );
             ui.add_space(4.0);
         });
 
@@ -2575,7 +2622,7 @@ impl eframe::App for ViewerApp {
         // is not that it changed but that the bar in front of the user is now a
         // different height.
         self.panel
-            .note_status(drawn_status, scrub_bar_response.response.rect.height());
+            .note_info_row(drawn_info, scrub_bar_response.response.rect.height());
 
         if toggle_requested {
             self.panel.expanded = !self.panel.expanded;
@@ -2990,3 +3037,7 @@ mod result_file_tests;
 #[cfg(test)]
 #[path = "app/panel_grow_tests.rs"]
 mod panel_grow_tests;
+
+#[cfg(test)]
+#[path = "app/icon_glyph_tests.rs"]
+mod icon_glyph_tests;

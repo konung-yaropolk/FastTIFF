@@ -17,7 +17,7 @@ use super::{PanelLayout, GROW_WAIT};
 /// One frame: the bar draws at `height` with `status`, and the window grows by
 /// whatever comes back.
 fn frame(p: &mut PanelLayout, status: Option<&str>, height: f32) -> Option<f32> {
-    p.note_status(status.map(str::to_string), height);
+    p.note_info_row(status.map(str::to_string), height);
     p.grow_delta(height)
 }
 
@@ -107,7 +107,7 @@ fn the_toggle_measures_from_the_height_it_was_clicked_at() {
     frame(&mut p, None, BARE);
 
     // The click frame: the bar is still its old size.
-    p.note_status(None, BARE);
+    p.note_info_row(None, BARE);
     p.arm_grow(BARE);
     assert_eq!(
         p.grow_delta(BARE),

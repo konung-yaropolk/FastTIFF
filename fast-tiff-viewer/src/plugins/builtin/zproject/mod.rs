@@ -1,11 +1,67 @@
-//! Z Project: flatten a stack's Z axis with a per-pixel statistic.
+//! Z Project: flatten one of a stack's axes with a per-pixel statistic.
 
 use fasttiff_plugin_api::{
-    HostContext, ImageResult, Outcome, ParamDecl, ParamKind, Params, PixelType, Plane, PlaneData,
-    Plugin, PluginError, PluginInfo,
+    HostContext, ImageInfo, ImageResult, Outcome, ParamDecl, ParamKind, Params, PixelType, Plane,
+    PlaneData, Plugin, PluginError, PluginInfo,
 };
 
-/// Flatten the Z axis with a per-pixel statistic — ImageJ's Z Project.
+/// An axis a projection can run along.
+///
+/// Not every stack has both, and one with a single plane along an axis has
+/// nothing to project there — flattening it would be a copy. So the dialog is
+/// offered only the axes that exist, which is why this is a list rather than a
+/// fixed pair.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Axis {
+    Z,
+    T,
+}
+
+impl Axis {
+    fn label(self) -> &'static str {
+        match self {
+            Axis::Z => "Z (slices)",
+            Axis::T => "T (frames)",
+        }
+    }
+
+    /// The suffix on the result's name, so two projections of one stack are
+    /// told apart by what they are rather than by the order they were made in.
+    fn tag(self) -> &'static str {
+        match self {
+            Axis::Z => "z",
+            Axis::T => "t",
+        }
+    }
+
+    /// How many planes this stack has along the axis.
+    fn depth(self, info: &ImageInfo) -> usize {
+        match self {
+            Axis::Z => info.slices,
+            Axis::T => info.frames,
+        }
+    }
+}
+
+/// The axes worth offering, in dialog order.
+///
+/// Never empty: a stack that is a single plane still gets a selector, showing
+/// the axis it would have projected, and [`ZProject::run`] refuses it with a
+/// reason. An empty dropdown would be a control with nothing in it at all,
+/// which reads as broken rather than as inapplicable.
+fn axes(info: &ImageInfo) -> Vec<Axis> {
+    let found: Vec<Axis> = [Axis::Z, Axis::T]
+        .into_iter()
+        .filter(|a| a.depth(info) > 1)
+        .collect();
+    if found.is_empty() {
+        vec![Axis::Z]
+    } else {
+        found
+    }
+}
+
+/// Flatten an axis with a per-pixel statistic — ImageJ's Z Project.
 pub struct ZProject;
 
 impl Plugin for ZProject {
@@ -14,12 +70,32 @@ impl Plugin for ZProject {
             .menu_path("Stacks")
             .version(env!("CARGO_PKG_VERSION"))
             .author("FastTIFF")
-            .description("Project the Z axis of the current timepoint to one plane.")
+            .description("Flatten a stack's Z or T axis to one plane per channel.")
     }
 
     fn params(&self, host: &dyn HostContext) -> Vec<ParamDecl> {
         let info = host.image();
+        let axes = axes(&info);
+        // The range has to cover whichever axis is picked, and which one that
+        // is cannot be known until the dialog is answered — the declarations
+        // are made once, before it opens. So it spans the longest axis on
+        // offer, and `run` clamps to the one actually chosen.
+        let longest = axes
+            .iter()
+            .map(|a| a.depth(&info))
+            .max()
+            .unwrap_or(1)
+            .max(1) as i64;
         vec![
+            ParamDecl::new(
+                "axis",
+                "Axis",
+                ParamKind::Choice {
+                    default: 0,
+                    options: axes.iter().map(|a| a.label().to_string()).collect(),
+                },
+            )
+            .help("Which axis to flatten. A stack with only one of them has no choice to make."),
             ParamDecl::new(
                 "method",
                 "Projection",
@@ -35,20 +111,21 @@ impl Plugin for ZProject {
             ),
             ParamDecl::new(
                 "first",
-                "First slice",
+                "First",
                 ParamKind::Int {
                     default: 1,
                     min: 1,
-                    max: info.slices.max(1) as i64,
+                    max: longest,
                 },
-            ),
+            )
+            .help("Counted along the axis above, from 1."),
             ParamDecl::new(
                 "last",
-                "Last slice",
+                "Last",
                 ParamKind::Int {
-                    default: info.slices.max(1) as i64,
+                    default: longest,
                     min: 1,
-                    max: info.slices.max(1) as i64,
+                    max: longest,
                 },
             ),
             ParamDecl::new(
@@ -61,23 +138,33 @@ impl Plugin for ZProject {
 
     fn run(&mut self, host: &mut dyn HostContext, params: &Params) -> Result<Outcome, PluginError> {
         let info = host.image();
-        if info.slices <= 1 {
-            return Err(PluginError::unsupported(
-                "this stack has a single Z slice — there is nothing to project",
-            ));
+        let offered = axes(&info);
+        let axis = offered
+            .get(params.choice("axis", 0))
+            .copied()
+            .unwrap_or(Axis::Z);
+        let available = axis.depth(&info);
+        if available <= 1 {
+            return Err(PluginError::unsupported(format!(
+                "this stack is one plane deep along {} — there is nothing to project",
+                axis.label()
+            )));
         }
         let n_px = info.plane_len();
         let t = host.view().frame_index.min(info.frames.saturating_sub(1));
 
         // The dialog is 1-based, as ImageJ's is; convert once, here.
         let first = (params.int("first", 1).max(1) as usize) - 1;
-        let last = (params.int("last", info.slices as i64).max(1) as usize) - 1;
+        let last = (params.int("last", available as i64).max(1) as usize) - 1;
         let (first, last) = if first <= last {
             (first, last)
         } else {
             (last, first)
         };
-        let last = last.min(info.slices - 1);
+        // Clamped to the axis actually chosen, which the declared range could
+        // not be: it had to cover the longer of the two.
+        let first = first.min(available - 1);
+        let last = last.min(available - 1);
         let depth = last - first + 1;
 
         let method = params.choice("method", 0);
@@ -87,42 +174,60 @@ impl Plugin for ZProject {
             1
         };
 
-        let mut planes = Vec::with_capacity(channels);
+        // Projecting Z flattens the slices of the timepoint on screen: one
+        // plane per channel. Projecting T flattens the timepoints *at every
+        // slice*, because the view says which timepoint is showing but not
+        // which slice — there is no current one to pick, and picking the first
+        // would quietly throw the rest of a 4D stack away. A timelapse, which
+        // is the ordinary case, has one slice and so gets one plane either way.
+        let out_slices = match axis {
+            Axis::Z => 1,
+            Axis::T => info.slices.max(1),
+        };
+
+        let mut planes = Vec::with_capacity(channels * out_slices);
         let mut buf = Vec::new();
-        let total = (channels * depth).max(1);
+        let total = (out_slices * channels * depth).max(1);
         let mut done = 0usize;
 
-        for c in 0..channels {
-            let mut acc = vec![
-                match method {
-                    0 => f32::NEG_INFINITY, // Maximum
-                    2 => f32::INFINITY,     // Minimum
-                    _ => 0.0,
-                };
-                n_px
-            ];
-            for z in first..=last {
-                if !host.progress(done as f32 / total as f32) {
-                    return Ok(Outcome::Cancelled);
-                }
-                host.read_plane_f32(Plane::new(c, z, t), &mut buf)?;
-                for (a, &v) in acc.iter_mut().zip(buf.iter()) {
+        // Channel fastest, then Z: the plane order the contract asks for.
+        for z in 0..out_slices {
+            for c in 0..channels {
+                let mut acc = vec![
                     match method {
-                        0 => *a = a.max(v),
-                        2 => *a = a.min(v),
-                        _ => *a += v,
+                        0 => f32::NEG_INFINITY, // Maximum
+                        2 => f32::INFINITY,     // Minimum
+                        _ => 0.0,
+                    };
+                    n_px
+                ];
+                for k in first..=last {
+                    if !host.progress(done as f32 / total as f32) {
+                        return Ok(Outcome::Cancelled);
+                    }
+                    let plane = match axis {
+                        Axis::Z => Plane::new(c, k, t),
+                        Axis::T => Plane::new(c, z, k),
+                    };
+                    host.read_plane_f32(plane, &mut buf)?;
+                    for (a, &v) in acc.iter_mut().zip(buf.iter()) {
+                        match method {
+                            0 => *a = a.max(v),
+                            2 => *a = a.min(v),
+                            _ => *a += v,
+                        }
+                    }
+                    done += 1;
+                }
+                // Mean is Sum scaled; doing it here keeps one accumulation loop.
+                if method == 1 && depth > 0 {
+                    let inv = 1.0 / depth as f32;
+                    for a in &mut acc {
+                        *a *= inv;
                     }
                 }
-                done += 1;
+                planes.push(PlaneData::F32(acc));
             }
-            // Mean is Sum scaled; doing it here keeps one accumulation loop.
-            if method == 1 && depth > 0 {
-                let inv = 1.0 / depth as f32;
-                for a in &mut acc {
-                    *a *= inv;
-                }
-            }
-            planes.push(PlaneData::F32(acc));
         }
 
         let label = ["max", "mean", "min", "sum"][method.min(3)];
@@ -130,12 +235,12 @@ impl Plugin for ZProject {
             width: info.width,
             height: info.height,
             channels,
-            slices: 1,
+            slices: out_slices,
             frames: 1,
             pixel_type: PixelType::F32,
             planes,
             channel_colors: Vec::new(),
-            name: format!("{}-{label}", host.stack_info().name),
+            name: format!("{}-{}{label}", host.stack_info().name, axis.tag()),
         })))
     }
 }
