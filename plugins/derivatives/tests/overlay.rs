@@ -133,7 +133,11 @@ fn params() -> Params {
     p.set("frame_lag", ParamValue::Int(-1));
     p.set("sync_coef", ParamValue::Float(-0.003));
     p.set("sigma", ParamValue::Float(2.3));
-    p.set("channel", ParamValue::Int(0));
+    // Channel *one*, counting the way the dialog does. The fixture has exactly
+    // one channel, so this is also the regression test for the numbering: read
+    // as an index rather than a number, it asks the host for a second channel
+    // that is not there and the run fails.
+    p.set("channel", ParamValue::Int(1));
     p
 }
 

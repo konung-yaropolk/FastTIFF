@@ -54,10 +54,10 @@ pub mod meta;
 
 /// The Gaussian width used for the derivative, in pixels and frames.
 ///
-/// 2.3 rather than ImageJ's usual 1.0: these recordings are noisy enough that
+/// 1.5 rather than ImageJ's usual 1.0: these recordings are noisy enough that
 /// a narrower kernel turns shot noise into spurious rises, and the positive
 /// part of the derivative sums noise rather than cancelling it.
-const DEFAULT_SIGMA: f64 = 2.3;
+const DEFAULT_SIGMA: f64 = 1.5;
 
 /// Red, green, blue — an ordinary RGB image.
 ///
@@ -91,7 +91,11 @@ pub struct Derivatives;
 
 impl Plugin for Derivatives {
     fn info(&self) -> PluginInfo {
-        PluginInfo::new("dev.fasttiff.derivatives", "Stimulus Derivatives…")
+        // The identifier stays `dev.fasttiff.derivatives` through any renaming:
+        // it is what settings and the registry key on, and changing it would
+        // orphan both. The trailing `…` is the menu convention for an entry
+        // that opens a dialog, as `Z Project…` does.
+        PluginInfo::new("dev.fasttiff.derivatives", "PI Derivatives Check…")
             .menu_path("Analysis")
             .version(env!("CARGO_PKG_VERSION"))
             .author("FastTIFF")
@@ -104,7 +108,7 @@ impl Plugin for Derivatives {
                 "pattern",
                 "Stimulation pattern",
                 ParamKind::Text {
-                    default: "10,01".into(),
+                    default: "10,11".into(),
                 },
             )
             .help("One row per stimulator, comma-separated; 1 fires, 0 does not."),
@@ -113,7 +117,7 @@ impl Plugin for Derivatives {
                 "Step duration (s)",
                 ParamKind::Float {
                     default: 10.0,
-                    min: 0.001,
+                    min: 1.0,
                     max: 3600.0,
                 },
             ),
@@ -122,8 +126,8 @@ impl Plugin for Derivatives {
                 "Response window (s)",
                 ParamKind::Float {
                     default: 0.8,
-                    min: 0.001,
-                    max: 3600.0,
+                    min: 0.1,
+                    max: 30.0,
                 },
             )
             .help("Must be long enough to contain the response peak."),
@@ -133,7 +137,7 @@ impl Plugin for Derivatives {
                 ParamKind::Int {
                     default: 1,
                     min: 1,
-                    max: 1024,
+                    max: 64,
                 },
             )
             .help("Which event marker in the file's metadata starts the sequence."),
@@ -143,7 +147,7 @@ impl Plugin for Derivatives {
                 ParamKind::Int {
                     default: 1,
                     min: 0,
-                    max: 100_000,
+                    max: 64,
                 },
             )
             .help("Epochs before this are ignored."),
@@ -152,8 +156,8 @@ impl Plugin for Derivatives {
                 "Frame lag",
                 ParamKind::Int {
                     default: -1,
-                    min: -1000,
-                    max: 1000,
+                    min: -10,
+                    max: 10,
                 },
             )
             .help("Shifts the response window, to line the derivative up with the stimulus."),
@@ -176,13 +180,18 @@ impl Plugin for Derivatives {
                     max: 20.0,
                 },
             ),
+            // Counted from 1, the way the channels are named everywhere a
+            // person sees them — the file's own `[Channel 1]`, the viewer's
+            // channel list, the microscope's CH1. A dialog asking for "channel
+            // 0" is asking about an index, which is this code's business and
+            // not the reader's.
             ParamDecl::new(
                 "channel",
                 "Source channel",
                 ParamKind::Int {
-                    default: 0,
-                    min: 0,
-                    max: 64,
+                    default: 1,
+                    min: 1,
+                    max: 3,
                 },
             ),
         ]
@@ -265,6 +274,7 @@ struct Plan {
     duration_s: f64,
     frame_lag: i64,
     sigma: f64,
+    /// Zero-based, as the host addresses planes — the dialog counts from 1.
     channel: usize,
     frames: usize,
 }
@@ -293,7 +303,7 @@ impl Plan {
             })?;
         let _ = event_name;
 
-        let steps = parse_pattern(params.text("pattern", "10,01"))?;
+        let steps = parse_pattern(params.text("pattern", "10,11"))?;
         let n_steps = steps.len();
         let firing: Vec<usize> = (0..n_steps).filter(|i| steps[*i]).collect();
         if firing.is_empty() {
@@ -331,7 +341,11 @@ impl Plan {
             duration_s,
             frame_lag: params.int("frame_lag", -1),
             sigma: params.float("sigma", DEFAULT_SIGMA),
-            channel: params.int("channel", 0).max(0) as usize,
+            // 1-based in the dialog, 0-based here. `saturating_sub` rather than
+            // `- 1`, so a stored setting from before the numbering changed —
+            // or any other 0 — asks for the first channel rather than
+            // underflowing to the last plane in the file.
+            channel: (params.int("channel", 1).max(0) as usize).saturating_sub(1),
             frames: info.frames.max(1),
         };
         plan.epochs = plan.fit_epochs();
@@ -432,7 +446,7 @@ impl Plan {
     }
 }
 
-/// `"10,01"` → which steps fire at all.
+/// `"10,11"` → which steps fire at all.
 ///
 /// Rows are stimulators and columns are steps, so a step fires when *any* row
 /// has a 1 in that column. The distinction between "stimulator A", "B" and
@@ -449,9 +463,9 @@ fn parse_pattern(text: &str) -> Result<Vec<bool>, PluginError> {
         return Err(PluginError::failed("the stimulation pattern is empty"));
     }
     let width = rows[0].chars().count();
-    if width == 0 || width > 1024 {
+    if width == 0 || width > 64 {
         return Err(PluginError::failed(
-            "each row of the stimulation pattern must have between 1 and 1024 steps",
+            "each row of the stimulation pattern must have between 1 and 64 steps",
         ));
     }
     let mut fires = vec![false; width];
