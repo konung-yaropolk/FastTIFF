@@ -258,10 +258,12 @@ mod tests {
     /// Nothing a Windows 7 machine cannot load may survive into its build.
     ///
     /// Ignored by default because it needs a *linked binary*, and which one
-    /// depends on how it was built. Point it at the Windows 7 executable:
+    /// depends on how it was built. Point it at the Windows 7 executable — the
+    /// path is read here, in the test process, whose working directory is this
+    /// crate rather than the workspace root, hence the `..`:
     ///
     /// ```text
-    /// FASTTIFF_EXE=target/x86_64-win7-windows-msvc/release/FastTIFF.exe \
+    /// FASTTIFF_EXE=../target/x86_64-win7-windows-msvc/release/FastTIFF.exe \
     ///     cargo test -p FastTIFF --bin FastTIFF -- --ignored no_combase
     /// ```
     ///

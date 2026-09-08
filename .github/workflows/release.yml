@@ -1,7 +1,8 @@
 name: Release
 
 # Runs when you publish a GitHub Release. Builds the app for Windows (portable
-# .exe + Inno Setup installer), Linux (.deb, .rpm, Arch .pkg.tar.zst, a Flatpak
+# .exe + Inno Setup installer, plus a separate portable build for the
+# deprecated Windows 7), Linux (.deb, .rpm, Arch .pkg.tar.zst, a Flatpak
 # bundle, and an AppImage — the last four all x86_64 + arm64), and macOS (.dmg,
 # arm64 + x86_64), and attaches every artifact to the release that triggered the
 # run. Jobs are independent: a failing packager attaches nothing but never
@@ -77,6 +78,89 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: FastTIFF-setup.exe
+
+  # The same portable .exe for Windows 7, which the job above cannot produce:
+  # its triple is a Tier 3 target, so no toolchain ships a prebuilt `std` for it
+  # and the standard library has to be compiled from source (`-Z build-std`) by
+  # a nightly cargo. Its own job for the reason every packager here is one — a
+  # nightly that breaks build-std then costs this asset and nothing else.
+  #
+  # 64-bit only. `i686-win7-windows-msvc` is the sibling target (already
+  # configured in .cargo/config.toml) if a 32-bit build is ever wanted.
+  #
+  # Portable only, no installer: Windows 7 is a deprecated target kept working
+  # for people who still have such a machine, and the fewer moving parts
+  # between them and a running program, the better.
+  build-windows7:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # `rust-src` is what build-std compiles — `rustup target add` has nothing
+      # to add for a Tier 3 target. A floating nightly, matching the README's
+      # build instructions; if build-std ever regresses, pin a date here
+      # (dtolnay/rust-toolchain@master with `toolchain: nightly-YYYY-MM-DD`)
+      # rather than dropping the job.
+      - name: Install Rust nightly + std sources
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      # Its own cache key: a from-source std for a different target shares
+      # nothing with the Windows 10/11 job's artifacts.
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: win7
+
+      # glow (OpenGL), not the wgpu default the job above ships: wgpu's DX12
+      # backend needs a Windows 10 runtime, so here OpenGL is not a preference
+      # but the only backend that runs at all. Same invocation the README
+      # documents for building this by hand.
+      - name: Build release exe (glow, Tier 3 win7 target)
+        run: >
+          cargo +nightly build --release --target x86_64-win7-windows-msvc
+          -Z build-std=std,panic_abort
+          -p FastTIFF --no-default-features --features renderer-glow
+
+      # The tripwire, and the reason this job is worth its minutes.
+      # FastTIFF/src/win7_compat.rs redirects the one `combase.dll` import the
+      # `windows` crates make to `ole32.dll`, because `combase.dll` does not
+      # exist before Windows 8 — and a static import of a missing DLL stops the
+      # program *starting*, with a dialog naming a DLL the user has never heard
+      # of. A dependency bump can add another such import at any time, and
+      # nothing else would notice. This reads the linked binary's PE import
+      # table, on the host toolchain, so a build that cannot start on Windows 7
+      # fails here rather than being attached to the release.
+      #
+      # Absolute, because a relative path would be read by the *test process*,
+      # whose working directory is the FastTIFF crate rather than the workspace
+      # root — so `target/…` would land one directory too deep and the check
+      # would fail with a file-not-found that says nothing about Windows 7.
+      - name: Check nothing Windows 7 lacks got linked in
+        shell: bash
+        env:
+          FASTTIFF_EXE: ${{ github.workspace }}/target/x86_64-win7-windows-msvc/release/FastTIFF.exe
+        run: |
+          set -euo pipefail
+          cargo test -p FastTIFF --bin FastTIFF --no-default-features \
+            --features renderer-glow -- --ignored no_combase | tee result.txt
+          # A filter matching nothing exits 0, so renaming the test would
+          # quietly turn the step above into a no-op. Insist that it ran.
+          grep -q "^test result: ok. 1 passed" result.txt
+
+      # `win7` because which Windows it runs on is what distinguishes it from
+      # the FastTIFF.exe attached above; the arch suffix to match the naming
+      # every other asset here uses, and to leave the 32-bit sibling a name.
+      - name: Stage artifact
+        shell: bash
+        run: cp target/x86_64-win7-windows-msvc/release/FastTIFF.exe FastTIFF-win7-x86_64.exe
+
+      - name: Attach exe to release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: FastTIFF-win7-x86_64.exe
 
   # Builds the Debian/Ubuntu .deb with cargo-deb and attaches it to the release,
   # alongside the Windows .exe above. Runs once per architecture on a native

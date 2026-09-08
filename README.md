@@ -164,10 +164,14 @@ cargo +nightly build --target x86_64-win7-windows-msvc -Z build-std=std,panic_ab
 ```
 
 
-Check a build with:
+Check a build with — the path is relative to the `FastTIFF` crate, which is
+where the test process runs, hence the `..`:
 ```sh
-FASTTIFF_EXE=target/x86_64-win7-windows-msvc/release/FastTIFF.exe cargo test -p FastTIFF --bin FastTIFF -- --ignored no_combase
+FASTTIFF_EXE=../target/x86_64-win7-windows-msvc/release/FastTIFF.exe cargo test -p FastTIFF --bin FastTIFF -- --ignored no_combase
 ```
+
+Released builds run this too — `build-windows7` in `.github/workflows/release.yml`
+attaches a `FastTIFF-win7-x86_64.exe` only if it passes.
 
 ## Test and lint
 
