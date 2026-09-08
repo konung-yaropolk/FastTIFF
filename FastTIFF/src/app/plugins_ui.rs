@@ -19,7 +19,16 @@ pub(super) enum MenuAction {
 }
 
 /// The Plugins menu button and its contents.
-pub(super) fn plugins_menu(ui: &mut egui::Ui, registry: &Registry) -> MenuAction {
+pub(super) fn plugins_menu(ui: &mut egui::Ui, registry: Option<&Registry>) -> MenuAction {
+    // `None` means an import has the registry — see `ViewerApp::plugins`. The
+    // button stays, greyed, rather than vanishing: a toolbar that loses an item
+    // for the duration of a long read is a toolbar whose other buttons move
+    // under the pointer while it is being read.
+    let Some(registry) = registry else {
+        ui.add_enabled(false, egui::Button::new("Plugins"))
+            .on_disabled_hover_text("Busy importing a file");
+        return MenuAction::None;
+    };
     let mut action = MenuAction::None;
     ui.menu_button("Plugins", |ui| {
         if registry.is_empty() {

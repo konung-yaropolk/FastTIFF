@@ -215,6 +215,123 @@ const ZOOM_GLIDE_SNAP: f32 = 0.01;
 /// drag — must not be turned into one enormous zoom jump on the frame after.
 const ZOOM_GLIDE_MAX_DT: f32 = 1.0 / 20.0;
 
+/// Read `path` with whichever registered importer claims it, reporting how far
+/// it has got into `progress` as a permille.
+///
+/// A free function rather than a method, and the reason is the whole point of
+/// the change around it: this runs on a worker thread, which cannot hold a
+/// `&mut ViewerApp`. Everything it needs is what it is given — the registry it
+/// borrows for the duration, the path, and somewhere to leave progress — and
+/// everything it has to say comes back in the return value.
+///
+/// The `Err` is a message for the status line. Saying which plugin declined and
+/// why beats falling through to the TIFF reader and reporting "not a TIFF".
+#[cfg(not(target_arch = "wasm32"))]
+fn import_with_plugin(
+    registry: &mut fast_tiff_viewer::plugins::Registry,
+    path: &std::path::Path,
+    progress: &std::sync::Arc<std::sync::atomic::AtomicU32>,
+) -> Result<Opened, String> {
+    let head = fast_tiff_viewer::plugins::Registry::read_head(path);
+    let (index, _confidence) = *registry
+        .importers_for(path, &head)
+        .first()
+        .ok_or_else(|| format!("nothing here can read {}", path.display()))?;
+
+    let request = fasttiff_plugin_api::ImportRequest {
+        path: path.to_path_buf(),
+        params: fasttiff_plugin_api::Params::new(),
+    };
+
+    struct Host<'a>(&'a std::sync::atomic::AtomicU32);
+    impl fasttiff_plugin_api::ImportHost for Host<'_> {
+        fn progress(&mut self, f: f32) -> bool {
+            self.0.store(
+                (f.clamp(0.0, 1.0) * 1000.0) as u32,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            // Never cancelled: nothing offers to yet. An importer that honours
+            // this is ready for one that does.
+            true
+        }
+        fn log(&mut self, m: &str) {
+            log::info!("import: {m}");
+        }
+    }
+
+    let entry = registry
+        .importer_mut(index)
+        .ok_or_else(|| "the importer went away".to_string())?;
+    let name = entry.info.name.clone();
+    let imported = entry
+        .importer
+        .import(&request, &mut Host(progress))
+        .map_err(|e| format!("{name}: {e}"))?;
+
+    let bytes = fast_tiff_viewer::plugins::to_tiff_bytes(&imported.image, imported.info.as_ref())
+        .map_err(|e| format!("{name}: {e:#}"))?;
+    let fallback = imported
+        .info
+        .as_ref()
+        .map(|i| i.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| imported.image.name.clone());
+    Ok(Opened::Bytes(bytes, imported_label(path, &fallback)))
+}
+
+/// Write a plugin's result where a new window can open it, and say where.
+///
+/// Tries `<stem>.tif` first and falls back to `<stem>-2.tif`, `-3.tif` and so
+/// on. The fallback is not tidiness about overwriting: a window already showing
+/// an earlier result **memory-maps that file for as long as it is open**, and
+/// Windows refuses to write to a file with a mapped section. So running a
+/// plugin twice without closing the first result failed at the write, and the
+/// caller's last-resort path — show it in this window instead — then replaced
+/// the document the user was working from. A second result is a second thing to
+/// look at, exactly as the first was; it needs a name of its own.
+///
+/// Each name is *created*, never overwritten — `create_new` fails if the file
+/// is there, which is the whole mechanism. Asking the filesystem to make a new
+/// file says what is meant, and says it the same way on every platform: relying
+/// on the write to fail would work on Windows, where the mapping locks the
+/// file, and silently overwrite another window's data everywhere else.
+///
+/// The bound is a bound, not a policy: a hundred results kept open at once is
+/// already absurd, and past that the last error is the honest answer.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_result(
+    dir: &std::path::Path,
+    stem: &str,
+    bytes: &[u8],
+) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    let mut last = None;
+    for n in 1..=100u32 {
+        let path = dir.join(match n {
+            1 => format!("{stem}.tif"),
+            n => format!("{stem}-{n}.tif"),
+        });
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(bytes)?;
+                return Ok(path);
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("no result file could be written")))
+}
+
+/// The status line's two voices: amber for something to be aware of, green for
+/// something that finished. Both are chosen to stay legible against the light
+/// and dark themes rather than to match either one.
+const STATUS_NOTE: Color32 = Color32::from_rgb(230, 170, 60);
+const STATUS_DONE: Color32 = Color32::from_rgb(120, 195, 120);
+
 /// A zoom step in flight: the level being glided to, and the point it turns
 /// about.
 ///
@@ -377,6 +494,39 @@ fn welcome_text() -> String {
 /// Native and web get files by different routes — a path from a dialog, argv or
 /// an Apple Event, versus bytes from an async browser picker or a drop event —
 /// so they meet here and everything downstream is shared.
+/// Something that arrived from somewhere other than this frame's user input.
+enum Incoming {
+    /// A file chosen by the asynchronous picker. Only the web build has one:
+    /// the native dialog blocks and applies its result directly.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    Opened(Opened),
+    /// An import finished. The registry travels back with the result, because
+    /// the worker was holding it — see [`ViewerApp::plugins`].
+    #[cfg(not(target_arch = "wasm32"))]
+    Imported(
+        Box<fast_tiff_viewer::plugins::Registry>,
+        Result<Opened, String>,
+    ),
+}
+
+/// An import in flight: what is being read, and how far it has got.
+///
+/// Progress is a permille rather than a float because it crosses threads and
+/// `f32` has no atomic. The importer reports a fraction; a thousandth of a file
+/// is finer than any progress bar can draw.
+#[cfg(not(target_arch = "wasm32"))]
+struct ImportJob {
+    name: String,
+    progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ImportJob {
+    fn fraction(&self) -> f32 {
+        self.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0
+    }
+}
+
 enum Opened {
     /// A path on disk. Native only; the browser has no filesystem to name.
     #[cfg(not(target_arch = "wasm32"))]
@@ -536,7 +686,14 @@ pub struct ViewerApp {
     /// Installed plugins and importers. Native only — see
     /// `fast_tiff_viewer::plugins`.
     #[cfg(not(target_arch = "wasm32"))]
-    plugins: fast_tiff_viewer::plugins::Registry,
+    /// The plugins, unless an import worker currently has them.
+    ///
+    /// Moved to the worker rather than shared behind a lock. A lock would have
+    /// to be taken by the menu on every frame, and taken *while the import
+    /// holds it* — which is the whole duration of the slow thing this exists to
+    /// get off the interface thread. Handing the registry over and taking it
+    /// back makes "busy" a state the code can see rather than a wait it cannot.
+    plugins: Option<fast_tiff_viewer::plugins::Registry>,
     /// The plugin whose dialog is open, and the values entered so far.
     #[cfg(not(target_arch = "wasm32"))]
     plugin_dialog: Option<PluginDialog>,
@@ -546,14 +703,34 @@ pub struct ViewerApp {
     /// Only the async web picker sends; natively the dialog blocks and applies
     /// its result directly, so the sender is unused there.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    open_tx: Sender<Opened>,
-    open_rx: Receiver<Opened>,
+    open_tx: Sender<Incoming>,
+    open_rx: Receiver<Incoming>,
+    /// The import running on a worker thread, while one is.
+    ///
+    /// Its presence is also what makes [`plugins`](Self::plugins) `None`: the
+    /// worker has the registry, and gives it back with the result.
+    #[cfg(not(target_arch = "wasm32"))]
+    import: Option<ImportJob>,
 
     // --- window chrome ------------------------------------------------------
     /// The window title last sent via `ViewportCommand::Title`. Native only —
     /// a canvas has no title bar; the page's `<title>` is the host's business.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     last_title: Option<String>,
+    /// The status message that should read as *done*, not as *careful*.
+    ///
+    /// The status line is amber, which is right for what it usually carries: a
+    /// dimension note, a refusal, a plugin's error. It is wrong for "opened it
+    /// in a new window", where amber reads as a warning about work that in fact
+    /// succeeded.
+    ///
+    /// Held as the message itself rather than as a flag beside it. `core.status`
+    /// is written from a dozen places — the loader, the dimension notes, every
+    /// plugin outcome — and a flag set here would still be set once one of them
+    /// replaced the text underneath it, colouring somebody else's message green.
+    /// Comparing the text means the colour can only ever apply to the message it
+    /// was set for.
+    good_status: Option<String>,
     /// Whether the file-metadata pop-up window is open.
     show_metadata: bool,
     /// Whether the 3D render-settings pop-up is open.
@@ -649,12 +826,15 @@ impl ViewerApp {
             view: View2d::default(),
             panel: PanelLayout::default(),
             #[cfg(not(target_arch = "wasm32"))]
-            plugins: fast_tiff_viewer::plugins::Registry::with_installed(),
+            plugins: Some(fast_tiff_viewer::plugins::Registry::with_installed()),
             #[cfg(not(target_arch = "wasm32"))]
             plugin_dialog: None,
             open_tx,
             open_rx,
+            #[cfg(not(target_arch = "wasm32"))]
+            import: None,
             last_title: None,
+            good_status: None,
             show_metadata: false,
             show_render_settings: false,
             show_histogram: false,
@@ -690,11 +870,17 @@ impl ViewerApp {
         // An importer plugin claims some extensions; a file it recognises is
         // read by the plugin and handed on as TIFF bytes, so everything
         // downstream — and every later save — sees an ordinary document.
+        //
+        // On a worker, and not because importing is merely slow: an OIR is
+        // gigabytes of scattered chunks to reassemble, which is tens of seconds
+        // of a window that does not repaint, does not respond, and that the
+        // desktop offers to kill. The core already opens files this way and
+        // draws a progress readout for it; an import is the same promise.
         #[cfg(not(target_arch = "wasm32"))]
         let opened = match opened {
-            Opened::Path(path) => match self.import_with_plugin(&path) {
-                Some(imported) => imported,
-                None => Opened::Path(path),
+            Opened::Path(path) => match self.start_import(path) {
+                Ok(()) => return,
+                Err(path) => Opened::Path(path),
             },
             other => other,
         };
@@ -802,8 +988,21 @@ impl ViewerApp {
     /// Drain anything the async picker produced since the last frame. A no-op
     /// natively, where the dialog is synchronous.
     fn drain_pending_open(&mut self) {
-        while let Ok(opened) = self.open_rx.try_recv() {
-            self.apply_opened(opened);
+        while let Ok(message) = self.open_rx.try_recv() {
+            match message {
+                Incoming::Opened(opened) => self.apply_opened(opened),
+                #[cfg(not(target_arch = "wasm32"))]
+                Incoming::Imported(registry, result) => {
+                    // The registry comes home first, so the app is usable again
+                    // whether the import worked or not.
+                    self.plugins = Some(*registry);
+                    self.import = None;
+                    match result {
+                        Ok(opened) => self.apply_opened(opened),
+                        Err(message) => self.core.status = Some(message),
+                    }
+                }
+            }
         }
     }
 
@@ -818,7 +1017,7 @@ impl ViewerApp {
         // whether there is more than one channel — so it is asked for now
         // rather than cached at load.
         let host = fast_tiff_viewer::plugins::StackHost::new(loaded, self.plugin_view(loaded));
-        let Some(entry) = self.plugins.entries().get(index) else {
+        let Some(entry) = self.plugins.as_ref().and_then(|p| p.entries().get(index)) else {
             return;
         };
         let title = entry.info.name.clone();
@@ -898,7 +1097,7 @@ impl ViewerApp {
         };
         let view = self.plugin_view(loaded);
         let mut host = fast_tiff_viewer::plugins::StackHost::new(loaded, view);
-        let Some(entry) = self.plugins.get_mut(index) else {
+        let Some(entry) = self.plugins.as_mut().and_then(|p| p.get_mut(index)) else {
             return;
         };
         let name = entry.info.name.clone();
@@ -922,7 +1121,12 @@ impl ViewerApp {
                 match fast_tiff_viewer::plugins::to_tiff_bytes(&image, None)
                     .and_then(|b| std::fs::write(&path, b).map_err(Into::into))
                 {
-                    Ok(()) => self.core.status = Some(format!("{name}: wrote {path}")),
+                    Ok(()) => {
+                        // A file written is the other thing here that succeeded.
+                        let done = format!("{name}: wrote {path}");
+                        self.good_status = Some(done.clone());
+                        self.core.status = Some(done);
+                    }
                     Err(e) => self.core.status = Some(format!("{name}: {e:#}")),
                 }
             }
@@ -966,11 +1170,16 @@ impl ViewerApp {
             stem
         };
         let dir = std::env::temp_dir().join("fasttiff-plugin-results");
-        let path = dir.join(format!("{stem}.tif"));
-        match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, &bytes)) {
-            Ok(()) => {
+        match std::fs::create_dir_all(&dir).and_then(|()| write_result(&dir, &stem, &bytes)) {
+            Ok(path) => {
                 crate::process::open_in_new_process(&path);
-                self.core.status = Some(format!("{plugin}: opened {stem}.tif in a new window"));
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| format!("{stem}.tif"));
+                let done = format!("{plugin}: opened {name} in a new window");
+                self.good_status = Some(done.clone());
+                self.core.status = Some(done);
             }
             // Nowhere to write is not a reason to lose the result: show it
             // here rather than discard it.
@@ -983,64 +1192,48 @@ impl ViewerApp {
         }
     }
 
-    /// Read `path` with an importer plugin, if one claims it.
+    /// Hand `path` to an importer plugin on a worker thread, if one claims it.
     ///
-    /// Returns the imported image as TIFF bytes, so the rest of opening — the
-    /// index, channel setup, contrast, everything — is the ordinary path and
-    /// cannot drift from it. `None` means no plugin claimed the file and the
-    /// built-in reader should have it.
+    /// `Ok(())` means an import is running and the caller is done; the result
+    /// arrives through [`drain_pending_open`](Self::drain_pending_open). `Err`
+    /// hands the path back, unclaimed, for the ordinary TIFF reader.
     #[cfg(not(target_arch = "wasm32"))]
-    fn import_with_plugin(&mut self, path: &std::path::Path) -> Option<Opened> {
-        // Cheap rejection first: no file is opened unless an extension matches,
-        // so the common case of a TIFF costs one string compare.
-        if !self.plugins.claims_extension(path) {
-            return None;
-        }
-        let head = fast_tiff_viewer::plugins::Registry::read_head(path);
-        let (index, _confidence) = *self.plugins.importers_for(path, &head).first()?;
-
-        let request = fasttiff_plugin_api::ImportRequest {
-            path: path.to_path_buf(),
-            params: fasttiff_plugin_api::Params::new(),
+    fn start_import(&mut self, path: std::path::PathBuf) -> Result<(), std::path::PathBuf> {
+        // One at a time. The registry is with the worker, and a second import
+        // would have nothing to read the file with — better to say so than to
+        // hand an OIR to the TIFF reader and report that it is not a TIFF.
+        let Some(registry) = self.plugins.take() else {
+            self.core.status = Some(match &self.import {
+                Some(job) => format!("Still importing {}", job.name),
+                None => "Still importing".to_string(),
+            });
+            return Ok(());
         };
-
-        struct Host;
-        impl fasttiff_plugin_api::ImportHost for Host {
-            fn progress(&mut self, _f: f32) -> bool {
-                true
-            }
-            fn log(&mut self, m: &str) {
-                log::info!("import: {m}");
-            }
+        // Cheap rejection first: no file is opened unless an extension matches,
+        // so the common case of a TIFF costs one string compare — and costs no
+        // thread.
+        if !registry.claims_extension(&path) {
+            self.plugins = Some(registry);
+            return Err(path);
         }
 
-        let entry = self.plugins.importer_mut(index)?;
-        let name = entry.info.name.clone();
-        let result = entry.importer.import(&request, &mut Host);
-
-        match result {
-            Ok(r) => match fast_tiff_viewer::plugins::to_tiff_bytes(&r.image, r.info.as_ref()) {
-                Ok(bytes) => {
-                    let fallback = r
-                        .info
-                        .as_ref()
-                        .map(|i| i.name.clone())
-                        .filter(|n| !n.is_empty())
-                        .unwrap_or_else(|| r.image.name.clone());
-                    Some(Opened::Bytes(bytes, imported_label(path, &fallback)))
-                }
-                Err(e) => {
-                    self.core.status = Some(format!("{name}: {e:#}"));
-                    None
-                }
-            },
-            // Say which plugin declined and why, rather than falling through to
-            // the TIFF reader and reporting "not a TIFF".
-            Err(e) => {
-                self.core.status = Some(format!("{name}: {e}"));
-                None
-            }
-        }
+        let progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        self.import = Some(ImportJob {
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            progress: progress.clone(),
+        });
+        let tx = self.open_tx.clone();
+        std::thread::spawn(move || {
+            let mut registry = registry;
+            let result = import_with_plugin(&mut registry, &path, &progress);
+            // If the send fails the window is gone, and so is anyone who wanted
+            // the result.
+            let _ = tx.send(Incoming::Imported(Box::new(registry), result));
+        });
+        Ok(())
     }
 
     /// Show the platform's file picker.
@@ -1057,7 +1250,11 @@ impl ViewerApp {
             // plugin can read is selectable without the user changing the
             // filter to "all files" and hoping.
             let mut dialog = rfd::FileDialog::new().add_filter("TIFF", &["tif", "tiff"]);
-            let types = self.plugins.open_file_types();
+            let types = self
+                .plugins
+                .as_ref()
+                .map(|p| p.open_file_types())
+                .unwrap_or_default();
             if !types.is_empty() {
                 let mut every: Vec<&str> = vec!["tif", "tiff"];
                 for t in &types {
@@ -1092,7 +1289,7 @@ impl ViewerApp {
                     .await
                 {
                     let name = handle.file_name();
-                    let _ = tx.send(Opened::Bytes(handle.read().await, name));
+                    let _ = tx.send(Incoming::Opened(Opened::Bytes(handle.read().await, name)));
                 }
                 // Wake the UI whether or not a file was chosen.
                 ctx.request_repaint();
@@ -1389,7 +1586,16 @@ impl eframe::App for ViewerApp {
         if self.core.poll_open() {
             self.finish_open();
         }
-        if self.core.load_stage().is_some() {
+        // An import counts as much as a load here: its worker cannot wake the
+        // interface either, and the frame that notices it has finished is this
+        // same one. Without this the readout would only move when the mouse
+        // did, and the result would land whenever the user next happened to
+        // touch something.
+        #[cfg(not(target_arch = "wasm32"))]
+        let importing = self.import.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let importing = false;
+        if importing || self.core.load_stage().is_some() {
             ui.ctx().request_repaint();
         }
 
@@ -1535,7 +1741,7 @@ impl eframe::App for ViewerApp {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    match plugins_ui::plugins_menu(ui, &self.plugins) {
+                    match plugins_ui::plugins_menu(ui, self.plugins.as_ref()) {
                         plugins_ui::MenuAction::Run(i) => plugin_to_start = Some(i),
                         plugins_ui::MenuAction::OpenPluginFolder => open_plugin_folder = true,
                         plugins_ui::MenuAction::None => {}
@@ -1766,22 +1972,46 @@ impl eframe::App for ViewerApp {
         let mut metadata_toggle = false;
         let mut histogram_toggle = false;
         let current_status = self.core.status.clone();
+        // Green only for the message it was recorded for; see `good_status`.
+        let status_is_good = current_status.is_some() && current_status == self.good_status;
 
-        let load_stage = self.core.load_stage();
-        let loading_name = self.core.loading_name();
+        // The readout is the same whichever slow thing is running: an import
+        // on its worker, or the core opening a file on its own. What differs is
+        // only the words and whether there is a fraction to draw, so that is
+        // all that is worked out here.
+        //
+        // The import comes first because it *is* first: a file is imported and
+        // then opened, so while both could be set the import is the one still
+        // happening.
+        #[cfg(not(target_arch = "wasm32"))]
+        let importing = self
+            .import
+            .as_ref()
+            .map(|job| ("Importing…", Some(job.fraction()), job.name.clone()));
+        #[cfg(target_arch = "wasm32")]
+        let importing: Option<(&str, Option<f32>, String)> = None;
+        let progress = importing.or_else(|| {
+            let stage = self.core.load_stage()?;
+            Some((
+                stage.label(),
+                stage.fraction(),
+                self.core.loading_name().unwrap_or_default(),
+            ))
+        });
+        let load_stage = progress.is_some();
         let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
             // Above everything else in the panel, and shown whether or not a
             // stack is already open: the previous file stays usable while the
             // next one loads, so this has to sit alongside a working set of
             // controls rather than replacing them.
-            if let Some(stage) = load_stage {
+            if let Some((label, fraction, name)) = &progress {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    match stage.fraction() {
+                    match fraction {
                         // Countable work — say how much is left.
                         Some(f) => {
                             ui.add(
-                                egui::ProgressBar::new(f)
+                                egui::ProgressBar::new(*f)
                                     .desired_width(160.0)
                                     .show_percentage(),
                             );
@@ -1793,15 +2023,15 @@ impl eframe::App for ViewerApp {
                             ui.add(egui::Spinner::new().size(14.0));
                         }
                     }
-                    ui.label(stage.label());
-                    if let Some(name) = &loading_name {
+                    ui.label(*label);
+                    if !name.is_empty() {
                         ui.label(RichText::new(name).weak());
                     }
                 });
                 ui.separator();
             }
             let Some(loaded) = &mut self.core.stack else {
-                if load_stage.is_none() {
+                if !load_stage {
                     ui.label("Open a TIFF stack to begin.");
                 }
                 return;
@@ -2171,7 +2401,12 @@ impl eframe::App for ViewerApp {
                 // on it), so this suppresses exactly the right message.
                 if !(view_is_volume && loaded.display.triple_axis_warning) {
                     ui.separator();
-                    ui.label(RichText::new(status).color(Color32::from_rgb(230, 170, 60)).small());
+                    let color = if status_is_good {
+                        STATUS_DONE
+                    } else {
+                        STATUS_NOTE
+                    };
+                    ui.label(RichText::new(status).color(color).small());
                 }
             }
             ui.add_space(4.0);
@@ -2646,3 +2881,8 @@ mod readout_tests;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "app/import_label_tests.rs"]
 mod import_label_tests;
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "app/result_file_tests.rs"]
+mod result_file_tests;
