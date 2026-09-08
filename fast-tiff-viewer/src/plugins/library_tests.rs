@@ -1280,3 +1280,162 @@ fn an_importer_with_a_malformed_file_type_is_refused() {
     let err = load(query).expect_err("a malformed file type must be refused");
     assert!(err.contains("malformed file type"), "{err}");
 }
+
+// ------------------------------------------------------ the exporter callback
+
+unsafe extern "C" fn ok_export(
+    _p: abi::FtStr,
+    _v: *const abi::FtValue,
+    _n: u64,
+    _h: *const abi::FtHost,
+) -> abi::FtStatus {
+    abi::FtStatus::Ok
+}
+
+fn exporter_vtable() -> abi::FtExporterVtable {
+    abi::FtExporterVtable {
+        struct_size: std::mem::size_of::<abi::FtExporterVtable>() as u32,
+        _pad: 0,
+        params: NO_DECLS,
+        export: ok_export,
+        last_error: no_error,
+    }
+}
+
+/// A valid exporter descriptor around `vt` and one file type.
+///
+/// Both are borrowed rather than owned, because every hostile fixture below
+/// wants to corrupt exactly one field and leave the rest true.
+fn exporter_desc(
+    vt: &abi::FtExporterVtable,
+    ft: &abi::FtFileType,
+    id: &'static str,
+) -> abi::FtExporterDesc {
+    abi::FtExporterDesc {
+        struct_size: std::mem::size_of::<abi::FtExporterDesc>() as u32,
+        _pad: 0,
+        id: abi::FtStr::from_str(id),
+        name: abi::FtStr::EMPTY,
+        version: abi::FtStr::EMPTY,
+        author: abi::FtStr::EMPTY,
+        description: abi::FtStr::EMPTY,
+        file_types: ft,
+        file_type_count: 1,
+        vtable: vt,
+    }
+}
+
+fn one_file_type(ext: &abi::FtStr) -> abi::FtFileType {
+    abi::FtFileType {
+        struct_size: std::mem::size_of::<abi::FtFileType>() as u32,
+        _pad: 0,
+        description: abi::FtStr::from_str("Nonsense"),
+        extensions: ext,
+        extension_count: 1,
+    }
+}
+
+/// A library with nothing but an exporter is a library, not an empty one — the
+/// "registered nothing" check has to count all three kinds.
+#[test]
+fn a_library_with_only_an_exporter_loads() {
+    unsafe extern "C" fn query(reg: *mut abi::FtRegistrar) -> abi::FtStatus {
+        let vt = exporter_vtable();
+        let ext = abi::FtStr::from_str("zzz");
+        let ft = one_file_type(&ext);
+        let desc = exporter_desc(&vt, &ft, "dev.test.exportonly");
+        let r = &mut *reg;
+        (r.add_exporter)(r.ctx, &desc);
+        abi::FtStatus::Ok
+    }
+    let loaded = load(query).expect("an exporter-only library should load");
+    assert!(loaded.plugins.is_empty());
+    assert!(loaded.importers.is_empty());
+    assert_eq!(loaded.exporters.len(), 1);
+    assert_eq!(loaded.exporters[0].info().id, "dev.test.exportonly");
+    assert_eq!(loaded.exporters[0].file_types()[0].extensions, vec!["zzz"]);
+}
+
+/// The same lie `add_plugin_cb` refuses, told to the exporter callback: reading
+/// the fields past the end of a shorter struct is reading whatever followed it.
+#[test]
+fn an_exporter_descriptor_shorter_than_this_abi_is_refused() {
+    unsafe extern "C" fn query(reg: *mut abi::FtRegistrar) -> abi::FtStatus {
+        let vt = exporter_vtable();
+        let ext = abi::FtStr::from_str("zzz");
+        let ft = one_file_type(&ext);
+        let mut desc = exporter_desc(&vt, &ft, "dev.test.shortexport");
+        desc.struct_size -= 1;
+        let r = &mut *reg;
+        (r.add_exporter)(r.ctx, &desc);
+        abi::FtStatus::Ok
+    }
+    let err = load(query).expect_err("a short descriptor must be refused");
+    assert!(err.contains("exporter descriptor is older"), "{err}");
+}
+
+#[test]
+fn an_exporter_with_a_short_or_null_vtable_is_refused() {
+    unsafe extern "C" fn short_vt(reg: *mut abi::FtRegistrar) -> abi::FtStatus {
+        let mut vt = exporter_vtable();
+        vt.struct_size = 8; // just the header
+        let ext = abi::FtStr::from_str("zzz");
+        let ft = one_file_type(&ext);
+        let desc = exporter_desc(&vt, &ft, "dev.test.shortexportvt");
+        let r = &mut *reg;
+        (r.add_exporter)(r.ctx, &desc);
+        abi::FtStatus::Ok
+    }
+    let err = load(short_vt).expect_err("a short vtable must be refused");
+    assert!(err.contains("exporter's vtable is older"), "{err}");
+
+    unsafe extern "C" fn null_vt(reg: *mut abi::FtRegistrar) -> abi::FtStatus {
+        let vt = exporter_vtable();
+        let ext = abi::FtStr::from_str("zzz");
+        let ft = one_file_type(&ext);
+        let mut desc = exporter_desc(&vt, &ft, "dev.test.nullexportvt");
+        desc.vtable = std::ptr::null();
+        let r = &mut *reg;
+        (r.add_exporter)(r.ctx, &desc);
+        abi::FtStatus::Ok
+    }
+    let err = load(null_vt).expect_err("a null vtable must be refused");
+    assert!(err.contains("exporter registered a null vtable"), "{err}");
+}
+
+/// The file-type checks are shared with the importer path, so what this pins is
+/// that the exporter's call reaches them *and* names itself when it complains —
+/// a message blaming an importer for an exporter's descriptor sends whoever
+/// reads it looking in the wrong place.
+#[test]
+fn an_exporter_with_an_absurd_file_type_count_is_refused() {
+    unsafe extern "C" fn query(reg: *mut abi::FtRegistrar) -> abi::FtStatus {
+        let vt = exporter_vtable();
+        let ext = abi::FtStr::from_str("zzz");
+        let ft = one_file_type(&ext);
+        let mut desc = exporter_desc(&vt, &ft, "dev.test.manyexporttypes");
+        // One exists; four billion are claimed.
+        desc.file_type_count = u64::MAX;
+        let r = &mut *reg;
+        (r.add_exporter)(r.ctx, &desc);
+        abi::FtStatus::Ok
+    }
+    let err = load(query).expect_err("an absurd count must be refused");
+    assert_eq!(err, "an exporter declares an absurd number of file types");
+}
+
+#[test]
+fn an_exporter_with_a_malformed_file_type_is_refused() {
+    unsafe extern "C" fn query(reg: *mut abi::FtRegistrar) -> abi::FtStatus {
+        let vt = exporter_vtable();
+        let ext = abi::FtStr::from_str("zzz");
+        let mut ft = one_file_type(&ext);
+        ft.extension_count = 10_000;
+        let desc = exporter_desc(&vt, &ft, "dev.test.manyexportexts");
+        let r = &mut *reg;
+        (r.add_exporter)(r.ctx, &desc);
+        abi::FtStatus::Ok
+    }
+    let err = load(query).expect_err("a malformed file type must be refused");
+    assert_eq!(err, "an exporter declares a malformed file type");
+}

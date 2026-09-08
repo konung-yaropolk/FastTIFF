@@ -21,7 +21,7 @@ pub use discover::{install_dir, is_library, search_paths, user_plugin_dir, LIBRA
 pub use host::{describe_image, describe_stack, describe_view, describe_volume, StackHost};
 pub use result::{to_stack, to_tiff_bytes};
 
-use fasttiff_plugin_api::{Confidence, FileType, Importer, Plugin, PluginInfo};
+use fasttiff_plugin_api::{Confidence, Exporter, FileType, Importer, Plugin, PluginInfo};
 use std::path::Path;
 
 /// Where a plugin came from. Shown in the menu so a user can tell a built-in
@@ -42,6 +42,14 @@ pub struct ImporterEntry {
     pub importer: Box<dyn Importer>,
 }
 
+/// One installed exporter.
+pub struct ExporterEntry {
+    pub info: PluginInfo,
+    pub origin: Origin,
+    pub file_types: Vec<FileType>,
+    pub exporter: Box<dyn Exporter>,
+}
+
 /// One installed plugin.
 pub struct Entry {
     pub info: PluginInfo,
@@ -53,6 +61,7 @@ pub struct Entry {
 pub struct Registry {
     entries: Vec<Entry>,
     importers: Vec<ImporterEntry>,
+    exporters: Vec<ExporterEntry>,
     /// Problems found while indexing — a library that would not load, two
     /// plugins claiming one id. Surfaced rather than swallowed: a plugin the
     /// user installed and cannot find is worse than one that says why.
@@ -72,6 +81,7 @@ impl Registry {
         let mut reg = Registry {
             entries: Vec::new(),
             importers: Vec::new(),
+            exporters: Vec::new(),
             problems: Vec::new(),
         };
         for p in builtin::all() {
@@ -79,6 +89,9 @@ impl Registry {
         }
         for i in builtin::importers() {
             reg.add_importer(i, Origin::BuiltIn);
+        }
+        for e in builtin::exporters() {
+            reg.add_exporter(e, Origin::BuiltIn);
         }
         reg.sort();
         reg
@@ -133,6 +146,75 @@ impl Registry {
 
     pub fn importers(&self) -> &[ImporterEntry] {
         &self.importers
+    }
+
+    /// Install one exporter, refusing a duplicate id for the reason
+    /// [`add`](Self::add) gives.
+    pub fn add_exporter(&mut self, exporter: Box<dyn Exporter>, origin: Origin) -> bool {
+        let info = exporter.info();
+        if info.id.trim().is_empty() {
+            self.problems
+                .push(format!("exporter \"{}\" has no id; ignored", info.name));
+            return false;
+        }
+        if let Some(e) = self.exporters.iter().find(|e| e.info.id == info.id) {
+            self.problems.push(format!(
+                "two exporters claim the id \"{}\": \"{}\" and \"{}\"; keeping the first",
+                info.id, e.info.name, info.name
+            ));
+            return false;
+        }
+        let file_types = exporter.file_types();
+        if file_types.is_empty() {
+            self.problems.push(format!(
+                "exporter \"{}\" declares no file types, so nothing could ever reach it; ignored",
+                info.name
+            ));
+            return false;
+        }
+        self.exporters.push(ExporterEntry {
+            info,
+            origin,
+            file_types,
+            exporter,
+        });
+        true
+    }
+
+    pub fn exporters(&self) -> &[ExporterEntry] {
+        &self.exporters
+    }
+
+    pub fn exporter_mut(&mut self, index: usize) -> Option<&mut ExporterEntry> {
+        self.exporters.get_mut(index)
+    }
+
+    /// Every file type any exporter offers, for the Save-as dialog's filter
+    /// list. Deduplicated by extension set, as [`open_file_types`] is.
+    ///
+    /// [`open_file_types`]: Self::open_file_types
+    pub fn save_file_types(&self) -> Vec<FileType> {
+        let mut out: Vec<FileType> = Vec::new();
+        for e in &self.exporters {
+            for t in &e.file_types {
+                if !out.iter().any(|o| o.extensions == t.extensions) {
+                    out.push(t.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Which exporter writes `path`, by its extension.
+    ///
+    /// By extension alone, and there is no ranking to do: the file does not
+    /// exist yet, so unlike opening there is nothing to probe. Two exporters
+    /// claiming one extension is a collision the first one wins, which is the
+    /// same rule the rest of the registry follows.
+    pub fn exporter_for(&self, path: &Path) -> Option<usize> {
+        self.exporters
+            .iter()
+            .position(|e| e.file_types.iter().any(|t| t.matches(path)))
     }
 
     pub fn importer_mut(&mut self, index: usize) -> Option<&mut ImporterEntry> {

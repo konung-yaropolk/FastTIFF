@@ -50,19 +50,29 @@ pub mod invert;
 #[cfg(feature = "netpbm-example")]
 pub mod netpbm;
 pub mod oir;
+pub mod png;
 pub mod zproject;
 
 pub use invert::Invert;
 #[cfg(feature = "netpbm-example")]
 pub use netpbm::Netpbm;
 pub use oir::Oir;
+pub use png::Png;
 pub use zproject::ZProject;
 
-use fasttiff_plugin_api::{Importer, Plugin};
+use fasttiff_plugin_api::{Exporter, Importer, Plugin};
 
 /// The filters compiled into this build, in registration order.
 pub fn all() -> Vec<Box<dyn Plugin>> {
     vec![Box::new(Invert), Box::new(ZProject)]
+}
+
+/// The exporters compiled into this build, in registration order.
+///
+/// Order is the tie-break when two claim one extension, as it is for importers
+/// — though an exporter cannot be probed, so order is the *only* tie-break.
+pub fn exporters() -> Vec<Box<dyn Exporter>> {
+    vec![Box::new(Png)]
 }
 
 /// The importers compiled into this build, in registration order.

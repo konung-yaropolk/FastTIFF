@@ -13,8 +13,8 @@
 
 use crate::abi::*;
 use crate::api::{
-    Confidence, ImportHost, ImportRequest, Importer, Outcome, ParamDecl, ParamKind, ParamValue,
-    Params, PixelType, PlaneData, Plugin,
+    Confidence, ExportRequest, Exporter, ImportHost, ImportRequest, Importer, Outcome, ParamDecl,
+    ParamKind, ParamValue, Params, PixelType, PlaneData, Plugin,
 };
 use crate::{guard, status_of, CHost};
 
@@ -94,7 +94,186 @@ pub fn register_importer<T: Importer + Default + 'static>(reg: &mut FtRegistrar)
     unsafe { (reg.add_importer)(reg.ctx, &desc) }
 }
 
+/// The host's registrar, in a shape this plugin can read whatever version it
+/// was built for.
+///
+/// The same problem [`CHost::new`](crate::CHost::new) solves, for the table on
+/// the other side of the call. A plugin built after a field was appended has a
+/// *bigger* `FtRegistrar` than an older host allocates, so `&mut *reg` — a
+/// reference to the plugin's whole struct over the host's shorter allocation —
+/// is undefined behaviour on creation, before a field of it is read. Requiring
+/// the sizes to match instead would be worse in a different way: it refuses to
+/// load a plugin whose filters and importers the old host could have run
+/// perfectly well, which is the opposite of what appending a field is for.
+///
+/// So the declared bytes are copied and the uncovered tail is filled with a
+/// stub that declines. `plugin_abi_minor` is written back through a pointer to
+/// that one field, which every version of the table has.
+///
+/// # Safety
+/// `reg` must point at a registrar the host allocated, valid for its own
+/// declared size, for the duration of the call.
+pub unsafe fn registrar_of(reg: *mut FtRegistrar) -> Result<FtRegistrar, FtStatus> {
+    if !crate::abi::covers(reg as *const FtRegistrar, FtRegistrar::CORE) {
+        crate::last_error::set("the host's registrar is too small to be a FastTIFF plugin host");
+        return Err(FtStatus::BadArgument);
+    }
+    let declared = crate::abi::declared_size(reg as *const FtRegistrar) as usize;
+
+    // Not `zeroed()`: the tail is function pointers, and a null one is not a
+    // valid function pointer whether or not it is ever called.
+    let mut buf = core::mem::MaybeUninit::<FtRegistrar>::uninit();
+    core::ptr::copy_nonoverlapping(
+        (reg as *const FtRegistrar).cast::<u8>(),
+        buf.as_mut_ptr().cast::<u8>(),
+        declared.min(core::mem::size_of::<FtRegistrar>()),
+    );
+    // Every byte the copy did not receive must be written before it can be
+    // assumed initialised. That holds today because `add_exporter` is the whole
+    // uncovered tail — a fact `FtRegistrar::WITH_EXPORTERS == size_of` pins in
+    // the ABI crate. The next appended field needs its own stub here, and the
+    // pinned assertion is what will fail if one is added without it.
+    if !crate::abi::covers(reg as *const FtRegistrar, FtRegistrar::WITH_EXPORTERS) {
+        core::ptr::addr_of_mut!((*buf.as_mut_ptr()).add_exporter).write(no_exporters);
+    }
+
+    // Written back to the host's own memory, not to the copy — it is how the
+    // host learns which trailing fields this plugin knows about. Through a
+    // pointer to the field rather than a reference to the struct, because the
+    // struct may be shorter than this one; the field is inside `CORE`.
+    core::ptr::addr_of_mut!((*reg).plugin_abi_minor).write(crate::abi::ABI_MINOR);
+    Ok(buf.assume_init())
+}
+
+/// The stub written over `add_exporter` on a host that predates it. Reached
+/// only if [`register_exporter`]'s own check is ever removed.
+unsafe extern "C" fn no_exporters(
+    _ctx: *mut core::ffi::c_void,
+    _d: *const FtExporterDesc,
+) -> FtStatus {
+    FtStatus::Unsupported
+}
+
+/// Register one exporter type with the host.
+///
+/// `Ok` on a host too old to have exporters, not an error: `add_exporter` was
+/// appended to the registrar in ABI minor 1, and a plugin that also carries
+/// filters or importers should install those rather than failing to load
+/// because one of the three has nowhere to go. The host says what it can take;
+/// this believes it.
+pub fn register_exporter<T: Exporter + Default + 'static>(reg: &mut FtRegistrar) -> FtStatus {
+    // SAFETY: `covers` reads only the four-byte prologue, which every version
+    // of the registrar has. Copying the struct first to look at `struct_size`
+    // would be the very over-read this is checking for.
+    if !unsafe { crate::abi::covers(reg as *const FtRegistrar, FtRegistrar::WITH_EXPORTERS) } {
+        return FtStatus::Ok;
+    }
+
+    let probe = T::default();
+    let info = probe.info();
+    let types = probe.file_types();
+
+    // Extensions must stay alive while the descriptor is read, so they are
+    // flattened here rather than built inside the loop below.
+    let ext_storage: Vec<Vec<FtStr>> = types
+        .iter()
+        .map(|t| t.extensions.iter().map(|e| FtStr::from_str(e)).collect())
+        .collect();
+    let c_types: Vec<FtFileType> = types
+        .iter()
+        .zip(ext_storage.iter())
+        .map(|(t, exts)| FtFileType {
+            struct_size: core::mem::size_of::<FtFileType>() as u32,
+            _pad: 0,
+            description: FtStr::from_str(&t.description),
+            extensions: exts.as_ptr(),
+            extension_count: exts.len() as u64,
+        })
+        .collect();
+
+    let vt = FtExporterVtable {
+        struct_size: core::mem::size_of::<FtExporterVtable>() as u32,
+        _pad: 0,
+        params: export_params_shim::<T>,
+        export: export_shim::<T>,
+        last_error: crate::last_error_shim,
+    };
+    let desc = FtExporterDesc {
+        struct_size: core::mem::size_of::<FtExporterDesc>() as u32,
+        _pad: 0,
+        id: FtStr::from_str(&info.id),
+        name: FtStr::from_str(&info.name),
+        version: FtStr::from_str(&info.version),
+        author: FtStr::from_str(&info.author),
+        description: FtStr::from_str(&info.description),
+        file_types: c_types.as_ptr(),
+        file_type_count: c_types.len() as u64,
+        vtable: &vt,
+    };
+    // SAFETY: as above — everything borrowed here outlives the call.
+    unsafe { (reg.add_exporter)(reg.ctx, &desc) }
+}
+
 // --------------------------------------------------------------------- shims
+
+unsafe extern "C" fn export_params_shim<T: Exporter + Default>(
+    host: *const FtHost,
+    sink: *const FtParamSink,
+) -> FtStatus {
+    guard(|| {
+        if sink.is_null() {
+            crate::last_error::set("the host passed no dialog sink");
+            return FtStatus::BadArgument;
+        }
+        let h = match CHost::new(host) {
+            Ok(h) => h,
+            Err(s) => return s,
+        };
+        let decls = T::default().params(&h);
+        push_decls(&*sink, &decls)
+    })
+}
+
+unsafe extern "C" fn export_shim<T: Exporter + Default>(
+    path: FtStr,
+    values: *const FtValue,
+    value_count: u64,
+    host: *const FtHost,
+) -> FtStatus {
+    guard(|| {
+        let Some(p) = path.as_str() else {
+            crate::last_error::set("the host passed a path that is not UTF-8");
+            return FtStatus::BadArgument;
+        };
+        let params = match values_from_c(values, value_count) {
+            Some(v) => v,
+            None => {
+                crate::last_error::set(
+                    "the host's dialog values could not be read; it may be built against \
+                     a different plugin ABI",
+                );
+                return FtStatus::BadArgument;
+            }
+        };
+        // Unlike an importer, an exporter always runs with something open, so
+        // the host table is required rather than optional.
+        let mut h = match CHost::new(host) {
+            Ok(h) => h,
+            Err(s) => return s,
+        };
+        let request = ExportRequest {
+            path: std::path::PathBuf::from(p),
+            params,
+        };
+        match T::default().export(&request, &mut h) {
+            Ok(()) => FtStatus::Ok,
+            // `status_of` records the message; setting it here as well would
+            // be dead — and, if the order were ever reversed, would be the
+            // double-framing its doc comment warns about.
+            Err(e) => status_of(&e),
+        }
+    })
+}
 
 unsafe extern "C" fn params_shim<T: Plugin + Default>(
     host: *const FtHost,

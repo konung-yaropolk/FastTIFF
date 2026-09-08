@@ -30,9 +30,9 @@ use std::sync::Mutex;
 
 use fasttiff_plugin_abi as abi;
 use fasttiff_plugin_api::{
-    Confidence, FileType, HostContext, ImageResult, ImportHost, ImportRequest, ImportResult,
-    Importer, Outcome, ParamDecl, ParamKind, ParamValue, Params, PixelType, PlaneData, Plugin,
-    PluginError, PluginInfo, StackInfo,
+    Confidence, ExportRequest, Exporter, FileType, HostContext, ImageResult, ImportHost,
+    ImportRequest, ImportResult, Importer, Outcome, ParamDecl, ParamKind, ParamValue, Params,
+    PixelType, PlaneData, Plugin, PluginError, PluginInfo, StackInfo,
 };
 
 use super::{Origin, Registry};
@@ -41,6 +41,7 @@ use super::{Origin, Registry};
 pub struct Loaded {
     pub plugins: Vec<LoadedPlugin>,
     pub importers: Vec<LoadedImporter>,
+    pub exporters: Vec<LoadedExporter>,
 }
 
 impl std::fmt::Debug for Loaded {
@@ -49,9 +50,10 @@ impl std::fmt::Debug for Loaded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Loaded {{ plugins: {}, importers: {} }}",
+            "Loaded {{ plugins: {}, importers: {}, exporters: {} }}",
             self.plugins.len(),
-            self.importers.len()
+            self.importers.len(),
+            self.exporters.len()
         )
     }
 }
@@ -69,6 +71,14 @@ pub struct LoadedImporter {
     info: PluginInfo,
     file_types: Vec<FileType>,
     vtable: abi::FtImporterVtable,
+    source: PathBuf,
+}
+
+/// An exporter living in a shared library.
+pub struct LoadedExporter {
+    info: PluginInfo,
+    file_types: Vec<FileType>,
+    vtable: abi::FtExporterVtable,
     source: PathBuf,
 }
 
@@ -100,6 +110,9 @@ pub fn load_all(registry: &mut Registry) {
                     for i in loaded.importers {
                         registry.add_importer(Box::new(i), Origin::Library);
                     }
+                    for e in loaded.exporters {
+                        registry.add_exporter(Box::new(e), Origin::Library);
+                    }
                 }
                 Err(e) => registry.problems.push(format!(
                     "{}: {e}",
@@ -115,6 +128,7 @@ pub fn load_all(registry: &mut Registry) {
 struct Collector {
     plugins: Vec<LoadedPlugin>,
     importers: Vec<LoadedImporter>,
+    exporters: Vec<LoadedExporter>,
     source: PathBuf,
     problems: Vec<String>,
 }
@@ -174,6 +188,7 @@ pub unsafe fn register_from(query: abi::FtQueryFn, source: &Path) -> Result<Load
         _pad: 0,
         add_plugin: add_plugin_cb,
         add_importer: add_importer_cb,
+        add_exporter: add_exporter_cb,
     };
 
     // A panic must not unwind out of the plugin and through this frame.
@@ -188,7 +203,10 @@ pub unsafe fn register_from(query: abi::FtQueryFn, source: &Path) -> Result<Load
     if !collector.problems.is_empty() {
         return Err(collector.problems.join("; "));
     }
-    if collector.plugins.is_empty() && collector.importers.is_empty() {
+    if collector.plugins.is_empty()
+        && collector.importers.is_empty()
+        && collector.exporters.is_empty()
+    {
         return Err("loaded, but registered nothing".into());
     }
     // A plugin built against a newer minor version than this host is fine —
@@ -207,6 +225,7 @@ pub unsafe fn register_from(query: abi::FtQueryFn, source: &Path) -> Result<Load
     Ok(Loaded {
         plugins: collector.plugins,
         importers: collector.importers,
+        exporters: collector.exporters,
     })
 }
 
@@ -300,45 +319,14 @@ unsafe extern "C" fn add_importer_cb(
     }
     let vt = &*d.vtable;
 
-    // A file-type count past anything real is a corrupt descriptor.
-    const MAX_TYPES: u64 = 256;
-    const MAX_EXTS: u64 = 256;
-    if d.file_type_count > MAX_TYPES {
-        c.problems
-            .push("an importer declares an absurd number of file types".into());
+    let Some(file_types) = file_types_of(
+        d.file_types,
+        d.file_type_count,
+        "an importer",
+        &mut c.problems,
+    ) else {
         return abi::FtStatus::BadArgument;
-    }
-    let mut file_types = Vec::new();
-    if !d.file_types.is_null() {
-        for i in 0..d.file_type_count {
-            // Indexed with this side's stride, which is sound only because
-            // `FtFileType` is an *arrayed* struct and therefore frozen in size
-            // — see its doc comment. A struct reached through an array cannot
-            // use the append-a-field rule: the stride is baked into the
-            // writer's pointer arithmetic and the reader's, and the two would
-            // silently disagree.
-            let element = d.file_types.add(i as usize);
-            if !abi::fits(element) || (*element).extension_count > MAX_EXTS {
-                c.problems
-                    .push("an importer declares a malformed file type".into());
-                return abi::FtStatus::BadArgument;
-            }
-            let t = &*element;
-            let mut exts = Vec::new();
-            if !t.extensions.is_null() {
-                for j in 0..t.extension_count {
-                    let e = *t.extensions.add(j as usize);
-                    if let Some(s) = e.as_str() {
-                        exts.push(s.to_lowercase());
-                    }
-                }
-            }
-            file_types.push(FileType {
-                description: owned(t.description, "a file type description", &mut c.problems),
-                extensions: exts,
-            });
-        }
-    }
+    };
 
     let info = PluginInfo {
         id: owned(d.id, "an importer id", &mut c.problems),
@@ -355,6 +343,118 @@ unsafe extern "C" fn add_importer_cb(
         source: c.source.clone(),
     });
     abi::FtStatus::Ok
+}
+
+unsafe extern "C" fn add_exporter_cb(
+    ctx: *mut std::ffi::c_void,
+    desc: *const abi::FtExporterDesc,
+) -> abi::FtStatus {
+    let Some(c) = (ctx as *mut Collector).as_mut() else {
+        return abi::FtStatus::BadArgument;
+    };
+    // Checked before the reference is formed; see `add_plugin_cb`.
+    if desc.is_null() {
+        return abi::FtStatus::BadArgument;
+    }
+    if !abi::fits(desc) {
+        c.problems
+            .push("an exporter descriptor is older than this ABI".into());
+        return abi::FtStatus::BadArgument;
+    }
+    let d = &*desc;
+    if d.vtable.is_null() {
+        c.problems
+            .push("an exporter registered a null vtable".into());
+        return abi::FtStatus::BadArgument;
+    }
+    if !abi::fits(d.vtable) {
+        c.problems
+            .push("an exporter's vtable is older than this ABI".into());
+        return abi::FtStatus::BadArgument;
+    }
+    let vt = &*d.vtable;
+
+    let Some(file_types) = file_types_of(
+        d.file_types,
+        d.file_type_count,
+        "an exporter",
+        &mut c.problems,
+    ) else {
+        return abi::FtStatus::BadArgument;
+    };
+
+    let info = PluginInfo {
+        id: owned(d.id, "an exporter id", &mut c.problems),
+        name: owned(d.name, "an exporter name", &mut c.problems),
+        menu_path: String::new(),
+        version: owned(d.version, "an exporter version", &mut c.problems),
+        author: owned(d.author, "an exporter author", &mut c.problems),
+        description: owned(d.description, "an exporter description", &mut c.problems),
+    };
+    c.exporters.push(LoadedExporter {
+        info,
+        file_types,
+        vtable: *vt,
+        source: c.source.clone(),
+    });
+    abi::FtStatus::Ok
+}
+
+/// Copy the file types a descriptor declares, or `None` if the list is not one.
+///
+/// Shared by importers and exporters: both descriptors end in the same
+/// `(*const FtFileType, u64)` pair, and a foreign one needs the same checks
+/// whichever it came from. `what` names the kind in the message, which is the
+/// only thing that differs between the two.
+///
+/// # Safety
+/// `types` must be null, or point at `count` `FtFileType`s that stay valid for
+/// the duration of this call.
+unsafe fn file_types_of(
+    types: *const abi::FtFileType,
+    count: u64,
+    what: &str,
+    problems: &mut Vec<String>,
+) -> Option<Vec<FileType>> {
+    // A file-type count past anything real is a corrupt descriptor.
+    const MAX_TYPES: u64 = 256;
+    const MAX_EXTS: u64 = 256;
+    if count > MAX_TYPES {
+        problems.push(format!("{what} declares an absurd number of file types"));
+        return None;
+    }
+    let mut out = Vec::new();
+    if types.is_null() {
+        return Some(out);
+    }
+    for i in 0..count {
+        // Indexed with this side's stride, which is sound only because
+        // `FtFileType` is an *arrayed* struct and therefore frozen in size
+        // — see its doc comment. A struct reached through an array cannot
+        // use the append-a-field rule: the stride is baked into the writer's
+        // pointer arithmetic and the reader's, and the two would silently
+        // disagree.
+        let element = types.add(i as usize);
+        if !abi::fits(element) || (*element).extension_count > MAX_EXTS {
+            problems.push(format!("{what} declares a malformed file type"));
+            return None;
+        }
+        let t = &*element;
+        let mut exts = Vec::new();
+        if !t.extensions.is_null() {
+            for j in 0..t.extension_count {
+                let e = *t.extensions.add(j as usize);
+                if let Some(s) = e.as_str() {
+                    exts.push(s.to_lowercase());
+                }
+            }
+        }
+        out.push(FileType {
+            description: owned(t.description, "a file type description", problems),
+            extensions: exts,
+        });
+    }
+    Some(out)
 }
 
 // ------------------------------------------------------------- host callbacks
@@ -1447,6 +1547,101 @@ impl Importer for LoadedImporter {
             }
             abi::FtStatus::Unsupported => Err(PluginError::unsupported(unsafe {
                 last_error_of(self.vtable.last_error, "cannot read this file")
+            })),
+            abi::FtStatus::Panic => Err(PluginError::failed(panic_message(
+                &name,
+                &self.source,
+                // SAFETY: the plugin's `last_error`, copied before returning.
+                unsafe { last_error_of(self.vtable.last_error, "") },
+            ))),
+            other => Err(PluginError::failed(unsafe {
+                last_error_of(self.vtable.last_error, &format!("failed ({other:?})"))
+            })),
+        }
+    }
+}
+
+impl Exporter for LoadedExporter {
+    fn info(&self) -> PluginInfo {
+        self.info.clone()
+    }
+
+    fn file_types(&self) -> Vec<FileType> {
+        self.file_types.clone()
+    }
+
+    fn params(&self, host: &dyn HostContext) -> Vec<ParamDecl> {
+        let _lock = CALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // As in `Plugin::params`: the trait takes `&dyn`, the C table is
+        // uniform over `&mut`, and everything reachable from here is read-only.
+        let mut shim = ReadOnly(host);
+        let mut cell = HostCell {
+            name: host.stack_info().name.clone(),
+            path: host.stack_info().path.clone().unwrap_or_default(),
+            inner: &mut shim,
+        };
+        let table = host_table(&mut cell);
+        let mut sink = DeclSink::default();
+        let sink_table = decl_sink_table(&mut sink);
+        // SAFETY: both tables point at locals that outlive the call, and the
+        // plugin's own shim catches its panics; `catch_unwind` here is the
+        // second line for a plugin that was not built with this crate.
+        let st = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            (self.vtable.params)(&table, &sink_table)
+        }))
+        .unwrap_or(abi::FtStatus::Panic);
+        if st != abi::FtStatus::Ok {
+            return Vec::new();
+        }
+        sink.decls
+    }
+
+    fn export(
+        &mut self,
+        request: &ExportRequest,
+        host: &mut dyn HostContext,
+    ) -> Result<(), PluginError> {
+        let _lock = CALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let name = self.info.name.clone();
+        let p = request.path.to_string_lossy().to_string();
+        // Kept alive for the call; see the note in `Plugin::run`.
+        let (values, _owned) = values_to_c(&request.params);
+        let mut cell = HostCell {
+            name: host.stack_info().name.clone(),
+            path: host.stack_info().path.clone().unwrap_or_default(),
+            inner: host,
+        };
+        let table = host_table(&mut cell);
+
+        // Nothing comes back but a status: the plugin wrote the file itself.
+        let st = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            (self.vtable.export)(
+                abi::FtStr::from_str(&p),
+                if values.is_empty() {
+                    std::ptr::null()
+                } else {
+                    values.as_ptr()
+                },
+                values.len() as u64,
+                &table,
+            )
+        }))
+        .unwrap_or(abi::FtStatus::Panic);
+
+        match st {
+            abi::FtStatus::Ok => Ok(()),
+            // The trait has no cancelled outcome, and an export that stopped
+            // because the user said so is still an export that did not happen —
+            // so it is reported, in the same words a built-in exporter uses.
+            abi::FtStatus::Cancelled => Err(PluginError::unsupported("cancelled")),
+            abi::FtStatus::Unsupported => Err(PluginError::unsupported(unsafe {
+                last_error_of(self.vtable.last_error, "cannot write this stack")
+            })),
+            abi::FtStatus::OutOfRange => Err(PluginError::OutOfRange(unsafe {
+                last_error_of(
+                    self.vtable.last_error,
+                    "asked for a plane that does not exist",
+                )
             })),
             abi::FtStatus::Panic => Err(PluginError::failed(panic_message(
                 &name,

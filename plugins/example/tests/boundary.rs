@@ -32,8 +32,9 @@
 
 use fast_tiff_viewer::plugins::{self, library, Origin, Registry};
 use fasttiff_plugin_api::{
-    Confidence, HostContext, ImageResult, ImportHost, ImportRequest, Importer, Outcome, ParamKind,
-    ParamValue, Params, PixelType, Plane, PlaneData, Plugin, StackInfo, VolumeMode, VolumeView,
+    Confidence, ExportRequest, Exporter, HostContext, ImageResult, ImportHost, ImportRequest,
+    Importer, Outcome, ParamKind, ParamValue, Params, PixelType, Plane, PlaneData, Plugin,
+    StackInfo, VolumeMode, VolumeView,
 };
 use std::path::{Path, PathBuf};
 
@@ -67,6 +68,11 @@ fn plugin(id: &str) -> library::LoadedPlugin {
 /// The registered importer.
 fn importer() -> library::LoadedImporter {
     example().importers.remove(0)
+}
+
+/// The registered exporter.
+fn exporter() -> library::LoadedExporter {
+    example().exporters.remove(0)
 }
 
 fn volume() -> VolumeView {
@@ -131,6 +137,13 @@ fn the_library_registers_what_it_declares() {
         .collect();
     assert_eq!(importers, vec!["dev.fasttiff.example.raw"]);
 
+    let exporters: Vec<String> = loaded
+        .exporters
+        .iter()
+        .map(|e| e.info().id.clone())
+        .collect();
+    assert_eq!(exporters, vec!["dev.fasttiff.example.csv"]);
+
     // Strings really crossed, rather than arriving empty or as the id again.
     let info = loaded.plugins[0].info();
     assert_eq!(info.name, "Invert (from library)");
@@ -147,6 +160,14 @@ fn the_library_registers_what_it_declares() {
     assert_eq!(types.len(), 1);
     assert_eq!(types[0].description, "Raw binary image");
     assert_eq!(types[0].extensions, vec!["raw", "bin"]);
+
+    // And the exporter's, which the Save-as dialog is built from. They travel
+    // through the same descriptor field as an importer's, so this is only worth
+    // asserting because the two arrive by different callbacks.
+    let types = loaded.exporters[0].file_types();
+    assert_eq!(types.len(), 1);
+    assert_eq!(types[0].description, "Comma-separated values");
+    assert_eq!(types[0].extensions, vec!["csv"]);
 }
 
 /// The point of the whole phase: the same filter, one side called as a Rust
@@ -296,6 +317,139 @@ fn an_importer_in_a_library_reads_a_file_end_to_end() {
     let _ = std::fs::remove_file(file);
 }
 
+/// The boundary run backwards: a path and a set of dialog values go out, the
+/// plugin reads pixels back through the host, and what returns is a file.
+///
+/// Nothing about the result crosses the ABI, which is exactly why this is worth
+/// asserting separately from the filter oracle — an exporter that never
+/// received the path, the values, or the right plane still returns `Ok`.
+#[test]
+fn an_exporter_in_a_library_writes_a_file_end_to_end() {
+    let mut csv = exporter();
+
+    // Frame 1 of 2, so an exporter that ignored `frame_index` and wrote frame 0
+    // produces different numbers rather than the same ones.
+    let s = stack(2, 2);
+    let view = plugins::describe_view(&s, 1, false, volume());
+    let mut host = plugins::StackHost::new(&s, view);
+
+    let path = std::env::temp_dir().join("fasttiff-boundary-export.csv");
+    let _ = std::fs::remove_file(&path);
+    let mut params = Params::new();
+    // Both non-default, so a value that failed to cross shows up as the
+    // default's output rather than passing unnoticed.
+    params.set("header", ParamValue::Bool(false));
+    params.set("decimals", ParamValue::Int(1));
+
+    csv.export(
+        &ExportRequest {
+            path: path.clone(),
+            params,
+        },
+        &mut host,
+    )
+    .expect("the export should succeed");
+
+    let text = std::fs::read_to_string(&path).expect("the exporter should have written the file");
+    assert!(
+        !text.starts_with('#'),
+        "the header was suppressed and should not appear: {text:?}"
+    );
+
+    // The pixels the host would hand out, formatted the way the plugin says it
+    // formats them. Comparing against the host rather than a literal is what
+    // makes this a boundary test; the literal below keeps it from being
+    // vacuous if `stack()` ever changes shape.
+    let mut want = Vec::new();
+    host.read_plane_f32(Plane::new(0, 0, 1), &mut want)
+        .expect("read");
+    let expected: String = want
+        .chunks(5)
+        .map(|row| {
+            row.iter()
+                .map(|v| format!("{v:.1}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(text.trim_end(), expected);
+    assert!(
+        text.starts_with("10.0,10.5,11.0,11.5,12.0"),
+        "frame 1 of channel 0 should be what was written: {:?}",
+        text.lines().next()
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A dialog declared by an exporter reaches the host the same way a filter's
+/// does, through a different vtable slot.
+#[test]
+fn an_exporters_dialog_arrives_intact() {
+    let csv = exporter();
+    let s = stack(1, 1);
+    let host = plugins::StackHost::new(&s, plugins::describe_view(&s, 0, false, volume()));
+
+    let decls = csv.params(&host);
+    assert_eq!(decls.len(), 2);
+    assert_eq!(decls[0].key, "header");
+    assert_eq!(decls[0].kind, ParamKind::Bool { default: true });
+    assert!(
+        decls[0]
+            .help
+            .as_deref()
+            .unwrap_or("")
+            .contains("widthxheight"),
+        "the help text did not cross: {:?}",
+        decls[0].help
+    );
+    assert_eq!(decls[1].key, "decimals");
+    assert_eq!(
+        decls[1].kind,
+        ParamKind::Int {
+            default: 3,
+            min: 0,
+            max: 9
+        }
+    );
+}
+
+/// Cancellation has to reach an exporter too, and a cancelled export must not
+/// leave a file behind that looks finished.
+#[test]
+fn an_exporter_stops_when_the_host_says_to() {
+    let mut csv = exporter();
+    let s = stack(1, 1);
+    let view = plugins::describe_view(&s, 0, false, volume());
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut host = plugins::StackHost::new(&s, view).with_cancel(
+        flag,
+        std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+    );
+
+    let path = std::env::temp_dir().join("fasttiff-boundary-cancelled.csv");
+    let _ = std::fs::remove_file(&path);
+    let err = csv
+        .export(
+            &ExportRequest {
+                path: path.clone(),
+                params: Params::new(),
+            },
+            &mut host,
+        )
+        .expect_err("a cancelled export should not report success");
+    // Framed once, like the importer's: `Unsupported`'s prefix is added by the
+    // host when it rebuilds the error, not carried across in the message.
+    let msg = err.to_string();
+    assert_eq!(msg, "not applicable: cancelled", "{msg}");
+    assert_eq!(msg.matches("not applicable").count(), 1);
+    assert!(
+        !path.exists(),
+        "a cancelled export must not leave a half-written file"
+    );
+}
+
 /// Every parameter kind must survive the crossing, not just the two the other
 /// tests happen to use — a marshalling mistake in one arm is otherwise
 /// invisible until a plugin uses that arm.
@@ -376,6 +530,9 @@ fn loaded_plugins_join_the_same_registry_as_the_built_ins() {
     for i in loaded.importers {
         assert!(reg.add_importer(Box::new(i), Origin::Library));
     }
+    for e in loaded.exporters {
+        assert!(reg.add_exporter(Box::new(e), Origin::Library));
+    }
     assert_eq!(reg.len(), built_ins + 3);
     assert!(
         reg.problems.is_empty(),
@@ -397,6 +554,20 @@ fn loaded_plugins_join_the_same_registry_as_the_built_ins() {
         "the plugin's file type did not reach the Open dialog: {types:?}"
     );
     assert!(reg.claims_extension(Path::new("a.bin")));
+
+    // And the Save-as dialog picks up the exporter's, which is the only way a
+    // user ever reaches one.
+    let types = reg.save_file_types();
+    assert!(
+        types
+            .iter()
+            .any(|t| t.extensions.contains(&"csv".to_string())),
+        "the plugin's file type did not reach the Save dialog: {types:?}"
+    );
+    let i = reg
+        .exporter_for(Path::new("frame.csv"))
+        .expect("a .csv name should route to the loaded exporter");
+    assert_eq!(reg.exporters()[i].info.id, "dev.fasttiff.example.csv");
 }
 
 /// Pixels read through the C boundary must be the same pixels, not merely

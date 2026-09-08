@@ -78,6 +78,28 @@ pub(super) fn plugins_menu(ui: &mut egui::Ui, registry: Option<&Registry>) -> Me
             }
         }
 
+        // Exporters are not menu entries either — they run from the Save-as
+        // dialog — and are listed for the same reason importers are: an
+        // installed plugin that silently failed to load looks exactly like one
+        // that is working and has not been triggered.
+        if !registry.exporters().is_empty() {
+            ui.separator();
+            ui.label(RichText::new("Exportable formats:").strong());
+            for e in registry.exporters() {
+                let exts: Vec<String> = e
+                    .file_types
+                    .iter()
+                    .flat_map(|t| t.extensions.iter().map(|x| format!(".{x}")))
+                    .collect();
+                ui.label(
+                    RichText::new(format!("{}  ({})", e.info.name, exts.join(" ")))
+                        .weak()
+                        .small(),
+                )
+                .on_hover_text(&e.info.description);
+            }
+        }
+
         ui.separator();
         if ui
             .button("Open plugin folder…")

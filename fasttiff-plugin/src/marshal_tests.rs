@@ -155,3 +155,133 @@ fn no_refusal_in_the_run_path_is_silent() {
         "write_outcome refused without saying why"
     );
 }
+
+// ------------------------------------------------------- registrar skew
+
+/// Counts what a newer host would receive, so "skipped" can be told from
+/// "called and ignored" — the same distinction the sink tests above draw.
+static EXPORTER_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static EXPORTER_ID: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+unsafe extern "C" fn add_plugin_stub(
+    _c: *mut core::ffi::c_void,
+    _d: *const FtPluginDesc,
+) -> FtStatus {
+    FtStatus::Ok
+}
+unsafe extern "C" fn add_importer_stub(
+    _c: *mut core::ffi::c_void,
+    _d: *const FtImporterDesc,
+) -> FtStatus {
+    FtStatus::Ok
+}
+unsafe extern "C" fn add_exporter_counting(
+    _c: *mut core::ffi::c_void,
+    d: *const FtExporterDesc,
+) -> FtStatus {
+    EXPORTER_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if let Some(id) = (*d).id.as_str() {
+        *EXPORTER_ID.lock().unwrap() = id.to_string();
+    }
+    FtStatus::Ok
+}
+
+/// A registrar declaring `size` bytes, whatever this build's really is.
+fn registrar(size: usize) -> FtRegistrar {
+    FtRegistrar {
+        struct_size: size as u32,
+        host_abi_minor: 0,
+        ctx: core::ptr::null_mut(),
+        plugin_abi_minor: 0,
+        _pad: 0,
+        add_plugin: add_plugin_stub,
+        add_importer: add_importer_stub,
+        add_exporter: add_exporter_counting,
+    }
+}
+
+#[derive(Default)]
+struct Csv;
+
+impl Exporter for Csv {
+    fn info(&self) -> crate::api::PluginInfo {
+        crate::api::PluginInfo::new("dev.test.csv", "CSV")
+    }
+    fn file_types(&self) -> Vec<crate::api::FileType> {
+        vec![crate::api::FileType::new("CSV", &["csv"])]
+    }
+    fn export(
+        &mut self,
+        _r: &ExportRequest,
+        _h: &mut dyn crate::api::HostContext,
+    ) -> Result<(), crate::api::PluginError> {
+        Ok(())
+    }
+}
+
+/// The direction the whole `registrar_of` dance exists for: a host from before
+/// exporters existed must still load a library that carries one.
+#[test]
+fn a_host_without_add_exporter_installs_everything_else() {
+    let older = FtRegistrar::CORE;
+    assert!(
+        older < core::mem::size_of::<FtRegistrar>(),
+        "the fixture must be smaller than today's registrar but still a valid one"
+    );
+    let mut host = registrar(older);
+    EXPORTER_CALLS.store(0, core::sync::atomic::Ordering::Relaxed);
+
+    // SAFETY: every callback in the fixture is real; only the declared size is
+    // smaller than this build's.
+    let mut copy = unsafe { registrar_of(&mut host) }.expect("an older host must be accepted");
+    assert_eq!(
+        register_exporter::<Csv>(&mut copy),
+        FtStatus::Ok,
+        "an exporter with nowhere to go must not fail the whole library"
+    );
+    assert_eq!(
+        EXPORTER_CALLS.load(core::sync::atomic::Ordering::Relaxed),
+        0,
+        "add_exporter was called on a host whose table does not contain it"
+    );
+    // And the host still learns what this plugin knows about, which is the one
+    // thing written back through the pointer rather than into the copy.
+    assert_eq!(host.plugin_abi_minor, crate::abi::ABI_MINOR);
+}
+
+/// The other direction: a host that does have the field is given the exporter,
+/// descriptor and all.
+#[test]
+fn a_host_with_add_exporter_receives_it() {
+    let mut host = registrar(core::mem::size_of::<FtRegistrar>());
+    EXPORTER_CALLS.store(0, core::sync::atomic::Ordering::Relaxed);
+    EXPORTER_ID.lock().unwrap().clear();
+
+    // SAFETY: as above; this fixture declares its true size.
+    let mut copy = unsafe { registrar_of(&mut host) }.expect("a current host must be accepted");
+    assert_eq!(register_exporter::<Csv>(&mut copy), FtStatus::Ok);
+    assert_eq!(
+        EXPORTER_CALLS.load(core::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(*EXPORTER_ID.lock().unwrap(), "dev.test.csv");
+}
+
+/// There is still a floor, as there is for the sink.
+#[test]
+fn a_registrar_below_the_core_is_refused_with_a_reason() {
+    let mut host = registrar(FtRegistrar::CORE - 1);
+    crate::last_error::set("");
+    // SAFETY: the fixture is a real registrar; only its declared size lies.
+    // `expect_err` would need the registrar to be `Debug`, and a table of raw
+    // function pointers has nothing worth printing.
+    let Err(st) = (unsafe { registrar_of(&mut host) }) else {
+        panic!("a table this small is not a host");
+    };
+    assert_eq!(st, FtStatus::BadArgument);
+    let msg = unsafe { crate::last_error::get().as_str().unwrap_or("") }.to_string();
+    assert!(
+        msg.contains("too small"),
+        "a refusal must say why, not just fail: {msg:?}"
+    );
+}
