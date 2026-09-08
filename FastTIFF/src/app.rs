@@ -337,13 +337,13 @@ const STATUS_DONE: Color32 = Color32::from_rgb(120, 195, 120);
 /// Every one of these is checked against the bundled fonts by
 /// `icon_glyph_tests`. A character the font does not have is not a compile
 /// error and not a runtime error: it is a tofu box in the toolbar, which
-/// nothing but a person looking at the window would ever notice. `≡` and `▼`
+/// nothing but a person looking at the window would ever notice. `≡` and `🗁`
 /// are two that look obvious and are not there.
-const ICON_OPEN: &str = "📂";
+const ICON_OPEN: &str = "🗁";
 const ICON_SAVE: &str = "💾";
 const ICON_PLUGINS: &str = "☰";
 const ICON_SETTINGS: &str = "⚙";
-const ICON_SIZE: f32 = 16.0;
+const ICON_SIZE: f32 = 14.0;
 
 /// A zoom step in flight: the level being glided to, and the point it turns
 /// about.
@@ -491,7 +491,7 @@ struct HistCache {
 /// every target: the shared lines are written once and cannot drift apart.
 fn welcome_text() -> String {
     let mut text =
-        String::from("Drag and drop a file here, \nor click \"Open File icon\" above.\n");
+        String::from("Drag and drop a file here, \nor click \"Open File\" above.\n");
     if cfg!(target_arch = "wasm32") {
         text.push_str(
             "\n\nEverything is processed locally in your browser — \nno file is ever uploaded to a server.\n",
@@ -1898,7 +1898,13 @@ impl eframe::App for ViewerApp {
                     // Nothing open yet: show the version + active render backend
                     // in the space the file info will later occupy.
                     ui.separator();
-                    ui.label(RichText::new("© 2026 konung_yaropolk, SciWare LLC").weak());
+                    ui.label(
+                        RichText::new(format!(
+                            "FastTIFF v{}, Renderer: {}",
+                            env!("CARGO_PKG_VERSION"),
+                            render::BACKEND
+                    )));
+
                 }
                 if let Some(loaded) = &self.core.stack {
                     let meta = &loaded.tiff.meta;
@@ -2159,12 +2165,7 @@ impl eframe::App for ViewerApp {
         let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
             let Some(loaded) = &mut self.core.stack else {
                 if !load_stage {
-                    ui.label(
-                        RichText::new(format!(
-                            "FastTIFF v{}, Renderer: {}",
-                            env!("CARGO_PKG_VERSION"),
-                            render::BACKEND
-                    )));
+                    ui.label(RichText::new("© 2026 SciWare LLC").weak());
                 }
                 // Still worth a row with nothing open: this is where the first
                 // file's progress is reported, and where a plugin's "open an
