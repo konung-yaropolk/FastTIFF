@@ -1,35 +1,40 @@
-//! The acquisition record an OIR carries in its own XML, translated into the
-//! text form FluoView exports beside the file.
+//! The acquisition record an OIR carries in its own XML, written out in the
+//! form the acquisition software exports beside the file as a `.txt`.
 //!
 //! # Why this exists
 //!
 //! An OIR's metadata reaches a converted TIFF through `ImageDescription`
-//! (tag 270), and it used to arrive in one of two completely different shapes.
-//! When the acquisition software's `<name>.txt` sidecar was there, tag 270 got
-//! that: a readable `"key"\t"value"` record. When it was not — the file was
-//! moved on its own, or the export was never made — the importer fell back to
-//! dumping the file's own XML in verbatim, and that is a different thing
-//! entirely. In one real acquisition it was four megabytes, of which
-//! **3.1 MB was three 65,536-entry display lookup tables written out as XML**,
-//! plus 350 KB of drawing overlays, plus the binary padding that sits between
-//! the documents in a block. The part a person would want was under 40 KB of
-//! it. A second file had 299 more documents, one per frame.
+//! (tag 270), and the file's own XML cannot go there as it stands. In one real
+//! acquisition it is four megabytes, of which **3.1 MB is three 65,536-entry
+//! display lookup tables written out as XML**, plus 350 KB of drawing overlays,
+//! plus the binary padding that sits between the documents in a block. The part
+//! a person would want is under 40 KB of it. A second file has 299 more
+//! documents, one per frame. Nothing reads that as a description.
 //!
-//! So a reader of the converted file saw either an acquisition record or a
-//! multi-megabyte blob, depending on something as arbitrary as whether a `.txt`
-//! was copied along with the `.oir`. Anything parsing tag 270 — this crate's
-//! own metadata reader, the stimulus-derivatives plugin, a person opening
-//! Image ▸ Show Info — had to cope with both, and got nothing usable from the
-//! second.
+//! So it is *translated*: every value that has a place in the exported record
+//! is written into one, and everything else — the lookup tables, the overlays,
+//! the per-frame duplicates — is dropped, being display state and drawing
+//! geometry rather than a record of how the data was acquired.
 //!
-//! This module removes the second case. The XML is *translated* rather than
-//! carried: every value that has a place in the FluoView text record is written
-//! into one, and everything else — the lookup tables, the overlays, the
-//! per-frame duplicates — is dropped, because it is display state and drawing
-//! geometry rather than a record of how the data was acquired. Tag 270 then
-//! carries the same kind of text whether or not the sidecar existed, and the
-//! numbers that matter (pixel size, z-step, frame timing, the event markers a
-//! stimulus experiment is aligned to) reach [`StackInfo`] either way.
+//! # Why that format
+//!
+//! Because things downstream parse it. A converted file's description is the
+//! only place an analysis can learn when the stimulus fired, and the stimulus
+//! plugins already read the shape the instrument exports. Inventing a second
+//! dialect here would mean every reader learning both, for no gain: this is a
+//! record of an acquisition, and the acquisition's own software already has a
+//! way of writing one down.
+//!
+//! What is *not* done is reading that `.txt`. It is an optional, detachable
+//! second copy of what the container already holds — it goes missing, it gets
+//! renamed, it is left behind when the `.oir` is moved, and because the export
+//! carries a series number it can belong to a different acquisition in the same
+//! folder. Everything here comes from the file being opened, so the record
+//! cannot end up describing some other recording's pixels.
+//!
+//! The numbers that matter (pixel size, z-step, frame timing, the event markers
+//! a stimulus experiment is aligned to) also reach [`StackInfo`] as values, not
+//! only as text — see [`Record`].
 //!
 //! [`StackInfo`]: fasttiff_plugin_api::StackInfo
 //!
@@ -37,15 +42,18 @@
 //!
 //! The mapping is not guesswork about what the elements mean: it was diffed
 //! against the vendor's own export. For an acquisition that has both, the text
-//! built here from the XML reproduces **46 of the 53 lines of FluoView's
-//! `.txt`, byte for byte and in the same order**, and contradicts none of them.
-//! The seven it does not emit are values the XML does not carry — the path on
-//! the acquisition machine, `Primary Dimensions`, `Region Mode`, `Find Mode`,
-//! `ADM`, `Laser ND Filter`, and `Integration Count`, the last of which the
-//! XML *does* hold but as a stale `5` where the sidecar says `0` because
-//! integration was off. Omitting a key is a gap; emitting a wrong value for it
-//! would be worse than the blob this replaces, so nothing is emitted that the
-//! oracle did not confirm.
+//! built here from the XML reproduces **46 of the 53 lines of that export, byte
+//! for byte and in the same order**, and contradicts none of them. The seven it
+//! does not emit are values the XML does not carry — the path on the
+//! acquisition machine, `Primary Dimensions`, `Region Mode`, `Find Mode`,
+//! `ADM`, and `Laser ND Filter`. Omitting a key is a gap; emitting a wrong
+//! value for it would be worse, so nothing is emitted that the oracle did not
+//! confirm.
+//!
+//! One value is *derived* rather than copied for that reason: the XML's
+//! integration count is whatever was last configured and stays there when
+//! integration is switched off, so a file stating `None` still carried a count
+//! of 5 where the export says 0.
 //!
 //! # Layout of the metadata
 //!
@@ -267,7 +275,7 @@ fn root_name(xml: &str) -> Option<&str> {
 pub(super) struct Channel {
     /// The acquisition's own name for it, `CH1`.
     pub(super) name: Option<String>,
-    /// The detector's name, `RNDD3G` — which is what FluoView's sidecar calls
+    /// The detector's name, `RNDD3G` — which is what the exported record calls
     /// the "Channel Name", so it is what is written under that key.
     pub(super) device: Option<String>,
     /// Barrier filter, `BA575-645`.
@@ -561,8 +569,8 @@ impl Record {
     }
 
     /// Seconds between frames, over the gaps rather than over the frame count —
-    /// the same reading [`Sidecar::parse`](super::oir::Sidecar) takes of a
-    /// sidecar's `T Dimension`, so the two sources cannot disagree by a frame.
+    /// which is how the `T Dimension` line this writes is meant to be read
+    /// back, so the value and the text cannot disagree by a frame.
     pub(super) fn frame_interval_s(&self, frames: usize) -> Option<f64> {
         if frames < 2 {
             return None;
@@ -713,10 +721,8 @@ impl Record {
     /// `"[Section]"` headers.
     ///
     /// The shape is not decoration. It is the format the acquisition software
-    /// itself exports, which means a converted file's tag 270 reads the same
-    /// whether it came from a sidecar or from here, and every reader of it —
-    /// this importer's own [`Sidecar`](super::oir::Sidecar) parser included —
-    /// needs one code path rather than two.
+    /// itself exports, so a converted file's tag 270 and that export can be
+    /// read by one parser rather than two.
     ///
     /// `frames` is the number of time points in the stack being imported, not
     /// the number the acquisition record claims. They differ: an interrupted
@@ -744,7 +750,7 @@ impl Record {
 
         let mut dims = Rows::default();
         // `512, 0.0 - 318.198 [um], 0.621 [um/pixel]` — the extent is the frame
-        // size times the pixel size, which is how the sidecar states it.
+        // size times the pixel size, which is how the export states it.
         for (key, size, pixel) in [
             ("X Dimension", self.width, self.pixel_x),
             ("Y Dimension", self.height, self.pixel_y),
@@ -876,7 +882,7 @@ impl Record {
 
         // Last, and in this order: an event is read as the three lines
         // `[Event n]`, `Event Contents`, `Event Timer`, which is how the
-        // sidecar writes them and how they are read back out.
+        // export writes them and how they are read back out.
         for (i, (contents, ms)) in self.events.iter().enumerate() {
             let mut ev = Rows::default();
             ev.set("Event Contents", Some(contents.clone()));
@@ -915,7 +921,7 @@ impl Record {
 }
 
 /// `2025-07-28T15:36:14.925-04:00` → `07/28/2025 03:36:14.925 PM`, the way the
-/// sidecar states it. `None` if the timestamp is not in the shape the schema
+/// export states it. `None` if the timestamp is not in the shape the schema
 /// uses, since a half-converted date is worse than none.
 fn fluoview_date(iso: &str) -> Option<String> {
     let b = iso.as_bytes();

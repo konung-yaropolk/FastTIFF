@@ -43,12 +43,21 @@
 //!
 //! # Metadata
 //!
-//! Two things state what the acquisition was: a `<name>.txt` the acquisition
-//! software writes beside the file, and the file's own XML. Only the first is
-//! readable as it stands; the second is megabytes of schema, most of it display
-//! lookup tables. Both end up as the same `"key"\t"value"` record — see
-//! [`meta`], which does the translation — so a converted file's description
-//! reads the same way whether or not the `.txt` travelled with the `.oir`.
+//! Everything a converted file says about the acquisition comes out of the OIR
+//! itself — see [`meta`], which reads the file's XML and writes it as the
+//! `"key"\t"value"` record the acquisition software exports beside an OIR as a
+//! `.txt`.
+//!
+//! That format is kept, and the `.txt` is not read. Two separate points. The
+//! format is kept because things downstream parse it: a converted file's
+//! description is the only place an analysis can learn when the stimulus fired,
+//! and it should not have to learn two dialects to do it. The file is not read
+//! because it is a second, optional, detachable copy of what the OIR already
+//! contains — it goes missing, it gets renamed, it can be left behind when the
+//! `.oir` is moved, and (since the exported name carries a series number) it
+//! can perfectly well belong to a different acquisition in the same folder.
+//! Reading the container means the record cannot disagree with the pixels
+//! beside it.
 //!
 //! # Reading
 //!
@@ -205,17 +214,9 @@ impl Importer for Oir {
         }
         let record = reader.finish();
 
-        // The sidecar the acquisition software writes beside every OIR. When it
-        // is there it is the authority — it is the vendor's own text, and it
-        // states a few things the XML does not. When it is not, the file still
-        // knows what it recorded, and `record` says the same in the same shape.
-        let sidecar = read_sidecar(&request.path);
-        let summary = match sidecar.as_deref() {
-            Some(text) => Sidecar::parse(text),
-            None => Sidecar::from_record(&record),
-        };
+        let summary = Summary::from_record(&record);
 
-        let (width, height) = dimensions(&record, &summary, &planes)?;
+        let (width, height) = dimensions(&record, &planes)?;
         let (shape, dropped) = Shape::derive(&mut planes, &summary, width, height)?;
         host.log(&format!(
             "{width}x{height}, {} channel(s), {} slice(s), {} frame(s), {}-bit",
@@ -240,35 +241,26 @@ impl Importer for Oir {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "oir".into());
 
-        // What tag 270 of the converted file will carry. Always this text
-        // form: an OIR's raw XML is not a description anybody can read — in one
-        // real acquisition it is four megabytes, 3.1 MB of which is three
-        // 65,536-entry lookup tables — and carrying it verbatim made the
-        // metadata of a converted file depend on whether a `.txt` happened to
-        // be copied along with it.
-        let description = match sidecar {
-            Some(text) => Some(text),
-            None => {
-                let file_name = request
-                    .path
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| format!("{name}.oir"));
-                let text = record.to_text(&file_name, shape.frames);
-                host.log(&match text {
-                    Some(_) => format!(
-                        "no `.txt` beside this file: translated the acquisition record from its \
-                         own metadata ({} channel(s), {} event marker(s))",
-                        record.channels.len(),
-                        record.events.len()
-                    ),
-                    None => "no `.txt` beside this file and nothing this reader recognises in its \
-                             own metadata: the converted file carries no acquisition record"
-                        .to_string(),
-                });
-                text
-            }
-        };
+        // What tag 270 of the converted file will carry: the acquisition
+        // record, written the way the acquisition software exports it. Never
+        // the file's own XML — that is four megabytes in one real acquisition,
+        // 3.1 MB of it three 65,536-entry lookup tables, and nothing can read
+        // it as a description.
+        let file_name = request
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("{name}.oir"));
+        let description = record.to_text(&file_name, shape.frames);
+        host.log(&match description {
+            Some(_) => format!(
+                "acquisition record: {} channel(s), {} event marker(s)",
+                record.channels.len(),
+                record.events.len()
+            ),
+            None => "this OIR carries nothing this reader recognises as an acquisition record"
+                .to_string(),
+        });
 
         Ok(ImportResult {
             image: ImageResult {
@@ -299,11 +291,9 @@ impl Importer for Oir {
                     y: summary.pixel_size,
                     z: summary.z_step,
                 },
-                // The sidecar's own reading of it first; the file's frame
-                // timestamps otherwise, over the frames actually imported.
-                frame_interval_s: summary
-                    .frame_interval_s
-                    .or_else(|| record.frame_interval_s(shape.frames)),
+                // From the file's own frame timestamps, over the frames
+                // actually imported.
+                frame_interval_s: record.frame_interval_s(shape.frames),
                 channel_names: summary.channel_names.clone(),
                 description,
                 ..Default::default()
@@ -595,7 +585,7 @@ impl Shape {
     /// the kind of thing that quietly ruins an average.
     fn derive(
         planes: &mut PlaneMap,
-        summary: &Sidecar,
+        summary: &Summary,
         width: u32,
         height: u32,
     ) -> Result<(Shape, usize), PluginError> {
@@ -646,20 +636,17 @@ impl Shape {
         }
 
         // The axes, preferably from the plane names themselves: distinct UIDs
-        // are the channels, distinct `z` fields the slices. The names are the
-        // file's own account of its shape and travel with it, where the sidecar
-        // is a separate `.txt` that may be missing, may have been renamed, or
-        // may describe a different acquisition — a multi-file recording whose
-        // sidecar was named after another part reported one channel and twice
-        // as many timepoints, a plausible-looking stack of the wrong shape
-        // rather than an error anybody would notice.
+        // are the channels, distinct `z` fields the slices. The names are what
+        // the container says about its own contents, which is as close to the
+        // pixels as this gets — the acquisition record beside them describes
+        // what was *configured*, and the two can differ.
         //
         // But only when the names actually distinguish something. Planes named
         // `t001_0_1`, `t002_0_1`, … have one UID and one `z` field between
         // them, and reading that as "one channel, one slice" would be taking
-        // silence for evidence — and would override a sidecar that does know.
-        // So a single UID and a single `z` defers to the sidecar, which also
-        // covers a file carrying an axis in some form this does not read.
+        // silence for evidence. So a single UID and a single `z` defers to the
+        // record, which also covers a file carrying an axis in some form these
+        // names do not spell out.
         let counted = axis_counts(planes);
         let informative = counted.0 > 1 || counted.1 > 1;
         let (c, z) = match counted {
@@ -706,24 +693,23 @@ fn axis_counts(planes: &PlaneMap) -> (usize, usize) {
     (uids.len().max(1), zs.len().max(1))
 }
 
-/// The frame size, from the sidecar if it says, otherwise from the file's XML.
+/// The frame size the acquisition record states, checked before it is used.
 ///
-/// The sidecar goes first because it is the only one of the two that can
-/// describe a file this reader does not fully understand; the record is the
-/// fallback, and covers every OIR that has no `.txt` beside it.
-fn dimensions(
-    record: &meta::Record,
-    summary: &Sidecar,
-    planes: &PlaneMap,
-) -> Result<(u32, u32), PluginError> {
-    if let (Some(w), Some(h)) = (summary.width, summary.height) {
-        return Ok((w, h));
-    }
+/// Validated rather than trusted: everything downstream multiplies these
+/// together — to size a plane buffer, to divide the bytes of a plane into a
+/// sample width — so a number out of a malformed file becomes an allocation
+/// and an arithmetic overflow rather than a refusal.
+///
+/// The record looks in three places for it ([`meta::Record::parse`]), so a file
+/// that reaches here without one is one whose metadata this reader does not
+/// recognise at all.
+fn dimensions(record: &meta::Record, planes: &PlaneMap) -> Result<(u32, u32), PluginError> {
+    const LIMIT: u32 = 1_000_000;
     match (record.width, record.height) {
-        (Some(w), Some(h)) if w >= 1 && h >= 1 && w <= 1_000_000 && h <= 1_000_000 => Ok((w, h)),
+        (Some(w), Some(h)) if (1..=LIMIT).contains(&w) && (1..=LIMIT).contains(&h) => Ok((w, h)),
         _ => Err(PluginError::failed(format!(
-            "could not determine the frame size: neither the sidecar `.txt` nor the \
-             file's own metadata states it (found {} plane(s))",
+            "could not determine the frame size: this OIR's own metadata does not state it \
+             (found {} plane(s))",
             planes.len()
         ))),
     }
@@ -774,146 +760,45 @@ fn read_planes(
 
 // ---------------------------------------------------------------- metadata
 
-/// The `.txt` the acquisition software writes beside an OIR.
+/// The values from the acquisition record that this import *acts on*, as
+/// opposed to the ones it merely carries into the description.
 ///
-/// This is the file's metadata in the form a person can read, and it is what
-/// goes into the written TIFF's `ImageDescription`. Everything [`meta`] does is
-/// an attempt to reconstruct it from the file itself when it is not here.
-///
-/// Two names, because FluoView uses two. A single-file acquisition gets
-/// `<name>.txt`; one long enough to be split gets `<name>_0001.txt`, the same
-/// series suffix its exported TIFF carries — so the acquisitions most in need
-/// of a readable record are exactly the ones whose record a
-/// `with_extension("txt")` misses.
-fn read_sidecar(path: &Path) -> Option<String> {
-    let mut names = vec![path.with_extension("txt")];
-    if let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().to_string()) {
-        names.push(path.with_file_name(format!("{stem}_0001.txt")));
-    }
-    names.into_iter().find_map(|txt| {
-        let bytes = std::fs::read(&txt).ok()?;
-        // FluoView writes these as plain ASCII; anything else is not the
-        // sidecar.
-        let text = String::from_utf8(bytes).ok()?;
-        (!text.trim().is_empty()).then_some(text)
-    })
-}
-
-/// The values worth acting on from the sidecar, as opposed to merely carrying.
+/// A separate type from [`meta::Record`] because they answer different
+/// questions. The record is everything the file says, at the precision it says
+/// it, on its way to tag 270. This is the handful of numbers that decide what
+/// the stack *is* — how many channels, how many slices, how big a pixel — and
+/// it exists so the code that decides that cannot accidentally reach for a
+/// laser wavelength.
 #[derive(Default)]
-struct Sidecar {
-    width: Option<u32>,
-    height: Option<u32>,
+struct Summary {
     channels: Option<usize>,
     slices: Option<usize>,
     /// Microns per pixel.
     pixel_size: Option<f64>,
     /// Microns between slices.
     z_step: Option<f64>,
-    frame_interval_s: Option<f64>,
     channel_names: Vec<String>,
 }
 
-impl Sidecar {
-    /// Parse FluoView's `"key"\t"value"` export.
-    ///
-    /// Deliberately forgiving: a key that is missing, renamed by a later
-    /// software version, or formatted differently leaves its field `None`
-    /// rather than failing the import. The pixels do not depend on any of it.
-    fn parse(text: &str) -> Sidecar {
-        let mut s = Sidecar::default();
-        for line in text.lines() {
-            let mut parts = line.splitn(2, '\t');
-            let (Some(k), Some(v)) = (parts.next(), parts.next()) else {
-                continue;
-            };
-            let key = k.trim().trim_matches('"');
-            let value = v.trim().trim_matches('"');
-            match key {
-                // `512, 0.0 - 318.198 [um], 0.621 [um/pixel]`
-                "X Dimension" => {
-                    s.width = first_number(value).map(|v| v as u32);
-                    s.pixel_size = unit_number(value, "[um/pixel]");
-                }
-                "Y Dimension" => s.height = first_number(value).map(|v| v as u32),
-                // `1 [Ch]`
-                "Channel Dimension" => s.channels = first_number(value).map(|v| v as usize),
-                // `10, 0.0 - 9.0 [um], 1.0 [um/slice]`
-                "Z Dimension" => {
-                    s.slices = first_number(value).map(|v| v as usize);
-                    s.z_step = unit_number(value, "[um/slice]");
-                }
-                // `298, 0.000 - 322.701 [s], Interval FreeRun`
-                "T Dimension" => {
-                    let n = first_number(value);
-                    // The span is start-to-end, so the interval is over one
-                    // fewer gaps than there are frames.
-                    let span = value
-                        .split_once('-')
-                        .and_then(|(_, rest)| first_number(rest));
-                    s.frame_interval_s = match (n, span) {
-                        (Some(n), Some(span)) if n > 1.0 => Some(span / (n - 1.0)),
-                        _ => None,
-                    };
-                }
-                "Channel Name" => s.channel_names.push(value.to_string()),
-                _ => {}
-            }
-        }
-        s
-    }
-}
-
-impl Sidecar {
-    /// The same values, taken from the file's own XML rather than from a `.txt`.
+impl Summary {
+    /// Taken from the record, at the precision the file states.
     ///
     /// Read from the [`Record`](meta::Record) rather than parsed back out of
-    /// the text it renders, and the difference matters: that text states a pixel
-    /// size to three decimals, because that is how FluoView's own export states
-    /// it. These numbers calibrate every measurement made on the stack, and
-    /// 0.621 where the file says 0.621480569402239 is an error of 0.08% in every
-    /// distance — small, and no reason to introduce it when the exact value is
-    /// right there.
-    fn from_record(r: &meta::Record) -> Sidecar {
-        Sidecar {
-            width: r.width,
-            height: r.height,
+    /// the text it renders, and the difference matters: that text states a
+    /// pixel size to three decimals, because that is how the acquisition
+    /// software's own export states it. These numbers calibrate every
+    /// measurement made on the stack, and 0.621 where the file says
+    /// 0.621480569402239 is an error of 0.08% in every distance — small, and no
+    /// reason to introduce it when the exact value is right there.
+    fn from_record(r: &meta::Record) -> Summary {
+        Summary {
             channels: (!r.channels.is_empty()).then_some(r.channels.len()),
             slices: r.slices,
             pixel_size: r.pixel_x,
             z_step: r.z_step,
-            // Not here: the frame interval depends on how many frames the
-            // stack ends up with, which is not known until the planes have
-            // been counted. The caller fills it in then.
-            frame_interval_s: None,
             channel_names: r.channels.iter().filter_map(|c| c.label()).collect(),
         }
     }
-}
-
-/// The first number in `s`, ignoring anything around it.
-fn first_number(s: &str) -> Option<f64> {
-    let mut start = None;
-    for (i, c) in s.char_indices() {
-        let numeric = c.is_ascii_digit() || (c == '-' && start.is_none()) || c == '.';
-        match (numeric, start) {
-            (true, None) => start = Some(i),
-            (false, Some(b)) => return s[b..i].parse().ok(),
-            _ => {}
-        }
-    }
-    start.and_then(|b| s[b..].parse().ok())
-}
-
-/// The number immediately before `unit`, as in `0.621 [um/pixel]`.
-fn unit_number(s: &str, unit: &str) -> Option<f64> {
-    let at = s.find(unit)?;
-    let before = s[..at].trim_end();
-    let start = before
-        .rfind(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    before[start..].parse().ok().filter(|v: &f64| v.is_finite())
 }
 
 /// Every XML document in the file's metadata blocks that this reader
@@ -968,8 +853,8 @@ fn embedded_xml(bytes: &[u8], offsets: &[u64]) -> Vec<String> {
         // not valid UTF-8 — an operator's name, a unit symbol, something typed
         // on a machine with a code page — and discarding the whole document for
         // it discarded the one that states the frame size, which then failed
-        // the import with "neither the sidecar nor the file's own metadata
-        // states it". Nothing here reads prose: these are searched for numeric
+        // the import with "this OIR's own metadata does not state it". Nothing
+        // here reads prose: these documents are searched for numeric
         // tags, and a replacement character in a field nobody looks at is not a
         // reason to throw the file's dimensions away.
         let text = String::from_utf8_lossy(&body[start..]);

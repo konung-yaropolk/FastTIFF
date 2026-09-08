@@ -81,12 +81,27 @@ impl Builder {
 /// in scattered chunks and in the wrong order — so a reader that concatenates
 /// blocks in file order, or ignores the declared offsets, fails.
 fn stack_file(w: u32, h: u32, names: &[&str], chunk: usize) -> Vec<u8> {
+    channels_file(w, h, names, chunk, 1)
+}
+
+/// As [`stack_file`], with the acquisition record stating `channels` recorded
+/// channels — which is what decides the shape when the plane names do not.
+fn channels_file(w: u32, h: u32, names: &[&str], chunk: usize, channels: usize) -> Vec<u8> {
     let mut b = Builder::new();
+    let listed: String = (0..channels)
+        .map(|i| {
+            format!(
+                "<commonimage:channel id=\"c{i}\"><commonphase:name>CH{i}</commonphase:name>\
+                 </commonimage:channel>"
+            )
+        })
+        .collect();
     b.xml(&format!(
-        // The nesting a real acquisition uses: the frame size is stated inside
-        // `imageInfo`, the part of the record describing what was recorded
-        // rather than what the microscope was configured to record.
+        // The nesting a real acquisition uses: the frame size and the channels
+        // that were recorded are stated inside `imageInfo`, the part of the
+        // record describing what happened rather than what was configured.
         "<?xml version=\"1.0\"?><lsmimage:imageProperties><commonimage:imageInfo>\
+         <commonimage:phase><commonimage:group>{listed}</commonimage:group></commonimage:phase>\
          <commonimage:width>{w}</commonimage:width>\
          <commonimage:height>{h}</commonimage:height>\
          </commonimage:imageInfo></lsmimage:imageProperties>"
@@ -220,74 +235,54 @@ fn plane_keys_sort_numerically_and_exclude_non_planes() {
 // -------------------------------------------------------------------- shape
 
 #[test]
-fn the_sidecar_states_the_axes_and_the_plane_count_must_agree() {
+fn the_records_channel_count_and_the_plane_count_must_agree() {
     let names: Vec<String> = (1..=6).map(|i| format!("t{i:03}_0_1_uid")).collect();
     let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    let file = tmp("axes.oir", &stack_file(4, 4, &refs, 16));
 
-    // 2 channels x 3 timepoints.
-    let txt = file.with_extension("txt");
-    std::fs::write(
-        &txt,
-        "\"[Dimensions]\"\t\"\"\n\"Channel Dimension\"\t\"2 [Ch]\"\n",
-    )
-    .unwrap();
+    // The record says two channels; six planes is then 2 x 3 timepoints.
+    let file = tmp("axes.oir", &channels_file(4, 4, &refs, 16, 2));
     let r = import(&file).expect("import");
     assert_eq!(
         (r.image.channels, r.image.slices, r.image.frames),
         (2, 1, 3)
     );
+    let _ = std::fs::remove_file(file);
 
-    // A sidecar describing a different file must be ignored, not believed:
-    // 4 channels does not divide 6 planes.
-    std::fs::write(
-        &txt,
-        "\"[Dimensions]\"\t\"\"\n\"Channel Dimension\"\t\"4 [Ch]\"\n",
-    )
-    .unwrap();
+    // A count that cannot be right for the planes present is ignored rather
+    // than believed: four channels does not divide six planes, and a stack of
+    // the wrong shape is worse than one of the plainest possible shape.
+    let file = tmp("axes_bad.oir", &channels_file(4, 4, &refs, 16, 4));
     let r = import(&file).expect("import");
     assert_eq!(
         (r.image.channels, r.image.frames),
         (1, 6),
-        "an inconsistent sidecar was trusted over the file itself"
+        "a channel count that does not divide the planes was trusted anyway"
     );
-
-    let _ = std::fs::remove_file(&txt);
     let _ = std::fs::remove_file(file);
 }
 
 /// The other half of the rule the test above states.
 ///
 /// There, the plane names carried one UID and one `z` between them, said
-/// nothing about the axes, and the sidecar was believed. Here they say two
-/// channels over three slices, and a sidecar claiming a plain six-frame
-/// timelapse must not be allowed to flatten them: this is the multi-file
-/// z-stack that opened as the wrong shape without anybody noticing, because a
-/// sidecar named after another part of the acquisition described that part.
+/// nothing about the axes, and the record was believed. Here they say two
+/// channels over three slices, and a record claiming a plain six-frame
+/// timelapse must not be allowed to flatten them: the names come from the same
+/// blocks as the pixels, and the record describes what the microscope was set
+/// up to do.
 #[test]
-fn plane_names_that_state_the_axes_outrank_a_sidecar_that_disagrees() {
+fn plane_names_that_state_the_axes_outrank_a_record_that_disagrees() {
     let names: Vec<String> = (1..=3)
         .flat_map(|z| ["uidA", "uidB"].map(move |c| format!("z{z}_0_1_{c}")))
         .collect();
     let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    let file = tmp("axes_from_names.oir", &stack_file(4, 4, &refs, 16));
+    let file = tmp("axes_from_names.oir", &channels_file(4, 4, &refs, 16, 1));
 
-    let txt = file.with_extension("txt");
-    std::fs::write(
-        &txt,
-        "\"[Dimensions]\"	\"\"
-\"Channel Dimension\"	\"1 [Ch]\"
-",
-    )
-    .unwrap();
     let r = import(&file).expect("import");
     assert_eq!(
         (r.image.channels, r.image.slices, r.image.frames),
         (2, 3, 1),
-        "the names say 2 channels over 3 slices; the sidecar was believed instead"
+        "the names say 2 channels over 3 slices; the record was believed instead"
     );
-
-    let _ = std::fs::remove_file(&txt);
     let _ = std::fs::remove_file(file);
 }
 
@@ -299,117 +294,97 @@ fn sample_width_is_measured_from_the_data_rather_than_assumed() {
     let _ = std::fs::remove_file(file);
 }
 
-// ----------------------------------------------------------------- sidecar
-
-#[test]
-fn the_fluoview_sidecar_is_parsed_for_the_values_worth_acting_on() {
-    // The shape FluoView writes: quoted, tab-separated, sectioned.
-    let s = Sidecar::parse(
-        "\"[General]\"\t\"\"\n\
-         \"Scan Mode\"\t\"XYT\"\n\
-         \"[Dimensions]\"\t\"\"\n\
-         \"X Dimension\"\t\"512, 0.0 - 318.198 [um], 0.621 [um/pixel]\"\n\
-         \"Y Dimension\"\t\"512, 0.0 - 318.198 [um], 0.621 [um/pixel]\"\n\
-         \"Channel Dimension\"\t\"2 [Ch]\"\n\
-         \"Z Dimension\"\t\"11, 0.0 - 10.0 [um], 1.0 [um/slice]\"\n\
-         \"T Dimension\"\t\"298, 0.000 - 322.701 [s], Interval FreeRun\"\n\
-         \"[Channel 1]\"\t\"\"\n\
-         \"Channel Name\"\t\"RNDD3G\"\n",
-    );
-    assert_eq!(s.width, Some(512));
-    assert_eq!(s.height, Some(512));
-    assert_eq!(s.channels, Some(2));
-    assert_eq!(s.slices, Some(11));
-    assert_eq!(s.pixel_size, Some(0.621));
-    assert_eq!(s.z_step, Some(1.0));
-    assert_eq!(s.channel_names, vec!["RNDD3G".to_string()]);
-    // 298 frames span 322.701 s end to end, so the gap is over 297 intervals.
-    let fi = s.frame_interval_s.expect("interval");
-    assert!(
-        (fi - 322.701 / 297.0).abs() < 1e-9,
-        "the interval was computed over the wrong number of gaps: {fi}"
-    );
-}
-
-#[test]
-fn a_sidecar_that_says_nothing_useful_leaves_every_field_empty() {
-    let s = Sidecar::parse("nonsense\nwithout tabs or quotes\n");
-    assert!(s.width.is_none() && s.channels.is_none() && s.pixel_size.is_none());
-    // And an empty one is treated as absent rather than as an empty description.
-    assert_eq!(read_sidecar(Path::new("/definitely/not/here.oir")), None);
-}
-
-#[test]
-fn numbers_are_read_from_the_shapes_fluoview_writes() {
-    assert_eq!(first_number("512, 0.0 - 318.198 [um]"), Some(512.0));
-    assert_eq!(first_number("1 [Ch]"), Some(1.0));
-    assert_eq!(first_number("no numbers here"), None);
-    assert_eq!(unit_number("0.621 [um/pixel]", "[um/pixel]"), Some(0.621));
-    assert_eq!(
-        unit_number("512, 0.0 - 318.198 [um], 0.621 [um/pixel]", "[um/pixel]"),
-        Some(0.621)
-    );
-    assert_eq!(unit_number("nothing", "[um/pixel]"), None);
-}
-
 // ------------------------------------------------------------- the metadata
 
 /// What the user asked for: the OIR's own metadata, in tag 270 of the file
-/// FastTIFF writes.
+/// FastTIFF writes — and in the form the acquisition software exports, because
+/// that is the form the analyses downstream already parse.
+///
+/// The file's own XML is never what goes there. In a real acquisition it is
+/// four megabytes, three quarters of it display lookup tables written out
+/// element by element, and no reader of a description can do anything with it.
 #[test]
-fn the_sidecar_metadata_reaches_tag_270_of_the_written_file() {
-    let file = tmp("meta.oir", &stack_file(8, 4, &["t001_0_1_uid"], 32));
-    let txt = file.with_extension("txt");
-    let sidecar = "\"[General]\"\t\"\"\n\
-                   \"System Name\"\t\"FVMPE-RS\"\n\
-                   \"[Dimensions]\"\t\"\"\n\
-                   \"X Dimension\"\t\"8, 0.0 - 4.968 [um], 0.621 [um/pixel]\"\n\
-                   \"[Acquisition]\"\t\"\"\n\
-                   \"Objective Lens\"\t\"XLUMPLFLN20XW\"\n";
-    std::fs::write(&txt, sidecar).unwrap();
+fn the_acquisition_record_reaches_tag_270_of_the_written_file() {
+    let mut b = Builder::new();
+    b.xml(
+        "<?xml version=\"1.0\"?><lsmimage:imageProperties>\
+         <commonimage:system><base:systemName>FVMPE-RS</base:systemName></commonimage:system>\
+         <commonimage:imageInfo>\
+         <commonimage:phase><commonimage:group><commonimage:channel id=\"c1\">\
+         <commonphase:name>CH1</commonphase:name>\
+         <commonphase:length><commonparam:x>0.621480569402239</commonparam:x>\
+         <commonparam:y>0.621480569402239</commonparam:y></commonphase:length>\
+         </commonimage:channel></commonimage:group></commonimage:phase>\
+         <commonimage:width>8</commonimage:width>\
+         <commonimage:height>4</commonimage:height>\
+         </commonimage:imageInfo>\
+         <lsmimage:acquisition><lsmimage:microscopeConfiguration>\
+         <opticalelement:objectiveLens><opticalelement:name>XLUMPLFLN20XW</opticalelement:name>\
+         </opticalelement:objectiveLens></lsmimage:microscopeConfiguration>\
+         </lsmimage:acquisition></lsmimage:imageProperties>",
+    );
+    // The document that must never reach tag 270. A real one is 525 KB of
+    // exactly this, and there are three of them.
+    b.xml("<?xml version=\"1.0\"?><lut:LUT><lut:intensity>0</lut:intensity></lut:LUT>");
+    b.plane_chunk("t001_0_1_uid", 0, &[7u8; 64]);
+    let file = tmp("meta.oir", &b.finish());
 
     let r = import(&file).expect("import");
     let info = r.info.clone().expect("metadata");
-    assert_eq!(
-        info.description.as_deref(),
-        Some(sidecar),
-        "the sidecar must be carried verbatim, not summarised"
+    let desc = info.description.clone().expect("the acquisition record");
+
+    assert!(
+        !desc.contains('<'),
+        "raw XML reached the description: {desc}"
     );
-    assert_eq!(info.spacing.x, Some(0.621));
+    for line in [
+        "\"Name\"\t\"fasttiff-oir-meta.oir\"",
+        "\"System Name\"\t\"FVMPE-RS\"",
+        "\"X Dimension\"\t\"8, 0.0 - 4.972 [um], 0.621 [um/pixel]\"",
+        "\"Objective Lens\"\t\"XLUMPLFLN20XW\"",
+    ] {
+        assert!(desc.contains(line), "missing {line:?} from:\n{desc}");
+    }
+
+    // The structured values keep the precision the file states, rather than the
+    // three decimals the text above rounds them to.
+    assert_eq!(info.spacing.x, Some(0.621480569402239));
     assert_eq!(info.unit.as_deref(), Some("micron"));
 
     // Through the writer and back out again.
     let stack = crate::plugins::to_stack(&r.image, r.info.as_ref(), false).expect("open");
-    let desc = stack
+    let written = stack
         .tiff
         .description
         .as_deref()
         .expect("tag 270 should have been written");
     assert!(
-        desc.contains("XLUMPLFLN20XW") && desc.contains("FVMPE-RS"),
-        "the acquisition record did not reach tag 270: {desc}"
+        written.contains("XLUMPLFLN20XW") && written.contains("FVMPE-RS"),
+        "the acquisition record did not reach tag 270: {written}"
     );
     // …and the structured metadata still works, so it opens as an image rather
     // than as a blob with a long description.
     assert_eq!(stack.dimensions(), Some((8, 4)));
-    assert_eq!(
-        stack.tiff.meta.pixel_width,
-        Some(0.621),
-        "the calibration was lost on the way to the file"
+    // Close, not equal: a TIFF states resolution as a rational, so an arbitrary
+    // f64 comes back rounded to what a numerator over a denominator can say.
+    // That is the format's limit rather than this importer's, and it is why the
+    // exact value is taken from the record rather than read back out of here.
+    let written_pixel = stack.tiff.meta.pixel_width.expect("the calibration");
+    assert!(
+        (written_pixel - 0.621480569402239).abs() < 1e-6,
+        "the calibration was lost on the way to the file: {written_pixel}"
     );
-
-    let _ = std::fs::remove_file(&txt);
     let _ = std::fs::remove_file(file);
 }
 
-/// An OIR with no `.txt` beside it used to have its own XML dumped into
-/// tag 270 — in a real acquisition four megabytes of it, three quarters of
-/// that being display lookup tables written out element by element. Now the
-/// record is *translated* into the same text a sidecar would have carried, so
-/// what a converted file says about itself no longer depends on whether a
-/// `.txt` happened to be copied along with the `.oir`.
+/// The whole record, end to end: an acquisition with events and timing, whose
+/// description has to come out as text a stimulus analysis can parse.
+///
+/// The same file also carries a lookup table, which is what tag 270 used to
+/// fill up with — four megabytes in a real acquisition, three quarters of it
+/// display tables written out element by element.
 #[test]
-fn without_a_sidecar_the_record_is_translated_rather_than_dumped() {
+fn the_record_is_translated_rather_than_dumped() {
     let mut b = Builder::new();
     b.xml(
         "<?xml version=\"1.0\"?><lsmimage:imageProperties>\
@@ -453,8 +428,6 @@ fn without_a_sidecar_the_record_is_translated_rather_than_dumped() {
         b.plane_chunk(name, 0, &[i as u8; 32]);
     }
     let file = tmp("translated.oir", &b.finish());
-    // Make sure a leftover from another test cannot satisfy this one.
-    let _ = std::fs::remove_file(file.with_extension("txt"));
 
     let info = import(&file).expect("import").info.expect("metadata");
     let desc = info.description.expect("the translated record");
@@ -469,8 +442,9 @@ fn without_a_sidecar_the_record_is_translated_rather_than_dumped() {
         "a lookup table survived: {desc}"
     );
 
-    // And it is the sidecar's own format, down to the keys — which is what
-    // lets one parser read a converted file whichever source it came from.
+    // And it is the acquisition software's own format, down to the keys —
+    // which is what lets one parser read a converted file and the instrument's
+    // own export.
     for line in [
         "\"[General]\"\t\"\"",
         "\"Name\"\t\"fasttiff-oir-translated.oir\"",
@@ -549,7 +523,6 @@ fn a_file_that_states_no_frame_size_is_refused_rather_than_guessed_at() {
     let mut b = Builder::new();
     b.plane_chunk("t001_0_1_uid", 0, &[0u8; 32]);
     let file = tmp("nosize.oir", &b.finish());
-    let _ = std::fs::remove_file(file.with_extension("txt"));
     let err = import(&file).expect_err("an unknown frame size must be refused");
     assert!(err.to_string().contains("frame size"), "{err}");
     let _ = std::fs::remove_file(file);
@@ -585,7 +558,6 @@ fn an_incomplete_trailing_plane_is_dropped_rather_than_padded() {
     }
     b.plane_chunk("t003_0_1_uid", 0, &[2u8; 6]);
     let file = tmp("partial.oir", &b.finish());
-    let _ = std::fs::remove_file(file.with_extension("txt"));
 
     let r = import(&file).expect("import");
     assert_eq!(
@@ -604,7 +576,6 @@ fn a_file_of_nothing_but_incomplete_planes_is_refused() {
     b.plane_chunk("t001_0_1_uid", 0, &[1u8; 128]);
     b.plane_chunk("t002_0_1_uid", 0, &[1u8; 128]);
     let file = tmp("allshort.oir", &b.finish());
-    let _ = std::fs::remove_file(file.with_extension("txt"));
     // 128 bytes over 64 pixels is 2 bytes each, so these are *complete* — the
     // reader must not invent a larger plane than the data supports.
     let r = import(&file).expect("uniformly short planes are just small planes");
@@ -653,9 +624,8 @@ fn a_real_oir_matches_the_software_export() {
         .and_then(|i| i.description.as_ref())
         .expect("no metadata was carried");
     eprintln!("--- description, {} bytes ---\n{desc}", desc.len());
-    // Whether it came from the sidecar or was translated from the file's own
-    // XML, what reaches tag 270 is text. It used to be whichever of the two the
-    // directory happened to contain, and the XML form ran to four megabytes.
+    // What reaches tag 270 is text. It used to be the file's own XML, which
+    // in a real acquisition runs to four megabytes.
     assert!(
         !desc.contains("<?xml"),
         "raw XML reached the description ({} bytes)",
