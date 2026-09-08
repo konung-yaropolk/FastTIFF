@@ -22,6 +22,8 @@ use rayon::prelude::*;
 use scivis_render::{ChannelKind, VolumeKind, MAX_CHANNELS};
 use std::path::PathBuf;
 #[cfg(feature = "threads")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "threads")]
 use std::sync::mpsc::{channel, Receiver, Sender};
 #[cfg(feature = "threads")]
 use std::sync::{Arc, Mutex};
@@ -279,6 +281,14 @@ struct BuiltReply {
 pub struct VolumeBuilder {
     tx: Sender<Request>,
     result: Arc<Mutex<Option<BuiltReply>>>,
+    /// Set by the worker when it could not open the file and gave up.
+    ///
+    /// A dead worker cannot be detected by *asking* it: `request` only fails
+    /// once the receiver has been dropped, which is a frame or two after the
+    /// open failed, and by then a request has already been queued and is being
+    /// polled for a reply that will never come. This is the flag that says so
+    /// on every frame after, rather than only on the one that happened to send.
+    failed: Arc<AtomicBool>,
     _handle: JoinHandle<()>,
 }
 
@@ -292,18 +302,34 @@ impl VolumeBuilder {
         let (tx, rx) = channel::<Request>();
         let result = Arc::new(Mutex::new(None));
         let result_worker = Arc::clone(&result);
+        let failed = Arc::new(AtomicBool::new(false));
+        let failed_worker = Arc::clone(&failed);
         let handle = std::thread::Builder::new()
             .name("fasttiff-volume".to_owned())
             .spawn(move || match TiffStack::open(&path) {
                 Ok(stack) => worker_loop(stack, rx, result_worker),
-                Err(e) => log::warn!("volume builder: can't open {}: {e:#}", path.display()),
+                Err(e) => {
+                    // Not always a problem worth reporting: a stack a plugin
+                    // imported has no file on disk at all, and its `path` is
+                    // the name it is shown under. The caller builds volumes
+                    // here on the main thread instead.
+                    log::debug!("volume builder: can't open {}: {e:#}", path.display());
+                    failed_worker.store(true, Ordering::Release);
+                }
             })
             .ok()?;
         Some(Self {
             tx,
             result,
+            failed,
             _handle: handle,
         })
+    }
+
+    /// Whether the worker gave up before it started: its file could not be
+    /// opened, and it will never answer anything.
+    pub fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
     }
 
     /// Queue a build. Returns `false` when the worker is gone (its file open
@@ -366,8 +392,17 @@ impl VolumeBuilder {
         match self.0 {}
     }
 
+    pub fn failed(&self) -> bool {
+        match self.0 {}
+    }
+
     #[allow(clippy::option_option)]
     pub fn take_matching(&self, _generation: u64, _time: usize) -> Option<Option<BuiltVolume>> {
         match self.0 {}
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "threads")]
+#[path = "volume_tests.rs"]
+mod tests;

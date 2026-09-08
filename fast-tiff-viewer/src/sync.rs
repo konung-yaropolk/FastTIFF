@@ -586,6 +586,19 @@ fn sync_volume(
             loaded.volume_builder = crate::volume::VolumeBuilder::new(loaded.path.clone());
             loaded.volume_builder_tried = true;
         }
+        // A worker that could not open the file is gone for good, and a stack a
+        // plugin imported has no file to open — its `path` is the name it is
+        // shown under. Drop it and build here instead.
+        //
+        // Noticing this needs its own flag rather than a failed `request`: the
+        // request that queued the first build was sent while the worker was
+        // still starting up, so it succeeded, and the frames after it never ask
+        // again — they poll for a reply. Which is why an imported stack sat on
+        // "Loading 3D…" and stayed there.
+        if loaded.volume_builder.as_ref().is_some_and(|b| b.failed()) {
+            loaded.volume_builder = None;
+            view.requested = None;
+        }
         let plan = plan_volume(loaded, renderer.max_3d_texture_size(), time);
         let mut handled = false;
         if let Some(builder) = &loaded.volume_builder {
