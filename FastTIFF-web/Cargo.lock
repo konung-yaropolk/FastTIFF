@@ -904,6 +904,7 @@ dependencies = [
  "libloading",
  "log",
  "memmap2",
+ "png",
  "quick-xml 0.37.5",
  "rayon",
  "scivis-render",

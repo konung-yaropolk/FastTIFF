@@ -65,6 +65,7 @@
 //! a plugin must depend on this crate and a copyleft SDK would force its licence
 //! on every plugin, including ones a hardware vendor might ship.
 
+pub mod export;
 pub mod host;
 pub mod image;
 pub mod import;
@@ -72,6 +73,7 @@ pub mod meta;
 pub mod params;
 pub mod plugin;
 
+pub use export::{ExportRequest, Exporter};
 pub use host::{HostContext, HostContextExt};
 pub use image::{
     ChannelView, ImageInfo, Lut, PixelType, Plane, ViewParams, VolumeMode, VolumeView,

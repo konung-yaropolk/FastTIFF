@@ -80,3 +80,7 @@ quick-xml = "0.37"
 # thirty-five scattered chunks, and a recording is a quarter of a million of
 # them. Same crate and same version fast-tiff-lib maps TIFFs with.
 memmap2 = "0.9"
+# The built-in PNG exporter (`plugins/builtin/png`). Already in the tree — the
+# GUI stack pulls it in for image decoding — so this adds a name rather than a
+# dependency.
+png = "0.18"

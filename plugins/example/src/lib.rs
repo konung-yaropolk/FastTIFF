@@ -15,6 +15,11 @@
 //!   declared from a *path* rather than an open stack, and a result produced
 //!   with no host to read pixels from.
 //!
+//! * [`CsvExport`] is an exporter, which is the boundary run backwards: the
+//!   host hands over a path and the dialog values, the plugin reads pixels back
+//!   out of the host, and what crosses in return is a file on disk rather than
+//!   an image.
+//!
 //! # Building one of these yourself
 //!
 //! ```toml
@@ -30,9 +35,9 @@
 //! folder...** opens.
 
 use fasttiff_plugin::api::{
-    Confidence, FileType, HostContext, ImageResult, ImportHost, ImportRequest, ImportResult,
-    Importer, Outcome, ParamDecl, ParamKind, Params, PixelType, Plane, PlaneData, Plugin,
-    PluginError, PluginInfo,
+    Confidence, ExportRequest, Exporter, FileType, HostContext, HostContextExt, ImageResult,
+    ImportHost, ImportRequest, ImportResult, Importer, Outcome, ParamDecl, ParamKind, Params,
+    PixelType, Plane, PlaneData, Plugin, PluginError, PluginInfo,
 };
 use std::path::Path;
 
@@ -480,6 +485,97 @@ fn fmt(v: Option<f64>) -> String {
     }
 }
 
+// ------------------------------------------------------------------- exporter
+
+/// Write the frame on screen as a grid of numbers.
+///
+/// Deliberately the dullest possible format. What an exporter in this crate has
+/// to demonstrate is the *boundary* — that a shared library can be handed a
+/// path and a set of dialog values, call back into the host for pixels, and be
+/// judged by the bytes it leaves on disk. A format with a real encoder would
+/// demonstrate the encoder.
+///
+/// The numbers are the file's own, read through `read_plane_f32` rather than
+/// the windowed ones on screen: a value written into a text file is a
+/// measurement, and rescaling it to wherever the contrast slider happens to sit
+/// would quietly change what it says.
+#[derive(Default)]
+pub struct CsvExport;
+
+impl Exporter for CsvExport {
+    fn info(&self) -> PluginInfo {
+        PluginInfo::new("dev.fasttiff.example.csv", "CSV (from library)")
+            .version(env!("CARGO_PKG_VERSION"))
+            .author("FastTIFF")
+            .description("Write the frame on screen as comma-separated values.")
+    }
+
+    fn file_types(&self) -> Vec<FileType> {
+        vec![FileType::new("Comma-separated values", &["csv"])]
+    }
+
+    fn params(&self, _host: &dyn HostContext) -> Vec<ParamDecl> {
+        vec![
+            ParamDecl::new("header", "Size header", ParamKind::Bool { default: true })
+                .help("Write a leading `# widthxheight` comment line."),
+            ParamDecl::new(
+                "decimals",
+                "Decimals",
+                ParamKind::Int {
+                    default: 3,
+                    min: 0,
+                    max: 9,
+                },
+            ),
+        ]
+    }
+
+    fn export(
+        &mut self,
+        request: &ExportRequest,
+        host: &mut dyn HostContext,
+    ) -> Result<(), PluginError> {
+        let info = host.image();
+        let (w, h) = (info.width as usize, info.height as usize);
+        if w == 0 || h == 0 {
+            return Err(PluginError::unsupported("there is no image to write"));
+        }
+        let decimals = request.params.int("decimals", 3).clamp(0, 9) as usize;
+        let header = request.params.bool("header", true);
+
+        let mut plane = Vec::new();
+        host.read_current_plane_f32(&mut plane)?;
+
+        let mut out = String::new();
+        if header {
+            out.push_str(&format!("# {w}x{h}\n"));
+        }
+        for (y, row) in plane.chunks(w).enumerate() {
+            for (x, v) in row.iter().enumerate() {
+                if x > 0 {
+                    out.push(',');
+                }
+                out.push_str(&format!("{v:.decimals$}"));
+            }
+            out.push('\n');
+            // Cheap enough to check every row: `h` is a picture's height, not a
+            // frame count, so this is thousands of calls at worst.
+            if !host.progress((y + 1) as f32 / h as f32) {
+                return Err(PluginError::unsupported("cancelled"));
+            }
+        }
+
+        // Written in one go. A half-written CSV that stops mid-row looks like a
+        // real file to whatever reads it next, and the host cannot tell the
+        // difference either — the status it got back was `Ok`.
+        std::fs::write(&request.path, out).map_err(|e| {
+            PluginError::failed(format!("could not write {}: {e}", request.path.display()))
+        })?;
+        host.log("wrote the displayed frame as CSV");
+        Ok(())
+    }
+}
+
 // ------------------------------------------------------------ panic fixture
 
 /// A plugin that panics, on purpose.
@@ -547,6 +643,7 @@ impl Plugin for Panics {
 fasttiff_plugin::export_plugin! {
     plugins: [Invert, ShowInfo, Panics],
     importers: [RawImport],
+    exporters: [CsvExport],
 }
 
 #[cfg(test)]

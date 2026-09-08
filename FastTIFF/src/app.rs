@@ -1362,6 +1362,18 @@ impl ViewerApp {
         let mut dialog = rfd::FileDialog::new()
             .add_filter("TIFF", &["tif", "tiff"])
             .set_file_name(format!("{stem}.tif"));
+        // Every installed exporter's formats, beside the host's own TIFF. TIFF
+        // is first because it is the only one that keeps the stack whole; the
+        // rest are for handing a picture to something else.
+        let offered = self
+            .plugins
+            .as_ref()
+            .map(|p| p.save_file_types())
+            .unwrap_or_default();
+        for t in &offered {
+            let exts: Vec<&str> = t.extensions.iter().map(|s| s.as_str()).collect();
+            dialog = dialog.add_filter(&t.description, &exts);
+        }
         if let Some(dir) = stack.path.parent().filter(|d| d.is_dir()) {
             dialog = dialog.set_directory(dir);
         }
@@ -1369,15 +1381,57 @@ impl ViewerApp {
             // Cancelled: not a failure, and not worth a status line either.
             return;
         };
-        let result = fast_tiff_viewer::save::save_stack(stack, &path);
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.display().to_string());
+        // The extension decides, not the filter row that was selected: the
+        // dialogs disagree about whether choosing a filter rewrites the name,
+        // and the name is the thing the user can see. An extension no exporter
+        // claims is a TIFF, which is also what an extension-less name gets.
+        let result = match self.exporter_for(&path) {
+            Some(index) => self.run_exporter(index, &path),
+            None => fast_tiff_viewer::save::save_stack(stack, &path),
+        };
         match result {
             Ok(()) => self.report_done(format!("Saved {name}")),
             Err(e) => self.core.status = Some(format!("Could not save {name}: {e:#}")),
         }
+    }
+
+    /// Which exporter, if any, claims this name.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn exporter_for(&self, path: &std::path::Path) -> Option<usize> {
+        self.plugins.as_ref()?.exporter_for(path)
+    }
+
+    /// Hand the open stack to an exporter.
+    ///
+    /// Its declared dialog is not shown — the values are its own defaults. An
+    /// export runs from a save dialog that has already been answered, and a
+    /// second modal on top of it needs the cross-frame state machine the filter
+    /// plugins use. Importers are in the same position today; whichever gets a
+    /// dialog first should give both one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_exporter(&mut self, index: usize, path: &std::path::Path) -> anyhow::Result<()> {
+        let Some(loaded) = self.core.stack.as_ref() else {
+            anyhow::bail!("nothing is open");
+        };
+        let view = self.plugin_view(loaded);
+        let mut host = fast_tiff_viewer::plugins::StackHost::new(loaded, view);
+        let Some(entry) = self.plugins.as_mut().and_then(|p| p.exporter_mut(index)) else {
+            anyhow::bail!("that exporter is no longer installed");
+        };
+        let name = entry.info.name.clone();
+        let decls = entry.exporter.params(&host);
+        let request = fasttiff_plugin_api::ExportRequest {
+            path: path.to_path_buf(),
+            params: fasttiff_plugin_api::Params::defaults(&decls).clamp_to(&decls),
+        };
+        entry
+            .exporter
+            .export(&request, &mut host)
+            .map_err(|e| anyhow::anyhow!("{name}: {e}"))
     }
 
     /// Show the platform's file picker.

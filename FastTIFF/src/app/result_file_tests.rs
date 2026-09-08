@@ -9,8 +9,14 @@
 
 use super::write_result;
 
+/// A directory of this test's own. Named per process as well as per test,
+/// because two `cargo test` runs at once would otherwise share it — and the
+/// first thing this does is empty it.
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("fasttiff-result-tests-{name}"));
+    let dir = std::env::temp_dir().join(format!(
+        "fasttiff-result-tests-{name}-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     dir
@@ -61,7 +67,11 @@ fn an_existing_result_is_left_exactly_as_it_was() {
 /// caller shows the result in the current window instead, and needs to say why.
 #[test]
 fn nowhere_to_write_comes_back_as_an_error() {
-    let dir = std::env::temp_dir().join("fasttiff-result-tests-missing/not/here");
-    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fasttiff-result-tests-missing"));
+    let root = std::env::temp_dir().join(format!(
+        "fasttiff-result-tests-missing-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let dir = root.join("not/here");
     assert!(write_result(&dir, "r", b"x").is_err());
 }

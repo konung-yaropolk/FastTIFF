@@ -51,10 +51,10 @@ fasttiff_plugin::export_plugin! { plugins: [Invert] }
 the folder that **Plugins ▸ Open plugin folder…** opens. Restart FastTIFF and it
 is in the menu.
 
-A worked example with a filter, an importer and a dialog lives in
+A worked example with a filter, an importer, an exporter and a dialog lives in
 [`plugins/example`](../plugins/example/src/lib.rs).
 
-## The two kinds of plugin
+## The three kinds of plugin
 
 **`Plugin`** runs against the stack that is open. It gets a `HostContext` —
 the image's shape in file coordinates, the viewer's current display state, and
@@ -68,7 +68,18 @@ importer is called and what it returns becomes an ordinary FastTIFF document.
 It is the one plugin type that runs with nothing open, which is why it takes a
 path rather than a `HostContext`.
 
-Both can declare a dialog by returning `ParamDecl`s. You describe the controls;
+**`Exporter`** writes a file format FastTIFF does not. The formats it declares
+become rows in the Save-as dialog, and the extension the user ends up with picks
+which exporter runs — a file that does not exist yet cannot be probed, so unlike
+opening, the content has no say. It is handed a path and reads the open stack
+back through a `HostContext`, so nothing returns but success or a reason.
+
+It is not for saving a stack faithfully — the host does that itself, in TIFF,
+and a format that cannot hold a 4D 16-bit hyperstack has no business pretending
+to. An exporter is for handing the data to something else: a figure, a movie, a
+colleague's software. Losing the axes is usually the point.
+
+All three can declare a dialog by returning `ParamDecl`s. You describe the controls;
 the host draws them, clamps the values to the ranges you gave, and hands back a
 `Params`. There is no UI toolkit in your dependency tree and no way for a plugin
 to draw something the host did not expect.

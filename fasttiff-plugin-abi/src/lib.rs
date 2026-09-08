@@ -57,7 +57,7 @@ pub const ABI_MAJOR: u32 = 1;
 
 /// The contract's minor version: how many optional trailing fields exist.
 /// Bumped when a field is appended; never when one changes meaning.
-pub const ABI_MINOR: u32 = 0;
+pub const ABI_MINOR: u32 = 1;
 
 /// The one symbol a plugin library must export, NUL-terminated for `dlsym`.
 ///
@@ -700,6 +700,45 @@ pub struct FtFileType {
     pub extension_count: u64,
 }
 
+/// An exporter's entry points.
+///
+/// Smaller than an importer's, and the difference is the whole shape of the
+/// two: an importer hands back an image the host then owns, so its result
+/// crosses through a sink; an exporter is given the host and a path and writes
+/// the file itself, so nothing comes back but a status.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FtExporterVtable {
+    pub struct_size: u32,
+    pub _pad: u32,
+    /// Declare a dialog for this export, if any.
+    pub params: unsafe extern "C" fn(host: *const FtHost, sink: *const FtParamSink) -> FtStatus,
+    /// Write the open stack to `path`.
+    pub export: unsafe extern "C" fn(
+        path: FtStr,
+        values: *const FtValue,
+        value_count: u64,
+        host: *const FtHost,
+    ) -> FtStatus,
+    pub last_error: unsafe extern "C" fn() -> FtStr,
+}
+
+/// An exporter being registered.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FtExporterDesc {
+    pub struct_size: u32,
+    pub _pad: u32,
+    pub id: FtStr,
+    pub name: FtStr,
+    pub version: FtStr,
+    pub author: FtStr,
+    pub description: FtStr,
+    pub file_types: *const FtFileType,
+    pub file_type_count: u64,
+    pub vtable: *const FtExporterVtable,
+}
+
 /// A plugin being registered.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -746,6 +785,25 @@ pub struct FtRegistrar {
     pub add_plugin: unsafe extern "C" fn(ctx: *mut c_void, desc: *const FtPluginDesc) -> FtStatus,
     pub add_importer:
         unsafe extern "C" fn(ctx: *mut c_void, desc: *const FtImporterDesc) -> FtStatus,
+    /// Appended in minor 1. A plugin must check
+    /// [`FtRegistrar::WITH_EXPORTERS`] with [`covers`] before calling it — an
+    /// older host's table stops at `add_importer`, and reading past it is
+    /// reading whatever follows the allocation.
+    pub add_exporter:
+        unsafe extern "C" fn(ctx: *mut c_void, desc: *const FtExporterDesc) -> FtStatus,
+}
+
+impl FtRegistrar {
+    /// Through `add_importer`: every version of this contract has had it.
+    pub const CORE: usize =
+        core::mem::offset_of!(FtRegistrar, add_importer) + core::mem::size_of::<*const ()>();
+
+    /// Through `add_exporter`, which minor 1 appended. A host that declares
+    /// less than this cannot take an exporter, and a plugin carrying one skips
+    /// registering it rather than failing to load — the filters and importers
+    /// in the same library still work.
+    pub const WITH_EXPORTERS: usize =
+        core::mem::offset_of!(FtRegistrar, add_exporter) + core::mem::size_of::<*const ()>();
 }
 
 // ------------------------------------------------------------ layout, pinned
@@ -787,6 +845,8 @@ const _: () = {
     assert!(offset_of!(FtFileType, struct_size) == 0);
     assert!(offset_of!(FtPluginDesc, struct_size) == 0);
     assert!(offset_of!(FtImporterDesc, struct_size) == 0);
+    assert!(offset_of!(FtExporterVtable, struct_size) == 0);
+    assert!(offset_of!(FtExporterDesc, struct_size) == 0);
     assert!(offset_of!(FtRegistrar, struct_size) == 0);
 
     // The open enumerations are `u32` on the wire.
@@ -846,9 +906,18 @@ const _: () = {
     let p = size_of::<*const u8>();
     assert!(size_of::<FtPluginVtable>() == 8 + 3 * p);
     assert!(size_of::<FtImporterVtable>() == 8 + 4 * p);
+    assert!(size_of::<FtExporterVtable>() == 8 + 3 * p);
     assert!(size_of::<FtParamSink>() == 8 + 2 * p);
     assert!(size_of::<FtSink>() == 8 + 6 * p);
     assert!(size_of::<FtHost>() == 8 + 12 * p);
+
+    // The append rule, pinned. `CORE` is what an older host declares, so it
+    // has to end exactly where the appended field begins; and the appended
+    // field has to be the last one, or the next append lands in the middle of
+    // the struct and every existing `covers` check silently means something
+    // else.
+    assert!(FtRegistrar::CORE == offset_of!(FtRegistrar, add_exporter));
+    assert!(FtRegistrar::WITH_EXPORTERS == size_of::<FtRegistrar>());
 
     assert!(size_of::<FtStackInfo>() == 64);
     assert!(offset_of!(FtStackInfo, mode) == 4);

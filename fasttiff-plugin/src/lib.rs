@@ -69,7 +69,7 @@ mod host;
 pub mod marshal;
 
 pub use host::CHost;
-pub use marshal::{register_importer, register_plugin};
+pub use marshal::{register_exporter, register_importer, register_plugin, registrar_of};
 
 /// Remember why the last call failed, for the host to ask about.
 ///
@@ -148,24 +148,42 @@ pub unsafe extern "C" fn last_error_shim() -> abi::FtStr {
 
 /// Generate the library's `ft_plugin_v1_query` entry point.
 ///
-/// Every named type must implement [`api::Plugin`] (or [`api::Importer`]) and
-/// `Default`: the vtable is stateless, so an instance is built per call and
-/// dropped inside it, and no opaque handle's lifetime has to be agreed between
-/// the two binaries.
+/// Every named type must implement the trait for the list it appears in —
+/// [`api::Plugin`], [`api::Importer`] or [`api::Exporter`] — and `Default`: the
+/// vtable is stateless, so an instance is built per call and dropped inside it,
+/// and no opaque handle's lifetime has to be agreed between the two binaries.
+///
+/// The lists are optional and may be given in any combination, as long as they
+/// stay in the order `plugins`, `importers`, `exporters`:
+///
+/// ```ignore
+/// fasttiff_plugin::export_plugin! { plugins: [Invert], exporters: [Csv] }
+/// fasttiff_plugin::export_plugin! { exporters: [Csv] }
+/// ```
+///
+/// An exporter registers only on a host new enough to have asked for one. That
+/// is not an error: `add_exporter` was appended to the registrar in ABI minor
+/// 1, and a library that also carries filters or importers should install those
+/// rather than refuse to load because one of the three has nowhere to go.
 #[macro_export]
 macro_rules! export_plugin {
-    (plugins: [$($p:ty),* $(,)?] $(, importers: [$($i:ty),* $(,)?])? $(,)?) => {
-        $crate::__export!([$($p),*], [$($($i),*)?]);
+    (plugins: [$($p:ty),* $(,)?]
+     $(, importers: [$($i:ty),* $(,)?])?
+     $(, exporters: [$($e:ty),* $(,)?])? $(,)?) => {
+        $crate::__export!([$($p),*], [$($($i),*)?], [$($($e),*)?]);
     };
-    (importers: [$($i:ty),* $(,)?] $(,)?) => {
-        $crate::__export!([], [$($i),*]);
+    (importers: [$($i:ty),* $(,)?] $(, exporters: [$($e:ty),* $(,)?])? $(,)?) => {
+        $crate::__export!([], [$($i),*], [$($($e),*)?]);
+    };
+    (exporters: [$($e:ty),* $(,)?] $(,)?) => {
+        $crate::__export!([], [], [$($e),*]);
     };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __export {
-    ([$($p:ty),*], [$($i:ty),*]) => {
+    ([$($p:ty),*], [$($i:ty),*], [$($e:ty),*]) => {
         /// The one symbol the host looks up. Its name carries the ABI major
         /// version, so a host of a different major simply does not find it.
         ///
@@ -189,19 +207,18 @@ macro_rules! __export {
                 if reg.is_null() {
                     return FtStatus::BadArgument;
                 }
-                // Size first, reference second: `&mut *reg` on a registrar
-                // built to an older, smaller layout is undefined behaviour on
-                // creation, before any field of it is touched.
-                if !unsafe { $crate::abi::fits(reg as *const _) } {
-                    $crate::last_error::set(
-                        "this plugin was built against a newer FastTIFF plugin ABI than the host provides",
-                    );
-                    return FtStatus::BadArgument;
-                }
-                let r: &mut $crate::abi::FtRegistrar = unsafe { &mut *reg };
-                // Tell the host which minor version this was built against, so
-                // it knows which trailing fields it may read back.
-                r.plugin_abi_minor = $crate::abi::ABI_MINOR;
+                // Never `&mut *reg`: on a host that predates a field this
+                // plugin knows about, a reference to the whole struct over a
+                // shorter allocation is undefined behaviour on creation. A
+                // size check that *refused* such a host would be safe and
+                // wrong — it would decline to install filters the host could
+                // have run. `registrar_of` copies what is there, stubs what is
+                // not, and writes this plugin's minor version back.
+                let mut r = match unsafe { $crate::registrar_of(reg) } {
+                    Ok(r) => r,
+                    Err(st) => return st,
+                };
+                let r = &mut r;
                 $(
                     let st = $crate::register_plugin::<$p>(r);
                     if st != FtStatus::Ok {
@@ -210,6 +227,12 @@ macro_rules! __export {
                 )*
                 $(
                     let st = $crate::register_importer::<$i>(r);
+                    if st != FtStatus::Ok {
+                        return st;
+                    }
+                )*
+                $(
+                    let st = $crate::register_exporter::<$e>(r);
                     if st != FtStatus::Ok {
                         return st;
                     }

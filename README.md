@@ -493,7 +493,7 @@ FastTIFF loads plugins from shared libraries — `.dll` on Windows, `.so` on
 Linux, `.dylib` on macOS. **Plugins ▸ Open plugin folder…** opens the folder to
 put them in; they appear in the menu on the next start.
 
-Two kinds:
+Three kinds:
 
 - **Filters** run against the stack that is open. They get the image's shape in
   file coordinates, the file's own scale (pixel size, Z step, frame interval,
@@ -507,6 +507,15 @@ Two kinds:
   drag-and-drop *before the plugin has run*; opening such a file calls the
   importer, and what it returns — pixels and the scale it read out of the file —
   becomes an ordinary FastTIFF document.
+- **Exporters** write formats FastTIFF does not. The mirror of an importer, and
+  the simpler half: the formats it declares become rows in the Save-as dialog,
+  and the extension the user ends up with picks which one runs. It is handed the
+  path and reads the open stack back through the host, so nothing returns but
+  success or a reason — a file that does not exist yet cannot be probed, which
+  is why an exporter is chosen by name where an importer is chosen by content.
+  Not for saving a stack faithfully; the host does that itself, in TIFF. An
+  exporter is for handing the data to something else — a figure, a movie, a
+  colleague's software — where losing the axes is usually the point.
 
 The boundary is a frozen C ABI, not Rust's, because Rust has no stable ABI: a
 plugin built next year by a different compiler must still load. Nothing crosses
@@ -525,7 +534,8 @@ happened to run the tests.
 Writing one is still ordinary Rust: implement a trait, call one macro. See
 [`fasttiff-plugin/README.md`](fasttiff-plugin/README.md) for the twenty-line
 version, and [`plugins/example/`](plugins/example/src/lib.rs)
-for a filter, an importer with a dialog, and a raw-binary reader. That crate is
+for a filter, an importer with a dialog, a raw-binary reader and a CSV
+exporter. That crate is
 not in the workspace, so build and test it on its own:
 
 ```sh
