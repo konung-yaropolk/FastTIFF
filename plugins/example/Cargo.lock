@@ -103,6 +103,8 @@ dependencies = [
  "fasttiff-plugin-api",
  "libloading",
  "log",
+ "memmap2",
+ "quick-xml",
  "rayon",
  "scivis-render",
 ]

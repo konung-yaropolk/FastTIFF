@@ -83,10 +83,13 @@ impl Builder {
 fn stack_file(w: u32, h: u32, names: &[&str], chunk: usize) -> Vec<u8> {
     let mut b = Builder::new();
     b.xml(&format!(
-        "<?xml version=\"1.0\"?><lsmimage:imageProperties>\
+        // The nesting a real acquisition uses: the frame size is stated inside
+        // `imageInfo`, the part of the record describing what was recorded
+        // rather than what the microscope was configured to record.
+        "<?xml version=\"1.0\"?><lsmimage:imageProperties><commonimage:imageInfo>\
          <commonimage:width>{w}</commonimage:width>\
          <commonimage:height>{h}</commonimage:height>\
-         </lsmimage:imageProperties>"
+         </commonimage:imageInfo></lsmimage:imageProperties>"
     ));
     // A reference image, which must not be mistaken for a frame.
     b.plane_chunk("REF_LSM0_abcdef_0", 0, &[0xEEu8; 64]);
@@ -399,18 +402,96 @@ fn the_sidecar_metadata_reaches_tag_270_of_the_written_file() {
     let _ = std::fs::remove_file(file);
 }
 
+/// An OIR with no `.txt` beside it used to have its own XML dumped into
+/// tag 270 — in a real acquisition four megabytes of it, three quarters of
+/// that being display lookup tables written out element by element. Now the
+/// record is *translated* into the same text a sidecar would have carried, so
+/// what a converted file says about itself no longer depends on whether a
+/// `.txt` happened to be copied along with the `.oir`.
 #[test]
-fn without_a_sidecar_the_files_own_xml_is_carried_instead() {
-    let file = tmp("noside.oir", &stack_file(4, 4, &["t001_0_1_uid"], 16));
+fn without_a_sidecar_the_record_is_translated_rather_than_dumped() {
+    let mut b = Builder::new();
+    b.xml(
+        "<?xml version=\"1.0\"?><lsmimage:imageProperties>\
+         <commonimage:general><base:creationDateTime>2025-02-10T18:49:39.124-05:00\
+         </base:creationDateTime></commonimage:general>\
+         <commonimage:imageInfo>\
+         <commonimage:phase><commonimage:group><commonimage:channel id=\"c1\">\
+         <commonphase:name>CH1</commonphase:name>\
+         <commonphase:length><commonparam:x>0.621480569402239</commonparam:x>\
+         <commonparam:y>0.621480569402239</commonparam:y></commonphase:length>\
+         </commonimage:channel></commonimage:group></commonimage:phase>\
+         <commonimage:axis><commonimage:axis>TIMELAPSE</commonimage:axis>\
+         <commonimage:step>0.0</commonimage:step>\
+         <commonimage:maxSize>2</commonimage:maxSize></commonimage:axis>\
+         <commonimage:width>4</commonimage:width>\
+         <commonimage:height>4</commonimage:height>\
+         </commonimage:imageInfo></lsmimage:imageProperties>",
+    );
+    // The two frames, each with its timestamp: 1 s apart.
+    for (n, ms) in [(1, "0.0"), (2, "1000.0")] {
+        b.xml(&format!(
+            "<?xml version=\"1.0\"?><lsmframe:frameProperties>\
+             <commonframe:axisValue><commonframe:axisType>TIMELAPSE</commonframe:axisType>\
+             <commonframe:position>{ms}</commonframe:position></commonframe:axisValue>\
+             </lsmframe:frameProperties>",
+        ));
+        let _ = n;
+    }
+    b.xml(
+        "<?xml version=\"1.0\"?><event:eventList><event:event>\
+         <event:name>DRS</event:name><event:time>27772.762</event:time>\
+         <event:type>TTL_OUT</event:type></event:event></event:eventList>",
+    );
+    // The document that made this a bug rather than an untidiness. A real one
+    // is 525 KB of exactly this, and there are three of them.
+    b.xml(
+        "<?xml version=\"1.0\"?><lut:LUT><lut:intensity>0</lut:intensity>\
+         <lut:contrast>1</lut:contrast></lut:LUT>",
+    );
+    for (i, name) in ["t001_0_1_uid", "t002_0_1_uid"].iter().enumerate() {
+        b.plane_chunk(name, 0, &[i as u8; 32]);
+    }
+    let file = tmp("translated.oir", &b.finish());
     // Make sure a leftover from another test cannot satisfy this one.
     let _ = std::fs::remove_file(file.with_extension("txt"));
-    let r = import(&file).expect("import");
-    let desc = r
-        .info
-        .expect("metadata")
-        .description
-        .expect("the embedded XML should be the fallback");
-    assert!(desc.contains("<lsmimage:imageProperties"), "{desc}");
+
+    let info = import(&file).expect("import").info.expect("metadata");
+    let desc = info.description.expect("the translated record");
+
+    // Not XML, in any form, however small.
+    assert!(
+        !desc.contains('<'),
+        "raw XML reached the description: {desc}"
+    );
+    assert!(
+        !desc.contains("intensity"),
+        "a lookup table survived: {desc}"
+    );
+
+    // And it is the sidecar's own format, down to the keys — which is what
+    // lets one parser read a converted file whichever source it came from.
+    for line in [
+        "\"[General]\"\t\"\"",
+        "\"Name\"\t\"fasttiff-oir-translated.oir\"",
+        "\"Scan Mode\"\t\"XYT\"",
+        "\"Date\"\t\"02/10/2025 06:49:39.124 PM\"",
+        "\"X Dimension\"\t\"4, 0.0 - 2.486 [um], 0.621 [um/pixel]\"",
+        "\"T Dimension\"\t\"2, 0.000 - 1.000 [s], Interval FreeRun\"",
+        "\"[Event 1]\"\t\"\"",
+        "\"Event Contents\"\t\"DRS\"",
+        "\"Event Timer\"\t\"27772.762000[ms]\"",
+    ] {
+        assert!(desc.contains(line), "missing {line:?} from:\n{desc}");
+    }
+
+    // The structured values come from the record too, at the precision the
+    // file states them — not re-parsed out of the three decimals the text
+    // above rounds them to.
+    assert_eq!(info.spacing.x, Some(0.621480569402239));
+    assert_eq!(info.spacing.y, Some(0.621480569402239));
+    assert_eq!(info.frame_interval_s, Some(1.0));
+    assert_eq!(info.channel_names, vec!["CH1".to_string()]);
     let _ = std::fs::remove_file(file);
 }
 
@@ -451,7 +532,7 @@ fn an_index_without_its_marker_is_refused() {
 #[test]
 fn an_oir_with_no_planes_says_so_rather_than_producing_an_empty_stack() {
     let mut b = Builder::new();
-    b.xml("<?xml version=\"1.0\"?><lsmimage:imageProperties><commonimage:width>4</commonimage:width><commonimage:height>4</commonimage:height></lsmimage:imageProperties>");
+    b.xml("<?xml version=\"1.0\"?><lsmimage:imageProperties><commonimage:imageInfo><commonimage:width>4</commonimage:width><commonimage:height>4</commonimage:height></commonimage:imageInfo></lsmimage:imageProperties>");
     b.plane_chunk("REF_LSM0_abc_0", 0, &[0u8; 32]);
     let file = tmp("noplanes.oir", &b.finish());
     let err = import(&file).expect_err("no planes is a failure");
@@ -477,7 +558,7 @@ fn a_file_that_states_no_frame_size_is_refused_rather_than_guessed_at() {
 #[test]
 fn a_chunk_claiming_to_run_past_its_plane_is_dropped_not_followed() {
     let mut b = Builder::new();
-    b.xml("<?xml version=\"1.0\"?><lsmimage:imageProperties><commonimage:width>4</commonimage:width><commonimage:height>2</commonimage:height></lsmimage:imageProperties>");
+    b.xml("<?xml version=\"1.0\"?><lsmimage:imageProperties><commonimage:imageInfo><commonimage:width>4</commonimage:width><commonimage:height>2</commonimage:height></commonimage:imageInfo></lsmimage:imageProperties>");
     // A whole 4x2 u16 plane, then a chunk that claims to start past its end.
     b.plane_chunk("t001_0_1_uid", 0, &[1u8; 16]);
     b.plane_chunk("t001_0_1_uid", 1_000_000, &[2u8; 16]);
@@ -497,7 +578,7 @@ fn a_chunk_claiming_to_run_past_its_plane_is_dropped_not_followed() {
 #[test]
 fn an_incomplete_trailing_plane_is_dropped_rather_than_padded() {
     let mut b = Builder::new();
-    b.xml("<?xml version=\"1.0\"?><lsmimage:imageProperties><commonimage:width>4</commonimage:width><commonimage:height>2</commonimage:height></lsmimage:imageProperties>");
+    b.xml("<?xml version=\"1.0\"?><lsmimage:imageProperties><commonimage:imageInfo><commonimage:width>4</commonimage:width><commonimage:height>2</commonimage:height></commonimage:imageInfo></lsmimage:imageProperties>");
     // Two whole 4x2 u16 planes, then one that stops half way.
     for name in ["t001_0_1_uid", "t002_0_1_uid"] {
         b.plane_chunk(name, 0, &[1u8; 16]);
@@ -518,7 +599,7 @@ fn an_incomplete_trailing_plane_is_dropped_rather_than_padded() {
 #[test]
 fn a_file_of_nothing_but_incomplete_planes_is_refused() {
     let mut b = Builder::new();
-    b.xml("<?xml version=\"1.0\"?><lsmimage:imageProperties><commonimage:width>8</commonimage:width><commonimage:height>8</commonimage:height></lsmimage:imageProperties>");
+    b.xml("<?xml version=\"1.0\"?><lsmimage:imageProperties><commonimage:imageInfo><commonimage:width>8</commonimage:width><commonimage:height>8</commonimage:height></commonimage:imageInfo></lsmimage:imageProperties>");
     // Short, but all the same length, so the sample width still resolves.
     b.plane_chunk("t001_0_1_uid", 0, &[1u8; 128]);
     b.plane_chunk("t002_0_1_uid", 0, &[1u8; 128]);
@@ -566,12 +647,24 @@ fn a_real_oir_matches_the_software_export() {
         r.image.pixel_type
     );
     r.image.validate().expect("shape");
+    let desc = r
+        .info
+        .as_ref()
+        .and_then(|i| i.description.as_ref())
+        .expect("no metadata was carried");
+    eprintln!("--- description, {} bytes ---\n{desc}", desc.len());
+    // Whether it came from the sidecar or was translated from the file's own
+    // XML, what reaches tag 270 is text. It used to be whichever of the two the
+    // directory happened to contain, and the XML form ran to four megabytes.
     assert!(
-        r.info
-            .as_ref()
-            .and_then(|i| i.description.as_ref())
-            .is_some(),
-        "no metadata was carried"
+        !desc.contains("<?xml"),
+        "raw XML reached the description ({} bytes)",
+        desc.len()
+    );
+    assert!(
+        desc.len() < 64 * 1024,
+        "a {}-byte description is a metadata dump, not a record",
+        desc.len()
     );
 
     let exported = path.with_extension("tif");

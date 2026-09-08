@@ -903,6 +903,7 @@ dependencies = [
  "fasttiff-plugin-api",
  "libloading",
  "log",
+ "quick-xml 0.37.5",
  "rayon",
  "scivis-render",
 ]

@@ -41,19 +41,44 @@
 //! whole planes, so opening the first reads them all — see
 //! [`acquisition_parts`].
 //!
+//! # Metadata
+//!
+//! Two things state what the acquisition was: a `<name>.txt` the acquisition
+//! software writes beside the file, and the file's own XML. Only the first is
+//! readable as it stands; the second is megabytes of schema, most of it display
+//! lookup tables. Both end up as the same `"key"\t"value"` record — see
+//! [`meta`], which does the translation — so a converted file's description
+//! reads the same way whether or not the `.txt` travelled with the `.oir`.
+//!
+//! # Reading
+//!
+//! Each part is **memory-mapped**, and everything below works on `&[u8]`. That
+//! is not an optimisation applied to a working reader so much as the shape the
+//! format asks for: a plane arrives as thirty-five scattered chunks, so
+//! reassembling one recording meant a quarter of a million `seek`+`read` pairs,
+//! each a syscall, to copy bytes the page cache was already holding. Mapped,
+//! the same work is a `copy_from_slice` per chunk and the kernel faults in what
+//! is actually touched — which also means the scan for metadata blocks costs
+//! only the pages it looks at rather than a read of every block in the file.
+//!
 //! # What it does not do
 //!
 //! Every plane is held in memory, because that is what the importer contract
 //! asks for — fine for the gigabyte-scale files this was built against, not for
-//! a forty-gigabyte timelapse.
+//! a forty-gigabyte timelapse. Mapping does not change that: the planes are
+//! reassembled into owned buffers because the contract hands back owned
+//! buffers.
+
+/// Translating the acquisition record the file carries in its own XML.
+mod meta;
 
 use fasttiff_plugin_api::{
     Confidence, FileType, ImageResult, ImportHost, ImportRequest, ImportResult, Importer,
     PixelType, PlaneData, PluginError, PluginInfo, Spacing, StackInfo,
 };
+use memmap2::Mmap;
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// The signature every OIR file starts with.
@@ -76,6 +101,9 @@ const MAX_PLANES: usize = 200_000;
 /// Parts of one acquisition to look for. Far beyond any real recording, and a
 /// bound on the directory scan rather than a limit anyone should reach.
 const MAX_PARTS: usize = 9_999;
+/// How much of a block to read before deciding whether it holds XML. See
+/// [`embedded_xml`].
+const XML_PEEK: usize = 512;
 
 pub struct Oir;
 
@@ -115,21 +143,29 @@ impl Importer for Oir {
         // complete container with its own index, so they are read the same way
         // and their planes merged into one map.
         let parts = acquisition_parts(&request.path);
-        let mut files = Vec::with_capacity(parts.len());
+        // One mapping per part, held for the whole import: the plane map points
+        // into them by part index.
+        let mut files: Vec<Mmap> = Vec::with_capacity(parts.len());
         let mut planes: PlaneMap = BTreeMap::new();
-        let mut offsets = Vec::new();
+        // Every part's block index, kept rather than only the first: each part
+        // carries the frame timestamps of the frames *it* holds, and the
+        // recording's timing is not in any one of them.
+        let mut indexes: Vec<Vec<u64>> = Vec::with_capacity(parts.len());
         for (part, path) in parts.iter().enumerate() {
-            let mut file = File::open(path)
+            let file = File::open(path)
                 .map_err(|e| PluginError::failed(format!("could not open the file: {e}")))?;
-            let index_at = read_header(&mut file)?;
-            let part_offsets = read_index(&mut file, index_at)?;
-            read_plane_map(&mut file, &part_offsets, part, &mut planes)?;
-            if part == 0 {
-                // The first part carries the acquisition's own description; the
-                // continuations repeat the container but not the metadata.
-                offsets = part_offsets;
-            }
-            files.push(file);
+            // SAFETY: the standard caveat of a mapping — the file must not be
+            // written while it is mapped. These are acquisition files, finished
+            // before they are opened, and this reader only ever reads. It is
+            // the same bargain the TIFF reader in `fast-tiff-lib` makes for the
+            // same reason.
+            let map = unsafe { Mmap::map(&file) }
+                .map_err(|e| PluginError::failed(format!("could not map the file: {e}")))?;
+            let index_at = read_header(&map)?;
+            let part_offsets = read_index(&map, index_at)?;
+            read_plane_map(&map, &part_offsets, part, &mut planes)?;
+            indexes.push(part_offsets);
+            files.push(map);
             host.progress(0.05 * (part + 1) as f32 / parts.len() as f32);
         }
         if parts.len() > 1 {
@@ -157,14 +193,29 @@ impl Importer for Oir {
                 "this OIR carries no image planes this reader recognises: {hint}"
             )));
         }
-        let file = &mut files[0];
+        // The acquisition's own account of itself, read once here and used
+        // twice below: for the values this import needs, and for the record it
+        // carries into the converted file. Every part is read, a part at a
+        // time — a four-part recording states 7,213 frames and puts about a
+        // quarter of the frame timestamps in each file, so the first part
+        // alone cannot say how long the recording was.
+        let mut reader = meta::Reader::default();
+        for (file, offsets) in files.iter().zip(&indexes) {
+            reader.absorb(&embedded_xml(file, offsets));
+        }
+        let record = reader.finish();
 
-        // The sidecar the acquisition software writes beside every OIR. It is
-        // the readable form of everything below, and the thing worth keeping.
+        // The sidecar the acquisition software writes beside every OIR. When it
+        // is there it is the authority — it is the vendor's own text, and it
+        // states a few things the XML does not. When it is not, the file still
+        // knows what it recorded, and `record` says the same in the same shape.
         let sidecar = read_sidecar(&request.path);
-        let summary = sidecar.as_deref().map(Sidecar::parse).unwrap_or_default();
+        let summary = match sidecar.as_deref() {
+            Some(text) => Sidecar::parse(text),
+            None => Sidecar::from_record(&record),
+        };
 
-        let (width, height) = dimensions(file, &offsets, &summary, &planes)?;
+        let (width, height) = dimensions(&record, &summary, &planes)?;
         let (shape, dropped) = Shape::derive(&mut planes, &summary, width, height)?;
         host.log(&format!(
             "{width}x{height}, {} channel(s), {} slice(s), {} frame(s), {}-bit",
@@ -181,20 +232,43 @@ impl Importer for Oir {
             ));
         }
 
-        let data = read_planes(&mut files, &planes, &shape, host)?;
-
-        let description = sidecar.or_else(|| {
-            // No sidecar: fall back to the file's own XML so the acquisition
-            // record is not simply lost.
-            let docs = embedded_xml(&mut files[0], &offsets);
-            (!docs.is_empty()).then(|| docs.join("\n"))
-        });
+        let data = read_planes(&files, &planes, &shape, host)?;
 
         let name = request
             .path
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "oir".into());
+
+        // What tag 270 of the converted file will carry. Always this text
+        // form: an OIR's raw XML is not a description anybody can read — in one
+        // real acquisition it is four megabytes, 3.1 MB of which is three
+        // 65,536-entry lookup tables — and carrying it verbatim made the
+        // metadata of a converted file depend on whether a `.txt` happened to
+        // be copied along with it.
+        let description = match sidecar {
+            Some(text) => Some(text),
+            None => {
+                let file_name = request
+                    .path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| format!("{name}.oir"));
+                let text = record.to_text(&file_name, shape.frames);
+                host.log(&match text {
+                    Some(_) => format!(
+                        "no `.txt` beside this file: translated the acquisition record from its \
+                         own metadata ({} channel(s), {} event marker(s))",
+                        record.channels.len(),
+                        record.events.len()
+                    ),
+                    None => "no `.txt` beside this file and nothing this reader recognises in its \
+                             own metadata: the converted file carries no acquisition record"
+                        .to_string(),
+                });
+                text
+            }
+        };
 
         Ok(ImportResult {
             image: ImageResult {
@@ -225,7 +299,11 @@ impl Importer for Oir {
                     y: summary.pixel_size,
                     z: summary.z_step,
                 },
-                frame_interval_s: summary.frame_interval_s,
+                // The sidecar's own reading of it first; the file's frame
+                // timestamps otherwise, over the frames actually imported.
+                frame_interval_s: summary
+                    .frame_interval_s
+                    .or_else(|| record.frame_interval_s(shape.frames)),
                 channel_names: summary.channel_names.clone(),
                 description,
                 ..Default::default()
@@ -278,12 +356,19 @@ fn acquisition_parts(path: &Path) -> Vec<std::path::PathBuf> {
     parts
 }
 
-fn read_at(file: &mut File, at: u64, len: usize) -> Result<Vec<u8>, PluginError> {
-    let mut buf = vec![0u8; len];
-    file.seek(SeekFrom::Start(at))
-        .and_then(|_| file.read_exact(&mut buf))
-        .map_err(|e| PluginError::failed(format!("could not read at {at:#x}: {e}")))?;
-    Ok(buf)
+/// The `len` bytes at `at`, or an error saying the file stops short of them.
+///
+/// Every read in this module goes through here, so a truncated or lying file
+/// produces a refusal naming the offset rather than a panic on a slice index.
+fn read_at(bytes: &[u8], at: u64, len: usize) -> Result<&[u8], PluginError> {
+    usize::try_from(at)
+        .ok()
+        .and_then(|start| bytes.get(start..start.checked_add(len)?))
+        .ok_or_else(|| {
+            PluginError::failed(format!(
+                "this OIR ends before the {len} byte(s) it points to at {at:#x}"
+            ))
+        })
 }
 
 fn u32_at(b: &[u8], at: usize) -> Option<u32> {
@@ -299,18 +384,15 @@ fn u64_at(b: &[u8], at: usize) -> Option<u64> {
 }
 
 /// Check the signature and return where the block index begins.
-fn read_header(file: &mut File) -> Result<u64, PluginError> {
-    let len = file
-        .metadata()
-        .map_err(|e| PluginError::failed(format!("could not stat the file: {e}")))?
-        .len();
-    let head = read_at(file, 0, 0x50.min(len as usize))?;
+fn read_header(bytes: &[u8]) -> Result<u64, PluginError> {
+    let len = bytes.len() as u64;
+    let head = read_at(bytes, 0, 0x50.min(bytes.len()))?;
     if !head.starts_with(MAGIC) {
         return Err(PluginError::unsupported(
             "not an OIR file: the OLYMPUSRAWFORMAT signature is missing",
         ));
     }
-    let at = u64_at(&head, INDEX_OFFSET_AT as usize)
+    let at = u64_at(head, INDEX_OFFSET_AT as usize)
         .ok_or_else(|| PluginError::failed("the OIR header is truncated"))?;
     // Validated rather than trusted: a bad offset here would otherwise become a
     // wild seek and an allocation sized from whatever bytes were there.
@@ -323,28 +405,26 @@ fn read_header(file: &mut File) -> Result<u64, PluginError> {
 }
 
 /// The block index: one file offset per block.
-fn read_index(file: &mut File, at: u64) -> Result<Vec<u64>, PluginError> {
-    let len = file
-        .metadata()
-        .map_err(|e| PluginError::failed(format!("could not stat the file: {e}")))?
-        .len();
-    let head = read_at(file, at, INDEX_HEADER)?;
-    if u32_at(&head, 0) != Some(INDEX_MARKER) {
+fn read_index(bytes: &[u8], at: u64) -> Result<Vec<u64>, PluginError> {
+    let len = bytes.len() as u64;
+    let head = read_at(bytes, at, INDEX_HEADER)?;
+    if u32_at(head, 0) != Some(INDEX_MARKER) {
         return Err(PluginError::unsupported(
             "this OIR's block index is not in a layout this reader knows",
         ));
     }
-    let bytes = len - at - INDEX_HEADER as u64;
-    let count = bytes / 8;
+    // The index is not counted anywhere: it runs from its header to the end of
+    // the file, one u64 per block.
+    let count = (len - at - INDEX_HEADER as u64) / 8;
     if count == 0 || count > MAX_BLOCKS {
         return Err(PluginError::failed(format!(
             "the OIR block index claims {count} blocks, which cannot be right"
         )));
     }
-    let raw = read_at(file, at + INDEX_HEADER as u64, (count * 8) as usize)?;
+    let raw = read_at(bytes, at + INDEX_HEADER as u64, (count * 8) as usize)?;
     let mut offsets = Vec::with_capacity(count as usize);
     for i in 0..count as usize {
-        let o = u64_at(&raw, i * 8).unwrap_or(u64::MAX);
+        let o = u64_at(raw, i * 8).unwrap_or(u64::MAX);
         // Blocks past the end are the shape a truncated or foreign file takes.
         if o + 8 > at {
             continue;
@@ -375,21 +455,21 @@ struct Chunk {
 type PlaneMap = BTreeMap<String, Vec<Chunk>>;
 
 fn read_plane_map(
-    file: &mut File,
+    bytes: &[u8],
     offsets: &[u64],
     part: usize,
     planes: &mut PlaneMap,
 ) -> Result<(), PluginError> {
     let mut i = 0usize;
     while i + 1 < offsets.len() {
-        let head = match read_at(file, offsets[i], 16) {
+        let head = match read_at(bytes, offsets[i], 16) {
             Ok(h) => h,
             Err(_) => {
                 i += 1;
                 continue;
             }
         };
-        let (Some(len), Some(ty)) = (u32_at(&head, 0), u32_at(&head, 4)) else {
+        let (Some(len), Some(ty)) = (u32_at(head, 0), u32_at(head, 4)) else {
             i += 1;
             continue;
         };
@@ -398,9 +478,8 @@ fn read_plane_map(
             continue;
         }
         // Descriptor payload: offset-within-plane, length, name length, name.
-        let body = read_at(file, offsets[i] + 8, len as usize)?;
-        let (Some(at), Some(run), Some(nlen)) =
-            (u32_at(&body, 0), u32_at(&body, 4), u32_at(&body, 8))
+        let body = read_at(bytes, offsets[i] + 8, len as usize)?;
+        let (Some(at), Some(run), Some(nlen)) = (u32_at(body, 0), u32_at(body, 4), u32_at(body, 8))
         else {
             i += 1;
             continue;
@@ -415,8 +494,8 @@ fn read_plane_map(
         };
 
         // The block that follows carries the bytes this one describes.
-        let data_head = read_at(file, offsets[i + 1], 8)?;
-        let data_len = u32_at(&data_head, 0).unwrap_or(0);
+        let data_head = read_at(bytes, offsets[i + 1], 8)?;
+        let data_len = u32_at(data_head, 0).unwrap_or(0);
         if data_len as usize != run as usize || data_len > MAX_BLOCK_BYTES {
             i += 1;
             continue;
@@ -628,22 +707,20 @@ fn axis_counts(planes: &PlaneMap) -> (usize, usize) {
 }
 
 /// The frame size, from the sidecar if it says, otherwise from the file's XML.
+///
+/// The sidecar goes first because it is the only one of the two that can
+/// describe a file this reader does not fully understand; the record is the
+/// fallback, and covers every OIR that has no `.txt` beside it.
 fn dimensions(
-    file: &mut File,
-    offsets: &[u64],
+    record: &meta::Record,
     summary: &Sidecar,
     planes: &PlaneMap,
 ) -> Result<(u32, u32), PluginError> {
     if let (Some(w), Some(h)) = (summary.width, summary.height) {
         return Ok((w, h));
     }
-    let docs = embedded_xml(file, offsets);
-    let w = element_number(&docs, "commonimage:width");
-    let h = element_number(&docs, "commonimage:height");
-    match (w, h) {
-        (Some(w), Some(h)) if w >= 1.0 && h >= 1.0 && w <= 1e6 && h <= 1e6 => {
-            Ok((w as u32, h as u32))
-        }
+    match (record.width, record.height) {
+        (Some(w), Some(h)) if w >= 1 && h >= 1 && w <= 1_000_000 && h <= 1_000_000 => Ok((w, h)),
         _ => Err(PluginError::failed(format!(
             "could not determine the frame size: neither the sidecar `.txt` nor the \
              file's own metadata states it (found {} plane(s))",
@@ -653,7 +730,7 @@ fn dimensions(
 }
 
 fn read_planes(
-    files: &mut [File],
+    files: &[Mmap],
     planes: &PlaneMap,
     shape: &Shape,
     host: &mut dyn ImportHost,
@@ -672,12 +749,16 @@ fn read_planes(
             if end > buf.len() {
                 continue;
             }
-            let Some(file) = files.get_mut(c.part) else {
+            let Some(file) = files.get(c.part) else {
                 continue;
             };
-            file.seek(SeekFrom::Start(c.file_at))
-                .and_then(|_| file.read_exact(&mut buf[c.at..end]))
-                .map_err(|e| PluginError::failed(format!("could not read plane data: {e}")))?;
+            // A chunk that runs past the end of its part is a corrupt
+            // descriptor; skip it and leave that run of the plane zeroed,
+            // exactly as an over-long chunk is skipped above.
+            let Ok(src) = read_at(file, c.file_at, c.len) else {
+                continue;
+            };
+            buf[c.at..end].copy_from_slice(src);
         }
         out.push(match shape.bytes_per_sample {
             1 => PlaneData::U8(buf),
@@ -693,19 +774,29 @@ fn read_planes(
 
 // ---------------------------------------------------------------- metadata
 
-/// The `<name>.txt` the acquisition software writes beside every OIR.
+/// The `.txt` the acquisition software writes beside an OIR.
 ///
 /// This is the file's metadata in the form a person can read, and it is what
-/// goes into the written TIFF's `ImageDescription`. Converting an OIR without
-/// it throws away the acquisition record — the objective, the laser, the PMT
-/// voltage, the event timings — which is the part that cannot be recovered from
-/// the pixels afterwards.
+/// goes into the written TIFF's `ImageDescription`. Everything [`meta`] does is
+/// an attempt to reconstruct it from the file itself when it is not here.
+///
+/// Two names, because FluoView uses two. A single-file acquisition gets
+/// `<name>.txt`; one long enough to be split gets `<name>_0001.txt`, the same
+/// series suffix its exported TIFF carries — so the acquisitions most in need
+/// of a readable record are exactly the ones whose record a
+/// `with_extension("txt")` misses.
 fn read_sidecar(path: &Path) -> Option<String> {
-    let txt = path.with_extension("txt");
-    let bytes = std::fs::read(&txt).ok()?;
-    // FluoView writes these as plain ASCII; anything else is not the sidecar.
-    let text = String::from_utf8(bytes).ok()?;
-    (!text.trim().is_empty()).then_some(text)
+    let mut names = vec![path.with_extension("txt")];
+    if let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().to_string()) {
+        names.push(path.with_file_name(format!("{stem}_0001.txt")));
+    }
+    names.into_iter().find_map(|txt| {
+        let bytes = std::fs::read(&txt).ok()?;
+        // FluoView writes these as plain ASCII; anything else is not the
+        // sidecar.
+        let text = String::from_utf8(bytes).ok()?;
+        (!text.trim().is_empty()).then_some(text)
+    })
 }
 
 /// The values worth acting on from the sidecar, as opposed to merely carrying.
@@ -773,6 +864,33 @@ impl Sidecar {
     }
 }
 
+impl Sidecar {
+    /// The same values, taken from the file's own XML rather than from a `.txt`.
+    ///
+    /// Read from the [`Record`](meta::Record) rather than parsed back out of
+    /// the text it renders, and the difference matters: that text states a pixel
+    /// size to three decimals, because that is how FluoView's own export states
+    /// it. These numbers calibrate every measurement made on the stack, and
+    /// 0.621 where the file says 0.621480569402239 is an error of 0.08% in every
+    /// distance — small, and no reason to introduce it when the exact value is
+    /// right there.
+    fn from_record(r: &meta::Record) -> Sidecar {
+        Sidecar {
+            width: r.width,
+            height: r.height,
+            channels: (!r.channels.is_empty()).then_some(r.channels.len()),
+            slices: r.slices,
+            pixel_size: r.pixel_x,
+            z_step: r.z_step,
+            // Not here: the frame interval depends on how many frames the
+            // stack ends up with, which is not known until the planes have
+            // been counted. The caller fills it in then.
+            frame_interval_s: None,
+            channel_names: r.channels.iter().filter_map(|c| c.label()).collect(),
+        }
+    }
+}
+
 /// The first number in `s`, ignoring anything around it.
 fn first_number(s: &str) -> Option<f64> {
     let mut start = None;
@@ -798,17 +916,27 @@ fn unit_number(s: &str, unit: &str) -> Option<f64> {
     before[start..].parse().ok().filter(|v: &f64| v.is_finite())
 }
 
-/// Every XML document in the file's metadata blocks.
+/// Every XML document in the file's metadata blocks that this reader
+/// understands.
+///
+/// Two things are going on beyond reading blocks. A block holds one or more
+/// *complete* documents laid end to end with binary padding between them — one
+/// real acquisition puts ten in a single block — so returning the block would
+/// return the padding along with them, and splitting is what makes each one
+/// parseable. And a document whose root element this reader has no use for is
+/// dropped here rather than carried: the display lookup tables alone are
+/// 3.1 MB of the 4 MB an ordinary acquisition holds, and nothing downstream
+/// wants them in memory, let alone in a TIFF tag.
 ///
 /// Only the blocks the index points at are examined, so this never scans the
 /// pixel data — which in a real acquisition is 95% of the file.
-fn embedded_xml(file: &mut File, offsets: &[u64]) -> Vec<String> {
+fn embedded_xml(bytes: &[u8], offsets: &[u64]) -> Vec<String> {
     let mut out = Vec::new();
     for &o in offsets {
-        let Ok(head) = read_at(file, o, 8) else {
+        let Ok(head) = read_at(bytes, o, 8) else {
             continue;
         };
-        let Some(len) = u32_at(&head, 0) else {
+        let Some(len) = u32_at(head, 0) else {
             continue;
         };
         // Metadata blocks are XML documents of a few tens of kilobytes; pixel
@@ -816,16 +944,26 @@ fn embedded_xml(file: &mut File, offsets: &[u64]) -> Vec<String> {
         if !(16..=(4 << 20)).contains(&len) {
             continue;
         }
-        let Ok(body) = read_at(file, o + 8, len as usize) else {
+        // Look at the head of the block before reading the whole of it. Nearly
+        // every block in an acquisition is pixel data — 12,186 of the 12,190 in
+        // one part of the recording this was built against — so reading each
+        // one in full to find out that it is not XML means reading the entire
+        // file, gigabytes of it, twice: once here and once for the pixels. In
+        // every file seen the declaration sits at offset 40 of the block, well
+        // inside this window.
+        let peek = (len as usize).min(XML_PEEK);
+        let Ok(head) = read_at(bytes, o + 8, peek) else {
             continue;
         };
-        let start = body
-            .windows(5)
-            .position(|w| w == b"<?xml")
-            .unwrap_or(usize::MAX);
-        if start == usize::MAX {
+        if !head.windows(5).any(|w| w == b"<?xml") {
             continue;
         }
+        let Ok(body) = read_at(bytes, o + 8, len as usize) else {
+            continue;
+        };
+        let Some(start) = body.windows(5).position(|w| w == b"<?xml") else {
+            continue;
+        };
         // Lossy, not strict. One of these documents in a real acquisition is
         // not valid UTF-8 — an operator's name, a unit symbol, something typed
         // on a machine with a code page — and discarding the whole document for
@@ -835,29 +973,37 @@ fn embedded_xml(file: &mut File, offsets: &[u64]) -> Vec<String> {
         // tags, and a replacement character in a field nobody looks at is not a
         // reason to throw the file's dimensions away.
         let text = String::from_utf8_lossy(&body[start..]);
-        let trimmed = text.trim_end_matches('\0').trim();
-        if trimmed.ends_with('>') {
-            out.push(trimmed.to_string());
+        out.extend(
+            split_documents(&text)
+                .into_iter()
+                .filter(|d| meta::is_known_document(d)),
+        );
+    }
+    out
+}
+
+/// The complete XML documents in `text`, each cut free of whatever follows it.
+///
+/// Documents are separated by the binary padding of the block they share, so
+/// each one runs from its declaration to its own last `>`; anything after that
+/// belongs to the block, not to the document.
+fn split_documents(text: &str) -> Vec<String> {
+    let starts: Vec<usize> = text.match_indices("<?xml").map(|(i, _)| i).collect();
+    let mut out = Vec::with_capacity(starts.len());
+    for (i, &from) in starts.iter().enumerate() {
+        let to = starts.get(i + 1).copied().unwrap_or(text.len());
+        let doc = &text[from..to];
+        let Some(close) = doc.rfind('>') else {
+            continue;
+        };
+        let doc = doc[..=close].trim();
+        if !doc.is_empty() {
+            out.push(doc.to_string());
         }
     }
     out
 }
 
-/// The number inside `<tag>…</tag>`, across all documents.
-fn element_number(docs: &[String], tag: &str) -> Option<f64> {
-    let open = format!("<{tag}>");
-    for d in docs {
-        if let Some(i) = d.find(&open) {
-            let rest = &d[i + open.len()..];
-            let end = rest.find('<')?;
-            if let Ok(v) = rest[..end].trim().parse::<f64>() {
-                return Some(v);
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
-#[path = "oir_tests.rs"]
+#[path = "mod_tests.rs"]
 mod tests;

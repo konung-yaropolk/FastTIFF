@@ -32,10 +32,19 @@
 //!
 //! # Adding one
 //!
-//! Write it in a file here, using nothing but `fasttiff_plugin_api`, and add it
-//! to [`all`] or [`importers`] below. That is the whole procedure — and if it
-//! turns out you would rather ship it separately, moving the file into a
-//! `cdylib` crate needs no changes to the plugin itself.
+//! Give it a directory here — `<name>/mod.rs`, its tests in `mod_tests.rs`
+//! beside that, and any further files it needs alongside them — write it using
+//! nothing but `fasttiff_plugin_api`, and add it to [`all`] or [`importers`]
+//! below. That is the whole procedure.
+//!
+//! A directory each rather than a file each, even for the two that are one file
+//! long. A plugin grows parts — [`oir`] has a container reader and a metadata
+//! translator, and would have had them as `oir.rs`, `oir_meta.rs`,
+//! `oir_tests.rs` and `oir_meta_tests.rs` in a shared directory, four files
+//! whose relationship is a naming convention. Keeping the boundary in the
+//! filesystem is also what makes the last step here cheap: if a plugin would
+//! rather ship separately, its directory becomes a `cdylib` crate's `src/` and
+//! nothing inside it has to change.
 
 pub mod invert;
 #[cfg(feature = "netpbm-example")]

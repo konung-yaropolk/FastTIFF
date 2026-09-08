@@ -69,3 +69,14 @@ fasttiff-plugin-abi = { path = "../fasttiff-plugin-abi", version = "0.18.0" }
 # Opening a shared library. Native only, for the same reason as above: there is
 # no `dlopen` in a browser.
 libloading = "0.8"
+# The OIR importer's acquisition record (`plugins/builtin/oir_meta.rs`). Kept in
+# step with fast-tiff-lib's OME reader so the workspace builds one copy, and
+# native-only because the whole plugin module is: a browser cannot open a `.oir`
+# from disk in the first place. Hand-rolling it was the alternative and is a bad
+# trade — the schema is namespaced throughout, and the documents come from an
+# untrusted file.
+quick-xml = "0.37"
+# The OIR reader maps each part rather than seeking through it: a plane is
+# thirty-five scattered chunks, and a recording is a quarter of a million of
+# them. Same crate and same version fast-tiff-lib maps TIFFs with.
+memmap2 = "0.9"

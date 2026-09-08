@@ -229,5 +229,5 @@ impl Importer for Netpbm {
 }
 
 #[cfg(test)]
-#[path = "netpbm_tests.rs"]
+#[path = "mod_tests.rs"]
 mod tests;
