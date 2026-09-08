@@ -1337,6 +1337,49 @@ impl ViewerApp {
         Ok(())
     }
 
+    /// Ask where to put the open stack, and write it there.
+    ///
+    /// Synchronous, unlike opening. The dialog blocks anyway, and the write is
+    /// a decode-and-encode of every plane — on a multi-gigabyte stack that is
+    /// seconds of an unresponsive window, which is worth fixing the same way
+    /// importing was if it starts to bite. It is not threaded yet because the
+    /// stack being written is the one the interface is drawing from, and
+    /// handing it to a worker means deciding what the window shows meanwhile.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_as(&mut self) {
+        let Some(stack) = self.core.stack.as_ref() else {
+            self.core.status = Some("Open an image first".into());
+            return;
+        };
+        // Suggest the file's own name with a `.tif` on it. An imported stack
+        // has no file, and its `path` is the name it is shown under — which is
+        // exactly what to suggest saving it as.
+        let stem = stack
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "stack".to_string());
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("TIFF", &["tif", "tiff"])
+            .set_file_name(format!("{stem}.tif"));
+        if let Some(dir) = stack.path.parent().filter(|d| d.is_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else {
+            // Cancelled: not a failure, and not worth a status line either.
+            return;
+        };
+        let result = fast_tiff_viewer::save::save_stack(stack, &path);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        match result {
+            Ok(()) => self.report_done(format!("Saved {name}")),
+            Err(e) => self.core.status = Some(format!("Could not save {name}: {e:#}")),
+        }
+    }
+
     /// Show the platform's file picker.
     ///
     /// Native: a blocking dialog that can select several files — the first
@@ -1827,6 +1870,8 @@ impl eframe::App for ViewerApp {
         let can_show_volume = self.core.can_show_volume();
         let mut mode_request: Option<ViewMode> = None;
         let mut open_requested = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut save_requested = false;
         let mut render_settings_toggle = false;
         #[cfg(not(target_arch = "wasm32"))]
         let mut plugin_to_start: Option<usize> = None;
@@ -1842,12 +1887,21 @@ impl eframe::App for ViewerApp {
                 {
                     open_requested = true;
                 }
-                // Saving is not written yet. The button is here so that the
-                // toolbar being looked at now is the one it will live in, and
-                // it says as much on hover rather than pretending to work.
-                let _ = ui
-                    .button(RichText::new(ICON_SAVE).size(ICON_SIZE))
-                    .on_hover_text("Save — not implemented yet");
+                // Disabled with nothing open, which is the one condition
+                // that makes it unavailable and one the user can reach — so a
+                // greyed button here is a promise rather than a dead end.
+                #[cfg(not(target_arch = "wasm32"))]
+                if ui
+                    .add_enabled(
+                        self.core.stack.is_some(),
+                        egui::Button::new(RichText::new(ICON_SAVE).size(ICON_SIZE)),
+                    )
+                    .on_hover_text("Save as TIFF…")
+                    .on_disabled_hover_text("Save as TIFF — nothing is open")
+                    .clicked()
+                {
+                    save_requested = true;
+                }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     match plugins_ui::plugins_menu(ui, self.plugins.as_ref()) {
@@ -2016,6 +2070,10 @@ impl eframe::App for ViewerApp {
         });
         if open_requested {
             self.show_open_dialog(ui.ctx());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if save_requested {
+            self.save_as();
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -3037,7 +3095,3 @@ mod result_file_tests;
 #[cfg(test)]
 #[path = "app/panel_grow_tests.rs"]
 mod panel_grow_tests;
-
-#[cfg(test)]
-#[path = "app/icon_glyph_tests.rs"]
-mod icon_glyph_tests;

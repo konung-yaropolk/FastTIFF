@@ -642,7 +642,11 @@ fn a_real_oir_matches_the_software_export() {
         eprintln!("no {} beside it; pixels not verified", exported.display());
         return;
     }
-    let tiff = fast_tiff_lib::TiffStack::open(&exported).expect("open the export");
+    // Read rather than mapped: `TiffStack::open` needs the `mmap` feature, and
+    // this crate is also tested without it (the shape a browser build takes).
+    let tiff =
+        fast_tiff_lib::TiffStack::from_bytes(std::fs::read(&exported).expect("read the export"))
+            .expect("open the export");
     let f0 = tiff.frames.first().expect("the export has no frames");
     assert_eq!(
         (f0.width, f0.height),
