@@ -191,7 +191,7 @@ impl Plugin for Derivatives {
                 ParamKind::Int {
                     default: 1,
                     min: 1,
-                    max: 3,
+                    max: 2,
                 },
             ),
         ]
