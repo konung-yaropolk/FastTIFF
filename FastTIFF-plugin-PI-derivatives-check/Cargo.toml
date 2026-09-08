@@ -1,0 +1,36 @@
+# A plugin that reproduces the derivative-map step of a two-photon stimulation
+# analysis: read the acquisition's own trigger and timing out of tag 270, take
+# the positive part of the temporal derivative over each stimulus response,
+# average across epochs, and show the two stimulus conditions as one overlay.
+[package]
+name = "fasttiff-plugin-derivatives"
+version = "0.18.0"
+edition = "2021"
+description = "Stimulus-locked derivative maps from a two-photon timelapse, as a magenta/green overlay."
+license = "MPL-2.0"
+repository = "https://github.com/konung-yaropolk/FastTIFF-plugin-PI-derivatives-check"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The host's plugin crates. Paths while this directory still sits inside the
+# FastTIFF checkout; once it is its own repository, comment each path out and
+# uncomment the git line under it — nothing else about the crate changes.
+#
+# A `[patch.crates-io]` or a `paths` override is the usual way to keep working
+# against a local FastTIFF after that; see the README.
+[dependencies]
+fasttiff-plugin = { path = "../fasttiff-plugin", version = "0.18.0" }
+# fasttiff-plugin = { git = "https://github.com/konung-yaropolk/FastTIFF" }
+
+# `fast-tiff-viewer` is a *test* dependency, and the dependency points this way
+# round on purpose: `tests/overlay.rs` drives the host's real plugin loader
+# against this plugin, through the C boundary, which is the only way to know
+# the two agree. A test that could only reach the plugin from inside would
+# prove nothing about the boundary it crosses in use.
+[dev-dependencies]
+fast-tiff-viewer = { path = "../fast-tiff-viewer" }
+fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
+# fast-tiff-viewer = { git = "https://github.com/konung-yaropolk/FastTIFF" }
+# fasttiff-plugin-api = { git = "https://github.com/konung-yaropolk/FastTIFF" }

@@ -7,7 +7,7 @@ resolver = "2"
 #   FastTIFF          the eframe desktop frontend
 # A future wasm frontend becomes a fifth member alongside `FastTIFF`, reusing
 # the lower three unchanged.
-members = ["fast-tiff-lib", "scivis-render", "fast-tiff-viewer", "fasttiff-plugin-api", "fasttiff-plugin-abi", "fasttiff-plugin", "plugins/derivatives", "FastTIFF"]
+members = ["fast-tiff-lib", "scivis-render", "fast-tiff-viewer", "fasttiff-plugin-api", "fasttiff-plugin-abi", "fasttiff-plugin", "FastTIFF"]
 # The fuzz harness is its own crate: it needs nightly + libFuzzer, so keeping it
 # out of the workspace means `cargo build/test --workspace` stays stable-only.
 # Run it with `cargo +nightly fuzz run <target>` from `fast-tiff-lib/`.
@@ -22,7 +22,18 @@ members = ["fast-tiff-lib", "scivis-render", "fast-tiff-viewer", "fasttiff-plugi
 # result against the built-in filter it was copied from — the one test that
 # crosses the plugin boundary for real. Out of `--workspace`, it no longer runs
 # in CI, so run the line above after changing anything in the plugin ABI.
-exclude = ["fast-tiff-lib/fuzz", "plugins/example"]
+# `FastTIFF-plugin-PI-derivatives-check` is on its way out of this repository
+# entirely: a stimulus-derivative analysis for one lab's two-photon protocol,
+# which is too specific to ship with a TIFF viewer. It is excluded rather than
+# deleted so that it keeps building where it stands until it is moved, and its
+# directory is already laid out as the repository it is about to become.
+#
+#     cargo test --manifest-path FastTIFF-plugin-PI-derivatives-check/Cargo.toml
+exclude = [
+    "fast-tiff-lib/fuzz",
+    "plugins/example",
+    "FastTIFF-plugin-PI-derivatives-check",
+]
 
 [profile.release]
 opt-level = 3
