@@ -34,6 +34,6 @@ zstd = { version = "0.13", optional = true } # ZSTD codec (50000, libtiff/GDAL e
 anyhow = "1.0"
 bytemuck = { version = "1.25", features = ["extern_crate_alloc"] }
 rayon = "1.10"     # data-parallel strip decompression + 32-bit conversion
-quick-xml = "0.37" # OME-TIFF metadata (OME-XML in ImageDescription)
+quick-xml = "0.39" # OME-TIFF metadata (OME-XML in ImageDescription)
 
 [dev-dependencies]
