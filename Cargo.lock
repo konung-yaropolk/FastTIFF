@@ -896,6 +896,15 @@ name = "fasttiff-plugin-api"
 version = "0.18.2"
 
 [[package]]
+name = "fasttiff-plugin-derivatives"
+version = "0.18.2"
+dependencies = [
+ "fast-tiff-viewer",
+ "fasttiff-plugin",
+ "fasttiff-plugin-api",
+]
+
+[[package]]
 name = "fax"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
