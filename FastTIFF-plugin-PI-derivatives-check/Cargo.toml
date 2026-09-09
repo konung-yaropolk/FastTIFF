@@ -4,7 +4,7 @@
 # average across epochs, and show the two stimulus conditions as one overlay.
 [package]
 name = "fasttiff-plugin-derivatives"
-version = "0.18.0"
+version = "0.18.2"
 edition = "2021"
 description = "Stimulus-locked derivative maps from a two-photon timelapse, as a magenta/green overlay."
 license = "MPL-2.0"
@@ -21,8 +21,8 @@ crate-type = ["cdylib", "rlib"]
 # A `[patch.crates-io]` or a `paths` override is the usual way to keep working
 # against a local FastTIFF after that; see the README.
 [dependencies]
-fasttiff-plugin = { path = "../fasttiff-plugin", version = "0.18.0" }
-# fasttiff-plugin = { git = "https://github.com/konung-yaropolk/FastTIFF" }
+# fasttiff-plugin = { path = "../fasttiff-plugin", version = "0.18.0" }
+fasttiff-plugin = { git = "https://github.com/konung-yaropolk/FastTIFF" }
 
 # `fast-tiff-viewer` is a *test* dependency, and the dependency points this way
 # round on purpose: `tests/overlay.rs` drives the host's real plugin loader
@@ -30,7 +30,7 @@ fasttiff-plugin = { path = "../fasttiff-plugin", version = "0.18.0" }
 # the two agree. A test that could only reach the plugin from inside would
 # prove nothing about the boundary it crosses in use.
 [dev-dependencies]
-fast-tiff-viewer = { path = "../fast-tiff-viewer" }
-fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
-# fast-tiff-viewer = { git = "https://github.com/konung-yaropolk/FastTIFF" }
-# fasttiff-plugin-api = { git = "https://github.com/konung-yaropolk/FastTIFF" }
+# fast-tiff-viewer = { path = "../fast-tiff-viewer" }
+# fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
+fast-tiff-viewer = { git = "https://github.com/konung-yaropolk/FastTIFF" }
+fasttiff-plugin-api = { git = "https://github.com/konung-yaropolk/FastTIFF" }
