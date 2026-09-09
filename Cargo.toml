@@ -22,17 +22,18 @@ members = ["fast-tiff-lib", "scivis-render", "fast-tiff-viewer", "fasttiff-plugi
 # result against the built-in filter it was copied from — the one test that
 # crosses the plugin boundary for real. Out of `--workspace`, it no longer runs
 # in CI, so run the line above after changing anything in the plugin ABI.
-# `FastTIFF-plugin-PI-derivatives-check` is on its way out of this repository
-# entirely: a stimulus-derivative analysis for one lab's two-photon protocol,
-# which is too specific to ship with a TIFF viewer. It is excluded rather than
-# deleted so that it keeps building where it stands until it is moved, and its
-# directory is already laid out as the repository it is about to become.
-#
-#     cargo test --manifest-path FastTIFF-plugin-PI-derivatives-check/Cargo.toml
+# `plugins/PI-derivatives-check` is a *member*, unlike `plugins/example`. It
+# reproduces one lab's two-photon stimulation analysis, which is too specific to
+# ship with a TIFF viewer, and it did live outside this repository for a while
+# — but a plugin built from its own checkout could not be made to run on the
+# Windows 7 target, which this workspace's release build supports. Building it
+# here, against the same toolchain and the same pinned dependency graph as the
+# host it loads into, is what fixes that. Being a member also means
+# `cargo test --workspace` runs its boundary tests, which is where they belong:
+# they drive the host's real plugin loader against this plugin.
 exclude = [
     "fast-tiff-lib/fuzz",
     "plugins/example",
-    "plugins/PI-derivatives-check",
 ]
 
 [profile.release]

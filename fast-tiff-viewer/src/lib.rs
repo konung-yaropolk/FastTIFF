@@ -44,6 +44,10 @@ pub mod dimensions;
 pub mod display;
 pub mod histogram;
 pub mod loader;
+/// Decoding one plane as `f32` in the file's own units. One definition, so the
+/// plugin host and anything else measuring pixels cannot disagree about what a
+/// sample is worth.
+pub mod planes;
 /// Plugins. Native only: wasm cannot load a shared library, and the browser
 /// build does not want the interface — so it is absent there rather than
 /// compiled in and inert. Nothing in the decode, sync or render path refers to

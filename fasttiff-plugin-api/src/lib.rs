@@ -72,6 +72,7 @@ pub mod import;
 pub mod meta;
 pub mod params;
 pub mod plugin;
+pub mod selection;
 
 pub use export::{ExportRequest, Exporter};
 pub use host::{HostContext, HostContextExt};
@@ -82,6 +83,7 @@ pub use import::{Confidence, FileType, ImportHost, ImportRequest, ImportResult, 
 pub use meta::{DisplayMode, Spacing, StackInfo};
 pub use params::{ParamDecl, ParamKind, ParamValue, Params};
 pub use plugin::{ImageResult, Outcome, PlaneData, Plugin, PluginError, PluginInfo};
+pub use selection::{Roi, Shape};
 
 /// The contract's version.
 ///

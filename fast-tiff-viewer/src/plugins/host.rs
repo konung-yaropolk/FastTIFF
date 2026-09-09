@@ -13,9 +13,7 @@ use fasttiff_plugin_api::{
 use crate::dimensions::plane_index;
 use crate::display::Dims;
 use crate::stack::Stack;
-use fast_tiff_lib::{
-    read_plane_f32_into, read_plane_u16_into, read_plane_u8_into, SampleFormat, TiffStack,
-};
+use fast_tiff_lib::{read_plane_u16_into, SampleFormat, TiffStack};
 use std::sync::Arc;
 
 /// Everything a plugin can reach for one run.
@@ -48,8 +46,7 @@ pub struct StackHost {
     /// case — an uncompressed, native-order, unsigned 16-bit frame, which is
     /// what this library's own writer and ImageJ both produce — converts
     /// straight from the memory map and leaves this empty.
-    scratch16: Vec<u16>,
-    scratch8: Vec<u8>,
+    scratch: crate::planes::Scratch,
     /// Messages the plugin logged, drained by the caller when the run ends.
     pub messages: Vec<String>,
     /// Set by the UI thread to ask the plugin to stop.
@@ -67,8 +64,7 @@ impl StackHost {
             tiff: Arc::clone(&stack.tiff),
             dims: stack.display.dims,
             rgb: stack.display.rgb,
-            scratch16: Vec::new(),
-            scratch8: Vec::new(),
+            scratch: Default::default(),
             messages: Vec::new(),
             cancel: None,
             progress: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -165,76 +161,16 @@ impl HostContext for StackHost {
 
     fn read_plane_f32(&mut self, plane: Plane, out: &mut Vec<f32>) -> Result<(), PluginError> {
         let (ifd, sample) = self.locate(plane)?;
-        let frame = &self.tiff.frames[ifd];
-        let data = &self.tiff.data;
-        let order = self.tiff.byte_order;
-        let fail = |e: anyhow::Error| {
-            PluginError::failed(format!(
-                "decoding (c{}, z{}, t{}): {e:#}",
-                plane.c, plane.z, plane.t
-            ))
-        };
-
-        // `read_plane_f32_into` handles 32- and 64-bit samples only, so the
-        // narrower depths are converted here. The contract says this returns
-        // the file's own values, so an 8-bit sample arrives as 0..255 and not
-        // widened to 16-bit the way the display path widens it — a plugin
-        // computing a mean must get the number that is in the file.
-        match frame.bits_per_sample {
-            32 | 64 => read_plane_f32_into(data, frame, order, sample, out).map_err(fail),
-            8 => {
-                let bytes = &mut self.scratch8;
-                read_plane_u8_into(data, frame, order, sample, bytes).map_err(fail)?;
-                out.clear();
-                out.extend(bytes.iter().map(|&v| v as f32));
-                Ok(())
-            }
-            _ => {
-                // 16-bit (and any other narrow depth the u16 reader accepts).
-                //
-                // The fast path first: for the shape this library's own writer
-                // and ImageJ both produce — uncompressed, one strip, native
-                // byte order, unsigned — `read_frame_u16` hands back a borrow
-                // straight over the memory map, so the samples convert into
-                // `out` in one pass with no intermediate buffer at all. That
-                // shape is the common case rather than a lucky one; see
-                // `fast_tiff_lib`'s encoder, which targets it deliberately.
-                //
-                // `read_frame_u16` reads plane 0, so it only applies where
-                // plane 0 is the whole frame. Multi-sample (RGB) frames need
-                // the deinterleaving `read_plane_u16_into` does.
-                // `sample == 0` as well as one sample per pixel: `read_frame_u16`
-                // reads plane 0, and taking it for any other plane would silently
-                // hand back the wrong channel.
-                if sample == 0
-                    && frame.samples_per_pixel <= 1
-                    && frame.sample_format != SampleFormat::SignedInt
-                {
-                    let borrowed =
-                        fast_tiff_lib::read_frame_u16(data, frame, order, None).map_err(fail)?;
-                    out.clear();
-                    out.extend(borrowed.iter().map(|&v| v as f32));
-                    return Ok(());
-                }
-
-                // Otherwise an intermediate is unavoidable — but it is reused
-                // between calls rather than allocated per plane.
-                //
-                // `read_plane_u16_into` offsets a signed sample into unsigned
-                // by flipping the sign bit; undo that so the value is the one
-                // the file states.
-                let signed = frame.sample_format == SampleFormat::SignedInt;
-                let raw = &mut self.scratch16;
-                read_plane_u16_into(data, frame, order, None, sample, raw).map_err(fail)?;
-                out.clear();
-                if signed {
-                    out.extend(raw.iter().map(|&v| v as f32 - 32768.0));
-                } else {
-                    out.extend(raw.iter().map(|&v| v as f32));
-                }
-                Ok(())
-            }
-        }
+        // Shared with `crate::measure`, so a plugin's mean and the app's own
+        // plot of the same pixels cannot disagree. See `crate::planes`.
+        crate::planes::plane_f32_into(&self.tiff, ifd, sample, &mut self.scratch, out).map_err(
+            |e| {
+                PluginError::failed(format!(
+                    "decoding (c{}, z{}, t{}): {e:#}",
+                    plane.c, plane.z, plane.t
+                ))
+            },
+        )
     }
 
     fn progress(&mut self, fraction: f32) -> bool {
