@@ -464,6 +464,28 @@ struct HostCell<'a> {
     inner: &'a mut dyn HostContext,
     name: String,
     path: String,
+    /// Staging for the plane readers, reused between calls.
+    ///
+    /// The C readers write into a buffer the *plugin* owns, so the host has to
+    /// decode somewhere of its own first and then copy across. Allocating that
+    /// somewhere per call — which is what this did — costs a plane-sized malloc
+    /// and free on every read, so a plugin walking a thousand planes paid a
+    /// thousand of each. The copy itself is inherent to the current contract;
+    /// the allocation was not.
+    scratch_f32: Vec<f32>,
+    scratch_u16: Vec<u16>,
+}
+
+impl<'a> HostCell<'a> {
+    fn new(inner: &'a mut dyn HostContext, name: String, path: String) -> Self {
+        HostCell {
+            inner,
+            name,
+            path,
+            scratch_f32: Vec::new(),
+            scratch_u16: Vec::new(),
+        }
+    }
 }
 
 /// Run `f`, converting a panic in the *host's own* callback into a status.
@@ -609,11 +631,15 @@ unsafe extern "C" fn cb_read_plane_f32(
         if out.is_null() || cap < need {
             return abi::FtStatus::BadArgument;
         }
-        let mut buf = Vec::new();
-        match cell.inner.read_plane_f32(
+        // `take`/put-back rather than a borrow: `cell.inner` and `cell.scratch`
+        // are both behind the same `&mut cell`, and the reader needs the first
+        // mutably while writing into the second.
+        let mut buf = std::mem::take(&mut cell.scratch_f32);
+        let result = cell.inner.read_plane_f32(
             fasttiff_plugin_api::Plane::new(c as usize, z as usize, t as usize),
             &mut buf,
-        ) {
+        );
+        let status = match result {
             Ok(()) => {
                 let n = buf.len().min(need as usize);
                 std::ptr::copy_nonoverlapping(buf.as_ptr(), out, n);
@@ -621,7 +647,9 @@ unsafe extern "C" fn cb_read_plane_f32(
             }
             Err(PluginError::OutOfRange(_)) => abi::FtStatus::OutOfRange,
             Err(_) => abi::FtStatus::Error,
-        }
+        };
+        cell.scratch_f32 = buf;
+        status
     })
 }
 
@@ -641,11 +669,12 @@ unsafe extern "C" fn cb_read_plane_u16(
         if out.is_null() || cap < need {
             return abi::FtStatus::BadArgument;
         }
-        let mut buf = Vec::new();
-        match cell.inner.read_plane_u16(
+        let mut buf = std::mem::take(&mut cell.scratch_u16);
+        let result = cell.inner.read_plane_u16(
             fasttiff_plugin_api::Plane::new(c as usize, z as usize, t as usize),
             &mut buf,
-        ) {
+        );
+        let status = match result {
             Ok(()) => {
                 let n = buf.len().min(need as usize);
                 std::ptr::copy_nonoverlapping(buf.as_ptr(), out, n);
@@ -653,7 +682,9 @@ unsafe extern "C" fn cb_read_plane_u16(
             }
             Err(PluginError::OutOfRange(_)) => abi::FtStatus::OutOfRange,
             Err(_) => abi::FtStatus::Error,
-        }
+        };
+        cell.scratch_u16 = buf;
+        status
     })
 }
 
@@ -1253,11 +1284,11 @@ impl Plugin for LoadedPlugin {
         // `params` takes `&dyn`, but the C table is uniform over `&mut`; the
         // callbacks it can reach from here are read-only.
         let mut shim = ReadOnly(host);
-        let mut cell = HostCell {
-            name: host.stack_info().name.clone(),
-            path: host.stack_info().path.clone().unwrap_or_default(),
-            inner: &mut shim,
-        };
+        // Both read `host` immutably, so they are taken before the
+        // mutable borrow the cell holds for the rest of the call.
+        let cell_name = host.stack_info().name.clone();
+        let cell_path = host.stack_info().path.clone().unwrap_or_default();
+        let mut cell = HostCell::new(&mut shim, cell_name, cell_path);
         let table = host_table(&mut cell);
         let mut sink = DeclSink::default();
         let sink_table = decl_sink_table(&mut sink);
@@ -1282,11 +1313,11 @@ impl Plugin for LoadedPlugin {
         // drop it here and leave every key and text value dangling for the
         // whole call.
         let (values, _owned) = values_to_c(params);
-        let mut cell = HostCell {
-            name: host.stack_info().name.clone(),
-            path: host.stack_info().path.clone().unwrap_or_default(),
-            inner: host,
-        };
+        // Both read `host` immutably, so they are taken before the
+        // mutable borrow the cell holds for the rest of the call.
+        let cell_name = host.stack_info().name.clone();
+        let cell_path = host.stack_info().path.clone().unwrap_or_default();
+        let mut cell = HostCell::new(host, cell_name, cell_path);
         let table = host_table(&mut cell);
         let mut sink = ResultSink::default();
         let sink_table = sink_table(&mut sink);
@@ -1501,11 +1532,11 @@ impl Importer for LoadedImporter {
         // logging, so it gets a host table whose pixel readers refuse rather
         // than no table at all.
         let mut shim = ImportOnly(host);
-        let mut cell = HostCell {
-            name: String::new(),
-            path: p.clone(),
-            inner: &mut shim,
-        };
+        // Both read `host` immutably, so they are taken before the
+        // mutable borrow the cell holds for the rest of the call.
+        let cell_name = String::new();
+        let cell_path = p.clone();
+        let mut cell = HostCell::new(&mut shim, cell_name, cell_path);
         let table = host_table(&mut cell);
 
         let st = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
@@ -1575,11 +1606,11 @@ impl Exporter for LoadedExporter {
         // As in `Plugin::params`: the trait takes `&dyn`, the C table is
         // uniform over `&mut`, and everything reachable from here is read-only.
         let mut shim = ReadOnly(host);
-        let mut cell = HostCell {
-            name: host.stack_info().name.clone(),
-            path: host.stack_info().path.clone().unwrap_or_default(),
-            inner: &mut shim,
-        };
+        // Both read `host` immutably, so they are taken before the
+        // mutable borrow the cell holds for the rest of the call.
+        let cell_name = host.stack_info().name.clone();
+        let cell_path = host.stack_info().path.clone().unwrap_or_default();
+        let mut cell = HostCell::new(&mut shim, cell_name, cell_path);
         let table = host_table(&mut cell);
         let mut sink = DeclSink::default();
         let sink_table = decl_sink_table(&mut sink);
@@ -1606,11 +1637,11 @@ impl Exporter for LoadedExporter {
         let p = request.path.to_string_lossy().to_string();
         // Kept alive for the call; see the note in `Plugin::run`.
         let (values, _owned) = values_to_c(&request.params);
-        let mut cell = HostCell {
-            name: host.stack_info().name.clone(),
-            path: host.stack_info().path.clone().unwrap_or_default(),
-            inner: host,
-        };
+        // Both read `host` immutably, so they are taken before the
+        // mutable borrow the cell holds for the rest of the call.
+        let cell_name = host.stack_info().name.clone();
+        let cell_path = host.stack_info().path.clone().unwrap_or_default();
+        let mut cell = HostCell::new(host, cell_name, cell_path);
         let table = host_table(&mut cell);
 
         // Nothing comes back but a status: the plugin wrote the file itself.

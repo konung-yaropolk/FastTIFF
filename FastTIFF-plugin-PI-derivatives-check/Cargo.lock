@@ -118,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
@@ -126,11 +126,11 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin-abi"
-version = "0.18.0"
+version = "0.18.1"
 
 [[package]]
 name = "fasttiff-plugin-api"
-version = "0.18.0"
+version = "0.18.1"
 
 [[package]]
 name = "fasttiff-plugin-derivatives"

@@ -72,11 +72,113 @@ impl Samples {
     }
 }
 
+/// Everything a save reads, owned.
+///
+/// A save is a decode-and-encode of every frame, which on a big stack is
+/// seconds — long enough that it belongs on a worker thread. This is what goes
+/// there. It is not a copy of the image: `tiff` is a second handle on the same
+/// indexed file, and `display` is the axis/contrast model, which is a few
+/// vectors of settings. Taking it costs a refcount bump and one small clone.
+///
+/// Owned rather than borrowed because the window carries on being used while
+/// the write runs, and a `&Stack` held across that would stop it.
+pub struct SaveSource {
+    tiff: std::sync::Arc<fast_tiff_lib::TiffStack>,
+    display: crate::display::Display,
+}
+
+impl SaveSource {
+    /// Snapshot the stack as it is being looked at *now*.
+    ///
+    /// The metadata written comes from the display model, so changing the
+    /// contrast or the axes after pressing Save must not change the file that
+    /// is already being written — hence a snapshot rather than a live borrow.
+    pub fn of(stack: &Stack) -> Self {
+        SaveSource {
+            tiff: std::sync::Arc::clone(&stack.tiff),
+            display: stack.display.clone(),
+        }
+    }
+
+    /// How many frames the write will step through, for a progress readout.
+    pub fn frames(&self) -> usize {
+        self.tiff.frames.len()
+    }
+}
+
 /// Write `stack` to `path` as a TIFF.
+///
+/// The blocking form, for callers with nothing to report progress to — tests,
+/// and any future headless use. [`save_source`] is what the app calls.
+pub fn save_stack(stack: &Stack, path: &Path) -> Result<()> {
+    save_source(&SaveSource::of(stack), path, &mut |_| true)
+}
+
+/// Write a snapshot to `path`, reporting progress and stopping when asked.
 ///
 /// Streams: one frame is decoded and written at a time, so saving a stack
 /// costs one frame of memory rather than a second copy of the whole thing.
-pub fn save_stack(stack: &Stack, path: &Path) -> Result<()> {
+///
+/// `on_progress` is called once per frame with the fraction completed and
+/// returns `false` to cancel.
+///
+/// # Nothing is destroyed until the write has succeeded
+///
+/// The pixels go to a temporary file beside the target and are renamed over it
+/// at the end. Two things make that worth the extra step rather than writing
+/// straight to `path`:
+///
+/// * A half-written TIFF has a valid header and a short IFD chain, so it
+///   *opens* — as a file with fewer frames than it should have. Nothing
+///   downstream can tell it is incomplete. Cancelling a save, or having one
+///   fail, must not produce one.
+/// * Saving over an existing file truncates it the moment the writer is
+///   created. A save that then fails half way would have destroyed the file it
+///   was supposed to replace — and "save over the file I am looking at" is a
+///   thing people do. Writing beside it means the original survives every
+///   failure, including the one where the rename itself is refused because
+///   another window has that file memory-mapped (Windows os error 1224).
+pub fn save_source(
+    source: &SaveSource,
+    path: &Path,
+    on_progress: &mut dyn FnMut(f32) -> bool,
+) -> Result<()> {
+    let temp = partial_path(path);
+    match write_all(source, &temp, on_progress) {
+        Ok(()) => std::fs::rename(&temp, path).with_context(|| {
+            // Best effort: leaving the part file behind after a failed rename
+            // would be a mystery file next to the one the user asked for.
+            let _ = std::fs::remove_file(&temp);
+            format!("could not put the finished file at {}", path.display())
+        }),
+        Err(e) => {
+            // Best effort: if the part file cannot be removed the error being
+            // reported is still the more useful one.
+            let _ = std::fs::remove_file(&temp);
+            Err(e)
+        }
+    }
+}
+
+/// Where the pixels go until the write has succeeded.
+///
+/// In the same directory as the target, because a rename across filesystems is
+/// a copy — and the temp directory is routinely on a different volume from the
+/// data drive a microscopy stack is being saved to.
+fn partial_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".fasttiff-part");
+    path.with_file_name(name)
+}
+
+/// The write itself. Split out so [`save_source`] can clean up after it without
+/// an early `return` skipping the cleanup.
+fn write_all(
+    source: &SaveSource,
+    path: &Path,
+    on_progress: &mut dyn FnMut(f32) -> bool,
+) -> Result<()> {
+    let stack = source;
     let first = stack
         .tiff
         .frames
@@ -118,7 +220,14 @@ pub fn save_stack(stack: &Stack, path: &Path) -> Result<()> {
     let mut u16s: Vec<u16> = Vec::new();
     let mut f32s: Vec<f32> = Vec::new();
     let mut bytes: Vec<u8> = Vec::new();
+    let total = stack.tiff.frames.len().max(1);
     for (i, frame) in stack.tiff.frames.iter().enumerate() {
+        // Before the frame, not after: a stack of one frame should still show
+        // that the write started, and the `finish` below is the tail this can
+        // never account for.
+        if !on_progress(i as f32 / total as f32) {
+            bail!("cancelled");
+        }
         let wrote = || format!("writing frame {i}");
         match samples {
             Samples::U8 => {
@@ -164,7 +273,7 @@ pub fn save_stack(stack: &Stack, path: &Path) -> Result<()> {
 /// two can differ. A stack whose axes were reinterpreted, or whose channels were
 /// recoloured, is saved as it is being looked at — which is the only reading of
 /// "save" that does not surprise someone who just changed something.
-fn metadata_of(stack: &Stack) -> StackMetaWrite {
+fn metadata_of(stack: &SaveSource) -> StackMetaWrite {
     let dims = stack.display.dims;
     let meta = &stack.tiff.meta;
     let mut out = StackMetaWrite::new(dims.channels, dims.slices).mode(stack.display.mode);
@@ -218,7 +327,7 @@ fn metadata_of(stack: &Stack) -> StackMetaWrite {
 /// reconstructed, so it travels. The ImageJ `key=value` block in front of it
 /// does not: every key in it is being regenerated from the values above, and
 /// carrying the old copy through would leave two of each in the file.
-fn carried_description(stack: &Stack) -> Option<String> {
+fn carried_description(stack: &SaveSource) -> Option<String> {
     let text = stack.tiff.description.as_deref()?;
     let kept = match metadata::detect(Some(text)) {
         MetadataFormat::ImageJ => text

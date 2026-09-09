@@ -50,6 +50,19 @@ pub trait HostContext {
     /// stops and returns [`crate::Outcome::Cancelled`]. A plugin that ignores it
     /// is not a correctness problem — the host discards the result of a
     /// cancelled run — but it does leave a core busy until it finishes.
+    ///
+    /// # This is the whole asynchrony contract
+    ///
+    /// Plugins run on a worker thread, and this one method is all a plugin has
+    /// to do about that. There is no status to poll, nothing to register, and
+    /// no second entry point: call it as the work goes and the window draws a
+    /// bar with your progress on it; do not call it and the window draws an
+    /// animated bar that says your plugin's name. Both are correct. A short
+    /// plugin should not bother.
+    ///
+    /// Call it often enough that stopping feels immediate — the return value is
+    /// only read when it is called, so a plugin that reports once per minute
+    /// takes a minute to stop.
     fn progress(&mut self, fraction: f32) -> bool;
 
     /// A line for the host to show the user. Not an error; use the returned

@@ -77,7 +77,7 @@ fn view() -> VolumeView {
     }
 }
 
-fn host(s: &Stack, frame_index: usize) -> StackHost<'_> {
+fn host(s: &Stack, frame_index: usize) -> StackHost {
     StackHost::new(s, describe_view(s, frame_index, false, view()))
 }
 
@@ -478,4 +478,82 @@ fn invert_runs_on_an_8_bit_stack() {
     img.validate().unwrap();
     // Inverted about its own 0..255 range.
     assert_eq!(planes_f32(&img)[0], &vec![255.0, 170.0, 85.0, 0.0]);
+}
+
+/// The borrow shortcut in `read_plane_f32` must produce the same numbers as the
+/// decode it skips.
+///
+/// For the common shape — uncompressed, one strip, native order, unsigned
+/// 16-bit — the host now converts straight out of the memory map instead of
+/// decoding into a scratch buffer first. That is a second code path for the
+/// most common kind of file there is, and the only thing that makes it safe is
+/// that both paths agree exactly. Compression forces the slow path, so writing
+/// the same pixels twice gives an oracle for free.
+#[test]
+fn the_borrowed_and_decoded_plane_paths_agree() {
+    use fast_tiff_lib::{Compression, SampleType};
+
+    // Values chosen to catch a sign-extension or byte-order slip: 0, 1, the
+    // byte boundary, and the top of the range.
+    let px: Vec<u16> = vec![0, 1, 255, 256, 32767, 32768, 65534, 65535];
+    let raw: Vec<u8> = px.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let mut planes = Vec::new();
+    for compression in [Compression::None, Compression::Deflate] {
+        let opts = WriterOptions::new(4, 2, SampleType::U16)
+            .compression(compression)
+            .metadata(StackMetaWrite::new(1, 1));
+        let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+        w.write_frame_bytes(&raw).unwrap();
+        let bytes = w.finish().unwrap().into_inner();
+        let s = Stack::from_bytes(bytes, "cmp.tif".into(), false).unwrap();
+
+        // Not vacuous: the two files must genuinely differ in how they are
+        // stored, or both would be taking the same path.
+        assert_eq!(s.tiff.frames[0].compression, compression);
+
+        let mut h = host(&s, 0);
+        let mut got = Vec::new();
+        h.read_plane_f32(Plane::new(0, 0, 0), &mut got).unwrap();
+        planes.push(got);
+    }
+
+    let want: Vec<f32> = px.iter().map(|&v| v as f32).collect();
+    assert_eq!(planes[0], want, "the borrowed path");
+    assert_eq!(planes[1], want, "the decoded path");
+    assert_eq!(planes[0], planes[1]);
+}
+
+/// Reading many planes must not allocate a buffer per plane. The scratch the
+/// slow path uses lives on the host and is reused; the fast path uses none at
+/// all. Checked by capacity rather than by a counter: after N reads the host
+/// holds at most one buffer's worth.
+#[test]
+fn repeated_plane_reads_reuse_one_buffer() {
+    use fast_tiff_lib::{Compression, SampleType};
+
+    // Compressed, so the scratch path is the one under test.
+    let opts = WriterOptions::new(4, 2, SampleType::U16)
+        .compression(Compression::Deflate)
+        .metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for _ in 0..8 {
+        w.write_frame_bytes(&[7u8; 16]).unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    let s = Stack::from_bytes(bytes, "many.tif".into(), false).unwrap();
+
+    let mut h = host(&s, 0);
+    let mut out = Vec::new();
+    for t in 0..8 {
+        h.read_plane_f32(Plane::new(0, 0, t), &mut out).unwrap();
+        assert_eq!(out.len(), 8);
+    }
+    // The plugin's own buffer was reused too — `read_plane_f32` must not leave
+    // it growing by a plane each call.
+    assert!(
+        out.capacity() < 64,
+        "capacity {} after 8 reads",
+        out.capacity()
+    );
 }
