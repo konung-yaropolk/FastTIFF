@@ -68,7 +68,7 @@ fasttiff-plugin-api = { path = "../fasttiff-plugin-api", version = "0.18.0" }
 fasttiff-plugin-abi = { path = "../fasttiff-plugin-abi", version = "0.18.0" }
 # Opening a shared library. Native only, for the same reason as above: there is
 # no `dlopen` in a browser.
-libloading = "0.8"
+libloading = "0.9"
 # The OIR importer's acquisition record (`plugins/builtin/oir_meta.rs`). Kept in
 # step with fast-tiff-lib's OME reader so the workspace builds one copy, and
 # native-only because the whole plugin module is: a browser cannot open a `.oir`
