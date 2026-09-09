@@ -11,15 +11,45 @@ use fasttiff_plugin_api::{
 };
 
 use crate::dimensions::plane_index;
+use crate::display::Dims;
 use crate::stack::Stack;
-use fast_tiff_lib::{read_plane_f32_into, read_plane_u16_into, read_plane_u8_into, SampleFormat};
+use fast_tiff_lib::{
+    read_plane_f32_into, read_plane_u16_into, read_plane_u8_into, SampleFormat, TiffStack,
+};
+use std::sync::Arc;
 
-/// Everything a plugin can reach, borrowed from the viewer for one run.
-pub struct StackHost<'a> {
-    stack: &'a Stack,
+/// Everything a plugin can reach for one run.
+///
+/// Owns what it needs rather than borrowing the [`Stack`], which is what lets a
+/// run happen on a worker thread while the window keeps drawing. The pixels are
+/// not copied to get there: `tiff` is a second handle on the *same* indexed
+/// file — one memory map, shared — and the two fields beside it are the plane
+/// layout, which is three `usize`s and a `bool`.
+///
+/// Everything here is read-only for the run's duration. That is the whole
+/// reason no lock is needed: a `TiffStack` is never mutated after it is
+/// indexed, so a worker reading it cannot race the window reading it.
+pub struct StackHost {
+    tiff: Arc<TiffStack>,
+    /// The c/z/t interpretation in force when the run started, copied because
+    /// the user may change it while a long run is going and a plugin must not
+    /// see the axes move underneath it.
+    dims: Dims,
+    /// Whether display channels are an IFD's sample planes rather than separate
+    /// IFDs. Part of the same frozen layout as `dims`.
+    rgb: bool,
     image: ImageInfo,
     view: ViewParams,
     info: StackInfo,
+    /// Reused between plane reads, so a run that reads a thousand planes does
+    /// not allocate a thousand buffers.
+    ///
+    /// Only the paths that genuinely need an intermediate touch it. The common
+    /// case — an uncompressed, native-order, unsigned 16-bit frame, which is
+    /// what this library's own writer and ImageJ both produce — converts
+    /// straight from the memory map and leaves this empty.
+    scratch16: Vec<u16>,
+    scratch8: Vec<u8>,
     /// Messages the plugin logged, drained by the caller when the run ends.
     pub messages: Vec<String>,
     /// Set by the UI thread to ask the plugin to stop.
@@ -28,13 +58,17 @@ pub struct StackHost<'a> {
     pub progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
-impl<'a> StackHost<'a> {
-    pub fn new(stack: &'a Stack, view: ViewParams) -> Self {
+impl StackHost {
+    pub fn new(stack: &Stack, view: ViewParams) -> Self {
         StackHost {
             image: describe_image(stack),
             info: describe_stack(stack),
             view,
-            stack,
+            tiff: Arc::clone(&stack.tiff),
+            dims: stack.display.dims,
+            rgb: stack.display.rgb,
+            scratch16: Vec::new(),
+            scratch8: Vec::new(),
             messages: Vec::new(),
             cancel: None,
             progress: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -75,14 +109,8 @@ impl<'a> StackHost<'a> {
                 p.c, p.z, p.t, self.image.channels, self.image.slices, self.image.frames
             )));
         }
-        let (ifd, sample) = plane_index(
-            self.stack.display.dims,
-            self.stack.display.rgb,
-            p.c,
-            p.z,
-            p.t,
-        );
-        if ifd >= self.stack.tiff.frames.len() {
+        let (ifd, sample) = plane_index(self.dims, self.rgb, p.c, p.z, p.t);
+        if ifd >= self.tiff.frames.len() {
             // Reachable: the metadata can describe more planes than the file
             // holds (a multi-file OME set gives every file the whole
             // dataset's dimensions). `dimensions::clamp_to_available` trims
@@ -93,14 +121,14 @@ impl<'a> StackHost<'a> {
                 p.c,
                 p.z,
                 p.t,
-                self.stack.tiff.frames.len()
+                self.tiff.frames.len()
             )));
         }
         Ok((ifd, sample))
     }
 }
 
-impl HostContext for StackHost<'_> {
+impl HostContext for StackHost {
     fn image(&self) -> ImageInfo {
         self.image
     }
@@ -115,14 +143,14 @@ impl HostContext for StackHost<'_> {
 
     fn read_plane_u16(&mut self, plane: Plane, out: &mut Vec<u16>) -> Result<(), PluginError> {
         let (ifd, sample) = self.locate(plane)?;
-        let frame = &self.stack.tiff.frames[ifd];
+        let frame = &self.tiff.frames[ifd];
         // The contrast window is what a float plane is rescaled through; a
         // plugin wanting the raw values asks for f32 instead.
         let range = self.view.channels.get(plane.c).map(|c| (c.min, c.max));
         read_plane_u16_into(
-            &self.stack.tiff.data,
+            &self.tiff.data,
             frame,
-            self.stack.tiff.byte_order,
+            self.tiff.byte_order,
             range,
             sample,
             out,
@@ -137,9 +165,9 @@ impl HostContext for StackHost<'_> {
 
     fn read_plane_f32(&mut self, plane: Plane, out: &mut Vec<f32>) -> Result<(), PluginError> {
         let (ifd, sample) = self.locate(plane)?;
-        let frame = &self.stack.tiff.frames[ifd];
-        let data = &self.stack.tiff.data;
-        let order = self.stack.tiff.byte_order;
+        let frame = &self.tiff.frames[ifd];
+        let data = &self.tiff.data;
+        let order = self.tiff.byte_order;
         let fail = |e: anyhow::Error| {
             PluginError::failed(format!(
                 "decoding (c{}, z{}, t{}): {e:#}",
@@ -155,21 +183,51 @@ impl HostContext for StackHost<'_> {
         match frame.bits_per_sample {
             32 | 64 => read_plane_f32_into(data, frame, order, sample, out).map_err(fail),
             8 => {
-                let mut bytes = Vec::new();
-                read_plane_u8_into(data, frame, order, sample, &mut bytes).map_err(fail)?;
+                let bytes = &mut self.scratch8;
+                read_plane_u8_into(data, frame, order, sample, bytes).map_err(fail)?;
                 out.clear();
                 out.extend(bytes.iter().map(|&v| v as f32));
                 Ok(())
             }
             _ => {
                 // 16-bit (and any other narrow depth the u16 reader accepts).
+                //
+                // The fast path first: for the shape this library's own writer
+                // and ImageJ both produce — uncompressed, one strip, native
+                // byte order, unsigned — `read_frame_u16` hands back a borrow
+                // straight over the memory map, so the samples convert into
+                // `out` in one pass with no intermediate buffer at all. That
+                // shape is the common case rather than a lucky one; see
+                // `fast_tiff_lib`'s encoder, which targets it deliberately.
+                //
+                // `read_frame_u16` reads plane 0, so it only applies where
+                // plane 0 is the whole frame. Multi-sample (RGB) frames need
+                // the deinterleaving `read_plane_u16_into` does.
+                // `sample == 0` as well as one sample per pixel: `read_frame_u16`
+                // reads plane 0, and taking it for any other plane would silently
+                // hand back the wrong channel.
+                if sample == 0
+                    && frame.samples_per_pixel <= 1
+                    && frame.sample_format != SampleFormat::SignedInt
+                {
+                    let borrowed =
+                        fast_tiff_lib::read_frame_u16(data, frame, order, None).map_err(fail)?;
+                    out.clear();
+                    out.extend(borrowed.iter().map(|&v| v as f32));
+                    return Ok(());
+                }
+
+                // Otherwise an intermediate is unavoidable — but it is reused
+                // between calls rather than allocated per plane.
+                //
                 // `read_plane_u16_into` offsets a signed sample into unsigned
                 // by flipping the sign bit; undo that so the value is the one
                 // the file states.
-                let mut raw = Vec::new();
-                read_plane_u16_into(data, frame, order, None, sample, &mut raw).map_err(fail)?;
+                let signed = frame.sample_format == SampleFormat::SignedInt;
+                let raw = &mut self.scratch16;
+                read_plane_u16_into(data, frame, order, None, sample, raw).map_err(fail)?;
                 out.clear();
-                if frame.sample_format == SampleFormat::SignedInt {
+                if signed {
                     out.extend(raw.iter().map(|&v| v as f32 - 32768.0));
                 } else {
                     out.extend(raw.iter().map(|&v| v as f32));

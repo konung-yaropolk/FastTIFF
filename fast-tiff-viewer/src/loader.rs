@@ -32,8 +32,8 @@ impl LoadStage {
     /// Wording for a progress readout.
     pub fn label(self) -> &'static str {
         match self {
-            LoadStage::Reading => "Reading file…",
-            LoadStage::Contrast { .. } => "Measuring channels…",
+            LoadStage::Reading => "    Reading file…",
+            LoadStage::Contrast { .. } => "    Measuring channels…",
         }
     }
 

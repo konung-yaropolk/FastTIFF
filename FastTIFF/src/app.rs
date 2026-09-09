@@ -230,7 +230,8 @@ const ZOOM_GLIDE_MAX_DT: f32 = 1.0 / 20.0;
 fn import_with_plugin(
     registry: &mut fast_tiff_viewer::plugins::Registry,
     path: &std::path::Path,
-    progress: &std::sync::Arc<std::sync::atomic::AtomicU32>,
+    progress: &std::sync::atomic::AtomicU32,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<Opened, String> {
     let head = fast_tiff_viewer::plugins::Registry::read_head(path);
     let (index, _confidence) = *registry
@@ -243,16 +244,14 @@ fn import_with_plugin(
         params: fasttiff_plugin_api::Params::new(),
     };
 
-    struct Host<'a>(&'a std::sync::atomic::AtomicU32);
+    struct Host<'a>(
+        &'a std::sync::atomic::AtomicU32,
+        &'a std::sync::atomic::AtomicBool,
+    );
     impl fasttiff_plugin_api::ImportHost for Host<'_> {
         fn progress(&mut self, f: f32) -> bool {
-            self.0.store(
-                (f.clamp(0.0, 1.0) * 1000.0) as u32,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            // Never cancelled: nothing offers to yet. An importer that honours
-            // this is ready for one that does.
-            true
+            Job::report(self.0, f);
+            !self.1.load(std::sync::atomic::Ordering::Relaxed)
         }
         fn log(&mut self, m: &str) {
             log::info!("import: {m}");
@@ -265,7 +264,7 @@ fn import_with_plugin(
     let name = entry.info.name.clone();
     let imported = entry
         .importer
-        .import(&request, &mut Host(progress))
+        .import(&request, &mut Host(progress, cancel))
         .map_err(|e| format!("{name}: {e}"))?;
 
     let bytes = fast_tiff_viewer::plugins::to_tiff_bytes(&imported.image, imported.info.as_ref())
@@ -520,23 +519,188 @@ enum Incoming {
         Box<fast_tiff_viewer::plugins::Registry>,
         Result<Opened, String>,
     ),
+    /// A filter plugin finished. The registry travels back for the same reason
+    /// an import's does.
+    #[cfg(not(target_arch = "wasm32"))]
+    Ran(Box<fast_tiff_viewer::plugins::Registry>, Box<PluginRun>),
+    /// A save or an export finished: the file's name, and how it went.
+    ///
+    /// The registry is `Some` only for an export, which had to borrow it; a
+    /// plain TIFF save is the app's own code and never takes it.
+    #[cfg(not(target_arch = "wasm32"))]
+    Wrote(
+        Option<Box<fast_tiff_viewer::plugins::Registry>>,
+        String,
+        WriteOutcome,
+    ),
 }
 
-/// An import in flight: what is being read, and how far it has got.
+/// How a save or an export ended.
 ///
-/// Progress is a permille rather than a float because it crosses threads and
-/// `f32` has no atomic. The importer reports a fraction; a thousandth of a file
-/// is finer than any progress bar can draw.
+/// Three cases rather than a `Result`, because stopping is not failing and the
+/// window should not say "could not save" about a file the user chose not to
+/// write. The distinction is drawn from the cancel flag rather than from the
+/// error text: an exporter reports being stopped through whatever error its
+/// author picked, and matching on strings to find out would be guesswork.
 #[cfg(not(target_arch = "wasm32"))]
-struct ImportJob {
-    name: String,
-    progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
+enum WriteOutcome {
+    Done,
+    Cancelled,
+    Failed(String),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl ImportJob {
-    fn fraction(&self) -> f32 {
-        self.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0
+impl WriteOutcome {
+    fn of(result: Result<(), String>, cancel: &std::sync::atomic::AtomicBool) -> Self {
+        match result {
+            Ok(()) => WriteOutcome::Done,
+            Err(_) if cancel.load(std::sync::atomic::Ordering::Relaxed) => WriteOutcome::Cancelled,
+            Err(e) => WriteOutcome::Failed(e),
+        }
+    }
+}
+
+/// What a filter plugin produced, carried back from its worker.
+#[cfg(not(target_arch = "wasm32"))]
+struct PluginRun {
+    name: String,
+    /// What the plugin logged, drained from its host when the run ended.
+    messages: Vec<String>,
+    outcome: Result<fasttiff_plugin_api::Outcome, fasttiff_plugin_api::PluginError>,
+}
+
+/// Progress that has not been reported yet, as distinct from nought reported.
+///
+/// A plugin is not obliged to call `progress` at all — most short ones do not —
+/// and a bar sitting at 0% for the whole run reads as "stuck" rather than as
+/// "no estimate". This sentinel is what makes the readout a spinner instead.
+#[cfg(not(target_arch = "wasm32"))]
+const PROGRESS_UNKNOWN: u32 = u32::MAX;
+
+/// Run a worker's work, turning a panic into a message instead of a dead thread.
+///
+/// The thread is the only thing holding the registry, and the only thing that
+/// will ever clear [`ViewerApp::job`]. If it unwinds out from under us the
+/// window is left saying "running" for ever, with the Plugins and Save buttons
+/// disabled and no way back short of a restart — strictly worse than the
+/// synchronous version this replaced, where a panic at least reached the top.
+///
+/// A `.dll` plugin's panics are already caught at the C boundary (they have to
+/// be: unwinding through `extern "C"` is undefined). This is for the built-ins
+/// and for the app's own code around them.
+#[cfg(not(target_arch = "wasm32"))]
+fn contained<T>(what: &str, work: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(|e| {
+        // The payload is `&str` for `panic!("...")` and `String` for a
+        // formatted one; anything else is a custom type nobody can print.
+        let why = e
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| e.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".to_string());
+        format!("{what} panicked: {why}")
+    })
+}
+
+/// What is written over the progress bar: how far along, then what is running.
+///
+/// One line, over the bar rather than beside it, so the bar can spread across
+/// the row instead of sharing it. A stage with no knowable length has no
+/// percentage to give and reads as the label alone.
+fn progress_text(label: &str, fraction: Option<f32>) -> String {
+    match fraction {
+        Some(f) => format!("{:.0}%  {label}", (f.clamp(0.0, 1.0)) * 100.0),
+        None => label.to_string(),
+    }
+}
+
+/// The status bar's progress bar.
+///
+/// No `desired_width`, which is what makes it spread: `egui::ProgressBar` then
+/// takes `available_size_before_wrap().x`, so it fills whatever is left of the
+/// row. Everything that has to stay visible — the status message, the stop
+/// button — is therefore placed *before* it.
+///
+/// `animate` when there is no fraction: it says "working" without inventing a
+/// number, and the repaints its animation asks for are already being requested
+/// while a job is running.
+fn progress_bar(label: &str, fraction: Option<f32>) -> egui::ProgressBar {
+    egui::ProgressBar::new(fraction.unwrap_or(0.0))
+        .animate(fraction.is_none())
+        .text(progress_text(label, fraction))
+}
+
+/// What the info row's *height* depends on, as a string to compare frames by.
+///
+/// The percentage is deliberately absent. This key is what
+/// [`PanelLayout::note_info_row`] compares one frame against the next to decide
+/// whether the row changed height and the window should grow — and a string
+/// that changed every frame would arm that on every frame, giving a window that
+/// creeps taller for the whole length of a load. Only the things that can
+/// actually reflow the row belong here: whether each part is present, and the
+/// text whose length decides how many lines it wraps to.
+fn info_key(status: Option<&str>, label: Option<&str>) -> String {
+    let mut key = String::new();
+    if let Some(status) = status {
+        key.push_str(status);
+    }
+    if let Some(label) = label {
+        key.push('\u{1}');
+        key.push_str(label);
+    }
+    key
+}
+
+/// A slow thing running on a worker: what to call it, how far it has got, and
+/// how to ask it to stop.
+///
+/// One type for all four — importing, running a filter, saving, exporting —
+/// because the window shows them identically and only ever runs one at a time.
+/// The alternative was four near-identical structs and four branches in the
+/// status bar.
+///
+/// Progress is a permille in an atomic rather than an `f32` because it crosses
+/// threads and `f32` has no atomic form. A thousandth of a file is finer than
+/// any progress bar can draw.
+///
+/// **No new plugin API carries it.** `HostContext::progress` and its cancel
+/// return already exist and are already what a plugin calls; this is just the
+/// other end of them, which used to be a local nobody could see.
+#[cfg(not(target_arch = "wasm32"))]
+struct Job {
+    /// What to print over the bar: "Importing", "Saving", the plugin's name.
+    label: String,
+    progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Job {
+    /// Start one, with nothing reported yet.
+    fn new(label: impl Into<String>) -> Self {
+        Job {
+            label: label.into(),
+            progress: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(PROGRESS_UNKNOWN)),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// How far along, or `None` when the worker has not said — which is a
+    /// spinner rather than a bar.
+    fn fraction(&self) -> Option<f32> {
+        match self.progress.load(std::sync::atomic::Ordering::Relaxed) {
+            PROGRESS_UNKNOWN => None,
+            permille => Some((permille as f32 / 1000.0).clamp(0.0, 1.0)),
+        }
+    }
+
+    /// Record a fraction reported by a worker. Free function shape, so a worker
+    /// that only has the `Arc` can call it.
+    fn report(progress: &std::sync::atomic::AtomicU32, fraction: f32) {
+        progress.store(
+            (fraction.clamp(0.0, 1.0) * 1000.0) as u32,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 }
 
@@ -801,12 +965,17 @@ pub struct ViewerApp {
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     open_tx: Sender<Incoming>,
     open_rx: Receiver<Incoming>,
-    /// The import running on a worker thread, while one is.
+    /// The slow thing running on a worker thread, while one is: an import, a
+    /// filter plugin, a save or an export.
     ///
-    /// Its presence is also what makes [`plugins`](Self::plugins) `None`: the
-    /// worker has the registry, and gives it back with the result.
+    /// One at a time, which is also the answer to "block the data from other
+    /// plugins while one is processing": there is no second worker to race, and
+    /// while this is `Some` the Plugins and Save buttons are disabled. For an
+    /// import, a plugin run or an export its presence is what makes
+    /// [`plugins`](Self::plugins) `None` — the worker has the registry and
+    /// gives it back with the result.
     #[cfg(not(target_arch = "wasm32"))]
-    import: Option<ImportJob>,
+    job: Option<Job>,
 
     // --- window chrome ------------------------------------------------------
     /// The window title last sent via `ViewportCommand::Title`. Native only —
@@ -928,7 +1097,7 @@ impl ViewerApp {
             open_tx,
             open_rx,
             #[cfg(not(target_arch = "wasm32"))]
-            import: None,
+            job: None,
             last_title: None,
             good_status: None,
             show_metadata: false,
@@ -981,6 +1150,9 @@ impl ViewerApp {
             other => other,
         };
 
+        // Same rule as a worker job: the readout is about to appear, and what
+        // the last action said is not about this one. See `begin_job`.
+        self.clear_status();
         self.core.begin_open(match opened {
             #[cfg(not(target_arch = "wasm32"))]
             Opened::Path(path) => fast_tiff_viewer::LoadSource::Path(path),
@@ -988,6 +1160,40 @@ impl ViewerApp {
                 fast_tiff_viewer::LoadSource::Bytes(bytes, PathBuf::from(name))
             }
         });
+    }
+
+    /// Start showing a job, clearing what the last one left behind.
+    ///
+    /// The status line and the progress bar share a row, so a message from
+    /// earlier would sit beside the new bar looking like a comment on it —
+    /// "Saved field_1.tif" next to an import that has nothing to do with it,
+    /// or worse, an error from the previous run beside a bar that is going
+    /// fine. The old message is spent the moment new work starts.
+    ///
+    /// Every job goes through here so that cannot be forgotten at one of the
+    /// four call sites.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn begin_job(
+        &mut self,
+        job: Job,
+    ) -> (
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.clear_status();
+        let handles = (job.progress.clone(), job.cancel.clone());
+        self.job = Some(job);
+        handles
+    }
+
+    /// Drop the last thing said, message and green-ness together.
+    ///
+    /// Both, always: `good_status` is what makes the text green, and leaving it
+    /// set while replacing the text would paint the next message green whether
+    /// or not it reported success.
+    fn clear_status(&mut self) {
+        self.core.status = None;
+        self.good_status = None;
     }
 
     /// Report something that finished, in the voice for it.
@@ -1104,10 +1310,32 @@ impl ViewerApp {
                     // The registry comes home first, so the app is usable again
                     // whether the import worked or not.
                     self.plugins = Some(*registry);
-                    self.import = None;
+                    self.job = None;
                     match result {
                         Ok(opened) => self.apply_opened(opened),
                         Err(message) => self.core.status = Some(message),
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                Incoming::Ran(registry, run) => {
+                    self.plugins = Some(*registry);
+                    self.job = None;
+                    self.apply_plugin_run(*run);
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                Incoming::Wrote(registry, name, result) => {
+                    if let Some(r) = registry {
+                        self.plugins = Some(*r);
+                    }
+                    self.job = None;
+                    match result {
+                        WriteOutcome::Done => self.report_done(format!("Saved {name}")),
+                        WriteOutcome::Cancelled => {
+                            self.core.status = Some(format!("Stopped saving {name}"))
+                        }
+                        WriteOutcome::Failed(e) => {
+                            self.core.status = Some(format!("Could not save {name}: {e}"))
+                        }
                     }
                 }
             }
@@ -1121,6 +1349,12 @@ impl ViewerApp {
             self.core.status = Some("Open an image first".into());
             return;
         };
+        // A plain TIFF save does not take the registry, so the menu being
+        // reachable is not on its own proof that nothing is running.
+        if self.job.is_some() {
+            self.core.status = Some(self.busy_message());
+            return;
+        }
         // The dialog may depend on what is open — how many slices there are,
         // whether there is more than one channel — so it is asked for now
         // rather than cached at load.
@@ -1187,30 +1421,86 @@ impl ViewerApp {
         }
     }
 
-    /// Run a plugin and apply what it returned.
+    /// What to say when something slow is already running.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn busy_message(&self) -> String {
+        match &self.job {
+            Some(job) => format!("Still busy: {}", job.label.to_lowercase()),
+            // The registry is away but no job holds it, which should not happen
+            // and is worth saying plainly rather than silently ignoring.
+            None => "Busy".to_string(),
+        }
+    }
+
+    /// Run a plugin on a worker thread.
     ///
-    /// Synchronous, for now: `StackHost` borrows the loaded stack, so moving
-    /// this to a worker would mean sharing the stack behind an `Arc` or
-    /// re-opening the file on the worker. Until then a long plugin blocks the
-    /// interface — which is why the trait already carries progress and cancel,
-    /// and why they are honoured here even though nothing can currently press
-    /// the button.
+    /// The host is built here, on the interface thread, because that is where
+    /// the stack is — and then moved. It can be moved because it *owns* what it
+    /// reads: a second handle on the same memory-mapped file, not a copy of it.
+    /// See `fast_tiff_viewer::plugins::StackHost`.
+    ///
+    /// The registry goes with it, exactly as an import's does, which is what
+    /// stops a second plugin starting while this one has the data.
     #[cfg(not(target_arch = "wasm32"))]
     fn run_plugin(&mut self, index: usize, values: fasttiff_plugin_api::Params) {
-        use fasttiff_plugin_api::Outcome;
-
         let Some(loaded) = self.core.stack.as_ref() else {
             self.core.status = Some("Open an image first".into());
             return;
         };
-        let view = self.plugin_view(loaded);
-        let mut host = fast_tiff_viewer::plugins::StackHost::new(loaded, view);
-        let Some(entry) = self.plugins.as_mut().and_then(|p| p.get_mut(index)) else {
+        // Reachable with a job already running: the dialog may have been left
+        // open while a save was started behind it. Taking the registry is not
+        // enough of a check on its own — a plain save never takes it.
+        if self.job.is_some() {
+            self.core.status = Some(self.busy_message());
+            return;
+        }
+        let Some(registry) = self.plugins.take() else {
+            self.core.status = Some(self.busy_message());
             return;
         };
-        let name = entry.info.name.clone();
-        let outcome = entry.plugin.run(&mut host, &values);
-        let messages = std::mem::take(&mut host.messages);
+        let Some(name) = registry.entries().get(index).map(|e| e.info.name.clone()) else {
+            self.plugins = Some(registry);
+            return;
+        };
+
+        let view = self.plugin_view(loaded);
+        let job = Job::new(name.clone());
+        let host = fast_tiff_viewer::plugins::StackHost::new(loaded, view)
+            .with_cancel(job.cancel.clone(), job.progress.clone());
+        self.begin_job(job);
+
+        let tx = self.open_tx.clone();
+        std::thread::spawn(move || {
+            let mut registry = registry;
+            let mut host = host;
+            let outcome = contained(&name, || match registry.get_mut(index) {
+                Some(entry) => entry.plugin.run(&mut host, &values),
+                // Cannot happen — the index was checked before the spawn and
+                // the registry has been on this thread since.
+                None => Err(fasttiff_plugin_api::PluginError::failed(
+                    "the plugin went away",
+                )),
+            })
+            .unwrap_or_else(|e| Err(fasttiff_plugin_api::PluginError::failed(e)));
+            let run = PluginRun {
+                name,
+                messages: std::mem::take(&mut host.messages),
+                outcome,
+            };
+            let _ = tx.send(Incoming::Ran(Box::new(registry), Box::new(run)));
+        });
+    }
+
+    /// Apply what a plugin returned, once its worker has handed it back.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_plugin_run(&mut self, run: PluginRun) {
+        use fasttiff_plugin_api::Outcome;
+
+        let PluginRun {
+            name,
+            messages,
+            outcome,
+        } = run;
         for m in &messages {
             log::info!("{name}: {m}");
         }
@@ -1304,10 +1594,7 @@ impl ViewerApp {
         // would have nothing to read the file with — better to say so than to
         // hand an OIR to the TIFF reader and report that it is not a TIFF.
         let Some(registry) = self.plugins.take() else {
-            self.core.status = Some(match &self.import {
-                Some(job) => format!("Still importing {}", job.name),
-                None => "Still importing".to_string(),
-            });
+            self.core.status = Some(self.busy_message());
             return Ok(());
         };
         // Cheap rejection first: no file is opened unless an extension matches,
@@ -1318,18 +1605,14 @@ impl ViewerApp {
             return Err(path);
         }
 
-        let progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-        self.import = Some(ImportJob {
-            name: path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            progress: progress.clone(),
-        });
+        let (progress, cancel) = self.begin_job(Job::new("Importing"));
         let tx = self.open_tx.clone();
         std::thread::spawn(move || {
             let mut registry = registry;
-            let result = import_with_plugin(&mut registry, &path, &progress);
+            let result = contained("the importer", || {
+                import_with_plugin(&mut registry, &path, &progress, &cancel)
+            })
+            .unwrap_or_else(Err);
             // If the send fails the window is gone, and so is anyone who wanted
             // the result.
             let _ = tx.send(Incoming::Imported(Box::new(registry), result));
@@ -1339,18 +1622,21 @@ impl ViewerApp {
 
     /// Ask where to put the open stack, and write it there.
     ///
-    /// Synchronous, unlike opening. The dialog blocks anyway, and the write is
-    /// a decode-and-encode of every plane — on a multi-gigabyte stack that is
-    /// seconds of an unresponsive window, which is worth fixing the same way
-    /// importing was if it starts to bite. It is not threaded yet because the
-    /// stack being written is the one the interface is drawing from, and
-    /// handing it to a worker means deciding what the window shows meanwhile.
+    /// The dialog blocks the interface, which is right — it is a modal, and
+    /// nothing else should be happening while it is up. The *write* does not:
+    /// it is a decode-and-encode of every plane, seconds on a large stack, and
+    /// it runs on a worker against its own handle on the same memory-mapped
+    /// file. See `fast_tiff_viewer::save::SaveSource`.
     #[cfg(not(target_arch = "wasm32"))]
     fn save_as(&mut self) {
         let Some(stack) = self.core.stack.as_ref() else {
             self.core.status = Some("Open an image first".into());
             return;
         };
+        if self.job.is_some() {
+            self.core.status = Some(self.busy_message());
+            return;
+        }
         // Suggest the file's own name with a `.tif` on it. An imported stack
         // has no file, and its `path` is the name it is shown under — which is
         // exactly what to suggest saving it as.
@@ -1389,49 +1675,98 @@ impl ViewerApp {
         // dialogs disagree about whether choosing a filter rewrites the name,
         // and the name is the thing the user can see. An extension no exporter
         // claims is a TIFF, which is also what an extension-less name gets.
-        let result = match self.exporter_for(&path) {
-            Some(index) => self.run_exporter(index, &path),
-            None => fast_tiff_viewer::save::save_stack(stack, &path),
-        };
-        match result {
-            Ok(()) => self.report_done(format!("Saved {name}")),
-            Err(e) => self.core.status = Some(format!("Could not save {name}: {e:#}")),
+        match self.exporter_for(&path) {
+            Some(index) => self.start_export(index, path, name),
+            None => self.start_save(path, name),
         }
+    }
+
+    /// Write the open stack as a TIFF, on a worker.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_save(&mut self, path: std::path::PathBuf, name: String) {
+        let Some(stack) = self.core.stack.as_ref() else {
+            return;
+        };
+        let source = fast_tiff_viewer::save::SaveSource::of(stack);
+        let (progress, cancel) = self.begin_job(Job::new("Saving"));
+
+        let tx = self.open_tx.clone();
+        std::thread::spawn(move || {
+            let result = contained("the writer", || {
+                fast_tiff_viewer::save::save_source(&source, &path, &mut |f| {
+                    Job::report(&progress, f);
+                    !cancel.load(std::sync::atomic::Ordering::Relaxed)
+                })
+                .map_err(|e| format!("{e:#}"))
+            })
+            .unwrap_or_else(Err);
+            let outcome = WriteOutcome::of(result, &cancel);
+            // The registry was never taken: a plain save is the app's own code.
+            let _ = tx.send(Incoming::Wrote(None, name, outcome));
+        });
+    }
+
+    /// Hand the open stack to an exporter, on a worker.
+    ///
+    /// The registry goes with it, as an import's and a filter's do, which is
+    /// what keeps a second job from starting while this one holds the data.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_export(&mut self, index: usize, path: std::path::PathBuf, name: String) {
+        let Some(loaded) = self.core.stack.as_ref() else {
+            return;
+        };
+        let Some(registry) = self.plugins.take() else {
+            self.core.status = Some(self.busy_message());
+            return;
+        };
+        let Some(plugin_name) = registry.exporters().get(index).map(|e| e.info.name.clone()) else {
+            self.plugins = Some(registry);
+            return;
+        };
+
+        let view = self.plugin_view(loaded);
+        let job = Job::new(format!("Exporting ({plugin_name})"));
+        let host = fast_tiff_viewer::plugins::StackHost::new(loaded, view)
+            .with_cancel(job.cancel.clone(), job.progress.clone());
+        let (_, cancel) = self.begin_job(job);
+
+        let tx = self.open_tx.clone();
+        std::thread::spawn(move || {
+            let mut registry = registry;
+            let mut host = host;
+            let result = contained(&plugin_name, || match registry.exporter_mut(index) {
+                Some(entry) => {
+                    // The declared dialog is not shown — the values are the
+                    // exporter's own defaults. An export runs from a save dialog
+                    // that has already been answered, and a second modal on top
+                    // of it needs the cross-frame state machine the filter
+                    // plugins use. Importers are in the same position today;
+                    // whichever gets a dialog first should give both one.
+                    let decls = entry.exporter.params(&host);
+                    let request = fasttiff_plugin_api::ExportRequest {
+                        path,
+                        params: fasttiff_plugin_api::Params::defaults(&decls).clamp_to(&decls),
+                    };
+                    entry
+                        .exporter
+                        .export(&request, &mut host)
+                        .map_err(|e| format!("{plugin_name}: {e}"))
+                }
+                None => Err("that exporter is no longer installed".to_string()),
+            })
+            .unwrap_or_else(Err);
+            for m in &host.messages {
+                log::info!("{plugin_name}: {m}");
+            }
+            let outcome = WriteOutcome::of(result, &cancel);
+            let _ = tx.send(Incoming::Wrote(Some(Box::new(registry)), name, outcome));
+        });
     }
 
     /// Which exporter, if any, claims this name.
     #[cfg(not(target_arch = "wasm32"))]
     fn exporter_for(&self, path: &std::path::Path) -> Option<usize> {
         self.plugins.as_ref()?.exporter_for(path)
-    }
-
-    /// Hand the open stack to an exporter.
-    ///
-    /// Its declared dialog is not shown — the values are its own defaults. An
-    /// export runs from a save dialog that has already been answered, and a
-    /// second modal on top of it needs the cross-frame state machine the filter
-    /// plugins use. Importers are in the same position today; whichever gets a
-    /// dialog first should give both one.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn run_exporter(&mut self, index: usize, path: &std::path::Path) -> anyhow::Result<()> {
-        let Some(loaded) = self.core.stack.as_ref() else {
-            anyhow::bail!("nothing is open");
-        };
-        let view = self.plugin_view(loaded);
-        let mut host = fast_tiff_viewer::plugins::StackHost::new(loaded, view);
-        let Some(entry) = self.plugins.as_mut().and_then(|p| p.exporter_mut(index)) else {
-            anyhow::bail!("that exporter is no longer installed");
-        };
-        let name = entry.info.name.clone();
-        let decls = entry.exporter.params(&host);
-        let request = fasttiff_plugin_api::ExportRequest {
-            path: path.to_path_buf(),
-            params: fasttiff_plugin_api::Params::defaults(&decls).clamp_to(&decls),
-        };
-        entry
-            .exporter
-            .export(&request, &mut host)
-            .map_err(|e| anyhow::anyhow!("{name}: {e}"))
     }
 
     /// Show the platform's file picker.
@@ -1782,13 +2117,13 @@ impl eframe::App for ViewerApp {
         if self.core.poll_open() {
             self.finish_open();
         }
-        // An import counts as much as a load here: its worker cannot wake the
-        // interface either, and the frame that notices it has finished is this
-        // same one. Without this the readout would only move when the mouse
-        // did, and the result would land whenever the user next happened to
-        // touch something.
+        // A worker counts as much as a load here — an import, a plugin, a save
+        // or an export. None of them can wake the interface, and the frame that
+        // notices one has finished is this same one. Without this the readout
+        // would only move when the mouse did, and the result would land
+        // whenever the user next happened to touch something.
         #[cfg(not(target_arch = "wasm32"))]
-        let importing = self.import.is_some();
+        let importing = self.job.is_some();
         #[cfg(target_arch = "wasm32")]
         let importing = false;
         if importing || self.core.load_stage().is_some() {
@@ -1947,18 +2282,23 @@ impl eframe::App for ViewerApp {
                 #[cfg(not(target_arch = "wasm32"))]
                 if ui
                     .add_enabled(
-                        self.core.stack.is_some(),
+                        self.core.stack.is_some() && self.job.is_none(),
                         egui::Button::new(RichText::new(ICON_SAVE).size(ICON_SIZE)),
                     )
                     .on_hover_text("Save as TIFF…")
-                    .on_disabled_hover_text("Save as TIFF — nothing is open")
+                    .on_disabled_hover_text(if self.core.stack.is_some() {
+                        "Save as TIFF — busy"
+                    } else {
+                        "Save as TIFF — nothing is open"
+                    })
                     .clicked()
                 {
                     save_requested = true;
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    match plugins_ui::plugins_menu(ui, self.plugins.as_ref()) {
+                    let available = self.plugins.as_ref().filter(|_| self.job.is_none());
+                    match plugins_ui::plugins_menu(ui, available) {
                         plugins_ui::MenuAction::Run(i) => plugin_to_start = Some(i),
                         plugins_ui::MenuAction::OpenPluginFolder => open_plugin_folder = true,
                         plugins_ui::MenuAction::None => {}
@@ -2195,32 +2535,44 @@ impl eframe::App for ViewerApp {
         // Green only for the message it was recorded for; see `good_status`.
         let status_is_good = current_status.is_some() && current_status == self.good_status;
 
-        // The readout is the same whichever slow thing is running: an import
-        // on its worker, or the core opening a file on its own. What differs is
-        // only the words and whether there is a fraction to draw, so that is
-        // all that is worked out here.
+        // The readout is the same whichever slow thing is running: a worker —
+        // import, plugin, save, export — or the core opening a file on its own.
+        // What differs is only the words and whether there is a fraction to
+        // draw, so that is all that is worked out here.
         //
-        // The import comes first because it *is* first: a file is imported and
-        // then opened, so while both could be set the import is the one still
+        // The worker comes first because it *is* first: a file is imported and
+        // then opened, so while both could be set the worker is the one still
         // happening.
+        //
+        // The file's name is deliberately not part of this. It was shown beside
+        // the label, but it is already in the window title, so it bought a
+        // second copy of the same string at the cost of the width the bar now
+        // spreads into.
         #[cfg(not(target_arch = "wasm32"))]
-        let importing = self
-            .import
+        let working = self
+            .job
             .as_ref()
-            .map(|job| ("Importing…", Some(job.fraction()), job.name.clone()));
+            .map(|job| (job.label.clone(), job.fraction()));
         #[cfg(target_arch = "wasm32")]
-        let importing: Option<(&str, Option<f32>, String)> = None;
-        let progress = importing.or_else(|| {
+        let working: Option<(String, Option<f32>)> = None;
+        let progress = working.or_else(|| {
             let stage = self.core.load_stage()?;
-            Some((
-                stage.label(),
-                stage.fraction(),
-                self.core.loading_name().unwrap_or_default(),
-            ))
+            Some((stage.label().to_string(), stage.fraction()))
         });
         let load_stage = progress.is_some();
         // Filled in below by the bar itself, if it draws a status line.
         let mut drawn_info: Option<String> = None;
+        // Set by the info row's stop button. A `Cell` because the row is a
+        // closure called from two places and captures everything by reference;
+        // it cannot reach `self` to set the flag directly.
+        //
+        // Only offered for work this app is running. The core's own load has no
+        // cancel to press.
+        #[cfg(not(target_arch = "wasm32"))]
+        let can_stop = self.job.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let can_stop = false;
+        let stop_clicked = std::cell::Cell::new(false);
         // The bottom line of the panel: what is running, and the last thing
         // that happened. One row for both.
         //
@@ -2238,37 +2590,27 @@ impl eframe::App for ViewerApp {
             if progress.is_none() && status.is_none() {
                 return None;
             }
-            let mut key = String::new();
+            let key = info_key(
+                status.map(|(s, _)| s),
+                progress.as_ref().map(|(label, _)| label.as_str()),
+            );
             ui.separator();
             ui.horizontal(|ui| {
-                if let Some((label, fraction, name)) = &progress {
-                    match fraction {
-                        // Countable work — say how much is left.
-                        Some(f) => {
-                            ui.add(
-                                egui::ProgressBar::new(*f)
-                                    .desired_width(120.0)
-                                    .show_percentage(),
-                            );
-                        }
-                        // Walking the IFD chain has no knowable length, so a
-                        // bar would have to invent a number. A spinner says
-                        // "working" without claiming to know how much is left.
-                        None => {
-                            ui.add(egui::Spinner::new().size(14.0));
-                        }
-                    }
-                    ui.label(*label);
-                    if !name.is_empty() {
-                        ui.label(RichText::new(name).weak());
-                    }
-                    key.push_str(label);
-                    key.push('\u{1}');
-                }
+                // The status goes first so the bar can have the rest of the
+                // row. An `egui::ProgressBar` with no `desired_width` takes
+                // `available_size_before_wrap().x`, so whatever is placed
+                // before it decides how wide it ends up — and anything placed
+                // after it would be squeezed out of the row entirely.
                 if let Some((status, good)) = status {
                     let color = if good { STATUS_DONE } else { STATUS_NOTE };
                     ui.label(RichText::new(status).color(color).small());
-                    key.push_str(status);
+                }
+                if let Some((label, fraction)) = &progress {
+                    // Also before the bar, and for the same reason.
+                    if can_stop && ui.small_button("✖").on_hover_text("Stop").clicked() {
+                        stop_clicked.set(true);
+                    }
+                    ui.add(progress_bar(label, *fraction));
                 }
             });
             Some(key)
@@ -2736,6 +3078,18 @@ impl eframe::App for ViewerApp {
         self.panel
             .note_info_row(drawn_info, scrub_bar_response.response.rect.height());
 
+        // The stop button only raises the flag the worker polls: it does not
+        // take the job away. The worker still owns the registry and still has
+        // to hand it back, and until it does the app must keep showing that
+        // something is running — a readout that vanished on the click would
+        // claim the work had stopped before it had.
+        #[cfg(not(target_arch = "wasm32"))]
+        if stop_clicked.get() {
+            if let Some(job) = &self.job {
+                job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
         if toggle_requested {
             self.panel.expanded = !self.panel.expanded;
             // Remember the panel's height *before* it expands/collapses; the
@@ -3149,3 +3503,8 @@ mod result_file_tests;
 #[cfg(test)]
 #[path = "app/panel_grow_tests.rs"]
 mod panel_grow_tests;
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "app/job_tests.rs"]
+mod job_tests;

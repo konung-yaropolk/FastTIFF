@@ -79,6 +79,26 @@ and a format that cannot hold a 4D 16-bit hyperstack has no business pretending
 to. An exporter is for handing the data to something else: a figure, a movie, a
 colleague's software. Losing the axes is usually the point.
 
+## Your plugin runs on a worker thread
+
+You do not have to do anything about that. There is no async trait, no status
+to poll and no second entry point — a plugin is the same synchronous function
+it always was, and the host runs it off the interface thread.
+
+The one thing worth doing is calling `host.progress(fraction)` as the work goes:
+
+```rust
+if !host.progress(done as f32 / total as f32) {
+    return Ok(Outcome::Cancelled);
+}
+```
+
+That gives the window a progress bar with your numbers on it, and its return
+value is how the user's Stop button reaches you. Skip it and the window shows an
+animated bar with your plugin's name instead, which for anything short is the
+right answer. Call it often enough that stopping feels immediate — the flag is
+only read when you ask.
+
 All three can declare a dialog by returning `ParamDecl`s. You describe the controls;
 the host draws them, clamps the values to the ranges you gave, and hands back a
 `Params`. There is no UI toolkit in your dependency tree and no way for a plugin

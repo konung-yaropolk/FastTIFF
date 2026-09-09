@@ -15,6 +15,7 @@ use crate::volume::VolumeBuilder;
 use fast_tiff_lib::TiffStack;
 use scivis_render::ChannelKind;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// One display channel's contrast window and GPU upload format.
 #[derive(Clone, Copy, Debug)]
@@ -52,7 +53,19 @@ pub struct ChannelSettings {
 
 /// An open TIFF stack plus everything the viewer derives from it.
 pub struct Stack {
-    pub tiff: TiffStack,
+    /// The file's bytes and frame index, shared rather than owned.
+    ///
+    /// `Arc` because a plugin, an export or a save runs on a worker thread and
+    /// needs the same pixels the window is showing. Handing the worker a clone
+    /// of this costs a refcount bump; the alternatives were re-opening the file
+    /// (a second mmap and a second walk of the IFD chain) or copying the bytes,
+    /// which on a multi-gigabyte stack is the whole file twice in RAM.
+    ///
+    /// Shared *immutably*, which is what makes it safe with no lock at all:
+    /// nothing mutates a `TiffStack` after it is indexed. Everything the viewer
+    /// does change — the frame index, the caches, the display model — lives in
+    /// the fields below and stays with the window.
+    pub tiff: Arc<TiffStack>,
     pub path: PathBuf,
     pub frame_index: usize,
     /// Subsampling applied on the way to the GPU: `1` when what is on screen is
@@ -212,7 +225,7 @@ impl Stack {
         let prefetch = None;
 
         let mut stack = Stack {
-            tiff,
+            tiff: Arc::new(tiff),
             path,
             display: Display::default(),
             frame_index: 0,

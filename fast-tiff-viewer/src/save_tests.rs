@@ -236,7 +236,12 @@ fn a_stack_of_mixed_frame_shapes_is_refused_with_a_reason() {
     let mut stack = stack;
     let mut odd = stack.tiff.frames[0].clone();
     odd.width = W + 2;
-    stack.tiff.frames.push(odd);
+    // Through `get_mut` because the stack shares its `TiffStack` with anything
+    // running on a worker; here nothing else holds it, so this always succeeds.
+    std::sync::Arc::get_mut(&mut stack.tiff)
+        .expect("the fixture holds the only reference")
+        .frames
+        .push(odd);
 
     let path = temp("mixed");
     let err = save_stack(&stack, &path).expect_err("mixed shapes cannot be saved");
@@ -263,4 +268,172 @@ fn nothing_is_carried_when_there_is_nothing_to_carry() {
     );
     assert_eq!(desc.matches("ImageJ=").count(), 1);
     let _ = std::fs::remove_file(&path);
+}
+
+// ------------------------------------------------- progress and stopping
+
+/// A save is now something a worker does while the window carries on, so it has
+/// to be able to say how far it has got and to be stopped.
+#[test]
+fn a_save_reports_progress_once_per_frame() {
+    let stack = open(source(SampleType::U16, 1, 1, 4));
+    let path = temp("progress");
+    let mut seen = Vec::new();
+    save_source(&SaveSource::of(&stack), &path, &mut |f| {
+        seen.push(f);
+        true
+    })
+    .expect("save");
+
+    assert_eq!(seen.len(), 4, "one report per frame: {seen:?}");
+    // Rising, starting at the beginning, and never claiming to be finished
+    // before it is — the `finish` that writes the IFD chain happens after the
+    // last frame and has nothing to report.
+    assert_eq!(seen[0], 0.0);
+    assert!(
+        seen.windows(2).all(|w| w[1] > w[0]),
+        "progress must not go backwards: {seen:?}"
+    );
+    assert!(seen.iter().all(|&f| f < 1.0), "{seen:?}");
+
+    // And it really did write the file it was reporting on.
+    let back = reopen(&path);
+    assert_eq!(back.frames.len(), 4);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A stopped save must leave *nothing*. A truncated TIFF has a valid header and
+/// a short IFD chain, so it opens — as a file with fewer frames than the stack
+/// it was supposed to be. That is worse than no file at all, because nothing
+/// downstream can tell it is incomplete.
+#[test]
+fn a_stopped_save_leaves_no_file_behind() {
+    let stack = open(source(SampleType::U16, 1, 1, 4));
+    let path = temp("stopped");
+
+    let mut calls = 0;
+    let err = save_source(&SaveSource::of(&stack), &path, &mut |_| {
+        calls += 1;
+        // Stop after the second frame has been asked for, so the writer is
+        // genuinely part-way through a real file rather than refusing at once.
+        calls < 3
+    })
+    .expect_err("a stopped save must not report success");
+    assert!(format!("{err:#}").contains("cancelled"), "{err:#}");
+    assert!(
+        !path.exists(),
+        "a stopped save left {} behind",
+        path.display()
+    );
+}
+
+/// The same guarantee for a save that fails on its own — the cleanup is not
+/// specific to cancelling.
+#[test]
+fn a_failed_save_leaves_no_file_behind() {
+    // A stack whose second frame is a different shape: refused, but only after
+    // the writer has been created and the file exists.
+    let stack = open(source(SampleType::U16, 1, 1, 2));
+    let mut stack = stack;
+    let mut odd = stack.tiff.frames[0].clone();
+    odd.width = W + 2;
+    std::sync::Arc::get_mut(&mut stack.tiff)
+        .expect("the fixture holds the only reference")
+        .frames
+        .push(odd);
+
+    let path = temp("failed");
+    save_source(&SaveSource::of(&stack), &path, &mut |_| true).expect_err("mixed shapes");
+    assert!(!path.exists(), "a failed save left a file behind");
+}
+
+/// The snapshot is of the stack *as it was*, so a save already running cannot
+/// be changed by what the window does next.
+#[test]
+fn the_snapshot_holds_the_shape_it_was_taken_with() {
+    let stack = open(source(SampleType::U16, 2, 1, 3));
+    let source_a = SaveSource::of(&stack);
+    assert_eq!(source_a.frames(), 6);
+
+    // Reinterpreting the axes after the snapshot must not reach it.
+    let mut stack = stack;
+    stack.display.dims = crate::display::Dims {
+        channels: 1,
+        slices: 2,
+        frames: 3,
+    };
+    let path = temp("snapshot");
+    save_source(&source_a, &path, &mut |_| true).expect("save");
+    let back = reopen(&path);
+    assert_eq!(
+        back.meta.channels, 2,
+        "the write used the axes the snapshot was taken with"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The regression this guards is one the first version of the atomic-save
+/// cleanup introduced: a failed write deleting the file it was meant to
+/// replace. Saving over the file you are looking at is an ordinary thing to
+/// do, and losing it because the write went wrong is not recoverable.
+#[test]
+fn a_failed_save_leaves_an_existing_file_untouched() {
+    let path = temp("existing");
+    std::fs::write(&path, b"the original, which must survive").expect("seed");
+
+    // Mixed frame shapes: refused, but only after a writer would have been
+    // created — which is what would truncate the target if it were the target.
+    let stack = open(source(SampleType::U16, 1, 1, 2));
+    let mut stack = stack;
+    let mut odd = stack.tiff.frames[0].clone();
+    odd.width = W + 2;
+    std::sync::Arc::get_mut(&mut stack.tiff)
+        .expect("the fixture holds the only reference")
+        .frames
+        .push(odd);
+
+    save_source(&SaveSource::of(&stack), &path, &mut |_| true).expect_err("mixed shapes");
+    assert_eq!(
+        std::fs::read(&path).expect("the original must still be there"),
+        b"the original, which must survive",
+        "a failed save destroyed the file it was replacing"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// And the same for a save the user stopped.
+#[test]
+fn a_stopped_save_leaves_an_existing_file_untouched() {
+    let path = temp("existing-stopped");
+    std::fs::write(&path, b"still here").expect("seed");
+
+    let stack = open(source(SampleType::U16, 1, 1, 4));
+    let mut calls = 0;
+    save_source(&SaveSource::of(&stack), &path, &mut |_| {
+        calls += 1;
+        calls < 3
+    })
+    .expect_err("stopped");
+    assert_eq!(std::fs::read(&path).expect("still there"), b"still here");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Nor may either failure leave the scratch file lying about next to it.
+#[test]
+fn no_part_file_is_left_behind() {
+    let path = temp("partfile");
+    let stack = open(source(SampleType::U16, 1, 1, 4));
+    let mut calls = 0;
+    save_source(&SaveSource::of(&stack), &path, &mut |_| {
+        calls += 1;
+        calls < 2
+    })
+    .expect_err("stopped");
+
+    let leftovers: Vec<_> = std::fs::read_dir(path.parent().expect("a directory"))
+        .expect("read the directory")
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().to_string()))
+        .filter(|n| n.starts_with("fasttiff-save-partfile") && n.contains("fasttiff-part"))
+        .collect();
+    assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
 }
