@@ -63,11 +63,50 @@ fn a_job_starts_uncancelled() {
 /// file name — that has to survive into the job.
 #[test]
 fn the_label_is_what_the_bar_will_say() {
-    assert_eq!(Job::new("Importing").label, "Importing");
+    assert_eq!(Job::new("Importing").label(), "Importing");
     assert_eq!(
-        Job::new(format!("Exporting ({})", "PNG")).label,
+        Job::new(format!("Exporting ({})", "PNG")).label(),
         "Exporting (PNG)"
     );
+}
+
+/// A long job is several pieces of work, and the bar says which one it is on.
+///
+/// This is the whole of the fix for a bar that reached 100% and then sat there:
+/// the run was not over, it had moved on to encoding and handing over a result,
+/// and nothing said so. A phase renames the bar *and* puts it back to unknown,
+/// so it cannot inherit the finished look of the phase before it.
+#[test]
+fn a_new_phase_renames_the_bar_and_starts_it_again() {
+    let job = Job::new("Derivatives");
+    Job::report(&job.progress, 1.0);
+    assert_eq!(job.fraction(), Some(1.0));
+
+    Job::begin_phase(&job.label, &job.progress, "Encoding result");
+    assert_eq!(job.label(), "Encoding result");
+    assert_eq!(
+        job.fraction(),
+        None,
+        "a new phase starts as a spinner, not at the last one's 100%"
+    );
+
+    Job::report(&job.progress, 0.25);
+    assert_eq!(job.fraction(), Some(0.25));
+}
+
+/// The handles a worker gets are the job's own, not copies of its state.
+///
+/// The phase is set from the worker thread and read by the interface thread; if
+/// `begin_phase` wrote to anything but the shared label, the bar would keep
+/// saying what the run started as.
+#[test]
+fn a_worker_renames_the_bar_the_interface_is_reading() {
+    let job = Job::new("Stabilizing");
+    let (label, progress) = (job.label.clone(), job.progress.clone());
+    std::thread::spawn(move || Job::begin_phase(&label, &progress, "Writing result"))
+        .join()
+        .expect("the worker panicked");
+    assert_eq!(job.label(), "Writing result");
 }
 
 // ---------------------------------------------------- what the bar says

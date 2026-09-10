@@ -151,6 +151,61 @@ pub fn measure_batch(
     maps.iter().map(|cc| peak_of(cc, lcorr)).collect()
 }
 
+/// Apply a measured correction to a batch of planes, in place and in parallel.
+///
+/// `frame_of[i]` says which frame `planes[i]` belongs to: a recording with
+/// several channels or z-slices has more planes than measurements, and every
+/// plane of one timepoint moves by that timepoint's shift. Measuring each
+/// channel separately would let them drift apart, which for a two-colour
+/// recording is the one thing registration must not do.
+///
+/// `warp` carries the deformation grid and one field per frame, for a non-rigid
+/// run; without it the correction is the rigid shift alone. The rigid shift is
+/// folded into the warp rather than applied before it, so a pixel is resampled
+/// once.
+///
+/// This is the other half of the run, next to [`measure_batch`]: a whole
+/// recording is resampled here, one output pixel at a time, and leaving it on
+/// one thread was enough on its own to hide which backend the measuring used.
+pub fn apply_batch(
+    planes: &mut [Vec<f32>],
+    ly: usize,
+    lx: usize,
+    frame_of: &[usize],
+    shifts: &[Shift],
+    warp: Option<(
+        &crate::nonrigid::Blocks,
+        &[Vec<crate::nonrigid::BlockShift>],
+    )>,
+    settings: &Settings,
+) {
+    let correct = |plane: &mut Vec<f32>, t: usize| {
+        // A plane with no measurement is left exactly as it is. It cannot
+        // happen through the plugin, which pairs them, and silently moving it
+        // by someone else's shift would be worse than not moving it.
+        let Some(&shift) = shifts.get(t) else {
+            return;
+        };
+        *plane = match warp.and_then(|(blocks, fields)| fields.get(t).map(|f| (blocks, f))) {
+            Some((blocks, field)) => crate::nonrigid::warp(plane, ly, lx, blocks, field, shift),
+            None => crate::rigid::shift_frame(plane, ly, lx, shift.dy, shift.dx),
+        };
+    };
+    // `Single-thread CPU` means one thread for the whole registration, not just
+    // for the measuring — someone who picks it wants a run they can compare
+    // against, or a machine they can still use while it runs.
+    if settings.backend == Backend::SingleThread {
+        for (plane, &t) in planes.iter_mut().zip(frame_of) {
+            correct(plane, t);
+        }
+    } else {
+        planes
+            .par_iter_mut()
+            .zip(frame_of.par_iter())
+            .for_each(|(plane, &t)| correct(plane, t));
+    }
+}
+
 /// Frames whose shift is an outlier, or that barely correlated at all.
 ///
 /// suite2p's `compute_crop`: a frame is bad when its displacement from the

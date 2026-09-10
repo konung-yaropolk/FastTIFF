@@ -58,6 +58,33 @@ fn window_icon() -> Option<egui::IconData> {
     })
 }
 
+/// Read a whole stack from standard input, for a window launched with
+/// [`process::FROM_STDIN`].
+///
+/// Everything before the window opens, deliberately: the process on the other
+/// end is blocked writing into the pipe and is showing a progress bar for it,
+/// so the sooner this drains the sooner that one is free. Nothing is written to
+/// disk on either side.
+///
+/// `None` for anything that goes wrong, which starts an empty viewer rather
+/// than no viewer — an empty window says the result did not arrive, where a
+/// process that exited silently would look like nothing had been asked for.
+fn read_piped_stack() -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    match std::io::stdin().lock().read_to_end(&mut bytes) {
+        Ok(_) if bytes.is_empty() => {
+            log::error!("nothing arrived on standard input");
+            None
+        }
+        Ok(_) => Some(bytes),
+        Err(e) => {
+            log::error!("could not read the stack from standard input: {e}");
+            None
+        }
+    }
+}
+
 fn main() -> eframe::Result {
     env_logger::init();
 
@@ -83,11 +110,24 @@ fn main() -> eframe::Result {
     // dragged onto the .exe / its shortcut. Selecting several files at once
     // passes them all to a single invocation — open the first here and launch
     // each of the rest in its own process so they all appear side by side.
-    let files: Vec<std::path::PathBuf> = std::env::args_os()
-        .skip(1)
-        .map(std::path::PathBuf::from)
-        .collect();
-    let initial_path = process::open_all(&files).cloned();
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let initial = match args.split_first() {
+        // Launched by a viewer that had a plugin result to hand over and had
+        // room to do it in memory. The stack arrives down the pipe instead of
+        // through a file; see `process::open_bytes_in_new_process`.
+        Some((flag, rest)) if flag == process::FROM_STDIN => {
+            let name = rest
+                .first()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "result.tif".to_string());
+            read_piped_stack().map(|bytes| app::Opened::Bytes(bytes, name))
+        }
+        _ => {
+            let files: Vec<std::path::PathBuf> =
+                args.into_iter().map(std::path::PathBuf::from).collect();
+            process::open_all(&files).cloned().map(app::Opened::Path)
+        }
+    };
 
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([320.0, 320.0])
@@ -141,7 +181,7 @@ fn main() -> eframe::Result {
             // cannot drift.
             fasttiff::install_chrome(&cc.egui_ctx);
             let render = render::init(cc);
-            Ok(Box::new(app::ViewerApp::new(initial_path, render)))
+            Ok(Box::new(app::ViewerApp::new(initial, render)))
         }),
     );
 

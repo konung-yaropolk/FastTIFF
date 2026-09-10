@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin"
-version = "0.18.2"
+version = "0.19.0"
 dependencies = [
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
@@ -133,15 +133,15 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin-abi"
-version = "0.18.2"
+version = "0.19.0"
 
 [[package]]
 name = "fasttiff-plugin-api"
-version = "0.18.2"
+version = "0.19.0"
 
 [[package]]
 name = "fasttiff-plugin-example"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "fast-tiff-viewer",
  "fasttiff-plugin",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "scivis-render"
-version = "0.16.0"
+version = "0.19.0"
 
 [[package]]
 name = "shlex"

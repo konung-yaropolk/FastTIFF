@@ -57,6 +57,8 @@ pub mod pipeline;
 pub mod rigid;
 pub mod settings;
 
+use rayon::prelude::*;
+
 use fft::Fft2;
 use masks::reference_filters_normed;
 pub use rigid::{shift_frame, Shift};
@@ -75,7 +77,13 @@ pub struct Frames<'a> {
 /// partners agree with it best, and average those 20. It is a way of asking
 /// "which part of this recording is the recording at rest", without anyone
 /// having to say so.
-pub fn pick_initial_reference(frames: &[Vec<f32>], ly: usize, lx: usize) -> Vec<f32> {
+pub fn pick_initial_reference(
+    frames: &[Vec<f32>],
+    ly: usize,
+    lx: usize,
+    settings: &Settings,
+) -> Vec<f32> {
+    let threaded = settings.backend != Backend::SingleThread;
     let n = frames.len();
     if n == 0 {
         return vec![0.0; ly * lx];
@@ -85,29 +93,62 @@ pub fn pick_initial_reference(frames: &[Vec<f32>], ly: usize, lx: usize) -> Vec<
     }
     // Mean-subtracted, so the correlation below is a correlation and not a
     // measure of overall brightness.
-    let centred: Vec<Vec<f64>> = frames
-        .iter()
-        .map(|f| {
-            let mean = f.iter().map(|&v| v as f64).sum::<f64>() / f.len().max(1) as f64;
-            f.iter().map(|&v| v as f64 - mean).collect()
-        })
-        .collect();
+    //
+    // Held as `f32`, with the mean taken in `f64` and the products accumulated
+    // in `f64` below. The correlation is bandwidth-bound — every pair of frames
+    // is streamed end to end — so storing it at double width would halve the
+    // speed of the whole function to protect digits that a 16-bit camera never
+    // produced.
+    let centre = |f: &Vec<f32>| -> Vec<f32> {
+        let mean = f.iter().map(|&v| v as f64).sum::<f64>() / f.len().max(1) as f64;
+        f.iter().map(|&v| (v as f64 - mean) as f32).collect()
+    };
+    let centred: Vec<Vec<f32>> = if threaded {
+        frames.par_iter().map(centre).collect()
+    } else {
+        frames.iter().map(centre).collect()
+    };
     let norm: Vec<f64> = centred
         .iter()
-        .map(|f| f.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-12))
+        .map(|f| {
+            f.iter()
+                .map(|&v| v as f64 * v as f64)
+                .sum::<f64>()
+                .sqrt()
+                .max(1e-12)
+        })
         .collect();
 
+    // Every frame against every other: `n * (n + 1) / 2` dot products of a whole
+    // frame each. At the default `nimg_init` that is fifty-odd thousand passes
+    // over a megabyte, which is the single largest piece of work in a
+    // registration and grows as the *square* of the sample.
+    //
+    // A row at a time, in parallel. Row `i` does `n - i` products, so the rows
+    // are wildly uneven in size; rayon steals work between threads, which is
+    // what makes an unbalanced split like this come out even.
+    let row = |i: usize| -> Vec<f64> {
+        (i..n)
+            .map(|j| {
+                let d: f64 = centred[i]
+                    .iter()
+                    .zip(&centred[j])
+                    .map(|(&a, &b)| a as f64 * b as f64)
+                    .sum();
+                d / (norm[i] * norm[j])
+            })
+            .collect()
+    };
+    let upper: Vec<Vec<f64>> = if threaded {
+        (0..n).into_par_iter().map(row).collect()
+    } else {
+        (0..n).map(row).collect()
+    };
     let mut cc = vec![0.0f64; n * n];
-    for i in 0..n {
-        for j in i..n {
-            let d: f64 = centred[i]
-                .iter()
-                .zip(&centred[j])
-                .map(|(a, b)| a * b)
-                .sum::<f64>()
-                / (norm[i] * norm[j]);
-            cc[i * n + j] = d;
-            cc[j * n + i] = d;
+    for (i, row) in upper.iter().enumerate() {
+        for (k, &d) in row.iter().enumerate() {
+            cc[i * n + (i + k)] = d;
+            cc[(i + k) * n + i] = d;
         }
     }
 
@@ -133,7 +174,7 @@ pub fn pick_initial_reference(frames: &[Vec<f32>], ly: usize, lx: usize) -> Vec<
     let mut out = vec![0.0f64; ly * lx];
     for &i in order.iter().take(top) {
         for (o, v) in out.iter_mut().zip(&centred[i]) {
-            *o += v;
+            *o += *v as f64;
         }
     }
     out.iter().map(|v| (v / top as f64) as f32).collect()
@@ -156,7 +197,7 @@ pub fn compute_reference(
     if movie.frames.is_empty() || ly == 0 || lx == 0 {
         return Some(vec![0.0; ly * lx]);
     }
-    let mut reference = pick_initial_reference(movie.frames, ly, lx);
+    let mut reference = pick_initial_reference(movie.frames, ly, lx, settings);
     let mut fft = Fft2::new(ly, lx);
     let niter = settings.reference_iterations.max(1);
     let n = movie.frames.len();
@@ -183,8 +224,17 @@ pub fn compute_reference(
         // which is not free.
         let shifts: Vec<Shift> =
             crate::pipeline::measure_batch(ly, lx, &filters, &aligned, settings);
-        for (frame, s) in aligned.iter_mut().zip(&shifts) {
-            *frame = shift_frame(frame, ly, lx, s.dy, s.dx);
+        // Eight passes over the sample, so this is `8 * nimg_init` whole-frame
+        // resamples — worth the same parallelism the measurement above gets.
+        if settings.backend == Backend::SingleThread {
+            for (frame, s) in aligned.iter_mut().zip(&shifts) {
+                *frame = shift_frame(frame, ly, lx, s.dy, s.dx);
+            }
+        } else {
+            aligned
+                .par_iter_mut()
+                .zip(shifts.par_iter())
+                .for_each(|(frame, s)| *frame = shift_frame(frame, ly, lx, s.dy, s.dx));
         }
 
         // Keep the best-correlated frames — more of them each pass.

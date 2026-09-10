@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -19,6 +19,7 @@ dependencies = [
  "rfd",
  "scivis-render",
  "wasm-bindgen-futures",
+ "windows-sys 0.61.2",
  "winres",
 ]
 
@@ -894,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -913,15 +914,15 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin-abi"
-version = "0.18.2"
+version = "0.19.0"
 
 [[package]]
 name = "fasttiff-plugin-api"
-version = "0.18.2"
+version = "0.19.0"
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",
@@ -2658,7 +2659,7 @@ dependencies = [
 
 [[package]]
 name = "scivis-render"
-version = "0.16.0"
+version = "0.19.0"
 dependencies = [
  "bytemuck",
  "half",
@@ -2887,7 +2888,11 @@ checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
 name = "suite2p-registration"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
+ "pollster",
+ "rayon",
  "rustfft",
+ "wgpu",
 ]
 
 [[package]]

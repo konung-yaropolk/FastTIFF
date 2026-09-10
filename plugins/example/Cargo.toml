@@ -7,7 +7,7 @@
 # the host is one that has never actually crossed the boundary it exists for.
 [package]
 name = "fasttiff-plugin-example"
-version = "0.18.0"
+version = "0.19.0"
 edition = "2021"
 description = "Example FastTIFF plugin library: an Invert filter and a raw-binary importer."
 license = "MPL-2.0"
@@ -21,7 +21,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-fasttiff-plugin = { path = "../../fasttiff-plugin", version = "0.18.0" }
+fasttiff-plugin = { path = "../../fasttiff-plugin", version = "0.19.0" }
 
 # The host, so `tests/boundary.rs` can drive the real loader against this
 # plugin. The dependency points this way round on purpose. The test has to run

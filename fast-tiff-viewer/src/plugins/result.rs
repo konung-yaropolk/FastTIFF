@@ -30,6 +30,25 @@ use std::io::Cursor;
 /// then Z, then time — which is the order the reader expects, so the result
 /// re-opens with the axes it declared.
 pub fn to_tiff_bytes(image: &ImageResult, info: Option<&StackInfo>) -> anyhow::Result<Vec<u8>> {
+    to_tiff_bytes_reporting(image, info, &mut |_| true)
+        .transpose()
+        .unwrap_or_else(|| Err(anyhow::anyhow!("cancelled")))
+}
+
+/// [`to_tiff_bytes`], reporting how far through the planes it is.
+///
+/// Encoding a plugin's result is not a rounding error on the run that produced
+/// it: a stabilised timelapse is every plane rewritten, which on a long
+/// recording is gigabytes and takes longer than the registration did. Doing it
+/// without saying so is what makes a progress bar reach 100% and then sit
+/// there.
+///
+/// `on_progress` returns `false` to stop, which returns `Ok(None)`.
+pub fn to_tiff_bytes_reporting(
+    image: &ImageResult,
+    info: Option<&StackInfo>,
+    on_progress: &mut dyn FnMut(f32) -> bool,
+) -> anyhow::Result<Option<Vec<u8>>> {
     image
         .validate()
         .map_err(|e| anyhow::anyhow!("the plugin returned an unusable image: {e}"))?;
@@ -102,7 +121,11 @@ pub fn to_tiff_bytes(image: &ImageResult, info: Option<&StackInfo>) -> anyhow::R
 
     let opts = WriterOptions::new(image.width, image.height, sample).metadata(meta);
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts)?;
-    for plane in &image.planes {
+    let total = image.planes.len().max(1);
+    for (i, plane) in image.planes.iter().enumerate() {
+        if !on_progress(i as f32 / total as f32) {
+            return Ok(None);
+        }
         match plane {
             PlaneData::U8(v) => w.write_frame_bytes(v)?,
             PlaneData::U16(v) => {
@@ -115,7 +138,7 @@ pub fn to_tiff_bytes(image: &ImageResult, info: Option<&StackInfo>) -> anyhow::R
             }
         }
     }
-    Ok(w.finish()?.into_inner())
+    Ok(Some(w.finish()?.into_inner()))
 }
 
 /// Encode a result and open it as a stack, exactly as a file would be opened.

@@ -19,7 +19,7 @@ pub mod result;
 
 pub use discover::{install_dir, is_library, search_paths, user_plugin_dir, LIBRARY_EXT};
 pub use host::{describe_image, describe_stack, describe_view, describe_volume, StackHost};
-pub use result::{to_stack, to_tiff_bytes};
+pub use result::{to_stack, to_tiff_bytes, to_tiff_bytes_reporting};
 
 use fasttiff_plugin_api::{Confidence, Exporter, FileType, Importer, Plugin, PluginInfo};
 use std::path::Path;

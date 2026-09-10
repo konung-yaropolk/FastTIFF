@@ -108,6 +108,12 @@ pub fn peak_of(cc: &[f32], lcorr: usize) -> Shift {
 ///
 /// `max_shift` is a fraction of the *smaller* frame dimension, as suite2p's
 /// `maxregshift` is: 0.1 of a 512-pixel frame is 51 pixels either way.
+///
+/// The frame is clipped to the reference's range when the filters carry one —
+/// `filters.clip`, which is `norm_frames`. Passing `None` here instead, which
+/// this used to do, correlated an unclipped frame against a reference built
+/// from a clipped one: two different pictures, and a setting that appeared to
+/// be on while doing nothing.
 pub fn phase_correlate(
     fft: &mut Fft2,
     filters: &RefFilters,
@@ -115,7 +121,7 @@ pub fn phase_correlate(
     max_shift: f64,
 ) -> Shift {
     let lcorr = lcorr_for(fft.ly, fft.lx, max_shift);
-    let cc = correlation_map(fft, filters, frame, max_shift, None);
+    let cc = correlation_map(fft, filters, frame, max_shift, filters.clip);
     peak_of(&cc, lcorr)
 }
 

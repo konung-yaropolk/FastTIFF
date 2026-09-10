@@ -5,7 +5,7 @@
 # binary interface it generates, not the convenience API that generates it.
 [package]
 name = "fasttiff-plugin"
-version = "0.18.2"
+version = "0.19.0"
 edition = "2021"
 description = "Write a FastTIFF plugin as an ordinary Rust type; this generates the extern \"C\" boundary."
 license = "MPL-2.0"
@@ -15,5 +15,5 @@ keywords = ["tiff", "plugin", "imaging", "microscopy"]
 categories = ["multimedia::images", "api-bindings"]
 
 [dependencies]
-fasttiff-plugin-api = { path = "../fasttiff-plugin-api", version = "0.18.0" }
-fasttiff-plugin-abi = { path = "../fasttiff-plugin-abi", version = "0.18.0" }
+fasttiff-plugin-api = { path = "../fasttiff-plugin-api", version = "^0.19.0" }
+fasttiff-plugin-abi = { path = "../fasttiff-plugin-abi", version = "^0.19.0" }

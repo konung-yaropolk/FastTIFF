@@ -61,7 +61,7 @@ fn the_initial_reference_resembles_a_still_movie() {
     let (ly, lx) = (48, 48);
     let base = blobs(ly, lx);
     let frames: Vec<Vec<f32>> = (0..12).map(|_| base.clone()).collect();
-    let r = pick_initial_reference(&frames, ly, lx);
+    let r = pick_initial_reference(&frames, ly, lx, &Settings::default());
 
     // Mean-subtracted, so compare shape rather than level: the brightest pixel
     // of the reference must be where the brightest blob is.
@@ -79,7 +79,10 @@ fn the_initial_reference_resembles_a_still_movie() {
 fn a_single_frame_is_its_own_reference() {
     let (ly, lx) = (16, 16);
     let f = blobs(ly, lx);
-    assert_eq!(pick_initial_reference(std::slice::from_ref(&f), ly, lx), f);
+    assert_eq!(
+        pick_initial_reference(std::slice::from_ref(&f), ly, lx, &Settings::default()),
+        f
+    );
 }
 
 /// The headline: a movie with a known motion path has that path measured back.
@@ -601,4 +604,55 @@ fn block_shifts_are_resolved_below_a_pixel() {
         fractional > 0,
         "every block shift landed on a whole pixel; the kriging refinement did nothing"
     );
+}
+
+/// The backends agree about the reference, bit for bit.
+///
+/// `pick_initial_reference` is the largest single piece of work in a run and it
+/// is now split across cores. The split must not change the answer: a run that
+/// measured differently depending on which selector was chosen would make the
+/// selector a scientific decision rather than a scheduling one.
+#[test]
+fn the_backends_pick_the_same_reference() {
+    let (ly, lx) = (24, 20);
+    // Frames that genuinely differ, so the correlation between them decides
+    // something and the choice of "most typical" is not arbitrary.
+    let frames: Vec<Vec<f32>> = (0..9)
+        .map(|k| {
+            (0..ly * lx)
+                .map(|i| {
+                    let (y, x) = (i / lx, i % lx);
+                    let bump = if (y + k) % 5 == 0 && (x + 2 * k) % 4 == 0 {
+                        40.0
+                    } else {
+                        0.0
+                    };
+                    (i % 17) as f32 + bump + k as f32
+                })
+                .collect()
+        })
+        .collect();
+
+    let one = pick_initial_reference(
+        &frames,
+        ly,
+        lx,
+        &Settings {
+            backend: Backend::SingleThread,
+            ..Settings::default()
+        },
+    );
+    let many = pick_initial_reference(
+        &frames,
+        ly,
+        lx,
+        &Settings {
+            backend: Backend::MultiThread,
+            ..Settings::default()
+        },
+    );
+    assert_eq!(one, many);
+    // And it is a real reference, not a plane of zeros that would compare equal
+    // to itself however the loop was written.
+    assert!(one.iter().any(|v| v.abs() > 1e-3), "the reference is empty");
 }

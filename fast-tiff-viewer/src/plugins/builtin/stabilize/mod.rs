@@ -28,9 +28,32 @@ use fasttiff_plugin_api::{
     PluginError, PluginInfo,
 };
 use suite2p_registration::{
-    compute_reference, fft::Fft2, masks::reference_filters_normed, nonrigid, rigid, shift_frame,
-    Frames, Shift,
+    compute_reference, fft::Fft2, masks::reference_filters_normed, nonrigid, shift_frame, Frames,
+    Settings, Shift,
 };
+
+/// Correct a chunk of read planes and move them into the result.
+///
+/// Split out only because it is called from two places — once when the chunk
+/// fills and once for whatever is left at the end of a batch — and getting one
+/// of those wrong loses planes off the end of the recording.
+fn flush(
+    pending: &mut Vec<Vec<f32>>,
+    at: &mut Vec<usize>,
+    out: &mut Vec<PlaneData>,
+    ly: usize,
+    lx: usize,
+    shifts: &[Shift],
+    warp: Option<(&nonrigid::Blocks, &[Vec<nonrigid::BlockShift>])>,
+    settings: &Settings,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    suite2p_registration::pipeline::apply_batch(pending, ly, lx, at, shifts, warp, settings);
+    out.extend(pending.drain(..).map(PlaneData::F32));
+    at.clear();
+}
 
 /// Motion correction for a timelapse, by suite2p's method.
 #[derive(Default)]
@@ -157,58 +180,154 @@ impl Plugin for Stabilize {
         let channels = info.channels.max(1);
         let mut planes: Vec<PlaneData> = Vec::with_capacity(channels * slices * info.frames);
         let mut shifts: Vec<Shift> = Vec::with_capacity(info.frames);
-        let mut measure = Vec::new();
+        let mut plane = Vec::new();
 
-        for t in 0..info.frames {
-            if !host.progress(0.3 + 0.7 * t as f32 / info.frames as f32) {
+        // One pass over the recording, a batch at a time.
+        //
+        // A batch rather than a frame, because `measure_batch` is where the
+        // chosen backend lives — measuring frame by frame here, which is what
+        // this did, ran the whole recording on one thread whatever the dialog
+        // said, and made the three backends indistinguishable. It is also what
+        // `smooth_sigma_time` smooths across, so a frame-at-a-time pass ignored
+        // that setting entirely on the recording while honouring it on the
+        // reference.
+        // Bounded by memory as well as by the setting: a batch is held as
+        // `f32`, and 100 frames of a 2048-pixel-square recording is a gigabyte
+        // and a half. At the default frame size the budget is far larger than
+        // the default batch, so the common case is exactly what was asked for.
+        const BATCH_BUDGET: usize = 256 << 20;
+        let per_frame = (ly * lx * std::mem::size_of::<f32>()).max(1);
+        let batch = settings
+            .batch_size
+            .max(1)
+            .min((BATCH_BUDGET / per_frame).max(1));
+        if batch < settings.batch_size && settings.smooth_sigma_time > 0.0 {
+            // Only worth saying when it changes the answer. `smooth_sigma_time`
+            // smooths within a batch, so a smaller batch is a shorter window;
+            // with it off, the batch is a scheduling detail and nothing else.
+            host.log(&format!(
+                "batch size reduced from {} to {batch} to bound memory at this frame size;                  smooth_sigma_time smooths within a batch, so its window is shorter",
+                settings.batch_size
+            ));
+        }
+        // How many planes are resampled in one parallel sweep. A bound rather
+        // than the whole batch: a recording with several channels and slices has
+        // many planes per timepoint, and a batch of all of them at once would be
+        // an unpredictable amount of memory.
+        const APPLY_CHUNK: usize = 64;
+
+        let mut batch_frames: Vec<Vec<f32>> = Vec::new();
+        let mut pending: Vec<Vec<f32>> = Vec::new();
+        let mut pending_at: Vec<usize> = Vec::new();
+
+        let mut t0 = 0;
+        while t0 < info.frames {
+            let t1 = (t0 + batch).min(info.frames);
+            if !host.progress(0.3 + 0.7 * t0 as f32 / info.frames as f32) {
                 return Ok(Outcome::Cancelled);
             }
-            host.read_plane_f32(Plane::new(align_by, 0, t), &mut measure)?;
-            if bidi != 0 {
-                suite2p_registration::bidiphase::shift(&mut measure, ly, lx, bidi);
+
+            // The measurement channel for this batch.
+            batch_frames.clear();
+            for t in t0..t1 {
+                host.read_plane_f32(Plane::new(align_by, 0, t), &mut plane)?;
+                if bidi != 0 {
+                    suite2p_registration::bidiphase::shift(&mut plane, ly, lx, bidi);
+                }
+                batch_frames.push(std::mem::take(&mut plane));
             }
-            let shift = rigid::phase_correlate(&mut fft, &filters, &measure, settings.maxregshift);
-            shifts.push(shift);
+
+            let batch_shifts = suite2p_registration::pipeline::measure_batch(
+                ly,
+                lx,
+                &filters,
+                &batch_frames,
+                &settings,
+            );
 
             // The deformation is measured on the *rigidly corrected* frame, so a
             // block is looking for the few pixels the tissue stretched rather
             // than the tens the animal moved — a 64-pixel block cannot see 50
             // pixels of travel.
-            let field = nonrigid.as_mut().map(|(blocks, filters)| {
-                let corrected = shift_frame(&measure, ly, lx, shift.dy, shift.dx);
-                nonrigid::measure_blocks(
-                    filters,
-                    &corrected,
-                    lx,
-                    blocks,
-                    &nonrigid::BlockSearch {
-                        maxregshift_nr: settings.maxregshift_nr,
-                        snr_thresh: settings.snr_thresh,
-                        subpixel: settings.subpixel,
-                        clip,
-                    },
-                )
+            //
+            // Serial, unlike everything around it: each block carries its own
+            // FFT plan and scratch, so a second thread would need a second set
+            // of them. Non-rigid is off by default and this is the price of
+            // turning it on.
+            let fields = nonrigid.as_mut().map(|(blocks, block_filters)| {
+                batch_frames
+                    .iter()
+                    .zip(&batch_shifts)
+                    .map(|(frame, s)| {
+                        let corrected = shift_frame(frame, ly, lx, s.dy, s.dx);
+                        nonrigid::measure_blocks(
+                            block_filters,
+                            &corrected,
+                            lx,
+                            blocks,
+                            &nonrigid::BlockSearch {
+                                maxregshift_nr: settings.maxregshift_nr,
+                                snr_thresh: settings.snr_thresh,
+                                subpixel: settings.subpixel,
+                                clip,
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>()
             });
+            let warp = nonrigid
+                .as_ref()
+                .zip(fields.as_ref())
+                .map(|((blocks, _), f)| (blocks, f.as_slice()));
 
-            // xyczt: channel fastest, then z, then t — the order the host
-            // expects a result's planes in.
-            for z in 0..slices {
-                for c in 0..channels {
-                    host.read_plane_f32(Plane::new(c, z, t), &mut plane)?;
-                    if bidi != 0 {
-                        suite2p_registration::bidiphase::shift(&mut plane, ly, lx, bidi);
-                    }
-                    let moved = match (&nonrigid, &field) {
-                        // The warp folds the rigid shift in, so it is applied
-                        // once rather than twice.
-                        (Some((blocks, _)), Some(f)) => {
-                            nonrigid::warp(&plane, ly, lx, blocks, f, shift)
+            // Now the planes themselves. xyczt: channel fastest, then z, then t
+            // — the order the host expects a result's planes in.
+            for t in t0..t1 {
+                for z in 0..slices {
+                    for c in 0..channels {
+                        // The measurement channel of a plain single-channel,
+                        // single-slice recording is the plane being corrected,
+                        // and it is already here. Re-reading and re-converting
+                        // it is a second pass over the whole recording for
+                        // nothing, and that is the common case.
+                        if channels == 1 && slices == 1 && c == align_by {
+                            pending.push(std::mem::take(&mut batch_frames[t - t0]));
+                        } else {
+                            host.read_plane_f32(Plane::new(c, z, t), &mut plane)?;
+                            if bidi != 0 {
+                                suite2p_registration::bidiphase::shift(&mut plane, ly, lx, bidi);
+                            }
+                            pending.push(std::mem::take(&mut plane));
                         }
-                        _ => shift_frame(&plane, ly, lx, shift.dy, shift.dx),
-                    };
-                    planes.push(PlaneData::F32(moved));
+                        pending_at.push(t - t0);
+                        if pending.len() >= APPLY_CHUNK {
+                            flush(
+                                &mut pending,
+                                &mut pending_at,
+                                &mut planes,
+                                ly,
+                                lx,
+                                &batch_shifts,
+                                warp,
+                                &settings,
+                            );
+                        }
+                    }
                 }
             }
+            flush(
+                &mut pending,
+                &mut pending_at,
+                &mut planes,
+                ly,
+                lx,
+                &batch_shifts,
+                warp,
+                &settings,
+            );
+
+            shifts.extend_from_slice(&batch_shifts);
+            t0 = t1;
         }
 
         let moved = shifts.iter().filter(|s| s.dy != 0 || s.dx != 0).count();
