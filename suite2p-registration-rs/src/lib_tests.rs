@@ -38,7 +38,11 @@ fn suite2ps_defaults_are_the_defaults() {
     assert!(!s.do_bidiphase);
     assert_eq!(s.bidiphase, 0);
     assert_eq!(s.batch_size, 100);
-    assert!(!s.nonrigid);
+    // The one deliberate divergence from suite2p, which ships this off. Pinned
+    // as a decision rather than left unchecked, so it cannot become a drift —
+    // and because it costs: a warped frame is interpolated, so a result that
+    // could have been the file's own samples moved has to be stored as float.
+    assert!(s.nonrigid);
     assert_eq!(s.maxregshift_nr, 10.0);
     assert_eq!(s.block_size, [64, 64]);
     assert_eq!(s.smooth_sigma_time, 0.0);
@@ -559,6 +563,9 @@ fn no_block_field_without_asking_for_one() {
         &movie,
         &Settings {
             spatial_taper: 5.0,
+            // Explicit: this build defaults `nonrigid` on, and the point of
+            // this test is what happens when it is off.
+            nonrigid: false,
             ..Settings::default()
         },
         &mut |_| true,

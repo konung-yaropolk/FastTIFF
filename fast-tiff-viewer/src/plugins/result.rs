@@ -120,7 +120,16 @@ pub fn to_tiff_bytes_reporting(
     }
 
     let opts = WriterOptions::new(image.width, image.height, sample).metadata(meta);
-    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts)?;
+    // Sized up front. The buffer would otherwise double its way to the finished
+    // size, and every doubling copies everything written so far — on a
+    // stabilised recording that is several gigabytes of memcpy, all of it after
+    // the plugin's own progress had reached the end.
+    let payload: usize = image.planes.iter().map(plane_bytes).sum();
+    // A generous IFD per plane, plus the header. Over-reserving a little costs
+    // one allocation that is never grown; under-reserving costs the doubling
+    // this exists to avoid.
+    let room = payload.saturating_add(image.planes.len().saturating_mul(512) + 4096);
+    let mut w = TiffWriter::new(Cursor::new(Vec::with_capacity(room)), opts)?;
     let total = image.planes.len().max(1);
     for (i, plane) in image.planes.iter().enumerate() {
         if !on_progress(i as f32 / total as f32) {
@@ -128,18 +137,52 @@ pub fn to_tiff_bytes_reporting(
         }
         match plane {
             PlaneData::U8(v) => w.write_frame_bytes(v)?,
-            PlaneData::U16(v) => {
-                let bytes: Vec<u8> = v.iter().flat_map(|s| s.to_le_bytes()).collect();
-                w.write_frame_bytes(&bytes)?
-            }
-            PlaneData::F32(v) => {
-                let bytes: Vec<u8> = v.iter().flat_map(|s| s.to_le_bytes()).collect();
-                w.write_frame_bytes(&bytes)?
-            }
+            PlaneData::U16(v) => w.write_frame_bytes(&le_bytes_u16(v))?,
+            PlaneData::F32(v) => w.write_frame_bytes(&le_bytes_f32(v))?,
         }
     }
     Ok(Some(w.finish()?.into_inner()))
 }
+
+/// How many bytes one plane occupies in the file.
+fn plane_bytes(plane: &PlaneData) -> usize {
+    match plane {
+        PlaneData::U8(v) => v.len(),
+        PlaneData::U16(v) => v.len() * 2,
+        PlaneData::F32(v) => v.len() * 4,
+    }
+}
+
+/// A plane's samples as the little-endian bytes the file stores them in.
+///
+/// Borrowed rather than built, on every platform this ships for: the samples
+/// are already laid out the way the file wants them, so there is nothing to do.
+/// Building a fresh `Vec` per plane — one sample at a time, through an
+/// iterator that cannot say how long it will be, so the buffer grew as it went
+/// — copied the entire result a second time. On a long recording that was the
+/// bulk of the wait after the bar had reached the end.
+macro_rules! le_bytes {
+    ($name:ident, $ty:ty) => {
+        fn $name(v: &[$ty]) -> std::borrow::Cow<'_, [u8]> {
+            #[cfg(target_endian = "little")]
+            {
+                std::borrow::Cow::Borrowed(bytemuck::cast_slice(v))
+            }
+            // A big-endian host has to swap, and then there is a copy to make.
+            // Nothing this runs on today takes this branch.
+            #[cfg(target_endian = "big")]
+            {
+                let mut out = Vec::with_capacity(std::mem::size_of::<$ty>() * v.len());
+                for s in v {
+                    out.extend_from_slice(&s.to_le_bytes());
+                }
+                std::borrow::Cow::Owned(out)
+            }
+        }
+    };
+}
+le_bytes!(le_bytes_u16, u16);
+le_bytes!(le_bytes_f32, f32);
 
 /// Encode a result and open it as a stack, exactly as a file would be opened.
 pub fn to_stack(

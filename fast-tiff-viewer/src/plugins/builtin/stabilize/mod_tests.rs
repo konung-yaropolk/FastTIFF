@@ -51,7 +51,12 @@ fn the_dialog_offers_suite2ps_defaults() {
     assert!(!boolean("do_bidiphase"));
     assert_eq!(int("bidiphase"), 0);
     assert_eq!(int("batch_size"), 100);
-    assert!(!boolean("nonrigid"));
+    // The one deliberate divergence: suite2p ships `nonrigid` off and this
+    // build turns it on. Pinned as a decision rather than left unchecked, so
+    // that it cannot quietly become a drift — and because it costs: a warped
+    // frame is interpolated, so the result is stored as float and is twice the
+    // size of one that was only shifted.
+    assert!(boolean("nonrigid"));
     assert_eq!(float("maxregshiftNR"), 10.0);
     assert_eq!(int("block_size"), 64);
     assert_eq!(float("smooth_sigma_time"), 0.0);
@@ -119,4 +124,72 @@ fn an_answered_dialog_reaches_the_settings() {
     assert!(s.nonrigid);
     assert_eq!(s.block_size, [128, 128]);
     assert_eq!(s.backend, suite2p_registration::Backend::SingleThread);
+}
+
+// ------------------------------------------------ what the result is stored in
+
+/// A rigid run gives the file's own width back; a non-rigid one gives float.
+///
+/// The distinction is not cosmetic. A rigid correction is `np.roll` — no
+/// arithmetic touches a sample — so the file's width is exact and half the
+/// size. Non-rigid interpolates between pixels and makes values that were never
+/// in the file, which need somewhere to live.
+#[test]
+fn the_result_keeps_the_source_width_unless_it_was_warped() {
+    assert_eq!(Store::of(PixelType::U16, false), Store::U16);
+    assert_eq!(Store::of(PixelType::U8, false), Store::U8);
+    assert_eq!(Store::of(PixelType::F32, false), Store::F32);
+    // Signed 16-bit has no `PlaneData` of its own; float says what it is.
+    assert_eq!(Store::of(PixelType::I16, false), Store::F32);
+
+    for source in [
+        PixelType::U8,
+        PixelType::U16,
+        PixelType::I16,
+        PixelType::F32,
+    ] {
+        assert_eq!(
+            Store::of(source, true),
+            Store::F32,
+            "a non-rigid run interpolates and cannot be stored as {source:?}"
+        );
+    }
+}
+
+/// Every 16-bit value survives the trip through the registration's `f32`
+/// exactly, including both ends of the range.
+///
+/// This is the whole justification for storing the result at the source's
+/// width: `f32` has a 24-bit mantissa, so every `u16` is representable, and a
+/// rigid shift only moves them.
+#[test]
+fn every_16_bit_value_round_trips_exactly() {
+    let samples: Vec<u16> = (0..=u16::MAX).collect();
+    let as_f32: Vec<f32> = samples.iter().map(|&v| v as f32).collect();
+    match Store::U16.plane(as_f32) {
+        PlaneData::U16(back) => assert_eq!(back, samples),
+        other => panic!("stored as {:?}", other.pixel_type()),
+    }
+
+    let bytes: Vec<u8> = (0..=u8::MAX).collect();
+    let as_f32: Vec<f32> = bytes.iter().map(|&v| v as f32).collect();
+    match Store::U8.plane(as_f32) {
+        PlaneData::U8(back) => assert_eq!(back, bytes),
+        other => panic!("stored as {:?}", other.pixel_type()),
+    }
+}
+
+/// A value that could not have come from the source is clamped rather than
+/// wrapped.
+///
+/// It cannot happen through the plugin. It is guarded because the failure mode
+/// if it ever did — `as u16` on a negative float is 0, but on a large one it
+/// saturates in a way that reads as a bright speck — is a picture that looks
+/// like data.
+#[test]
+fn an_out_of_range_sample_is_clamped_not_wrapped() {
+    match Store::U16.plane(vec![-5.0, 70000.0, 1234.0]) {
+        PlaneData::U16(v) => assert_eq!(v, vec![0, 65535, 1234]),
+        other => panic!("stored as {:?}", other.pixel_type()),
+    }
 }

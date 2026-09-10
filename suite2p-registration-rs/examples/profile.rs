@@ -199,6 +199,56 @@ fn main() {
         "the parallel apply must give the same answer"
     );
 
+    // ---- the non-rigid measurement, which is now the default ------------
+    if settings.nonrigid {
+        let blocks =
+            suite2p_registration::nonrigid::make_blocks(LY, LX, settings.block_size, settings.subpixel);
+        let search = suite2p_registration::nonrigid::BlockSearch {
+            maxregshift_nr: settings.maxregshift_nr,
+            snr_thresh: settings.snr_thresh,
+            subpixel: settings.subpixel,
+            clip: filters.clip,
+        };
+        println!(
+            "
+  non-rigid block measurement over {} blocks:",
+            blocks.blocks.len()
+        );
+        let cores = std::thread::available_parallelism()
+            .map(|c| c.get())
+            .unwrap_or(1);
+        let mut first: Option<usize> = None;
+        for workers in [1, cores] {
+            let at = Instant::now();
+            let mut sets = suite2p_registration::nonrigid::filter_sets(
+                &reference,
+                LX,
+                &blocks,
+                settings.spatial_taper,
+                settings.smooth_sigma,
+                workers,
+            );
+            let built = ms(at);
+            let at = Instant::now();
+            let fields = suite2p_registration::nonrigid::measure_blocks_batch(
+                &mut sets, LY, LX, &blocks, &movie, &shifts, &search,
+            );
+            println!(
+                "    {workers:>3} worker(s)  {:8.1} ms   (+{built:.1} ms building filters)",
+                ms(at)
+            );
+            // Splitting the work must not lose a frame.
+            assert_eq!(fields.len(), movie.len());
+            if let Some(prev) = first {
+                assert_eq!(prev, fields.len());
+            }
+            first = Some(fields.len());
+            if cores == 1 {
+                break;
+            }
+        }
+    }
+
     println!(
         "\n  measured shifts: {} of {n} frames moved, largest {} px",
         shifts.iter().filter(|s| s.dy != 0 || s.dx != 0).count(),
