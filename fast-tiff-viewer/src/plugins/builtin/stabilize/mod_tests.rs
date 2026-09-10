@@ -51,7 +51,7 @@ fn the_dialog_offers_suite2ps_defaults() {
     assert!(!boolean("do_bidiphase"));
     assert_eq!(int("bidiphase"), 0);
     assert_eq!(int("batch_size"), 100);
-    assert!(!boolean("nonrigid"));
+    assert!(boolean("nonrigid"));
     assert_eq!(float("maxregshiftNR"), 10.0);
     assert_eq!(int("block_size"), 64);
     assert_eq!(float("smooth_sigma_time"), 0.0);
