@@ -39,7 +39,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
         decls.push(
             ParamDecl::new(
                 "align_by_chan2",
-                "Align by channel 2 (align_by_chan2)",
+                "Align by channel 2",
                 ParamKind::Bool {
                     default: d.align_by_chan2,
                 },
@@ -54,7 +54,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "nimg_init",
-            "Reference frames (nimg_init)",
+            "Reference frames",
             ParamKind::Int {
                 default: d.nimg_init as i64,
                 min: 2,
@@ -67,7 +67,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "maxregshift",
-            "Max shift (maxregshift)",
+            "Max shift",
             ParamKind::Float {
                 default: d.maxregshift,
                 min: 0.01,
@@ -83,7 +83,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "smooth_sigma",
-            "Spatial smoothing (smooth_sigma)",
+            "Spatial smoothing",
             ParamKind::Float {
                 default: d.smooth_sigma,
                 min: 0.0,
@@ -95,7 +95,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "smooth_sigma_time",
-            "Temporal smoothing (smooth_sigma_time)",
+            "Temporal smoothing",
             ParamKind::Float {
                 default: d.smooth_sigma_time,
                 min: 0.0,
@@ -111,7 +111,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "spatial_taper",
-            "Edge taper (spatial_taper)",
+            "Edge taper",
             ParamKind::Float {
                 default: d.spatial_taper,
                 min: 0.0,
@@ -126,7 +126,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "norm_frames",
-            "Normalize frames (norm_frames)",
+            "Normalize frames",
             ParamKind::Bool {
                 default: d.norm_frames,
             },
@@ -149,7 +149,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "batch_size",
-            "Batch size (batch_size)",
+            "Batch size",
             ParamKind::Int {
                 default: d.batch_size as i64,
                 min: 1,
@@ -165,7 +165,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "do_bidiphase",
-            "Correct bidirectional phase (do_bidiphase)",
+            "Correct bidirectional phase",
             ParamKind::Bool {
                 default: d.do_bidiphase,
             },
@@ -178,7 +178,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "bidiphase",
-            "Fixed bidi offset (bidiphase)",
+            "Fixed bidirectional phase offset",
             ParamKind::Int {
                 default: d.bidiphase as i64,
                 min: -20,
@@ -191,7 +191,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "nonrigid",
-            "Non-rigid (nonrigid)",
+            "Non-rigid",
             ParamKind::Bool {
                 default: d.nonrigid,
             },
@@ -205,7 +205,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "block_size",
-            "Block size (block_size)",
+            "Block size",
             ParamKind::Int {
                 default: d.block_size[0] as i64,
                 min: 16,
@@ -217,7 +217,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "maxregshiftNR",
-            "Max block shift (maxregshiftNR)",
+            "Max block shift",
             ParamKind::Float {
                 default: d.maxregshift_nr,
                 min: 0.0,
@@ -229,7 +229,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "snr_thresh",
-            "Block SNR threshold (snr_thresh)",
+            "Block SNR threshold",
             ParamKind::Float {
                 default: d.snr_thresh,
                 min: 1.0,
@@ -244,7 +244,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "subpixel",
-            "Subpixel precision (subpixel)",
+            "Subpixel precision",
             ParamKind::Int {
                 default: d.subpixel as i64,
                 min: 1,
@@ -260,7 +260,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     decls.push(
         ParamDecl::new(
             "th_badframes",
-            "Bad-frame threshold (th_badframes)",
+            "Bad-frame threshold",
             ParamKind::Float {
                 default: d.th_badframes,
                 min: 0.0,

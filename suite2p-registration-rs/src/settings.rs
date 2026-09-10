@@ -183,7 +183,7 @@ impl Default for Settings {
             batch_size: 100,
             do_bidiphase: false,
             bidiphase: 0,
-            nonrigid: false,
+            nonrigid: true,
             block_size: [64, 64],
             maxregshift_nr: 10.0,
             snr_thresh: 1.25,
