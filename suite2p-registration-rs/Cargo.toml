@@ -1,0 +1,37 @@
+# A Rust port of the registration (motion-correction) algorithm from suite2p.
+#
+# GPL-3.0, because suite2p is: this is a derivative work of
+# https://github.com/MouseLand/suite2p (Copyright © 2023 Howard Hughes Medical
+# Institute, authored by Carsen Stringer and Marius Pachitariu), and the licence
+# travels with the algorithm whoever retypes it.
+[package]
+name = "suite2p-registration"
+version = "0.1.0"
+edition = "2021"
+description = "Rigid and bidirectional-phase motion correction, ported from suite2p."
+license = "GPL-3.0-only"
+repository = "https://github.com/konung-yaropolk/FastTIFF"
+publish = false
+
+[dependencies]
+# Phase correlation is FFT-based, so an FFT is not optional. `rustfft` is
+# MIT OR Apache-2.0, which combines into a GPL-3 work without friction, and it
+# handles non-power-of-two sizes (Bluestein) — which matters, because a
+# 1024x768 frame is not a power of two in either axis.
+rustfft = "6"
+# Multi-threaded CPU registration: frames are independent, so a batch of them is
+# an embarrassingly parallel map. Already in this workspace (fast-tiff-lib uses
+# it for strip decompression), so it is not a new dependency for the project.
+rayon = "1.10"
+
+# The GPU backend, behind a feature so the algorithm crate does not drag a
+# graphics stack into anything that only wants the CPU path. Same wgpu the
+# renderer already uses, so it is a feature flag rather than a new dependency
+# for the project.
+wgpu = { version = "29", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+pollster = { version = "0.4", optional = true }
+
+[features]
+default = []
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]

@@ -635,6 +635,18 @@ pub unsafe fn write_outcome(sink: &FtSink, outcome: Outcome) -> FtStatus {
             let name = image.name.clone();
             write_image(sink, &image, &name, FtOutcomeKind::SaveToFile, &path)
         }
+        // Not yet carried across the C boundary: a plot needs its own sink
+        // callbacks (a series is a label plus a run of floats, which is the
+        // same push-per-item shape `push_plane` already has). A plugin compiled
+        // *into* the host returns one fine — `Outcome::Plot` is part of the
+        // Rust contract — so this is the one place the two lanes differ, and it
+        // says so rather than dropping the result on the floor.
+        Outcome::Plot(_) => {
+            crate::last_error::set(
+                "this plugin returned a plot, which this ABI version cannot carry across                  a shared library boundary; compile it into the host instead",
+            );
+            FtStatus::Unsupported
+        }
     }
 }
 

@@ -174,7 +174,7 @@ impl Stacks {
 
 /// Write the stack with fast-tiff-lib's own writer — timed, so the write
 /// benchmark comes free — plus the raw baseline file.
-pub fn write_stacks(dir: &Path, run: &Run) -> Result<Stacks> {
+pub fn write_stacks(dir: &Path, run: &Run) -> Result<Stack> {
     let f = &run.family;
     let tiff = dir.join(format!("bench_{}.tif", run.slug()));
     let raw = tiff.with_extension("raw");

@@ -65,6 +65,19 @@ pub trait HostContext {
     /// takes a minute to stop.
     fn progress(&mut self, fraction: f32) -> bool;
 
+    /// The regions the user has drawn on the picture.
+    ///
+    /// Empty until a plot has asked for a selection tool and something has been
+    /// drawn with it — and empty is not "no answer", it is **the whole frame**:
+    /// that is the question the plugin was asked before anything was selected.
+    ///
+    /// Provided rather than required, so no existing host or plugin has to know
+    /// this exists. A host that offers no tool answers with nothing, which is
+    /// the correct answer for it.
+    fn selection(&self) -> crate::plot::Selection<'_> {
+        &[]
+    }
+
     /// A line for the host to show the user. Not an error; use the returned
     /// `Err` for that.
     fn log(&mut self, message: &str);

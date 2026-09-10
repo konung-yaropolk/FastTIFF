@@ -67,7 +67,7 @@ pub struct ZProject;
 impl Plugin for ZProject {
     fn info(&self) -> PluginInfo {
         PluginInfo::new("dev.fasttiff.zproject", "Z Project…")
-            .menu_path("Stacks")
+            .menu_path("Stack")
             .version(env!("CARGO_PKG_VERSION"))
             .author("FastTIFF")
             .description("Flatten a stack's Z or T axis to one plane per channel.")

@@ -1373,6 +1373,9 @@ impl Plugin for LoadedPlugin {
 struct ImportOnly<'a>(&'a mut dyn ImportHost);
 
 impl HostContext for ImportOnly<'_> {
+    // Not forwarded, and the default's empty slice is the true answer: an
+    // importer runs before anything is open, so there is no picture to have
+    // drawn a region on.
     fn image(&self) -> fasttiff_plugin_api::ImageInfo {
         // Zero, honestly: there is no image yet. `plane_len()` is then 0, so
         // the pixel readers below refuse every request rather than appearing to
@@ -1447,6 +1450,14 @@ struct ReadOnly<'a>(&'a dyn HostContext);
 impl HostContext for ReadOnly<'_> {
     fn image(&self) -> fasttiff_plugin_api::ImageInfo {
         self.0.image()
+    }
+    // Forwarded like everything else here. This shim implements the trait by
+    // hand, so a method that gains a default body is a method this silently
+    // answers *for* the host it wraps — with the default's empty slice rather
+    // than what the host actually has. Anything added to `HostContext` has to
+    // be added here too.
+    fn selection(&self) -> fasttiff_plugin_api::Selection<'_> {
+        self.0.selection()
     }
     fn view(&self) -> &fasttiff_plugin_api::ViewParams {
         self.0.view()

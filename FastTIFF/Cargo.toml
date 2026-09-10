@@ -19,7 +19,7 @@ default = ["renderer-wgpu"]
 # Each feature turns on the matching eframe backend AND the matching backend in
 # `scivis-render`, so the *unused* renderer's entire dependency subtree is
 # excluded from the build (`cargo tree`).
-renderer-wgpu = ["eframe/wgpu", "scivis-render/backend-wgpu", "fast-tiff-viewer/backend-wgpu"]
+renderer-wgpu = ["eframe/wgpu", "scivis-render/backend-wgpu", "fast-tiff-viewer/backend-wgpu", "fast-tiff-viewer/gpu-registration"]
 renderer-glow = ["eframe/glow", "scivis-render/backend-glow", "fast-tiff-viewer/backend-glow"]
 
 # lib + bin: the library half holds the egui UI so `FastTIFF-web` can compile

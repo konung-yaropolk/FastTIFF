@@ -35,6 +35,11 @@ mod dialog;
 mod kinetic;
 mod minimap;
 mod overlay;
+// Drawing a plot a plugin declared, and the canvas selection tool that feeds
+// it. Native only, like `plugins_ui`: both are reached from the Plugins menu,
+// which the browser build does not have.
+#[cfg(not(target_arch = "wasm32"))]
+mod plot;
 #[cfg(not(target_arch = "wasm32"))]
 mod plugins_ui;
 mod scale;
@@ -563,6 +568,11 @@ impl WriteOutcome {
 /// What a filter plugin produced, carried back from its worker.
 #[cfg(not(target_arch = "wasm32"))]
 struct PluginRun {
+    /// Which plugin, so a plot it returned can be recomputed for a new
+    /// selection without asking the user again.
+    index: usize,
+    /// What its dialog was answered with, reused verbatim on a re-run.
+    params: fasttiff_plugin_api::Params,
     name: String,
     /// What the plugin logged, drained from its host when the run ended.
     messages: Vec<String>,
@@ -976,6 +986,13 @@ pub struct ViewerApp {
     /// gives it back with the result.
     #[cfg(not(target_arch = "wasm32"))]
     job: Option<Job>,
+    /// The plot a plugin returned, while one is on screen.
+    ///
+    /// It owns the canvas selection too: the regions belong to the plot they
+    /// feed, so closing the window takes the tool away with it rather than
+    /// leaving a selection behind that nothing is measuring.
+    #[cfg(not(target_arch = "wasm32"))]
+    plot: Option<plot::PlotWindow>,
 
     // --- window chrome ------------------------------------------------------
     /// The window title last sent via `ViewportCommand::Title`. Native only —
@@ -1098,6 +1115,8 @@ impl ViewerApp {
             open_rx,
             #[cfg(not(target_arch = "wasm32"))]
             job: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            plot: None,
             last_title: None,
             good_status: None,
             show_metadata: false,
@@ -1223,6 +1242,14 @@ impl ViewerApp {
         self.view.was_pannable = false;
         // Momentum from the last picture means nothing in this one.
         self.view.pan_glide.stop();
+        // And neither does a plot of it. The regions are in pixels of the
+        // picture they were drawn on; carrying them to a different image would
+        // put them somewhere arbitrary and go on measuring, which is worse than
+        // losing them.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.plot = None;
+        }
         self.view.resize_to_zoom = false;
         // A glide belongs to the picture that was on screen; carrying one into
         // a new file would slide the fresh image away from the zoom it just
@@ -1403,6 +1430,52 @@ impl ViewerApp {
         )
     }
 
+    /// Draw the open plot, and act on what it asks for.
+    ///
+    /// A re-run goes through the ordinary plugin path — same worker, same
+    /// progress readout, same stop button — so a measurement over a long
+    /// timelapse behaves like any other slow plugin rather than freezing the
+    /// window every time a region is drawn.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_plot(&mut self, ctx: &egui::Context) {
+        let Some(win) = self.plot.as_mut() else {
+            return;
+        };
+        let busy = self.job.is_some();
+        match plot::plot_window(ctx, win, busy) {
+            plot::PlotAction::Close => self.plot = None,
+            plot::PlotAction::Rerun => win.stale = true,
+            plot::PlotAction::None => {}
+        }
+        // Deferred to here rather than done inside the window: a run needs the
+        // registry, which the window's borrow of `self.plot` would still hold.
+        let Some(win) = self.plot.as_ref() else {
+            return;
+        };
+        if !win.stale {
+            return;
+        }
+        match &self.job {
+            // A measurement is already running and its answer is now the wrong
+            // one — the user has drawn another region since. Stop it rather
+            // than queue behind it: a five-thousand-frame trace takes seconds,
+            // and waiting out a result nobody wants any more is the difference
+            // between a tool that follows the pointer and one that lags a
+            // gesture behind.
+            //
+            // The flag is all this does. The worker still owns the registry and
+            // still has to hand it back; the fresh run starts on the frame
+            // after it does.
+            Some(job) => job.cancel.store(true, std::sync::atomic::Ordering::Relaxed),
+            None if self.plugins.is_some() => {
+                let (index, params) = (win.plugin, win.params.clone());
+                self.plot.as_mut().expect("still open").stale = false;
+                self.run_plugin(index, params);
+            }
+            None => {}
+        }
+    }
+
     /// Draw the open plugin dialog, and run the plugin when it is accepted.
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_plugin_dialog(&mut self, ctx: &egui::Context) {
@@ -1464,8 +1537,18 @@ impl ViewerApp {
         };
 
         let view = self.plugin_view(loaded);
+        // The regions belong to the plot this plugin is feeding, if it has one.
+        // A different plugin gets none — a selection drawn for one measurement
+        // is not an input to an unrelated one.
+        let selection = self
+            .plot
+            .as_ref()
+            .filter(|p| p.plugin == index)
+            .map(|p| p.rois.clone())
+            .unwrap_or_default();
         let job = Job::new(name.clone());
         let host = fast_tiff_viewer::plugins::StackHost::new(loaded, view)
+            .with_selection(selection)
             .with_cancel(job.cancel.clone(), job.progress.clone());
         self.begin_job(job);
 
@@ -1483,6 +1566,8 @@ impl ViewerApp {
             })
             .unwrap_or_else(|e| Err(fasttiff_plugin_api::PluginError::failed(e)));
             let run = PluginRun {
+                index,
+                params: values,
                 name,
                 messages: std::mem::take(&mut host.messages),
                 outcome,
@@ -1497,6 +1582,8 @@ impl ViewerApp {
         use fasttiff_plugin_api::Outcome;
 
         let PluginRun {
+            index,
+            params,
             name,
             messages,
             outcome,
@@ -1506,7 +1593,26 @@ impl ViewerApp {
         }
 
         match outcome {
+            Ok(Outcome::Plot(plot)) => match self.plot.as_mut().filter(|p| p.plugin == index) {
+                // A re-run for a changed selection: keep the window, the tool
+                // and the regions exactly where they are and swap the chart.
+                // Rebuilding it would move a window the user had placed.
+                Some(open) => {
+                    open.plot = *plot;
+                    open.stale = false;
+                }
+                None => self.plot = Some(plot::PlotWindow::new(index, params, *plot)),
+            },
             Ok(Outcome::Nothing) => {}
+            // A run stopped to make way for a newer selection is not news:
+            // the user drew a region, they did not cancel anything. Saying
+            // "cancelled" for their own edit would be the tool complaining
+            // about being used.
+            Ok(Outcome::Cancelled)
+                if self
+                    .plot
+                    .as_ref()
+                    .is_some_and(|p| p.plugin == index && p.stale) => {}
             Ok(Outcome::Cancelled) => self.core.status = Some(format!("{name}: cancelled")),
             Ok(Outcome::Message(m)) => self.core.status = Some(format!("{name}: {m}")),
             Ok(Outcome::NewDocument(image)) => {
@@ -2490,6 +2596,7 @@ impl eframe::App for ViewerApp {
                 self.start_plugin(index);
             }
             self.poll_plugin_dialog(ui.ctx());
+            self.poll_plot(ui.ctx());
         }
         if let Some(mode) = mode_request {
             self.core.view_mode = mode;
@@ -3282,10 +3389,20 @@ impl eframe::App for ViewerApp {
                 );
                 let pannable = overflow.x > 0.0 || overflow.y > 0.0;
 
+                // A plot asking for regions takes the drag: while its tool is
+                // armed, dragging on the picture draws rather than pans. The
+                // picture can still be moved with the scrollbars and the
+                // navigator, and the tool is only armed while its window is
+                // open — so this cannot strand someone with an unpannable view.
+                #[cfg(not(target_arch = "wasm32"))]
+                let selecting = self.plot.as_ref().is_some_and(|p| p.wants_regions()) && !pinching;
+                #[cfg(target_arch = "wasm32")]
+                let selecting = false;
+
                 // Drag to pan when the image overflows the panel. Not during a
                 // gesture: egui synthesises a pointer from the first touch, so a
                 // two-finger pan arrives here as well and would be applied twice.
-                if pannable && response.dragged() && !pinching {
+                if pannable && response.dragged() && !pinching && !selecting {
                     // Taking hold of the picture ends any glide: the hand on it now
                     // decides where it goes.
                     self.view.pan_glide.stop();
@@ -3311,6 +3428,41 @@ impl eframe::App for ViewerApp {
                 );
                 self.view.image_origin = origin;
 
+                // The selection tool, now that the transform for this frame is
+                // settled. Committed on release rather than continuously, so a
+                // drag across a long timelapse starts one measurement instead
+                // of one per frame of the gesture.
+                #[cfg(not(target_arch = "wasm32"))]
+                if selecting {
+                    let zoom = self.view.zoom;
+                    let add = ui.input(|i| i.modifiers.shift);
+                    if let Some(win) = self.plot.as_mut() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let px = plot::pixel_at(pos, origin, zoom);
+                            match win.drag {
+                                None if response.drag_started() => win.drag = Some((px, px)),
+                                Some((from, _)) if response.dragged() => {
+                                    win.drag = Some((from, px))
+                                }
+                                _ => {}
+                            }
+                        }
+                        if response.drag_stopped() {
+                            if let Some((from, to)) = win.drag.take() {
+                                if let Some(roi) = plot::drag_region(from, to, win.shape, w, h) {
+                                    // Shift adds; a plain drag replaces, which
+                                    // is what makes "start again" one gesture.
+                                    if !add {
+                                        win.rois.clear();
+                                    }
+                                    win.rois.push(roi);
+                                    win.stale = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Render into the on-screen *visible* rectangle only, and pan/zoom
                 // via UVs. Drawing into an oversized rect doesn't work: the callback
                 // viewport is clamped to the framebuffer, which would just squash the
@@ -3328,6 +3480,19 @@ impl eframe::App for ViewerApp {
                     ui.painter()
                         .with_clip_rect(panel_rect)
                         .add(render::paint_callback(&self.render, visible));
+                }
+
+                // The regions, over the picture and clipped to the panel like
+                // everything else here.
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(win) = self.plot.as_ref().filter(|p| p.wants_regions()) {
+                    plot::draw_rois(
+                        &ui.painter().with_clip_rect(panel_rect),
+                        win,
+                        origin,
+                        self.view.zoom,
+                        (w, h),
+                    );
                 }
 
                 // Where the view sits in the frame, once that stops being obvious.

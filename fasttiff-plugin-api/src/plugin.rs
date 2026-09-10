@@ -209,6 +209,12 @@ pub enum Outcome {
         image: Box<ImageResult>,
         path: String,
     },
+    /// Show this chart. The host draws it; see [`crate::plot`].
+    ///
+    /// If the plot asks for a canvas tool, the host arms it and runs this
+    /// plugin again whenever the selection changes — so a plot is a function of
+    /// what is selected, and the plugin stays a plain call that returns.
+    Plot(Box<crate::plot::Plot>),
     /// The user cancelled. The host discards everything and says so.
     Cancelled,
 }

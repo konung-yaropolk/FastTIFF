@@ -71,6 +71,7 @@ pub mod image;
 pub mod import;
 pub mod meta;
 pub mod params;
+pub mod plot;
 pub mod plugin;
 pub mod selection;
 
@@ -82,6 +83,7 @@ pub use image::{
 pub use import::{Confidence, FileType, ImportHost, ImportRequest, ImportResult, Importer};
 pub use meta::{DisplayMode, Spacing, StackInfo};
 pub use params::{ParamDecl, ParamKind, ParamValue, Params};
+pub use plot::{Plot, Selection, SelectionKind, Series};
 pub use plugin::{ImageResult, Outcome, PlaneData, Plugin, PluginError, PluginInfo};
 pub use selection::{Roi, Shape};
 

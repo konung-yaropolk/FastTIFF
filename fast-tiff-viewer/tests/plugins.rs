@@ -557,3 +557,432 @@ fn repeated_plane_reads_reuse_one_buffer() {
         out.capacity()
     );
 }
+
+// ------------------------------------------------- Plot third axis, end to end
+//
+// The fixture's pixel `i` of plane (c, z, t) is `c*100 + z*10 + t + i/1000`,
+// over an 8x4 plane. So a whole-frame mean is the tag plus the mean of
+// `i/1000` for i in 0..32, which is 31/2/1000 = 0.0155.
+
+/// The mean of the fixture's plane `(c, z, t)`, worked out from the fixture's
+/// own definition rather than from the code under test.
+fn expected_mean(c: usize, z: usize, t: usize) -> f32 {
+    let n = (W * H) as usize;
+    let frac: f32 = (0..n).map(|i| i as f32 / 1000.0).sum::<f32>() / n as f32;
+    plane_tag(c, z, t) + frac
+}
+
+#[test]
+fn plot_third_axis_is_installed() {
+    let reg = fast_tiff_viewer::plugins::Registry::new();
+    let i = reg
+        .find("dev.fasttiff.plot-axis")
+        .expect("Plot third axis should be a built-in");
+    assert_eq!(reg.entries()[i].info.name, "Plot third axis");
+}
+
+/// A stack that is one plane in both Z and T has nothing to plot against, and
+/// the refusal has to say so in those words.
+#[test]
+fn plot_third_axis_refuses_a_stack_with_no_third_dimension() {
+    let s = stack(1, 1, 1);
+    assert_eq!(s.display.dims.slices, 1);
+    assert_eq!(s.display.dims.frames, 1);
+
+    let mut h = host(&s, 0);
+    let err = builtin::PlotAxis
+        .run(&mut h, &Params::new())
+        .expect_err("a single plane has no third axis");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no third dimension"),
+        "the reason must name what is missing: {msg}"
+    );
+}
+
+/// Nothing selected: one trace over the whole frame, one point per frame.
+#[test]
+fn plot_third_axis_measures_the_whole_frame_by_default() {
+    let s = stack(1, 1, 4);
+    let mut h = host(&s, 0);
+    let Outcome::Plot(plot) = builtin::PlotAxis.run(&mut h, &Params::new()).expect("run") else {
+        panic!("Plot third axis should return a plot");
+    };
+
+    assert_eq!(plot.series.len(), 1);
+    assert_eq!(plot.series[0].label, "Whole frame");
+    assert_eq!(plot.y_label, "Mean pixel value");
+    assert_eq!(plot.series[0].values.len(), 4);
+    for (t, v) in plot.series[0].values.iter().enumerate() {
+        assert!(
+            (v - expected_mean(0, 0, t)).abs() < 1e-3,
+            "frame {t}: {v} vs {}",
+            expected_mean(0, 0, t)
+        );
+    }
+    // And it asks for the tool that lets the user replace this with regions.
+    assert_eq!(plot.wants, fasttiff_plugin_api::SelectionKind::Regions);
+}
+
+/// With regions selected the whole-frame trace is replaced by one per region —
+/// the behaviour the feature was asked for.
+#[test]
+fn plot_third_axis_replaces_the_whole_frame_with_the_regions() {
+    let s = stack(1, 1, 2);
+    // Two single-pixel regions whose values are known exactly: pixel (0,0) is
+    // index 0, and pixel (7,3) is index 31 of an 8-wide plane.
+    let rois = vec![
+        fasttiff_plugin_api::Roi {
+            shape: fasttiff_plugin_api::Shape::Rect,
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+        },
+        fasttiff_plugin_api::Roi {
+            shape: fasttiff_plugin_api::Shape::Rect,
+            x: 7,
+            y: 3,
+            w: 1,
+            h: 1,
+        },
+    ];
+    let mut h = StackHost::new(&s, describe_view(&s, 0, false, view())).with_selection(rois);
+
+    let Outcome::Plot(plot) = builtin::PlotAxis.run(&mut h, &Params::new()).expect("run") else {
+        panic!("expected a plot");
+    };
+    assert_eq!(plot.series.len(), 2, "one trace per region");
+    assert_eq!(plot.series[0].label, "ROI 1");
+    assert_eq!(plot.series[1].label, "ROI 2");
+    assert!(
+        !plot.series.iter().any(|s| s.label == "Whole frame"),
+        "a selection replaces the whole-frame trace rather than joining it"
+    );
+
+    for t in 0..2 {
+        let tag = plane_tag(0, 0, t);
+        assert!((plot.series[0].values[t] - tag).abs() < 1e-4);
+        assert!((plot.series[1].values[t] - (tag + 31.0 / 1000.0)).abs() < 1e-4);
+    }
+}
+
+/// The axis is calibrated when the file says how long a frame took, so the plot
+/// reads in seconds rather than in frame numbers.
+#[test]
+fn plot_third_axis_uses_the_files_frame_interval() {
+    let s = stack(1, 1, 4);
+    let info = fasttiff_plugin_api::StackInfo {
+        frame_interval_s: Some(0.25),
+        ..fast_tiff_viewer::plugins::describe_stack(&s)
+    };
+    let mut h = StackHost::new(&s, describe_view(&s, 0, false, view())).with_info(info);
+
+    let Outcome::Plot(plot) = builtin::PlotAxis.run(&mut h, &Params::new()).expect("run") else {
+        panic!("expected a plot");
+    };
+    assert_eq!(plot.x_step, 0.25);
+    assert_eq!(plot.x_at(2), 0.5);
+    assert_eq!(plot.x_label, "Time (s)");
+}
+
+/// Without a stated interval it plots against the index rather than inventing a
+/// calibration.
+#[test]
+fn plot_third_axis_falls_back_to_frame_numbers() {
+    let s = stack(1, 1, 3);
+    let mut h = host(&s, 0);
+    let Outcome::Plot(plot) = builtin::PlotAxis.run(&mut h, &Params::new()).expect("run") else {
+        panic!("expected a plot");
+    };
+    assert_eq!(plot.x_step, 1.0);
+    assert_eq!(plot.x_label, "T (frames)");
+}
+
+/// A 4D stack really can be walked along Z, and that is a different set of
+/// planes from walking along T.
+#[test]
+fn plot_third_axis_can_walk_z_on_a_4d_stack() {
+    let s = stack(2, 3, 2);
+    assert_eq!((s.display.dims.slices, s.display.dims.frames), (3, 2));
+
+    // `axes` offers the longer first, so Z (3) precedes T (2) and is index 0.
+    let mut h = host(&s, 0);
+    let Outcome::Plot(z) = builtin::PlotAxis.run(&mut h, &Params::new()).expect("run") else {
+        panic!("expected a plot");
+    };
+    assert_eq!(z.x_label, "Z (slices)");
+    assert_eq!(z.series[0].values.len(), 3);
+    for (i, v) in z.series[0].values.iter().enumerate() {
+        assert!((v - expected_mean(0, i, 0)).abs() < 1e-3, "slice {i}");
+    }
+
+    // And T, chosen explicitly, walks timepoints instead.
+    let mut params = Params::new();
+    params.set("axis", ParamValue::Choice(1));
+    let mut h = host(&s, 0);
+    let Outcome::Plot(t) = builtin::PlotAxis.run(&mut h, &params).expect("run") else {
+        panic!("expected a plot");
+    };
+    assert_eq!(t.x_label, "T (frames)");
+    assert_eq!(t.series[0].values.len(), 2);
+    for (i, v) in t.series[0].values.iter().enumerate() {
+        assert!((v - expected_mean(0, 0, i)).abs() < 1e-3, "frame {i}");
+    }
+}
+
+// ------------------------------------------------ suite2p stabilization
+
+/// A movie of one field wandering along a known path, written as a real TIFF
+/// and opened as a real stack — so this exercises the plugin exactly as the
+/// menu does.
+fn wandering_stack(ly: u32, lx: u32, path: &[(i32, i32)], channels: usize) -> Stack {
+    // Blobs, so there is something to lock onto. Flat noise registers nowhere.
+    let base: Vec<f32> = {
+        let mut f = vec![10.0f32; (ly * lx) as usize];
+        for (cy, cx, amp) in [
+            (20.0f32, 24.0f32, 200.0f32),
+            (40.0, 44.0, 150.0),
+            (28.0, 12.0, 120.0),
+        ] {
+            for y in 0..ly {
+                for x in 0..lx {
+                    let d2 = ((y as f32 - cy).powi(2) + (x as f32 - cx).powi(2)) / 8.0;
+                    f[(y * lx + x) as usize] += amp * (-d2).exp();
+                }
+            }
+        }
+        f
+    };
+    let at = |dy: i32, dx: i32, y: u32, x: u32| -> f32 {
+        let sy = (y as i32 - dy).rem_euclid(ly as i32) as u32;
+        let sx = (x as i32 - dx).rem_euclid(lx as i32) as u32;
+        base[(sy * lx + sx) as usize]
+    };
+
+    let opts =
+        WriterOptions::new(lx, ly, SampleType::F32).metadata(StackMetaWrite::new(channels, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for &(dy, dx) in path {
+        for c in 0..channels {
+            // Every channel moves together, as a real two-channel recording
+            // does — one field photographed twice at once.
+            let px: Vec<f32> = (0..ly * lx)
+                .map(|i| at(dy, dx, i / lx, i % lx) + c as f32 * 1000.0)
+                .collect();
+            w.write_frame_f32(&px).unwrap();
+        }
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    Stack::from_bytes(bytes, "moving.tif".into(), false).expect("open")
+}
+
+#[test]
+fn stabilize_is_installed_in_its_own_submenu() {
+    let reg = fast_tiff_viewer::plugins::Registry::new();
+    let i = reg
+        .find("dev.fasttiff.stabilize")
+        .expect("suite2p stabilization should be a built-in");
+    assert_eq!(reg.entries()[i].info.name, "suite2p stabilization");
+    assert_eq!(reg.entries()[i].info.menu_path, "Stabilization");
+}
+
+/// A stack with one timepoint has no motion to correct, and saying so beats
+/// handing back a copy that looks registered.
+#[test]
+fn stabilize_refuses_a_stack_with_no_time_axis() {
+    let s = stack(1, 1, 1);
+    let mut h = host(&s, 0);
+    let err = builtin::Stabilize
+        .run(&mut h, &Params::new())
+        .expect_err("one timepoint is not a time series");
+    assert!(err.to_string().contains("time series"), "{err}");
+}
+
+/// The headline: a movie that wanders comes back still.
+#[test]
+fn stabilize_removes_a_known_motion() {
+    let (ly, lx) = (64u32, 64u32);
+    let path = [(0i32, 0i32), (3, -2), (-4, 1), (2, 3), (-1, -3), (4, 2)];
+    let s = wandering_stack(ly, lx, &path, 1);
+    let mut h = host(&s, 0);
+
+    let mut params = Params::new();
+    // A taper sized for a 64-pixel test frame; the default 40 is for a
+    // 512-pixel two-photon frame and would fade this one away entirely.
+    params.set("spatial_taper", ParamValue::Float(5.0));
+    // And headroom on the search. The reference lands wherever the
+    // best-correlated frames sit — with six frames that can be a few pixels off
+    // centre — so the budget has to cover the motion *plus* that offset. The
+    // default 0.1 of a 64-pixel frame is 6 pixels, and this path needs 7.
+    params.set("maxregshift", ParamValue::Float(0.3));
+    let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
+        panic!("stabilization should produce a new document");
+    };
+    assert_eq!(out.frames, path.len());
+    assert_eq!((out.width, out.height), (lx, ly));
+    out.validate().expect("the result's shape must be valid");
+
+    // Every registered frame should agree with the first, away from the border
+    // the wrap brings the far side into.
+    let planes = planes_f32(&out);
+    for y in 12..(ly - 12) as usize {
+        for x in 12..(lx - 12) as usize {
+            let first = planes[0][y * lx as usize + x];
+            for (t, p) in planes.iter().enumerate().skip(1) {
+                let v = p[y * lx as usize + x];
+                assert!(
+                    (v - first).abs() < 1.0,
+                    "frame {t} at ({y},{x}) is {v}, frame 0 is {first} — the movie \
+                     is still moving after stabilization"
+                );
+            }
+        }
+    }
+}
+
+/// The channels must move together. Measuring on one and applying to all is
+/// what keeps a two-channel recording in register with itself.
+#[test]
+fn stabilize_moves_every_channel_by_the_same_amount() {
+    let (ly, lx) = (64u32, 64u32);
+    let path = [(0i32, 0i32), (3, -2), (-4, 1)];
+    let s = wandering_stack(ly, lx, &path, 2);
+    assert_eq!(s.display.dims.channels, 2);
+
+    let mut h = host(&s, 0);
+    let mut params = Params::new();
+    params.set("spatial_taper", ParamValue::Float(5.0));
+    params.set("maxregshift", ParamValue::Float(0.3));
+    let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
+        panic!("expected a document");
+    };
+    assert_eq!(out.channels, 2);
+    let planes = planes_f32(&out);
+
+    // Channel 1 is channel 0 plus 1000 everywhere, by construction. If the two
+    // had been registered independently they would have drifted apart.
+    for t in 0..path.len() {
+        let (c0, c1) = (planes[t * 2], planes[t * 2 + 1]);
+        for y in 12..(ly - 12) as usize {
+            for x in 12..(lx - 12) as usize {
+                let i = y * lx as usize + x;
+                assert!(
+                    (c1[i] - c0[i] - 1000.0).abs() < 1.0,
+                    "frame {t} at ({y},{x}): the channels moved apart"
+                );
+            }
+        }
+    }
+}
+
+/// A still movie must not be "corrected" into moving.
+#[test]
+fn stabilize_leaves_a_still_movie_alone() {
+    let (ly, lx) = (64u32, 64u32);
+    let s = wandering_stack(ly, lx, &[(0, 0), (0, 0), (0, 0), (0, 0)], 1);
+    let mut h = host(&s, 0);
+    let mut params = Params::new();
+    params.set("spatial_taper", ParamValue::Float(5.0));
+    params.set("maxregshift", ParamValue::Float(0.3));
+    let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
+        panic!("expected a document");
+    };
+    let planes = planes_f32(&out);
+    for (t, p) in planes.iter().enumerate() {
+        for (i, v) in p.iter().enumerate() {
+            assert!(
+                (v - planes[0][i]).abs() < 1e-3,
+                "frame {t} was moved for no reason"
+            );
+        }
+    }
+}
+
+/// Non-rigid produces a different result from rigid — if it did not, the switch
+/// would be doing nothing.
+#[test]
+fn stabilize_non_rigid_differs_from_rigid() {
+    let (ly, lx) = (128u32, 128u32);
+    let path = [(0i32, 0i32), (3, -2), (-2, 1), (1, 2)];
+    let s = wandering_stack(ly, lx, &path, 1);
+
+    let run = |nonrigid: bool| {
+        let mut h = host(&s, 0);
+        let mut params = Params::new();
+        params.set("spatial_taper", ParamValue::Float(10.0));
+        params.set("maxregshift", ParamValue::Float(0.3));
+        params.set("nonrigid", ParamValue::Bool(nonrigid));
+        params.set("block_size", ParamValue::Int(32));
+        params.set("snr_thresh", ParamValue::Float(1.0));
+        match builtin::Stabilize.run(&mut h, &params).expect("run") {
+            Outcome::NewDocument(out) => out,
+            other => panic!("expected a document, got {other:?}"),
+        }
+    };
+
+    let rigid = run(false);
+    let warped = run(true);
+    assert_eq!(rigid.frames, warped.frames);
+    assert_eq!((rigid.width, rigid.height), (warped.width, warped.height));
+    warped
+        .validate()
+        .expect("the warped result's shape must be valid");
+
+    // The warp is a resample, so it cannot be bit-identical to a whole-pixel
+    // roll. If it were, the block field was empty and the switch did nothing.
+    let a = planes_f32(&rigid);
+    let b = planes_f32(&warped);
+    let differing = a
+        .iter()
+        .zip(&b)
+        .flat_map(|(p, q)| p.iter().zip(q.iter()))
+        .filter(|(x, y)| (*x - *y).abs() > 1e-4)
+        .count();
+    assert!(
+        differing > 0,
+        "non-rigid produced exactly the rigid result; the block field did nothing"
+    );
+}
+
+/// A GPU backend that cannot take this stack is refused with a reason, not
+/// quietly swapped for the CPU — the two are indistinguishable to the user
+/// otherwise, one just being slower.
+///
+/// A frame that is not a power of two in both axes cannot go through the
+/// device's radix-2 FFT. That holds whether or not the `gpu` feature is
+/// compiled in, which is what makes this test say the same thing in every
+/// build.
+#[test]
+fn stabilize_refuses_a_gpu_run_it_cannot_do() {
+    let s = wandering_stack(48, 48, &[(0, 0), (1, 1)], 1);
+    let mut h = host(&s, 0);
+    let mut params = Params::new();
+    // Index 2 is GPU in the selector's order.
+    params.set("backend", ParamValue::Choice(2));
+    let err = builtin::Stabilize
+        .run(&mut h, &params)
+        .expect_err("a GPU run it cannot do must be refused, not silently swapped");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("GPU"),
+        "the reason must name the backend: {msg}"
+    );
+}
+
+/// And the CPU backends take that same stack without complaint — so the refusal
+/// above is about the GPU, not about the stack being unregisterable.
+#[test]
+fn stabilize_runs_the_same_stack_on_the_cpu() {
+    let s = wandering_stack(48, 48, &[(0, 0), (1, 1)], 1);
+    for backend in [0, 1] {
+        let mut h = host(&s, 0);
+        let mut params = Params::new();
+        params.set("backend", ParamValue::Choice(backend));
+        params.set("spatial_taper", ParamValue::Float(5.0));
+        assert!(
+            builtin::Stabilize.run(&mut h, &params).is_ok(),
+            "backend {backend} refused a stack it should take"
+        );
+    }
+}

@@ -47,6 +47,9 @@ pub struct StackHost {
     /// what this library's own writer and ImageJ both produce — converts
     /// straight from the memory map and leaves this empty.
     scratch: crate::planes::Scratch,
+    /// The regions the user has drawn, if any. See
+    /// [`HostContext::selection`](fasttiff_plugin_api::HostContext::selection).
+    selection: Vec<fasttiff_plugin_api::Roi>,
     /// Messages the plugin logged, drained by the caller when the run ends.
     pub messages: Vec<String>,
     /// Set by the UI thread to ask the plugin to stop.
@@ -65,6 +68,7 @@ impl StackHost {
             dims: stack.display.dims,
             rgb: stack.display.rgb,
             scratch: Default::default(),
+            selection: Vec::new(),
             messages: Vec::new(),
             cancel: None,
             progress: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -79,6 +83,16 @@ impl StackHost {
     /// need to state exactly what a plugin should see.
     pub fn with_info(mut self, info: StackInfo) -> Self {
         self.info = info;
+        self
+    }
+
+    /// Hand the plugin the regions the user has drawn.
+    ///
+    /// Snapshotted for the run, like the view is: a selection that changed
+    /// underneath a running measurement would give a trace of two different
+    /// regions at once. The host runs the plugin again for the new one instead.
+    pub fn with_selection(mut self, selection: Vec<fasttiff_plugin_api::Roi>) -> Self {
+        self.selection = selection;
         self
     }
 
@@ -135,6 +149,10 @@ impl HostContext for StackHost {
 
     fn stack_info(&self) -> &StackInfo {
         &self.info
+    }
+
+    fn selection(&self) -> fasttiff_plugin_api::Selection<'_> {
+        &self.selection
     }
 
     fn read_plane_u16(&mut self, plane: Plane, out: &mut Vec<u16>) -> Result<(), PluginError> {

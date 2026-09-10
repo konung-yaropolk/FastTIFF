@@ -3,7 +3,12 @@ name = "fast-tiff-viewer"
 version = "0.18.0"
 edition = "2021"
 description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
-license = "MPL-2.0"
+# GPL-3.0, not MPL-2.0 as the rest of the library crates are. The built-in
+# `stabilize` plugin is a port of suite2p's registration, which is GPL-3, and a
+# copyleft licence travels with the algorithm into whatever links it. Anything
+# depending on this crate is therefore GPL-3 too — `FastTIFF` and `FastTIFF-web`
+# already are.
+license = "GPL-3.0-only"
 readme = "README.md"
 repository = "https://github.com/konung-yaropolk/FastTIFF"
 keywords = ["tiff", "imagej", "microscopy", "viewer", "visualization"]
@@ -30,6 +35,12 @@ default = ["threads", "mmap", "codec-zstd"]
 # math) — useful for tests and headless tooling.
 backend-wgpu = ["scivis-render/backend-wgpu"]
 backend-glow = ["scivis-render/backend-glow"]
+# The `stabilize` plugin's GPU path. Off by default: it is a compute pipeline of
+# its own, not the renderer's, so it pulls wgpu into builds that would not
+# otherwise have it — including the glow one. Turn it on where the machines
+# running this have GPUs worth using; the plugin says plainly when the backend
+# is not there rather than quietly using the processor.
+gpu-registration = ["suite2p-registration/gpu"]
 # Background worker threads (read-ahead decode + 3D volume assembly). On by
 # default; a single-threaded host — notably `wasm32-unknown-unknown`, where
 # `std::thread::spawn` is unavailable — turns this off and gets the synchronous
@@ -76,6 +87,9 @@ libloading = "0.9"
 # trade — the schema is namespaced throughout, and the documents come from an
 # untrusted file.
 quick-xml = "0.37"
+# The registration algorithm behind the `stabilize` built-in. GPL-3, which is
+# why this crate is; see the licence note above.
+suite2p-registration = { path = "../suite2p-registration-rs" }
 # The OIR reader maps each part rather than seeking through it: a plane is
 # thirty-five scattered chunks, and a recording is a quarter of a million of
 # them. Same crate and same version fast-tiff-lib maps TIFFs with.

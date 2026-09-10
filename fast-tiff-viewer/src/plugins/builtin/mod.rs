@@ -50,21 +50,30 @@ pub mod invert;
 #[cfg(feature = "netpbm-example")]
 pub mod netpbm;
 pub mod oir;
+pub mod plot_axis;
 pub mod png;
+pub mod stabilize;
 pub mod zproject;
 
 pub use invert::Invert;
 #[cfg(feature = "netpbm-example")]
 pub use netpbm::Netpbm;
 pub use oir::Oir;
+pub use plot_axis::PlotAxis;
 pub use png::Png;
+pub use stabilize::Stabilize;
 pub use zproject::ZProject;
 
 use fasttiff_plugin_api::{Exporter, Importer, Plugin};
 
 /// The filters compiled into this build, in registration order.
 pub fn all() -> Vec<Box<dyn Plugin>> {
-    vec![Box::new(Invert), Box::new(ZProject)]
+    vec![
+        Box::new(Invert),
+        Box::new(ZProject),
+        Box::new(PlotAxis),
+        Box::new(Stabilize),
+    ]
 }
 
 /// The exporters compiled into this build, in registration order.
