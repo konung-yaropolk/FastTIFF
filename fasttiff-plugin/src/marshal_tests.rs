@@ -163,6 +163,10 @@ fn no_refusal_in_the_run_path_is_silent() {
 /// "called and ignored" — the same distinction the sink tests above draw.
 static EXPORTER_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static EXPORTER_ID: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+// The two registrar tests reset and inspect the counters above. Cargo runs
+// tests concurrently, so make that shared fixture exclusive rather than
+// letting one test's legitimate callback look like another's ABI violation.
+static EXPORTER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 unsafe extern "C" fn add_plugin_stub(
     _c: *mut core::ffi::c_void,
@@ -224,6 +228,9 @@ impl Exporter for Csv {
 /// exporters existed must still load a library that carries one.
 #[test]
 fn a_host_without_add_exporter_installs_everything_else() {
+    let _exclusive = EXPORTER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let older = FtRegistrar::CORE;
     assert!(
         older < core::mem::size_of::<FtRegistrar>(),
@@ -254,6 +261,9 @@ fn a_host_without_add_exporter_installs_everything_else() {
 /// descriptor and all.
 #[test]
 fn a_host_with_add_exporter_receives_it() {
+    let _exclusive = EXPORTER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut host = registrar(core::mem::size_of::<FtRegistrar>());
     EXPORTER_CALLS.store(0, core::sync::atomic::Ordering::Relaxed);
     EXPORTER_ID.lock().unwrap().clear();
