@@ -211,6 +211,7 @@ impl Importer for Netpbm {
                 },
                 planes,
                 channel_colors: Vec::new(),
+                metadata: None,
                 name: name.clone(),
             },
             info: Some(StackInfo {

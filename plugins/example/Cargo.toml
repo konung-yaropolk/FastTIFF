@@ -7,7 +7,7 @@
 # the host is one that has never actually crossed the boundary it exists for.
 [package]
 name = "fasttiff-plugin-example"
-version = "0.19.0"
+version = "0.19.1"
 edition = "2021"
 description = "Example FastTIFF plugin library: an Invert filter and a raw-binary importer."
 license = "MPL-2.0"

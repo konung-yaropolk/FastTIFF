@@ -102,6 +102,7 @@ fn an_optional_callback_is_skipped_rather_than_called_past_the_end() {
             crate::api::PlaneData::U8(vec![3, 4]),
         ],
         channel_colors: vec![[255, 0, 255], [0, 255, 0]],
+        metadata: None,
         name: "x".into(),
     };
 

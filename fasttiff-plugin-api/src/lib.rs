@@ -30,6 +30,7 @@
 //!             pixel_type: PixelType::F32,
 //!             planes: vec![PlaneData::F32(px)],
 //!             channel_colors: Vec::new(),
+//!             metadata: None,
 //!             name: "Inverted".into(),
 //!         })))
 //!     }
@@ -95,4 +96,4 @@ pub use selection::{Roi, Shape};
 /// symbol at load rather than two sides disagreeing about a struct layout after
 /// the call has already begun.
 pub const API_VERSION_MAJOR: u32 = 1;
-pub const API_VERSION_MINOR: u32 = 0;
+pub const API_VERSION_MINOR: u32 = 1;

@@ -81,6 +81,7 @@ impl Plugin for Invert {
             pixel_type: PixelType::F32,
             planes,
             channel_colors: Vec::new(),
+            metadata: None,
             name: format!("{}-inverted", host.stack_info().name),
         })))
     }

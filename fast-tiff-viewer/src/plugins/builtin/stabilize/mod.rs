@@ -363,6 +363,7 @@ impl Plugin for Stabilize {
             pixel_type: PixelType::F32,
             planes,
             channel_colors: Vec::new(),
+            metadata: Some(host.stack_info().clone()),
             name: format!("{}-stabilized", host.stack_info().name),
         })))
     }

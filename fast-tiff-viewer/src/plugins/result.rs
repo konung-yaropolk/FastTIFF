@@ -60,6 +60,9 @@ pub fn to_tiff_bytes_reporting(
         PixelType::F32 => SampleType::F32,
     };
 
+    // An explicit caller override wins; otherwise a result may carry the
+    // source metadata its plugin deliberately preserved.
+    let info = info.or(image.metadata.as_ref());
     let mut meta = StackMetaWrite::new(image.channels.max(1), image.slices.max(1));
     if let Some(info) = info {
         meta = meta.mode(match info.mode {
