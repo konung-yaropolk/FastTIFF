@@ -10,8 +10,8 @@ use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::plugins::{builtin, describe_view, StackHost};
 use fast_tiff_viewer::Stack;
 use fasttiff_plugin_api::{
-    HostContext, ImageResult, Outcome, ParamKind, ParamValue, Params, PixelType, Plane, PlaneData,
-    Plugin, PluginError, VolumeMode, VolumeView,
+    DisplayMode, HostContext, ImageResult, Outcome, ParamKind, ParamValue, Params, PixelType,
+    Plane, PlaneData, Plugin, PluginError, Spacing, StackInfo, VolumeMode, VolumeView,
 };
 use std::io::Cursor;
 
@@ -393,6 +393,7 @@ fn a_malformed_result_is_rejected() {
         pixel_type: PixelType::F32,
         planes: vec![PlaneData::F32(vec![0.0; 4])],
         channel_colors: Vec::new(),
+        metadata: None,
         name: "ok".into(),
     };
     base.validate().expect("the well-formed case must pass");
@@ -897,6 +898,62 @@ fn stabilize_leaves_a_still_movie_alone() {
             );
         }
     }
+}
+
+/// Stabilization changes pixel positions but not what those pixels mean. The
+/// result must retain every metadata field the host handed the plugin, and the
+/// writer must embed the calibration and original record in the new TIFF.
+#[test]
+fn stabilize_copies_the_source_metadata_to_its_result() {
+    let (ly, lx) = (64u32, 64u32);
+    let s = wandering_stack(ly, lx, &[(0, 0), (2, -1), (-1, 3)], 1);
+    let source = StackInfo {
+        path: Some("C:/data/acquisition.tif".into()),
+        name: "acquisition.tif".into(),
+        mode: DisplayMode::Composite,
+        unit: Some("micron".into()),
+        spacing: Spacing {
+            x: Some(0.65),
+            y: Some(0.70),
+            z: Some(2.5),
+        },
+        frame_interval_s: Some(0.25),
+        channel_names: vec!["GCaMP".into()],
+        calibration: Some((12.0, 0.5)),
+        description: Some("Instrument=two-photon\nAcquisition=42".into()),
+    };
+    let mut h = host(&s, 0).with_info(source.clone());
+    let mut params = Params::new();
+    params.set("spatial_taper", ParamValue::Float(5.0));
+    params.set("maxregshift", ParamValue::Float(0.3));
+    params.set("nonrigid", ParamValue::Bool(false));
+
+    let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
+        panic!("expected a document");
+    };
+    assert_eq!(out.metadata.as_ref(), Some(&source));
+
+    let written = fast_tiff_viewer::plugins::to_stack(&out, None, false).expect("open result");
+    let meta = &written.tiff.meta;
+    assert_eq!(meta.unit.as_deref(), Some("micron"));
+    assert_eq!(meta.frame_interval_s, Some(0.25));
+    assert_eq!(meta.spacing, Some(2.5));
+    assert_eq!(meta.calibration, Some((12.0, 0.5)));
+    assert!(
+        (meta.pixel_width.unwrap() - 0.65).abs() < 1e-9
+            && (meta.pixel_height.unwrap() - 0.70).abs() < 1e-9,
+        "physical pixel size was not preserved: {:?} x {:?}",
+        meta.pixel_width,
+        meta.pixel_height
+    );
+    assert!(
+        written
+            .tiff
+            .description
+            .as_deref()
+            .is_some_and(|text| text.contains("Instrument=two-photon\nAcquisition=42")),
+        "the source record was not carried into ImageDescription"
+    );
 }
 
 /// Non-rigid produces a different result from rigid — if it did not, the switch

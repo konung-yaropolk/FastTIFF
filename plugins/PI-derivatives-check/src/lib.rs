@@ -248,6 +248,7 @@ impl Plugin for Derivatives {
             pixel_type: PixelType::F32,
             planes,
             channel_colors,
+            metadata: None,
             name,
         })))
     }

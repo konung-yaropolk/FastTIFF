@@ -240,6 +240,7 @@ impl Plugin for ZProject {
             pixel_type: PixelType::F32,
             planes,
             channel_colors: Vec::new(),
+            metadata: None,
             name: format!("{}-{}{label}", host.stack_info().name, axis.tag()),
         })))
     }

@@ -1,4 +1,5 @@
 # FastTIFF - a lightning-fast multi-frame 2D- and 3D-viewer with ImageJ-compatible GPU-rendering
+[![Stand With Ukraine](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/banner-direct-single.svg)](https://stand-with-ukraine.pp.ua)
 
 [![Try it online](https://img.shields.io/badge/Try%20it-FastTIFF%20Online-5b9dd9?logo=googlechrome&logoColor=white)](https://konung-yaropolk.github.io/FastTIFF/)
 [![Release](https://img.shields.io/github/v/release/konung-yaropolk/FastTIFF?label=release)](https://github.com/konung-yaropolk/FastTIFF/releases)

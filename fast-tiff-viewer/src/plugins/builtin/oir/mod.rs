@@ -276,6 +276,7 @@ impl Importer for Oir {
                 },
                 planes: data,
                 channel_colors: Vec::new(),
+                metadata: None,
                 name: name.clone(),
             },
             info: Some(StackInfo {

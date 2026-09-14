@@ -2,6 +2,7 @@
 
 use crate::host::HostContext;
 use crate::image::PixelType;
+use crate::meta::StackInfo;
 use crate::params::{ParamDecl, Params};
 
 /// Who a plugin is. Shown in the menu and in error messages.
@@ -112,6 +113,10 @@ pub struct ImageResult {
     ///
     /// Shorter than `channels` is fine; the rest fall back to the default.
     pub channel_colors: Vec<[u8; 3]>,
+    /// Metadata to carry into the result document. A filter that preserves an
+    /// image's geometry, such as stabilization, can clone this from the host
+    /// so calibration and the source record survive the rewrite.
+    pub metadata: Option<StackInfo>,
     /// What to call it. The host uses it for the window title and the default
     /// filename.
     pub name: String,

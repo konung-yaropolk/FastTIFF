@@ -30,6 +30,7 @@
 //!             pixel_type: PixelType::F32,
 //!             planes: vec![PlaneData::F32(out)],
 //!             channel_colors: Vec::new(),
+//!             metadata: None,
 //!             name: format!("{}-inverted", host.stack_info().name),
 //!         })))
 //!     }

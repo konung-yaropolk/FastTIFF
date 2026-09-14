@@ -88,6 +88,7 @@ fn stack() -> fast_tiff_viewer::stack::Stack {
         pixel_type: PixelType::F32,
         planes: movie(),
         channel_colors: Vec::new(),
+        metadata: None,
         name: "synthetic".into(),
     };
     let info = StackInfo {

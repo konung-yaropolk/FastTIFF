@@ -110,6 +110,7 @@ fn stack(channels: usize, frames: usize) -> fast_tiff_viewer::stack::Stack {
         pixel_type: PixelType::F32,
         planes,
         channel_colors: Vec::new(),
+        metadata: None,
         name: "oracle".into(),
     };
     plugins::to_stack(&img, None, false).expect("the fixture should open")

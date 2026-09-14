@@ -1,6 +1,6 @@
 [package]
 name = "fast-tiff-viewer"
-version = "0.19.0"
+version = "0.19.1"
 edition = "2021"
 description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
 # GPL-3.0, not MPL-2.0 as the rest of the library crates are. The built-in

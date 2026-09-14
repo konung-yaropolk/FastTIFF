@@ -1059,6 +1059,7 @@ impl ResultSink {
                     pixel_type: self.pixel_type.unwrap_or(PixelType::U16),
                     planes: self.planes,
                     channel_colors,
+                    metadata: None,
                     name: self.name,
                 };
                 // The plugin may simply have pushed too few planes; the host
