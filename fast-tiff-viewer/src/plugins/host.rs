@@ -192,11 +192,9 @@ impl HostContext for StackHost {
     }
 
     fn progress(&mut self, fraction: f32) -> bool {
-        let clamped = fraction.clamp(0.0, 1.0);
-        self.progress.store(
-            (clamped * 10_000.0) as u32,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        // Through the shared encoding, which the bar decodes. This stored basis
+        // points while the bar read permille, so a tenth drew a full bar.
+        super::progress::store(&self.progress, fraction);
         !self
             .cancel
             .as_ref()

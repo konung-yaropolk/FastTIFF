@@ -15,6 +15,7 @@ pub mod builtin;
 pub mod discover;
 pub mod host;
 pub mod library;
+pub mod progress;
 pub mod result;
 
 pub use discover::{install_dir, is_library, search_paths, user_plugin_dir, LIBRARY_EXT};
