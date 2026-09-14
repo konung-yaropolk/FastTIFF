@@ -6,7 +6,7 @@
 # travels with the algorithm whoever retypes it.
 [package]
 name = "suite2p-registration"
-version = "0.1.0"
+version = "0.19.2"
 edition = "2021"
 description = "Rigid and bidirectional-phase motion correction, ported from suite2p."
 license = "GPL-3.0-only"

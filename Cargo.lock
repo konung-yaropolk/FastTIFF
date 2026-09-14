@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.19.1"
+version = "1.19.2"
 dependencies = [
  "anyhow",
  "eframe",
@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.19.1"
+version = "0.19.2"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2881,7 +2881,7 @@ checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
 
 [[package]]
 name = "suite2p-registration"
-version = "0.1.0"
+version = "0.19.2"
 dependencies = [
  "bytemuck",
  "pollster",
