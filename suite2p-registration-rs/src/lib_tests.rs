@@ -663,3 +663,17 @@ fn the_backends_pick_the_same_reference() {
     // to itself however the loop was written.
     assert!(one.iter().any(|v| v.abs() > 1e-3), "the reference is empty");
 }
+
+/// A refusal is shown to the user as a sentence, so it reads as one.
+///
+/// Both messages once carried thirty-odd spaces in the middle, where a line
+/// continuation had been lost from the string. Whichever reason applies in
+/// this build — no device path, or a frame it cannot take — is checked.
+#[test]
+fn a_refusal_reads_as_a_sentence() {
+    let why = Backend::Gpu
+        .unavailable_reason(768, 1024)
+        .expect("a 1024x768 frame is refused with or without the gpu feature");
+    assert!(!why.contains("  "), "a run of spaces in {why:?}");
+    assert!(why.ends_with('.') || why.ends_with("enabled"), "{why:?}");
+}

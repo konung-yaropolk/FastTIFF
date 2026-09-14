@@ -44,9 +44,9 @@ impl Backend {
 
     /// Whether this backend can run a frame of this size.
     ///
-    /// The GPU path is a radix-2 FFT, so it takes power-of-two frames only —
-    /// 512x512 yes, 1024x768 no. And it is only compiled in with the `gpu`
-    /// feature.
+    /// The GPU path is a radix-2 FFT, so it takes power-of-two frames only, up
+    /// to 1024 on a side — 512x512 yes, 1024x768 and 2048x2048 no. And it is
+    /// only compiled in with the `gpu` feature.
     ///
     /// Checked rather than silently downgraded: a run that said GPU and used
     /// the processor is indistinguishable from a slow one, and there would be
@@ -62,7 +62,8 @@ impl Backend {
                 #[cfg(not(feature = "gpu"))]
                 {
                     Some(
-                        "this build has no GPU backend: it is behind the crate's `gpu`                          feature, which was not enabled"
+                        "this build has no GPU backend: it is behind the crate's `gpu` \
+                         feature, which was not enabled"
                             .to_string(),
                     )
                 }
@@ -70,7 +71,9 @@ impl Backend {
                 {
                     if !crate::gpu::size_supported(_ly, _lx) {
                         Some(format!(
-                            "the GPU backend needs power-of-two frame sizes (its FFT is                              radix-2); this stack is {_lx}x{_ly}. Use a CPU backend."
+                            "the GPU backend needs frames whose sides are powers of two, at \
+                             most 1024 (its FFT is radix-2); this stack is {_lx}x{_ly}. \
+                             Use a CPU backend."
                         ))
                     } else {
                         None

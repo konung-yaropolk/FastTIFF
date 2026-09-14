@@ -201,8 +201,12 @@ fn main() {
 
     // ---- the non-rigid measurement, which is now the default ------------
     if settings.nonrigid {
-        let blocks =
-            suite2p_registration::nonrigid::make_blocks(LY, LX, settings.block_size, settings.subpixel);
+        let blocks = suite2p_registration::nonrigid::make_blocks(
+            LY,
+            LX,
+            settings.block_size,
+            settings.subpixel,
+        );
         let search = suite2p_registration::nonrigid::BlockSearch {
             maxregshift_nr: settings.maxregshift_nr,
             snr_thresh: settings.snr_thresh,

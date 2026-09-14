@@ -25,10 +25,10 @@ fn available_memory_is_plausible_or_absent() {
             );
         }
         // Only where nothing is asked. Both platforms this is built for answer.
-        None => assert!(
-            !cfg!(any(windows, target_os = "linux")),
-            "this platform has a memory query and it declined to answer"
-        ),
+        None => {
+            #[cfg(any(windows, target_os = "linux"))]
+            panic!("this platform has a memory query and it declined to answer");
+        }
     }
 }
 

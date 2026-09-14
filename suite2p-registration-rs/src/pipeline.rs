@@ -81,9 +81,10 @@ pub fn smooth_in_time(maps: &mut [Vec<f32>], sigma: f64) {
 
 /// Measure the shift of every frame in a batch.
 ///
-/// The backend decides how many are in flight at once and nothing else — the
-/// answer is the same either way, which is what makes it safe to offer as a
-/// choice.
+/// The backend decides where the correlation maps are computed and nothing
+/// else. Every backend hands its maps to the same smoothing and the same
+/// [`peak_of`], so the answer is the same whichever is chosen — which is what
+/// makes it safe to offer as a choice.
 ///
 /// [`Backend::Gpu`] runs the correlation on the device when the crate was built
 /// with the `gpu` feature and the frame size suits its radix-2 FFT.
@@ -105,25 +106,16 @@ pub fn measure_batch(
     // and the run — which takes the CPU path rather than failing the whole
     // registration part-way through.
     #[cfg(feature = "gpu")]
-    if settings.backend == Backend::Gpu {
-        if let Some(gpu) = crate::gpu::GpuContext::new(ly, lx) {
-            gpu.set_reference(filters);
-            // One frame at a time: the device is already parallel across the
-            // plane, and queueing more would add host bookkeeping for nothing.
-            //
-            // Note this path does not apply `smooth_sigma_time` — the peak is
-            // taken on the device. A run that needs temporal smoothing should
-            // use a CPU backend; `measure_batch`'s caller checks that.
-            return frames
-                .iter()
-                .map(|f| gpu.shift_of(f, filters, settings.maxregshift))
-                .collect();
-        }
-    }
+    let on_device = (settings.backend == Backend::Gpu)
+        .then(|| crate::gpu::maps_of(ly, lx, filters, frames, settings.maxregshift))
+        .flatten();
+    #[cfg(not(feature = "gpu"))]
+    let on_device: Option<Vec<Vec<f32>>> = None;
 
-    let mut maps: Vec<Vec<f32>> = match settings.backend {
+    let mut maps: Vec<Vec<f32>> = match (on_device, settings.backend) {
+        (Some(maps), _) => maps,
         // One plan, reused; nothing else to schedule.
-        Backend::SingleThread => {
+        (None, Backend::SingleThread) => {
             let mut fft = Fft2::new(ly, lx);
             frames
                 .iter()
@@ -133,9 +125,9 @@ pub fn measure_batch(
         // A frame per core. Each worker needs its own plan and scratch — an
         // `Fft2` is stateful — so one is built per chunk rather than per frame.
         //
-        // `Gpu` reaches here only in a build without the feature, or after the
-        // adapter check above declined; both are already reported to the user.
-        Backend::MultiThread | Backend::Gpu => frames
+        // `Gpu` reaches here only in a build without the feature, or when the
+        // device could not be opened; both are already reported to the user.
+        (None, Backend::MultiThread | Backend::Gpu) => frames
             .par_chunks(8.max(frames.len().div_ceil(rayon::current_num_threads().max(1))))
             .flat_map_iter(|chunk| {
                 let mut fft = Fft2::new(ly, lx);
