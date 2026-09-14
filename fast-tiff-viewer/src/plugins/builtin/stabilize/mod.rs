@@ -28,9 +28,87 @@ use fasttiff_plugin_api::{
     PluginError, PluginInfo,
 };
 use suite2p_registration::{
-    compute_reference, fft::Fft2, masks::reference_filters_normed, nonrigid, shift_frame, Frames,
+    compute_reference, fft::Fft2, masks::reference_filters_normed, nonrigid, work, Frames,
     Settings, Shift,
 };
+
+/// How many workers a parallel backend should spread the block filters over.
+///
+/// From the standard library rather than from rayon: rayon is behind this
+/// crate's `threads` feature and the registration crate always has it, so
+/// asking it here would pull it into a build that turned threads off. The count
+/// is a scheduling hint — one too many costs a little memory, not correctness.
+fn workers_available() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// How a corrected plane is stored in the result.
+///
+/// A rigid correction is `np.roll`: every sample is the file's own, moved.
+/// Nothing is interpolated and no arithmetic touches a value, so writing them
+/// back at the width they arrived in is exact — and half the size of a float
+/// copy, through the encoder, through the handover to the new window, and in
+/// that window's memory for as long as it is open.
+///
+/// A non-rigid run does interpolate between pixels, which makes values that
+/// were never in the file, so that one stays float.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Store {
+    U8,
+    U16,
+    F32,
+}
+
+impl Store {
+    /// What to store a result in, given what the file holds and whether the
+    /// correction will interpolate.
+    fn of(source: PixelType, nonrigid: bool) -> Self {
+        if nonrigid {
+            return Store::F32;
+        }
+        match source {
+            PixelType::U8 => Store::U8,
+            PixelType::U16 => Store::U16,
+            // Signed 16-bit has no `PlaneData` of its own, and a float result
+            // says what it is rather than pretending to be unsigned.
+            PixelType::I16 | PixelType::F32 => Store::F32,
+        }
+    }
+
+    fn pixel_type(self) -> PixelType {
+        match self {
+            Store::U8 => PixelType::U8,
+            Store::U16 => PixelType::U16,
+            Store::F32 => PixelType::F32,
+        }
+    }
+
+    /// Move a corrected plane into the result at this width.
+    ///
+    /// The clamp cannot bite on a plane that came from a file of this type —
+    /// it is there so that a plane which somehow did not still produces a
+    /// picture rather than a wrapped-around one.
+    fn plane(self, v: Vec<f32>) -> PlaneData {
+        match self {
+            Store::U8 => PlaneData::U8(v.iter().map(|&x| x.clamp(0.0, 255.0) as u8).collect()),
+            Store::U16 => PlaneData::U16(v.iter().map(|&x| x.clamp(0.0, 65535.0) as u16).collect()),
+            Store::F32 => PlaneData::F32(v),
+        }
+    }
+}
+
+/// How one batch's planes are corrected and stored — the same for every chunk
+/// of it.
+struct Correction<'a> {
+    ly: usize,
+    lx: usize,
+    shifts: &'a [Shift],
+    warp: Option<(&'a nonrigid::Blocks, &'a [Vec<nonrigid::BlockShift>])>,
+    settings: &'a Settings,
+    store: Store,
+}
 
 /// Correct a chunk of read planes and move them into the result.
 ///
@@ -41,17 +119,21 @@ fn flush(
     pending: &mut Vec<Vec<f32>>,
     at: &mut Vec<usize>,
     out: &mut Vec<PlaneData>,
-    ly: usize,
-    lx: usize,
-    shifts: &[Shift],
-    warp: Option<(&nonrigid::Blocks, &[Vec<nonrigid::BlockShift>])>,
-    settings: &Settings,
+    how: &Correction<'_>,
 ) {
     if pending.is_empty() {
         return;
     }
-    suite2p_registration::pipeline::apply_batch(pending, ly, lx, at, shifts, warp, settings);
-    out.extend(pending.drain(..).map(PlaneData::F32));
+    suite2p_registration::pipeline::apply_batch(
+        pending,
+        how.ly,
+        how.lx,
+        at,
+        how.shifts,
+        how.warp,
+        how.settings,
+    );
+    out.extend(pending.drain(..).map(|v| how.store.plane(v)));
     at.clear();
 }
 
@@ -112,10 +194,35 @@ impl Plugin for Stabilize {
         // twenty-minute recording is tens of thousands. Reading all of them to
         // build one average would be the slowest part of the run by far.
         let step = (info.frames / settings.nimg_init).max(1);
-        let mut sample: Vec<Vec<f32>> = Vec::new();
+        let sample_len = info.frames.div_ceil(step);
+
+        // One bar for the whole run, divided by how long each stage takes
+        // rather than by how many stages there are — see `work`. Split evenly,
+        // it gave a tenth to reading the sample (a blink), a fifth to building
+        // the reference (most of the run) and the rest to the pass over the
+        // recording, so it raced, froze for seconds, and raced again.
+        let planes_per_frame = info.channels.max(1) * info.slices.max(1);
+        // A single-plane recording's measurement plane is the one corrected,
+        // so it is not read a second time. See the pass below.
+        let reread = planes_per_frame > 1;
+        let measure_work =
+            work::READ + work::CORRELATION + if settings.nonrigid { work::BLOCKS } else { 0.0 };
+        let plane_work = if settings.nonrigid {
+            work::WARP
+        } else {
+            work::SHIFT
+        } + if reread { work::READ } else { 0.0 };
+        let reading = sample_len as f64 * work::READ;
+        let referencing = work::reference(sample_len, settings.reference_iterations);
+        let registering =
+            info.frames as f64 * (measure_work + planes_per_frame as f64 * plane_work);
+        let total = (reading + referencing + registering).max(f64::MIN_POSITIVE);
+        let at = move |done: f64| (done / total) as f32;
+
+        let mut sample: Vec<Vec<f32>> = Vec::with_capacity(sample_len);
         let mut plane = Vec::new();
         for t in (0..info.frames).step_by(step) {
-            if !host.progress(0.1 * sample.len() as f32 / settings.nimg_init as f32) {
+            if !host.progress(at(sample.len() as f64 * work::READ)) {
                 return Ok(Outcome::Cancelled);
             }
             host.read_plane_f32(Plane::new(align_by, 0, t), &mut plane)?;
@@ -138,7 +245,7 @@ impl Plugin for Stabilize {
             frames: &sample,
         };
         let Some(reference) = compute_reference(&sample_movie, &settings, &mut |f| {
-            host.progress(0.1 + 0.2 * f)
+            host.progress(at(reading + f as f64 * referencing))
         }) else {
             return Ok(Outcome::Cancelled);
         };
@@ -161,16 +268,26 @@ impl Plugin for Stabilize {
         // The deformation grid, when one was asked for. Built once from the
         // reference: every frame's blocks are the same blocks, which is what
         // makes the per-block shifts comparable between frames.
+        // One set of block filters per worker, built once for the whole run.
+        // Every block carries its own FFT plan and scratch, so workers cannot
+        // share a set; building them per batch instead would pay a transform per
+        // block per batch, which over a long recording is thousands of them.
+        let workers = if settings.backend == suite2p_registration::Backend::SingleThread {
+            1
+        } else {
+            workers_available()
+        };
         let mut nonrigid = settings.nonrigid.then(|| {
             let blocks = nonrigid::make_blocks(ly, lx, settings.block_size, settings.subpixel);
-            let filters = nonrigid::block_filters(
+            let sets = nonrigid::filter_sets(
                 &reference,
                 lx,
                 &blocks,
                 settings.spatial_taper,
                 settings.smooth_sigma,
+                workers,
             );
-            (blocks, filters)
+            (blocks, sets)
         });
         let clip = settings
             .norm_frames
@@ -178,6 +295,7 @@ impl Plugin for Stabilize {
 
         let slices = info.slices.max(1);
         let channels = info.channels.max(1);
+        let store = Store::of(info.pixel_type, settings.nonrigid);
         let mut planes: Vec<PlaneData> = Vec::with_capacity(channels * slices * info.frames);
         let mut shifts: Vec<Shift> = Vec::with_capacity(info.frames);
         let mut plane = Vec::new();
@@ -220,10 +338,13 @@ impl Plugin for Stabilize {
         let mut pending: Vec<Vec<f32>> = Vec::new();
         let mut pending_at: Vec<usize> = Vec::new();
 
+        // Work done so far, in `work` units, reported as each piece lands.
+        let mut done = reading + referencing;
         let mut t0 = 0;
         while t0 < info.frames {
             let t1 = (t0 + batch).min(info.frames);
-            if !host.progress(0.3 + 0.7 * t0 as f32 / info.frames as f32) {
+            let frames_here = (t1 - t0) as f64;
+            if !host.progress(at(done)) {
                 return Ok(Outcome::Cancelled);
             }
 
@@ -236,6 +357,8 @@ impl Plugin for Stabilize {
                 }
                 batch_frames.push(std::mem::take(&mut plane));
             }
+            done += frames_here * work::READ;
+            host.progress(at(done));
 
             let batch_shifts = suite2p_registration::pipeline::measure_batch(
                 ly,
@@ -244,41 +367,44 @@ impl Plugin for Stabilize {
                 &batch_frames,
                 &settings,
             );
+            done += frames_here * work::CORRELATION;
+            if !host.progress(at(done)) {
+                return Ok(Outcome::Cancelled);
+            }
 
-            // The deformation is measured on the *rigidly corrected* frame, so a
-            // block is looking for the few pixels the tissue stretched rather
-            // than the tens the animal moved — a 64-pixel block cannot see 50
-            // pixels of travel.
-            //
-            // Serial, unlike everything around it: each block carries its own
-            // FFT plan and scratch, so a second thread would need a second set
-            // of them. Non-rigid is off by default and this is the price of
-            // turning it on.
-            let fields = nonrigid.as_mut().map(|(blocks, block_filters)| {
-                batch_frames
-                    .iter()
-                    .zip(&batch_shifts)
-                    .map(|(frame, s)| {
-                        let corrected = shift_frame(frame, ly, lx, s.dy, s.dx);
-                        nonrigid::measure_blocks(
-                            block_filters,
-                            &corrected,
-                            lx,
-                            blocks,
-                            &nonrigid::BlockSearch {
-                                maxregshift_nr: settings.maxregshift_nr,
-                                snr_thresh: settings.snr_thresh,
-                                subpixel: settings.subpixel,
-                                clip,
-                            },
-                        )
-                    })
-                    .collect::<Vec<_>>()
+            let fields = nonrigid.as_mut().map(|(blocks, sets)| {
+                nonrigid::measure_blocks_batch(
+                    sets,
+                    ly,
+                    lx,
+                    blocks,
+                    &batch_frames,
+                    &batch_shifts,
+                    &nonrigid::BlockSearch {
+                        maxregshift_nr: settings.maxregshift_nr,
+                        snr_thresh: settings.snr_thresh,
+                        subpixel: settings.subpixel,
+                        clip,
+                    },
+                )
             });
-            let warp = nonrigid
-                .as_ref()
-                .zip(fields.as_ref())
-                .map(|((blocks, _), f)| (blocks, f.as_slice()));
+            if fields.is_some() {
+                done += frames_here * work::BLOCKS;
+                if !host.progress(at(done)) {
+                    return Ok(Outcome::Cancelled);
+                }
+            }
+            let correction = Correction {
+                ly,
+                lx,
+                shifts: &batch_shifts,
+                warp: nonrigid
+                    .as_ref()
+                    .zip(fields.as_ref())
+                    .map(|((blocks, _), f)| (blocks, f.as_slice())),
+                settings: &settings,
+                store,
+            };
 
             // Now the planes themselves. xyczt: channel fastest, then z, then t
             // — the order the host expects a result's planes in.
@@ -301,34 +427,24 @@ impl Plugin for Stabilize {
                         }
                         pending_at.push(t - t0);
                         if pending.len() >= APPLY_CHUNK {
-                            flush(
-                                &mut pending,
-                                &mut pending_at,
-                                &mut planes,
-                                ly,
-                                lx,
-                                &batch_shifts,
-                                warp,
-                                &settings,
-                            );
+                            done += pending.len() as f64 * plane_work;
+                            flush(&mut pending, &mut pending_at, &mut planes, &correction);
+                            if !host.progress(at(done)) {
+                                return Ok(Outcome::Cancelled);
+                            }
                         }
                     }
                 }
             }
-            flush(
-                &mut pending,
-                &mut pending_at,
-                &mut planes,
-                ly,
-                lx,
-                &batch_shifts,
-                warp,
-                &settings,
-            );
+            done += pending.len() as f64 * plane_work;
+            flush(&mut pending, &mut pending_at, &mut planes, &correction);
 
             shifts.extend_from_slice(&batch_shifts);
             t0 = t1;
         }
+        // The estimate only divides the bar; the end of the work is the end of
+        // it, whatever the sum came to.
+        host.progress(1.0);
 
         let moved = shifts.iter().filter(|s| s.dy != 0 || s.dx != 0).count();
         let worst = shifts
@@ -357,10 +473,9 @@ impl Plugin for Stabilize {
             channels,
             slices,
             frames: info.frames,
-            // Float, because a shifted frame is the file's own samples moved,
-            // and rounding them back to integers here would quantise every
-            // pixel a second time for no gain.
-            pixel_type: PixelType::F32,
+            // The file's own width back again for a rigid run, float for one
+            // that interpolated. See [`Store`].
+            pixel_type: store.pixel_type(),
             planes,
             channel_colors: Vec::new(),
             metadata: Some(host.stack_info().clone()),

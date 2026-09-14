@@ -351,3 +351,55 @@ fn a_plain_load_clears_the_status_too() {
         "a load shows the progress readout, so it must clear the last message first"
     );
 }
+
+// ------------------------------------------ what a plugin reports, drawn
+
+/// A plugin that has done a tenth of its work draws a tenth of a bar.
+///
+/// Tested across the real seam — a `StackHost` wired to a `Job` exactly as
+/// `run_plugin` wires them — because each end was right on its own. The host
+/// stored basis points and the bar read permille, so every plugin's bar was
+/// full by the time it was a tenth done: stabilization reached "100%" in a
+/// fraction of a second and sat there for the rest of the run.
+#[test]
+fn a_plugins_progress_reaches_the_bar_at_the_same_scale() {
+    use fasttiff_plugin_api::{HostContext, VolumeMode, VolumeView};
+
+    let opts = fast_tiff_lib::WriterOptions::new(4, 4, fast_tiff_lib::SampleType::U16);
+    let mut w = fast_tiff_lib::TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+    for _ in 0..2 {
+        w.write_frame_bytes(&[0u8; 32]).unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    let stack = fast_tiff_viewer::Stack::from_bytes(bytes, "seam.tif".into(), false).unwrap();
+    let view = fast_tiff_viewer::plugins::describe_view(
+        &stack,
+        0,
+        false,
+        VolumeView {
+            mode: VolumeMode::Mip,
+            density: 1.0,
+            iso: 0.5,
+            eye: [0.0; 3],
+            forward: [0.0, 0.0, 1.0],
+            up: [0.0, 1.0, 0.0],
+            right: [1.0, 0.0, 0.0],
+        },
+    );
+
+    let job = Job::new("suite2p stabilization");
+    let mut host = fast_tiff_viewer::plugins::StackHost::new(&stack, view)
+        .with_cancel(job.cancel.clone(), job.progress.clone());
+
+    assert_eq!(job.fraction(), None, "nothing reported yet is a spinner");
+    for f in [0.1f32, 0.3, 0.75, 1.0] {
+        assert!(host.progress(f), "an uncancelled run is told to go on");
+        let drawn = job
+            .fraction()
+            .expect("a reported fraction is drawn as a bar");
+        assert!(
+            (drawn - f).abs() < 0.001,
+            "the plugin said {f}, the bar drew {drawn}"
+        );
+    }
+}

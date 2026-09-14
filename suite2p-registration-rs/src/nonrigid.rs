@@ -40,6 +40,7 @@
 use crate::fft::Fft2;
 use crate::masks::{gaussian_fft, spatial_taper};
 use crate::rigid::Shift;
+use rayon::prelude::*;
 use rustfft::num_complex::Complex32;
 
 /// How wide the kriging window around a peak is, in pixels. suite2p's `lpad`.
@@ -618,6 +619,70 @@ fn sample(frame: &[f32], ly: usize, lx: usize, y: f64, x: f64) -> f32 {
     let top = v(y0, x0) * (1.0 - tx) + v(y0, x1) * tx;
     let bot = v(y1, x0) * (1.0 - tx) + v(y1, x1) * tx;
     (top * (1.0 - ty) + bot * ty) as f32
+}
+
+/// Measure the deformation of a whole batch of frames at once.
+///
+/// The deformation is measured on the *rigidly corrected* frame, so a block is
+/// looking for the few pixels the tissue stretched rather than the tens the
+/// animal moved — a 64-pixel block cannot see 50 pixels of travel.
+///
+/// `sets` is what makes this parallel, and it is a parameter rather than
+/// something built here for a reason: every block carries its own FFT plan and
+/// scratch, so a worker cannot share one set with another, and building a set
+/// costs a small transform per block. One set per worker, built once for the
+/// whole run and handed back here for every batch, pays that cost once instead
+/// of once per batch. `sets.len() == 1` is the single-threaded path, and takes
+/// the same route with one chunk.
+pub fn measure_blocks_batch(
+    sets: &mut [Vec<BlockFilters>],
+    ly: usize,
+    lx: usize,
+    blocks: &Blocks,
+    frames: &[Vec<f32>],
+    shifts: &[Shift],
+    search: &BlockSearch,
+) -> Vec<Vec<BlockShift>> {
+    if sets.is_empty() || frames.is_empty() {
+        return Vec::new();
+    }
+    // Chunked so each worker takes a contiguous run of frames and keeps its own
+    // set for all of them. `zip` against `sets` is what ties one chunk to one
+    // set, and is why the chunk count must not exceed the number of sets.
+    let chunk = frames.len().div_ceil(sets.len()).max(1);
+    let measured: Vec<Vec<Vec<BlockShift>>> = frames
+        .par_chunks(chunk)
+        .zip(shifts.par_chunks(chunk))
+        .zip(sets.par_iter_mut())
+        .map(|((frames, shifts), filters)| {
+            frames
+                .iter()
+                .zip(shifts)
+                .map(|(frame, s)| {
+                    let corrected = crate::rigid::shift_frame(frame, ly, lx, s.dy, s.dx);
+                    measure_blocks(filters, &corrected, lx, blocks, search)
+                })
+                .collect()
+        })
+        .collect();
+    measured.into_iter().flatten().collect()
+}
+
+/// One set of block filters per worker, for [`measure_blocks_batch`].
+///
+/// `workers` of 1 gives the single-threaded path. Built once for a run: the
+/// blocks are the reference's blocks and do not change between batches.
+pub fn filter_sets(
+    reference: &[f32],
+    lx: usize,
+    blocks: &Blocks,
+    mask_slope: f64,
+    smooth_sigma: f64,
+    workers: usize,
+) -> Vec<Vec<BlockFilters>> {
+    (0..workers.max(1))
+        .map(|_| block_filters(reference, lx, blocks, mask_slope, smooth_sigma))
+        .collect()
 }
 
 #[cfg(test)]

@@ -739,8 +739,11 @@ fn finish_outcome(
 /// A plugin is not obliged to call `progress` at all — most short ones do not —
 /// and a bar sitting at 0% for the whole run reads as "stuck" rather than as
 /// "no estimate". This sentinel is what makes the readout a spinner instead.
+///
+/// Defined next to the encoding plugin hosts write with, so the two cannot
+/// disagree — see `fast_tiff_viewer::plugins::progress`.
 #[cfg(not(target_arch = "wasm32"))]
-const PROGRESS_UNKNOWN: u32 = u32::MAX;
+const PROGRESS_UNKNOWN: u32 = fast_tiff_viewer::plugins::progress::UNKNOWN;
 
 /// Run a worker's work, turning a panic into a message instead of a dead thread.
 ///
@@ -877,25 +880,19 @@ impl Job {
             Ok(mut l) => *l = name.into(),
             Err(e) => *e.into_inner() = name.into(),
         }
-        progress.store(PROGRESS_UNKNOWN, std::sync::atomic::Ordering::Relaxed);
+        fast_tiff_viewer::plugins::progress::clear(progress);
     }
 
     /// How far along, or `None` when the worker has not said — which is a
     /// spinner rather than a bar.
     fn fraction(&self) -> Option<f32> {
-        match self.progress.load(std::sync::atomic::Ordering::Relaxed) {
-            PROGRESS_UNKNOWN => None,
-            permille => Some((permille as f32 / 1000.0).clamp(0.0, 1.0)),
-        }
+        fast_tiff_viewer::plugins::progress::load(&self.progress)
     }
 
     /// Record a fraction reported by a worker. Free function shape, so a worker
     /// that only has the `Arc` can call it.
     fn report(progress: &std::sync::atomic::AtomicU32, fraction: f32) {
-        progress.store(
-            (fraction.clamp(0.0, 1.0) * 1000.0) as u32,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        fast_tiff_viewer::plugins::progress::store(progress, fraction);
     }
 }
 

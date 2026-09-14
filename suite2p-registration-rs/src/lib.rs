@@ -56,6 +56,7 @@ pub mod nonrigid;
 pub mod pipeline;
 pub mod rigid;
 pub mod settings;
+pub mod work;
 
 use rayon::prelude::*;
 
@@ -83,13 +84,30 @@ pub fn pick_initial_reference(
     lx: usize,
     settings: &Settings,
 ) -> Vec<f32> {
+    pick_initial_reference_reporting(frames, ly, lx, settings, &mut |_| true)
+        .expect("a pick that is never asked to stop always finishes")
+}
+
+/// [`pick_initial_reference`], reporting how far through the pairs it is.
+///
+/// Worth reporting on its own: it is one step of building the reference and a
+/// third of the whole run, and a bar that says nothing for that long reads as a
+/// hang. `on_progress` gets the fraction of pairs done and returns `false` to
+/// stop, which returns `None`.
+pub fn pick_initial_reference_reporting(
+    frames: &[Vec<f32>],
+    ly: usize,
+    lx: usize,
+    settings: &Settings,
+    on_progress: &mut dyn FnMut(f32) -> bool,
+) -> Option<Vec<f32>> {
     let threaded = settings.backend != Backend::SingleThread;
     let n = frames.len();
     if n == 0 {
-        return vec![0.0; ly * lx];
+        return Some(vec![0.0; ly * lx]);
     }
     if n == 1 {
-        return frames[0].clone();
+        return Some(frames[0].clone());
     }
     // Mean-subtracted, so the correlation below is a correlation and not a
     // measure of overall brightness.
@@ -139,11 +157,47 @@ pub fn pick_initial_reference(
             })
             .collect()
     };
-    let upper: Vec<Vec<f64>> = if threaded {
-        (0..n).into_par_iter().map(row).collect()
+    //
+    // In blocks, so there is somewhere to report from. The rows go in an order
+    // that pairs a long one with a short one — row `k` does `n - k` products and
+    // row `n - 1 - k` does `k + 1`, so each pair is `n + 1` — which makes every
+    // block the same share of the work and lets the bar move at an even pace.
+    // A row is computed identically in any order and lands at its own index, so
+    // the order changes nothing in the result.
+    let order: Vec<usize> = (0..n.div_ceil(2))
+        .flat_map(|k| {
+            let far = n - 1 - k;
+            std::iter::once(k).chain((far != k).then_some(far))
+        })
+        .collect();
+    let workers = if threaded {
+        rayon::current_num_threads().max(1)
     } else {
-        (0..n).map(row).collect()
+        1
     };
+    // Enough rows to keep every worker busy, and enough blocks that no single
+    // report is a large jump.
+    let block = (2 * workers).max(n / 32).max(2);
+    let total = n as f64 * (n as f64 + 1.0) / 2.0;
+    let mut done = 0.0f64;
+    let mut upper: Vec<Vec<f64>> = vec![Vec::new(); n];
+    for rows in order.chunks(block) {
+        if !on_progress((done / total) as f32) {
+            return None;
+        }
+        let computed: Vec<(usize, Vec<f64>)> = if threaded {
+            rows.par_iter().map(|&i| (i, row(i))).collect()
+        } else {
+            rows.iter().map(|&i| (i, row(i))).collect()
+        };
+        for (i, r) in computed {
+            done += r.len() as f64;
+            upper[i] = r;
+        }
+    }
+    // The rest — sorting partners and averaging — is a rounding error beside
+    // the products, so the pick is done as far as the bar is concerned.
+    on_progress(1.0);
     let mut cc = vec![0.0f64; n * n];
     for (i, row) in upper.iter().enumerate() {
         for (k, &d) in row.iter().enumerate() {
@@ -177,7 +231,7 @@ pub fn pick_initial_reference(
             *o += *v as f64;
         }
     }
-    out.iter().map(|v| (v / top as f64) as f32).collect()
+    Some(out.iter().map(|v| (v / top as f64) as f32).collect())
 }
 
 /// Build the reference frames are registered against.
@@ -187,7 +241,9 @@ pub fn pick_initial_reference(
 /// again. The number kept grows each pass — a quarter of the frames on the
 /// first, all of them by the last — so an early bad reference cannot lock in.
 ///
-/// `on_progress` is called with a fraction and returns `false` to stop.
+/// `on_progress` is called with a fraction and returns `false` to stop. The
+/// fraction is of the *work*, weighted by [`work`], so it moves at the pace the
+/// reference is actually being built rather than a step at a time.
 pub fn compute_reference(
     movie: &Frames<'_>,
     settings: &Settings,
@@ -197,16 +253,25 @@ pub fn compute_reference(
     if movie.frames.is_empty() || ly == 0 || lx == 0 {
         return Some(vec![0.0; ly * lx]);
     }
-    let mut reference = pick_initial_reference(movie.frames, ly, lx, settings);
-    let mut fft = Fft2::new(ly, lx);
     let niter = settings.reference_iterations.max(1);
     let n = movie.frames.len();
+    let total = work::reference(n, niter).max(f64::MIN_POSITIVE);
+    let pick_share = work::pick(n);
+    let mut reference =
+        pick_initial_reference_reporting(movie.frames, ly, lx, settings, &mut |f| {
+            on_progress((f as f64 * pick_share / total) as f32)
+        })?;
+    let mut fft = Fft2::new(ly, lx);
+    // How much of a pass each half is, for reporting between them.
+    let measured = n as f64 * work::CORRELATION;
+    let shifted = n as f64 * work::SHIFT;
 
     // The frames as they are shifted onto the reference, refined each pass.
     let mut aligned: Vec<Vec<f32>> = movie.frames.to_vec();
 
     for iter in 0..niter {
-        if !on_progress(iter as f32 / niter as f32) {
+        let before = pick_share + iter as f64 * (measured + shifted);
+        if !on_progress((before / total) as f32) {
             return None;
         }
         let filters = reference_filters_normed(
@@ -224,6 +289,9 @@ pub fn compute_reference(
         // which is not free.
         let shifts: Vec<Shift> =
             crate::pipeline::measure_batch(ly, lx, &filters, &aligned, settings);
+        if !on_progress(((before + measured) / total) as f32) {
+            return None;
+        }
         // Eight passes over the sample, so this is `8 * nimg_init` whole-frame
         // resamples — worth the same parallelism the measurement above gets.
         if settings.backend == Backend::SingleThread {

@@ -38,6 +38,10 @@ fn suite2ps_defaults_are_the_defaults() {
     assert!(!s.do_bidiphase);
     assert_eq!(s.bidiphase, 0);
     assert_eq!(s.batch_size, 100);
+    // The one deliberate divergence from suite2p, which ships this off. Pinned
+    // as a decision rather than left unchecked, so it cannot become a drift —
+    // and because it costs: a warped frame is interpolated, so a result that
+    // could have been the file's own samples moved has to be stored as float.
     assert!(s.nonrigid);
     assert_eq!(s.maxregshift_nr, 10.0);
     assert_eq!(s.block_size, [64, 64]);
@@ -545,32 +549,34 @@ fn non_rigid_corrects_a_shear_that_rigid_cannot() {
     );
 }
 
-// /// With `nonrigid` off there is no field, and `apply` is the rigid shift.
-// /// Deprecated test due to changed default to nonrigid.
-// #[test]
-// fn no_block_field_without_asking_for_one() {
-//     let (ly, lx) = (64, 64);
-//     let frames = wandering(ly, lx, &[(0, 0), (2, -1), (-1, 2)]);
-//     let movie = Frames {
-//         ly,
-//         lx,
-//         frames: &frames,
-//     };
-//     let out = register(
-//         &movie,
-//         &Settings {
-//             spatial_taper: 5.0,
-//             ..Settings::default()
-//         },
-//         &mut |_| true,
-//     )
-//     .unwrap();
-//     assert!(out.nonrigid.is_none());
-//     // `apply` then agrees with `shift_frame` exactly.
-//     let a = out.apply(&frames[1], ly, lx, 1);
-//     let b = shift_frame(&frames[1], ly, lx, out.shifts[1].dy, out.shifts[1].dx);
-//     assert_eq!(a, b);
-// }
+/// With `nonrigid` off there is no field, and `apply` is the rigid shift.
+#[test]
+fn no_block_field_without_asking_for_one() {
+    let (ly, lx) = (64, 64);
+    let frames = wandering(ly, lx, &[(0, 0), (2, -1), (-1, 2)]);
+    let movie = Frames {
+        ly,
+        lx,
+        frames: &frames,
+    };
+    let out = register(
+        &movie,
+        &Settings {
+            spatial_taper: 5.0,
+            // Explicit: this build defaults `nonrigid` on, and the point of
+            // this test is what happens when it is off.
+            nonrigid: false,
+            ..Settings::default()
+        },
+        &mut |_| true,
+    )
+    .unwrap();
+    assert!(out.nonrigid.is_none());
+    // `apply` then agrees with `shift_frame` exactly.
+    let a = out.apply(&frames[1], ly, lx, 1);
+    let b = shift_frame(&frames[1], ly, lx, out.shifts[1].dy, out.shifts[1].dx);
+    assert_eq!(a, b);
+}
 
 /// Sub-pixel refinement really is sub-pixel: block shifts are not whole numbers.
 #[test]
@@ -656,4 +662,18 @@ fn the_backends_pick_the_same_reference() {
     // And it is a real reference, not a plane of zeros that would compare equal
     // to itself however the loop was written.
     assert!(one.iter().any(|v| v.abs() > 1e-3), "the reference is empty");
+}
+
+/// A refusal is shown to the user as a sentence, so it reads as one.
+///
+/// Both messages once carried thirty-odd spaces in the middle, where a line
+/// continuation had been lost from the string. Whichever reason applies in
+/// this build — no device path, or a frame it cannot take — is checked.
+#[test]
+fn a_refusal_reads_as_a_sentence() {
+    let why = Backend::Gpu
+        .unavailable_reason(768, 1024)
+        .expect("a 1024x768 frame is refused with or without the gpu feature");
+    assert!(!why.contains("  "), "a run of spaces in {why:?}");
+    assert!(why.ends_with('.') || why.ends_with("enabled"), "{why:?}");
 }
