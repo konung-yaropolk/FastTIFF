@@ -48,7 +48,7 @@ scivis-render = { path = "../scivis-render" }
 # as an unavoidable core dependency.)
 eframe = { version = "0.34", default-features = false, features = ["default_fonts"] }
 egui = "0.34"
-egui_extras = "0.34"
+egui_extras = "0.35"
 anyhow = "1.0"
 rfd = "0.17"
 log = "0.4"
