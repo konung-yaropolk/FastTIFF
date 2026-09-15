@@ -70,6 +70,15 @@
 //! is actually touched — which also means the scan for metadata blocks costs
 //! only the pages it looks at rather than a read of every block in the file.
 //!
+//! And each part is read **once, front to back**. A descriptor and the pixels
+//! it describes sit next to each other, so the pixels are copied out the moment
+//! their descriptor has been read. Reading every descriptor first and the
+//! pixels afterwards — which this did — walks a file that is not yet in memory
+//! twice: once touching a page every fifteen kilobytes to find the descriptors,
+//! and once more for the pages in between. On the spinning disk a lab keeps its
+//! recordings on, that second walk was the difference between six seconds and
+//! eight and a half for a 750 MB acquisition.
+//!
 //! # What it does not do
 //!
 //! Every plane is held in memory, because that is what the importer contract
@@ -152,14 +161,22 @@ impl Importer for Oir {
         // complete container with its own index, so they are read the same way
         // and their planes merged into one map.
         let parts = acquisition_parts(&request.path);
-        // One mapping per part, held for the whole import: the plane map points
-        // into them by part index.
+        // One mapping per part, held for the whole import: the metadata is read
+        // from them after the planes are.
         let mut files: Vec<Mmap> = Vec::with_capacity(parts.len());
-        let mut planes: PlaneMap = BTreeMap::new();
+        let mut planes = Planes::default();
         // Every part's block index, kept rather than only the first: each part
         // carries the frame timestamps of the frames *it* holds, and the
         // recording's timing is not in any one of them.
         let mut indexes: Vec<Vec<u64>> = Vec::with_capacity(parts.len());
+        // The bar follows bytes, not parts: the parts of a split recording are
+        // not the same size, and the last is usually short.
+        let sizes: Vec<u64> = parts
+            .iter()
+            .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .collect();
+        let total = sizes.iter().sum::<u64>().max(1) as f32;
+        let mut before = 0u64;
         for (part, path) in parts.iter().enumerate() {
             let file = File::open(path)
                 .map_err(|e| PluginError::failed(format!("could not open the file: {e}")))?;
@@ -172,11 +189,16 @@ impl Importer for Oir {
                 .map_err(|e| PluginError::failed(format!("could not map the file: {e}")))?;
             let index_at = read_header(&map)?;
             let part_offsets = read_index(&map, index_at)?;
-            read_plane_map(&map, &part_offsets, part, &mut planes)?;
+            let size = sizes.get(part).copied().unwrap_or(0) as f32;
+            let start = before as f32;
+            read_part(&map, &part_offsets, &mut planes, &mut |f| {
+                host.progress(0.9 * (start + f * size) / total)
+            })?;
+            before += sizes.get(part).copied().unwrap_or(0);
             indexes.push(part_offsets);
             files.push(map);
-            host.progress(0.05 * (part + 1) as f32 / parts.len() as f32);
         }
+        let mut planes = planes.map;
         if parts.len() > 1 {
             host.log(&format!(
                 "{} part(s) of this acquisition, {} planes in total",
@@ -233,7 +255,8 @@ impl Importer for Oir {
             ));
         }
 
-        let data = read_planes(&files, &planes, &shape, host)?;
+        host.progress(0.95);
+        let data = finish_planes(planes, &shape);
 
         let name = request
             .path
@@ -425,34 +448,94 @@ fn read_index(bytes: &[u8], at: u64) -> Result<Vec<u64>, PluginError> {
     Ok(offsets)
 }
 
-/// One run of bytes belonging to a plane.
+/// One run of bytes written into a plane.
 #[derive(Clone, Copy)]
-struct Chunk {
-    /// Where in the reassembled plane these bytes go.
+struct Run {
+    /// Where in the reassembled plane these bytes went.
     at: usize,
-    /// Which part of the acquisition holds them — an index into the open
-    /// files. A single-file OIR only ever uses 0.
-    part: usize,
-    /// Where in that part they are.
-    file_at: u64,
     len: usize,
 }
 
-/// Every plane in the file, keyed by its name, with the chunks that make it up.
+/// A plane as it is reassembled.
+#[derive(Default)]
+struct Plane {
+    /// The plane's bytes, held in 16-bit units. Nearly every plane is 16-bit,
+    /// and storing it this way means a finished plane *is* its sample buffer:
+    /// no zeroed byte buffer copied into and then converted, which was three
+    /// passes over every plane where one will do. An 8-bit plane is converted
+    /// once, at the end.
+    samples: Vec<u16>,
+    /// Every run written, in the order written — what [`Shape::derive`] checks
+    /// a plane's coverage against, and what decides the sample width.
+    runs: Vec<Run>,
+}
+
+impl Plane {
+    /// Copy a run of the file's bytes into place.
+    fn write(&mut self, at: usize, src: &[u8]) {
+        let end = at + src.len();
+        let need = end.div_ceil(2);
+        if self.samples.len() < need {
+            self.samples.resize(need, 0);
+        }
+        let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut self.samples);
+        bytes[at..end].copy_from_slice(src);
+        self.runs.push(Run { at, len: src.len() });
+    }
+}
+
+/// Every plane in the file, keyed by its name.
 ///
 /// A `BTreeMap` because the key ordering *is* the plane ordering: names are
 /// `t001_0_1`, `t002_0_1`, … so sorting them sorts by timepoint and then by the
 /// remaining axes, which is the order the stack wants.
-type PlaneMap = BTreeMap<String, Vec<Chunk>>;
+type PlaneMap = BTreeMap<String, Plane>;
 
-fn read_plane_map(
+/// The planes of an acquisition as its parts are read, and what they have cost.
+#[derive(Default)]
+struct Planes {
+    map: PlaneMap,
+    /// Bytes the reassembled planes hold between them.
+    held: usize,
+    /// Bytes they may hold: the size of every part read so far, plus slack.
+    ///
+    /// A file cannot carry more pixel data than it has bytes, so planes that
+    /// grow past this are being grown by descriptors that lie — an offset of a
+    /// gigabyte into a plane is a gigabyte of zeros, not a gigabyte of pixels.
+    /// Copying as the descriptors are read means an allocation happens before
+    /// anything could check a descriptor against the frame size, so this is the
+    /// check instead.
+    budget: usize,
+    /// The largest plane so far, in samples. Every plane of an acquisition is
+    /// the same size, so each new one is given this much room up front rather
+    /// than growing a chunk at a time and copying itself on every doubling.
+    typical: usize,
+}
+
+/// Slack in [`Planes::budget`] beyond the file's own size. Covers the zeroed
+/// tail of a plane whose last chunk is short, many times over.
+const BUDGET_SLACK: usize = 64 << 20;
+
+/// Read one part: every descriptor, and the pixels it describes, in file order.
+///
+/// `on_progress` gets the fraction of this part's blocks done, and returns
+/// `false` to stop.
+fn read_part(
     bytes: &[u8],
     offsets: &[u64],
-    part: usize,
-    planes: &mut PlaneMap,
+    planes: &mut Planes,
+    on_progress: &mut dyn FnMut(f32) -> bool,
 ) -> Result<(), PluginError> {
+    planes.budget = planes.budget.max(BUDGET_SLACK).saturating_add(bytes.len());
     let mut i = 0usize;
+    let mut reported = 0usize;
     while i + 1 < offsets.len() {
+        if i >= reported + 1024 {
+            reported = i;
+            if !on_progress(i as f32 / offsets.len() as f32) {
+                return Err(PluginError::unsupported("cancelled"));
+            }
+        }
         let head = match read_at(bytes, offsets[i], 16) {
             Ok(h) => h,
             Err(_) => {
@@ -493,24 +576,40 @@ fn read_plane_map(
         }
 
         if let Some(key) = plane_key(name) {
-            let end = (at as usize).saturating_add(run as usize);
+            let at = at as usize;
+            let end = at.saturating_add(run as usize);
             if end <= MAX_PLANE_BYTES {
-                planes.entry(key).or_default().push(Chunk {
-                    at: at as usize,
-                    part,
-                    file_at: offsets[i + 1] + 8,
-                    len: run as usize,
-                });
+                // A run the part does not actually hold is a corrupt
+                // descriptor; it is skipped and that stretch of the plane left
+                // zeroed, as a run past the end of the plane is.
+                if let Ok(src) = read_at(bytes, offsets[i + 1] + 8, run as usize) {
+                    let typical = planes.typical;
+                    let plane = planes.map.entry(key).or_insert_with(|| Plane {
+                        samples: Vec::with_capacity(typical),
+                        runs: Vec::new(),
+                    });
+                    let was = plane.samples.len();
+                    let grows = end.div_ceil(2).saturating_sub(was) * 2;
+                    if planes.held.saturating_add(grows) > planes.budget {
+                        return Err(PluginError::failed(
+                            "this OIR's descriptors place more pixel data than the file holds",
+                        ));
+                    }
+                    plane.write(at, src);
+                    planes.held += (plane.samples.len() - was) * 2;
+                    planes.typical = planes.typical.max(plane.samples.len());
+                }
             }
         }
         i += 2;
     }
-    if planes.len() > MAX_PLANES {
+    if planes.map.len() > MAX_PLANES {
         return Err(PluginError::failed(format!(
             "this OIR declares {} planes, which cannot be right",
-            planes.len()
+            planes.map.len()
         )));
     }
+    on_progress(1.0);
     Ok(())
 }
 
@@ -603,10 +702,11 @@ impl Shape {
         let ceiling = px.saturating_mul(2);
         let plane_bytes = planes
             .values()
-            .map(|cs| {
-                cs.iter()
-                    .filter(|c| c.at < ceiling)
-                    .map(|c| c.at + c.len)
+            .map(|p| {
+                p.runs
+                    .iter()
+                    .filter(|r| r.at < ceiling)
+                    .map(|r| r.at + r.len)
                     .max()
                     .unwrap_or(0)
             })
@@ -624,8 +724,13 @@ impl Shape {
 
         let full = px * bytes_per_sample;
         let before = planes.len();
-        planes.retain(|_, cs| {
-            let covered: usize = cs.iter().filter(|c| c.at < ceiling).map(|c| c.len).sum();
+        planes.retain(|_, p| {
+            let covered: usize = p
+                .runs
+                .iter()
+                .filter(|r| r.at < ceiling)
+                .map(|r| r.len)
+                .sum();
             covered >= full
         });
         let dropped = before - planes.len();
@@ -716,47 +821,42 @@ fn dimensions(record: &meta::Record, planes: &PlaneMap) -> Result<(u32, u32), Pl
     }
 }
 
-fn read_planes(
-    files: &[Mmap],
-    planes: &PlaneMap,
-    shape: &Shape,
-    host: &mut dyn ImportHost,
-) -> Result<Vec<PlaneData>, PluginError> {
-    let total = planes.len();
-    let mut out = Vec::with_capacity(total);
-    for (i, chunks) in planes.values().enumerate() {
-        if i % 16 == 0 && !host.progress(0.1 + 0.85 * (i as f32 / total.max(1) as f32)) {
-            return Err(PluginError::unsupported("cancelled"));
-        }
-        let mut buf = vec![0u8; shape.plane_bytes];
-        for c in chunks {
-            let end = c.at.saturating_add(c.len);
-            // A chunk claiming to run past the plane it belongs to is a
-            // corrupt descriptor; the plane is short rather than the read wild.
-            if end > buf.len() {
-                continue;
+/// Turn reassembled planes into the stack's planes, in plane order.
+///
+/// Nothing is read here: every byte was copied as its descriptor was read. A
+/// plane is cut to exactly the frame's size — a run that claimed to go past the
+/// end of its plane wrote only beyond it, and that is dropped with the tail.
+fn finish_planes(planes: PlaneMap, shape: &Shape) -> Vec<PlaneData> {
+    let samples = shape.plane_bytes / shape.bytes_per_sample;
+    planes
+        .into_values()
+        .map(|plane| {
+            let mut buf = plane.samples;
+            match shape.bytes_per_sample {
+                1 => {
+                    let bytes: &[u8] = bytemuck::cast_slice(&buf);
+                    let mut out = bytes[..bytes.len().min(samples)].to_vec();
+                    out.resize(samples, 0);
+                    PlaneData::U8(out)
+                }
+                _ => {
+                    // Overlapping runs can cover a plane's byte count without
+                    // reaching its end; that stretch stays zero, as it always
+                    // did.
+                    buf.resize(samples, 0);
+                    buf.truncate(samples);
+                    buf.shrink_to_fit();
+                    // The file is little-endian and the bytes went in as they
+                    // are. Only a big-endian host has anything to do.
+                    #[cfg(target_endian = "big")]
+                    for v in buf.iter_mut() {
+                        *v = u16::from_le(*v);
+                    }
+                    PlaneData::U16(buf)
+                }
             }
-            let Some(file) = files.get(c.part) else {
-                continue;
-            };
-            // A chunk that runs past the end of its part is a corrupt
-            // descriptor; skip it and leave that run of the plane zeroed,
-            // exactly as an over-long chunk is skipped above.
-            let Ok(src) = read_at(file, c.file_at, c.len) else {
-                continue;
-            };
-            buf[c.at..end].copy_from_slice(src);
-        }
-        out.push(match shape.bytes_per_sample {
-            1 => PlaneData::U8(buf),
-            _ => PlaneData::U16(
-                buf.chunks_exact(2)
-                    .map(|b| u16::from_le_bytes([b[0], b[1]]))
-                    .collect(),
-            ),
-        });
-    }
-    Ok(out)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------- metadata

@@ -31,6 +31,10 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 mod camera;
+// Windows only, where clipboard text wants CRLF line endings; tests run it
+// everywhere.
+#[cfg(any(windows, test))]
+mod clipboard;
 mod dialog;
 mod kinetic;
 mod minimap;
@@ -2305,8 +2309,11 @@ impl ViewerApp {
     }
 }
 
-impl eframe::App for ViewerApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl ViewerApp {
+    /// The whole of one frame. Kept apart from [`eframe::App::ui`] so that
+    /// what must happen after every frame happens however this one ends — it
+    /// returns early from several places.
+    fn draw(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Files dropped onto the window. Natively these carry a path, and
         // dropping several opens the first here and launches the rest in their
         // own processes; in a browser the drop event carries the bytes instead.
@@ -3777,6 +3784,16 @@ impl eframe::App for ViewerApp {
         if outcome.needs_repaint {
             ui.ctx().request_repaint();
         }
+    }
+}
+
+impl eframe::App for ViewerApp {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.draw(ui, frame);
+        // Copied text in Windows line endings. See `clipboard`.
+        #[cfg(windows)]
+        ui.ctx()
+            .output_mut(|o| clipboard::to_windows_line_endings(&mut o.commands));
     }
 }
 
