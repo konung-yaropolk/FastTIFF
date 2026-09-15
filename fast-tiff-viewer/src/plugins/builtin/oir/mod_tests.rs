@@ -678,3 +678,73 @@ fn a_real_oir_matches_the_software_export() {
     eprintln!("{checked} frame(s) identical to {}", exported.display());
     assert!(checked > 0, "nothing was compared");
 }
+
+// ------------------------------------------------------- split acquisitions
+
+/// One part of a split acquisition: `frames` 4x2 planes named from `first`,
+/// each pixel `frame * 1000 + index`, with the record only in the first part —
+/// which is where a real acquisition keeps it.
+fn part_file(first: usize, frames: usize, with_record: bool) -> Vec<u8> {
+    let mut b = Builder::new();
+    if with_record {
+        b.xml("<?xml version=\"1.0\"?><lsmimage:imageProperties><commonimage:imageInfo><commonimage:width>4</commonimage:width><commonimage:height>2</commonimage:height></commonimage:imageInfo></lsmimage:imageProperties>");
+    }
+    for t in first..first + frames {
+        let bytes: Vec<u8> = (0..8u16)
+            .flat_map(|i| (t as u16 * 1000 + i).to_le_bytes())
+            .collect();
+        // Two chunks per plane, as the real format scatters them.
+        let name = format!("t{:03}_0_1_uid", t + 1);
+        b.plane_chunk(&name, 0, &bytes[..10]);
+        b.plane_chunk(&name, 10, &bytes[10..]);
+    }
+    b.finish()
+}
+
+/// A recording split across files comes back whole, in order, pixel for pixel.
+///
+/// Each part is read front to back as it is opened, and the planes of one part
+/// must neither be lost nor reordered by the part read after it. The middle
+/// part carries no extension and the last one does, because both are written.
+#[test]
+fn a_split_acquisition_is_read_whole_and_in_order() {
+    let dir = std::env::temp_dir().join(format!("fasttiff-oir-split-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let first = dir.join("rec.oir");
+    std::fs::write(&first, part_file(0, 2, true)).unwrap();
+    std::fs::write(dir.join("rec_00001"), part_file(2, 3, false)).unwrap();
+    std::fs::write(dir.join("rec_00002.oir"), part_file(5, 1, false)).unwrap();
+
+    let r = import(&first).expect("a split acquisition imports");
+    assert_eq!(r.image.frames, 6, "frames from some part were lost");
+    for (t, plane) in r.image.planes.iter().enumerate() {
+        let want: Vec<u16> = (0..8).map(|i| t as u16 * 1000 + i).collect();
+        assert_eq!(
+            plane,
+            &PlaneData::U16(want),
+            "frame {t} is wrong or out of order"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Descriptors that place far more pixel data than the file holds are refused
+/// before the memory is allocated.
+///
+/// Pixels are copied as their descriptor is read, so a descriptor claiming its
+/// sixteen bytes belong most of a gigabyte into a plane would otherwise become
+/// most of a gigabyte of zeros — from a file of a few hundred bytes.
+#[test]
+fn descriptors_placing_more_data_than_the_file_holds_are_refused() {
+    let mut b = Builder::new();
+    b.xml("<?xml version=\"1.0\"?><lsmimage:imageProperties><commonimage:imageInfo><commonimage:width>4</commonimage:width><commonimage:height>2</commonimage:height></commonimage:imageInfo></lsmimage:imageProperties>");
+    b.plane_chunk("t001_0_1_uid", (MAX_PLANE_BYTES - 16) as u32, &[7u8; 16]);
+    let file = tmp("lying.oir", &b.finish());
+    let err = import(&file).expect_err("a gigabyte of zeros is not a plane");
+    assert!(
+        err.to_string()
+            .contains("more pixel data than the file holds"),
+        "{err}"
+    );
+    let _ = std::fs::remove_file(file);
+}

@@ -437,3 +437,71 @@ fn no_part_file_is_left_behind() {
         .collect();
     assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
 }
+
+// ------------------------------------------------------------- compression
+
+/// A saved file is Deflate-compressed, at the level chosen, with no predictor.
+///
+/// Pinned because nothing else here would notice it changing: every other test
+/// reads values back, and those come back identical from an uncompressed file.
+#[test]
+fn a_saved_file_is_deflate_compressed_without_a_predictor() {
+    for sample in [
+        SampleType::U8,
+        SampleType::U16,
+        SampleType::I16,
+        SampleType::F32,
+    ] {
+        let stack = open(source(sample, 1, 1, 3));
+        let path = temp(&format!("deflate-{sample:?}"));
+        save_stack(&stack, &path).expect("save");
+        let back = reopen(&path);
+        for (i, f) in back.frames.iter().enumerate() {
+            assert_eq!(
+                f.compression,
+                fast_tiff_lib::Compression::Deflate,
+                "{sample:?}: frame {i} was not compressed"
+            );
+            assert_eq!(f.predictor, 1, "{sample:?}: frame {i} carries a predictor");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// A save written in several batches keeps every frame, in order, exactly.
+///
+/// Frames are gathered and compressed together, so the thing to get wrong is
+/// the seam between batches — a frame dropped, doubled, or written into its
+/// neighbour's place — and the partial batch at the end. Five frames a batch
+/// over twenty-four planes makes five seams and a short last batch, for every
+/// sample type the writer handles.
+#[test]
+fn a_save_in_several_batches_keeps_every_frame_in_order() {
+    for (sample, width) in [
+        (SampleType::U8, 1usize),
+        (SampleType::U16, 2),
+        (SampleType::I16, 2),
+        (SampleType::F32, 4),
+    ] {
+        let stack = open(source(sample, 2, 3, 4));
+        let path = temp(&format!("batches-{sample:?}"));
+        let five_frames = W as usize * H as usize * width * 5;
+        write_all(&SaveSource::of(&stack), &path, &mut |_| true, five_frames).expect("save");
+
+        let back = reopen(&path);
+        assert_eq!(back.frames.len(), 24, "{sample:?}: frames lost or invented");
+        for (i, (a, b)) in stack.tiff.frames.iter().zip(&back.frames).enumerate() {
+            if sample == SampleType::F32 {
+                let want = read_frame_f32(&stack.tiff.data, a, stack.tiff.byte_order).unwrap();
+                let got = read_frame_f32(&back.data, b, back.byte_order).unwrap();
+                assert_eq!(want, got, "{sample:?}: frame {i} changed or moved");
+            } else {
+                let want =
+                    read_frame_u16(&stack.tiff.data, a, stack.tiff.byte_order, None).unwrap();
+                let got = read_frame_u16(&back.data, b, back.byte_order, None).unwrap();
+                assert_eq!(want, got, "{sample:?}: frame {i} changed or moved");
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+}

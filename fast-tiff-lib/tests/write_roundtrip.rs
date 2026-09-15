@@ -492,3 +492,134 @@ fn u64_stack_opens_and_rescales_to_display_space() {
     // 2^38 / 2^40 = 0.25 -> 16384, 2^39 / 2^40 = 0.5 -> 32768, 2^40 -> 65535.
     assert_eq!(got.as_ref(), &[0, 16384, 32768, 65535]);
 }
+
+// ------------------------------------------------------ batched frame writes
+
+/// Decoded samples as the little-endian bytes they were written from.
+fn bytemuck_le(samples: &[u16]) -> Vec<u8> {
+    samples.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+/// Write `frames` into an in-memory TIFF, either one frame per call or in
+/// batches of the given sizes (cycled), and return the file's bytes.
+fn write_in_memory(
+    options: WriterOptions,
+    frames: &[Vec<u8>],
+    batches: Option<&[usize]>,
+) -> Vec<u8> {
+    let mut w = TiffWriter::new(std::io::Cursor::new(Vec::new()), options).unwrap();
+    match batches {
+        None => {
+            for f in frames {
+                w.write_frame_bytes(f).unwrap();
+            }
+        }
+        Some(sizes) => {
+            let mut at = 0;
+            let mut size = sizes.iter().cycle();
+            while at < frames.len() {
+                let n = (*size.next().unwrap()).min(frames.len() - at);
+                let refs: Vec<&[u8]> = frames[at..at + n].iter().map(|f| f.as_slice()).collect();
+                w.write_frames_bytes(&refs).unwrap();
+                at += n;
+            }
+        }
+    }
+    w.finish().unwrap().into_inner()
+}
+
+/// Writing frames in batches produces exactly the file writing them one at a
+/// time does — for every codec, with and without a predictor, in both planar
+/// layouts.
+///
+/// Byte-identical rather than "decodes the same": the batch path compresses
+/// strips in parallel and reassembles them, and the one way it can be wrong
+/// without being obviously wrong is to put a strip in the wrong place — which
+/// a decode of a smooth test image can survive. The batches are uneven, and
+/// big enough in total to cross the parallel floor, so the reassembly is
+/// actually exercised rather than skipped.
+#[test]
+fn batched_writes_match_single_frame_writes_byte_for_byte() {
+    let (w, h) = (300u32, 400u32); // 120k pixels a frame: parallel only as a batch
+    let frames: Vec<Vec<u8>> = (0..24u32)
+        .map(|t| {
+            (0..w * h)
+                .flat_map(|i| {
+                    // Texture plus a per-frame ramp, so strips genuinely differ
+                    // and a swapped one changes the bytes.
+                    let (x, y) = (i % w, i / w);
+                    let v = ((x * 7 + y * 13 + t * 101) % 4093) as u16 ^ ((x * y) % 17) as u16;
+                    v.to_le_bytes()
+                })
+                .collect()
+        })
+        .collect();
+
+    let mut codecs = vec![
+        Compression::None,
+        Compression::Deflate,
+        Compression::Lzw,
+        Compression::PackBits,
+    ];
+    if cfg!(feature = "codec-zstd") {
+        codecs.push(Compression::Zstd);
+    }
+    for compression in codecs {
+        for predictor in [false, true] {
+            if compression == Compression::None && predictor {
+                continue;
+            }
+            // Many strips a frame, the last one short: at the default strip
+            // size a frame this small is one strip, and a strip put in the
+            // wrong place inside its frame would go unnoticed.
+            let options = || {
+                WriterOptions::new(w, h, SampleType::U16)
+                    .compression(compression)
+                    .predictor(predictor)
+                    .rows_per_strip(37)
+            };
+            let single = write_in_memory(options(), &frames, None);
+            // Frame at a time is itself a batch of one now, so agreeing with it
+            // is not enough on its own: the file also has to decode back to the
+            // frames that went in.
+            let back = fast_tiff_lib::TiffStack::from_bytes(single.clone()).unwrap();
+            assert_eq!(back.frames.len(), frames.len());
+            for (t, (frame, want)) in back.frames.iter().zip(&frames).enumerate() {
+                let got = read_frame_u16(&back.data, frame, back.byte_order, None).unwrap();
+                assert!(
+                    bytemuck_le(&got) == *want,
+                    "{compression:?}, predictor {predictor}: frame {t} decodes wrong"
+                );
+            }
+            for batches in [&[24usize][..], &[5, 11, 3], &[1]] {
+                let batched = write_in_memory(options(), &frames, Some(batches));
+                assert!(
+                    single == batched,
+                    "{compression:?}, predictor {predictor}, batches {batches:?}: \
+                     the batched file differs from the frame-at-a-time one"
+                );
+            }
+        }
+    }
+}
+
+/// A batch with a frame of the wrong size is refused before anything is
+/// written, rather than part-way through.
+#[test]
+fn a_batch_with_a_malformed_frame_writes_nothing() {
+    let good = vec![0u8; 4 * 4 * 2];
+    let bad = vec![0u8; 5];
+    let mut w = TiffWriter::new(
+        std::io::Cursor::new(Vec::new()),
+        WriterOptions::new(4, 4, SampleType::U16).compression(Compression::Deflate),
+    )
+    .unwrap();
+    assert!(w.write_frames_bytes(&[&good, &bad]).is_err());
+    assert_eq!(
+        w.frames_written(),
+        0,
+        "the good frame before the bad one was written"
+    );
+    w.write_frames_bytes(&[&good, &good]).unwrap();
+    assert_eq!(w.frames_written(), 2);
+}

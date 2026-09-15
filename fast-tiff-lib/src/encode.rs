@@ -354,6 +354,36 @@ pub struct TiffWriter<W: Write + Seek> {
     frame_bytes: usize,
 }
 
+/// A predictor pass, detached from the writer so frames can take it in
+/// parallel.
+#[derive(Clone, Copy)]
+struct Predict {
+    tag: u16,
+    row_bytes: usize,
+    stride: usize,
+    sample_bytes: usize,
+}
+
+impl Predict {
+    /// The frame with the predictor applied, or the frame itself when there is
+    /// none.
+    fn apply<'a>(self, data: &'a [u8]) -> Cow<'a, [u8]> {
+        match self.tag {
+            2 => {
+                let mut owned = data.to_vec();
+                apply_predictor(&mut owned, self.row_bytes, self.stride, self.sample_bytes);
+                Cow::Owned(owned)
+            }
+            3 => {
+                let mut owned = data.to_vec();
+                apply_float_predictor(&mut owned, self.row_bytes, self.stride, self.sample_bytes);
+                Cow::Owned(owned)
+            }
+            _ => Cow::Borrowed(data),
+        }
+    }
+}
+
 struct FrameStrips {
     offsets: Vec<u64>,
     byte_counts: Vec<u64>,
@@ -506,6 +536,123 @@ impl<W: Write + Seek> TiffWriter<W> {
     /// sample 1, …). Both layouts are the same length, so the check below
     /// cannot tell them apart — see that method.
     pub fn write_frame_bytes(&mut self, data: &[u8]) -> Result<()> {
+        self.write_frames_bytes(&[data])
+    }
+
+    /// Append several frames at once, compressing all of their strips in
+    /// parallel. Each frame is laid out as for
+    /// [`write_frame_bytes`](Self::write_frame_bytes), and the file is
+    /// byte-for-byte what writing them one at a time would produce.
+    ///
+    /// For compressed output this is the fast path. A frame's strips are the
+    /// only units a compressor can work on independently, and a frame under a
+    /// megapixel is one or two of them — so frames written singly compress on
+    /// one thread, and a Deflate save of a typical 512x512 recording ran at a
+    /// few tens of megabytes a second while every other core idled. Handing
+    /// over a batch gives every core a strip. Uncompressed output has nothing
+    /// to parallelise and is written exactly as before.
+    ///
+    /// Memory is the caller's to bound: the whole batch is held, and so are its
+    /// compressed strips until they are written.
+    pub fn write_frames_bytes(&mut self, frames: &[&[u8]]) -> Result<()> {
+        for data in frames {
+            self.check_frame_len(data)?;
+        }
+
+        if self.compression == Compression::None {
+            for data in frames {
+                // Predictor first (a per-row operation, so strip boundaries —
+                // always whole rows — don't affect it).
+                let processed = self.predict().apply(data);
+                let strip_len = self.rows_per_strip as usize * self.row_bytes;
+                let mut strips = FrameStrips {
+                    offsets: Vec::new(),
+                    byte_counts: Vec::new(),
+                };
+                // Raw strips stream straight from the (possibly borrowed) frame
+                // buffer — for the default single-strip layout this is one
+                // contiguous write with no intermediate allocation.
+                for plane in processed.chunks(self.plane_bytes) {
+                    for chunk in plane.chunks(strip_len) {
+                        self.push_strip_bytes(chunk, &mut strips)?;
+                    }
+                }
+                self.frames.push(strips);
+            }
+            return Ok(());
+        }
+
+        // Predictor, then split into strips and compress each strip
+        // independently, as the TIFF spec requires. Strips never span a plane
+        // boundary: chunky yields one plane (the whole frame), planar yields
+        // `spp`, each split independently — StripsPerImage x SamplesPerPixel
+        // strips, as TIFF6 requires and as the reader's `strip_dest_lens`
+        // expects on the way back in.
+        // A batch is the caller asking for this work to use the cores — a save
+        // on a worker thread, where nothing competes for them — so it does,
+        // whatever the process-wide hint says. That hint exists for playback,
+        // and is off unless playback is falling behind, which says nothing
+        // about a save. A single frame still follows it, as it always has.
+        let parallel = if frames.len() > 1 {
+            !cfg!(target_arch = "wasm32")
+        } else {
+            crate::decode::should_parallelize(self.width as usize * self.height as usize)
+        };
+        let predict = self.predict();
+        let processed: Vec<Cow<[u8]>> = if parallel && frames.len() > 1 {
+            frames.par_iter().map(|d| predict.apply(d)).collect()
+        } else {
+            frames.iter().map(|d| predict.apply(d)).collect()
+        };
+        let strip_len = self.rows_per_strip as usize * self.row_bytes;
+        let plane_bytes = self.plane_bytes;
+        fn strips_of(frame: &[u8], plane_bytes: usize, strip_len: usize) -> Vec<&[u8]> {
+            frame
+                .chunks(plane_bytes)
+                .flat_map(|plane| plane.chunks(strip_len))
+                .collect()
+        }
+        let per_frame = processed
+            .first()
+            .map(|f| strips_of(f, plane_bytes, strip_len).len())
+            .unwrap_or(0);
+        let chunks: Vec<&[u8]> = processed
+            .iter()
+            .flat_map(|f| strips_of(f, plane_bytes, strip_len))
+            .collect();
+
+        let compression = self.compression;
+        let level = self.compression_level;
+        let row_bytes = self.row_bytes;
+        // Strips are independent compressed units, so they compress in
+        // parallel; the ordered collect preserves row and frame order.
+        let compressed: Vec<Vec<u8>> = if chunks.len() > 1 && parallel {
+            chunks
+                .par_iter()
+                .map(|c| compress_strip(c, compression, row_bytes, level))
+                .collect::<Result<_>>()?
+        } else {
+            chunks
+                .iter()
+                .map(|c| compress_strip(c, compression, row_bytes, level))
+                .collect::<Result<_>>()?
+        };
+
+        for frame in compressed.chunks(per_frame.max(1)) {
+            let mut strips = FrameStrips {
+                offsets: Vec::new(),
+                byte_counts: Vec::new(),
+            };
+            for strip in frame {
+                self.push_strip_bytes(strip, &mut strips)?;
+            }
+            self.frames.push(strips);
+        }
+        Ok(())
+    }
+
+    /// Refuse a frame that is not exactly the configured layout's size.
+    fn check_frame_len(&self, data: &[u8]) -> Result<()> {
         if data.len() != self.frame_bytes {
             bail!(
                 "frame data is {} bytes but the configured frame layout ({}x{}, {} sample(s)/px, \
@@ -518,79 +665,20 @@ impl<W: Write + Seek> TiffWriter<W> {
                 self.frame_bytes
             );
         }
-
-        // Predictor first (a per-row operation, so strip boundaries — always
-        // whole rows — don't affect it), then split into strips and compress
-        // each strip independently, as the TIFF spec requires. The differencing
-        // stride is one pixel to the left: `spp` samples away when interleaved,
-        // 1 when each plane is stored whole.
-        let stride = if self.planar { 1 } else { self.spp };
-        let processed: Cow<[u8]> = match self.predictor_tag {
-            2 => {
-                let mut owned = data.to_vec();
-                apply_predictor(&mut owned, self.row_bytes, stride, self.sample_type.bytes());
-                Cow::Owned(owned)
-            }
-            3 => {
-                let mut owned = data.to_vec();
-                apply_float_predictor(&mut owned, self.row_bytes, stride, self.sample_type.bytes());
-                Cow::Owned(owned)
-            }
-            _ => Cow::Borrowed(data),
-        };
-
-        // Strips never span a plane boundary: chunky yields one plane (the
-        // whole frame), planar yields `spp`, each split independently —
-        // StripsPerImage x SamplesPerPixel strips, as TIFF6 requires and as the
-        // reader's `strip_dest_lens` expects on the way back in.
-        let strip_len = self.rows_per_strip as usize * self.row_bytes;
-        let plane_bytes = self.plane_bytes;
-        let mut strips = FrameStrips {
-            offsets: Vec::new(),
-            byte_counts: Vec::new(),
-        };
-
-        if self.compression == Compression::None {
-            // Raw strips stream straight from the (possibly borrowed) frame
-            // buffer — for the default single-strip layout this is one
-            // contiguous write with no intermediate allocation.
-            for plane in processed.chunks(plane_bytes) {
-                for chunk in plane.chunks(strip_len) {
-                    self.push_strip_bytes(chunk, &mut strips)?;
-                }
-            }
-        } else {
-            let chunks: Vec<&[u8]> = processed
-                .chunks(plane_bytes)
-                .flat_map(|plane| plane.chunks(strip_len))
-                .collect();
-            let compression = self.compression;
-            let level = self.compression_level;
-            let row_bytes = self.row_bytes;
-            // Strips are independent compressed units, so a big frame's strips
-            // compress in parallel (ordered collect preserves row order) —
-            // under the same process-wide hint + size floor as decoding
-            // (`set_parallel_decode`), so the host has one threading switch.
-            let n_pixels = self.width as usize * self.height as usize;
-            let compressed: Vec<Vec<u8>> =
-                if chunks.len() > 1 && crate::decode::should_parallelize(n_pixels) {
-                    chunks
-                        .par_iter()
-                        .map(|c| compress_strip(c, compression, row_bytes, level))
-                        .collect::<Result<_>>()?
-                } else {
-                    chunks
-                        .iter()
-                        .map(|c| compress_strip(c, compression, row_bytes, level))
-                        .collect::<Result<_>>()?
-                };
-            for strip in &compressed {
-                self.push_strip_bytes(strip, &mut strips)?;
-            }
-        }
-
-        self.frames.push(strips);
         Ok(())
+    }
+
+    /// The predictor this writer applies, as plain values: it runs on worker
+    /// threads, which the writer itself — holding the output — cannot go to.
+    fn predict(&self) -> Predict {
+        Predict {
+            tag: self.predictor_tag,
+            row_bytes: self.row_bytes,
+            // The differencing stride is one pixel to the left: `spp` samples
+            // away when interleaved, 1 when each plane is stored whole.
+            stride: if self.planar { 1 } else { self.spp },
+            sample_bytes: self.sample_type.bytes(),
+        }
     }
 
     /// Append one frame of `u8` samples. Requires `SampleType::U8`.
