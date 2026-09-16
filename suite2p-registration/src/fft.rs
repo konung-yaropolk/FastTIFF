@@ -28,7 +28,9 @@ use std::sync::Arc;
 
 /// Cached forward and inverse plans for one plane size.
 pub struct Fft2 {
+    /// Rows in the plane these plans are for.
     pub ly: usize,
+    /// Columns in it.
     pub lx: usize,
     fwd_row: Arc<dyn Fft<f32>>,
     fwd_col: Arc<dyn Fft<f32>>,
@@ -39,6 +41,9 @@ pub struct Fft2 {
 }
 
 impl Fft2 {
+    /// Plan both transforms for an `ly * lx` plane. Expensive to build and
+    /// cheap to reuse — a timelapse transforms the same size thousands of
+    /// times, so one of these is kept for the run.
     pub fn new(ly: usize, lx: usize) -> Self {
         let mut planner = FftPlanner::<f32>::new();
         Fft2 {
@@ -52,10 +57,12 @@ impl Fft2 {
         }
     }
 
+    /// Samples in a plane: `ly * lx`.
     pub fn len(&self) -> usize {
         self.ly * self.lx
     }
 
+    /// Whether the plane has no samples at all.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

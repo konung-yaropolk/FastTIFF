@@ -65,16 +65,22 @@ pub fn calculate_nblocks(l: usize, block_size: usize) -> (usize, usize) {
 /// One block's extent in the frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Block {
+    /// First row of the block, inclusive.
     pub y0: usize,
+    /// Last row, exclusive.
     pub y1: usize,
+    /// First column, inclusive.
     pub x0: usize,
+    /// Last column, exclusive.
     pub x1: usize,
 }
 
 impl Block {
+    /// Rows the block covers.
     pub fn height(&self) -> usize {
         self.y1 - self.y0
     }
+    /// Columns it covers.
     pub fn width(&self) -> usize {
         self.x1 - self.x0
     }
@@ -92,7 +98,9 @@ impl Block {
 pub struct Blocks {
     /// Row-major: block `iy * nx + ix`.
     pub blocks: Vec<Block>,
+    /// Blocks down the frame.
     pub ny: usize,
+    /// Blocks across it.
     pub nx: usize,
     /// The effective block size, which is the requested one clamped to the
     /// frame.
@@ -278,9 +286,17 @@ fn mat_upsample(lpad: usize, subpixel: usize) -> (Vec<f32>, usize) {
 
 /// One block's reference: the taper, the offset and the whitened spectrum.
 pub struct BlockFilters {
+    /// The taper this block is multiplied by.
     pub mask_mul: Vec<f32>,
+    /// What the taper took away, added back: `mean * (1 - taper)`.
     pub mask_offset: Vec<f32>,
+    /// The block of the reference, whitened, smoothed and conjugated.
     pub cf_ref: Vec<Complex32>,
+    /// The transform for this block's size, planned once.
+    ///
+    /// One per block rather than one shared: an [`Fft2`] carries scratch, so
+    /// blocks measured on different threads cannot share it. See
+    /// [`filter_sets`], which builds a set per worker.
     pub fft: Fft2,
 }
 
@@ -411,8 +427,11 @@ fn block_map(
 /// A per-block shift, in fractional pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlockShift {
+    /// Rows the block moved, to `1/subpixel` of a pixel.
     pub dy: f32,
+    /// Columns it moved, likewise.
     pub dx: f32,
+    /// Its correlation peak — what `snr_thresh` is compared against.
     pub corr: f32,
 }
 

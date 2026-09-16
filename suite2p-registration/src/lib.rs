@@ -27,23 +27,95 @@
 //!
 //! Because it is a derivative work of GPL-3 software, this crate is GPL-3.
 //!
-//! # What is here, and what is not
+//! # What is here
 //!
-//! * **Bidirectional phase** correction — the comb artefact from a resonant
-//!   scanner. See [`bidiphase`].
 //! * **Rigid registration** — one whole-frame shift per frame, by phase
 //!   correlation against an iteratively-built reference. See [`rigid`].
 //! * **Non-rigid registration** — a shift per block, interpolated to a shift
-//!   per pixel, for tissue that deforms rather than merely sliding. See
-//!   [`nonrigid`].
-//!
+//!   per pixel, for tissue that deforms rather than merely sliding. Measured on
+//!   top of the rigid correction, not instead of it. See [`nonrigid`].
+//! * **Bidirectional phase** correction — the comb a resonant scanner leaves on
+//!   alternate lines. See [`bidiphase`].
+//! * **Bad-frame detection** — frames whose shift is an outlier or that barely
+//!   correlated. Reported, never discarded: which frames to throw away is the
+//!   experimenter's decision, and a registration that quietly removed some of
+//!   the recording would be making it for them.
 //! * **Three backends** — one thread, every core, or the graphics card. The
-//!   answer is the same on each; only how many frames are in flight differs,
-//!   and [`lib_tests`](self) pins that. The GPU path is behind the `gpu`
-//!   feature and takes power-of-two frame sizes only (its FFT is radix-2);
-//!   [`Backend::unavailable_reason`] says so rather than quietly using the
-//!   processor, because a run that said GPU and used the CPU is
-//!   indistinguishable from a slow one.
+//!   answer is the same on each; only how many frames are in flight differs.
+//!   The device path is behind the `gpu` feature and takes power-of-two frames
+//!   up to 1024 a side, its FFT being radix-2.
+//!   [`Backend::unavailable_reason`] says when it cannot run rather than
+//!   quietly using the processor, because a run that said GPU and used the CPU
+//!   is indistinguishable from a slow one.
+//!
+//! # Registering a recording
+//!
+//! Measuring and applying are separate calls, and deliberately so: a two-colour
+//! recording is registered *once*, measured on one channel and applied to both,
+//! or the channels drift apart.
+//!
+//! ```
+//! use suite2p_registration::{register, Frames, Settings};
+//!
+//! # let (ly, lx) = (64, 64);
+//! # let movie: Vec<Vec<f32>> = (0..8).map(|_| vec![0.0; ly * lx]).collect();
+//! // `movie`: one `Vec<f32>` per timepoint, row-major, `ly * lx` samples each.
+//! let frames = Frames { ly, lx, frames: &movie };
+//! let settings = Settings {
+//!     nonrigid: false,
+//!     // The default taper is sized for a real frame; see `Settings`.
+//!     spatial_taper: 5.0,
+//!     ..Settings::default()
+//! };
+//!
+//! // The closure is progress: it returns `false` to stop, and `register` then
+//! // returns `None`.
+//! let out = register(&frames, &settings, &mut |_fraction| true).expect("not cancelled");
+//!
+//! for (t, shift) in out.shifts.iter().enumerate() {
+//!     let _ = (t, shift.dy, shift.dx, shift.corr);
+//! }
+//!
+//! // Put a frame back where it belongs — the rigid shift, or the warp with the
+//! // rigid shift folded in when there is a block field. One call, so it cannot
+//! // be applied twice or the deformation forgotten.
+//! let corrected: Vec<f32> = out.apply(&movie[1], ly, lx, 1);
+//! # let _ = corrected;
+//! ```
+//!
+//! [`Registered`] carries the shifts, the reference they were measured against,
+//! the bidirectional offset that was applied, which frames look bad, and the
+//! block field when there is one.
+//!
+//! # The settings are suite2p's
+//!
+//! [`Settings`] uses suite2p's own option names and defaults — `maxregshift`,
+//! `smooth_sigma`, `spatial_taper`, `nimg_init`, `batch_size`, `nonrigid`,
+//! `block_size`, `snr_thresh`, `subpixel`, `th_badframes` — so a value copied
+//! from a lab's `ops.npy` means the same thing here. Two are worth knowing
+//! before a first run:
+//!
+//! * **`maxregshift`** is the largest shift allowed, as a fraction of the
+//!   smaller frame dimension. It has to cover the motion *plus* wherever the
+//!   reference landed; a shift beyond it is clipped, which reads as nearly
+//!   working.
+//! * **`spatial_taper`** fades the frame border before correlating, because an
+//!   FFT wraps. Keep it well above `3 * smooth_sigma`. Its default of 50 fades
+//!   a small test frame away entirely, which is why the example above lowers
+//!   it.
+//!
+//! # Doing it by hand
+//!
+//! [`register`] is the whole pipeline, and it wants every frame in memory at
+//! once. A host that streams a recording off disk can use the same stages
+//! directly instead: [`compute_reference`] to build the reference,
+//! [`masks::reference_filters_normed`] to prepare it,
+//! [`pipeline::measure_batch`] for a batch of frames at a time, and
+//! [`pipeline::apply_batch`] to move the planes. That is what this crate's own
+//! viewer does, and it is why each stage is public.
+
+// A published crate, so every public item says what it is.
+#![warn(missing_docs)]
 
 pub mod bidiphase;
 pub mod fft;
@@ -67,8 +139,11 @@ pub use settings::{Backend, Settings};
 
 /// A movie to register: frames of `ly * lx`, row-major.
 pub struct Frames<'a> {
+    /// Rows in a frame.
     pub ly: usize,
+    /// Columns in a frame.
     pub lx: usize,
+    /// One frame per timepoint, row-major, each `ly * lx` samples long.
     pub frames: &'a [Vec<f32>],
 }
 

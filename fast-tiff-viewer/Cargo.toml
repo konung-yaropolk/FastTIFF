@@ -89,7 +89,7 @@ libloading = "0.9"
 quick-xml = "0.37"
 # The registration algorithm behind the `stabilize` built-in. GPL-3, which is
 # why this crate is; see the licence note above.
-suite2p-registration = { path = "../suite2p-registration-rs" }
+suite2p-registration = { path = "../suite2p-registration" }
 # The OIR reader maps each part rather than seeking through it: a plane is
 # thirty-five scattered chunks, and a recording is a quarter of a million of
 # them. Same crate and same version fast-tiff-lib maps TIFFs with.

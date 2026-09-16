@@ -1,4 +1,4 @@
-name: Publish fast-tiff-lib
+name: Publish crates
 
 on:
   release:
@@ -35,5 +35,49 @@ jobs:
       - name: Publish
         if: steps.pub.outputs.already == 'false'
         run: cargo publish -p fast-tiff-lib
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # suite2p-registration: the registration algorithm on its own, with no
+  # dependency on anything else in this workspace, so it publishes beside
+  # fast-tiff-lib rather than after it.
+  publish-suite2p-registration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Read crate version
+        id: ver
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name=="suite2p-registration") | .version')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "suite2p-registration version: $v"
+
+      - name: Already on crates.io?
+        id: pub
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+                 -H "User-Agent: ${{ github.repository }} publish CI" \
+                 "https://crates.io/api/v1/crates/suite2p-registration/${{ steps.ver.outputs.version }}")
+          if [ "$code" = "200" ]; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v${{ steps.ver.outputs.version }} already published — skipping."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The GPU backend is optional and pulls in a graphics stack, so the
+      # default-feature build is what `cargo publish` verifies. Checking the
+      # feature here means a `gpu` build that stopped compiling cannot be
+      # published and found broken by whoever turns it on.
+      - name: Check the gpu feature builds
+        if: steps.pub.outputs.already == 'false'
+        run: cargo check -p suite2p-registration --features gpu
+
+      - name: Publish
+        if: steps.pub.outputs.already == 'false'
+        run: cargo publish -p suite2p-registration
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

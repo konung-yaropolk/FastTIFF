@@ -29,6 +29,7 @@ pub enum Backend {
 }
 
 impl Backend {
+    /// What to call this backend in an interface.
     pub fn label(self) -> &'static str {
         match self {
             Backend::SingleThread => "Single-thread CPU",

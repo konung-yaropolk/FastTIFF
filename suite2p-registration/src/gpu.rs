@@ -54,7 +54,7 @@
 //!   back** — 42 kilobytes a frame at the defaults, not two megabytes.
 //!
 //! The peak is still taken on the host, from the window, by the same
-//! [`peak_of`] the CPU path uses. Tie-breaking and the correlation value come
+//! [`crate::rigid::peak_of`] the CPU path uses. Tie-breaking and the correlation value come
 //! from one definition, and `smooth_sigma_time` works on this path too.
 
 use crate::masks::RefFilters;

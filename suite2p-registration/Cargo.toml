@@ -6,12 +6,25 @@
 # travels with the algorithm whoever retypes it.
 [package]
 name = "suite2p-registration"
-version = "0.19.2"
+version = "0.19.5"
 edition = "2021"
-description = "Rigid and bidirectional-phase motion correction, ported from suite2p."
+# `Option::is_none_or`, in the GPU backend's context cache.
+rust-version = "1.82"
+description = """
+Motion correction for two-photon timelapses: rigid and non-rigid registration \
+by phase correlation, and bidirectional-phase (resonant scanner) correction. \
+A Rust port of suite2p's registration, parameter for parameter.\
+"""
 license = "GPL-3.0-only"
 repository = "https://github.com/konung-yaropolk/FastTIFF"
-publish = false
+homepage = "https://github.com/konung-yaropolk/FastTIFF"
+readme = "README.md"
+keywords = ["microscopy", "registration", "suite2p", "neuroscience", "imaging"]
+categories = ["science", "algorithms", "multimedia::images"]
+# The GPU backend is behind a feature, so docs.rs is told to build it — a module
+# that is not in the documentation may as well not exist.
+[package.metadata.docs.rs]
+features = ["gpu"]
 
 [dependencies]
 # Phase correlation is FFT-based, so an FFT is not optional. `rustfft` is
