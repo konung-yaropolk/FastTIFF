@@ -1,7 +1,23 @@
 //! Text leaving the app through the clipboard, in the line endings the system
 //! expects.
 
-/// Rewrite every copy this frame issued to use `\r\n` between lines.
+/// Put this pass's copies into the system's line endings.
+///
+/// Called once per *viewport* per frame, not once per frame. Each egui viewport
+/// — and every pop-out dialog is one, see `dialog::show` — carries its own
+/// platform output, and the backend hands each one to the clipboard separately.
+/// Converting only the root window's output left every dialog copying what it
+/// always did, which is how the metadata window went on pasting as a single
+/// line into Windows 7's Notepad while the main window was fine.
+pub(super) fn to_system_line_endings(ctx: &egui::Context) {
+    #[cfg(windows)]
+    ctx.output_mut(|o| to_windows_line_endings(&mut o.commands));
+    // Everywhere else `\n` is already the convention.
+    #[cfg(not(windows))]
+    let _ = ctx;
+}
+
+/// Rewrite every copy in `commands` to use `\r\n` between lines.
 ///
 /// egui copies text exactly as it holds it — `\n` between lines — and the
 /// clipboard crate under it hands that to the system unchanged. On Windows the
@@ -14,6 +30,7 @@
 /// the app is covered — the metadata window, the coordinate readout, whatever
 /// is added next — without each having to remember it. Only called on Windows:
 /// everywhere else `\n` is the convention already.
+#[cfg(any(windows, test))]
 pub(super) fn to_windows_line_endings(commands: &mut [egui::OutputCommand]) {
     for command in commands {
         if let egui::OutputCommand::CopyText(text) = command {
@@ -24,6 +41,7 @@ pub(super) fn to_windows_line_endings(commands: &mut [egui::OutputCommand]) {
 
 /// `text` with every line break as `\r\n`. A break that already is one is left
 /// alone, so nothing is doubled.
+#[cfg(any(windows, test))]
 fn crlf(text: &str) -> String {
     if !text.contains('\n') {
         return text.to_string();

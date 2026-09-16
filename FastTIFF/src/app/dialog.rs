@@ -89,6 +89,10 @@ pub(super) fn show(
             if ui.ctx().input(|i| i.viewport().close_requested()) {
                 dismissed = true;
             }
+            // This window is its own viewport, with its own platform output
+            // that the backend hands to the clipboard by itself, so its copies
+            // are converted here rather than by the main window.
+            super::clipboard::to_system_line_endings(ui.ctx());
         },
     );
     if dismissed {

@@ -31,9 +31,6 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 mod camera;
-// Windows only, where clipboard text wants CRLF line endings; tests run it
-// everywhere.
-#[cfg(any(windows, test))]
 mod clipboard;
 mod dialog;
 mod kinetic;
@@ -3790,10 +3787,9 @@ impl ViewerApp {
 impl eframe::App for ViewerApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.draw(ui, frame);
-        // Copied text in Windows line endings. See `clipboard`.
-        #[cfg(windows)]
-        ui.ctx()
-            .output_mut(|o| clipboard::to_windows_line_endings(&mut o.commands));
+        // This window's copies, in the system's line endings. Every pop-out
+        // dialog does the same for its own — see `clipboard`.
+        clipboard::to_system_line_endings(ui.ctx());
     }
 }
 
