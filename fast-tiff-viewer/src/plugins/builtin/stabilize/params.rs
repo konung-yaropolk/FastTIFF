@@ -10,9 +10,26 @@ use fasttiff_plugin_api::{ImageInfo, ParamDecl, ParamKind, Params};
 use suite2p_registration::{Backend, Settings};
 
 /// Build the dialog for a stack of this shape.
+///
+/// The order is the grouping: the contract has no notion of a section, so what
+/// a reader gets instead is a sequence that runs from the decisions that change
+/// a run most to the ones most people never touch —
+///
+///   1. where it runs, and whether the correction can deform;
+///   2. what is registered against what, and how far it may move;
+///   3. how the reference is built;
+///   4. the non-rigid grid, which only matters with non-rigid on;
+///   5. the settings for a recording too dim to register frame by frame;
+///   6. the scanner's own artefact;
+///   7. what is reported afterwards.
+///
+/// Two of the help texts point at their neighbours ("given below", "above"), so
+/// those pairs have to stay adjacent and in order.
 pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
     let d = Settings::default();
     let mut decls = Vec::new();
+
+    // ---- what runs, and what kind of correction ----------------------------
 
     // Where it runs. Not a suite2p option — suite2p takes CUDA if it finds it —
     // but "it was slower than I expected" and "it gave a different answer" are
@@ -34,6 +51,22 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
         )
         .help("The answer is the same on each; only how many frames are in flight differs."),
     );
+    decls.push(
+        ParamDecl::new(
+            "nonrigid",
+            "Non-rigid",
+            ParamKind::Bool {
+                default: d.nonrigid,
+            },
+        )
+        .help(
+            "Correct tissue that deforms rather than merely sliding: a shift per \
+             block, interpolated to a shift per pixel. Measured on top of the rigid \
+             correction rather than instead of it, and slower.",
+        ),
+    );
+
+    // ---- what is registered, and how far it may move -----------------------
 
     if info.channels > 1 {
         decls.push(
@@ -50,20 +83,6 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
             ),
         );
     }
-
-    decls.push(
-        ParamDecl::new(
-            "nimg_init",
-            "Reference frames",
-            ParamKind::Int {
-                default: d.nimg_init as i64,
-                min: 2,
-                max: 5000,
-            },
-        )
-        .help("How many frames are sampled to build the reference image."),
-    );
-
     decls.push(
         ParamDecl::new(
             "maxregshift",
@@ -92,22 +111,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
         )
         .help("~1 suits two-photon; 3-5 is recommended for one-photon."),
     );
-    decls.push(
-        ParamDecl::new(
-            "smooth_sigma_time",
-            "Temporal smoothing",
-            ParamKind::Float {
-                default: d.smooth_sigma_time,
-                min: 0.0,
-                max: 10.0,
-            },
-        )
-        .help(
-            "Smooth the correlation maps along time before taking the peak — for a \
-             recording too dim to locate frame by frame. Smoothed within a batch, \
-             so it is the one setting the batch size can change the answer through.",
-        ),
-    );
+    // Next to the smoothing it has to stay above: the help says so.
     decls.push(
         ParamDecl::new(
             "spatial_taper",
@@ -136,6 +140,21 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
              one bright speck cannot pull the peak.",
         ),
     );
+
+    // ---- how the reference is built ----------------------------------------
+
+    decls.push(
+        ParamDecl::new(
+            "nimg_init",
+            "Reference frames",
+            ParamKind::Int {
+                default: d.nimg_init as i64,
+                min: 2,
+                max: 5000,
+            },
+        )
+        .help("How many frames are sampled to build the reference image."),
+    );
     decls.push(
         ParamDecl::new(
             "two_step_registration",
@@ -146,62 +165,9 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
         )
         .help("Register, then register the result again. For low-SNR recordings."),
     );
-    decls.push(
-        ParamDecl::new(
-            "batch_size",
-            "Batch size",
-            ParamKind::Int {
-                default: d.batch_size as i64,
-                min: 1,
-                max: 2000,
-            },
-        )
-        .help(
-            "How many frames are processed at once. A memory and scheduling knob \
-             only, except through the temporal smoothing above.",
-        ),
-    );
 
-    decls.push(
-        ParamDecl::new(
-            "do_bidiphase",
-            "Correct bidirectional phase",
-            ParamKind::Bool {
-                default: d.do_bidiphase,
-            },
-        )
-        .help(
-            "Measure and undo the comb a resonant scanner leaves. Ignored when a \
-             fixed offset is given below, which is suite2p's rule.",
-        ),
-    );
-    decls.push(
-        ParamDecl::new(
-            "bidiphase",
-            "Fixed bidirectional phase offset",
-            ParamKind::Int {
-                default: d.bidiphase as i64,
-                min: -20,
-                max: 20,
-            },
-        )
-        .help("A known scanner offset, in pixels. 0 means measure it instead."),
-    );
+    // ---- the non-rigid grid, for when the switch above is on ---------------
 
-    decls.push(
-        ParamDecl::new(
-            "nonrigid",
-            "Non-rigid",
-            ParamKind::Bool {
-                default: d.nonrigid,
-            },
-        )
-        .help(
-            "Correct tissue that deforms rather than merely sliding: a shift per \
-             block, interpolated to a shift per pixel. Measured on top of the rigid \
-             correction rather than instead of it, and slower.",
-        ),
-    );
     decls.push(
         ParamDecl::new(
             "block_size",
@@ -256,6 +222,72 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
              rigid pass is whole pixels, and so is this one.",
         ),
     );
+
+    // ---- a recording too dim to register frame by frame --------------------
+
+    decls.push(
+        ParamDecl::new(
+            "smooth_sigma_time",
+            "Temporal smoothing",
+            ParamKind::Float {
+                default: d.smooth_sigma_time,
+                min: 0.0,
+                max: 10.0,
+            },
+        )
+        .help(
+            "Smooth the correlation maps along time before taking the peak — for a \
+             recording too dim to locate frame by frame. Smoothed within a batch, \
+             so it is the one setting the batch size can change the answer through.",
+        ),
+    );
+    // Below the temporal smoothing, which its help refers to as "above".
+    decls.push(
+        ParamDecl::new(
+            "batch_size",
+            "Batch size",
+            ParamKind::Int {
+                default: d.batch_size as i64,
+                min: 1,
+                max: 2000,
+            },
+        )
+        .help(
+            "How many frames are processed at once. A memory and scheduling knob \
+             only, except through the temporal smoothing above.",
+        ),
+    );
+
+    // ---- the scanner's own artefact ----------------------------------------
+
+    decls.push(
+        ParamDecl::new(
+            "do_bidiphase",
+            "Correct bidirectional phase",
+            ParamKind::Bool {
+                default: d.do_bidiphase,
+            },
+        )
+        .help(
+            "Measure and undo the comb a resonant scanner leaves. Ignored when a \
+             fixed offset is given below, which is suite2p's rule.",
+        ),
+    );
+    // Below the switch, which its help refers to as "below".
+    decls.push(
+        ParamDecl::new(
+            "bidiphase",
+            "Fixed bidirectional phase offset",
+            ParamKind::Int {
+                default: d.bidiphase as i64,
+                min: -20,
+                max: 20,
+            },
+        )
+        .help("A known scanner offset, in pixels. 0 means measure it instead."),
+    );
+
+    // ---- what is reported afterwards ---------------------------------------
 
     decls.push(
         ParamDecl::new(
