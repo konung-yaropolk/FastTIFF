@@ -1043,3 +1043,143 @@ fn stabilize_runs_the_same_stack_on_the_cpu() {
         );
     }
 }
+
+/// A 16-bit source, so the width the result comes back at can be checked.
+///
+/// `wandering_stack` writes float samples; a two-photon recording is 16-bit,
+/// and that is the case the result's width has to match.
+fn wandering_u16_stack(ly: u32, lx: u32, path: &[(i32, i32)]) -> Stack {
+    let base: Vec<u16> = (0..ly * lx)
+        .map(|i| {
+            let (y, x) = ((i / lx) as f32, (i % lx) as f32);
+            let mut v = 300.0f32;
+            for (cy, cx, amp) in [(20.0f32, 24.0f32, 4000.0f32), (40.0, 44.0, 2500.0)] {
+                let d2 = ((y - cy).powi(2) + (x - cx).powi(2)) / 8.0;
+                v += amp * (-d2).exp();
+            }
+            v as u16
+        })
+        .collect();
+    let at = |dy: i32, dx: i32, y: u32, x: u32| -> u16 {
+        let sy = (y as i32 - dy).rem_euclid(ly as i32) as u32;
+        let sx = (x as i32 - dx).rem_euclid(lx as i32) as u32;
+        base[(sy * lx + sx) as usize]
+    };
+    let opts = WriterOptions::new(lx, ly, SampleType::U16).metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for &(dy, dx) in path {
+        let bytes: Vec<u8> = (0..ly * lx)
+            .flat_map(|i| at(dy, dx, i / lx, i % lx).to_le_bytes())
+            .collect();
+        w.write_frame_bytes(&bytes).unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    Stack::from_bytes(bytes, "moving16.tif".into(), false).expect("open")
+}
+
+/// A stabilised 16-bit recording comes back 16-bit — rigid or non-rigid.
+///
+/// It used to widen to float whenever `nonrigid` was on, which is the default,
+/// so every stabilised file was twice the size of the recording it came from.
+#[test]
+fn stabilize_keeps_the_sources_bit_depth() {
+    let (ly, lx) = (64u32, 64u32);
+    let path = [(0i32, 0i32), (3, -2), (-4, 1), (2, 3)];
+    let s = wandering_u16_stack(ly, lx, &path);
+    assert_eq!(
+        s.tiff.frames[0].bits_per_sample, 16,
+        "the fixture is 16-bit"
+    );
+
+    for nonrigid in [false, true] {
+        let mut h = host(&s, 0);
+        let mut params = Params::new();
+        params.set("spatial_taper", ParamValue::Float(5.0));
+        params.set("maxregshift", ParamValue::Float(0.3));
+        params.set("nonrigid", ParamValue::Bool(nonrigid));
+        // A block small enough to fit a 64-pixel test frame.
+        params.set("block_size", ParamValue::Int(16));
+        let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run")
+        else {
+            panic!("expected a document");
+        };
+        assert_eq!(
+            out.pixel_type,
+            PixelType::U16,
+            "non-rigid {nonrigid}: a 16-bit recording came back as {:?}",
+            out.pixel_type
+        );
+        for (i, plane) in out.planes.iter().enumerate() {
+            assert!(
+                matches!(plane, PlaneData::U16(_)),
+                "non-rigid {nonrigid}: plane {i} is {:?}",
+                plane.pixel_type()
+            );
+        }
+        out.validate().expect("the result's shape must be valid");
+    }
+}
+
+/// A signed 16-bit recording comes back signed, with its samples unchanged.
+///
+/// The case that looks fine and is wrong. The decoder hands a plugin true
+/// signed values, and a signed result travels as the same bits in the `U16`
+/// lane declaring `PixelType::I16`. Getting either half backwards shifts every
+/// pixel by half the range — an image that still looks like an image. The
+/// frames here do not move, so a correct run returns exactly what it was given.
+#[test]
+fn stabilize_keeps_signed_samples_signed() {
+    let (ly, lx) = (32u32, 32u32);
+    let samples: Vec<i16> = (0..ly * lx)
+        .map(|i| {
+            let (y, x) = ((i / lx) as f32, (i % lx) as f32);
+            let d2 = ((y - 16.0).powi(2) + (x - 16.0).powi(2)) / 8.0;
+            // Straddling zero, so a lost sign is visible.
+            (-8000.0 + 15000.0 * (-d2).exp()) as i16
+        })
+        .collect();
+    let opts = WriterOptions::new(lx, ly, SampleType::I16).metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for _ in 0..4 {
+        let bytes: Vec<u8> = samples.iter().flat_map(|v| v.to_le_bytes()).collect();
+        w.write_frame_bytes(&bytes).unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    let s = Stack::from_bytes(bytes, "signed.tif".into(), false).expect("open");
+
+    let mut h = host(&s, 0);
+    let mut params = Params::new();
+    params.set("spatial_taper", ParamValue::Float(5.0));
+    params.set("nonrigid", ParamValue::Bool(false));
+    let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
+        panic!("expected a document");
+    };
+    assert_eq!(
+        out.pixel_type,
+        PixelType::I16,
+        "the result stopped being signed"
+    );
+    out.validate()
+        .expect("I16 declared with U16 planes is what the contract asks for");
+
+    for (t, plane) in out.planes.iter().enumerate() {
+        let PlaneData::U16(bits) = plane else {
+            panic!("frame {t} is {:?}, not the U16 lane", plane.pixel_type());
+        };
+        // Sorted, not positional. A rigid correction is a roll, so the frame
+        // holds exactly the samples it started with, in some other order — and
+        // the whole recording may legitimately come back shifted by a pixel or
+        // two, because it is aligned to a reference that lands where the
+        // best-correlated frames put it, not to the origin. What must not
+        // change is the samples themselves: lose the sign and every negative
+        // one lands near +32768, which no reordering can hide.
+        let mut got: Vec<i16> = bits.iter().map(|&v| v as i16).collect();
+        let mut want = samples.clone();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(
+            got, want,
+            "frame {t}: the samples themselves changed, not just their places"
+        );
+    }
+}

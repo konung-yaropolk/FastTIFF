@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.19.4"
+version = "1.19.5"
 dependencies = [
  "anyhow",
  "eframe",
@@ -980,7 +980,7 @@ version = "0.19.1"
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "1.19.4"
+version = "1.19.5"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",
@@ -3025,7 +3025,7 @@ checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
 
 [[package]]
 name = "suite2p-registration"
-version = "0.19.2"
+version = "0.19.5"
 dependencies = [
  "bytemuck",
  "pollster 1.0.1",

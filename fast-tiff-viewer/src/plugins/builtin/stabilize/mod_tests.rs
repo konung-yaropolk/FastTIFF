@@ -128,31 +128,62 @@ fn an_answered_dialog_reaches_the_settings() {
 
 // ------------------------------------------------ what the result is stored in
 
-/// A rigid run gives the file's own width back; a non-rigid one gives float.
+/// The result comes back at the file's own width, whatever the correction was.
 ///
-/// The distinction is not cosmetic. A rigid correction is `np.roll` — no
-/// arithmetic touches a sample — so the file's width is exact and half the
-/// size. Non-rigid interpolates between pixels and makes values that were never
-/// in the file, which need somewhere to live.
+/// A stabilised 16-bit recording is a 16-bit recording. It used to widen to
+/// float whenever `nonrigid` was on — which is the default here — so every
+/// stabilised file was twice the size of the one it came from.
 #[test]
-fn the_result_keeps_the_source_width_unless_it_was_warped() {
-    assert_eq!(Store::of(PixelType::U16, false), Store::U16);
-    assert_eq!(Store::of(PixelType::U8, false), Store::U8);
-    assert_eq!(Store::of(PixelType::F32, false), Store::F32);
-    // Signed 16-bit has no `PlaneData` of its own; float says what it is.
-    assert_eq!(Store::of(PixelType::I16, false), Store::F32);
+fn the_result_keeps_the_source_width() {
+    assert_eq!(Store::of(PixelType::U8), Store::U8);
+    assert_eq!(Store::of(PixelType::U16), Store::U16);
+    assert_eq!(Store::of(PixelType::I16), Store::I16);
+    assert_eq!(Store::of(PixelType::F32), Store::F32);
 
-    for source in [
-        PixelType::U8,
-        PixelType::U16,
-        PixelType::I16,
-        PixelType::F32,
-    ] {
-        assert_eq!(
-            Store::of(source, true),
-            Store::F32,
-            "a non-rigid run interpolates and cannot be stored as {source:?}"
-        );
+    // And each one declares itself as what it is, so the file says so too.
+    assert_eq!(Store::U8.pixel_type(), PixelType::U8);
+    assert_eq!(Store::U16.pixel_type(), PixelType::U16);
+    assert_eq!(Store::I16.pixel_type(), PixelType::I16);
+    assert_eq!(Store::F32.pixel_type(), PixelType::F32);
+}
+
+/// Signed samples travel as their bit pattern, and come back as themselves.
+///
+/// The contract has no `PlaneData::I16`: a signed result is `PlaneData::U16`
+/// holding the same sixteen bits, declared `PixelType::I16`. Get that wrong and
+/// every negative sample reads as a very bright one — a picture that still
+/// looks like a picture.
+#[test]
+fn every_signed_16_bit_value_round_trips_exactly() {
+    let samples: Vec<i16> = (i16::MIN..=i16::MAX).collect();
+    let as_f32: Vec<f32> = samples.iter().map(|&v| v as f32).collect();
+    match Store::I16.plane(as_f32) {
+        PlaneData::U16(back) => {
+            let signed: Vec<i16> = back.iter().map(|&v| v as i16).collect();
+            assert_eq!(signed, samples);
+        }
+        other => panic!("stored as {:?}", other.pixel_type()),
+    }
+}
+
+/// An interpolated sample is rounded to the nearest whole one, not truncated.
+///
+/// Only a non-rigid run produces these — a rigid shift moves whole samples —
+/// and truncating them would darken every warped frame by half a sample on
+/// average, which is a bias, not noise.
+#[test]
+fn interpolated_samples_are_rounded_to_nearest() {
+    match Store::U16.plane(vec![41.6, 41.4, 0.5, 1.5, 2.49]) {
+        // 0.5 and 1.5 round away from zero, as `f32::round` does.
+        PlaneData::U16(v) => assert_eq!(v, vec![42, 41, 1, 2, 2]),
+        other => panic!("stored as {:?}", other.pixel_type()),
+    }
+    match Store::I16.plane(vec![-3.4, -3.6, -0.5]) {
+        PlaneData::U16(v) => {
+            let signed: Vec<i16> = v.iter().map(|&x| x as i16).collect();
+            assert_eq!(signed, vec![-3, -4, -1]);
+        }
+        other => panic!("stored as {:?}", other.pixel_type()),
     }
 }
 

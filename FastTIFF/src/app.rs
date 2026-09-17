@@ -629,6 +629,7 @@ fn finish_outcome(
     label: &std::sync::Mutex<String>,
     progress: &std::sync::atomic::AtomicU32,
     cancel: &std::sync::atomic::AtomicBool,
+    luts: &[fasttiff_plugin_api::Lut],
 ) -> Result<PluginProduct, String> {
     use fasttiff_plugin_api::Outcome;
     let stopped = || cancel.load(std::sync::atomic::Ordering::Relaxed);
@@ -640,15 +641,19 @@ fn finish_outcome(
         Outcome::Plot(p) => Ok(PluginProduct::Plot(p)),
         Outcome::NewDocument(image) => {
             Job::begin_phase(label, progress, "Encoding result");
-            let bytes =
-                match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(&image, None, &mut |f| {
+            let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
+                &image,
+                None,
+                luts,
+                &mut |f| {
                     Job::report(progress, f);
                     !stopped()
-                }) {
-                    Ok(Some(b)) => b,
-                    Ok(None) => return Ok(PluginProduct::Cancelled),
-                    Err(e) => return Err(format!("{e:#}")),
-                };
+                },
+            ) {
+                Ok(Some(b)) => b,
+                Ok(None) => return Ok(PluginProduct::Cancelled),
+                Err(e) => return Err(format!("{e:#}")),
+            };
 
             // A file name from the image's own name, with anything a filesystem
             // would object to replaced. Needed even for the handover that never
@@ -719,15 +724,19 @@ fn finish_outcome(
         }
         Outcome::SaveToFile { image, path } => {
             Job::begin_phase(label, progress, "Writing result");
-            let bytes =
-                match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(&image, None, &mut |f| {
+            let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
+                &image,
+                None,
+                luts,
+                &mut |f| {
                     Job::report(progress, f);
                     !stopped()
-                }) {
-                    Ok(Some(b)) => b,
-                    Ok(None) => return Ok(PluginProduct::Cancelled),
-                    Err(e) => return Err(format!("{e:#}")),
-                };
+                },
+            ) {
+                Ok(Some(b)) => b,
+                Ok(None) => return Ok(PluginProduct::Cancelled),
+                Err(e) => return Err(format!("{e:#}")),
+            };
             std::fs::write(&path, bytes)
                 .map(|()| PluginProduct::Saved(path))
                 .map_err(|e| e.to_string())
@@ -1729,6 +1738,12 @@ impl ViewerApp {
             .filter(|p| p.plugin == index)
             .map(|p| p.rois.clone())
             .unwrap_or_default();
+        // The source's own tables, so a result that keeps its channels opens
+        // looking like the document it came from. Taken now, with the rest of
+        // the run's inputs, rather than when the result lands — the user may
+        // change a LUT while a long run is going, and the result belongs to
+        // the state the run started in.
+        let luts = loaded.display.luts.clone();
         let job = Job::new(name.clone());
         let host = fast_tiff_viewer::plugins::StackHost::new(loaded, view)
             .with_selection(selection)
@@ -1753,7 +1768,7 @@ impl ViewerApp {
             // interface thread once the result came back — which is why the bar
             // reached 100% and the window then froze until it was done.
             let outcome = match outcome {
-                Ok(o) => finish_outcome(o, &label, &progress, &cancel),
+                Ok(o) => finish_outcome(o, &label, &progress, &cancel, &luts),
                 Err(e) => Err(e.to_string()),
             };
             let run = PluginRun {

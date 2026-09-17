@@ -46,34 +46,42 @@ fn workers_available() -> usize {
 
 /// How a corrected plane is stored in the result.
 ///
-/// A rigid correction is `np.roll`: every sample is the file's own, moved.
-/// Nothing is interpolated and no arithmetic touches a value, so writing them
-/// back at the width they arrived in is exact — and half the size of a float
-/// copy, through the encoder, through the handover to the new window, and in
-/// that window's memory for as long as it is open.
+/// **The file's own width, always.** A stabilised recording is the recording
+/// with its frames moved: a 16-bit acquisition should come back 16-bit, the
+/// same size, and open in whatever opened the original. Widening it to float
+/// doubles every byte of it — on disk, through the handover to the new window,
+/// and in that window's memory for as long as it is open.
 ///
-/// A non-rigid run does interpolate between pixels, which makes values that
-/// were never in the file, so that one stays float.
+/// What that costs depends on the correction:
+///
+/// * A **rigid** run is `np.roll`. Every sample is the file's own, moved; no
+///   arithmetic touches a value, and `f32` carries every `u8`, `u16` and `i16`
+///   exactly. Nothing is lost at all.
+/// * A **non-rigid** run interpolates between pixels, so it makes values that
+///   were never in the file, and storing them at the source's width rounds
+///   them — by at most half a sample step. suite2p does the same: its own
+///   `reg_tif` output is `int16`, not float.
+///
+/// A float source stays float, having nothing to round to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Store {
     U8,
     U16,
+    /// Signed 16-bit. It has no `PlaneData` arm of its own: the samples travel
+    /// as their raw bit pattern in [`PlaneData::U16`] with the result declaring
+    /// [`PixelType::I16`], which is what the contract asks for.
+    I16,
     F32,
 }
 
 impl Store {
-    /// What to store a result in, given what the file holds and whether the
-    /// correction will interpolate.
-    fn of(source: PixelType, nonrigid: bool) -> Self {
-        if nonrigid {
-            return Store::F32;
-        }
+    /// What to store a result in: whatever the file holds.
+    fn of(source: PixelType) -> Self {
         match source {
             PixelType::U8 => Store::U8,
             PixelType::U16 => Store::U16,
-            // Signed 16-bit has no `PlaneData` of its own, and a float result
-            // says what it is rather than pretending to be unsigned.
-            PixelType::I16 | PixelType::F32 => Store::F32,
+            PixelType::I16 => Store::I16,
+            PixelType::F32 => Store::F32,
         }
     }
 
@@ -81,22 +89,48 @@ impl Store {
         match self {
             Store::U8 => PixelType::U8,
             Store::U16 => PixelType::U16,
+            Store::I16 => PixelType::I16,
             Store::F32 => PixelType::F32,
         }
     }
 
     /// Move a corrected plane into the result at this width.
     ///
-    /// The clamp cannot bite on a plane that came from a file of this type —
-    /// it is there so that a plane which somehow did not still produces a
-    /// picture rather than a wrapped-around one.
+    /// Rounded to nearest rather than truncated: an interpolated 41.6 is nearer
+    /// 42 than 41, and truncating would darken every warped frame by half a
+    /// sample on average. A rigid run's samples are already whole, so rounding
+    /// leaves them alone.
+    ///
+    /// The clamp cannot bite on a plane that came from a file of this type — it
+    /// is there so that a plane which somehow did not still produces a picture
+    /// rather than a wrapped-around one.
     fn plane(self, v: Vec<f32>) -> PlaneData {
         match self {
-            Store::U8 => PlaneData::U8(v.iter().map(|&x| x.clamp(0.0, 255.0) as u8).collect()),
-            Store::U16 => PlaneData::U16(v.iter().map(|&x| x.clamp(0.0, 65535.0) as u16).collect()),
+            Store::U8 => PlaneData::U8(v.iter().map(|&x| whole(x, 0.0, 255.0) as u8).collect()),
+            Store::U16 => {
+                PlaneData::U16(v.iter().map(|&x| whole(x, 0.0, 65535.0) as u16).collect())
+            }
+            // The bit pattern, as `PlaneData` documents it: `i16` first, then
+            // those same sixteen bits read as `u16`.
+            Store::I16 => PlaneData::U16(
+                v.iter()
+                    .map(|&x| whole(x, -32768.0, 32767.0) as i16 as u16)
+                    .collect(),
+            ),
             Store::F32 => PlaneData::F32(v),
         }
     }
+}
+
+/// A sample rounded to the nearest whole number and held inside `lo..=hi`.
+///
+/// `NaN` comes out as `lo` rather than as a cast's zero, which for signed data
+/// would be mid-grey — a hole in a frame that looks like data.
+fn whole(x: f32, lo: f32, hi: f32) -> f32 {
+    if x.is_nan() {
+        return lo;
+    }
+    x.clamp(lo, hi).round()
 }
 
 /// How one batch's planes are corrected and stored — the same for every chunk
@@ -295,7 +329,7 @@ impl Plugin for Stabilize {
 
         let slices = info.slices.max(1);
         let channels = info.channels.max(1);
-        let store = Store::of(info.pixel_type, settings.nonrigid);
+        let store = Store::of(info.pixel_type);
         let mut planes: Vec<PlaneData> = Vec::with_capacity(channels * slices * info.frames);
         let mut shifts: Vec<Shift> = Vec::with_capacity(info.frames);
         let mut plane = Vec::new();

@@ -21,7 +21,7 @@
 use fast_tiff_lib::{
     DisplayMode as LibDisplayMode, SampleType, StackMetaWrite, TiffWriter, WriterOptions,
 };
-use fasttiff_plugin_api::{DisplayMode, ImageResult, PixelType, PlaneData, StackInfo};
+use fasttiff_plugin_api::{DisplayMode, ImageResult, Lut, PixelType, PlaneData, StackInfo};
 use std::io::Cursor;
 
 /// Encode a plugin's result as a TIFF in memory.
@@ -30,7 +30,7 @@ use std::io::Cursor;
 /// then Z, then time — which is the order the reader expects, so the result
 /// re-opens with the axes it declared.
 pub fn to_tiff_bytes(image: &ImageResult, info: Option<&StackInfo>) -> anyhow::Result<Vec<u8>> {
-    to_tiff_bytes_reporting(image, info, &mut |_| true)
+    to_tiff_bytes_reporting(image, info, &[], &mut |_| true)
         .transpose()
         .unwrap_or_else(|| Err(anyhow::anyhow!("cancelled")))
 }
@@ -47,6 +47,7 @@ pub fn to_tiff_bytes(image: &ImageResult, info: Option<&StackInfo>) -> anyhow::R
 pub fn to_tiff_bytes_reporting(
     image: &ImageResult,
     info: Option<&StackInfo>,
+    luts: &[Lut],
     on_progress: &mut dyn FnMut(f32) -> bool,
 ) -> anyhow::Result<Option<Vec<u8>>> {
     image
@@ -119,6 +120,23 @@ pub fn to_tiff_bytes_reporting(
                 .copied()
                 .unwrap_or_else(|| fast_tiff_lib::metadata::composite_color(c));
             meta = meta.channel_lut(fast_tiff_lib::color_ramp_lut(color));
+        }
+    } else if luts.len() == image.channels.max(1) {
+        // The tables the source is being shown with, carried into a result that
+        // kept its channels — so a stabilised copy of a recording opens looking
+        // like the recording, its built-in LUT and all, rather than in the
+        // viewer's default grey.
+        //
+        // A whole table rather than a colour: a file's own LUT need not be a
+        // ramp at all — Fire, a segmentation palette — and rebuilding one from
+        // a single colour would throw that away. `channel_colors` still wins
+        // when the plugin set it: a plugin that states its colours has an
+        // opinion about what its own result means, which outranks what the
+        // source happened to look like. The display mode is left alone, these
+        // being the source's tables and not a reason to composite a grayscale
+        // stack.
+        for lut in luts {
+            meta = meta.channel_lut(*lut);
         }
     }
 
