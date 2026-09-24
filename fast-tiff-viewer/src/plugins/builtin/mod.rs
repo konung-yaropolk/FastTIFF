@@ -23,6 +23,9 @@
 //! * [`Oir`] is the importer that earns its place: a proprietary format with no
 //!   spec at all, worked out from a real acquisition and checked against the
 //!   vendor software's own export.
+//! * [`PngImport`] is the one people actually reach for, because a figure, a
+//!   mask or a screenshot arrives as a PNG and has to be got *in* — at the
+//!   depth the file stores it, which no screenshot-shaped reader does.
 //!
 //! [`Netpbm`] is a fifth thing — a worked example of the other shape the job
 //! takes, a documented format implemented straight from its spec. It is behind
@@ -60,7 +63,7 @@ pub use invert::Invert;
 pub use netpbm::Netpbm;
 pub use oir::Oir;
 pub use plot_axis::PlotAxis;
-pub use png::Png;
+pub use png::{Png, PngImport};
 pub use stabilize::Stabilize;
 pub use zproject::ZProject;
 
@@ -90,8 +93,10 @@ pub fn exporters() -> Vec<Box<dyn Exporter>> {
 /// file, so it is a real decision rather than a list: the more specific format
 /// goes first.
 pub fn importers() -> Vec<Box<dyn Importer>> {
+    // OIR first, being the specific format; both answer on a signature of
+    // their own, so the order between them never actually decides anything.
     #[allow(unused_mut)]
-    let mut v: Vec<Box<dyn Importer>> = vec![Box::new(Oir)];
+    let mut v: Vec<Box<dyn Importer>> = vec![Box::new(Oir), Box::new(PngImport)];
     #[cfg(feature = "netpbm-example")]
     v.push(Box::new(Netpbm));
     v

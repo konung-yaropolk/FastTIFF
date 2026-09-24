@@ -27,6 +27,44 @@
 //! plugin built against an older minor version runs on a newer host and vice
 //! versa. [`ABI_MINOR`] says which fields to expect.
 //!
+//! **But only in one direction.** Which structs may actually grow is not a
+//! matter of taste, and the answer is not "all of them":
+//!
+//! * The **tables the host hands the plugin** — [`FtHost`], [`FtSink`],
+//!   [`FtRegistrar`] — are read with [`covers`], which asks "is this field
+//!   there". They grow. A plugin checks each optional callback before calling
+//!   it and does without the ones an older host lacks.
+//! * Everything the **plugin hands the host** — the three vtables,
+//!   [`FtPluginDesc`], [`FtImporterDesc`], [`FtExporterDesc`], [`FtParamDecl`],
+//!   [`FtStackInfo`] — is read with [`fits`], which asks "is this at least as
+//!   new as me". Those are **frozen**: appending a field to one makes every
+//!   plugin already in the wild fail to register, because the host would now
+//!   require a struct they were built too early to provide.
+//!
+//! [`FtParamSink`] is the odd one: the host builds it, like the three tables
+//! above, but the plugin reads it with strict [`fits`]. It may therefore grow
+//! — an older plugin sees a bigger struct than it knows and is satisfied — but
+//! a plugin built *after* the growth refuses every older host outright rather
+//! than doing without the new field, which is the failure mode [`covers`]
+//! exists to avoid. Grow it only alongside a major version, or convert it to
+//! [`covers`] first.
+//!
+//! To carry something new from a plugin to the host, then, the room is in a
+//! *sink callback* — which is the host's table, and may grow — rather than in
+//! the struct the plugin returns. That is why a plot crosses as
+//! [`FtSink::begin_plot`] and [`FtSink::push_series`] rather than as a field on
+//! a vtable, and why [`FtFileType`] carries a separate warning of its own: an
+//! arrayed struct cannot grow in *either* direction.
+//!
+//! Appending to a table has one more obligation, easy to miss and undefined
+//! behaviour to get wrong. The receiving side copies the caller's declared
+//! bytes into a local and must then write **every field the copy did not
+//! reach**, with a stub — never `zeroed()`, because a null function pointer is
+//! not a valid one whether or not it is ever called. `registrar_of`, `sink_of`
+//! and `CHost::new` in the `fasttiff-plugin` crate each do this, and the
+//! `offset_of!(T, newest_field) + size_of::<*const ()>() == size_of::<T>()`
+//! assertions below are what fail the build if a later append forgets.
+//!
 //! **Layout is pinned by tests, not by hope.** `layout_tests.rs` asserts
 //! hard-coded sizes and offsets. Reordering a field fails CI rather than a
 //! user's microscope.
@@ -57,7 +95,18 @@ pub const ABI_MAJOR: u32 = 1;
 
 /// The contract's minor version: how many optional trailing fields exist.
 /// Bumped when a field is appended; never when one changes meaning.
-pub const ABI_MINOR: u32 = 1;
+///
+/// * **0** — the original contract, which already had [`FtHost::stack_info`],
+///   [`FtHost::stack_string`] and [`FtSink::set_info`]. [`FtSink::set_channel`]
+///   was appended later and *did not* bump this, so a plugin cannot tell from
+///   the number whether a minor-0 host has it. That is what
+///   [`ft_covers!`] is for, and why every call site asks about its own field
+///   rather than about the version.
+/// * **1** — [`FtRegistrar::add_exporter`], and with it exporters.
+/// * **2** — plots: [`FtSink::begin_plot`] and [`FtSink::push_series`], and
+///   the selection they are a function of, [`FtHost::selection_count`] and
+///   [`FtHost::selection_roi`].
+pub const ABI_MINOR: u32 = 2;
 
 /// The one symbol a plugin library must export, NUL-terminated for `dlsym`.
 ///
@@ -439,6 +488,42 @@ pub struct FtViewParams {
     pub right: [f32; 3],
 }
 
+open_enum! {
+    /// What a plot asks the host to offer on the canvas. Matches
+    /// `fasttiff_plugin_api::SelectionKind`.
+    FtSelectionKind {
+        /// No tool. The plot is what it is, and the host will not call again.
+        None = 0,
+        /// Regions, snapped to whole pixels.
+        Regions = 1,
+    }
+}
+
+/// One region the user drew, in whole image pixels.
+///
+/// An out-parameter rather than an array, so it may grow like every other
+/// struct here: the host fills as much of it as the plugin's own `struct_size`
+/// says the plugin allocated.
+///
+/// Integers because a selection is over samples. Half a pixel is not something
+/// the data has, and a region whose edge fell between samples would measure
+/// differently depending on how it was rounded later.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FtRoi {
+    pub struct_size: u32,
+    /// 0 rectangle, 1 ellipse — matching `fasttiff_plugin_api::Shape`. An
+    /// unknown shape should be read as a rectangle: its bounding box is the
+    /// only thing a reader that does not know the shape can honestly use.
+    pub shape: u32,
+    /// The top-left corner, from the image's top-left.
+    pub x: u32,
+    pub y: u32,
+    /// The extent. Never zero: a region covering nothing has no mean.
+    pub w: u32,
+    pub h: u32,
+}
+
 /// Callbacks the host provides. Every one takes the opaque `ctx` first.
 ///
 /// A plugin must check `struct_size` before using any field: a host older than
@@ -498,6 +583,21 @@ pub struct FtHost {
     /// contract most likely to grow, and a selector grows without touching the
     /// table's layout.
     pub stack_string: unsafe extern "C" fn(ctx: *mut c_void, which: u32, index: u64) -> FtStr,
+
+    /// How many regions the user has drawn.
+    ///
+    /// **Zero is not "no answer" — it is the whole frame.** That is the
+    /// question the plugin was asked before anything was selected, and a
+    /// plugin that treated it as "measure nothing" would show an empty chart
+    /// every time a plot was first opened.
+    pub selection_count: unsafe extern "C" fn(ctx: *mut c_void) -> u64,
+    /// Region `index`, counting from zero, into `out`.
+    ///
+    /// The regions only ever change between runs, never during one: the host
+    /// re-runs the plugin when the selection changes rather than mutating what
+    /// a running call can see.
+    pub selection_roi:
+        unsafe extern "C" fn(ctx: *mut c_void, index: u64, out: *mut FtRoi) -> FtStatus,
 }
 
 open_enum! {
@@ -507,6 +607,8 @@ open_enum! {
         Message = 1,
         NewDocument = 2,
         SaveToFile = 3,
+        /// Show the chart declared through [`FtSink::begin_plot`].
+        Plot = 4,
     }
 }
 
@@ -606,7 +708,53 @@ pub struct FtSink {
     /// defaults.
     pub set_channel:
         unsafe extern "C" fn(ctx: *mut c_void, index: u64, name: FtStr, rgb: u32) -> FtStatus,
+
+    /// Declare a chart. Must precede any [`push_series`](Self::push_series),
+    /// and is finished by `set_outcome(FtOutcomeKind::Plot, ...)` like an image
+    /// is.
+    ///
+    /// The x axis is two numbers rather than an array: it cannot be ragged, it
+    /// cannot disagree with a series' length, and it covers what a calibrated
+    /// axis actually is — seconds from a frame interval, microns from a z step.
+    /// Both must be finite.
+    ///
+    /// `wants` is an [`FtSelectionKind`]: ask for a tool and the host arms it,
+    /// then runs the plugin **again** whenever the regions change. There is no
+    /// session and no second entry point — a run is still one call that returns
+    /// and is done.
+    pub begin_plot: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        title: FtStr,
+        x_label: FtStr,
+        y_label: FtStr,
+        x_start: f64,
+        x_step: f64,
+        wants: FtSelectionKind,
+    ) -> FtStatus,
+    /// One curve. `values` points at `len` `f32`s, which the host copies
+    /// immediately; `len` may be zero, in which case `values` is never read.
+    ///
+    /// A non-finite value is a **gap**: the host breaks the line there rather
+    /// than drawing through it, because a line across a hole asserts a
+    /// measurement nobody made.
+    ///
+    /// `color` is `0x00RRGGBB`, or [`FT_COLOR_NONE`] to take the next colour
+    /// from the host's palette.
+    pub push_series: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        label: FtStr,
+        values: *const f32,
+        len: u64,
+        color: u32,
+    ) -> FtStatus,
 }
+
+/// No colour of its own: let the host choose. For [`FtSink::push_series`].
+///
+/// A sentinel because `Option<[u8; 3]>` has no C spelling and every value of a
+/// bare `u32` in `0x00RRGGBB` range is a real colour. This one is out of that
+/// range, so it cannot collide with one.
+pub const FT_COLOR_NONE: u32 = 0xFFFF_FFFF;
 
 /// Where a plugin declares its dialog, one control at a time.
 ///
@@ -855,6 +1003,7 @@ const _: () = {
     assert!(size_of::<FtParamKind>() == 4);
     assert!(size_of::<FtOutcomeKind>() == 4);
     assert!(size_of::<FtConfidence>() == 4);
+    assert!(size_of::<FtSelectionKind>() == 4);
 
     // A pointer followed by a `u64` is 8-aligned on every target, so these
     // sizes are the same on 32- and 64-bit and can be written as one number.
@@ -908,8 +1057,8 @@ const _: () = {
     assert!(size_of::<FtImporterVtable>() == 8 + 4 * p);
     assert!(size_of::<FtExporterVtable>() == 8 + 3 * p);
     assert!(size_of::<FtParamSink>() == 8 + 2 * p);
-    assert!(size_of::<FtSink>() == 8 + 6 * p);
-    assert!(size_of::<FtHost>() == 8 + 12 * p);
+    assert!(size_of::<FtSink>() == 8 + 8 * p);
+    assert!(size_of::<FtHost>() == 8 + 14 * p);
 
     // The append rule, pinned. `CORE` is what an older host declares, so it
     // has to end exactly where the appended field begins; and the appended
@@ -918,6 +1067,24 @@ const _: () = {
     // else.
     assert!(FtRegistrar::CORE == offset_of!(FtRegistrar, add_exporter));
     assert!(FtRegistrar::WITH_EXPORTERS == size_of::<FtRegistrar>());
+
+    // The same rule for the two tables minor 2 appended to. `CORE` still ends
+    // where the first optional field begins, and the newest field is last —
+    // which is what every `ft_covers!` check in the workspace assumes.
+    assert!(FtSink::CORE == offset_of!(FtSink, set_info));
+    assert!(offset_of!(FtSink, push_series) + p == size_of::<FtSink>());
+    assert!(FtHost::CORE == offset_of!(FtHost, stack_info));
+    assert!(offset_of!(FtHost, selection_roi) + p == size_of::<FtHost>());
+
+    // Carried by value into a plugin's own allocation, so its prologue is
+    // where a shorter one is detected.
+    assert!(size_of::<FtRoi>() == 24);
+    assert!(offset_of!(FtRoi, struct_size) == 0);
+    assert!(offset_of!(FtRoi, shape) == 4);
+    assert!(offset_of!(FtRoi, x) == 8);
+    assert!(offset_of!(FtRoi, y) == 12);
+    assert!(offset_of!(FtRoi, w) == 16);
+    assert!(offset_of!(FtRoi, h) == 20);
 
     assert!(size_of::<FtStackInfo>() == 64);
     assert!(offset_of!(FtStackInfo, mode) == 4);
@@ -956,6 +1123,14 @@ const _: () = {
     assert!(FtOutcomeKind::Message.0 == 1);
     assert!(FtOutcomeKind::NewDocument.0 == 2);
     assert!(FtOutcomeKind::SaveToFile.0 == 3);
+    assert!(FtOutcomeKind::Plot.0 == 4);
+
+    assert!(FtSelectionKind::None.0 == 0);
+    assert!(FtSelectionKind::Regions.0 == 1);
+
+    // Out of the `0x00RRGGBB` range every real colour is in, or it could not
+    // mean "no colour".
+    assert!(FT_COLOR_NONE > 0x00FF_FFFF);
 };
 
 /// Whether `name` is the entry symbol this ABI's host looks up.

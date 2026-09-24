@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.19.4"
+version = "0.19.6"
 dependencies = [
  "anyhow",
  "bytemuck",

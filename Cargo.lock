@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.19.6"
+version = "1.20.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.19.6"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin"
-version = "0.19.1"
+version = "0.20.0"
 dependencies = [
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
@@ -949,11 +949,11 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin-abi"
-version = "0.19.1"
+version = "0.20.0"
 
 [[package]]
 name = "fasttiff-plugin-api"
-version = "0.19.1"
+version = "0.20.0"
 
 [[package]]
 name = "fasttiff-plugin-derivatives"

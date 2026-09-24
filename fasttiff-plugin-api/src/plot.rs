@@ -17,6 +17,18 @@
 //! returns and is done, the vtable stays stateless, and nothing acquires a
 //! lifetime the two sides have to agree on. The only new thing is that the host
 //! may start a run the user did not pick from the menu.
+//!
+//! # It crosses a shared library too
+//!
+//! Both halves of that loop travel the C ABI, as of plugin ABI 1.2: a [`Plot`]
+//! goes out through the host's sink one series at a time, and the regions come
+//! back in through the host's table. A plugin in a `.dll` therefore returns a
+//! chart, and is re-run for a new selection, exactly as one compiled into the
+//! app is.
+//!
+//! On an older host a plot is refused with a message saying so, rather than
+//! reported as a success nothing came of. The plugin's other results still
+//! work: a version gap costs the feature, not the plugin.
 
 use crate::selection::Roi;
 

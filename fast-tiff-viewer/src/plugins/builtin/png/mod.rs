@@ -28,6 +28,10 @@
 //! here, and 32-bit integer microscopy data is rare enough that it has not been
 //! worth widening the contract over.
 
+/// Reading one in, which is the other half of the format.
+mod import;
+pub use import::PngImport;
+
 use fasttiff_plugin_api::{
     ExportRequest, Exporter, FileType, HostContext, PixelType, Plane, PluginError, PluginInfo,
 };
