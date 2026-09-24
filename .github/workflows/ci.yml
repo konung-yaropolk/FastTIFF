@@ -36,6 +36,29 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
+      # A path dependency that also carries `version` is a version requirement
+      # against the crate next door, so bumping that crate breaks this one --
+      # and the resolver reports it as a missing candidate, which reads like a
+      # registry problem rather than a manifest that needs one word deleted.
+      # Nothing in this repo publishes an intra-repo path dependency, so none
+      # of them needs the field at all.
+      #
+      # If a crate here ever does get published, it will need versions on its
+      # path dependencies and this check will fail on it. That is the moment to
+      # narrow the check to the crates that are not published, not to delete it.
+      - name: No path dependency pins a version
+        shell: bash
+        run: |
+          pinned=$(grep -rnE '^[a-zA-Z0-9_-]+ *= *\{.*(path.*version|version.*path) *=' --include=Cargo.toml . || true)
+          if [ -n "$pinned" ]; then
+            echo "$pinned"
+            echo
+            echo "A path dependency above also pins a version, so bumping the"
+            echo "crate it points at will break this build. Drop the 'version'"
+            echo "field unless the crate holding it is published."
+            exit 1
+          fi
+
       # The example plugin is deliberately *excluded* from the workspace — it
       # is a worked example rather than part of the product — so `-p` cannot
       # name it and `--workspace` does not test it. Both halves are needed here
