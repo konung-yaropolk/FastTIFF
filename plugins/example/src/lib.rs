@@ -20,6 +20,12 @@
 //!   out of the host, and what crosses in return is a file on disk rather than
 //!   an image.
 //!
+//! * [`PlotMean`] returns a **chart** rather than pixels, which is the one
+//!   result that travels in both directions: the plugin asks for a selection
+//!   tool, the host arms it and runs the plugin again whenever the regions
+//!   change, and the regions come back the other way. It is the only plugin
+//!   here that reads anything the host learned *from the user*.
+//!
 //! # Building one of these yourself
 //!
 //! ```toml
@@ -37,7 +43,7 @@
 use fasttiff_plugin::api::{
     Confidence, ExportRequest, Exporter, FileType, HostContext, HostContextExt, ImageResult,
     ImportHost, ImportRequest, ImportResult, Importer, Outcome, ParamDecl, ParamKind, Params,
-    PixelType, Plane, PlaneData, Plugin, PluginError, PluginInfo,
+    PixelType, Plane, PlaneData, Plot, Plugin, PluginError, PluginInfo, Roi, SelectionKind, Series,
 };
 use std::path::Path;
 
@@ -643,8 +649,136 @@ impl Plugin for Panics {
     }
 }
 
+// ----------------------------------------------------------------------- plot
+
+/// Mean sample value along T, for the whole frame or for each region drawn.
+///
+/// What a timelapse is usually for: how bright something is, as it changes.
+/// The whole frame answers "did anything happen"; a region answers "did it
+/// happen *there*", which is the question a cell is.
+///
+/// # The shape a plot plugin has
+///
+/// There is no session here and no second entry point. [`Plot::wants`] asks the
+/// host for a canvas tool, the host arms it, and every time the regions change
+/// the host calls [`Plugin::run`] **again** — same plugin, same
+/// [`Params`], a new [`HostContext::selection`]. So a plot is a plain function
+/// of what is selected, and this stays an ordinary call that returns.
+///
+/// # Units
+///
+/// The file's own sample values, which is what [`HostContext::read_plane_f32`]
+/// promises — deliberately not the display's units, because a trace rescaled by
+/// the contrast slider would move when the slider did while the specimen sat
+/// still. The x axis is seconds when the file states a frame interval and
+/// frame numbers when it does not, rather than seconds computed from a made-up
+/// interval.
+#[derive(Default)]
+pub struct PlotMean;
+
+impl Plugin for PlotMean {
+    fn info(&self) -> PluginInfo {
+        PluginInfo::new(
+            "dev.fasttiff.example.plotmean",
+            "Plot mean over time (from library)",
+        )
+        .menu_path("Examples")
+        .version(env!("CARGO_PKG_VERSION"))
+        .author("FastTIFF")
+        .description(
+            "Mean value of channel 1 along T, for the whole frame or for each region \
+                 drawn. Loaded from a shared library.",
+        )
+    }
+
+    fn run(
+        &mut self,
+        host: &mut dyn HostContext,
+        _params: &Params,
+    ) -> Result<Outcome, PluginError> {
+        let info = host.image();
+        if info.frames < 2 {
+            return Err(PluginError::unsupported(
+                "this stack has no time axis to plot along",
+            ));
+        }
+        if info.plane_len() == 0 {
+            return Err(PluginError::unsupported("the stack has no pixels"));
+        }
+
+        // Copied out before the first `read_plane_f32`, which takes `host`
+        // mutably. Empty is not "no answer" — it is the whole frame, which is
+        // the question this was asked before anything was drawn.
+        let rois: Vec<Roi> = host.selection().to_vec();
+        let interval = host.stack_info().frame_interval_s;
+
+        // Resolved once rather than per frame: the containment test is the same
+        // answer however many planes it is asked about.
+        let masks: Vec<Vec<usize>> = rois
+            .iter()
+            .map(|r| r.indices(info.width, info.height))
+            .collect();
+
+        let mut traces = vec![Vec::with_capacity(info.frames); masks.len().max(1)];
+        let mut buf = Vec::new();
+        for t in 0..info.frames {
+            if !host.progress(t as f32 / info.frames as f32) {
+                return Ok(Outcome::Cancelled);
+            }
+            host.read_plane_f32(Plane::new(0, 0, t), &mut buf)?;
+            if masks.is_empty() {
+                traces[0].push(mean_of(buf.iter().copied()));
+            } else {
+                for (trace, mask) in traces.iter_mut().zip(&masks) {
+                    trace.push(mean_of(mask.iter().map(|&i| buf[i])));
+                }
+            }
+        }
+
+        let mut plot = Plot::new("Mean over time")
+            .labels(
+                if interval.is_some() {
+                    "Time (s)"
+                } else {
+                    "T (frames)"
+                },
+                "Mean value",
+            )
+            .scale(0.0, interval.unwrap_or(1.0))
+            .wants(SelectionKind::Regions);
+        for (i, values) in traces.into_iter().enumerate() {
+            let label = if masks.is_empty() {
+                "Whole frame".to_string()
+            } else {
+                format!("Region {}", i + 1)
+            };
+            plot = plot.push(Series::new(label, values));
+        }
+        Ok(Outcome::Plot(Box::new(plot)))
+    }
+}
+
+/// The mean of what was measured, or `NaN` when nothing was.
+///
+/// `NaN` rather than zero, because the api reads a non-finite point as a **gap**
+/// and breaks the line there. Zero would draw a trace dipping to the bottom of
+/// the chart, which reads as a measurement of darkness rather than as the
+/// absence of one.
+fn mean_of(values: impl Iterator<Item = f32>) -> f32 {
+    let mut sum = 0.0f64;
+    let mut n = 0u64;
+    for v in values {
+        sum += v as f64;
+        n += 1;
+    }
+    if n == 0 {
+        return f32::NAN;
+    }
+    (sum / n as f64) as f32
+}
+
 fasttiff_plugin::export_plugin! {
-    plugins: [Invert, ShowInfo, Panics],
+    plugins: [Invert, ShowInfo, PlotMean, Panics],
     importers: [RawImport],
     exporters: [CsvExport],
 }

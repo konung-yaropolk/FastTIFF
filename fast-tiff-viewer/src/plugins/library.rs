@@ -32,7 +32,7 @@ use fasttiff_plugin_abi as abi;
 use fasttiff_plugin_api::{
     Confidence, ExportRequest, Exporter, FileType, HostContext, ImageResult, ImportHost,
     ImportRequest, ImportResult, Importer, Outcome, ParamDecl, ParamKind, ParamValue, Params,
-    PixelType, PlaneData, Plugin, PluginError, PluginInfo, StackInfo,
+    PixelType, PlaneData, Plot, Plugin, PluginError, PluginInfo, SelectionKind, Series, StackInfo,
 };
 
 use super::{Origin, Registry};
@@ -759,6 +759,56 @@ unsafe extern "C" fn cb_stack_string(
     s.map(abi::FtStr::from_str).unwrap_or(abi::FtStr::EMPTY)
 }
 
+unsafe extern "C" fn cb_selection_count(ctx: *mut std::ffi::c_void) -> u64 {
+    match (ctx as *mut HostCell).as_mut() {
+        Some(c) => c.inner.selection().len() as u64,
+        // Zero is the honest answer for a context that is not there, and it is
+        // also the harmless one: the api reads no regions as "the whole frame".
+        None => 0,
+    }
+}
+
+unsafe extern "C" fn cb_selection_roi(
+    ctx: *mut std::ffi::c_void,
+    index: u64,
+    out: *mut abi::FtRoi,
+) -> abi::FtStatus {
+    host_guard(|| {
+        let Some(c) = (ctx as *mut HostCell).as_mut() else {
+            return abi::FtStatus::BadArgument;
+        };
+        // Before the index is looked at: somewhere to put the answer is the
+        // caller's side of the contract, and a plugin that passed nowhere has
+        // a bug whatever index it asked for. Checking the index first would
+        // report that bug as an out-of-range region, which is a different
+        // thing and sends the author looking in the wrong place.
+        if out.is_null() {
+            return abi::FtStatus::BadArgument;
+        }
+        let Some(r) = c.inner.selection().get(index as usize).copied() else {
+            return abi::FtStatus::OutOfRange;
+        };
+        let filled = abi::FtRoi {
+            // Overwritten by `write_prefix` with the plugin's own, which is
+            // what describes the allocation being written into.
+            struct_size: 0,
+            shape: match r.shape {
+                fasttiff_plugin_api::Shape::Ellipse => 1,
+                fasttiff_plugin_api::Shape::Rect => 0,
+            },
+            x: r.x,
+            y: r.y,
+            w: r.w,
+            h: r.h,
+        };
+        if abi::write_prefix(out, filled) {
+            abi::FtStatus::Ok
+        } else {
+            abi::FtStatus::BadArgument
+        }
+    })
+}
+
 unsafe extern "C" fn cb_progress(ctx: *mut std::ffi::c_void, fraction: f32) -> u32 {
     match (ctx as *mut HostCell).as_mut() {
         Some(c) => {
@@ -796,6 +846,8 @@ fn host_table(cell: &mut HostCell) -> abi::FtHost {
         log: cb_log,
         stack_info: cb_stack_info,
         stack_string: cb_stack_string,
+        selection_count: cb_selection_count,
+        selection_roi: cb_selection_roi,
     }
 }
 
@@ -821,7 +873,33 @@ struct ResultSink {
     /// Per-channel colours, by index. Sparse: a plugin may colour some
     /// channels and leave the rest to the host.
     colors: std::collections::BTreeMap<u64, [u8; 3]>,
+    /// The chart being declared, once `begin_plot` has been called.
+    plot: Option<PlotSink>,
 }
+
+/// A chart, accumulating. Separate from the image fields above because a run
+/// produces one or the other, never both, and sharing a `name` between them
+/// would let a plugin declare an image and finish it as a plot.
+struct PlotSink {
+    title: String,
+    x_label: String,
+    y_label: String,
+    x_start: f64,
+    x_step: f64,
+    wants: SelectionKind,
+    series: Vec<Series>,
+    /// Points pushed so far, against [`MAX_PLOT_VALUES`].
+    values: u64,
+}
+
+/// More curves than any legend can carry, and more than any plugin means to
+/// push. Bounds a runaway loop one series at a time.
+const MAX_SERIES: usize = 4096;
+
+/// Points in a whole chart, across every series. Ten times past the largest
+/// plot anyone draws — fifty thousand timepoints across thirty regions — and
+/// far short of a plugin that has started allocating by mistake.
+const MAX_PLOT_VALUES: u64 = 1 << 24;
 
 unsafe extern "C" fn sink_begin(
     ctx: *mut std::ffi::c_void,
@@ -929,6 +1007,98 @@ unsafe extern "C" fn sink_push_plane(
     })
 }
 
+unsafe extern "C" fn sink_begin_plot(
+    ctx: *mut std::ffi::c_void,
+    title: abi::FtStr,
+    x_label: abi::FtStr,
+    y_label: abi::FtStr,
+    x_start: f64,
+    x_step: f64,
+    wants: abi::FtSelectionKind,
+) -> abi::FtStatus {
+    host_guard(|| {
+        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+            return abi::FtStatus::BadArgument;
+        };
+        // An axis that is not a number cannot be drawn against, and every
+        // point would land at the same non-place — a chart that looks empty
+        // rather than wrong. Refused where it can still be explained.
+        if !x_start.is_finite() || !x_step.is_finite() {
+            s.problem = Some("the plugin declared a plot whose x axis is not a number".into());
+            return abi::FtStatus::BadArgument;
+        }
+        s.plot = Some(PlotSink {
+            title: title.as_str().unwrap_or("Plot").to_string(),
+            x_label: x_label.as_str().unwrap_or("").to_string(),
+            y_label: y_label.as_str().unwrap_or("").to_string(),
+            x_start,
+            x_step,
+            // A tool from a newer ABI: offering none is the only honest
+            // answer, since this host has no idea what the gesture would be.
+            // The chart still draws; it just will not be recomputed.
+            wants: match wants {
+                abi::FtSelectionKind::Regions => SelectionKind::Regions,
+                _ => SelectionKind::None,
+            },
+            series: Vec::new(),
+            values: 0,
+        });
+        abi::FtStatus::Ok
+    })
+}
+
+unsafe extern "C" fn sink_push_series(
+    ctx: *mut std::ffi::c_void,
+    label: abi::FtStr,
+    values: *const f32,
+    len: u64,
+    color: u32,
+) -> abi::FtStatus {
+    host_guard(|| {
+        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+            return abi::FtStatus::BadArgument;
+        };
+        let Some(p) = s.plot.as_mut() else {
+            s.problem = Some("the plugin pushed a series before declaring the plot".into());
+            return abi::FtStatus::BadArgument;
+        };
+        if p.series.len() >= MAX_SERIES {
+            s.problem = Some(format!("the plugin pushed more than {MAX_SERIES} series"));
+            return abi::FtStatus::BadArgument;
+        }
+        p.values = p.values.saturating_add(len);
+        if p.values > MAX_PLOT_VALUES {
+            s.problem = Some("the plugin declared a plot too large to be real".into());
+            return abi::FtStatus::BadArgument;
+        }
+        // A series may legitimately be empty — a region the plugin measured
+        // nothing in — and then the pointer is never read, exactly as an empty
+        // `FtStr`'s is not.
+        let v = if len == 0 {
+            Vec::new()
+        } else if values.is_null() {
+            s.problem = Some("the plugin pushed a series with no values behind it".into());
+            return abi::FtStatus::BadArgument;
+        } else {
+            // Copied here, inside the call: the plugin's memory is not the
+            // host's to hold on to.
+            std::slice::from_raw_parts(values, len as usize).to_vec()
+        };
+        p.series.push(Series {
+            label: label.as_str().unwrap_or("").to_string(),
+            values: v,
+            // Every value in `0x00RRGGBB` is a colour; only the sentinel is
+            // not, so anything else is taken at face value.
+            color: (color != abi::FT_COLOR_NONE).then_some([
+                (color >> 16) as u8,
+                (color >> 8) as u8,
+                color as u8,
+            ]),
+        });
+        abi::FtStatus::Ok
+    })
+}
+
 unsafe extern "C" fn sink_set_outcome(
     ctx: *mut std::ffi::c_void,
     kind: abi::FtOutcomeKind,
@@ -1019,6 +1189,8 @@ fn sink_table(sink: &mut ResultSink) -> abi::FtSink {
         set_outcome: sink_set_outcome,
         set_info: sink_set_info,
         set_channel: sink_set_channel,
+        begin_plot: sink_begin_plot,
+        push_series: sink_push_series,
     }
 }
 
@@ -1036,6 +1208,22 @@ impl ResultSink {
         match kind {
             abi::FtOutcomeKind::Nothing => Ok(Outcome::Nothing),
             abi::FtOutcomeKind::Message => Ok(Outcome::Message(self.text)),
+            abi::FtOutcomeKind::Plot => {
+                let Some(p) = self.plot else {
+                    return Err(PluginError::failed(format!(
+                        "{name} asked for a plot to be shown without declaring one"
+                    )));
+                };
+                Ok(Outcome::Plot(Box::new(Plot {
+                    title: p.title,
+                    x_label: p.x_label,
+                    y_label: p.y_label,
+                    x_start: p.x_start,
+                    x_step: p.x_step,
+                    series: p.series,
+                    wants: p.wants,
+                })))
+            }
             abi::FtOutcomeKind::NewDocument | abi::FtOutcomeKind::SaveToFile => {
                 // Dense, up to the highest channel the plugin coloured: the
                 // result carries a colour per channel or none at all, and a

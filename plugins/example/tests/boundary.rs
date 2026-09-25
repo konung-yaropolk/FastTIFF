@@ -33,8 +33,8 @@
 use fast_tiff_viewer::plugins::{self, library, Origin, Registry};
 use fasttiff_plugin_api::{
     Confidence, ExportRequest, Exporter, HostContext, ImageResult, ImportHost, ImportRequest,
-    Importer, Outcome, ParamKind, ParamValue, Params, PixelType, Plane, PlaneData, Plugin,
-    StackInfo, VolumeMode, VolumeView,
+    Importer, Outcome, ParamKind, ParamValue, Params, PixelType, Plane, PlaneData, Plugin, Roi,
+    SelectionKind, Shape, StackInfo, VolumeMode, VolumeView,
 };
 use std::path::{Path, PathBuf};
 
@@ -126,6 +126,7 @@ fn the_library_registers_what_it_declares() {
         vec![
             "dev.fasttiff.example.invert",
             "dev.fasttiff.example.showinfo",
+            "dev.fasttiff.example.plotmean",
             "dev.fasttiff.example.panics"
         ],
         "both plugins must register, in the order the macro lists them"
@@ -534,7 +535,7 @@ fn loaded_plugins_join_the_same_registry_as_the_built_ins() {
     for e in loaded.exporters {
         assert!(reg.add_exporter(Box::new(e), Origin::Library));
     }
-    assert_eq!(reg.len(), built_ins + 3);
+    assert_eq!(reg.len(), built_ins + 4);
     assert!(
         reg.problems.is_empty(),
         "the example plugin should install cleanly: {:?}",
@@ -910,7 +911,7 @@ fn a_built_shared_library_loads_and_registers() {
     };
     let loaded = library::load_library(&path)
         .unwrap_or_else(|e| panic!("{} should load: {e}", path.display()));
-    assert_eq!(loaded.plugins.len(), 3);
+    assert_eq!(loaded.plugins.len(), 4);
     assert_eq!(loaded.importers.len(), 1);
     assert_eq!(loaded.plugins[0].info().id, "dev.fasttiff.example.invert");
 }
@@ -1024,4 +1025,248 @@ fn a_real_binary_without_the_entry_point_is_rejected_by_symbol() {
             "unhelpful message: {e}"
         ),
     }
+}
+
+// ------------------------------------------------------------------- plots
+//
+// The one result that crosses in both directions: the chart comes back through
+// the sink, and the regions it is a chart *of* go the other way through the
+// host table. Before ABI 1.2 neither half existed — a `.dll` plugin returning a
+// plot was refused outright, and had it not been, it would have seen an empty
+// selection for ever and silently re-measured the whole frame each time the
+// user drew something.
+
+/// The fixture's sample at plane `t`, pixel index `i`. Stated here rather than
+/// read back out of the stack, so the expected means are arithmetic this test
+/// did itself instead of a second copy of the code under test.
+fn fixture_sample(t: usize, i: usize) -> f64 {
+    (t * 10) as f64 + i as f64 * 0.5
+}
+
+/// The mean over `indices` at plane `t`, as `f32` — the same width the plugin
+/// reports in.
+fn expected_mean(t: usize, indices: &[usize]) -> f32 {
+    let sum: f64 = indices.iter().map(|&i| fixture_sample(t, i)).sum();
+    (sum / indices.len() as f64) as f32
+}
+
+fn run_plot(s: &fast_tiff_viewer::stack::Stack, rois: Vec<Roi>) -> fasttiff_plugin_api::Plot {
+    let mut from_library = plugin("dev.fasttiff.example.plotmean");
+    let view = plugins::describe_view(s, 0, false, volume());
+    let mut host = plugins::StackHost::new(s, view).with_selection(rois);
+    match from_library.run(&mut host, &Params::new()) {
+        Ok(Outcome::Plot(p)) => *p,
+        other => panic!("expected a plot, got {other:?}"),
+    }
+}
+
+/// With nothing drawn, the plugin measures the whole frame — and every field of
+/// the chart survives the crossing.
+#[test]
+fn a_plot_crosses_a_real_library_boundary() {
+    let frames = 4;
+    let s = stack(1, frames);
+    let plot = run_plot(&s, Vec::new());
+
+    assert_eq!(plot.title, "Mean over time");
+    assert_eq!(plot.y_label, "Mean value");
+    // No frame interval in the fixture, so the axis is frame numbers and says
+    // so, rather than seconds computed from an interval nobody stated.
+    assert_eq!(plot.x_label, "T (frames)");
+    assert_eq!((plot.x_start, plot.x_step), (0.0, 1.0));
+    // Without this the host arms no tool, the user can draw nothing, and the
+    // plugin is never called again — a plot that silently cannot be narrowed.
+    assert_eq!(plot.wants, SelectionKind::Regions);
+
+    assert_eq!(plot.series.len(), 1);
+    assert_eq!(plot.series[0].label, "Whole frame");
+    assert_eq!(plot.series[0].color, None);
+    let all: Vec<usize> = (0..20).collect();
+    let want: Vec<f32> = (0..frames).map(|t| expected_mean(t, &all)).collect();
+    assert_eq!(plot.series[0].values, want);
+    // Not vacuous: the trace has to actually go somewhere.
+    assert!(want[0] != want[frames - 1]);
+}
+
+/// The regions the user drew reach a plugin on the other side of the boundary,
+/// and each one gets its own trace.
+#[test]
+fn the_regions_the_user_drew_reach_a_library_plugin() {
+    let frames = 3;
+    let s = stack(1, frames);
+    // The fixture is 5x4. Two regions that share no pixel, so a swap or a
+    // dropped offset cannot land on the same numbers.
+    let a = Roi {
+        shape: Shape::Rect,
+        x: 0,
+        y: 0,
+        w: 2,
+        h: 2,
+    };
+    let b = Roi {
+        shape: Shape::Rect,
+        x: 3,
+        y: 2,
+        w: 2,
+        h: 2,
+    };
+    let plot = run_plot(&s, vec![a, b]);
+
+    assert_eq!(plot.series.len(), 2, "one trace per region");
+    assert_eq!(plot.series[0].label, "Region 1");
+    assert_eq!(plot.series[1].label, "Region 2");
+    for (series, roi) in plot.series.iter().zip([a, b]) {
+        let idx = roi.indices(5, 4);
+        let want: Vec<f32> = (0..frames).map(|t| expected_mean(t, &idx)).collect();
+        assert_eq!(series.values, want, "for {roi:?}");
+    }
+    // The two regions must genuinely disagree, or the test would pass with the
+    // geometry ignored entirely.
+    assert!(plot.series[0].values[0] != plot.series[1].values[0]);
+}
+
+/// An ellipse crosses as an ellipse.
+///
+/// The shape is one `u32` in the middle of the region, and dropping it is
+/// invisible: the plugin would measure the bounding box instead, over the right
+/// frames, in the right units, and produce a trace that looks completely
+/// ordinary and is averaged over the wrong pixels.
+///
+/// This one needs its own fixture. The stack every other test uses rises
+/// linearly with the pixel index, and a rectangle and the ellipse inscribed in
+/// it are both symmetric about the same centre — so over a straight ramp their
+/// means are *equal*, and the test would pass with the shape thrown away. The
+/// field here is the square of the index, under which a symmetric set no longer
+/// averages to its centre.
+#[test]
+fn an_ellipse_crosses_as_an_ellipse() {
+    let (w, h) = (5u32, 4u32);
+    let n = (w * h) as usize;
+    let curved = |t: usize, i: usize| (t * 400 + i * i) as f64;
+    let img = ImageResult {
+        width: w,
+        height: h,
+        channels: 1,
+        slices: 1,
+        frames: 2,
+        pixel_type: PixelType::F32,
+        planes: (0..2)
+            .map(|t| PlaneData::F32((0..n).map(|i| curved(t, i) as f32).collect()))
+            .collect(),
+        channel_colors: Vec::new(),
+        metadata: None,
+        name: "curved".into(),
+    };
+    let s = plugins::to_stack(&img, None, false).expect("the fixture should open");
+    let mean = |t: usize, idx: &[usize]| -> f32 {
+        (idx.iter().map(|&i| curved(t, i)).sum::<f64>() / idx.len() as f64) as f32
+    };
+
+    let rect = Roi {
+        shape: Shape::Rect,
+        x: 0,
+        y: 0,
+        w: 4,
+        h: 4,
+    };
+    let ellipse = rect.with_shape(Shape::Ellipse);
+    let (ri, ei) = (rect.indices(w, h), ellipse.indices(w, h));
+
+    // The premise, asserted rather than assumed: if the two shapes agreed here
+    // the rest of this test would prove nothing at all.
+    assert!(ei.len() < ri.len(), "the ellipse must be the smaller set");
+    assert!(
+        mean(0, &ri) != mean(0, &ei),
+        "the fixture must tell the two shapes apart"
+    );
+
+    let plot = run_plot(&s, vec![ellipse]);
+    assert_eq!(plot.series[0].values[0], mean(0, &ei));
+    assert!(
+        plot.series[0].values[0] != mean(0, &ri),
+        "the shape was dropped and the bounding box measured instead"
+    );
+}
+
+/// A stated frame interval makes the axis seconds, and the interval itself
+/// crosses as the x step.
+///
+/// Worth its own case because the step is `1.0` by default: a plugin whose
+/// scale never crossed would produce a correct-looking chart on every file that
+/// does not state an interval.
+#[test]
+fn a_calibrated_time_axis_crosses_as_seconds() {
+    let (w, h, frames) = (5u32, 4u32, 3usize);
+    let n = (w * h) as usize;
+    let planes: Vec<PlaneData> = (0..frames)
+        .map(|t| PlaneData::F32((0..n).map(|i| fixture_sample(t, i) as f32).collect()))
+        .collect();
+    let img = ImageResult {
+        width: w,
+        height: h,
+        channels: 1,
+        slices: 1,
+        frames,
+        pixel_type: PixelType::F32,
+        planes,
+        channel_colors: Vec::new(),
+        metadata: None,
+        name: "timed".into(),
+    };
+    let info = StackInfo {
+        name: "timed".into(),
+        frame_interval_s: Some(0.25),
+        ..Default::default()
+    };
+    let s = plugins::to_stack(&img, Some(&info), false).expect("the fixture should open");
+
+    let plot = run_plot(&s, Vec::new());
+    assert_eq!(plot.x_label, "Time (s)");
+    assert_eq!(
+        plot.x_step, 0.25,
+        "the frame interval did not reach the plugin"
+    );
+    // And the axis it produces: point 2 is half a second in.
+    assert_eq!(plot.x_at(2), 0.5);
+}
+
+/// A region the user drew off the picture measures nothing, and says so with a
+/// gap rather than with a zero.
+#[test]
+fn a_region_that_covers_no_pixels_becomes_a_gap() {
+    let s = stack(1, 2);
+    // Inside the coordinate space but past the 5x4 image.
+    let away = Roi {
+        shape: Shape::Rect,
+        x: 40,
+        y: 40,
+        w: 2,
+        h: 2,
+    };
+    let plot = run_plot(&s, vec![away]);
+
+    assert_eq!(plot.series.len(), 1);
+    assert!(
+        plot.series[0].values.iter().all(|v| v.is_nan()),
+        "a region with no pixels must read as a gap, not as darkness: {:?}",
+        plot.series[0].values
+    );
+    // And the host draws nothing rather than a flat line at zero.
+    assert_eq!(plot.range(), None);
+}
+
+/// A stack with no time axis is refused, rather than plotted as a single point.
+#[test]
+fn a_stack_with_no_time_axis_is_refused_across_the_boundary() {
+    let mut from_library = plugin("dev.fasttiff.example.plotmean");
+    let s = stack(1, 1);
+    let view = plugins::describe_view(&s, 0, false, volume());
+    let mut host = plugins::StackHost::new(&s, view);
+    let err = from_library
+        .run(&mut host, &Params::new())
+        .expect_err("a single frame is not a time series");
+    assert!(
+        err.to_string().contains("time axis"),
+        "the reason did not cross: {err}"
+    );
 }

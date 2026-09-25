@@ -21,7 +21,25 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-fasttiff-plugin = { path = "../../fasttiff-plugin", version = "0.19.0" }
+# Path only, with no `version`. It is worth knowing why, because adding one
+# back looks like an improvement and is not.
+#
+# On a path dependency `version` is not documentation — it is a requirement,
+# checked against whatever version that path's manifest currently declares.
+# `version = "0.19.0"` means `^0.19.0`, and a 0.x minor bump is breaking under
+# semver, so the day `fasttiff-plugin` became 0.20.0 this crate stopped
+# resolving:
+#
+#     error: failed to select a version for the requirement
+#     `fasttiff-plugin = "^0.19.0"`
+#     candidate versions found which didn't match: 0.20.0
+#
+# Cargo only *needs* that field when the depending crate is published, so the
+# registry copy of its manifest has something resolvable. This crate is
+# `publish = false`, so the field bought nothing and cost a red CI run on every
+# bump. Every other intra-repo dependency in this workspace is already path
+# only, which is why this was the only one that ever broke.
+fasttiff-plugin = { path = "../../fasttiff-plugin" }
 
 # The host, so `tests/boundary.rs` can drive the real loader against this
 # plugin. The dependency points this way round on purpose. The test has to run

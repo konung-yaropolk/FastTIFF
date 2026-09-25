@@ -1439,3 +1439,231 @@ fn an_exporter_with_a_malformed_file_type_is_refused() {
     let err = load(query).expect_err("a malformed file type must be refused");
     assert_eq!(err, "an exporter declares a malformed file type");
 }
+
+// ------------------------------------------------------- what a plot may say
+//
+// A plugin that behaves cannot reach any of these: `write_outcome` only ever
+// pushes a well-formed chart. They are driven straight at the sink because
+// that is the only way to be a plugin that does not behave — and a guard
+// nobody has fired is a guard nobody knows works.
+
+/// Run `f` against a real result sink and hand back what it collected.
+fn against_the_sink(f: impl FnOnce(&abi::FtSink)) -> ResultSink {
+    let mut sink = ResultSink::default();
+    let table = sink_table(&mut sink);
+    f(&table);
+    sink
+}
+
+/// Declare a chart with the axis and tool given, and nothing else.
+unsafe fn begin(t: &abi::FtSink, x_start: f64, x_step: f64) -> abi::FtStatus {
+    (t.begin_plot)(
+        t.ctx,
+        abi::FtStr::from_str("T"),
+        abi::FtStr::from_str("x"),
+        abi::FtStr::from_str("y"),
+        x_start,
+        x_step,
+        abi::FtSelectionKind::Regions,
+    )
+}
+
+/// The happy path, so the refusals below are not just "everything is refused".
+#[test]
+fn a_well_formed_plot_arrives_as_one() {
+    let sink = against_the_sink(|t| unsafe {
+        assert_eq!(begin(t, 2.5, 0.25), abi::FtStatus::Ok);
+        let v = [1.0f32, 2.0, 3.0];
+        assert_eq!(
+            (t.push_series)(
+                t.ctx,
+                abi::FtStr::from_str("Region 1"),
+                v.as_ptr(),
+                3,
+                0x000A_141E,
+            ),
+            abi::FtStatus::Ok
+        );
+        assert_eq!(
+            (t.push_series)(
+                t.ctx,
+                abi::FtStr::from_str("Region 2"),
+                core::ptr::null(),
+                0,
+                abi::FT_COLOR_NONE,
+            ),
+            abi::FtStatus::Ok
+        );
+        (t.set_outcome)(t.ctx, abi::FtOutcomeKind::Plot, abi::FtStr::EMPTY);
+    });
+
+    let Ok(Outcome::Plot(p)) = sink.finish("test") else {
+        panic!("a well-formed chart should arrive");
+    };
+    assert_eq!(p.title, "T");
+    assert_eq!((p.x_start, p.x_step), (2.5, 0.25));
+    assert_eq!(p.wants, SelectionKind::Regions);
+    assert_eq!(p.series.len(), 2);
+    assert_eq!(p.series[0].values, vec![1.0, 2.0, 3.0]);
+    assert_eq!(p.series[0].color, Some([10, 20, 30]));
+    // An empty series is a region nothing was measured in, which is a fact
+    // about the data rather than an error.
+    assert!(p.series[1].values.is_empty());
+    // The sentinel is not a colour, and must not arrive as one.
+    assert_eq!(p.series[1].color, None);
+}
+
+/// A tool this host has never heard of arms nothing, and the chart still draws.
+///
+/// The forward-compatibility path: a plugin built against a later minor may ask
+/// for a gesture this host cannot offer. Refusing the whole chart over it would
+/// throw away a measurement that is perfectly good.
+#[test]
+fn a_tool_this_host_does_not_know_arms_nothing() {
+    let sink = against_the_sink(|t| unsafe {
+        (t.begin_plot)(
+            t.ctx,
+            abi::FtStr::from_str("T"),
+            abi::FtStr::EMPTY,
+            abi::FtStr::EMPTY,
+            0.0,
+            1.0,
+            abi::FtSelectionKind(999),
+        );
+        (t.set_outcome)(t.ctx, abi::FtOutcomeKind::Plot, abi::FtStr::EMPTY);
+    });
+    let Ok(Outcome::Plot(p)) = sink.finish("test") else {
+        panic!("the chart should still arrive");
+    };
+    assert_eq!(p.wants, SelectionKind::None);
+}
+
+/// An axis that is not a number is refused while it can still be explained.
+#[test]
+fn an_axis_that_is_not_a_number_is_refused() {
+    for (start, step) in [
+        (f64::NAN, 1.0),
+        (0.0, f64::NAN),
+        (f64::INFINITY, 1.0),
+        (0.0, f64::NEG_INFINITY),
+    ] {
+        let sink = against_the_sink(|t| unsafe {
+            assert_eq!(begin(t, start, step), abi::FtStatus::BadArgument);
+            (t.set_outcome)(t.ctx, abi::FtOutcomeKind::Plot, abi::FtStr::EMPTY);
+        });
+        let err = sink.finish("test").expect_err("must be refused");
+        assert!(
+            err.to_string().contains("not a number"),
+            "unhelpful for ({start}, {step}): {err}"
+        );
+    }
+}
+
+#[test]
+fn a_series_pushed_before_the_plot_is_refused() {
+    let sink = against_the_sink(|t| unsafe {
+        let v = [1.0f32];
+        assert_eq!(
+            (t.push_series)(t.ctx, abi::FtStr::EMPTY, v.as_ptr(), 1, abi::FT_COLOR_NONE),
+            abi::FtStatus::BadArgument
+        );
+        (t.set_outcome)(t.ctx, abi::FtOutcomeKind::Plot, abi::FtStr::EMPTY);
+    });
+    let err = sink.finish("test").expect_err("must be refused");
+    assert!(
+        err.to_string().contains("before declaring the plot"),
+        "{err}"
+    );
+}
+
+/// A length with no memory behind it, which is the null-pointer case that
+/// would otherwise be a read from address zero.
+#[test]
+fn a_series_with_no_values_behind_it_is_refused() {
+    let sink = against_the_sink(|t| unsafe {
+        begin(t, 0.0, 1.0);
+        assert_eq!(
+            (t.push_series)(t.ctx, abi::FtStr::EMPTY, core::ptr::null(), 4, 0),
+            abi::FtStatus::BadArgument
+        );
+        (t.set_outcome)(t.ctx, abi::FtOutcomeKind::Plot, abi::FtStr::EMPTY);
+    });
+    let err = sink.finish("test").expect_err("must be refused");
+    assert!(err.to_string().contains("no values behind it"), "{err}");
+}
+
+/// A declared length that cannot be real is refused before a slice that size
+/// is ever constructed from it.
+#[test]
+fn a_plot_too_large_to_be_real_is_refused() {
+    let sink = against_the_sink(|t| unsafe {
+        begin(t, 0.0, 1.0);
+        let v = [1.0f32];
+        assert_eq!(
+            (t.push_series)(t.ctx, abi::FtStr::EMPTY, v.as_ptr(), u64::MAX, 0),
+            abi::FtStatus::BadArgument
+        );
+        (t.set_outcome)(t.ctx, abi::FtOutcomeKind::Plot, abi::FtStr::EMPTY);
+    });
+    let err = sink.finish("test").expect_err("must be refused");
+    assert!(err.to_string().contains("too large to be real"), "{err}");
+}
+
+/// And a runaway loop pushing one empty series at a time, which no single
+/// length check would catch.
+#[test]
+fn a_plugin_pushing_series_without_end_is_stopped() {
+    let sink = against_the_sink(|t| unsafe {
+        begin(t, 0.0, 1.0);
+        let mut refused = None;
+        for i in 0..MAX_SERIES + 10 {
+            let st = (t.push_series)(t.ctx, abi::FtStr::EMPTY, core::ptr::null(), 0, 0);
+            if st != abi::FtStatus::Ok {
+                refused = Some(i);
+                break;
+            }
+        }
+        assert_eq!(refused, Some(MAX_SERIES), "it should stop at the cap");
+        (t.set_outcome)(t.ctx, abi::FtOutcomeKind::Plot, abi::FtStr::EMPTY);
+    });
+    let err = sink.finish("test").expect_err("must be refused");
+    assert!(err.to_string().contains("more than"), "{err}");
+}
+
+/// Asking for a chart nobody declared is refused rather than drawn empty.
+#[test]
+fn a_plot_finished_without_being_declared_is_refused() {
+    let sink = against_the_sink(|t| unsafe {
+        (t.set_outcome)(t.ctx, abi::FtOutcomeKind::Plot, abi::FtStr::EMPTY);
+    });
+    let err = sink.finish("test").expect_err("must be refused");
+    assert!(err.to_string().contains("without declaring one"), "{err}");
+}
+
+/// The host answers honestly about a region index nobody drew.
+#[test]
+fn a_region_that_was_never_drawn_is_out_of_range() {
+    let mut inner = FakeHost::default();
+    let mut cell = HostCell::new(&mut inner, "n".into(), String::new());
+    let table = host_table(&mut cell);
+    unsafe {
+        assert_eq!((table.selection_count)(table.ctx), 0);
+        let mut roi = abi::FtRoi {
+            struct_size: std::mem::size_of::<abi::FtRoi>() as u32,
+            shape: 0,
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        };
+        assert_eq!(
+            (table.selection_roi)(table.ctx, 0, &mut roi),
+            abi::FtStatus::OutOfRange
+        );
+        // And an out-parameter that cannot carry its own prologue.
+        assert_eq!(
+            (table.selection_roi)(table.ctx, 0, std::ptr::null_mut()),
+            abi::FtStatus::BadArgument
+        );
+    }
+}

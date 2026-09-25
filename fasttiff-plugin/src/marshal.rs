@@ -14,7 +14,7 @@
 use crate::abi::*;
 use crate::api::{
     Confidence, ExportRequest, Exporter, ImportHost, ImportRequest, Importer, Outcome, ParamDecl,
-    ParamKind, ParamValue, Params, PixelType, PlaneData, Plugin,
+    ParamKind, ParamValue, Params, PixelType, PlaneData, Plugin, SelectionKind,
 };
 use crate::{guard, status_of, CHost};
 
@@ -154,6 +154,117 @@ unsafe extern "C" fn no_exporters(
     FtStatus::Unsupported
 }
 
+/// The stubs written over an [`FtSink`] tail the host does not have. Each is
+/// guarded by its own `ft_covers!` at the call site, so none is ever reached;
+/// they exist because a value with an uninitialised byte in it is undefined
+/// behaviour whether or not that byte is read.
+unsafe extern "C" fn no_set_info(
+    _ctx: *mut core::ffi::c_void,
+    _info: *const FtStackInfo,
+    _unit: FtStr,
+    _description: FtStr,
+) -> FtStatus {
+    FtStatus::Unsupported
+}
+
+unsafe extern "C" fn no_set_channel(
+    _ctx: *mut core::ffi::c_void,
+    _index: u64,
+    _name: FtStr,
+    _rgb: u32,
+) -> FtStatus {
+    FtStatus::Unsupported
+}
+
+unsafe extern "C" fn no_begin_plot(
+    _ctx: *mut core::ffi::c_void,
+    _title: FtStr,
+    _x_label: FtStr,
+    _y_label: FtStr,
+    _x_start: f64,
+    _x_step: f64,
+    _wants: FtSelectionKind,
+) -> FtStatus {
+    FtStatus::Unsupported
+}
+
+unsafe extern "C" fn no_push_series(
+    _ctx: *mut core::ffi::c_void,
+    _label: FtStr,
+    _values: *const f32,
+    _len: u64,
+    _color: u32,
+) -> FtStatus {
+    FtStatus::Unsupported
+}
+
+/// The host's result sink, copied into a value this plugin may safely hold.
+///
+/// The same dance as [`registrar_of`], and for the same reason — but this one
+/// is load-bearing rather than defensive, because [`FtSink`] has now grown
+/// twice. A minor-1 host allocates six pointers' worth and a plugin built
+/// today believes in eight, so the obvious spelling, `&*sink`, forms a
+/// reference to eight pointers over an allocation holding six. That is
+/// undefined behaviour at the moment the reference is created, before any
+/// field is read and before any `covers` check can run. It has to be a copy,
+/// bounded by what the host says it allocated.
+///
+/// The host's own `struct_size` is what gets copied, not overwritten with this
+/// plugin's: every `ft_covers!` on the result therefore still asks about the
+/// *host's* table, which is the whole point of holding one.
+///
+/// # Safety
+/// `sink` must point at a sink the host allocated, valid for its own declared
+/// size, for the duration of the call.
+unsafe fn sink_of(sink: *const FtSink) -> Result<FtSink, FtStatus> {
+    if !crate::abi::covers(sink, FtSink::CORE) {
+        crate::last_error::set("the host's result sink is too small to be a FastTIFF plugin host");
+        return Err(FtStatus::BadArgument);
+    }
+    let declared = crate::abi::declared_size(sink) as usize;
+    let mut buf = core::mem::MaybeUninit::<FtSink>::uninit();
+    core::ptr::copy_nonoverlapping(
+        sink.cast::<u8>(),
+        buf.as_mut_ptr().cast::<u8>(),
+        declared.min(core::mem::size_of::<FtSink>()),
+    );
+    // Every field the copy did not reach, written in the order they were
+    // appended. `offset_of!(FtSink, push_series) + p == size_of` is pinned in
+    // the ABI crate, so the next appended field fails that assertion rather
+    // than silently leaving a hole here.
+    let p = buf.as_mut_ptr();
+    if !crate::abi::ft_covers!(sink, FtSink, set_info) {
+        core::ptr::addr_of_mut!((*p).set_info).write(no_set_info);
+    }
+    if !crate::abi::ft_covers!(sink, FtSink, set_channel) {
+        core::ptr::addr_of_mut!((*p).set_channel).write(no_set_channel);
+    }
+    if !crate::abi::ft_covers!(sink, FtSink, begin_plot) {
+        core::ptr::addr_of_mut!((*p).begin_plot).write(no_begin_plot);
+    }
+    if !crate::abi::ft_covers!(sink, FtSink, push_series) {
+        core::ptr::addr_of_mut!((*p).push_series).write(no_push_series);
+    }
+    Ok(buf.assume_init())
+}
+
+/// The host's dialog sink, copied for the same reason [`sink_of`] copies.
+///
+/// [`FtParamSink`] has never grown, so today the copy is exact and this is
+/// only the check written where it can actually run: reading `struct_size`
+/// through a reference that had to exist first is the bug it is meant to
+/// catch.
+///
+/// # Safety
+/// As [`sink_of`].
+unsafe fn param_sink_of(sink: *const FtParamSink) -> Result<FtParamSink, FtStatus> {
+    if !crate::abi::fits(sink) {
+        crate::last_error::set("the host's dialog sink is older than this plugin's ABI");
+        return Err(FtStatus::BadArgument);
+    }
+    Ok(core::ptr::read(sink))
+}
+
 /// Register one exporter type with the host.
 ///
 /// `Ok` on a host too old to have exporters, not an error: `add_exporter` was
@@ -230,7 +341,10 @@ unsafe extern "C" fn export_params_shim<T: Exporter + Default>(
             Err(s) => return s,
         };
         let decls = T::default().params(&h);
-        push_decls(&*sink, &decls)
+        match param_sink_of(sink) {
+            Ok(s) => push_decls(&s, &decls),
+            Err(e) => e,
+        }
     })
 }
 
@@ -289,7 +403,10 @@ unsafe extern "C" fn params_shim<T: Plugin + Default>(
             Err(s) => return s,
         };
         let decls = T::default().params(&h);
-        push_decls(&*sink, &decls)
+        match param_sink_of(sink) {
+            Ok(s) => push_decls(&s, &decls),
+            Err(e) => e,
+        }
     })
 }
 
@@ -300,9 +417,10 @@ unsafe extern "C" fn run_shim<T: Plugin + Default>(
     sink: *const FtSink,
 ) -> FtStatus {
     guard(|| {
-        if sink.is_null() {
-            return FtStatus::BadArgument;
-        }
+        let sink = match sink_of(sink) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
         let mut h = match CHost::new(host) {
             Ok(h) => h,
             Err(s) => return s,
@@ -318,7 +436,7 @@ unsafe extern "C" fn run_shim<T: Plugin + Default>(
             }
         };
         match T::default().run(&mut h, &params) {
-            Ok(o) => write_outcome(&*sink, o),
+            Ok(o) => write_outcome(&sink, o),
             Err(e) => status_of(&e),
         }
     })
@@ -365,7 +483,10 @@ unsafe extern "C" fn import_params_shim<T: Importer + Default>(
             return FtStatus::BadArgument;
         };
         let decls = T::default().params(std::path::Path::new(p));
-        push_decls(&*sink, &decls)
+        match param_sink_of(sink) {
+            Ok(s) => push_decls(&s, &decls),
+            Err(e) => e,
+        }
     })
 }
 
@@ -377,9 +498,10 @@ unsafe extern "C" fn import_shim<T: Importer + Default>(
     sink: *const FtSink,
 ) -> FtStatus {
     guard(|| {
-        if sink.is_null() {
-            return FtStatus::BadArgument;
-        }
+        let sink = match sink_of(sink) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
         let Some(p) = path.as_str() else {
             return FtStatus::BadArgument;
         };
@@ -389,7 +511,11 @@ unsafe extern "C" fn import_shim<T: Importer + Default>(
         };
 
         // An importer runs before anything is open, so the host table may be
-        // absent; progress and logging then go nowhere, which is correct.
+        // absent; progress and logging then go nowhere, which is correct. A
+        // table that is present is *copied* by its own declared size rather
+        // than read whole — see `host_of`. Reading it whole is what this used
+        // to do, and appending to `FtHost` turned that into a read past the end
+        // of every already-shipped host's allocation.
         struct Progress(Option<FtHost>);
         impl ImportHost for Progress {
             fn progress(&mut self, f: f32) -> bool {
@@ -404,7 +530,7 @@ unsafe extern "C" fn import_shim<T: Importer + Default>(
                 }
             }
         }
-        let mut ph = Progress(if host.is_null() { None } else { Some(*host) });
+        let mut ph = Progress(crate::host::host_of(host).ok());
 
         let request = ImportRequest {
             path: std::path::PathBuf::from(p),
@@ -422,14 +548,14 @@ unsafe extern "C" fn import_shim<T: Importer + Default>(
                 // import without its metadata is worth having, and refusing
                 // one because the host is a version behind is not.
                 if let Some(info) = r.info.as_ref() {
-                    if crate::abi::ft_covers!(&*sink as *const FtSink, FtSink, set_info) {
-                        let st = write_stack_info(&*sink, info);
+                    if crate::abi::ft_covers!(&sink as *const FtSink, FtSink, set_info) {
+                        let st = write_stack_info(&sink, info);
                         if st != FtStatus::Ok {
                             return st;
                         }
                     }
                 }
-                write_image(&*sink, &r.image, &name, FtOutcomeKind::NewDocument, "")
+                write_image(&sink, &r.image, &name, FtOutcomeKind::NewDocument, "")
             }
             Err(e) => status_of(&e),
         }
@@ -488,11 +614,10 @@ unsafe fn write_stack_info(sink: &FtSink, info: &crate::api::StackInfo) -> FtSta
 }
 
 /// Push a declaration list through the host's sink, one control at a time.
+///
+/// The size check that used to be here has moved to [`param_sink_of`], which
+/// is where it can be made before the reference exists rather than after.
 unsafe fn push_decls(sink: &FtParamSink, decls: &[ParamDecl]) -> FtStatus {
-    if (sink.struct_size as usize) < core::mem::size_of::<FtParamSink>() {
-        crate::last_error::set("the host's dialog sink is older than this plugin's ABI");
-        return FtStatus::BadArgument;
-    }
     for d in decls {
         // The option strings must outlive the push, so they live here.
         let opts: Vec<FtStr> = match &d.kind {
@@ -635,19 +760,62 @@ pub unsafe fn write_outcome(sink: &FtSink, outcome: Outcome) -> FtStatus {
             let name = image.name.clone();
             write_image(sink, &image, &name, FtOutcomeKind::SaveToFile, &path)
         }
-        // Not yet carried across the C boundary: a plot needs its own sink
-        // callbacks (a series is a label plus a run of floats, which is the
-        // same push-per-item shape `push_plane` already has). A plugin compiled
-        // *into* the host returns one fine — `Outcome::Plot` is part of the
-        // Rust contract — so this is the one place the two lanes differ, and it
-        // says so rather than dropping the result on the floor.
-        Outcome::Plot(_) => {
-            crate::last_error::set(
-                "this plugin returned a plot, which this ABI version cannot carry across                  a shared library boundary; compile it into the host instead",
-            );
-            FtStatus::Unsupported
+        Outcome::Plot(plot) => write_plot(sink, &plot),
+    }
+}
+
+/// Declare a chart, push every series, then say to show it.
+///
+/// The same shape as [`write_image`], for the same reason: a series is a label
+/// and a run of floats, which is a push-per-item, and pushing means no
+/// allocation crosses.
+unsafe fn write_plot(sink: &FtSink, plot: &crate::api::Plot) -> FtStatus {
+    // Minor 1 and older hosts have nowhere to put a chart. Saying so beats
+    // both alternatives: returning `Ok` would look like a plugin that silently
+    // does nothing, and refusing at *load* would keep a plugin's other work
+    // from running on a host that can do all of it but this.
+    if !crate::abi::ft_covers!(sink as *const FtSink, FtSink, push_series) {
+        crate::last_error::set(
+            "this plugin returned a plot, and this host is too old to show one; it \
+             needs a FastTIFF built against plugin ABI 1.2 or newer",
+        );
+        return FtStatus::Unsupported;
+    }
+    let st = (sink.begin_plot)(
+        sink.ctx,
+        FtStr::from_str(&plot.title),
+        FtStr::from_str(&plot.x_label),
+        FtStr::from_str(&plot.y_label),
+        plot.x_start,
+        plot.x_step,
+        match plot.wants {
+            SelectionKind::Regions => FtSelectionKind::Regions,
+            SelectionKind::None => FtSelectionKind::None,
+        },
+    );
+    if st != FtStatus::Ok {
+        return st;
+    }
+    for s in &plot.series {
+        let color = match s.color {
+            Some(c) => (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32,
+            None => FT_COLOR_NONE,
+        };
+        // An empty series pushes a dangling-but-aligned pointer with a zero
+        // length, which the contract says the host never reads — the same rule
+        // `FtStr` has for an empty string.
+        let st = (sink.push_series)(
+            sink.ctx,
+            FtStr::from_str(&s.label),
+            s.values.as_ptr(),
+            s.values.len() as u64,
+            color,
+        );
+        if st != FtStatus::Ok {
+            return st;
         }
     }
+    (sink.set_outcome)(sink.ctx, FtOutcomeKind::Plot, FtStr::EMPTY)
 }
 
 /// Declare a result's shape, push every plane, then say what to do with it.
