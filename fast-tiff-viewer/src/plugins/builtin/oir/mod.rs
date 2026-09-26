@@ -41,6 +41,26 @@
 //! whole planes, so opening the first reads them all — see
 //! [`acquisition_parts`].
 //!
+//! # Files that are not finished
+//!
+//! The block index is the **last** thing an acquisition writes. A recording
+//! still in progress, or one whose tail was lost, has no index — and the
+//! offset at `0x28` that should say where it lives is either zero or points
+//! past the end of what was written. Reading from the index is therefore the
+//! one thing that cannot be done to such a file, and it is where this reader
+//! used to stop.
+//!
+//! It no longer has to. Blocks are self-delimiting, so when the index is
+//! missing or unusable the stream is **walked** from the first block instead —
+//! see [`walk_blocks`]. The walk stops at the first block that does not fit in
+//! what is there, which is exactly what a half-written tail looks like, and
+//! everything in front of it is whole. [`Shape::derive`] then drops the
+//! part-written plane at the end as it already did for an acquisition stopped
+//! mid-frame, and the import says what it recovered.
+//!
+//! This is a snapshot, not a subscription: what was on disk when the file was
+//! opened is what is read. Reopening it later reads more.
+//!
 //! # Metadata
 //!
 //! Everything a converted file says about the acquisition comes out of the OIR
@@ -119,6 +139,40 @@ const MAX_PLANES: usize = 200_000;
 /// Parts of one acquisition to look for. Far beyond any real recording, and a
 /// bound on the directory scan rather than a limit anyone should reach.
 const MAX_PARTS: usize = 9_999;
+
+/// Where the block stream is looked for when there is no index to say.
+///
+/// The first block's position is **found, not assumed**: a real acquisition
+/// starts at `0x60`, behind a 16-byte structure this reader has no other use
+/// for, while the synthetic files in this module's tests start at `0x50`.
+const FIRST_BLOCK_FROM: u64 = 0x50;
+/// Candidates are eight-byte aligned, because every field in the header is.
+const FIRST_BLOCK_STEP: u64 = 8;
+/// How far past the header to look — room for a header structure an order of
+/// magnitude larger than any seen, and a bound so a file of rubbish ends rather
+/// than hangs.
+const FIRST_BLOCK_CANDIDATES: usize = 64;
+/// Consecutive plausible blocks a candidate must show before it is believed.
+///
+/// One is not enough, and this is the trap the whole of [`find_first_block`]
+/// exists to avoid: `0x50` in a real acquisition holds `u32 3, u32 2`, which
+/// reads perfectly well as a three-byte block of type 2. A reader satisfied
+/// with one block takes it, lands at `0x5b`, reads the bytes there as a length
+/// and is desynchronised from every block in the file — producing not an error
+/// but a wrong picture. The second block never parses from there, so a run is
+/// what rejects it.
+const FIRST_BLOCK_PROBE: usize = 4;
+/// Block types in real files run 0 to 5. This is the bound
+/// [`find_first_block`] uses to tell a real block header from two halves of
+/// something else; the walk itself never checks the type, because an unknown
+/// type is simply stepped over.
+const MAX_BLOCK_TYPE: u32 = 15;
+/// Consecutive zero-length blocks tolerated before the walk gives up.
+///
+/// A zero-length block is legitimate — one type-5 marker ends every timepoint —
+/// but a region of zeros parses as an endless run of them, and stepping eight
+/// bytes at a time through a gigabyte of zeros is a hang, not an error.
+const MAX_EMPTY_RUN: usize = 4_096;
 /// How much of a block to read before deciding whether it holds XML. See
 /// [`embedded_xml`].
 const XML_PEEK: usize = 512;
@@ -169,6 +223,9 @@ impl Importer for Oir {
         // carries the frame timestamps of the frames *it* holds, and the
         // recording's timing is not in any one of them.
         let mut indexes: Vec<Vec<u64>> = Vec::with_capacity(parts.len());
+        // Parts that had no usable index and had to be walked, which is what a
+        // recording still in progress looks like.
+        let mut walked = 0usize;
         // The bar follows bytes, not parts: the parts of a split recording are
         // not the same size, and the last is usually short.
         let sizes: Vec<u64> = parts
@@ -180,25 +237,66 @@ impl Importer for Oir {
         for (part, path) in parts.iter().enumerate() {
             let file = File::open(path)
                 .map_err(|e| PluginError::failed(format!("could not open the file: {e}")))?;
-            // SAFETY: the standard caveat of a mapping — the file must not be
-            // written while it is mapped. These are acquisition files, finished
-            // before they are opened, and this reader only ever reads. It is
-            // the same bargain the TIFF reader in `fast-tiff-lib` makes for the
-            // same reason.
+            // SAFETY: the standard caveat of a mapping — the bytes under it
+            // must not change. They do not: a mapping's length is fixed when
+            // it is made, and an acquisition only ever *appends*, so a file
+            // still being written is read as the snapshot it was at this
+            // moment and every byte in that snapshot is one already written
+            // and never rewritten. That is what lets this reader open an
+            // unfinished recording at all.
+            //
+            // The bargain would be broken by the file being *truncated* while
+            // mapped, which is not something an acquisition does. It is the
+            // same bargain the TIFF reader in `fast-tiff-lib` makes.
             let map = unsafe { Mmap::map(&file) }
                 .map_err(|e| PluginError::failed(format!("could not map the file: {e}")))?;
-            let index_at = read_header(&map)?;
-            let part_offsets = read_index(&map, index_at)?;
+            let (mut part_offsets, mut found) = block_offsets(&map)?;
             let size = sizes.get(part).copied().unwrap_or(0) as f32;
             let start = before as f32;
+            let had = planes.map.len();
             read_part(&map, &part_offsets, &mut planes, &mut |f| {
                 host.progress(0.9 * (start + f * size) / total)
             })?;
+            // An index that read cleanly and produced nothing is what a
+            // half-written one looks like: the header is there, the offsets in
+            // it are not yet. Walking the file is the same recovery as having
+            // no index at all, so try it before giving up on the part.
+            //
+            // Conditioned on planes rather than on blocks because the first
+            // part of a split acquisition legitimately carries only metadata,
+            // and re-reading that one must not be mistaken for a recovery.
+            if found == Found::Index && planes.map.len() == had {
+                let walked_offsets = walk_blocks(&map);
+                if !walked_offsets.is_empty() {
+                    read_part(&map, &walked_offsets, &mut planes, &mut |f| {
+                        host.progress(0.9 * (start + f * size) / total)
+                    })?;
+                    if planes.map.len() > had {
+                        part_offsets = walked_offsets;
+                        found = Found::Walk;
+                    }
+                }
+            }
+            if found == Found::Walk {
+                walked += 1;
+            }
             before += sizes.get(part).copied().unwrap_or(0);
             indexes.push(part_offsets);
             files.push(map);
         }
         let mut planes = planes.map;
+        if walked > 0 {
+            // Said plainly, because the frames that are missing are the ones
+            // the file does not have yet — not ones this reader declined to
+            // read. Someone who expected the whole recording should know to
+            // open it again when the acquisition has finished.
+            host.log(&format!(
+                "unfinished acquisition: {walked} of {} part(s) have no block index, so \
+                 their blocks were recovered by walking the file. This is what was on \
+                 disk when it was opened; open it again later for the rest.",
+                parts.len()
+            ));
+        }
         if parts.len() > 1 {
             host.log(&format!(
                 "{} part(s) of this acquisition, {} planes in total",
@@ -397,25 +495,162 @@ fn u64_at(b: &[u8], at: usize) -> Option<u64> {
     ]))
 }
 
-/// Check the signature and return where the block index begins.
-fn read_header(bytes: &[u8]) -> Result<u64, PluginError> {
-    let len = bytes.len() as u64;
+/// Refuse anything that is not an OIR at all.
+fn check_signature(bytes: &[u8]) -> Result<(), PluginError> {
     let head = read_at(bytes, 0, 0x50.min(bytes.len()))?;
     if !head.starts_with(MAGIC) {
         return Err(PluginError::unsupported(
             "not an OIR file: the OLYMPUSRAWFORMAT signature is missing",
         ));
     }
-    let at = u64_at(head, INDEX_OFFSET_AT as usize)
-        .ok_or_else(|| PluginError::failed("the OIR header is truncated"))?;
-    // Validated rather than trusted: a bad offset here would otherwise become a
-    // wild seek and an allocation sized from whatever bytes were there.
-    if at < MAGIC.len() as u64 || at.checked_add(INDEX_HEADER as u64).is_none_or(|e| e > len) {
-        return Err(PluginError::failed(format!(
-            "the OIR block index offset ({at:#x}) is outside the file"
-        )));
+    Ok(())
+}
+
+/// Where the header says the block index begins.
+///
+/// Read, not vetted: [`read_index`] bounds-checks the offset before it reads a
+/// byte from it, so a second check here would only be a second copy of the same
+/// rule. What changed is what happens when it is wrong — a bad offset is still
+/// never *followed*, but it is no longer the end of the read either, because
+/// the files that produce one are a recording still in progress and a recording
+/// whose tail was lost, and in both the pixels sit in front of the index and
+/// are unaffected by it.
+fn index_offset(bytes: &[u8]) -> Option<u64> {
+    u64_at(bytes.get(..0x50)?, INDEX_OFFSET_AT as usize)
+}
+
+/// How a part's blocks were found.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Found {
+    /// From the file's own index, which is what a finished file has.
+    Index,
+    /// By walking the block stream, because there was no usable index — which
+    /// is what a file still being written looks like.
+    Walk,
+}
+
+/// Every block in a part, and how they were found.
+fn block_offsets(bytes: &[u8]) -> Result<(Vec<u64>, Found), PluginError> {
+    check_signature(bytes)?;
+    let indexed = index_offset(bytes)
+        .and_then(|at| read_index(bytes, at).ok())
+        .filter(|o| !o.is_empty());
+    if let Some(offsets) = indexed {
+        return Ok((offsets, Found::Index));
     }
-    Ok(at)
+    let walked = walk_blocks(bytes);
+    if walked.is_empty() {
+        return Err(PluginError::failed(
+            "this OIR has no usable block index, and no run of blocks could be found in \
+             it either: the file is damaged past what this reader can recover",
+        ));
+    }
+    Ok((walked, Found::Walk))
+}
+
+/// Walk at most `want` blocks from `from`.
+///
+/// Reports how many parsed, whether any of them carried a payload, and whether
+/// the walk ended at the end of the file rather than at something implausible.
+/// The three are what [`find_first_block`] needs to tell a real start from a
+/// coincidence.
+fn probe_blocks(bytes: &[u8], from: u64, want: usize) -> (usize, bool, bool) {
+    let len = bytes.len() as u64;
+    let mut at = from;
+    let mut seen = 0usize;
+    let mut substantial = false;
+    while seen < want {
+        let Some(head) = at
+            .checked_add(8)
+            .filter(|e| *e <= len)
+            .and_then(|_| bytes.get(at as usize..at as usize + 8))
+        else {
+            return (seen, substantial, true);
+        };
+        let (Some(blen), Some(ty)) = (u32_at(head, 0), u32_at(head, 4)) else {
+            return (seen, substantial, true);
+        };
+        if blen > MAX_BLOCK_BYTES || ty > MAX_BLOCK_TYPE {
+            return (seen, substantial, false);
+        }
+        if at.saturating_add(8).saturating_add(blen as u64) > len {
+            return (seen, substantial, true);
+        }
+        substantial |= blen > 0;
+        at += 8 + blen as u64;
+        seen += 1;
+    }
+    (seen, substantial, true)
+}
+
+/// Where the block stream starts.
+///
+/// Each eight-byte-aligned candidate past the header is tried and the first
+/// from which [`FIRST_BLOCK_PROBE`] blocks parse is kept.
+///
+/// Two further rules earn their keep. A candidate is rejected the moment a
+/// header is implausible, but merely **running out of file** is not a
+/// rejection: a file with only one block in it has nothing wrong with it, and
+/// the best such candidate is the answer when none can show a full run. And a
+/// run must contain at least one **non-empty** block, because a stretch of
+/// zeros parses as an unlimited run of zero-length type-0 blocks and would
+/// otherwise win simply by coming first.
+fn find_first_block(bytes: &[u8]) -> Option<u64> {
+    let len = bytes.len() as u64;
+    let mut partial: Option<(usize, u64)> = None;
+    let mut at = FIRST_BLOCK_FROM;
+    for _ in 0..FIRST_BLOCK_CANDIDATES {
+        if at.saturating_add(8) > len {
+            break;
+        }
+        let (count, substantial, ran_out) = probe_blocks(bytes, at, FIRST_BLOCK_PROBE);
+        if count >= FIRST_BLOCK_PROBE && substantial {
+            return Some(at);
+        }
+        if ran_out && substantial && partial.is_none_or(|(c, _)| count > c) {
+            partial = Some((count, at));
+        }
+        at += FIRST_BLOCK_STEP;
+    }
+    partial.map(|(_, at)| at)
+}
+
+/// Every block, found by walking the stream rather than by reading the index.
+///
+/// Blocks are `u32 length, u32 type, length bytes`, so each says where the next
+/// begins and no index is needed to visit them all. The walk stops at the first
+/// block that does not fit in what is there — which is what the tail of a file
+/// still being written looks like, and what makes everything in front of it
+/// whole.
+///
+/// It also stops cleanly on a file that *does* have an index: an index begins
+/// with `0xFFFFFFFF`, which as a block length is past [`MAX_BLOCK_BYTES`].
+fn walk_blocks(bytes: &[u8]) -> Vec<u64> {
+    let Some(mut at) = find_first_block(bytes) else {
+        return Vec::new();
+    };
+    let len = bytes.len() as u64;
+    let mut offsets = Vec::new();
+    let mut empties = 0usize;
+    while (offsets.len() as u64) < MAX_BLOCKS {
+        if at.saturating_add(8) > len {
+            break;
+        }
+        let Some(head) = bytes.get(at as usize..at as usize + 8) else {
+            break;
+        };
+        let Some(blen) = u32_at(head, 0) else { break };
+        if blen > MAX_BLOCK_BYTES || at.saturating_add(8).saturating_add(blen as u64) > len {
+            break;
+        }
+        empties = if blen == 0 { empties + 1 } else { 0 };
+        if empties > MAX_EMPTY_RUN {
+            break;
+        }
+        offsets.push(at);
+        at += 8 + blen as u64;
+    }
+    offsets
 }
 
 /// The block index: one file offset per block.

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.20.0"
+version = "1.20.1"
 dependencies = [
  "anyhow",
  "eframe",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "anyhow",
  "bytemuck",

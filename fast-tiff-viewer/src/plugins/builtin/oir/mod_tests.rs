@@ -21,6 +21,40 @@ impl ImportHost for Silent {
     fn log(&mut self, _m: &str) {}
 }
 
+/// A host that remembers what it was told, so a warning the reader promises can
+/// be checked rather than assumed.
+#[derive(Default)]
+struct Notes {
+    lines: Vec<String>,
+}
+
+impl ImportHost for Notes {
+    fn progress(&mut self, _f: f32) -> bool {
+        true
+    }
+    fn log(&mut self, m: &str) {
+        self.lines.push(m.to_string());
+    }
+}
+
+impl Notes {
+    fn said(&self, needle: &str) -> bool {
+        self.lines.iter().any(|l| l.contains(needle))
+    }
+}
+
+fn import_noting(path: &std::path::Path) -> (Result<ImportResult, PluginError>, Notes) {
+    let mut host = Notes::default();
+    let r = Oir.import(
+        &ImportRequest {
+            path: path.to_path_buf(),
+            params: Default::default(),
+        },
+        &mut host,
+    );
+    (r, host)
+}
+
 /// Builds an OIR the way the acquisition software lays one out.
 #[derive(Default)]
 struct Builder {
@@ -128,6 +162,34 @@ fn channels_file(w: u32, h: u32, names: &[&str], chunk: usize, channels: usize) 
         }
     }
     b.finish()
+}
+
+/// As [`stack_file`], laid out the way a real acquisition is: a 16-byte
+/// `u32 3, u32 2, u64 -1` structure at `0x50`, and the first block at `0x60`.
+///
+/// That structure is the reason [`find_first_block`] demands a run of blocks
+/// rather than one — see the test that uses this.
+fn real_layout_file(w: u32, h: u32, names: &[&str], chunk: usize) -> Vec<u8> {
+    let plain = stack_file(w, h, names, chunk);
+    let mut out = Vec::with_capacity(plain.len() + 16);
+    out.extend_from_slice(&plain[..0x50]);
+    out.extend(3u32.to_le_bytes());
+    out.extend(2u32.to_le_bytes());
+    out.extend(u64::MAX.to_le_bytes());
+    out.extend_from_slice(&plain[0x50..]);
+    // Every offset in the header and the index moved along by the insertion.
+    let shift = 16u64;
+    let total = u64::from_le_bytes(out[0x20..0x28].try_into().unwrap()) + shift;
+    let index_at = u64::from_le_bytes(out[0x28..0x30].try_into().unwrap()) + shift;
+    out[0x20..0x28].copy_from_slice(&total.to_le_bytes());
+    out[0x28..0x30].copy_from_slice(&index_at.to_le_bytes());
+    let mut at = index_at as usize + INDEX_HEADER;
+    while at + 8 <= out.len() {
+        let o = u64::from_le_bytes(out[at..at + 8].try_into().unwrap()) + shift;
+        out[at..at + 8].copy_from_slice(&o.to_le_bytes());
+        at += 8;
+    }
+    out
 }
 
 fn tmp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
@@ -479,27 +541,167 @@ fn a_file_without_the_signature_is_refused_by_name() {
     let _ = std::fs::remove_file(file);
 }
 
+/// A wild index offset is never *followed*, and the file is read anyway.
+///
+/// It used to be refused. The offset is still not followed — that would be a
+/// wild seek and an allocation sized from whatever bytes were at it — but
+/// refusing was the wrong response to it, because the two files that produce a
+/// bad offset are a recording still in progress and one whose tail was lost,
+/// and in both the pixels are in front of the index and perfectly good. The
+/// assertion that it was not followed is the pixels: they are the ones the
+/// fixture wrote, in order.
 #[test]
-fn a_corrupt_index_offset_is_refused_rather_than_followed() {
+fn a_corrupt_index_offset_is_not_followed_but_the_pixels_are_still_read() {
     let mut f = stack_file(4, 4, &["t001_0_1_uid"], 16);
     f[0x28..0x30].copy_from_slice(&u64::MAX.to_le_bytes());
     let file = tmp("badindex.oir", &f);
-    let err = import(&file).expect_err("a wild index offset must be refused");
-    assert!(err.to_string().contains("outside the file"), "{err}");
+    let (r, host) = import_noting(&file);
+    let r = r.expect("the blocks are all there and should be recovered");
+
+    assert_eq!(r.image.frames, 1);
+    match &r.image.planes[0] {
+        PlaneData::U16(v) => assert_eq!(v, &(0..16u16).collect::<Vec<_>>()),
+        other => panic!("{:?}", other.pixel_type()),
+    }
+    assert!(host.said("unfinished acquisition"), "{:?}", host.lines);
     let _ = std::fs::remove_file(file);
 }
 
+/// An index whose marker is not the one this reader knows is the same case: not
+/// read, not fatal.
 #[test]
-fn an_index_without_its_marker_is_refused() {
+fn an_index_without_its_marker_falls_back_to_walking() {
     let mut f = stack_file(4, 4, &["t001_0_1_uid"], 16);
     let at = u64::from_le_bytes(f[0x28..0x30].try_into().unwrap()) as usize;
     f[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
     let file = tmp("nomarker.oir", &f);
-    let err = import(&file).expect_err("an unrecognised index must be refused");
-    assert!(
-        err.to_string().contains("layout this reader knows"),
-        "{err}"
-    );
+    let (r, host) = import_noting(&file);
+    let r = r.expect("the blocks are all there");
+
+    assert_eq!(r.image.frames, 1);
+    assert!(host.said("unfinished acquisition"), "{:?}", host.lines);
+    let _ = std::fs::remove_file(file);
+}
+
+// ------------------------------------------------- acquisitions still running
+
+/// A recording whose index has not been written yet opens at the frames it has.
+///
+/// The index is the *last* thing an acquisition writes, so this is what every
+/// file being recorded looks like: whole frames, and nothing at `0x28` to say
+/// where they are.
+#[test]
+fn a_file_whose_index_was_never_written_still_opens() {
+    let mut f = stack_file(4, 4, &["t001_0_1_uid", "t002_0_1_uid"], 16);
+    let at = u64::from_le_bytes(f[0x28..0x30].try_into().unwrap()) as usize;
+    // As the file stands on disk mid-recording: no index, and the field that
+    // would point at one still zero.
+    f.truncate(at);
+    f[0x28..0x30].copy_from_slice(&0u64.to_le_bytes());
+    let file = tmp("noindex.oir", &f);
+    let (r, host) = import_noting(&file);
+    let r = r.expect("a recording in progress should open");
+
+    assert_eq!(r.image.frames, 2, "both finished frames should be there");
+    match &r.image.planes[0] {
+        PlaneData::U16(v) => assert_eq!(v, &(0..16u16).collect::<Vec<_>>()),
+        other => panic!("{:?}", other.pixel_type()),
+    }
+    assert!(host.said("unfinished acquisition"), "{:?}", host.lines);
+    assert!(host.said("open it again later"), "{:?}", host.lines);
+    let _ = std::fs::remove_file(file);
+}
+
+/// A file cut in the middle of a frame keeps the frames before the cut and
+/// drops the part-written one.
+///
+/// The half-frame is the thing that must not survive: padded out with zeros it
+/// becomes a mostly-black frame at the end of the recording, which is not an
+/// error anyone sees and quietly ruins an average.
+#[test]
+fn a_file_cut_mid_frame_keeps_the_frames_before_the_cut() {
+    let mut f = stack_file(4, 4, &["t001_0_1_uid", "t002_0_1_uid"], 16);
+    let at = u64::from_le_bytes(f[0x28..0x30].try_into().unwrap()) as usize;
+    // Into the last frame's final data block, so that frame is half written.
+    f.truncate(at - 8);
+    let file = tmp("cutframe.oir", &f);
+    let (r, host) = import_noting(&file);
+    let r = r.expect("the finished frame should still open");
+
+    assert_eq!(r.image.frames, 1, "the half-written frame must not survive");
+    match &r.image.planes[0] {
+        PlaneData::U16(v) => assert_eq!(v, &(0..16u16).collect::<Vec<_>>()),
+        other => panic!("{:?}", other.pixel_type()),
+    }
+    assert!(host.said("incomplete plane"), "{:?}", host.lines);
+    let _ = std::fs::remove_file(file);
+}
+
+/// The first block is found, not assumed.
+///
+/// A real acquisition puts a 16-byte structure at `0x50` and its first block at
+/// `0x60`. The trap is that the structure's first eight bytes read perfectly
+/// well as a block header — `u32 3, u32 2` is a three-byte block of type 2 —
+/// so a reader that accepts the first candidate that parses lands at `0x5b`,
+/// mid-field, and is desynchronised from every block in the file. It would not
+/// fail; it would produce the wrong picture.
+#[test]
+fn the_first_block_is_found_rather_than_assumed() {
+    let mut f = real_layout_file(4, 4, &["t001_0_1_uid"], 16);
+    // No index, so the start has to be found rather than read.
+    let at = u64::from_le_bytes(f[0x28..0x30].try_into().unwrap()) as usize;
+    f.truncate(at);
+    f[0x28..0x30].copy_from_slice(&0u64.to_le_bytes());
+    let file = tmp("realstart.oir", &f);
+    let r = import(&file).expect("a real-layout file should open");
+
+    assert_eq!(r.image.frames, 1);
+    match &r.image.planes[0] {
+        PlaneData::U16(v) => assert_eq!(
+            v,
+            &(0..16u16).collect::<Vec<_>>(),
+            "the walk began at the wrong offset"
+        ),
+        other => panic!("{:?}", other.pixel_type()),
+    }
+    let _ = std::fs::remove_file(file);
+}
+
+/// A run of zeros is not a block stream.
+///
+/// Zeros parse as an unlimited run of zero-length type-0 blocks, so a candidate
+/// pointing into them agrees with itself for ever and would win by coming
+/// first. It has to carry something.
+#[test]
+fn a_run_of_zeros_is_not_mistaken_for_a_block_stream() {
+    let mut f = Vec::new();
+    f.extend(MAGIC);
+    f.extend([0u8; 0x2000]);
+    let file = tmp("zeros.oir", &f);
+    let err = import(&file).expect_err("a file of zeros carries no blocks");
+    // The specific refusal matters: it is the one that means no candidate was
+    // believed at all. Without the non-empty rule a candidate *is* believed,
+    // the walk returns thousands of phantom empty blocks, and the file is
+    // refused later for carrying no planes -- the same outcome by luck.
+    assert!(err.to_string().contains("damaged past"), "{err}");
+    let _ = std::fs::remove_file(file);
+}
+
+/// And a file whose signature is right but whose contents are rubbish is still
+/// refused, rather than walked into something.
+#[test]
+fn a_file_whose_blocks_are_rubbish_is_still_refused() {
+    let mut f = Vec::new();
+    f.extend(MAGIC);
+    f.extend([0u8; 0x40]);
+    // Lengths far past any block, at every alignment a candidate could land on.
+    for _ in 0..512 {
+        f.extend(0xDEAD_BEEFu32.to_le_bytes());
+        f.extend(0xFEED_FACEu32.to_le_bytes());
+    }
+    let file = tmp("rubbish.oir", &f);
+    let err = import(&file).expect_err("rubbish must not be walked into");
+    assert!(err.to_string().contains("damaged past"), "{err}");
     let _ = std::fs::remove_file(file);
 }
 
@@ -747,4 +949,97 @@ fn descriptors_placing_more_data_than_the_file_holds_are_refused() {
         "{err}"
     );
     let _ = std::fs::remove_file(file);
+}
+
+/// The walk stops at a block that is not all there, rather than emitting an
+/// offset for it.
+///
+/// Checked on the walk's own output. End to end the half-written block is
+/// harmless either way — the chunk read fails, the plane stays short and is
+/// dropped — so an end-to-end test cannot tell the two apart, and the rule the
+/// doc comment states would go unpinned.
+#[test]
+fn the_walk_stops_at_a_block_that_is_not_all_there() {
+    let f = stack_file(4, 4, &["t001_0_1_uid"], 16);
+    let at = u64::from_le_bytes(f[0x28..0x30].try_into().unwrap()) as usize;
+    let whole = walk_blocks(&f[..at]);
+    assert!(whole.len() > 2, "the fixture should have several blocks");
+
+    // One byte short of the last block's final byte.
+    let cut = walk_blocks(&f[..at - 1]);
+    assert_eq!(
+        cut.len(),
+        whole.len() - 1,
+        "the block that is one byte short must not be offered"
+    );
+    assert_eq!(cut, whole[..whole.len() - 1]);
+}
+
+/// An index that reads cleanly and points at nothing is recovered by walking.
+///
+/// What a half-written index looks like: the header is there, the offsets in it
+/// are not yet. It is not an unreadable index — every check this reader makes
+/// of one passes — so the fallback cannot be conditioned on the index failing
+/// to parse. It is conditioned on the index failing to produce a plane.
+#[test]
+fn an_index_that_points_at_nothing_is_recovered_by_walking() {
+    let mut f = stack_file(4, 4, &["t001_0_1_uid"], 16);
+    let at = u64::from_le_bytes(f[0x28..0x30].try_into().unwrap()) as usize;
+    // Keep the marker and the header; blank every offset it lists.
+    for b in f[at + INDEX_HEADER..].iter_mut() {
+        *b = 0;
+    }
+    let file = tmp("blankindex.oir", &f);
+    let (r, host) = import_noting(&file);
+    let r = r.expect("the blocks are still in the file and should be found");
+
+    assert_eq!(r.image.frames, 1);
+    match &r.image.planes[0] {
+        PlaneData::U16(v) => assert_eq!(v, &(0..16u16).collect::<Vec<_>>()),
+        other => panic!("{:?}", other.pixel_type()),
+    }
+    assert!(host.said("unfinished acquisition"), "{:?}", host.lines);
+    let _ = std::fs::remove_file(file);
+}
+
+/// A first part carrying only metadata is not mistaken for a recovery.
+///
+/// A split acquisition legitimately keeps its record in the named file and its
+/// planes in the siblings, so "this part produced no planes" is ordinary there.
+/// Warning about it would tell the user a finished recording was unfinished.
+#[test]
+fn a_metadata_only_part_is_not_reported_as_unfinished() {
+    // Several blocks, none of them a plane -- which is what a real first part
+    // holds: the record, the reference snapshot, the thumbnail. It has to be
+    // several, or the walk finds nothing and the guard under test is never
+    // reached: it is the plane count that must decide this, not the luck of a
+    // fixture too small to walk.
+    let first = {
+        let mut b = Builder::new();
+        b.xml("<?xml version=\"1.0\"?><lsmimage:imageProperties><commonimage:imageInfo>               <commonimage:width>4</commonimage:width><commonimage:height>2               </commonimage:height></commonimage:imageInfo></lsmimage:imageProperties>");
+        b.plane_chunk("REF_LSM0_abc_0", 0, &[0u8; 16]);
+        b.plane_chunk("REF_LSM0_abc_1", 16, &[0u8; 16]);
+        b.finish()
+    };
+    assert!(
+        walk_blocks(&first).len() >= 4,
+        "the fixture must be walkable, or it cannot exercise the guard"
+    );
+    let second = part_file(1, 2, false);
+    let dir = std::env::temp_dir();
+    let a = dir.join("fasttiff-oir-meta-only.oir");
+    let b = dir.join("fasttiff-oir-meta-only_00001.oir");
+    std::fs::write(&a, &first).unwrap();
+    std::fs::write(&b, &second).unwrap();
+
+    let (r, host) = import_noting(&a);
+    let r = r.expect("a split acquisition should open");
+    assert_eq!(r.image.frames, 2);
+    assert!(
+        !host.said("unfinished"),
+        "a finished recording was called unfinished: {:?}",
+        host.lines
+    );
+    let _ = std::fs::remove_file(a);
+    let _ = std::fs::remove_file(b);
 }
