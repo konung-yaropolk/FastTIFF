@@ -56,6 +56,7 @@ pub mod oir;
 pub mod plot_axis;
 pub mod png;
 pub mod stabilize;
+pub mod stack_tools;
 pub mod zproject;
 
 pub use invert::Invert;
@@ -65,6 +66,7 @@ pub use oir::Oir;
 pub use plot_axis::PlotAxis;
 pub use png::{Png, PngImport};
 pub use stabilize::Stabilize;
+pub use stack_tools::{SliceKeeper, SliceOrderInvert, SliceRemover};
 pub use zproject::ZProject;
 
 use fasttiff_plugin_api::{Exporter, Importer, Plugin};
@@ -76,6 +78,9 @@ pub fn all() -> Vec<Box<dyn Plugin>> {
         Box::new(ZProject),
         Box::new(PlotAxis),
         Box::new(Stabilize),
+        Box::new(SliceKeeper),
+        Box::new(SliceRemover),
+        Box::new(SliceOrderInvert),
     ]
 }
 

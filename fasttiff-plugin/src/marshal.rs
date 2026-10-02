@@ -756,6 +756,10 @@ pub unsafe fn write_outcome(sink: &FtSink, outcome: Outcome) -> FtStatus {
             let name = img.name.clone();
             write_image(sink, &img, &name, FtOutcomeKind::NewDocument, "")
         }
+        Outcome::ReplaceDocument(img) => {
+            let name = img.name.clone();
+            write_image(sink, &img, &name, FtOutcomeKind::ReplaceDocument, "")
+        }
         Outcome::SaveToFile { image, path } => {
             let name = image.name.clone();
             write_image(sink, &image, &name, FtOutcomeKind::SaveToFile, &path)
@@ -831,6 +835,23 @@ unsafe fn write_image(
     // refusing something it cannot explain.
     if let Err(e) = img.validate() {
         return status_of(&e);
+    }
+    // The result's own metadata, when it has any. An importer's goes across
+    // here too (see `import_shim`); a *filter's* did not, which meant a
+    // geometry-preserving filter in a `.dll` silently dropped the calibration
+    // its built-in twin carried — the one divergence between the two lanes
+    // that produced a file with no units rather than an error.
+    //
+    // Skipped on a host that predates the callback: an image without its
+    // calibration is still worth having, which is the same bargain
+    // `set_channel` makes just below.
+    if let Some(info) = &img.metadata {
+        if crate::abi::ft_covers!(sink as *const FtSink, FtSink, set_info) {
+            let st = write_stack_info(sink, info);
+            if st != FtStatus::Ok {
+                return st;
+            }
+        }
     }
     let ty = match img.pixel_type {
         PixelType::U8 => FtPixelType::U8,

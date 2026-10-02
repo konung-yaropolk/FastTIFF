@@ -1224,7 +1224,9 @@ impl ResultSink {
                     wants: p.wants,
                 })))
             }
-            abi::FtOutcomeKind::NewDocument | abi::FtOutcomeKind::SaveToFile => {
+            abi::FtOutcomeKind::NewDocument
+            | abi::FtOutcomeKind::SaveToFile
+            | abi::FtOutcomeKind::ReplaceDocument => {
                 // Dense, up to the highest channel the plugin coloured: the
                 // result carries a colour per channel or none at all, and a
                 // half-filled list would silently mean "black" for the rest.
@@ -1247,16 +1249,24 @@ impl ResultSink {
                     pixel_type: self.pixel_type.unwrap_or(PixelType::U16),
                     planes: self.planes,
                     channel_colors,
-                    metadata: None,
+                    // What the plugin said about its own result, when it
+                    // said anything. An importer has already taken this (see
+                    // `LoadedImporter::import`, which does so explicitly
+                    // *before* calling `finish`), so this is a filter's
+                    // metadata and nothing else — the calibration a
+                    // geometry-preserving filter carried over from its source.
+                    metadata: self.info,
                     name: self.name,
                 };
                 // The plugin may simply have pushed too few planes; the host
                 // checks rather than trusting the declaration.
                 image.validate()?;
-                if kind == abi::FtOutcomeKind::NewDocument {
-                    Ok(Outcome::NewDocument(Box::new(image)))
-                } else {
-                    Ok(Outcome::SaveToFile { image: Box::new(image), path: self.text })
+                match kind {
+                    abi::FtOutcomeKind::NewDocument => Ok(Outcome::NewDocument(Box::new(image))),
+                    abi::FtOutcomeKind::ReplaceDocument => {
+                        Ok(Outcome::ReplaceDocument(Box::new(image)))
+                    }
+                    _ => Ok(Outcome::SaveToFile { image: Box::new(image), path: self.text }),
                 }
             }
             // A kind from a newer ABI. The plugin did the work and expects

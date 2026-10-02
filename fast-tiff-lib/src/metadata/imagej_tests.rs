@@ -84,3 +84,87 @@ fn parser_requires_the_magic() {
     let bogus = vec![b'r', b'a', b'n', b'g', 0, 0, 0, 1, 1, 2, 3, 4];
     assert!(try_parse_ij_blocks(&bogus, &[8, 4]).is_none());
 }
+
+/// A carried-over description cannot redescribe the file it is carried into.
+///
+/// The real case, with the real numbers. Inverting a 101-slice ImageJ z-stack
+/// gives a 101-*frame* result: the writer states `frames=101` and says nothing
+/// about slices, because there is one. If the source's own `slices=101` rides
+/// along in the trailing text it becomes the only `slices=` in the description
+/// — "first occurrence wins" cannot help, there being no competing occurrence
+/// — and the file reads back as 101 slices x 101 frames. 10,201 planes
+/// declared against 101 present, reported on every window as a damaged file.
+#[test]
+fn a_carried_description_cannot_redescribe_the_shape() {
+    let source = "ImageJ=1.54p\nimages=101\nslices=101\nunit=micron\nspacing=0.2\n\
+                  loop=false\nmin=0.0\nmax=4095.0\n";
+    let write = StackMetaWrite::new(1, 1)
+        .unit("micron")
+        .trailing(source.to_string());
+    let desc = serialize(101, &write).unwrap();
+
+    // The writer's own account of the shape, and only that.
+    assert!(desc.contains("frames=101"), "{desc}");
+    assert_eq!(desc.matches("slices=").count(), 0, "{desc}");
+    assert_eq!(
+        desc.matches("ImageJ=").count(),
+        1,
+        "two version markers: {desc}"
+    );
+
+    let meta = parse(Some(&desc), None, None, 101, None, None);
+    assert_eq!(
+        (meta.channels, meta.slices, meta.frames),
+        (1, 1, 101),
+        "the source's shape leaked into the result"
+    );
+    // The structured block still carries what it was told.
+    assert_eq!(meta.unit.as_deref(), Some("micron"));
+}
+
+/// What `trailing` exists for still survives: a vendor record carries no
+/// `key=value` lines of this dialect's, so none of it is dropped.
+///
+/// Olympus OIR's record is `"key"\t"value"`, which is what the importer writes
+/// and what an analysis downstream reads to find out when the stimulus fired.
+#[test]
+fn a_vendor_record_passes_through_untouched() {
+    let record = "\"[General]\"\t\"\"\n\"Name\"\t\"a.oir\"\n\"Scan Mode\"\t\"XY\"\n\
+                  \"Image Size\"\t\"512 * 512 [pixel]\"\n";
+    let write = StackMetaWrite::new(1, 1).trailing(record.to_string());
+    let desc = serialize(4, &write).unwrap();
+    for line in record.lines() {
+        assert!(desc.contains(line), "dropped {line:?} from {desc}");
+    }
+}
+
+/// And a line that merely *contains* an `=` inside a value is not mistaken for
+/// one of this dialect's keys.
+#[test]
+fn an_equals_inside_a_vendor_value_is_not_a_key() {
+    let record = "\"Comment\"\t\"gain=2, mode=fast\"\nfree text with = in it\n";
+    let write = StackMetaWrite::new(1, 1).trailing(record.to_string());
+    let desc = serialize(4, &write).unwrap();
+    assert!(
+        desc.contains("\"Comment\"\t\"gain=2, mode=fast\""),
+        "{desc}"
+    );
+    assert!(desc.contains("free text with = in it"), "{desc}");
+}
+
+/// The keys the writer *does* emit were already protected, and still are.
+#[test]
+fn a_carried_description_cannot_override_what_the_writer_stated() {
+    let source = "ImageJ=1.50a\nmode=grayscale\nunit=inch\nmin=7.0\nmax=9.0\n";
+    let write = StackMetaWrite::new(2, 1)
+        .mode(DisplayMode::Composite)
+        .unit("micron")
+        .range(10.0, 200.0)
+        .trailing(source.to_string());
+    let desc = serialize(6, &write).unwrap();
+    let meta = parse(Some(&desc), None, None, 6, None, None);
+
+    assert_eq!(meta.mode, DisplayMode::Composite);
+    assert_eq!(meta.unit.as_deref(), Some("micron"));
+    assert_eq!(meta.channel_display[0].range, Some((10.0, 200.0)));
+}

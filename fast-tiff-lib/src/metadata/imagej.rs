@@ -282,16 +282,65 @@ pub(crate) fn serialize(planes: usize, meta: &StackMetaWrite) -> Result<String> 
     for (key, value) in &meta.extra {
         s += &format!("{key}={value}\n");
     }
-    // The source file's own metadata, last: everything above it is structured
-    // and must win, which `parse_description` guarantees by keeping the first
-    // occurrence of a key.
+    // The source file's own metadata, last — minus anything that would
+    // redescribe *this* file. See `OWNED_KEYS`.
     if let Some(text) = &meta.trailing {
-        s += text;
-        if !text.ends_with('\n') {
+        for line in text.lines() {
+            if owns(line) {
+                continue;
+            }
+            s += line;
             s += "\n";
         }
     }
     Ok(s)
+}
+
+/// The keys this dialect reads, and therefore the keys a carried-over
+/// description is not allowed to supply.
+///
+/// `parse_description` keeps the *first* occurrence of a key, which was meant to
+/// be enough: the structured block is written first, so it wins. It is not
+/// enough, and the gap is the keys the writer **omits**. `slices=` is only
+/// emitted when the stack has more than one Z-slice — so for a stack with none,
+/// a `slices=101` carried over from the source becomes the only occurrence and
+/// fills the silence.
+///
+/// That is not hypothetical. Inverting a 101-slice ImageJ z-stack produces a
+/// 101-*frame* result; the writer stated `frames=101` and said nothing about
+/// slices; the source's own `slices=101` rode along; and the file read back as
+/// 101 slices x 101 frames — 10,201 planes declared against 101 present, which
+/// the viewer reported as a damaged file on every window it opened.
+///
+/// Dropping these costs nothing that `trailing` exists for. Its purpose is the
+/// vendor record an importer read out of a proprietary container — Olympus OIR
+/// writes `"key"\t"value"` lines, which carry no `=` at all and so pass through
+/// untouched. What is dropped is only a *second* file's idea of this one's
+/// shape, units and display range.
+const OWNED_KEYS: &[&str] = &[
+    "ImageJ",
+    "images",
+    "channels",
+    "slices",
+    "frames",
+    "hyperstack",
+    "mode",
+    "unit",
+    "spacing",
+    "loop",
+    "min",
+    "max",
+    "fps",
+    "finterval",
+    "cf",
+    "c0",
+    "c1",
+];
+
+/// Whether `line` is a `key=value` line whose key this dialect owns.
+fn owns(line: &str) -> bool {
+    line.split_once('=')
+        .is_some_and(|(k, _)| OWNED_KEYS.contains(&k.trim()))
 }
 
 /// Serialize per-channel color LUTs into an ImageJ `IJMetadata` block — the

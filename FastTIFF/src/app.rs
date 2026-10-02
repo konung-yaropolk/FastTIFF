@@ -605,6 +605,17 @@ enum PluginProduct {
     },
     /// Written where the plugin asked.
     Saved(String),
+    /// Takes the place of the document it was run on, because the plugin asked
+    /// for that rather than for a window.
+    ///
+    /// Carries the bytes like [`PluginProduct::Inline`] does, and for the same
+    /// reason — they have nowhere else to go — but it is not a failure path:
+    /// nothing went wrong and there is nothing to apologise for in the status
+    /// line.
+    Replace {
+        bytes: Vec<u8>,
+        name: String,
+    },
 }
 
 /// What a filter plugin produced, carried back from its worker.
@@ -721,6 +732,28 @@ fn finish_outcome(
                     why: e.to_string(),
                 }),
             }
+        }
+        Outcome::ReplaceDocument(image) => {
+            Job::begin_phase(label, progress, "Encoding result");
+            let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
+                &image,
+                None,
+                luts,
+                &mut |f| {
+                    Job::report(progress, f);
+                    !stopped()
+                },
+            ) {
+                Ok(Some(b)) => b,
+                Ok(None) => return Ok(PluginProduct::Cancelled),
+                Err(e) => return Err(format!("{e:#}")),
+            };
+            // No spawn, no temp file, no fallback: the window it replaces is
+            // this one, so the bytes only have to reach the interface thread.
+            Ok(PluginProduct::Replace {
+                bytes,
+                name: image.name.clone(),
+            })
         }
         Outcome::SaveToFile { image, path } => {
             Job::begin_phase(label, progress, "Writing result");
@@ -1834,6 +1867,10 @@ impl ViewerApp {
                 self.core.status = Some(format!(
                     "{name}: could not open a new window ({why}); showing it here"
                 ));
+                self.apply_opened(Opened::Bytes(bytes, n));
+            }
+            Ok(PluginProduct::Replace { bytes, name: n }) => {
+                self.report_done(format!("{name}: replaced this window's image"));
                 self.apply_opened(Opened::Bytes(bytes, n));
             }
             Ok(PluginProduct::Saved(path)) => self.report_done(format!("{name}: wrote {path}")),
