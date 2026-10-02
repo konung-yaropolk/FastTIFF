@@ -174,15 +174,23 @@ fn the_library_registers_what_it_declares() {
 
 /// The point of the whole phase: the same filter, one side called as a Rust
 /// trait and one side through the C vtable, must agree exactly.
+///
+/// Everything but `metadata` is compared bit for bit. `metadata` cannot match
+/// and should not: the host deliberately blanks a result's `name` and `path`
+/// on the way in (`sink_set_info` in `library.rs` — "the host knows which file
+/// it asked for, and a plugin naming a *different* one is not something to
+/// take at face value"), so the library's copy comes back without them while
+/// the built-in's, which never crossed, still has them. The calibration that
+/// *is* the point of carrying metadata is asserted separately below.
 #[test]
 fn a_loaded_plugin_matches_the_built_in_it_was_copied_from() {
     let mut from_library = plugin("dev.fasttiff.example.invert");
     let mut built_in = plugins::builtin::Invert;
 
-    for (channels, frames, all) in [(1usize, 1usize, false), (3, 2, true), (3, 2, false)] {
+    for (channels, frames, new_window) in [(1usize, 1usize, true), (3, 2, true), (3, 2, false)] {
         let s = stack(channels, frames);
         let mut params = Params::new();
-        params.set("all_channels", ParamValue::Bool(all));
+        params.set("new_window", ParamValue::Bool(new_window));
 
         let view = plugins::describe_view(&s, frames - 1, false, volume());
         let mut host = plugins::StackHost::new(&s, view.clone());
@@ -191,18 +199,38 @@ fn a_loaded_plugin_matches_the_built_in_it_was_copied_from() {
         let mut host = plugins::StackHost::new(&s, view);
         let got = from_library.run(&mut host, &params).expect("library run");
 
-        let (Outcome::NewDocument(want), Outcome::NewDocument(got)) = (&want, &got) else {
-            panic!("both should produce a document, got {want:?} / {got:?}");
+        // The checkbox decides which outcome, and it has to cross as itself:
+        // an unchecked box that arrived as `NewDocument` would open a window
+        // the user declined, and a checked one that arrived as
+        // `ReplaceDocument` would destroy the image they were looking at.
+        let (want, got) = match (&want, &got) {
+            (Outcome::NewDocument(w), Outcome::NewDocument(g)) if new_window => (w, g),
+            (Outcome::ReplaceDocument(w), Outcome::ReplaceDocument(g)) if !new_window => (w, g),
+            (w, g) => panic!("new_window={new_window} gave {w:?} / {g:?}"),
+        };
+
+        let bare = |i: &ImageResult| ImageResult {
+            metadata: None,
+            ..i.clone()
         };
         assert_eq!(
-            got, want,
+            bare(got),
+            bare(want),
             "the library's result differs from the built-in's for \
-             {channels}c x {frames}t, all_channels={all}"
+             {channels}c x {frames}t, new_window={new_window}"
         );
-        // Not vacuous: the fixture must actually have produced pixels, and the
-        // `all_channels` flag must have crossed and been acted on.
-        assert_eq!(want.planes.len(), if all { channels } else { 1 });
+        // Not vacuous: every plane of the stack must have been inverted, not
+        // just the one on screen.
+        assert_eq!(want.planes.len(), channels * frames);
         assert_eq!(want.planes[0].len(), 20);
+        // And the calibration crossed, which is what `metadata` is for even
+        // though the name and path cannot.
+        let (wm, gm) = (
+            want.metadata.as_ref().expect("built-in carried metadata"),
+            got.metadata.as_ref().expect("the library's crossed"),
+        );
+        assert_eq!(gm.spacing, wm.spacing, "spacing did not cross");
+        assert_eq!(gm.mode, wm.mode, "display mode did not cross");
     }
 }
 
@@ -210,28 +238,22 @@ fn a_loaded_plugin_matches_the_built_in_it_was_copied_from() {
 fn a_dialog_declared_inside_the_library_arrives_intact() {
     let from_library = plugin("dev.fasttiff.example.invert");
 
-    // One channel: the plugin suppresses the checkbox, and that decision has to
-    // survive the crossing too.
-    let s = stack(1, 1);
-    let host = plugins::StackHost::new(&s, plugins::describe_view(&s, 0, false, volume()));
-    assert!(
-        from_library.params(&host).is_empty(),
-        "a single-channel stack should offer no controls"
-    );
-
     let s = stack(3, 1);
     let host = plugins::StackHost::new(&s, plugins::describe_view(&s, 0, false, volume()));
     let decls = from_library.params(&host);
     assert_eq!(decls.len(), 1);
-    assert_eq!(decls[0].key, "all_channels");
-    assert_eq!(decls[0].label, "All channels");
-    assert_eq!(decls[0].kind, ParamKind::Bool { default: false });
+    assert_eq!(decls[0].key, "new_window");
+    assert_eq!(decls[0].label, "Open in a new window");
+    // The default is the half that matters: `true` is the answer that cannot
+    // lose anything, and a default that crossed as `false` would make every
+    // run of a freshly installed plugin destructive.
+    assert_eq!(decls[0].kind, ParamKind::Bool { default: true });
     assert!(
         decls[0]
             .help
             .as_deref()
             .unwrap_or("")
-            .contains("every channel"),
+            .contains("cannot be undone"),
         "the help text did not cross: {:?}",
         decls[0].help
     );
@@ -584,25 +606,38 @@ fn planes_read_by_a_loaded_plugin_address_the_same_data_as_the_host() {
     let view = plugins::describe_view(&s, 1, false, volume());
     let mut host = plugins::StackHost::new(&s, view);
 
-    let mut params = Params::new();
-    params.set("all_channels", ParamValue::Bool(true));
-    let Outcome::NewDocument(got) = from_library.run(&mut host, &params).expect("run") else {
+    let Outcome::NewDocument(got) = from_library.run(&mut host, &Params::new()).expect("run")
+    else {
         panic!("expected a document");
     };
 
+    // The fixture is float, so the pivot is the whole stack's measured range —
+    // one number for every plane, which is what makes a plane computed from
+    // the wrong pixels visible here rather than merely different.
     let mut host = plugins::StackHost::new(&s, plugins::describe_view(&s, 1, false, volume()));
     let mut buf = Vec::new();
-    for c in 0..3 {
-        host.read_plane_f32(Plane::new(c, 0, 1), &mut buf)
-            .expect("read");
-        let lo = buf.iter().cloned().fold(f32::INFINITY, f32::min);
-        let hi = buf.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let want: Vec<f32> = buf.iter().map(|&v| hi - (v - lo)).collect();
-        assert_eq!(
-            got.planes[c],
-            PlaneData::F32(want),
-            "channel {c} of frame 1 came back computed from different pixels"
-        );
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for t in 0..2 {
+        for c in 0..3 {
+            host.read_plane_f32(Plane::new(c, 0, t), &mut buf)
+                .expect("read");
+            lo = buf.iter().cloned().fold(lo, f32::min);
+            hi = buf.iter().cloned().fold(hi, f32::max);
+        }
+    }
+
+    for t in 0..2 {
+        for c in 0..3 {
+            host.read_plane_f32(Plane::new(c, 0, t), &mut buf)
+                .expect("read");
+            let want: Vec<f32> = buf.iter().map(|&v| lo + hi - v).collect();
+            // xyczt: channel fastest, then z, then t.
+            assert_eq!(
+                got.planes[t * 3 + c],
+                PlaneData::F32(want),
+                "channel {c} of frame {t} came back computed from different pixels"
+            );
+        }
     }
 }
 

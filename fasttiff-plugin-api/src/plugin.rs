@@ -208,6 +208,24 @@ pub enum Outcome {
     Message(String),
     /// Open the image in a new FastTIFF document.
     NewDocument(Box<ImageResult>),
+    /// Replace the document the plugin was run on with this image.
+    ///
+    /// The other half of [`Outcome::NewDocument`], and the reason a tool can
+    /// offer an "open in a new window" checkbox at all: FastTIFF is one stack
+    /// per window, so a result either arrives in a window of its own or takes
+    /// the place of the one it came from, and only the user knows which they
+    /// wanted.
+    ///
+    /// Unlike the other outcomes this one is **destructive** — what was open is
+    /// gone from that window unless it was saved — so a plugin should default
+    /// to [`NewDocument`](Outcome::NewDocument) and reach for this only when
+    /// asked.
+    ///
+    /// A host that predates it refuses the run with a message saying so, rather
+    /// than silently opening a window the user did not ask for. There is no
+    /// field to probe for it: it is a value, not a callback, so the refusal is
+    /// the whole negotiation.
+    ReplaceDocument(Box<ImageResult>),
     /// Write the image to this path. The host picks the format from the
     /// extension and reports what it wrote.
     SaveToFile {

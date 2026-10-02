@@ -65,6 +65,67 @@ fn plane_tag(c: usize, z: usize, t: usize) -> f32 {
     (c * 100 + z * 10 + t) as f32
 }
 
+/// As [`stack`], but 16-bit — so a tool that must give back the width it was
+/// handed has a width other than float to give back.
+///
+/// Pixel 0 of each plane is [`plane_tag`] again, so the same addressing
+/// assertions work; the rest ramps so that an inversion is visible.
+fn stack_u16(channels: usize, slices: usize, frames: usize) -> Stack {
+    let opts =
+        WriterOptions::new(W, H, SampleType::U16).metadata(StackMetaWrite::new(channels, slices));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for t in 0..frames.max(1) {
+        for z in 0..slices.max(1) {
+            for c in 0..channels.max(1) {
+                let tag = plane_tag(c, z, t) as u16;
+                let px: Vec<u16> = (0..W * H).map(|i| tag.wrapping_add(i as u16)).collect();
+                let bytes: Vec<u8> = px.iter().flat_map(|v| v.to_le_bytes()).collect();
+                w.write_frame_bytes(&bytes).unwrap();
+            }
+        }
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    let s = Stack::from_bytes(bytes, "probe16.tif".into(), false).expect("stack should open");
+    assert_eq!(
+        (
+            s.display.dims.channels,
+            s.display.dims.slices,
+            s.display.dims.frames
+        ),
+        (channels.max(1), slices.max(1), frames.max(1)),
+        "the stack did not resolve to the requested shape"
+    );
+    s
+}
+
+fn planes_u16(r: &ImageResult) -> Vec<&Vec<u16>> {
+    r.planes
+        .iter()
+        .map(|p| match p {
+            PlaneData::U16(v) => v,
+            other => panic!("expected u16 planes, got {:?}", other.pixel_type()),
+        })
+        .collect()
+}
+
+/// Answer a tool's dialog: the axis by index, then the three numbers.
+fn slice_params(
+    p: &dyn Plugin,
+    h: &StackHost,
+    axis: usize,
+    first: i64,
+    last: i64,
+    increment: i64,
+) -> Params {
+    let decls = p.params(h);
+    let mut params = Params::defaults(&decls);
+    params.set("axis", ParamValue::Choice(axis));
+    params.set("first", ParamValue::Int(first));
+    params.set("last", ParamValue::Int(last));
+    params.set("increment", ParamValue::Int(increment));
+    params.clamp_to(&decls)
+}
+
 fn view() -> VolumeView {
     VolumeView {
         mode: VolumeMode::Mip,
@@ -135,8 +196,15 @@ fn an_out_of_range_plane_is_an_error() {
     }
 }
 
+/// A single-plane float file inverts about the range it has.
+///
+/// `Invert` reflects about the sample *type's* range, but float has none, so it
+/// measures — and for a file of one plane the stack's range and the plane's
+/// range are the same number, which is why this reads like the old per-plane
+/// rule and still passes. `a_float_stack_is_inverted_about_its_whole_measured_range`
+/// is the case that tells the two apart.
 #[test]
-fn invert_reflects_the_plane_about_its_own_range() {
+fn invert_reflects_a_single_float_plane_about_its_own_range() {
     let s = stack(1, 1, 1);
     let mut h = host(&s, 0);
     let mut original = Vec::new();
@@ -477,8 +545,13 @@ fn invert_runs_on_an_8_bit_stack() {
         panic!("Invert should open a document")
     };
     img.validate().unwrap();
-    // Inverted about its own 0..255 range.
-    assert_eq!(planes_f32(&img)[0], &vec![255.0, 170.0, 85.0, 0.0]);
+    // Reflected about the *type's* range, and still 8-bit: an 8-bit file that
+    // came back as float would have doubled on disk for nothing.
+    assert_eq!(img.pixel_type, PixelType::U8);
+    match &img.planes[0] {
+        PlaneData::U8(v) => assert_eq!(v, &vec![255u8, 170, 85, 0]),
+        other => panic!("expected u8 planes, got {:?}", other.pixel_type()),
+    }
 }
 
 /// The borrow shortcut in `read_plane_f32` must produce the same numbers as the
@@ -1182,4 +1255,528 @@ fn stabilize_keeps_signed_samples_signed() {
             "frame {t}: the samples themselves changed, not just their places"
         );
     }
+}
+
+// --------------------------------------------------------------- Stack Tools
+
+/// Slice Keeper keeps exactly the planes the dialog named, every channel of
+/// them, in the right order.
+///
+/// The ordering is the assertion that matters: a tool that kept the right
+/// planes and emitted them channel-slowest would produce a stack with every
+/// plane present and the channels interleaved wrongly — which looks like a
+/// stack, and is not one.
+#[test]
+fn slice_keeper_keeps_exactly_the_planes_it_was_given() {
+    let s = stack(2, 4, 3);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceKeeper;
+    // Z is index 0 when both axes are on offer. Slices 1..=3, every one.
+    let params = slice_params(&p, &h, 0, 1, 3, 1);
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!((img.channels, img.slices, img.frames), (2, 3, 3));
+    let planes = planes_f32(&img);
+    assert_eq!(planes.len(), 2 * 3 * 3);
+    for t in 0..3 {
+        for z in 0..3 {
+            for c in 0..2 {
+                // z of the result is z of the source, the selection starting
+                // at the first slice.
+                let want = plane_tag(c, z, t);
+                let got = planes[t * 3 * 2 + z * 2 + c][0];
+                assert_eq!(got, want, "result c{c} z{z} t{t} holds the wrong plane");
+            }
+        }
+    }
+}
+
+/// Slice Remover keeps exactly the complement, which here is the one slice the
+/// dialog did not name.
+#[test]
+fn slice_remover_keeps_exactly_the_complement() {
+    let s = stack(2, 4, 3);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceRemover;
+    let params = slice_params(&p, &h, 0, 1, 3, 1);
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!((img.channels, img.slices, img.frames), (2, 1, 3));
+    let planes = planes_f32(&img);
+    for t in 0..3 {
+        for c in 0..2 {
+            // Only source slice 3 survives.
+            let want = plane_tag(c, 3, t);
+            assert_eq!(planes[t * 2 + c][0], want, "c{c} t{t}");
+        }
+    }
+}
+
+/// The increment makes the selection sparse, for both tools — so Remover
+/// leaves the planes between rather than deleting through them.
+#[test]
+fn the_increment_leaves_the_planes_between() {
+    let s = stack(2, 4, 2);
+    // Slices 1..=4 step 2 selects source slices 0 and 2.
+    let at = |z: usize, c: usize| z * 2 + c; // t0 of a 2-channel, 2-slice result
+
+    let mut h = host(&s, 0);
+    let mut keeper = builtin::SliceKeeper;
+    let params = slice_params(&keeper, &h, 0, 1, 4, 2);
+    let Outcome::NewDocument(kept) = keeper.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!(kept.slices, 2);
+    let kp = planes_f32(&kept);
+    assert_eq!(kp[at(0, 0)][0], plane_tag(0, 0, 0));
+    assert_eq!(kp[at(1, 0)][0], plane_tag(0, 2, 0));
+
+    let mut h = host(&s, 0);
+    let mut remover = builtin::SliceRemover;
+    let params = slice_params(&remover, &h, 0, 1, 4, 2);
+    let Outcome::NewDocument(left) = remover.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!(left.slices, 2, "the planes between must survive");
+    let lp = planes_f32(&left);
+    assert_eq!(lp[at(0, 0)][0], plane_tag(0, 1, 0));
+    assert_eq!(lp[at(1, 0)][0], plane_tag(0, 3, 0));
+}
+
+/// Taking planes out along T leaves Z whole, and vice versa.
+#[test]
+fn taking_planes_out_along_one_axis_leaves_the_other_whole() {
+    let s = stack(2, 3, 4);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceKeeper;
+    // Index 1 is T when both axes are offered. Frames 2..=3.
+    let params = slice_params(&p, &h, 1, 2, 3, 1);
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!((img.channels, img.slices, img.frames), (2, 3, 2));
+    let planes = planes_f32(&img);
+    for t in 0..2 {
+        for z in 0..3 {
+            for c in 0..2 {
+                let want = plane_tag(c, z, t + 1);
+                assert_eq!(planes[t * 3 * 2 + z * 2 + c][0], want, "c{c} z{z} t{t}");
+            }
+        }
+    }
+}
+
+/// A selection that would leave nothing is refused rather than producing a
+/// stack with no planes in it.
+#[test]
+fn leaving_no_planes_at_all_is_refused() {
+    let s = stack(2, 4, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceRemover;
+    // Every slice.
+    let params = slice_params(&p, &h, 0, 1, 4, 1);
+    let err = p.run(&mut h, &params).expect_err("must refuse");
+    assert!(err.to_string().contains("no planes"), "{err}");
+}
+
+/// An axis one plane deep is refused with a reason, rather than copied.
+#[test]
+fn an_axis_with_nothing_to_take_out_is_refused() {
+    // A single plane: neither axis is deeper than one, so the selector offers
+    // Z and the run refuses it. An empty dropdown would read as broken.
+    let s = stack(1, 1, 1);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceKeeper;
+    let params = slice_params(&p, &h, 0, 1, 1, 1);
+    let err = p.run(&mut h, &params).expect_err("must refuse");
+    assert!(err.to_string().contains("nothing to take out"), "{err}");
+}
+
+/// The tools give back the sample width they were handed.
+#[test]
+fn taking_planes_out_keeps_the_stacks_bit_depth() {
+    let s = stack_u16(2, 4, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceKeeper;
+    let params = slice_params(&p, &h, 0, 1, 2, 1);
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!(img.pixel_type, PixelType::U16, "a 16-bit stack widened");
+    let planes = planes_u16(&img);
+    // t0, channel 0, of a 2-channel 2-slice result.
+    assert_eq!(planes[0][0], plane_tag(0, 0, 0) as u16);
+    assert_eq!(planes[2][0], plane_tag(0, 1, 0) as u16);
+}
+
+/// Unchecking the box replaces the open document instead of opening a window.
+#[test]
+fn unchecking_the_window_box_replaces_the_document() {
+    let s = stack(2, 3, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceKeeper;
+    let decls = p.params(&h);
+    let mut params = Params::defaults(&decls);
+    params.set("axis", ParamValue::Choice(0));
+    params.set("first", ParamValue::Int(1));
+    params.set("last", ParamValue::Int(2));
+    params.set("increment", ParamValue::Int(1));
+    params.set("new_window", ParamValue::Bool(false));
+
+    match p.run(&mut h, &params.clamp_to(&decls)).unwrap() {
+        Outcome::ReplaceDocument(img) => assert_eq!(img.slices, 2),
+        other => panic!("expected a replacement, got {other:?}"),
+    }
+}
+
+// --------------------------------------------------------------- Invert Stack
+
+/// Invert Stack reflects a 16-bit stack about its type's range, keeps the
+/// width, and does it to every plane.
+#[test]
+fn invert_stack_reflects_a_16_bit_stack_about_its_type_range() {
+    let s = stack_u16(2, 2, 2);
+    let mut h = host(&s, 0);
+    let mut before = Vec::new();
+    h.read_plane_f32(Plane::new(1, 1, 1), &mut before).unwrap();
+
+    let mut p = builtin::Invert;
+    let decls = p.params(&h);
+    let Outcome::NewDocument(img) = p.run(&mut h, &Params::defaults(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!(img.pixel_type, PixelType::U16);
+    assert_eq!((img.channels, img.slices, img.frames), (2, 2, 2));
+
+    // The last plane, which a tool that only did the frame on screen would
+    // have left alone.
+    let planes = planes_u16(&img);
+    let at = |c: usize, z: usize, t: usize| t * 2 * 2 + z * 2 + c;
+    let last = planes[at(1, 1, 1)];
+    for (i, &got) in last.iter().enumerate() {
+        let want = 65535.0 - before[i];
+        assert_eq!(got as f32, want, "sample {i} of the last plane");
+    }
+}
+
+/// Inverting twice is the identity, which is the property a type-range
+/// reflection has and a per-plane one does not.
+#[test]
+fn inverting_a_stack_twice_gives_it_back() {
+    let s = stack_u16(2, 2, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::Invert;
+    let decls = p.params(&h);
+    let Outcome::NewDocument(once) = p.run(&mut h, &Params::defaults(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+
+    // Round-trip the result back into a stack and invert it again. This is
+    // also what checks the result is a stack the host can actually reopen.
+    let s2 = fast_tiff_viewer::plugins::to_stack(&once, None, false).expect("result should open");
+    let mut h2 = host(&s2, 0);
+    let Outcome::NewDocument(twice) = p.run(&mut h2, &Params::defaults(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+
+    let mut original = Vec::new();
+    let mut h = host(&s, 0);
+    let back = planes_u16(&twice);
+    for t in 0..2 {
+        for z in 0..2 {
+            for c in 0..2 {
+                h.read_plane_f32(Plane::new(c, z, t), &mut original)
+                    .unwrap();
+                let want: Vec<u16> = original.iter().map(|&v| v as u16).collect();
+                assert_eq!(
+                    back[t * 2 * 2 + z * 2 + c],
+                    &want,
+                    "c{c} z{z} t{t} did not come back"
+                );
+            }
+        }
+    }
+}
+
+/// A float stack has no range of its own, so it is inverted about the range it
+/// actually has — measured over the whole stack, not per plane.
+///
+/// Per-plane would make a dim plane and a bright plane come back equally
+/// bright, which destroys exactly the signal a timelapse is of.
+#[test]
+fn a_float_stack_is_inverted_about_its_whole_measured_range() {
+    let s = stack(2, 2, 2);
+    let mut h = host(&s, 0);
+
+    // The stack's own extremes, over every plane.
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    let mut buf = Vec::new();
+    for t in 0..2 {
+        for z in 0..2 {
+            for c in 0..2 {
+                h.read_plane_f32(Plane::new(c, z, t), &mut buf).unwrap();
+                for &v in &buf {
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+        }
+    }
+
+    let mut p = builtin::Invert;
+    let decls = p.params(&h);
+    let Outcome::NewDocument(img) = p.run(&mut h, &Params::defaults(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!(img.pixel_type, PixelType::F32);
+
+    let planes = planes_f32(&img);
+    for t in 0..2 {
+        for z in 0..2 {
+            for c in 0..2 {
+                h.read_plane_f32(Plane::new(c, z, t), &mut buf).unwrap();
+                for (i, &src) in buf.iter().enumerate() {
+                    let want = lo + hi - src;
+                    let got = planes[t * 2 * 2 + z * 2 + c][i];
+                    assert!(
+                        (got - want).abs() < 1e-3,
+                        "c{c} z{z} t{t} sample {i}: {got} vs {want}"
+                    );
+                }
+            }
+        }
+    }
+    // Not vacuous: a per-plane range would agree with a global one on a stack
+    // whose planes all span the same values. These do not.
+    assert!(hi - lo > 1.0, "the fixture has no range to speak of");
+}
+
+/// Cancelling a Stack Tools run is a cancellation, not an error.
+///
+/// The distinction is visible to the user: `Outcome::Cancelled` leaves the
+/// window alone quietly, where an `Err` puts its message in the status bar
+/// styled as a failure — so returning one for something the user asked for
+/// reads as "the tool broke". Every one of these tools is a long walk over
+/// every plane, so cancelling them is the ordinary case, not the rare one.
+#[test]
+fn cancelling_a_stack_tool_is_not_reported_as_a_failure() {
+    use std::sync::atomic::{AtomicBool, AtomicU32};
+    use std::sync::Arc;
+
+    let s = stack(2, 4, 2);
+    for (name, run) in [
+        ("Slice Keeper", 0usize),
+        ("Slice Remover", 1),
+        ("Invert Stack", 2),
+    ] {
+        let flag = Arc::new(AtomicBool::new(true)); // already cancelled
+        let progress = Arc::new(AtomicU32::new(0));
+        let mut h =
+            StackHost::new(&s, describe_view(&s, 0, false, view())).with_cancel(flag, progress);
+        let got = match run {
+            0 => {
+                let mut p = builtin::SliceKeeper;
+                let params = slice_params(&p, &h, 0, 1, 2, 1);
+                p.run(&mut h, &params)
+            }
+            1 => {
+                let mut p = builtin::SliceRemover;
+                let params = slice_params(&p, &h, 0, 1, 2, 1);
+                p.run(&mut h, &params)
+            }
+            _ => {
+                let mut p = builtin::Invert;
+                let decls = p.params(&h);
+                p.run(&mut h, &Params::defaults(&decls))
+            }
+        };
+        assert_eq!(
+            got.unwrap_or_else(|e| panic!("{name} reported a cancel as an error: {e}")),
+            Outcome::Cancelled,
+            "{name}"
+        );
+    }
+}
+
+// ---------------------------------------------------------- Slice Order Invert
+
+/// Reversing the order along an axis reverses that axis and nothing else.
+///
+/// The pixels are untouched, so every plane must arrive byte-identical to one
+/// of the source's — just in the opposite order. The channels keep their order
+/// within each plane, which is the part a reversal of the flat plane list would
+/// get wrong: reversing `planes` wholesale would also swap channel 0 and
+/// channel 1 of every plane, and the picture would still look like a picture.
+#[test]
+fn slice_order_invert_reverses_one_axis_and_leaves_the_rest() {
+    let s = stack(2, 4, 3);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceOrderInvert;
+    let decls = p.params(&h);
+    let mut params = Params::defaults(&decls);
+    params.set("axis", ParamValue::Choice(0)); // Z
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params.clamp_to(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    // Same shape: nothing is added or dropped.
+    assert_eq!((img.channels, img.slices, img.frames), (2, 4, 3));
+    let planes = planes_f32(&img);
+    for t in 0..3 {
+        for z in 0..4 {
+            for c in 0..2 {
+                // Z runs backwards; C and T do not.
+                let want = plane_tag(c, 3 - z, t);
+                assert_eq!(planes[t * 4 * 2 + z * 2 + c][0], want, "c{c} z{z} t{t}");
+            }
+        }
+    }
+}
+
+/// And along T, with Z left alone.
+#[test]
+fn slice_order_invert_reverses_time_when_asked() {
+    let s = stack(2, 3, 4);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceOrderInvert;
+    let decls = p.params(&h);
+    let mut params = Params::defaults(&decls);
+    params.set("axis", ParamValue::Choice(1)); // T
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params.clamp_to(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!((img.channels, img.slices, img.frames), (2, 3, 4));
+    let planes = planes_f32(&img);
+    for t in 0..4 {
+        for z in 0..3 {
+            for c in 0..2 {
+                let want = plane_tag(c, z, 3 - t);
+                assert_eq!(planes[t * 3 * 2 + z * 2 + c][0], want, "c{c} z{z} t{t}");
+            }
+        }
+    }
+}
+
+/// Reversing twice gives the stack back, which is the property rather than the
+/// arithmetic.
+#[test]
+fn reversing_the_order_twice_gives_the_stack_back() {
+    let s = stack(2, 4, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceOrderInvert;
+    let decls = p.params(&h);
+    let params = Params::defaults(&decls);
+
+    let Outcome::NewDocument(once) = p.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    let s2 = fast_tiff_viewer::plugins::to_stack(&once, None, false).expect("result should open");
+    let mut h2 = host(&s2, 0);
+    let Outcome::NewDocument(twice) = p.run(&mut h2, &params).unwrap() else {
+        panic!("expected a document")
+    };
+
+    let back = planes_f32(&twice);
+    for t in 0..2 {
+        for z in 0..4 {
+            for c in 0..2 {
+                assert_eq!(
+                    back[t * 4 * 2 + z * 2 + c][0],
+                    plane_tag(c, z, t),
+                    "c{c} z{z} t{t} did not come back"
+                );
+            }
+        }
+    }
+}
+
+/// An axis with one plane has no order to reverse, and is refused rather than
+/// copied.
+#[test]
+fn an_axis_with_no_order_to_reverse_is_refused() {
+    let s = stack(1, 1, 1);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceOrderInvert;
+    let decls = p.params(&h);
+    let err = p
+        .run(&mut h, &Params::defaults(&decls))
+        .expect_err("must refuse");
+    assert!(err.to_string().contains("no order to reverse"), "{err}");
+}
+
+/// A plugin result opens in its new window without a damaged-file warning.
+///
+/// The path every new window takes: run a filter, encode the result to TIFF,
+/// reopen it. A filter that carries its source's metadata — which the ones that
+/// preserve geometry all do — carries the source's `ImageDescription` with it,
+/// and that description describes the *source's* shape.
+///
+/// It went wrong for a z-stack. 101 slices resolve to 101 frames, so the result
+/// is 101 frames with one slice; the writer stated `frames=101` and omitted
+/// `slices=` because there was nothing to say; and the source's `slices=101`
+/// rode along in the carried text as the only `slices=` in the file. Reopened,
+/// that read as 101 x 101 = 10,201 planes declared against 101 present, and
+/// every window a plugin opened said the file was truncated.
+#[test]
+fn a_plugin_result_reopens_without_a_plane_mismatch() {
+    // A z-stack described the way ImageJ describes one, which is the shape that
+    // produced the bug: `slices=` set, `frames=` absent.
+    let (w, h, n) = (4u32, 2u32, 6usize);
+    let opts = WriterOptions::new(w, h, SampleType::U16)
+        .metadata(StackMetaWrite::new(1, n).unit("micron").spacing(0.2));
+    let mut wr = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for i in 0..n {
+        let px: Vec<u16> = (0..w * h).map(|j| (i as u16) * 100 + j as u16).collect();
+        wr.write_frame_bytes(&px.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>())
+            .unwrap();
+    }
+    let bytes = wr.finish().unwrap().into_inner();
+    let s = Stack::from_bytes(bytes, "zstack.tif".into(), false).expect("opens");
+    assert_eq!(s.display.plane_mismatch, None, "the source should be clean");
+    // Z folds into time, which is what makes the result's shape differ from
+    // the description it carries.
+    assert_eq!(
+        (s.display.dims.slices, s.display.dims.frames),
+        (1, n),
+        "the fixture must be the folded shape the bug needed"
+    );
+
+    let mut host = host(&s, 0);
+    let mut p = builtin::Invert;
+    let decls = p.params(&host);
+    let Outcome::NewDocument(img) = p.run(&mut host, &Params::defaults(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    // The filter carries the source's record, including its description.
+    assert!(
+        img.metadata.is_some(),
+        "the case only arises when metadata is carried"
+    );
+
+    // Exactly what the app does on the way to a new window.
+    let encoded = fast_tiff_viewer::plugins::to_tiff_bytes(&img, None).expect("encode");
+    let reopened =
+        Stack::from_bytes(encoded, "result.tif".into(), false).expect("the result should reopen");
+    assert_eq!(
+        reopened.display.plane_mismatch, None,
+        "the new window reported a damaged file"
+    );
+    assert_eq!(
+        (
+            reopened.display.dims.channels,
+            reopened.display.dims.slices,
+            reopened.display.dims.frames
+        ),
+        (1, 1, n)
+    );
+    // And the calibration the carried record was there for still arrived.
+    assert_eq!(reopened.tiff.meta.unit.as_deref(), Some("micron"));
 }

@@ -49,13 +49,89 @@ use std::path::Path;
 
 // --------------------------------------------------------------------- filter
 
-/// Invert the frame on screen, about its own range.
+/// Invert whatever is loaded, about the sample type's range.
 ///
 /// Deliberately identical to `fast_tiff_viewer::plugins::builtin::Invert`,
 /// down to the NaN handling and the result's name. The test that compares them
 /// is only meaningful while that stays true — if you change one, change both.
+///
+/// It is also, incidentally, the example of the thing a plugin author gets
+/// wrong first: a filter that reads through `read_plane_f32` and stores
+/// `PlaneData::F32` has quietly doubled the size of every 8- and 16-bit file it
+/// touches. `Store` below is the whole fix, and it is nine lines.
 #[derive(Default)]
 pub struct Invert;
+
+/// What a result's samples are stored as, so a filter gives back what it was
+/// given.
+///
+/// `read_plane_f32` hands over the file's own sample values as `f32` — 0..255
+/// for an 8-bit file, 0..65535 for a 16-bit one — because that is the one type
+/// every stack can be read as. It does not follow that the *result* should be
+/// float: `f32` has a 24-bit mantissa, so every `u8` and `u16` survives the
+/// trip exactly and can be put back.
+#[derive(Clone, Copy)]
+enum Store {
+    U8,
+    U16,
+    I16,
+    F32,
+}
+
+impl Store {
+    fn of(source: PixelType) -> Self {
+        match source {
+            PixelType::U8 => Store::U8,
+            PixelType::U16 => Store::U16,
+            PixelType::I16 => Store::I16,
+            PixelType::F32 => Store::F32,
+        }
+    }
+
+    fn pixel_type(self) -> PixelType {
+        match self {
+            Store::U8 => PixelType::U8,
+            Store::U16 => PixelType::U16,
+            Store::I16 => PixelType::I16,
+            Store::F32 => PixelType::F32,
+        }
+    }
+
+    /// The range this width can hold; `None` for float, which has none.
+    fn range(self) -> Option<(f32, f32)> {
+        match self {
+            Store::U8 => Some((0.0, 255.0)),
+            Store::U16 => Some((0.0, 65535.0)),
+            Store::I16 => Some((-32768.0, 32767.0)),
+            Store::F32 => None,
+        }
+    }
+
+    /// The signed arm is the one to be careful with: the contract has no
+    /// `PlaneData::I16`, so signed samples travel as the same sixteen bits in
+    /// the `U16` lane, declared `PixelType::I16`.
+    fn plane(self, v: Vec<f32>) -> PlaneData {
+        let whole = |x: f32, lo: f32, hi: f32| {
+            if x.is_nan() {
+                lo
+            } else {
+                x.clamp(lo, hi).round()
+            }
+        };
+        match self {
+            Store::U8 => PlaneData::U8(v.iter().map(|&x| whole(x, 0.0, 255.0) as u8).collect()),
+            Store::U16 => {
+                PlaneData::U16(v.iter().map(|&x| whole(x, 0.0, 65535.0) as u16).collect())
+            }
+            Store::I16 => PlaneData::U16(
+                v.iter()
+                    .map(|&x| whole(x, -32768.0, 32767.0) as i16 as u16)
+                    .collect(),
+            ),
+            Store::F32 => PlaneData::F32(v),
+        }
+    }
+}
 
 impl Plugin for Invert {
     fn info(&self) -> PluginInfo {
@@ -64,22 +140,21 @@ impl Plugin for Invert {
             .version(env!("CARGO_PKG_VERSION"))
             .author("FastTIFF")
             .description(
-                "Invert the current frame about its own min/max. Loaded from a shared library.",
+                "Invert about the sample type's full range, every plane, keeping the \
+                 file's bit depth. Loaded from a shared library.",
             )
     }
 
-    fn params(&self, host: &dyn HostContext) -> Vec<ParamDecl> {
-        let info = host.image();
-        // Only offer the choice when there is one.
-        if info.channels <= 1 {
-            return Vec::new();
-        }
+    fn params(&self, _host: &dyn HostContext) -> Vec<ParamDecl> {
         vec![ParamDecl::new(
-            "all_channels",
-            "All channels",
-            ParamKind::Bool { default: false },
+            "new_window",
+            "Open in a new window",
+            ParamKind::Bool { default: true },
         )
-        .help("Invert every channel rather than only the first.")]
+        .help(
+            "On, the result opens in its own window and this one is left alone. Off, it \
+             replaces the image in this window — which cannot be undone.",
+        )]
     }
 
     fn run(&mut self, host: &mut dyn HostContext, params: &Params) -> Result<Outcome, PluginError> {
@@ -87,50 +162,91 @@ impl Plugin for Invert {
         if info.plane_len() == 0 {
             return Err(PluginError::unsupported("the stack has no pixels"));
         }
-        let t = host.view().frame_index.min(info.frames.saturating_sub(1));
-        let all = params.bool("all_channels", false);
-        let n = if all { info.channels.max(1) } else { 1 };
+        let channels = info.channels.max(1);
+        let slices = info.slices.max(1);
+        let frames = info.frames.max(1);
+        let store = Store::of(info.pixel_type);
+        let n_planes = channels * slices * frames;
 
-        let mut planes = Vec::with_capacity(n);
-        let mut buf = Vec::new();
-        for c in 0..n {
-            if !host.progress(c as f32 / n as f32) {
-                return Ok(Outcome::Cancelled);
-            }
-            host.read_plane_f32(Plane::new(c, 0, t), &mut buf)?;
-            let (lo, hi) = buf
-                .iter()
-                .fold((f32::INFINITY, f32::NEG_INFINITY), |(l, h), &v| {
-                    if v.is_finite() {
-                        (l.min(v), h.max(v))
-                    } else {
-                        (l, h)
+        let measured = store.range().is_none();
+        let (lo, hi) = match store.range() {
+            Some(range) => range,
+            None => {
+                let mut lo = f32::INFINITY;
+                let mut hi = f32::NEG_INFINITY;
+                let mut buf = Vec::new();
+                let mut done = 0usize;
+                for t in 0..frames {
+                    for z in 0..slices {
+                        for c in 0..channels {
+                            if !host.progress(0.5 * done as f32 / n_planes as f32) {
+                                return Ok(Outcome::Cancelled);
+                            }
+                            host.read_plane_f32(Plane::new(c, z, t), &mut buf)?;
+                            for &v in buf.iter().filter(|v| v.is_finite()) {
+                                lo = lo.min(v);
+                                hi = hi.max(v);
+                            }
+                            done += 1;
+                        }
                     }
-                });
-            let (lo, hi) = if lo.is_finite() && hi.is_finite() {
+                }
+                if lo > hi {
+                    return Err(PluginError::unsupported(
+                        "this stack has no finite samples to invert",
+                    ));
+                }
+                host.log(&format!(
+                    "float data: inverted about its own measured range, {lo} to {hi}"
+                ));
                 (lo, hi)
-            } else {
-                (0.0, 1.0)
-            };
-            planes.push(PlaneData::F32(
-                buf.iter()
-                    .map(|&v| if v.is_finite() { hi - (v - lo) } else { v })
-                    .collect(),
-            ));
+            }
+        };
+        let pivot = lo + hi;
+
+        let mut planes: Vec<PlaneData> = Vec::with_capacity(n_planes);
+        let mut buf = Vec::new();
+        let mut done = 0usize;
+        let (base, span) = if measured { (0.5, 0.5) } else { (0.0, 1.0) };
+        for t in 0..frames {
+            for z in 0..slices {
+                for c in 0..channels {
+                    if !host.progress(base + span * done as f32 / n_planes as f32) {
+                        return Ok(Outcome::Cancelled);
+                    }
+                    host.read_plane_f32(Plane::new(c, z, t), &mut buf)?;
+                    for v in buf.iter_mut() {
+                        if v.is_finite() {
+                            *v = pivot - *v;
+                        }
+                    }
+                    planes.push(store.plane(std::mem::take(&mut buf)));
+                    done += 1;
+                }
+            }
         }
 
-        Ok(Outcome::NewDocument(Box::new(ImageResult {
+        let image = ImageResult {
             width: info.width,
             height: info.height,
-            channels: n,
-            slices: 1,
-            frames: 1,
-            pixel_type: PixelType::F32,
+            channels,
+            slices,
+            frames,
+            pixel_type: store.pixel_type(),
             planes,
             channel_colors: Vec::new(),
-            metadata: None,
+            metadata: Some(host.stack_info().clone()),
             name: format!("{}-inverted", host.stack_info().name),
-        })))
+        };
+        image.validate()?;
+        // The checkbox, which is the other half of why this is the example:
+        // a result either opens in a window of its own or takes the place of
+        // the one it came from, and only the user knows which.
+        Ok(if params.bool("new_window", true) {
+            Outcome::NewDocument(Box::new(image))
+        } else {
+            Outcome::ReplaceDocument(Box::new(image))
+        })
     }
 }
 

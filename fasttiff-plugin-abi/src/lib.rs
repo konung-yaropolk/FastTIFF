@@ -609,6 +609,12 @@ open_enum! {
         SaveToFile = 3,
         /// Show the chart declared through [`FtSink::begin_plot`].
         Plot = 4,
+        /// Replace the document the plugin ran on with the pushed image.
+        ///
+        /// A value rather than a callback, so there is nothing to probe: a host
+        /// that does not know it refuses the run and says so, which is what the
+        /// catch-all arm of a host's outcome handling is for.
+        ReplaceDocument = 5,
     }
 }
 
@@ -1124,6 +1130,7 @@ const _: () = {
     assert!(FtOutcomeKind::NewDocument.0 == 2);
     assert!(FtOutcomeKind::SaveToFile.0 == 3);
     assert!(FtOutcomeKind::Plot.0 == 4);
+    assert!(FtOutcomeKind::ReplaceDocument.0 == 5);
 
     assert!(FtSelectionKind::None.0 == 0);
     assert!(FtSelectionKind::Regions.0 == 1);

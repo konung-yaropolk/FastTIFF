@@ -117,7 +117,11 @@ pub fn compute_status(
     // reader should know that before anything else.
     if let Some((declared, available)) = plane_mismatch {
         Some(format!(
-            "Warning: this file's metadata describes {declared} image plane(s) but the file              contains {available}. Showing {} channel(s) × {} Z-slice(s) × {} frame(s), which is              what fits — the rest may live in a companion file (a multi-file OME set gives every              file the whole dataset's dimensions), or the file may be truncated.",
+            "Warning: this file's metadata describes {declared} image plane(s) but the file \
+             contains {available}. Showing {} channel(s) × {} Z-slice(s) × {} frame(s), \
+             which is what fits — the rest may live in a companion file (a multi-file \
+             OME set gives every file the whole dataset's dimensions), or the file may \
+             be truncated.",
             dims.channels, dims.slices, dims.frames
         ))
     } else if triple_axis_warning {
