@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -935,6 +935,7 @@ dependencies = [
  "png",
  "quick-xml 0.37.5",
  "rayon",
+ "rustfft",
  "scivis-render",
  "suite2p-registration",
 ]

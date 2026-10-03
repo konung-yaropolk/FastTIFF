@@ -26,6 +26,11 @@
 //! * [`PngImport`] is the one people actually reach for, because a figure, a
 //!   mask or a screenshot arrives as a PNG and has to be got *in* — at the
 //!   depth the file stores it, which no screenshot-shaped reader does.
+//! * [`deconvolve`] is the one that is a real piece of science rather than a
+//!   convenience, and the proof that the contract is wide enough to carry one:
+//!   a dialog of twenty controls, a file the plugin opens for itself, an hour
+//!   of arithmetic that has to stay cancellable, and nine published algorithms
+//!   behind one menu entry.
 //!
 //! [`Netpbm`] is a fifth thing — a worked example of the other shape the job
 //! takes, a documented format implemented straight from its spec. It is behind
@@ -49,6 +54,7 @@
 //! rather ship separately, its directory becomes a `cdylib` crate's `src/` and
 //! nothing inside it has to change.
 
+pub mod deconvolve;
 pub mod invert;
 #[cfg(feature = "netpbm-example")]
 pub mod netpbm;
@@ -59,6 +65,7 @@ pub mod stabilize;
 pub mod stack_tools;
 pub mod zproject;
 
+pub use deconvolve::{Deconvolve, GeneratePsf};
 pub use invert::Invert;
 #[cfg(feature = "netpbm-example")]
 pub use netpbm::Netpbm;
@@ -81,6 +88,8 @@ pub fn all() -> Vec<Box<dyn Plugin>> {
         Box::new(SliceKeeper),
         Box::new(SliceRemover),
         Box::new(SliceOrderInvert),
+        Box::new(GeneratePsf),
+        Box::new(Deconvolve),
     ]
 }
 

@@ -50,6 +50,9 @@ pub struct StackHost {
     /// The regions the user has drawn, if any. See
     /// [`HostContext::selection`](fasttiff_plugin_api::HostContext::selection).
     selection: Vec<fasttiff_plugin_api::Roi>,
+    /// What the dialog holds, while this host exists to answer a `params`
+    /// call. Empty for a run.
+    pending: fasttiff_plugin_api::Params,
     /// Messages the plugin logged, drained by the caller when the run ends.
     pub messages: Vec<String>,
     /// Set by the UI thread to ask the plugin to stop.
@@ -69,6 +72,7 @@ impl StackHost {
             rgb: stack.display.rgb,
             scratch: Default::default(),
             selection: Vec::new(),
+            pending: Default::default(),
             messages: Vec::new(),
             cancel: None,
             progress: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -83,6 +87,17 @@ impl StackHost {
     /// need to state exactly what a plugin should see.
     pub fn with_info(mut self, info: StackInfo) -> Self {
         self.info = info;
+        self
+    }
+
+    /// Hand the plugin the dialog values chosen so far.
+    ///
+    /// Only meaningful for the host built to ask a plugin what its dialog
+    /// should be: the plugin reads these and may declare a different set of
+    /// controls, which is how a dialog follows the method chosen in it. For a
+    /// run the values arrive as the run's own argument and this stays empty.
+    pub fn with_pending_params(mut self, pending: fasttiff_plugin_api::Params) -> Self {
+        self.pending = pending;
         self
     }
 
@@ -153,6 +168,10 @@ impl HostContext for StackHost {
 
     fn selection(&self) -> fasttiff_plugin_api::Selection<'_> {
         &self.selection
+    }
+
+    fn pending_params(&self) -> &fasttiff_plugin_api::Params {
+        &self.pending
     }
 
     fn read_plane_u16(&mut self, plane: Plane, out: &mut Vec<u16>) -> Result<(), PluginError> {

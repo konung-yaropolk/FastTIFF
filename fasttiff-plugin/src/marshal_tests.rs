@@ -204,6 +204,13 @@ unsafe extern "C" fn host_count(_c: *mut core::ffi::c_void) -> u64 {
 unsafe extern "C" fn host_roi(_c: *mut core::ffi::c_void, _i: u64, _o: *mut FtRoi) -> FtStatus {
     FtStatus::OutOfRange
 }
+unsafe extern "C" fn host_param_value(
+    _c: *mut core::ffi::c_void,
+    _i: u64,
+    _o: *mut crate::abi::FtValue,
+) -> FtStatus {
+    FtStatus::OutOfRange
+}
 
 /// A host table declaring `size` bytes, whatever this build's `FtHost` is.
 fn host_table(size: usize) -> FtHost {
@@ -224,6 +231,8 @@ fn host_table(size: usize) -> FtHost {
         stack_string: no_stack_string_fixture,
         selection_count: host_count,
         selection_roi: host_roi,
+        param_count: host_count,
+        param_value: host_param_value,
     }
 }
 
@@ -817,5 +826,121 @@ fn an_importer_survives_a_host_that_is_not_one() {
         PROGRESS.load(core::sync::atomic::Ordering::Relaxed),
         0,
         "progress must go nowhere rather than through a pointer that was never there"
+    );
+}
+
+/// A host whose shape and view queries succeed, which `CHost::new` needs
+/// before it gets as far as anything else. The table shared by the tests
+/// above answers `Unsupported` to both, because those tests never build a
+/// `CHost`.
+unsafe extern "C" fn ok_image_info(
+    _c: *mut core::ffi::c_void,
+    o: *mut crate::abi::FtImageInfo,
+) -> FtStatus {
+    let mut filled = core::mem::zeroed::<crate::abi::FtImageInfo>();
+    filled.width = 2;
+    filled.height = 2;
+    filled.samples_per_pixel = 1;
+    filled.channels = 1;
+    filled.slices = 1;
+    filled.frames = 1;
+    if crate::abi::write_prefix(o, filled) {
+        FtStatus::Ok
+    } else {
+        FtStatus::BadArgument
+    }
+}
+
+unsafe extern "C" fn ok_view(
+    _c: *mut core::ffi::c_void,
+    o: *mut crate::abi::FtViewParams,
+) -> FtStatus {
+    let filled = core::mem::zeroed::<crate::abi::FtViewParams>();
+    if crate::abi::write_prefix(o, filled) {
+        FtStatus::Ok
+    } else {
+        FtStatus::BadArgument
+    }
+}
+
+/// The shared table, with those two answering properly.
+fn answering_host(size: usize) -> FtHost {
+    let mut t = host_table(size);
+    t.image_info = ok_image_info;
+    t.view_params = ok_view;
+    t
+}
+
+/// A minor-2 host — one shipped before the dialog could be re-asked — must
+/// not have its table read past the end when a plugin asks what the dialog
+/// currently holds.
+///
+/// The whole path, not just `host_of`: `CHost::new` now reads the pending
+/// values at construction, and the guard that stops it doing so on an older
+/// host is the only thing between this and two calls through uninitialised
+/// function pointers. Under Miri a missing stub in `host_of` fails at
+/// `assume_init`, and a missing guard fails at the call — which is why this
+/// test is worth more here than anywhere else.
+#[test]
+fn a_host_without_pending_params_is_not_read_past_its_end() {
+    let declared = core::mem::offset_of!(FtHost, param_count);
+    assert!(
+        declared >= FtHost::CORE && declared < core::mem::size_of::<FtHost>(),
+        "the fixture must be a real minor-2 host"
+    );
+    let short = Exactly::holding(&answering_host(declared), declared);
+
+    // SAFETY: the block holds a well-formed prefix of an `FtHost`, sized by
+    // its own `struct_size`.
+    let h = unsafe { crate::host::CHost::new(short.as_ptr()) }.expect("a minor-2 host");
+    assert!(
+        fasttiff_plugin_api::HostContext::pending_params(&h).is_empty(),
+        "a host that cannot be asked has nothing pending"
+    );
+}
+
+/// And a host that *can* be asked is read, which is the other half: a guard
+/// that refused everything would pass the test above and break the feature.
+#[test]
+fn a_host_with_pending_params_is_read() {
+    unsafe extern "C" fn one(_c: *mut core::ffi::c_void) -> u64 {
+        1
+    }
+    unsafe extern "C" fn value(
+        _c: *mut core::ffi::c_void,
+        index: u64,
+        out: *mut crate::abi::FtValue,
+    ) -> FtStatus {
+        if index != 0 || out.is_null() {
+            return FtStatus::OutOfRange;
+        }
+        let filled = crate::abi::FtValue {
+            struct_size: 0,
+            kind: crate::abi::FtParamKind::Choice,
+            key: crate::abi::FtStr::from_str("method"),
+            i: 4,
+            f: 0.0,
+            b: 0,
+            _pad: 0,
+            s: crate::abi::FtStr::EMPTY,
+        };
+        if crate::abi::write_prefix(out, filled) {
+            FtStatus::Ok
+        } else {
+            FtStatus::BadArgument
+        }
+    }
+
+    let mut table = answering_host(core::mem::size_of::<FtHost>());
+    table.param_count = one;
+    table.param_value = value;
+    let full = Exactly::holding(&table, core::mem::size_of::<FtHost>());
+
+    // SAFETY: a complete, well-formed table of this build's own size.
+    let h = unsafe { crate::host::CHost::new(full.as_ptr()) }.expect("a current host");
+    assert_eq!(
+        fasttiff_plugin_api::HostContext::pending_params(&h).choice("method", 0),
+        4,
+        "the chosen method did not cross"
     );
 }

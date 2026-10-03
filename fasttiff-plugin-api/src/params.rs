@@ -80,6 +80,15 @@ pub enum ParamKind {
     /// Not a control: a line of text in the dialog. Lets a plugin explain
     /// itself without the host inventing a documentation channel.
     Label,
+    /// Not a control either: the start of a group, drawn as a heading with a
+    /// rule under it.
+    ///
+    /// Distinct from [`Label`](ParamKind::Label) because the two are drawn
+    /// differently and only the plugin knows which it meant. A dialog of
+    /// twenty controls in one column is unreadable whatever the labels say;
+    /// four groups of five is a form. A host that predates this draws it as a
+    /// plain label, which is the right thing to degrade to.
+    Section,
 }
 
 /// A value the user chose.
@@ -92,6 +101,13 @@ pub enum ParamValue {
     Text(String),
     Path(String),
 }
+
+/// No values at all, as something a default implementation can lend.
+///
+/// A `static` rather than a `const`: `Params` owns a `Vec`, so it has a
+/// destructor, so a reference to a `const` would borrow a temporary instead
+/// of being promoted. Statics are never dropped, which is what is wanted.
+pub static NO_PARAMS: Params = Params { values: Vec::new() };
 
 /// The filled-in dialog handed to [`crate::Plugin::run`].
 ///
@@ -127,6 +143,18 @@ impl Params {
 
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// The `index`th value, in the order they were set.
+    ///
+    /// Positional access exists for the C boundary, which hands values across
+    /// one at a time rather than lending a slice of them.
+    pub fn at(&self, index: usize) -> Option<(&str, &ParamValue)> {
+        self.values.get(index).map(|(k, v)| (k.as_str(), v))
     }
 
     pub fn int(&self, key: &str, default: i64) -> i64 {
@@ -182,7 +210,7 @@ impl Params {
                 ParamKind::Choice { default, .. } => ParamValue::Choice(*default),
                 ParamKind::Text { default } => ParamValue::Text(default.clone()),
                 ParamKind::Path { default, .. } => ParamValue::Path(default.clone()),
-                ParamKind::Label => continue,
+                ParamKind::Label | ParamKind::Section => continue,
             };
             p.set(d.key.clone(), v);
         }
@@ -263,7 +291,7 @@ impl Params {
                     };
                     out.set(d.key.clone(), ParamValue::Path(t));
                 }
-                (ParamKind::Label, _) => {}
+                (ParamKind::Label | ParamKind::Section, _) => {}
             }
         }
         out

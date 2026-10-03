@@ -1,6 +1,6 @@
 [package]
 name = "fast-tiff-viewer"
-version = "0.21.0"
+version = "0.22.0"
 edition = "2021"
 description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
 # GPL-3.0, not MPL-2.0 as the rest of the library crates are. The built-in
@@ -98,3 +98,9 @@ memmap2 = "0.9"
 # GUI stack pulls it in for image decoding — so this adds a name rather than a
 # dependency.
 png = "0.18"
+# The deconvolution tools (`plugins/builtin/deconvolve`). Convolving a
+# 512-cubed volume with a PSF directly is 10^14 multiplies; through a pair of
+# FFTs it is seconds, so an FFT is no more optional here than it is for
+# registration. Same crate and same major version `suite2p-registration`
+# already pulls in, so the workspace builds one copy of it.
+rustfft = "6"

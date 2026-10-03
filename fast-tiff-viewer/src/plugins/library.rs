@@ -809,6 +809,77 @@ unsafe extern "C" fn cb_selection_roi(
     })
 }
 
+unsafe extern "C" fn cb_param_count(ctx: *mut std::ffi::c_void) -> u64 {
+    match (ctx as *mut HostCell).as_mut() {
+        Some(c) => c.inner.pending_params().len() as u64,
+        None => 0,
+    }
+}
+
+unsafe extern "C" fn cb_param_value(
+    ctx: *mut std::ffi::c_void,
+    index: u64,
+    out: *mut abi::FtValue,
+) -> abi::FtStatus {
+    host_guard(|| {
+        let Some(c) = (ctx as *mut HostCell).as_mut() else {
+            return abi::FtStatus::BadArgument;
+        };
+        // Somewhere to put the answer before which answer: see `cb_selection_roi`.
+        if out.is_null() {
+            return abi::FtStatus::BadArgument;
+        }
+        let pending = c.inner.pending_params();
+        let Some((key, value)) = pending.at(index as usize) else {
+            return abi::FtStatus::OutOfRange;
+        };
+        // The strings are borrowed from the host's own `Params`, which
+        // outlives this call — the plugin copies them before returning, as
+        // the contract says. Nothing here allocates, so there is nothing for
+        // the plugin to free.
+        let text = match value {
+            ParamValue::Text(t) | ParamValue::Path(t) => t.as_str(),
+            _ => "",
+        };
+        let mut filled = abi::FtValue {
+            // Overwritten by `write_prefix` with the plugin's own.
+            struct_size: 0,
+            kind: abi::FtParamKind::Label,
+            key: abi::FtStr::from_str(key),
+            i: 0,
+            f: 0.0,
+            b: 0,
+            _pad: 0,
+            s: abi::FtStr::from_str(text),
+        };
+        match value {
+            ParamValue::Int(i) => {
+                filled.kind = abi::FtParamKind::Int;
+                filled.i = *i;
+            }
+            ParamValue::Float(f) => {
+                filled.kind = abi::FtParamKind::Float;
+                filled.f = *f;
+            }
+            ParamValue::Bool(b) => {
+                filled.kind = abi::FtParamKind::Bool;
+                filled.b = u32::from(*b);
+            }
+            ParamValue::Choice(c) => {
+                filled.kind = abi::FtParamKind::Choice;
+                filled.i = *c as i64;
+            }
+            ParamValue::Text(_) => filled.kind = abi::FtParamKind::Text,
+            ParamValue::Path(_) => filled.kind = abi::FtParamKind::Path,
+        }
+        if abi::write_prefix(out, filled) {
+            abi::FtStatus::Ok
+        } else {
+            abi::FtStatus::BadArgument
+        }
+    })
+}
+
 unsafe extern "C" fn cb_progress(ctx: *mut std::ffi::c_void, fraction: f32) -> u32 {
     match (ctx as *mut HostCell).as_mut() {
         Some(c) => {
@@ -848,6 +919,8 @@ fn host_table(cell: &mut HostCell) -> abi::FtHost {
         stack_string: cb_stack_string,
         selection_count: cb_selection_count,
         selection_roi: cb_selection_roi,
+        param_count: cb_param_count,
+        param_value: cb_param_value,
     }
 }
 
@@ -1315,6 +1388,7 @@ unsafe extern "C" fn decl_push(
             .filter(|h| !h.is_empty())
             .map(|h| h.to_string());
 
+        let mut unknown = false;
         let kind = match d.kind {
             abi::FtParamKind::Int => ParamKind::Int {
                 default: d.i_default,
@@ -1355,14 +1429,23 @@ unsafe extern "C" fn decl_push(
                 save: d.save != 0,
             },
             abi::FtParamKind::Label => ParamKind::Label,
+            abi::FtParamKind::Section => ParamKind::Section,
             // A control kind from a newer ABI. Dropping it would show the user
             // a dialog quietly missing a setting the plugin expects them to
             // make; refusing the whole dialog would hide the reason. A label in
             // the control's own place says exactly what is wrong, where the
             // user is looking.
-            _ => ParamKind::Label,
+            _ => {
+                unknown = true;
+                ParamKind::Label
+            }
         };
-        let label = if d.kind.0 > abi::FtParamKind::Label.0 {
+        // Set by the arm above rather than by comparing against the highest
+        // kind this host knows. The comparison was `> Label`, and adding
+        // `Section` after it would have labelled every section heading "needs
+        // a newer FastTIFF" on the very host that had just learned to draw
+        // one. A flag set where the decision is actually made cannot drift.
+        let label = if unknown {
             format!("{label} — needs a newer FastTIFF")
         } else {
             label
