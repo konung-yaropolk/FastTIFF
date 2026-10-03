@@ -6,7 +6,30 @@
 //! no time axis is refused rather than silently "registered".
 
 use super::*;
-use fasttiff_plugin_api::{ImageInfo, ParamKind};
+use fasttiff_plugin_api::{ImageInfo, ParamKind, ParamValue, Params};
+
+/// The declarations for a stack of this shape, with nothing chosen yet.
+fn decls_for(info: &ImageInfo) -> Vec<fasttiff_plugin_api::ParamDecl> {
+    super::params::declare(info, &Params::new())
+}
+
+/// The declarations once `chosen` has been set, as the host would ask for
+/// them after the user changed something.
+fn decls_with(
+    info: &ImageInfo,
+    chosen: &[(&str, ParamValue)],
+) -> Vec<fasttiff_plugin_api::ParamDecl> {
+    let mut p = Params::new();
+    for (k, v) in chosen {
+        p.set(*k, v.clone());
+    }
+    super::params::declare(info, &p)
+}
+
+/// Just the keys, for the tests that are about what is offered.
+fn offered(decls: &[fasttiff_plugin_api::ParamDecl]) -> Vec<String> {
+    decls.iter().map(|d| d.key.clone()).collect()
+}
 
 fn info(channels: usize, slices: usize, frames: usize) -> ImageInfo {
     ImageInfo {
@@ -25,7 +48,7 @@ fn info(channels: usize, slices: usize, frames: usize) -> ImageInfo {
 /// numbers published results were produced with.
 #[test]
 fn the_dialog_offers_suite2ps_defaults() {
-    let decls = super::params::declare(&info(1, 1, 10));
+    let decls = decls_for(&info(1, 1, 10));
     let find = |k: &str| {
         decls
             .iter()
@@ -72,7 +95,7 @@ fn the_dialog_offers_suite2ps_defaults() {
 /// The backend selector offers all three, defaulting to multi-thread.
 #[test]
 fn the_dialog_offers_every_backend() {
-    let decls = super::params::declare(&info(1, 1, 10));
+    let decls = decls_for(&info(1, 1, 10));
     let backend = decls.iter().find(|d| d.key == "backend").expect("backend");
     match &backend.kind {
         ParamKind::Choice { default, options } => {
@@ -94,12 +117,12 @@ fn the_dialog_offers_every_backend() {
 #[test]
 fn the_channel_switch_appears_only_for_a_multichannel_stack() {
     assert!(
-        super::params::declare(&info(1, 1, 10))
+        decls_for(&info(1, 1, 10))
             .iter()
             .all(|d| d.key != "align_by_chan2"),
         "one channel is not a choice"
     );
-    assert!(super::params::declare(&info(2, 1, 10))
+    assert!(decls_for(&info(2, 1, 10))
         .iter()
         .any(|d| d.key == "align_by_chan2"));
 }
@@ -223,4 +246,180 @@ fn an_out_of_range_sample_is_clamped_not_wrapped() {
         PlaneData::U16(v) => assert_eq!(v, vec![0, 65535, 1234]),
         other => panic!("stored as {:?}", other.pixel_type()),
     }
+}
+
+// ------------------------------------------------- a dialog that follows itself
+
+/// The four non-rigid controls exist only while the non-rigid correction
+/// does.
+///
+/// They are dead settings for a rigid run — nothing reads them — and a dead
+/// setting that is still on screen is worse than a missing one: the usual
+/// outcome is someone raising the block shift, seeing no difference, and
+/// concluding the non-rigid correction is broken.
+#[test]
+fn the_non_rigid_grid_appears_only_with_the_non_rigid_correction() {
+    let i = info(1, 1, 10);
+    let grid = ["block_size", "maxregshiftNR", "snr_thresh", "subpixel"];
+
+    let on = offered(&decls_with(&i, &[("nonrigid", ParamValue::Bool(true))]));
+    for key in grid {
+        assert!(
+            on.iter().any(|k| k == key),
+            "non-rigid is on and {key} is missing"
+        );
+    }
+    assert!(
+        on.iter().any(|k| k == "h_nonrigid"),
+        "and so is its heading"
+    );
+
+    let off = offered(&decls_with(&i, &[("nonrigid", ParamValue::Bool(false))]));
+    for key in grid {
+        assert!(
+            !off.iter().any(|k| k == key),
+            "non-rigid is off and {key} is offered"
+        );
+    }
+    assert!(
+        !off.iter().any(|k| k == "h_nonrigid"),
+        "an empty group must take its heading with it"
+    );
+    // Everything else is still there: the rigid run is not a cut-down dialog.
+    for key in [
+        "backend",
+        "nonrigid",
+        "maxregshift",
+        "nimg_init",
+        "th_badframes",
+    ] {
+        assert!(
+            off.iter().any(|k| k == key),
+            "{key} went missing with the grid"
+        );
+    }
+}
+
+/// suite2p ignores the measurement whenever a fixed offset is given, so the
+/// switch is offered only while there is no offset to beat it.
+#[test]
+fn the_bidirectional_switch_hides_behind_a_fixed_offset() {
+    let i = info(1, 1, 10);
+    let none = offered(&decls_with(&i, &[("bidiphase", ParamValue::Int(0))]));
+    assert!(none.iter().any(|k| k == "do_bidiphase"));
+
+    for offset in [-3i64, 7] {
+        let set = offered(&decls_with(&i, &[("bidiphase", ParamValue::Int(offset))]));
+        assert!(
+            !set.iter().any(|k| k == "do_bidiphase"),
+            "an offset of {offset} overrides the switch, so it should not be offered"
+        );
+        // The offset itself stays, or there would be no way back.
+        assert!(set.iter().any(|k| k == "bidiphase"));
+    }
+}
+
+/// The groups the module doc describes are now drawn rather than described.
+#[test]
+fn the_dialog_is_grouped_into_sections() {
+    let decls = decls_for(&info(1, 1, 10));
+    let sections: Vec<&str> = decls
+        .iter()
+        .filter(|d| d.kind == ParamKind::Section)
+        .map(|d| d.label.as_str())
+        .collect();
+    assert_eq!(
+        sections,
+        vec![
+            "Correction",
+            "Alignment",
+            "Reference",
+            "Non-rigid grid",
+            "Low signal",
+            "Scanner",
+            "Reporting",
+        ]
+    );
+    // No heading may be last or immediately followed by another: either is a
+    // group that lost its contents to a condition without losing its title.
+    for (n, d) in decls.iter().enumerate() {
+        if d.kind == ParamKind::Section {
+            assert!(
+                decls
+                    .get(n + 1)
+                    .is_some_and(|x| x.kind != ParamKind::Section),
+                "the {:?} heading has nothing under it",
+                d.label
+            );
+        }
+    }
+}
+
+/// And that stays true for every combination that can hide something.
+#[test]
+fn no_heading_is_ever_left_empty() {
+    for channels in [1usize, 2] {
+        for nonrigid in [true, false] {
+            for offset in [0i64, 5] {
+                let decls = decls_with(
+                    &info(channels, 1, 10),
+                    &[
+                        ("nonrigid", ParamValue::Bool(nonrigid)),
+                        ("bidiphase", ParamValue::Int(offset)),
+                    ],
+                );
+                for (n, d) in decls.iter().enumerate() {
+                    if d.kind == ParamKind::Section {
+                        assert!(
+                            decls
+                                .get(n + 1)
+                                .is_some_and(|x| x.kind != ParamKind::Section),
+                            "c{channels} nonrigid={nonrigid} offset={offset}: \
+                             the {:?} heading has nothing under it",
+                            d.label
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A hidden control falls back to suite2p's default, and that default is the
+/// one the run would have ignored anyway.
+///
+/// This is what makes hiding safe rather than merely tidy: `clamp_to` drops
+/// every key the settled dialog did not declare, so `settings_from` sees a
+/// rigid run with no block size at all. It has to produce the same `Settings`
+/// as a rigid run that was shown one and left it alone.
+#[test]
+fn hiding_a_control_does_not_change_what_runs() {
+    let i = info(1, 1, 10);
+
+    let shown = decls_with(&i, &[("nonrigid", ParamValue::Bool(true))]);
+    let mut as_rigid = Params::defaults(&shown);
+    as_rigid.set("nonrigid", ParamValue::Bool(false));
+    // The dialog as it was before the switch was turned off: the block size
+    // is still in there, and is still declared.
+    let with_dead_keys = super::params::settings_from(&as_rigid.clamp_to(&shown));
+
+    let hidden = decls_with(&i, &[("nonrigid", ParamValue::Bool(false))]);
+    // Defaults *plus the choice*, which is what the host holds: `defaults`
+    // alone would put `nonrigid` back to suite2p's `true` and so contradict
+    // the very choice that produced these declarations. The host only ever
+    // uses defaults to seed keys that have just appeared.
+    let mut settled = Params::defaults(&hidden);
+    settled.set("nonrigid", ParamValue::Bool(false));
+    assert!(
+        settled.get("block_size").is_none(),
+        "the fixture must actually be missing the key"
+    );
+    let without = super::params::settings_from(&settled.clamp_to(&hidden));
+
+    assert!(!with_dead_keys.nonrigid);
+    assert!(!without.nonrigid);
+    assert_eq!(with_dead_keys.block_size, without.block_size);
+    assert_eq!(with_dead_keys.subpixel, without.subpixel);
+    assert_eq!(with_dead_keys.snr_thresh, without.snr_thresh);
+    assert_eq!(with_dead_keys.maxregshift_nr, without.maxregshift_nr);
 }

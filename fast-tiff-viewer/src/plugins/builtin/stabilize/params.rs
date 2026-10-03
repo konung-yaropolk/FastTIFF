@@ -9,28 +9,57 @@
 use fasttiff_plugin_api::{ImageInfo, ParamDecl, ParamKind, Params};
 use suite2p_registration::{Backend, Settings};
 
-/// Build the dialog for a stack of this shape.
+/// A group heading, drawn by the host as bold text with a rule under it.
+fn section(key: &str, text: &str) -> ParamDecl {
+    ParamDecl::new(key, text, ParamKind::Section)
+}
+
+/// Build the dialog for a stack of this shape, and for what has been chosen
+/// in it so far.
 ///
-/// The order is the grouping: the contract has no notion of a section, so what
-/// a reader gets instead is a sequence that runs from the decisions that change
-/// a run most to the ones most people never touch —
+/// # Grouping
 ///
-///   1. where it runs, and whether the correction can deform;
+/// Seven sections, running from the decisions that change a run most to the
+/// ones most people never touch:
+///
+///   1. where it runs, and whether the correction may deform;
 ///   2. what is registered against what, and how far it may move;
 ///   3. how the reference is built;
-///   4. the non-rigid grid, which only matters with non-rigid on;
+///   4. the non-rigid grid;
 ///   5. the settings for a recording too dim to register frame by frame;
 ///   6. the scanner's own artefact;
 ///   7. what is reported afterwards.
 ///
-/// Two of the help texts point at their neighbours ("given below", "above"), so
-/// those pairs have to stay adjacent and in order.
-pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
+/// This was a *comment* until the contract grew [`ParamKind::Section`]: the
+/// order was the only grouping expressible, and a reader had to be told where
+/// the boundaries were. They are now drawn.
+///
+/// Two of the help texts point at their neighbours ("given below", "above"),
+/// so those pairs stay adjacent and in order.
+///
+/// # What is hidden, and why hiding is honest here
+///
+/// Three groups of controls do nothing unless something else is set, and
+/// suite2p's own documentation is where that is written down rather than the
+/// dialog. Four of them are the non-rigid grid, which the rigid pass does not
+/// read at all; one is the bidirectional-phase switch, which suite2p ignores
+/// whenever a fixed offset is given. Showing a control that will be ignored
+/// is not neutral — it is an invitation to set it and conclude the algorithm
+/// is broken when nothing changes.
+///
+/// `chosen` is what the dialog holds right now, which is empty the first time
+/// it is built and reads back as the declared defaults — so this one function
+/// produces both the first dialog and every one after a change. See
+/// `HostContext::pending_params`.
+pub(super) fn declare(info: &ImageInfo, chosen: &Params) -> Vec<ParamDecl> {
     let d = Settings::default();
-    let mut decls = Vec::new();
 
     // ---- what runs, and what kind of correction ----------------------------
 
+    // Built by pushing rather than as one literal: four of the controls below
+    // are conditional, and a list that is half literal and half appended is
+    // harder to read than one that is all appended.
+    let mut decls = vec![section("h_correction", "Correction")];
     // Where it runs. Not a suite2p option — suite2p takes CUDA if it finds it —
     // but "it was slower than I expected" and "it gave a different answer" are
     // worth being able to ask separately.
@@ -62,12 +91,14 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
         .help(
             "Correct tissue that deforms rather than merely sliding: a shift per \
              block, interpolated to a shift per pixel. Measured on top of the rigid \
-             correction rather than instead of it, and slower.",
+             correction rather than instead of it, and slower. Its own settings \
+             appear below when it is on.",
         ),
     );
 
     // ---- what is registered, and how far it may move -----------------------
 
+    decls.push(section("h_align", "Alignment"));
     if info.channels > 1 {
         decls.push(
             ParamDecl::new(
@@ -143,6 +174,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
 
     // ---- how the reference is built ----------------------------------------
 
+    decls.push(section("h_reference", "Reference"));
     decls.push(
         ParamDecl::new(
             "nimg_init",
@@ -166,65 +198,72 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
         .help("Register, then register the result again. For low-SNR recordings."),
     );
 
-    // ---- the non-rigid grid, for when the switch above is on ---------------
+    // ---- the non-rigid grid, only when the switch above is on --------------
 
-    decls.push(
-        ParamDecl::new(
-            "block_size",
-            "Block size",
-            ParamKind::Int {
-                default: d.block_size[0] as i64,
-                min: 16,
-                max: 512,
-            },
-        )
-        .help("The square block the field is divided into, in pixels. Non-rigid only."),
-    );
-    decls.push(
-        ParamDecl::new(
-            "maxregshiftNR",
-            "Max block shift",
-            ParamKind::Float {
-                default: d.maxregshift_nr,
-                min: 0.0,
-                max: 50.0,
-            },
-        )
-        .help("How far a block may move on top of the rigid shift. Non-rigid only."),
-    );
-    decls.push(
-        ParamDecl::new(
-            "snr_thresh",
-            "Block SNR threshold",
-            ParamKind::Float {
-                default: d.snr_thresh,
-                min: 1.0,
-                max: 5.0,
-            },
-        )
-        .help(
-            "A block below this is smoothed against its neighbours until it clears \
-             the bar. 1.0 means no smoothing. Non-rigid only.",
-        ),
-    );
-    decls.push(
-        ParamDecl::new(
-            "subpixel",
-            "Subpixel precision",
-            ParamKind::Int {
-                default: d.subpixel as i64,
-                min: 1,
-                max: 50,
-            },
-        )
-        .help(
-            "Shifts are resolved to 1/this of a pixel. Non-rigid only — suite2p's \
-             rigid pass is whole pixels, and so is this one.",
-        ),
-    );
+    // The rigid pass never reads any of these four. Offered while they are
+    // dead, the usual outcome is someone raising the block shift, seeing no
+    // difference, and concluding the non-rigid correction does not work.
+    if chosen.bool("nonrigid", d.nonrigid) {
+        decls.push(section("h_nonrigid", "Non-rigid grid"));
+        decls.push(
+            ParamDecl::new(
+                "block_size",
+                "Block size",
+                ParamKind::Int {
+                    default: d.block_size[0] as i64,
+                    min: 16,
+                    max: 512,
+                },
+            )
+            .help("The square block the field is divided into, in pixels."),
+        );
+        decls.push(
+            ParamDecl::new(
+                "maxregshiftNR",
+                "Max block shift",
+                ParamKind::Float {
+                    default: d.maxregshift_nr,
+                    min: 0.0,
+                    max: 50.0,
+                },
+            )
+            .help("How far a block may move on top of the rigid shift."),
+        );
+        decls.push(
+            ParamDecl::new(
+                "snr_thresh",
+                "Block SNR threshold",
+                ParamKind::Float {
+                    default: d.snr_thresh,
+                    min: 1.0,
+                    max: 5.0,
+                },
+            )
+            .help(
+                "A block below this is smoothed against its neighbours until it clears \
+                 the bar. 1.0 means no smoothing.",
+            ),
+        );
+        decls.push(
+            ParamDecl::new(
+                "subpixel",
+                "Subpixel precision",
+                ParamKind::Int {
+                    default: d.subpixel as i64,
+                    min: 1,
+                    max: 50,
+                },
+            )
+            .help(
+                "Block shifts are resolved to 1/this of a pixel. suite2p's rigid pass \
+                 is whole pixels, and so is this one.",
+            ),
+        );
+    }
 
     // ---- a recording too dim to register frame by frame --------------------
 
+    decls.push(section("h_dim", "Low signal"));
     decls.push(
         ParamDecl::new(
             "smooth_sigma_time",
@@ -260,19 +299,27 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
 
     // ---- the scanner's own artefact ----------------------------------------
 
-    decls.push(
-        ParamDecl::new(
-            "do_bidiphase",
-            "Correct bidirectional phase",
-            ParamKind::Bool {
-                default: d.do_bidiphase,
-            },
-        )
-        .help(
-            "Measure and undo the comb a resonant scanner leaves. Ignored when a \
-             fixed offset is given below, which is suite2p's rule.",
-        ),
-    );
+    decls.push(section("h_scanner", "Scanner"));
+    // suite2p's rule: a non-zero fixed offset wins and the measurement never
+    // runs. So the switch is offered only while there is no fixed offset to
+    // beat it — rather than shown next to the thing that silently overrides
+    // it, which is how the rule gets discovered the hard way.
+    if chosen.int("bidiphase", d.bidiphase as i64) == 0 {
+        decls.push(
+            ParamDecl::new(
+                "do_bidiphase",
+                "Correct bidirectional phase",
+                ParamKind::Bool {
+                    default: d.do_bidiphase,
+                },
+            )
+            .help(
+                "Measure and undo the comb a resonant scanner leaves. Offered only \
+                 while the offset below is 0, because suite2p's rule is that a fixed \
+                 offset wins and the measurement is then never run.",
+            ),
+        );
+    }
     // Below the switch, which its help refers to as "below".
     decls.push(
         ParamDecl::new(
@@ -289,6 +336,7 @@ pub(super) fn declare(info: &ImageInfo) -> Vec<ParamDecl> {
 
     // ---- what is reported afterwards ---------------------------------------
 
+    decls.push(section("h_report", "Reporting"));
     decls.push(
         ParamDecl::new(
             "th_badframes",

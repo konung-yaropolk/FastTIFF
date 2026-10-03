@@ -3,7 +3,7 @@
 
 use crate::abi::*;
 use crate::api::{
-    ChannelView, DisplayMode, HostContext, ImageInfo, PixelType, Plane, PluginError, Roi,
+    ChannelView, DisplayMode, HostContext, ImageInfo, Params, PixelType, Plane, PluginError, Roi,
     Selection, Shape, Spacing, StackInfo, ViewParams, VolumeMode, VolumeView,
 };
 
@@ -40,6 +40,22 @@ unsafe extern "C" fn no_selection_count(_ctx: *mut core::ffi::c_void) -> u64 {
 }
 
 /// Stands in for `selection_roi` on a host too old to have it. Never reached:
+/// A host that predates the dialog being re-asked holds no pending values,
+/// which is also what every host reports outside `params`.
+unsafe extern "C" fn no_param_count(_ctx: *mut core::ffi::c_void) -> u64 {
+    0
+}
+
+/// Never reached through a sound caller, for the same reason as
+/// `no_selection_roi`: `no_param_count` says there are none.
+unsafe extern "C" fn no_param_value(
+    _ctx: *mut core::ffi::c_void,
+    _index: u64,
+    _out: *mut crate::abi::FtValue,
+) -> FtStatus {
+    FtStatus::OutOfRange
+}
+
 /// `no_selection_count` says there are none.
 unsafe extern "C" fn no_selection_roi(
     _ctx: *mut core::ffi::c_void,
@@ -107,6 +123,12 @@ pub unsafe fn host_of(host: *const FtHost) -> Result<FtHost, FtStatus> {
     if !crate::abi::ft_covers!(host, FtHost, selection_count) {
         core::ptr::addr_of_mut!((*p).selection_count).write(no_selection_count);
     }
+    if !crate::abi::ft_covers!(host, FtHost, param_count) {
+        core::ptr::addr_of_mut!((*p).param_count).write(no_param_count);
+    }
+    if !crate::abi::ft_covers!(host, FtHost, param_value) {
+        core::ptr::addr_of_mut!((*p).param_value).write(no_param_value);
+    }
     if !crate::abi::ft_covers!(host, FtHost, selection_roi) {
         core::ptr::addr_of_mut!((*p).selection_roi).write(no_selection_roi);
     }
@@ -123,6 +145,8 @@ pub struct CHost {
     /// re-runs the plugin when the regions change rather than changing them
     /// under a call that is already going.
     selection: Vec<Roi>,
+    /// What the dialog holds while `params` is being asked. Empty otherwise.
+    pending: Params,
 }
 
 impl CHost {
@@ -252,7 +276,28 @@ impl CHost {
             }
         }
 
+        // The dialog values, if this is a `params` call and the host
+        // re-asks. Read here rather than on demand because the trait lends a
+        // reference to them: the strings inside an `FtValue` belong to the
+        // host and are valid only for the length of the call that produced
+        // them, so they are copied now or not at all.
+        let mut pending = Params::new();
+        if crate::abi::ft_covers!(&h as *const FtHost, FtHost, param_value) {
+            let count = (h.param_count)(h.ctx).min(4096);
+            for i in 0..count {
+                let mut v = core::mem::zeroed::<crate::abi::FtValue>();
+                v.struct_size = core::mem::size_of::<crate::abi::FtValue>() as u32;
+                if (h.param_value)(h.ctx, i, &mut v) != FtStatus::Ok {
+                    break;
+                }
+                if let Some((key, value)) = crate::marshal::value_from_c(&v) {
+                    pending.set(key, value);
+                }
+            }
+        }
+
         Ok(CHost {
+            pending,
             selection,
             image: ImageInfo {
                 width: ii.width,
@@ -317,6 +362,10 @@ impl CHost {
 }
 
 impl HostContext for CHost {
+    fn pending_params(&self) -> &Params {
+        &self.pending
+    }
+
     fn image(&self) -> ImageInfo {
         self.image
     }

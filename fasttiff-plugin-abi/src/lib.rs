@@ -106,7 +106,13 @@ pub const ABI_MAJOR: u32 = 1;
 /// * **2** — plots: [`FtSink::begin_plot`] and [`FtSink::push_series`], and
 ///   the selection they are a function of, [`FtHost::selection_count`] and
 ///   [`FtHost::selection_roi`].
-pub const ABI_MINOR: u32 = 2;
+/// * **3** — dialogs that follow what is chosen in them:
+///   [`FtHost::param_count`] and [`FtHost::param_value`] let a plugin see the
+///   values while it is being asked what controls to declare, and the host
+///   asks again after every change. Plus [`FtParamKind::Section`], a group
+///   heading, which is a new *value* of an open enum rather than a new field
+///   and so costs nothing in either direction.
+pub const ABI_MINOR: u32 = 3;
 
 /// The one symbol a plugin library must export, NUL-terminated for `dlsym`.
 ///
@@ -374,6 +380,14 @@ open_enum! {
         Text = 4,
         Path = 5,
         Label = 6,
+        /// Not a control: a group heading, drawn with a rule under it.
+        ///
+        /// Appending a *value* to an open enum is the one kind of growth that
+        /// costs nothing in either direction: an older host falls through its
+        /// catch-all arm and draws a plain label, and an older plugin never
+        /// sends it. That is why the dialog vocabulary grows here and not as
+        /// a field on `FtParamDecl`, which is frozen.
+        Section = 7,
     }
 }
 
@@ -598,6 +612,21 @@ pub struct FtHost {
     /// a running call can see.
     pub selection_roi:
         unsafe extern "C" fn(ctx: *mut c_void, index: u64, out: *mut FtRoi) -> FtStatus,
+
+    /// How many values the dialog is holding, while `params` is being asked.
+    ///
+    /// Zero everywhere else, and zero from a host that does not re-ask: a
+    /// plugin reading nothing here declares the dialog it would have declared
+    /// anyway. See `HostContext::pending_params`.
+    pub param_count: unsafe extern "C" fn(ctx: *mut c_void) -> u64,
+    /// Value `index`, into `out`.
+    ///
+    /// The strings in the filled `FtValue` are **borrowed** from the host and
+    /// valid only until this call returns; copy them. One at a time rather
+    /// than a lent array, for the reason `selection_roi` is: an array would
+    /// make the host promise a lifetime it has no way to state here.
+    pub param_value:
+        unsafe extern "C" fn(ctx: *mut c_void, index: u64, out: *mut FtValue) -> FtStatus,
 }
 
 open_enum! {
@@ -1064,7 +1093,7 @@ const _: () = {
     assert!(size_of::<FtExporterVtable>() == 8 + 3 * p);
     assert!(size_of::<FtParamSink>() == 8 + 2 * p);
     assert!(size_of::<FtSink>() == 8 + 8 * p);
-    assert!(size_of::<FtHost>() == 8 + 14 * p);
+    assert!(size_of::<FtHost>() == 8 + 16 * p);
 
     // The append rule, pinned. `CORE` is what an older host declares, so it
     // has to end exactly where the appended field begins; and the appended
@@ -1080,7 +1109,7 @@ const _: () = {
     assert!(FtSink::CORE == offset_of!(FtSink, set_info));
     assert!(offset_of!(FtSink, push_series) + p == size_of::<FtSink>());
     assert!(FtHost::CORE == offset_of!(FtHost, stack_info));
-    assert!(offset_of!(FtHost, selection_roi) + p == size_of::<FtHost>());
+    assert!(offset_of!(FtHost, param_value) + p == size_of::<FtHost>());
 
     // Carried by value into a plugin's own allocation, so its prologue is
     // where a shorter one is detected.
@@ -1120,6 +1149,7 @@ const _: () = {
     assert!(FtParamKind::Text.0 == 4);
     assert!(FtParamKind::Path.0 == 5);
     assert!(FtParamKind::Label.0 == 6);
+    assert!(FtParamKind::Section.0 == 7);
 
     assert!(FtConfidence::No.0 == 0);
     assert!(FtConfidence::Maybe.0 == 1);

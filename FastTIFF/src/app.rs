@@ -1707,6 +1707,7 @@ impl ViewerApp {
         let Some(mut dialog) = self.plugin_dialog.take() else {
             return;
         };
+        let before = dialog.values.clone();
         match plugins_ui::dialog(ctx, &dialog.title, &dialog.decls, &mut dialog.values) {
             Some(true) => {
                 // Clamp to what the plugin declared, so `run` never sees a
@@ -1715,8 +1716,60 @@ impl ViewerApp {
                 self.run_plugin(dialog.index, values);
             }
             Some(false) => {}
-            None => self.plugin_dialog = Some(dialog),
+            None => {
+                if dialog.values != before {
+                    self.requery_dialog(&mut dialog);
+                }
+                self.plugin_dialog = Some(dialog);
+            }
         }
+    }
+
+    /// Ask the plugin for its dialog again, now that a value has changed.
+    ///
+    /// This is what makes a dialog follow the choices made in it: a plugin
+    /// sees what has been chosen through `HostContext::pending_params` and
+    /// may declare a different set of controls for it — the iteration count
+    /// only for the methods that iterate, the coverslip only for the model
+    /// that uses it.
+    ///
+    /// Only on a change, not every frame. The cost is one `params` call, but
+    /// a plugin is entitled to do real work in it (`Generate PSF` reads the
+    /// stack's calibration) and sixty of those a second for a dialog nobody
+    /// is touching would be waste.
+    ///
+    /// What the user has already set is kept: `clamp_to` takes the existing
+    /// value for every key still declared and the plugin's default for any
+    /// that has just appeared. Values for controls that went away stay in
+    /// `values` untouched, so going back to a method restores what was set
+    /// for it rather than resetting it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn requery_dialog(&mut self, dialog: &mut PluginDialog) {
+        let Some(loaded) = self.core.stack.as_ref() else {
+            return;
+        };
+        let host = fast_tiff_viewer::plugins::StackHost::new(loaded, self.plugin_view(loaded))
+            .with_pending_params(dialog.values.clone());
+        let Some(entry) = self
+            .plugins
+            .as_ref()
+            .and_then(|p| p.entries().get(dialog.index))
+        else {
+            return;
+        };
+        let decls = entry.plugin.params(&host);
+        if decls == dialog.decls {
+            return;
+        }
+        // Seed anything newly declared, without disturbing what is set. The
+        // merge is onto `values` rather than onto the clamped copy, so a
+        // control that disappears and comes back comes back as it was.
+        for (k, v) in fasttiff_plugin_api::Params::defaults(&decls).iter() {
+            if dialog.values.get(k).is_none() {
+                dialog.values.set(k, v.clone());
+            }
+        }
+        dialog.decls = decls;
     }
 
     /// What to say when something slow is already running.

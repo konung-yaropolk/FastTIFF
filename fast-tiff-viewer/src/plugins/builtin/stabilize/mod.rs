@@ -189,7 +189,7 @@ impl Plugin for Stabilize {
     }
 
     fn params(&self, host: &dyn HostContext) -> Vec<ParamDecl> {
-        params::declare(&host.image())
+        params::declare(&host.image(), host.pending_params())
     }
 
     fn run(&mut self, host: &mut dyn HostContext, params: &Params) -> Result<Outcome, PluginError> {

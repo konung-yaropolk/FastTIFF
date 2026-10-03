@@ -78,6 +78,28 @@ pub trait HostContext {
         &[]
     }
 
+    /// The values the dialog is holding right now.
+    ///
+    /// Empty everywhere except inside [`crate::Plugin::params`], and that is
+    /// the whole point of it: a plugin declaring its dialog can look at what
+    /// has been chosen so far and declare a *different* dialog. A
+    /// deconvolution offering nine algorithms has a dozen parameters between
+    /// them and two or three belonging to any one of them; without this it
+    /// must show all twelve and leave the user to work out which nine are
+    /// being ignored.
+    ///
+    /// The host asks again whenever a value changes, so a plugin reading this
+    /// gets a dialog that follows the choice. Values for controls that are no
+    /// longer declared are kept rather than discarded, so going back to a
+    /// method restores what was set for it.
+    ///
+    /// Provided rather than required: a host that does not re-ask answers
+    /// with nothing, and a plugin that ignores it declares the same dialog
+    /// every time, which is what every plugin did before this existed.
+    fn pending_params(&self) -> &crate::params::Params {
+        &crate::params::NO_PARAMS
+    }
+
     /// A line for the host to show the user. Not an error; use the returned
     /// `Err` for that.
     fn log(&mut self, message: &str);

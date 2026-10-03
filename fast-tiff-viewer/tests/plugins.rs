@@ -1780,3 +1780,182 @@ fn a_plugin_result_reopens_without_a_plane_mismatch() {
     // And the calibration the carried record was there for still arrived.
     assert_eq!(reopened.tiff.meta.unit.as_deref(), Some("micron"));
 }
+
+// ---------------------------------------------------------- deconvolution
+
+/// A PSF file on disk, for the deconvolution tests to point at.
+fn psf_file(name: &str, w: u32, h: u32, planes: &[Vec<f32>]) -> String {
+    let opts = WriterOptions::new(w, h, SampleType::F32)
+        .metadata(StackMetaWrite::new(1, planes.len().max(1)));
+    let mut wr = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for p in planes {
+        wr.write_frame_f32(p).unwrap();
+    }
+    let dir = std::env::temp_dir().join(format!("fasttiff-deconv-it-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, wr.finish().unwrap().into_inner()).unwrap();
+    path.display().to_string()
+}
+
+/// Through the real host, against a real file: every plane of a three-axis
+/// stack must come back as itself.
+///
+/// `StackHost` resolves `(c, z, t)` to an IFD and a sample plane through
+/// `plane_index`, which the in-module tests do not exercise — they hand the
+/// plugin a buffer. With a one-voxel PSF the arithmetic is the identity, so
+/// anything that does not match has been addressed wrongly on the way in or
+/// written back wrongly on the way out.
+#[test]
+fn deconvolving_reaches_every_plane_through_the_real_host() {
+    let s = stack(3, 4, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::Deconvolve;
+    let decls = p.params(&h);
+    let mut params = Params::defaults(&decls);
+    params.set(
+        "psf_path",
+        ParamValue::Path(psf_file("delta.tif", 1, 1, &[vec![1.0]])),
+    );
+    let params = params.clamp_to(&decls);
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!((img.channels, img.slices, img.frames), (3, 4, 2));
+    img.validate().expect("self-consistent");
+
+    let planes = planes_f32(&img);
+    for t in 0..2 {
+        for z in 0..4 {
+            for c in 0..3 {
+                let at = t * (4 * 3) + z * 3 + c;
+                assert!(
+                    (planes[at][0] - plane_tag(c, z, t)).abs() < 0.01,
+                    "plane (c{c}, z{z}, t{t}) came back as {} not {}",
+                    planes[at][0],
+                    plane_tag(c, z, t)
+                );
+            }
+        }
+    }
+}
+
+/// A deconvolved stack keeps its calibration and reopens clean.
+///
+/// The same path that produced the 10,201-plane warning: a filter that
+/// carries the source's record, encoded and reopened as a new window. A
+/// deconvolution preserves geometry exactly, so the calibration must survive
+/// — a result that lost its pixel size is no longer something to measure.
+#[test]
+fn a_deconvolved_stack_reopens_calibrated_and_undamaged() {
+    let (w, h, n) = (8u32, 6u32, 6usize);
+    let opts = WriterOptions::new(w, h, SampleType::U16)
+        .metadata(StackMetaWrite::new(1, n).unit("micron").spacing(0.2));
+    let mut wr = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for i in 0..n {
+        let px: Vec<u16> = (0..w * h)
+            .map(|j| (i as u16) * 100 + j as u16 + 10)
+            .collect();
+        wr.write_frame_bytes(&px.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>())
+            .unwrap();
+    }
+    let s = Stack::from_bytes(
+        wr.finish().unwrap().into_inner(),
+        "zstack.tif".into(),
+        false,
+    )
+    .expect("opens");
+    assert_eq!(s.display.plane_mismatch, None, "the source should be clean");
+
+    let mut host = host(&s, 0);
+    let mut p = builtin::Deconvolve;
+    let decls = p.params(&host);
+    let mut params = Params::defaults(&decls);
+    params.set(
+        "psf_path",
+        ParamValue::Path(psf_file("blur.tif", 3, 3, &[vec![1.0f32; 9]])),
+    );
+    params.set("iterations", ParamValue::Int(5));
+    let params = params.clamp_to(&decls);
+
+    let Outcome::NewDocument(img) = p.run(&mut host, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    let encoded = fast_tiff_viewer::plugins::to_tiff_bytes(&img, None).expect("encode");
+    let reopened =
+        Stack::from_bytes(encoded, "result.tif".into(), false).expect("the result should reopen");
+
+    assert_eq!(
+        reopened.display.plane_mismatch, None,
+        "the new window reported a damaged file"
+    );
+    assert_eq!(
+        (
+            reopened.display.dims.channels,
+            reopened.display.dims.slices,
+            reopened.display.dims.frames
+        ),
+        (1, 1, n)
+    );
+    assert_eq!(reopened.tiff.meta.unit.as_deref(), Some("micron"));
+}
+
+/// A generated PSF reopens as the volume it says it is, calibrated in microns.
+///
+/// It is the input to the other plugin, so "it looks right on screen" is not
+/// enough: the spacing it carries is what tells the user whether it matches
+/// the stack they are about to deconvolve.
+#[test]
+fn a_generated_psf_reopens_as_the_volume_it_describes() {
+    // All three axes above 1, as `stack` requires: what this needs from the
+    // host is only that it has a Z axis, so that the slice count defaults to
+    // a volume.
+    let s = stack(2, 5, 3);
+    let mut host = host(&s, 0);
+    let mut p = builtin::GeneratePsf;
+    let decls = p.params(&host);
+    let mut params = Params::defaults(&decls);
+    params.set("model", ParamValue::Choice(2)); // Gaussian: the quick one.
+    params.set("width", ParamValue::Int(11));
+    params.set("height", ParamValue::Int(11));
+    params.set("slices", ParamValue::Int(7));
+    params.set("pixel", ParamValue::Float(90.0));
+    params.set("step", ParamValue::Float(350.0));
+    let params = params.clamp_to(&decls);
+
+    let Outcome::NewDocument(img) = p.run(&mut host, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!(img.pixel_type, PixelType::F32);
+
+    let encoded = fast_tiff_viewer::plugins::to_tiff_bytes(&img, None).expect("encode");
+    let reopened =
+        Stack::from_bytes(encoded, "psf.tif".into(), false).expect("the PSF should reopen");
+    assert_eq!(reopened.display.plane_mismatch, None);
+    assert_eq!(reopened.dimensions(), Some((11, 11)));
+    assert_eq!(reopened.tiff.frames.len(), 7);
+    assert_eq!(reopened.tiff.meta.unit.as_deref(), Some("micron"));
+    // `spacing=` is ImageJ's Z step; the lateral size travels in the
+    // resolution tags.
+    assert_eq!(reopened.tiff.meta.spacing, Some(0.35));
+
+    // And it is still a PSF after the round trip: normalised, and peaked in
+    // the middle of the middle slice.
+    let mut total = 0.0f64;
+    let mut peak = (0usize, 0usize, f32::MIN);
+    for (z, frame) in reopened.tiff.frames.iter().enumerate() {
+        let px =
+            fast_tiff_lib::read_plane_f32(&reopened.tiff.data, frame, reopened.tiff.byte_order, 0)
+                .expect("decode");
+        for (i, &v) in px.iter().enumerate() {
+            total += v as f64;
+            if v > peak.2 {
+                peak = (i, z, v);
+            }
+        }
+    }
+    assert!((total - 1.0).abs() < 1e-5, "the PSF sums to {total}");
+    assert_eq!(peak.1, 3, "the peak belongs on the middle slice");
+    assert_eq!(peak.0, 11 * 5 + 5, "and in the middle of it");
+}

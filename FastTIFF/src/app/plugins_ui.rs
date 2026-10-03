@@ -148,15 +148,18 @@ pub(super) fn dialog(
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
-            egui::Grid::new("plugin_params")
-                .num_columns(2)
-                .spacing([12.0, 6.0])
-                .show(ui, |ui| {
-                    for d in decls {
-                        control(ui, d, values);
-                        ui.end_row();
-                    }
-                });
+            // The controls scroll; the buttons below do not. A plugin decides
+            // how many controls it wants and some want twenty — the
+            // deconvolution dialog is the union of what ImageJ's
+            // deconvolution plugins ask for — and on a laptop screen a column
+            // that long pushes Run off the bottom of the display, where the
+            // window being centred and not resizable leaves no way to reach
+            // it. Keeping the buttons outside the scrolled region is the
+            // whole fix: however long the dialog, it can always be answered.
+            egui::ScrollArea::vertical()
+                .max_height(ctx.content_rect().height() * 0.7)
+                .auto_shrink([false, true])
+                .show(ui, |ui| groups(ui, decls, values));
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("Run").clicked() {
@@ -174,11 +177,74 @@ pub(super) fn dialog(
     outcome
 }
 
+/// Draw the declarations, split into groups at each
+/// [`ParamKind::Section`].
+///
+/// A grid per group rather than one grid with headings inside it, for two
+/// reasons. A rule drawn inside a two-column grid is as wide as the column it
+/// lands in, which is not what a heading rule is for; and the label column of
+/// a group about the objective has no reason to line up with the label column
+/// of a group about sampling — letting each group size its own columns is
+/// what stops one long label in one group from indenting every control in the
+/// dialog.
+fn groups(ui: &mut egui::Ui, decls: &[ParamDecl], values: &mut Params) {
+    let mut group = 0usize;
+    let mut rest = decls;
+    // Anything before the first section heading is a group of its own, so a
+    // plugin that declares no sections draws exactly as it did before.
+    while !rest.is_empty() {
+        let head = match &rest[0].kind {
+            ParamKind::Section => {
+                let d = &rest[0];
+                rest = &rest[1..];
+                Some(d)
+            }
+            _ => None,
+        };
+        let end = rest
+            .iter()
+            .position(|d| matches!(d.kind, ParamKind::Section))
+            .unwrap_or(rest.len());
+        let (here, after) = rest.split_at(end);
+        rest = after;
+
+        if let Some(d) = head {
+            if group > 0 {
+                ui.add_space(10.0);
+            }
+            let r = ui.strong(&d.label);
+            if let Some(h) = &d.help {
+                r.on_hover_text(h);
+            }
+            ui.separator();
+        }
+        if !here.is_empty() {
+            egui::Grid::new(("plugin_params", group))
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    for d in here {
+                        control(ui, d, values);
+                        ui.end_row();
+                    }
+                });
+        }
+        group += 1;
+    }
+}
+
 /// One declared control.
 fn control(ui: &mut egui::Ui, d: &ParamDecl, values: &mut Params) {
     match &d.kind {
         ParamKind::Label => {
             ui.label(&d.label);
+            ui.label("");
+        }
+        // `groups` takes the section headings out before this is reached, so
+        // one arriving here is a declaration list that was rendered some
+        // other way. Drawing it as a heading is still the right answer.
+        ParamKind::Section => {
+            ui.strong(&d.label);
             ui.label("");
         }
         ParamKind::Int { default, min, max } => {
@@ -197,10 +263,24 @@ fn control(ui: &mut egui::Ui, d: &ParamDecl, values: &mut Params) {
             label(ui, d);
             let mut v = values.float(&d.key, *default);
             let (lo, hi) = (min.min(*max), max.max(*min));
-            if ui
-                .add(egui::Slider::new(&mut v, lo..=hi).clamping(egui::SliderClamping::Always))
-                .changed()
-            {
+            // A slider over a range that spans orders of magnitude is not a
+            // control. A regularisation weight declared `0.000001..=1` with a
+            // default of `0.001` sits a thousandth of the way along a linear
+            // track: every useful value is in the first pixel of it, and the
+            // rest of the track is values nobody wants. Laid out
+            // logarithmically the same declaration gives even resolution over
+            // every decade.
+            //
+            // Decided from the declaration rather than added to it: a plugin
+            // asking for a positive quantity spanning a thousandfold has said
+            // everything that is needed, and a `logarithmic` flag would have
+            // to cross the C ABI — where `FtParamDecl` is frozen — to be
+            // worth anything to the plugins that are not compiled in.
+            let decades = lo > 0.0 && hi / lo >= 1000.0;
+            let slider = egui::Slider::new(&mut v, lo..=hi)
+                .clamping(egui::SliderClamping::Always)
+                .logarithmic(decades);
+            if ui.add(slider).changed() {
                 values.set(d.key.clone(), ParamValue::Float(v));
             }
         }

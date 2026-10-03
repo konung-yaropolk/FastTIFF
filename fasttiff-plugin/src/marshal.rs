@@ -679,6 +679,7 @@ unsafe fn push_decls(sink: &FtParamSink, decls: &[ParamDecl]) -> FtStatus {
                 c.save = u32::from(*save);
             }
             ParamKind::Label => c.kind = FtParamKind::Label,
+            ParamKind::Section => c.kind = FtParamKind::Section,
         }
         let st = (sink.push)(sink.ctx, &c);
         if st != FtStatus::Ok {
@@ -713,25 +714,36 @@ pub unsafe fn values_from_c(values: *const FtValue, count: u64) -> Option<Params
             return None;
         }
         let v = &*element;
-        let key = v.key.as_str()?.to_string();
-        let value = match v.kind {
-            FtParamKind::Int => ParamValue::Int(v.i),
-            FtParamKind::Float => ParamValue::Float(v.f),
-            FtParamKind::Bool => ParamValue::Bool(v.b != 0),
-            FtParamKind::Choice => ParamValue::Choice(v.i.max(0) as usize),
-            FtParamKind::Text => ParamValue::Text(v.s.as_str()?.to_string()),
-            FtParamKind::Path => ParamValue::Path(v.s.as_str()?.to_string()),
-            FtParamKind::Label => continue,
-            // A kind this plugin's ABI does not know: the host is newer than
-            // the crate this plugin was built with. Skipping the control is
-            // right — the plugin never declared it, so it cannot want it, and
-            // failing the whole call over a value it does not use would make
-            // every plugin break on a host upgrade.
-            _ => continue,
-        };
-        p.set(key, value);
+        if let Some((key, value)) = value_from_c(v) {
+            p.set(key, value);
+        }
     }
     Some(p)
+}
+
+/// One of the host's values, or `None` for one this plugin cannot use.
+///
+/// `None` covers three cases that all mean the same thing here — a label or a
+/// section, which carry no value; a kind from a host newer than the crate
+/// this plugin was built against; and a string that is not valid UTF-8.
+/// Skipping is right for all of them: the plugin never declared the control,
+/// so it cannot want it, and failing the whole call over a value it does not
+/// use would make every plugin break on a host upgrade.
+///
+/// # Safety
+/// `v` must be a valid `FtValue` whose strings outlive the call.
+pub(crate) unsafe fn value_from_c(v: &FtValue) -> Option<(String, ParamValue)> {
+    let key = v.key.as_str()?.to_string();
+    let value = match v.kind {
+        FtParamKind::Int => ParamValue::Int(v.i),
+        FtParamKind::Float => ParamValue::Float(v.f),
+        FtParamKind::Bool => ParamValue::Bool(v.b != 0),
+        FtParamKind::Choice => ParamValue::Choice(v.i.max(0) as usize),
+        FtParamKind::Text => ParamValue::Text(v.s.as_str()?.to_string()),
+        FtParamKind::Path => ParamValue::Path(v.s.as_str()?.to_string()),
+        _ => return None,
+    };
+    Some((key, value))
 }
 
 /// Write an [`Outcome`] into the host's sink.
