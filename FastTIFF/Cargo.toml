@@ -144,6 +144,15 @@ web-sys = { version = "0.3", features = [
     # `window.open`, and `fetch` of the blob on the other side.
     "Window",
     "Response",
+    # And `src/web_save.rs`: an `<a download>` built, clicked and removed, which
+    # is how a browser is handed a file. `BlobPropertyBag` states the type the
+    # download manager sees; `Node` is what `append_child` lives on.
+    "Document",
+    "Element",
+    "Node",
+    "HtmlElement",
+    "HtmlAnchorElement",
+    "BlobPropertyBag",
 ] }
 
 # Asking Windows how much physical memory is free, which decides whether a

@@ -486,7 +486,7 @@ fn a_save_in_several_batches_keeps_every_frame_in_order() {
         let stack = open(source(sample, 2, 3, 4));
         let path = temp(&format!("batches-{sample:?}"));
         let five_frames = W as usize * H as usize * width * 5;
-        write_all(&SaveSource::of(&stack), &path, &mut |_| true, five_frames).expect("save");
+        write_to_path(&SaveSource::of(&stack), &path, &mut |_| true, five_frames).expect("save");
 
         let back = reopen(&path);
         assert_eq!(back.frames.len(), 24, "{sample:?}: frames lost or invented");
@@ -504,4 +504,64 @@ fn a_save_in_several_batches_keeps_every_frame_in_order() {
         }
         let _ = std::fs::remove_file(&path);
     }
+}
+
+// ---------------------------------------------------- the in-memory encoder
+
+/// The claim `save_to_bytes` makes is that it is the *same* encode, so the
+/// assertion is byte equality against the file the path version writes rather
+/// than "it also opens". Anything weaker would let the two drift — a different
+/// compression level, a dropped LUT — and only the browser build would notice.
+#[test]
+fn encoding_to_memory_gives_the_same_file_as_encoding_to_a_path() {
+    for sample in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let stack = open(source(sample, 2, 3, 4));
+        let path = temp(&format!("same-{sample:?}"));
+        save_stack(&stack, &path).expect("save");
+
+        let on_disk = std::fs::read(&path).expect("the saved file should be there");
+        let in_memory =
+            save_to_bytes(&SaveSource::of(&stack), &mut |_| true).expect("save to bytes");
+        assert_eq!(
+            in_memory, on_disk,
+            "{sample:?}: the two destinations must produce one file"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// And that what it produces is a stack, not just bytes that match.
+#[test]
+fn what_was_encoded_to_memory_reopens() {
+    let stack = open(source(SampleType::U16, 2, 3, 4));
+    let bytes = save_to_bytes(&SaveSource::of(&stack), &mut |_| true).expect("save to bytes");
+    let back = TiffStack::from_bytes(bytes).expect("the encoded stack should open");
+    assert_eq!(back.frames.len(), 2 * 3 * 4);
+}
+
+/// Progress is reported and cancelling stops it, as on the path side — the
+/// browser runs this on the frame that asked for it, so a stack big enough to
+/// be worth cancelling is exactly the one that will want to be.
+#[test]
+fn encoding_to_memory_reports_progress_and_can_be_stopped() {
+    let stack = open(source(SampleType::U16, 1, 1, 8));
+
+    let mut seen: Vec<f32> = Vec::new();
+    save_to_bytes(&SaveSource::of(&stack), &mut |f| {
+        seen.push(f);
+        true
+    })
+    .expect("save to bytes");
+    assert!(seen.len() >= 8, "one report per frame at least: {seen:?}");
+    assert!(
+        seen.windows(2).all(|w| w[1] >= w[0]),
+        "progress must not go backwards: {seen:?}"
+    );
+
+    let err = save_to_bytes(&SaveSource::of(&stack), &mut |_| false)
+        .expect_err("refusing at the first frame must stop the encode");
+    assert!(
+        format!("{err:#}").contains("cancelled"),
+        "stopping is reported as cancellation: {err:#}"
+    );
 }

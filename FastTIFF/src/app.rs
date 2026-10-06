@@ -790,6 +790,18 @@ fn finish_outcome(
                 Ok(None) => return Ok(PluginProduct::Cancelled),
                 Err(e) => return Err(format!("{e:#}")),
             };
+            // The browser's filesystem is the download manager. The plugin's
+            // path still names the file — the last component of it — because
+            // the desktop honours that name and the two should not disagree
+            // about what the result is called; what a tab cannot honour is the
+            // directory, and it does not pretend to.
+            #[cfg(target_arch = "wasm32")]
+            {
+                let name = crate::web_save::name_from_path(&path);
+                return crate::web_save::download(&bytes, &name)
+                    .map(|()| PluginProduct::Saved(name));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
             std::fs::write(&path, bytes)
                 .map(|()| PluginProduct::Saved(path))
                 .map_err(|e| e.to_string())
@@ -2082,6 +2094,63 @@ impl ViewerApp {
         });
     }
 
+    /// Encode the open stack and hand it to the browser as a download.
+    ///
+    /// The browser's `save_as`, and shorter than the desktop's because both of
+    /// the things that make that one long are gone. There is no dialog to put
+    /// up — a tab cannot ask where a file should go, and the download manager
+    /// asks instead, if the user has told it to — and there is no worker to put
+    /// the write on.
+    ///
+    /// # It runs on the frame that asked for it
+    ///
+    /// Same as a plugin on this target, for the same reason: `std::thread::spawn`
+    /// compiles on `wasm32-unknown-unknown` and panics when called. So the
+    /// interface does not repaint while the encode runs, which means the
+    /// progress bar would never be seen and Cancel could never be clicked —
+    /// hence no [`Job`] at all here, rather than one that reports to nothing.
+    /// The status line afterwards is the whole of what this says.
+    ///
+    /// A large stack will therefore hold the tab for as long as the encode
+    /// takes. That is a real limit of this target and not a small one; it is
+    /// also why the desktop path was written to stream in the first place.
+    ///
+    /// # Only TIFF
+    ///
+    /// The exporter lane does not reach here. An [`Exporter`] is handed a path
+    /// and writes the file itself — that is its contract — and a browser has no
+    /// path to hand it. Offering PNG in a menu that could only fail would be
+    /// worse than not offering it, so the web build registers the PNG plugin as
+    /// an importer and this button writes TIFF.
+    ///
+    /// [`Exporter`]: fasttiff_plugin_api::Exporter
+    #[cfg(target_arch = "wasm32")]
+    fn save_as(&mut self) {
+        let Some(stack) = self.core.stack.as_ref() else {
+            self.core.status = Some("Open an image first".into());
+            return;
+        };
+        if self.job.is_some() {
+            self.core.status = Some(self.busy_message());
+            return;
+        }
+        // What the window is titled with, which for a document that arrived as
+        // bytes is the name it arrived under.
+        let name = crate::web_save::suggested_name(&stack.path.to_string_lossy());
+        let source = fast_tiff_viewer::save::SaveSource::of(stack);
+        // Nothing to report progress to and nothing that could set the cancel
+        // flag, so the callback is a constant rather than a pretence.
+        let wrote = fast_tiff_viewer::save::save_to_bytes(&source, &mut |_| true)
+            .map_err(|e| format!("{e:#}"))
+            .and_then(|bytes| crate::web_save::download(&bytes, &name));
+        match wrote {
+            // "Saved" rather than "Downloaded": where it went is the browser's
+            // business, and the user asked to save their image.
+            Ok(()) => self.report_done(format!("Saved {name}")),
+            Err(e) => self.core.status = Some(format!("Could not save {name}: {e}")),
+        }
+    }
+
     /// Hand the open stack to an exporter, on a worker.
     ///
     /// The registry goes with it, as an import's and a filter's do, which is
@@ -2638,7 +2707,6 @@ impl ViewerApp {
         let can_show_volume = self.core.can_show_volume();
         let mut mode_request: Option<ViewMode> = None;
         let mut open_requested = false;
-        #[cfg(not(target_arch = "wasm32"))]
         let mut save_requested = false;
         let mut render_settings_toggle = false;
         let mut plugin_to_start: Option<usize> = None;
@@ -2657,17 +2725,26 @@ impl ViewerApp {
                 // Disabled with nothing open, which is the one condition
                 // that makes it unavailable and one the user can reach — so a
                 // greyed button here is a promise rather than a dead end.
-                #[cfg(not(target_arch = "wasm32"))]
+                //
+                // Named for what each platform actually does. The desktop asks
+                // where to put the file, so its label ends in an ellipsis; the
+                // browser cannot ask and hands the file to the download manager
+                // instead, so promising a dialog there would be a lie.
+                let save_label = if cfg!(target_arch = "wasm32") {
+                    "Download as TIFF"
+                } else {
+                    "Save as TIFF…"
+                };
                 if ui
                     .add_enabled(
                         self.core.stack.is_some() && self.job.is_none(),
                         egui::Button::new(RichText::new(ICON_SAVE).size(ICON_SIZE)),
                     )
-                    .on_hover_text("Save as TIFF…")
+                    .on_hover_text(save_label)
                     .on_disabled_hover_text(if self.core.stack.is_some() {
-                        "Save as TIFF — busy"
+                        format!("{save_label} — busy")
                     } else {
-                        "Save as TIFF — nothing is open"
+                        format!("{save_label} — nothing is open")
                     })
                     .clicked()
                 {
@@ -2845,7 +2922,6 @@ impl ViewerApp {
         if open_requested {
             self.show_open_dialog(ui.ctx());
         }
-        #[cfg(not(target_arch = "wasm32"))]
         if save_requested {
             self.save_as();
         }

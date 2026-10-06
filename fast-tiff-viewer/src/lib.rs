@@ -63,7 +63,6 @@ pub mod prefetch;
 pub mod roi;
 /// Writing the open stack back out as a TIFF. Native only: it writes to a
 /// path, and a browser has none.
-#[cfg(not(target_arch = "wasm32"))]
 pub mod save;
 pub mod stack;
 pub mod viewer;

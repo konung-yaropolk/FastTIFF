@@ -89,7 +89,7 @@ Not listed (32-bit or a different CPU)? Build from source.
 ## Browser limitations
 
 [FastTIFF Online](https://konung-yaropolk.github.io/FastTIFF/) runs the same code as the
-desktop build, but the browser withholds three things the native app relies on. None of it is a
+desktop build, but a tab is not a desktop and four things follow from that. None of it is a
 missing feature — it's the platform:
 
 **File size.** The desktop build memory-maps the file, so opening a 20 GB stack
@@ -121,9 +121,22 @@ visible stall.
 be built for this target. LZW, Deflate, PackBits and uncompressed all work; a
 ZSTD file reports a clear error rather than failing silently.
 
+**Saving is a download, and the file is built in memory.** Same encoder, same
+bytes — a stack saved in the browser is byte-for-byte the file the desktop
+would have written, which is asserted in the tests rather than hoped for. Two
+differences, both the platform again. A tab cannot ask where a file should go,
+so the browser's download manager decides (turn on "ask where to save each
+file" to get the dialog back), and the name is taken from what the window is
+showing. And the whole file is assembled in memory instead of streamed, so
+saving peaks at roughly the stack's own size on top of what is already loaded,
+against the 4 GB ceiling above — and the page freezes while it encodes, for the
+same no-threads reason the volume builder does. Plugin **exporters** (PNG and
+anything a `.dll` adds) are desktop-only: an exporter's contract is that it
+writes the file itself, given a path, and there is no path to give it.
+
 Everything else — per-channel contrast and LUTs, ImageJ/OME metadata,
-dimension-order correction, playback, all three volume modes — behaves exactly
-as it does natively, because it *is* the same code.
+dimension-order correction, playback, all three volume modes, the built-in
+plugins — behaves exactly as it does natively, because it *is* the same code.
 
 ## Build & run
 

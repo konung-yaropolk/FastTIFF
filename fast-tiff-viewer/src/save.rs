@@ -41,6 +41,21 @@
 //! smooth images — averaged, widefield, electron microscopy — a predictor and a
 //! higher level can do better, so this is a choice for the data this viewer is
 //! mostly pointed at, not a universal one.
+//!
+//! # Two destinations, one encoder
+//!
+//! [`save_source`] writes a file; [`save_to_bytes`] fills a `Vec<u8>`. They are
+//! the same encode — [`write_all`] takes any `Write + Seek` — and differ only
+//! in where the bytes land and in what can be promised about the result.
+//!
+//! The file path is the careful one: it writes beside the target and renames,
+//! so nothing is destroyed until the write has succeeded (see [`save_source`]).
+//! The byte path cannot destroy anything, having nothing to overwrite, and so
+//! needs none of that. It exists for the browser, where a download *is* a
+//! buffer handed to the user agent and there is no filesystem to be careful
+//! with — and the whole file is therefore in memory at once, which is the one
+//! real difference between the two. A stack larger than the tab can hold fails
+//! here where the desktop would have streamed it.
 
 use crate::stack::Stack;
 use anyhow::{bail, Context, Result};
@@ -59,6 +74,7 @@ const COMPRESSION_LEVEL: i32 = 1;
 /// two strips, so frames handed over singly compress on one core; a batch gives
 /// every core a strip. This bounds the memory that costs.
 const BATCH_BYTES: usize = 64 << 20;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 /// How a frame's samples travel from the file to the file.
@@ -144,6 +160,7 @@ impl SaveSource {
 ///
 /// The blocking form, for callers with nothing to report progress to — tests,
 /// and any future headless use. [`save_source`] is what the app calls.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_stack(stack: &Stack, path: &Path) -> Result<()> {
     save_source(&SaveSource::of(stack), path, &mut |_| true)
 }
@@ -152,7 +169,8 @@ pub fn save_stack(stack: &Stack, path: &Path) -> Result<()> {
 ///
 /// Streams: frames are decoded and written a batch at a time, so saving a stack
 /// costs a few tens of megabytes of memory rather than a second copy of the
-/// whole thing.
+/// whole thing. [`save_to_bytes`] is the same encode without that property, for
+/// a host that has no file to stream into.
 ///
 /// `on_progress` is called once per frame with the fraction completed and
 /// returns `false` to cancel.
@@ -173,13 +191,14 @@ pub fn save_stack(stack: &Stack, path: &Path) -> Result<()> {
 ///   thing people do. Writing beside it means the original survives every
 ///   failure, including the one where the rename itself is refused because
 ///   another window has that file memory-mapped (Windows os error 1224).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_source(
     source: &SaveSource,
     path: &Path,
     on_progress: &mut dyn FnMut(f32) -> bool,
 ) -> Result<()> {
     let temp = partial_path(path);
-    match write_all(source, &temp, on_progress, BATCH_BYTES) {
+    match write_to_path(source, &temp, on_progress, BATCH_BYTES) {
         Ok(()) => std::fs::rename(&temp, path).with_context(|| {
             // Best effort: leaving the part file behind after a failed rename
             // would be a mystery file next to the one the user asked for.
@@ -195,28 +214,89 @@ pub fn save_source(
     }
 }
 
+/// Encode a snapshot into memory, reporting progress and stopping when asked.
+///
+/// The same TIFF [`save_source`] would have written — same compression, same
+/// metadata, same bytes — built in a buffer instead of a file, for a host with
+/// nowhere to put one. The browser build's only route, and the counterpart to
+/// [`plugins::to_tiff_bytes`](crate::plugins::to_tiff_bytes), which does this
+/// for a plugin's result rather than for what is open.
+///
+/// Not a replacement for [`save_source`] where a path exists. This holds the
+/// finished file in memory, so it peaks at roughly its own size on top of
+/// everything else; the path version streams and peaks at a batch.
+///
+/// Cancelling yields `Err`, as it does there, and the buffer is dropped. There
+/// is no half-written file to clean up, which is the one way this is the
+/// simpler of the two.
+pub fn save_to_bytes(
+    source: &SaveSource,
+    on_progress: &mut dyn FnMut(f32) -> bool,
+) -> Result<Vec<u8>> {
+    let sink = write_all(
+        source,
+        std::io::Cursor::new(Vec::new()),
+        on_progress,
+        BATCH_BYTES,
+    )?;
+    Ok(sink.into_inner())
+}
+
+/// Create `path` and encode into it, buffered.
+///
+/// Split from [`write_all`] so that the encoder does not know what a file is:
+/// everything above this line is shared with the browser, and everything below
+/// it is the part that needs a filesystem.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_to_path(
+    source: &SaveSource,
+    path: &Path,
+    on_progress: &mut dyn FnMut(f32) -> bool,
+    batch_bytes: usize,
+) -> Result<()> {
+    use std::io::Write;
+    let file = std::fs::File::create(path)
+        .with_context(|| format!("could not create {}", path.display()))?;
+    let mut sink = write_all(
+        source,
+        std::io::BufWriter::new(file),
+        on_progress,
+        batch_bytes,
+    )?;
+    // Explicitly, rather than on drop: a `BufWriter` dropped with bytes still
+    // in it flushes and discards the error, which for the last strip of a save
+    // would mean a truncated file reported as a success.
+    sink.flush()
+        .with_context(|| format!("finishing {}", path.display()))?;
+    Ok(())
+}
+
 /// Where the pixels go until the write has succeeded.
 ///
 /// In the same directory as the target, because a rename across filesystems is
 /// a copy — and the temp directory is routinely on a different volume from the
 /// data drive a microscopy stack is being saved to.
+#[cfg(not(target_arch = "wasm32"))]
 fn partial_path(path: &Path) -> std::path::PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".fasttiff-part");
     path.with_file_name(name)
 }
 
-/// The write itself. Split out so [`save_source`] can clean up after it without
-/// an early `return` skipping the cleanup.
+/// The encode itself, into any sink, returning it.
+///
+/// Split out twice over: so [`save_source`] can clean up after it without an
+/// early `return` skipping the cleanup, and so that the same code serves a file
+/// and a `Vec<u8>`. Nothing in here knows which it has.
 ///
 /// `batch_bytes` is [`BATCH_BYTES`] outside of tests, which need several
 /// batches from a stack small enough to build in one.
-fn write_all(
+fn write_all<W: std::io::Write + std::io::Seek>(
     source: &SaveSource,
-    path: &Path,
+    sink: W,
     on_progress: &mut dyn FnMut(f32) -> bool,
     batch_bytes: usize,
-) -> Result<()> {
+) -> Result<W> {
     let stack = source;
     let first = stack
         .tiff
@@ -252,8 +332,7 @@ fn write_all(
         .compression(COMPRESSION)
         .compression_level(COMPRESSION_LEVEL)
         .metadata(metadata_of(stack));
-    let mut writer = TiffWriter::create(path, options)
-        .with_context(|| format!("creating {}", path.display()))?;
+    let mut writer = TiffWriter::new(sink, options).context("starting the TIFF")?;
 
     let data = &stack.tiff.data;
     let order = stack.tiff.byte_order;
@@ -324,10 +403,7 @@ fn write_all(
         write_batch(&mut writer, &batch[..filled])
             .with_context(|| format!("writing frames {first_in_batch} onwards"))?;
     }
-    writer
-        .finish()
-        .with_context(|| format!("finishing {}", path.display()))?;
-    Ok(())
+    writer.finish().context("finishing the TIFF")
 }
 
 /// Hand a batch of frames to the writer, which compresses them together.

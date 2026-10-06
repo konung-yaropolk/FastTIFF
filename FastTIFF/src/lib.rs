@@ -64,5 +64,10 @@ pub mod process;
 /// tab instead of to a second process.
 #[cfg(target_arch = "wasm32")]
 pub mod web_open;
+/// The browser's counterpart to a save dialog: handing a file to the user as a
+/// download. Compiled under `test` on every target for the one part of it that
+/// is not about a browser; see the module.
+#[cfg(any(target_arch = "wasm32", test))]
+pub mod web_save;
 
 pub use app::{install_chrome, ViewerApp};
