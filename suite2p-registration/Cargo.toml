@@ -6,7 +6,7 @@
 # travels with the algorithm whoever retypes it.
 [package]
 name = "suite2p-registration"
-version = "0.19.5"
+version = "0.22.1"
 edition = "2021"
 # `Option::is_none_or`, in the GPU backend's context cache.
 rust-version = "1.82"
@@ -35,7 +35,14 @@ rustfft = "6"
 # Multi-threaded CPU registration: frames are independent, so a batch of them is
 # an embarrassingly parallel map. Already in this workspace (fast-tiff-lib uses
 # it for strip decompression), so it is not a new dependency for the project.
-rayon = "1.10"
+#
+# Optional, and behind `threads`, for the browser's sake. rayon does build for
+# `wasm32-unknown-unknown` — it falls back to running a `par_iter` on the
+# calling thread — so this is not about compiling. It is that a thread pool
+# which can never run is a large thing to send over a network, and that under
+# that fallback `Backend::MultiThread` is a single-threaded run calling itself
+# otherwise. See `src/par.rs`; the algorithm itself needs no thread.
+rayon = { version = "1.10", optional = true }
 
 # The GPU backend, behind a feature so the algorithm crate does not drag a
 # graphics stack into anything that only wants the CPU path. Same wgpu the
@@ -46,5 +53,10 @@ bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "1.0", optional = true }
 
 [features]
-default = []
+default = ["threads"]
+# Parallel CPU registration. On by default: every native build wants it, and a
+# crate that had to be asked for its usual behaviour would be a trap. Turning it
+# off leaves the arithmetic untouched and `Backend::MultiThread` unavailable —
+# `src/par.rs` says what that costs and why it costs nothing else.
+threads = ["dep:rayon"]
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]

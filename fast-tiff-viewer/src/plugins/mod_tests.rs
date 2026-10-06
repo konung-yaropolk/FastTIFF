@@ -12,10 +12,14 @@ impl Plugin for Stub {
     }
 }
 
+/// What holds for every configuration: whatever was compiled in registers, and
+/// registers cleanly. Which plugins those are is a build-time choice (the
+/// `plugin-*` features), so the identity assertions below are tied to the
+/// features that put them there rather than to a list this test keeps its own
+/// copy of — a copy would only ever go stale.
 #[test]
 fn the_builtins_are_installed_and_uniquely_identified() {
     let reg = Registry::new();
-    assert!(!reg.is_empty(), "the built-in plugins must be present");
     assert!(
         reg.problems.is_empty(),
         "a clean build registers cleanly: {:?}",
@@ -27,9 +31,45 @@ fn the_builtins_are_installed_and_uniquely_identified() {
     ids.sort_unstable();
     ids.dedup();
     assert_eq!(ids.len(), before, "built-in ids must be unique");
-    assert!(reg.find("dev.fasttiff.invert").is_some());
-    assert!(reg.find("dev.fasttiff.zproject").is_some());
     assert!(reg.entries().iter().all(|e| e.origin == Origin::BuiltIn));
+
+    #[cfg(feature = "builtin-plugins")]
+    assert!(
+        !reg.is_empty(),
+        "a build that asked for the built-in plugins must have them"
+    );
+    #[cfg(feature = "plugin-invert")]
+    assert!(reg.find("dev.fasttiff.invert").is_some());
+    #[cfg(feature = "plugin-zproject")]
+    assert!(reg.find("dev.fasttiff.zproject").is_some());
+}
+
+/// The other half of the switch: a plugin left out is *gone*, not merely
+/// hidden. Without this, a feature could silently do nothing and every other
+/// test here would still pass.
+#[test]
+fn a_plugin_left_out_of_the_build_is_absent_from_the_registry() {
+    let reg = Registry::new();
+    for (feature_on, id) in [
+        (cfg!(feature = "plugin-invert"), "dev.fasttiff.invert"),
+        (cfg!(feature = "plugin-zproject"), "dev.fasttiff.zproject"),
+        (cfg!(feature = "plugin-plot-axis"), "dev.fasttiff.plot-axis"),
+        (
+            cfg!(feature = "plugin-stack-tools"),
+            "dev.fasttiff.stacktools.keeper",
+        ),
+        (cfg!(feature = "plugin-stabilize"), "dev.fasttiff.stabilize"),
+        (
+            cfg!(feature = "plugin-deconvolve"),
+            "dev.fasttiff.deconvolve.run",
+        ),
+    ] {
+        assert_eq!(
+            reg.find(id).is_some(),
+            feature_on,
+            "{id} must be installed exactly when its feature is on"
+        );
+    }
 }
 
 /// Which plugin runs must not depend on directory order, so a duplicate id is
@@ -118,6 +158,7 @@ impl fasttiff_plugin_api::Importer for StubImporter {
     }
 }
 
+#[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
 #[test]
 fn the_builtin_importer_is_installed_and_offers_its_file_types() {
     let reg = Registry::new();
@@ -142,7 +183,7 @@ fn the_builtin_importer_is_installed_and_offers_its_file_types() {
 
 /// The example importer still registers when it is asked for, so the feature is
 /// a switch rather than a way for the file to rot unnoticed.
-#[cfg(feature = "netpbm-example")]
+#[cfg(feature = "plugin-netpbm")]
 #[test]
 fn the_example_importer_registers_when_enabled() {
     let reg = Registry::new();

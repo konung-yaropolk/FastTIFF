@@ -5,6 +5,23 @@
 //! [`StackHost`] and hands back a result the host can use. When the `.dll` lane
 //! lands these same assertions become its oracle: the identical filter, run
 //! through the C boundary, must produce byte-identical output.
+//!
+//! # Why the whole file is behind one feature
+//!
+//! Each `plugin-*` feature decides whether that plugin exists, so a test naming
+//! one would not compile without it. Gating per test is the obvious answer and
+//! the wrong one here: most of what is below reaches the host *through* a
+//! plugin — plane addressing, bit depths, cancellation, buffer reuse — so the
+//! gates would attach the host's coverage to whichever plugin happened to be
+//! the vehicle, and a reader could no longer tell which was being tested.
+//!
+//! So this file is the full set or nothing, and `builtin-plugins` is the full
+//! set. That is the configuration that ships and the one CI runs; a build that
+//! trims plugins is a product decision taken *after* this suite has passed, not
+//! a configuration this suite has an opinion about. The registry's own
+//! bookkeeping — including that a plugin left out really is gone — is unit-
+//! tested next to it in `src/plugins/mod_tests.rs`, which does gate per feature.
+#![cfg(feature = "builtin-plugins")]
 
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::plugins::{builtin, describe_view, StackHost};

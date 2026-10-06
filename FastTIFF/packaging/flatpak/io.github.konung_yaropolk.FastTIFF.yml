@@ -44,7 +44,7 @@ modules:
     # entry and its icon are picked up. The committed .desktop uses
     # `Icon=fasttiff`; rewrite it to the app ID the exported icon is named by.
     build-commands:
-      - cargo --offline build --release -p FastTIFF --no-default-features --features renderer-glow
+      - cargo --offline build --release -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins
       - install -Dm755 target/release/FastTIFF /app/bin/FastTIFF
       - install -Dm644 FastTIFF/packaging/fasttiff.desktop /app/share/applications/io.github.konung_yaropolk.FastTIFF.desktop
       - sed -i 's/^Icon=.*/Icon=io.github.konung_yaropolk.FastTIFF/' /app/share/applications/io.github.konung_yaropolk.FastTIFF.desktop

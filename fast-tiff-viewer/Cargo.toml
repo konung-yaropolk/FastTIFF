@@ -1,6 +1,6 @@
 [package]
 name = "fast-tiff-viewer"
-version = "0.22.0"
+version = "0.22.1"
 edition = "2021"
 description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
 # GPL-3.0, not MPL-2.0 as the rest of the library crates are. The built-in
@@ -25,10 +25,66 @@ include = [
 ]
 
 [features]
+default = ["threads", "mmap", "codec-zstd", "builtin-plugins"]
+
+# ---------------------------------------------------------------------------
+# Which built-in plugins are compiled in.
+#
+# One feature per plugin directory under `src/plugins/builtin/`, and
+# `builtin-plugins` is all of the ones that ship. This list is the whole
+# switch: a plugin left out of it is absent from the binary, its menu entry is
+# never drawn, and anything it alone depended on is not compiled or linked —
+# which is the point, since `plugin-deconvolve` carries an FFT and
+# `plugin-stabilize` carries a whole registration crate.
+#
+# Removing one is a product decision rather than a build tweak, so two of them
+# are worth calling out:
+#
+# * `plugin-stabilize` is why this crate is GPL-3 (see the licence note above).
+#   It is the only GPL-3 thing in the tree; a build without it links nothing
+#   copyleft, though relicensing the crate would still be a separate decision.
+# * `plugin-png` is the only importer *and* exporter a browser build has.
+#   Without it the web build can open nothing but TIFF and save nothing but
+#   TIFF, which is a smaller application than it looks.
+#
+# Nothing here is target-gated. Plugins that cannot work on a given target say
+# so in their own `cfg` next to the reason — see `builtin/mod.rs` — so that
+# enabling one for a target it cannot serve is inert rather than broken.
+builtin-plugins = [
+    "plugin-invert",
+    "plugin-zproject",
+    "plugin-plot-axis",
+    "plugin-stack-tools",
+    "plugin-stabilize",
+    "plugin-deconvolve",
+    "plugin-png",
+    "plugin-oir",
+]
+
+# The four that cost nothing but their own code.
+plugin-invert = []
+plugin-zproject = []
+plugin-plot-axis = []
+plugin-stack-tools = []
+
+# And the four that bring a dependency with them. Each names only what *it*
+# needs, so the dependency arrives with the plugin and leaves with it.
+# `suite2p-registration` is the registration algorithm; `rustfft` the
+# deconvolution transforms; `png` the PNG importer/exporter; `quick-xml` and
+# `memmap2` the OIR container reader.
+plugin-stabilize = ["dep:suite2p-registration"]
+plugin-deconvolve = ["dep:rustfft"]
+plugin-png = ["dep:png"]
+plugin-oir = ["dep:quick-xml", "dep:memmap2"]
+
 # A worked example for plugin authors rather than a format this viewer needs;
-# see `plugins/builtin/mod.rs`. Off by default, compiled and tested on demand.
-netpbm-example = []
-default = ["threads", "mmap", "codec-zstd"]
+# see `plugins/builtin/mod.rs`. Off by default — deliberately not in
+# `builtin-plugins` — and compiled and tested on demand.
+plugin-netpbm = []
+# The name this had before the family was regularised. Kept because it is what
+# the module documentation and anyone's muscle memory say.
+netpbm-example = ["plugin-netpbm"]
+# ---------------------------------------------------------------------------
 # Which GPU backend `sync` drives. Exactly one is required to use `Viewer::sync`
 # and `volume::build_volume`; with neither, the crate still provides the whole
 # CPU-side model (stack state, channel settings, dimension resolution, camera
@@ -40,7 +96,10 @@ backend-glow = ["scivis-render/backend-glow"]
 # otherwise have it — including the glow one. Turn it on where the machines
 # running this have GPUs worth using; the plugin says plainly when the backend
 # is not there rather than quietly using the processor.
-gpu-registration = ["suite2p-registration/gpu"]
+# `?/`: the GPU path belongs to a plugin that may not be here. Without the weak
+# form this would pull the registration crate back in on its own, which is the
+# one thing `plugin-stabilize = off` is for.
+gpu-registration = ["suite2p-registration?/gpu"]
 # Background worker threads (read-ahead decode + 3D volume assembly). On by
 # default; a single-threaded host — notably `wasm32-unknown-unknown`, where
 # `std::thread::spawn` is unavailable — turns this off and gets the synchronous
@@ -73,15 +132,29 @@ rayon = { version = "1.10", optional = true }
 # `fasttiff-plugin-abi` and `libloading` below.
 fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
 
+# The registration algorithm behind the `stabilize` built-in. GPL-3, which is
+# why this crate is; see the licence note at the top.
+#
+# `default-features = false` is what lets this be a shared dependency at all.
+# Its default is `threads`, which is rayon. rayon does build for wasm — it falls
+# back to running a `par_iter` on the calling thread — so this is about weight
+# and honesty rather than about compiling: a thread pool that can never run is a
+# large thing to send over the network, and `Backend::MultiThread` under that
+# fallback is a single-threaded run that calls itself otherwise. The threaded
+# build is restored for every target that has threads, in the native block
+# below; a browser gets the same arithmetic on one thread and is told so.
+suite2p-registration = { path = "../suite2p-registration", default-features = false, optional = true }
+
 # Two built-ins that the browser build also gets, so their dependencies are no
 # longer desktop-only either: `png` for the PNG importer/exporter, `rustfft` for
-# the deconvolution tools. Both build for wasm.
-png = "0.18"
+# the deconvolution tools. Both build for wasm. Optional, and pulled in by the
+# plugin that needs them — see the feature list above.
+png = { version = "0.18", optional = true }
 # Convolving a 512-cubed volume with a PSF directly is 10^14 multiplies; through
 # a pair of FFTs it is seconds, so an FFT is no more optional here than it is
 # for registration. Same crate and same major version `suite2p-registration`
 # already pulls in, so the workspace builds one copy of it.
-rustfft = "6"
+rustfft = { version = "6", optional = true }
 
 # Desktop-only. Target-gated rather than put behind a feature: a `plugins`
 # feature in `default` would silently vanish from the glow build, which is
@@ -95,19 +168,23 @@ fasttiff-plugin-abi = { path = "../fasttiff-plugin-abi"}
 # Opening a shared library. Native only, for the same reason as above: there is
 # no `dlopen` in a browser.
 libloading = "0.9"
+# Threads for the registration crate, on every target that has them. Target-
+# gated rather than tied to this crate's own `threads` feature, and that is
+# deliberate: `threads` can be switched off on a native host, where rayon builds
+# perfectly well and the registration should still use it. What rayon cannot do
+# is build for wasm, and `cfg(not(target_arch = "wasm32"))` is the condition
+# that says exactly that and cannot be forgotten.
+suite2p-registration = { path = "../suite2p-registration", default-features = false, features = ["threads"], optional = true }
 # The OIR importer's acquisition record (`plugins/builtin/oir_meta.rs`). Kept in
 # step with fast-tiff-lib's OME reader so the workspace builds one copy, and
 # native-only because the whole plugin module is: a browser cannot open a `.oir`
 # from disk in the first place. Hand-rolling it was the alternative and is a bad
 # trade — the schema is namespaced throughout, and the documents come from an
 # untrusted file.
-quick-xml = "0.37"
-# The registration algorithm behind the `stabilize` built-in. GPL-3, which is
-# why this crate is; see the licence note above.
-suite2p-registration = { path = "../suite2p-registration" }
+quick-xml = { version = "0.37", optional = true }
 # The OIR reader maps each part rather than seeking through it: a plane is
 # thirty-five scattered chunks, and a recording is a quarter of a million of
 # them. Same crate and same version fast-tiff-lib maps TIFFs with.
-memmap2 = "0.9"
+memmap2 = { version = "0.9", optional = true }
 # `png` and `rustfft` used to live here. They moved up into the shared
 # dependencies when their plugins started building for the browser.

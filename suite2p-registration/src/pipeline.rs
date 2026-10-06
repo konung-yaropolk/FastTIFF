@@ -13,9 +13,9 @@
 
 use crate::fft::Fft2;
 use crate::masks::RefFilters;
+use crate::par::*;
 use crate::rigid::{correlation_map, lcorr_for, peak_of, Shift};
 use crate::settings::{Backend, Settings};
-use rayon::prelude::*;
 
 /// The 1st and 99th percentile of an image, as `norm_frames` uses.
 ///
@@ -128,7 +128,7 @@ pub fn measure_batch(
         // `Gpu` reaches here only in a build without the feature, or when the
         // device could not be opened; both are already reported to the user.
         (None, Backend::MultiThread | Backend::Gpu) => frames
-            .par_chunks(8.max(frames.len().div_ceil(rayon::current_num_threads().max(1))))
+            .par_chunks(8.max(frames.len().div_ceil(crate::par::workers())))
             .flat_map_iter(|chunk| {
                 let mut fft = Fft2::new(ly, lx);
                 chunk

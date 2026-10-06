@@ -33,14 +33,14 @@
 //!     index = t * (slices * channels) + z * channels + c
 //! ```
 //!
-//! # Shared with `Filters > Invert`
+//! # Shared with `Filters > Invert` and with deconvolution
 //!
-//! [`Store`], [`deliver`] and [`in_new_window`] are `pub(crate)` because
-//! `Filters > Invert` is built from them as well: it inverts whatever is
-//! loaded, which is the same walk over the same planes at the same sample
-//! width, and the checkbox means the same thing there as here. They live here
-//! rather than in a module of their own because this is where there are three
-//! users of them and there one.
+//! [`Store`], [`deliver`] and [`in_new_window`] used to live here, because
+//! `Filters > Invert` is built from them as well and this was where three of
+//! the four users were. They are in [`shared`](super::shared) now: deconvolution
+//! became a fourth user, and each of these is a Cargo feature that can be
+//! compiled out on its own, which a plugin reaching into another plugin's module
+//! does not survive.
 //!
 //! None of these tools has to *call* that formula: each walks the planes in
 //! that order and emits them in that order, so the order is the loop nesting.
@@ -48,10 +48,8 @@
 //! to [`map_planes`] already in order — which is why that is the one place the
 //! ordering has to be right.
 
-use fasttiff_plugin_api::{
-    HostContext, ImageInfo, ImageResult, Outcome, ParamDecl, ParamKind, Params, PixelType,
-    PlaneData, PluginError,
-};
+use super::shared::Store;
+use fasttiff_plugin_api::{HostContext, ImageInfo, PlaneData, PluginError};
 
 mod order;
 mod slices;
@@ -98,118 +96,6 @@ pub(crate) fn axes(info: &ImageInfo) -> Vec<Axis> {
     }
 }
 
-/// The key of the "open in a new window" checkbox.
-pub(crate) const NEW_WINDOW: &str = "new_window";
-
-/// The checkbox every tool here offers.
-///
-/// `Filters > Invert` offers it too, so this is `pub(crate)` rather than
-/// private to this module.
-///
-/// Declared in one place so the four of them cannot drift — a tool that spelled
-/// the key differently would read the default on every run and silently always
-/// open a window.
-pub(crate) fn in_new_window() -> ParamDecl {
-    ParamDecl::new(
-        "new_window",
-        "Open in a new window",
-        ParamKind::Bool { default: true },
-    )
-    .help(
-        "On, the result opens in its own window and this one is left alone. Off, it \
-         replaces the image in this window — which cannot be undone.",
-    )
-}
-
-/// Hand an image back the way the dialog asked for it.
-pub(crate) fn deliver(image: ImageResult, params: &Params) -> Outcome {
-    if params.bool(NEW_WINDOW, true) {
-        Outcome::NewDocument(Box::new(image))
-    } else {
-        Outcome::ReplaceDocument(Box::new(image))
-    }
-}
-
-/// What a result's samples are stored as, so a tool gives back what it was
-/// given.
-///
-/// A tool here changes which planes there are, not what a sample means, so a
-/// 16-bit recording must come back 16-bit. Widening everything to float — which
-/// is what reading through `read_plane_f32` and storing the result would do —
-/// doubles every file for nothing.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Store {
-    U8,
-    U16,
-    I16,
-    F32,
-}
-
-impl Store {
-    pub(crate) fn of(source: PixelType) -> Self {
-        match source {
-            PixelType::U8 => Store::U8,
-            PixelType::U16 => Store::U16,
-            PixelType::I16 => Store::I16,
-            PixelType::F32 => Store::F32,
-        }
-    }
-
-    pub(crate) fn pixel_type(self) -> PixelType {
-        match self {
-            Store::U8 => PixelType::U8,
-            Store::U16 => PixelType::U16,
-            Store::I16 => PixelType::I16,
-            Store::F32 => PixelType::F32,
-        }
-    }
-
-    /// The range a sample of this width can hold, for the tools that need one.
-    /// `None` for float, which has no range of its own to invert about.
-    pub(crate) fn range(self) -> Option<(f32, f32)> {
-        match self {
-            Store::U8 => Some((0.0, 255.0)),
-            Store::U16 => Some((0.0, 65535.0)),
-            Store::I16 => Some((-32768.0, 32767.0)),
-            Store::F32 => None,
-        }
-    }
-
-    /// Store a plane of `f32` samples as this width.
-    ///
-    /// The signed arm is the one to be careful with: the contract has no
-    /// `PlaneData::I16`, so signed samples travel as the same sixteen bits in
-    /// the `U16` lane and are declared `PixelType::I16`. Getting that wrong
-    /// makes every negative sample read as a very bright one — a picture that
-    /// still looks like a picture.
-    pub(crate) fn plane(self, v: Vec<f32>) -> PlaneData {
-        match self {
-            Store::U8 => PlaneData::U8(v.iter().map(|&x| whole(x, 0.0, 255.0) as u8).collect()),
-            Store::U16 => {
-                PlaneData::U16(v.iter().map(|&x| whole(x, 0.0, 65535.0) as u16).collect())
-            }
-            Store::I16 => PlaneData::U16(
-                v.iter()
-                    .map(|&x| whole(x, -32768.0, 32767.0) as i16 as u16)
-                    .collect(),
-            ),
-            Store::F32 => PlaneData::F32(v),
-        }
-    }
-}
-
-/// Round to the nearest whole sample, clamped into range.
-///
-/// `NaN` becomes the bottom of the range rather than zero-by-cast: `as u16` on
-/// a `NaN` is 0, which for a signed stack is the middle of the range and reads
-/// as mid-grey rather than as nothing.
-fn whole(x: f32, lo: f32, hi: f32) -> f32 {
-    if x.is_nan() {
-        return lo;
-    }
-    x.clamp(lo, hi).round()
-}
-
 /// Read every plane of the source, in `xyczt` order, applying `f` to each.
 ///
 /// Shared because three of the four tools are "walk the planes and keep some of
@@ -245,7 +131,3 @@ pub(crate) fn map_planes(
     }
     Ok(Some(planes))
 }
-
-#[cfg(test)]
-#[path = "mod_tests.rs"]
-mod tests;

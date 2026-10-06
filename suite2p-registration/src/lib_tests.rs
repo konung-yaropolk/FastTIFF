@@ -54,8 +54,17 @@ fn suite2ps_defaults_are_the_defaults() {
     assert_eq!(s.subpixel, 10);
     assert!(!s.two_step_registration);
     // Not a suite2p option: where it runs. Multi-thread by default, because a
-    // single thread is a diagnostic rather than a choice anyone wants.
+    // single thread is a diagnostic rather than a choice anyone wants — except
+    // in a build that has no threads to offer, where it is the only backend
+    // there is and defaulting to one that is unavailable would be a bug.
+    #[cfg(feature = "threads")]
     assert_eq!(s.backend, Backend::MultiThread);
+    #[cfg(not(feature = "threads"))]
+    assert_eq!(s.backend, Backend::SingleThread);
+    assert!(
+        s.backend.available_for(512, 512),
+        "the default backend must be one this build can actually run"
+    );
 }
 
 /// The initial reference is an average of the frames that agree with each

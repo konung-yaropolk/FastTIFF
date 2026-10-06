@@ -125,12 +125,15 @@ pub mod fft;
 pub mod gpu;
 pub mod masks;
 pub mod nonrigid;
+/// Parallel loops, or sequential stand-ins for them when the `threads` feature
+/// is off. Every `par_` call in this crate resolves through here.
+pub mod par;
 pub mod pipeline;
 pub mod rigid;
 pub mod settings;
 pub mod work;
 
-use rayon::prelude::*;
+use crate::par::*;
 
 use fft::Fft2;
 use masks::reference_filters_normed;
@@ -245,11 +248,7 @@ pub fn pick_initial_reference_reporting(
             std::iter::once(k).chain((far != k).then_some(far))
         })
         .collect();
-    let workers = if threaded {
-        rayon::current_num_threads().max(1)
-    } else {
-        1
-    };
+    let workers = if threaded { crate::par::workers() } else { 1 };
     // Enough rows to keep every worker busy, and enough blocks that no single
     // report is a large jump.
     let block = (2 * workers).max(n / 32).max(2);

@@ -141,7 +141,7 @@ cargo run --release
 ```
 **glow** (OpenGL) is opt-in:
 ```sh
-cargo run --release --no-default-features --features renderer-glow
+cargo run --release --no-default-features --features renderer-glow,builtin-plugins
 ```
 
 wgpu is the default: it's the more actively developed backend and preferable on
@@ -161,7 +161,7 @@ rustup component add rust-src --toolchain nightly
 
 Compile for the Tier 3 (deprecated) target, **with the OpenGL backend**:
 ```sh
-cargo +nightly build --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --release --no-default-features --features renderer-glow
+cargo +nightly build --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --release --no-default-features --features renderer-glow,builtin-plugins
 ```
 
 
@@ -187,7 +187,7 @@ kept building so they cannot quietly rot:
 
 ```sh
 cargo test --manifest-path plugins/example/Cargo.toml
-cargo test -p fast-tiff-viewer --features netpbm-example
+cargo test -p fast-tiff-viewer --features plugin-netpbm
 ```
 
 Lint:
@@ -543,18 +543,50 @@ not in the workspace, so build and test it on its own:
 cargo test --manifest-path plugins/example/Cargo.toml
 ```
 
-A second worked example lives *inside* the viewer:
-[`plugins/builtin/netpbm.rs`](fast-tiff-viewer/src/plugins/builtin/netpbm.rs)
-reads PBM/PGM/PPM as a built-in importer. It is a demonstration rather than a
-format this viewer needs, so it is behind the off-by-default `netpbm-example`
-feature and does not ship in a normal build:
+### Built-in plugins, and choosing which get compiled in
+
+Some plugins ship *inside* the binary rather than as libraries: Invert, Z
+Project, Plot third axis, the three Slice tools, Generate PSF, Deconvolve,
+suite2p stabilization, the PNG importer/exporter and the Olympus OIR reader.
+They are written against the same contract a `.dll` is — being compiled in is a
+lane, not a different kind of plugin — and they are what the browser build has,
+since it can load nothing.
+
+Each one is a Cargo feature named `plugin-<name>`, and `builtin-plugins` is all
+of them. Every one is on by default. To leave some out, name the ones you want:
 
 ```sh
-cargo test -p fast-tiff-viewer --features netpbm-example
+cargo build --release -p FastTIFF --no-default-features \
+    --features renderer-wgpu,plugin-invert,plugin-zproject
 ```
 
-Native only — there is no `dlopen` in a browser, so the web build has no plugin
-interface rather than a disabled one.
+A plugin left out is *gone*: no module, no menu entry, and no dependency of its
+own compiled or linked. Two carry enough to notice — `plugin-deconvolve` brings
+an FFT and `plugin-stabilize` a whole registration crate, and dropping both
+takes about 460 KB off the web bundle. `plugin-stabilize` is also the only
+GPL-3 code in the tree, which is why `fast-tiff-viewer` is licensed GPL-3 where
+the other library crates are MPL-2.0.
+
+Because these features live in `default`, `--no-default-features` drops the
+plugins along with whatever it was really for — notably the glow renderer, which
+is how the Linux packages are built. Every such invocation in this repository
+names `builtin-plugins` again, and the application refuses to compile with no
+plugins at all unless `--features plugins-none` says that was deliberate, so a
+forgotten one stops the build rather than shipping a binary that quietly cannot
+do half of what it is for.
+
+A worked example lives among them:
+[`plugins/builtin/netpbm/`](fast-tiff-viewer/src/plugins/builtin/netpbm/mod.rs)
+reads PBM/PGM/PPM as a built-in importer. It is a demonstration rather than a
+format this viewer needs, so it is off by default and deliberately not part of
+`builtin-plugins`:
+
+```sh
+cargo test -p fast-tiff-viewer --features plugin-netpbm
+```
+
+The shared-library lane is native-only — there is no `dlopen` in a browser — so
+the web build gets the built-ins and no way to add to them.
 
 ## What it doesn't do (intentionally out of scope for a "viewer")
 

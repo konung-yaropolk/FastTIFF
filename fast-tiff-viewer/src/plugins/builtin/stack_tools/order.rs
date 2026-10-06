@@ -18,7 +18,8 @@
 //! the difference between light and dark and the difference between first and
 //! last read as the same choice.
 
-use super::{axes, deliver, in_new_window, map_planes, Axis, Store};
+use super::super::shared::{deliver, in_new_window, Store};
+use super::{axes, map_planes, Axis};
 use fasttiff_plugin_api::{
     HostContext, ImageResult, Outcome, ParamDecl, ParamKind, Params, Plugin, PluginError,
     PluginInfo,

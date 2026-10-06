@@ -80,8 +80,14 @@ jobs:
       # The test run above exercises the default (wgpu) backend. glow is the
       # Linux release backend; the compile check here (in addition to the Linux
       # job below) catches Windows-specific glow breakage cheaply.
+      #
+      # `builtin-plugins` rides along with every `--no-default-features` here and
+      # in release.yml, because the built-in plugins live in `default` too and
+      # dropping the renderer would otherwise drop them. Forgetting it does not
+      # ship a plugin-less binary — `FastTIFF/src/lib.rs` refuses to compile one
+      # that was not asked for — but it would stop the build, so it is named.
       - name: Build glow backend
-        run: cargo build -p FastTIFF --no-default-features --features renderer-glow
+        run: cargo build -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins
 
       # fast-tiff-lib without memmap or the C zstd codec — the shape the wasm
       # build uses. This runs the *same* suite as the default build: the
@@ -97,7 +103,7 @@ jobs:
         run: |
           rustup target add wasm32-unknown-unknown
           cargo check -p fast-tiff-lib --target wasm32-unknown-unknown --no-default-features
-          cargo check -p fast-tiff-viewer --target wasm32-unknown-unknown --no-default-features --features backend-wgpu
+          cargo check -p fast-tiff-viewer --target wasm32-unknown-unknown --no-default-features --features backend-wgpu,builtin-plugins
 
       # The egui UI is shared between the desktop binary and the browser build,
       # so a desktop-only edit can break the wasm side. This is the check that
@@ -112,11 +118,18 @@ jobs:
       # background volume builder, no rayon — which is what a wasm frontend will
       # build. Nothing in the desktop app selects it, so without this step the
       # `#[cfg(not(feature = "threads"))]` fallbacks would rot unnoticed.
+      #
+      # With the plugins, deliberately: deconvolution has single-threaded
+      # fallbacks of its own (`deconvolve/par.rs`) and this is the only step
+      # that runs them. The no-plugins shape is the step after this one.
       - name: Check core without threads (wasm-shaped)
-        run: cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu
+        run: cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu,builtin-plugins
 
-      # And with no GPU backend at all: the CPU-side model must stand alone, so
-      # headless tooling can use it without pulling in wgpu or glow.
+      # And with no GPU backend at all, and no plugins: the CPU-side model must
+      # stand alone, so headless tooling can use it without pulling in wgpu,
+      # glow, an FFT or a registration crate. This is also what holds the plugin
+      # features honest — with every one of them off, nothing outside
+      # `plugins/builtin/` may still refer to a plugin.
       - name: Check core with no backend
         run: cargo check -p fast-tiff-viewer --no-default-features
 
@@ -197,7 +210,7 @@ jobs:
           cargo test --manifest-path plugins/example/Cargo.toml
 
       - name: Run tests (glow backend)
-        run: cargo test --workspace --no-default-features --features FastTIFF/renderer-glow
+        run: cargo test --workspace --no-default-features --features FastTIFF/renderer-glow,FastTIFF/builtin-plugins
 
       # The deploy's own build, run before the merge instead of after it.
       #

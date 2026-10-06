@@ -76,6 +76,19 @@ jobs:
         if: steps.pub.outputs.already == 'false'
         run: cargo check -p suite2p-registration --features gpu
 
+      # And the other direction, for the same reason: `threads` is *in* the
+      # default set, so `cargo publish` verifies only the build that has it. The
+      # threadless one is what a wasm consumer gets, and it is the one with
+      # hand-written stand-ins for rayon's iterators (`src/par.rs`) — the half
+      # most able to stop compiling without anyone here noticing.
+      - name: Check the crate builds without threads
+        if: steps.pub.outputs.already == 'false'
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p suite2p-registration --no-default-features
+          cargo check -p suite2p-registration --no-default-features \
+            --target wasm32-unknown-unknown
+
       - name: Publish
         if: steps.pub.outputs.already == 'false'
         run: cargo publish -p suite2p-registration

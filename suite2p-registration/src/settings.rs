@@ -20,9 +20,17 @@
 pub enum Backend {
     /// One frame at a time. Slowest, and the one to reach for when a result
     /// looks wrong — it removes scheduling from the list of suspects.
+    #[cfg_attr(not(feature = "threads"), default)]
     SingleThread,
-    /// A frame per core, through rayon.
-    #[default]
+    /// A frame per core, through rayon — and so only in a build with the
+    /// `threads` feature, which is where the default also is. Without it this
+    /// is still offered and still refused by [`unavailable_reason`], the same
+    /// way [`Backend::Gpu`] is in a build without `gpu`: an option that is
+    /// visibly unavailable tells the truth, and one that silently ran on one
+    /// thread would be indistinguishable from a slow machine.
+    ///
+    /// [`unavailable_reason`]: Backend::unavailable_reason
+    #[cfg_attr(feature = "threads", default)]
     MultiThread,
     /// On the graphics card.
     Gpu,
@@ -81,6 +89,14 @@ impl Backend {
                     }
                 }
             }
+            // Same rule as the GPU arm above, for the same reason: say so
+            // rather than quietly run somewhere else.
+            #[cfg(not(feature = "threads"))]
+            Backend::MultiThread => Some(
+                "this build has no threads: rayon is behind the crate's `threads` \
+                 feature, which was not enabled. Use the single-threaded CPU backend."
+                    .to_string(),
+            ),
             _ => None,
         }
     }

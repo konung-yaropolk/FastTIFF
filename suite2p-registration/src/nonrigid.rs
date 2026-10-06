@@ -39,8 +39,8 @@
 
 use crate::fft::Fft2;
 use crate::masks::{gaussian_fft, spatial_taper};
+use crate::par::*;
 use crate::rigid::Shift;
-use rayon::prelude::*;
 use rustfft::num_complex::Complex32;
 
 /// How wide the kriging window around a peak is, in pixels. suite2p's `lpad`.

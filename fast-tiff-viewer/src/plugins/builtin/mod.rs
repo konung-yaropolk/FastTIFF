@@ -33,16 +33,37 @@
 //!   behind one menu entry.
 //!
 //! [`Netpbm`] is a fifth thing — a worked example of the other shape the job
-//! takes, a documented format implemented straight from its spec. It is behind
-//! the off-by-default `netpbm-example` feature: read it when writing an
-//! importer, enable it (`--features netpbm-example`) to run it, but it is not
-//! part of the product and nobody opens a `.pgm` in a TIFF viewer.
+//! takes, a documented format implemented straight from its spec. Read it when
+//! writing an importer, enable it (`--features plugin-netpbm`) to run it, but
+//! it is not part of the product and nobody opens a `.pgm` in a TIFF viewer.
+//!
+//! # Which of them are here
+//!
+//! One Cargo feature per directory, named `plugin-<directory>`, and
+//! `builtin-plugins` is every one that ships. All of them are on by default;
+//! the manifest is where the list lives and what it costs to drop one is
+//! written there. The effect is total: a plugin whose feature is off has no
+//! module, no entry in the lists below, no menu entry, and — for the four that
+//! bring one — no dependency compiled or linked.
+//!
+//! Two kinds of `cfg` therefore appear below, and they mean different things:
+//!
+//! * `feature = "plugin-…"` is *whether this build wants it*, a product
+//!   decision taken in the manifest.
+//! * `not(target_arch = "wasm32")` is *whether this target can run it at all*,
+//!   a fact about the platform, written next to the reason it is true.
+//!
+//! Only [`oir`] still has the second, because it memory-maps a file. Keeping
+//! both means enabling a plugin for a target that cannot serve it is inert
+//! rather than broken: the feature is simply ignored there.
 //!
 //! # Adding one
 //!
 //! Give it a directory here — `<name>/mod.rs`, its tests in `mod_tests.rs`
 //! beside that, and any further files it needs alongside them — write it using
-//! nothing but `fasttiff_plugin_api`, and add it to [`all`] or [`importers`]
+//! nothing but `fasttiff_plugin_api`, add a `plugin-<name>` feature to the
+//! manifest (with any dependency of its own named by that feature and nothing
+//! else), put it in `builtin-plugins`, and add it to [`all`] or [`importers`]
 //! below. That is the whole procedure.
 //!
 //! A directory each rather than a file each, even for the two that are one file
@@ -54,57 +75,109 @@
 //! rather ship separately, its directory becomes a `cdylib` crate's `src/` and
 //! nothing inside it has to change.
 
+#[cfg(feature = "plugin-deconvolve")]
 pub mod deconvolve;
+#[cfg(feature = "plugin-invert")]
 pub mod invert;
-#[cfg(feature = "netpbm-example")]
+#[cfg(feature = "plugin-netpbm")]
 pub mod netpbm;
-/// Desktop-only: it memory-maps the container and parses the vendor's XML, and
-/// a browser has no file to map.
-#[cfg(not(target_arch = "wasm32"))]
+/// Desktop-only on top of its feature: it memory-maps the container and parses
+/// the vendor's XML, and a browser has no file to map.
+#[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
 pub mod oir;
+#[cfg(feature = "plugin-plot-axis")]
 pub mod plot_axis;
+#[cfg(feature = "plugin-png")]
 pub mod png;
-/// Desktop-only. It compiles for wasm, which is the trap: `suite2p-registration`
-/// uses rayon unconditionally, and `std::thread::spawn` is unsupported on
-/// `wasm32-unknown-unknown` — so the browser build would offer the menu entry
-/// and then panic on the first frame it registered. Absent is better than
-/// present and fatal.
-#[cfg(not(target_arch = "wasm32"))]
+/// What more than one of them is built from, and the reason each of them can be
+/// chosen on its own.
+///
+/// The condition is its users, so that a build with none of them does not carry
+/// it and warn that it is unused. Nothing has to remember to update this list:
+/// a fourth user that forgot would fail to find the module.
+#[cfg(any(
+    feature = "plugin-invert",
+    feature = "plugin-stack-tools",
+    feature = "plugin-deconvolve",
+))]
+pub(crate) mod shared;
+/// Every target, now that `suite2p-registration` can be built without rayon.
+///
+/// This was desktop-only, on the grounds that the registration crate depended
+/// on rayon unconditionally and would therefore panic in a browser. That was
+/// wrong twice over: rayon documents a fallback that runs a `par_iter`
+/// sequentially on `wasm32-unknown-unknown` rather than failing, and nothing in
+/// that crate spawns a thread directly. The plugin would have worked.
+///
+/// What it would not have done is tell the truth, because under that fallback
+/// `Backend::MultiThread` is single-threaded and still calls itself
+/// multi-threaded. So rayon is now behind the registration crate's `threads`
+/// feature, which this crate asks for only on targets that have threads; a
+/// browser gets the same arithmetic on one thread, and `MultiThread` reports
+/// itself unavailable there the way the GPU backend already does.
+///
+/// One thing to know before reaching for it in a browser: a plugin run on the
+/// web is synchronous, so a long registration will hold the tab.
+#[cfg(feature = "plugin-stabilize")]
 pub mod stabilize;
+#[cfg(feature = "plugin-stack-tools")]
 pub mod stack_tools;
+#[cfg(feature = "plugin-zproject")]
 pub mod zproject;
 
+#[cfg(feature = "plugin-deconvolve")]
 pub use deconvolve::{Deconvolve, GeneratePsf};
+#[cfg(feature = "plugin-invert")]
 pub use invert::Invert;
-#[cfg(feature = "netpbm-example")]
+#[cfg(feature = "plugin-netpbm")]
 pub use netpbm::Netpbm;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
 pub use oir::Oir;
+#[cfg(feature = "plugin-plot-axis")]
 pub use plot_axis::PlotAxis;
+#[cfg(feature = "plugin-png")]
 pub use png::{Png, PngImport};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "plugin-stabilize")]
 pub use stabilize::Stabilize;
+#[cfg(feature = "plugin-stack-tools")]
 pub use stack_tools::{SliceKeeper, SliceOrderInvert, SliceRemover};
+#[cfg(feature = "plugin-zproject")]
 pub use zproject::ZProject;
 
 use fasttiff_plugin_api::{Exporter, Importer, Plugin};
 
 /// The filters compiled into this build, in registration order.
 ///
-/// Pushed rather than written as one literal because `Stabilize` is not in the
-/// browser build; see its module. Order is not load-bearing here — the menu
-/// sorts by path and name, and `add` only uses order to break an id clash —
-/// but keeping the desktop list in its historical order keeps the diff honest.
+/// Pushed rather than written as one literal because any of them may be absent;
+/// see the feature note above. Order is not load-bearing here — the menu sorts
+/// by path and name, and `add` only uses order to break an id clash — but
+/// keeping the historical order keeps the diff honest.
+///
+/// `vec_init_then_push`: the literal clippy asks for cannot be written when
+/// every element is conditional.
+#[allow(clippy::vec_init_then_push)]
 pub fn all() -> Vec<Box<dyn Plugin>> {
-    let mut v: Vec<Box<dyn Plugin>> =
-        vec![Box::new(Invert), Box::new(ZProject), Box::new(PlotAxis)];
-    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(unused_mut)]
+    let mut v: Vec<Box<dyn Plugin>> = Vec::new();
+    #[cfg(feature = "plugin-invert")]
+    v.push(Box::new(Invert));
+    #[cfg(feature = "plugin-zproject")]
+    v.push(Box::new(ZProject));
+    #[cfg(feature = "plugin-plot-axis")]
+    v.push(Box::new(PlotAxis));
+    #[cfg(feature = "plugin-stabilize")]
     v.push(Box::new(Stabilize));
-    v.push(Box::new(SliceKeeper));
-    v.push(Box::new(SliceRemover));
-    v.push(Box::new(SliceOrderInvert));
-    v.push(Box::new(GeneratePsf));
-    v.push(Box::new(Deconvolve));
+    #[cfg(feature = "plugin-stack-tools")]
+    {
+        v.push(Box::new(SliceKeeper));
+        v.push(Box::new(SliceRemover));
+        v.push(Box::new(SliceOrderInvert));
+    }
+    #[cfg(feature = "plugin-deconvolve")]
+    {
+        v.push(Box::new(GeneratePsf));
+        v.push(Box::new(Deconvolve));
+    }
     v
 }
 
@@ -112,8 +185,13 @@ pub fn all() -> Vec<Box<dyn Plugin>> {
 ///
 /// Order is the tie-break when two claim one extension, as it is for importers
 /// — though an exporter cannot be probed, so order is the *only* tie-break.
+#[allow(clippy::vec_init_then_push)]
 pub fn exporters() -> Vec<Box<dyn Exporter>> {
-    vec![Box::new(Png)]
+    #[allow(unused_mut)]
+    let mut v: Vec<Box<dyn Exporter>> = Vec::new();
+    #[cfg(feature = "plugin-png")]
+    v.push(Box::new(Png));
+    v
 }
 
 /// The importers compiled into this build, in registration order.
@@ -122,19 +200,20 @@ pub fn exporters() -> Vec<Box<dyn Exporter>> {
 /// file, so it is a real decision rather than a list: the more specific format
 /// goes first.
 /// `vec_init_then_push`: the literal clippy asks for cannot be written here,
-/// because the *first* element is the conditional one and the order is the
-/// documented tie-break. Seeding the vector with the second element would put
-/// the general format ahead of the specific one on every target.
+/// because the *first* element is conditional and the order is the documented
+/// tie-break. Seeding the vector with the second element would put the general
+/// format ahead of the specific one.
 #[allow(clippy::vec_init_then_push)]
 pub fn importers() -> Vec<Box<dyn Importer>> {
     // OIR first, being the specific format; both answer on a signature of
     // their own, so the order between them never actually decides anything.
     #[allow(unused_mut)]
     let mut v: Vec<Box<dyn Importer>> = Vec::new();
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
     v.push(Box::new(Oir));
+    #[cfg(feature = "plugin-png")]
     v.push(Box::new(PngImport));
-    #[cfg(feature = "netpbm-example")]
+    #[cfg(feature = "plugin-netpbm")]
     v.push(Box::new(Netpbm));
     v
 }

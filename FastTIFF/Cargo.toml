@@ -1,6 +1,6 @@
 [package]
 name = "FastTIFF"
-version = "1.22.0"
+version = "1.22.1"
 edition = "2021"
 description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering."
 license = "GPL-3.0-only"
@@ -14,13 +14,64 @@ license = "GPL-3.0-only"
 # Linux), and avoids a Windows 10 idle-CPU spin that wgpu triggers on some
 # machines. Each feature turns on the matching eframe backend, so the *unused*
 # renderer's entire dependency subtree is excluded from the build (`cargo tree`).
+#
+# Note that `--no-default-features` drops the built-in plugins along with the
+# renderer, so the glow line above is really:
+#
+#     cargo build --no-default-features --features renderer-glow,builtin-plugins
+#
+# See the plugin block below, which explains why that is safe to rely on.
 [features]
-default = ["renderer-wgpu"]
+default = ["renderer-wgpu", "builtin-plugins"]
 # Each feature turns on the matching eframe backend AND the matching backend in
 # `scivis-render`, so the *unused* renderer's entire dependency subtree is
 # excluded from the build (`cargo tree`).
 renderer-wgpu = ["eframe/wgpu", "scivis-render/backend-wgpu", "fast-tiff-viewer/backend-wgpu", "fast-tiff-viewer/gpu-registration"]
 renderer-glow = ["eframe/glow", "scivis-render/backend-glow", "fast-tiff-viewer/backend-glow"]
+
+# ---------------------------------------------------------------------------
+# Which built-in plugins this binary carries.
+#
+# One feature per plugin, forwarded straight to `fast-tiff-viewer`, where the
+# list is documented and the dependencies hang off it. `builtin-plugins` is
+# every one that ships and is in `default`, so an ordinary build is unchanged.
+#
+# To leave one out, name the ones you want:
+#
+#     cargo build -p FastTIFF --no-default-features \
+#         --features renderer-wgpu,plugin-invert,plugin-zproject
+#
+# **`--no-default-features` therefore drops the plugins too**, and that is the
+# trap this family has to be built around: it is also how the glow renderer is
+# selected, which is the Linux release backend. Every such invocation in this
+# repository names `builtin-plugins` explicitly — and `src/lib.rs` refuses to
+# compile an application with no plugins at all unless `plugins-none` says it
+# was meant, so a forgotten one fails at the build rather than at the ship.
+builtin-plugins = [
+    "plugin-invert",
+    "plugin-zproject",
+    "plugin-plot-axis",
+    "plugin-stack-tools",
+    "plugin-stabilize",
+    "plugin-deconvolve",
+    "plugin-png",
+    "plugin-oir",
+]
+plugin-invert = ["fast-tiff-viewer/plugin-invert"]
+plugin-zproject = ["fast-tiff-viewer/plugin-zproject"]
+plugin-plot-axis = ["fast-tiff-viewer/plugin-plot-axis"]
+plugin-stack-tools = ["fast-tiff-viewer/plugin-stack-tools"]
+plugin-stabilize = ["fast-tiff-viewer/plugin-stabilize"]
+plugin-deconvolve = ["fast-tiff-viewer/plugin-deconvolve"]
+plugin-png = ["fast-tiff-viewer/plugin-png"]
+plugin-oir = ["fast-tiff-viewer/plugin-oir"]
+# The worked example for plugin authors; off by default there and here.
+plugin-netpbm = ["fast-tiff-viewer/plugin-netpbm"]
+# "Yes, really, no plugins." It enables nothing; it exists so that the guard in
+# `src/lib.rs` can tell a deliberate build from a forgotten feature.
+plugins-none = []
+# ---------------------------------------------------------------------------
+
 
 # lib + bin: the library half holds the egui UI so `FastTIFF-web` can compile
 # the same interface to wasm; the binary is just the native host around it.

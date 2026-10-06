@@ -35,7 +35,7 @@ use super::algorithms::{self, Method, Settings, Stopped};
 use super::fft::{Dims, Transform};
 use super::grid::{self, Edge, Grid, Operator};
 use super::{heading, load_psf, Psf, MAX_WORKING_BYTES, MENU};
-use crate::plugins::builtin::stack_tools::{deliver, in_new_window, Store};
+use crate::plugins::builtin::shared::{deliver, in_new_window, Store};
 use fasttiff_plugin_api::{
     HostContext, ImageResult, Outcome, ParamDecl, ParamKind, Params, Plane, PlaneData, Plugin,
     PluginError, PluginInfo,

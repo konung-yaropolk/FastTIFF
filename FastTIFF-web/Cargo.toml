@@ -8,7 +8,7 @@
 
 [package]
 name = "fasttiff-web-egui"
-version = "1.22.0"
+version = "1.22.1"
 edition = "2021"
 description = "FastTIFF's egui interface, compiled to WebAssembly and drawn on a browser canvas."
 license = "GPL-3.0-only"
@@ -16,6 +16,31 @@ publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+# Which built-in plugins the bundle carries, forwarded one for one to the shared
+# UI crate and from there to `fast-tiff-viewer`, where the list is documented.
+# `wasm-pack build` passes no feature flags, so `default` is what ships; to trim
+# the bundle, pass them through:
+#
+#     wasm-pack build --target web --release -- #         --no-default-features --features plugin-invert,plugin-zproject
+#
+# Worth doing only for the two that carry weight. `plugin-deconvolve` brings an
+# FFT and `plugin-stabilize` a registration crate; the other six are their own
+# code and little else.
+[features]
+default = ["builtin-plugins"]
+builtin-plugins = ["fasttiff/builtin-plugins"]
+plugin-invert = ["fasttiff/plugin-invert"]
+plugin-zproject = ["fasttiff/plugin-zproject"]
+plugin-plot-axis = ["fasttiff/plugin-plot-axis"]
+plugin-stack-tools = ["fasttiff/plugin-stack-tools"]
+plugin-stabilize = ["fasttiff/plugin-stabilize"]
+plugin-deconvolve = ["fasttiff/plugin-deconvolve"]
+plugin-png = ["fasttiff/plugin-png"]
+# `plugin-oir` is deliberately absent: the OIR importer memory-maps its
+# container, so it is desktop-only whatever the feature says, and offering a
+# switch here that could not turn anything on would only mislead.
+plugins-none = ["fasttiff/plugins-none"]
 
 [dependencies]
 # The shared egui UI. `default-features = false` keeps the desktop-only feature

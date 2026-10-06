@@ -122,7 +122,7 @@ jobs:
         run: >
           cargo +nightly build --release --target x86_64-win7-windows-msvc
           -Z build-std=std,panic_abort
-          -p FastTIFF --no-default-features --features renderer-glow
+          -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins
 
       # The tripwire, and the reason this job is worth its minutes.
       # FastTIFF/src/win7_compat.rs redirects the one `combase.dll` import the
@@ -145,7 +145,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test -p FastTIFF --bin FastTIFF --no-default-features \
-            --features renderer-glow -- --ignored no_combase | tee result.txt
+            --features renderer-glow,builtin-plugins -- --ignored no_combase | tee result.txt
           # A filter matching nothing exits 0, so renaming the test would
           # quietly turn the step above into a no-op. Insist that it ran.
           grep -q "^test result: ok. 1 passed" result.txt
@@ -214,7 +214,7 @@ jobs:
       # ICD at runtime that cargo-deb's $auto dep scan can't see (wgpu dlopens
       # libvulkan). cargo-deb forwards these flags to the cargo build it runs.
       - name: Build .deb
-        run: cargo deb -p FastTIFF --no-default-features --features renderer-glow
+        run: cargo deb -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins
 
       # Copy to a stable, version-less name (cargo-deb bakes the version into its
       # filename) so the README can link via releases/latest/download/. The
@@ -269,7 +269,7 @@ jobs:
       # The release profile already strips the binary, which cargo-generate-rpm
       # packages as-is; auto-req still reads the ELF's NEEDED sonames.
       - name: Build release binary (glow)
-        run: cargo build --release -p FastTIFF --no-default-features --features renderer-glow
+        run: cargo build --release -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins
 
       # Run from the workspace root so the metadata's root-relative asset paths
       # resolve. Output: target/generate-rpm/fasttiff-<version>-1.<arch>.rpm
@@ -451,7 +451,7 @@ jobs:
 
       # Linux ships glow (OpenGL), same rationale as the .deb (see that job).
       - name: Build release binary (glow)
-        run: cargo build --release -p FastTIFF --no-default-features --features renderer-glow
+        run: cargo build --release -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins
 
       # linuxdeploy assembles the AppDir (binary + its ldd-resolved libs +
       # AppRun) from the committed .desktop and icon, then its appimage plugin
@@ -542,7 +542,7 @@ jobs:
       - name: Build release binary
         run: >
           cargo build --release --target ${{ matrix.target }}
-          -p FastTIFF --no-default-features --features renderer-wgpu
+          -p FastTIFF --no-default-features --features renderer-wgpu,builtin-plugins
 
       # Assemble FastTIFF.app by hand (no cargo-bundle dependency): synthesize an
       # Info.plist whose strings mirror [package.metadata.winres] from

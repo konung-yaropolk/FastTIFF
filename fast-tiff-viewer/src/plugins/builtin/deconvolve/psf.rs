@@ -17,7 +17,7 @@
 use super::fft::Dims;
 use super::optics::{self, Mode, Model, Optics};
 use super::{fresh_info, heading, MAX_VOXELS, MENU};
-use crate::plugins::builtin::stack_tools::{deliver, in_new_window};
+use crate::plugins::builtin::shared::{deliver, in_new_window};
 use fasttiff_plugin_api::{
     HostContext, ImageResult, Outcome, ParamDecl, ParamKind, Params, PixelType, PlaneData, Plugin,
     PluginError, PluginInfo,

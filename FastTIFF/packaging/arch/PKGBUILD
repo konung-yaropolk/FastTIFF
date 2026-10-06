@@ -43,7 +43,7 @@ build() {
     # Linux ships the glow (OpenGL) backend, not the crate default (wgpu):
     # OpenGL is near-universal, whereas wgpu would pull a Vulkan runtime dep.
     # The `depends` above (libglvnd etc.) are glow's link libs to match.
-    cargo build --frozen --release -p FastTIFF --no-default-features --features renderer-glow
+    cargo build --frozen --release -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins
 }
 
 package() {

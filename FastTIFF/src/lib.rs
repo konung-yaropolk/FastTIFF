@@ -20,6 +20,37 @@
 //! dimension order, playback and the 3D camera — comes from `fast_tiff_viewer`
 //! and is identical on every target.
 
+// An application whose Plugins menu is empty is almost always an accident: the
+// plugin features live in `default`, and `--no-default-features` is also how the
+// glow renderer is selected, so one forgotten `builtin-plugins` would produce a
+// binary that builds, runs, and quietly cannot do half of what it is for. The
+// original objection to putting plugins behind a feature at all was exactly
+// that CI would not notice, because a release step only compiles — so this is
+// the thing that notices, at the only moment where noticing is free.
+#[cfg(not(any(
+    feature = "plugin-invert",
+    feature = "plugin-zproject",
+    feature = "plugin-plot-axis",
+    feature = "plugin-stack-tools",
+    feature = "plugin-stabilize",
+    feature = "plugin-deconvolve",
+    feature = "plugin-png",
+    feature = "plugin-oir",
+    feature = "plugin-netpbm",
+    feature = "plugins-none",
+)))]
+compile_error!(
+    "FastTIFF is being built with no built-in plugins, which is almost always a \
+     `--no-default-features` that forgot to name them again: add `builtin-plugins` \
+     to the feature list (e.g. `--features renderer-glow,builtin-plugins`, or \
+     `FastTIFF/builtin-plugins` from the workspace root). It has to be this \
+     crate's own feature: naming `fast-tiff-viewer/builtin-plugins` instead \
+     compiles the plugins into the viewer and leaves this binary unable to \
+     see them. If a binary without plugins is what you actually want, say \
+     so with \
+     `--features plugins-none`."
+);
+
 pub mod app;
 pub mod render;
 
