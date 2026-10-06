@@ -13,7 +13,9 @@ use fasttiff_plugin_api::{ParamDecl, ParamKind, ParamValue, Params, PluginInfo};
 pub(super) enum MenuAction {
     /// Run this plugin, showing its dialog first if it declared one.
     Run(usize),
-    /// Open the folder plugins are installed into.
+    /// Open the folder plugins are installed into. Desktop-only, like the
+    /// menu entry that produces it.
+    #[cfg(not(target_arch = "wasm32"))]
     OpenPluginFolder,
     None,
 }
@@ -100,14 +102,20 @@ pub(super) fn plugins_menu(ui: &mut egui::Ui, registry: Option<&Registry>) -> Me
             }
         }
 
-        ui.separator();
-        if ui
-            .button("Open plugin folder…")
-            .on_hover_text("Where to put a plugin so FastTIFF finds it")
-            .clicked()
+        // Desktop-only: there is no folder to open in a browser, and nothing
+        // to put in one — the web build runs the built-in plugins and cannot
+        // load a shared library. The rest of this menu is identical on both.
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            action = MenuAction::OpenPluginFolder;
-            ui.close();
+            ui.separator();
+            if ui
+                .button("Open plugin folder…")
+                .on_hover_text("Where to put a plugin so FastTIFF finds it")
+                .clicked()
+            {
+                action = MenuAction::OpenPluginFolder;
+                ui.close();
+            }
         }
 
         // A plugin the user installed and cannot find is worse than one that
@@ -322,6 +330,17 @@ fn control(ui: &mut egui::Ui, d: &ParamDecl, values: &mut Params) {
                 values.set(d.key.clone(), ParamValue::Text(v));
             }
         }
+        // The browse button is desktop-only, and so is the control's whole
+        // point there. A browser has no filesystem path to produce: its picker
+        // hands over *bytes*, and a plugin that asked for a path means to open
+        // it itself — which it cannot do in a browser either. So the web build
+        // shows the field and no button. A plugin that needs a file is then
+        // visibly unusable rather than invisibly broken, and the ones that
+        // offer an alternative (deconvolution's built-in Gaussian PSF) still
+        // work. `rfd` is in the shared dependencies, but only its *async*
+        // dialog exists on wasm, and an async picker cannot answer inside the
+        // synchronous `changed()` of a widget.
+        #[cfg(not(target_arch = "wasm32"))]
         ParamKind::Path { default, save } => {
             label(ui, d);
             ui.horizontal(|ui| {
@@ -340,6 +359,14 @@ fn control(ui: &mut egui::Ui, d: &ParamDecl, values: &mut Params) {
                     }
                 }
             });
+        }
+        #[cfg(target_arch = "wasm32")]
+        ParamKind::Path { default, .. } => {
+            label(ui, d);
+            let mut v = values.text(&d.key, default).to_string();
+            if ui.text_edit_singleline(&mut v).changed() {
+                values.set(d.key.clone(), ParamValue::Path(v.clone()));
+            }
         }
     }
 }

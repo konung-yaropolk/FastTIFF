@@ -25,9 +25,18 @@
 
 /// Below this many elements, spreading a pass over cores costs more than it
 /// saves.
+///
+/// Defined in every configuration, not just the threaded one: it is part of
+/// what this module promises, `fft.rs` reads it, and `par_tests.rs` sizes its
+/// fixtures either side of it — and those tests run in the single-threaded
+/// shape too (CI builds that configuration on purpose).
+#[cfg_attr(not(feature = "threads"), allow(dead_code))]
 pub(crate) const FLOOR: usize = 1 << 16;
 
 /// How much one task takes, and the unit a reduction is chunked by.
+///
+/// `cfg`: a single-threaded build has one task.
+#[cfg(feature = "threads")]
 const CHUNK: usize = 1 << 16;
 
 /// Apply `f` to every element.

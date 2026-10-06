@@ -58,9 +58,18 @@ pub mod deconvolve;
 pub mod invert;
 #[cfg(feature = "netpbm-example")]
 pub mod netpbm;
+/// Desktop-only: it memory-maps the container and parses the vendor's XML, and
+/// a browser has no file to map.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod oir;
 pub mod plot_axis;
 pub mod png;
+/// Desktop-only. It compiles for wasm, which is the trap: `suite2p-registration`
+/// uses rayon unconditionally, and `std::thread::spawn` is unsupported on
+/// `wasm32-unknown-unknown` — so the browser build would offer the menu entry
+/// and then panic on the first frame it registered. Absent is better than
+/// present and fatal.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod stabilize;
 pub mod stack_tools;
 pub mod zproject;
@@ -69,9 +78,11 @@ pub use deconvolve::{Deconvolve, GeneratePsf};
 pub use invert::Invert;
 #[cfg(feature = "netpbm-example")]
 pub use netpbm::Netpbm;
+#[cfg(not(target_arch = "wasm32"))]
 pub use oir::Oir;
 pub use plot_axis::PlotAxis;
 pub use png::{Png, PngImport};
+#[cfg(not(target_arch = "wasm32"))]
 pub use stabilize::Stabilize;
 pub use stack_tools::{SliceKeeper, SliceOrderInvert, SliceRemover};
 pub use zproject::ZProject;
@@ -79,18 +90,22 @@ pub use zproject::ZProject;
 use fasttiff_plugin_api::{Exporter, Importer, Plugin};
 
 /// The filters compiled into this build, in registration order.
+///
+/// Pushed rather than written as one literal because `Stabilize` is not in the
+/// browser build; see its module. Order is not load-bearing here — the menu
+/// sorts by path and name, and `add` only uses order to break an id clash —
+/// but keeping the desktop list in its historical order keeps the diff honest.
 pub fn all() -> Vec<Box<dyn Plugin>> {
-    vec![
-        Box::new(Invert),
-        Box::new(ZProject),
-        Box::new(PlotAxis),
-        Box::new(Stabilize),
-        Box::new(SliceKeeper),
-        Box::new(SliceRemover),
-        Box::new(SliceOrderInvert),
-        Box::new(GeneratePsf),
-        Box::new(Deconvolve),
-    ]
+    let mut v: Vec<Box<dyn Plugin>> =
+        vec![Box::new(Invert), Box::new(ZProject), Box::new(PlotAxis)];
+    #[cfg(not(target_arch = "wasm32"))]
+    v.push(Box::new(Stabilize));
+    v.push(Box::new(SliceKeeper));
+    v.push(Box::new(SliceRemover));
+    v.push(Box::new(SliceOrderInvert));
+    v.push(Box::new(GeneratePsf));
+    v.push(Box::new(Deconvolve));
+    v
 }
 
 /// The exporters compiled into this build, in registration order.
@@ -106,11 +121,19 @@ pub fn exporters() -> Vec<Box<dyn Exporter>> {
 /// Order is the tie-break when two importers are equally confident about a
 /// file, so it is a real decision rather than a list: the more specific format
 /// goes first.
+/// `vec_init_then_push`: the literal clippy asks for cannot be written here,
+/// because the *first* element is the conditional one and the order is the
+/// documented tie-break. Seeding the vector with the second element would put
+/// the general format ahead of the specific one on every target.
+#[allow(clippy::vec_init_then_push)]
 pub fn importers() -> Vec<Box<dyn Importer>> {
     // OIR first, being the specific format; both answer on a signature of
     // their own, so the order between them never actually decides anything.
     #[allow(unused_mut)]
-    let mut v: Vec<Box<dyn Importer>> = vec![Box::new(Oir), Box::new(PngImport)];
+    let mut v: Vec<Box<dyn Importer>> = Vec::new();
+    #[cfg(not(target_arch = "wasm32"))]
+    v.push(Box::new(Oir));
+    v.push(Box::new(PngImport));
     #[cfg(feature = "netpbm-example")]
     v.push(Box::new(Netpbm));
     v

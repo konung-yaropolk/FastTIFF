@@ -165,7 +165,7 @@ impl Transform {
         self.run(buf, true);
         let scale = 1.0 / self.dims.len().max(1) as f32;
         #[cfg(feature = "threads")]
-        if buf.len() >= PARALLEL_FLOOR {
+        if buf.len() >= super::par::FLOOR {
             use rayon::prelude::*;
             buf.par_iter_mut().for_each(|v| *v *= scale);
             return;
@@ -236,10 +236,10 @@ fn columns(
         return;
     }
     debug_assert_eq!(mat.len(), n * w);
-    let block = block_width(w);
 
     #[cfg(feature = "threads")]
     rayon::scope(|scope| {
+        let block = block_width(w);
         // `rest` is the columns not yet handed out, as one slice per row.
         let mut rest: Vec<&mut [Complex32]> = mat.chunks_exact_mut(w).collect();
         while rest.first().is_some_and(|r| !r.is_empty()) {
@@ -265,6 +265,9 @@ fn columns(
 }
 
 /// How wide a block of columns one task should get.
+///
+/// `cfg`: there are no tasks in a single-threaded build.
+#[cfg(feature = "threads")]
 ///
 /// Enough tasks to keep every core fed and not so many that the bookkeeping
 /// costs more than the transform: a few per core. The floor matters more than
@@ -337,25 +340,18 @@ fn tile_width(n: usize) -> usize {
     (8192 / n.max(1)).clamp(8, 256)
 }
 
-/// Below this many elements, spreading a pass over cores costs more than it
-/// saves.
-///
-/// Every pass here is memory-bound — a read, an arithmetic operation and a
-/// write — so on a grid of any size the cores are waiting on RAM and splitting
-/// the work is most of the available speedup. On a grid of a few thousand
-/// voxels, which is what the tests and a small 2-D image use, the task
-/// bookkeeping is the whole cost.
-pub(crate) const PARALLEL_FLOOR: usize = 1 << 16;
-
 /// Apply `f` to each `(a, b)` pair, across cores when the slice is long enough
 /// to pay for it.
+///
+/// The threshold is [`super::par::FLOOR`] — one definition for the whole
+/// directory, since the reasoning behind it is the same here as there.
 pub(crate) fn zip_each<F>(a: &mut [Complex32], b: &[Complex32], f: F)
 where
     F: Fn(&mut Complex32, &Complex32) + Send + Sync,
 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(feature = "threads")]
-    if a.len() >= PARALLEL_FLOOR {
+    if a.len() >= super::par::FLOOR {
         use rayon::prelude::*;
         a.par_iter_mut()
             .zip(b.par_iter())
@@ -388,7 +384,7 @@ pub(crate) fn multiply_conj(a: &mut [Complex32], b: &[Complex32]) {
 pub(crate) fn lift(src: &[f32], dst: &mut [Complex32]) {
     debug_assert_eq!(src.len(), dst.len());
     #[cfg(feature = "threads")]
-    if src.len() >= PARALLEL_FLOOR {
+    if src.len() >= super::par::FLOOR {
         use rayon::prelude::*;
         dst.par_iter_mut()
             .zip(src.par_iter())
@@ -404,7 +400,7 @@ pub(crate) fn lift(src: &[f32], dst: &mut [Complex32]) {
 pub(crate) fn lower(src: &[Complex32], dst: &mut [f32]) {
     debug_assert_eq!(src.len(), dst.len());
     #[cfg(feature = "threads")]
-    if src.len() >= PARALLEL_FLOOR {
+    if src.len() >= super::par::FLOOR {
         use rayon::prelude::*;
         dst.par_iter_mut()
             .zip(src.par_iter())

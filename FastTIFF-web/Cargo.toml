@@ -39,6 +39,29 @@ console_error_panic_hook = "0.1"
 version = "0.3"
 features = ["HtmlCanvasElement", "Window", "Document", "Element"]
 
+# There is deliberately no `[package.metadata.wasm-pack.profile.release]`
+# `wasm-opt` block here, and it is worth saying why so that the next person
+# debugging a wasm-opt failure does not add one.
+#
+# It looks like the fix: `wasm-bindgen` gives this module a second table (an
+# `externref` table for the JS values Rust holds), a second table needs the
+# `reference-types` feature, so tell `wasm-opt` to enable it. It is not the
+# fix. The `wasm-opt` that broke the deploy was Binaryen 90, whose
+# `readFunctionTableDeclaration` throws "Only 1 table definition allowed in
+# MVP" unconditionally on any module with more than one table — the check is
+# not feature-gated, and Binaryen 90 has no multi-table representation to fall
+# back on. Multiple tables first became expressible in Binaryen 100. So no
+# `--enable-` flag could have rescued it, and `--enable-multivalue` does not
+# even exist in Binaryen 90: the block would have turned a confusing table
+# error into a more confusing unknown-option error. Pinning the tool, in
+# `deploy-web.yml`, is the fix.
+#
+# The block is also not additive. wasm-pack *replaces* its default argument
+# vector with whatever is listed, and the release default is exactly `["-O"]`
+# — so the optimisation level becomes one hand-maintained entry among what
+# read as feature switches, and dropping it silently ships an unoptimised
+# bundle.
+
 [profile.release]
 opt-level = 3
 lto = "fat"        # Enable Link-Time Optimization

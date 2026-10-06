@@ -51,6 +51,9 @@ egui = "0.34"
 egui_extras = "0.35"
 anyhow = "1.0"
 rfd = "0.17"
+# The plugin contract. Shared, like the plugin system itself now is: the
+# browser build runs the built-in plugins and so needs the dialog types.
+fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
 log = "0.4"
 env_logger = "0.11"
 # Decodes the bundled PNG into RGBA for the application icon (see `window_icon`
@@ -66,16 +69,31 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # `rfd`'s blocking dialog and the process fan-out are likewise native-only.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 fast-tiff-viewer = { path = "../fast-tiff-viewer", features = ["threads", "mmap", "codec-zstd"] }
-# The plugin contract. Native only, like the plugin system itself.
-fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
 # Also depended on directly (the UI names `Compression`, `SampleFormat`, …),
 # so its host-dependent features need topping up here too — otherwise the
 # C zstd codec follows the direct edge into the wasm build.
 fast-tiff-lib = { path = "../fast-tiff-lib", features = ["mmap", "codec-zstd"] }
 
-# The browser build needs the async picker and a task spawner instead.
+# The browser build needs the async picker and a task spawner instead — and,
+# since plugins run here too, a way to hand a result to a second tab the way
+# the desktop hands one to a second process. That is `src/web_open.rs`, and
+# these are what it is written against.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    # The blob a result travels in, and the URL that names it.
+    "Blob",
+    "Url",
+    # Reading the query a tab was opened with, and clearing it afterwards.
+    "Location",
+    "UrlSearchParams",
+    "History",
+    # `window.open`, and `fetch` of the blob on the other side.
+    "Window",
+    "Response",
+] }
 
 # Asking Windows how much physical memory is free, which decides whether a
 # plugin result is handed to its new window in memory or through a temporary

@@ -36,12 +36,19 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pinned, as ci.yml's Linux jobs are. This is the job that produces what
+    # gets served, so it is the last place to want a floating image.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install the Rust wasm target
-        run: rustup target add wasm32-unknown-unknown
+      # Pinned, like every other workflow here. This job used to take whatever
+      # Rust the runner image happened to ship, which is the one toolchain in
+      # the repository nobody had chosen.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo + target
         uses: actions/cache@v4
@@ -53,9 +60,41 @@ jobs:
           key: egui-wasm-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'FastTIFF-web/Cargo.toml') }}
           restore-keys: egui-wasm-${{ runner.os }}-
 
+      # Pinned, and the pin is the whole fix for the deploy that failed with
+      # "Only 1 table definition allowed in MVP".
+      #
+      # With `version: latest`, this action resolves the version at job time
+      # through an *unauthenticated* `GET api.github.com/.../releases/latest`
+      # and then takes `JSON.parse(body).tag_name || "v0.9.1"`. A body with no
+      # `tag_name` — the 60-per-hour unauthenticated rate limit on the
+      # runner's shared egress address is the realistic way to get one —
+      # silently installs wasm-pack **v0.9.1**, from 2020, which fetches
+      # Binaryen 90. Binaryen 90 cannot represent a module with more than one
+      # table at all, and `wasm-bindgen` has been adding a second one (its
+      # `externref` table) ever since rustc turned `reference-types` on by
+      # default for wasm32 in 1.82. Hence a deploy that breaks with no commit
+      # behind it, intermittently: two runs four hours apart, identical
+      # bundle inputs, one fine and one dead.
+      #
+      # The failing log named the binary precisely enough to identify it:
+      # `~/.cache/.wasm-pack/wasm-opt-4d7a65327e9363b7`, where that suffix is
+      # a hash of the download URL, and it is the hash of Binaryen 90's
+      # `x86-linux` tarball — an asset name only wasm-pack 0.9.x/0.10.x ask
+      # for. A good run on this runner shows `wasm-opt-1ceaaea8b7b5f7e0`,
+      # Binaryen 117.
+      #
+      # Naming a version means the lookup never happens, so the fallback
+      # cannot fire. v0.15.0 is the current release (2026-05-15) and pins
+      # Binaryen 117, which parses this module.
+      #
+      # Caveat worth knowing: wasm-pack 0.15 prefers a `wasm-opt` already on
+      # PATH over its own pinned download. Nothing here puts one there, and
+      # `~/.cargo/bin` and `~/.cache/.wasm-pack` are both deliberately absent
+      # from the cache below — caching the latter would have made this
+      # intermittent failure permanent.
       - uses: jetli/wasm-pack-action@v0.4.0
         with:
-          version: latest
+          version: v0.15.0
 
       - name: Build wasm
         working-directory: FastTIFF-web

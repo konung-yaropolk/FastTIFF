@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.19.5"
+version = "1.22.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -15,10 +15,13 @@ dependencies = [
  "fast-tiff-viewer",
  "fasttiff-plugin-api",
  "image",
+ "js-sys",
  "log",
  "rfd",
  "scivis-render",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
  "windows-sys 0.61.2",
  "winres",
 ]
@@ -939,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-lib"
-version = "0.19.3"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -953,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.19.4"
+version = "0.22.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -966,21 +969,22 @@ dependencies = [
  "png",
  "quick-xml 0.37.5",
  "rayon",
+ "rustfft",
  "scivis-render",
  "suite2p-registration",
 ]
 
 [[package]]
 name = "fasttiff-plugin-abi"
-version = "0.19.1"
+version = "0.21.0"
 
 [[package]]
 name = "fasttiff-plugin-api"
-version = "0.19.1"
+version = "0.21.0"
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "1.19.5"
+version = "1.22.0"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",

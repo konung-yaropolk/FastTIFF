@@ -20,6 +20,19 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<WebHandle, JsVa
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(log::Level::Warn);
 
+    // A document this tab was opened to show, if it was. That is how a plugin
+    // result reaches a new tab: the tab that ran the plugin put the encoded
+    // TIFF in a blob and opened us with its URL in the query. An ordinary
+    // visit answers `None` and nothing below changes. See
+    // `fasttiff::web_open`.
+    //
+    // Awaited before the app is built rather than after, so the viewer comes
+    // up with the image already in it — the same way the desktop binary opens
+    // a path from its argv — instead of appearing empty and filling in.
+    let opened = fasttiff::web_open::take_pending()
+        .await
+        .map(|(bytes, name)| fasttiff::app::Opened::Bytes(bytes, name));
+
     let mut web_options = eframe::WebOptions::default();
     fasttiff::render::tune_web_options(&mut web_options);
 
@@ -35,9 +48,10 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<WebHandle, JsVa
                 // rather than here.
                 fasttiff::install_chrome(&cc.egui_ctx);
                 let render = fasttiff::render::init(cc);
-                // No initial path — a browser has no argv and no filesystem;
-                // files arrive from the picker or a drop.
-                Ok(Box::new(fasttiff::ViewerApp::new(None, render)))
+                // No initial *path* — a browser has no argv and no filesystem.
+                // Files arrive from the picker, from a drop, or, for a plugin
+                // result handed over from another tab, as the bytes read above.
+                Ok(Box::new(fasttiff::ViewerApp::new(opened, render)))
             }),
         )
         .await?;

@@ -48,12 +48,16 @@ pub mod loader;
 /// plugin host and anything else measuring pixels cannot disagree about what a
 /// sample is worth.
 pub mod planes;
-/// Plugins. Native only: wasm cannot load a shared library, and the browser
-/// build does not want the interface — so it is absent there rather than
-/// compiled in and inert. Nothing in the decode, sync or render path refers to
-/// this module, so a native build that never opens the Plugins menu pays for it
-/// only in binary size.
-#[cfg(not(target_arch = "wasm32"))]
+/// Plugins — the registry, the host a plugin sees, and the ones compiled in.
+///
+/// Built for every target, including wasm. What is desktop-only is narrower
+/// than the whole module and is gated inside it: loading a third-party shared
+/// library (`plugins::library`, `plugins::discover`) and the two built-ins that
+/// cannot work in a browser. The browser build gets the rest, which is what
+/// `plugins::Registry::new` has always been for.
+///
+/// Nothing in the decode, sync or render path refers to this module, so a build
+/// that never opens the Plugins menu pays for it only in binary size.
 pub mod plugins;
 pub mod prefetch;
 pub mod roi;

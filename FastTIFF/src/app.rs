@@ -39,9 +39,7 @@ mod overlay;
 // Drawing a plot a plugin declared, and the canvas selection tool that feeds
 // it. Native only, like `plugins_ui`: both are reached from the Plugins menu,
 // which the browser build does not have.
-#[cfg(not(target_arch = "wasm32"))]
 mod plot;
-#[cfg(not(target_arch = "wasm32"))]
 mod plugins_ui;
 mod scale;
 mod scroll;
@@ -527,7 +525,6 @@ enum Incoming {
     ),
     /// A filter plugin finished. The registry travels back for the same reason
     /// an import's does.
-    #[cfg(not(target_arch = "wasm32"))]
     Ran(Box<fast_tiff_viewer::plugins::Registry>, Box<PluginRun>),
     /// A save or an export finished: the file's name, and how it went.
     ///
@@ -573,7 +570,6 @@ impl WriteOutcome {
 /// not small: a stabilised timelapse is every plane rewritten, which on a long
 /// recording takes longer than the registration did. Doing them here, after the
 /// result came back, froze the window with the bar sitting at 100%.
-#[cfg(not(target_arch = "wasm32"))]
 enum PluginProduct {
     Nothing,
     Cancelled,
@@ -619,7 +615,6 @@ enum PluginProduct {
 }
 
 /// What a filter plugin produced, carried back from its worker.
-#[cfg(not(target_arch = "wasm32"))]
 struct PluginRun {
     /// Which plugin, so a plot it returned can be recomputed for a new
     /// selection without asking the user again.
@@ -634,7 +629,6 @@ struct PluginRun {
 
 /// Turn what a plugin returned into something the interface can apply in a
 /// frame — encoding and writing on the way, since this runs on the worker.
-#[cfg(not(target_arch = "wasm32"))]
 fn finish_outcome(
     outcome: fasttiff_plugin_api::Outcome,
     label: &std::sync::Mutex<String>,
@@ -688,49 +682,75 @@ fn finish_outcome(
             };
 
             Job::begin_phase(label, progress, "Opening a new window");
-            // In memory when the machine has the room for it. A stabilised
-            // recording is as big as the recording, and writing it to a
-            // temporary file only for the new window to read it straight back
-            // is the slowest thing left in the run — twice the size of the
-            // result over the disk, for a file that is deleted when the
-            // machine next clears its temporary directory.
-            if crate::process::fits_in_memory(bytes.len()) {
+
+            // The browser's handover. A tab, not a process — see
+            // `crate::web_open` for why a blob and not a message, and why the
+            // plugin had to run synchronously for this call to be allowed.
+            #[cfg(target_arch = "wasm32")]
+            {
                 let name = format!("{stem}.tif");
-                match crate::process::open_bytes_in_new_process(&bytes, &name, &mut |f| {
-                    Job::report(progress, f);
-                    !stopped()
-                }) {
-                    Ok(()) => return Ok(PluginProduct::NewWindow(name)),
-                    Err(_) if stopped() => return Ok(PluginProduct::Cancelled),
-                    // Not fatal, and not worth telling the user about: the file
-                    // below does the same job. It is worth a log line, because
-                    // a machine where this always fails is silently doing twice
-                    // the disk traffic it needs to.
-                    Err(e) => log::warn!("in-memory handover failed, using a file: {e}"),
-                }
+                return match crate::web_open::open_bytes_in_new_tab(&bytes, &name) {
+                    Ok(()) => Ok(PluginProduct::NewWindow(name)),
+                    // A refused popup is the expected failure, not an
+                    // exceptional one, and it is already handled: the result
+                    // comes back whole and is shown in this tab, with the
+                    // reason in the status line. That is exactly what `Inline`
+                    // was built for when a desktop handover could not go
+                    // through.
+                    Err(why) => Ok(PluginProduct::Inline {
+                        bytes,
+                        name: image.name.clone(),
+                        why,
+                    }),
+                };
             }
 
-            // Too big to hold, or the handover would not go through. A file it
-            // is — which for a stack that large is the better home anyway, the
-            // new window memory-mapping it rather than holding it resident.
-            Job::begin_phase(label, progress, "Writing result");
-            let dir = std::env::temp_dir().join("fasttiff-plugin-results");
-            let written = std::fs::create_dir_all(&dir)
-                .and_then(|()| write_result(&dir, &stem, &bytes))
-                .and_then(|path| crate::process::try_open_in_new_process(&path).map(|()| path));
-            match written {
-                Ok(path) => Ok(PluginProduct::NewWindow(
-                    path.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| format!("{stem}.tif")),
-                )),
-                // Nowhere to put it is not a reason to lose it: it comes back
-                // whole and is shown in this window instead.
-                Err(e) => Ok(PluginProduct::Inline {
-                    bytes,
-                    name: image.name.clone(),
-                    why: e.to_string(),
-                }),
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                // In memory when the machine has the room for it. A stabilised
+                // recording is as big as the recording, and writing it to a
+                // temporary file only for the new window to read it straight back
+                // is the slowest thing left in the run — twice the size of the
+                // result over the disk, for a file that is deleted when the
+                // machine next clears its temporary directory.
+                if crate::process::fits_in_memory(bytes.len()) {
+                    let name = format!("{stem}.tif");
+                    match crate::process::open_bytes_in_new_process(&bytes, &name, &mut |f| {
+                        Job::report(progress, f);
+                        !stopped()
+                    }) {
+                        Ok(()) => return Ok(PluginProduct::NewWindow(name)),
+                        Err(_) if stopped() => return Ok(PluginProduct::Cancelled),
+                        // Not fatal, and not worth telling the user about: the file
+                        // below does the same job. It is worth a log line, because
+                        // a machine where this always fails is silently doing twice
+                        // the disk traffic it needs to.
+                        Err(e) => log::warn!("in-memory handover failed, using a file: {e}"),
+                    }
+                }
+
+                // Too big to hold, or the handover would not go through. A file it
+                // is — which for a stack that large is the better home anyway, the
+                // new window memory-mapping it rather than holding it resident.
+                Job::begin_phase(label, progress, "Writing result");
+                let dir = std::env::temp_dir().join("fasttiff-plugin-results");
+                let written = std::fs::create_dir_all(&dir)
+                    .and_then(|()| write_result(&dir, &stem, &bytes))
+                    .and_then(|path| crate::process::try_open_in_new_process(&path).map(|()| path));
+                match written {
+                    Ok(path) => Ok(PluginProduct::NewWindow(
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| format!("{stem}.tif")),
+                    )),
+                    // Nowhere to put it is not a reason to lose it: it comes back
+                    // whole and is shown in this window instead.
+                    Err(e) => Ok(PluginProduct::Inline {
+                        bytes,
+                        name: image.name.clone(),
+                        why: e.to_string(),
+                    }),
+                }
             }
         }
         Outcome::ReplaceDocument(image) => {
@@ -785,7 +805,6 @@ fn finish_outcome(
 ///
 /// Defined next to the encoding plugin hosts write with, so the two cannot
 /// disagree — see `fast_tiff_viewer::plugins::progress`.
-#[cfg(not(target_arch = "wasm32"))]
 const PROGRESS_UNKNOWN: u32 = fast_tiff_viewer::plugins::progress::UNKNOWN;
 
 /// Run a worker's work, turning a panic into a message instead of a dead thread.
@@ -799,7 +818,6 @@ const PROGRESS_UNKNOWN: u32 = fast_tiff_viewer::plugins::progress::UNKNOWN;
 /// A `.dll` plugin's panics are already caught at the C boundary (they have to
 /// be: unwinding through `extern "C"` is undefined). This is for the built-ins
 /// and for the app's own code around them.
-#[cfg(not(target_arch = "wasm32"))]
 fn contained<T>(what: &str, work: impl FnOnce() -> T) -> Result<T, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(|e| {
         // The payload is `&str` for `panic!("...")` and `String` for a
@@ -877,7 +895,6 @@ fn info_key(status: Option<&str>, label: Option<&str>) -> String {
 /// **No new plugin API carries it.** `HostContext::progress` and its cancel
 /// return already exist and are already what a plugin calls; this is just the
 /// other end of them, which used to be a local nobody could see.
-#[cfg(not(target_arch = "wasm32"))]
 struct Job {
     /// What to print over the bar: "Importing", "Saving", the plugin's name.
     ///
@@ -891,7 +908,6 @@ struct Job {
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Job {
     /// Start one, with nothing reported yet.
     fn new(label: impl Into<String>) -> Self {
@@ -1182,7 +1198,6 @@ pub struct ViewerApp {
     panel: PanelLayout,
     /// Installed plugins and importers. Native only — see
     /// `fast_tiff_viewer::plugins`.
-    #[cfg(not(target_arch = "wasm32"))]
     /// The plugins, unless an import worker currently has them.
     ///
     /// Moved to the worker rather than shared behind a lock. A lock would have
@@ -1192,7 +1207,6 @@ pub struct ViewerApp {
     /// back makes "busy" a state the code can see rather than a wait it cannot.
     plugins: Option<fast_tiff_viewer::plugins::Registry>,
     /// The plugin whose dialog is open, and the values entered so far.
-    #[cfg(not(target_arch = "wasm32"))]
     plugin_dialog: Option<PluginDialog>,
     /// Files opened asynchronously arrive here. Only the web picker uses it —
     /// the native dialog blocks and applies its result directly — but the
@@ -1211,14 +1225,12 @@ pub struct ViewerApp {
     /// import, a plugin run or an export its presence is what makes
     /// [`plugins`](Self::plugins) `None` — the worker has the registry and
     /// gives it back with the result.
-    #[cfg(not(target_arch = "wasm32"))]
     job: Option<Job>,
     /// The plot a plugin returned, while one is on screen.
     ///
     /// It owns the canvas selection too: the regions belong to the plot they
     /// feed, so closing the window takes the tool away with it rather than
     /// leaving a selection behind that nothing is measuring.
-    #[cfg(not(target_arch = "wasm32"))]
     plot: Option<plot::PlotWindow>,
 
     // --- window chrome ------------------------------------------------------
@@ -1300,7 +1312,6 @@ fn open_in_file_manager(dir: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// A plugin's dialog, while it is open.
-#[cfg(not(target_arch = "wasm32"))]
 struct PluginDialog {
     /// Index into the registry's plugin list.
     index: usize,
@@ -1334,15 +1345,19 @@ impl ViewerApp {
             render,
             view: View2d::default(),
             panel: PanelLayout::default(),
+            // `with_installed` scans the plugin folders and loads every
+            // shared library it finds; `new` is the built-ins alone. The
+            // browser gets the latter because there is nothing to scan and no
+            // `dlopen` to do it with — which is the only difference between
+            // the two platforms' plugin menus.
             #[cfg(not(target_arch = "wasm32"))]
             plugins: Some(fast_tiff_viewer::plugins::Registry::with_installed()),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_arch = "wasm32")]
+            plugins: Some(fast_tiff_viewer::plugins::Registry::new()),
             plugin_dialog: None,
             open_tx,
             open_rx,
-            #[cfg(not(target_arch = "wasm32"))]
             job: None,
-            #[cfg(not(target_arch = "wasm32"))]
             plot: None,
             last_title: None,
             good_status: None,
@@ -1415,7 +1430,6 @@ impl ViewerApp {
     ///
     /// Every job goes through here so that cannot be forgotten at one of the
     /// four call sites.
-    #[cfg(not(target_arch = "wasm32"))]
     fn begin_job(
         &mut self,
         job: Job,
@@ -1568,7 +1582,6 @@ impl ViewerApp {
                         Err(message) => self.core.status = Some(message),
                     }
                 }
-                #[cfg(not(target_arch = "wasm32"))]
                 Incoming::Ran(registry, run) => {
                     self.plugins = Some(*registry);
                     self.job = None;
@@ -1595,7 +1608,6 @@ impl ViewerApp {
     }
 
     /// Begin a plugin: show its dialog, or run it at once if it declared none.
-    #[cfg(not(target_arch = "wasm32"))]
     fn start_plugin(&mut self, index: usize) {
         let Some(loaded) = self.core.stack.as_ref() else {
             self.core.status = Some("Open an image first".into());
@@ -1631,7 +1643,6 @@ impl ViewerApp {
     }
 
     /// The viewer state a plugin sees, snapshotted for one run.
-    #[cfg(not(target_arch = "wasm32"))]
     fn plugin_view(&self, loaded: &fast_tiff_viewer::Stack) -> fasttiff_plugin_api::ViewParams {
         let v = &self.core.volume;
         let (forward, right, up) = v.cam.basis();
@@ -1661,7 +1672,6 @@ impl ViewerApp {
     /// progress readout, same stop button — so a measurement over a long
     /// timelapse behaves like any other slow plugin rather than freezing the
     /// window every time a region is drawn.
-    #[cfg(not(target_arch = "wasm32"))]
     fn poll_plot(&mut self, ctx: &egui::Context) {
         let Some(win) = self.plot.as_mut() else {
             return;
@@ -1702,7 +1712,6 @@ impl ViewerApp {
     }
 
     /// Draw the open plugin dialog, and run the plugin when it is accepted.
-    #[cfg(not(target_arch = "wasm32"))]
     fn poll_plugin_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut dialog) = self.plugin_dialog.take() else {
             return;
@@ -1743,7 +1752,6 @@ impl ViewerApp {
     /// that has just appeared. Values for controls that went away stay in
     /// `values` untouched, so going back to a method restores what was set
     /// for it rather than resetting it.
-    #[cfg(not(target_arch = "wasm32"))]
     fn requery_dialog(&mut self, dialog: &mut PluginDialog) {
         let Some(loaded) = self.core.stack.as_ref() else {
             return;
@@ -1773,7 +1781,6 @@ impl ViewerApp {
     }
 
     /// What to say when something slow is already running.
-    #[cfg(not(target_arch = "wasm32"))]
     fn busy_message(&self) -> String {
         match &self.job {
             Some(job) => format!("Still busy: {}", job.label().to_lowercase()),
@@ -1792,7 +1799,6 @@ impl ViewerApp {
     ///
     /// The registry goes with it, exactly as an import's does, which is what
     /// stops a second plugin starting while this one has the data.
-    #[cfg(not(target_arch = "wasm32"))]
     fn run_plugin(&mut self, index: usize, values: fasttiff_plugin_api::Params) {
         let Some(loaded) = self.core.stack.as_ref() else {
             self.core.status = Some("Open an image first".into());
@@ -1837,7 +1843,9 @@ impl ViewerApp {
         let (progress, cancel, label) = self.begin_job(job);
 
         let tx = self.open_tx.clone();
-        std::thread::spawn(move || {
+        // The run itself, as one closure, so that the only difference between
+        // the platforms is whether a thread carries it.
+        let work = move || {
             let mut registry = registry;
             let mut host = host;
             let outcome = contained(&name, || match registry.get_mut(index) {
@@ -1865,11 +1873,31 @@ impl ViewerApp {
                 outcome,
             };
             let _ = tx.send(Incoming::Ran(Box::new(registry), Box::new(run)));
-        });
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        std::thread::spawn(work);
+
+        // No thread to spawn: `std::thread::spawn` compiles on
+        // wasm32-unknown-unknown and panics when called, and a browser without
+        // shared memory has no worker that could hold this anyway. So it runs
+        // here, on the frame that asked for it. Two things follow, and both
+        // are deliberate.
+        //
+        // The interface does not repaint while a plugin runs, so the progress
+        // bar it reports to is never seen and Cancel cannot be clicked. That
+        // is a real limitation of the web build, not an oversight — the
+        // alternative is a worker, shared memory, and a second wasm instance.
+        //
+        // It is also what makes `web_open` work: the result is handed to a new
+        // tab from inside the same task as the click that started the run, so
+        // the browser still counts the user as having asked for it and does
+        // not refuse the popup.
+        #[cfg(target_arch = "wasm32")]
+        work();
     }
 
     /// Apply what a plugin returned, once its worker has handed it back.
-    #[cfg(not(target_arch = "wasm32"))]
     fn apply_plugin_run(&mut self, run: PluginRun) {
         let PluginRun {
             index,
@@ -2613,7 +2641,6 @@ impl ViewerApp {
         #[cfg(not(target_arch = "wasm32"))]
         let mut save_requested = false;
         let mut render_settings_toggle = false;
-        #[cfg(not(target_arch = "wasm32"))]
         let mut plugin_to_start: Option<usize> = None;
         #[cfg(not(target_arch = "wasm32"))]
         let mut open_plugin_folder = false;
@@ -2646,11 +2673,13 @@ impl ViewerApp {
                 {
                     save_requested = true;
                 }
-                #[cfg(not(target_arch = "wasm32"))]
                 {
                     let available = self.plugins.as_ref().filter(|_| self.job.is_none());
                     match plugins_ui::plugins_menu(ui, available) {
                         plugins_ui::MenuAction::Run(i) => plugin_to_start = Some(i),
+                        // The entry that produces this is itself desktop-only,
+                        // so on the web the variant is simply never sent.
+                        #[cfg(not(target_arch = "wasm32"))]
                         plugins_ui::MenuAction::OpenPluginFolder => open_plugin_folder = true,
                         plugins_ui::MenuAction::None => {}
                     }
@@ -2821,28 +2850,25 @@ impl ViewerApp {
             self.save_as();
         }
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            if open_plugin_folder {
-                match fast_tiff_viewer::plugins::install_dir() {
-                    Some(dir) => {
-                        self.report_done(format!("Plugin folder: {}", dir.display()));
-                        // Best effort: showing the path in the status bar is the
-                        // part that must not fail, so a file manager that will
-                        // not launch is not an error.
-                        let _ = open_in_file_manager(&dir);
-                    }
-                    None => {
-                        self.core.status =
-                            Some("Could not determine a writable plugin folder".into())
-                    }
+        if open_plugin_folder {
+            match fast_tiff_viewer::plugins::install_dir() {
+                Some(dir) => {
+                    self.report_done(format!("Plugin folder: {}", dir.display()));
+                    // Best effort: showing the path in the status bar is the
+                    // part that must not fail, so a file manager that will
+                    // not launch is not an error.
+                    let _ = open_in_file_manager(&dir);
+                }
+                None => {
+                    self.core.status = Some("Could not determine a writable plugin folder".into())
                 }
             }
-            if let Some(index) = plugin_to_start {
-                self.start_plugin(index);
-            }
-            self.poll_plugin_dialog(ui.ctx());
-            self.poll_plot(ui.ctx());
         }
+        if let Some(index) = plugin_to_start {
+            self.start_plugin(index);
+        }
+        self.poll_plugin_dialog(ui.ctx());
+        self.poll_plot(ui.ctx());
         if let Some(mode) = mode_request {
             self.core.view_mode = mode;
             // Entering 3D stops movie playback — unless the stack is 4D (a
@@ -2900,10 +2926,7 @@ impl ViewerApp {
         // the label, but it is already in the window title, so it bought a
         // second copy of the same string at the cost of the width the bar now
         // spreads into.
-        #[cfg(not(target_arch = "wasm32"))]
         let working = self.job.as_ref().map(|job| (job.label(), job.fraction()));
-        #[cfg(target_arch = "wasm32")]
-        let working: Option<(String, Option<f32>)> = None;
         let progress = working.or_else(|| {
             let stage = self.core.load_stage()?;
             Some((stage.label().to_string(), stage.fraction()))
@@ -3636,10 +3659,7 @@ impl ViewerApp {
                 // picture can still be moved with the scrollbars and the
                 // navigator, and the tool is only armed while its window is
                 // open — so this cannot strand someone with an unpannable view.
-                #[cfg(not(target_arch = "wasm32"))]
                 let selecting = self.plot.as_ref().is_some_and(|p| p.wants_regions()) && !pinching;
-                #[cfg(target_arch = "wasm32")]
-                let selecting = false;
 
                 // Drag to pan when the image overflows the panel. Not during a
                 // gesture: egui synthesises a pointer from the first touch, so a
@@ -3674,7 +3694,6 @@ impl ViewerApp {
                 // settled. Committed on release rather than continuously, so a
                 // drag across a long timelapse starts one measurement instead
                 // of one per frame of the gesture.
-                #[cfg(not(target_arch = "wasm32"))]
                 if selecting {
                     let zoom = self.view.zoom;
                     let add = ui.input(|i| i.modifiers.shift);
@@ -3726,7 +3745,6 @@ impl ViewerApp {
 
                 // The regions, over the picture and clipped to the panel like
                 // everything else here.
-                #[cfg(not(target_arch = "wasm32"))]
                 if let Some(win) = self.plot.as_ref().filter(|p| p.wants_regions()) {
                     plot::draw_rois(
                         &ui.painter().with_clip_rect(panel_rect),

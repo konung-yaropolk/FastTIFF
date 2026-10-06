@@ -15,10 +15,13 @@ dependencies = [
  "fast-tiff-viewer",
  "fasttiff-plugin-api",
  "image",
+ "js-sys",
  "log",
  "rfd",
  "scivis-render",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
  "windows-sys 0.61.2",
  "winres",
 ]

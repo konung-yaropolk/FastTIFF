@@ -67,15 +67,30 @@ log = "0.4"
 # needs real threads to build, let alone run.
 rayon = { version = "1.10", optional = true }
 
-# The plugin contract, native only. Target-gated rather than put behind a
-# feature: a `plugins` feature in `default` would silently vanish from the glow
-# build, which is `--no-default-features` and is the Linux release backend — the
-# binary would ship with no plugin support and CI would not notice, because that
-# step only compiles. A `cfg(not(wasm32))` dependency cannot be forgotten.
-# Wasm has no dynamic loading and the browser build does not want the interface
-# at all, so it is absent there rather than present-and-empty.
+# The plugin contract. Not target-gated: the browser build runs the built-in
+# plugins too, and they are written against this crate like any other. Only the
+# *loader* for third-party shared libraries is desktop-only — see
+# `fasttiff-plugin-abi` and `libloading` below.
+fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
+
+# Two built-ins that the browser build also gets, so their dependencies are no
+# longer desktop-only either: `png` for the PNG importer/exporter, `rustfft` for
+# the deconvolution tools. Both build for wasm.
+png = "0.18"
+# Convolving a 512-cubed volume with a PSF directly is 10^14 multiplies; through
+# a pair of FFTs it is seconds, so an FFT is no more optional here than it is
+# for registration. Same crate and same major version `suite2p-registration`
+# already pulls in, so the workspace builds one copy of it.
+rustfft = "6"
+
+# Desktop-only. Target-gated rather than put behind a feature: a `plugins`
+# feature in `default` would silently vanish from the glow build, which is
+# `--no-default-features` and is the Linux release backend — the binary would
+# ship with no plugin support and CI would not notice, because that step only
+# compiles. A `cfg(not(wasm32))` dependency cannot be forgotten.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-fasttiff-plugin-api = { path = "../fasttiff-plugin-api"}
+# The C ABI, and the loader that uses it. A browser cannot `dlopen`, so neither
+# has anything to do there.
 fasttiff-plugin-abi = { path = "../fasttiff-plugin-abi"}
 # Opening a shared library. Native only, for the same reason as above: there is
 # no `dlopen` in a browser.
@@ -94,13 +109,5 @@ suite2p-registration = { path = "../suite2p-registration" }
 # thirty-five scattered chunks, and a recording is a quarter of a million of
 # them. Same crate and same version fast-tiff-lib maps TIFFs with.
 memmap2 = "0.9"
-# The built-in PNG exporter (`plugins/builtin/png`). Already in the tree — the
-# GUI stack pulls it in for image decoding — so this adds a name rather than a
-# dependency.
-png = "0.18"
-# The deconvolution tools (`plugins/builtin/deconvolve`). Convolving a
-# 512-cubed volume with a PSF directly is 10^14 multiplies; through a pair of
-# FFTs it is seconds, so an FFT is no more optional here than it is for
-# registration. Same crate and same major version `suite2p-registration`
-# already pulls in, so the workspace builds one copy of it.
-rustfft = "6"
+# `png` and `rustfft` used to live here. They moved up into the shared
+# dependencies when their plugins started building for the browser.

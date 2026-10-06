@@ -102,7 +102,8 @@ jobs:
       # The egui UI is shared between the desktop binary and the browser build,
       # so a desktop-only edit can break the wasm side. This is the check that
       # catches it — `FastTIFF-web` is its own workspace, hence the separate
-      # invocation.
+      # invocation. The *bundle* is built in `test-linux`, on the deploy's own
+      # operating system; see the note there.
       - name: Check the shared UI builds for the web
         working-directory: FastTIFF-web
         run: cargo check --target wasm32-unknown-unknown
@@ -161,8 +162,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # `targets:` because the web-bundle step at the end of this job builds
+      # for wasm32. The Windows job adds the target with a `rustup target add`
+      # line of its own instead; either works, this one is fewer steps.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -192,6 +198,28 @@ jobs:
 
       - name: Run tests (glow backend)
         run: cargo test --workspace --no-default-features --features FastTIFF/renderer-glow
+
+      # The deploy's own build, run before the merge instead of after it.
+      #
+      # Every other wasm step in this file is `cargo check`, which stops before
+      # codegen — so none of them can see a bundle that compiles and then fails
+      # to *post-process*. That is the gap a broken deploy went through: the
+      # module compiled, `wasm-bindgen` added its second table, and `wasm-opt`
+      # refused to parse the result. `deploy-web.yml` runs only on a push to
+      # main, so nothing could notice until the merge had happened.
+      #
+      # Here rather than in the Windows job, which is where it is tempting to
+      # put it next to the other wasm steps: wasm-pack downloads a different
+      # Binaryen asset per host, and the one that broke was `x86-linux`. A
+      # Windows guard would have stayed green through the whole incident. Same
+      # OS as the deploy, same pinned wasm-pack, same command — otherwise it
+      # is not a guard.
+      - uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: v0.15.0
+      - name: Build the web bundle the way the deploy does
+        working-directory: FastTIFF-web
+        run: wasm-pack build --target web --out-dir pkg --release
 
   # `fast-tiff-lib` parses completely untrusted files, so a malformed TIFF must
   # never panic, abort (an oversized allocation calls abort(), which no caller

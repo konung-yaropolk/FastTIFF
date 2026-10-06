@@ -29,5 +29,9 @@ pub mod render;
 pub mod macos_open;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod process;
+/// The browser's counterpart to [`process`]: handing a document to a second
+/// tab instead of to a second process.
+#[cfg(target_arch = "wasm32")]
+pub mod web_open;
 
 pub use app::{install_chrome, ViewerApp};

@@ -12,12 +12,20 @@
 /// The plugins compiled into this build. Everything else in this module is the
 /// *interface* they are written against; nothing here reaches into it.
 pub mod builtin;
+/// Finding installed plugin libraries on disk. Desktop-only: there is no disk
+/// to search in a browser.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod discover;
 pub mod host;
+/// Loading a plugin from a shared library through the C ABI. Desktop-only —
+/// there is no `dlopen` in a browser, which is why the web build gets the
+/// built-ins and nothing else.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod library;
 pub mod progress;
 pub mod result;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use discover::{install_dir, is_library, search_paths, user_plugin_dir, LIBRARY_EXT};
 pub use host::{describe_image, describe_stack, describe_view, describe_volume, StackHost};
 pub use result::{to_stack, to_tiff_bytes, to_tiff_bytes_reporting};
@@ -99,12 +107,14 @@ impl Registry {
     }
 
     /// The built-ins plus every plugin library on the search path. This is what
-    /// the application calls at startup.
+    /// the desktop application calls at startup; the browser build calls
+    /// [`new`](Self::new), there being nothing to search and no way to load it.
     ///
     /// Built-ins are added first so that a library cannot displace one by
     /// claiming its id — [`add`](Self::add) keeps the first registration and
     /// reports the clash, and "the app's own plugin wins" is the safer of the
     /// two answers.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_installed() -> Self {
         let mut reg = Registry::new();
         library::load_all(&mut reg);
