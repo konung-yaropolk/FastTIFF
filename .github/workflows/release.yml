@@ -3,9 +3,9 @@ name: Release
 # Runs when you publish a GitHub Release. Builds the app for Windows (portable
 # .exe + Inno Setup installer, plus a separate portable build for the
 # deprecated Windows 7), Linux (.deb, .rpm, Arch .pkg.tar.zst, a Flatpak
-# bundle, and an AppImage — the last four all x86_64 + arm64), and macOS (.dmg,
-# arm64 + x86_64), and attaches every artifact to the release that triggered the
-# run. Jobs are independent: a failing packager attaches nothing but never
+# bundle, and an AppImage — the last four all x86_64 + arm64), and macOS (one
+# universal .dmg carrying both Apple Silicon and Intel), and attaches every
+# artifact to the release that triggered the run. Jobs are independent: a failing packager attaches nothing but never
 # blocks the release or the other packages.
 #
 # Icons are committed, pre-rendered from icon.svg by tools/generate-icons.bat
@@ -500,23 +500,49 @@ jobs:
 
   # Builds the macOS .app bundle and packages it into a .dmg, then attaches it
   # to the release — the macOS counterpart to the .exe / .deb / pacman jobs above.
-  # Runs once per architecture on a native runner (no cross-compiling the Metal /
-  # Cocoa stack): macos-14 -> arm64 (Apple Silicon), macos-15-intel -> x86_64.
-  # Apple has deprecated x86_64; macos-15-intel is the last Intel image Actions
-  # offers (available through ~August 2027), so the Intel job is best-effort and
-  # allowed to fail without blocking the arm64 one (fail-fast: false).
+  #
+  # One job, one asset: a **universal** binary holding both the Apple Silicon
+  # and the Intel slice, so nobody has to know which Mac they have. This used to
+  # be a matrix of two native runners producing two .dmgs
+  # (macos-14 -> arm64, macos-15-intel -> x86_64).
+  #
+  # Both slices are now built on the arm64 runner, which is a deliberate
+  # reversal of the note that used to be here ("no cross-compiling the Metal /
+  # Cocoa stack"). Cross-compiling *to* another Apple arch *on* macOS is not the
+  # thing that note was about: the SDK ships every framework fat, and clang and
+  # `cc`-driven C dependencies (zstd, through `codec-zstd`) take `--target` and
+  # build the other slice from the same SDK. What remains impossible is
+  # cross-compiling this from Linux, which nothing here tries.
+  #
+  # The reason to prefer that over `lipo`-ing two runners' output is the Intel
+  # image. Apple has deprecated x86_64 and macos-15-intel is the last one
+  # Actions offers (through ~August 2027); a universal asset assembled from two
+  # jobs would stop being produced at all the day that image goes, taking the
+  # whole macOS release with it. Built this way, the x86_64 slice outlives the
+  # Intel runner, and losing the runner costs nothing.
+  #
+  # Two costs, both accepted on purpose.
+  #
+  # Test coverage: the suite runs on this runner's own arch only, where the old
+  # Intel job ran it natively on x86_64. Running the x86_64 tests here would
+  # need Rosetta, which is not something to depend on in CI. The Intel slice is
+  # therefore compiled and linked but not executed before release — the same
+  # position every cross-built target in this workflow is in.
+  #
+  # Resilience: this is now all-or-nothing. The old matrix shipped arm64 even
+  # when the Intel job failed, because they were separate assets; one universal
+  # asset cannot be partly built, so an x86_64 failure now costs the whole macOS
+  # release. That is the right way round — the alternative is shipping a file
+  # called "universal" with one slice in it, which is precisely what the check
+  # below exists to prevent.
   build-macos-dmg:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14
-            arch: arm64
-            target: aarch64-apple-darwin
-          - runner: macos-15-intel
-            arch: x86_64
-            target: x86_64-apple-darwin
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-14
+    env:
+      # Both slices target what the Info.plist below claims
+      # (LSMinimumSystemVersion 11.0). Without this each target takes rustc's
+      # own default — 11.0 for arm64, 10.12 for x86_64 — and the binary would
+      # disagree with the bundle about the oldest macOS it supports.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -524,25 +550,57 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          # Pin the target so the build matches the runner's arch even if the
-          # host default ever drifts (belt-and-suspenders on native runners).
-          targets: ${{ matrix.target }}
+          # Both halves of the universal binary. Named explicitly rather than
+          # relying on the host default, which only ever gives one of them.
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      # Release-mode tests so the optimized build below reuses these artifacts.
+      # Release-mode tests so the arm64 build below reuses these artifacts.
+      # This runner's own architecture only — see the note on the job.
       - name: Run tests
-        run: cargo test --workspace --release --target ${{ matrix.target }}
+        run: cargo test --workspace --release --target aarch64-apple-darwin
 
       # macOS ships the wgpu (Metal) backend, matching the crate default and the
       # Windows job. wgpu is preferred on macOS because Apple deprecated OpenGL,
       # so the glow path used for Linux is intentionally NOT used here. Pinned
       # explicitly so the per-OS renderer split stays deliberate.
-      - name: Build release binary
-        run: >
-          cargo build --release --target ${{ matrix.target }}
-          -p FastTIFF --no-default-features --features renderer-wgpu,builtin-plugins
+      - name: Build release binaries (both architectures)
+        run: |
+          set -euo pipefail
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            echo "::group::$target"
+            cargo build --release --target "$target" \
+              -p FastTIFF --no-default-features --features renderer-wgpu,builtin-plugins
+            echo "::endgroup::"
+          done
+
+      # `lipo` glues the two Mach-O files into one fat binary. macOS picks the
+      # matching slice at exec; Rosetta never comes into it.
+      #
+      # Then checks that it really did. A universal binary that quietly lost a
+      # slice is the worst outcome available here: it builds, it signs, it
+      # installs, it runs perfectly on the machine that made it, and it fails
+      # for every Intel user with "cannot be opened". So the arch list is
+      # asserted rather than printed, and a missing slice fails the job.
+      - name: Make the universal binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/universal
+          lipo -create -output target/universal/FastTIFF \
+            target/aarch64-apple-darwin/release/FastTIFF \
+            target/x86_64-apple-darwin/release/FastTIFF
+          archs="$(lipo -archs target/universal/FastTIFF)"
+          echo "slices: $archs"
+          for want in arm64 x86_64; do
+            case " $archs " in
+              *" $want "*) ;;
+              *) echo "::error::the universal binary has no $want slice (got: $archs)"
+                 exit 1 ;;
+            esac
+          done
 
       # Assemble FastTIFF.app by hand (no cargo-bundle dependency): synthesize an
       # Info.plist whose strings mirror [package.metadata.winres] from
@@ -562,14 +620,15 @@ jobs:
           set -euo pipefail
           VERSION="$(cargo metadata --no-deps --format-version 1 \
             | python3 -c 'import sys,json; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="FastTIFF"))')"
-          echo "Building FastTIFF.app version $VERSION for ${{ matrix.arch }}"
+          echo "Building universal FastTIFF.app version $VERSION"
 
           APP="FastTIFF.app"
           rm -rf "$APP"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
           # --- binary ---
-          cp "target/${{ matrix.target }}/release/FastTIFF" "$APP/Contents/MacOS/FastTIFF"
+          # The fat one from the lipo step, so the bundle serves both arches.
+          cp "target/universal/FastTIFF" "$APP/Contents/MacOS/FastTIFF"
           chmod +x "$APP/Contents/MacOS/FastTIFF"
 
           # --- icons: assemble iconsets from committed PNGs, then pack .icns ---
@@ -648,6 +707,7 @@ jobs:
       # NOT notarized — end users on another Mac will still need to right-click
       # -> Open (or `xattr -dr com.apple.quarantine`) the first time. Real
       # notarization needs an Apple Developer ID cert.
+      # One signature covers a fat binary: `codesign` signs each slice.
       - name: Ad-hoc sign the app
         run: codesign --force --deep --sign - "FastTIFF.app"
 
@@ -662,7 +722,8 @@ jobs:
           rm -rf "$STAGE"; mkdir -p "$STAGE"
           cp -R "FastTIFF.app" "$STAGE/"
           ln -s /Applications "$STAGE/Applications"
-          DMG="FastTIFF-${{ matrix.arch }}.dmg"
+          # "universal" rather than an architecture: one file, either Mac.
+          DMG="FastTIFF-universal.dmg"
           rm -f "$DMG"
           hdiutil create -volname "Fast TIFF Viewer" \
             -srcfolder "$STAGE" -fs HFS+ -format UDZO -imagekey zlib-level=9 \

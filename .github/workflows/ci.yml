@@ -134,8 +134,9 @@ jobs:
         run: cargo check -p fast-tiff-viewer --no-default-features
 
   # macOS compiles the `#[cfg(target_os = "macos")]` code no other job sees —
-  # the macos_open.rs "Open With" FFI — and runs its unit tests. arm64, matching
-  # the primary .dmg release target.
+  # the macos_open.rs "Open With" FFI — and runs its unit tests. arm64, which is
+  # the runner the release .dmg is built on and the slice of it these tests
+  # actually exercise.
   test-macos:
     runs-on: macos-14
     steps:
@@ -144,6 +145,10 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          # The second half of the release's universal binary, for the check at
+          # the end of this job.
+          targets: x86_64-apple-darwin
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -165,6 +170,25 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+      # The Intel half of the release's universal .dmg, which is cross-built on
+      # an arm64 runner (see `build-macos-dmg` in release.yml) and therefore
+      # never compiled anywhere else. This is the step that matters because the
+      # macOS release is now all-or-nothing: one universal asset cannot be
+      # partly built, so an x86_64 failure costs the whole .dmg rather than one
+      # of two. Catching it here means that happens on a pull request instead of
+      # on a published release.
+      #
+      # A check, not a test run: executing x86_64 code here would need Rosetta,
+      # which is not a thing to depend on in CI. So this guards compile breakage
+      # only — an arch-specific *behaviour* difference would still reach the
+      # release untested, which is the standing cost of cross-building a slice.
+      - name: Check the Intel slice of the universal build compiles
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: >
+          cargo check --release --target x86_64-apple-darwin
+          -p FastTIFF --no-default-features --features renderer-wgpu,builtin-plugins
 
   # Linux compiles the target-gated x11/wayland eframe features with the glow
   # backend — the exact configuration the .deb / Arch release jobs ship. Same

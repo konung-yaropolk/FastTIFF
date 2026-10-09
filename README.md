@@ -55,8 +55,7 @@ specific or older version.
 | Download | For | Install / run |
 |----------|-----|---------------|
 |[**Installer**](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-setup.exe) or [**Portable**](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF.exe) |<img width="16" height="16" alt="microsoft-windows-icon" src="https://github.com/user-attachments/assets/506a3842-c123-4f21-b571-ef9769573b04" /> **Windows 10 / 11** — 64-bit | Installer adds a Start-menu entry + "Open with" for TIFFs; the portable `.exe` just runs. |
-|[`FastTIFF-arm64.dmg`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-arm64.dmg) |<img width="16" height="16" alt="apple" src="https://github.com/user-attachments/assets/0d2c799e-8aac-4e07-9ee8-96bbccff1693" />&nbsp;**macOS 11+** — Apple Silicon (M-series chipsets) | Open the `.dmg`, drag **FastTIFF** into Applications. |
-|[`FastTIFF-x86_64.dmg`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-x86_64.dmg) |<img width="16" height="16" alt="apple" src="https://github.com/user-attachments/assets/0d2c799e-8aac-4e07-9ee8-96bbccff1693" />&nbsp;**macOS 11+** — Intel | Open the `.dmg`, drag **FastTIFF** into Applications. |
+|[`FastTIFF-universal.dmg`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-universal.dmg) |<img width="16" height="16" alt="apple" src="https://github.com/user-attachments/assets/0d2c799e-8aac-4e07-9ee8-96bbccff1693" />&nbsp;**macOS 11+** — Apple Silicon *and* Intel | Open the `.dmg`, drag **FastTIFF** into Applications. |
 |[`FastTIFF-arm64.deb`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-arm64.deb) |<img width="16" height="16" alt="debian" src="https://github.com/user-attachments/assets/2fefe976-d357-4abb-a476-6a8a31b422fe" />&nbsp;**Debian / <img width="16" height="16" alt="ubuntu" src="https://github.com/user-attachments/assets/e2bd815d-709d-4571-9665-f957c90e8300" />&nbsp;Ubuntu** — ARM64 | `sudo apt install ./FastTIFF-arm64.deb` |
 |[`FastTIFF-x86_64.deb`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-x86_64.deb) |<img width="16" height="16" alt="debian" src="https://github.com/user-attachments/assets/2fefe976-d357-4abb-a476-6a8a31b422fe" />&nbsp;**Debian / <img width="16" height="16" alt="ubuntu" src="https://github.com/user-attachments/assets/e2bd815d-709d-4571-9665-f957c90e8300" />&nbsp;Ubuntu** — x86-64 | `sudo apt install ./FastTIFF-x86_64.deb` |
 |[`FastTIFF-arm64.rpm`](https://github.com/konung-yaropolk/FastTIFF/releases/latest/download/FastTIFF-arm64.rpm) |<img width="16" height="16" alt="fedora" src="https://github.com/user-attachments/assets/97817114-81e7-40bd-8b4d-165fc856cba4" />&nbsp;**Fedora / <img width="16" height="16" alt="redhat-icon" src="https://github.com/user-attachments/assets/aaf64e10-797c-4cb7-87d9-04293d761cc8" />&nbsp;RHEL / <img width="16" height="16" alt="suse" src="https://github.com/user-attachments/assets/2f9e5316-fbea-4394-b801-784672831993" />&nbsp;openSUSE** — ARM64 | `sudo dnf install ./FastTIFF-arm64.rpm` |
@@ -71,11 +70,12 @@ specific or older version.
 with your system package manager; the **Flatpak** and **AppImage** are
 distro-agnostic and self-contained — handy when no native package matches your
 distro. For the CPU: 64-bit Intel/AMD → the `x86_64` files; 64-bit ARM
-(Raspberry Pi, Ampere, Apple Silicon) → the `arm64` files. On Linux, `uname -m`
-prints `x86_64` or `aarch64` (which is the `arm64` file); on macOS, *About This
-Mac* shows "Apple M…" (arm64) or "Intel" (x86_64). After installing on Linux,
-launch it from the apps menu or by running `FastTIFF` (or `fasttiff`) in a
-terminal.
+(Raspberry Pi, Ampere) → the `arm64` files. `uname -m` prints `x86_64` or
+`aarch64` (which is the `arm64` file). **On macOS there is nothing to choose**
+— the `.dmg` holds a universal binary, so the same download runs natively on
+Apple Silicon and on Intel, and macOS picks the right half when the app
+launches. After installing on Linux, launch it from the apps menu or by running
+`FastTIFF` (or `fasttiff`) in a terminal.
 
 **First-launch security prompt** (the binaries aren't signed with a paid
 developer certificate):
