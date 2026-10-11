@@ -275,32 +275,6 @@ pub struct TiffStack {
 }
 ```
 
-#### Migrating from 0.9.6 and earlier
-
-`TiffStack::mmap` is now `TiffStack::data`, typed [`Bytes`](#bytes) rather than
-`memmap2::Mmap`. Since `Bytes` derefs to `&[u8]`, call sites that passed the
-field to a decoder need only the rename:
-
-```diff
-- let pixels = read_frame_u16(&stack.mmap, frame, stack.byte_order, None)?;
-+ let pixels = read_frame_u16(&stack.data, frame, stack.byte_order, None)?;
-```
-
-Code that named the type (`let m: &Mmap = &stack.mmap`) has to match on `Bytes`
-or go through the deref. Nothing else moved, and `TiffStack::open` is unchanged
-on a default build.
-
-#### Migrating from 0.16.0 and earlier
-
-`FrameInfo::strip_offsets` and `strip_byte_counts` are [`Strips`] rather than
-`Vec<u64>`. Reading them is unchanged — `Strips` derefs to `&[u64]` — so this
-only affects code that constructs a `FrameInfo` by hand, which needs `.into()`:
-
-```diff
-- strip_offsets: vec![0],
-+ strip_offsets: vec![0].into(),
-```
-
 ### `Bytes`
 
 Where the file's bytes live. It derefs to `&[u8]`, so it's passed straight to
@@ -711,7 +685,7 @@ rustc 1.96.
 
 ![All tests](https://raw.githubusercontent.com/konung-yaropolk/FastTIFF/main/fast-tiff-lib/bench/graphs/scaling.png)
 
-One honest caveat: the benchmark forces every reader to produce owned buffers
+Notice: the benchmark forces every reader to produce owned buffers
 and reads each frame exactly once, which bills mmap's one-time page-fault
 cost (expensive on Windows, minor on Linux) entirely to this crate while
 giving its zero-copy design no credit — the uncompressed single-pass rows are
