@@ -30,6 +30,7 @@ use fast_tiff_viewer::{DecodeMode, Stack, ViewMode, Viewer};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
+mod autoscroll;
 mod camera;
 mod clipboard;
 mod dialog;
@@ -1030,6 +1031,27 @@ struct View2d {
     /// overflow to survive a frame is what stops the navigator blinking on
     /// during a zoom between two views that both fit.
     was_pannable: bool,
+    /// Whether the drag in flight began on the navigator, and is therefore
+    /// moving the view rather than dragging the picture.
+    ///
+    /// Sticky for the life of the gesture rather than re-tested each frame, and
+    /// it has to be, in both directions. The pointer leaves the map the moment
+    /// the view box is dragged to an edge, and the drag must carry on. And a
+    /// drag begun on the picture that happens to pass over the map must not
+    /// start teleporting the view half way through.
+    minimap_drag: bool,
+    /// Where an autoscroll gesture is anchored, when that mode is on.
+    ///
+    /// The anchor is the whole of the mode's state: the velocity is a function
+    /// of where the pointer is *relative to it* (see [`autoscroll`]), so there
+    /// is no accumulated speed to keep and nothing to decay. Holding the point
+    /// rather than a flag is also what lets the marker be drawn where the
+    /// gesture started, which is the only thing telling the user where neutral
+    /// is.
+    ///
+    /// Cleared on open along with the rest of the transform: an anchor is a
+    /// position in *this* window over *this* picture.
+    autoscroll: Option<egui::Pos2>,
 }
 
 impl View2d {
@@ -1093,6 +1115,8 @@ impl Default for View2d {
             image_origin: egui::Pos2::ZERO,
             panel_rect: egui::Rect::ZERO,
             was_pannable: false,
+            minimap_drag: false,
+            autoscroll: None,
             pan_glide: kinetic::Glide::default(),
         }
     }
@@ -1493,6 +1517,13 @@ impl ViewerApp {
         self.view.was_pannable = false;
         // Momentum from the last picture means nothing in this one.
         self.view.pan_glide.stop();
+        // And neither does a gesture over it. Both of these are positions on
+        // screen tied to a transform that has just been reset: an autoscroll
+        // anchor would park the new picture's neutral point wherever the last
+        // click happened to land, and a navigator drag would carry on moving a
+        // view of an image that is no longer open.
+        self.view.autoscroll = None;
+        self.view.minimap_drag = false;
         // And neither does a plot of it. The regions are in pixels of the
         // picture they were drawn on; carrying them to a different image would
         // put them somewhere arbitrary and go on measuring, which is worse than
@@ -3730,17 +3761,172 @@ impl ViewerApp {
                 );
                 let pannable = overflow.x > 0.0 || overflow.y > 0.0;
 
-                // A plot asking for regions takes the drag: while its tool is
-                // armed, dragging on the picture draws rather than pans. The
-                // picture can still be moved with the scrollbars and the
-                // navigator, and the tool is only armed while its window is
-                // open — so this cannot strand someone with an unpannable view.
+                // A plot asking for regions takes the *primary* drag: while its
+                // tool is armed, dragging on the picture with the left button
+                // draws rather than pans. Every other button still pans — see the
+                // rule below — and the tool is only armed while its window is
+                // open, so this cannot strand someone with an unpannable view.
                 let selecting = self.plot.as_ref().is_some_and(|p| p.wants_regions()) && !pinching;
+
+                // The navigator's frame box, worked out before anything acts on a
+                // drag: a press that lands on the map has to claim the gesture
+                // early enough that the picture underneath does not pan as well.
+                //
+                // Gated on the same `steady_pannable` that decides whether the map
+                // is *drawn*, so it is never clickable while invisible — an
+                // invisible hit target in the corner of the image would be a
+                // mystery rather than a feature. The `was_pannable` bookkeeping
+                // moves up here with it, which is where it belongs anyway: it is
+                // part of this frame's decision, not of the painting.
+                let settled = !self.view.pending_initial_fit;
+                let steady_pannable = pannable && self.view.was_pannable && settled;
+                self.view.was_pannable = pannable && settled;
+                let map = steady_pannable
+                    .then(|| minimap::frame_box(panel_rect, img_px.x, img_px.y))
+                    .flatten();
+
+                // Who owns the drag in flight. Decided once, when it starts, and
+                // the primary button only: the middle button belongs to panning
+                // and to autoscroll everywhere on the picture, including over the
+                // map. Without that split a middle-click on the map would both
+                // jump the view and arm autoscroll, from one press.
+                if response.drag_started() {
+                    self.view.minimap_drag = response.drag_started_by(egui::PointerButton::Primary)
+                        && map
+                            .zip(response.interact_pointer_pos())
+                            .is_some_and(|(outer, at)| outer.contains(at));
+                }
+                if response.drag_stopped() {
+                    self.view.minimap_drag = false;
+                }
+                let on_map = self.view.minimap_drag;
+
+                // Where on the map the pointer is acting, if it is.
+                //
+                // Two ways in, and the second is easy to miss: egui only calls a
+                // gesture a drag once the pointer has moved past its click
+                // threshold, so a careful single click never sets `dragged()` at
+                // all. Without the `clicked()` arm, clicking the map — the first
+                // thing anyone tries — would do nothing.
+                //
+                // Mid-drag the position is used wherever it is, including outside
+                // the map: dragging the view box to an edge and carrying on is how
+                // you reach the corner of a large image, and clamping that to the
+                // map's bounds would make the gesture stop short of the edge.
+                let map_action = map.and_then(|outer| {
+                    let at = response.interact_pointer_pos()?;
+                    let taken = on_map
+                        || (response.clicked_by(egui::PointerButton::Primary)
+                            && outer.contains(at));
+                    taken.then_some((outer, at))
+                });
+
+                // Dragging or clicking the navigator moves the view to the pointer.
+                //
+                // Anywhere in the frame box counts, not only on the view box. At
+                // `MIN_VIEW_BOX` that box is a four-point target, which is not
+                // something to ask anyone to hit; and "click the map to go there"
+                // is what a navigator is for. Grabbing the box and dragging it is
+                // then the same code path rather than a second handler, which is
+                // what keeps the two gestures from disagreeing about where the
+                // view ends up.
+                if let Some((outer, at)) = map_action {
+                    // As with the picture: a hand on it ends any glide.
+                    self.view.pan_glide.stop();
+                    // How much of the image is on screen, which is what `pan_for`
+                    // centres on the clicked point: the panel on an axis that
+                    // overflows, the whole image on one that fits.
+                    let view = egui::vec2(img_px.x.min(available.x), img_px.y.min(available.y));
+                    self.view.pan = minimap::pan_for(outer, img_px, view, at);
+                }
+
+                // Autoscroll: the sticky mode a middle-click turns on, where the
+                // view drifts towards wherever the pointer sits. See
+                // [`autoscroll`] for the curve and why the mode is worth having
+                // beside the drag.
+                //
+                // A *click* toggles it, never a drag, and that is what lets the
+                // two gestures share the middle button without a mode switch: a
+                // middle press that moves is a pan (the rule below), a middle
+                // press that does not is this. egui will not report `clicked` for
+                // a pointer that travelled past its click threshold, so the two
+                // are mutually exclusive by construction rather than by a guard
+                // that could be got wrong.
+                if response.clicked_by(egui::PointerButton::Middle) {
+                    // Toggling off from anywhere, so a second middle-click always
+                    // means stop — including the one that would otherwise re-anchor
+                    // the mode somewhere new and leave no way out but the keyboard.
+                    self.view.autoscroll = match self.view.autoscroll {
+                        Some(_) => None,
+                        // Only where there is something to scroll. A mode that
+                        // swallowed the click and then did nothing would be
+                        // indistinguishable from a dead button.
+                        None if pannable => response.interact_pointer_pos(),
+                        None => None,
+                    };
+                }
+                // Every other way out. A left- or right-click is how anyone leaves
+                // this mode by reflex; taking hold of the picture or the map means
+                // steering by hand from now on, and leaving the drift running
+                // under a drag would have two things moving the view at once;
+                // Escape is the way out when the first reflex was wrong; and an
+                // image that no longer overflows has nothing left to scroll.
+                //
+                // A drag start cannot collide with the toggle above — egui reports
+                // a gesture as a click or as a drag, never both — so the order of
+                // these two blocks does not decide anything.
+                if self.view.autoscroll.is_some()
+                    && (!pannable
+                        || response.drag_started()
+                        || response.clicked_by(egui::PointerButton::Primary)
+                        || response.clicked_by(egui::PointerButton::Secondary)
+                        || ui.input(|i| i.key_pressed(egui::Key::Escape)))
+                {
+                    self.view.autoscroll = None;
+                }
+                if let Some(anchor) = self.view.autoscroll {
+                    // `latest_pos` rather than `hover_pos`: the pointer may be over
+                    // a panel or off the window entirely while the mode runs, and
+                    // "keep scrolling the way I left it pointing" is the behaviour
+                    // every platform's version has.
+                    if let Some(at) = ui.input(|i| i.pointer.latest_pos()) {
+                        let dt = ui.input(|i| i.stable_dt);
+                        // `stable_dt` rather than the raw frame time: this is
+                        // multiplied by a velocity every frame, so a single long
+                        // frame — a decode, a window resize — would otherwise land
+                        // as a jump of hundreds of points.
+                        let v = autoscroll::velocity(anchor, at);
+                        // Opposite sign to the drag below, and deliberately: a drag
+                        // moves the *picture* under the pointer, while this moves
+                        // the *view* towards it. Pointing below the anchor scrolls
+                        // down, which means showing a lower part of the image,
+                        // which means a larger pan.
+                        self.view.pan += v * dt;
+                        // The mode animates, so it has to ask for the frames. Only
+                        // while actually moving: parked in the dead zone it should
+                        // cost no more than any other idle window.
+                        if v != egui::Vec2::ZERO {
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                }
 
                 // Drag to pan when the image overflows the panel. Not during a
                 // gesture: egui synthesises a pointer from the first touch, so a
                 // two-finger pan arrives here as well and would be applied twice.
-                if pannable && response.dragged() && !pinching && !selecting {
+                //
+                // **Any button pans**, with one exception: the primary one belongs
+                // to the region tool while that tool is armed. Spelling the rule
+                // out this way rather than leaving it to `dragged()` is what gives
+                // the middle button a pan that survives the region tool — and the
+                // middle button is the one this matters for, being what CAD and
+                // image editors use to pan and what the 3D view's own CAD mode
+                // already maps to pan (`camera.rs`). It is also why the region
+                // handler below asks for the primary button specifically: without
+                // that, a middle-drag would pan and draw a region at once.
+                let dragging_picture = response.dragged()
+                    && !(selecting && response.dragged_by(egui::PointerButton::Primary));
+                if pannable && dragging_picture && !pinching && !on_map {
                     // Taking hold of the picture ends any glide: the hand on it now
                     // decides where it goes.
                     self.view.pan_glide.stop();
@@ -3770,15 +3956,22 @@ impl ViewerApp {
                 // settled. Committed on release rather than continuously, so a
                 // drag across a long timelapse starts one measurement instead
                 // of one per frame of the gesture.
-                if selecting {
+                // The primary button only, and not a gesture the navigator took:
+                // the other buttons pan (see the rule above), and a drag that
+                // began on the map is moving the view rather than measuring
+                // anything. Without either guard one gesture would do two things.
+                if selecting && !on_map {
                     let zoom = self.view.zoom;
                     let add = ui.input(|i| i.modifiers.shift);
                     if let Some(win) = self.plot.as_mut() {
                         if let Some(pos) = response.interact_pointer_pos() {
                             let px = plot::pixel_at(pos, origin, zoom);
+                            let primary = egui::PointerButton::Primary;
                             match win.drag {
-                                None if response.drag_started() => win.drag = Some((px, px)),
-                                Some((from, _)) if response.dragged() => {
+                                None if response.drag_started_by(primary) => {
+                                    win.drag = Some((px, px))
+                                }
+                                Some((from, _)) if response.dragged_by(primary) => {
                                     win.drag = Some((from, px))
                                 }
                                 _ => {}
@@ -3835,29 +4028,61 @@ impl ViewerApp {
                 // Drawn after the image so it is over it, and clipped to the panel
                 // like everything else here.
                 //
-                // Gated on the same `pannable` the drag handler uses, so "the image
-                // is bigger than the panel" has one answer rather than two that
-                // disagree by a rounding error — and on that answer having held for
-                // a frame, so a zoom's momentary overflow does not flash it up.
-                //
-                // Also not while an opening fit is still pending: the zoom is then
-                // a placeholder about to be replaced, and on a large image that
-                // placeholder overflows — so the navigator would appear for the
-                // frame or two before the picture settles.
-                let settled = !self.view.pending_initial_fit;
-                let steady_pannable = pannable && self.view.was_pannable && settled;
-                self.view.was_pannable = pannable && settled;
-                if steady_pannable {
+                // `map` is `Some` exactly when this should be drawn, and it was
+                // decided above, before the drag handlers — see the comment there
+                // for why it has to be, and why `steady_pannable` is the condition.
+                if let Some(outer) = map {
                     minimap::draw(
                         &ui.painter().with_clip_rect(panel_rect),
                         ui.visuals(),
-                        panel_rect,
+                        outer,
                         full_rect,
                         visible,
                     );
                 }
 
-                response.on_hover_cursor(if pannable {
+                // The autoscroll anchor, so the mode is visible and so its neutral
+                // point is findable. Without a marker the only way to stop
+                // scrolling is to hunt for the dead zone by trial and error, and
+                // the only way to know the mode is on at all is that the picture
+                // is moving — which is also what it looks like when something else
+                // has gone wrong.
+                if let Some(anchor) = self.view.autoscroll {
+                    let painter = ui.painter().with_clip_rect(panel_rect);
+                    let (ink, opposite) = minimap::contrasting_ink(ui.visuals());
+                    // A ring the size of the dead zone, so the thing on screen is
+                    // the thing the arithmetic uses: inside the ring is parked,
+                    // outside it moves. Haloed in the opposite ink for the same
+                    // reason the map has a backdrop — this sits over the picture,
+                    // which can be any brightness.
+                    for (r, w, c) in [
+                        (
+                            autoscroll::DEAD_ZONE + 1.0,
+                            3.0,
+                            opposite.gamma_multiply(0.6),
+                        ),
+                        (autoscroll::DEAD_ZONE, 1.5, ink),
+                    ] {
+                        painter.circle_stroke(anchor, r, egui::Stroke::new(w, c));
+                    }
+                    painter.circle_filled(anchor, 1.5, ink);
+                }
+
+                // What the pointer is over decides the cursor. Three answers, in
+                // the order of what has the gesture: the autoscroll mode owns the
+                // pointer wherever it is, the navigator owns it over the map, and
+                // otherwise it is the picture's.
+                let over_map = map
+                    .zip(response.hover_pos())
+                    .is_some_and(|(outer, at)| outer.contains(at));
+                response.on_hover_cursor(if self.view.autoscroll.is_some() {
+                    egui::CursorIcon::AllScroll
+                } else if over_map || on_map {
+                    // The hand means "drag what is under the pointer", and over the
+                    // map what moves is the view somewhere else. The four-way arrow
+                    // is what every navigator uses for that.
+                    egui::CursorIcon::Move
+                } else if pannable {
                     egui::CursorIcon::Grab
                 } else {
                     egui::CursorIcon::Crosshair

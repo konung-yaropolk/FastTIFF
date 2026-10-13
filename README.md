@@ -371,7 +371,7 @@ it can be used in projects that couldn't take a GPL dependency.
   background, and linear puts all of it in one bin at the edge.
 - Z-slice selector when `slices > 1` (the scrubber itself always drives
   the time/frame axis).
-- Zoom (Ctrl+scroll) and pan (drag) of the 2D image, with the window sized
+- Zoom (Ctrl+scroll) and pan (drag, or middle-drag) of the 2D image, with the window sized
   to fit on open. A wheel notch **glides** to the next level over about a tenth
   of a second, about the point under the cursor, rather than jumping — long
   enough to see which way the picture moved, short enough that a second notch
@@ -382,7 +382,20 @@ it can be used in projects that couldn't take a GPL dependency.
 - A **navigator** in the corner of the 2D view once the whole frame no longer
   fits: two nested rectangles, the frame and the part of it on screen, in the
   manner of ImageJ's. At 800% on a mosaic every screenful looks like every
-  other, and this is what says which one you are looking at.
+  other, and this is what says which one you are looking at. **Click it to jump
+  there, or drag to sweep the view** — anywhere in the frame rectangle counts,
+  not just the inner box, which at high zoom is only a few points across. It
+  stays visible on extreme aspect ratios: a 20000 x 4 line scan gets a map with
+  a floor on both sides, squashed rather than invisible, and the box's *position*
+  in it is still exact even where its shape cannot be.
+- **Middle-click to autoscroll**, the gesture browsers and file managers have:
+  the cursor becomes a four-way arrow, a ring marks the neutral point, and the
+  view drifts towards wherever the pointer sits — further out is faster. Click
+  again, or take hold of the picture, or press Escape to stop. It exists because
+  a drag can only move the view as far as the hand can travel: crossing a
+  20000-pixel mosaic by dragging is a dozen grab-release cycles, where
+  autoscroll is one click and a wait. Middle-*drag* still pans directly, as it
+  does in the 3D view's CAD mode.
 - **Physical size** in the toolbar next to the pixel count, when the file says
   how big a pixel is (OME `PhysicalSize`, or the TIFF resolution tags). Both
   axes always, since anisotropic pixels are common enough that collapsing them
