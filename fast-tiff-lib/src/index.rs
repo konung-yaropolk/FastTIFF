@@ -594,13 +594,27 @@ impl FrameInfo {
             }
         }
 
-        let x0 = tx.start * tw;
-        let y0 = ty.start * th;
-        let x1 = (tx.end * tw).min(self.width);
-        let y1 = (ty.end * th).min(self.height);
+        // Tile index back to pixels, saturating because the grid is sized from
+        // the file's own numbers: `across` is `width.div_ceil(tw)`, so
+        // `across * tw` is the width rounded *up* to a whole tile and can land
+        // just past `u32::MAX` — a 4278190116-row frame in 2147483664-row tiles
+        // needs two of them, and 2 x 2147483664 is one more than `u32::MAX`.
+        //
+        // Saturating is not a fudge here, it is the right answer: a product that
+        // overflows was necessarily already past the frame, so the `min` below
+        // clamps it to the edge exactly as it would have without the overflow.
+        // Wrapping, which is what a release build without overflow checks does,
+        // would instead give a tiny `y1` and a frame whose height underflows.
+        let x0 = tx.start.saturating_mul(tw);
+        let y0 = ty.start.saturating_mul(th);
+        let x1 = tx.end.saturating_mul(tw).min(self.width);
+        let y1 = ty.end.saturating_mul(th).min(self.height);
         let mut frame = self.clone();
-        frame.width = x1 - x0;
-        frame.height = y1 - y0;
+        // `span` guarantees `start < end` and that the start tile begins inside
+        // the frame, so `x1 > x0`; saturating only so that a future change to
+        // `span` yields an empty crop rather than a panic here.
+        frame.width = x1.saturating_sub(x0);
+        frame.height = y1.saturating_sub(y0);
         frame.strip_offsets = offsets.into();
         frame.strip_byte_counts = counts.into();
         Ok(Region {
@@ -646,8 +660,21 @@ impl FrameInfo {
         let end = rows.end.clamp(start, self.height);
         // An empty request still has to yield a decodable frame; give it the
         // single strip containing `start` rather than a zero-height band.
+        //
+        // Saturating, not wrapping, and not plain `+ 1`: `height` is whatever
+        // the file's ImageLength said, so a hostile one can be `u32::MAX`, and
+        // then `start` clamps to `u32::MAX` too and `start + 1` overflows. That
+        // is a panic under the overflow checks `cargo fuzz` builds with — and a
+        // silent wrap to 0 without them, which is worse, because `last` would
+        // come back smaller than `first` and the band would describe strips it
+        // does not own. Saturating keeps the pair ordered; a frame that really
+        // claims four billion rows then fails the strip-table check below,
+        // which is the honest answer for a table that cannot describe it.
         let first = start / rps;
-        let last = end.max(start + 1).div_ceil(rps).max(first + 1);
+        let last = end
+            .max(start.saturating_add(1))
+            .div_ceil(rps)
+            .max(first.saturating_add(1));
 
         let per_plane = (self.height.div_ceil(rps)) as usize;
         let planes = if self.is_planar() {

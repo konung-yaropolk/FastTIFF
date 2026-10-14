@@ -66,7 +66,20 @@ fuzz_target!(|data: &[u8]| {
     let bad_cols = std::ops::Range { start: 9u32, end: 2 };
     let bad_rows = std::ops::Range { start: 7u32, end: 3 };
     let backwards_band = std::ops::Range { start: 7u32, end: 2 };
-    for (cols, rows) in [(0u32..1, 0u32..1), (0..u32::MAX, 0..u32::MAX), (2..9, 3..7), (bad_cols, bad_rows)] {
+    // Starting *at* `u32::MAX`, which is a different case than one below it:
+    // `crop_rows` clamps `start` to the frame height, so a file claiming
+    // `u32::MAX` rows makes `start` saturate there too and the `start + 1` that
+    // guarantees a non-empty band overflows. `u32::MAX - 1` does not reach it.
+    let at_the_top = std::ops::Range { start: u32::MAX, end: 0 };
+    let top_to_top = std::ops::Range { start: u32::MAX, end: u32::MAX };
+    for (cols, rows) in [
+        (0u32..1, 0u32..1),
+        (0..u32::MAX, 0..u32::MAX),
+        (2..9, 3..7),
+        (bad_cols, bad_rows),
+        (0..u32::MAX, at_the_top.clone()),
+        (0..1, top_to_top.clone()),
+    ] {
         if let Ok(region) = frame.crop(cols, rows) {
             let r = &region.frame;
             let _ = fast_tiff_lib::read_planes_u8(bytes, r, order);
@@ -75,7 +88,15 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    for rows in [0u32..1, 0..u32::MAX, 3..9, u32::MAX - 1..u32::MAX, backwards_band] {
+    for rows in [
+        0u32..1,
+        0..u32::MAX,
+        3..9,
+        u32::MAX - 1..u32::MAX,
+        backwards_band,
+        at_the_top,
+        top_to_top,
+    ] {
         if let Ok(band) = frame.crop_rows(rows) {
             let b = &band.frame;
             let _ = fast_tiff_lib::read_planes_u8(bytes, b, order);

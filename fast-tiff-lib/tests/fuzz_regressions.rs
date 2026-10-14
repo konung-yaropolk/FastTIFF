@@ -71,11 +71,27 @@ fn exercise(data: &[u8]) {
         start: 7u32,
         end: 2,
     };
+    // Starting *at* `u32::MAX` rather than one below it, which is a different
+    // case than it looks: `crop_rows` clamps `start` to the frame height, so a
+    // file claiming `u32::MAX` rows makes `start` saturate to `u32::MAX` too,
+    // and the `start + 1` that guarantees a non-empty band then overflows. One
+    // below the top does not reach it. Found by hand after the committed
+    // ranges missed it, so it is pinned here rather than left to luck.
+    let at_the_top = std::ops::Range {
+        start: u32::MAX,
+        end: 0,
+    };
+    let top_to_top = std::ops::Range {
+        start: u32::MAX,
+        end: u32::MAX,
+    };
     for (cols, rows) in [
         (0u32..1, 0u32..1),
         (0..u32::MAX, 0..u32::MAX),
         (2..9, 3..7),
         (bad_cols, bad_rows),
+        (0..u32::MAX, at_the_top.clone()),
+        (0..1, top_to_top.clone()),
     ] {
         if let Ok(region) = frame.crop(cols, rows) {
             let r = &region.frame;
@@ -90,6 +106,8 @@ fn exercise(data: &[u8]) {
         3..9,
         u32::MAX - 1..u32::MAX,
         backwards_band,
+        at_the_top,
+        top_to_top,
     ] {
         if let Ok(band) = frame.crop_rows(rows) {
             let f = &band.frame;
