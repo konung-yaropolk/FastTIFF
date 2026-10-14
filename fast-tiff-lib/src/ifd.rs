@@ -425,6 +425,50 @@ pub fn next_ifd_offset(
     })
 }
 
+/// The file is not a TIFF at all — its header is some other format's, or none.
+///
+/// A type rather than a message because callers act on this one differently
+/// from every other header error. A malformed BigTIFF is a *broken TIFF* and the
+/// user wants the detail; this is *not a TIFF*, and a caller that can read other
+/// formats too — an application with importer plugins, say — wants to say
+/// something about its own range of formats rather than repeat this crate's.
+/// Matching on the message text would work until the message changed, so the
+/// signal is downcastable instead:
+///
+/// ```no_run
+/// # fn main() -> anyhow::Result<()> {
+/// # let bytes: &[u8] = &[];
+/// match fast_tiff_lib::ifd::read_header(bytes) {
+///     Err(e) if e.downcast_ref::<fast_tiff_lib::ifd::NotTiff>().is_some() => {
+///         // Hand it to another reader, or say it is unsupported.
+///     }
+///     other => { other?; }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// [`Display`](std::fmt::Display) keeps the wording it always had, so callers
+/// that only print the error see no change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotTiff {
+    /// The magic number found, when the byte order was readable and only the
+    /// magic was wrong. `None` when the byte-order mark itself was not `II` or
+    /// `MM`, in which case nothing about the file was TIFF-shaped.
+    pub magic: Option<u16>,
+}
+
+impl std::fmt::Display for NotTiff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.magic {
+            Some(m) => write!(f, "not a TIFF (magic {m}; expected 42 or 43)"),
+            None => write!(f, "not a TIFF"),
+        }
+    }
+}
+
+impl std::error::Error for NotTiff {}
+
 /// Parse the TIFF header: byte order, flavor (classic magic 42 / BigTIFF
 /// magic 43), and the first IFD's absolute offset.
 pub fn read_header(file: &[u8]) -> Result<(ByteOrder, TiffFlavor, u64)> {
@@ -437,7 +481,7 @@ pub fn read_header(file: &[u8]) -> Result<(ByteOrder, TiffFlavor, u64)> {
     let order = match &file[0..2] {
         b"II" => ByteOrder::Little,
         b"MM" => ByteOrder::Big,
-        _other => bail!("not a TIFF"),
+        _other => return Err(NotTiff { magic: None }.into()),
     };
     let magic = order.u16(&file[2..4]);
     match magic {
@@ -458,6 +502,6 @@ pub fn read_header(file: &[u8]) -> Result<(ByteOrder, TiffFlavor, u64)> {
             }
             Ok((order, TiffFlavor::Big, order.u64(&file[8..16])))
         }
-        other => bail!("not a TIFF (magic {other}; expected 42 or 43)"),
+        other => Err(NotTiff { magic: Some(other) }.into()),
     }
 }

@@ -15,7 +15,7 @@ pub use decode::{
 pub use encode::{
     SampleType, TiffWriter, WriterOptions, DEFAULT_DEFLATE_LEVEL, DEFAULT_ZSTD_LEVEL,
 };
-pub use ifd::{ByteOrder, TiffFlavor};
+pub use ifd::{ByteOrder, NotTiff, TiffFlavor};
 pub use index::{
     Compression, FrameInfo, Region, RowBand, SampleFormat, SampledBand, Strips, TiffStack,
 };

@@ -242,6 +242,30 @@ pub struct Viewer {
     pub volume: VolumeView,
 }
 
+/// What to put after "Failed to open file:" — the error's own words, unless the
+/// file simply was not a TIFF.
+///
+/// This viewer reads more than TIFF: importer plugins bring OIR, NIfTI, DICOM
+/// and PNG, and more can be loaded from disk. So when the TIFF reader says "not
+/// a TIFF" it has answered a narrower question than the user asked. By the time
+/// the bytes reach the TIFF reader every importer has already declined them, and
+/// the honest summary of that is **"file not supported"** — naming TIFF would
+/// suggest the one format this program happens to be named after is the only one
+/// it has, which stopped being true.
+///
+/// Every other failure keeps its own message. "Malformed BigTIFF header" is a
+/// *broken TIFF*, not an unsupported file, and flattening the two would throw
+/// away the part that tells the user whether to go and find a better copy.
+///
+/// Keyed on [`NotTiff`] rather than on the message text, so rewording the
+/// library cannot silently turn this back into a passthrough.
+fn open_failure(e: &anyhow::Error) -> String {
+    if e.chain().any(|c| c.is::<fast_tiff_lib::NotTiff>()) {
+        return "file not supported".to_string();
+    }
+    format!("{e:#}")
+}
+
 impl Viewer {
     pub fn new() -> Self {
         Viewer {
@@ -379,7 +403,7 @@ impl Viewer {
                 Ok(())
             }
             Err(e) => {
-                self.status = Some(format!("Failed to open file: {e:#}"));
+                self.status = Some(format!("Failed to open file: {}", open_failure(&e)));
                 Err(e)
             }
         }
