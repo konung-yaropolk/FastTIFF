@@ -309,8 +309,14 @@ pub struct Region {
 
 impl RowBand {
     /// How many rows the band holds.
+    ///
+    /// Saturating because the fields are public and this type is not
+    /// `#[non_exhaustive]`: `crop_rows` never builds a backwards band, but a
+    /// caller can, and a `len()` that panics is the wrong answer in a crate
+    /// whose promise is that it does not. An inverted range reads as empty,
+    /// which is what [`is_empty`](Self::is_empty) then reports.
     pub fn len(&self) -> u32 {
-        self.rows.end - self.rows.start
+        self.rows.end.saturating_sub(self.rows.start)
     }
 
     /// Whether the band holds no rows, which `crop_rows` never returns.
@@ -708,10 +714,17 @@ impl FrameInfo {
             counts.extend_from_slice(&self.strip_byte_counts[base + first..base + last]);
         }
 
-        let y0 = first as u32 * rps;
-        let y1 = ((last as u32) * rps).min(self.height);
+        // Strip index back to rows, saturating for exactly the reason the tiled
+        // path above does: `per_plane` is `height.div_ceil(rps)`, so
+        // `per_plane * rps` is the height rounded up to a whole strip and can
+        // land past `u32::MAX` when the file declares both a huge ImageLength
+        // and a huge RowsPerStrip. This is the stripped twin of the tiled
+        // overflow, and it was missed when that one was fixed — the two are the
+        // same arithmetic over different names, so they get the same treatment.
+        let y0 = (first as u32).saturating_mul(rps);
+        let y1 = (last as u32).saturating_mul(rps).min(self.height);
         let mut frame = self.clone();
-        frame.height = y1 - y0;
+        frame.height = y1.saturating_sub(y0);
         frame.strip_offsets = offsets.into();
         frame.strip_byte_counts = counts.into();
         Ok(RowBand {
