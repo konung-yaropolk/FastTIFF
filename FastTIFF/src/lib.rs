@@ -36,6 +36,8 @@
     feature = "plugin-deconvolve",
     feature = "plugin-png",
     feature = "plugin-oir",
+    feature = "plugin-nifti",
+    feature = "plugin-dicom",
     feature = "plugin-netpbm",
     feature = "plugins-none",
 )))]

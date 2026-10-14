@@ -8,7 +8,7 @@
 
 [package]
 name = "fasttiff-web-egui"
-version = "1.22.1"
+version = "1.24.0"
 edition = "2021"
 description = "FastTIFF's egui interface, compiled to WebAssembly and drawn on a browser canvas."
 license = "GPL-3.0-only"
@@ -37,9 +37,10 @@ plugin-stack-tools = ["fasttiff/plugin-stack-tools"]
 plugin-stabilize = ["fasttiff/plugin-stabilize"]
 plugin-deconvolve = ["fasttiff/plugin-deconvolve"]
 plugin-png = ["fasttiff/plugin-png"]
-# `plugin-oir` is deliberately absent: the OIR importer memory-maps its
-# container, so it is desktop-only whatever the feature says, and offering a
-# switch here that could not turn anything on would only mislead.
+# `plugin-oir`, `plugin-nifti` and `plugin-dicom` are deliberately absent. All
+# three are importers, and the importer lane is desktop-only: an `ImportRequest`
+# carries a filesystem path, which a browser tab has none of. A switch here that
+# could not turn anything on would only mislead.
 plugins-none = ["fasttiff/plugins-none"]
 
 [dependencies]

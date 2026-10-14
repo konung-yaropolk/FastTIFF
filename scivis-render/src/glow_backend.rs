@@ -216,6 +216,7 @@ uniform int num_channels;
 uniform int u_mode;          // 0 = MIP, 1 = alpha DVR, 2 = isosurface
 uniform float u_density;     // alpha-DVR opacity scale (higher = more solid)
 uniform float u_iso;         // isosurface threshold in windowed units (0..1)
+uniform float u_brightness;  // gain on the composited colour (MIP and alpha DVR)
 uniform int u_interp;        // 0 = point/linear (GL filter), 1 = in-shader tricubic
 
 // ---------------------------------------------------------------------------
@@ -400,7 +401,7 @@ void main() {
             if (acc > 0.995) break;
             p += dp;
         }
-        frag_color = vec4(clamp(col, vec3(0.0), vec3(1.0)), 1.0);
+        frag_color = vec4(clamp(col * u_brightness, vec3(0.0), vec3(1.0)), 1.0);
     } else if (u_mode == 2) {
         // Isosurface: walk the ray until the composite field first reaches u_iso,
         // refine the crossing between the two bracketing samples, then shade the
@@ -450,7 +451,7 @@ void main() {
         if (num_channels > 3) color += ch_enabled[3] * lut_col(m3, 3);
         if (num_channels > 4) color += ch_enabled[4] * lut_col(m4, 4);
         if (num_channels > 5) color += ch_enabled[5] * lut_col(m5, 5);
-        frag_color = vec4(clamp(color, vec3(0.0), vec3(1.0)), 1.0);
+        frag_color = vec4(clamp(color * u_brightness, vec3(0.0), vec3(1.0)), 1.0);
     }
 }
 "#;
@@ -527,6 +528,7 @@ struct VolumeGl {
     u_mode: Option<glow::NativeUniformLocation>,
     u_density: Option<glow::NativeUniformLocation>,
     u_iso: Option<glow::NativeUniformLocation>,
+    u_brightness: Option<glow::NativeUniformLocation>,
     u_interp: Option<glow::NativeUniformLocation>,
     params: Option<VolumeParams>,
 }
@@ -560,6 +562,7 @@ impl VolumeGl {
             u_mode: gl.get_uniform_location(program, "u_mode"),
             u_density: gl.get_uniform_location(program, "u_density"),
             u_iso: gl.get_uniform_location(program, "u_iso"),
+            u_brightness: gl.get_uniform_location(program, "u_brightness"),
             u_interp: gl.get_uniform_location(program, "u_interp"),
             params: None,
         }
@@ -781,6 +784,7 @@ impl ImageRenderResources {
             gl.uniform_1_i32(v.u_mode.as_ref(), p.render_mode);
             gl.uniform_1_f32(v.u_density.as_ref(), p.density);
             gl.uniform_1_f32(v.u_iso.as_ref(), p.iso);
+            gl.uniform_1_f32(v.u_brightness.as_ref(), p.brightness);
             gl.uniform_1_i32(v.u_interp.as_ref(), v.interp_mode);
 
             gl.disable(glow::BLEND);

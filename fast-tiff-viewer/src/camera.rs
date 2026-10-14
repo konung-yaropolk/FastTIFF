@@ -512,6 +512,7 @@ pub fn build_volume_params(
     render: VolumeRender,
     density: f32,
     iso: f32,
+    brightness: f32,
 ) -> VolumeParams {
     let n = channels.len().min(MAX_CHANNELS);
     let mut windows = [0.0f32; MAX_CHANNELS * 2];
@@ -536,6 +537,7 @@ pub fn build_volume_params(
         render_mode: render.shader_mode(),
         density,
         iso,
+        brightness,
         eye: cam.eye,
         forward: cam.forward,
         right: cam.right,

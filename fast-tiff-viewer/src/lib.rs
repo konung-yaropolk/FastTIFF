@@ -37,6 +37,7 @@
 //!   spawn, so nothing else changes.
 
 pub mod bandcache;
+pub mod brightness;
 pub mod camera;
 pub mod channels;
 pub mod colormap;

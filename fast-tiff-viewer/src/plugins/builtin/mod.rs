@@ -77,10 +77,19 @@
 
 #[cfg(feature = "plugin-deconvolve")]
 pub mod deconvolve;
+/// Desktop-only on top of its feature, as every importer is: an
+/// [`ImportRequest`](fasttiff_plugin_api::ImportRequest) carries a filesystem
+/// path, and a browser tab has none. See the module for what that costs and why
+/// the contract is right to be that way.
+#[cfg(all(feature = "plugin-dicom", not(target_arch = "wasm32")))]
+pub mod dicom;
 #[cfg(feature = "plugin-invert")]
 pub mod invert;
 #[cfg(feature = "plugin-netpbm")]
 pub mod netpbm;
+/// Desktop-only on top of its feature, for the reason [`dicom`] is.
+#[cfg(all(feature = "plugin-nifti", not(target_arch = "wasm32")))]
+pub mod nifti;
 /// Desktop-only on top of its feature: it memory-maps the container and parses
 /// the vendor's XML, and a browser has no file to map.
 #[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
@@ -127,10 +136,14 @@ pub mod zproject;
 
 #[cfg(feature = "plugin-deconvolve")]
 pub use deconvolve::{Deconvolve, GeneratePsf};
+#[cfg(all(feature = "plugin-dicom", not(target_arch = "wasm32")))]
+pub use dicom::Dicom;
 #[cfg(feature = "plugin-invert")]
 pub use invert::Invert;
 #[cfg(feature = "plugin-netpbm")]
 pub use netpbm::Netpbm;
+#[cfg(all(feature = "plugin-nifti", not(target_arch = "wasm32")))]
+pub use nifti::Nifti;
 #[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
 pub use oir::Oir;
 #[cfg(feature = "plugin-plot-axis")]
@@ -205,12 +218,24 @@ pub fn exporters() -> Vec<Box<dyn Exporter>> {
 /// format ahead of the specific one.
 #[allow(clippy::vec_init_then_push)]
 pub fn importers() -> Vec<Box<dyn Importer>> {
-    // OIR first, being the specific format; both answer on a signature of
-    // their own, so the order between them never actually decides anything.
+    // OIR first, being the specific format; every one of these answers on a
+    // signature of its own, so the order between them rarely decides anything.
+    //
+    // The exception, and the reason the order is still worth keeping
+    // deliberate: NIfTI claims `.gz` as well as `.nii`, because `.nii.gz` has
+    // `gz` for its extension and there is no way to declare a two-part one. It
+    // is therefore the one importer here that is offered files it will decline,
+    // and it declines them in `probe` by looking at the name and the magic
+    // rather than by being asked last. Anything added after it that also wants
+    // `.gz` should be put *before* it.
     #[allow(unused_mut)]
     let mut v: Vec<Box<dyn Importer>> = Vec::new();
     #[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
     v.push(Box::new(Oir));
+    #[cfg(all(feature = "plugin-dicom", not(target_arch = "wasm32")))]
+    v.push(Box::new(Dicom));
+    #[cfg(all(feature = "plugin-nifti", not(target_arch = "wasm32")))]
+    v.push(Box::new(Nifti));
     #[cfg(feature = "plugin-png")]
     v.push(Box::new(PngImport));
     #[cfg(feature = "plugin-netpbm")]

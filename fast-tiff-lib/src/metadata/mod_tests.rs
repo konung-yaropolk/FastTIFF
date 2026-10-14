@@ -239,3 +239,84 @@ fn neutral_parse_still_honors_resolution_tags() {
     assert_eq!(meta.pixel_height, Some(0.1));
     assert_eq!(meta.frames, 4); // inferred from the IFD count
 }
+
+/// A single-channel 4-D stack keeps all three axes.
+///
+/// This is the commonest 4-D shape there is — one channel, tens of slices, tens
+/// of timepoints, which is what an fMRI or an ASL series looks like — and it
+/// used to be folded into one long movie because the "keep all three" branch
+/// also demanded more than one channel. Two things went wrong at once: the 3-D
+/// view built its depth from slices × frames and showed every timepoint's
+/// volume stacked end to end in a row, and the scrubber stepped through slices
+/// and timepoints interleaved with no way to hold one still.
+///
+/// There is nothing to trade here. One channel leaves the channel slot free, so
+/// all three numbers fit and no warning is needed.
+#[test]
+fn a_single_channel_four_dimensional_stack_keeps_its_slice_axis() {
+    check(
+        1,
+        20,
+        10,
+        ResolvedDimensions {
+            channels: 1,
+            slices: 20,
+            frames: 10,
+            triple_axis_warning: false,
+        },
+        "an ASL series: 1 channel x 20 slices x 10 timepoints",
+    );
+    // Two slices and two frames is the smallest case that is genuinely 4-D,
+    // and it must not be folded either.
+    check(
+        1,
+        2,
+        2,
+        ResolvedDimensions {
+            channels: 1,
+            slices: 2,
+            frames: 2,
+            triple_axis_warning: false,
+        },
+        "the smallest real 4-D stack",
+    );
+}
+
+/// With several channels there is nothing left to put Z in, so the warning
+/// stands — the viewer shows one Z-slice and says so.
+#[test]
+fn a_multi_channel_four_dimensional_stack_still_warns() {
+    check(
+        3,
+        20,
+        10,
+        ResolvedDimensions {
+            channels: 3,
+            slices: 20,
+            frames: 10,
+            triple_axis_warning: true,
+        },
+        "3 channels x 20 slices x 10 timepoints",
+    );
+}
+
+/// A single timepoint is still folded, which is the long-standing behaviour and
+/// deliberate: a one-timepoint z-stack and a movie are indistinguishable from
+/// the plane count alone, and the movie reading is right far more often. The
+/// 3-D view does not care — with one slice it builds its depth from the frame
+/// axis instead — so nothing is lost by it.
+#[test]
+fn a_z_stack_with_one_timepoint_is_still_read_as_a_movie() {
+    check(
+        1,
+        190,
+        1,
+        ResolvedDimensions {
+            channels: 1,
+            slices: 1,
+            frames: 190,
+            triple_axis_warning: false,
+        },
+        "a structural scan",
+    );
+}

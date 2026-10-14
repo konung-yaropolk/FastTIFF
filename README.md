@@ -503,6 +503,22 @@ with the same per-channel LUTs and contrast as the 2D view.
 - Two rendering modes: **Max intensity** (MIP) and a translucent **Volume**
   mode modelled on ImageJ's 3D Viewer (emission–absorption alpha compositing,
   with a density control).
+- **Brightness is per mode, because the modes do not accumulate the same thing.**
+  A MIP takes the brightest sample along each ray, so it is independent of how
+  far the ray travelled but runs hot — a maximum over a few hundred samples is a
+  high-order statistic, and it reads as blown out next to the same data in 2-D.
+  It gets a plain gain, defaulting to **78%**. Volume mode instead accumulates
+  `1 - exp(-density · intensity · dt)`, which means dragging **Density** changes
+  how *bright* the volume is as much as how *solid* — dark at the low end,
+  saturated at the high one. **Auto-level brightness** (on by default) divides
+  that out, so density controls solidity alone. It is an approximation, not a
+  guarantee: the correction assumes a typical optical thickness, so on a volume
+  much thinner or more opaque than typical it flattens the response only partly —
+  turn it off and the manual Brightness slider appears.
+- **The settings window shows the current mode's controls and hides the others**,
+  rather than greying them out: Density belongs to Volume, Threshold to Surface,
+  and each mode has its own brightness. It also stays **on top**, so it can be
+  left open while you drag the volume underneath it.
 - **Navigation styles** — CAD, Blender, Maya, and a first-person **WASD Fly** —
   selectable in the render-settings window (⚙). Orbit modes rotate around the
   point where the view center enters the volume; the wheel zooms and WASD moves
@@ -573,7 +589,8 @@ cargo test --manifest-path plugins/example/Cargo.toml
 
 Some plugins ship *inside* the binary rather than as libraries: Invert, Z
 Project, Plot third axis, the three Slice tools, Generate PSF, Deconvolve,
-suite2p stabilization, the PNG importer/exporter and the Olympus OIR reader.
+suite2p stabilization, the PNG importer/exporter, the Olympus OIR reader and
+the two MRI importers below.
 They are written against the same contract a `.dll` is — being compiled in is a
 lane, not a different kind of plugin — and they are what the browser build has,
 since it can load nothing.
@@ -589,7 +606,13 @@ cargo build --release -p FastTIFF --no-default-features \
 A plugin left out is *gone*: no module, no menu entry, and no dependency of its
 own compiled or linked. Two carry enough to notice — `plugin-deconvolve` brings
 an FFT and `plugin-stabilize` a whole registration crate, and dropping both
-takes about 460 KB off the web bundle. `plugin-stabilize` is also the only
+takes about 460 KB off the web bundle. `plugin-dicom` brings a JPEG decoder, for
+the two JPEG codecs DICOM actually uses. `plugin-nifti` brings only gzip, which
+the Deflate TIFF codec already needs, so it costs nothing — and the same is true
+of `plugin-oir`'s XML parser, which OME-XML metadata already pulls in. (A plugin
+that reuses a dependency the library needs anyway cannot be dropped from the
+graph by turning the plugin off; `cargo tree --invert` shows who the real user
+is.) `plugin-stabilize` is also the only
 GPL-3 code in the tree, which is why `fast-tiff-viewer` is licensed GPL-3 where
 the other library crates are MPL-2.0.
 
@@ -613,6 +636,60 @@ cargo test -p fast-tiff-viewer --features plugin-netpbm
 
 The shared-library lane is native-only — there is no `dlopen` in a browser — so
 the web build gets the built-ins and no way to add to them.
+
+### MRI: NIfTI and DICOM
+
+Two built-in importers read the formats MRI comes in. Both map the scan onto the
+viewer's own axes — **z becomes the slice axis**, so a structural scan opens as a
+stack you scroll through — and both bring the voxel size with them, so the 3-D
+view and the readouts are in millimetres rather than in voxels.
+
+| | reads | notes |
+|---|---|---|
+| **NIfTI** | `.nii`, `.nii.gz` | NIfTI-1, either byte order. A 4-D fMRI series opens with both a slice and a frame axis, and `pixdim[4]` becomes the frame interval. NIfTI-2 is detected and refused by name rather than mis-read. |
+| **DICOM** | `.dcm`, and extensionless scanner exports | Gathers the **whole series** from the folder and orders it by slice position. Reads native (implicit/explicit, either byte order), **RLE**, **baseline JPEG** and **lossless JPEG** (processes 14 and 1/selection-value 1), and expands palette-colour images. |
+
+Three things worth knowing before you rely on either:
+
+- **The slice order is from the geometry, not the file numbering.** DICOM slices
+  are sorted by their position along the slice normal
+  (`ImagePositionPatient` projected onto the normal of
+  `ImageOrientationPatient`), because `InstanceNumber` is acquisition order and
+  an interleaved acquisition sorted that way comes out as a comb. When a series
+  carries no position the reader falls back to `InstanceNumber` **and says so**,
+  since that is exactly when the result might be interleaved.
+- **Most compressed DICOM is read; the rest is refused by name.** RLE, baseline
+  JPEG and lossless JPEG decode in-process, which covers the common clinical
+  export. What is left — JPEG-LS, JPEG 2000, 12-bit extended JPEG, deflated, and
+  the encapsulated-but-uncompressed syntax — each produces a message naming the
+  syntax it actually is and the command that converts it (`dcmdjpeg`,
+  `gdcmconv --raw`, or `dcm2niix` to NIfTI, which this also reads). The
+  transfer-syntax UID names *two* things, the element encoding and the pixel
+  codec, so a file can be perfectly ordinary except for its codec; the refusal
+  says which part it tripped on.
+
+  Lossless JPEG is the one to be slightly careful with, because it is not the
+  JPEG most people mean: process 14 is *predictive*, not DCT, and a decoder that
+  guesses wrong produces a plausible-looking image made of noise. The test for
+  it here is quantitative rather than visual — mean absolute difference between
+  horizontally adjacent pixels, which on a correct decode of a skull CT comes out
+  at 0.5% of range (anatomy) against 3.7% for a known-good MRI, and at tens of
+  percent for a wrong one.
+- **Left and right are not guaranteed.** Both formats carry the transform from
+  voxel indices to the patient's frame — NIfTI's qform/sform, DICOM's
+  orientation cosines — and this viewer shows planes with a voxel size, so there
+  is nothing here that could honour a direction matrix. The planes are in the
+  file's own storage order. If laterality matters for what you are doing, it
+  matters more than this viewer can promise.
+
+Nothing identifying is read from a DICOM. `PatientName`, `PatientID` and the
+rest are in every one of those files and none of them are touched: the document
+is named after the file on disk, and its description comes from `Modality` and
+`SeriesDescription`. A viewer that put a patient's name in a window title would
+put it in screenshots and in bug reports.
+
+Both are importers, so both are desktop-only — an importer is handed a
+filesystem path, and a browser tab has none.
 
 ## What it doesn't do (intentionally out of scope for a "viewer")
 
@@ -676,6 +753,14 @@ this is the one-line formula to change.
 - Done: close all opened dialog windows when opened new file
 - Done: surface rendering mode added
 - Done: Add windows installer with files association
+- Done: built-in plugins are per-plugin Cargo features, each with its own deps
+- Done: universal (arm64 + x86_64) macOS binary, so there is one download
+- Done: minimap has a minimum size, and click/drag moves the field of view
+- Done: sticky autoscroll mode on the middle mouse button (2D)
+- Done: NIfTI importer (.nii, .nii.gz)
+- Done: DICOM importer (.dcm), with RLE, baseline JPEG and lossless JPEG
+- Done: per-mode 3D brightness, auto-levelled against Density in Volume mode
+- Done: 3D settings window is mode-aware and stays on top
 - publish in Brew
 - Add 3D volume save in best suitable format for the gpu rendering (not necessary now, need to study the idea)
 

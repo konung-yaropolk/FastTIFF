@@ -97,6 +97,7 @@ struct VolParamsGpu {
     box_he: [f32; 4],
     /// `(tan_half_fov, aspect, density, iso)`.
     misc: [f32; 4],
+    gain: [f32; 4],
     /// `(num_channels, render_mode, interp, unused)`.
     modes: [i32; 4],
 }
@@ -457,6 +458,7 @@ impl ImageRenderResources {
             cam_up: [p.up[0], p.up[1], p.up[2], 0.0],
             box_he: [p.box_he[0], p.box_he[1], p.box_he[2], 0.0],
             misc: [p.tan_half_fov, p.aspect, p.density, p.iso],
+            gain: [p.brightness, 0.0, 0.0, 0.0],
             modes: [p.num_channels, p.render_mode, self.volume_interp_mode, 0],
         };
         for c in 0..MAX_CHANNELS {

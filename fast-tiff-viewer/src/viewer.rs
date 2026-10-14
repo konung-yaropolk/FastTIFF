@@ -127,6 +127,22 @@ pub struct VolumeView {
     pub density: f32,
     /// Isosurface threshold in windowed units 0..1 (only used by `Surface`).
     pub iso: f32,
+    /// The gain on the max-intensity render, as a fraction.
+    ///
+    /// Per mode rather than shared, because the two modes want different
+    /// values: a MIP comes out hot and wants less than 1, where a volume
+    /// composited at its default density wants exactly 1. One slider remembering
+    /// whichever mode was last on screen would reset the other every time the
+    /// mode changed.
+    pub mip_brightness: f32,
+    /// The gain on the volume render when [`Self::volume_autolevel`] is off.
+    pub volume_brightness: f32,
+    /// Whether the volume render's gain follows the density automatically.
+    ///
+    /// On by default. See [`crate::brightness::autolevel`] for what it
+    /// compensates and why the density slider otherwise changes the brightness
+    /// as much as the solidity.
+    pub volume_autolevel: bool,
     /// The volume viewport aspect ratio (width/height), set by the frontend each
     /// frame so the ray-march projection matches the on-screen rect.
     pub aspect: f32,
@@ -152,8 +168,11 @@ impl Default for VolumeView {
             scale: [1.0, 1.0, 1.0],
             interp: VolumeInterp::Linear,
             render: VolumeRender::Mip,
-            density: 100.0,
+            density: crate::brightness::DENSITY_DEFAULT,
             iso: 0.1,
+            mip_brightness: crate::brightness::MIP_DEFAULT,
+            volume_brightness: 1.0,
+            volume_autolevel: true,
             aspect: 1.0,
             built_frame: None,
             generation: 0,

@@ -13,10 +13,23 @@ use egui::RichText;
 use fast_tiff_viewer::camera::{NavMode, OrbitPoint};
 use fast_tiff_viewer::histogram::{fill_alpha, fill_tint, Histogram, BINS};
 
-/// The 3D render-settings pop-up: rendering method (+ alpha density), per-axis
-/// voxel scale (x:y:z), interpolation, navigation style, and a camera-reset
-/// button. Scale defaults to the stack's pixel calibration (with a button to
-/// re-seed it). `reset_position` is set true when the user clicks Reset position.
+/// The 3D render-settings pop-up: rendering method and the controls belonging
+/// to it, per-axis voxel scale (x:y:z), interpolation, navigation style, and a
+/// camera-reset button. Scale defaults to the stack's pixel calibration (with a
+/// button to re-seed it). `reset_position` is set true when the user clicks
+/// Reset position.
+///
+/// # The mode's controls, and only the mode's
+///
+/// Density belongs to Volume, Threshold to Surface, and each mode has its own
+/// brightness. They used to be laid out together and greyed out when they did
+/// not apply, which is the wrong choice here: a disabled control is a promise
+/// that some reachable state will enable it, and reading three greyed rows to
+/// find the one live one is work on every visit. They are **hidden** instead,
+/// so the panel shows what the current mode actually has.
+///
+/// The exception that proves the rule is the mode selector itself, which is
+/// always all three — that *is* the reachable state.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_settings_window(
     ctx: &egui::Context,
@@ -30,6 +43,9 @@ pub(super) fn render_settings_window(
     render_mode: &mut render::VolumeRender,
     density: &mut f32,
     iso: &mut f32,
+    mip_brightness: &mut f32,
+    volume_brightness: &mut f32,
+    volume_autolevel: &mut bool,
     show_coord_box: &mut bool,
     reset_position: &mut bool,
     loaded: Option<&Stack>,
@@ -40,6 +56,9 @@ pub(super) fn render_settings_window(
         size: egui::vec2(300.0, 560.0),
         scroll: true,
         resizable: false,
+        // Every slider in here changes the render while it is being dragged, so
+        // the picture and the controls have to be visible at once.
+        always_on_top: true,
     };
     dialog::show(ctx, spec, open, |ui| {
         ui.label(RichText::new("Rendering").strong());
@@ -51,23 +70,75 @@ pub(super) fn render_settings_window(
             ui.selectable_value(render_mode, render::VolumeRender::Surface, "Surface")
                 .on_hover_text("Opaque isosurface: a shaded solid at the intensity threshold");
         });
-        // Density only affects the alpha DVR — disabled for the other modes.
-        ui.add_enabled_ui(*render_mode == render::VolumeRender::Alpha, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Density");
-                ui.add(egui::Slider::new(density, 1.0..=1000.0).logarithmic(true))
-                    .on_hover_text("Opacity of the alpha volume (higher = brighter/more solid)");
-            });
-        });
-        // Iso threshold only affects the surface mode — disabled otherwise.
-        ui.add_enabled_ui(*render_mode == render::VolumeRender::Surface, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Threshold");
-                ui.add(egui::Slider::new(iso, 0.01..=1.0)).on_hover_text(
-                    "Isosurface level in windowed units (higher = only brighter voxels)",
-                );
-            });
-        });
+        match *render_mode {
+            // Max intensity: a plain gain, and nothing else to set. The default
+            // is below 100% because a maximum over a few hundred samples per
+            // ray is a high-order statistic and comes out hotter than the same
+            // data in 2-D — see `fast_tiff_viewer::brightness`.
+            render::VolumeRender::Mip => {
+                ui.horizontal(|ui| {
+                    ui.label("Brightness");
+                    ui.add(
+                        egui::Slider::new(mip_brightness, 0.1..=2.0)
+                            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                            .custom_parser(|s| {
+                                s.trim_end_matches('%')
+                                    .trim()
+                                    .parse::<f64>()
+                                    .ok()
+                                    .map(|v| v / 100.0)
+                            }),
+                    )
+                    .on_hover_text(
+                        "Gain on the projection. Below 100% by default: a \
+                         maximum along each ray runs brighter than the same \
+                         data in 2D.",
+                    );
+                });
+            }
+            render::VolumeRender::Alpha => {
+                ui.horizontal(|ui| {
+                    ui.label("Density");
+                    ui.add(egui::Slider::new(density, 1.0..=1000.0).logarithmic(true))
+                        .on_hover_text("How solid the volume is (higher = more opaque)");
+                });
+                ui.checkbox(volume_autolevel, "Auto-level brightness")
+                    .on_hover_text(
+                        "Keeps the brightness steady as Density moves. Without \
+                         it, dragging Density changes how bright the volume is \
+                         as much as how solid — dark at the low end and \
+                         saturated at the high one.",
+                    );
+                // The manual gain appears only when the automatic one is off,
+                // because two brightness controls fighting each other is worse
+                // than either alone.
+                if !*volume_autolevel {
+                    ui.horizontal(|ui| {
+                        ui.label("Brightness");
+                        ui.add(
+                            egui::Slider::new(volume_brightness, 0.1..=4.0)
+                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                                .custom_parser(|s| {
+                                    s.trim_end_matches('%')
+                                        .trim()
+                                        .parse::<f64>()
+                                        .ok()
+                                        .map(|v| v / 100.0)
+                                }),
+                        )
+                        .on_hover_text("Gain on the composited volume");
+                    });
+                }
+            }
+            render::VolumeRender::Surface => {
+                ui.horizontal(|ui| {
+                    ui.label("Threshold");
+                    ui.add(egui::Slider::new(iso, 0.01..=1.0)).on_hover_text(
+                        "Isosurface level in windowed units (higher = only brighter voxels)",
+                    );
+                });
+            }
+        }
 
         ui.separator();
         ui.label(RichText::new("Voxel scale (x : y : z)").strong());
@@ -184,6 +255,9 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Sta
         size: egui::vec2(360.0, 600.0),
         scroll: true,
         resizable: true,
+        // Read *about* the picture rather than used to change it, so it
+        // stays an ordinary window a user can put behind the app.
+        always_on_top: false,
     };
     dialog::show(ctx, spec, open, |ui| {
         fn kv(ui: &mut egui::Ui, k: &str, v: impl Into<String>) {
@@ -478,6 +552,9 @@ pub(super) fn histogram_window(
         // the controls, and inside a scroll area that is unbounded.
         scroll: false,
         resizable: true,
+        // Read *about* the picture rather than used to change it, so it
+        // stays an ordinary window a user can put behind the app.
+        always_on_top: false,
     };
     dialog::show(ctx, spec, open, |ui| {
         // How tall everything *below* the plot is depends on the channel

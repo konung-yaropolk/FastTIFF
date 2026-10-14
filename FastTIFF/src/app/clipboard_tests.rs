@@ -95,6 +95,9 @@ fn frame_with_a_dialog(copies: bool) -> (Vec<egui::OutputCommand>, Vec<egui::Out
             size: egui::vec2(360.0, 600.0),
             scroll: false,
             resizable: true,
+            // Irrelevant here, and false is the honest value: this is the
+            // metadata dialog, which is not one of the always-on-top ones.
+            always_on_top: false,
         };
         crate::app::dialog::show(&ctx, spec, &mut open, |ui| {
             if copies {

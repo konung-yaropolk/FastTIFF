@@ -185,6 +185,16 @@ pub struct VolumeParams {
     pub render_mode: i32,
     /// Alpha-DVR opacity scale (higher = more solid). Ignored by MIP/surface.
     pub density: f32,
+    /// A gain applied to the composited colour, for MIP and alpha DVR.
+    ///
+    /// One uniform rather than one per mode, because the shader only ever runs
+    /// one of them: the host decides what the gain means for the mode it asked
+    /// for. Surface mode ignores it — it returns a shaded hit rather than an
+    /// accumulation, and has its own shading constants.
+    ///
+    /// 1.0 is "as composited". See `fast_tiff_viewer::brightness` for where the
+    /// values come from and why MIP's default is below 1.
+    pub brightness: f32,
     /// Isosurface threshold in windowed units (0..1). Only used by surface mode.
     pub iso: f32,
     pub eye: [f32; 3],
