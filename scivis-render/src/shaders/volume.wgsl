@@ -37,6 +37,7 @@ struct VolParams {
     cam_up: vec4<f32>,
     box_he: vec4<f32>,
     misc: vec4<f32>,   // tan_half_fov, aspect, density, iso
+    gain: vec4<f32>,   // brightness, unused x3
     modes: vec4<i32>,  // num_channels, render_mode (0=MIP,1=alpha,2=surface), interp (0=nearest,1=linear,2=cubic), unused
 };
 
@@ -259,7 +260,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             if (acc > 0.995) { break; }
             p += dp;
         }
-        return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+        // Clamped *after* the gain, so a gain above 1 brightens what is there
+        // rather than being rounded away first.
+        return vec4<f32>(clamp(col * P.gain.x, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
     }
 
     if (P.modes.y == 2) {

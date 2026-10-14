@@ -1,6 +1,6 @@
 [package]
 name = "FastTIFF"
-version = "1.23.0"
+version = "1.24.0"
 edition = "2021"
 description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering."
 license = "GPL-3.0-only"
@@ -56,6 +56,8 @@ builtin-plugins = [
     "plugin-deconvolve",
     "plugin-png",
     "plugin-oir",
+    "plugin-nifti",
+    "plugin-dicom",
 ]
 plugin-invert = ["fast-tiff-viewer/plugin-invert"]
 plugin-zproject = ["fast-tiff-viewer/plugin-zproject"]
@@ -65,6 +67,8 @@ plugin-stabilize = ["fast-tiff-viewer/plugin-stabilize"]
 plugin-deconvolve = ["fast-tiff-viewer/plugin-deconvolve"]
 plugin-png = ["fast-tiff-viewer/plugin-png"]
 plugin-oir = ["fast-tiff-viewer/plugin-oir"]
+plugin-nifti = ["fast-tiff-viewer/plugin-nifti"]
+plugin-dicom = ["fast-tiff-viewer/plugin-dicom"]
 # The worked example for plugin authors; off by default there and here.
 plugin-netpbm = ["fast-tiff-viewer/plugin-netpbm"]
 # "Yes, really, no plugins." It enables nothing; it exists so that the guard in

@@ -23,32 +23,119 @@ const MINMAX_SAMPLE_BUDGET: usize = 1 << 18; // 262144
 /// Scans at most [`MINMAX_SAMPLE_BUDGET`] samples, striding across the frame
 /// when it is larger. Decoding still costs a frame, but the scan itself stops
 /// being O(pixels) on a 4K image.
-pub fn first_frame_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
-    let idx = channel.min(tiff.frames.len().saturating_sub(1));
-    let frame = tiff.frames.get(idx)?;
-    let pixels = fast_tiff_lib::read_frame_u16(&tiff.data, frame, tiff.byte_order, None).ok()?;
-    let (mut lo, mut hi) = (u16::MAX, 0u16);
-    // A prime-ish stride avoids landing on the same column of every row, which
-    // a power-of-two stride would do on a power-of-two-wide image and could
-    // miss a whole feature.
-    let stride = (pixels.len() / MINMAX_SAMPLE_BUDGET).max(1);
-    for &p in pixels.iter().step_by(stride) {
-        lo = lo.min(p);
-        hi = hi.max(p);
-    }
-    if hi <= lo {
-        hi = lo.saturating_add(1);
-    }
-    Some((lo as f32, hi as f32))
+pub fn channel_minmax(tiff: &TiffStack, channel: usize, step: usize) -> Option<(f32, f32)> {
+    let one = |idx: usize| -> Option<(f32, f32)> {
+        let frame = tiff.frames.get(idx)?;
+        let pixels =
+            fast_tiff_lib::read_frame_u16(&tiff.data, frame, tiff.byte_order, None).ok()?;
+        let (mut lo, mut hi) = (u16::MAX, 0u16);
+        // A prime-ish stride avoids landing on the same column of every row,
+        // which a power-of-two stride would do on a power-of-two-wide image and
+        // could miss a whole feature.
+        let stride = (pixels.len() / MINMAX_SAMPLE_BUDGET).max(1);
+        for &p in pixels.iter().step_by(stride) {
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+        Some((lo as f32, hi as f32))
+    };
+    scan_for_contrast(tiff, channel, step, one)
 }
 
 /// Actual float min/max of channel `c`'s first frame, for 32-bit float
 /// data — matches ImageJ auto-ranging a float image to its own values
 /// rather than assuming a fixed integer-shaped scale.
-pub fn first_frame_float_minmax(tiff: &TiffStack, channel: usize) -> Option<(f32, f32)> {
-    let idx = channel.min(tiff.frames.len().saturating_sub(1));
-    let frame = tiff.frames.get(idx)?;
-    fast_tiff_lib::frame_float_minmax(&tiff.data, frame, tiff.byte_order).ok()?
+pub fn channel_float_minmax(tiff: &TiffStack, channel: usize, step: usize) -> Option<(f32, f32)> {
+    scan_for_contrast(tiff, channel, step, |idx| {
+        let frame = tiff.frames.get(idx)?;
+        fast_tiff_lib::frame_float_minmax(&tiff.data, frame, tiff.byte_order).ok()?
+    })
+}
+
+/// Where to look for a plane with contrast in it, as fractions of the
+/// channel's own plane count.
+///
+/// Ordered, and the order is the whole idea. The first probe is plane 0, so the
+/// common case costs exactly one decode and nothing about opening an ordinary
+/// stack changes. After that it bisects — the middle, then the quarters, then
+/// the eighths — which finds content wherever it happens to be in two or three
+/// probes rather than walking towards it.
+///
+/// Walking was the first attempt and it is the wrong shape. "How many empty
+/// planes does a volume start with" has no safe constant: the file that
+/// prompted this, an SPM statistical map, begins with **exactly eight** blank
+/// slices, so a budget of eight found nothing and a budget of nine would have
+/// looked like it worked. Bisection has no such number in it.
+const PROBES: [(usize, usize); 8] = [
+    (0, 1),
+    (1, 2),
+    (1, 4),
+    (3, 4),
+    (1, 8),
+    (3, 8),
+    (5, 8),
+    (7, 8),
+];
+
+/// A plane of channel `channel` that has some spread in it, measured with
+/// `measure`, stepping by `step` to stay on the same channel.
+///
+/// # Why not just plane 0
+///
+/// Because the first plane of a volume is routinely empty, and a window fitted
+/// to an empty plane has no width. The old behaviour took plane 0's min and
+/// max, found them equal, and widened by exactly one unit — leaving a window
+/// one value wide, which maps everything below it to black and everything above
+/// to white. The picture came out as a two-tone mask, and nothing about it
+/// suggested the contrast was at fault rather than the data.
+///
+/// Anything with air at the top of it lands here: a head CT, a brain MRI, a
+/// z-stack with empty optical sections before the specimen. A statistical map
+/// is the worst case, being exact zeros everywhere outside its mask.
+///
+/// `step` is the channel count, because planes are `xyczt` with the channel
+/// fastest — so a channel's own planes are every `step`-th one. Stepping by 1
+/// would sample a *different* channel and fit this channel's window to another
+/// channel's data.
+///
+/// If every probe is flat, the first answer stands, widened by the smallest
+/// amount that is still a window — which is what a genuinely uniform image
+/// should get and what this has always done.
+fn scan_for_contrast(
+    tiff: &TiffStack,
+    channel: usize,
+    step: usize,
+    measure: impl Fn(usize) -> Option<(f32, f32)>,
+) -> Option<(f32, f32)> {
+    let step = step.max(1);
+    let total = tiff.frames.len();
+    if total == 0 {
+        return None;
+    }
+    let start = channel.min(total - 1);
+    // How many planes belong to this channel.
+    let planes = (total - start).div_ceil(step).max(1);
+
+    let mut first = None;
+    let mut tried = [usize::MAX; PROBES.len()];
+    for (slot, &(num, den)) in PROBES.iter().enumerate() {
+        let n = (planes.saturating_mul(num) / den).min(planes - 1);
+        // A short stack maps several fractions onto one plane; decoding it
+        // repeatedly would make opening a two-plane file eight times as slow
+        // for no new information.
+        if tried[..slot].contains(&n) {
+            continue;
+        }
+        tried[slot] = n;
+        let Some((lo, hi)) = measure(start + n * step) else {
+            continue;
+        };
+        if hi > lo {
+            return Some((lo, hi));
+        }
+        first = first.or(Some((lo, hi)));
+    }
+    first.map(|(lo, hi)| (lo, if hi > lo { hi } else { lo + 1.0 }))
 }
 
 /// Apply a Shift-drag's delta from one channel's contrast handles to all the
@@ -267,7 +354,11 @@ pub fn build_channel_settings_reporting(
     on_channel(0, total);
     (0..total)
         .map(|c| {
-            let settings = build_one(tiff, c);
+            // The *resolved* channel count, not `total`: `total` is capped at
+            // what can be shown, while the plane stride is whatever the file
+            // actually interleaves. A seven-channel file shows six and still
+            // has its channel's planes seven apart.
+            let settings = build_one(tiff, c, channels);
             on_channel(c + 1, total);
             settings
         })
@@ -275,7 +366,11 @@ pub fn build_channel_settings_reporting(
 }
 
 /// One channel's contrast window and upload format.
-fn build_one(tiff: &TiffStack, c: usize) -> ChannelSettings {
+///
+/// `channels` is how many planes apart this channel's own planes are; see
+/// [`scan_for_contrast`], which needs it to stay on one channel while looking
+/// for a plane with something in it.
+fn build_one(tiff: &TiffStack, c: usize, channels: usize) -> ChannelSettings {
     {
         // The metadata may describe fewer channels than we're showing (a
         // dimension override can raise the count), so fall back to "no
@@ -318,7 +413,7 @@ fn build_one(tiff: &TiffStack, c: usize) -> ChannelSettings {
         });
 
         if is_float {
-            let data = first_frame_float_minmax(tiff, c);
+            let data = channel_float_minmax(tiff, c, channels);
             let (lo, hi) = meta_range
                 .map(|(lo, hi)| (lo as f32, hi as f32))
                 .or(data)
@@ -333,7 +428,7 @@ fn build_one(tiff: &TiffStack, c: usize) -> ChannelSettings {
                 kind: ChannelKind::Float,
             }
         } else {
-            let data = first_frame_minmax(tiff, c);
+            let data = channel_minmax(tiff, c, channels);
             let (min, max) = meta_range
                 .map(|(lo, hi)| (lo as f32, hi as f32))
                 // No display range in metadata at all (not even

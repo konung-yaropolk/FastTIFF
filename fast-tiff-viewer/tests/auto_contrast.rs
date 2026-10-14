@@ -542,3 +542,86 @@ fn channels_without_a_histogram_keep_their_window() {
         .collect();
     assert_eq!(before, after);
 }
+
+// ------------------------- the window a file opens with, before Auto is used
+//
+// Everything above is about the Auto button. These are about the window that is
+// already there when the file appears, which is fitted by probing planes — and
+// which, for any volume with air at the top of it, used to be fitted to
+// nothing.
+
+/// A stack of `planes` planes where the first `blank` are a flat `0` and the
+/// rest carry a 0..=255 ramp. The shape of every scan that starts above the
+/// anatomy: a head CT, a brain MRI, a z-stack with empty sections before the
+/// specimen.
+fn capped_u16_stack(planes: usize, blank: usize, w: u32, h: u32) -> Vec<u8> {
+    let opts = WriterOptions::new(w, h, SampleType::U16).metadata(StackMetaWrite::new(1, planes));
+    let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    let n = (w * h) as usize;
+    for p in 0..planes {
+        let px: Vec<u16> = if p < blank {
+            vec![0u16; n]
+        } else {
+            (0..n).map(|i| (i % 256) as u16).collect()
+        };
+        writer
+            .write_frame_bytes(&px.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>())
+            .unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
+
+fn opening_window(bytes: Vec<u8>) -> (f32, f32) {
+    let s = Stack::from_bytes(bytes, "probe.tif".into(), false).expect("should open");
+    let c = s.display.settings.first().expect("one channel");
+    (c.min, c.max)
+}
+
+/// The bug: a volume whose first plane is empty opened with a window one unit
+/// wide, so every pixel was either black or white and the picture was a two-tone
+/// mask. Nothing about it suggested the contrast was at fault rather than the
+/// data.
+///
+/// Eight blank planes is not an arbitrary number — it is what the file that
+/// prompted this has, an SPM statistical map with exactly eight empty slices
+/// before the brain starts. A reader that walked forward with a budget of eight
+/// found nothing and one with a budget of nine would have looked correct.
+#[test]
+fn a_volume_that_starts_blank_still_opens_with_a_usable_window() {
+    for blank in [1usize, 5, 8, 9, 20, 40] {
+        let (lo, hi) = opening_window(capped_u16_stack(64, blank, 16, 16));
+        assert!(
+            hi - lo > 1.0,
+            "{blank} blank planes gave a {}-wide window",
+            hi - lo
+        );
+        assert!(
+            (hi - lo) > 200.0,
+            "{blank} blank planes: the window should span the ramp, got {lo}..{hi}"
+        );
+    }
+}
+
+/// And an image that genuinely holds one value still gets the narrowest window
+/// that is not zero-width — a zero-width one divides by zero on the way to the
+/// shader.
+#[test]
+fn a_genuinely_uniform_image_still_gets_a_window() {
+    let (lo, hi) = opening_window(capped_u16_stack(8, 8, 16, 16));
+    assert!(hi > lo, "{lo}..{hi} must not be empty");
+    assert!(
+        hi - lo <= 1.0,
+        "nothing to fit to, so the minimum: {lo}..{hi}"
+    );
+}
+
+/// The common case still costs one decode: a stack whose first plane has
+/// contrast is fitted to that plane and no other. Asserted through the window
+/// rather than by counting decodes — the first plane's ramp and the later
+/// planes' are identical here, so what this really pins is that probing more
+/// planes does not *change* the answer where the first one was good.
+#[test]
+fn a_stack_whose_first_plane_has_contrast_is_fitted_to_it() {
+    let (lo, hi) = opening_window(capped_u16_stack(16, 0, 16, 16));
+    assert_eq!((lo, hi), (0.0, 255.0));
+}

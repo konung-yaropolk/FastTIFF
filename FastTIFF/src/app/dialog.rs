@@ -41,6 +41,19 @@ pub(super) struct Dialog<'a> {
     /// screen is shorter than the content with no way to reach the rest of it.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub resizable: bool,
+    /// Whether it floats above the main window.
+    ///
+    /// Not on by default, and not right for every pop-up. It earns its place
+    /// where the controls act on the picture *continuously* — the 3-D settings,
+    /// whose every slider changes the render while you drag it. There the main
+    /// window has to be visible and the pop-up has to be reachable at the same
+    /// time, and a window that sinks behind the thing it is adjusting turns
+    /// each change into click-raise-drag-click.
+    ///
+    /// The metadata viewer and the histogram are read *about* the picture
+    /// rather than used to change it, so they stay ordinary windows a user can
+    /// put behind the app and forget.
+    pub always_on_top: bool,
 }
 
 /// Draw `body` as `dialog`, closing it when the user dismisses the window.
@@ -64,9 +77,15 @@ pub(super) fn show(
     // choosing to resize the window when the open file changes shape. For that
     // one it is the right call, since a window kept at the old file's height
     // would clip the controls of a file with more channels.
-    let builder = egui::ViewportBuilder::default()
+    let mut builder = egui::ViewportBuilder::default()
         .with_title(dialog.title)
         .with_inner_size(dialog.size);
+    if dialog.always_on_top {
+        // The window manager's own always-on-top, so it holds against every
+        // other application too — which is the point when the other
+        // application is a reference image or a paper.
+        builder = builder.with_always_on_top();
+    }
 
     let mut dismissed = false;
     ctx.show_viewport_immediate(
@@ -111,11 +130,17 @@ pub(super) fn show(
     mut body: impl FnMut(&mut egui::Ui),
 ) {
     unscaled(ctx, |ctx| {
-        let win = egui::Window::new(dialog.title)
+        let mut win = egui::Window::new(dialog.title)
             .id(egui::Id::new(dialog.id))
             .open(open)
             .resizable(dialog.resizable)
             .vscroll(dialog.scroll);
+        if dialog.always_on_top {
+            // In the browser there is no window manager to ask, only egui's own
+            // layer order — so "on top" means the foreground layer, above the
+            // canvas and above the other pop-ups.
+            win = win.order(egui::Order::Foreground);
+        }
         // Only the height is conditional. A scrolling body has no height of its
         // own to ask for, so the window hugs its content and stops growing when
         // it runs out of canvas — which matters far more here than on a desktop,

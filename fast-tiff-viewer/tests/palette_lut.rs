@@ -235,6 +235,8 @@ fn volume_params_carry_the_albedo_per_channel() {
         scivis_render::VolumeRender::Surface,
         100.0,
         0.1,
+        // Surface mode ignores the gain; 1.0 is "as composited".
+        1.0,
     );
     assert_eq!(params.albedo_t[0], albedo);
     // Absent channels keep the top entry, which is what an unused slot wants.

@@ -492,23 +492,37 @@ const CHANNEL_SIZE_CUTOFF: usize = 6;
 /// metadata claims the opposite (a "channels" value that's actually a
 /// mislabeled frame count, or vice versa), or is missing entirely.
 ///
-/// Z is never its own navigable axis: it's always folded into "frames" —
-/// just another time-like step — *unless* the file genuinely has
-/// channels, Z-slices, AND time-frames all greater than 1 at once. In that
-/// case there's no lossless way to collapse to two axes, so the three raw
-/// values are kept as-is and `triple_axis_warning` is set; the caller
-/// should show a warning and always read the first Z-slice.
+/// Z folds into "frames" — just another time-like step — *unless* the file
+/// genuinely has both Z-slices and time-frames. When it has both there is no
+/// lossless way to collapse to two axes, so all three values are kept as-is.
+///
+/// Whether that costs anything depends on the channel count, and the two cases
+/// are different enough to be worth separating:
+///
+/// * **One channel, Z and time both real.** The three axes fit the three slots
+///   exactly and nothing is given up, so no warning is set. This is the
+///   commonest 4-D shape there is — an fMRI or ASL series is one channel, tens
+///   of slices and tens of timepoints — and it used to be folded into a single
+///   long movie, because this branch demanded `c > 1` as well. The symptom was
+///   a 3-D view showing every timepoint's volume stacked end to end in one row,
+///   and a scrubber that stepped through slices and timepoints interleaved.
+/// * **Several channels, Z and time both real.** Now there is nothing left to
+///   put Z in, so `triple_axis_warning` is set; the caller shows a warning and
+///   reads the first Z-slice only.
 ///
 /// `channels * slices * frames` on the output always equals `c * z * f` on
 /// the input — this never invents or drops planes, only reclassifies which
 /// axis they belong to.
 pub fn resolve_dimensions(c: usize, z: usize, f: usize) -> ResolvedDimensions {
-    if c > 1 && z > 1 && f > 1 {
+    if z > 1 && f > 1 {
         return ResolvedDimensions {
-            channels: c,
+            channels: c.max(1),
             slices: z,
             frames: f,
-            triple_axis_warning: true,
+            // Only when a channel axis is competing for the same slots. With
+            // one channel this is a plain 4-D stack and there is nothing to
+            // warn about.
+            triple_axis_warning: c > 1,
         };
     }
 

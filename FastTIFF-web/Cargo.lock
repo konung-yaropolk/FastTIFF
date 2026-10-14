@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.22.1"
+version = "1.24.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -956,13 +956,14 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.22.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "bytemuck",
  "fast-tiff-lib",
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
+ "flate2",
  "libloading 0.9.0",
  "log",
  "memmap2",
@@ -972,6 +973,7 @@ dependencies = [
  "rustfft",
  "scivis-render",
  "suite2p-registration",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -984,7 +986,7 @@ version = "0.21.0"
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "1.22.1"
+version = "1.24.0"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",
