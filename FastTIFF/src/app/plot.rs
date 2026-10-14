@@ -368,6 +368,11 @@ pub(super) fn plot_window(ctx: &egui::Context, win: &mut PlotWindow, busy: bool)
         size: egui::vec2(480.0, 320.0) / super::scale::UI_SCALE,
         scroll: false,
         resizable: true,
+        // A plot is a result to read beside the picture, not a control acting
+        // on it — and with a canvas tool armed it is the *picture* that has to
+        // stay reachable, so floating this over it would be the wrong way
+        // round.
+        always_on_top: false,
     };
     dialog::show(ctx, spec, &mut open, |ui| {
         // The tool controls, only when the plugin asked for a selection.

@@ -299,3 +299,55 @@ fn open_file_types_are_deduplicated() {
 fn reading_the_head_of_a_missing_file_yields_nothing() {
     assert!(Registry::read_head(Path::new("/definitely/not/here.zz")).is_empty());
 }
+
+/// The MRI readers, each present exactly when its feature is on and offering
+/// the extensions the Open dialog needs.
+///
+/// The extension list is the part worth asserting rather than the registration:
+/// a `.nii.gz` has `gz` for its extension and nothing finer can be declared, so
+/// if that one slipped out of the list the importer would still be installed
+/// and would simply never be offered the files it exists for.
+#[test]
+fn the_mri_importers_are_installed_exactly_when_their_features_are() {
+    let reg = Registry::new();
+    for (feature_on, id, exts) in [
+        (
+            cfg!(all(feature = "plugin-nifti", not(target_arch = "wasm32"))),
+            "dev.fasttiff.nifti",
+            &["nii", "gz"][..],
+        ),
+        (
+            cfg!(all(feature = "plugin-dicom", not(target_arch = "wasm32"))),
+            "dev.fasttiff.dicom",
+            &["dcm"][..],
+        ),
+    ] {
+        let entry = reg.importers().iter().find(|e| e.info.id == id);
+        assert_eq!(
+            entry.is_some(),
+            feature_on,
+            "{id} must be installed exactly when its feature is on"
+        );
+        if let Some(entry) = entry {
+            let declared: Vec<&str> = entry
+                .file_types
+                .iter()
+                .flat_map(|t| t.extensions.iter().map(String::as_str))
+                .collect();
+            for want in exts {
+                assert!(
+                    declared.contains(want),
+                    "{id} should offer .{want}: {declared:?}"
+                );
+            }
+            // And the Open dialog learns about them.
+            let dialog = reg.open_file_types();
+            assert!(
+                dialog
+                    .iter()
+                    .any(|t| exts.iter().any(|e| t.extensions.contains(&e.to_string()))),
+                "{id}'s types should reach the Open dialog"
+            );
+        }
+    }
+}

@@ -1,6 +1,6 @@
 [package]
 name = "fast-tiff-viewer"
-version = "0.22.1"
+version = "0.24.0"
 edition = "2021"
 description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
 # GPL-3.0, not MPL-2.0 as the rest of the library crates are. The built-in
@@ -59,6 +59,8 @@ builtin-plugins = [
     "plugin-deconvolve",
     "plugin-png",
     "plugin-oir",
+    "plugin-nifti",
+    "plugin-dicom",
 ]
 
 # The four that cost nothing but their own code.
@@ -76,6 +78,15 @@ plugin-stabilize = ["dep:suite2p-registration"]
 plugin-deconvolve = ["dep:rustfft"]
 plugin-png = ["dep:png"]
 plugin-oir = ["dep:quick-xml", "dep:memmap2"]
+# The two MRI readers. `plugin-dicom` brings nothing with it — the format is
+# read from its own bytes — and `plugin-nifti` brings only gzip, which
+# fast-tiff-lib's Deflate codec already puts in the tree, so neither adds a
+# crate to the build.
+plugin-nifti = ["dep:flate2"]
+# `zune-jpeg` decodes the baseline (DCT) transfer syntax. The *lossless* one is
+# hand-rolled in `dicom/lossless.rs` — no crate on crates.io decodes it, zune
+# included, and it is the one medical archives actually use.
+plugin-dicom = ["dep:zune-jpeg"]
 
 # A worked example for plugin authors rather than a format this viewer needs;
 # see `plugins/builtin/mod.rs`. Off by default — deliberately not in
@@ -186,5 +197,23 @@ quick-xml = { version = "0.37", optional = true }
 # thirty-five scattered chunks, and a recording is a quarter of a million of
 # them. Same crate and same version fast-tiff-lib maps TIFFs with.
 memmap2 = { version = "0.9", optional = true }
+# `.nii.gz`, which is how NIfTI volumes are almost always distributed — the
+# plain `.nii` is the exception. Whole-file gzip and nothing more exotic, so
+# this is `flate2`'s simplest use. Already in the tree twice over (fast-tiff-lib
+# decodes Deflate-compressed TIFFs with it, and `png` pulls it in), at the same
+# version, so the NIfTI reader compiles no new crate.
+#
+# Here rather than in the shared table because the importer lane is native-only
+# — see `plugins/builtin/nifti/mod.rs` for why — and a dependency for a module
+# that cannot be reached on a target has no business being compiled for it.
+flate2 = { version = "1.1", optional = true }
+# Baseline JPEG, for the DICOM transfer syntax that uses it. Pure Rust, and
+# already in this workspace's tree via `image` (which `FastTIFF` uses to decode
+# its own icon), so the same version is built once.
+#
+# It decodes baseline and progressive and says plainly that it cannot do
+# lossless Huffman, which is why `dicom/lossless.rs` exists beside it rather
+# than this being the whole JPEG story.
+zune-jpeg = { version = "0.5", optional = true }
 # `png` and `rustfft` used to live here. They moved up into the shared
 # dependencies when their plugins started building for the browser.

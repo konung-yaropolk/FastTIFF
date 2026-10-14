@@ -678,6 +678,18 @@ fn sync_volume(
     let cam = volume_camera(&view.cam, view.scale, (w, h, loaded.volume_depth()));
     // Cache the box extents so the orbit re-pivot can ray-cast the box.
     view.cam.box_he = cam.box_he;
+    // The gain, decided here rather than in the shader because which of the
+    // three answers applies depends on the mode — see [`crate::brightness`].
+    let brightness = match view.render {
+        scivis_render::VolumeRender::Mip => view.mip_brightness,
+        scivis_render::VolumeRender::Alpha if view.volume_autolevel => {
+            crate::brightness::autolevel(view.density)
+        }
+        scivis_render::VolumeRender::Alpha => view.volume_brightness,
+        // Surface returns a shaded hit rather than an accumulation, and has its
+        // own shading constants.
+        scivis_render::VolumeRender::Surface => 1.0,
+    };
     let params = build_volume_params(
         &cam,
         windows,
@@ -685,6 +697,7 @@ fn sync_volume(
         view.render,
         view.density,
         view.iso,
+        brightness,
     );
     renderer.set_volume_params(params);
     needs_repaint
