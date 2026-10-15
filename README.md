@@ -604,8 +604,8 @@ cargo test --manifest-path plugins/example/Cargo.toml
 
 Some plugins ship *inside* the binary rather than as libraries: Invert, Z
 Project, Plot third axis, the three Slice tools, Generate PSF, Deconvolve,
-suite2p stabilization, the PNG importer/exporter, the Olympus OIR reader and
-the two MRI importers below.
+suite2p stabilization, TurboReg stabilization, the PNG importer/exporter, the
+Olympus OIR reader and the two MRI importers below.
 They are written against the same contract a `.dll` is — being compiled in is a
 lane, not a different kind of plugin — and they are what the browser build has,
 since it can load nothing.
@@ -620,8 +620,8 @@ cargo build --release -p FastTIFF --no-default-features \
 
 A plugin left out is *gone*: no module, no menu entry, and no dependency of its
 own compiled or linked. Two carry enough to notice — `plugin-deconvolve` brings
-an FFT and `plugin-stabilize` a whole registration crate, and dropping both
-takes about 460 KB off the web bundle. `plugin-dicom` brings a JPEG decoder, for
+an FFT, and `plugin-stabilize` and `plugin-turboreg` a registration crate
+each. Dropping the FFT and suite2p takes about 460 KB off the web bundle. `plugin-dicom` brings a JPEG decoder, for
 the two JPEG codecs DICOM actually uses. `plugin-nifti` brings only gzip, which
 the Deflate TIFF codec already needs, so it costs nothing — and the same is true
 of `plugin-oir`'s XML parser, which OME-XML metadata already pulls in. (A plugin
@@ -651,6 +651,68 @@ cargo test -p fast-tiff-viewer --features plugin-netpbm
 
 The shared-library lane is native-only — there is no `dlopen` in a browser — so
 the web build gets the built-ins and no way to add to them.
+
+### Registration: two plugins, two different questions
+
+Both put frames back on top of each other, and which to reach for depends on
+*how* they moved.
+
+| | measures | takes out | cost |
+|---|---|---|---|
+| **suite2p stabilization** | a shift, by phase correlation | drift, plus an optional block-wise deformation | fast |
+| **TurboReg stabilization** | a transformation, by optimisation | rotation, scale, shear or a bilinear warp | slower per frame |
+
+A two-photon timelapse that drifted under the objective wants the first. A
+histology series where each section was placed on the slide by hand, or a
+recording where the stage rotated, wants the second.
+
+TurboReg offers five models — translation, rigid body, scaled rotation, affine
+and bilinear — and three targets in time: the previous frame, the first, or the
+mean of the stack. The first frame is the default: nothing accumulates down the
+series, and the target is a frame that was actually photographed rather than an
+average of frames that each need correcting. The stack mean is sharper on a
+long, noisy recording. Aligning to the previous frame suits a steady drift but
+compounds its own error, and it is not offered for a bilinear warp, which cannot
+be chained onto another.
+
+**Pick the smallest model that covers the motion.** More degrees of freedom is
+not better, and the cost is measurable. Registering a series built by rotating
+and shifting one image, as residual difference between frames afterwards:
+
+| model | ordinary image | self-similar pattern |
+|---|---|---|
+| Translation | 3.8% → 1.4% | 33.6% → 22.1% |
+| Rigid body | 3.8% → **0.075%** | 33.6% → **3.8%** |
+| Affine | 3.8% → 0.091% | 33.6% → 19.9% |
+
+Affine contains rigid body, so on an ordinary image it does just as well. On a
+*repeating* pattern it collapses, because such an image has a local minimum
+everywhere one period lines up with the next and the extra freedom finds them.
+A grid, a regular array of wells, a tissue microarray: use the model the motion
+actually needs.
+
+**Measured on one channel, applied to all.** A multi-channel recording is one
+specimen photographed several ways at once, so the channels moved together: the
+transformation is measured on the channel you name — or on their mean, the
+default, since averaging raises what the search is matching — and applied to
+every channel. Registering each channel on its own would move them relative to
+each other, which is the one thing a multi-channel recording must not do. With a
+single channel there is nothing to choose and the selector says so.
+
+Both run single- or multi-threaded, selectable in the dialog. The answer is the
+same either way; only how many frames are in flight differs. The chained
+reference is the exception — it is a chain by construction and runs on one
+thread whatever is chosen.
+
+The algorithm is Thévenaz, Rüttimann & Unser's, shipped by EPFL as TurboReg and
+StackReg. [`turboreg-registration/`](turboreg-registration/) is an
+implementation of it with the API of
+[pystackreg](https://github.com/glichtner/pystackreg), **not** a port of that
+project's code: pystackreg carries the pre-2023 EPFL terms ("you should not
+redistribute it without our consent"), which are not GPL-compatible, whereas
+EPFL relicensed TurboReg/StackReg itself to GPL-3-or-later in April 2023. It
+does not claim bit-parity with StackReg; see the crate's README for exactly
+where it differs and why.
 
 ### MRI: NIfTI and DICOM
 
@@ -768,6 +830,7 @@ this is the one-line formula to change.
 - Done: close all opened dialog windows when opened new file
 - Done: surface rendering mode added
 - Done: Add windows installer with files association
+- Done: TurboReg stabilization plugin (rigid/affine/bilinear) + turboreg-registration crate
 - Done: copy the view as an image (2D frame at original size, 3D as framed), button + Ctrl/Cmd+C
 - Done: built-in plugins are per-plugin Cargo features, each with its own deps
 - Done: universal (arm64 + x86_64) macOS binary, so there is one download

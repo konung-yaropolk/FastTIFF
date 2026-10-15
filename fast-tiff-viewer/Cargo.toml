@@ -56,6 +56,7 @@ builtin-plugins = [
     "plugin-plot-axis",
     "plugin-stack-tools",
     "plugin-stabilize",
+    "plugin-turboreg",
     "plugin-deconvolve",
     "plugin-png",
     "plugin-oir",
@@ -75,6 +76,11 @@ plugin-stack-tools = []
 # deconvolution transforms; `png` the PNG importer/exporter; `quick-xml` and
 # `memmap2` the OIR container reader.
 plugin-stabilize = ["dep:suite2p-registration"]
+# StackReg registration. A second registration crate rather than an option on
+# the first: the two answer different questions (a shift by phase correlation
+# versus a transformation by optimisation) and share no code. Also GPL-3, for
+# its own reasons — see that crate's manifest.
+plugin-turboreg = ["dep:turboreg-registration"]
 plugin-deconvolve = ["dep:rustfft"]
 plugin-png = ["dep:png"]
 plugin-oir = ["dep:quick-xml", "dep:memmap2"]
@@ -155,6 +161,7 @@ fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
 # build is restored for every target that has threads, in the native block
 # below; a browser gets the same arithmetic on one thread and is told so.
 suite2p-registration = { path = "../suite2p-registration", default-features = false, optional = true }
+turboreg-registration = { path = "../turboreg-registration", default-features = false, optional = true }
 
 # Two built-ins that the browser build also gets, so their dependencies are no
 # longer desktop-only either: `png` for the PNG importer/exporter, `rustfft` for
@@ -186,6 +193,7 @@ libloading = "0.9"
 # is build for wasm, and `cfg(not(target_arch = "wasm32"))` is the condition
 # that says exactly that and cannot be forgotten.
 suite2p-registration = { path = "../suite2p-registration", default-features = false, features = ["threads"], optional = true }
+turboreg-registration = { path = "../turboreg-registration", default-features = false, features = ["threads"], optional = true }
 # The OIR importer's acquisition record (`plugins/builtin/oir_meta.rs`). Kept in
 # step with fast-tiff-lib's OME reader so the workspace builds one copy, and
 # native-only because the whole plugin module is: a browser cannot open a `.oir`

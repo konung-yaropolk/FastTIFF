@@ -968,6 +968,7 @@ dependencies = [
  "log",
  "memmap2",
  "png",
+ "pystackreg-registration",
  "quick-xml 0.37.5",
  "rayon",
  "rustfft",
@@ -2502,6 +2503,13 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "pystackreg-registration"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+]
 
 [[package]]
 name = "quick-error"

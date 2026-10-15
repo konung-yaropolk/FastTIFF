@@ -33,6 +33,7 @@
     feature = "plugin-plot-axis",
     feature = "plugin-stack-tools",
     feature = "plugin-stabilize",
+    feature = "plugin-turboreg",
     feature = "plugin-deconvolve",
     feature = "plugin-png",
     feature = "plugin-oir",
