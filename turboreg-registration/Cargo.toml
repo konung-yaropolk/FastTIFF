@@ -1,0 +1,63 @@
+# A Rust implementation of the TurboReg/StackReg pyramid registration algorithm,
+# with the API surface of pystackreg.
+#
+# GPL-3.0, and the licensing here is worth reading before changing anything.
+#
+# The algorithm is Thevenaz, Ruttimann & Unser's, published in 1998 and shipped
+# by EPFL as the ImageJ plugins TurboReg and StackReg. EPFL relicensed both to
+# **GPL-3-or-later in April 2023**, so a GPL-3 implementation of their algorithm
+# is on the same terms as its source.
+#
+# What this crate is NOT is a port of pystackreg's code. pystackreg
+# (https://github.com/glichtner/pystackreg) is a C++ port of the same EPFL
+# original by Gregor Lichtner, and it still carries the pre-2023 terms: its
+# per-file headers say "you should not redistribute it without our consent",
+# its LICENSE.txt allows distribution only "under the same terms as this
+# license specifies", and PyPI classifies it "Free To Use But Restricted". None
+# of that is compatible with GPL-3, and EPFL's relicensing does not reach
+# Lichtner's own porting work. So pystackreg lends this crate its *interface* —
+# which is what makes a result comparable — and nothing else.
+#
+# Citation, which EPFL asks for alongside the GPL and which is not a licence
+# condition but is owed anyway:
+#
+#   P. Thevenaz, U.E. Ruttimann, M. Unser, "A Pyramid Approach to Subpixel
+#   Registration Based on Intensity", IEEE Transactions on Image Processing,
+#   vol. 7, no. 1, pp. 27-41, January 1998.
+[package]
+name = "turboreg-registration"
+version = "0.24.2"
+edition = "2021"
+# `let ... else`, used throughout the optimizer.
+rust-version = "1.82"
+description = """
+Rigid-body, affine and bilinear image registration by the TurboReg/StackReg \
+pyramid method: cubic B-spline interpolation, a least-squares spline pyramid, \
+and Thevenaz's inverse Marquardt-Levenberg optimizer. API-compatible with \
+pystackreg.\
+"""
+license = "GPL-3.0-only"
+repository = "https://github.com/konung-yaropolk/FastTIFF"
+homepage = "https://github.com/konung-yaropolk/FastTIFF"
+readme = "README.md"
+keywords = ["microscopy", "registration", "stackreg", "turboreg", "imaging"]
+categories = ["science", "algorithms", "multimedia::images"]
+
+[dependencies]
+# Parallel CPU registration. Frames are independent once the reference is
+# fixed, so a stack is an embarrassingly parallel map — except under
+# `Reference::Previous`, which is a chain and cannot be (see `par.rs`).
+#
+# Optional, and behind `threads`, for the browser's sake: rayon does build for
+# `wasm32-unknown-unknown`, falling back to running a `par_iter` on the calling
+# thread, but a thread pool that can never run is a large thing to send over a
+# network and `Backend::MultiThread` would then be a label with nothing behind
+# it. Same reasoning, and the same shape, as `suite2p-registration`.
+rayon = { version = "1.10", optional = true }
+
+[features]
+default = ["threads"]
+# Parallel CPU registration. On by default: every native build wants it, and a
+# crate that had to be asked for its usual behaviour would be a trap. Turning it
+# off leaves the arithmetic untouched and `Backend::MultiThread` unavailable.
+threads = ["dep:rayon"]

@@ -108,8 +108,13 @@ pub mod png;
     feature = "plugin-invert",
     feature = "plugin-stack-tools",
     feature = "plugin-deconvolve",
+    feature = "plugin-turboreg",
 ))]
 pub(crate) mod shared;
+#[cfg(feature = "plugin-stabilize")]
+pub mod stabilize;
+#[cfg(feature = "plugin-stack-tools")]
+pub mod stack_tools;
 /// Every target, now that `suite2p-registration` can be built without rayon.
 ///
 /// This was desktop-only, on the grounds that the registration crate depended
@@ -127,10 +132,8 @@ pub(crate) mod shared;
 ///
 /// One thing to know before reaching for it in a browser: a plugin run on the
 /// web is synchronous, so a long registration will hold the tab.
-#[cfg(feature = "plugin-stabilize")]
-pub mod stabilize;
-#[cfg(feature = "plugin-stack-tools")]
-pub mod stack_tools;
+#[cfg(feature = "plugin-turboreg")]
+pub mod turboreg;
 #[cfg(feature = "plugin-zproject")]
 pub mod zproject;
 
@@ -154,6 +157,8 @@ pub use png::{Png, PngImport};
 pub use stabilize::Stabilize;
 #[cfg(feature = "plugin-stack-tools")]
 pub use stack_tools::{SliceKeeper, SliceOrderInvert, SliceRemover};
+#[cfg(feature = "plugin-turboreg")]
+pub use turboreg::TurboReg;
 #[cfg(feature = "plugin-zproject")]
 pub use zproject::ZProject;
 
@@ -180,6 +185,8 @@ pub fn all() -> Vec<Box<dyn Plugin>> {
     v.push(Box::new(PlotAxis));
     #[cfg(feature = "plugin-stabilize")]
     v.push(Box::new(Stabilize));
+    #[cfg(feature = "plugin-turboreg")]
+    v.push(Box::new(TurboReg));
     #[cfg(feature = "plugin-stack-tools")]
     {
         v.push(Box::new(SliceKeeper));

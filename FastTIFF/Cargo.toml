@@ -53,6 +53,7 @@ builtin-plugins = [
     "plugin-plot-axis",
     "plugin-stack-tools",
     "plugin-stabilize",
+    "plugin-turboreg",
     "plugin-deconvolve",
     "plugin-png",
     "plugin-oir",
@@ -64,6 +65,7 @@ plugin-zproject = ["fast-tiff-viewer/plugin-zproject"]
 plugin-plot-axis = ["fast-tiff-viewer/plugin-plot-axis"]
 plugin-stack-tools = ["fast-tiff-viewer/plugin-stack-tools"]
 plugin-stabilize = ["fast-tiff-viewer/plugin-stabilize"]
+plugin-turboreg = ["fast-tiff-viewer/plugin-turboreg"]
 plugin-deconvolve = ["fast-tiff-viewer/plugin-deconvolve"]
 plugin-png = ["fast-tiff-viewer/plugin-png"]
 plugin-oir = ["fast-tiff-viewer/plugin-oir"]
