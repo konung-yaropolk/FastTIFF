@@ -65,6 +65,7 @@ pub mod roi;
 /// Writing the open stack back out as a TIFF. Native only: it writes to a
 /// path, and a browser has none.
 pub mod save;
+pub mod snapshot;
 pub mod stack;
 pub mod viewer;
 pub mod volume;

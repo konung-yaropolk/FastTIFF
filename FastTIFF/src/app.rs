@@ -33,6 +33,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 mod autoscroll;
 mod camera;
 mod clipboard;
+mod copy_view;
 mod dialog;
 mod kinetic;
 mod minimap;
@@ -345,6 +346,7 @@ const STATUS_DONE: Color32 = Color32::from_rgb(120, 195, 120);
 /// are two that look obvious and are not there.
 const ICON_OPEN: &str = "🗁";
 const ICON_SAVE: &str = "💾";
+const ICON_COPY: &str = "🗐";
 const ICON_PLUGINS: &str = "☰";
 const ICON_SETTINGS: &str = "⚙";
 const ICON_SIZE: f32 = 14.0;
@@ -1317,6 +1319,19 @@ pub struct ViewerApp {
     /// Space / Shift translation; `scroll_speed` scales the mouse-wheel fly.
     move_speed: f32,
     scroll_speed: f32,
+
+    // --- copying the view ---------------------------------------------------
+    /// The 3-D panel's rect, recorded as it is painted.
+    ///
+    /// Copying the 3-D view is a screenshot of the window cropped to this, and
+    /// the crop happens a frame or more after the request — so the rect has to
+    /// be remembered rather than asked for at crop time, when the panel may not
+    /// be being laid out at all.
+    volume_rect: Option<egui::Rect>,
+    /// Set when a screenshot has been asked for in order to copy the 3-D view,
+    /// holding the rect to cut out of it. `None` when no copy is outstanding,
+    /// which is also what keeps an unrelated screenshot from being copied.
+    pending_copy: Option<egui::Rect>,
 }
 
 /// Reveal a directory in the platform's file manager.
@@ -1406,6 +1421,8 @@ impl ViewerApp {
             show_coord_box: false,
             move_speed: 1.0,
             scroll_speed: 1.0,
+            volume_rect: None,
+            pending_copy: None,
         };
         if let Some(opened) = initial {
             app.apply_opened(opened);
@@ -2182,6 +2199,78 @@ impl ViewerApp {
         }
     }
 
+    /// Put the view on the clipboard as an image.
+    ///
+    /// Which picture that is depends on the mode, and the two are genuinely
+    /// different requests rather than one with a switch in it:
+    ///
+    /// * **2-D** copies the *image* — the current frame at its own size, every
+    ///   enabled channel through its own window and LUT, composed on the CPU.
+    ///   Not what is on screen: that is at some zoom and pan, and on a stack too
+    ///   large to upload whole it is only a window of the frame.
+    /// * **3-D** copies the *view*, because for a ray-march there is nothing
+    ///   else to copy. There is no original size, and the camera and projection
+    ///   are the picture. So it screenshots the panel, which cannot finish this
+    ///   frame — the backend reads a screenshot back after painting — and
+    ///   completes in [`poll_copy`](Self::poll_copy).
+    ///
+    /// Shared by the toolbar button and the hotkey, so the two cannot drift.
+    fn copy_view(&mut self, ctx: &egui::Context) {
+        let Some(stack) = self.core.stack.as_ref() else {
+            self.core.status = Some("Open an image first".into());
+            return;
+        };
+        if self.job.is_some() {
+            self.core.status = Some(self.busy_message());
+            return;
+        }
+        if self.core.view_mode == ViewMode::Volume {
+            // Nothing has been painted yet on the frame a file opens in, so
+            // there is no view to grab. Saying so beats copying a blank.
+            let Some(rect) = self.volume_rect else {
+                self.core.status = Some("The 3D view has not been drawn yet".into());
+                return;
+            };
+            copy_view::request_volume(ctx);
+            self.pending_copy = Some(rect);
+            return;
+        }
+        match fast_tiff_viewer::snapshot::of_frame(stack) {
+            Ok(snap) => {
+                let (w, h) = (snap.width, snap.height);
+                copy_view::put(ctx, copy_view::image_of(&snap));
+                self.report_done(format!("Copied {w} x {h} image"));
+            }
+            Err(e) => self.core.status = Some(format!("Could not copy the view: {e:#}")),
+        }
+    }
+
+    /// Finish a 3-D copy once the screenshot lands.
+    ///
+    /// Only acts while a copy is outstanding: a screenshot taken for any other
+    /// reason is none of this function's business, and copying it would put a
+    /// picture on the clipboard that nobody asked for.
+    fn poll_copy(&mut self, ctx: &egui::Context) {
+        let Some(rect) = self.pending_copy else {
+            return;
+        };
+        let Some(shot) = copy_view::take_screenshot(ctx) else {
+            return;
+        };
+        // Taken, whatever happens next: a screenshot that cannot be cropped is
+        // not going to become croppable on the following frame, and leaving the
+        // request standing would copy the next unrelated screenshot instead.
+        self.pending_copy = None;
+        match copy_view::crop(&shot, rect, ctx.pixels_per_point()) {
+            Some(image) => {
+                let (w, h) = (image.width(), image.height());
+                copy_view::put(ctx, image);
+                self.report_done(format!("Copied {w} x {h} view"));
+            }
+            None => self.core.status = Some("The 3D view is too small to copy".into()),
+        }
+    }
+
     /// Hand the open stack to an exporter, on a worker.
     ///
     /// The registry goes with it, as an import's and a filter's do, which is
@@ -2739,6 +2828,7 @@ impl ViewerApp {
         let mut mode_request: Option<ViewMode> = None;
         let mut open_requested = false;
         let mut save_requested = false;
+        let mut copy_requested = false;
         let mut render_settings_toggle = false;
         let mut plugin_to_start: Option<usize> = None;
         #[cfg(not(target_arch = "wasm32"))]
@@ -2753,33 +2843,59 @@ impl ViewerApp {
                 {
                     open_requested = true;
                 }
-                // Disabled with nothing open, which is the one condition
-                // that makes it unavailable and one the user can reach — so a
-                // greyed button here is a promise rather than a dead end.
+                // Save and Copy both act on the open image, so with nothing
+                // open they are *hidden* rather than greyed out. A disabled
+                // control is a promise that some reachable state will enable
+                // it; "open a file first" is not that state, it is the whole
+                // program not having started yet, and two dead buttons beside
+                // Open say nothing Open does not already say.
                 //
-                // Named for what each platform actually does. The desktop asks
-                // where to put the file, so its label ends in an ellipsis; the
-                // browser cannot ask and hands the file to the download manager
-                // instead, so promising a dialog there would be a lie.
-                let save_label = if cfg!(target_arch = "wasm32") {
-                    "Download as TIFF"
-                } else {
-                    "Save as TIFF…"
-                };
-                if ui
-                    .add_enabled(
-                        self.core.stack.is_some() && self.job.is_none(),
-                        egui::Button::new(RichText::new(ICON_SAVE).size(ICON_SIZE)),
-                    )
-                    .on_hover_text(save_label)
-                    .on_disabled_hover_text(if self.core.stack.is_some() {
-                        format!("{save_label} — busy")
+                // Busy is the opposite case and stays greyed: there *is* an
+                // image, the button *will* work, and the only thing missing is
+                // the few seconds a write or an import is taking. That is a
+                // promise worth making, so the disabled hover text names it.
+                if self.core.stack.is_some() {
+                    // Named for what each platform actually does. The desktop
+                    // asks where to put the file, so its label ends in an
+                    // ellipsis; the browser cannot ask and hands the file to the
+                    // download manager instead, so promising a dialog there
+                    // would be a lie.
+                    let save_label = if cfg!(target_arch = "wasm32") {
+                        "Download as TIFF"
                     } else {
-                        format!("{save_label} — nothing is open")
-                    })
-                    .clicked()
-                {
-                    save_requested = true;
+                        "Save as TIFF…"
+                    };
+                    if ui
+                        .add_enabled(
+                            self.job.is_none(),
+                            egui::Button::new(RichText::new(ICON_SAVE).size(ICON_SIZE)),
+                        )
+                        .on_hover_text(save_label)
+                        .on_disabled_hover_text(format!("{save_label} — busy"))
+                        .clicked()
+                    {
+                        save_requested = true;
+                    }
+                    // What a copy *is* differs by view mode, so the tooltip
+                    // says which one the user will get rather than a generic
+                    // "copy": in 2-D the frame at its own size, in 3-D the view
+                    // as it is framed on screen. See `copy_view`.
+                    let copy_label = if self.core.view_mode == ViewMode::Volume {
+                        "Copy the 3D view as an image"
+                    } else {
+                        "Copy this frame as an image"
+                    };
+                    if ui
+                        .add_enabled(
+                            self.job.is_none(),
+                            egui::Button::new(RichText::new(ICON_COPY).size(ICON_SIZE)),
+                        )
+                        .on_hover_text(format!("{copy_label}  (Ctrl/Cmd+C)"))
+                        .on_disabled_hover_text(format!("{copy_label} — busy"))
+                        .clicked()
+                    {
+                        copy_requested = true;
+                    }
                 }
                 {
                     let available = self.plugins.as_ref().filter(|_| self.job.is_none());
@@ -2956,6 +3072,9 @@ impl ViewerApp {
         if save_requested {
             self.save_as();
         }
+        if copy_requested {
+            self.copy_view(ui.ctx());
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if open_plugin_folder {
             match fast_tiff_viewer::plugins::install_dir() {
@@ -2976,6 +3095,13 @@ impl ViewerApp {
         }
         self.poll_plugin_dialog(ui.ctx());
         self.poll_plot(ui.ctx());
+        // Ctrl/Cmd+C, after the buttons so an explicit click this frame is not
+        // also counted as a chord, and before the poll so a copy asked for by
+        // key is picked up on the same schedule as one asked for by button.
+        if copy_view::hotkey(ui.ctx()) {
+            self.copy_view(ui.ctx());
+        }
+        self.poll_copy(ui.ctx());
         if let Some(mode) = mode_request {
             self.core.view_mode = mode;
             // Entering 3D stops movie playback — unless the stack is 4D (a
@@ -3728,6 +3854,10 @@ impl ViewerApp {
                     }
 
                     let animating = self.drive_volume_camera(ui, &response, panel_rect);
+                    // Where the view is, for a copy of it. Recorded at the one
+                    // place that knows — a copy happens a frame later, by which
+                    // time this panel may not be being laid out at all.
+                    self.volume_rect = Some(panel_rect);
                     response.on_hover_cursor(egui::CursorIcon::Crosshair);
                     ui.painter()
                         .with_clip_rect(panel_rect)

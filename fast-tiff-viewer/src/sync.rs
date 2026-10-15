@@ -121,23 +121,20 @@ impl Viewer {
         // Window/level goes to the shader in the units its texture actually
         // holds: 16-bit ints in raw 0..65535, floats in their own units (R32F
         // holds raw samples), and 8-bit ints in 0..255 — the slider keeps the
-        // window in 0..65535, so an 8-bit channel's bounds are rescaled by 257
-        // (the widening factor) here. `is_float` tells the shader which texture
-        // to sample; the two integer formats share one sampler.
-        const SCALE_8BIT: f32 = 257.0;
+        // window in 0..65535, so an 8-bit channel's bounds are rescaled by the
+        // widening factor. That conversion is
+        // [`crate::channels::sample_window`], shared with the CPU compositor so
+        // the two cannot drift. `is_float` tells the shader which texture to
+        // sample; the two integer formats share one sampler.
         let uniforms: Vec<ChannelUniform> = loaded
             .display
             .settings
             .iter()
             .map(|s| {
-                let scale = if s.kind == ChannelKind::Int8 {
-                    SCALE_8BIT
-                } else {
-                    1.0
-                };
+                let (min, max) = crate::channels::sample_window(s.kind, s.min, s.max);
                 ChannelUniform {
-                    min: s.min / scale,
-                    max: s.max / scale,
+                    min,
+                    max,
                     enabled: s.enabled,
                     is_float: s.kind == ChannelKind::Float,
                 }

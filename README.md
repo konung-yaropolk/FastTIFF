@@ -371,6 +371,21 @@ it can be used in projects that couldn't take a GPL dependency.
   background, and linear puts all of it in one bin at the edge.
 - Z-slice selector when `slices > 1` (the scrubber itself always drives
   the time/frame axis).
+- **Copy the view as an image** — the toolbar's copy button, or **Ctrl+C**
+  (**⌘C** on macOS). What gets copied differs by mode, because the two modes
+  have different right answers:
+  - In **2D** it is the *image*: the current frame at its **original size**,
+    every enabled channel through its own contrast window and LUT. Not a grab of
+    what is on screen — that is at whatever zoom and pan you left it, and on a
+    stack too large to upload whole it is only the window currently resident.
+    The frame is recomposed on the CPU for the copy, which is also why it does
+    not need a working GPU.
+  - In **3D** it is the *view*, because for a ray-march there is nothing else to
+    copy: there is no original size, and the camera, projection and brightness
+    are the picture. So it takes the 3D panel exactly as framed.
+
+  The hotkey yields to whatever has keyboard focus, so Ctrl+C in a text box
+  still copies the text.
 - Zoom (Ctrl+scroll) and pan (drag, or middle-drag) of the 2D image, with the window sized
   to fit on open. A wheel notch **glides** to the next level over about a tenth
   of a second, about the point under the cursor, rather than jumping — long
@@ -753,6 +768,7 @@ this is the one-line formula to change.
 - Done: close all opened dialog windows when opened new file
 - Done: surface rendering mode added
 - Done: Add windows installer with files association
+- Done: copy the view as an image (2D frame at original size, 3D as framed), button + Ctrl/Cmd+C
 - Done: built-in plugins are per-plugin Cargo features, each with its own deps
 - Done: universal (arm64 + x86_64) macOS binary, so there is one download
 - Done: minimap has a minimum size, and click/drag moves the field of view

@@ -175,6 +175,34 @@ pub fn shift_sync(settings: &mut [ChannelSettings], before: &[(f32, f32)]) {
     }
 }
 
+/// The factor an 8-bit channel's contrast window is scaled down by.
+///
+/// The interface keeps every integer channel's window in 0..65535 so one slider
+/// serves 8- and 16-bit data alike, but an `Int8` channel's texture holds the
+/// raw 0..255 samples. 257 is the widening factor (`0xFF * 257 == 0xFFFF`), so
+/// dividing by it puts the window back in the units the samples are in.
+const WIDEN_8BIT: f32 = 257.0;
+
+/// A channel's contrast window in the units its *samples* are in.
+///
+/// Two readers of the same pixels disagreeing by a factor of 257 is the exact
+/// hazard [`crate::planes`] warns about, and it is invisible: an 8-bit image
+/// composed with a 16-bit window comes out black, and one composed the other
+/// way comes out blown out, and both look like a contrast bug rather than a
+/// unit bug. So the conversion lives here, once, and everything that pairs a
+/// window with samples goes through it — the GPU uniforms in `crate::sync` and
+/// the CPU compositor in [`crate::snapshot`].
+///
+/// `Int16` needs no conversion (the window is already in raw 0..65535) and
+/// neither does `Float` (an R32F texture holds the samples in their own units,
+/// and so does the window).
+pub fn sample_window(kind: ChannelKind, min: f32, max: f32) -> (f32, f32) {
+    match kind {
+        ChannelKind::Int8 => (min / WIDEN_8BIT, max / WIDEN_8BIT),
+        ChannelKind::Int16 | ChannelKind::Float => (min, max),
+    }
+}
+
 /// The contrast range-slider's track bounds: the channel's data min/max
 /// (when known) unioned with the current display `window`, so both handles
 /// always land on the track and the user has a little headroom to widen the
