@@ -166,16 +166,27 @@ in - the other's dependencies are excluded entirely.
 
 ## Deprecated Windows 7 build
 
-Install the Nightly Toolchain:
+Install the Nightly Toolchain — **a pinned one**, see the note below:
 ```sh
-rustup toolchain install nightly
-rustup component add rust-src --toolchain nightly
+rustup toolchain install nightly-2026-09-08
+rustup component add rust-src --toolchain nightly-2026-09-08
 ```
 
 Compile for the Tier 3 (deprecated) target, **with the OpenGL backend**:
 ```sh
-cargo +nightly build --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --release --no-default-features --features renderer-glow,builtin-plugins
+cargo +nightly-2026-09-08 build --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --release --no-default-features --features renderer-glow,builtin-plugins
 ```
+
+> **Why a pinned nightly.** `-Z build-std` compiles the standard library from
+> source, so a regression in *std* breaks this build and nothing in this
+> repository can work around it. A nightly after 2026-09-08 put
+> `#[cfg(not(target_vendor = "win7"))]` on `is_console` in
+> `library/std/src/sys/stdio/windows.rs` while leaving its two call sites
+> unconditional, so std stops compiling for this target with
+> `cannot find function is_console in this scope`. 2026-09-08 is pinned because
+> it was tested against this target. Once that `cfg` is gone upstream, try a
+> current nightly and drop the pin here and in
+> `.github/workflows/release.yml`.
 
 
 Check a build with — the path is relative to the `FastTIFF` crate, which is

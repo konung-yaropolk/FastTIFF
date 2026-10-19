@@ -98,13 +98,27 @@ jobs:
         uses: actions/checkout@v6
 
       # `rust-src` is what build-std compiles — `rustup target add` has nothing
-      # to add for a Tier 3 target. A floating nightly, matching the README's
-      # build instructions; if build-std ever regresses, pin a date here
-      # (dtolnay/rust-toolchain@master with `toolchain: nightly-YYYY-MM-DD`)
-      # rather than dropping the job.
+      # to add for a Tier 3 target.
+      #
+      # PINNED, as the note here always said to do if build-std regressed. It
+      # did: a nightly after 2026-09-08 put `#[cfg(not(target_vendor = "win7"))]`
+      # on `is_console` in `library/std/src/sys/stdio/windows.rs` while leaving
+      # its two call sites unconditional, so std itself stops compiling for this
+      # target with "cannot find function `is_console` in this scope". The
+      # function even carries a `cfg_select!` arm for win7 that the outer `cfg`
+      # makes unreachable, which is what gives it away as an oversight rather
+      # than an intentional drop of the target.
+      #
+      # Nothing here can work around it: build-std compiles std from source, so
+      # a broken std is a broken build. 2026-09-08 is pinned because it was
+      # tested — std compiles for `x86_64-win7-windows-msvc` on it.
+      #
+      # To unpin: check whether the outer `cfg` is gone from that function
+      # upstream, try a recent nightly, and if it builds, put `@nightly` back.
       - name: Install Rust nightly + std sources
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-09-08
           components: rust-src
 
       # Its own cache key: a from-source std for a different target shares
@@ -118,9 +132,14 @@ jobs:
       # backend needs a Windows 10 runtime, so here OpenGL is not a preference
       # but the only backend that runs at all. Same invocation the README
       # documents for building this by hand.
+      #
+      # `+nightly-2026-09-08`, not `+nightly`: the toolchain above is pinned,
+      # and rustup installs a missing toolchain on demand rather than failing —
+      # so a bare `+nightly` would quietly fetch the current nightly and walk
+      # straight back into the std regression the pin exists to avoid.
       - name: Build release exe (glow, Tier 3 win7 target)
         run: >
-          cargo +nightly build --release --target x86_64-win7-windows-msvc
+          cargo +nightly-2026-09-08 build --release --target x86_64-win7-windows-msvc
           -Z build-std=std,panic_abort
           -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins
 
