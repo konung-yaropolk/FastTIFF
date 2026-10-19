@@ -77,25 +77,69 @@ fn a_backend_reports_whether_it_can_run() {
     );
     if !cfg!(feature = "threads") {
         assert!(Backend::MultiThread
-            .unavailable_reason()
+            .unavailable_reason(64, 64)
             .is_some_and(|r| r.contains("threads")));
     }
 }
 
-/// `Reference::Previous` is a chain, so it cannot be parallel whatever backend
-/// is chosen. Reported here rather than discovered as a benchmark that did not
-/// improve.
+/// The GPU backend is offered in every build and refused, with a reason, where
+/// it cannot run — never silently replaced by the processor.
 #[test]
-fn registering_against_the_previous_frame_cannot_be_parallel() {
+fn the_gpu_backend_is_refused_with_a_reason_where_it_cannot_run() {
+    assert_eq!(Backend::all().len(), 3);
+    assert!(Backend::all().contains(&Backend::Gpu));
+    assert_eq!(Backend::Gpu.label(), "GPU");
+    match Backend::Gpu.unavailable_reason(64, 64) {
+        // Available: the crate has the feature, this is not a browser, and the
+        // machine has a real adapter.
+        None => {
+            assert!(cfg!(feature = "gpu"), "available without the feature?");
+            assert!(Backend::Gpu.available());
+        }
+        Some(why) => {
+            assert!(!Backend::Gpu.available());
+            if !cfg!(feature = "gpu") {
+                assert!(why.contains("`gpu` feature"), "{why}");
+            }
+            assert!(why.contains("CPU backend"), "the reason should say what to do: {why}");
+        }
+    }
+    // It does the rest of its work on the CPU threads, like the multi-thread
+    // backend, and is not the default.
+    assert_eq!(Backend::Gpu.threaded(), cfg!(feature = "threads"));
+    assert_ne!(Backend::default(), Backend::Gpu);
+}
+
+/// Under `Reference::Previous` the *frames* cannot overlap — each needs the
+/// last one's answer — but the backend is still threaded, because the work
+/// inside each frame spreads over every core.
+///
+/// This test used to assert the first half only, and stopped there: a chained
+/// registration was "correctly" not parallel, which in practice meant that
+/// choosing Multi-thread CPU with the chained reference ran on one core at the
+/// speed of Single-thread CPU. The two questions are now separate, and the
+/// second one is the one that decides whether the cores are used.
+#[test]
+fn a_chained_reference_takes_frames_in_turn_but_still_uses_every_core() {
     for b in Backend::all() {
         assert!(
             !b.parallel_for(Reference::Previous),
-            "{b:?} should not claim parallelism for a chained reference"
+            "{b:?}: chained frames cannot run at the same time"
         );
     }
-    // The other two modes are parallel on the threaded backend.
+    assert_eq!(
+        Backend::MultiThread.threaded(),
+        cfg!(feature = "threads"),
+        "multi-thread is threaded in every mode, chained included"
+    );
+    assert!(!Backend::SingleThread.threaded());
+    // The other two modes run frames at the same time as well.
     assert_eq!(
         Backend::MultiThread.parallel_for(Reference::Mean),
+        cfg!(feature = "threads")
+    );
+    assert_eq!(
+        Backend::MultiThread.parallel_for(Reference::First),
         cfg!(feature = "threads")
     );
     assert!(!Backend::SingleThread.parallel_for(Reference::Mean));

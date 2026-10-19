@@ -390,16 +390,37 @@ pub fn matrix_from_landmarks(
 /// `moving` is samples, not coefficients; this prefilters a copy. Out-of-frame
 /// positions read the mirrored extension rather than a fill value, because the
 /// spline is defined there and a hard edge would show as a seam.
+///
+/// On one thread; [`warp_with`] is the same arithmetic on every core.
 pub fn warp(moving: &[f32], w: usize, h: usize, m: &Matrix) -> Vec<f32> {
-    let mut coeff = moving.to_vec();
-    crate::spline::prefilter_2d(&mut coeff, w, h, &crate::spline::POLES_3);
+    warp_with(moving, w, h, m, false)
+}
+
+/// [`warp`], optionally on every core.
+///
+/// Every output pixel is read independently from the same coefficients, so the
+/// rows parallelise with nothing to combine, and the prefilter before them does
+/// too. Bit-identical with `parallel` on or off.
+///
+/// This is the cost a registration pays once per *plane* rather than once per
+/// timepoint, so on a stack with several channels or slices it is most of the
+/// run after the measurement — and when it ran on one thread, it was the reason
+/// a multi-channel stack scaled worse than a single-channel one.
+pub fn warp_with(moving: &[f32], w: usize, h: usize, m: &Matrix, parallel: bool) -> Vec<f32> {
     let mut out = vec![0.0f32; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let p = m.apply(Point::new(x as f64, y as f64));
-            out[y * w + x] = crate::spline::interpolate(&coeff, w, h, p.x, p.y) as f32;
-        }
+    if w == 0 || h == 0 {
+        return out;
     }
+    let mut coeff = moving.to_vec();
+    crate::spline::prefilter_2d_with(&mut coeff, w, h, &crate::spline::POLES_3, parallel);
+    let coeff = &coeff;
+    crate::par::for_each_chunk_mut(&mut out, w, parallel, |y, row| {
+        let yf = y as f64;
+        for (x, o) in row.iter_mut().enumerate() {
+            let p = m.apply(Point::new(x as f64, yf));
+            *o = crate::spline::interpolate(coeff, w, h, p.x, p.y) as f32;
+        }
+    });
     out
 }
 

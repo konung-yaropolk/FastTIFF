@@ -710,10 +710,24 @@ every channel. Registering each channel on its own would move them relative to
 each other, which is the one thing a multi-channel recording must not do. With a
 single channel there is nothing to choose and the selector says so.
 
-Both run single- or multi-threaded, selectable in the dialog. The answer is the
-same either way; only how many frames are in flight differs. The chained
-reference is the exception — it is a chain by construction and runs on one
-thread whatever is chosen.
+Both run single- or multi-threaded, selectable in the dialog, and the answer is
+the same either way. For TurboReg that is *bit for bit*, not to a tolerance: the
+work is split into pieces fixed by the image, never by the thread count, and
+summed in a fixed order.
+
+TurboReg spends its threads at two levels: inside each frame (the pixel sums,
+the gradient images, the spline prefilters and the final resampling) and across
+frames. Aligning to the previous frame is a chain, so its frames go one at a
+time — but each still uses every core. On 512×512 frames with 16 threads:
+
+| | single-thread | multi-thread | |
+|---|---|---|---|
+| first frame | 2107 ms | 266 ms | 7.9× |
+| previous frame | 1472 ms | 244 ms | 6.0× |
+| resampling the result | 123 ms | 18 ms | 6.9× |
+
+Small frames scale less well under the chained reference, because the coarse
+pyramid levels have the most iterations and the fewest pixels to share out.
 
 The algorithm is Thévenaz, Rüttimann & Unser's, shipped by EPFL as TurboReg and
 StackReg. [`turboreg-registration/`](turboreg-registration/) is an

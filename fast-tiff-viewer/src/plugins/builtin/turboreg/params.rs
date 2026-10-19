@@ -221,9 +221,10 @@ pub(super) fn declare(info: &ImageInfo, chosen: &Params) -> Vec<ParamDecl> {
             },
         )
         .help(
-            "The answer is the same on each; only how many frames are in flight differs. \
-             Aligning to the previous frame is a chain and runs on one thread whatever is \
-             chosen here.",
+            "The answer is identical on each, bit for bit; multi-thread spreads every \
+             frame's work over all cores, and also runs separate frames at once. Aligning \
+             to the previous frame takes its frames in turn, since each needs the last, \
+             but still uses every core within each one.",
         ),
     );
     decls.push(

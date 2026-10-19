@@ -196,13 +196,70 @@ fn an_empty_stack_registers_to_nothing() {
 #[test]
 fn the_moving_average_is_centred() {
     let frames: Vec<Vec<f32>> = (0..5).map(|t| vec![t as f32 * 10.0; 4]).collect();
-    let smoothed = moving_average(&frames, 3);
+    let smoothed = moving_average(&frames, 3, false);
     assert_eq!(smoothed.len(), 5);
     // The middle frame of a linear ramp is unchanged by a centred window.
     assert!((smoothed[2][0] - 20.0).abs() < 1e-5, "{:?}", smoothed[2]);
     // An even window is treated as the next odd one rather than being
     // off-centre.
-    assert_eq!(moving_average(&frames, 4)[2][0], smoothed[2][0]);
+    assert_eq!(moving_average(&frames, 4, false)[2][0], smoothed[2][0]);
     // A window of one changes nothing.
-    assert_eq!(moving_average(&frames, 1), frames);
+    assert_eq!(moving_average(&frames, 1, false), frames);
+}
+
+/// The stack-wide averages are the same numbers on every core: each pixel's
+/// sum still runs over the frames in order, whichever thread takes its piece.
+#[test]
+fn the_stack_averages_do_not_depend_on_threads() {
+    // Enough pixels to span several pieces, and values that make float
+    // addition order-sensitive, so a reordered sum would show.
+    let len = 3 * PIXELS_PER_CHUNK + 17;
+    let frames: Vec<Vec<f32>> = (0..7)
+        .map(|t| {
+            (0..len)
+                .map(|i| ((i * 31 + t * 7) % 1000) as f32 * 0.1 + 1e6 * (t % 2) as f32)
+                .collect()
+        })
+        .collect();
+    for take in [1, 3, 7] {
+        assert_eq!(
+            mean_of(&frames, take, false),
+            mean_of(&frames, take, true),
+            "the mean of {take} frames should not depend on threads"
+        );
+    }
+    assert_eq!(
+        moving_average(&frames, 3, false),
+        moving_average(&frames, 3, true),
+        "the moving average should not depend on threads"
+    );
+}
+
+/// A whole stack registers to bit-identical matrices on either backend, in
+/// every reference mode — including the chained one, which is the mode that
+/// used to run on one core whatever was chosen.
+#[test]
+fn both_backends_register_a_stack_identically() {
+    let frames = drifting(64, 56, 4, 1.5);
+    let movie = Frames {
+        ly: 56,
+        lx: 64,
+        frames: &frames,
+    };
+    for mode in Reference::all() {
+        let single = register_stack(&movie, &stack_settings(mode), &mut |_| true).expect("single");
+        let multi_settings = Settings {
+            backend: Backend::MultiThread,
+            ..stack_settings(mode)
+        };
+        let multi = register_stack(&movie, &multi_settings, &mut |_| true).expect("multi");
+        assert_eq!(
+            single.matrices, multi.matrices,
+            "{mode:?}: the backends should agree bit for bit"
+        );
+        assert_eq!(single.failed, multi.failed);
+        // And the result carries the backend into `apply`.
+        assert!(!single.threaded);
+        assert_eq!(multi.threaded, Backend::MultiThread.available());
+    }
 }

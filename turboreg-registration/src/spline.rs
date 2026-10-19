@@ -121,27 +121,53 @@ fn initial_anticausal(c: &[f64], z: f64) -> f64 {
 /// B-spline is the product of two 1-D ones.
 ///
 /// Stored back as `f32` after each pass, for the reason in the module header.
+///
+/// On one thread; [`prefilter_2d_with`] is the same arithmetic on every core.
 pub fn prefilter_2d(img: &mut [f32], w: usize, h: usize, poles: &[f64]) {
+    prefilter_2d_with(img, w, h, poles, false);
+}
+
+/// [`prefilter_2d`], optionally on every core.
+///
+/// Every row is independent of every other, and so is every column, so each
+/// pass parallelises with nothing to combine. The column pass goes through a
+/// transposed copy: a column of a row-major image is strided, and handing
+/// threads disjoint *columns* to write would mean handing them interleaved
+/// slices of one buffer. Transposed, each column is a contiguous row and the
+/// pass is the row pass again.
+///
+/// The arithmetic is unchanged by any of this — each line is read from the
+/// `f32` store into an `f64` line, filtered, and stored back as `f32`, exactly
+/// as before — so the result is bit-identical with `parallel` on or off.
+pub fn prefilter_2d_with(img: &mut [f32], w: usize, h: usize, poles: &[f64], parallel: bool) {
     if w == 0 || h == 0 {
         return;
     }
-    let mut line: Vec<f64> = Vec::with_capacity(w.max(h));
-    for y in 0..h {
-        line.clear();
-        line.extend(img[y * w..(y + 1) * w].iter().map(|&v| v as f64));
+    let filter_line = |row: &mut [f32]| {
+        let mut line: Vec<f64> = row.iter().map(|&v| v as f64).collect();
         samples_to_coefficients_1d(&mut line, poles);
-        for (x, &v) in line.iter().enumerate() {
-            img[y * w + x] = v as f32;
+        for (o, &v) in row.iter_mut().zip(line.iter()) {
+            *o = v as f32;
         }
+    };
+    // Rows.
+    crate::par::for_each_chunk_mut(img, w, parallel, |_, row| filter_line(row));
+    // Columns, as the rows of a transposed copy.
+    let mut t = vec![0.0f32; w * h];
+    {
+        let src: &[f32] = img;
+        crate::par::for_each_chunk_mut(&mut t, h, parallel, |x, col| {
+            for (y, o) in col.iter_mut().enumerate() {
+                *o = src[y * w + x];
+            }
+            filter_line(col);
+        });
     }
-    for x in 0..w {
-        line.clear();
-        line.extend((0..h).map(|y| img[y * w + x] as f64));
-        samples_to_coefficients_1d(&mut line, poles);
-        for (y, &v) in line.iter().enumerate() {
-            img[y * w + x] = v as f32;
+    crate::par::for_each_chunk_mut(img, w, parallel, |y, row| {
+        for (x, o) in row.iter_mut().enumerate() {
+            *o = t[x * h + y];
         }
-    }
+    });
 }
 
 /// The four cubic B-spline weights for a fractional offset in `0..1`.
@@ -171,10 +197,20 @@ pub fn weights(frac: f64) -> [f64; 4] {
 pub fn indexes(x: f64, n: usize) -> [usize; 4] {
     debug_assert!(n > 0, "an axis of no samples has no indices");
     let twice = 2 * n as i64;
-    // Truncation toward zero, then a correction for the negative side, which is
-    // how the reference spells `floor(x) + 2` without calling floor.
-    let t = x as i64;
-    let mut p = if x >= 0.0 { t + 2 } else { t + 1 };
+    // `floor(x) + 2`, from the true floor — the same floor [`frac`] takes the
+    // weights' offset from, which is the whole requirement: the index and the
+    // offset must split `x` the same way.
+    //
+    // This used to be `trunc(x) + 2`, or `trunc(x) + 1` below zero, which is
+    // the reference's spelling of the same thing. It is only the same thing
+    // where `x` is not a negative integer. At one, truncation *is* the floor, so
+    // the `+ 1` lands a tap short while the weights still come from the floor:
+    // at x = -44.0 the spline was read at -45. The reference does not have that
+    // problem only because it also takes the offset from the truncation; this
+    // code took it from the floor and kept the truncated index. Every integer
+    // shift toward the left or top edge read the wrong pixel for the samples it
+    // sent past that edge.
+    let mut p = x.floor() as i64 + 2;
     let mut out = [0usize; 4];
     for slot in out.iter_mut() {
         let mut q = if p < 0 { -1 - p } else { p };

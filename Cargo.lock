@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.24.3"
+version = "1.24.4"
 dependencies = [
  "anyhow",
  "eframe",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.24.2"
+version = "0.24.4"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3196,9 +3196,12 @@ dependencies = [
 
 [[package]]
 name = "turboreg-registration"
-version = "0.24.2"
+version = "0.24.4"
 dependencies = [
+ "bytemuck",
+ "pollster 1.0.1",
  "rayon",
+ "wgpu",
 ]
 
 [[package]]

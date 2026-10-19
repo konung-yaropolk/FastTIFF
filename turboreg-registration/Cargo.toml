@@ -26,7 +26,7 @@
 #   vol. 7, no. 1, pp. 27-41, January 1998.
 [package]
 name = "turboreg-registration"
-version = "0.24.2"
+version = "0.24.4"
 edition = "2021"
 # `let ... else`, used throughout the optimizer.
 rust-version = "1.82"
@@ -55,9 +55,26 @@ categories = ["science", "algorithms", "multimedia::images"]
 # it. Same reasoning, and the same shape, as `suite2p-registration`.
 rayon = { version = "1.10", optional = true }
 
+# The GPU backend, behind a feature so the algorithm crate does not drag a
+# graphics stack into anything that only wants the CPU path. The same wgpu,
+# bytemuck and pollster `suite2p-registration` and the renderer already use, so
+# turning it on adds no new dependency to the project.
+wgpu = { version = "29", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+pollster = { version = "1.0", optional = true }
+
 [features]
 default = ["threads"]
 # Parallel CPU registration. On by default: every native build wants it, and a
 # crate that had to be asked for its usual behaviour would be a trap. Turning it
 # off leaves the arithmetic untouched and `Backend::MultiThread` unavailable.
 threads = ["dep:rayon"]
+# The criterion's sum over pixels on the graphics card. Off by default: it is
+# not faster everywhere (see `src/gpu.rs` for what it was measured against),
+# and a build that has no use for a GPU should not link one.
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+
+# docs.rs builds the GPU module too — a module missing from the documentation
+# may as well not exist.
+[package.metadata.docs.rs]
+features = ["gpu"]

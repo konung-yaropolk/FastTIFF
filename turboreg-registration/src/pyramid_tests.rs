@@ -174,3 +174,26 @@ fn a_flat_image_has_no_gradient() {
         );
     }
 }
+
+/// Gradient images are the same on every core as on one: each output pixel
+/// reads only the coefficients, so rows cannot affect each other.
+#[test]
+fn gradients_do_not_depend_on_threads() {
+    let (w, h) = (41usize, 29usize);
+    let level = Level {
+        w,
+        h,
+        img: (0..w * h).map(|i| ((i * 37) % 97) as f32).collect(),
+        octave: 0,
+    };
+    let coeff = coefficients(&level);
+    let seq = gradients_from(&coeff, w, h, false);
+    let par = gradients_from(&coeff, w, h, true);
+    assert_eq!(seq, par, "threaded gradients differ");
+    assert_eq!(
+        gradients(&level),
+        seq,
+        "the plain entry point is sequential"
+    );
+    assert_eq!(coefficients_with(&level, true), coeff);
+}

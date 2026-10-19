@@ -78,3 +78,52 @@ fn the_worker_count_is_at_least_one() {
     #[cfg(not(feature = "threads"))]
     assert_eq!(workers(), 1, "without threads there is exactly one worker");
 }
+
+/// `map_in_order` returns results in input order with the flag on or off —
+/// the property every ordered reduction in this crate rests on.
+#[test]
+fn ordered_map_keeps_input_order_either_way() {
+    let items: Vec<u64> = (0..1000).collect();
+    let seq = map_in_order(&items, false, |&x| x * x + 1);
+    let par = map_in_order(&items, true, |&x| x * x + 1);
+    assert_eq!(seq, par);
+    assert_eq!(seq[0], 1);
+    assert_eq!(seq[999], 999 * 999 + 1);
+}
+
+/// Chunked writes cover every element exactly once, chunk indices count from
+/// zero, and the last chunk is the short one.
+#[test]
+fn chunked_writes_cover_the_buffer_exactly_once() {
+    for parallel in [false, true] {
+        let mut buf = vec![0u32; 103];
+        for_each_chunk_mut(&mut buf, 10, parallel, |i, c| {
+            for (j, v) in c.iter_mut().enumerate() {
+                *v += (i * 10 + j) as u32 + 1;
+            }
+        });
+        let want: Vec<u32> = (1..=103).collect();
+        assert_eq!(buf, want, "parallel = {parallel}");
+    }
+    // A chunk size of zero is treated as one rather than panicking.
+    let mut buf = vec![0u8; 4];
+    for_each_chunk_mut(&mut buf, 0, true, |i, c| c[0] = i as u8);
+    assert_eq!(buf, vec![0, 1, 2, 3]);
+}
+
+/// The paired form hands chunk `i` of both buffers to the same call.
+#[test]
+fn paired_chunks_stay_in_step() {
+    for parallel in [false, true] {
+        let mut a = vec![0usize; 50];
+        let mut b = vec![0usize; 50];
+        for_each_chunk_pair_mut(&mut a, &mut b, 7, parallel, |i, ca, cb| {
+            ca.iter_mut().for_each(|v| *v = i);
+            cb.iter_mut().for_each(|v| *v = i * 2);
+        });
+        for k in 0..50 {
+            assert_eq!(b[k], a[k] * 2, "chunk mismatch at {k}");
+            assert_eq!(a[k], k / 7);
+        }
+    }
+}

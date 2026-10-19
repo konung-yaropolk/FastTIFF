@@ -243,3 +243,61 @@ fn the_poles_are_the_published_ones() {
         assert!(z.abs() < 1.0, "pole {z} is not inside the unit circle");
     }
 }
+
+/// The prefilter gives the same coefficients on every core as on one — bit for
+/// bit. Both passes read each line from the `f32` store into an `f64` line and
+/// store it back, in the same order, whichever thread runs them; the column
+/// pass's detour through a transposed copy moves values without touching them.
+#[test]
+fn the_prefilter_does_not_depend_on_threads() {
+    for (w, h) in [(37usize, 23usize), (1, 9), (9, 1), (64, 64)] {
+        let img: Vec<f32> = (0..w * h)
+            .map(|i| ((i * 7919) % 1013) as f32 * 0.37 - 150.0)
+            .collect();
+        let mut seq = img.clone();
+        let mut par = img.clone();
+        prefilter_2d_with(&mut seq, w, h, &POLES_3, false);
+        prefilter_2d_with(&mut par, w, h, &POLES_3, true);
+        assert_eq!(seq, par, "{w}x{h}: threaded prefilter differs");
+        // And the plain entry point is the sequential one.
+        let mut plain = img.clone();
+        prefilter_2d(&mut plain, w, h, &POLES_3);
+        assert_eq!(plain, seq, "{w}x{h}");
+    }
+}
+
+/// The spline is continuous, so a value at an exact integer equals the limit
+/// from either side — including at *negative* integers, past the left or top
+/// edge, which are what an integer shift toward that edge produces.
+///
+/// The index used to be computed as `trunc(x) + 1` on the negative side while
+/// the weights used the true floor. Those agree everywhere except at exact
+/// negative integers, where the centre weight landed one tap to the left: at
+/// x = -44.0 the spline was read at -45. Found because the GPU path, working in
+/// `f32`, hits exact integers at different pixels than the `f64` CPU path did,
+/// and the two stopped agreeing past the edge.
+#[test]
+fn the_spline_is_continuous_at_negative_integers() {
+    let (w, h) = (12usize, 9usize);
+    let mut coeff: Vec<f32> = (0..w * h)
+        .map(|i| ((i * 7) % 23) as f32 * 3.0 + (i / w) as f32)
+        .collect();
+    prefilter_2d(&mut coeff, w, h, &POLES_3);
+    for x in [-1.0f64, -3.0, -7.0, -12.0, -25.0] {
+        for y in [-2.0f64, 0.0, 4.5] {
+            let at = interpolate(&coeff, w, h, x, y);
+            let left = interpolate(&coeff, w, h, x - 1e-9, y);
+            let right = interpolate(&coeff, w, h, x + 1e-9, y);
+            assert!(
+                (at - left).abs() < 1e-5 && (at - right).abs() < 1e-5,
+                "discontinuous at x = {x}, y = {y}: left {left}, at {at}, right {right}"
+            );
+        }
+    }
+    // The same along y.
+    for y in [-1.0f64, -4.0, -9.0] {
+        let at = interpolate(&coeff, w, h, 3.25, y);
+        let near = interpolate(&coeff, w, h, 3.25, y + 1e-9);
+        assert!((at - near).abs() < 1e-5, "discontinuous at y = {y}: {at} vs {near}");
+    }
+}
