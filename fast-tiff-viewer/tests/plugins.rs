@@ -1274,6 +1274,140 @@ fn stabilize_keeps_signed_samples_signed() {
     }
 }
 
+// ------------------------------------------------ TurboReg stabilization
+
+/// A smooth texture drifting by known sub-pixel amounts, one frame per step.
+///
+/// Each frame is the texture *evaluated* where it has moved to, not resampled,
+/// so the motion is exact. `side` is at least 128 for a run that should reach
+/// the graphics card: smaller pyramid levels are fitted on the CPU whatever the
+/// backend.
+fn drift_frames(side: u32, path: &[(f32, f32)]) -> Vec<Vec<f32>> {
+    let texture = |y: f32, x: f32| {
+        400.0 + ((x * 0.031).sin() * (y * 0.027).cos()) * 120.0 + (x * 0.11 + y * 0.07).sin() * 40.0
+    };
+    path.iter()
+        .map(|&(dy, dx)| {
+            (0..side * side)
+                .map(|i| texture((i / side) as f32 - dy, (i % side) as f32 - dx))
+                .collect()
+        })
+        .collect()
+}
+
+/// Those frames written as a real TIFF and opened as a real stack.
+fn drifting_stack(side: u32, frames: &[Vec<f32>]) -> Stack {
+    let opts = WriterOptions::new(side, side, SampleType::F32).metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for f in frames {
+        w.write_frame_f32(f).unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    Stack::from_bytes(bytes, "drifting.tif".into(), false).expect("open")
+}
+
+/// The dialog's index for a compute backend.
+fn turboreg_backend(b: turboreg_registration::Backend) -> Params {
+    let mut params = Params::new();
+    let i = turboreg_registration::Backend::all()
+        .iter()
+        .position(|x| *x == b)
+        .expect("offered");
+    params.set("backend", ParamValue::Choice(i));
+    params
+}
+
+/// The largest difference between two results, away from the border — where
+/// a registered frame shows the mirrored extension and the original does not.
+fn interior_gap(a: &[&Vec<f32>], b: &[&Vec<f32>], side: usize, margin: usize) -> f32 {
+    assert_eq!(a.len(), b.len());
+    let mut gap = 0.0f32;
+    for (pa, pb) in a.iter().zip(b) {
+        for y in margin..side - margin {
+            for x in margin..side - margin {
+                gap = gap.max((pa[y * side + x] - pb[y * side + x]).abs());
+            }
+        }
+    }
+    gap
+}
+
+const DRIFT: [(f32, f32); 4] = [(0.0, 0.0), (1.5, -2.25), (-3.0, 1.0), (2.75, 3.5)];
+
+#[test]
+fn turboreg_is_installed_next_to_stabilize() {
+    let reg = fast_tiff_viewer::plugins::Registry::new();
+    let i = reg
+        .find("dev.fasttiff.turboreg")
+        .expect("TurboReg stabilization should be a built-in");
+    assert_eq!(reg.entries()[i].info.name, "TurboReg stabilization");
+    assert_eq!(reg.entries()[i].info.menu_path, "Stabilization");
+}
+
+/// A drift the test put in comes back out: against the first frame, the
+/// default, every registered frame lands on it.
+///
+/// Held to a tenfold improvement rather than to a fixed number of grey levels:
+/// the fit stops at TurboReg's own schedule, which on this texture leaves about
+/// a tenth of a pixel, and the test is of the plugin's wiring, not of that.
+#[test]
+fn turboreg_removes_a_known_drift() {
+    let frames = drift_frames(96, &DRIFT);
+    let s = drifting_stack(96, &frames);
+    let mut h = host(&s, 0);
+    let Outcome::NewDocument(out) = builtin::TurboReg.run(&mut h, &Params::new()).expect("run")
+    else {
+        panic!("registration should produce a new document");
+    };
+    assert_eq!(out.frames, DRIFT.len());
+    out.validate().expect("the result's shape must be valid");
+    let before: Vec<&Vec<f32>> = frames.iter().collect();
+    let after = planes_f32(&out);
+    let gap_before = interior_gap(&before, &vec![&frames[0]; frames.len()], 96, 12);
+    let gap_after = interior_gap(&after, &vec![after[0]; after.len()], 96, 12);
+    assert!(
+        gap_after < gap_before / 10.0,
+        "registering took the worst gap to the first frame from {gap_before} to only {gap_after}"
+    );
+}
+
+/// The GPU option either runs — and lands where the CPU does, to the tolerance
+/// the crate promises — or is refused, saying why and what to use instead. It
+/// is never quietly run on the processor.
+#[test]
+fn turboreg_on_the_gpu_matches_the_cpu_or_says_why_not() {
+    use turboreg_registration::Backend;
+    // Large enough that the full-resolution level goes to the device.
+    let s = drifting_stack(160, &drift_frames(160, &DRIFT));
+    let mut cpu_host = host(&s, 0);
+    let Outcome::NewDocument(cpu) = builtin::TurboReg
+        .run(&mut cpu_host, &turboreg_backend(Backend::SingleThread))
+        .expect("cpu run")
+    else {
+        panic!("registration should produce a new document");
+    };
+    let mut gpu_host = host(&s, 0);
+    match builtin::TurboReg.run(&mut gpu_host, &turboreg_backend(Backend::Gpu)) {
+        Ok(Outcome::NewDocument(gpu)) => {
+            let gap = interior_gap(&planes_f32(&cpu), &planes_f32(&gpu), 160, 12);
+            assert!(
+                gap < 0.5,
+                "the GPU result is {gap} grey levels off the CPU's"
+            );
+            assert!(
+                gpu_host.messages.iter().any(|m| m.contains("on the GPU")),
+                "the log should say where the run went: {:?}",
+                gpu_host.messages
+            );
+        }
+        Ok(_) => panic!("registration should produce a new document"),
+        Err(e) => {
+            assert!(!Backend::Gpu.available());
+            assert!(e.to_string().contains("CPU backend"), "{e}");
+        }
+    }
+}
+
 // --------------------------------------------------------------- Stack Tools
 
 /// Slice Keeper keeps exactly the planes the dialog named, every channel of

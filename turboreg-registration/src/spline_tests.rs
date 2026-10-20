@@ -298,6 +298,9 @@ fn the_spline_is_continuous_at_negative_integers() {
     for y in [-1.0f64, -4.0, -9.0] {
         let at = interpolate(&coeff, w, h, 3.25, y);
         let near = interpolate(&coeff, w, h, 3.25, y + 1e-9);
-        assert!((at - near).abs() < 1e-5, "discontinuous at y = {y}: {at} vs {near}");
+        assert!(
+            (at - near).abs() < 1e-5,
+            "discontinuous at y = {y}: {at} vs {near}"
+        );
     }
 }

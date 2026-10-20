@@ -28,6 +28,13 @@
 //! handed the processor after asking for the device is indistinguishable from
 //! the device being slow, and there would be no way to tell.
 //!
+//! **Not in a browser**, where it is refused the same way. Opening the device
+//! there resolves through the page's event loop, and a registration run is
+//! synchronous: blocking on the request would wait for something that cannot
+//! happen until it stops waiting. The module still compiles for
+//! `wasm32-unknown-unknown`, so a build that turns on `gpu` everywhere does not
+//! have to special-case the web — it just never finds a device there.
+//!
 //! # Why it is shaped like this
 //!
 //! The first version ran one frame at a time, one dispatch per butterfly stage,
@@ -60,6 +67,7 @@
 use crate::masks::RefFilters;
 use crate::rigid::{lcorr_for, peak_of, Shift};
 use bytemuck::{Pod, Zeroable};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use wgpu::util::DeviceExt;
@@ -190,31 +198,47 @@ pub struct GpuContext {
 /// `None`, remembered, when there is no usable adapter. A software adapter
 /// counts as none: it would run the device path on the processor, slower than
 /// the processor path, while the user believes they chose the card.
+///
+/// Not in a browser build, where there is never a device to keep (see
+/// [`shared_device`]) and wgpu's browser objects cannot sit in a `static`.
+#[cfg(not(target_arch = "wasm32"))]
 static DEVICE: OnceLock<Option<(wgpu::Device, wgpu::Queue)>> = OnceLock::new();
 
 fn shared_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    DEVICE
-        .get_or_init(|| {
-            let instance = wgpu::Instance::default();
-            let adapter =
-                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
+    // Requesting an adapter is asynchronous, and in a browser it resolves
+    // through the page's event loop — which `block_on` would be blocking. So
+    // there is no device to offer there; `Backend::unavailable_reason` says so
+    // before a run gets this far.
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        DEVICE
+            .get_or_init(|| {
+                let instance = wgpu::Instance::default();
+                let adapter =
+                    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        ..Default::default()
+                    }))
+                    .ok()?;
+                if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+                    return None;
+                }
+                // Whatever the adapter can do: the batch size is derived from
+                // these, and the defaults would cap it at a fraction of what
+                // the card holds.
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                    label: Some("suite2p-registration"),
+                    required_limits: adapter.limits(),
                     ..Default::default()
                 }))
-                .ok()?;
-            if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
-                return None;
-            }
-            // Whatever the adapter can do: the batch size is derived from these,
-            // and the defaults would cap it at a fraction of what the card holds.
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("suite2p-registration"),
-                required_limits: adapter.limits(),
-                ..Default::default()
-            }))
-            .ok()
-        })
-        .clone()
+                .ok()
+            })
+            .clone()
+    }
 }
 
 impl GpuContext {
@@ -662,12 +686,32 @@ impl GpuContext {
 /// work, and a registration asks for correlations dozens of times — once per
 /// reference pass and once per batch of the recording. Rebuilding it every time
 /// cost more than the correlations did.
+///
+/// Native only, like [`DEVICE`]: a browser build never has a context to keep.
+#[cfg(not(target_arch = "wasm32"))]
 static RESIDENT: Mutex<Option<GpuContext>> = Mutex::new(None);
 
 /// Correlation windows for `frames` against `filters`, on the resident device.
 ///
 /// `None` when no device can be opened for this size, which the caller treats
 /// as the adapter having gone away between the availability check and the run.
+/// Always `None` in a browser, where there is no device (see [`shared_device`]).
+#[cfg(target_arch = "wasm32")]
+pub fn maps_of(
+    _ly: usize,
+    _lx: usize,
+    _filters: &RefFilters,
+    _frames: &[Vec<f32>],
+    _max_shift: f64,
+) -> Option<Vec<Vec<f32>>> {
+    None
+}
+
+/// Correlation windows for `frames` against `filters`, on the resident device.
+///
+/// `None` when no device can be opened for this size, which the caller treats
+/// as the adapter having gone away between the availability check and the run.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn maps_of(
     ly: usize,
     lx: usize,

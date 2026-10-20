@@ -31,10 +31,14 @@
 //! submission scores all of them, and the host then updates each one. The
 //! round trips are shared across the batch.
 //!
-//! That needs frames that do not depend on each other, so it applies to the
-//! first-frame and mean references. Aligning to the previous frame is a chain —
-//! each frame needs the last one's answer — and runs one lane at a time, which
-//! makes it latency-bound on the device; see the crate README for measurements.
+//! That needs frames that do not depend on each other, and in every reference
+//! mode they do not. Each lane carries its own reference, so the previous-frame
+//! mode batches like the others: lane `t` is fitted against the raw frame
+//! `t - 1`, which does not wait on any other lane's answer. Only composing the
+//! answers into matrices relative to frame 0 is sequential, and that happens on
+//! the host afterwards. (It used to run one lane per round trip, on the false
+//! premise that the fits themselves formed a chain, and was slower on the
+//! device than on the CPU.)
 //!
 //! # How it agrees with the CPU
 //!
@@ -60,7 +64,9 @@
 
 use crate::optimize::{Prepared, Sums};
 use bytemuck::{Pod, Zeroable};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::OnceLock;
 use std::time::Duration;
 use wgpu::util::DeviceExt;
 
@@ -125,6 +131,10 @@ struct LaneGpu {
 /// first — and a registration only ever needs one anyway.
 ///
 /// `None`, remembered, when there is no usable adapter.
+///
+/// Not in a browser build, where there is never a device to keep (see
+/// [`shared_device`]) and wgpu's browser objects cannot sit in a `static`.
+#[cfg(not(target_arch = "wasm32"))]
 static DEVICE: OnceLock<Option<(wgpu::Device, wgpu::Queue)>> = OnceLock::new();
 
 fn shared_device() -> Option<(wgpu::Device, wgpu::Queue)> {
@@ -199,7 +209,8 @@ pub fn lanes_for(w: usize, h: usize) -> usize {
     if plane == 0 {
         return 0;
     }
-    let budget = (limits.max_storage_buffer_binding_size as u64)
+    let budget = limits
+        .max_storage_buffer_binding_size
         .min(limits.max_buffer_size)
         .min(BATCH_MEMORY);
     // Four planes per lane: its reference, and its image's three coefficient
@@ -211,10 +222,17 @@ pub fn lanes_for(w: usize, h: usize) -> usize {
 ///
 /// The count is compiled in rather than passed at run time so each invocation's
 /// running sums are fixed-size arrays the compiler can keep in registers.
+///
+/// Native only, like [`DEVICE`]: a browser build never has a device to build a
+/// pipeline for.
+#[cfg(not(target_arch = "wasm32"))]
 static PIPELINES: Mutex<Vec<(usize, wgpu::ComputePipeline)>> = Mutex::new(Vec::new());
 
 fn pipeline(device: &wgpu::Device, n: usize) -> Option<wgpu::ComputePipeline> {
+    #[cfg(not(target_arch = "wasm32"))]
     let mut cache = PIPELINES.lock().unwrap_or_else(|e| e.into_inner());
+    #[cfg(target_arch = "wasm32")]
+    let mut cache: Vec<(usize, wgpu::ComputePipeline)> = Vec::new();
     if let Some((_, p)) = cache.iter().find(|(k, _)| *k == n) {
         return Some(p.clone());
     }
@@ -290,7 +308,7 @@ impl GpuLevel {
         }
         let limits = device.limits();
         let coeff_bytes = (slots * 4 * pixels * 4) as u64;
-        if coeff_bytes > limits.max_storage_buffer_binding_size as u64
+        if coeff_bytes > limits.max_storage_buffer_binding_size
             || coeff_bytes > limits.max_buffer_size
         {
             return None;
@@ -389,7 +407,9 @@ impl GpuLevel {
         if batch.is_empty() {
             return Some(Vec::new());
         }
-        if batch.len() > self.slots {
+        // More lanes than the partials buffer holds, or a slot with no planes
+        // behind it, would have the kernel read or write past a buffer.
+        if batch.len() > self.slots || batch.iter().any(|&(s, _)| s >= self.slots) {
             return None;
         }
         let n = self.n;

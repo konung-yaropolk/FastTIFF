@@ -34,7 +34,23 @@ use fasttiff_plugin_api::{
     HostContext, ImageResult, Outcome, ParamDecl, Params, Plane, PlaneData, Plugin, PluginError,
     PluginInfo,
 };
-use turboreg_registration::{register_stack, Frames, Reference, Transformation};
+use turboreg_registration::{register_stack, Backend, Frames, Reference, Transformation};
+
+/// Where a run went, for the log line — naming the card for a GPU run, since
+/// "GPU" on a machine with an integrated and a discrete one does not say which.
+fn ran_on(backend: Backend) -> String {
+    match backend {
+        Backend::SingleThread => "on one CPU thread".to_string(),
+        Backend::MultiThread => "on every CPU core".to_string(),
+        Backend::Gpu => {
+            #[cfg(feature = "gpu-registration")]
+            if let Some(name) = turboreg_registration::gpu::adapter_name() {
+                return format!("on the GPU ({name})");
+            }
+            "on the GPU".to_string()
+        }
+    }
+}
 
 /// Relative cost of the pieces of a run, for dividing one progress bar.
 ///
@@ -121,7 +137,7 @@ impl Plugin for TurboReg {
         let settings = params::settings_from(params);
         // Refused, not quietly downgraded: someone who picked a backend and got
         // a different one would have no way to tell.
-        if let Some(why) = settings.backend.unavailable_reason() {
+        if let Some(why) = settings.backend.unavailable_reason(ly, lx) {
             return Err(PluginError::unsupported(why));
         }
         // The dialog does not offer this combination, but a saved parameter set
@@ -201,7 +217,7 @@ impl Plugin for TurboReg {
             .filter(|m| **m != turboreg_registration::Matrix::identity())
             .count();
         host.log(&format!(
-            "registered {} frames by {} on {}{}; {moved} moved{}",
+            "registered {} frames by {} on {}{}, {}; {moved} moved{}",
             info.frames,
             settings.transformation.label().to_lowercase(),
             match measure_on {
@@ -213,6 +229,7 @@ impl Plugin for TurboReg {
                 Reference::First => ", against the first frame",
                 Reference::Mean => ", against the stack mean",
             },
+            ran_on(settings.backend),
             if result.failed.is_empty() {
                 String::new()
             } else {

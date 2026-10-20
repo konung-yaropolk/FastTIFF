@@ -768,8 +768,8 @@ fn register_pair_cpu(
         return None;
     }
     let model = settings.transformation;
-    // Inside the frame, every mode can use every core: this is the level of
-    // parallelism that a chained reference still has. See `Backend::threaded`.
+    // Inside the frame, every mode can use every core, on top of the frames
+    // that run side by side. See `Backend::threaded`.
     let parallel = settings.backend.threaded();
     let depth = pyramid::depth_for(w, h, settings.max_pyramid_depth);
     let ref_levels = pyramid::build(reference, w, h, depth);
@@ -917,7 +917,10 @@ fn register_batch_gpu(
     // which is a few reductions wasted against seconds of search; keeping the
     // lanes uniform is what lets one driver serve every reference mode.
     let levels: Vec<(Vec<Level>, Vec<Level>)> = map_in_order(pairs, threaded, |&(r, m)| {
-        (pyramid::build(r, w, h, depth), pyramid::build(m, w, h, depth))
+        (
+            pyramid::build(r, w, h, depth),
+            pyramid::build(m, w, h, depth),
+        )
     });
     let full = transform::initial_landmarks(model, w, h);
     let mut moving_at = vec![full.clone(); lanes];
@@ -933,14 +936,25 @@ fn register_batch_gpu(
             .collect();
         let starts: Vec<Vec<Point>> = moving_at
             .iter()
-            .map(|at| at.iter().map(|p| Point::new(p.x * scale, p.y * scale)).collect())
+            .map(|at| {
+                at.iter()
+                    .map(|p| Point::new(p.x * scale, p.y * scale))
+                    .collect()
+            })
             .collect();
         // Every lane's level has the same size: the frames are all `w * h`.
         let (lw, lh) = (levels[0].0[octave].w, levels[0].0[octave].h);
         let outcomes: Vec<(Vec<Point>, f64, usize)> = if lw * lh < crate::gpu::MIN_PIXELS {
             map_in_order(&lane_ids, threaded, |&l| {
                 let (refs, movs) = &levels[l];
-                fit_level(model, &refs[octave], &movs[octave], &fixed, &starts[l], threaded)
+                fit_level(
+                    model,
+                    &refs[octave],
+                    &movs[octave],
+                    &fixed,
+                    &starts[l],
+                    threaded,
+                )
             })
         } else {
             let samplers: Vec<Sampler> = map_in_order(&lane_ids, threaded, |&l| {

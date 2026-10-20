@@ -145,9 +145,8 @@ impl Reference {
 /// The CPU threads are spent at two levels. *Within* a frame, the criterion's
 /// sum over pixels, the gradient images, the spline prefilters and the final
 /// resampling each run across every core. *Across* frames, independent frames
-/// run at the same time too. The first level is always available; the second
-/// is not under [`Reference::Previous`], where each frame needs the one
-/// before it — see [`Backend::parallel_for`].
+/// run at the same time too — in every reference mode, the previous-frame one
+/// included; see [`Backend::parallel_for`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Backend {
     /// One frame at a time. The one to reach for when a result looks wrong, as

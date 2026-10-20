@@ -59,7 +59,10 @@ fn disagreement(a: &Matrix, b: &Matrix, w: usize, h: usize) -> f64 {
     let mut worst = 0.0f64;
     for gy in 0..=4 {
         for gx in 0..=4 {
-            let p = Point::new(gx as f64 * (w - 1) as f64 / 4.0, gy as f64 * (h - 1) as f64 / 4.0);
+            let p = Point::new(
+                gx as f64 * (w - 1) as f64 / 4.0,
+                gy as f64 * (h - 1) as f64 / 4.0,
+            );
             let (pa, pb) = (a.apply(p), b.apply(p));
             worst = worst.max(((pa.x - pb.x).powi(2) + (pa.y - pb.y).powi(2)).sqrt());
         }
@@ -78,11 +81,12 @@ fn on(backend: Backend, model: Transformation, reference: Reference) -> Settings
 
 /// The test's premise: the full-resolution level really is large enough to
 /// run on the device, so these tests exercise the kernel and not only the CPU
-/// fallback for small levels.
-#[test]
-fn the_test_frames_reach_the_device() {
-    assert!(W * H >= MIN_PIXELS, "{W}x{H} is fitted entirely on the CPU");
-}
+/// fallback for small levels. Checked when the tests compile, since both sides
+/// are constants.
+const _: () = assert!(
+    W * H >= MIN_PIXELS,
+    "the test frames are fitted entirely on the CPU"
+);
 
 /// One pair, every model: the GPU's answer moves every pixel to within a
 /// hundredth of a pixel of where the CPU's does.
@@ -115,13 +119,19 @@ fn a_pair_lands_where_the_cpu_lands() {
         assert!(d < 0.01, "{model:?}: GPU and CPU disagree by {d} px");
         // And the criterion agrees to f32 precision.
         let rel = (gpu.criterion - cpu.criterion).abs() / cpu.criterion.max(1e-9);
-        assert!(rel < 1e-3, "{model:?}: criterion {} vs {}", gpu.criterion, cpu.criterion);
+        assert!(
+            rel < 1e-3,
+            "{model:?}: criterion {} vs {}",
+            gpu.criterion,
+            cpu.criterion
+        );
     }
 }
 
 /// A whole stack in every reference mode: each frame's transformation agrees.
-/// `First` and `Mean` run the frames as lanes of one batch; `Previous` runs
-/// them one at a time, chained — both paths are covered.
+/// `First` and `Mean` give every lane of the batch the same reference;
+/// `Previous` gives each lane its own, the frame before it, and composes the
+/// answers afterwards — both are covered.
 #[test]
 fn a_stack_lands_where_the_cpu_lands_in_every_mode() {
     if !available() {
@@ -148,7 +158,11 @@ fn a_stack_lands_where_the_cpu_lands_in_every_mode() {
         let s = |backend| on(backend, Transformation::RigidBody, reference);
         let cpu = register_stack(&movie, &s(Backend::MultiThread), &mut |_| true).expect("cpu");
         let gpu = register_stack(&movie, &s(Backend::Gpu), &mut |_| true).expect("gpu");
-        assert!(gpu.failed.is_empty(), "{reference:?}: GPU failed {:?}", gpu.failed);
+        assert!(
+            gpu.failed.is_empty(),
+            "{reference:?}: GPU failed {:?}",
+            gpu.failed
+        );
         for (t, (a, b)) in cpu.matrices.iter().zip(&gpu.matrices).enumerate() {
             let d = disagreement(a, b, W, H);
             assert!(d < 0.02, "{reference:?} frame {t}: disagree by {d} px");
@@ -191,7 +205,10 @@ fn a_stack_longer_than_one_batch_comes_back_in_order() {
         for j in (i + 1)..n {
             if shifts[i] == shifts[j] {
                 let d = disagreement(&out.matrices[i], &out.matrices[j], W, H);
-                assert!(d < 0.02, "frames {i} and {j} share a shift but got {d} px apart");
+                assert!(
+                    d < 0.02,
+                    "frames {i} and {j} share a shift but got {d} px apart"
+                );
             }
         }
     }
@@ -207,7 +224,14 @@ fn the_gpu_path_is_reproducible() {
     }
     let base = textured(W, H);
     let frames: Vec<Vec<f32>> = (0..4)
-        .map(|t| transform::warp(&base, W, H, &rigid(0.004 * t as f64, 0.7 * t as f64, 0.3, W, H)))
+        .map(|t| {
+            transform::warp(
+                &base,
+                W,
+                H,
+                &rigid(0.004 * t as f64, 0.7 * t as f64, 0.3, W, H),
+            )
+        })
         .collect();
     let movie = Frames {
         ly: H,

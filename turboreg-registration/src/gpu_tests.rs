@@ -83,7 +83,11 @@ fn one_evaluation_matches_the_cpu() {
     }
     let (w, h) = (97, 83);
     let lv = level(w, h);
-    let reference = level(w, h).img.iter().map(|v| v * 0.98 + 3.0).collect::<Vec<_>>();
+    let reference = level(w, h)
+        .img
+        .iter()
+        .map(|v| v * 0.98 + 3.0)
+        .collect::<Vec<_>>();
     let sampler = Sampler::of(&lv, false);
     for model in Transformation::all() {
         let (fixed, moved) = nudged(model, w, h);
@@ -92,10 +96,14 @@ fn one_evaluation_matches_the_cpu() {
             let cpu = accumulate(&prep, &reference, w, h, &sampler, false);
             let gpu = GpuLevel::new(
                 model.dof(),
-                &reference,
                 w,
                 h,
-                &[[&sampler.img[..], &sampler.gx[..], &sampler.gy[..]]],
+                &[[
+                    &reference[..],
+                    &sampler.img[..],
+                    &sampler.gx[..],
+                    &sampler.gy[..],
+                ]],
             )
             .expect("level")
             .evaluate(&[(0, &prep)])
@@ -140,10 +148,14 @@ fn the_mirror_boundary_matches_the_cpu() {
     let cpu = accumulate(&prep, &lv.img, w, h, &sampler, false);
     let gpu = GpuLevel::new(
         model.dof(),
-        &lv.img,
         w,
         h,
-        &[[&sampler.img[..], &sampler.gx[..], &sampler.gy[..]]],
+        &[[
+            &lv.img[..],
+            &sampler.img[..],
+            &sampler.gx[..],
+            &sampler.gy[..],
+        ]],
     )
     .expect("level")
     .evaluate(&[(0, &prep)])
@@ -175,12 +187,16 @@ fn lanes_in_one_dispatch_are_independent() {
         })
         .collect();
     let samplers: Vec<Sampler> = levels.iter().map(|lv| Sampler::of(lv, false)).collect();
-    let planes: Vec<[&[f32]; 3]> = samplers
-        .iter()
-        .map(|s| [&s.img[..], &s.gx[..], &s.gy[..]])
+    // Each lane its own reference as well, as the previous-frame mode has it.
+    let references: Vec<Vec<f32>> = (0..3)
+        .map(|k| level(w, h).img.iter().map(|v| v + 4.0 * k as f32).collect())
         .collect();
-    let reference = level(w, h).img;
-    let gpu = GpuLevel::new(model.dof(), &reference, w, h, &planes).expect("level");
+    let planes: Vec<[&[f32]; 4]> = samplers
+        .iter()
+        .zip(&references)
+        .map(|(s, r)| [&r[..], &s.img[..], &s.gx[..], &s.gy[..]])
+        .collect();
+    let gpu = GpuLevel::new(model.dof(), w, h, &planes).expect("level");
     let (fixed, moved) = nudged(model, w, h);
     let preps: Vec<_> = (0..3)
         .map(|k| {
@@ -197,6 +213,14 @@ fn lanes_in_one_dispatch_are_independent() {
     for k in 0..3 {
         let alone = gpu.evaluate(&[(k, &preps[k])]).expect("round").remove(0);
         assert_eq!(together[k], alone, "lane {k} depends on its neighbours");
+        // And each lane is scored against its own reference, not slot 0's: the
+        // same candidate on the CPU, with that reference, agrees.
+        let cpu = accumulate(&preps[k], &references[k], w, h, &samplers[k], false);
+        let ss = (alone.sum_sq - cpu.sum_sq).abs() / cpu.sum_sq.max(1e-12);
+        assert!(
+            ss < 1e-4,
+            "lane {k} read the wrong reference: {ss:e} relative"
+        );
     }
 }
 
@@ -215,10 +239,14 @@ fn repeated_rounds_are_identical() {
     let prep = prepare(model, &fixed, &moved, true).expect("candidate");
     let gpu = GpuLevel::new(
         model.dof(),
-        &lv.img,
         w,
         h,
-        &[[&sampler.img[..], &sampler.gx[..], &sampler.gy[..]]],
+        &[[
+            &lv.img[..],
+            &sampler.img[..],
+            &sampler.gx[..],
+            &sampler.gy[..],
+        ]],
     )
     .expect("level");
     let first = gpu.evaluate(&[(0, &prep)]).expect("round");
@@ -227,8 +255,8 @@ fn repeated_rounds_are_identical() {
     }
 }
 
-/// More lanes than the level was built for is refused rather than written past
-/// the end of a buffer.
+/// More lanes than the level was built for, or a slot it has no planes for, is
+/// refused rather than read or written past the end of a buffer.
 #[test]
 fn an_oversized_round_is_refused() {
     if !available() {
@@ -243,12 +271,17 @@ fn an_oversized_round_is_refused() {
     let prep = prepare(model, &fixed, &moved, true).expect("candidate");
     let gpu = GpuLevel::new(
         model.dof(),
-        &lv.img,
         w,
         h,
-        &[[&sampler.img[..], &sampler.gx[..], &sampler.gy[..]]],
+        &[[
+            &lv.img[..],
+            &sampler.img[..],
+            &sampler.gx[..],
+            &sampler.gy[..],
+        ]],
     )
     .expect("level");
     assert!(gpu.evaluate(&[(0, &prep), (0, &prep)]).is_none());
+    assert!(gpu.evaluate(&[(1, &prep)]).is_none());
     assert_eq!(gpu.evaluate(&[]).expect("empty"), Vec::new());
 }

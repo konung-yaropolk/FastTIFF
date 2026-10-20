@@ -93,7 +93,9 @@ fn the_gpu_backend_is_refused_with_a_reason_where_it_cannot_run() {
         // Available: the crate has the feature, this is not a browser, and the
         // machine has a real adapter.
         None => {
-            assert!(cfg!(feature = "gpu"), "available without the feature?");
+            #[cfg(not(feature = "gpu"))]
+            panic!("available without the feature?");
+            #[cfg(feature = "gpu")]
             assert!(Backend::Gpu.available());
         }
         Some(why) => {
@@ -101,7 +103,10 @@ fn the_gpu_backend_is_refused_with_a_reason_where_it_cannot_run() {
             if !cfg!(feature = "gpu") {
                 assert!(why.contains("`gpu` feature"), "{why}");
             }
-            assert!(why.contains("CPU backend"), "the reason should say what to do: {why}");
+            assert!(
+                why.contains("CPU backend"),
+                "the reason should say what to do: {why}"
+            );
         }
     }
     // It does the rest of its work on the CPU threads, like the multi-thread
@@ -110,37 +115,22 @@ fn the_gpu_backend_is_refused_with_a_reason_where_it_cannot_run() {
     assert_ne!(Backend::default(), Backend::Gpu);
 }
 
-/// Under `Reference::Previous` the *frames* cannot overlap — each needs the
-/// last one's answer — but the backend is still threaded, because the work
-/// inside each frame spreads over every core.
+/// Every reference mode runs separate frames at the same time on a threaded
+/// backend — the previous-frame one included.
 ///
-/// This test used to assert the first half only, and stopped there: a chained
-/// registration was "correctly" not parallel, which in practice meant that
-/// choosing Multi-thread CPU with the chained reference ran on one core at the
-/// speed of Single-thread CPU. The two questions are now separate, and the
-/// second one is the one that decides whether the cores are used.
+/// This test used to assert the opposite for `Reference::Previous`, on the
+/// grounds that each frame needs the last. It does not: frame `t` is fitted
+/// against the raw frame `t - 1`, so the fits are independent and only their
+/// composition is sequential. The old answer kept that mode to one frame at a
+/// time, which on the GPU meant one lane per round trip.
 #[test]
-fn a_chained_reference_takes_frames_in_turn_but_still_uses_every_core() {
-    for b in Backend::all() {
-        assert!(
-            !b.parallel_for(Reference::Previous),
-            "{b:?}: chained frames cannot run at the same time"
-        );
+fn every_reference_mode_runs_frames_side_by_side() {
+    for r in Reference::all() {
+        for b in Backend::all() {
+            assert_eq!(b.parallel_for(r), b.threaded(), "{b:?} under {r:?}");
+        }
     }
-    assert_eq!(
-        Backend::MultiThread.threaded(),
-        cfg!(feature = "threads"),
-        "multi-thread is threaded in every mode, chained included"
-    );
+    assert_eq!(Backend::MultiThread.threaded(), cfg!(feature = "threads"));
     assert!(!Backend::SingleThread.threaded());
-    // The other two modes run frames at the same time as well.
-    assert_eq!(
-        Backend::MultiThread.parallel_for(Reference::Mean),
-        cfg!(feature = "threads")
-    );
-    assert_eq!(
-        Backend::MultiThread.parallel_for(Reference::First),
-        cfg!(feature = "threads")
-    );
-    assert!(!Backend::SingleThread.parallel_for(Reference::Mean));
+    assert!(!Backend::SingleThread.parallel_for(Reference::Previous));
 }

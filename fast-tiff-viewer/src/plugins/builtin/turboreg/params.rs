@@ -221,10 +221,10 @@ pub(super) fn declare(info: &ImageInfo, chosen: &Params) -> Vec<ParamDecl> {
             },
         )
         .help(
-            "The answer is identical on each, bit for bit; multi-thread spreads every \
-             frame's work over all cores, and also runs separate frames at once. Aligning \
-             to the previous frame takes its frames in turn, since each needs the last, \
-             but still uses every core within each one.",
+            "The two CPU options give identical answers, bit for bit; multi-thread uses \
+             every core. GPU scores frames on the graphics card in batches and agrees with \
+             the CPU to well under a hundredth of a pixel; it is not always faster, and is \
+             refused with a reason where no usable card is present.",
         ),
     );
     decls.push(

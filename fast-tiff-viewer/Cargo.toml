@@ -108,15 +108,16 @@ netpbm-example = ["plugin-netpbm"]
 # math) — useful for tests and headless tooling.
 backend-wgpu = ["scivis-render/backend-wgpu"]
 backend-glow = ["scivis-render/backend-glow"]
-# The `stabilize` plugin's GPU path. Off by default: it is a compute pipeline of
-# its own, not the renderer's, so it pulls wgpu into builds that would not
-# otherwise have it — including the glow one. Turn it on where the machines
-# running this have GPUs worth using; the plugin says plainly when the backend
-# is not there rather than quietly using the processor.
-# `?/`: the GPU path belongs to a plugin that may not be here. Without the weak
-# form this would pull the registration crate back in on its own, which is the
-# one thing `plugin-stabilize = off` is for.
-gpu-registration = ["suite2p-registration?/gpu"]
+# The registration plugins' GPU paths (`stabilize` and `turboreg`). Off by
+# default: each is a compute pipeline of its own, not the renderer's, so it
+# pulls wgpu into builds that would not otherwise have it — including the glow
+# one. Turn it on where the machines running this have GPUs worth using; the
+# plugins say plainly when the backend is not there rather than quietly using
+# the processor.
+# `?/`: each GPU path belongs to a plugin that may not be here. Without the weak
+# form this would pull a registration crate back in on its own, which is the
+# one thing `plugin-stabilize = off` / `plugin-turboreg = off` is for.
+gpu-registration = ["suite2p-registration?/gpu", "turboreg-registration?/gpu"]
 # Background worker threads (read-ahead decode + 3D volume assembly). On by
 # default; a single-threaded host — notably `wasm32-unknown-unknown`, where
 # `std::thread::spawn` is unavailable — turns this off and gets the synchronous
