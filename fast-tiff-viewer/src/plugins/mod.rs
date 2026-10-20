@@ -4,10 +4,11 @@
 //! the window — and because the browser build gets the built-in plugins for
 //! free that way. The app supplies only the dialog and the menu.
 //!
-//! A plugin loaded from a `.dll`/`.so` ends up in the same [`Registry`] behind
-//! the same [`Plugin`](fasttiff_plugin_api::Plugin) trait as a built-in one, so
-//! nothing above this module learns where a plugin came from. [`library`] is
-//! the only place that knows.
+//! Every plugin reaches the [`Registry`] through the C ABI — a `.dll`/`.so`
+//! through its query function, and a built-in through the same registration
+//! run in this process (see [`library`]). So there is one kind of entry, held
+//! to one set of rules, and the only difference between a built-in and a
+//! library is the [`Origin`] the menu shows.
 
 /// The plugins compiled into this build. Everything else in this module is the
 /// *interface* they are written against; nothing here reaches into it.
@@ -17,10 +18,9 @@ pub mod builtin;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod discover;
 pub mod host;
-/// Loading a plugin from a shared library through the C ABI. Desktop-only —
-/// there is no `dlopen` in a browser, which is why the web build gets the
-/// built-ins and nothing else.
-#[cfg(not(target_arch = "wasm32"))]
+/// The host half of the C ABI, for every plugin. Opening a shared library is
+/// the one desktop-only part of it — there is no `dlopen` in a browser, which
+/// is why the web build gets the built-ins and nothing else.
 pub mod library;
 pub mod progress;
 pub mod result;
@@ -30,11 +30,16 @@ pub use discover::{install_dir, is_library, search_paths, user_plugin_dir, LIBRA
 pub use host::{describe_image, describe_stack, describe_view, describe_volume, StackHost};
 pub use result::{to_stack, to_tiff_bytes, to_tiff_bytes_reporting};
 
+pub use library::{LoadedExporter, LoadedImporter, LoadedPlugin};
+
 use fasttiff_plugin_api::{Confidence, Exporter, FileType, Importer, Plugin, PluginInfo};
 use std::path::Path;
 
 /// Where a plugin came from. Shown in the menu so a user can tell a built-in
 /// from something they installed.
+///
+/// That is all it decides. Both kinds are registered through the C ABI and run
+/// through it, so the origin says where the code lives, not how it is treated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
     /// Compiled into the application.
@@ -48,7 +53,7 @@ pub struct ImporterEntry {
     pub info: PluginInfo,
     pub origin: Origin,
     pub file_types: Vec<FileType>,
-    pub importer: Box<dyn Importer>,
+    pub importer: LoadedImporter,
 }
 
 /// One installed exporter.
@@ -56,14 +61,14 @@ pub struct ExporterEntry {
     pub info: PluginInfo,
     pub origin: Origin,
     pub file_types: Vec<FileType>,
-    pub exporter: Box<dyn Exporter>,
+    pub exporter: LoadedExporter,
 }
 
 /// One installed plugin.
 pub struct Entry {
     pub info: PluginInfo,
     pub origin: Origin,
-    pub plugin: Box<dyn Plugin>,
+    pub plugin: LoadedPlugin,
 }
 
 /// Everything installed, in menu order.
@@ -87,23 +92,21 @@ impl Registry {
     /// The built-ins only. Touches no filesystem and loads no code, which is
     /// what the tests and the browser build want.
     pub fn new() -> Self {
-        let mut reg = Registry {
+        let mut reg = Registry::empty();
+        builtin::register(&mut reg);
+        reg.sort();
+        reg
+    }
+
+    /// Nothing installed at all — not even the built-ins. For a test that
+    /// wants to know exactly what is in the registry it is looking at.
+    pub fn empty() -> Self {
+        Registry {
             entries: Vec::new(),
             importers: Vec::new(),
             exporters: Vec::new(),
             problems: Vec::new(),
-        };
-        for p in builtin::all() {
-            reg.add(p, Origin::BuiltIn);
         }
-        for i in builtin::importers() {
-            reg.add_importer(i, Origin::BuiltIn);
-        }
-        for e in builtin::exporters() {
-            reg.add_exporter(e, Origin::BuiltIn);
-        }
-        reg.sort();
-        reg
     }
 
     /// The built-ins plus every plugin library on the search path. This is what
@@ -122,9 +125,22 @@ impl Registry {
         reg
     }
 
-    /// Install one importer, refusing a duplicate id for the reason
-    /// [`add`](Self::add) gives.
-    pub fn add_importer(&mut self, importer: Box<dyn Importer>, origin: Origin) -> bool {
+    /// Install importer type `T`, registering it through the C ABI in this
+    /// process — the way every built-in importer arrives. See [`add`](Self::add).
+    pub fn add_importer<T: Importer + Default + 'static>(&mut self, origin: Origin) -> bool {
+        match library::importer_of::<T>() {
+            Ok(i) => self.add_loaded_importer(i, origin),
+            Err(e) => {
+                self.problems
+                    .push(format!("an importer could not be registered: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Install an importer that has been through the C ABI already, refusing
+    /// a duplicate id for the reason [`add`](Self::add) gives.
+    pub fn add_loaded_importer(&mut self, importer: LoadedImporter, origin: Origin) -> bool {
         let info = importer.info();
         if info.id.trim().is_empty() {
             self.problems
@@ -159,9 +175,22 @@ impl Registry {
         &self.importers
     }
 
-    /// Install one exporter, refusing a duplicate id for the reason
-    /// [`add`](Self::add) gives.
-    pub fn add_exporter(&mut self, exporter: Box<dyn Exporter>, origin: Origin) -> bool {
+    /// Install exporter type `T`, registering it through the C ABI in this
+    /// process. See [`add`](Self::add).
+    pub fn add_exporter<T: Exporter + Default + 'static>(&mut self, origin: Origin) -> bool {
+        match library::exporter_of::<T>() {
+            Ok(e) => self.add_loaded_exporter(e, origin),
+            Err(e) => {
+                self.problems
+                    .push(format!("an exporter could not be registered: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Install an exporter that has been through the C ABI already, refusing
+    /// a duplicate id for the reason [`add`](Self::add) gives.
+    pub fn add_loaded_exporter(&mut self, exporter: LoadedExporter, origin: Origin) -> bool {
         let info = exporter.info();
         if info.id.trim().is_empty() {
             self.problems
@@ -294,13 +323,38 @@ impl Registry {
         }
     }
 
-    /// Install one plugin, refusing a duplicate id.
+    /// Install plugin type `T`, registering it through the C ABI in this
+    /// process.
+    ///
+    /// This is how the built-ins arrive, and it is deliberately the same road a
+    /// shared library takes: `fasttiff_plugin` builds the descriptor and the
+    /// vtable, the host's registrar checks them, and every later call goes
+    /// through the host table and sinks. There is no way to put a plugin in the
+    /// registry that skips that, so there is no plugin that plays by other
+    /// rules.
+    ///
+    /// `T` is constructed afresh for every call, as a library's types are —
+    /// the C vtable is stateless — so a plugin keeps nothing between runs that
+    /// it does not keep in a static of its own.
+    pub fn add<T: Plugin + Default + 'static>(&mut self, origin: Origin) -> bool {
+        match library::plugin_of::<T>() {
+            Ok(p) => self.add_loaded(p, origin),
+            Err(e) => {
+                self.problems
+                    .push(format!("a plugin could not be registered: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Install a plugin that has been through the C ABI already, refusing a
+    /// duplicate id.
     ///
     /// Two plugins with the same id is an installation error the host reports
     /// rather than resolves: picking one silently would make which of them runs
     /// depend on directory order, which is the kind of thing that wastes an
     /// afternoon.
-    pub fn add(&mut self, plugin: Box<dyn Plugin>, origin: Origin) -> bool {
+    pub fn add_loaded(&mut self, plugin: LoadedPlugin, origin: Origin) -> bool {
         let info = plugin.info();
         if info.id.trim().is_empty() {
             self.problems

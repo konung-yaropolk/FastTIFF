@@ -244,11 +244,13 @@ pub enum Outcome {
 
 /// A FastTIFF plugin.
 ///
-/// Implement this for a built-in plugin, or let the `fasttiff-plugin` crate's
-/// export macro wrap it for a `.dll`/`.so`. The trait is the same either way,
-/// which is the point: a plugin can start life compiled into the app, be moved
-/// out to a shared library, and later run in a subprocess, without its code
-/// changing.
+/// Implement this, derive `Default`, and either let the `fasttiff-plugin`
+/// crate's export macro wrap it for a `.dll`/`.so` or have the app register it
+/// as a built-in. Both are the same registration through the same C boundary,
+/// so the trait is not merely the same either way — the treatment is: a plugin
+/// can start life compiled into the app and be moved out to a shared library
+/// without its code, or what happens to it, changing. The rules it is held to
+/// are listed in the [crate documentation](crate#one-set-of-rules).
 pub trait Plugin: Send {
     fn info(&self) -> PluginInfo;
 

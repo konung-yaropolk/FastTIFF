@@ -961,6 +961,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "fast-tiff-lib",
+ "fasttiff-plugin",
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
  "flate2",
@@ -975,6 +976,14 @@ dependencies = [
  "suite2p-registration",
  "turboreg-registration",
  "zune-jpeg",
+]
+
+[[package]]
+name = "fasttiff-plugin"
+version = "0.21.0"
+dependencies = [
+ "fasttiff-plugin-abi",
+ "fasttiff-plugin-api",
 ]
 
 [[package]]

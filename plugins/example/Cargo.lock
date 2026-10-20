@@ -92,7 +92,7 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "fast-tiff-lib"
-version = "0.21.0"
+version = "0.24.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -106,13 +106,15 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.22.1"
+version = "0.24.4"
 dependencies = [
  "anyhow",
  "bytemuck",
  "fast-tiff-lib",
+ "fasttiff-plugin",
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
+ "flate2",
  "libloading",
  "log",
  "memmap2",
@@ -122,6 +124,8 @@ dependencies = [
  "rustfft",
  "scivis-render",
  "suite2p-registration",
+ "turboreg-registration",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -398,6 +402,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "turboreg-registration"
+version = "0.24.4"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
 name = "weezl"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -441,4 +452,19 @@ checksum = "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
 dependencies = [
  "cc",
  "pkg-config",
+]
+
+[[package]]
+name = "zune-core"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
+dependencies = [
+ "zune-core",
 ]

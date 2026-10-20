@@ -158,6 +158,16 @@ For the whole of one run:
 * Every `read_*` either fills your buffer to exactly `plane_len()` or returns
   `Err` — never a short read.
 
+And for every call: **your plugin is treated exactly as a built-in one is.**
+FastTIFF registers its own plugins through this same crate and this same C
+boundary, in its own process, so there is no second set of rules to learn and
+nothing a built-in can see or return that you cannot. Your plugin gets the
+channels' colour tables in `view().luts`, the file's calibration and channel
+names in `stack_info()`, and the selection and pending dialog values; it can
+return pixels, channel colours and names, metadata, a plot, or a message. A
+panic, a result that does not validate, or a dialog that cannot be built is
+reported with your plugin's name on it — for a built-in, the same way.
+
 ## What you must not assume
 
 * **Nothing you allocate crosses the boundary.** The host copies every string,
@@ -171,7 +181,12 @@ For the whole of one run:
   with your plugin's name on it.
 * **The vtable is stateless.** An instance of your type is built per call and
   dropped inside it, which is why `Default` is required. Keep state in your own
-  statics if you need it, where your own allocator owns it.
+  statics if you need it, where your own allocator owns it. The built-ins live
+  by the same rule.
+* **Calls are not serialised for you across plugins.** One plugin is called
+  from one thread at a time, but two different plugins — two in your library
+  included — may run at once. Your statics must be `Sync`, as Rust already
+  insists they are.
 * **The library is never unloaded.** Reinstalling a plugin needs a restart.
 
 ## Versions
@@ -187,6 +202,10 @@ struct layout halfway through a call. Within a major version, every struct
 carries its own size and fields are only ever appended, so an older plugin runs
 on a newer host and a newer plugin runs on an older one — each side reads only
 the fields both agree exist.
+
+The current minor is **1.4**, which added the colour tables (`view().luts`)
+and a result's channel names. On an older host those are simply absent: the
+tables come back empty and the names are not sent, and everything else works.
 
 ## Where plugins live
 

@@ -24,6 +24,7 @@ use fasttiff_plugin_api::{
 };
 
 /// Compute a theoretical PSF.
+#[derive(Default)]
 pub struct GeneratePsf;
 
 /// The defaults for sampling, taken from the open stack where it says.

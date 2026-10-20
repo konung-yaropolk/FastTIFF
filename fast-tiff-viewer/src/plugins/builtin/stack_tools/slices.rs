@@ -27,9 +27,11 @@ use fasttiff_plugin_api::{
 };
 
 /// Keep the selected planes and discard the rest.
+#[derive(Default)]
 pub struct SliceKeeper;
 
 /// Discard the selected planes and keep the rest.
+#[derive(Default)]
 pub struct SliceRemover;
 
 /// Which way round a tool reads the selection.

@@ -45,11 +45,36 @@
 //! **Rust has no stable ABI.** A plugin compiled by a different `rustc`, at a
 //! different optimisation level, or against different dependency versions,
 //! cannot safely exchange `Vec`, `String`, `&mut` or a trait object with the
-//! host. This crate is the *Rust-native* face of the contract — used directly
-//! by plugins compiled into the app — and the `.dll`/`.so` lane reaches it
-//! through a narrow `extern "C"` boundary that only `#[repr(C)]` types cross.
-//! Everything here is therefore shaped so it can be marshalled: owned data,
-//! no borrows of host memory, no callbacks holding host types.
+//! host. This crate is the *Rust-native* face of the contract, and every
+//! plugin reaches the host through a narrow `extern "C"` boundary that only
+//! `#[repr(C)]` types cross — a plugin in a `.dll`/`.so`, and equally one
+//! compiled into the app, which the host registers through the same boundary
+//! in its own process. Everything here is therefore shaped so it can be
+//! marshalled: owned data, no borrows of host memory, no callbacks holding host
+//! types.
+//!
+//! # One set of rules
+//!
+//! Because there is only one way in, a plugin is held to the same rules
+//! wherever its code lives:
+//!
+//! * **A fresh value for every call.** [`Plugin::params`] and [`Plugin::run`]
+//!   are each called on a newly built `Default` value; nothing carries over in
+//!   the plugin's fields from one call to the next. State that must outlive a
+//!   call belongs in a static of the plugin's own.
+//! * **One thread at a time** for any one plugin; different plugins may run at
+//!   once. The trait is `Send`, not `Sync`.
+//! * **Results are checked.** An [`ImageResult`] must [`validate`]; a plot
+//!   needs a finite x axis; both have size limits a runaway loop would hit
+//!   first. A result that fails is an error naming the plugin, not a document.
+//! * **A panic is contained** and reported as a failure naming the plugin, in
+//!   the dialog as well as the run. A dialog that cannot be built is reported,
+//!   and the plugin is not run.
+//! * **What crosses, crosses whole**: the stack's shape, calibration, channel
+//!   windows and colour tables, the selection, the dialog's pending values in;
+//!   pixels, colours, channel names and metadata, plots and messages out.
+//!
+//! [`validate`]: ImageResult::validate
 //!
 //! **A plugin cannot draw.** Handing an `&mut egui::Ui` across that boundary is
 //! precisely the unsound case, so dialogs are *declared* and the host renders

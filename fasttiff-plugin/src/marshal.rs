@@ -198,6 +198,14 @@ unsafe extern "C" fn no_push_series(
     FtStatus::Unsupported
 }
 
+unsafe extern "C" fn no_set_channel_name(
+    _ctx: *mut core::ffi::c_void,
+    _index: u64,
+    _name: FtStr,
+) -> FtStatus {
+    FtStatus::Unsupported
+}
+
 /// The host's result sink, copied into a value this plugin may safely hold.
 ///
 /// The same dance as [`registrar_of`], and for the same reason — but this one
@@ -229,9 +237,9 @@ unsafe fn sink_of(sink: *const FtSink) -> Result<FtSink, FtStatus> {
         declared.min(core::mem::size_of::<FtSink>()),
     );
     // Every field the copy did not reach, written in the order they were
-    // appended. `offset_of!(FtSink, push_series) + p == size_of` is pinned in
-    // the ABI crate, so the next appended field fails that assertion rather
-    // than silently leaving a hole here.
+    // appended. `offset_of!(FtSink, set_channel_name) + p == size_of` is
+    // pinned in the ABI crate, so the next appended field fails that assertion
+    // rather than silently leaving a hole here.
     let p = buf.as_mut_ptr();
     if !crate::abi::ft_covers!(sink, FtSink, set_info) {
         core::ptr::addr_of_mut!((*p).set_info).write(no_set_info);
@@ -244,6 +252,9 @@ unsafe fn sink_of(sink: *const FtSink) -> Result<FtSink, FtStatus> {
     }
     if !crate::abi::ft_covers!(sink, FtSink, push_series) {
         core::ptr::addr_of_mut!((*p).push_series).write(no_push_series);
+    }
+    if !crate::abi::ft_covers!(sink, FtSink, set_channel_name) {
+        core::ptr::addr_of_mut!((*p).set_channel_name).write(no_set_channel_name);
     }
     Ok(buf.assume_init())
 }
@@ -537,25 +548,22 @@ unsafe extern "C" fn import_shim<T: Importer + Default>(
             params,
         };
         match T::default().import(&request, &mut ph) {
-            Ok(r) => {
-                let name = r
-                    .info
-                    .as_ref()
-                    .map(|i| i.name.clone())
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| r.image.name.clone());
-                // Skipped rather than failed on a host that predates it: an
-                // import without its metadata is worth having, and refusing
-                // one because the host is a version behind is not.
-                if let Some(info) = r.info.as_ref() {
-                    if crate::abi::ft_covers!(&sink as *const FtSink, FtSink, set_info) {
-                        let st = write_stack_info(&sink, info);
-                        if st != FtStatus::Ok {
-                            return st;
-                        }
-                    }
+            Ok(mut r) => {
+                // What the importer said about the file, and failing that what
+                // it said about the image — the same precedence the host's
+                // encoder gives the pair. This used to send both, the image's
+                // last, so on the host the image's won.
+                let info = r.info.take().or_else(|| r.image.metadata.take());
+                if let Some(n) = info.as_ref().map(|i| &i.name).filter(|n| !n.is_empty()) {
+                    r.image.name = n.clone();
                 }
-                write_image(&sink, &r.image, &name, FtOutcomeKind::NewDocument, "")
+                write_image(
+                    &sink,
+                    r.image,
+                    info.as_ref(),
+                    FtOutcomeKind::NewDocument,
+                    "",
+                )
             }
             Err(e) => status_of(&e),
         }
@@ -764,17 +772,12 @@ pub unsafe fn write_outcome(sink: &FtSink, outcome: Outcome) -> FtStatus {
         Outcome::Message(m) => {
             (sink.set_outcome)(sink.ctx, FtOutcomeKind::Message, FtStr::from_str(&m))
         }
-        Outcome::NewDocument(img) => {
-            let name = img.name.clone();
-            write_image(sink, &img, &name, FtOutcomeKind::NewDocument, "")
-        }
+        Outcome::NewDocument(img) => write_result(sink, *img, FtOutcomeKind::NewDocument, ""),
         Outcome::ReplaceDocument(img) => {
-            let name = img.name.clone();
-            write_image(sink, &img, &name, FtOutcomeKind::ReplaceDocument, "")
+            write_result(sink, *img, FtOutcomeKind::ReplaceDocument, "")
         }
         Outcome::SaveToFile { image, path } => {
-            let name = image.name.clone();
-            write_image(sink, &image, &name, FtOutcomeKind::SaveToFile, &path)
+            write_result(sink, *image, FtOutcomeKind::SaveToFile, &path)
         }
         Outcome::Plot(plot) => write_plot(sink, &plot),
     }
@@ -834,11 +837,32 @@ unsafe fn write_plot(sink: &FtSink, plot: &crate::api::Plot) -> FtStatus {
     (sink.set_outcome)(sink.ctx, FtOutcomeKind::Plot, FtStr::EMPTY)
 }
 
+/// A filter's image result: its own metadata goes with it.
+unsafe fn write_result(
+    sink: &FtSink,
+    mut img: crate::api::ImageResult,
+    kind: FtOutcomeKind,
+    text: &str,
+) -> FtStatus {
+    let info = img.metadata.take();
+    write_image(sink, img, info.as_ref(), kind, text)
+}
+
 /// Declare a result's shape, push every plane, then say what to do with it.
+///
+/// `info` is the metadata that travels with it: a filter's own, or what an
+/// importer read out of the file.
+///
+/// The image is taken by value, and each plane is let go as soon as the host
+/// has copied it. Pushing from a borrow kept the plugin's whole result alive
+/// until its last plane was across, so for that moment the result existed
+/// twice — which, for a registration that rewrote a recording the size of the
+/// machine's memory, is the difference between finishing and not. The app's
+/// own plugins go through here as well, so it is their memory too.
 unsafe fn write_image(
     sink: &FtSink,
-    img: &crate::api::ImageResult,
-    name: &str,
+    img: crate::api::ImageResult,
+    info: Option<&crate::api::StackInfo>,
     kind: FtOutcomeKind,
     text: &str,
 ) -> FtStatus {
@@ -848,16 +872,10 @@ unsafe fn write_image(
     if let Err(e) = img.validate() {
         return status_of(&e);
     }
-    // The result's own metadata, when it has any. An importer's goes across
-    // here too (see `import_shim`); a *filter's* did not, which meant a
-    // geometry-preserving filter in a `.dll` silently dropped the calibration
-    // its built-in twin carried — the one divergence between the two lanes
-    // that produced a file with no units rather than an error.
-    //
     // Skipped on a host that predates the callback: an image without its
     // calibration is still worth having, which is the same bargain
     // `set_channel` makes just below.
-    if let Some(info) = &img.metadata {
+    if let Some(info) = info {
         if crate::abi::ft_covers!(sink as *const FtSink, FtSink, set_info) {
             let st = write_stack_info(sink, info);
             if st != FtStatus::Ok {
@@ -865,7 +883,19 @@ unsafe fn write_image(
             }
         }
     }
-    let ty = match img.pixel_type {
+    let crate::api::ImageResult {
+        width,
+        height,
+        channels,
+        slices,
+        frames,
+        pixel_type,
+        planes,
+        channel_colors,
+        metadata: _,
+        name,
+    } = img;
+    let ty = match pixel_type {
         PixelType::U8 => FtPixelType::U8,
         PixelType::U16 => FtPixelType::U16,
         PixelType::I16 => FtPixelType::I16,
@@ -873,13 +903,13 @@ unsafe fn write_image(
     };
     let st = (sink.begin_image)(
         sink.ctx,
-        img.width,
-        img.height,
-        img.channels as u64,
-        img.slices as u64,
-        img.frames as u64,
+        width,
+        height,
+        channels as u64,
+        slices as u64,
+        frames as u64,
         ty,
-        FtStr::from_str(name),
+        FtStr::from_str(&name),
     );
     if st != FtStatus::Ok {
         return st;
@@ -889,7 +919,7 @@ unsafe fn write_image(
     // callback — the image is still right, it just comes out in the host's
     // default colours.
     if crate::abi::ft_covers!(sink as *const FtSink, FtSink, set_channel) {
-        for (i, color) in img.channel_colors.iter().enumerate() {
+        for (i, color) in channel_colors.iter().enumerate() {
             let rgb = (color[0] as u32) << 16 | (color[1] as u32) << 8 | color[2] as u32;
             let st = (sink.set_channel)(sink.ctx, i as u64, FtStr::EMPTY, rgb);
             if st != FtStatus::Ok {
@@ -897,8 +927,21 @@ unsafe fn write_image(
             }
         }
     }
-    for p in &img.planes {
-        let (ptr, len) = match p {
+    // The names, every entry including empty ones, so the host rebuilds the
+    // list exactly rather than one closed up around a gap. Skipped on a host
+    // that predates the callback, as the colours are.
+    if let Some(info) = info {
+        if crate::abi::ft_covers!(sink as *const FtSink, FtSink, set_channel_name) {
+            for (i, n) in info.channel_names.iter().enumerate() {
+                let st = (sink.set_channel_name)(sink.ctx, i as u64, FtStr::from_str(n));
+                if st != FtStatus::Ok {
+                    return st;
+                }
+            }
+        }
+    }
+    for p in planes {
+        let (ptr, len) = match &p {
             PlaneData::U8(v) => (v.as_ptr() as *const core::ffi::c_void, v.len() as u64),
             PlaneData::U16(v) => (v.as_ptr() as *const core::ffi::c_void, v.len() as u64),
             PlaneData::F32(v) => (v.as_ptr() as *const core::ffi::c_void, v.len() as u64),
@@ -907,6 +950,7 @@ unsafe fn write_image(
         if st != FtStatus::Ok {
             return st;
         }
+        // `p` drops here: the host has its copy.
     }
     (sink.set_outcome)(sink.ctx, kind, FtStr::from_str(text))
 }

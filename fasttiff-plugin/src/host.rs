@@ -65,9 +65,24 @@ unsafe extern "C" fn no_selection_roi(
     FtStatus::Unsupported
 }
 
+/// Stands in for `channel_lut` on a host too old to have it: there are no
+/// tables, which a plugin reads as an empty `luts`, exactly what such a host
+/// always handed over.
+unsafe extern "C" fn no_channel_lut(
+    _ctx: *mut core::ffi::c_void,
+    _index: u64,
+    _out: *mut u8,
+    _cap: u64,
+) -> FtStatus {
+    FtStatus::OutOfRange
+}
+
 /// More regions than anyone draws, so a host answering nonsense cannot make a
 /// plugin allocate without bound before it has looked at a single one.
 const MAX_REGIONS: u64 = 4096;
+
+/// More colour tables than any stack has channels, for the same reason.
+const MAX_LUTS: u64 = 1024;
 
 /// The host's callback table, copied into a value this plugin may safely hold.
 ///
@@ -111,7 +126,7 @@ pub unsafe fn host_of(host: *const FtHost) -> Result<FtHost, FtStatus> {
     // Field by field rather than in the pairs they were appended in: a field
     // the copy reached only halfway is covered by neither, and checking each
     // one separately is what guarantees every byte is written. The assertion
-    // `offset_of!(FtHost, selection_roi) + p == size_of` in the ABI crate is
+    // `offset_of!(FtHost, channel_lut) + p == size_of` in the ABI crate is
     // what fails if a later append forgets to add its line here.
     let p = buf.as_mut_ptr();
     if !crate::abi::ft_covers!(host, FtHost, stack_info) {
@@ -131,6 +146,9 @@ pub unsafe fn host_of(host: *const FtHost) -> Result<FtHost, FtStatus> {
     }
     if !crate::abi::ft_covers!(host, FtHost, selection_roi) {
         core::ptr::addr_of_mut!((*p).selection_roi).write(no_selection_roi);
+    }
+    if !crate::abi::ft_covers!(host, FtHost, channel_lut) {
+        core::ptr::addr_of_mut!((*p).channel_lut).write(no_channel_lut);
     }
     Ok(buf.assume_init())
 }
@@ -209,6 +227,25 @@ impl CHost {
             }
         }
 
+        // The tables the channels are drawn with. Through the copy, so a host
+        // that predates them answers through the stub with none.
+        let mut luts = Vec::new();
+        for i in 0..MAX_LUTS {
+            let mut lut: crate::api::Lut = [[0; 3]; 256];
+            // `Lut` is 256 `[u8; 3]`, which is 768 contiguous bytes in red,
+            // green, blue order — the layout the host writes.
+            let st = (h.channel_lut)(
+                h.ctx,
+                i,
+                lut.as_mut_ptr().cast::<u8>(),
+                core::mem::size_of_val(&lut) as u64,
+            );
+            if st != FtStatus::Ok {
+                break;
+            }
+            luts.push(lut);
+        }
+
         let name = (h.stack_name)(h.ctx).as_str().unwrap_or("").to_string();
         let path = (h.stack_path)(h.ctx).as_str().unwrap_or("").to_string();
 
@@ -229,17 +266,25 @@ impl CHost {
             let s = (h.stack_string)(h.ctx, which, 0).as_str().unwrap_or("");
             (!s.is_empty()).then(|| s.to_string())
         };
+        // Every channel's name, gaps included: an unnamed channel between two
+        // named ones keeps its place. This stopped at the first empty name,
+        // so a file naming only its second channel arrived with no names at
+        // all. An empty string is what the host answers both for "unnamed"
+        // and for "past the end", so trailing ones are dropped — the api
+        // documents the list may be shorter than the channels.
         let mut channel_names = Vec::new();
         for i in 0..if has_metadata {
             ii.channels.min(1024)
         } else {
             0
         } {
-            match (h.stack_string)(h.ctx, FT_STRING_CHANNEL_NAME, i).as_str() {
-                Some(n) if !n.is_empty() => channel_names.push(n.to_string()),
-                // Names run out; the api documents the list may be short.
-                _ => break,
-            }
+            let n = (h.stack_string)(h.ctx, FT_STRING_CHANNEL_NAME, i)
+                .as_str()
+                .unwrap_or("");
+            channel_names.push(n.to_string());
+        }
+        while channel_names.last().is_some_and(|n| n.is_empty()) {
+            channel_names.pop();
         }
 
         // The regions the plot is a function of. Read here with the rest of
@@ -317,11 +362,7 @@ impl CHost {
                 frame_index: vp.frame_index as usize,
                 volume_view: vp.volume_view != 0,
                 channels,
-                // LUTs are not carried across the boundary in ABI 1. A plugin
-                // that needs one can be added to a later minor without breaking
-                // anything, because this struct is built here rather than
-                // shared; leaving it empty is honest about what ABI 1 provides.
-                luts: Vec::new(),
+                luts,
                 volume: VolumeView {
                     mode: match vp.volume_mode {
                         1 => VolumeMode::Dvr,

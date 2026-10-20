@@ -1,6 +1,6 @@
 [package]
 name = "fast-tiff-viewer"
-version = "0.24.4"
+version = "0.25.0"
 edition = "2021"
 description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
 # GPL-3.0, not MPL-2.0 as the rest of the library crates are. The built-in
@@ -146,9 +146,16 @@ rayon = { version = "1.10", optional = true }
 
 # The plugin contract. Not target-gated: the browser build runs the built-in
 # plugins too, and they are written against this crate like any other. Only the
-# *loader* for third-party shared libraries is desktop-only — see
-# `fasttiff-plugin-abi` and `libloading` below.
+# *loader* for third-party shared libraries is desktop-only — see `libloading`
+# below.
 fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
+# The C ABI, and the crate that generates a plugin's side of it. Every target:
+# the built-in plugins are registered through the same C contract a shared
+# library is, in this process, so that a built-in and a library are one kind of
+# plugin with one set of rules (`plugins/library.rs`). A browser has no
+# `dlopen`, but it has `extern "C"` function pointers, which is all this needs.
+fasttiff-plugin-abi = { path = "../fasttiff-plugin-abi" }
+fasttiff-plugin = { path = "../fasttiff-plugin" }
 
 # The registration algorithm behind the `stabilize` built-in. GPL-3, which is
 # why this crate is; see the licence note at the top.
@@ -181,11 +188,7 @@ rustfft = { version = "6", optional = true }
 # ship with no plugin support and CI would not notice, because that step only
 # compiles. A `cfg(not(wasm32))` dependency cannot be forgotten.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# The C ABI, and the loader that uses it. A browser cannot `dlopen`, so neither
-# has anything to do there.
-fasttiff-plugin-abi = { path = "../fasttiff-plugin-abi"}
-# Opening a shared library. Native only, for the same reason as above: there is
-# no `dlopen` in a browser.
+# Opening a shared library. Native only: there is no `dlopen` in a browser.
 libloading = "0.9"
 # Threads for the registration crate, on every target that has them. Target-
 # gated rather than tied to this crate's own `threads` feature, and that is

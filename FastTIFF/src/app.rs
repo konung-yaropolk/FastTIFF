@@ -27,6 +27,13 @@ use fast_tiff_viewer::channels::{
 };
 use fast_tiff_viewer::roi::LargeImageMode;
 use fast_tiff_viewer::{DecodeMode, Stack, ViewMode, Viewer};
+// The registry's entries are the C-boundary types themselves rather than
+// trait objects, so the traits whose methods the app calls are named here —
+// the importer's and exporter's only where the app imports and exports with
+// plugins, which a browser does not.
+use fasttiff_plugin_api::Plugin as _;
+#[cfg(not(target_arch = "wasm32"))]
+use fasttiff_plugin_api::{Exporter as _, Importer as _};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -830,9 +837,10 @@ const PROGRESS_UNKNOWN: u32 = fast_tiff_viewer::plugins::progress::UNKNOWN;
 /// disabled and no way back short of a restart — strictly worse than the
 /// synchronous version this replaced, where a panic at least reached the top.
 ///
-/// A `.dll` plugin's panics are already caught at the C boundary (they have to
-/// be: unwinding through `extern "C"` is undefined). This is for the built-ins
-/// and for the app's own code around them.
+/// A plugin's own panics are already caught at the C boundary — every plugin's,
+/// the built-ins included, since they are registered through it too — and come
+/// back as an error naming the plugin. This is for the app's own code around
+/// the call: encoding the result, handing it to a window.
 fn contained<T>(what: &str, work: impl FnOnce() -> T) -> Result<T, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(|e| {
         // The payload is `&str` for `panic!("...")` and `String` for a
@@ -1687,7 +1695,17 @@ impl ViewerApp {
             return;
         };
         let title = entry.info.name.clone();
-        let decls = entry.plugin.params(&host);
+        // The fallible form: a dialog that failed is reported, and the plugin
+        // is not run. Asking `params` instead would read the failure as "no
+        // controls" and start the run at once, with none of the settings the
+        // plugin meant to ask for.
+        let decls = match entry.plugin.dialog(&host) {
+            Ok(d) => d,
+            Err(e) => {
+                self.core.status = Some(format!("{title}: {e}"));
+                return;
+            }
+        };
 
         if decls.is_empty() {
             self.run_plugin(index, fasttiff_plugin_api::Params::new());
@@ -1825,7 +1843,16 @@ impl ViewerApp {
         else {
             return;
         };
-        let decls = entry.plugin.params(&host);
+        // A dialog that fails to re-declare keeps the controls it had, and says
+        // why: dropping them would leave the user an empty dialog whose OK
+        // runs the plugin with nothing set.
+        let decls = match entry.plugin.dialog(&host) {
+            Ok(d) => d,
+            Err(e) => {
+                self.core.status = Some(format!("{}: {e}", dialog.title));
+                return;
+            }
+        };
         if decls == dialog.decls {
             return;
         }
@@ -2307,7 +2334,12 @@ impl ViewerApp {
                     // of it needs the cross-frame state machine the filter
                     // plugins use. Importers are in the same position today;
                     // whichever gets a dialog first should give both one.
-                    let decls = entry.exporter.params(&host);
+                    // Failing to declare it fails the export, rather than
+                    // writing a file with none of the exporter's defaults.
+                    let decls = entry
+                        .exporter
+                        .dialog(&host)
+                        .map_err(|e| format!("{plugin_name}: {e}"))?;
                     let request = fasttiff_plugin_api::ExportRequest {
                         path,
                         params: fasttiff_plugin_api::Params::defaults(&decls).clamp_to(&decls),
@@ -4194,11 +4226,11 @@ impl ViewerApp {
                             3.0,
                             opposite.gamma_multiply(0.6),
                         ),
-                        (autoscroll::DEAD_ZONE, 1.5, ink),
+                        (autoscroll::DEAD_ZONE, 1.5_f32, ink),
                     ] {
                         painter.circle_stroke(anchor, r, egui::Stroke::new(w, c));
                     }
-                    painter.circle_filled(anchor, 1.5, ink);
+                    painter.circle_filled(anchor, 1.5_f32, ink);
                 }
 
                 // What the pointer is over decides the cursor. Three answers, in

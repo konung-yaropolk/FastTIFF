@@ -38,6 +38,7 @@ use fasttiff_plugin_api::{
 use std::io::BufWriter;
 
 /// Write the displayed frame as an 8-bit RGB PNG.
+#[derive(Default)]
 pub struct Png;
 
 impl Exporter for Png {

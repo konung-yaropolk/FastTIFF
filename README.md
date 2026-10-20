@@ -567,10 +567,12 @@ Three kinds:
 - **Filters** run against the stack that is open. They get the image's shape in
   file coordinates, the file's own scale (pixel size, Z step, frame interval,
   intensity calibration, channel names), the viewer's current display state
-  (contrast window, 3D camera), and a plane-at-a-time reader — then return a new
-  document, a file to write, or a message. A plugin declares its dialog as a
-  list of typed controls and the host draws it, so there is no UI toolkit in a
-  plugin's dependency tree.
+  (contrast window, the channels' colour tables, 3D camera), and a
+  plane-at-a-time reader — then return a new document, a file to write, a
+  chart, or a message. A chart can ask for a selection tool, and the host then
+  runs the plugin again for each new set of regions the user draws. A plugin
+  declares its dialog as a list of typed controls and the host draws it, so
+  there is no UI toolkit in a plugin's dependency tree.
 - **Importers** read formats FastTIFF does not know. An importer declares the
   extensions it handles, and the host adds them to the Open dialog and to
   drag-and-drop *before the plugin has run*; opening such a file calls the
@@ -617,9 +619,15 @@ Some plugins ship *inside* the binary rather than as libraries: Invert, Z
 Project, Plot third axis, the three Slice tools, Generate PSF, Deconvolve,
 suite2p stabilization, TurboReg stabilization, the PNG importer/exporter, the
 Olympus OIR reader and the two MRI importers below.
-They are written against the same contract a `.dll` is — being compiled in is a
-lane, not a different kind of plugin — and they are what the browser build has,
-since it can load nothing.
+They are written against the same contract a `.dll` is, and installed through
+it: the app registers each one through the same C ABI a library is registered
+through, only in its own process. So being compiled in is a matter of where the
+code lives, not of how it is treated — a built-in is built fresh for each call,
+has its results checked, has its panics contained and is shown exactly what a
+library is, and a library can do everything a built-in can. A test runs every
+built-in both directly and through the boundary and requires the same answer to
+the bit; routing them through it costs a copy of each plane, within the noise of
+a run. They are also what the browser build has, since it can load nothing.
 
 Each one is a Cargo feature named `plugin-<name>`, and `builtin-plugins` is all
 of them. Every one is on by default. To leave some out, name the ones you want:

@@ -26,6 +26,7 @@ use fasttiff_plugin_api::{
 };
 
 /// Reverse the order of the planes along an axis.
+#[derive(Default)]
 pub struct SliceOrderInvert;
 
 impl Plugin for SliceOrderInvert {

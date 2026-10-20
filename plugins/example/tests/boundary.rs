@@ -549,13 +549,13 @@ fn loaded_plugins_join_the_same_registry_as_the_built_ins() {
     let mut reg = Registry::new();
     let built_ins = reg.len();
     for p in loaded.plugins {
-        assert!(reg.add(Box::new(p), Origin::Library));
+        assert!(reg.add_loaded(p, Origin::Library));
     }
     for i in loaded.importers {
-        assert!(reg.add_importer(Box::new(i), Origin::Library));
+        assert!(reg.add_loaded_importer(i, Origin::Library));
     }
     for e in loaded.exporters {
-        assert!(reg.add_exporter(Box::new(e), Origin::Library));
+        assert!(reg.add_loaded_exporter(e, Origin::Library));
     }
     assert_eq!(reg.len(), built_ins + 4);
     assert!(
