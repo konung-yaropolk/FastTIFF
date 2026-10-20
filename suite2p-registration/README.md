@@ -94,9 +94,12 @@ if let Some(why) = settings.backend.unavailable_reason(512, 512) {
 ```
 
 `Backend::Gpu` needs the `gpu` feature and takes power-of-two frames up to 1024
-a side, its FFT being radix-2. It is **refused rather than silently downgraded**
-— a run that said GPU and used the processor is indistinguishable from a slow
-one — so ask `unavailable_reason` first.
+a side, its FFT being radix-2. It needs a real graphics adapter (a software
+renderer does not count), and it does not run in a browser, though the feature
+still compiles for `wasm32-unknown-unknown`, so one build can enable it
+everywhere. In every one of those cases it is **refused rather than silently
+downgraded** — a run that said GPU and used the processor is indistinguishable
+from a slow one — so ask `unavailable_reason` first.
 
 ```toml
 suite2p-registration = { version = "0.19", features = ["gpu"] }

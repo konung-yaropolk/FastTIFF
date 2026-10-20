@@ -710,10 +710,47 @@ every channel. Registering each channel on its own would move them relative to
 each other, which is the one thing a multi-channel recording must not do. With a
 single channel there is nothing to choose and the selector says so.
 
-Both run single- or multi-threaded, selectable in the dialog. The answer is the
-same either way; only how many frames are in flight differs. The chained
-reference is the exception — it is a chain by construction and runs on one
-thread whatever is chosen.
+Both run single- or multi-threaded, selectable in the dialog, and the answer is
+the same either way. For TurboReg that is *bit for bit*, not to a tolerance: the
+work is split into pieces fixed by the image, never by the thread count, and
+summed in a fixed order.
+
+TurboReg spends its threads at two levels: inside each frame (the pixel sums,
+the gradient images, the spline prefilters and the final resampling) and across
+frames, in every reference mode. Aligning to the previous frame looks like a
+chain, but not where the time goes: frame *t* is fitted against the raw frame
+*t − 1*, not against frame *t − 1* registered, so the fits are independent.
+Only composing them into one transformation per frame is sequential, and that
+is a few 3×3 products.
+
+TurboReg also has a **GPU** backend. The search stays on the processor; what
+goes to the card is the sum over pixels that scores each candidate — every
+pixel's spline interpolation, residual and derivatives — which is where the time
+is. Frames are scored in batches, every frame's next candidate in one dispatch,
+because one round trip to the card is long next to one candidate's arithmetic.
+The coarse pyramid levels, too small to repay a round trip, are fitted on the
+CPU threads instead. The card computes in `f32`, so the GPU agrees with the CPU
+to a tolerance rather than bit for bit — within a fiftieth of a pixel in the
+tests — and repeats itself exactly, run to run, on the same card. It is in the
+builds with the wgpu renderer (the default), not in the glow build or the
+browser, and the dialog refuses it with the reason wherever it cannot run.
+
+32 frames of 512×512, rigid body, median of five runs, 16 threads and a Quadro
+P620:
+
+| reference | single-thread | multi-thread | GPU |
+|---|---|---|---|
+| first frame | 12.0 s | 1.45 s | 0.79 s |
+| previous frame | 7.15 s | 0.87 s | 0.65 s |
+| stack mean | 15.5 s | 1.92 s | 0.77 s |
+| resampling the result | 0.55 s | 0.08 s | (CPU) |
+
+On that machine the GPU won at every size tried, 256×256 to 1024×1024, by 1.2×
+to 2.5× over multi-thread depending on size and target. That is an entry-level
+card, but the margin is not a promise: a stronger processor or a weaker card
+narrows it, so multi-thread CPU stays the default. The previous frame is the
+quickest target here because neighbouring frames start out nearly aligned, and
+the search has least to do.
 
 The algorithm is Thévenaz, Rüttimann & Unser's, shipped by EPFL as TurboReg and
 StackReg. [`turboreg-registration/`](turboreg-registration/) is an

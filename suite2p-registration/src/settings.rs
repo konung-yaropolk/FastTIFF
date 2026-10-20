@@ -54,12 +54,16 @@ impl Backend {
     /// Whether this backend can run a frame of this size.
     ///
     /// The GPU path is a radix-2 FFT, so it takes power-of-two frames only, up
-    /// to 1024 on a side — 512x512 yes, 1024x768 and 2048x2048 no. And it is
-    /// only compiled in with the `gpu` feature.
+    /// to 1024 on a side — 512x512 yes, 1024x768 and 2048x2048 no. It is only
+    /// compiled in with the `gpu` feature, never runs in a browser, and needs a
+    /// real graphics adapter: a software renderer does not count.
     ///
     /// Checked rather than silently downgraded: a run that said GPU and used
     /// the processor is indistinguishable from a slow one, and there would be
     /// no way to tell which had happened.
+    ///
+    /// For [`Backend::Gpu`] this opens the device the first time it is asked,
+    /// which takes a moment; the answer is remembered.
     pub fn available_for(self, ly: usize, lx: usize) -> bool {
         self.unavailable_reason(ly, lx).is_none()
     }
@@ -78,7 +82,27 @@ impl Backend {
                 }
                 #[cfg(feature = "gpu")]
                 {
-                    if !crate::gpu::size_supported(_ly, _lx) {
+                    if cfg!(target_arch = "wasm32") {
+                        // The module compiles there but never finds a device;
+                        // see `crate::gpu`. Saying so here is what keeps a
+                        // browser run from quietly taking the CPU path.
+                        Some(
+                            "the GPU backend is not available in a browser. Use a CPU \
+                             backend."
+                                .to_string(),
+                        )
+                    } else if !crate::gpu::available() {
+                        // Without this, a machine with no card passed the
+                        // check and the run took the CPU path when the device
+                        // would not open — the one thing this function is
+                        // here to prevent.
+                        Some(
+                            "no usable graphics adapter was found (a software renderer \
+                             does not count: it would run the GPU path on the processor, \
+                             slower than the CPU backends). Use a CPU backend."
+                                .to_string(),
+                        )
+                    } else if !crate::gpu::size_supported(_ly, _lx) {
                         Some(format!(
                             "the GPU backend needs frames whose sides are powers of two, at \
                              most 1024 (its FFT is radix-2); this stack is {_lx}x{_ly}. \

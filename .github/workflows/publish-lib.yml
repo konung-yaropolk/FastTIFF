@@ -5,7 +5,7 @@ on:
     types: [published]          # fires on each GitHub release (same trigger as your exe build)
 
 jobs:
-  publish:
+  publish-fast-tiff-lib:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -92,5 +92,63 @@ jobs:
       - name: Publish
         if: steps.pub.outputs.already == 'false'
         run: cargo publish -p suite2p-registration
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+
+  # turboreg-registration: the registration algorithm on its own, with no
+  # dependency on anything else in this workspace, so it publishes beside
+  # fast-tiff-lib rather than after it.
+  publish-turboreg-registration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Read crate version
+        id: ver
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name=="turboreg-registration") | .version')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "turboreg-registration version: $v"
+
+      - name: Already on crates.io?
+        id: pub
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+                 -H "User-Agent: ${{ github.repository }} publish CI" \
+                 "https://crates.io/api/v1/crates/turboreg-registration/${{ steps.ver.outputs.version }}")
+          if [ "$code" = "200" ]; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v${{ steps.ver.outputs.version }} already published — skipping."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The GPU backend is optional and pulls in a graphics stack, so the
+      # default-feature build is what `cargo publish` verifies. Checking the
+      # feature here means a `gpu` build that stopped compiling cannot be
+      # published and found broken by whoever turns it on.
+      - name: Check the gpu feature builds
+        if: steps.pub.outputs.already == 'false'
+        run: cargo check -p turboreg-registration --features gpu
+
+      # And the other direction, for the same reason: `threads` is *in* the
+      # default set, so `cargo publish` verifies only the build that has it. The
+      # threadless one is what a wasm consumer gets, and it is the one with
+      # hand-written stand-ins for rayon's iterators (`src/par.rs`) — the half
+      # most able to stop compiling without anyone here noticing.
+      - name: Check the crate builds without threads
+        if: steps.pub.outputs.already == 'false'
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p turboreg-registration --no-default-features
+          cargo check -p turboreg-registration --no-default-features \
+            --target wasm32-unknown-unknown
+
+      - name: Publish
+        if: steps.pub.outputs.already == 'false'
+        run: cargo publish -p turboreg-registration
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

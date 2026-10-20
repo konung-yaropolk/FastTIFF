@@ -319,3 +319,25 @@ fn warping_by_a_whole_pixel_shift_moves_the_image() {
         "a reference->moving offset of -2 should move the feature right by 2"
     );
 }
+
+/// Resampling gives the same image on every core as on one. Every output
+/// pixel is read independently from the same coefficients.
+#[test]
+fn warping_does_not_depend_on_threads() {
+    let (w, h) = (53usize, 31usize);
+    let img: Vec<f32> = (0..w * h).map(|i| ((i * 13) % 251) as f32).collect();
+    let a: f64 = 0.07;
+    let m = Matrix {
+        c: [2.3, a.cos(), -a.sin(), 0.0, -1.1, a.sin(), a.cos(), 0.0],
+    };
+    let seq = warp_with(&img, w, h, &m, false);
+    let par = warp_with(&img, w, h, &m, true);
+    assert_eq!(seq, par, "threaded warp differs");
+    assert_eq!(
+        warp(&img, w, h, &m),
+        seq,
+        "the plain entry point is sequential"
+    );
+    // Degenerate sizes produce an empty image rather than a panic.
+    assert!(warp_with(&[], 0, 0, &m, true).is_empty());
+}

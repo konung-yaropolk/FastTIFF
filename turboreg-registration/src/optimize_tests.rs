@@ -7,7 +7,7 @@
 //! answer, and nothing short of a known ground truth distinguishes the two.
 
 use super::*;
-use crate::settings::{Backend, Reference};
+use crate::settings::Backend;
 
 /// A test image with structure at several scales and no symmetry.
 ///
@@ -340,10 +340,88 @@ fn the_parallel_path_agrees_with_the_sequential_one() {
     }
 }
 
-/// `Reference::Previous` is never parallel, so a stack registered that way is a
-/// chain whatever backend is asked for. Checked on the settings rather than by
-/// timing, which would be flaky.
+/// A single pair registers to the bit-identical matrix on either backend, for
+/// every model. The pixel sum is split into pieces fixed by the image and added
+/// in piece order, so the thread count cannot change it — this is what lets
+/// Single-thread CPU stand as the reference for Multi-thread CPU.
+///
+/// The pair-level path is the one a chained registration spends all its time
+/// in, so this is also the check that making it parallel did not make it
+/// approximate.
 #[test]
-fn the_chained_reference_is_never_parallel() {
-    assert!(!Backend::MultiThread.parallel_for(Reference::Previous));
+fn one_pair_registers_identically_on_either_backend() {
+    let (w, h) = (80, 72);
+    let reference = textured(w, h);
+    let a: f64 = 0.03;
+    let (moving, _) = displaced(
+        &reference,
+        w,
+        h,
+        &Matrix {
+            c: [2.5, a.cos(), -a.sin(), 0.0, -1.5, a.sin(), a.cos(), 0.0],
+        },
+    );
+    for model in Transformation::all() {
+        let single = register_pair(&reference, &moving, w, h, &settings(model)).expect("single");
+        let multi = register_pair(
+            &reference,
+            &moving,
+            w,
+            h,
+            &Settings {
+                backend: Backend::MultiThread,
+                ..settings(model)
+            },
+        )
+        .expect("multi");
+        assert_eq!(
+            single.matrix, multi.matrix,
+            "{model:?}: the backends should agree bit for bit"
+        );
+        assert_eq!(
+            single.criterion.to_bits(),
+            multi.criterion.to_bits(),
+            "{model:?}"
+        );
+        assert_eq!(single.evaluations, multi.evaluations, "{model:?}");
+    }
+}
+
+/// The criterion reported is the criterion of the matrix returned — not of a
+/// nearby candidate the search tried last. It used to be recomputed after the
+/// fact, at the cost of rebuilding the full-resolution sampler; it now comes
+/// from the last level of the fit, which this checks is the same number.
+#[test]
+fn the_reported_criterion_belongs_to_the_returned_matrix() {
+    let (w, h) = (72, 64);
+    let reference = textured(w, h);
+    let (moving, _) = displaced(
+        &reference,
+        w,
+        h,
+        &Matrix {
+            c: [1.5, 1.0, 0.0, 0.0, -2.0, 0.0, 1.0, 0.0],
+        },
+    );
+    let fit = register_pair(
+        &reference,
+        &moving,
+        w,
+        h,
+        &settings(Transformation::Translation),
+    )
+    .expect("fit");
+    // Recompute it independently from the returned matrix.
+    let restored = transform::warp(&moving, w, h, &fit.matrix);
+    let direct: f64 = reference
+        .iter()
+        .zip(&restored)
+        .map(|(a, b)| ((a - b) as f64).powi(2))
+        .sum::<f64>()
+        / (w * h) as f64;
+    assert!(
+        (fit.criterion - direct).abs() <= 1e-3 * direct.max(1.0),
+        "reported {} but the returned matrix scores {direct}",
+        fit.criterion
+    );
 }

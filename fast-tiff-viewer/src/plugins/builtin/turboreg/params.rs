@@ -221,9 +221,10 @@ pub(super) fn declare(info: &ImageInfo, chosen: &Params) -> Vec<ParamDecl> {
             },
         )
         .help(
-            "The answer is the same on each; only how many frames are in flight differs. \
-             Aligning to the previous frame is a chain and runs on one thread whatever is \
-             chosen here.",
+            "The two CPU options give identical answers, bit for bit; multi-thread uses \
+             every core. GPU scores frames on the graphics card in batches and agrees with \
+             the CPU to well under a hundredth of a pixel; it is not always faster, and is \
+             refused with a reason where no usable card is present.",
         ),
     );
     decls.push(

@@ -8,6 +8,19 @@ bilinear.
 The API mirrors [pystackreg](https://github.com/glichtner/pystackreg) so results
 can be compared against the reference implementation.
 
+## Features
+
+| feature | default | what it adds |
+|---|---|---|
+| `threads` | on | `Backend::MultiThread`, through rayon: every core within each frame, and separate frames side by side |
+| `gpu` | off | `Backend::Gpu`, through wgpu: the per-pixel sums of the large pyramid levels on the graphics card |
+
+The two CPU backends give the same answer bit for bit. The GPU backend computes
+in `f32`, so it agrees with them to a tolerance (within a fiftieth of a pixel in
+the tests) and is reproducible run to run on the same card. A backend that
+cannot run — a feature left out, no usable adapter, a browser — is refused by
+`Backend::unavailable_reason` rather than quietly swapped for another.
+
 ## Licensing
 
 GPL-3.0-only. The algorithm is Thevenaz, Ruttimann & Unser's, shipped by EPFL as

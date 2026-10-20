@@ -77,26 +77,60 @@ fn a_backend_reports_whether_it_can_run() {
     );
     if !cfg!(feature = "threads") {
         assert!(Backend::MultiThread
-            .unavailable_reason()
+            .unavailable_reason(64, 64)
             .is_some_and(|r| r.contains("threads")));
     }
 }
 
-/// `Reference::Previous` is a chain, so it cannot be parallel whatever backend
-/// is chosen. Reported here rather than discovered as a benchmark that did not
-/// improve.
+/// The GPU backend is offered in every build and refused, with a reason, where
+/// it cannot run — never silently replaced by the processor.
 #[test]
-fn registering_against_the_previous_frame_cannot_be_parallel() {
-    for b in Backend::all() {
-        assert!(
-            !b.parallel_for(Reference::Previous),
-            "{b:?} should not claim parallelism for a chained reference"
-        );
+fn the_gpu_backend_is_refused_with_a_reason_where_it_cannot_run() {
+    assert_eq!(Backend::all().len(), 3);
+    assert!(Backend::all().contains(&Backend::Gpu));
+    assert_eq!(Backend::Gpu.label(), "GPU");
+    match Backend::Gpu.unavailable_reason(64, 64) {
+        // Available: the crate has the feature, this is not a browser, and the
+        // machine has a real adapter.
+        None => {
+            #[cfg(not(feature = "gpu"))]
+            panic!("available without the feature?");
+            #[cfg(feature = "gpu")]
+            assert!(Backend::Gpu.available());
+        }
+        Some(why) => {
+            assert!(!Backend::Gpu.available());
+            if !cfg!(feature = "gpu") {
+                assert!(why.contains("`gpu` feature"), "{why}");
+            }
+            assert!(
+                why.contains("CPU backend"),
+                "the reason should say what to do: {why}"
+            );
+        }
     }
-    // The other two modes are parallel on the threaded backend.
-    assert_eq!(
-        Backend::MultiThread.parallel_for(Reference::Mean),
-        cfg!(feature = "threads")
-    );
-    assert!(!Backend::SingleThread.parallel_for(Reference::Mean));
+    // It does the rest of its work on the CPU threads, like the multi-thread
+    // backend, and is not the default.
+    assert_eq!(Backend::Gpu.threaded(), cfg!(feature = "threads"));
+    assert_ne!(Backend::default(), Backend::Gpu);
+}
+
+/// Every reference mode runs separate frames at the same time on a threaded
+/// backend — the previous-frame one included.
+///
+/// This test used to assert the opposite for `Reference::Previous`, on the
+/// grounds that each frame needs the last. It does not: frame `t` is fitted
+/// against the raw frame `t - 1`, so the fits are independent and only their
+/// composition is sequential. The old answer kept that mode to one frame at a
+/// time, which on the GPU meant one lane per round trip.
+#[test]
+fn every_reference_mode_runs_frames_side_by_side() {
+    for r in Reference::all() {
+        for b in Backend::all() {
+            assert_eq!(b.parallel_for(r), b.threaded(), "{b:?} under {r:?}");
+        }
+    }
+    assert_eq!(Backend::MultiThread.threaded(), cfg!(feature = "threads"));
+    assert!(!Backend::SingleThread.threaded());
+    assert!(!Backend::SingleThread.parallel_for(Reference::Previous));
 }

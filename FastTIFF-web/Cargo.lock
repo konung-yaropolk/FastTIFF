@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.24.2"
+version = "1.24.4"
 dependencies = [
  "anyhow",
  "eframe",
@@ -956,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.24.2"
+version = "0.24.4"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -968,12 +968,12 @@ dependencies = [
  "log",
  "memmap2",
  "png",
- "pystackreg-registration",
  "quick-xml 0.37.5",
  "rayon",
  "rustfft",
  "scivis-render",
  "suite2p-registration",
+ "turboreg-registration",
  "zune-jpeg",
 ]
 
@@ -987,7 +987,7 @@ version = "0.21.0"
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "1.24.2"
+version = "1.24.4"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",
@@ -2505,13 +2505,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
-name = "pystackreg-registration"
-version = "0.1.0"
-dependencies = [
- "rayon",
-]
-
-[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3218,6 +3211,16 @@ checksum = "1ad61aed86bc3faea4300c7aee358b4c6d0c8d6ccc36524c96e4c92ccf26e77e"
 dependencies = [
  "num-integer",
  "strength_reduce",
+]
+
+[[package]]
+name = "turboreg-registration"
+version = "0.24.4"
+dependencies = [
+ "bytemuck",
+ "pollster 1.0.1",
+ "rayon",
+ "wgpu",
 ]
 
 [[package]]

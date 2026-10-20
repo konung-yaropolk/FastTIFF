@@ -173,8 +173,13 @@ pub fn build(img: &[f32], w: usize, h: usize, depth: usize) -> Vec<Level> {
 
 /// A level's samples as spline coefficients, ready for [`spline::interpolate`].
 pub fn coefficients(level: &Level) -> Vec<f32> {
+    coefficients_with(level, false)
+}
+
+/// [`coefficients`], optionally on every core. Bit-identical either way.
+pub fn coefficients_with(level: &Level, parallel: bool) -> Vec<f32> {
     let mut c = level.img.clone();
-    spline::prefilter_2d(&mut c, level.w, level.h, &spline::POLES_3);
+    spline::prefilter_2d_with(&mut c, level.w, level.h, &spline::POLES_3, parallel);
     c
 }
 
@@ -193,25 +198,40 @@ pub fn coefficients(level: &Level) -> Vec<f32> {
 /// interpolant a small step either side, which for a cubic is exact to the
 /// precision the `f32` storage keeps anyway and needs no second weight table.
 pub fn gradients(level: &Level) -> (Vec<f32>, Vec<f32>) {
-    let coeff = coefficients(level);
-    let (w, h) = (level.w, level.h);
+    gradients_from(&coefficients(level), level.w, level.h, false)
+}
+
+/// [`gradients`] from coefficients the caller already has, optionally on every
+/// core.
+///
+/// Taking the coefficients rather than the level is what lets the optimiser
+/// prefilter a level once: it needs the same coefficients for sampling the
+/// image, and building them a second time inside here was one full prefilter
+/// per level per frame spent on nothing. Each output pixel depends only on the
+/// coefficients, so rows are independent and the result is bit-identical with
+/// `parallel` on or off.
+pub fn gradients_from(coeff: &[f32], w: usize, h: usize, parallel: bool) -> (Vec<f32>, Vec<f32>) {
     let mut gx = vec![0.0f32; w * h];
     let mut gy = vec![0.0f32; w * h];
+    if w == 0 || h == 0 {
+        return (gx, gy);
+    }
     // A half-pixel step: the cubic is a polynomial over each unit cell, and a
     // central difference at this spacing differs from the analytic derivative
     // by a term in the third derivative that the f32 storage cannot hold.
     const STEP: f64 = 0.5;
-    for y in 0..h {
-        for x in 0..w {
-            let (xf, yf) = (x as f64, y as f64);
-            let right = spline::interpolate(&coeff, w, h, xf + STEP, yf);
-            let left = spline::interpolate(&coeff, w, h, xf - STEP, yf);
-            let down = spline::interpolate(&coeff, w, h, xf, yf + STEP);
-            let up = spline::interpolate(&coeff, w, h, xf, yf - STEP);
-            gx[y * w + x] = ((right - left) / (2.0 * STEP)) as f32;
-            gy[y * w + x] = ((down - up) / (2.0 * STEP)) as f32;
+    crate::par::for_each_chunk_pair_mut(&mut gx, &mut gy, w, parallel, |y, rx, ry| {
+        let yf = y as f64;
+        for (x, (ox, oy)) in rx.iter_mut().zip(ry.iter_mut()).enumerate() {
+            let xf = x as f64;
+            let right = spline::interpolate(coeff, w, h, xf + STEP, yf);
+            let left = spline::interpolate(coeff, w, h, xf - STEP, yf);
+            let down = spline::interpolate(coeff, w, h, xf, yf + STEP);
+            let up = spline::interpolate(coeff, w, h, xf, yf - STEP);
+            *ox = ((right - left) / (2.0 * STEP)) as f32;
+            *oy = ((down - up) / (2.0 * STEP)) as f32;
         }
-    }
+    });
     (gx, gy)
 }
 

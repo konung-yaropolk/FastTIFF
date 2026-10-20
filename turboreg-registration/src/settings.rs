@@ -137,11 +137,16 @@ impl Reference {
 
 /// Where the arithmetic runs.
 ///
-/// The answer is the same on each: a frame's transformation depends on the
-/// reference and on that frame, never on another frame's result — except under
-/// [`Reference::Previous`], which is a chain by construction and runs on one
-/// thread whatever is chosen here. That exception is reported rather than
-/// hidden; see [`Backend::unavailable_reason`].
+/// The two CPU backends give the same answer bit for bit, not to a tolerance;
+/// see `crate::par` for what makes that a rule rather than luck. The GPU backend
+/// agrees with them to a tolerance — its per-pixel arithmetic is `f32` — and is
+/// reproducible run to run on the same device; see `crate::gpu`.
+///
+/// The CPU threads are spent at two levels. *Within* a frame, the criterion's
+/// sum over pixels, the gradient images, the spline prefilters and the final
+/// resampling each run across every core. *Across* frames, independent frames
+/// run at the same time too — in every reference mode, the previous-frame one
+/// included; see [`Backend::parallel_for`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Backend {
     /// One frame at a time. The one to reach for when a result looks wrong, as
@@ -157,6 +162,17 @@ pub enum Backend {
     /// [`unavailable_reason`]: Backend::unavailable_reason
     #[cfg_attr(feature = "threads", default)]
     MultiThread,
+    /// The criterion's sum over pixels on the graphics card, for the pyramid
+    /// levels large enough to be worth a round trip; everything else on every
+    /// CPU core, as [`Backend::MultiThread`] does it.
+    ///
+    /// Not the default, and not promised to be faster: on a modest card the
+    /// multi-thread CPU path can match it. Offered in every build and refused
+    /// by [`unavailable_reason`] where it cannot run — without the `gpu`
+    /// feature, in a browser, or on a machine with no usable adapter.
+    ///
+    /// [`unavailable_reason`]: Backend::unavailable_reason
+    Gpu,
 }
 
 impl Backend {
@@ -164,50 +180,115 @@ impl Backend {
         match self {
             Backend::SingleThread => "Single-thread CPU",
             Backend::MultiThread => "Multi-thread CPU",
+            Backend::Gpu => "GPU",
         }
     }
 
-    pub fn all() -> [Backend; 2] {
-        [Backend::SingleThread, Backend::MultiThread]
+    /// Every backend, in the order a selector should offer them.
+    pub fn all() -> [Backend; 3] {
+        [Backend::SingleThread, Backend::MultiThread, Backend::Gpu]
     }
 
-    /// Whether this backend can run at all in this build.
-    pub fn available(self) -> bool {
-        self.unavailable_reason().is_none()
-    }
-
-    /// Why it cannot run, for a caller to show.
-    pub fn unavailable_reason(self) -> Option<String> {
-        match self {
-            Backend::MultiThread => {
-                #[cfg(not(feature = "threads"))]
-                {
-                    Some(
-                        "this build has no thread pool: it is behind the crate's `threads` \
-                         feature, which was not enabled"
-                            .to_string(),
-                    )
-                }
-                #[cfg(feature = "threads")]
-                {
-                    None
-                }
-            }
-            Backend::SingleThread => None,
-        }
-    }
-
-    /// Whether a stack registered this way can use more than one thread.
+    /// Whether this backend can run at all here, whatever the frame size.
     ///
-    /// [`Reference::Previous`] cannot: frame `t` is registered against frame
-    /// `t - 1`'s *result*, so the frames are a chain and there is nothing to
-    /// run in parallel. Stated here rather than discovered as a disappointing
-    /// benchmark.
-    pub fn parallel_for(self, reference: Reference) -> bool {
-        self == Backend::MultiThread
-            && self.available()
-            && !matches!(reference, Reference::Previous)
+    /// For [`Backend::Gpu`] this opens the device the first time it is asked,
+    /// which takes a moment; the answer is remembered.
+    pub fn available(self) -> bool {
+        match self {
+            Backend::SingleThread => true,
+            Backend::MultiThread => cfg!(feature = "threads"),
+            Backend::Gpu => gpu_ready(),
+        }
     }
+
+    /// Why it cannot run frames of `ly` rows by `lx` columns, for a caller to
+    /// show.
+    ///
+    /// Checked rather than silently downgraded: a run that said GPU and used
+    /// the processor is indistinguishable from a slow one, and there would be
+    /// no way to tell which had happened.
+    pub fn unavailable_reason(self, ly: usize, lx: usize) -> Option<String> {
+        match self {
+            Backend::SingleThread => None,
+            Backend::MultiThread => (!cfg!(feature = "threads")).then(|| {
+                "this build has no thread pool: it is behind the crate's `threads` \
+                 feature, which was not enabled. Use the single-thread CPU backend."
+                    .to_string()
+            }),
+            Backend::Gpu => gpu_unavailable_reason(ly, lx),
+        }
+    }
+
+    /// Whether this backend uses more than one CPU thread at all.
+    ///
+    /// True for [`Backend::MultiThread`] and [`Backend::Gpu`] in a build that
+    /// has threads, whatever the reference mode — the GPU backend runs
+    /// everything it does not send to the device the way the multi-thread one
+    /// does. This is the switch for the work *inside* a frame, which every mode
+    /// has.
+    pub fn threaded(self) -> bool {
+        matches!(self, Backend::MultiThread | Backend::Gpu) && cfg!(feature = "threads")
+    }
+
+    /// Whether separate *frames* may be registered at the same time.
+    ///
+    /// In every reference mode, on a threaded backend. That includes
+    /// [`Reference::Previous`], which this used to exclude on the grounds that
+    /// it is a chain — and it is not, where it matters. Frame `t` is fitted
+    /// against the *raw* frame `t - 1`, not against frame `t - 1` registered,
+    /// so the fits are as independent as any others. Only composing them into
+    /// matrices relative to frame 0 is sequential, and that is a handful of
+    /// 3x3 products after the expensive part is over. Treating the whole
+    /// registration as a chain kept the chained mode one frame at a time — on
+    /// one core, until the work inside each frame was spread too — and on the
+    /// GPU one lane per round trip, which made it slower there than on the CPU.
+    ///
+    /// The `reference` argument stays so callers say which mode they are
+    /// asking about; no mode is excluded today.
+    pub fn parallel_for(self, reference: Reference) -> bool {
+        let _ = reference;
+        self.threaded()
+    }
+}
+
+#[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+fn gpu_ready() -> bool {
+    crate::gpu::available()
+}
+
+#[cfg(not(all(feature = "gpu", not(target_arch = "wasm32"))))]
+fn gpu_ready() -> bool {
+    false
+}
+
+#[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+fn gpu_unavailable_reason(ly: usize, lx: usize) -> Option<String> {
+    if !crate::gpu::available() {
+        return Some(
+            "no usable graphics adapter was found (a software renderer does not count: it \
+             would run the GPU path on the processor, slower than the CPU backends). Use a \
+             CPU backend."
+                .to_string(),
+        );
+    }
+    if crate::gpu::lanes_for(lx, ly) == 0 {
+        return Some(format!(
+            "a {lx}x{ly} frame does not fit in this graphics card's memory limits. Use a CPU \
+             backend."
+        ));
+    }
+    None
+}
+
+#[cfg(not(all(feature = "gpu", not(target_arch = "wasm32"))))]
+fn gpu_unavailable_reason(_ly: usize, _lx: usize) -> Option<String> {
+    Some(if cfg!(target_arch = "wasm32") {
+        "the GPU backend is not available in a browser. Use a CPU backend.".to_string()
+    } else {
+        "this build has no GPU backend: it is behind the crate's `gpu` feature, which was \
+         not enabled. Use a CPU backend."
+            .to_string()
+    })
 }
 
 /// Everything a run needs beyond the pixels.
