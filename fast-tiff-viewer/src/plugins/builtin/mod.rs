@@ -8,18 +8,24 @@
 //! does not offer, that is a gap in the contract rather than a reason to reach
 //! sideways into the viewer.
 //!
-//! Being compiled in is a *lane*, not a different kind of plugin. These
-//! implement the same [`Plugin`] and [`Importer`] traits a `.dll` does, and the
-//! registry cannot tell them apart except by the [`Origin`](super::Origin) tag
-//! it stores alongside. They exist for four reasons:
+//! Being compiled in is a *place*, not a different kind of plugin. These
+//! implement the same [`Plugin`], [`Importer`] and [`Exporter`] traits a `.dll`
+//! does, and [`register`] installs them through the same C ABI a `.dll` is
+//! installed through — the same registration, run in this process instead of
+//! from a library's query function. From then on every call they receive goes
+//! through the host table and sinks a library's does, so there is nothing a
+//! built-in can do that a library cannot, and no rule one is held to that the
+//! other is not. The registry knows the difference only by the
+//! [`Origin`](super::Origin) tag it stores alongside. They exist for four
+//! reasons:
 //!
 //! * The browser build can never load a shared library, and still gets a
 //!   working Plugins menu.
 //! * The contract gets a real consumer before any loading mechanism exists,
 //!   which is how a plugin API avoids being designed in the abstract and then
 //!   failing on the first real plugin.
-//! * [`Invert`] is the oracle for the `.dll` lane: the same filter, run both
-//!   ways, must produce byte-identical output.
+//! * [`Invert`] is the oracle for the `.dll` boundary: the same filter, run
+//!   from a real library and from here, must produce byte-identical output.
 //! * [`Oir`] is the importer that earns its place: a proprietary format with no
 //!   spec at all, worked out from a real acquisition and checked against the
 //!   vendor software's own export.
@@ -63,8 +69,8 @@
 //! beside that, and any further files it needs alongside them — write it using
 //! nothing but `fasttiff_plugin_api`, add a `plugin-<name>` feature to the
 //! manifest (with any dependency of its own named by that feature and nothing
-//! else), put it in `builtin-plugins`, and add it to [`all`] or [`importers`]
-//! below. That is the whole procedure.
+//! else), put it in `builtin-plugins`, derive `Default` on its type, and add
+//! it to [`register`] below. That is the whole procedure.
 //!
 //! A directory each rather than a file each, even for the two that are one file
 //! long. A plugin grows parts — [`oir`] has a container reader and a metadata
@@ -162,90 +168,71 @@ pub use turboreg::TurboReg;
 #[cfg(feature = "plugin-zproject")]
 pub use zproject::ZProject;
 
-use fasttiff_plugin_api::{Exporter, Importer, Plugin};
+use super::{Origin, Registry};
 
-/// The filters compiled into this build, in registration order.
+/// Install every plugin compiled into this build, through the C ABI.
 ///
-/// Pushed rather than written as one literal because any of them may be absent;
-/// see the feature note above. Order is not load-bearing here — the menu sorts
-/// by path and name, and `add` only uses order to break an id clash — but
-/// keeping the historical order keeps the diff honest.
+/// One list for all three kinds, in registration order. Order is not
+/// load-bearing for the filters — the menu sorts by path and name, and `add`
+/// only uses order to break an id clash — but it is the tie-break for the
+/// other two, so it is a real decision there:
 ///
-/// `vec_init_then_push`: the literal clippy asks for cannot be written when
-/// every element is conditional.
-#[allow(clippy::vec_init_then_push)]
-pub fn all() -> Vec<Box<dyn Plugin>> {
-    #[allow(unused_mut)]
-    let mut v: Vec<Box<dyn Plugin>> = Vec::new();
+/// * **Importers**, when two are equally confident about a file: the more
+///   specific format goes first. OIR first, being the specific one; every
+///   importer here answers on a signature of its own, so the order between
+///   them rarely decides anything. The exception, and the reason the order is
+///   still worth keeping deliberate: NIfTI claims `.gz` as well as `.nii`,
+///   because `.nii.gz` has `gz` for its extension and there is no way to
+///   declare a two-part one. It is therefore the one importer here that is
+///   offered files it will decline, and it declines them in `probe` by looking
+///   at the name and the magic rather than by being asked last. Anything added
+///   after it that also wants `.gz` should be put *before* it.
+/// * **Exporters**, when two claim one extension. An exporter cannot be
+///   probed, so order is the *only* tie-break.
+///
+/// Each plugin is pushed under its own `cfg` because any of them may be
+/// absent; see the feature note above.
+pub fn register(reg: &mut Registry) {
+    let o = Origin::BuiltIn;
+    // Every line below is conditional, so a build with every plugin left out
+    // uses neither of these — and must still build without a warning.
+    let _ = (&reg, o);
+    // ---- filters
     #[cfg(feature = "plugin-invert")]
-    v.push(Box::new(Invert));
+    reg.add::<Invert>(o);
     #[cfg(feature = "plugin-zproject")]
-    v.push(Box::new(ZProject));
+    reg.add::<ZProject>(o);
     #[cfg(feature = "plugin-plot-axis")]
-    v.push(Box::new(PlotAxis));
+    reg.add::<PlotAxis>(o);
     #[cfg(feature = "plugin-stabilize")]
-    v.push(Box::new(Stabilize));
+    reg.add::<Stabilize>(o);
     #[cfg(feature = "plugin-turboreg")]
-    v.push(Box::new(TurboReg));
+    reg.add::<TurboReg>(o);
     #[cfg(feature = "plugin-stack-tools")]
     {
-        v.push(Box::new(SliceKeeper));
-        v.push(Box::new(SliceRemover));
-        v.push(Box::new(SliceOrderInvert));
+        reg.add::<SliceKeeper>(o);
+        reg.add::<SliceRemover>(o);
+        reg.add::<SliceOrderInvert>(o);
     }
     #[cfg(feature = "plugin-deconvolve")]
     {
-        v.push(Box::new(GeneratePsf));
-        v.push(Box::new(Deconvolve));
+        reg.add::<GeneratePsf>(o);
+        reg.add::<Deconvolve>(o);
     }
-    v
-}
 
-/// The exporters compiled into this build, in registration order.
-///
-/// Order is the tie-break when two claim one extension, as it is for importers
-/// — though an exporter cannot be probed, so order is the *only* tie-break.
-#[allow(clippy::vec_init_then_push)]
-pub fn exporters() -> Vec<Box<dyn Exporter>> {
-    #[allow(unused_mut)]
-    let mut v: Vec<Box<dyn Exporter>> = Vec::new();
-    #[cfg(feature = "plugin-png")]
-    v.push(Box::new(Png));
-    v
-}
-
-/// The importers compiled into this build, in registration order.
-///
-/// Order is the tie-break when two importers are equally confident about a
-/// file, so it is a real decision rather than a list: the more specific format
-/// goes first.
-/// `vec_init_then_push`: the literal clippy asks for cannot be written here,
-/// because the *first* element is conditional and the order is the documented
-/// tie-break. Seeding the vector with the second element would put the general
-/// format ahead of the specific one.
-#[allow(clippy::vec_init_then_push)]
-pub fn importers() -> Vec<Box<dyn Importer>> {
-    // OIR first, being the specific format; every one of these answers on a
-    // signature of its own, so the order between them rarely decides anything.
-    //
-    // The exception, and the reason the order is still worth keeping
-    // deliberate: NIfTI claims `.gz` as well as `.nii`, because `.nii.gz` has
-    // `gz` for its extension and there is no way to declare a two-part one. It
-    // is therefore the one importer here that is offered files it will decline,
-    // and it declines them in `probe` by looking at the name and the magic
-    // rather than by being asked last. Anything added after it that also wants
-    // `.gz` should be put *before* it.
-    #[allow(unused_mut)]
-    let mut v: Vec<Box<dyn Importer>> = Vec::new();
+    // ---- importers, most specific first
     #[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
-    v.push(Box::new(Oir));
+    reg.add_importer::<Oir>(o);
     #[cfg(all(feature = "plugin-dicom", not(target_arch = "wasm32")))]
-    v.push(Box::new(Dicom));
+    reg.add_importer::<Dicom>(o);
     #[cfg(all(feature = "plugin-nifti", not(target_arch = "wasm32")))]
-    v.push(Box::new(Nifti));
+    reg.add_importer::<Nifti>(o);
     #[cfg(feature = "plugin-png")]
-    v.push(Box::new(PngImport));
+    reg.add_importer::<PngImport>(o);
     #[cfg(feature = "plugin-netpbm")]
-    v.push(Box::new(Netpbm));
-    v
+    reg.add_importer::<Netpbm>(o);
+
+    // ---- exporters
+    #[cfg(feature = "plugin-png")]
+    reg.add_exporter::<Png>(o);
 }

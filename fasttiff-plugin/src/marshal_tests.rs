@@ -51,6 +51,17 @@ unsafe extern "C" fn channel(_c: *mut core::ffi::c_void, _i: u64, _n: FtStr, _r:
     FtStatus::Ok
 }
 
+/// What `set_channel_name` was handed, in order.
+static NAMES: std::sync::Mutex<Vec<(u64, String)>> = std::sync::Mutex::new(Vec::new());
+
+unsafe extern "C" fn channel_name(_c: *mut core::ffi::c_void, i: u64, n: FtStr) -> FtStatus {
+    NAMES
+        .lock()
+        .unwrap()
+        .push((i, n.as_str().unwrap_or("?").to_string()));
+    FtStatus::Ok
+}
+
 /// A chart as `begin_plot` received it: title, x label, y label, x start,
 /// x step, and the raw `FtSelectionKind`.
 type BegunPlot = (String, String, String, f64, f64, u32);
@@ -141,6 +152,7 @@ fn sink(size: usize) -> FtSink {
         set_channel: channel,
         begin_plot,
         push_series,
+        set_channel_name: channel_name,
     }
 }
 
@@ -233,7 +245,17 @@ fn host_table(size: usize) -> FtHost {
         selection_roi: host_roi,
         param_count: host_count,
         param_value: host_param_value,
+        channel_lut: host_no_lut,
     }
+}
+
+unsafe extern "C" fn host_no_lut(
+    _c: *mut core::ffi::c_void,
+    _i: u64,
+    _o: *mut u8,
+    _n: u64,
+) -> FtStatus {
+    FtStatus::OutOfRange
 }
 
 unsafe extern "C" fn no_stack_info_fixture(
@@ -343,7 +365,7 @@ fn an_optional_callback_is_skipped_rather_than_called_past_the_end() {
     // A host that has the callback receives it.
     CHANNEL_CALLS.store(0, core::sync::atomic::Ordering::Relaxed);
     let full = sink(core::mem::size_of::<FtSink>());
-    let st = unsafe { write_image(&full, &img, "x", FtOutcomeKind::NewDocument, "") };
+    let st = unsafe { write_image(&full, img.clone(), None, FtOutcomeKind::NewDocument, "") };
     assert_eq!(st, FtStatus::Ok);
     assert_eq!(
         CHANNEL_CALLS.load(core::sync::atomic::Ordering::Relaxed),
@@ -354,7 +376,7 @@ fn an_optional_callback_is_skipped_rather_than_called_past_the_end() {
     // A host that does not still gets the image, just without the colours.
     CHANNEL_CALLS.store(0, core::sync::atomic::Ordering::Relaxed);
     let old = sink(core::mem::offset_of!(FtSink, set_channel));
-    let st = unsafe { write_image(&old, &img, "x", FtOutcomeKind::NewDocument, "") };
+    let st = unsafe { write_image(&old, img, None, FtOutcomeKind::NewDocument, "") };
     assert_eq!(st, FtStatus::Ok, "an older host lost the whole image");
     assert_eq!(
         CHANNEL_CALLS.load(core::sync::atomic::Ordering::Relaxed),
@@ -942,5 +964,200 @@ fn a_host_with_pending_params_is_read() {
         fasttiff_plugin_api::HostContext::pending_params(&h).choice("method", 0),
         4,
         "the chosen method did not cross"
+    );
+}
+
+// ------------------------------------------------- what minor 4 carries across
+
+/// A result's channel names cross, every entry in its place — an unnamed one
+/// between two named ones included — so the host can rebuild the list exactly.
+#[test]
+fn channel_names_cross_with_their_gaps() {
+    let _alone = alone();
+    let img = crate::api::ImageResult {
+        width: 1,
+        height: 1,
+        channels: 3,
+        slices: 1,
+        frames: 1,
+        pixel_type: PixelType::U8,
+        planes: vec![
+            PlaneData::U8(vec![1]),
+            PlaneData::U8(vec![2]),
+            PlaneData::U8(vec![3]),
+        ],
+        channel_colors: Vec::new(),
+        metadata: None,
+        name: "x".into(),
+    };
+    let info = crate::api::StackInfo {
+        channel_names: vec!["DAPI".into(), String::new(), "GFP".into()],
+        ..Default::default()
+    };
+
+    NAMES.lock().unwrap().clear();
+    let full = sink(core::mem::size_of::<FtSink>());
+    // SAFETY: every callback in the fixture is real.
+    let st = unsafe {
+        write_image(
+            &full,
+            img.clone(),
+            Some(&info),
+            FtOutcomeKind::NewDocument,
+            "",
+        )
+    };
+    assert_eq!(st, FtStatus::Ok);
+    assert_eq!(
+        *NAMES.lock().unwrap(),
+        vec![
+            (0, "DAPI".to_string()),
+            (1, String::new()),
+            (2, "GFP".to_string())
+        ]
+    );
+
+    // A host from before the callback gets the image and no names, rather
+    // than a call through a pointer it never had.
+    NAMES.lock().unwrap().clear();
+    let older = sink(core::mem::offset_of!(FtSink, set_channel_name));
+    // SAFETY: as above; only the declared size is smaller.
+    let st = unsafe { write_image(&older, img, Some(&info), FtOutcomeKind::NewDocument, "") };
+    assert_eq!(st, FtStatus::Ok, "an older host lost the whole image");
+    assert!(NAMES.lock().unwrap().is_empty());
+}
+
+/// A filter's own metadata is what its names come from, so they go with the
+/// outcome and not only with a direct `write_image`.
+#[test]
+fn a_filters_channel_names_go_with_its_outcome() {
+    let _alone = alone();
+    let img = crate::api::ImageResult {
+        width: 1,
+        height: 1,
+        channels: 2,
+        slices: 1,
+        frames: 1,
+        pixel_type: PixelType::U8,
+        planes: vec![PlaneData::U8(vec![1]), PlaneData::U8(vec![2])],
+        channel_colors: Vec::new(),
+        metadata: Some(crate::api::StackInfo {
+            channel_names: vec!["red".into(), "far red".into()],
+            ..Default::default()
+        }),
+        name: "x".into(),
+    };
+    NAMES.lock().unwrap().clear();
+    let s = sink(core::mem::size_of::<FtSink>());
+    // SAFETY: every callback in the fixture is real.
+    let st = unsafe { write_outcome(&s, Outcome::NewDocument(Box::new(img))) };
+    assert_eq!(st, FtStatus::Ok);
+    assert_eq!(
+        *NAMES.lock().unwrap(),
+        vec![(0, "red".to_string()), (1, "far red".to_string())]
+    );
+}
+
+/// A host from before `channel_lut` must not have its table read past the
+/// end, and leaves a plugin with no tables — what it always had.
+#[test]
+fn a_host_without_luts_is_not_read_past_its_end() {
+    let declared = core::mem::offset_of!(FtHost, channel_lut);
+    assert!(
+        declared >= FtHost::CORE && declared < core::mem::size_of::<FtHost>(),
+        "the fixture must be a real minor-3 host"
+    );
+    let short = Exactly::holding(&answering_host(declared), declared);
+    // SAFETY: the block holds a well-formed prefix of an `FtHost`, sized by
+    // its own `struct_size`.
+    let h = unsafe { crate::host::CHost::new(short.as_ptr()) }.expect("a minor-3 host");
+    assert!(fasttiff_plugin_api::HostContext::view(&h).luts.is_empty());
+}
+
+/// And a host that has them hands every one over, in order, byte for byte.
+#[test]
+fn a_host_with_luts_hands_them_over() {
+    unsafe extern "C" fn two(
+        _c: *mut core::ffi::c_void,
+        index: u64,
+        out: *mut u8,
+        cap: u64,
+    ) -> FtStatus {
+        if index >= 2 {
+            return FtStatus::OutOfRange;
+        }
+        if out.is_null() || cap < crate::abi::FT_LUT_BYTES {
+            return FtStatus::BadArgument;
+        }
+        for i in 0..256usize {
+            // Channel 0 a red ramp, channel 1 a green one.
+            let rgb = if index == 0 {
+                [i as u8, 0, 0]
+            } else {
+                [0, i as u8, 0]
+            };
+            core::ptr::copy_nonoverlapping(rgb.as_ptr(), out.add(i * 3), 3);
+        }
+        FtStatus::Ok
+    }
+    let mut table = answering_host(core::mem::size_of::<FtHost>());
+    table.channel_lut = two;
+    let full = Exactly::holding(&table, core::mem::size_of::<FtHost>());
+    // SAFETY: a complete, well-formed table of this build's own size.
+    let h = unsafe { crate::host::CHost::new(full.as_ptr()) }.expect("a current host");
+    let luts = &fasttiff_plugin_api::HostContext::view(&h).luts;
+    assert_eq!(luts.len(), 2);
+    assert_eq!(luts[0][200], [200, 0, 0]);
+    assert_eq!(luts[1][17], [0, 17, 0]);
+}
+
+/// The stack's channel names reach a plugin with an unnamed channel kept in
+/// its place. This used to stop at the first empty name, so a file that named
+/// only its second channel arrived with no names at all.
+#[test]
+fn a_stack_naming_only_its_second_channel_keeps_that_name() {
+    unsafe extern "C" fn two_channels(
+        _c: *mut core::ffi::c_void,
+        o: *mut crate::abi::FtImageInfo,
+    ) -> FtStatus {
+        let mut filled = core::mem::zeroed::<crate::abi::FtImageInfo>();
+        filled.width = 2;
+        filled.height = 2;
+        filled.samples_per_pixel = 1;
+        filled.channels = 3;
+        filled.slices = 1;
+        filled.frames = 1;
+        if crate::abi::write_prefix(o, filled) {
+            FtStatus::Ok
+        } else {
+            FtStatus::BadArgument
+        }
+    }
+    unsafe extern "C" fn names(_c: *mut core::ffi::c_void, which: u32, index: u64) -> FtStr {
+        match (which, index) {
+            (crate::abi::FT_STRING_CHANNEL_NAME, 1) => FtStr::from_str("GFP"),
+            _ => FtStr::EMPTY,
+        }
+    }
+    unsafe extern "C" fn info_ok(_c: *mut core::ffi::c_void, o: *mut FtStackInfo) -> FtStatus {
+        let filled = core::mem::zeroed::<FtStackInfo>();
+        if crate::abi::write_prefix(o, filled) {
+            FtStatus::Ok
+        } else {
+            FtStatus::BadArgument
+        }
+    }
+    let mut table = answering_host(core::mem::size_of::<FtHost>());
+    table.image_info = two_channels;
+    table.stack_string = names;
+    table.stack_info = info_ok;
+    let full = Exactly::holding(&table, core::mem::size_of::<FtHost>());
+    // SAFETY: a complete, well-formed table of this build's own size.
+    let h = unsafe { crate::host::CHost::new(full.as_ptr()) }.expect("a current host");
+    // The third channel is unnamed too, and trailing gaps are not kept: the
+    // host answers "unnamed" and "no such channel" the same way.
+    assert_eq!(
+        fasttiff_plugin_api::HostContext::stack_info(&h).channel_names,
+        vec![String::new(), "GFP".to_string()]
     );
 }

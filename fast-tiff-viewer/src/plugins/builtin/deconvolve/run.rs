@@ -42,6 +42,7 @@ use fasttiff_plugin_api::{
 };
 
 /// Deconvolve the open stack.
+#[derive(Default)]
 pub struct Deconvolve;
 
 /// Where the PSF comes from.

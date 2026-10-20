@@ -62,6 +62,7 @@ fn axes(info: &ImageInfo) -> Vec<Axis> {
 }
 
 /// Flatten an axis with a per-pixel statistic — ImageJ's Z Project.
+#[derive(Default)]
 pub struct ZProject;
 
 impl Plugin for ZProject {

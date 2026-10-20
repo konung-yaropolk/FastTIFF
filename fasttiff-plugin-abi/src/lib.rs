@@ -85,6 +85,14 @@
 //! None of this, ideally. The `fasttiff-plugin` crate wraps it: an author
 //! implements the ordinary Rust `Plugin` or `Importer` trait from
 //! `fasttiff-plugin-api` and writes `export_plugin!`.
+//!
+//! # Who else uses it
+//!
+//! FastTIFF itself, for its built-in plugins. They are registered through this
+//! contract in the host's own process — the same `fasttiff-plugin`
+//! registration a library's query function runs — so there is one kind of
+//! plugin, and this contract is all of it. Anything a built-in can see or
+//! return has to be expressible here, which is what minor 4 was for.
 
 #![allow(clippy::missing_safety_doc)]
 
@@ -112,7 +120,13 @@ pub const ABI_MAJOR: u32 = 1;
 ///   asks again after every change. Plus [`FtParamKind::Section`], a group
 ///   heading, which is a new *value* of an open enum rather than a new field
 ///   and so costs nothing in either direction.
-pub const ABI_MINOR: u32 = 3;
+/// * **4** — the last two things a plugin compiled into the app could see or
+///   say and one in a library could not: [`FtHost::channel_lut`], the colour
+///   table each channel is drawn with, and [`FtSink::set_channel_name`], what
+///   a result's channel is called. With those, the app registers its own
+///   built-in plugins through this contract too, so a built-in and a library
+///   cannot differ in what they can do — there is only one way in.
+pub const ABI_MINOR: u32 = 4;
 
 /// The one symbol a plugin library must export, NUL-terminated for `dlsym`.
 ///
@@ -627,7 +641,23 @@ pub struct FtHost {
     /// make the host promise a lifetime it has no way to state here.
     pub param_value:
         unsafe extern "C" fn(ctx: *mut c_void, index: u64, out: *mut FtValue) -> FtStatus,
+
+    /// The colour table channel `index` is drawn with: 256 RGB triples,
+    /// [`FT_LUT_BYTES`] bytes, written into `out`. `cap` is how many bytes
+    /// `out` holds; less than a whole table is refused rather than filled in
+    /// part. `OutOfRange` past the last channel that has one.
+    ///
+    /// For a plugin that draws what the user sees — an exporter writing the
+    /// displayed frame as a picture — the window alone is not enough: a
+    /// composite is magenta and green, or Fire, and without the tables it
+    /// comes out grey.
+    pub channel_lut:
+        unsafe extern "C" fn(ctx: *mut c_void, index: u64, out: *mut u8, cap: u64) -> FtStatus,
 }
+
+/// One channel's colour table as [`FtHost::channel_lut`] writes it: 256
+/// entries of red, green, blue.
+pub const FT_LUT_BYTES: u64 = 256 * 3;
 
 open_enum! {
     /// What a plugin decided to produce. Matches `fasttiff_plugin_api::Outcome`.
@@ -734,13 +764,16 @@ pub struct FtSink {
         unit: FtStr,
         description: FtStr,
     ) -> FtStatus,
-    /// Name and colour one channel of the result, `0`-based.
+    /// Colour one channel of the result, `0`-based.
     ///
     /// A callback rather than an array on [`FtSink::begin_image`], for the same
     /// reason `push_plane` is one: the count is not known to this contract in
     /// advance, and a repeated call needs no ownership rules. `rgb` is
-    /// `0x00RRGGBB`. Optional; unnamed, uncoloured channels get the host's
-    /// defaults.
+    /// `0x00RRGGBB`. Optional; uncoloured channels get the host's defaults.
+    ///
+    /// `name` is ignored, and always has been: no host ever read it. A name
+    /// goes through [`set_channel_name`](Self::set_channel_name), which can
+    /// carry one without also forcing a colour.
     pub set_channel:
         unsafe extern "C" fn(ctx: *mut c_void, index: u64, name: FtStr, rgb: u32) -> FtStatus,
 
@@ -782,6 +815,14 @@ pub struct FtSink {
         len: u64,
         color: u32,
     ) -> FtStatus,
+
+    /// Name one channel of the result, `0`-based.
+    ///
+    /// A name is part of the result's metadata, so it is kept only alongside
+    /// what [`set_info`](Self::set_info) declared — a result that says nothing
+    /// else about itself is shown the way an unannotated one is.
+    pub set_channel_name:
+        unsafe extern "C" fn(ctx: *mut c_void, index: u64, name: FtStr) -> FtStatus,
 }
 
 /// No colour of its own: let the host choose. For [`FtSink::push_series`].
@@ -1092,8 +1133,8 @@ const _: () = {
     assert!(size_of::<FtImporterVtable>() == 8 + 4 * p);
     assert!(size_of::<FtExporterVtable>() == 8 + 3 * p);
     assert!(size_of::<FtParamSink>() == 8 + 2 * p);
-    assert!(size_of::<FtSink>() == 8 + 8 * p);
-    assert!(size_of::<FtHost>() == 8 + 16 * p);
+    assert!(size_of::<FtSink>() == 8 + 9 * p);
+    assert!(size_of::<FtHost>() == 8 + 17 * p);
 
     // The append rule, pinned. `CORE` is what an older host declares, so it
     // has to end exactly where the appended field begins; and the appended
@@ -1103,13 +1144,17 @@ const _: () = {
     assert!(FtRegistrar::CORE == offset_of!(FtRegistrar, add_exporter));
     assert!(FtRegistrar::WITH_EXPORTERS == size_of::<FtRegistrar>());
 
-    // The same rule for the two tables minor 2 appended to. `CORE` still ends
-    // where the first optional field begins, and the newest field is last —
-    // which is what every `ft_covers!` check in the workspace assumes.
+    // The same rule for the two tables minors 2 to 4 appended to. `CORE` still
+    // ends where the first optional field begins, and the newest field is last
+    // — which is what every `ft_covers!` check in the workspace assumes, and
+    // what the stub-the-uncovered-tail code in `fasttiff-plugin` relies on.
     assert!(FtSink::CORE == offset_of!(FtSink, set_info));
-    assert!(offset_of!(FtSink, push_series) + p == size_of::<FtSink>());
+    assert!(offset_of!(FtSink, push_series) + p == offset_of!(FtSink, set_channel_name));
+    assert!(offset_of!(FtSink, set_channel_name) + p == size_of::<FtSink>());
     assert!(FtHost::CORE == offset_of!(FtHost, stack_info));
-    assert!(offset_of!(FtHost, param_value) + p == size_of::<FtHost>());
+    assert!(offset_of!(FtHost, param_value) + p == offset_of!(FtHost, channel_lut));
+    assert!(offset_of!(FtHost, channel_lut) + p == size_of::<FtHost>());
+    assert!(FT_LUT_BYTES == 768);
 
     // Carried by value into a plugin's own allocation, so its prologue is
     // where a shorter one is detected.

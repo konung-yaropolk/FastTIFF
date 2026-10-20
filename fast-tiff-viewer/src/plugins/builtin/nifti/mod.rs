@@ -44,6 +44,7 @@ use fasttiff_plugin_api::{
 use header::{Datatype, Hdr};
 use std::path::Path;
 
+#[derive(Default)]
 pub struct Nifti;
 
 /// The gzip member header, which is how a `.nii.gz` announces itself.

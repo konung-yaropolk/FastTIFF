@@ -1,10 +1,25 @@
-//! Loading plugins from shared libraries.
+//! The host half of the C boundary — for every plugin, not only the ones in
+//! shared libraries.
 //!
-//! The host half of the C boundary: it opens a library, looks up
-//! [`QUERY_SYMBOL`](fasttiff_plugin_abi::QUERY_SYMBOL), lets the plugin
-//! register what it provides, and wraps each registration in a type that
-//! implements the ordinary [`Plugin`]/[`Importer`] traits — so nothing above
-//! this module can tell a loaded plugin from a built-in one.
+//! A library is opened, its [`QUERY_SYMBOL`](fasttiff_plugin_abi::QUERY_SYMBOL)
+//! looked up, and whatever it registers is wrapped in [`LoadedPlugin`],
+//! [`LoadedImporter`] or [`LoadedExporter`]. The app's own built-in plugins
+//! arrive the same way: [`plugin_of`] and its two siblings register a Rust type
+//! through the very same descriptors, vtables, host table and sinks, in this
+//! process, without a file. So there is one way into the [`Registry`] and one
+//! set of rules for what happens there — the dialog, the run, the limits on a
+//! result, the treatment of a panic — and a built-in cannot do anything a
+//! library cannot, or be held to anything a library is not. Only *where the
+//! vtable came from* differs, and that is what [`Origin`] records.
+//!
+//! The cost of the shared path is a copy of each plane in each direction —
+//! the host decodes into a buffer of its own and copies into the plugin's, and
+//! copies a result plane before the plugin lets it go. Both are memcpy next to
+//! a decode or an encode, and neither holds a second whole stack: the plugin
+//! side frees each result plane the moment it is across.
+//!
+//! [`Registry`]: super::Registry
+//! [`Origin`]: super::Origin
 //!
 //! Everything here assumes the plugin is **wrong, not merely foreign**:
 //!
@@ -19,14 +34,23 @@
 //!
 //! # Libraries are never unloaded
 //!
-//! Once opened, a [`Library`] is leaked for the process's lifetime. Calling
-//! `dlclose` while a plugin's thread, a registered TLS destructor, or a
+//! Once opened, a `libloading::Library` is leaked for the process's lifetime.
+//! Calling `dlclose` while a plugin's thread, a registered TLS destructor, or a
 //! function pointer the host still holds is alive is a family of crashes that
 //! only ever appear on someone else's machine. Reinstalling a plugin therefore
 //! needs a restart, which is the trade every long-lived plugin host makes.
+//!
+//! # Threads
+//!
+//! A plugin is called from one thread at a time, and different plugins may
+//! run at once. That is the [`Plugin`] trait's own rule — `Send`, not `Sync` —
+//! and it holds here by construction: `run` takes `&mut self`, and a registry
+//! is not shared between threads. There used to be a process-wide lock around
+//! every call into a library, which held libraries to a stricter rule than the
+//! built-ins and protected nothing: every call builds its own host cell and
+//! sink, so two calls cannot alias.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use fasttiff_plugin_abi as abi;
 use fasttiff_plugin_api::{
@@ -35,6 +59,7 @@ use fasttiff_plugin_api::{
     PixelType, PlaneData, Plot, Plugin, PluginError, PluginInfo, SelectionKind, Series, StackInfo,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 use super::{Origin, Registry};
 
 /// What one library gave us.
@@ -58,28 +83,94 @@ impl std::fmt::Debug for Loaded {
     }
 }
 
-/// A plugin living in a shared library.
+/// A plugin behind the C boundary: in a shared library, or compiled into the
+/// app and registered through the same contract.
 pub struct LoadedPlugin {
     info: PluginInfo,
     vtable: abi::FtPluginVtable,
-    /// Kept so the error can name the file rather than just the plugin.
-    source: PathBuf,
+    /// The file it came from, so an error can name it. `None` for one
+    /// registered in this process — a built-in.
+    source: Option<PathBuf>,
 }
 
-/// An importer living in a shared library.
+/// An importer behind the C boundary.
 pub struct LoadedImporter {
     info: PluginInfo,
     file_types: Vec<FileType>,
     vtable: abi::FtImporterVtable,
-    source: PathBuf,
+    source: Option<PathBuf>,
 }
 
-/// An exporter living in a shared library.
+/// An exporter behind the C boundary.
 pub struct LoadedExporter {
     info: PluginInfo,
     file_types: Vec<FileType>,
     vtable: abi::FtExporterVtable,
-    source: PathBuf,
+    source: Option<PathBuf>,
+}
+
+impl LoadedPlugin {
+    /// The file this plugin was loaded from; `None` for a built-in.
+    pub fn source(&self) -> Option<&Path> {
+        self.source.as_deref()
+    }
+}
+
+impl LoadedImporter {
+    /// The file this importer was loaded from; `None` for a built-in.
+    pub fn source(&self) -> Option<&Path> {
+        self.source.as_deref()
+    }
+}
+
+impl LoadedExporter {
+    /// The file this exporter was loaded from; `None` for a built-in.
+    pub fn source(&self) -> Option<&Path> {
+        self.source.as_deref()
+    }
+}
+
+// ------------------------------------------------- registering in this process
+
+/// Register a plugin type through the C boundary without a library.
+///
+/// The same `fasttiff_plugin` registration a `.dll` runs in its query
+/// function, so the result is exactly what that `.dll` would have produced:
+/// the same descriptor, the same generated vtable, and from then on the same
+/// host table and sinks on every call. This is how the app installs its own
+/// plugins, and it is what makes "built-in" a statement about where the code
+/// lives rather than about which rules it plays by.
+pub fn plugin_of<T: Plugin + Default + 'static>() -> Result<LoadedPlugin, String> {
+    // SAFETY: the closure registers through `fasttiff_plugin`'s own generated
+    // shims for `T`, which are linked into this binary for its whole life.
+    let mut loaded =
+        unsafe { register_with(None, |reg| fasttiff_plugin::register_plugin::<T>(reg)) }?;
+    loaded
+        .plugins
+        .pop()
+        .ok_or_else(|| "a plugin registered as something other than a plugin".to_string())
+}
+
+/// [`plugin_of`], for an importer.
+pub fn importer_of<T: Importer + Default + 'static>() -> Result<LoadedImporter, String> {
+    // SAFETY: as in `plugin_of`.
+    let mut loaded =
+        unsafe { register_with(None, |reg| fasttiff_plugin::register_importer::<T>(reg)) }?;
+    loaded
+        .importers
+        .pop()
+        .ok_or_else(|| "an importer registered as something other than an importer".to_string())
+}
+
+/// [`plugin_of`], for an exporter.
+pub fn exporter_of<T: Exporter + Default + 'static>() -> Result<LoadedExporter, String> {
+    // SAFETY: as in `plugin_of`.
+    let mut loaded =
+        unsafe { register_with(None, |reg| fasttiff_plugin::register_exporter::<T>(reg)) }?;
+    loaded
+        .exporters
+        .pop()
+        .ok_or_else(|| "an exporter registered as something other than an exporter".to_string())
 }
 
 // ---------------------------------------------------------------- discovery
@@ -89,6 +180,7 @@ pub struct LoadedExporter {
 /// Problems are recorded on the registry rather than returned: one unloadable
 /// library must not stop the others, and the user needs to be told which one
 /// and why.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_all(registry: &mut Registry) {
     for dir in super::search_paths() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -105,13 +197,13 @@ pub fn load_all(registry: &mut Registry) {
             match load_library(&file) {
                 Ok(loaded) => {
                     for p in loaded.plugins {
-                        registry.add(Box::new(p), Origin::Library);
+                        registry.add_loaded(p, Origin::Library);
                     }
                     for i in loaded.importers {
-                        registry.add_importer(Box::new(i), Origin::Library);
+                        registry.add_loaded_importer(i, Origin::Library);
                     }
                     for e in loaded.exporters {
-                        registry.add_exporter(Box::new(e), Origin::Library);
+                        registry.add_loaded_exporter(e, Origin::Library);
                     }
                 }
                 Err(e) => registry.problems.push(format!(
@@ -129,11 +221,12 @@ struct Collector {
     plugins: Vec<LoadedPlugin>,
     importers: Vec<LoadedImporter>,
     exporters: Vec<LoadedExporter>,
-    source: PathBuf,
+    source: Option<PathBuf>,
     problems: Vec<String>,
 }
 
 /// Open one library and let it register itself.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_library(path: &Path) -> Result<Loaded, String> {
     // SAFETY: opening a library runs its initialisers, which is inherent to
     // loading a plugin at all; there is no safe version of this.
@@ -176,8 +269,25 @@ pub fn load_library(path: &Path) -> Result<Loaded, String> {
 /// produced by `fasttiff_plugin::export_plugin!` — and the code behind it must
 /// stay loaded for as long as anything it registers is used.
 pub unsafe fn register_from(query: abi::FtQueryFn, source: &Path) -> Result<Loaded, String> {
+    register_with(Some(source.to_path_buf()), |reg| query(reg))
+}
+
+/// The body of every registration: build the host's registrar, hand it to
+/// `register`, and adapt what comes back.
+///
+/// `register` is a library's query function, or — for a plugin compiled into
+/// the app — the same `fasttiff_plugin` registration that query function would
+/// have run. Either way the descriptors arrive through the callbacks below and
+/// are checked by them, so a built-in is validated exactly as a library is.
+///
+/// # Safety
+/// Whatever `register` registers must stay loaded for as long as it is used.
+unsafe fn register_with(
+    source: Option<PathBuf>,
+    register: impl FnOnce(&mut abi::FtRegistrar) -> abi::FtStatus,
+) -> Result<Loaded, String> {
     let mut collector = Collector {
-        source: source.to_path_buf(),
+        source: source.clone(),
         ..Default::default()
     };
     let mut reg = abi::FtRegistrar {
@@ -192,7 +302,7 @@ pub unsafe fn register_from(query: abi::FtQueryFn, source: &Path) -> Result<Load
     };
 
     // A panic must not unwind out of the plugin and through this frame.
-    let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| query(&mut reg)))
+    let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| register(&mut reg)))
         .map_err(|_| "panicked while registering".to_string())?;
 
     if status != abi::FtStatus::Ok {
@@ -214,8 +324,12 @@ pub unsafe fn register_from(query: abi::FtQueryFn, source: &Path) -> Result<Load
     // is the first thing to suspect if the plugin then behaves oddly.
     if reg.plugin_abi_minor > abi::ABI_MINOR {
         log::info!(
-            "{}: built against plugin ABI 1.{}, this host provides 1.{};              anything newer than 1.{} is ignored",
-            source.display(),
+            "{}: built against plugin ABI 1.{}, this host provides 1.{}; \
+             anything newer than 1.{} is ignored",
+            source
+                .as_deref()
+                .map(|s| s.display().to_string())
+                .unwrap_or_else(|| "a built-in plugin".into()),
             reg.plugin_abi_minor,
             abi::ABI_MINOR,
             abi::ABI_MINOR
@@ -880,6 +994,31 @@ unsafe extern "C" fn cb_param_value(
     })
 }
 
+unsafe extern "C" fn cb_channel_lut(
+    ctx: *mut std::ffi::c_void,
+    index: u64,
+    out: *mut u8,
+    cap: u64,
+) -> abi::FtStatus {
+    host_guard(|| {
+        let Some(c) = (ctx as *mut HostCell).as_mut() else {
+            return abi::FtStatus::BadArgument;
+        };
+        // Somewhere to put the answer before which answer: see `cb_selection_roi`.
+        // A buffer short of a whole table is refused rather than filled in
+        // part — half a table is not a colour scale.
+        if out.is_null() || cap < abi::FT_LUT_BYTES {
+            return abi::FtStatus::BadArgument;
+        }
+        let Some(lut) = c.inner.view().luts.get(index as usize) else {
+            return abi::FtStatus::OutOfRange;
+        };
+        // `Lut` is 256 `[u8; 3]`: 768 contiguous bytes, red, green, blue.
+        std::ptr::copy_nonoverlapping(lut.as_ptr().cast::<u8>(), out, abi::FT_LUT_BYTES as usize);
+        abi::FtStatus::Ok
+    })
+}
+
 unsafe extern "C" fn cb_progress(ctx: *mut std::ffi::c_void, fraction: f32) -> u32 {
     match (ctx as *mut HostCell).as_mut() {
         Some(c) => {
@@ -921,6 +1060,7 @@ fn host_table(cell: &mut HostCell) -> abi::FtHost {
         selection_roi: cb_selection_roi,
         param_count: cb_param_count,
         param_value: cb_param_value,
+        channel_lut: cb_channel_lut,
     }
 }
 
@@ -946,6 +1086,8 @@ struct ResultSink {
     /// Per-channel colours, by index. Sparse: a plugin may colour some
     /// channels and leave the rest to the host.
     colors: std::collections::BTreeMap<u64, [u8; 3]>,
+    /// Per-channel names, by index, kept with `info` — see [`Self::take_info`].
+    names: std::collections::BTreeMap<u64, String>,
     /// The chart being declared, once `begin_plot` has been called.
     plot: Option<PlotSink>,
 }
@@ -1023,7 +1165,8 @@ unsafe extern "C" fn sink_begin(
             abi::FtPixelType::I16 => PixelType::I16,
             other => {
                 s.problem = Some(format!(
-                    "the plugin declared a sample format this version of                      FastTIFF does not know ({other:?})"
+                    "the plugin declared a sample format this version of \
+                     FastTIFF does not know ({other:?})"
                 ));
                 return abi::FtStatus::BadArgument;
             }
@@ -1252,6 +1395,28 @@ unsafe extern "C" fn sink_set_channel(
     })
 }
 
+unsafe extern "C" fn sink_set_channel_name(
+    ctx: *mut std::ffi::c_void,
+    index: u64,
+    name: abi::FtStr,
+) -> abi::FtStatus {
+    host_guard(|| {
+        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+            return abi::FtStatus::BadArgument;
+        };
+        // The same bound as a colour, for the same reason.
+        if index > 4096 {
+            return abi::FtStatus::OutOfRange;
+        }
+        let Some(n) = name.as_str() else {
+            s.problem = Some("the plugin named a channel with something that is not text".into());
+            return abi::FtStatus::BadArgument;
+        };
+        s.names.insert(index, n.to_string());
+        abi::FtStatus::Ok
+    })
+}
+
 fn sink_table(sink: &mut ResultSink) -> abi::FtSink {
     abi::FtSink {
         struct_size: std::mem::size_of::<abi::FtSink>() as u32,
@@ -1264,12 +1429,33 @@ fn sink_table(sink: &mut ResultSink) -> abi::FtSink {
         set_channel: sink_set_channel,
         begin_plot: sink_begin_plot,
         push_series: sink_push_series,
+        set_channel_name: sink_set_channel_name,
     }
 }
 
 impl ResultSink {
+    /// The result's metadata, with the channel names it was given.
+    ///
+    /// A name lives in `StackInfo::channel_names`, so it is kept only where
+    /// there is a `StackInfo` to keep it in — what `set_info` declared. Making
+    /// one up to hold a name would also make up a display mode, and a
+    /// multi-channel result that declares nothing is composited, where an
+    /// invented default would show it in grey.
+    ///
+    /// Dense up to the highest index named, an unnamed channel in between kept
+    /// as an empty string, so the list arrives as the plugin had it.
+    fn take_info(&mut self) -> Option<StackInfo> {
+        let mut info = self.info.take()?;
+        if let Some(&highest) = self.names.keys().next_back() {
+            info.channel_names = (0..=highest)
+                .map(|i| self.names.get(&i).cloned().unwrap_or_default())
+                .collect();
+        }
+        Some(info)
+    }
+
     /// Turn what was pushed into an outcome, or say what was wrong with it.
-    fn finish(self, name: &str) -> Result<Outcome, PluginError> {
+    fn finish(mut self, name: &str) -> Result<Outcome, PluginError> {
         if let Some(p) = self.problem {
             return Err(PluginError::failed(p));
         }
@@ -1313,6 +1499,7 @@ impl ResultSink {
                         .collect(),
                     None => Vec::new(),
                 };
+                let metadata = self.take_info();
                 let image = ImageResult {
                     width: self.width,
                     height: self.height,
@@ -1328,7 +1515,7 @@ impl ResultSink {
                     // *before* calling `finish`), so this is a filter's
                     // metadata and nothing else — the calibration a
                     // geometry-preserving filter carried over from its source.
-                    metadata: self.info,
+                    metadata,
                     name: self.name,
                 };
                 // The plugin may simply have pushed too few planes; the host
@@ -1339,14 +1526,18 @@ impl ResultSink {
                     abi::FtOutcomeKind::ReplaceDocument => {
                         Ok(Outcome::ReplaceDocument(Box::new(image)))
                     }
-                    _ => Ok(Outcome::SaveToFile { image: Box::new(image), path: self.text }),
+                    _ => Ok(Outcome::SaveToFile {
+                        image: Box::new(image),
+                        path: self.text,
+                    }),
                 }
             }
             // A kind from a newer ABI. The plugin did the work and expects
             // something to happen to the result; quietly doing nothing would
             // look like a plugin that silently fails.
             other => Err(PluginError::failed(format!(
-                "{name} asked for something this version of FastTIFF does not                  know how to do ({other:?}); the plugin needs a newer FastTIFF"
+                "{name} asked for something this version of FastTIFF does not \
+                 know how to do ({other:?}); the plugin needs a newer FastTIFF"
             ))),
         }
     }
@@ -1356,6 +1547,16 @@ impl ResultSink {
 #[derive(Default)]
 struct DeclSink {
     decls: Vec<ParamDecl>,
+    /// Why a control was refused, for the user — the plugin only learns
+    /// `BadArgument`, and passes that back without a reason of its own.
+    problem: Option<String>,
+}
+
+impl DeclSink {
+    fn refuse(&mut self, why: impl Into<String>) -> abi::FtStatus {
+        self.problem.get_or_insert_with(|| why.into());
+        abi::FtStatus::BadArgument
+    }
 }
 
 unsafe extern "C" fn decl_push(
@@ -1368,18 +1569,15 @@ unsafe extern "C" fn decl_push(
         };
         // Checked before the reference is formed; see `add_plugin_cb`.
         if !abi::fits(decl) {
-            return abi::FtStatus::BadArgument;
+            return s.refuse("its dialog declares a control older than this ABI");
         }
         let d = &*decl;
-        if (d.struct_size as usize) < std::mem::size_of::<abi::FtParamDecl>() {
-            return abi::FtStatus::BadArgument;
-        }
         // A dialog with thousands of controls is a runaway loop, not a dialog.
         if s.decls.len() >= 256 {
-            return abi::FtStatus::BadArgument;
+            return s.refuse("its dialog declares more than 256 controls");
         }
         let Some(key) = d.key.as_str() else {
-            return abi::FtStatus::BadArgument;
+            return s.refuse("a control in its dialog has a key that is not text");
         };
         let label = d.label.as_str().unwrap_or("").to_string();
         let help = d
@@ -1405,14 +1603,20 @@ unsafe extern "C" fn decl_push(
             },
             abi::FtParamKind::Choice => {
                 if d.option_count > 1024 {
-                    return abi::FtStatus::BadArgument;
+                    return s.refuse(format!(
+                        "the choice \"{key}\" offers more than 1024 options"
+                    ));
                 }
                 let mut options = Vec::new();
                 if !d.options.is_null() {
                     for i in 0..d.option_count {
                         match (*d.options.add(i as usize)).as_str() {
                             Some(o) => options.push(o.to_string()),
-                            None => return abi::FtStatus::BadArgument,
+                            None => {
+                                return s.refuse(format!(
+                                    "an option of the choice \"{key}\" is not text"
+                                ))
+                            }
                         }
                     }
                 }
@@ -1541,54 +1745,140 @@ unsafe fn last_error_of(f: unsafe extern "C" fn() -> abi::FtStr, fallback: &str)
 /// its own name or which file it was loaded from; this side knows both and
 /// nothing about the panic. Neither half is much use alone: "panicked" does not
 /// say which of six installed plugins to remove, and the payload does not say
-/// where to look.
-fn panic_message(name: &str, source: &Path, detail: String) -> String {
+/// where to look. A built-in has no file, and then its name is the whole answer.
+fn panic_message(name: &str, source: Option<&Path>, detail: String) -> String {
     let detail = detail.trim();
+    let from = source
+        .map(|s| format!(" (from {})", s.display()))
+        .unwrap_or_default();
     if detail.is_empty() {
-        format!("{name} panicked (from {})", source.display())
+        format!("{name} panicked{from}")
     } else {
-        format!("{name} panicked (from {}): {detail}", source.display())
+        format!("{name} panicked{from}: {detail}")
     }
 }
 
-/// One plugin call may not be re-entered while another is running: the sinks
-/// and host cells are addressed by raw pointer, and a plugin calling back into
-/// the host to run another plugin would alias them.
-static CALL_LOCK: Mutex<()> = Mutex::new(());
+/// What a call that did not end `Ok` means — one answer for every entry point.
+///
+/// This was a `match` per call site, and they had drifted apart: an importer
+/// that asked for a missing plane said "failed (OutOfRange)" where a filter
+/// said it was out of range, and a cancelled import said "failed (Cancelled)".
+/// `cannot` is what `Unsupported` means for this kind of call, for a plugin
+/// that gave no reason of its own.
+///
+/// A cancelled *run* does not come here: that is an outcome, not an error.
+/// The other calls have no cancelled outcome to give, so an import or export
+/// the user stopped is reported as one that did not happen.
+///
+/// # Safety
+/// `last_error` must be the plugin's own entry point.
+unsafe fn failure(
+    status: abi::FtStatus,
+    last_error: unsafe extern "C" fn() -> abi::FtStr,
+    name: &str,
+    source: Option<&Path>,
+    cannot: &str,
+) -> PluginError {
+    match status {
+        abi::FtStatus::Unsupported => PluginError::unsupported(last_error_of(last_error, cannot)),
+        abi::FtStatus::OutOfRange => PluginError::OutOfRange(last_error_of(
+            last_error,
+            "asked for a plane that does not exist",
+        )),
+        abi::FtStatus::Cancelled => PluginError::unsupported("cancelled"),
+        abi::FtStatus::Panic => {
+            PluginError::failed(panic_message(name, source, last_error_of(last_error, "")))
+        }
+        other => PluginError::failed(last_error_of(last_error, &format!("failed ({other:?})"))),
+    }
+}
+
+/// Ask for a dialog through `params`, or say why there is not one.
+///
+/// # Safety
+/// `params` must call the plugin's own entry point with the sink it is given,
+/// and `last_error` must be that plugin's.
+unsafe fn ask_dialog(
+    params: impl FnOnce(*const abi::FtParamSink) -> abi::FtStatus,
+    last_error: unsafe extern "C" fn() -> abi::FtStr,
+    name: &str,
+    source: Option<&Path>,
+) -> Result<Vec<ParamDecl>, PluginError> {
+    let mut sink = DeclSink::default();
+    let table = decl_sink_table(&mut sink);
+    // The plugin's own shim catches its panics; this is the second line, for a
+    // plugin that was not built with `fasttiff-plugin`.
+    let st = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| params(&table)))
+        .unwrap_or(abi::FtStatus::Panic);
+    if st == abi::FtStatus::Ok {
+        return Ok(sink.decls);
+    }
+    // The host's reason, when it was the host that refused a control: the
+    // plugin was only told `BadArgument`, and has nothing better to add.
+    if let Some(p) = sink.problem {
+        return Err(PluginError::failed(format!(
+            "{name} could not declare its dialog: {p}"
+        )));
+    }
+    Err(failure(
+        st,
+        last_error,
+        name,
+        source,
+        "has no dialog for this stack",
+    ))
+}
+
+/// The host table for a dialog: read-only, over a `&dyn` host.
+///
+/// `params` takes `&dyn HostContext`, but the C table is uniform over `&mut`;
+/// [`ReadOnly`] is what makes the one usable as the other, and everything it
+/// lets a plugin reach from here only reads.
+fn with_dialog_host<R>(host: &dyn HostContext, f: impl FnOnce(&abi::FtHost) -> R) -> R {
+    let mut shim = ReadOnly(host);
+    // Both read `host` immutably, so they are taken before the mutable borrow
+    // the cell holds for the rest of the call.
+    let cell_name = host.stack_info().name.clone();
+    let cell_path = host.stack_info().path.clone().unwrap_or_default();
+    let mut cell = HostCell::new(&mut shim, cell_name, cell_path);
+    let table = host_table(&mut cell);
+    f(&table)
+}
+
+impl LoadedPlugin {
+    /// The plugin's dialog, or why it could not declare one.
+    ///
+    /// The fallible form of [`Plugin::params`], which has nowhere to put a
+    /// failure and answers with no controls — and a plugin with no controls is
+    /// run at once, which is the wrong thing to do with one whose dialog has
+    /// just failed. The app asks this instead, and stops with the reason.
+    pub fn dialog(&self, host: &dyn HostContext) -> Result<Vec<ParamDecl>, PluginError> {
+        with_dialog_host(host, |table| {
+            // SAFETY: `table` and the sink `ask_dialog` builds are locals that
+            // outlive the call.
+            unsafe {
+                ask_dialog(
+                    |sink| (self.vtable.params)(table, sink),
+                    self.vtable.last_error,
+                    &self.info.name,
+                    self.source(),
+                )
+            }
+        })
+    }
+}
 
 impl Plugin for LoadedPlugin {
     fn info(&self) -> PluginInfo {
         self.info.clone()
     }
 
+    /// The dialog, a failure answered with none; see [`LoadedPlugin::dialog`].
     fn params(&self, host: &dyn HostContext) -> Vec<ParamDecl> {
-        let _lock = CALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // `params` takes `&dyn`, but the C table is uniform over `&mut`; the
-        // callbacks it can reach from here are read-only.
-        let mut shim = ReadOnly(host);
-        // Both read `host` immutably, so they are taken before the
-        // mutable borrow the cell holds for the rest of the call.
-        let cell_name = host.stack_info().name.clone();
-        let cell_path = host.stack_info().path.clone().unwrap_or_default();
-        let mut cell = HostCell::new(&mut shim, cell_name, cell_path);
-        let table = host_table(&mut cell);
-        let mut sink = DeclSink::default();
-        let sink_table = decl_sink_table(&mut sink);
-        // SAFETY: both tables point at locals that outlive the call, and the
-        // plugin's own shim catches its panics; `catch_unwind` here is the
-        // second line for a plugin that was not built with this crate.
-        let st = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            (self.vtable.params)(&table, &sink_table)
-        }))
-        .unwrap_or(abi::FtStatus::Panic);
-        if st != abi::FtStatus::Ok {
-            return Vec::new();
-        }
-        sink.decls
+        self.dialog(host).unwrap_or_default()
     }
 
     fn run(&mut self, host: &mut dyn HostContext, params: &Params) -> Result<Outcome, PluginError> {
-        let _lock = CALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let name = self.info.name.clone();
         // `_owned` holds the strings the `FtValue`s point at. The leading
         // underscore keeps it alive to the end of this scope — a bare `_` would
@@ -1623,24 +1913,16 @@ impl Plugin for LoadedPlugin {
         match st {
             abi::FtStatus::Ok => sink.finish(&name),
             abi::FtStatus::Cancelled => Ok(Outcome::Cancelled),
-            abi::FtStatus::Unsupported => Err(PluginError::unsupported(unsafe {
-                last_error_of(self.vtable.last_error, "not applicable to this stack")
-            })),
-            abi::FtStatus::OutOfRange => Err(PluginError::OutOfRange(unsafe {
-                last_error_of(
+            // SAFETY: the plugin's own `last_error`, copied before returning.
+            other => Err(unsafe {
+                failure(
+                    other,
                     self.vtable.last_error,
-                    "asked for a plane that does not exist",
+                    &name,
+                    self.source(),
+                    "not applicable to this stack",
                 )
-            })),
-            abi::FtStatus::Panic => Err(PluginError::failed(panic_message(
-                &name,
-                &self.source,
-                // SAFETY: the plugin's `last_error`, copied before returning.
-                unsafe { last_error_of(self.vtable.last_error, "") },
-            ))),
-            other => Err(PluginError::failed(unsafe {
-                last_error_of(self.vtable.last_error, &format!("failed ({other:?})"))
-            })),
+            }),
         }
     }
 }
@@ -1741,6 +2023,14 @@ impl HostContext for ReadOnly<'_> {
     fn selection(&self) -> fasttiff_plugin_api::Selection<'_> {
         self.0.selection()
     }
+    // The one this shim exists for. A dialog is declared through it, and the
+    // values the dialog holds are what a plugin reads to decide which controls
+    // to declare — so leaving this to the default, which it was, meant no
+    // plugin behind the boundary could have a dialog that followed its own
+    // choices, ABI 1.3 notwithstanding.
+    fn pending_params(&self) -> &Params {
+        self.0.pending_params()
+    }
     fn view(&self) -> &fasttiff_plugin_api::ViewParams {
         self.0.view()
     }
@@ -1771,6 +2061,23 @@ impl HostContext for ReadOnly<'_> {
     fn log(&mut self, _m: &str) {}
 }
 
+impl LoadedImporter {
+    /// The importer's dialog for `path`, or why it could not declare one. See
+    /// [`LoadedPlugin::dialog`].
+    pub fn dialog(&self, path: &Path) -> Result<Vec<ParamDecl>, PluginError> {
+        let p = path.to_string_lossy().to_string();
+        // SAFETY: the path and the sink `ask_dialog` builds outlive the call.
+        unsafe {
+            ask_dialog(
+                |sink| (self.vtable.params)(abi::FtStr::from_str(&p), sink),
+                self.vtable.last_error,
+                &self.info.name,
+                self.source(),
+            )
+        }
+    }
+}
+
 impl Importer for LoadedImporter {
     fn info(&self) -> PluginInfo {
         self.info.clone()
@@ -1793,19 +2100,9 @@ impl Importer for LoadedImporter {
         }
     }
 
+    /// The dialog, a failure answered with none; see [`LoadedImporter::dialog`].
     fn params(&self, path: &Path) -> Vec<ParamDecl> {
-        let _lock = CALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let p = path.to_string_lossy().to_string();
-        let mut sink = DeclSink::default();
-        let table = decl_sink_table(&mut sink);
-        let st = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            (self.vtable.params)(abi::FtStr::from_str(&p), &table)
-        }))
-        .unwrap_or(abi::FtStatus::Panic);
-        if st != abi::FtStatus::Ok {
-            return Vec::new();
-        }
-        sink.decls
+        self.dialog(path).unwrap_or_default()
     }
 
     fn import(
@@ -1813,7 +2110,6 @@ impl Importer for LoadedImporter {
         request: &ImportRequest,
         host: &mut dyn ImportHost,
     ) -> Result<ImportResult, PluginError> {
-        let _lock = CALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let name = self.info.name.clone();
         let p = request.path.to_string_lossy().to_string();
         // Kept alive for the call; see the note in `Plugin::run`.
@@ -1825,11 +2121,7 @@ impl Importer for LoadedImporter {
         // logging, so it gets a host table whose pixel readers refuse rather
         // than no table at all.
         let mut shim = ImportOnly(host);
-        // Both read `host` immutably, so they are taken before the
-        // mutable borrow the cell holds for the rest of the call.
-        let cell_name = String::new();
-        let cell_path = p.clone();
-        let mut cell = HostCell::new(&mut shim, cell_name, cell_path);
+        let mut cell = HostCell::new(&mut shim, String::new(), p.clone());
         let table = host_table(&mut cell);
 
         let st = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
@@ -1847,41 +2139,54 @@ impl Importer for LoadedImporter {
         }))
         .unwrap_or(abi::FtStatus::Panic);
 
-        match st {
-            abi::FtStatus::Ok => {
-                // Taken before `finish` consumes the sink.
-                let declared = sink.info.take();
-                match sink.finish(&name)? {
-                    Outcome::NewDocument(image) => Ok(ImportResult {
-                        // What the importer read out of the file, with the name and
-                        // path filled in by the host — which is the side that knows
-                        // them. Before this crossed, everything the importer had
-                        // learned about spacing and calibration was dropped here.
-                        info: Some(StackInfo {
-                            name: image.name.clone(),
-                            path: Some(p),
-                            ..declared.unwrap_or_default()
-                        }),
-                        image: *image,
-                    }),
-                    _ => Err(PluginError::failed(format!(
-                        "{name} did not return an image"
-                    ))),
-                }
-            }
-            abi::FtStatus::Unsupported => Err(PluginError::unsupported(unsafe {
-                last_error_of(self.vtable.last_error, "cannot read this file")
-            })),
-            abi::FtStatus::Panic => Err(PluginError::failed(panic_message(
-                &name,
-                &self.source,
-                // SAFETY: the plugin's `last_error`, copied before returning.
-                unsafe { last_error_of(self.vtable.last_error, "") },
-            ))),
-            other => Err(PluginError::failed(unsafe {
-                last_error_of(self.vtable.last_error, &format!("failed ({other:?})"))
-            })),
+        if st != abi::FtStatus::Ok {
+            // SAFETY: the plugin's own `last_error`, copied before returning.
+            return Err(unsafe {
+                failure(
+                    st,
+                    self.vtable.last_error,
+                    &name,
+                    self.source(),
+                    "cannot read this file",
+                )
+            });
         }
+        // Taken before `finish` consumes the sink: an importer's metadata is
+        // the *file's*, and belongs on the import rather than on the image.
+        let declared = sink.take_info();
+        match sink.finish(&name)? {
+            Outcome::NewDocument(image) => Ok(ImportResult {
+                // What the importer read out of the file, with the name and path
+                // filled in by the host — which is the side that knows them.
+                info: Some(StackInfo {
+                    name: image.name.clone(),
+                    path: Some(p),
+                    ..declared.unwrap_or_default()
+                }),
+                image: *image,
+            }),
+            _ => Err(PluginError::failed(format!(
+                "{name} did not return an image"
+            ))),
+        }
+    }
+}
+
+impl LoadedExporter {
+    /// The exporter's dialog, or why it could not declare one. See
+    /// [`LoadedPlugin::dialog`].
+    pub fn dialog(&self, host: &dyn HostContext) -> Result<Vec<ParamDecl>, PluginError> {
+        with_dialog_host(host, |table| {
+            // SAFETY: as in `LoadedPlugin::dialog`.
+            unsafe {
+                ask_dialog(
+                    |sink| (self.vtable.params)(table, sink),
+                    self.vtable.last_error,
+                    &self.info.name,
+                    self.source(),
+                )
+            }
+        })
     }
 }
 
@@ -1894,30 +2199,9 @@ impl Exporter for LoadedExporter {
         self.file_types.clone()
     }
 
+    /// The dialog, a failure answered with none; see [`LoadedExporter::dialog`].
     fn params(&self, host: &dyn HostContext) -> Vec<ParamDecl> {
-        let _lock = CALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // As in `Plugin::params`: the trait takes `&dyn`, the C table is
-        // uniform over `&mut`, and everything reachable from here is read-only.
-        let mut shim = ReadOnly(host);
-        // Both read `host` immutably, so they are taken before the
-        // mutable borrow the cell holds for the rest of the call.
-        let cell_name = host.stack_info().name.clone();
-        let cell_path = host.stack_info().path.clone().unwrap_or_default();
-        let mut cell = HostCell::new(&mut shim, cell_name, cell_path);
-        let table = host_table(&mut cell);
-        let mut sink = DeclSink::default();
-        let sink_table = decl_sink_table(&mut sink);
-        // SAFETY: both tables point at locals that outlive the call, and the
-        // plugin's own shim catches its panics; `catch_unwind` here is the
-        // second line for a plugin that was not built with this crate.
-        let st = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            (self.vtable.params)(&table, &sink_table)
-        }))
-        .unwrap_or(abi::FtStatus::Panic);
-        if st != abi::FtStatus::Ok {
-            return Vec::new();
-        }
-        sink.decls
+        self.dialog(host).unwrap_or_default()
     }
 
     fn export(
@@ -1925,7 +2209,6 @@ impl Exporter for LoadedExporter {
         request: &ExportRequest,
         host: &mut dyn HostContext,
     ) -> Result<(), PluginError> {
-        let _lock = CALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let name = self.info.name.clone();
         let p = request.path.to_string_lossy().to_string();
         // Kept alive for the call; see the note in `Plugin::run`.
@@ -1954,28 +2237,16 @@ impl Exporter for LoadedExporter {
 
         match st {
             abi::FtStatus::Ok => Ok(()),
-            // The trait has no cancelled outcome, and an export that stopped
-            // because the user said so is still an export that did not happen —
-            // so it is reported, in the same words a built-in exporter uses.
-            abi::FtStatus::Cancelled => Err(PluginError::unsupported("cancelled")),
-            abi::FtStatus::Unsupported => Err(PluginError::unsupported(unsafe {
-                last_error_of(self.vtable.last_error, "cannot write this stack")
-            })),
-            abi::FtStatus::OutOfRange => Err(PluginError::OutOfRange(unsafe {
-                last_error_of(
+            // SAFETY: the plugin's own `last_error`, copied before returning.
+            other => Err(unsafe {
+                failure(
+                    other,
                     self.vtable.last_error,
-                    "asked for a plane that does not exist",
+                    &name,
+                    self.source(),
+                    "cannot write this stack",
                 )
-            })),
-            abi::FtStatus::Panic => Err(PluginError::failed(panic_message(
-                &name,
-                &self.source,
-                // SAFETY: the plugin's `last_error`, copied before returning.
-                unsafe { last_error_of(self.vtable.last_error, "") },
-            ))),
-            other => Err(PluginError::failed(unsafe {
-                last_error_of(self.vtable.last_error, &format!("failed ({other:?})"))
-            })),
+            }),
         }
     }
 }

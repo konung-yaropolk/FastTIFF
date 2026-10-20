@@ -36,6 +36,7 @@ use fasttiff_plugin_api::{
 use crate::plugins::builtin::shared::{deliver, in_new_window, Store};
 
 /// Invert every plane of whatever is loaded, about the sample type's range.
+#[derive(Default)]
 pub struct Invert;
 
 impl Plugin for Invert {

@@ -52,6 +52,7 @@ use parse::{Codec, Found, Syntax, Tag};
 use pixels::Format;
 use std::path::Path;
 
+#[derive(Default)]
 pub struct Dicom;
 
 /// The key of the "read the whole series" switch.

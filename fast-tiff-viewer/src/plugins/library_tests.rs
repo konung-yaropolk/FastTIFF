@@ -31,6 +31,8 @@ struct FakeHost {
     /// crossed rather than trusting that it did.
     cancel: bool,
     logged: Vec<String>,
+    /// What the dialog holds, for the tests of a dialog that follows it.
+    pending: Params,
 }
 
 impl Default for FakeHost {
@@ -57,6 +59,7 @@ impl Default for FakeHost {
             },
             cancel: false,
             logged: Vec::new(),
+            pending: Params::new(),
         }
     }
 }
@@ -98,6 +101,9 @@ impl HostContext for FakeHost {
     }
     fn log(&mut self, m: &str) {
         self.logged.push(m.to_string());
+    }
+    fn pending_params(&self) -> &Params {
+        &self.pending
     }
 }
 
@@ -187,7 +193,7 @@ macro_rules! plugin_with_run {
         });
         let desc = desc_for(vt, "dev.test.hostile");
         let mut c = Collector {
-            source: src().to_path_buf(),
+            source: Some(src().to_path_buf()),
             ..Default::default()
         };
         // SAFETY: `desc` is a valid, fully-initialised descriptor that outlives
@@ -629,7 +635,7 @@ fn an_unreadable_last_error_falls_back_to_the_status() {
     });
     let desc = desc_for(vt, "dev.test.garbage");
     let mut c = Collector {
-        source: src().to_path_buf(),
+        source: Some(src().to_path_buf()),
         ..Default::default()
     };
     // SAFETY: a valid descriptor that outlives the call.
@@ -671,7 +677,7 @@ fn a_failed_dialog_declaration_yields_no_controls() {
     });
     let desc = desc_for(vt, "dev.test.paramspanic");
     let mut c = Collector {
-        source: src().to_path_buf(),
+        source: Some(src().to_path_buf()),
         ..Default::default()
     };
     // SAFETY: a valid descriptor that outlives the call.
@@ -713,7 +719,7 @@ fn a_dialog_with_no_end_is_capped() {
     });
     let desc = desc_for(vt, "dev.test.runaway");
     let mut c = Collector {
-        source: src().to_path_buf(),
+        source: Some(src().to_path_buf()),
         ..Default::default()
     };
     // SAFETY: a valid descriptor that outlives the call.
@@ -1043,7 +1049,7 @@ fn an_unknown_control_kind_becomes_a_visible_label() {
     });
     let desc = desc_for(vt, "dev.test.futurekind");
     let mut c = Collector {
-        source: src().to_path_buf(),
+        source: Some(src().to_path_buf()),
         ..Default::default()
     };
     // SAFETY: a valid descriptor that outlives the call.
@@ -1666,4 +1672,343 @@ fn a_region_that_was_never_drawn_is_out_of_range() {
             abi::FtStatus::BadArgument
         );
     }
+}
+
+// --------------------------------------------- one lane: what a built-in gets
+
+/// A channel colour table: `color` scaled from black.
+fn ramp(color: [u8; 3]) -> fasttiff_plugin_api::Lut {
+    let mut lut = [[0u8; 3]; 256];
+    for (i, e) in lut.iter_mut().enumerate() {
+        for (out, c) in e.iter_mut().zip(color) {
+            *out = (c as usize * i / 255) as u8;
+        }
+    }
+    lut
+}
+
+/// Says how many colour tables it was shown, and the middle of the first.
+#[derive(Default)]
+struct LutEcho;
+
+impl Plugin for LutEcho {
+    fn info(&self) -> PluginInfo {
+        PluginInfo::new("dev.test.lut-echo", "Lut echo")
+    }
+    fn run(&mut self, host: &mut dyn HostContext, _p: &Params) -> Result<Outcome, PluginError> {
+        let luts = &host.view().luts;
+        Ok(Outcome::Message(format!(
+            "{}:{:?}",
+            luts.len(),
+            luts.first().map(|l| l[128])
+        )))
+    }
+}
+
+/// The colour tables the channels are drawn with reach a plugin registered
+/// through the boundary. Before minor 4 they did not cross at all, so an
+/// exporter that drew the displayed frame came out grey from a library and in
+/// colour as a built-in.
+#[test]
+fn a_plugin_sees_the_tables_its_channels_are_drawn_with() {
+    let mut host = FakeHost::default();
+    host.view.luts = vec![ramp([255, 0, 255]), ramp([0, 255, 0])];
+    let mut p = plugin_of::<LutEcho>().expect("registers");
+    let out = p.run(&mut host, &Params::new()).expect("runs");
+    assert_eq!(out, Outcome::Message("2:Some([128, 0, 128])".into()));
+}
+
+/// A colour table into a buffer too small for one is refused, not written in
+/// part — and past the last channel there is no table.
+#[test]
+fn a_colour_table_needs_room_for_a_whole_one() {
+    let mut inner = FakeHost::default();
+    inner.view.luts = vec![ramp([255, 255, 255])];
+    let mut cell = HostCell::new(&mut inner, "n".into(), String::new());
+    let table = host_table(&mut cell);
+    let mut buf = [0u8; 768];
+    unsafe {
+        assert_eq!(
+            (table.channel_lut)(table.ctx, 0, buf.as_mut_ptr(), 767),
+            abi::FtStatus::BadArgument
+        );
+        assert_eq!(buf, [0u8; 768], "a refused table must not be half-written");
+        assert_eq!(
+            (table.channel_lut)(table.ctx, 0, buf.as_mut_ptr(), 768),
+            abi::FtStatus::Ok
+        );
+        assert_eq!(&buf[255 * 3..], &[255, 255, 255]);
+        assert_eq!(
+            (table.channel_lut)(table.ctx, 1, buf.as_mut_ptr(), 768),
+            abi::FtStatus::OutOfRange
+        );
+    }
+}
+
+/// Returns three channels named with a gap in the middle, under metadata
+/// carrying a calibration too.
+#[derive(Default)]
+struct Named;
+
+impl Plugin for Named {
+    fn info(&self) -> PluginInfo {
+        PluginInfo::new("dev.test.named", "Named")
+    }
+    fn run(&mut self, _h: &mut dyn HostContext, _p: &Params) -> Result<Outcome, PluginError> {
+        Ok(Outcome::NewDocument(Box::new(ImageResult {
+            width: 1,
+            height: 1,
+            channels: 3,
+            slices: 1,
+            frames: 1,
+            pixel_type: PixelType::U8,
+            planes: vec![
+                PlaneData::U8(vec![1]),
+                PlaneData::U8(vec![2]),
+                PlaneData::U8(vec![3]),
+            ],
+            channel_colors: Vec::new(),
+            metadata: Some(StackInfo {
+                channel_names: vec!["DAPI".into(), String::new(), "GFP".into()],
+                unit: Some("µm".into()),
+                ..Default::default()
+            }),
+            name: "named".into(),
+        })))
+    }
+}
+
+/// A result's channel names come back as the plugin had them. They were
+/// dropped on the way across before minor 4, so a filter that kept its
+/// source's channels kept their names only when it was compiled in.
+#[test]
+fn a_results_channel_names_survive_the_boundary() {
+    let mut p = plugin_of::<Named>().expect("registers");
+    let out = p
+        .run(&mut FakeHost::default(), &Params::new())
+        .expect("runs");
+    let Outcome::NewDocument(img) = out else {
+        panic!("expected an image, got {out:?}");
+    };
+    let meta = img.metadata.expect("the metadata crossed");
+    assert_eq!(meta.channel_names, vec!["DAPI", "", "GFP"]);
+    assert_eq!(meta.unit.as_deref(), Some("µm"));
+}
+
+/// Panics while it is being asked for its dialog.
+#[derive(Default)]
+struct BrokenDialog;
+
+impl Plugin for BrokenDialog {
+    fn info(&self) -> PluginInfo {
+        PluginInfo::new("dev.test.broken-dialog", "Broken dialog")
+    }
+    fn params(&self, _h: &dyn HostContext) -> Vec<ParamDecl> {
+        panic!("the dialog fell over")
+    }
+    fn run(&mut self, _h: &mut dyn HostContext, _p: &Params) -> Result<Outcome, PluginError> {
+        Ok(Outcome::Nothing)
+    }
+}
+
+/// A dialog that fails says why, rather than being read as a dialog with no
+/// controls — which the app would take as "run it now". A built-in that did
+/// this used to take the whole application down instead, the call being made
+/// on the interface thread with nothing to catch it.
+#[test]
+fn a_dialog_that_fails_says_why_instead_of_running_with_nothing() {
+    let p = plugin_of::<BrokenDialog>().expect("registers");
+    let err = p
+        .dialog(&FakeHost::default())
+        .expect_err("a failed dialog is an error");
+    let text = err.to_string();
+    assert!(text.contains("Broken dialog panicked"), "{text}");
+    assert!(text.contains("the dialog fell over"), "{text}");
+    // A built-in has no file to name.
+    assert!(!text.contains("(from"), "{text}");
+    // `Plugin::params` has nowhere to put the error, and answers with none.
+    assert!(p.params(&FakeHost::default()).is_empty());
+}
+
+/// Declares more controls than the host takes.
+#[derive(Default)]
+struct HugeDialog;
+
+impl Plugin for HugeDialog {
+    fn info(&self) -> PluginInfo {
+        PluginInfo::new("dev.test.huge-dialog", "Huge dialog")
+    }
+    fn params(&self, _h: &dyn HostContext) -> Vec<ParamDecl> {
+        (0..300)
+            .map(|i| ParamDecl::new(format!("k{i}"), "x", ParamKind::Label))
+            .collect()
+    }
+    fn run(&mut self, _h: &mut dyn HostContext, _p: &Params) -> Result<Outcome, PluginError> {
+        Ok(Outcome::Nothing)
+    }
+}
+
+/// When it is the host that refused a control, the host's reason is the one
+/// given: the plugin was only told `BadArgument`.
+#[test]
+fn a_dialog_the_host_refuses_says_what_was_refused() {
+    let p = plugin_of::<HugeDialog>().expect("registers");
+    let err = p
+        .dialog(&FakeHost::default())
+        .expect_err("300 controls is refused");
+    assert!(err.to_string().contains("more than 256 controls"), "{err}");
+}
+
+/// Panics when run.
+#[derive(Default)]
+struct Panicker;
+
+impl Plugin for Panicker {
+    fn info(&self) -> PluginInfo {
+        PluginInfo::new("dev.test.panicker", "Panicker")
+    }
+    fn run(&mut self, _h: &mut dyn HostContext, _p: &Params) -> Result<Outcome, PluginError> {
+        panic!("boom")
+    }
+}
+
+/// A panic in a run is caught at the boundary and named after the plugin —
+/// for a built-in exactly as for a library, minus the file it came from.
+#[test]
+fn a_panicking_built_in_is_named_and_contained() {
+    let mut p = plugin_of::<Panicker>().expect("registers");
+    let err = p
+        .run(&mut FakeHost::default(), &Params::new())
+        .expect_err("a panic is an error");
+    assert_eq!(err, PluginError::failed("Panicker panicked: boom"));
+}
+
+/// Every entry point reads a status the same way. They each had a `match` of
+/// their own, and an importer's had drifted: a missing plane was "failed
+/// (OutOfRange)", a cancellation "failed (Cancelled)".
+#[test]
+fn every_entry_point_reads_a_status_the_same_way() {
+    let f = |st| unsafe { failure(st, no_error, "P", None, "cannot here") };
+    assert_eq!(
+        f(abi::FtStatus::OutOfRange),
+        PluginError::OutOfRange("asked for a plane that does not exist".into())
+    );
+    assert_eq!(
+        f(abi::FtStatus::Cancelled),
+        PluginError::unsupported("cancelled")
+    );
+    assert_eq!(
+        f(abi::FtStatus::Unsupported),
+        PluginError::unsupported("cannot here")
+    );
+    assert_eq!(f(abi::FtStatus::Panic), PluginError::failed("P panicked"));
+    assert_eq!(
+        f(abi::FtStatus::BadArgument),
+        PluginError::failed("failed (BadArgument)")
+    );
+    // A library's panic names the file.
+    let from_file = unsafe {
+        failure(
+            abi::FtStatus::Panic,
+            no_error,
+            "P",
+            Some(Path::new("p.dll")),
+            "",
+        )
+    };
+    assert_eq!(from_file, PluginError::failed("P panicked (from p.dll)"));
+}
+
+/// Counts its own runs, in a field.
+#[derive(Default)]
+struct Counter {
+    runs: usize,
+}
+
+impl Plugin for Counter {
+    fn info(&self) -> PluginInfo {
+        PluginInfo::new("dev.test.counter", "Counter")
+    }
+    fn run(&mut self, _h: &mut dyn HostContext, _p: &Params) -> Result<Outcome, PluginError> {
+        self.runs += 1;
+        Ok(Outcome::Message(self.runs.to_string()))
+    }
+}
+
+/// A plugin is built afresh for every call, compiled in or not. A built-in
+/// used to be one value kept in the registry for the whole session, so state
+/// in its fields carried from one run to the next — which a library's could
+/// not, its vtable being stateless. Now neither can, and a plugin that wants
+/// to remember something keeps it where a library would: in a static.
+#[test]
+fn a_plugin_is_built_fresh_for_every_call() {
+    let mut p = plugin_of::<Counter>().expect("registers");
+    let mut host = FakeHost::default();
+    for _ in 0..3 {
+        assert_eq!(
+            p.run(&mut host, &Params::new()).expect("runs"),
+            Outcome::Message("1".into())
+        );
+    }
+}
+
+/// The app's own plugins are in the registry through the same boundary as a
+/// library's — they simply have no file behind them.
+#[test]
+fn the_built_ins_come_through_the_boundary_with_no_file_behind_them() {
+    let reg = super::super::Registry::new();
+    assert!(reg.problems.is_empty(), "{:?}", reg.problems);
+    for e in reg.entries() {
+        assert_eq!(e.origin, super::super::Origin::BuiltIn);
+        assert!(e.plugin.source().is_none(), "{} has a source", e.info.id);
+        assert_eq!(e.plugin.info(), e.info);
+    }
+    for e in reg.importers() {
+        assert!(e.importer.source().is_none(), "{} has a source", e.info.id);
+    }
+    for e in reg.exporters() {
+        assert!(e.exporter.source().is_none(), "{} has a source", e.info.id);
+    }
+}
+
+/// Declares a second control only once the first is switched on.
+#[derive(Default)]
+struct Follows;
+
+impl Plugin for Follows {
+    fn info(&self) -> PluginInfo {
+        PluginInfo::new("dev.test.follows", "Follows")
+    }
+    fn params(&self, host: &dyn HostContext) -> Vec<ParamDecl> {
+        let mut d = vec![ParamDecl::new(
+            "more",
+            "More",
+            ParamKind::Bool { default: false },
+        )];
+        if host.pending_params().bool("more", false) {
+            d.push(ParamDecl::new("extra", "Extra", ParamKind::Label));
+        }
+        d
+    }
+    fn run(&mut self, _h: &mut dyn HostContext, _p: &Params) -> Result<Outcome, PluginError> {
+        Ok(Outcome::Nothing)
+    }
+}
+
+/// A dialog behind the boundary is shown what it holds, so it can follow its
+/// own choices. The shim the host declares a dialog through answered "nothing
+/// pending" whatever the host held, so from ABI 1.3, which was added for
+/// exactly this, until now no plugin behind the boundary ever saw a value.
+#[test]
+fn a_dialog_behind_the_boundary_follows_its_own_choices() {
+    let p = plugin_of::<Follows>().expect("registers");
+    let mut host = FakeHost::default();
+    assert_eq!(p.dialog(&host).unwrap().len(), 1);
+    host.pending.set("more", ParamValue::Bool(true));
+    let decls = p.dialog(&host).unwrap();
+    assert_eq!(
+        decls.iter().map(|d| d.key.as_str()).collect::<Vec<_>>(),
+        vec!["more", "extra"],
+        "the switch was on, and the dialog never heard"
+    );
 }

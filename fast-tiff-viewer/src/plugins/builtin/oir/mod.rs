@@ -177,6 +177,7 @@ const MAX_EMPTY_RUN: usize = 4_096;
 /// [`embedded_xml`].
 const XML_PEEK: usize = 512;
 
+#[derive(Default)]
 pub struct Oir;
 
 impl Importer for Oir {

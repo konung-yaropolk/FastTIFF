@@ -57,6 +57,7 @@ const MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 const MAX_TEXT: usize = 64 * 1024;
 
 /// Read a PNG as a document.
+#[derive(Default)]
 pub struct PngImport;
 
 impl Importer for PngImport {
