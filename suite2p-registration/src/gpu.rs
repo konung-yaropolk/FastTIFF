@@ -241,6 +241,14 @@ fn shared_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     }
 }
 
+/// Whether this machine has a device the GPU backend can use.
+///
+/// Opens it the first time it is asked, which takes a moment; the answer is
+/// remembered, and the device is the one a run then uses.
+pub fn available() -> bool {
+    shared_device().is_some()
+}
+
 impl GpuContext {
     /// Open a device and build everything for `ly * lx` frames.
     ///

@@ -676,8 +676,9 @@ fn the_backends_pick_the_same_reference() {
 /// A refusal is shown to the user as a sentence, so it reads as one.
 ///
 /// Both messages once carried thirty-odd spaces in the middle, where a line
-/// continuation had been lost from the string. Whichever reason applies in
-/// this build — no device path, or a frame it cannot take — is checked.
+/// continuation had been lost from the string. Whichever reason applies here —
+/// no device path in this build, no usable adapter on this machine, or a frame
+/// it cannot take — is checked.
 #[test]
 fn a_refusal_reads_as_a_sentence() {
     let why = Backend::Gpu
@@ -685,4 +686,31 @@ fn a_refusal_reads_as_a_sentence() {
         .expect("a 1024x768 frame is refused with or without the gpu feature");
     assert!(!why.contains("  "), "a run of spaces in {why:?}");
     assert!(why.ends_with('.') || why.ends_with("enabled"), "{why:?}");
+}
+
+/// A frame the device path can take is still refused on a machine with no
+/// usable adapter. This used to pass the check, and the run then quietly took
+/// the CPU path when the device would not open.
+///
+/// Holds either way the machine is: with a card the frame is accepted and the
+/// device really is there; without one it is refused, saying what to do.
+#[test]
+fn the_gpu_backend_is_refused_without_an_adapter() {
+    match Backend::Gpu.unavailable_reason(512, 512) {
+        None => {
+            #[cfg(not(feature = "gpu"))]
+            panic!("accepted without the gpu feature");
+            #[cfg(feature = "gpu")]
+            assert!(crate::gpu::available(), "accepted with no device to run on");
+        }
+        Some(why) => {
+            #[cfg(feature = "gpu")]
+            {
+                assert!(!crate::gpu::available(), "refused with a device: {why}");
+                assert!(why.contains("CPU backend"), "say what to do instead: {why}");
+            }
+            #[cfg(not(feature = "gpu"))]
+            assert!(why.contains("`gpu`"), "{why}");
+        }
+    }
 }
