@@ -105,6 +105,27 @@ jobs:
           cargo check -p fast-tiff-lib --target wasm32-unknown-unknown --no-default-features
           cargo check -p fast-tiff-viewer --target wasm32-unknown-unknown --no-default-features --features backend-wgpu,builtin-plugins
 
+      # The OIR reader on its own. `cargo test --workspace` above reads every
+      # fixture mapped; this reads them through the buffered path alone, as a
+      # build without `mmap` does. The browser target is checked *with* default
+      # features, which is what proves memmap2 is gated on the target and not
+      # only on the feature. Then the docs, with no broken links, and the crate
+      # as it would be published.
+      #
+      # The viewer's importer gets the buffered path too, for free: the "core
+      # without threads" step below builds the viewer without `mmap`, and its
+      # tests read every importer fixture both ways and compare.
+      - name: OIR reader without mmap, for the browser, and as packaged
+        shell: bash
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo test -p oir-reader --no-default-features
+          cargo check -p oir-reader --target wasm32-unknown-unknown --all-targets
+          cargo check -p oir-reader --target wasm32-unknown-unknown --no-default-features
+          cargo doc -p oir-reader --no-deps
+          cargo package -p oir-reader
+
       # The egui UI is shared between the desktop binary and the browser build,
       # so a desktop-only edit can break the wasm side. This is the check that
       # catches it — `FastTIFF-web` is its own workspace, hence the separate

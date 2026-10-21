@@ -28,7 +28,8 @@
 //!   from a real library and from here, must produce byte-identical output.
 //! * [`Oir`] is the importer that earns its place: a proprietary format with no
 //!   spec at all, worked out from a real acquisition and checked against the
-//!   vendor software's own export.
+//!   vendor software's own export. Its reader is the `oir-reader` crate,
+//!   published on its own; what is here is the importer around it.
 //! * [`PngImport`] is the one people actually reach for, because a figure, a
 //!   mask or a screenshot arrives as a PNG and has to be got *in* — at the
 //!   depth the file stores it, which no screenshot-shaped reader does.
@@ -59,9 +60,10 @@
 //! * `not(target_arch = "wasm32")` is *whether this target can run it at all*,
 //!   a fact about the platform, written next to the reason it is true.
 //!
-//! Only [`oir`] still has the second, because it memory-maps a file. Keeping
-//! both means enabling a plugin for a target that cannot serve it is inert
-//! rather than broken: the feature is simply ignored there.
+//! [`oir`], [`dicom`] and [`nifti`] have the second: an importer is handed a
+//! path, and a browser has none. Keeping both means enabling a plugin for a
+//! target that cannot serve it is inert rather than broken: the feature is
+//! simply ignored there.
 //!
 //! # Adding one
 //!
@@ -73,13 +75,15 @@
 //! it to [`register`] below. That is the whole procedure.
 //!
 //! A directory each rather than a file each, even for the two that are one file
-//! long. A plugin grows parts — [`oir`] has a container reader and a metadata
-//! translator, and would have had them as `oir.rs`, `oir_meta.rs`,
-//! `oir_tests.rs` and `oir_meta_tests.rs` in a shared directory, four files
-//! whose relationship is a naming convention. Keeping the boundary in the
-//! filesystem is also what makes the last step here cheap: if a plugin would
-//! rather ship separately, its directory becomes a `cdylib` crate's `src/` and
-//! nothing inside it has to change.
+//! long. A plugin grows parts — [`deconvolve`] has its algorithms, its
+//! transforms, its optics and its point-spread functions, and would have had
+//! them as `deconvolve.rs`, `deconvolve_fft.rs`, `deconvolve_psf.rs` and so on
+//! in a shared directory, files whose relationship is a naming convention.
+//! Keeping the boundary in the filesystem is also what makes the last step here
+//! cheap: if a plugin would rather ship separately, its directory becomes a
+//! `cdylib` crate's `src/` and nothing inside it has to change. [`oir`] went
+//! one step further and gave its reader away: the container and record code
+//! became the `oir-reader` crate, and the directory kept the importer.
 
 #[cfg(feature = "plugin-deconvolve")]
 pub mod deconvolve;
@@ -96,8 +100,9 @@ pub mod netpbm;
 /// Desktop-only on top of its feature, for the reason [`dicom`] is.
 #[cfg(all(feature = "plugin-nifti", not(target_arch = "wasm32")))]
 pub mod nifti;
-/// Desktop-only on top of its feature: it memory-maps the container and parses
-/// the vendor's XML, and a browser has no file to map.
+/// Desktop-only on top of its feature, for the reason [`dicom`] is. The reader
+/// itself is the `oir-reader` crate, which does build for wasm; only this
+/// importer around it is gated.
 #[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
 pub mod oir;
 #[cfg(feature = "plugin-plot-axis")]

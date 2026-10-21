@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.24.4"
+version = "1.25.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -956,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.24.4"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -967,9 +967,8 @@ dependencies = [
  "flate2",
  "libloading 0.9.0",
  "log",
- "memmap2",
+ "oir-reader",
  "png",
- "quick-xml 0.37.5",
  "rayon",
  "rustfft",
  "scivis-render",
@@ -980,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin"
-version = "0.21.0"
+version = "0.25.0"
 dependencies = [
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
@@ -988,15 +987,15 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin-abi"
-version = "0.21.0"
+version = "0.25.0"
 
 [[package]]
 name = "fasttiff-plugin-api"
-version = "0.21.0"
+version = "0.25.0"
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "1.24.4"
+version = "1.25.0"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",
@@ -2239,6 +2238,15 @@ dependencies = [
  "objc2 0.5.2",
  "objc2-core-location",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "oir-reader"
+version = "0.25.0"
+dependencies = [
+ "bytemuck",
+ "memmap2",
+ "quick-xml 0.37.5",
 ]
 
 [[package]]

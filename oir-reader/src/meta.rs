@@ -3,12 +3,13 @@
 //!
 //! # Why this exists
 //!
-//! An OIR's metadata reaches a converted TIFF through `ImageDescription`
-//! (tag 270), and the file's own XML cannot go there as it stands. In one real
-//! acquisition it is four megabytes, of which **3.1 MB is three 65,536-entry
-//! display lookup tables written out as XML**, plus 350 KB of drawing overlays,
-//! plus the binary padding that sits between the documents in a block. The part
-//! a person would want is under 40 KB of it. A second file has 299 more
+//! An OIR's metadata is meant to travel with its pixels — into a converted
+//! TIFF's `ImageDescription` (tag 270), for one — and the file's own XML cannot
+//! go there as it stands. In one real acquisition it is four megabytes, of
+//! which **3.1 MB is three 65,536-entry display lookup tables written out as
+//! XML**, plus 350 KB of drawing overlays, plus the binary padding that sits
+//! between the documents in a block. The part a person would want is under
+//! 40 KB of it. A second file has 299 more
 //! documents, one per frame. Nothing reads that as a description.
 //!
 //! So it is *translated*: every value that has a place in the exported record
@@ -33,10 +34,8 @@
 //! cannot end up describing some other recording's pixels.
 //!
 //! The numbers that matter (pixel size, z-step, frame timing, the event markers
-//! a stimulus experiment is aligned to) also reach [`StackInfo`] as values, not
-//! only as text — see [`Record`].
-//!
-//! [`StackInfo`]: fasttiff_plugin_api::StackInfo
+//! a stimulus experiment is aligned to) are also available as values, not only
+//! as text — see [`Record`]'s accessors.
 //!
 //! # How it was checked
 //!
@@ -73,13 +72,13 @@
 //! Both `imageProperties` and `eventList` appear more than once: an OIR is
 //! written as it is acquired, so there is an early copy and a final one. The
 //! early `eventList` is *empty* — the events had not happened yet — which is
-//! why [`Record::parse`] takes the last non-empty one rather than the first
-//! match. Reading the first would silently produce a recording with no
-//! stimulus markers at all.
+//! why the last non-empty one is taken rather than the first match. Reading
+//! the first would silently produce a recording with no stimulus markers at
+//! all.
 
-use quick_xml::events::Event;
-// Aliased: `Reader` below is this module's own, and reads better unqualified
-// at its call site than quick-xml's does here.
+// Both aliased: in this crate a reader is the OIR reader, and an event is
+// something that happened during an acquisition.
+use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
 
 /// Document roots this module reads. Everything else in an OIR's metadata is
@@ -108,7 +107,7 @@ const MAX_ELEMENTS: usize = 50_000;
 /// element in a different namespace prefix (`base:`, `commonimage:`,
 /// `lsmparam:`, …) and none of the paths below are ambiguous without them.
 #[derive(Debug, Default)]
-pub(super) struct El {
+struct El {
     name: String,
     attrs: Vec<(String, String)>,
     text: String,
@@ -126,9 +125,9 @@ impl El {
         loop {
             let event = reader.read_event();
             // `<a/>` arrives as `Empty` and never sends a matching `End`.
-            let empty = matches!(event, Ok(Event::Empty(_)));
+            let empty = matches!(event, Ok(XmlEvent::Empty(_)));
             match event {
-                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                Ok(XmlEvent::Start(ref e)) | Ok(XmlEvent::Empty(ref e)) => {
                     count += 1;
                     if count > MAX_ELEMENTS || stack.len() > MAX_DEPTH {
                         return None;
@@ -159,7 +158,7 @@ impl El {
                         stack.push(el);
                     }
                 }
-                Ok(Event::End(_)) => {
+                Ok(XmlEvent::End(_)) => {
                     // The root sentinel must survive: a document with a stray
                     // closing tag would otherwise pop it and panic below.
                     if stack.len() <= 1 {
@@ -168,12 +167,12 @@ impl El {
                     let done = stack.pop()?;
                     stack.last_mut()?.kids.push(done);
                 }
-                Ok(Event::Text(t)) => {
+                Ok(XmlEvent::Text(t)) => {
                     if let Ok(s) = t.unescape() {
                         stack.last_mut()?.text.push_str(s.trim());
                     }
                 }
-                Ok(Event::Eof) => break,
+                Ok(XmlEvent::Eof) => break,
                 Err(_) => return None,
                 _ => {}
             }
@@ -246,7 +245,7 @@ fn frame_size(el: &El) -> Option<(u32, u32)> {
 /// Whether a document is one of the [`KNOWN_ROOTS`] — decided on its root
 /// element's name alone, which is what keeps a 525 KB lookup table from ever
 /// being parsed, carried, or written into a TIFF tag.
-pub(super) fn is_known_document(xml: &str) -> bool {
+pub(crate) fn is_known_document(xml: &str) -> bool {
     root_name(xml).is_some_and(|r| KNOWN_ROOTS.contains(&r))
 }
 
@@ -271,13 +270,16 @@ fn root_name(xml: &str) -> Option<&str> {
 // ------------------------------------------------------------- the record
 
 /// One channel as the acquisition recorded it.
-#[derive(Debug, Default)]
-pub(super) struct Channel {
+///
+/// Every value is the text the file states, unaltered — see the note on
+/// [`Record`] for why nothing here is parsed and printed again.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Channel {
     /// The acquisition's own name for it, `CH1`.
-    pub(super) name: Option<String>,
+    name: Option<String>,
     /// The detector's name, `RNDD3G` — which is what the exported record calls
     /// the "Channel Name", so it is what is written under that key.
-    pub(super) device: Option<String>,
+    device: Option<String>,
     /// Barrier filter, `BA575-645`.
     filter: Option<String>,
     /// Emission dichroic mirror, `SDM570`.
@@ -293,29 +295,95 @@ pub(super) struct Channel {
 impl Channel {
     /// What to call this channel in a one-line label: the detector name if the
     /// file gives one, else the acquisition's own `CHn`.
-    pub(super) fn label(&self) -> Option<String> {
-        self.device.clone().or_else(|| self.name.clone())
+    pub fn label(&self) -> Option<&str> {
+        self.device.as_deref().or(self.name.as_deref())
+    }
+
+    /// The acquisition's own name for the channel, `CH1`.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The detector that recorded it, `RNDD3G` — what FluoView's export calls
+    /// the "Channel Name".
+    pub fn detector(&self) -> Option<&str> {
+        self.device.as_deref()
+    }
+
+    /// The barrier filter, `BA575-645`.
+    pub fn barrier_filter(&self) -> Option<&str> {
+        self.filter.as_deref()
+    }
+
+    /// The emission dichroic mirror, `SDM570`.
+    pub fn dichroic(&self) -> Option<&str> {
+        self.dichroic.as_deref()
+    }
+
+    /// The dye the channel was configured for, `Alexa Fluor 488`.
+    pub fn dye(&self) -> Option<&str> {
+        self.dye.as_deref()
+    }
+
+    /// That dye's emission peak, in nanometres, as the file states it.
+    pub fn emission_nm(&self) -> Option<&str> {
+        self.emission_nm.as_deref()
+    }
+
+    /// The significant bits per sample, `10` — so a 16-bit sample of such a
+    /// channel saturates at 1023, not 65535.
+    pub fn bits(&self) -> Option<&str> {
+        self.bits.as_deref()
+    }
+
+    /// The detector's PMT voltage, in volts.
+    pub fn pmt_voltage(&self) -> Option<&str> {
+        self.voltage.as_deref()
+    }
+}
+
+/// One event marker: a stimulus or TTL the acquisition logged, and when.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Event {
+    name: String,
+    time_ms: f64,
+}
+
+impl Event {
+    /// What the marker says — the event's name, `DRS`.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// When it happened, in milliseconds from the start of the acquisition.
+    pub fn time_ms(&self) -> f64 {
+        self.time_ms
     }
 }
 
 /// Everything this reader takes from an OIR's own XML.
 ///
-/// Every field is optional and independently sourced: a file that states none
-/// of them yields an empty record and no text, rather than a failed import.
-/// The pixels never depend on any of it.
-#[derive(Debug, Default)]
-pub(super) struct Record {
+/// Every value is optional and independently sourced: a file that states none
+/// of them yields an empty record and no text, rather than a failed read. The
+/// pixels never depend on any of it.
+///
+/// Numbers that are *used* — the frame size, the pixel size, the z-step, the
+/// frame timestamps — are parsed, at the precision the file states them. Every
+/// other value is carried as the text the file states and returned unaltered:
+/// see the note on the fields below for why.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Record {
     file_version: Option<String>,
     created: Option<String>,
     system_name: Option<String>,
     system_version: Option<String>,
 
-    pub(super) width: Option<u32>,
-    pub(super) height: Option<u32>,
+    width: Option<u32>,
+    height: Option<u32>,
     /// Microns per pixel, at full precision — the text record rounds these to
     /// three decimals, and the structured metadata should not inherit that.
-    pub(super) pixel_x: Option<f64>,
-    pub(super) pixel_y: Option<f64>,
+    pixel_x: Option<f64>,
+    pixel_y: Option<f64>,
 
     /// Every frame timestamp the acquisition recorded, in milliseconds, sorted
     /// and without duplicates — a multi-channel acquisition writes one document
@@ -328,8 +396,8 @@ pub(super) struct Record {
     /// Whether the timelapse ran free (no interval was set), which is the only
     /// interval state this can tell apart.
     free_run: bool,
-    pub(super) slices: Option<usize>,
-    pub(super) z_step: Option<f64>,
+    slices: Option<usize>,
+    z_step: Option<f64>,
 
     // Everything below is carried as the *text the file states*, not as a
     // number this reads and prints again. Reformatting is how a record starts
@@ -357,9 +425,9 @@ pub(super) struct Record {
     laser_nm: Option<String>,
     laser_transmissivity: Option<String>,
 
-    pub(super) channels: Vec<Channel>,
-    /// `(contents, milliseconds)` for each event marker, in acquisition order.
-    pub(super) events: Vec<(String, f64)>,
+    channels: Vec<Channel>,
+    /// Each event marker, in acquisition order.
+    events: Vec<Event>,
 }
 
 /// One section's rows, in the order they are written.
@@ -393,17 +461,17 @@ fn row(key: &str, value: &str) -> String {
 /// here; taking them one at a time is what keeps one part's documents in memory
 /// rather than all of them.
 #[derive(Default)]
-pub(super) struct Reader {
+pub(crate) struct RecordBuilder {
     props: Option<El>,
     /// The frame size as stated somewhere other than the acquisition record,
     /// which is where it is normally read from.
     size: Option<(u32, u32)>,
     file_version: Option<String>,
-    events: Vec<(String, f64)>,
+    events: Vec<Event>,
     times: Vec<f64>,
 }
 
-impl Reader {
+impl RecordBuilder {
     /// Take in one file's documents.
     ///
     /// Later documents win over earlier ones for `imageProperties` and the
@@ -411,7 +479,7 @@ impl Reader {
     /// describes the acquisition that was *about* to happen, the last one the
     /// acquisition that did. The rule holds across parts as well as within one,
     /// since every part's final copy restates the whole acquisition.
-    pub(super) fn absorb(&mut self, docs: &[String]) {
+    pub(crate) fn absorb(&mut self, docs: &[String]) {
         for doc in docs {
             let Some(root) = root_name(doc) else { continue };
             if !KNOWN_ROOTS.contains(&root) {
@@ -427,12 +495,15 @@ impl Reader {
                     }
                 }
                 "eventList" => {
-                    let events: Vec<(String, f64)> = el
+                    let events: Vec<Event> = el
                         .all("event")
                         .iter()
                         .filter_map(|e| {
                             let ms = e.num_at("time")?;
-                            Some((e.text_at("name").unwrap_or("").to_string(), ms))
+                            Some(Event {
+                                name: e.text_at("name").unwrap_or("").to_string(),
+                                time_ms: ms,
+                            })
                         })
                         .collect();
                     // The early copy is empty; only a list with something in it
@@ -462,7 +533,7 @@ impl Reader {
     }
 
     /// The record, once every part has been absorbed.
-    pub(super) fn finish(self) -> Record {
+    pub(crate) fn finish(self) -> Record {
         let mut r = Record {
             file_version: self.file_version,
             events: self.events,
@@ -491,12 +562,12 @@ impl Reader {
 }
 
 impl Record {
-    /// Every document at once. The importer reads a part at a time through
-    /// [`Reader`]; this is the shape the tests are written in, where the whole
-    /// acquisition is a handful of strings.
+    /// Every document at once. The reader absorbs a part at a time through
+    /// [`RecordBuilder`]; this is the shape the tests are written in, where the
+    /// whole acquisition is a handful of strings.
     #[cfg(test)]
-    pub(super) fn parse(docs: &[String]) -> Record {
-        let mut reader = Reader::default();
+    pub(crate) fn parse(docs: &[String]) -> Record {
+        let mut reader = RecordBuilder::default();
         reader.absorb(docs);
         reader.finish()
     }
@@ -532,7 +603,7 @@ impl Record {
     /// really being asked: did the recording run that long? The last of them
     /// falls on frame `round(last / period)`, and if that reaches the last kept
     /// frame, it did.
-    pub(super) fn duration_s(&self, frames: usize) -> Option<f64> {
+    pub fn duration_s(&self, frames: usize) -> Option<f64> {
         if frames == 0 {
             return None;
         }
@@ -568,14 +639,170 @@ impl Record {
         Some(gaps[gaps.len() / 2]).filter(|p| p.is_finite() && *p > 0.0)
     }
 
-    /// Seconds between frames, over the gaps rather than over the frame count —
+    /// Seconds between frames, for a stack of `frames` frames — over the gaps
+    /// rather than over the frame count —
     /// which is how the `T Dimension` line this writes is meant to be read
     /// back, so the value and the text cannot disagree by a frame.
-    pub(super) fn frame_interval_s(&self, frames: usize) -> Option<f64> {
+    pub fn frame_interval_s(&self, frames: usize) -> Option<f64> {
         if frames < 2 {
             return None;
         }
         Some(self.duration_s(frames)? / (frames - 1) as f64)
+    }
+
+    /// The frame width in pixels, as the file states it.
+    pub fn width(&self) -> Option<u32> {
+        self.width
+    }
+
+    /// The frame height in pixels, as the file states it.
+    pub fn height(&self) -> Option<u32> {
+        self.height
+    }
+
+    /// Microns per pixel along x, at the precision the file states — the text
+    /// record rounds it to three decimals; this does not.
+    pub fn pixel_x_um(&self) -> Option<f64> {
+        self.pixel_x
+    }
+
+    /// Microns per pixel along y. See [`pixel_x_um`](Self::pixel_x_um).
+    pub fn pixel_y_um(&self) -> Option<f64> {
+        self.pixel_y
+    }
+
+    /// How many slices a z-stack was configured for.
+    pub fn slices(&self) -> Option<usize> {
+        self.slices
+    }
+
+    /// Microns between slices.
+    pub fn z_step_um(&self) -> Option<f64> {
+        self.z_step
+    }
+
+    /// Every frame timestamp the acquisition recorded, in milliseconds, sorted
+    /// and without duplicates. Not necessarily one per frame: see
+    /// [`duration_s`](Self::duration_s).
+    pub fn frame_times_ms(&self) -> &[f64] {
+        &self.times
+    }
+
+    /// Whether the timelapse ran free — no interval set, the scanner as fast as
+    /// it could go.
+    pub fn free_run(&self) -> bool {
+        self.free_run
+    }
+
+    /// The channels that were recorded, in recording order.
+    pub fn channels(&self) -> &[Channel] {
+        &self.channels
+    }
+
+    /// The event markers, in acquisition order.
+    pub fn events(&self) -> &[Event] {
+        &self.events
+    }
+
+    /// The OIR format version the file states.
+    pub fn file_version(&self) -> Option<&str> {
+        self.file_version.as_deref()
+    }
+
+    /// When the acquisition was made, as the file states it (ISO 8601).
+    pub fn created(&self) -> Option<&str> {
+        self.created.as_deref()
+    }
+
+    /// The acquisition system's name, `FVMPE-RS`.
+    pub fn system_name(&self) -> Option<&str> {
+        self.system_name.as_deref()
+    }
+
+    /// The acquisition software's version.
+    pub fn system_version(&self) -> Option<&str> {
+        self.system_version.as_deref()
+    }
+
+    /// The objective lens, `XLUMPLFLN20XW`.
+    pub fn objective(&self) -> Option<&str> {
+        self.objective.as_deref()
+    }
+
+    /// The objective's magnification, `20.0`.
+    pub fn magnification(&self) -> Option<&str> {
+        self.magnification.as_deref()
+    }
+
+    /// The objective's numerical aperture, `1.0`.
+    pub fn numerical_aperture(&self) -> Option<&str> {
+        self.numerical_aperture.as_deref()
+    }
+
+    /// The scanner that ran, `Resonant` or `Galvano`.
+    pub fn scanner(&self) -> Option<&str> {
+        self.scanner.as_deref()
+    }
+
+    /// Whether the scan ran both ways (`true`) or one way (`false`).
+    pub fn roundtrip(&self) -> Option<bool> {
+        self.roundtrip
+    }
+
+    /// The pixel dwell time, in microseconds per pixel.
+    pub fn sampling_speed_us(&self) -> Option<&str> {
+        self.sampling_speed_us.as_deref()
+    }
+
+    /// The sequential-acquisition mode, `None`, `Line` or `Frame`.
+    pub fn sequential_mode(&self) -> Option<&str> {
+        self.sequential.as_deref()
+    }
+
+    /// The integration (averaging) type.
+    pub fn integration(&self) -> Option<&str> {
+        self.integration.as_deref()
+    }
+
+    /// How many scans were integrated; `0` when integration was off, as
+    /// FluoView itself states it.
+    pub fn integration_count(&self) -> Option<&str> {
+        self.integration_count.as_deref()
+    }
+
+    /// The scan rotation, in degrees.
+    pub fn rotation_deg(&self) -> Option<&str> {
+        self.rotation_deg.as_deref()
+    }
+
+    /// The scan area's x offset, in microns.
+    pub fn pan_x_um(&self) -> Option<&str> {
+        self.pan_x.as_deref()
+    }
+
+    /// The scan area's y offset, in microns.
+    pub fn pan_y_um(&self) -> Option<&str> {
+        self.pan_y.as_deref()
+    }
+
+    /// The scan zoom.
+    pub fn zoom(&self) -> Option<&str> {
+        self.zoom.as_deref()
+    }
+
+    /// The first mirror turret's position.
+    pub fn mirror_turret(&self) -> Option<&str> {
+        self.mirror_turret.as_deref()
+    }
+
+    /// The imaging laser's wavelength, in nanometres.
+    pub fn laser_wavelength_nm(&self) -> Option<&str> {
+        self.laser_nm.as_deref()
+    }
+
+    /// The imaging laser's transmissivity, in percent.
+    pub fn laser_transmissivity_pct(&self) -> Option<&str> {
+        self.laser_transmissivity.as_deref()
     }
 
     /// Everything that comes out of the `imageProperties` document.
@@ -709,8 +936,9 @@ impl Record {
             .map(str::to_string);
     }
 
-    /// Whether anything was found worth writing down.
-    fn is_empty(&self) -> bool {
+    /// Whether anything was found worth writing down — `true` for a file whose
+    /// metadata this reader recognises none of.
+    pub fn is_empty(&self) -> bool {
         self.width.is_none()
             && self.channels.is_empty()
             && self.events.is_empty()
@@ -733,7 +961,7 @@ impl Record {
     ///
     /// `None` when the file carried nothing recognizable, so the caller writes
     /// no description at all rather than an empty scaffold of section headers.
-    pub(super) fn to_text(&self, file_name: &str, frames: usize) -> Option<String> {
+    pub fn to_fluoview_text(&self, file_name: &str, frames: usize) -> Option<String> {
         if self.is_empty() {
             return None;
         }
@@ -854,7 +1082,7 @@ impl Record {
 
         for (i, c) in self.channels.iter().enumerate() {
             let mut ch = Rows::default();
-            ch.set("Channel Name", c.label());
+            ch.set("Channel Name", c.label().map(str::to_string));
             ch.set("Dye Name", c.dye.clone());
             ch.set(
                 "Emission WaveLength",
@@ -883,10 +1111,10 @@ impl Record {
         // Last, and in this order: an event is read as the three lines
         // `[Event n]`, `Event Contents`, `Event Timer`, which is how the
         // export writes them and how they are read back out.
-        for (i, (contents, ms)) in self.events.iter().enumerate() {
+        for (i, e) in self.events.iter().enumerate() {
             let mut ev = Rows::default();
-            ev.set("Event Contents", Some(contents.clone()));
-            ev.set("Event Timer", Some(format!("{ms:.6}[ms]")));
+            ev.set("Event Contents", Some(e.name.clone()));
+            ev.set("Event Timer", Some(format!("{:.6}[ms]", e.time_ms)));
             doc.push((format!("[Event {}]", i + 1), ev));
         }
 

@@ -205,6 +205,15 @@ Unit Test:
 cargo test --workspace
 ```
 
+That builds the OIR reader with its default features, where parts are
+memory-mapped unless a test asks otherwise. Without them — the build a browser
+or a no-`mmap` desktop build gets — every part goes through the buffered
+reader, and that takes a line of its own:
+
+```sh
+cargo test -p oir-reader --no-default-features
+```
+
 Two things sit outside the workspace on purpose and so are missed by the line
 above — both are worked examples rather than parts of the app, and both are
 kept building so they cannot quietly rot:
@@ -300,6 +309,12 @@ sites.
   (zoom, pan, window sizing, which panels are open). `src/render.rs` is the sole
   file bridging the renderer to eframe — a browser frontend writes its own
   ~150-line equivalent and reuses everything else.
+- **`oir-reader/`** — the Olympus/Evident OIR reader behind the OIR importer:
+  the container, split and unfinished recordings, and the acquisition record
+  in FluoView's own export format. Memory-mapped where the platform allows, a
+  bounded buffered reader elsewhere, and it builds for
+  `wasm32-unknown-unknown`. The importer in `fast-tiff-viewer` is the glue
+  around it. **Published on crates.io** under MPL-2.0 — see below.
 - **`fasttiff-plugin-abi/`**, **`fasttiff-plugin-api/`**,
   **`fasttiff-plugin/`** — the plugin contract, split by what may change.
   `-abi` is the frozen binary interface (`#[repr(C)]`, `extern "C"`, zero
@@ -348,6 +363,22 @@ TinyTIFF, and benchmarks are in [`fast-tiff-lib/README.md`](fast-tiff-lib/README
 
 Note the licenses differ: the viewer is GPLv3, but the crate is **MPL-2.0**, so
 it can be used in projects that couldn't take a GPL dependency.
+
+## The OIR reader is a standalone crate too
+
+Olympus/Evident FluoView `.oir` files have no published specification. The
+reader behind the OIR importer was worked out from real acquisitions and
+checked frame by frame against the vendor's own TIFF export. It is published
+on its own as [**`oir-reader`**](https://crates.io/crates/oir-reader), also
+**MPL-2.0**:
+
+```sh
+cargo add oir-reader
+```
+
+It reads single and split acquisitions, recovers recordings that are still
+being written, and translates the embedded XML into the record FluoView exports
+beside a file. Details are in [`oir-reader/README.md`](oir-reader/README.md).
 
 ## What v1 covers
 
@@ -643,7 +674,8 @@ an FFT, and `plugin-stabilize` and `plugin-turboreg` a registration crate
 each. Dropping the FFT and suite2p takes about 460 KB off the web bundle. `plugin-dicom` brings a JPEG decoder, for
 the two JPEG codecs DICOM actually uses. `plugin-nifti` brings only gzip, which
 the Deflate TIFF codec already needs, so it costs nothing — and the same is true
-of `plugin-oir`'s XML parser, which OME-XML metadata already pulls in. (A plugin
+of `plugin-oir`, whose `oir-reader` crate parses its XML and maps its files with
+the quick-xml and memmap2 that fast-tiff-lib already uses. (A plugin
 that reuses a dependency the library needs anyway cannot be dropped from the
 graph by turning the plugin off; `cargo tree --invert` shows who the real user
 is.) `plugin-stabilize` is also the only
@@ -896,6 +928,7 @@ this is the one-line formula to change.
 - Done: DICOM importer (.dcm), with RLE, baseline JPEG and lossless JPEG
 - Done: per-mode 3D brightness, auto-levelled against Density in Volume mode
 - Done: 3D settings window is mode-aware and stays on top
+- Done: OIR reader split out as the `oir-reader` crate, memory-mapped by default with a buffered fallback
 - publish in Brew
 - Add 3D volume save in best suitable format for the gpu rendering (not necessary now, need to study the idea)
 
