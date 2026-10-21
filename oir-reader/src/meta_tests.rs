@@ -199,7 +199,9 @@ fn properties() -> String {
 #[test]
 fn the_record_becomes_the_text_the_acquisition_software_exports() {
     let r = Record::parse(&documents());
-    let text = r.to_text("Field_1.oir", 3).expect("a record to write");
+    let text = r
+        .to_fluoview_text("Field_1.oir", 3)
+        .expect("a record to write");
     let expected = "\
 \"[General]\"\t\"\"
 \"Name\"\t\"Field_1.oir\"
@@ -276,9 +278,9 @@ fn the_record_becomes_the_text_the_acquisition_software_exports() {
 fn channel_facts_are_matched_by_id_rather_than_by_position() {
     let r = Record::parse(&documents());
     assert_eq!(r.channels.len(), 2);
-    assert_eq!(r.channels[0].label().as_deref(), Some("RNDD4G"));
+    assert_eq!(r.channels[0].label(), Some("RNDD4G"));
     assert_eq!(r.channels[0].voltage.as_deref(), Some("612"));
-    assert_eq!(r.channels[1].label().as_deref(), Some("RNDD3G"));
+    assert_eq!(r.channels[1].label(), Some("RNDD3G"));
     assert_eq!(r.channels[1].voltage.as_deref(), Some("600"));
 }
 
@@ -290,8 +292,8 @@ fn channel_facts_are_matched_by_id_rather_than_by_position() {
 fn the_event_list_written_at_the_end_wins_over_the_empty_one() {
     let r = Record::parse(&documents());
     assert_eq!(r.events.len(), 2, "the empty first list should not win");
-    assert_eq!(r.events[0].0, "DRS");
-    assert_eq!(r.events[0].1, 27772.762);
+    assert_eq!(r.events[0].name, "DRS");
+    assert_eq!(r.events[0].time_ms, 27772.762);
 
     // And the empty one does not erase a list already found, whichever order
     // the documents arrive in.
@@ -306,7 +308,7 @@ fn the_event_list_written_at_the_end_wins_over_the_empty_one() {
 #[test]
 fn the_settings_of_the_scanner_actually_used_are_the_ones_read() {
     let text = Record::parse(&documents())
-        .to_text("f.oir", 3)
+        .to_fluoview_text("f.oir", 3)
         .expect("a record");
     assert!(
         text.contains("\"Sampling Speed\"\t\"2.0 [us/pixel]\""),
@@ -339,7 +341,7 @@ fn a_duration_is_stated_only_when_every_frame_was_timed() {
         "one timestamp cannot time three frames"
     );
 
-    let text = r.to_text("f.oir", 3).expect("a record");
+    let text = r.to_fluoview_text("f.oir", 3).expect("a record");
     // The count is still worth writing; the range is not invented.
     assert!(text.contains("\"T Dimension\"\t\"3 [T]\""), "{text}");
     assert!(!text.contains("0.000 -"), "a range was invented: {text}");
@@ -352,7 +354,7 @@ fn the_timestamps_of_every_part_add_up_to_the_recording() {
     // Part one: the acquisition record and the first two frames. Part two: two
     // more frames, and nothing else — which is what a continuation looks like.
     let all = documents();
-    let mut part1 = Reader::default();
+    let mut part1 = RecordBuilder::default();
     part1.absorb(&all);
     let one = part1.finish();
     assert_eq!(one.duration_s(3), Some(2.5));
@@ -362,7 +364,7 @@ fn the_timestamps_of_every_part_add_up_to_the_recording() {
         "three timestamps cannot time five frames"
     );
 
-    let mut both = Reader::default();
+    let mut both = RecordBuilder::default();
     both.absorb(&all);
     both.absorb(&[frame(3, 4000.0), frame(4, 5500.0)]);
     let joined = both.finish();
@@ -375,7 +377,7 @@ fn the_timestamps_of_every_part_add_up_to_the_recording() {
     assert_eq!(joined.events.len(), 2);
     assert_eq!(joined.width, Some(512));
     assert!(joined
-        .to_text("f.oir", 5)
+        .to_fluoview_text("f.oir", 5)
         .expect("a record")
         .contains("\"T Dimension\"\t\"5, 0.000 - 5.500 [s], Interval FreeRun\""));
 }
@@ -399,7 +401,7 @@ fn documents_missing_from_the_middle_do_not_cost_the_duration() {
 
     // Every frame but three, which are dropped from the middle exactly as the
     // real acquisition drops them — leaving three gaps of double the period.
-    let mut reader = Reader::default();
+    let mut reader = RecordBuilder::default();
     reader.absorb(&[properties()]);
     let mut docs = Vec::new();
     for i in 0..FRAMES {
@@ -426,7 +428,7 @@ fn documents_missing_from_the_middle_do_not_cost_the_duration() {
     );
 
     // The line that reaches tag 270, and with it the analysis downstream.
-    let text = r.to_text("f.oir", FRAMES).expect("a record");
+    let text = r.to_fluoview_text("f.oir", FRAMES).expect("a record");
     assert!(
         text.contains("\"T Dimension\"\t\"7213, 0.000 - 961.600 [s]"),
         "{}",
@@ -437,7 +439,7 @@ fn documents_missing_from_the_middle_do_not_cost_the_duration() {
 
     // Now the case that must still be refused: the same recording, timed only
     // as far as its first part reaches.
-    let mut first_part = Reader::default();
+    let mut first_part = RecordBuilder::default();
     first_part.absorb(&[properties()]);
     first_part.absorb(&docs[..2030]);
     let part = first_part.finish();
@@ -447,7 +449,7 @@ fn documents_missing_from_the_middle_do_not_cost_the_duration() {
         "a quarter of the timestamps were taken for the whole recording"
     );
     assert!(part
-        .to_text("f.oir", FRAMES)
+        .to_fluoview_text("f.oir", FRAMES)
         .expect("a record")
         .contains("\"T Dimension\"\t\"7213 [T]\""));
 }
@@ -466,7 +468,7 @@ fn timestamps_that_are_short_and_overshoot_at_once_still_give_the_duration() {
     const PERIOD: f64 = 133.333333;
     const FRAMES: usize = 4913;
 
-    let mut reader = Reader::default();
+    let mut reader = RecordBuilder::default();
     reader.absorb(&[properties()]);
     // Frame slots 0..=4913 — one more than the stack keeps — less two from the
     // middle.
@@ -503,7 +505,7 @@ fn timestamps_that_are_short_and_overshoot_at_once_still_give_the_duration() {
 #[test]
 fn the_frame_count_written_is_the_one_the_stack_ends_up_with() {
     let r = Record::parse(&documents());
-    let text = r.to_text("f.oir", 2).expect("a record");
+    let text = r.to_fluoview_text("f.oir", 2).expect("a record");
     assert!(
         text.contains("\"T Dimension\"\t\"2, 0.000 - 1.000 [s], Interval FreeRun\""),
         "{text}"
@@ -606,11 +608,11 @@ fn the_acquisition_date_is_written_the_way_the_sidecar_writes_it() {
 /// than a scaffold of empty section headers that looks like metadata.
 #[test]
 fn a_file_with_no_acquisition_record_produces_no_text() {
-    assert!(Record::parse(&[]).to_text("f.oir", 3).is_none());
+    assert!(Record::parse(&[]).to_fluoview_text("f.oir", 3).is_none());
     let junk = vec![
         r#"<?xml version="1.0"?><lut:LUT><lut:intensity>3</lut:intensity></lut:LUT>"#.to_string(),
     ];
-    assert!(Record::parse(&junk).to_text("f.oir", 3).is_none());
+    assert!(Record::parse(&junk).to_fluoview_text("f.oir", 3).is_none());
 }
 
 /// The bounds exist so a hostile file fails on a limit rather than on memory.

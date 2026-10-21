@@ -1,0 +1,52 @@
+# The Olympus/Evident FluoView OIR reader behind FastTIFF's importer.
+#
+# MPL-2.0. The format was worked out from real acquisitions
+# and checked against the vendor's own TIFF export; no vendor SDK, no published
+# specification (there is none) and no code from another reader went into it.
+# It moved here from fast-tiff-viewer, where it was GPL-3 only by being in that
+# crate.
+[package]
+name = "oir-reader"
+version = "0.25.1"
+edition = "2021"
+# `usize::is_multiple_of` (deciding the shape) is 1.87; `Option::is_none_or`
+# (finding the first block) is 1.82.
+rust-version = "1.87"
+description = """
+Reader for Olympus/Evident FluoView OIR microscopy files: reassembles the \
+scattered image planes of a single or split acquisition, recovers recordings \
+still being written, and translates the embedded XML into the acquisition \
+record FluoView exports. Memory-mapped where the platform allows, a bounded \
+buffered reader elsewhere; builds for wasm32.\
+"""
+license = "MPL-2.0"
+repository = "https://github.com/konung-yaropolk/FastTIFF"
+homepage = "https://github.com/konung-yaropolk/FastTIFF"
+readme = "README.md"
+keywords = ["oir", "olympus", "fluoview", "microscopy", "imaging"]
+categories = ["science", "parser-implementations", "multimedia::images"]
+include = [
+    "src/**/*.rs",
+    "tests/**/*.rs",
+    "examples/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
+
+[features]
+default = ["mmap"]
+# Map each part on unix and Windows. Inert everywhere else: the dependency below
+# is target-gated, so a wasm build needs no --no-default-features, compiles no
+# memmap2 stub, and reads every part through the buffered reader.
+mmap = ["dep:memmap2"]
+
+[dependencies]
+# The acquisition record's XML. The same version as fast-tiff-lib's OME reader,
+# so a build with both carries one copy.
+quick-xml = "0.37"
+# A plane's u16 buffer seen as the bytes it is reassembled from, without unsafe.
+bytemuck = "1.25"
+
+[target.'cfg(any(unix, windows))'.dependencies]
+memmap2 = { version = "0.9", optional = true }

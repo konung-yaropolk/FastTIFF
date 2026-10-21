@@ -25,7 +25,7 @@
 //! writing. A dataset is walked once and a dozen known tags are copied out as
 //! raw bytes, which the caller interprets because it knows what it asked for.
 //! That is enough to open a scan and small enough to be read in full by whoever
-//! has to trust it — the trade the OIR reader next door makes for the same
+//! has to trust it — the trade the `oir-reader` crate makes for the same
 //! reason.
 
 use fasttiff_plugin_api::PluginError;

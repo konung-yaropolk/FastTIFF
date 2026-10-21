@@ -1,6 +1,6 @@
 [package]
 name = "fast-tiff-viewer"
-version = "0.25.0"
+version = "0.25.1"
 edition = "2021"
 description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
 # GPL-3.0, not MPL-2.0 as the rest of the library crates are. The built-in
@@ -73,8 +73,8 @@ plugin-stack-tools = []
 # And the four that bring a dependency with them. Each names only what *it*
 # needs, so the dependency arrives with the plugin and leaves with it.
 # `suite2p-registration` is the registration algorithm; `rustfft` the
-# deconvolution transforms; `png` the PNG importer/exporter; `quick-xml` and
-# `memmap2` the OIR container reader.
+# deconvolution transforms; `png` the PNG importer/exporter; `oir-reader` the
+# OIR container reader.
 plugin-stabilize = ["dep:suite2p-registration"]
 # StackReg registration. A second registration crate rather than an option on
 # the first: the two answer different questions (a shift by phase correlation
@@ -83,7 +83,7 @@ plugin-stabilize = ["dep:suite2p-registration"]
 plugin-turboreg = ["dep:turboreg-registration"]
 plugin-deconvolve = ["dep:rustfft"]
 plugin-png = ["dep:png"]
-plugin-oir = ["dep:quick-xml", "dep:memmap2"]
+plugin-oir = ["dep:oir-reader"]
 # The two MRI readers. `plugin-dicom` brings nothing with it — the format is
 # read from its own bytes — and `plugin-nifti` brings only gzip, which
 # fast-tiff-lib's Deflate codec already puts in the tree, so neither adds a
@@ -124,10 +124,13 @@ gpu-registration = ["suite2p-registration?/gpu", "turboreg-registration?/gpu"]
 # fallback paths, which are already the code path taken whenever a worker fails
 # to spawn.
 threads = ["dep:rayon"]
-# Forwarded straight to fast-tiff-lib. `mmap` brings `Viewer::open` (a path);
-# without it only `Viewer::load_bytes` exists, which is all a browser can use
-# anyway. `codec-zstd` is a C dependency and cannot build for wasm.
-mmap = ["fast-tiff-lib/mmap"]
+# Forwarded to fast-tiff-lib and, where the OIR importer is built, to its
+# reader, so `mmap` means "this build memory-maps the files it opens" for both.
+# It brings `Viewer::open` (a path); without it only `Viewer::load_bytes`
+# exists, which is all a browser can use anyway, and the OIR importer reads
+# each part through a bounded buffer instead. `codec-zstd` is a C dependency and
+# cannot build for wasm.
+mmap = ["fast-tiff-lib/mmap", "oir-reader?/mmap"]
 codec-zstd = ["fast-tiff-lib/codec-zstd"]
 
 [dependencies]
@@ -198,17 +201,13 @@ libloading = "0.9"
 # that says exactly that and cannot be forgotten.
 suite2p-registration = { path = "../suite2p-registration", default-features = false, features = ["threads"], optional = true }
 turboreg-registration = { path = "../turboreg-registration", default-features = false, features = ["threads"], optional = true }
-# The OIR importer's acquisition record (`plugins/builtin/oir_meta.rs`). Kept in
-# step with fast-tiff-lib's OME reader so the workspace builds one copy, and
-# native-only because the whole plugin module is: a browser cannot open a `.oir`
-# from disk in the first place. Hand-rolling it was the alternative and is a bad
-# trade — the schema is namespaced throughout, and the documents come from an
-# untrusted file.
-quick-xml = { version = "0.37", optional = true }
-# The OIR reader maps each part rather than seeking through it: a plane is
-# thirty-five scattered chunks, and a recording is a quarter of a million of
-# them. Same crate and same version fast-tiff-lib maps TIFFs with.
-memmap2 = { version = "0.9", optional = true }
+# The OIR container reader behind the importer. A crate of its own, which
+# builds for wasm, but native-only here for the reason `flate2` is below: the
+# importer that uses it is handed a path, and a browser has none. Without its
+# default features, so that this crate's `mmap` decides whether parts are
+# mapped. Its quick-xml and memmap2 are the versions fast-tiff-lib already
+# brings, so it adds no crate to the build but itself.
+oir-reader = { path = "../oir-reader", default-features = false, optional = true }
 # `.nii.gz`, which is how NIfTI volumes are almost always distributed — the
 # plain `.nii` is the exception. Whole-file gzip and nothing more exotic, so
 # this is `flate2`'s simplest use. Already in the tree twice over (fast-tiff-lib

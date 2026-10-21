@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.24.4"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -117,9 +117,8 @@ dependencies = [
  "flate2",
  "libloading",
  "log",
- "memmap2",
+ "oir-reader",
  "png",
- "quick-xml",
  "rayon",
  "rustfft",
  "scivis-render",
@@ -130,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin"
-version = "0.21.0"
+version = "0.25.0"
 dependencies = [
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
@@ -138,11 +137,11 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin-abi"
-version = "0.21.0"
+version = "0.25.0"
 
 [[package]]
 name = "fasttiff-plugin-api"
-version = "0.21.0"
+version = "0.25.0"
 
 [[package]]
 name = "fasttiff-plugin-example"
@@ -282,6 +281,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "oir-reader"
+version = "0.25.0"
+dependencies = [
+ "bytemuck",
+ "memmap2",
+ "quick-xml",
 ]
 
 [[package]]

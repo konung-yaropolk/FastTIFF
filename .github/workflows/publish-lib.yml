@@ -152,3 +152,48 @@ jobs:
         run: cargo publish -p turboreg-registration
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # oir-reader: the Olympus OIR reader on its own, with no dependency on
+  # anything else in this workspace, so it publishes beside fast-tiff-lib
+  # rather than after it.
+  publish-oir-reader:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Read crate version
+        id: ver
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1               | jq -r '.packages[] | select(.name=="oir-reader") | .version')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "oir-reader version: $v"
+
+      - name: Already on crates.io?
+        id: pub
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}'                  -H "User-Agent: ${{ github.repository }} publish CI"                  "https://crates.io/api/v1/crates/oir-reader/${{ steps.ver.outputs.version }}")
+          if [ "$code" = "200" ]; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v${{ steps.ver.outputs.version }} already published — skipping."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # `mmap` is in the default set, so `cargo publish` verifies only the
+      # mapped build. The buffered-only build, and the browser target with and
+      # without the feature, are checked here, so that neither can be published
+      # broken and found so by whoever builds it.
+      - name: Check the crate builds without mmap and for wasm
+        if: steps.pub.outputs.already == 'false'
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p oir-reader --no-default-features
+          cargo check -p oir-reader --target wasm32-unknown-unknown
+          cargo check -p oir-reader --target wasm32-unknown-unknown --no-default-features
+
+      - name: Publish
+        if: steps.pub.outputs.already == 'false'
+        run: cargo publish -p oir-reader
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
