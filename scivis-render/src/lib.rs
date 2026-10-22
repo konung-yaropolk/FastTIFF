@@ -207,6 +207,19 @@ pub struct VolumeParams {
     pub box_he: [f32; 3],
 }
 
+/// The volume rendered off screen, read back: what `capture_volume` produces.
+///
+/// The picture the 3D view would show at this size, with nothing the host
+/// draws over the view: `rgba` is `width * height` pixels of 8-bit RGBA, rows
+/// top to bottom, alpha 255 (the ray-march is opaque, black where a ray misses
+/// the volume).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VolumeImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 /// One channel's window/level + on/off state, as the host produces it each
 /// frame. The backend maps it to whatever GPU representation it uses.
 #[derive(Clone, Copy, Debug)]

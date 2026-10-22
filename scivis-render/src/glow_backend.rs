@@ -16,7 +16,8 @@
 //! this backend deliberately does not second-guess it.
 
 use crate::{
-    ChannelKind, ChannelUniform, Lut, VolumeInterp, VolumeKind, VolumeParams, MAX_CHANNELS,
+    ChannelKind, ChannelUniform, Lut, VolumeImage, VolumeInterp, VolumeKind, VolumeParams,
+    MAX_CHANNELS,
 };
 use glow::HasContext as _;
 use std::sync::Arc;
@@ -496,6 +497,9 @@ pub struct ImageRenderResources {
 
     /// The 3D ray-march pipeline + volume texture (see `paint_volume`).
     volume: VolumeGl,
+    /// The picture `capture_volume` rendered, until `take_volume_capture`
+    /// collects it.
+    capture: Option<Result<VolumeImage, String>>,
 }
 
 /// The 3D volume pipeline: its own program, per-channel unorm (R8/R16) and R32F
@@ -612,6 +616,7 @@ impl ImageRenderResources {
                 uv_offset: [0.0, 0.0],
                 uv_scale: [1.0, 1.0],
                 volume: VolumeGl::new(gl),
+                capture: None,
             }
         }
     }
@@ -790,6 +795,133 @@ impl ImageRenderResources {
             gl.disable(glow::BLEND);
             gl.draw_arrays(glow::TRIANGLES, 0, 6);
         }
+    }
+
+    /// Render the volume off screen at `width` x `height` pixels, with the
+    /// params last given to `set_volume_params`; collect the picture with
+    /// [`take_volume_capture`].
+    ///
+    /// The ray-march has no resolution of its own (every pixel is a ray), so
+    /// this is the view at any size: sharper than the window when larger, and
+    /// with nothing the host draws over the view in it. The aspect ratio is
+    /// taken from the size, not from the params. GL reads back synchronously,
+    /// so the picture is ready at once; the two calls match the wgpu backend,
+    /// whose readback is not. The host's framebuffer, viewport and scissor are
+    /// put back as they were.
+    ///
+    /// [`take_volume_capture`]: Self::take_volume_capture
+    pub fn capture_volume(&mut self, width: u32, height: u32) -> Result<(), String> {
+        let Some(params) = self.volume.params else {
+            return Err("there is no volume to render".into());
+        };
+        let max = self.max_2d_texture_size();
+        if width == 0 || height == 0 || width > max || height > max {
+            return Err(format!(
+                "a {width} x {height} picture is beyond what this GPU can render (up to {max} a side)"
+            ));
+        }
+        if self.capture.is_some() {
+            return Err("the last capture has not been taken yet".into());
+        }
+        self.volume.params = Some(VolumeParams {
+            aspect: width as f32 / height as f32,
+            ..params
+        });
+        let result = unsafe { self.render_offscreen(width, height) };
+        self.volume.params = Some(params);
+        self.capture = Some(result);
+        Ok(())
+    }
+
+    /// The picture [`capture_volume`] rendered, or `None` when none was asked
+    /// for since the last one was taken.
+    ///
+    /// [`capture_volume`]: Self::capture_volume
+    pub fn take_volume_capture(&mut self) -> Option<Result<VolumeImage, String>> {
+        self.capture.take()
+    }
+
+    unsafe fn render_offscreen(&self, width: u32, height: u32) -> Result<VolumeImage, String> {
+        let gl: &glow::Context = &self.gl;
+        let previous_fb = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);
+        let mut previous_viewport = [0i32; 4];
+        gl.get_parameter_i32_slice(glow::VIEWPORT, &mut previous_viewport);
+        let scissor = gl.is_enabled(glow::SCISSOR_TEST);
+
+        let texture = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            width as i32,
+            height as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        let fb = match gl.create_framebuffer() {
+            Ok(fb) => fb,
+            Err(why) => {
+                gl.delete_texture(texture);
+                return Err(why);
+            }
+        };
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fb));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(texture),
+            0,
+        );
+        let result = if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE
+        {
+            Err(format!(
+                "cannot render a {width} x {height} picture off screen"
+            ))
+        } else {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.viewport(0, 0, width as i32, height as i32);
+            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+            self.paint_volume(gl);
+            let (w, h) = (width as usize, height as usize);
+            let mut pixels = vec![0u8; w * h * 4];
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+            gl.read_pixels(
+                0,
+                0,
+                width as i32,
+                height as i32,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
+            );
+            // GL's rows run bottom to top.
+            let mut rgba = Vec::with_capacity(pixels.len());
+            for row in pixels.chunks_exact(w * 4).rev() {
+                for px in row.chunks_exact(4) {
+                    rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                }
+            }
+            Ok(VolumeImage {
+                width,
+                height,
+                rgba,
+            })
+        };
+
+        gl.bind_framebuffer(glow::FRAMEBUFFER, previous_fb);
+        gl.delete_framebuffer(fb);
+        gl.delete_texture(texture);
+        let [x, y, w, h] = previous_viewport;
+        gl.viewport(x, y, w, h);
+        if scissor {
+            gl.enable(glow::SCISSOR_TEST);
+        }
+        result
     }
 
     /// (Re)allocate channel textures for the current frame size and per-channel

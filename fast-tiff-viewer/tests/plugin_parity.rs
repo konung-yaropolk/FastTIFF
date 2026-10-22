@@ -226,6 +226,18 @@ fn every_built_in_filter_answers_the_same_through_the_boundary() {
         covered.push(same_both_ways::<builtin::GeneratePsf>(&s));
         covered.push(same_both_ways::<builtin::Deconvolve>(&s));
     }
+    // Every button of the panel, not only the run with none pressed: each is
+    // a different outcome — an animation to play, one to save, a stop — and
+    // each has its own way of being lost on the way across.
+    #[cfg(feature = "plugin-animation-3d")]
+    {
+        covered.push(same_both_ways::<builtin::Animation3d>(&s));
+        for button in ["play", "save", "stop"] {
+            same_both_ways_with::<builtin::Animation3d>(&s, |p| {
+                p.set(button, ParamValue::Bool(true))
+            });
+        }
+    }
 
     let mut installed: Vec<String> = Registry::new()
         .entries()
@@ -392,4 +404,33 @@ fn deconvolution_with_a_real_psf_answers_the_same_through_the_boundary() {
         );
     });
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A dialog that follows the view: the 3D animation offers Stop while one of
+/// its animations is running, and the host's answer to "is it running" has to
+/// reach a plugin through the boundary as it does directly.
+#[cfg(feature = "plugin-animation-3d")]
+#[test]
+fn the_animation_panel_follows_the_view_through_the_boundary() {
+    let s = stack();
+    let mut reg = Registry::empty();
+    assert!(reg.add::<builtin::Animation3d>(Origin::BuiltIn));
+    let entry = reg.get_mut(0).expect("installed");
+    for animating in [false, true] {
+        let h = || host(&s).with_animating(animating);
+        let direct = builtin::Animation3d.params(&h());
+        let crossed = entry.plugin.dialog(&h()).expect("the dialog crossed");
+        assert_eq!(crossed, direct);
+        let keys: Vec<&str> = crossed.iter().map(|d| d.key.as_str()).collect();
+        let want = if animating { "stop" } else { "play" };
+        assert!(keys.contains(&want), "animating {animating}: {keys:?}");
+        assert!(
+            crossed
+                .iter()
+                .filter(|d| matches!(d.kind, ParamKind::Action))
+                .count()
+                == 2,
+            "the buttons did not cross as buttons"
+        );
+    }
 }

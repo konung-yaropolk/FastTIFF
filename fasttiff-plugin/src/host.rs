@@ -77,6 +77,12 @@ unsafe extern "C" fn no_channel_lut(
     FtStatus::OutOfRange
 }
 
+/// Stands in for `animating` on a host too old to have it: such a host has no
+/// animations, so none of this plugin's is running, which is what 0 says.
+unsafe extern "C" fn no_animating(_ctx: *mut core::ffi::c_void) -> u32 {
+    0
+}
+
 /// More regions than anyone draws, so a host answering nonsense cannot make a
 /// plugin allocate without bound before it has looked at a single one.
 const MAX_REGIONS: u64 = 4096;
@@ -126,8 +132,8 @@ pub unsafe fn host_of(host: *const FtHost) -> Result<FtHost, FtStatus> {
     // Field by field rather than in the pairs they were appended in: a field
     // the copy reached only halfway is covered by neither, and checking each
     // one separately is what guarantees every byte is written. The assertion
-    // `offset_of!(FtHost, channel_lut) + p == size_of` in the ABI crate is
-    // what fails if a later append forgets to add its line here.
+    // `offset_of!(FtHost, animating) + p == size_of` in the ABI crate is what
+    // fails if a later append forgets to add its line here.
     let p = buf.as_mut_ptr();
     if !crate::abi::ft_covers!(host, FtHost, stack_info) {
         core::ptr::addr_of_mut!((*p).stack_info).write(no_stack_info);
@@ -150,6 +156,9 @@ pub unsafe fn host_of(host: *const FtHost) -> Result<FtHost, FtStatus> {
     if !crate::abi::ft_covers!(host, FtHost, channel_lut) {
         core::ptr::addr_of_mut!((*p).channel_lut).write(no_channel_lut);
     }
+    if !crate::abi::ft_covers!(host, FtHost, animating) {
+        core::ptr::addr_of_mut!((*p).animating).write(no_animating);
+    }
     Ok(buf.assume_init())
 }
 
@@ -165,6 +174,8 @@ pub struct CHost {
     selection: Vec<Roi>,
     /// What the dialog holds while `params` is being asked. Empty otherwise.
     pending: Params,
+    /// Whether one of this plugin's animations is running, as of the call.
+    animating: bool,
 }
 
 impl CHost {
@@ -341,8 +352,13 @@ impl CHost {
             }
         }
 
+        // Through the copy, so a host that predates animations answers through
+        // the stub: none is running.
+        let animating = (h.animating)(h.ctx) != 0;
+
         Ok(CHost {
             pending,
+            animating,
             selection,
             image: ImageInfo {
                 width: ii.width,
@@ -463,6 +479,10 @@ impl HostContext for CHost {
 
     fn selection(&self) -> Selection<'_> {
         &self.selection
+    }
+
+    fn animating(&self) -> bool {
+        self.animating
     }
 
     fn log(&mut self, message: &str) {

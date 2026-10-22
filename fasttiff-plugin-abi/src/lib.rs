@@ -126,7 +126,16 @@ pub const ABI_MAJOR: u32 = 1;
 ///   a result's channel is called. With those, the app registers its own
 ///   built-in plugins through this contract too, so a built-in and a library
 ///   cannot differ in what they can do — there is only one way in.
-pub const ABI_MINOR: u32 = 4;
+/// * **5** — the 3D view, and dialogs that stay open. [`FtSink::set_animation`]
+///   carries an animation — one rotation of the volume per frame — for the
+///   host to play or to render to a file, finished by
+///   [`FtOutcomeKind::Animate`]; [`FtOutcomeKind::StopAnimation`] stops it;
+///   [`FtHost::animating`] tells a plugin whether one of its own is running.
+///   And [`FtParamKind::Action`], a button, which makes a dialog a panel whose
+///   every press is a run. The two kinds are new values of open enums and cost
+///   nothing in either direction; the two callbacks are appended to tables
+///   that are read with [`covers`].
+pub const ABI_MINOR: u32 = 5;
 
 /// The one symbol a plugin library must export, NUL-terminated for `dlsym`.
 ///
@@ -402,6 +411,11 @@ open_enum! {
         /// sends it. That is why the dialog vocabulary grows here and not as
         /// a field on `FtParamDecl`, which is frozen.
         Section = 7,
+        /// A button. Pressing it runs the plugin with the dialog's values
+        /// and one more: this control's key, as a `Bool` of 1. A dialog
+        /// that declares one stays open after a run. An older host draws it
+        /// as a label saying it needs a newer FastTIFF.
+        Action = 8,
     }
 }
 
@@ -653,6 +667,11 @@ pub struct FtHost {
     /// comes out grey.
     pub channel_lut:
         unsafe extern "C" fn(ctx: *mut c_void, index: u64, out: *mut u8, cap: u64) -> FtStatus,
+
+    /// 1 when an animation this plugin started is playing on the 3D view or
+    /// being rendered to a file, 0 otherwise. Appended in minor 5; a host
+    /// that predates it has no animations, which a plugin should read as 0.
+    pub animating: unsafe extern "C" fn(ctx: *mut c_void) -> u32,
 }
 
 /// One channel's colour table as [`FtHost::channel_lut`] writes it: 256
@@ -674,6 +693,12 @@ open_enum! {
         /// that does not know it refuses the run and says so, which is what the
         /// catch-all arm of a host's outcome handling is for.
         ReplaceDocument = 5,
+        /// Play the animation declared through [`FtSink::set_animation`], or
+        /// render it to a file, as it says.
+        Animate = 6,
+        /// Stop this plugin's animation, if one is running. Nothing is pushed
+        /// for it.
+        StopAnimation = 7,
     }
 }
 
@@ -823,7 +848,42 @@ pub struct FtSink {
     /// else about itself is shown the way an unannotated one is.
     pub set_channel_name:
         unsafe extern "C" fn(ctx: *mut c_void, index: u64, name: FtStr) -> FtStatus,
+
+    /// Declare an animation of the 3D view, finished by
+    /// `set_outcome(FtOutcomeKind::Animate, ...)`.
+    ///
+    /// `poses` points at `pose_count * floats_per_pose` `f32`s, which the
+    /// host copies immediately. Each pose begins with a rotation of the volume
+    /// about a point in the volume at the centre of the view — nine floats, row-major, in volume coordinates (x
+    /// along the image's width, y its height, z through the slices) — relative
+    /// to how it lay when the animation started. `floats_per_pose` is the
+    /// stride, so that a later minor can append to a pose without changing
+    /// this callback: a host reads the first [`FT_POSE_FLOATS`] of each and
+    /// steps over the rest, and refuses a stride shorter than that.
+    ///
+    /// `output` is [`FT_ANIMATION_PLAY`] or [`FT_ANIMATION_SAVE_TIFF`]; for
+    /// the second, `path` is where to write, empty for the host to ask the
+    /// user. `fps` is the frame rate on screen and in the file.
+    pub set_animation: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        fps: f32,
+        output: u32,
+        path: FtStr,
+        poses: *const f32,
+        pose_count: u64,
+        floats_per_pose: u64,
+    ) -> FtStatus,
 }
+
+/// The floats of a pose this minor defines: a 3×3 rotation, row-major. See
+/// [`FtSink::set_animation`].
+pub const FT_POSE_FLOATS: u64 = 9;
+
+/// [`FtSink::set_animation`]'s `output`: play on the 3D view, looping.
+pub const FT_ANIMATION_PLAY: u32 = 0;
+/// [`FtSink::set_animation`]'s `output`: render every pose once and write the
+/// frames as a TIFF.
+pub const FT_ANIMATION_SAVE_TIFF: u32 = 1;
 
 /// No colour of its own: let the host choose. For [`FtSink::push_series`].
 ///
@@ -1133,8 +1193,8 @@ const _: () = {
     assert!(size_of::<FtImporterVtable>() == 8 + 4 * p);
     assert!(size_of::<FtExporterVtable>() == 8 + 3 * p);
     assert!(size_of::<FtParamSink>() == 8 + 2 * p);
-    assert!(size_of::<FtSink>() == 8 + 9 * p);
-    assert!(size_of::<FtHost>() == 8 + 17 * p);
+    assert!(size_of::<FtSink>() == 8 + 10 * p);
+    assert!(size_of::<FtHost>() == 8 + 18 * p);
 
     // The append rule, pinned. `CORE` is what an older host declares, so it
     // has to end exactly where the appended field begins; and the appended
@@ -1144,16 +1204,18 @@ const _: () = {
     assert!(FtRegistrar::CORE == offset_of!(FtRegistrar, add_exporter));
     assert!(FtRegistrar::WITH_EXPORTERS == size_of::<FtRegistrar>());
 
-    // The same rule for the two tables minors 2 to 4 appended to. `CORE` still
+    // The same rule for the two tables minors 2 to 5 appended to. `CORE` still
     // ends where the first optional field begins, and the newest field is last
     // — which is what every `ft_covers!` check in the workspace assumes, and
     // what the stub-the-uncovered-tail code in `fasttiff-plugin` relies on.
     assert!(FtSink::CORE == offset_of!(FtSink, set_info));
     assert!(offset_of!(FtSink, push_series) + p == offset_of!(FtSink, set_channel_name));
-    assert!(offset_of!(FtSink, set_channel_name) + p == size_of::<FtSink>());
+    assert!(offset_of!(FtSink, set_channel_name) + p == offset_of!(FtSink, set_animation));
+    assert!(offset_of!(FtSink, set_animation) + p == size_of::<FtSink>());
     assert!(FtHost::CORE == offset_of!(FtHost, stack_info));
     assert!(offset_of!(FtHost, param_value) + p == offset_of!(FtHost, channel_lut));
-    assert!(offset_of!(FtHost, channel_lut) + p == size_of::<FtHost>());
+    assert!(offset_of!(FtHost, channel_lut) + p == offset_of!(FtHost, animating));
+    assert!(offset_of!(FtHost, animating) + p == size_of::<FtHost>());
     assert!(FT_LUT_BYTES == 768);
 
     // Carried by value into a plugin's own allocation, so its prologue is
@@ -1195,6 +1257,7 @@ const _: () = {
     assert!(FtParamKind::Path.0 == 5);
     assert!(FtParamKind::Label.0 == 6);
     assert!(FtParamKind::Section.0 == 7);
+    assert!(FtParamKind::Action.0 == 8);
 
     assert!(FtConfidence::No.0 == 0);
     assert!(FtConfidence::Maybe.0 == 1);
@@ -1206,6 +1269,12 @@ const _: () = {
     assert!(FtOutcomeKind::SaveToFile.0 == 3);
     assert!(FtOutcomeKind::Plot.0 == 4);
     assert!(FtOutcomeKind::ReplaceDocument.0 == 5);
+    assert!(FtOutcomeKind::Animate.0 == 6);
+    assert!(FtOutcomeKind::StopAnimation.0 == 7);
+
+    assert!(FT_POSE_FLOATS == 9);
+    assert!(FT_ANIMATION_PLAY == 0);
+    assert!(FT_ANIMATION_SAVE_TIFF == 1);
 
     assert!(FtSelectionKind::None.0 == 0);
     assert!(FtSelectionKind::Regions.0 == 1);

@@ -32,6 +32,7 @@
     feature = "plugin-zproject",
     feature = "plugin-plot-axis",
     feature = "plugin-stack-tools",
+    feature = "plugin-animation-3d",
     feature = "plugin-stabilize",
     feature = "plugin-turboreg",
     feature = "plugin-deconvolve",

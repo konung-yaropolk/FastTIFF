@@ -205,6 +205,19 @@ fn paint_volume(&self, render_pass: &mut wgpu::RenderPass)   // wgpu
 fn paint_volume(&self, gl: &glow::Context)                   // glow
 ```
 
+```rust,ignore
+fn capture_volume(&mut self, width: u32, height: u32) -> Result<(), String>
+fn take_volume_capture(&mut self) -> Option<Result<VolumeImage, String>>
+```
+Render the volume off screen at any size and read it back, for a still or a
+movie frame sharper than the window. Every pixel is a ray, so a larger render
+has more detail, not stretched pixels. The aspect ratio comes from the size,
+and nothing the host draws over its view is included. Call `capture_volume`
+after `set_volume_params`, then call `take_volume_capture` once per frame until
+it returns the RGBA picture. On wgpu the readback lands a frame or more later,
+and a browser cannot wait for it; glow reads back at once. Only one capture can
+be in flight at a time.
+
 ## Backend-specific extras
 
 Two members exist only on `wgpu_backend`:

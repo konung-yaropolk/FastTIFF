@@ -100,6 +100,22 @@ pub trait HostContext {
         &crate::params::NO_PARAMS
     }
 
+    /// Whether an animation this plugin started is playing on the 3D view, or
+    /// being rendered to a file, right now.
+    ///
+    /// Only this plugin's: another plugin's animation is none of its business,
+    /// and a Stop button offered for it would stop something the user did not
+    /// start here. Read in [`crate::Plugin::params`] it is what lets a dialog
+    /// offer Play or Stop; the host asks for the dialog again whenever this
+    /// changes — when the animation starts, ends, or is stopped because the
+    /// user took the view back.
+    ///
+    /// Provided rather than required: a host that cannot animate answers
+    /// `false`, which is the truth for it.
+    fn animating(&self) -> bool {
+        false
+    }
+
     /// A line for the host to show the user. Not an error; use the returned
     /// `Err` for that.
     fn log(&mut self, message: &str);

@@ -85,12 +85,21 @@
 //! the plugin is a separate library. So pixels are pulled one plane at a time
 //! into a buffer the plugin owns. See [`HostContext`].
 //!
+//! **A run is one call that returns.** So a plugin that wants something to
+//! keep happening — a chart that follows the selection, a volume that turns —
+//! declares it and the host carries it out: a [`Plot`] the host re-asks for
+//! when the regions change, an [`Animation`] the host plays on the 3D view.
+//! And a dialog that is used more than once, Play then Stop, declares buttons
+//! ([`ParamKind::Action`]) and becomes a panel that stays open, each press a
+//! run of its own. See [`animation`].
+//!
 //! # Licence
 //!
 //! MPL-2.0 — deliberately weaker copyleft than the GPL-3.0 application, because
 //! a plugin must depend on this crate and a copyleft SDK would force its licence
 //! on every plugin, including ones a hardware vendor might ship.
 
+pub mod animation;
 pub mod export;
 pub mod host;
 pub mod image;
@@ -101,6 +110,7 @@ pub mod plot;
 pub mod plugin;
 pub mod selection;
 
+pub use animation::{Animation, AnimationOutput, Pose};
 pub use export::{ExportRequest, Exporter};
 pub use host::{HostContext, HostContextExt};
 pub use image::{
@@ -121,4 +131,4 @@ pub use selection::{Roi, Shape};
 /// symbol at load rather than two sides disagreeing about a struct layout after
 /// the call has already begun.
 pub const API_VERSION_MAJOR: u32 = 1;
-pub const API_VERSION_MINOR: u32 = 1;
+pub const API_VERSION_MINOR: u32 = 2;

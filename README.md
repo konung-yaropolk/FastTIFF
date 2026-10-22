@@ -585,6 +585,19 @@ with the same per-channel LUTs and contrast as the 2D view.
   (XResolution/YResolution) and Z `spacing`, editable in the settings window.
 - **4D**: for channels+Z+time stacks, playing the movie animates the volume
   through time.
+- **3D animation** (Plugins ▸ Stack ▸ 3D animation): turn the volume about its
+  own X or Y axis, or wobble it in a **precession** — its Z axis tilted (15° by
+  default) and swung round a cone, so a z-stack shows its depth without ever
+  turning upside down. Play/Stop and a speed in degrees per second; the volume
+  turns in place about a point in the volume at the centre of the view, in
+  front of the camera you set up, and
+  any drag, scroll or key on the view — or going back to 2D — stops it and puts
+  the view back. **Save animation as TIFF…** renders exactly one cycle, every
+  frame once with no repeat where it loops, as an RGB movie at 30 frames a
+  second. Each frame is rendered off screen in the shape of the 3D view, large
+  enough that every pixel of the stack in view gets at least a pixel of its own
+  (never smaller than the view on screen, up to 8192 on the long side), and
+  without the coordinate box or anything else drawn over the view.
 - Runs on both the glow and wgpu backends.
 
 ## Plugins
@@ -600,10 +613,14 @@ Three kinds:
   intensity calibration, channel names), the viewer's current display state
   (contrast window, the channels' colour tables, 3D camera), and a
   plane-at-a-time reader — then return a new document, a file to write, a
-  chart, or a message. A chart can ask for a selection tool, and the host then
-  runs the plugin again for each new set of regions the user draws. A plugin
+  chart, an animation of the 3D view, or a message. A chart can ask for a
+  selection tool, and the host then runs the plugin again for each new set of
+  regions the user draws; an animation is a list of volume orientations, one per
+  frame, which the host plays on the 3D view or renders to a movie. A plugin
   declares its dialog as a list of typed controls and the host draws it, so
-  there is no UI toolkit in a plugin's dependency tree.
+  there is no UI toolkit in a plugin's dependency tree — and a dialog that
+  declares buttons becomes a panel that stays open, each button a run of its
+  own.
 - **Importers** read formats FastTIFF does not know. An importer declares the
   extensions it handles, and the host adds them to the Open dialog and to
   drag-and-drop *before the plugin has run*; opening such a file calls the
@@ -647,7 +664,8 @@ cargo test --manifest-path plugins/example/Cargo.toml
 ### Built-in plugins, and choosing which get compiled in
 
 Some plugins ship *inside* the binary rather than as libraries: Invert, Z
-Project, Plot third axis, the three Slice tools, Generate PSF, Deconvolve,
+Project, Plot third axis, the three Slice tools, 3D animation, Generate PSF,
+Deconvolve,
 suite2p stabilization, TurboReg stabilization, the PNG importer/exporter, the
 Olympus OIR reader and the two MRI importers below.
 They are written against the same contract a `.dll` is, and installed through
@@ -929,6 +947,7 @@ this is the one-line formula to change.
 - Done: per-mode 3D brightness, auto-levelled against Density in Volume mode
 - Done: 3D settings window is mode-aware and stays on top
 - Done: OIR reader split out as the `oir-reader` crate, memory-mapped by default with a buffered fallback
+- Done: 3D animation plugin (rotate about X/Y, precession), saved as a seamless TIFF movie; plugin API for animating the 3D view and for dialog buttons
 - publish in Brew
 - Add 3D volume save in best suitable format for the gpu rendering (not necessary now, need to study the idea)
 

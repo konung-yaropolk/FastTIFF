@@ -54,9 +54,10 @@ use std::path::{Path, PathBuf};
 
 use fasttiff_plugin_abi as abi;
 use fasttiff_plugin_api::{
-    Confidence, ExportRequest, Exporter, FileType, HostContext, ImageResult, ImportHost,
-    ImportRequest, ImportResult, Importer, Outcome, ParamDecl, ParamKind, ParamValue, Params,
-    PixelType, PlaneData, Plot, Plugin, PluginError, PluginInfo, SelectionKind, Series, StackInfo,
+    Animation, AnimationOutput, Confidence, ExportRequest, Exporter, FileType, HostContext,
+    ImageResult, ImportHost, ImportRequest, ImportResult, Importer, Outcome, ParamDecl, ParamKind,
+    ParamValue, Params, PixelType, PlaneData, Plot, Plugin, PluginError, PluginInfo, Pose,
+    SelectionKind, Series, StackInfo,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1019,6 +1020,13 @@ unsafe extern "C" fn cb_channel_lut(
     })
 }
 
+unsafe extern "C" fn cb_animating(ctx: *mut std::ffi::c_void) -> u32 {
+    match (ctx as *mut HostCell).as_ref() {
+        Some(c) => u32::from(c.inner.animating()),
+        None => 0,
+    }
+}
+
 unsafe extern "C" fn cb_progress(ctx: *mut std::ffi::c_void, fraction: f32) -> u32 {
     match (ctx as *mut HostCell).as_mut() {
         Some(c) => {
@@ -1061,6 +1069,7 @@ fn host_table(cell: &mut HostCell) -> abi::FtHost {
         param_count: cb_param_count,
         param_value: cb_param_value,
         channel_lut: cb_channel_lut,
+        animating: cb_animating,
     }
 }
 
@@ -1090,6 +1099,8 @@ struct ResultSink {
     names: std::collections::BTreeMap<u64, String>,
     /// The chart being declared, once `begin_plot` has been called.
     plot: Option<PlotSink>,
+    /// The animation being declared, once `set_animation` has been called.
+    animation: Option<Animation>,
 }
 
 /// A chart, accumulating. Separate from the image fields above because a run
@@ -1417,6 +1428,76 @@ unsafe extern "C" fn sink_set_channel_name(
     })
 }
 
+unsafe extern "C" fn sink_set_animation(
+    ctx: *mut std::ffi::c_void,
+    fps: f32,
+    output: u32,
+    path: abi::FtStr,
+    poses: *const f32,
+    pose_count: u64,
+    floats_per_pose: u64,
+) -> abi::FtStatus {
+    host_guard(|| {
+        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+            return abi::FtStatus::BadArgument;
+        };
+        // A stride shorter than a rotation cannot hold one, and a longer one
+        // is a newer minor's pose with fields this host steps over. Bounded
+        // too, so a corrupt stride cannot turn a few poses into gigabytes.
+        if !(abi::FT_POSE_FLOATS..=64).contains(&floats_per_pose) {
+            s.problem = Some(format!(
+                "the plugin declared an animation with {floats_per_pose} numbers per \
+                 pose, where this version of FastTIFF reads {}",
+                abi::FT_POSE_FLOATS
+            ));
+            return abi::FtStatus::BadArgument;
+        }
+        // Refused before anything is copied: the count is the plugin's word,
+        // and the copy below is sized from it.
+        if pose_count == 0 || pose_count > Animation::MAX_POSES as u64 {
+            s.problem = Some(format!(
+                "the plugin declared an animation of {pose_count} poses; one needs \
+                 between 1 and {}",
+                Animation::MAX_POSES
+            ));
+            return abi::FtStatus::BadArgument;
+        }
+        if poses.is_null() {
+            s.problem = Some("the plugin declared an animation with no poses behind it".into());
+            return abi::FtStatus::BadArgument;
+        }
+        let output = match output {
+            abi::FT_ANIMATION_PLAY => AnimationOutput::Play,
+            abi::FT_ANIMATION_SAVE_TIFF => AnimationOutput::SaveTiff {
+                path: path.as_str().unwrap_or("").to_string(),
+            },
+            // A destination from a newer ABI. Playing it instead would do
+            // something the user did not ask for; saying so does not.
+            other => {
+                s.problem = Some(format!(
+                    "the plugin asked for its animation to go somewhere this version \
+                     of FastTIFF does not know ({other}); the plugin needs a newer FastTIFF"
+                ));
+                return abi::FtStatus::BadArgument;
+            }
+        };
+        // Copied here, inside the call: the plugin's memory is not the host's
+        // to hold on to. Only the first nine numbers of each pose are this
+        // minor's; the rest are stepped over.
+        let all = std::slice::from_raw_parts(poses, (pose_count * floats_per_pose) as usize);
+        let poses = all
+            .chunks_exact(floats_per_pose as usize)
+            .map(|f| {
+                Pose::from_matrix([[f[0], f[1], f[2]], [f[3], f[4], f[5]], [f[6], f[7], f[8]]])
+            })
+            .collect();
+        let mut animation = Animation::new(poses, fps);
+        animation.output = output;
+        s.animation = Some(animation);
+        abi::FtStatus::Ok
+    })
+}
+
 fn sink_table(sink: &mut ResultSink) -> abi::FtSink {
     abi::FtSink {
         struct_size: std::mem::size_of::<abi::FtSink>() as u32,
@@ -1430,6 +1511,7 @@ fn sink_table(sink: &mut ResultSink) -> abi::FtSink {
         begin_plot: sink_begin_plot,
         push_series: sink_push_series,
         set_channel_name: sink_set_channel_name,
+        set_animation: sink_set_animation,
     }
 }
 
@@ -1483,6 +1565,19 @@ impl ResultSink {
                     wants: p.wants,
                 })))
             }
+            abi::FtOutcomeKind::Animate => {
+                let Some(animation) = self.animation else {
+                    return Err(PluginError::failed(format!(
+                        "{name} asked for an animation to be played without declaring one"
+                    )));
+                };
+                // Checked here as an image is, whatever the plugin checked on
+                // its side: a host that drew a skewed pose would show the
+                // volume distorted and blame nobody.
+                animation.validate()?;
+                Ok(Outcome::Animate(Box::new(animation)))
+            }
+            abi::FtOutcomeKind::StopAnimation => Ok(Outcome::StopAnimation),
             abi::FtOutcomeKind::NewDocument
             | abi::FtOutcomeKind::SaveToFile
             | abi::FtOutcomeKind::ReplaceDocument => {
@@ -1634,6 +1729,7 @@ unsafe extern "C" fn decl_push(
             },
             abi::FtParamKind::Label => ParamKind::Label,
             abi::FtParamKind::Section => ParamKind::Section,
+            abi::FtParamKind::Action => ParamKind::Action,
             // A control kind from a newer ABI. Dropping it would show the user
             // a dialog quietly missing a setting the plugin expects them to
             // make; refusing the whole dialog would hide the reason. A label in
@@ -2030,6 +2126,12 @@ impl HostContext for ReadOnly<'_> {
     // choices, ABI 1.3 notwithstanding.
     fn pending_params(&self) -> &Params {
         self.0.pending_params()
+    }
+    // And the one ABI 1.5 added, for the same reason as the two above: a panel
+    // whose button reads Play or Stop decides which while its dialog is being
+    // declared, which is exactly when this shim is in the way.
+    fn animating(&self) -> bool {
+        self.0.animating()
     }
     fn view(&self) -> &fasttiff_plugin_api::ViewParams {
         self.0.view()

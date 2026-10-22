@@ -8,7 +8,7 @@ Write a FastTIFF plugin as an ordinary Rust type. This crate generates the
 crate-type = ["cdylib"]
 
 [dependencies]
-fasttiff-plugin = "0.18"
+fasttiff-plugin = "0.26"
 ```
 
 ```rust
@@ -59,7 +59,9 @@ A worked example with a filter, an importer, an exporter and a dialog lives in
 **`Plugin`** runs against the stack that is open. It gets a `HostContext` —
 the image's shape in file coordinates, the viewer's current display state, and
 a pull-based plane reader — and returns an `Outcome`: a new document, a file to
-write, a message, or nothing.
+write, a chart, an animation of the 3D view, a message, or nothing. A dialog
+that declares buttons (`ParamKind::Action`) is a panel that stays open, each
+press a run of its own with that button's key set — `params.pressed("play")`.
 
 **`Importer`** reads a file format FastTIFF does not know. It declares the
 extensions it handles, which the host adds to the Open dialog and to
@@ -164,7 +166,8 @@ boundary, in its own process, so there is no second set of rules to learn and
 nothing a built-in can see or return that you cannot. Your plugin gets the
 channels' colour tables in `view().luts`, the file's calibration and channel
 names in `stack_info()`, and the selection and pending dialog values; it can
-return pixels, channel colours and names, metadata, a plot, or a message. A
+return pixels, channel colours and names, metadata, a plot, an animation of the
+3D view, or a message. A
 panic, a result that does not validate, or a dialog that cannot be built is
 reported with your plugin's name on it — for a built-in, the same way.
 
@@ -203,9 +206,13 @@ carries its own size and fields are only ever appended, so an older plugin runs
 on a newer host and a newer plugin runs on an older one — each side reads only
 the fields both agree exist.
 
-The current minor is **1.4**, which added the colour tables (`view().luts`)
-and a result's channel names. On an older host those are simply absent: the
-tables come back empty and the names are not sent, and everything else works.
+The current minor is **1.5**, which added animations of the 3D view
+(`Outcome::Animate`, `Outcome::StopAnimation`, `HostContext::animating`) and
+dialog buttons (`ParamKind::Action`). On an older host an animation is refused
+with a message naming the version it needs, a Stop has nothing to stop, and a
+button is drawn as a label saying it needs a newer FastTIFF; everything else
+works. Minor 1.4 added the colour tables (`view().luts`) and a result's channel
+names, which an older host simply does not send.
 
 ## Where plugins live
 

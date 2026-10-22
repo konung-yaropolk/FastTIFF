@@ -238,6 +238,24 @@ pub enum Outcome {
     /// plugin again whenever the selection changes — so a plot is a function of
     /// what is selected, and the plugin stays a plain call that returns.
     Plot(Box<crate::plot::Plot>),
+    /// Move the 3D view: play this animation on it, or render it to a file.
+    /// The host switches to the 3D view to do either. See
+    /// [`crate::animation`].
+    ///
+    /// The host checks the animation with [`Animation::validate`] and refuses
+    /// one that fails, naming the plugin, as it does an image.
+    ///
+    /// Replaces whatever animation was already running, this plugin's or
+    /// another's: there is one 3D view, and it can only turn one way at a time.
+    ///
+    /// [`Animation::validate`]: crate::Animation::validate
+    Animate(Box<crate::animation::Animation>),
+    /// Stop this plugin's animation, if one is running, and put the view back
+    /// where it was when it started. An animation another plugin started is
+    /// left alone. Not an error when nothing is running: a Stop button pressed
+    /// just after the user took the view back has nothing left to stop, and
+    /// that is fine.
+    StopAnimation,
     /// The user cancelled. The host discards everything and says so.
     Cancelled,
 }

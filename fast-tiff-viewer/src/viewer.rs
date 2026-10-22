@@ -159,6 +159,18 @@ pub struct VolumeView {
     /// The `(generation, time)` currently queued on the background builder, so
     /// the request isn't re-sent on every polling frame.
     pub requested: Option<(u64, usize)>,
+    /// A turn of the volume about the middle of the volume under the centre
+    /// of the view (see `VolumeCamera::pivot_distance`), on top
+    /// of the camera — row-major, in volume coordinates. Set by a frontend playing an animation, frame by
+    /// frame; `None` the rest of the time. See [`VolumeCamera::posed`].
+    ///
+    /// Separate from [`cam`](Self::cam) on purpose: the camera is what the user
+    /// set up and the animation is seen from, and leaving it untouched is what
+    /// lets a frontend tell that the user has taken the view back (it changed)
+    /// and put the view back exactly as it was when the animation ends.
+    ///
+    /// [`VolumeCamera::posed`]: crate::camera::VolumeCamera::posed
+    pub pose: Option<[[f32; 3]; 3]>,
 }
 
 impl Default for VolumeView {
@@ -177,11 +189,38 @@ impl Default for VolumeView {
             built_frame: None,
             generation: 0,
             requested: None,
+            pose: None,
         }
     }
 }
 
 impl VolumeView {
+    /// The camera the ray-march uses this frame, for a volume of `dims`
+    /// voxels: the user's, turned by [`pose`](Self::pose) when an animation
+    /// has set one.
+    ///
+    /// The one place it is worked out, so the shader and anything drawn over
+    /// the render — the coordinate box — cannot disagree about where the
+    /// volume is.
+    pub fn camera(&self, dims: (u32, u32, u32)) -> crate::camera::VolumeCamera {
+        let cam = crate::camera::volume_camera(&self.cam, self.scale, dims);
+        match &self.pose {
+            // About the middle of the volume under the centre of the picture,
+            // so it turns in place in the middle of the frame however the user
+            // has panned or zoomed (see `VolumeCamera::pivot_distance`).
+            Some(r) => cam.posed(r, cam.focus(cam.pivot_distance())),
+            None => cam,
+        }
+    }
+
+    /// How many pixels tall a render of this view has to be to keep every
+    /// pixel of the stack in view, for a volume of `dims` voxels — see
+    /// [`VolumeCamera::detail_height`](crate::camera::VolumeCamera::detail_height).
+    pub fn detail_height(&self, dims: (u32, u32, u32)) -> f32 {
+        let cam = self.camera(dims);
+        cam.detail_height(cam.pivot_distance(), (dims.0, dims.1))
+    }
+
     /// Invalidate the uploaded volume and any in-flight background build, so the
     /// next 3D draw rebuilds. Call after anything that changes the volume's
     /// shape (new file, dimension-order swap).
