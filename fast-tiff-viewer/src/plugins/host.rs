@@ -53,6 +53,9 @@ pub struct StackHost {
     /// What the dialog holds, while this host exists to answer a `params`
     /// call. Empty for a run.
     pending: fasttiff_plugin_api::Params,
+    /// Whether an animation the plugin being asked started is running. See
+    /// [`HostContext::animating`].
+    animating: bool,
     /// Messages the plugin logged, drained by the caller when the run ends.
     pub messages: Vec<String>,
     /// Set by the UI thread to ask the plugin to stop.
@@ -73,6 +76,7 @@ impl StackHost {
             scratch: Default::default(),
             selection: Vec::new(),
             pending: Default::default(),
+            animating: false,
             messages: Vec::new(),
             cancel: None,
             progress: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -108,6 +112,16 @@ impl StackHost {
     /// regions at once. The host runs the plugin again for the new one instead.
     pub fn with_selection(mut self, selection: Vec<fasttiff_plugin_api::Roi>) -> Self {
         self.selection = selection;
+        self
+    }
+
+    /// Say whether an animation this plugin started is running — what its
+    /// dialog reads to offer Play or Stop.
+    ///
+    /// The caller answers for the plugin it is about to ask, not for the view:
+    /// another plugin's animation is not this one's to stop.
+    pub fn with_animating(mut self, animating: bool) -> Self {
+        self.animating = animating;
         self
     }
 
@@ -172,6 +186,10 @@ impl HostContext for StackHost {
 
     fn pending_params(&self) -> &fasttiff_plugin_api::Params {
         &self.pending
+    }
+
+    fn animating(&self) -> bool {
+        self.animating
     }
 
     fn read_plane_u16(&mut self, plane: Plane, out: &mut Vec<u16>) -> Result<(), PluginError> {

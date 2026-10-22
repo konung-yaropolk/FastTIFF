@@ -72,7 +72,16 @@
 //! nothing but `fasttiff_plugin_api`, add a `plugin-<name>` feature to the
 //! manifest (with any dependency of its own named by that feature and nothing
 //! else), put it in `builtin-plugins`, derive `Default` on its type, and add
-//! it to [`register`] below. That is the whole procedure.
+//! it to [`register`] below. That is this crate's part.
+//!
+//! The applications choose their plugins by feature too, so the feature has
+//! to reach them: forward it, and list it in `builtin-plugins`, in
+//! `FastTIFF/Cargo.toml`; add it to the no-plugins guard in
+//! `FastTIFF/src/lib.rs`; and forward it in `FastTIFF-web/Cargo.toml` if it
+//! can run in a browser. Miss those and the plugin builds, passes its tests and
+//! appears in neither application. Last, add it to
+//! `tests/plugin_parity.rs`, which fails until every installed built-in is
+//! checked through the C boundary.
 //!
 //! A directory each rather than a file each, even for the two that are one file
 //! long. A plugin grows parts — [`deconvolve`] has its algorithms, its
@@ -85,6 +94,10 @@
 //! one step further and gave its reader away: the container and record code
 //! became the `oir-reader` crate, and the directory kept the importer.
 
+/// Every target: it computes poses and the host plays them, so it needs
+/// nothing a browser lacks.
+#[cfg(feature = "plugin-animation-3d")]
+pub mod animation_3d;
 #[cfg(feature = "plugin-deconvolve")]
 pub mod deconvolve;
 /// Desktop-only on top of its feature, as every importer is: an
@@ -148,6 +161,8 @@ pub mod turboreg;
 #[cfg(feature = "plugin-zproject")]
 pub mod zproject;
 
+#[cfg(feature = "plugin-animation-3d")]
+pub use animation_3d::Animation3d;
 #[cfg(feature = "plugin-deconvolve")]
 pub use deconvolve::{Deconvolve, GeneratePsf};
 #[cfg(all(feature = "plugin-dicom", not(target_arch = "wasm32")))]
@@ -219,6 +234,8 @@ pub fn register(reg: &mut Registry) {
         reg.add::<SliceRemover>(o);
         reg.add::<SliceOrderInvert>(o);
     }
+    #[cfg(feature = "plugin-animation-3d")]
+    reg.add::<Animation3d>(o);
     #[cfg(feature = "plugin-deconvolve")]
     {
         reg.add::<GeneratePsf>(o);

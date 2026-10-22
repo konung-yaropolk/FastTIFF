@@ -167,3 +167,52 @@ fn clamp_survives_an_inverted_range() {
     assert!((0..=10).contains(&c.int("i", -1)));
     assert!((0.0..=10.0).contains(&c.float("f", -1.0)));
 }
+
+fn panel() -> Vec<ParamDecl> {
+    vec![
+        ParamDecl::new(
+            "speed",
+            "Speed",
+            ParamKind::Float {
+                default: 30.0,
+                min: 1.0,
+                max: 360.0,
+            },
+        ),
+        ParamDecl::new("play", "Play", ParamKind::Action),
+        ParamDecl::new("save", "Save…", ParamKind::Action),
+    ]
+}
+
+/// A button has no value of its own: a fresh dialog has pressed nothing.
+#[test]
+fn a_button_has_no_default_value() {
+    let p = Params::defaults(&panel());
+    assert_eq!(p.len(), 1);
+    assert!(!p.pressed("play"));
+    assert_eq!(p.pressed_of(&["play", "save"]), None);
+}
+
+/// The press survives the host's clamp, whichever order the host does the
+/// two in, and nothing else under a button's key does.
+#[test]
+fn the_pressed_button_survives_the_clamp_and_nothing_else_does() {
+    let mut p = Params::defaults(&panel());
+    p.set("save", ParamValue::Bool(true));
+    p.set("play", ParamValue::Bool(false));
+    let c = p.clamp_to(&panel());
+    assert!(c.pressed("save"));
+    assert!(!c.pressed("play"));
+    assert!(
+        c.get("play").is_none(),
+        "an unpressed button is not a value"
+    );
+    assert_eq!(c.pressed_of(&["play", "save"]), Some("save"));
+
+    let mut q = Params::new();
+    q.set("play", ParamValue::Int(1));
+    assert!(
+        !q.clamp_to(&panel()).pressed("play"),
+        "only a Bool(true) is a press"
+    );
+}

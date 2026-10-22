@@ -140,9 +140,152 @@ fn entry(ui: &mut egui::Ui, info: &PluginInfo) -> egui::Response {
     }
 }
 
-/// Draw a plugin's declared dialog. Returns `Some(true)` to run, `Some(false)`
-/// to cancel, `None` while it is still open.
+/// What the user did with a dialog this frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum DialogAnswer {
+    /// Run with the values as they stand, and close.
+    Run,
+    /// Close without running.
+    Cancel,
+    /// One of a panel's buttons, by its key: run with the values as they stand
+    /// and that key pressed, and stay open.
+    Press(String),
+}
+
+/// Draw a plugin's declared dialog. `None` while it is still open and nothing
+/// has been asked of it.
+///
+/// A dialog that declares buttons ([`ParamKind::Action`]) is a panel and is
+/// drawn as one — see [`panel`]. `busy` greys a panel's buttons out while
+/// something else has the plugins, when a press could only be refused.
 pub(super) fn dialog(
+    ctx: &egui::Context,
+    title: &str,
+    decls: &[ParamDecl],
+    values: &mut Params,
+    busy: bool,
+) -> Option<DialogAnswer> {
+    if decls.iter().any(|d| matches!(d.kind, ParamKind::Action)) {
+        return panel(ctx, title, decls, values, busy);
+    }
+    form(ctx, title, decls, values).map(|run| {
+        if run {
+            DialogAnswer::Run
+        } else {
+            DialogAnswer::Cancel
+        }
+    })
+}
+
+/// A dialog with buttons of its own: a companion window rather than a form.
+///
+/// A form asks once and goes; a panel is used — Play, then Stop, then Save —
+/// while the user watches what it does. So it is drawn the way the 3D settings
+/// are, as a window of its own beside the picture that stays on top of it,
+/// rather than as a form centred over the very view it controls. On the
+/// desktop that also keeps it out of a recording of the 3D view, which is a
+/// capture of the main window.
+///
+/// No Run and no Cancel: every button is a run, and the window's own close is
+/// the way out.
+fn panel(
+    ctx: &egui::Context,
+    title: &str,
+    decls: &[ParamDecl],
+    values: &mut Params,
+    busy: bool,
+) -> Option<DialogAnswer> {
+    let controls: Vec<ParamDecl> = decls
+        .iter()
+        .filter(|d| !matches!(d.kind, ParamKind::Action))
+        .cloned()
+        .collect();
+    let buttons: Vec<&ParamDecl> = decls
+        .iter()
+        .filter(|d| matches!(d.kind, ParamKind::Action))
+        .collect();
+    let mut answer = None;
+    let mut open = true;
+    super::dialog::show(
+        ctx,
+        super::dialog::Dialog {
+            id: "plugin-panel",
+            title,
+            size: egui::vec2(260.0, 320.0),
+            // The controls scroll on their own, below, rather than the window
+            // scrolling: an egui window that scrolls fills every point of
+            // height it is allowed, and a three-control panel would stand the
+            // height of the canvas over the view it is animating.
+            scroll: false,
+            // And fixed, for the same reason: a resizable window keeps a size
+            // of its own rather than its content's. In the browser only — a
+            // desktop window is resizable whatever this says.
+            resizable: false,
+            always_on_top: true,
+        },
+        &mut open,
+        |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(ctx.content_rect().height() * 0.6)
+                .auto_shrink([false, true])
+                .show(ui, |ui| column(ui, &controls, values));
+            ui.separator();
+            // One under another, as wide as the panel: a narrow window beside
+            // the picture, read top to bottom, with every button the same size
+            // and easy to hit while the eye is on the view.
+            let width = ui.available_width();
+            for b in &buttons {
+                let r = ui.add_enabled(
+                    !busy,
+                    egui::Button::new(&b.label).min_size(egui::vec2(width, 0.0)),
+                );
+                let r = match &b.help {
+                    Some(h) => r.on_hover_text(h),
+                    None => r,
+                };
+                let r = r.on_disabled_hover_text("Busy — another plugin is running");
+                if r.clicked() {
+                    answer = Some(DialogAnswer::Press(b.key.clone()));
+                }
+            }
+        },
+    );
+    if !open && answer.is_none() {
+        answer = Some(DialogAnswer::Cancel);
+    }
+    answer
+}
+
+/// A panel's controls in one column: each label above its control, rather
+/// than beside it as a form's grid has them, so the panel can be narrow enough
+/// to stand beside the picture it controls.
+fn column(ui: &mut egui::Ui, decls: &[ParamDecl], values: &mut Params) {
+    for (i, d) in decls.iter().enumerate() {
+        if i > 0 {
+            ui.add_space(4.0);
+        }
+        match &d.kind {
+            // Text, not a control: one line, with nothing under it.
+            ParamKind::Label => {
+                ui.label(&d.label);
+            }
+            ParamKind::Section => {
+                let r = ui.strong(&d.label);
+                if let Some(h) = &d.help {
+                    r.on_hover_text(h);
+                }
+                ui.separator();
+            }
+            // In a vertical layout the label `control` draws first lands above
+            // the widget it draws second.
+            _ => control(ui, d, values),
+        }
+    }
+}
+
+/// A dialog without buttons of its own: a form with Run and Cancel. Returns
+/// `Some(true)` to run, `Some(false)` to cancel, `None` while it is still open.
+fn form(
     ctx: &egui::Context,
     title: &str,
     decls: &[ParamDecl],
@@ -253,6 +396,13 @@ fn control(ui: &mut egui::Ui, d: &ParamDecl, values: &mut Params) {
         // other way. Drawing it as a heading is still the right answer.
         ParamKind::Section => {
             ui.strong(&d.label);
+            ui.label("");
+        }
+        // A panel draws its buttons in a row of their own, below the controls
+        // — see `panel` — so none reaches the grid. One that did would be a
+        // press with nowhere to go, so it is drawn as the label it carries.
+        ParamKind::Action => {
+            label(ui, d);
             ui.label("");
         }
         ParamKind::Int { default, min, max } => {

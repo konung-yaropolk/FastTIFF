@@ -89,6 +89,21 @@ pub enum ParamKind {
     /// four groups of five is a form. A host that predates this draws it as a
     /// plain label, which is the right thing to degrade to.
     Section,
+    /// A button. The label is what it says; the key is how the plugin learns
+    /// it was pressed.
+    ///
+    /// Pressing one runs the plugin straight away, with the dialog's values as
+    /// they stand and this button's key set — read it with
+    /// [`Params::pressed`]. The dialog stays open, so a dialog that declares
+    /// buttons is a **panel** rather than a form: it has no Run button of its
+    /// own, each of its buttons is a run, and the user closes it when they are
+    /// done. That is what a control that is used more than once needs — Play,
+    /// then Stop, then Save — and what a form's Run-and-close cannot be.
+    ///
+    /// A host that predates buttons draws one as a label saying it needs a
+    /// newer FastTIFF, which is the honest thing to degrade to: the dialog
+    /// cannot be answered, and says so where the user is looking.
+    Action,
 }
 
 /// A value the user chose.
@@ -197,6 +212,22 @@ impl Params {
         }
     }
 
+    /// Whether this run is the button declared as `key` being pressed — see
+    /// [`ParamKind::Action`].
+    ///
+    /// At most one button is pressed per run, and a run that was not started by
+    /// a button (a test, a macro runner, a host that predates buttons) has none
+    /// pressed, so a plugin should give that case a sensible meaning of its
+    /// own.
+    pub fn pressed(&self, key: &str) -> bool {
+        self.bool(key, false)
+    }
+
+    /// Which of `keys` is pressed, if any.
+    pub fn pressed_of<'k>(&self, keys: &[&'k str]) -> Option<&'k str> {
+        keys.iter().copied().find(|k| self.pressed(k))
+    }
+
     /// The defaults a declaration list asks for — what the host seeds a fresh
     /// dialog with, and what a headless caller (a test, a macro runner) can use
     /// to run a plugin without showing one.
@@ -210,7 +241,9 @@ impl Params {
                 ParamKind::Choice { default, .. } => ParamValue::Choice(*default),
                 ParamKind::Text { default } => ParamValue::Text(default.clone()),
                 ParamKind::Path { default, .. } => ParamValue::Path(default.clone()),
-                ParamKind::Label | ParamKind::Section => continue,
+                // A button has no value until it is pressed, and a fresh
+                // dialog has not had anything pressed.
+                ParamKind::Label | ParamKind::Section | ParamKind::Action => continue,
             };
             p.set(d.key.clone(), v);
         }
@@ -292,6 +325,13 @@ impl Params {
                     out.set(d.key.clone(), ParamValue::Path(t));
                 }
                 (ParamKind::Label | ParamKind::Section, _) => {}
+                // The one button that was pressed survives the clamp, so a
+                // host may set it before clamping or after; anything else
+                // under a button's key is not a press and is dropped.
+                (ParamKind::Action, Some(ParamValue::Bool(true))) => {
+                    out.set(d.key.clone(), ParamValue::Bool(true));
+                }
+                (ParamKind::Action, _) => {}
             }
         }
         out

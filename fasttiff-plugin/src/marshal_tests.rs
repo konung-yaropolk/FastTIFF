@@ -130,6 +130,38 @@ unsafe extern "C" fn push_series(
     FtStatus::Ok
 }
 
+/// An animation as `set_animation` received it: fps, output, path, the raw
+/// floats, the pose count and the stride.
+type SetAnimation = (f32, u32, String, Vec<f32>, u64, u64);
+
+static ANIMATION: std::sync::Mutex<Option<SetAnimation>> = std::sync::Mutex::new(None);
+
+unsafe extern "C" fn set_animation(
+    _c: *mut core::ffi::c_void,
+    fps: f32,
+    output: u32,
+    path: FtStr,
+    poses: *const f32,
+    pose_count: u64,
+    floats_per_pose: u64,
+) -> FtStatus {
+    let n = (pose_count * floats_per_pose) as usize;
+    let v = if n == 0 {
+        Vec::new()
+    } else {
+        core::slice::from_raw_parts(poses, n).to_vec()
+    };
+    *ANIMATION.lock().unwrap() = Some((
+        fps,
+        output,
+        path.as_str().unwrap_or("?").into(),
+        v,
+        pose_count,
+        floats_per_pose,
+    ));
+    FtStatus::Ok
+}
+
 unsafe extern "C" fn recording_outcome(
     _c: *mut core::ffi::c_void,
     k: FtOutcomeKind,
@@ -153,6 +185,7 @@ fn sink(size: usize) -> FtSink {
         begin_plot,
         push_series,
         set_channel_name: channel_name,
+        set_animation,
     }
 }
 
@@ -246,7 +279,12 @@ fn host_table(size: usize) -> FtHost {
         param_count: host_count,
         param_value: host_param_value,
         channel_lut: host_no_lut,
+        animating: host_not_animating,
     }
+}
+
+unsafe extern "C" fn host_not_animating(_c: *mut core::ffi::c_void) -> u32 {
+    0
 }
 
 unsafe extern "C" fn host_no_lut(
@@ -1160,4 +1198,238 @@ fn a_stack_naming_only_its_second_channel_keeps_that_name() {
         fasttiff_plugin_api::HostContext::stack_info(&h).channel_names,
         vec![String::new(), "GFP".to_string()]
     );
+}
+
+// ------------------------------------------------- what minor 5 carries across
+
+/// A turn about y in four frames, saved: every field of an animation set to
+/// something that is not its default, so one that fails to cross cannot hide.
+fn an_animation() -> crate::api::Animation {
+    crate::api::Animation::cycle(4, 25.0, |phase| {
+        crate::api::Pose::rotation([0.0, 1.0, 0.0], phase)
+    })
+    .save_tiff("turn.tif")
+}
+
+#[test]
+fn an_animation_crosses_pose_for_pose() {
+    let _alone = alone();
+    let s = recording_sink(core::mem::size_of::<FtSink>());
+    *ANIMATION.lock().unwrap() = None;
+    let a = an_animation();
+    // SAFETY: every callback in the fixture is real, and the declared size is
+    // this build's own.
+    let st = unsafe { write_outcome(&s, Outcome::Animate(Box::new(a.clone()))) };
+    assert_eq!(st, FtStatus::Ok, "{:?}", unsafe {
+        crate::last_error::get().as_str()
+    });
+    let (fps, output, path, floats, count, stride) = ANIMATION
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("set_animation was not called");
+    assert_eq!(fps, 25.0);
+    assert_eq!(output, FT_ANIMATION_SAVE_TIFF);
+    assert_eq!(path, "turn.tif");
+    assert_eq!(count, 4);
+    assert_eq!(stride, FT_POSE_FLOATS);
+    // Row-major, pose after pose: the layout the host is told to expect.
+    let want: Vec<f32> = a
+        .poses
+        .iter()
+        .flat_map(|p| p.rotation.iter().flatten().copied())
+        .collect();
+    assert_eq!(floats, want);
+    assert_eq!(
+        LAST_KIND.load(core::sync::atomic::Ordering::Relaxed),
+        FtOutcomeKind::Animate.0,
+        "the animation was declared but never finished"
+    );
+}
+
+/// Playing is the other output, with no path.
+#[test]
+fn an_animation_to_play_says_so() {
+    let _alone = alone();
+    let s = recording_sink(core::mem::size_of::<FtSink>());
+    let a = crate::api::Animation::new(vec![crate::api::Pose::IDENTITY], 30.0);
+    // SAFETY: as above.
+    let st = unsafe { write_outcome(&s, Outcome::Animate(Box::new(a))) };
+    assert_eq!(st, FtStatus::Ok);
+    let (_, output, path, _, count, _) = ANIMATION.lock().unwrap().clone().unwrap();
+    assert_eq!(output, FT_ANIMATION_PLAY);
+    assert_eq!(path, "");
+    assert_eq!(count, 1);
+}
+
+/// A host from before animations says so, rather than reporting a success
+/// nothing came of.
+#[test]
+fn a_host_too_old_for_animations_refuses_with_a_reason() {
+    let _alone = alone();
+    let older = core::mem::offset_of!(FtSink, set_animation);
+    assert!(
+        older >= FtSink::CORE && older < core::mem::size_of::<FtSink>(),
+        "the fixture must be a real minor-4 sink"
+    );
+    let s = sink(older);
+    crate::last_error::set("");
+    // SAFETY: the callbacks are real; only the declared size is older.
+    let st = unsafe { write_outcome(&s, Outcome::Animate(Box::new(an_animation()))) };
+    assert_eq!(st, FtStatus::Unsupported);
+    let msg = unsafe { crate::last_error::get().as_str().unwrap_or("").to_string() };
+    assert!(
+        msg.contains("too old") && msg.contains("1.5"),
+        "unhelpful: {msg}"
+    );
+}
+
+/// Stop on a host that could never have started anything is nothing, not an
+/// outcome it does not know.
+#[test]
+fn stopping_on_a_host_without_animations_is_nothing() {
+    let _alone = alone();
+    let old = recording_sink(core::mem::offset_of!(FtSink, set_animation));
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { write_outcome(&old, Outcome::StopAnimation) },
+        FtStatus::Ok
+    );
+    assert_eq!(
+        LAST_KIND.load(core::sync::atomic::Ordering::Relaxed),
+        FtOutcomeKind::Nothing.0
+    );
+    let new = recording_sink(core::mem::size_of::<FtSink>());
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { write_outcome(&new, Outcome::StopAnimation) },
+        FtStatus::Ok
+    );
+    assert_eq!(
+        LAST_KIND.load(core::sync::atomic::Ordering::Relaxed),
+        FtOutcomeKind::StopAnimation.0
+    );
+}
+
+/// A pose that is not a rotation is the plugin's mistake, and it hears about it
+/// before anything crosses.
+#[test]
+fn an_animation_that_is_not_one_is_refused_before_it_crosses() {
+    let _alone = alone();
+    let s = recording_sink(core::mem::size_of::<FtSink>());
+    *ANIMATION.lock().unwrap() = None;
+    let skew = crate::api::Pose::from_matrix([[1.0, 0.4, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+    let a = crate::api::Animation::new(vec![skew], 30.0);
+    crate::last_error::set("");
+    // SAFETY: as above.
+    let st = unsafe { write_outcome(&s, Outcome::Animate(Box::new(a))) };
+    assert_ne!(st, FtStatus::Ok);
+    assert!(
+        ANIMATION.lock().unwrap().is_none(),
+        "a bad animation crossed"
+    );
+    let msg = unsafe { crate::last_error::get().as_str().unwrap_or("").to_string() };
+    assert!(msg.contains("not a rotation"), "{msg}");
+}
+
+/// A sink the host allocated to the minor-4 layout is copied, and its missing
+/// `set_animation` stubbed rather than read from past the allocation.
+#[test]
+fn a_minor_4_sink_is_copied_within_what_the_host_allocated() {
+    let _alone = alone();
+    let declared = core::mem::offset_of!(FtSink, set_animation);
+    let short = Exactly::holding(&sink(declared), declared);
+    // SAFETY: the block holds a well-formed prefix of an `FtSink`.
+    let copied = unsafe { sink_of(short.as_ptr()) }.expect("a minor-4 sink");
+    assert_eq!(copied.struct_size as usize, declared);
+    // SAFETY: `copied` is a fully initialised local.
+    assert!(!unsafe { crate::abi::ft_covers!(&copied as *const FtSink, FtSink, set_animation) });
+    // SAFETY: `copied` is a valid sink for the call.
+    let st = unsafe { write_outcome(&copied, Outcome::Animate(Box::new(an_animation()))) };
+    assert_eq!(st, FtStatus::Unsupported);
+}
+
+/// What the dialog sink was handed, kind by kind.
+static DECL_KINDS: std::sync::Mutex<Vec<(String, u32)>> = std::sync::Mutex::new(Vec::new());
+
+unsafe extern "C" fn record_decl(_c: *mut core::ffi::c_void, d: *const FtParamDecl) -> FtStatus {
+    let d = &*d;
+    DECL_KINDS
+        .lock()
+        .unwrap()
+        .push((d.key.as_str().unwrap_or("?").into(), d.kind.0));
+    FtStatus::Ok
+}
+
+#[test]
+fn a_button_crosses_as_its_own_kind() {
+    let _alone = alone();
+    DECL_KINDS.lock().unwrap().clear();
+    let sink = FtParamSink {
+        struct_size: core::mem::size_of::<FtParamSink>() as u32,
+        _pad: 0,
+        ctx: core::ptr::null_mut(),
+        push: record_decl,
+    };
+    let decls = vec![
+        crate::api::ParamDecl::new("play", "Play", ParamKind::Action),
+        crate::api::ParamDecl::new("note", "A note", ParamKind::Label),
+    ];
+    // SAFETY: the sink's callback is real and the declarations outlive the call.
+    assert_eq!(unsafe { push_decls(&sink, &decls) }, FtStatus::Ok);
+    assert_eq!(
+        *DECL_KINDS.lock().unwrap(),
+        vec![
+            ("play".to_string(), FtParamKind::Action.0),
+            ("note".to_string(), FtParamKind::Label.0)
+        ]
+    );
+}
+
+/// The press arrives as an ordinary `Bool` under the button's key, which a
+/// plugin built before buttons existed reads like any other value it ignores.
+#[test]
+fn a_press_arrives_as_a_bool_under_the_buttons_key() {
+    let v = FtValue {
+        struct_size: core::mem::size_of::<FtValue>() as u32,
+        kind: FtParamKind::Bool,
+        key: FtStr::from_str("play"),
+        i: 0,
+        f: 0.0,
+        b: 1,
+        _pad: 0,
+        s: FtStr::EMPTY,
+    };
+    // SAFETY: one valid value.
+    let p = unsafe { values_from_c(&v, 1) }.expect("readable");
+    assert!(p.pressed("play"));
+}
+
+/// A minor-4 host — one shipped before animations — must not have its table
+/// read past the end when a plugin asks whether it is animating, and must
+/// answer that it is not.
+#[test]
+fn a_host_without_animating_is_not_read_past_its_end() {
+    let declared = core::mem::offset_of!(FtHost, animating);
+    assert!(
+        declared >= FtHost::CORE && declared < core::mem::size_of::<FtHost>(),
+        "the fixture must be a real minor-4 host"
+    );
+    let short = Exactly::holding(&answering_host(declared), declared);
+    // SAFETY: the block holds a well-formed prefix of an `FtHost`.
+    let h = unsafe { crate::host::CHost::new(short.as_ptr()) }.expect("a minor-4 host");
+    assert!(!fasttiff_plugin_api::HostContext::animating(&h));
+}
+
+#[test]
+fn a_host_that_is_animating_says_so() {
+    unsafe extern "C" fn yes(_c: *mut core::ffi::c_void) -> u32 {
+        1
+    }
+    let mut table = answering_host(core::mem::size_of::<FtHost>());
+    table.animating = yes;
+    let full = Exactly::holding(&table, core::mem::size_of::<FtHost>());
+    // SAFETY: a complete, well-formed table of this build's own size.
+    let h = unsafe { crate::host::CHost::new(full.as_ptr()) }.expect("a current host");
+    assert!(fasttiff_plugin_api::HostContext::animating(&h));
 }

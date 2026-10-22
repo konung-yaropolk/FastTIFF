@@ -373,6 +373,104 @@ pub struct VolumeCamera {
     pub box_he: [f32; 3],
 }
 
+impl VolumeCamera {
+    /// This camera, looking at the volume turned by `rotation` about the point
+    /// `pivot` — row-major, a point of the volume at `p` drawn as though it
+    /// were at `pivot + rotation · (p − pivot)`.
+    ///
+    /// The pivot is what the turn stays fixed on. An animation passes the
+    /// point at the centre of the view (see [`VolumeCamera::focus`]), so the
+    /// volume turns about the middle of the picture the user is looking at —
+    /// which is the volume's own centre until they pan, and stays the middle
+    /// of the frame after they do.
+    ///
+    /// The shader ray-marches in the volume's own coordinates, so turning the
+    /// volume in front of a fixed camera is the same picture as turning the
+    /// camera the opposite way around a fixed volume: every vector of the
+    /// camera goes through the transpose, which is the inverse of a rotation.
+    /// Nothing about the shader changes, and the camera the user set up — its
+    /// distance, its pan, its angle — is where the turning volume is seen from.
+    ///
+    /// This is how an animation moves the view without touching
+    /// [`CameraState`]: a yaw-and-pitch camera cannot roll and cannot pass
+    /// over the pole, and a tumble about the volume's own x axis does both.
+    pub fn posed(&self, rotation: &[[f32; 3]; 3], pivot: [f32; 3]) -> VolumeCamera {
+        let t = |v: [f32; 3]| {
+            [
+                rotation[0][0] * v[0] + rotation[1][0] * v[1] + rotation[2][0] * v[2],
+                rotation[0][1] * v[0] + rotation[1][1] * v[1] + rotation[2][1] * v[2],
+                rotation[0][2] * v[0] + rotation[1][2] * v[1] + rotation[2][2] * v[2],
+            ]
+        };
+        // The eye is a point, so it turns about the pivot; the basis vectors
+        // are directions and only turn.
+        let rel = t([
+            self.eye[0] - pivot[0],
+            self.eye[1] - pivot[1],
+            self.eye[2] - pivot[2],
+        ]);
+        VolumeCamera {
+            eye: [rel[0] + pivot[0], rel[1] + pivot[1], rel[2] + pivot[2]],
+            // Re-normalised: a rotation that is a rotation only to within the
+            // tolerance it was accepted at must not shrink or grow the rays.
+            forward: norm3(t(self.forward)),
+            right: norm3(t(self.right)),
+            up: norm3(t(self.up)),
+            ..*self
+        }
+    }
+
+    /// The point at the centre of the picture, `dist` ahead of the eye: what
+    /// the camera is aimed at. For the orbit modes, `dist` is the orbit radius
+    /// and this is the orbit target.
+    pub fn focus(&self, dist: f32) -> [f32; 3] {
+        [
+            self.eye[0] + self.forward[0] * dist,
+            self.eye[1] + self.forward[1] * dist,
+            self.eye[2] + self.forward[2] * dist,
+        ]
+    }
+
+    /// How far ahead of the eye an animation turns the volume about: the
+    /// middle of the stretch of the view axis that lies inside the volume.
+    ///
+    /// So the pivot is always at the centre of the picture, and inside the
+    /// volume whenever the centre of the picture is on it, however the user
+    /// has panned, zoomed or flown. A fixed distance ahead (the orbit radius)
+    /// can sit well in front of or behind the volume, and a volume turned
+    /// about a point that far away swings across the frame instead of turning
+    /// in place. With the eye inside the volume it is the middle of what lies
+    /// ahead. When the axis misses the volume, it is the point on the axis
+    /// nearest the volume's centre.
+    pub fn pivot_distance(&self) -> f32 {
+        match focal_box_span(self.eye, self.forward, self.box_he) {
+            Some((near, far)) => 0.5 * (near + far),
+            None => (-(self.eye[0] * self.forward[0]
+                + self.eye[1] * self.forward[1]
+                + self.eye[2] * self.forward[2]))
+                .max(0.0),
+        }
+    }
+
+    /// How many pixels tall a picture from this camera has to be for a pixel
+    /// of a `voxels.0` x `voxels.1` stack, `dist` ahead at the centre of the
+    /// view, to be one pixel of the picture, so a render that size loses
+    /// none of the detail in view.
+    ///
+    /// Measured at the centre because that is where an animation's pivot is
+    /// (`dist` is [`pivot_distance`](Self::pivot_distance) there),
+    /// and with the smaller of the two pixel sizes so an anisotropic plane
+    /// keeps its finer axis. It scales with what is in view: zoomed out until
+    /// the whole stack is in the picture, it is taller than the stack is; zoomed
+    /// in on a corner, it is about as many pixels as that corner has.
+    pub fn detail_height(&self, dist: f32, voxels: (u32, u32)) -> f32 {
+        let pixel = (2.0 * self.box_he[0] / voxels.0.max(1) as f32)
+            .min(2.0 * self.box_he[1] / voxels.1.max(1) as f32)
+            .max(1e-9);
+        2.0 * dist.max(0.0) * self.tan_half_fov / pixel
+    }
+}
+
 /// Vertical field of view is fixed at 45°; the shader takes its tangent.
 const TAN_HALF_FOV: f32 = 0.414_213_57; // tan(22.5°)
 
@@ -413,6 +511,13 @@ pub fn norm3(v: [f32; 3]) -> [f32; 3] {
 /// `[-he, he]` (a slab test). `None` if the ray misses the box ahead of the eye;
 /// clamped to ≥ 0, so it's 0 when the eye is already inside the box.
 pub fn focal_box_entry(ro: [f32; 3], rd: [f32; 3], he: [f32; 3]) -> Option<f32> {
+    focal_box_span(ro, rd, he).map(|(near, _)| near)
+}
+
+/// Where the ray `ro + t*rd` enters and leaves the box `[-he, he]`, as the
+/// distances `(near, far)` along it; `near` is clamped to ≥ 0 as in
+/// [`focal_box_entry`]. `None` if the ray misses the box ahead of the eye.
+pub fn focal_box_span(ro: [f32; 3], rd: [f32; 3], he: [f32; 3]) -> Option<(f32, f32)> {
     let mut t0 = f32::NEG_INFINITY;
     let mut t1 = f32::INFINITY;
     for i in 0..3 {
@@ -435,7 +540,7 @@ pub fn focal_box_entry(ro: [f32; 3], rd: [f32; 3], he: [f32; 3]) -> Option<f32> 
     if t1 < t0.max(0.0) {
         return None;
     }
-    Some(t0.max(0.0))
+    Some((t0.max(0.0), t1))
 }
 
 /// Orthonormal camera basis (`forward`, `right`, `up`) for an orientation. At

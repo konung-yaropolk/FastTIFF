@@ -23,9 +23,11 @@
 //! that's `prepare` then `paint`, elsewhere just call them in order.
 
 use crate::{
-    ChannelKind, ChannelUniform, Lut, VolumeInterp, VolumeKind, VolumeParams, MAX_CHANNELS,
+    ChannelKind, ChannelUniform, Lut, VolumeImage, VolumeInterp, VolumeKind, VolumeParams,
+    MAX_CHANNELS,
 };
 use std::num::NonZeroU64;
+use std::sync::{Arc, Mutex};
 
 const LUT_WIDTH: u32 = 256;
 /// Bind-group binding indices. Integer channel textures occupy `1..=MAX_CHANNELS`,
@@ -139,6 +141,27 @@ pub struct ImageRenderResources {
     /// The camera/window params, stashed by `set_volume_params` and marshalled
     /// into the uniform buffer by `write_volume_uniform`.
     volume_params: Option<VolumeParams>,
+    /// The format the pipelines were built for, which an offscreen render has
+    /// to use too.
+    target_format: wgpu::TextureFormat,
+    /// The offscreen target and readback buffer of `capture_volume`, kept from
+    /// one capture to the next while the size stays the same.
+    capture: Option<VolumeCapture>,
+}
+
+/// An offscreen render of the volume and the buffer it is read back through.
+struct VolumeCapture {
+    texture: wgpu::Texture,
+    buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    /// Bytes per row in `buffer`: a row of pixels padded to wgpu's copy alignment.
+    padded_row: u32,
+    /// Set by the map callback when the readback has landed (or failed).
+    /// `None` while it is on its way.
+    mapped: Arc<Mutex<Option<Result<(), String>>>>,
+    /// Whether a capture has been submitted and not yet taken.
+    in_flight: bool,
 }
 
 impl ImageRenderResources {
@@ -292,6 +315,8 @@ impl ImageRenderResources {
             volume_unorm16,
             volume_interp_mode: 1, // linear
             volume_params: None,
+            target_format,
+            capture: None,
         }
     }
 
@@ -481,6 +506,179 @@ impl ImageRenderResources {
         render_pass.set_pipeline(&self.volume_pipeline);
         render_pass.set_bind_group(0, &self.volume_bind_group, &[]);
         render_pass.draw(0..6, 0..1);
+    }
+
+    /// Render the volume off screen at `width` x `height` pixels, with the
+    /// params last given to `set_volume_params`, and start reading it back.
+    ///
+    /// The ray-march has no resolution of its own (every pixel is a ray), so
+    /// this is the view at any size: sharper than the window when larger, and
+    /// with nothing the host draws over the view in it. The aspect ratio is
+    /// taken from the size, not from the params.
+    ///
+    /// The picture arrives later, from [`take_volume_capture`]: a GPU readback
+    /// cannot be waited for in a browser. One capture at a time.
+    ///
+    /// [`take_volume_capture`]: Self::take_volume_capture
+    pub fn capture_volume(&mut self, width: u32, height: u32) -> Result<(), String> {
+        let Some(params) = self.volume_params else {
+            return Err("there is no volume to render".into());
+        };
+        let max = self.max_2d_texture_size();
+        if width == 0 || height == 0 || width > max || height > max {
+            return Err(format!(
+                "a {width} x {height} picture is beyond what this GPU can render (up to {max} a side)"
+            ));
+        }
+        if swizzle(self.target_format).is_none() {
+            return Err(format!(
+                "cannot read back a render in {:?}",
+                self.target_format
+            ));
+        }
+        if self.capture.as_ref().is_some_and(|c| c.in_flight) {
+            return Err("the last capture has not been taken yet".into());
+        }
+        let reuse = self
+            .capture
+            .as_ref()
+            .is_some_and(|c| (c.width, c.height) == (width, height));
+        if !reuse {
+            self.capture = Some(self.create_capture(width, height));
+        }
+
+        // The uniform for this size, then the params put back as they were:
+        // the view's own paint writes the uniform again before its draw.
+        self.volume_params = Some(VolumeParams {
+            aspect: width as f32 / height as f32,
+            ..params
+        });
+        self.write_volume_uniform();
+        self.volume_params = Some(params);
+
+        let capture = self.capture.as_mut().expect("created above");
+        let view = capture.texture.create_view(&Default::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("volume capture"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("volume capture"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.volume_pipeline);
+            pass.set_bind_group(0, &self.volume_bind_group, &[]);
+            pass.draw(0..6, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            capture.texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &capture.buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(capture.padded_row),
+                    rows_per_image: None,
+                },
+            },
+            capture.texture.size(),
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        *capture.mapped.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let mapped = Arc::clone(&capture.mapped);
+        capture
+            .buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                *mapped.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(result.map_err(|e| e.to_string()));
+            });
+        capture.in_flight = true;
+        Ok(())
+    }
+
+    /// The picture [`capture_volume`] asked for, once it has arrived: `None`
+    /// while it is still on its way, or when none was asked for. Call once a
+    /// frame until it answers.
+    ///
+    /// [`capture_volume`]: Self::capture_volume
+    pub fn take_volume_capture(&mut self) -> Option<Result<VolumeImage, String>> {
+        let capture = self.capture.as_mut().filter(|c| c.in_flight)?;
+        // Drives the map callback on native; in a browser the browser does.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        let result = capture
+            .mapped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()?;
+        capture.in_flight = false;
+        if let Err(why) = result {
+            return Some(Err(format!("the render could not be read back: {why}")));
+        }
+        let order = swizzle(self.target_format).expect("checked when captured");
+        let (w, h) = (capture.width as usize, capture.height as usize);
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        {
+            let data = capture.buffer.slice(..).get_mapped_range();
+            for row in data.chunks(capture.padded_row as usize).take(h) {
+                for px in row[..w * 4].chunks_exact(4) {
+                    rgba.extend_from_slice(&[px[order[0]], px[order[1]], px[order[2]], 255]);
+                }
+            }
+        }
+        capture.buffer.unmap();
+        Some(Ok(VolumeImage {
+            width: capture.width,
+            height: capture.height,
+            rgba,
+        }))
+    }
+
+    fn create_capture(&self, width: u32, height: u32) -> VolumeCapture {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("volume capture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.target_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let padded_row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("volume capture readback"),
+            size: padded_row as u64 * height as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        VolumeCapture {
+            texture,
+            buffer,
+            width,
+            height,
+            padded_row,
+            mapped: Arc::new(Mutex::new(None)),
+            in_flight: false,
+        }
     }
 
     /// (Re)allocate channel textures for the current frame size and per-channel
@@ -1102,4 +1300,16 @@ fn build_volume_bind_group(
         layout,
         entries: &entries,
     })
+}
+
+/// Where red, green and blue sit in a pixel of `format`, for the formats a
+/// render can be read back from. Both are 8-bit; an sRGB one holds the bytes
+/// the screen shows, the same as a plain one does.
+fn swizzle(format: wgpu::TextureFormat) -> Option<[usize; 3]> {
+    use wgpu::TextureFormat as F;
+    match format {
+        F::Rgba8Unorm | F::Rgba8UnormSrgb => Some([0, 1, 2]),
+        F::Bgra8Unorm | F::Bgra8UnormSrgb => Some([2, 1, 0]),
+        _ => None,
+    }
 }

@@ -12,6 +12,7 @@
 //!
 //! Supporting clusters live in child modules (which share this module's
 //! privacy, so the split adds no `pub` surface beyond `pub(super)`):
+//!   * `animation` — a plugin's animation of the 3D view, played or recorded
 //!   * `camera`  — egui input → the core camera
 //!   * `minimap` — the 2D navigator: where the view sits in the whole frame
 //!   * `overlay` — the 3D coordinate-box overlay, drawn with the egui painter
@@ -37,6 +38,7 @@ use fasttiff_plugin_api::{Exporter as _, Importer as _};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
+mod animation;
 mod autoscroll;
 mod camera;
 mod clipboard;
@@ -622,6 +624,10 @@ enum PluginProduct {
         bytes: Vec<u8>,
         name: String,
     },
+    /// Move the 3D view as the plugin declared. See [`animation`].
+    Animate(Box<fasttiff_plugin_api::Animation>),
+    /// Stop the plugin's own animation.
+    StopAnimation,
 }
 
 /// What a filter plugin produced, carried back from its worker.
@@ -654,6 +660,10 @@ fn finish_outcome(
         Outcome::Cancelled => Ok(PluginProduct::Cancelled),
         Outcome::Message(m) => Ok(PluginProduct::Message(m)),
         Outcome::Plot(p) => Ok(PluginProduct::Plot(p)),
+        // Nothing to encode: the poses are the whole result, and the work of
+        // carrying them out happens frame by frame on the interface thread.
+        Outcome::Animate(a) => Ok(PluginProduct::Animate(a)),
+        Outcome::StopAnimation => Ok(PluginProduct::StopAnimation),
         Outcome::NewDocument(image) => {
             Job::begin_phase(label, progress, "Encoding result");
             let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
@@ -1340,6 +1350,19 @@ pub struct ViewerApp {
     /// holding the rect to cut out of it. `None` when no copy is outstanding,
     /// which is also what keeps an unrelated screenshot from being copied.
     pending_copy: Option<egui::Rect>,
+
+    // --- animating the 3D view ----------------------------------------------
+    /// A plugin's animation of the 3D view, playing or being recorded. See
+    /// [`animation`].
+    animation: Option<animation::Running>,
+    /// A recorded animation whose frames are all in, being written.
+    animation_saving: Option<animation::Saving>,
+    /// The off-screen render of a pose a recording asked for.
+    volume_capture: animation::VolumeCapture,
+    /// Set when the pointer is pressed on the 3D view, and taken by the next
+    /// frame's animation step: grabbing a turning volume is how people stop
+    /// it, whether or not the grab goes on to move anything.
+    volume_pressed: bool,
 }
 
 /// Reveal a directory in the platform's file manager.
@@ -1431,6 +1454,10 @@ impl ViewerApp {
             scroll_speed: 1.0,
             volume_rect: None,
             pending_copy: None,
+            animation: None,
+            animation_saving: None,
+            volume_capture: Default::default(),
+            volume_pressed: false,
         };
         if let Some(opened) = initial {
             app.apply_opened(opened);
@@ -1690,7 +1717,8 @@ impl ViewerApp {
         // The dialog may depend on what is open — how many slices there are,
         // whether there is more than one channel — so it is asked for now
         // rather than cached at load.
-        let host = fast_tiff_viewer::plugins::StackHost::new(loaded, self.plugin_view(loaded));
+        let host = fast_tiff_viewer::plugins::StackHost::new(loaded, self.plugin_view(loaded))
+            .with_animating(self.animating_for(index));
         let Some(entry) = self.plugins.as_ref().and_then(|p| p.entries().get(index)) else {
             return;
         };
@@ -1795,14 +1823,26 @@ impl ViewerApp {
             return;
         };
         let before = dialog.values.clone();
-        match plugins_ui::dialog(ctx, &dialog.title, &dialog.decls, &mut dialog.values) {
-            Some(true) => {
+        // A panel's buttons wait while something else has the plugins: a press
+        // now could only be refused as busy.
+        let busy = self.job.is_some() || self.plugins.is_none();
+        match plugins_ui::dialog(ctx, &dialog.title, &dialog.decls, &mut dialog.values, busy) {
+            Some(plugins_ui::DialogAnswer::Run) => {
                 // Clamp to what the plugin declared, so `run` never sees a
                 // value it already ruled out.
                 let values = dialog.values.clamp_to(&dialog.decls);
                 self.run_plugin(dialog.index, values);
             }
-            Some(false) => {}
+            Some(plugins_ui::DialogAnswer::Cancel) => {}
+            // A button: a run with the values as they stand and that button's
+            // key set, and the panel stays where it is for the next press.
+            Some(plugins_ui::DialogAnswer::Press(key)) => {
+                let mut values = dialog.values.clamp_to(&dialog.decls);
+                values.set(key, fasttiff_plugin_api::ParamValue::Bool(true));
+                let index = dialog.index;
+                self.plugin_dialog = Some(dialog);
+                self.run_plugin(index, values);
+            }
             None => {
                 if dialog.values != before {
                     self.requery_dialog(&mut dialog);
@@ -1835,7 +1875,8 @@ impl ViewerApp {
             return;
         };
         let host = fast_tiff_viewer::plugins::StackHost::new(loaded, self.plugin_view(loaded))
-            .with_pending_params(dialog.values.clone());
+            .with_pending_params(dialog.values.clone())
+            .with_animating(self.animating_for(dialog.index));
         let Some(entry) = self
             .plugins
             .as_ref()
@@ -1926,6 +1967,7 @@ impl ViewerApp {
         let job = Job::new(name.clone());
         let host = fast_tiff_viewer::plugins::StackHost::new(loaded, view)
             .with_selection(selection)
+            .with_animating(self.animating_for(index))
             .with_cancel(job.cancel.clone(), job.progress.clone());
         let (progress, cancel, label) = self.begin_job(job);
 
@@ -2042,8 +2084,23 @@ impl ViewerApp {
                 self.apply_opened(Opened::Bytes(bytes, n));
             }
             Ok(PluginProduct::Saved(path)) => self.report_done(format!("{name}: wrote {path}")),
+            Ok(PluginProduct::Animate(a)) => self.start_animation(index, &name, *a),
+            Ok(PluginProduct::StopAnimation) => self.stop_animation_of(index),
             Err(e) => self.core.status = Some(format!("{name}: {e}")),
         }
+    }
+
+    /// Ask the open dialog's plugin for its dialog again, if it is `plugin`'s —
+    /// because something it reads has changed underneath it: an animation of
+    /// its started or stopped, and its Play/Stop button has to say so.
+    fn requery_dialog_of(&mut self, plugin: usize) {
+        let Some(mut dialog) = self.plugin_dialog.take() else {
+            return;
+        };
+        if dialog.index == plugin {
+            self.requery_dialog(&mut dialog);
+        }
+        self.plugin_dialog = Some(dialog);
     }
 
     /// Hand `path` to an importer plugin on a worker thread, if one claims it.
@@ -3803,6 +3860,11 @@ impl ViewerApp {
             self.core.playback.last_time = None;
         }
 
+        // The animation's step for this frame, now that every way of leaving
+        // 3D or moving the camera this frame has been applied, and before the
+        // 3D view is drawn with the pose it decides.
+        self.tick_animation(ui.ctx());
+
         // Central panel: the image is drawn at exactly `image_size × zoom`. When
         // that fits the panel it's centered (letterboxed); when it's larger
         // (zoomed past what the monitor-capped window can show) it overflows and
@@ -3886,6 +3948,11 @@ impl ViewerApp {
                     }
 
                     let animating = self.drive_volume_camera(ui, &response, panel_rect);
+                    // A press, moving or not, is the user reaching for the
+                    // view: an animation stops for it on the next frame.
+                    if response.is_pointer_button_down_on() {
+                        self.volume_pressed = true;
+                    }
                     // Where the view is, for a copy of it. Recorded at the one
                     // place that knows — a copy happens a frame later, by which
                     // time this panel may not be being laid out at all.
@@ -4362,9 +4429,14 @@ impl ViewerApp {
 
         // Bring the GPU up to date with the core state, then honor a pending
         // background volume build by scheduling another frame.
-        let Self { core, render, .. } = self;
+        let render = std::sync::Arc::clone(&self.render);
         let outcome = match render.lock() {
-            Ok(mut resources) => core.sync(&mut resources),
+            Ok(mut resources) => {
+                let outcome = self.core.sync(&mut resources);
+                // A recording's frame, now that the GPU has this frame's pose.
+                self.capture_animation_frame(&mut resources);
+                outcome
+            }
             Err(_) => Default::default(),
         };
         if outcome.needs_repaint {

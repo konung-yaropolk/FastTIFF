@@ -13,8 +13,9 @@
 
 use crate::abi::*;
 use crate::api::{
-    Confidence, ExportRequest, Exporter, ImportHost, ImportRequest, Importer, Outcome, ParamDecl,
-    ParamKind, ParamValue, Params, PixelType, PlaneData, Plugin, SelectionKind,
+    Animation, AnimationOutput, Confidence, ExportRequest, Exporter, ImportHost, ImportRequest,
+    Importer, Outcome, ParamDecl, ParamKind, ParamValue, Params, PixelType, PlaneData, Plugin,
+    SelectionKind,
 };
 use crate::{guard, status_of, CHost};
 
@@ -206,6 +207,18 @@ unsafe extern "C" fn no_set_channel_name(
     FtStatus::Unsupported
 }
 
+unsafe extern "C" fn no_set_animation(
+    _ctx: *mut core::ffi::c_void,
+    _fps: f32,
+    _output: u32,
+    _path: FtStr,
+    _poses: *const f32,
+    _pose_count: u64,
+    _floats_per_pose: u64,
+) -> FtStatus {
+    FtStatus::Unsupported
+}
+
 /// The host's result sink, copied into a value this plugin may safely hold.
 ///
 /// The same dance as [`registrar_of`], and for the same reason — but this one
@@ -237,9 +250,9 @@ unsafe fn sink_of(sink: *const FtSink) -> Result<FtSink, FtStatus> {
         declared.min(core::mem::size_of::<FtSink>()),
     );
     // Every field the copy did not reach, written in the order they were
-    // appended. `offset_of!(FtSink, set_channel_name) + p == size_of` is
-    // pinned in the ABI crate, so the next appended field fails that assertion
-    // rather than silently leaving a hole here.
+    // appended. `offset_of!(FtSink, set_animation) + p == size_of` is pinned
+    // in the ABI crate, so the next appended field fails that assertion rather
+    // than silently leaving a hole here.
     let p = buf.as_mut_ptr();
     if !crate::abi::ft_covers!(sink, FtSink, set_info) {
         core::ptr::addr_of_mut!((*p).set_info).write(no_set_info);
@@ -255,6 +268,9 @@ unsafe fn sink_of(sink: *const FtSink) -> Result<FtSink, FtStatus> {
     }
     if !crate::abi::ft_covers!(sink, FtSink, set_channel_name) {
         core::ptr::addr_of_mut!((*p).set_channel_name).write(no_set_channel_name);
+    }
+    if !crate::abi::ft_covers!(sink, FtSink, set_animation) {
+        core::ptr::addr_of_mut!((*p).set_animation).write(no_set_animation);
     }
     Ok(buf.assume_init())
 }
@@ -688,6 +704,7 @@ unsafe fn push_decls(sink: &FtParamSink, decls: &[ParamDecl]) -> FtStatus {
             }
             ParamKind::Label => c.kind = FtParamKind::Label,
             ParamKind::Section => c.kind = FtParamKind::Section,
+            ParamKind::Action => c.kind = FtParamKind::Action,
         }
         let st = (sink.push)(sink.ctx, &c);
         if st != FtStatus::Ok {
@@ -780,7 +797,63 @@ pub unsafe fn write_outcome(sink: &FtSink, outcome: Outcome) -> FtStatus {
             write_result(sink, *image, FtOutcomeKind::SaveToFile, &path)
         }
         Outcome::Plot(plot) => write_plot(sink, &plot),
+        Outcome::Animate(animation) => write_animation(sink, &animation),
+        // A host that predates animations cannot be running one of this
+        // plugin's, so there is nothing to stop — and saying so as "nothing"
+        // rather than as a kind it does not know is what keeps a Stop button
+        // from reporting an error on a host where Play could never have worked.
+        Outcome::StopAnimation => {
+            let kind = if crate::abi::ft_covers!(sink as *const FtSink, FtSink, set_animation) {
+                FtOutcomeKind::StopAnimation
+            } else {
+                FtOutcomeKind::Nothing
+            };
+            (sink.set_outcome)(sink.ctx, kind, FtStr::EMPTY)
+        }
     }
+}
+
+/// Declare an animation, then say to carry it out.
+///
+/// The poses cross in one call, as one flat run of floats with a stride,
+/// rather than one call per pose: a pose is nine numbers and a cycle may be a
+/// few thousand of them, so a call each would be the boundary's overhead paid
+/// thousands of times for nothing. The stride is what lets a later minor
+/// append to a pose without a new callback.
+unsafe fn write_animation(sink: &FtSink, animation: &Animation) -> FtStatus {
+    if !crate::abi::ft_covers!(sink as *const FtSink, FtSink, set_animation) {
+        crate::last_error::set(
+            "this plugin returned an animation, and this host is too old to play one;              it needs a FastTIFF built against plugin ABI 1.5 or newer",
+        );
+        return FtStatus::Unsupported;
+    }
+    // Checked here too, not only by the host, so a plugin learns about its own
+    // mistake in its own words.
+    if let Err(e) = animation.validate() {
+        return status_of(&e);
+    }
+    let floats: Vec<f32> = animation
+        .poses
+        .iter()
+        .flat_map(|p| p.rotation.iter().flatten().copied())
+        .collect();
+    let (output, path) = match &animation.output {
+        AnimationOutput::SaveTiff { path } => (FT_ANIMATION_SAVE_TIFF, path.as_str()),
+        _ => (FT_ANIMATION_PLAY, ""),
+    };
+    let st = (sink.set_animation)(
+        sink.ctx,
+        animation.fps,
+        output,
+        FtStr::from_str(path),
+        floats.as_ptr(),
+        animation.poses.len() as u64,
+        FT_POSE_FLOATS,
+    );
+    if st != FtStatus::Ok {
+        return st;
+    }
+    (sink.set_outcome)(sink.ctx, FtOutcomeKind::Animate, FtStr::EMPTY)
 }
 
 /// Declare a chart, push every series, then say to show it.

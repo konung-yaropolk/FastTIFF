@@ -12,7 +12,7 @@
 //! still provides the full CPU-side model.
 
 use crate::bandcache;
-use crate::camera::{build_volume_params, volume_camera, VolumeChannel};
+use crate::camera::{build_volume_params, VolumeChannel};
 use crate::prefetch::{build_jobs, decode_jobs, ChannelJob, Decoded, PrefetchResult};
 use crate::roi::{self, Roi, Serving};
 use crate::stack::Stack;
@@ -672,7 +672,7 @@ fn sync_volume(
     let windows = &windows[..n];
 
     let (w, h) = loaded.dimensions().unwrap_or((1, 1));
-    let cam = volume_camera(&view.cam, view.scale, (w, h, loaded.volume_depth()));
+    let cam = view.camera((w, h, loaded.volume_depth()));
     // Cache the box extents so the orbit re-pivot can ray-cast the box.
     view.cam.box_he = cam.box_he;
     // The gain, decided here rather than in the shader because which of the

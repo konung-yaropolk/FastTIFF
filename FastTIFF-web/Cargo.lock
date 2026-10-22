@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.25.0"
+version = "1.25.1"
 dependencies = [
  "anyhow",
  "eframe",
@@ -956,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.25.0"
+version = "0.25.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -995,7 +995,7 @@ version = "0.25.0"
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "1.25.0"
+version = "1.25.1"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",
@@ -2242,7 +2242,7 @@ dependencies = [
 
 [[package]]
 name = "oir-reader"
-version = "0.25.0"
+version = "0.25.1"
 dependencies = [
  "bytemuck",
  "memmap2",

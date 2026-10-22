@@ -6,7 +6,7 @@
 //! the rendered volume on both the wgpu and glow backends.
 
 use super::*;
-use fast_tiff_viewer::camera::{volume_camera, VolumeCamera};
+use fast_tiff_viewer::camera::VolumeCamera;
 
 impl ViewerApp {
     /// Draw the coordinate box for the current volume view into `painter` (which
@@ -22,8 +22,9 @@ impl ViewerApp {
         let dims = (w, h, loaded.volume_depth());
 
         // Rebuild the exact camera the shader used this frame (box half-extents
-        // fold in the voxel scale, matching what's on screen).
-        let cam = volume_camera(&self.core.volume.cam, self.core.volume.scale, dims);
+        // fold in the voxel scale, matching what's on screen), turned by an
+        // animation's pose when one is playing, so the box turns with it.
+        let cam = self.core.volume.camera(dims);
 
         let unit = loaded.tiff.meta.unit.as_deref().filter(|u| !u.is_empty());
         draw_box(

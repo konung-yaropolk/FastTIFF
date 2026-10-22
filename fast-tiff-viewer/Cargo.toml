@@ -1,6 +1,6 @@
 [package]
 name = "fast-tiff-viewer"
-version = "0.25.1"
+version = "0.26.0"
 edition = "2021"
 description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
 # GPL-3.0, not MPL-2.0 as the rest of the library crates are. The built-in
@@ -55,6 +55,7 @@ builtin-plugins = [
     "plugin-zproject",
     "plugin-plot-axis",
     "plugin-stack-tools",
+    "plugin-animation-3d",
     "plugin-stabilize",
     "plugin-turboreg",
     "plugin-deconvolve",
@@ -64,11 +65,14 @@ builtin-plugins = [
     "plugin-dicom",
 ]
 
-# The four that cost nothing but their own code.
+# The five that cost nothing but their own code.
 plugin-invert = []
 plugin-zproject = []
 plugin-plot-axis = []
 plugin-stack-tools = []
+# The 3D animation is poses and nothing else: the host plays them, so the
+# plugin needs no renderer and no dependency of its own.
+plugin-animation-3d = []
 
 # And the four that bring a dependency with them. Each names only what *it*
 # needs, so the dependency arrives with the plugin and leaves with it.
