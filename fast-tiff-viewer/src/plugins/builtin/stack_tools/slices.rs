@@ -233,7 +233,7 @@ fn run(host: &mut dyn HostContext, params: &Params, sense: Sense) -> Result<Outc
         planes,
         channel_colors: Vec::new(),
         metadata: Some(host.stack_info().clone()),
-        name: format!("{}-{verb}", host.stack_info().name),
+        name: format!("{}-{verb}", host.stack_info().stem()),
     };
     image.validate()?;
     Ok(deliver(image, params))

@@ -135,7 +135,12 @@ pub const ABI_MAJOR: u32 = 1;
 ///   every press is a run. The two kinds are new values of open enums and cost
 ///   nothing in either direction; the two callbacks are appended to tables
 ///   that are read with [`covers`].
-pub const ABI_MINOR: u32 = 5;
+/// * **6** — [`FtOutcomeKind::SelectRegion`]: ask the user for a rectangle,
+///   and be run again with it. A new value of an open enum, carrying its
+///   prompt in the text every outcome already has, so nothing is appended; a
+///   host that predates it refuses the run as it does any kind it does not
+///   know.
+pub const ABI_MINOR: u32 = 6;
 
 /// The one symbol a plugin library must export, NUL-terminated for `dlsym`.
 ///
@@ -699,6 +704,9 @@ open_enum! {
         /// Stop this plugin's animation, if one is running. Nothing is pushed
         /// for it.
         StopAnimation = 7,
+        /// Ask the user to draw a rectangle, then run this plugin again with it
+        /// as the selection. The text is the prompt to show while they do.
+        SelectRegion = 8,
     }
 }
 
@@ -1271,6 +1279,7 @@ const _: () = {
     assert!(FtOutcomeKind::ReplaceDocument.0 == 5);
     assert!(FtOutcomeKind::Animate.0 == 6);
     assert!(FtOutcomeKind::StopAnimation.0 == 7);
+    assert!(FtOutcomeKind::SelectRegion.0 == 8);
 
     assert!(FT_POSE_FLOATS == 9);
     assert!(FT_ANIMATION_PLAY == 0);

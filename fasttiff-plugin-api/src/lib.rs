@@ -91,7 +91,8 @@
 //! when the regions change, an [`Animation`] the host plays on the 3D view.
 //! And a dialog that is used more than once, Play then Stop, declares buttons
 //! ([`ParamKind::Action`]) and becomes a panel that stays open, each press a
-//! run of its own. See [`animation`].
+//! run of its own. See [`animation`]. A tool whose input is a region asks for
+//! one with [`Outcome::SelectRegion`] and is run again once it is drawn.
 //!
 //! # Licence
 //!
@@ -131,4 +132,4 @@ pub use selection::{Roi, Shape};
 /// symbol at load rather than two sides disagreeing about a struct layout after
 /// the call has already begun.
 pub const API_VERSION_MAJOR: u32 = 1;
-pub const API_VERSION_MINOR: u32 = 2;
+pub const API_VERSION_MINOR: u32 = 3;

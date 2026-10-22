@@ -1578,6 +1578,7 @@ impl ResultSink {
                 Ok(Outcome::Animate(Box::new(animation)))
             }
             abi::FtOutcomeKind::StopAnimation => Ok(Outcome::StopAnimation),
+            abi::FtOutcomeKind::SelectRegion => Ok(Outcome::SelectRegion { prompt: self.text }),
             abi::FtOutcomeKind::NewDocument
             | abi::FtOutcomeKind::SaveToFile
             | abi::FtOutcomeKind::ReplaceDocument => {

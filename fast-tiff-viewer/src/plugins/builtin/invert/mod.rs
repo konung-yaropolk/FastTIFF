@@ -145,7 +145,7 @@ impl Plugin for Invert {
             planes,
             channel_colors: Vec::new(),
             metadata: Some(host.stack_info().clone()),
-            name: format!("{}-inverted", host.stack_info().name),
+            name: format!("{}-inverted", host.stack_info().stem()),
         };
         image.validate()?;
         Ok(deliver(image, params))

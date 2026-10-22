@@ -810,6 +810,11 @@ pub unsafe fn write_outcome(sink: &FtSink, outcome: Outcome) -> FtStatus {
             };
             (sink.set_outcome)(sink.ctx, kind, FtStr::EMPTY)
         }
+        Outcome::SelectRegion { prompt } => (sink.set_outcome)(
+            sink.ctx,
+            FtOutcomeKind::SelectRegion,
+            FtStr::from_str(&prompt),
+        ),
     }
 }
 

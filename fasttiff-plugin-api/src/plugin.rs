@@ -256,6 +256,19 @@ pub enum Outcome {
     /// just after the user took the view back has nothing left to stop, and
     /// that is fine.
     StopAnimation,
+    /// Ask the user to draw a rectangle on the picture first, then run this
+    /// plugin again with it as the [selection](crate::HostContext::selection),
+    /// using the same parameters.
+    ///
+    /// For a tool whose input is a region, such as a crop. The host shows the
+    /// image in 2D, puts `prompt` in its status line, and arms its rectangle
+    /// tool. Enter runs the plugin again with the rectangle; Escape gives up,
+    /// and the plugin is not run again. So a plugin returns this when its
+    /// selection is empty, and does its work when it is not.
+    ///
+    /// A host that predates it refuses the run with a message saying so, as it
+    /// does any outcome it does not know.
+    SelectRegion { prompt: String },
     /// The user cancelled. The host discards everything and says so.
     Cancelled,
 }

@@ -98,6 +98,8 @@
 /// nothing a browser lacks.
 #[cfg(feature = "plugin-animation-3d")]
 pub mod animation_3d;
+#[cfg(feature = "plugin-crop")]
+pub mod crop;
 #[cfg(feature = "plugin-deconvolve")]
 pub mod deconvolve;
 /// Desktop-only on top of its feature, as every importer is: an
@@ -132,10 +134,10 @@ pub mod png;
     feature = "plugin-invert",
     feature = "plugin-stack-tools",
     feature = "plugin-deconvolve",
-    feature = "plugin-turboreg",
+    feature = "plugin-turboreg-stabilize",
 ))]
 pub(crate) mod shared;
-#[cfg(feature = "plugin-stabilize")]
+#[cfg(feature = "plugin-suite2p-stabilize")]
 pub mod stabilize;
 #[cfg(feature = "plugin-stack-tools")]
 pub mod stack_tools;
@@ -156,13 +158,15 @@ pub mod stack_tools;
 ///
 /// One thing to know before reaching for it in a browser: a plugin run on the
 /// web is synchronous, so a long registration will hold the tab.
-#[cfg(feature = "plugin-turboreg")]
+#[cfg(feature = "plugin-turboreg-stabilize")]
 pub mod turboreg;
 #[cfg(feature = "plugin-zproject")]
 pub mod zproject;
 
 #[cfg(feature = "plugin-animation-3d")]
 pub use animation_3d::Animation3d;
+#[cfg(feature = "plugin-crop")]
+pub use crop::Crop;
 #[cfg(feature = "plugin-deconvolve")]
 pub use deconvolve::{Deconvolve, GeneratePsf};
 #[cfg(all(feature = "plugin-dicom", not(target_arch = "wasm32")))]
@@ -179,11 +183,11 @@ pub use oir::Oir;
 pub use plot_axis::PlotAxis;
 #[cfg(feature = "plugin-png")]
 pub use png::{Png, PngImport};
-#[cfg(feature = "plugin-stabilize")]
+#[cfg(feature = "plugin-suite2p-stabilize")]
 pub use stabilize::Stabilize;
 #[cfg(feature = "plugin-stack-tools")]
 pub use stack_tools::{SliceKeeper, SliceOrderInvert, SliceRemover};
-#[cfg(feature = "plugin-turboreg")]
+#[cfg(feature = "plugin-turboreg-stabilize")]
 pub use turboreg::TurboReg;
 #[cfg(feature = "plugin-zproject")]
 pub use zproject::ZProject;
@@ -224,9 +228,9 @@ pub fn register(reg: &mut Registry) {
     reg.add::<ZProject>(o);
     #[cfg(feature = "plugin-plot-axis")]
     reg.add::<PlotAxis>(o);
-    #[cfg(feature = "plugin-stabilize")]
+    #[cfg(feature = "plugin-suite2p-stabilize")]
     reg.add::<Stabilize>(o);
-    #[cfg(feature = "plugin-turboreg")]
+    #[cfg(feature = "plugin-turboreg-stabilize")]
     reg.add::<TurboReg>(o);
     #[cfg(feature = "plugin-stack-tools")]
     {
@@ -236,6 +240,8 @@ pub fn register(reg: &mut Registry) {
     }
     #[cfg(feature = "plugin-animation-3d")]
     reg.add::<Animation3d>(o);
+    #[cfg(feature = "plugin-crop")]
+    reg.add::<Crop>(o);
     #[cfg(feature = "plugin-deconvolve")]
     {
         reg.add::<GeneratePsf>(o);

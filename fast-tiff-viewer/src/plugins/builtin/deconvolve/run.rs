@@ -633,7 +633,7 @@ impl Plugin for Deconvolve {
             planes,
             channel_colors: Vec::new(),
             metadata: Some(host.stack_info().clone()),
-            name: format!("{}-{}", host.stack_info().name, method.tag()),
+            name: format!("{}-{}", host.stack_info().stem(), method.tag()),
         };
         image.validate()?;
         Ok(deliver(image, params))

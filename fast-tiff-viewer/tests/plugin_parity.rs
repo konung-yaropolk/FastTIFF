@@ -211,9 +211,9 @@ fn every_built_in_filter_answers_the_same_through_the_boundary() {
     covered.push(same_both_ways::<builtin::ZProject>(&s));
     #[cfg(feature = "plugin-plot-axis")]
     covered.push(same_both_ways::<builtin::PlotAxis>(&s));
-    #[cfg(feature = "plugin-stabilize")]
+    #[cfg(feature = "plugin-suite2p-stabilize")]
     covered.push(same_both_ways::<builtin::Stabilize>(&s));
-    #[cfg(feature = "plugin-turboreg")]
+    #[cfg(feature = "plugin-turboreg-stabilize")]
     covered.push(same_both_ways::<builtin::TurboReg>(&s));
     #[cfg(feature = "plugin-stack-tools")]
     {
@@ -239,6 +239,13 @@ fn every_built_in_filter_answers_the_same_through_the_boundary() {
         }
     }
 
+    // Both halves: the run that asks for a rectangle, and the one that has it.
+    #[cfg(feature = "plugin-crop")]
+    {
+        covered.push(same_both_ways::<builtin::Crop>(&s));
+        crop_same_both_ways(&s);
+    }
+
     let mut installed: Vec<String> = Registry::new()
         .entries()
         .iter()
@@ -250,6 +257,60 @@ fn every_built_in_filter_answers_the_same_through_the_boundary() {
         covered, installed,
         "every installed built-in filter must be checked here"
     );
+}
+
+/// Crop with a rectangle drawn, both ways, and what it made: every channel,
+/// slice and frame kept, cut to the rectangle.
+#[cfg(feature = "plugin-crop")]
+fn crop_same_both_ways(s: &Stack) {
+    use fasttiff_plugin_api::{Roi, Shape};
+    let roi = Roi {
+        shape: Shape::Rect,
+        x: 3,
+        y: 5,
+        w: 10,
+        h: 7,
+    };
+    let picked = || host(s).with_selection(vec![roi]);
+    let mut reg = Registry::empty();
+    assert!(reg.add::<builtin::Crop>(Origin::BuiltIn));
+    let entry = reg.get_mut(0).expect("installed");
+    let by_hand = builtin::Crop.run(&mut picked(), &Params::new());
+    let through = entry.plugin.run(&mut picked(), &Params::new());
+    assert_eq!(
+        shown(through),
+        shown(by_hand.clone()),
+        "crop changed on the way across"
+    );
+
+    let Ok(Outcome::NewDocument(img)) = by_hand else {
+        panic!("crop did not make an image: {by_hand:?}");
+    };
+    assert_eq!((img.width, img.height), (10, 7));
+    assert_eq!((img.channels, img.slices, img.frames), (C, Z, T));
+    assert_eq!(img.name, "parity-crop", "named from the file's stem");
+    let mut whole = Vec::new();
+    for (i, plane) in img.planes.iter().enumerate() {
+        let (c, z, t) = (i % C, (i / C) % Z, i / (C * Z));
+        fasttiff_plugin_api::HostContext::read_plane_f32(
+            &mut host(s),
+            fasttiff_plugin_api::Plane::new(c, z, t),
+            &mut whole,
+        )
+        .unwrap();
+        let fasttiff_plugin_api::PlaneData::U16(px) = plane else {
+            panic!("plane {i} changed type");
+        };
+        for y in 0..7 {
+            for x in 0..10 {
+                assert_eq!(
+                    px[y * 10 + x] as f32,
+                    whole[(y + 5) * W as usize + x + 3],
+                    "plane {i} at ({x}, {y})"
+                );
+            }
+        }
+    }
 }
 
 /// The PNG exporter draws the displayed frame through the channels' colour

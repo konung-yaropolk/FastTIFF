@@ -51,3 +51,38 @@ pub struct StackInfo {
     /// a dialect the host does not parse.
     pub description: Option<String>,
 }
+
+impl StackInfo {
+    /// [`name`](Self::name) without its file extension: `"cells"` for
+    /// `"cells.tif"`, and for the two-part extensions `"cells.ome.tif"` and
+    /// `"brain.nii.gz"` as well. What to build a result's name from, so it
+    /// is not saved as `cells.tif-inverted.tif`.
+    ///
+    /// A name with no extension comes back as it is. So does a dotfile
+    /// (`".hidden"`): the dot starts its name, it does not end it.
+    pub fn stem(&self) -> &str {
+        let name = self.name.as_str();
+        // ASCII lowercasing keeps every byte where it was, so an index into
+        // `lower` is an index into `name`.
+        let lower = name.to_ascii_lowercase();
+        for pair in [".ome.tif", ".ome.tiff", ".nii.gz"] {
+            if lower.len() > pair.len() && lower.ends_with(pair) {
+                return &name[..name.len() - pair.len()];
+            }
+        }
+        match name.rfind('.') {
+            Some(dot)
+                if dot > 0
+                    && (1..=5).contains(&(name.len() - dot - 1))
+                    && name[dot + 1..].chars().all(|c| c.is_ascii_alphanumeric()) =>
+            {
+                &name[..dot]
+            }
+            _ => name,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "meta_tests.rs"]
+mod tests;

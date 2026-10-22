@@ -248,7 +248,7 @@ impl Plugin for TurboReg {
                 planes: out,
                 channel_colors: Vec::new(),
                 metadata: Some(host.stack_info().clone()),
-                name: format!("{}-registered", host.stack_info().name),
+                name: format!("{}-registered", host.stack_info().stem()),
             },
             params,
         ))

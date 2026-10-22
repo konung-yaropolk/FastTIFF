@@ -1311,6 +1311,21 @@ fn stopping_on_a_host_without_animations_is_nothing() {
     );
 }
 
+/// A request for a region crosses as its kind, with the prompt as the text.
+#[test]
+fn a_request_for_a_region_carries_its_prompt() {
+    let _alone = alone();
+    let s = recording_sink(core::mem::size_of::<FtSink>());
+    let prompt = "Drag a rectangle, then press Enter".to_string();
+    // SAFETY: the callbacks are real.
+    let st = unsafe { write_outcome(&s, Outcome::SelectRegion { prompt }) };
+    assert_eq!(st, FtStatus::Ok);
+    assert_eq!(
+        LAST_KIND.load(core::sync::atomic::Ordering::Relaxed),
+        FtOutcomeKind::SelectRegion.0
+    );
+}
+
 /// A pose that is not a rotation is the plugin's mistake, and it hears about it
 /// before anything crosses.
 #[test]
