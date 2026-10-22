@@ -218,6 +218,13 @@ it returns the RGBA picture. On wgpu the readback lands a frame or more later,
 and a browser cannot wait for it; glow reads back at once. Only one capture can
 be in flight at a time.
 
+A capture is rendered in tiles of `CAPTURE_TILE` (1024) pixels, each read back
+before the next is drawn. Each GPU job then costs about what a frame of the view
+costs, however large the picture. Drawn in one go, an 8192-pixel frame of a
+large volume can run long enough for Windows to reset the GPU, which loses the
+device. GPU memory holds one tile, not the whole picture. `capture_tiles` and
+`tile_params` are public if you want to render the tiles yourself.
+
 ## Backend-specific extras
 
 Two members exist only on `wgpu_backend`:

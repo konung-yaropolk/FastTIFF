@@ -95,6 +95,26 @@ fn clamp_bounds_a_choice_to_its_options() {
     assert_eq!(q.clamp_to(&empty).choice("x", 99), 0);
 }
 
+/// Radio buttons are a choice drawn differently: the same default, the same
+/// value, the same bounds.
+#[test]
+fn radio_buttons_hold_a_choice() {
+    let radio = vec![ParamDecl::new(
+        "size",
+        "Save in",
+        ParamKind::Radio {
+            default: 1,
+            options: vec!["Window".into(), "Max".into()],
+        },
+    )];
+    assert_eq!(Params::defaults(&radio).choice("size", 9), 1);
+    let mut p = Params::new();
+    p.set("size", ParamValue::Choice(0));
+    assert_eq!(p.clamp_to(&radio).choice("size", 9), 0);
+    p.set("size", ParamValue::Choice(5));
+    assert_eq!(p.clamp_to(&radio).choice("size", 9), 1);
+}
+
 /// A value of the wrong variant means the two sides disagree about the dialog.
 /// Falling back to the declared default keeps the run going; silently coercing
 /// a `Text` into an `Int` would hide the disagreement.

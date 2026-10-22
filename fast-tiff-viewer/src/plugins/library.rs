@@ -55,9 +55,9 @@ use std::path::{Path, PathBuf};
 use fasttiff_plugin_abi as abi;
 use fasttiff_plugin_api::{
     Animation, AnimationOutput, Confidence, ExportRequest, Exporter, FileType, HostContext,
-    ImageResult, ImportHost, ImportRequest, ImportResult, Importer, Outcome, ParamDecl, ParamKind,
-    ParamValue, Params, PixelType, PlaneData, Plot, Plugin, PluginError, PluginInfo, Pose,
-    SelectionKind, Series, StackInfo,
+    ImageResult, ImportHost, ImportRequest, ImportResult, Importer, MovieResolution, Outcome,
+    ParamDecl, ParamKind, ParamValue, Params, PixelType, PlaneData, Plot, Plugin, PluginError,
+    PluginInfo, Pose, SelectionKind, Series, StackInfo,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1466,11 +1466,13 @@ unsafe extern "C" fn sink_set_animation(
             s.problem = Some("the plugin declared an animation with no poses behind it".into());
             return abi::FtStatus::BadArgument;
         }
-        let output = match output {
-            abi::FT_ANIMATION_PLAY => AnimationOutput::Play,
-            abi::FT_ANIMATION_SAVE_TIFF => AnimationOutput::SaveTiff {
-                path: path.as_str().unwrap_or("").to_string(),
-            },
+        let save = || AnimationOutput::SaveTiff {
+            path: path.as_str().unwrap_or("").to_string(),
+        };
+        let (output, resolution) = match output {
+            abi::FT_ANIMATION_PLAY => (AnimationOutput::Play, MovieResolution::Max),
+            abi::FT_ANIMATION_SAVE_TIFF => (save(), MovieResolution::Max),
+            abi::FT_ANIMATION_SAVE_TIFF_WINDOW => (save(), MovieResolution::Window),
             // A destination from a newer ABI. Playing it instead would do
             // something the user did not ask for; saying so does not.
             other => {
@@ -1491,7 +1493,7 @@ unsafe extern "C" fn sink_set_animation(
                 Pose::from_matrix([[f[0], f[1], f[2]], [f[3], f[4], f[5]], [f[6], f[7], f[8]]])
             })
             .collect();
-        let mut animation = Animation::new(poses, fps);
+        let mut animation = Animation::new(poses, fps).resolution(resolution);
         animation.output = output;
         s.animation = Some(animation);
         abi::FtStatus::Ok
@@ -1697,7 +1699,7 @@ unsafe extern "C" fn decl_push(
             abi::FtParamKind::Bool => ParamKind::Bool {
                 default: d.b_default != 0,
             },
-            abi::FtParamKind::Choice => {
+            abi::FtParamKind::Choice | abi::FtParamKind::Radio => {
                 if d.option_count > 1024 {
                     return s.refuse(format!(
                         "the choice \"{key}\" offers more than 1024 options"
@@ -1716,9 +1718,11 @@ unsafe extern "C" fn decl_push(
                         }
                     }
                 }
-                ParamKind::Choice {
-                    default: d.i_default.max(0) as usize,
-                    options,
+                let default = d.i_default.max(0) as usize;
+                if d.kind == abi::FtParamKind::Radio {
+                    ParamKind::Radio { default, options }
+                } else {
+                    ParamKind::Choice { default, options }
                 }
             }
             abi::FtParamKind::Text => ParamKind::Text {

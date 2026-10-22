@@ -594,10 +594,14 @@ with the same per-channel LUTs and contrast as the 2D view.
   any drag, scroll or key on the view — or going back to 2D — stops it and puts
   the view back. **Save animation as TIFF…** renders exactly one cycle, every
   frame once with no repeat where it loops, as an RGB movie at 30 frames a
-  second. Each frame is rendered off screen in the shape of the 3D view, large
-  enough that every pixel of the stack in view gets at least a pixel of its own
-  (never smaller than the view on screen, up to 8192 on the long side), and
-  without the coordinate box or anything else drawn over the view.
+  second. **Save in** picks the size: *Window resolution* is the 3D view's size
+  on screen; *Max resolution* (the default) is large enough that every pixel
+  of the stack in view gets at least a pixel of its own, never smaller than the
+  view, up to 8192 on the long side. Either way each frame is rendered off
+  screen, in the shape of the 3D view and without the coordinate box or
+  anything else drawn over it, in window-sized tiles so that a large frame of
+  a large volume never asks the GPU for one job long enough for Windows to
+  reset it.
 - Runs on both the glow and wgpu backends.
 
 ## Plugins

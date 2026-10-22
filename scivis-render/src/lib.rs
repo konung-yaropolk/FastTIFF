@@ -207,6 +207,70 @@ pub struct VolumeParams {
     pub box_he: [f32; 3],
 }
 
+/// The side of the square tiles an off-screen capture is rendered in, in
+/// pixels.
+///
+/// A capture is not drawn in one go. A movie frame can be 8192 pixels wide,
+/// and ray-marching that many pixels through a large volume is one GPU job
+/// of many seconds, which Windows ends by resetting the GPU (its two-second
+/// timeout): the device is lost, and the next thing to draw panics. In tiles
+/// about the size of a window, each job costs what a frame of the view on
+/// screen costs, and a tile at a time is all the GPU memory a capture needs.
+pub const CAPTURE_TILE: u32 = 1024;
+
+/// The tiles a `width` x `height` capture is rendered in, row by row, as
+/// `(x, y, w, h)` in pixels from the top-left. The last column and row are
+/// narrower where the picture does not divide evenly.
+pub fn capture_tiles(width: u32, height: u32) -> Vec<(u32, u32, u32, u32)> {
+    let mut tiles = Vec::new();
+    for y in (0..height).step_by(CAPTURE_TILE as usize) {
+        for x in (0..width).step_by(CAPTURE_TILE as usize) {
+            tiles.push((
+                x,
+                y,
+                CAPTURE_TILE.min(width - x),
+                CAPTURE_TILE.min(height - y),
+            ));
+        }
+    }
+    tiles
+}
+
+/// `params` narrowed to `tile` of a `width` x `height` picture: rendered on
+/// its own, at the tile's size, it is exactly that part of the picture.
+///
+/// Every pixel is a ray, `forward + ndc.x * aspect * tan * right + ndc.y *
+/// tan * up` with `ndc` across the target, so a part of the picture is the
+/// same camera looking a little to the side (`forward` moved to the tile's
+/// centre) with a narrower view (`tan` and `aspect` scaled to the tile's
+/// share). The shaders normalise the ray, so `forward` need not be a unit
+/// vector. The picture's aspect ratio is `width / height`, whatever `params`
+/// says.
+pub fn tile_params(
+    params: &VolumeParams,
+    (width, height): (u32, u32),
+    (x, y, w, h): (u32, u32, u32, u32),
+) -> VolumeParams {
+    let (fw, fh) = (width.max(1) as f32, height.max(1) as f32);
+    let aspect = fw / fh;
+    let tan = params.tan_half_fov;
+    // The tile's edges in the picture's normalised coordinates: x to the
+    // right and y up, -1..1 across.
+    let (left, right) = (2.0 * x as f32 / fw - 1.0, 2.0 * (x + w) as f32 / fw - 1.0);
+    let (top, bottom) = (1.0 - 2.0 * y as f32 / fh, 1.0 - 2.0 * (y + h) as f32 / fh);
+    let (cx, sx) = (0.5 * (left + right), 0.5 * (right - left));
+    let (cy, sy) = (0.5 * (top + bottom), 0.5 * (top - bottom));
+    let forward: [f32; 3] = std::array::from_fn(|i| {
+        params.forward[i] + cx * aspect * tan * params.right[i] + cy * tan * params.up[i]
+    });
+    VolumeParams {
+        forward,
+        tan_half_fov: tan * sy,
+        aspect: aspect * sx / sy,
+        ..*params
+    }
+}
+
 /// The volume rendered off screen, read back: what `capture_volume` produces.
 ///
 /// The picture the 3D view would show at this size, with nothing the host
@@ -233,3 +297,7 @@ pub struct ChannelUniform {
     /// channel, where `min`/`max` are in raw sample units.
     pub is_float: bool,
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;

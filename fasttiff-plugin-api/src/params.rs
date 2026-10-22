@@ -68,6 +68,15 @@ pub enum ParamKind {
         default: usize,
         options: Vec<String>,
     },
+    /// A closed set drawn as radio buttons, every option in view, rather
+    /// than as a drop-down list. For two or three options the user should
+    /// see side by side. The value is a [`ParamValue::Choice`], exactly as
+    /// for [`Choice`](Self::Choice). An older host draws it as a label saying
+    /// it needs a newer FastTIFF, and the plugin reads its default.
+    Radio {
+        default: usize,
+        options: Vec<String>,
+    },
     Text {
         default: String,
     },
@@ -238,7 +247,9 @@ impl Params {
                 ParamKind::Int { default, .. } => ParamValue::Int(*default),
                 ParamKind::Float { default, .. } => ParamValue::Float(*default),
                 ParamKind::Bool { default } => ParamValue::Bool(*default),
-                ParamKind::Choice { default, .. } => ParamValue::Choice(*default),
+                ParamKind::Choice { default, .. } | ParamKind::Radio { default, .. } => {
+                    ParamValue::Choice(*default)
+                }
                 ParamKind::Text { default } => ParamValue::Text(default.clone()),
                 ParamKind::Path { default, .. } => ParamValue::Path(default.clone()),
                 // A button has no value until it is pressed, and a fresh
@@ -295,7 +306,10 @@ impl Params {
                     };
                     out.set(d.key.clone(), ParamValue::Bool(b));
                 }
-                (ParamKind::Choice { default, options }, v) => {
+                (
+                    ParamKind::Choice { default, options } | ParamKind::Radio { default, options },
+                    v,
+                ) => {
                     let raw = match v {
                         Some(ParamValue::Choice(i)) => *i,
                         Some(ParamValue::Int(i)) if *i >= 0 => *i as usize,

@@ -79,7 +79,10 @@ fn a_plugin_left_out_of_the_build_is_absent_from_the_registry() {
             cfg!(feature = "plugin-stack-tools"),
             "dev.fasttiff.stacktools.keeper",
         ),
-        (cfg!(feature = "plugin-suite2p-stabilize"), "dev.fasttiff.stabilize"),
+        (
+            cfg!(feature = "plugin-suite2p-stabilize"),
+            "dev.fasttiff.stabilize",
+        ),
         (
             cfg!(feature = "plugin-deconvolve"),
             "dev.fasttiff.deconvolve.run",

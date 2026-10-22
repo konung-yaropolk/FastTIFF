@@ -139,7 +139,10 @@ pub const ABI_MAJOR: u32 = 1;
 ///   and be run again with it. A new value of an open enum, carrying its
 ///   prompt in the text every outcome already has, so nothing is appended; a
 ///   host that predates it refuses the run as it does any kind it does not
-///   know.
+///   know. Also [`FtParamKind::Radio`], a choice drawn as radio buttons, and
+///   [`FT_ANIMATION_SAVE_TIFF_WINDOW`], a movie saved at the size of the 3D
+///   view rather than at full detail: two more new values, which an older
+///   host draws as a label and refuses with a message respectively.
 pub const ABI_MINOR: u32 = 6;
 
 /// The one symbol a plugin library must export, NUL-terminated for `dlsym`.
@@ -421,6 +424,10 @@ open_enum! {
         /// that declares one stays open after a run. An older host draws it
         /// as a label saying it needs a newer FastTIFF.
         Action = 8,
+        /// A choice drawn as radio buttons: the fields and the value are a
+        /// [`Choice`](Self::Choice)'s. An older host draws it as a label
+        /// saying it needs a newer FastTIFF. Added in minor 6.
+        Radio = 9,
     }
 }
 
@@ -890,8 +897,12 @@ pub const FT_POSE_FLOATS: u64 = 9;
 /// [`FtSink::set_animation`]'s `output`: play on the 3D view, looping.
 pub const FT_ANIMATION_PLAY: u32 = 0;
 /// [`FtSink::set_animation`]'s `output`: render every pose once and write the
-/// frames as a TIFF.
+/// frames as a TIFF, at full detail (see
+/// `fasttiff_plugin_api::MovieResolution::Max`).
 pub const FT_ANIMATION_SAVE_TIFF: u32 = 1;
+/// [`FtSink::set_animation`]'s `output`: as [`FT_ANIMATION_SAVE_TIFF`], at the
+/// size of the 3D view on screen. Added in minor 6; an older host refuses it.
+pub const FT_ANIMATION_SAVE_TIFF_WINDOW: u32 = 2;
 
 /// No colour of its own: let the host choose. For [`FtSink::push_series`].
 ///
@@ -1266,6 +1277,7 @@ const _: () = {
     assert!(FtParamKind::Label.0 == 6);
     assert!(FtParamKind::Section.0 == 7);
     assert!(FtParamKind::Action.0 == 8);
+    assert!(FtParamKind::Radio.0 == 9);
 
     assert!(FtConfidence::No.0 == 0);
     assert!(FtConfidence::Maybe.0 == 1);
@@ -1284,6 +1296,7 @@ const _: () = {
     assert!(FT_POSE_FLOATS == 9);
     assert!(FT_ANIMATION_PLAY == 0);
     assert!(FT_ANIMATION_SAVE_TIFF == 1);
+    assert!(FT_ANIMATION_SAVE_TIFF_WINDOW == 2);
 
     assert!(FtSelectionKind::None.0 == 0);
     assert!(FtSelectionKind::Regions.0 == 1);

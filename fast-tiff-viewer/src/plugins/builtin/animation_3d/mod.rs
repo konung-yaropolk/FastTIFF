@@ -36,8 +36,8 @@
 //! so it would work unchanged as a shared library.
 
 use fasttiff_plugin_api::{
-    Animation, HostContext, Outcome, ParamDecl, ParamKind, Params, Plugin, PluginError, PluginInfo,
-    Pose,
+    Animation, HostContext, MovieResolution, Outcome, ParamDecl, ParamKind, Params, Plugin,
+    PluginError, PluginInfo, Pose,
 };
 
 /// The frame rate the animation is computed at — on screen, and in the movie a
@@ -88,6 +88,22 @@ const DEFAULT_SPEED: f64 = 30.0;
 const SPEED: (f64, f64) = (1.0, 360.0);
 const DEFAULT_TILT: f64 = 15.0;
 const TILT: (f64, f64) = (1.0, 80.0);
+/// The sizes a saved movie can be, in the order the dialog offers them.
+const RESOLUTIONS: [(&str, MovieResolution); 2] = [
+    ("Window resolution", MovieResolution::Window),
+    ("Max resolution", MovieResolution::Max),
+];
+/// Max: the most a saved movie can show, which is what saving one is for.
+const DEFAULT_RESOLUTION: usize = 1;
+
+/// The size the dialog asks a saved movie to be.
+fn resolution(params: &Params) -> MovieResolution {
+    let i = params.choice("resolution", DEFAULT_RESOLUTION);
+    RESOLUTIONS
+        .get(i)
+        .unwrap_or(&RESOLUTIONS[DEFAULT_RESOLUTION])
+        .1
+}
 
 /// How many frames one cycle takes at `speed` degrees a second.
 ///
@@ -188,9 +204,24 @@ impl Plugin for Animation3d {
                 .help("Animate the 3D view. Drag it, scroll, or go back to 2D to stop.")
         });
         d.push(
+            ParamDecl::new(
+                "resolution",
+                "Save in",
+                ParamKind::Radio {
+                    default: DEFAULT_RESOLUTION,
+                    options: RESOLUTIONS.iter().map(|(l, _)| l.to_string()).collect(),
+                },
+            )
+            .help(
+                "Window resolution: the size of the 3D view on screen. Max resolution: \
+                 large enough that every pixel of the stack in view gets a pixel of its \
+                 own (up to 8192 on the long side), and never smaller than the view.",
+            ),
+        );
+        d.push(
             ParamDecl::new("save", "Save animation as TIFF…", ParamKind::Action).help(
                 "Render one cycle, every frame once, and write it as an RGB movie at the \
-                 size of the 3D view.",
+                 resolution chosen above.",
             ),
         );
         d
@@ -217,7 +248,7 @@ impl Plugin for Animation3d {
         // No button pressed — a test, a macro runner, a host that predates
         // buttons — plays, which is what the plugin is for.
         Ok(Outcome::Animate(Box::new(if params.pressed("save") {
-            a.save_tiff("")
+            a.save_tiff("").resolution(resolution(params))
         } else {
             a
         })))

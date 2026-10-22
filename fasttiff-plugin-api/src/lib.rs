@@ -111,7 +111,7 @@ pub mod plot;
 pub mod plugin;
 pub mod selection;
 
-pub use animation::{Animation, AnimationOutput, Pose};
+pub use animation::{Animation, AnimationOutput, MovieResolution, Pose};
 pub use export::{ExportRequest, Exporter};
 pub use host::{HostContext, HostContextExt};
 pub use image::{

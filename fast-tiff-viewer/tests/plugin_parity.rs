@@ -173,6 +173,11 @@ fn same_both_ways_with<P: Plugin + Default + 'static>(
             ParamKind::Choice { options, .. } if !options.is_empty() => {
                 moved.set(d.key.clone(), ParamValue::Choice(options.len() - 1));
             }
+            // The other end from a drop-down's, so a radio's default (often
+            // the last) is moved off too.
+            ParamKind::Radio { options, .. } if !options.is_empty() => {
+                moved.set(d.key.clone(), ParamValue::Choice(0));
+            }
             ParamKind::Bool { default } => moved.set(d.key.clone(), ParamValue::Bool(!default)),
             _ => {}
         }
@@ -235,6 +240,13 @@ fn every_built_in_filter_answers_the_same_through_the_boundary() {
         for button in ["play", "save", "stop"] {
             same_both_ways_with::<builtin::Animation3d>(&s, |p| {
                 p.set(button, ParamValue::Bool(true))
+            });
+        }
+        // A save at each size: the size crosses in the animation's output.
+        for size in [0, 1] {
+            same_both_ways_with::<builtin::Animation3d>(&s, |p| {
+                p.set("save", ParamValue::Bool(true));
+                p.set("resolution", ParamValue::Choice(size));
             });
         }
     }
