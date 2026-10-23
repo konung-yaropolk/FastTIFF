@@ -52,6 +52,7 @@ mod overlay;
 // which the browser build does not have.
 mod plot;
 mod plugins_ui;
+mod region_pick;
 mod scale;
 mod scroll;
 mod widgets;
@@ -628,6 +629,9 @@ enum PluginProduct {
     Animate(Box<fasttiff_plugin_api::Animation>),
     /// Stop the plugin's own animation.
     StopAnimation,
+    /// Have the user draw a rectangle, with this prompt in the status line,
+    /// then run the plugin again with it. See [`region_pick`].
+    SelectRegion(String),
 }
 
 /// What a filter plugin produced, carried back from its worker.
@@ -664,6 +668,7 @@ fn finish_outcome(
         // carrying them out happens frame by frame on the interface thread.
         Outcome::Animate(a) => Ok(PluginProduct::Animate(a)),
         Outcome::StopAnimation => Ok(PluginProduct::StopAnimation),
+        Outcome::SelectRegion { prompt } => Ok(PluginProduct::SelectRegion(prompt)),
         Outcome::NewDocument(image) => {
             Job::begin_phase(label, progress, "Encoding result");
             let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
@@ -1288,6 +1293,12 @@ pub struct ViewerApp {
     /// feed, so closing the window takes the tool away with it rather than
     /// leaving a selection behind that nothing is measuring.
     plot: Option<plot::PlotWindow>,
+    /// A rectangle being drawn because a plugin asked for one. See
+    /// [`region_pick`].
+    region_pick: Option<region_pick::RegionPick>,
+    /// The rectangle a plugin asked for, drawn and confirmed, waiting for the
+    /// run it is the selection of: which plugin, and the regions.
+    picked: Option<(usize, Vec<fasttiff_plugin_api::Roi>)>,
 
     // --- window chrome ------------------------------------------------------
     /// The window title last sent via `ViewportCommand::Title`. Native only —
@@ -1441,6 +1452,8 @@ impl ViewerApp {
             open_rx,
             job: None,
             plot: None,
+            region_pick: None,
+            picked: None,
             last_title: None,
             good_status: None,
             show_metadata: false,
@@ -1584,6 +1597,8 @@ impl ViewerApp {
         {
             self.plot = None;
         }
+        // A rectangle being drawn for a plugin was drawn on the last picture.
+        self.region_pick = None;
         self.view.resize_to_zoom = false;
         // A glide belongs to the picture that was on screen; carrying one into
         // a new file would slide the fresh image away from the zoom it just
@@ -1952,12 +1967,20 @@ impl ViewerApp {
         // The regions belong to the plot this plugin is feeding, if it has one.
         // A different plugin gets none — a selection drawn for one measurement
         // is not an input to an unrelated one.
-        let selection = self
-            .plot
-            .as_ref()
-            .filter(|p| p.plugin == index)
-            .map(|p| p.rois.clone())
-            .unwrap_or_default();
+        //
+        // Or the rectangle the plugin asked to have drawn, which is its alone.
+        let picked = self
+            .picked
+            .take()
+            .filter(|(plugin, _)| *plugin == index)
+            .map(|(_, rois)| rois);
+        let selection = picked.unwrap_or_else(|| {
+            self.plot
+                .as_ref()
+                .filter(|p| p.plugin == index)
+                .map(|p| p.rois.clone())
+                .unwrap_or_default()
+        });
         // The source's own tables, so a result that keeps its channels opens
         // looking like the document it came from. Taken now, with the rest of
         // the run's inputs, rather than when the result lands — the user may
@@ -2086,6 +2109,9 @@ impl ViewerApp {
             Ok(PluginProduct::Saved(path)) => self.report_done(format!("{name}: wrote {path}")),
             Ok(PluginProduct::Animate(a)) => self.start_animation(index, &name, *a),
             Ok(PluginProduct::StopAnimation) => self.stop_animation_of(index),
+            Ok(PluginProduct::SelectRegion(prompt)) => {
+                self.start_region_pick(index, params, &name, prompt)
+            }
             Err(e) => self.core.status = Some(format!("{name}: {e}")),
         }
     }
@@ -3864,6 +3890,7 @@ impl ViewerApp {
         // 3D or moving the camera this frame has been applied, and before the
         // 3D view is drawn with the pose it decides.
         self.tick_animation(ui.ctx());
+        self.tick_region_pick(ui.ctx());
 
         // Central panel: the image is drawn at exactly `image_size × zoom`. When
         // that fits the panel it's centered (letterboxed); when it's larger
@@ -3998,7 +4025,12 @@ impl ViewerApp {
                 // draws rather than pans. Every other button still pans — see the
                 // rule below — and the tool is only armed while its window is
                 // open, so this cannot strand someone with an unpannable view.
-                let selecting = self.plot.as_ref().is_some_and(|p| p.wants_regions()) && !pinching;
+                //
+                // A rectangle a plugin asked for takes it the same way, and
+                // ahead of a plot: it is what the user was just asked to do.
+                let selecting = (self.region_pick.is_some()
+                    || self.plot.as_ref().is_some_and(|p| p.wants_regions()))
+                    && !pinching;
 
                 // The navigator's frame box, worked out before anything acts on a
                 // drag: a press that lands on the map has to claim the gesture
@@ -4192,7 +4224,23 @@ impl ViewerApp {
                 // the other buttons pan (see the rule above), and a drag that
                 // began on the map is moving the view rather than measuring
                 // anything. Without either guard one gesture would do two things.
-                if selecting && !on_map {
+                if let (true, Some(pick)) = (selecting && !on_map, self.region_pick.as_mut()) {
+                    let primary = egui::PointerButton::Primary;
+                    let px = response
+                        .interact_pointer_pos()
+                        .map(|pos| plot::pixel_at(pos, origin, self.view.zoom));
+                    let pressed = ui
+                        .input(|i| i.pointer.press_origin())
+                        .map(|pos| plot::pixel_at(pos, origin, self.view.zoom));
+                    let buttons = (
+                        response.drag_started_by(primary),
+                        response.dragged_by(primary),
+                        response.drag_stopped(),
+                    );
+                    if let Some(roi) = pick.track(px, pressed, buttons, (w, h)) {
+                        self.core.status = Some(pick.drawn_message(&roi));
+                    }
+                } else if selecting && !on_map {
                     let zoom = self.view.zoom;
                     let add = ui.input(|i| i.modifiers.shift);
                     if let Some(win) = self.plot.as_mut() {
@@ -4246,7 +4294,15 @@ impl ViewerApp {
 
                 // The regions, over the picture and clipped to the panel like
                 // everything else here.
-                if let Some(win) = self.plot.as_ref().filter(|p| p.wants_regions()) {
+                if let Some(pick) = self.region_pick.as_ref() {
+                    region_pick::draw(
+                        &ui.painter().with_clip_rect(panel_rect),
+                        pick,
+                        origin,
+                        self.view.zoom,
+                        (w, h),
+                    );
+                } else if let Some(win) = self.plot.as_ref().filter(|p| p.wants_regions()) {
                     plot::draw_rois(
                         &ui.painter().with_clip_rect(panel_rect),
                         win,

@@ -23,8 +23,8 @@
 //! that's `prepare` then `paint`, elsewhere just call them in order.
 
 use crate::{
-    ChannelKind, ChannelUniform, Lut, VolumeImage, VolumeInterp, VolumeKind, VolumeParams,
-    MAX_CHANNELS,
+    capture_tiles, tile_params, ChannelKind, ChannelUniform, Lut, VolumeImage, VolumeInterp,
+    VolumeKind, VolumeParams, CAPTURE_TILE, MAX_CHANNELS,
 };
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
@@ -144,24 +144,35 @@ pub struct ImageRenderResources {
     /// The format the pipelines were built for, which an offscreen render has
     /// to use too.
     target_format: wgpu::TextureFormat,
-    /// The offscreen target and readback buffer of `capture_volume`, kept from
-    /// one capture to the next while the size stays the same.
-    capture: Option<VolumeCapture>,
+    /// The tile texture and readback buffer `capture_volume` renders through,
+    /// made on the first capture and kept.
+    capture_target: Option<CaptureTarget>,
+    /// The capture under way, if one is.
+    capture: Option<CaptureJob>,
 }
 
-/// An offscreen render of the volume and the buffer it is read back through.
-struct VolumeCapture {
+/// One tile's worth of render target, and the buffer it is read back through.
+struct CaptureTarget {
     texture: wgpu::Texture,
     buffer: wgpu::Buffer,
+    /// Bytes per row in `buffer`: a tile's row padded to wgpu's copy alignment.
+    padded_row: u32,
+}
+
+/// An off-screen capture under way, a tile at a time (see [`CAPTURE_TILE`]).
+struct CaptureJob {
     width: u32,
     height: u32,
-    /// Bytes per row in `buffer`: a row of pixels padded to wgpu's copy alignment.
-    padded_row: u32,
-    /// Set by the map callback when the readback has landed (or failed).
-    /// `None` while it is on its way.
+    /// The params it was asked for with, kept: the view's own may move on
+    /// while the tiles are being rendered.
+    params: VolumeParams,
+    tiles: Vec<(u32, u32, u32, u32)>,
+    /// The tile being rendered and read back; those before it are in `rgba`.
+    next: usize,
+    rgba: Vec<u8>,
+    /// Set by the map callback when the tile's readback has landed (or
+    /// failed). `None` while it is on its way.
     mapped: Arc<Mutex<Option<Result<(), String>>>>,
-    /// Whether a capture has been submitted and not yet taken.
-    in_flight: bool,
 }
 
 impl ImageRenderResources {
@@ -316,6 +327,7 @@ impl ImageRenderResources {
             volume_interp_mode: 1, // linear
             volume_params: None,
             target_format,
+            capture_target: None,
             capture: None,
         }
     }
@@ -474,7 +486,13 @@ impl ImageRenderResources {
     /// Call once per 3D frame, before `paint_volume` (under egui_wgpu this is
     /// the callback's `prepare` step). No-op until `set_volume_params` has run.
     pub fn write_volume_uniform(&self) {
-        let Some(p) = self.volume_params else { return };
+        if let Some(p) = self.volume_params {
+            self.write_volume_uniform_with(&p);
+        }
+    }
+
+    /// Marshal `p` + the interp mode into the volume uniform buffer.
+    fn write_volume_uniform_with(&self, p: &VolumeParams) {
         let mut gpu = VolParamsGpu {
             channels: [[0.0; 4]; MAX_CHANNELS],
             cam_eye: [p.eye[0], p.eye[1], p.eye[2], 0.0],
@@ -509,15 +527,20 @@ impl ImageRenderResources {
     }
 
     /// Render the volume off screen at `width` x `height` pixels, with the
-    /// params last given to `set_volume_params`, and start reading it back.
+    /// params last given to `set_volume_params`, and read it back.
     ///
     /// The ray-march has no resolution of its own (every pixel is a ray), so
     /// this is the view at any size: sharper than the window when larger, and
     /// with nothing the host draws over the view in it. The aspect ratio is
     /// taken from the size, not from the params.
     ///
-    /// The picture arrives later, from [`take_volume_capture`]: a GPU readback
-    /// cannot be waited for in a browser. One capture at a time.
+    /// Rendered in tiles of [`CAPTURE_TILE`] pixels, one GPU job and one
+    /// readback each, so that no single job runs long enough for the system
+    /// to reset the GPU, and GPU memory holds one tile rather than the
+    /// picture. The first tile starts here; [`take_volume_capture`] collects
+    /// each as it lands and starts the next, and returns the picture once the
+    /// last is in. A readback cannot be waited for in a browser, so a capture
+    /// takes a frame or more a tile. One capture at a time.
     ///
     /// [`take_volume_capture`]: Self::take_volume_capture
     pub fn capture_volume(&mut self, width: u32, height: u32) -> Result<(), String> {
@@ -536,28 +559,96 @@ impl ImageRenderResources {
                 self.target_format
             ));
         }
-        if self.capture.as_ref().is_some_and(|c| c.in_flight) {
+        if self.capture.is_some() {
             return Err("the last capture has not been taken yet".into());
         }
-        let reuse = self
-            .capture
-            .as_ref()
-            .is_some_and(|c| (c.width, c.height) == (width, height));
-        if !reuse {
-            self.capture = Some(self.create_capture(width, height));
+        if self.capture_target.is_none() {
+            self.capture_target = Some(self.create_capture_target());
         }
-
-        // The uniform for this size, then the params put back as they were:
-        // the view's own paint writes the uniform again before its draw.
-        self.volume_params = Some(VolumeParams {
-            aspect: width as f32 / height as f32,
-            ..params
+        self.capture = Some(CaptureJob {
+            width,
+            height,
+            params: VolumeParams {
+                aspect: width as f32 / height as f32,
+                ..params
+            },
+            tiles: capture_tiles(width, height),
+            next: 0,
+            rgba: vec![0; width as usize * height as usize * 4],
+            mapped: Arc::new(Mutex::new(None)),
         });
-        self.write_volume_uniform();
-        self.volume_params = Some(params);
+        self.submit_capture_tile();
+        Ok(())
+    }
 
-        let capture = self.capture.as_mut().expect("created above");
-        let view = capture.texture.create_view(&Default::default());
+    /// The picture [`capture_volume`] asked for, once every tile of it has
+    /// arrived: `None` while it is still being rendered, or when none was
+    /// asked for. Call once a frame until it answers; each call collects the
+    /// tile that has landed and starts the next.
+    ///
+    /// [`capture_volume`]: Self::capture_volume
+    pub fn take_volume_capture(&mut self) -> Option<Result<VolumeImage, String>> {
+        self.capture.as_ref()?;
+        // Drives the map callback on native; in a browser the browser does.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        let job = self.capture.as_mut().expect("checked above");
+        let result = job
+            .mapped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()?;
+        if let Err(why) = result {
+            self.capture = None;
+            return Some(Err(format!("the render could not be read back: {why}")));
+        }
+        let target = self.capture_target.as_ref().expect("made with the job");
+        let order = swizzle(self.target_format).expect("checked when captured");
+        let (x, y, w, h) = job.tiles[job.next];
+        let stride = job.width as usize * 4;
+        {
+            let data = target.buffer.slice(..).get_mapped_range();
+            for (r, row) in data
+                .chunks(target.padded_row as usize)
+                .take(h as usize)
+                .enumerate()
+            {
+                let at = (y as usize + r) * stride + x as usize * 4;
+                let out = &mut job.rgba[at..at + w as usize * 4];
+                for (o, px) in out.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+                    o.copy_from_slice(&[px[order[0]], px[order[1]], px[order[2]], 255]);
+                }
+            }
+        }
+        target.buffer.unmap();
+        job.next += 1;
+        if job.next < job.tiles.len() {
+            self.submit_capture_tile();
+            return None;
+        }
+        let job = self.capture.take().expect("checked above");
+        Some(Ok(VolumeImage {
+            width: job.width,
+            height: job.height,
+            rgba: job.rgba,
+        }))
+    }
+
+    /// Render the job's next tile into the tile texture, copy it to the
+    /// readback buffer and start mapping it.
+    fn submit_capture_tile(&mut self) {
+        let Some(job) = self.capture.as_ref() else {
+            return;
+        };
+        let tile = job.tiles[job.next];
+        let params = tile_params(&job.params, (job.width, job.height), tile);
+        let mapped = Arc::clone(&job.mapped);
+        let (_, _, w, h) = tile;
+        // This tile's uniform, ahead of its submit. The view's own paint
+        // writes the uniform again before its draw, from its own params.
+        self.write_volume_uniform_with(&params);
+
+        let target = self.capture_target.as_ref().expect("made with the job");
+        let view = target.texture.create_view(&Default::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -580,80 +671,48 @@ impl ImageRenderResources {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
+            // An edge tile is drawn into the corner of the tile texture, at
+            // its own size, so its pixels are the picture's pixels.
+            pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
             pass.set_pipeline(&self.volume_pipeline);
             pass.set_bind_group(0, &self.volume_bind_group, &[]);
             pass.draw(0..6, 0..1);
         }
         encoder.copy_texture_to_buffer(
-            capture.texture.as_image_copy(),
+            target.texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
-                buffer: &capture.buffer,
+                buffer: &target.buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(capture.padded_row),
+                    bytes_per_row: Some(target.padded_row),
                     rows_per_image: None,
                 },
             },
-            capture.texture.size(),
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         self.queue.submit(Some(encoder.finish()));
 
-        *capture.mapped.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        let mapped = Arc::clone(&capture.mapped);
-        capture
+        *mapped.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let slot = Arc::clone(&mapped);
+        target
             .buffer
             .slice(..)
             .map_async(wgpu::MapMode::Read, move |result| {
-                *mapped.lock().unwrap_or_else(|e| e.into_inner()) =
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some(result.map_err(|e| e.to_string()));
             });
-        capture.in_flight = true;
-        Ok(())
     }
 
-    /// The picture [`capture_volume`] asked for, once it has arrived: `None`
-    /// while it is still on its way, or when none was asked for. Call once a
-    /// frame until it answers.
-    ///
-    /// [`capture_volume`]: Self::capture_volume
-    pub fn take_volume_capture(&mut self) -> Option<Result<VolumeImage, String>> {
-        let capture = self.capture.as_mut().filter(|c| c.in_flight)?;
-        // Drives the map callback on native; in a browser the browser does.
-        let _ = self.device.poll(wgpu::PollType::Poll);
-        let result = capture
-            .mapped
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()?;
-        capture.in_flight = false;
-        if let Err(why) = result {
-            return Some(Err(format!("the render could not be read back: {why}")));
-        }
-        let order = swizzle(self.target_format).expect("checked when captured");
-        let (w, h) = (capture.width as usize, capture.height as usize);
-        let mut rgba = Vec::with_capacity(w * h * 4);
-        {
-            let data = capture.buffer.slice(..).get_mapped_range();
-            for row in data.chunks(capture.padded_row as usize).take(h) {
-                for px in row[..w * 4].chunks_exact(4) {
-                    rgba.extend_from_slice(&[px[order[0]], px[order[1]], px[order[2]], 255]);
-                }
-            }
-        }
-        capture.buffer.unmap();
-        Some(Ok(VolumeImage {
-            width: capture.width,
-            height: capture.height,
-            rgba,
-        }))
-    }
-
-    fn create_capture(&self, width: u32, height: u32) -> VolumeCapture {
+    fn create_capture_target(&self) -> CaptureTarget {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("volume capture"),
+            label: Some("volume capture tile"),
             size: wgpu::Extent3d {
-                width,
-                height,
+                width: CAPTURE_TILE,
+                height: CAPTURE_TILE,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -663,21 +722,17 @@ impl ImageRenderResources {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let padded_row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let padded_row = (CAPTURE_TILE * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("volume capture readback"),
-            size: padded_row as u64 * height as u64,
+            size: padded_row as u64 * CAPTURE_TILE as u64,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        VolumeCapture {
+        CaptureTarget {
             texture,
             buffer,
-            width,
-            height,
             padded_row,
-            mapped: Arc::new(Mutex::new(None)),
-            in_flight: false,
         }
     }
 

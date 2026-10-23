@@ -29,7 +29,12 @@
 //! The size is chosen once, when the first frame is rendered: the shape of the
 //! view on screen, made as large as it takes for every pixel of the stack in
 //! view to be at least a pixel of the movie, and never smaller than the view
-//! is on screen. See [`movie_size`].
+//! is on screen. See [`movie_size`]. Or, when the plugin asks for
+//! `MovieResolution::Window`, the view's own size.
+//!
+//! The renderer draws a frame in tiles, a tile a frame of the interface, so a
+//! large frame takes several before it comes back. See
+//! `scivis_render::CAPTURE_TILE` for why.
 //!
 //! A readback lands a frame or more after it is asked for, and only then is
 //! the next pose rendered, so every pose is in the movie exactly once.
@@ -40,7 +45,7 @@
 
 use fast_tiff_lib::{Compression, SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::camera::{CameraState, NavMode, OrbitPoint};
-use fasttiff_plugin_api::{Animation, AnimationOutput};
+use fasttiff_plugin_api::{Animation, AnimationOutput, MovieResolution};
 use scivis_render::VolumeImage;
 use std::io::{Seek, Write};
 #[cfg(not(target_arch = "wasm32"))]
@@ -170,6 +175,8 @@ pub(super) struct Recording {
     /// Frames rendered so far.
     pub(super) done: usize,
     pub(super) dest: Destination,
+    /// How large the plugin asked the frames to be.
+    pub(super) resolution: MovieResolution,
 }
 
 /// An animation being carried out.
@@ -237,6 +244,7 @@ impl Running {
         generation: u64,
         recording: Option<(Destination, FrameSink)>,
     ) -> Running {
+        let resolution = animation.resolution;
         Running {
             plugin,
             poses: animation.poses.into_iter().map(|p| p.rotation).collect(),
@@ -251,6 +259,7 @@ impl Running {
                 frames,
                 done: 0,
                 dest,
+                resolution,
             }),
         }
     }
@@ -865,7 +874,17 @@ impl super::ViewerApp {
         let movie = match (self.volume_rect, self.core.stack.as_ref()) {
             (Some(rect), Some(stack)) => {
                 let (w, h) = stack.dimensions().unwrap_or((1, 1));
-                let detail = self.core.volume.detail_height((w, h, stack.volume_depth()));
+                // At window resolution the movie is the view's own size,
+                // which is what `movie_size` makes of no detail to keep.
+                let window = run
+                    .recording
+                    .as_ref()
+                    .is_some_and(|r| r.resolution == MovieResolution::Window);
+                let detail = if window {
+                    0.0
+                } else {
+                    self.core.volume.detail_height((w, h, stack.volume_depth()))
+                };
                 movie_size((rect.width() * ppp, rect.height() * ppp), detail, max_side)
             }
             _ => None,

@@ -513,7 +513,7 @@ impl Plugin for Stabilize {
             planes,
             channel_colors: Vec::new(),
             metadata: Some(host.stack_info().clone()),
-            name: format!("{}-stabilized", host.stack_info().name),
+            name: format!("{}-stabilized", host.stack_info().stem()),
         })))
     }
 }

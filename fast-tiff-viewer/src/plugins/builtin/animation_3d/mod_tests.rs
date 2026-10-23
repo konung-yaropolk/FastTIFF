@@ -213,7 +213,19 @@ fn precession_does_not_spin_the_volume_about_its_own_axis() {
 fn the_dialog_offers_play_then_stop_and_tilt_only_for_precession() {
     let host = Fake::new(10);
     let d = Animation3d.params(&host);
-    assert_eq!(keys(&d), ["motion", "speed", "cycle", "play", "save"]);
+    assert_eq!(
+        keys(&d),
+        ["motion", "speed", "cycle", "play", "resolution", "save"]
+    );
+    // Radio buttons, just before the button they belong to, at Max.
+    let res = d.iter().find(|d| d.key == "resolution").unwrap();
+    assert_eq!(
+        res.kind,
+        ParamKind::Radio {
+            default: 1,
+            options: vec!["Window resolution".into(), "Max resolution".into()],
+        }
+    );
     assert!(d.iter().any(|d| d.label.contains("360 frames")));
 
     let mut host = Fake::new(10);
@@ -222,7 +234,15 @@ fn the_dialog_offers_play_then_stop_and_tilt_only_for_precession() {
     let d = Animation3d.params(&host);
     assert_eq!(
         keys(&d),
-        ["motion", "tilt", "speed", "cycle", "play", "save"]
+        [
+            "motion",
+            "tilt",
+            "speed",
+            "cycle",
+            "play",
+            "resolution",
+            "save"
+        ]
     );
     assert!(d.iter().any(|d| d.label.contains("120 frames")));
 
@@ -261,6 +281,16 @@ fn each_button_asks_for_what_it_says() {
             },
             "a save with no path asks the host to ask where"
         ),
+        other => panic!("{other:?}"),
+    }
+    match Animation3d.run(&mut host, &save).expect("save") {
+        Outcome::Animate(a) => assert_eq!(a.resolution, MovieResolution::Max),
+        other => panic!("{other:?}"),
+    }
+    let mut window = save.clone();
+    window.set("resolution", ParamValue::Choice(0));
+    match Animation3d.run(&mut host, &window).expect("save") {
+        Outcome::Animate(a) => assert_eq!(a.resolution, MovieResolution::Window),
         other => panic!("{other:?}"),
     }
 

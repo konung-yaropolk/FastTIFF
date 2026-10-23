@@ -594,10 +594,14 @@ with the same per-channel LUTs and contrast as the 2D view.
   any drag, scroll or key on the view — or going back to 2D — stops it and puts
   the view back. **Save animation as TIFF…** renders exactly one cycle, every
   frame once with no repeat where it loops, as an RGB movie at 30 frames a
-  second. Each frame is rendered off screen in the shape of the 3D view, large
-  enough that every pixel of the stack in view gets at least a pixel of its own
-  (never smaller than the view on screen, up to 8192 on the long side), and
-  without the coordinate box or anything else drawn over the view.
+  second. **Save in** picks the size: *Window resolution* is the 3D view's size
+  on screen; *Max resolution* (the default) is large enough that every pixel
+  of the stack in view gets at least a pixel of its own, never smaller than the
+  view, up to 8192 on the long side. Either way each frame is rendered off
+  screen, in the shape of the 3D view and without the coordinate box or
+  anything else drawn over it, in window-sized tiles so that a large frame of
+  a large volume never asks the GPU for one job long enough for Windows to
+  reset it.
 - Runs on both the glow and wgpu backends.
 
 ## Plugins
@@ -620,7 +624,11 @@ Three kinds:
   declares its dialog as a list of typed controls and the host draws it, so
   there is no UI toolkit in a plugin's dependency tree — and a dialog that
   declares buttons becomes a panel that stays open, each button a run of its
-  own.
+  own. A tool whose input is a region can instead ask for one: the host shows
+  its prompt in the status line, the user drags a rectangle and presses Enter
+  (Esc cancels), and the plugin runs again with it. Built-in results are named
+  after the file without its extension: `cells-inverted`, not
+  `cells.tif-inverted`.
 - **Importers** read formats FastTIFF does not know. An importer declares the
   extensions it handles, and the host adds them to the Open dialog and to
   drag-and-drop *before the plugin has run*; opening such a file calls the
@@ -663,7 +671,7 @@ cargo test --manifest-path plugins/example/Cargo.toml
 
 ### Built-in plugins, and choosing which get compiled in
 
-Some plugins ship *inside* the binary rather than as libraries: Invert, Z
+Some plugins ship *inside* the binary rather than as libraries: Crop, Invert, Z
 Project, Plot third axis, the three Slice tools, 3D animation, Generate PSF,
 Deconvolve,
 suite2p stabilization, TurboReg stabilization, the PNG importer/exporter, the
@@ -688,7 +696,7 @@ cargo build --release -p FastTIFF --no-default-features \
 
 A plugin left out is *gone*: no module, no menu entry, and no dependency of its
 own compiled or linked. Two carry enough to notice — `plugin-deconvolve` brings
-an FFT, and `plugin-stabilize` and `plugin-turboreg` a registration crate
+an FFT, and `plugin-suite2p-stabilize` and `plugin-turboreg-stabilize` a registration crate
 each. Dropping the FFT and suite2p takes about 460 KB off the web bundle. `plugin-dicom` brings a JPEG decoder, for
 the two JPEG codecs DICOM actually uses. `plugin-nifti` brings only gzip, which
 the Deflate TIFF codec already needs, so it costs nothing — and the same is true
@@ -696,7 +704,7 @@ of `plugin-oir`, whose `oir-reader` crate parses its XML and maps its files with
 the quick-xml and memmap2 that fast-tiff-lib already uses. (A plugin
 that reuses a dependency the library needs anyway cannot be dropped from the
 graph by turning the plugin off; `cargo tree --invert` shows who the real user
-is.) `plugin-stabilize` is also the only
+is.) `plugin-suite2p-stabilize` is also the only
 GPL-3 code in the tree, which is why `fast-tiff-viewer` is licensed GPL-3 where
 the other library crates are MPL-2.0.
 
@@ -948,6 +956,8 @@ this is the one-line formula to change.
 - Done: 3D settings window is mode-aware and stays on top
 - Done: OIR reader split out as the `oir-reader` crate, memory-mapped by default with a buffered fallback
 - Done: 3D animation plugin (rotate about X/Y, precession), saved as a seamless TIFF movie; plugin API for animating the 3D view and for dialog buttons
+- Done: Crop (Plugins ▸ Image ▸ Crop): drag a rectangle, Enter to crop every channel, slice and frame in X and Y; plugin API for asking the user for a region
+- Done: result names drop the source file's extension
 - publish in Brew
 - Add 3D volume save in best suitable format for the gpu rendering (not necessary now, need to study the idea)
 

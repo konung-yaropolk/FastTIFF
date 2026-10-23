@@ -206,7 +206,17 @@ carries its own size and fields are only ever appended, so an older plugin runs
 on a newer host and a newer plugin runs on an older one — each side reads only
 the fields both agree exist.
 
-The current minor is **1.5**, which added animations of the 3D view
+The current minor is **1.6**, which added `Outcome::SelectRegion`: return it
+with a prompt and the host has the user drag a rectangle and press Enter, then
+runs the plugin again with the rectangle as its `selection()`. An older host
+refuses it as an outcome it does not know. Also `ParamKind::Radio`, a choice
+drawn as radio buttons (an older host draws a label instead), and
+`Animation::resolution`, the size a saved movie is rendered at
+(`MovieResolution::Max` or `Window`; an older host refuses a `Window` save).
+Use `StackInfo::stem()` (the file name without its extension) to name a
+result.
+
+Minor 1.5 added animations of the 3D view
 (`Outcome::Animate`, `Outcome::StopAnimation`, `HostContext::animating`) and
 dialog buttons (`ParamKind::Action`). On an older host an animation is refused
 with a message naming the version it needs, a Stop has nothing to stop, and a

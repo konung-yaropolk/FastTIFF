@@ -16,8 +16,8 @@
 //! this backend deliberately does not second-guess it.
 
 use crate::{
-    ChannelKind, ChannelUniform, Lut, VolumeImage, VolumeInterp, VolumeKind, VolumeParams,
-    MAX_CHANNELS,
+    capture_tiles, tile_params, ChannelKind, ChannelUniform, Lut, VolumeImage, VolumeInterp,
+    VolumeKind, VolumeParams, CAPTURE_TILE, MAX_CHANNELS,
 };
 use glow::HasContext as _;
 use std::sync::Arc;
@@ -809,6 +809,10 @@ impl ImageRenderResources {
     /// whose readback is not. The host's framebuffer, viewport and scissor are
     /// put back as they were.
     ///
+    /// Rendered in tiles of [`CAPTURE_TILE`] pixels, each read back before the
+    /// next is drawn, so that no single job runs long enough for the system to
+    /// reset the GPU, and GPU memory holds one tile rather than the picture.
+    ///
     /// [`take_volume_capture`]: Self::take_volume_capture
     pub fn capture_volume(&mut self, width: u32, height: u32) -> Result<(), String> {
         let Some(params) = self.volume.params else {
@@ -823,11 +827,8 @@ impl ImageRenderResources {
         if self.capture.is_some() {
             return Err("the last capture has not been taken yet".into());
         }
-        self.volume.params = Some(VolumeParams {
-            aspect: width as f32 / height as f32,
-            ..params
-        });
-        let result = unsafe { self.render_offscreen(width, height) };
+        let result = unsafe { self.render_offscreen(&params, width, height) };
+        // Each tile set its own; the view's are put back for its next paint.
         self.volume.params = Some(params);
         self.capture = Some(result);
         Ok(())
@@ -841,8 +842,13 @@ impl ImageRenderResources {
         self.capture.take()
     }
 
-    unsafe fn render_offscreen(&self, width: u32, height: u32) -> Result<VolumeImage, String> {
-        let gl: &glow::Context = &self.gl;
+    unsafe fn render_offscreen(
+        &mut self,
+        params: &VolumeParams,
+        width: u32,
+        height: u32,
+    ) -> Result<VolumeImage, String> {
+        let gl = Arc::clone(&self.gl);
         let previous_fb = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);
         let mut previous_viewport = [0i32; 4];
         gl.get_parameter_i32_slice(glow::VIEWPORT, &mut previous_viewport);
@@ -854,8 +860,8 @@ impl ImageRenderResources {
             glow::TEXTURE_2D,
             0,
             glow::RGBA8 as i32,
-            width as i32,
-            height as i32,
+            CAPTURE_TILE as i32,
+            CAPTURE_TILE as i32,
             0,
             glow::RGBA,
             glow::UNSIGNED_BYTE,
@@ -878,32 +884,47 @@ impl ImageRenderResources {
         );
         let result = if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE
         {
-            Err(format!(
-                "cannot render a {width} x {height} picture off screen"
-            ))
+            Err("cannot render the volume off screen".to_string())
         } else {
             gl.disable(glow::SCISSOR_TEST);
-            gl.viewport(0, 0, width as i32, height as i32);
-            gl.clear_color(0.0, 0.0, 0.0, 1.0);
-            gl.clear(glow::COLOR_BUFFER_BIT);
-            self.paint_volume(gl);
-            let (w, h) = (width as usize, height as usize);
-            let mut pixels = vec![0u8; w * h * 4];
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
-            gl.read_pixels(
-                0,
-                0,
-                width as i32,
-                height as i32,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelPackData::Slice(Some(&mut pixels)),
-            );
-            // GL's rows run bottom to top.
-            let mut rgba = Vec::with_capacity(pixels.len());
-            for row in pixels.chunks_exact(w * 4).rev() {
-                for px in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+            let whole = VolumeParams {
+                aspect: width as f32 / height as f32,
+                ..*params
+            };
+            let stride = width as usize * 4;
+            let mut rgba = vec![0u8; stride * height as usize];
+            let mut pixels = vec![0u8; (CAPTURE_TILE * CAPTURE_TILE * 4) as usize];
+            for tile in capture_tiles(width, height) {
+                let (x, y, w, h) = tile;
+                self.volume.params = Some(tile_params(&whole, (width, height), tile));
+                gl.viewport(0, 0, w as i32, h as i32);
+                gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+                self.paint_volume(&gl);
+                let tile_bytes = &mut pixels[..(w * h * 4) as usize];
+                // Waits for the tile: the next is not drawn until this one is
+                // done, which is what keeps each job short.
+                gl.read_pixels(
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelPackData::Slice(Some(tile_bytes)),
+                );
+                // GL's rows run bottom to top.
+                for (r, row) in pixels[..(w * h * 4) as usize]
+                    .chunks_exact(w as usize * 4)
+                    .rev()
+                    .enumerate()
+                {
+                    let at = (y as usize + r) * stride + x as usize * 4;
+                    let out = &mut rgba[at..at + w as usize * 4];
+                    for (o, px) in out.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+                        o.copy_from_slice(&[px[0], px[1], px[2], 255]);
+                    }
                 }
             }
             Ok(VolumeImage {

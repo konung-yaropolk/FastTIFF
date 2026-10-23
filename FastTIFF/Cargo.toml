@@ -1,6 +1,6 @@
 [package]
 name = "FastTIFF"
-version = "1.26.0"
+version = "1.26.1"
 edition = "2021"
 description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering."
 license = "GPL-3.0-only"
@@ -53,8 +53,9 @@ builtin-plugins = [
     "plugin-plot-axis",
     "plugin-stack-tools",
     "plugin-animation-3d",
-    "plugin-stabilize",
-    "plugin-turboreg",
+    "plugin-crop",
+    "plugin-suite2p-stabilize",
+    "plugin-turboreg-stabilize",
     "plugin-deconvolve",
     "plugin-png",
     "plugin-oir",
@@ -66,8 +67,9 @@ plugin-zproject = ["fast-tiff-viewer/plugin-zproject"]
 plugin-plot-axis = ["fast-tiff-viewer/plugin-plot-axis"]
 plugin-stack-tools = ["fast-tiff-viewer/plugin-stack-tools"]
 plugin-animation-3d = ["fast-tiff-viewer/plugin-animation-3d"]
-plugin-stabilize = ["fast-tiff-viewer/plugin-stabilize"]
-plugin-turboreg = ["fast-tiff-viewer/plugin-turboreg"]
+plugin-crop = ["fast-tiff-viewer/plugin-crop"]
+plugin-suite2p-stabilize = ["fast-tiff-viewer/plugin-suite2p-stabilize"]
+plugin-turboreg-stabilize = ["fast-tiff-viewer/plugin-turboreg-stabilize"]
 plugin-deconvolve = ["fast-tiff-viewer/plugin-deconvolve"]
 plugin-png = ["fast-tiff-viewer/plugin-png"]
 plugin-oir = ["fast-tiff-viewer/plugin-oir"]

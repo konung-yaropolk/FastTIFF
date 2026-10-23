@@ -116,7 +116,7 @@ pub(super) fn drag_region(
     Roi::from_corners(lo, hi, width, height).map(|r| r.with_shape(shape))
 }
 
-fn roi_rect(roi: &Roi, origin: Pos2, zoom: f32) -> Rect {
+pub(super) fn roi_rect(roi: &Roi, origin: Pos2, zoom: f32) -> Rect {
     Rect::from_min_size(
         origin + Vec2::new(roi.x as f32 * zoom, roi.y as f32 * zoom),
         Vec2::new(roi.w as f32 * zoom, roi.h as f32 * zoom),
@@ -128,7 +128,7 @@ fn roi_rect(roi: &Roi, origin: Pos2, zoom: f32) -> Rect {
 /// An ellipse is a closed polyline because egui has no ellipse primitive and
 /// `circle_stroke` cannot be squashed. Forty segments is past where the corners
 /// show at any zoom this view reaches.
-fn stroke_roi(painter: &egui::Painter, rect: Rect, shape: Shape, stroke: Stroke) {
+pub(super) fn stroke_roi(painter: &egui::Painter, rect: Rect, shape: Shape, stroke: Stroke) {
     match shape {
         Shape::Rect => {
             painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);

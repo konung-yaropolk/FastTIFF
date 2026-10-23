@@ -1,6 +1,6 @@
 [package]
 name = "fast-tiff-viewer"
-version = "0.26.0"
+version = "0.26.1"
 edition = "2021"
 description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
 # GPL-3.0, not MPL-2.0 as the rest of the library crates are. The built-in
@@ -35,12 +35,12 @@ default = ["threads", "mmap", "codec-zstd", "builtin-plugins"]
 # switch: a plugin left out of it is absent from the binary, its menu entry is
 # never drawn, and anything it alone depended on is not compiled or linked —
 # which is the point, since `plugin-deconvolve` carries an FFT and
-# `plugin-stabilize` carries a whole registration crate.
+# `plugin-suite2p-stabilize` carries a whole registration crate.
 #
 # Removing one is a product decision rather than a build tweak, so two of them
 # are worth calling out:
 #
-# * `plugin-stabilize` is why this crate is GPL-3 (see the licence note above).
+# * `plugin-suite2p-stabilize` is why this crate is GPL-3 (see the licence note above).
 #   It is the only GPL-3 thing in the tree; a build without it links nothing
 #   copyleft, though relicensing the crate would still be a separate decision.
 # * `plugin-png` is the only importer *and* exporter a browser build has.
@@ -56,8 +56,9 @@ builtin-plugins = [
     "plugin-plot-axis",
     "plugin-stack-tools",
     "plugin-animation-3d",
-    "plugin-stabilize",
-    "plugin-turboreg",
+    "plugin-crop",
+    "plugin-suite2p-stabilize",
+    "plugin-turboreg-stabilize",
     "plugin-deconvolve",
     "plugin-png",
     "plugin-oir",
@@ -73,18 +74,20 @@ plugin-stack-tools = []
 # The 3D animation is poses and nothing else: the host plays them, so the
 # plugin needs no renderer and no dependency of its own.
 plugin-animation-3d = []
+# Crop asks the host for a rectangle and cuts every plane to it.
+plugin-crop = []
 
 # And the four that bring a dependency with them. Each names only what *it*
 # needs, so the dependency arrives with the plugin and leaves with it.
 # `suite2p-registration` is the registration algorithm; `rustfft` the
 # deconvolution transforms; `png` the PNG importer/exporter; `oir-reader` the
 # OIR container reader.
-plugin-stabilize = ["dep:suite2p-registration"]
+plugin-suite2p-stabilize = ["dep:suite2p-registration"]
 # StackReg registration. A second registration crate rather than an option on
 # the first: the two answer different questions (a shift by phase correlation
 # versus a transformation by optimisation) and share no code. Also GPL-3, for
 # its own reasons — see that crate's manifest.
-plugin-turboreg = ["dep:turboreg-registration"]
+plugin-turboreg-stabilize = ["dep:turboreg-registration"]
 plugin-deconvolve = ["dep:rustfft"]
 plugin-png = ["dep:png"]
 plugin-oir = ["dep:oir-reader"]
@@ -120,7 +123,7 @@ backend-glow = ["scivis-render/backend-glow"]
 # the processor.
 # `?/`: each GPU path belongs to a plugin that may not be here. Without the weak
 # form this would pull a registration crate back in on its own, which is the
-# one thing `plugin-stabilize = off` / `plugin-turboreg = off` is for.
+# one thing `plugin-suite2p-stabilize = off` / `plugin-turboreg-stabilize = off` is for.
 gpu-registration = ["suite2p-registration?/gpu", "turboreg-registration?/gpu"]
 # Background worker threads (read-ahead decode + 3D volume assembly). On by
 # default; a single-threaded host — notably `wasm32-unknown-unknown`, where

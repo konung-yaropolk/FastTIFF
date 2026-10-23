@@ -188,6 +188,11 @@ pub(super) fn dialog(
 ///
 /// No Run and no Cancel: every button is a run, and the window's own close is
 /// the way out.
+///
+/// The controls declared before the first button scroll; from the first button
+/// on, everything is drawn in the order declared, below them. So a control
+/// that belongs to one button (the size a Save writes at) can be declared
+/// just before it and is drawn there.
 fn panel(
     ctx: &egui::Context,
     title: &str,
@@ -195,15 +200,11 @@ fn panel(
     values: &mut Params,
     busy: bool,
 ) -> Option<DialogAnswer> {
-    let controls: Vec<ParamDecl> = decls
+    let first_button = decls
         .iter()
-        .filter(|d| !matches!(d.kind, ParamKind::Action))
-        .cloned()
-        .collect();
-    let buttons: Vec<&ParamDecl> = decls
-        .iter()
-        .filter(|d| matches!(d.kind, ParamKind::Action))
-        .collect();
+        .position(|d| matches!(d.kind, ParamKind::Action))
+        .unwrap_or(decls.len());
+    let (controls, buttons) = decls.split_at(first_button);
     let mut answer = None;
     let mut open = true;
     super::dialog::show(
@@ -228,13 +229,18 @@ fn panel(
             egui::ScrollArea::vertical()
                 .max_height(ctx.content_rect().height() * 0.6)
                 .auto_shrink([false, true])
-                .show(ui, |ui| column(ui, &controls, values));
+                .show(ui, |ui| column(ui, controls, values));
             ui.separator();
             // One under another, as wide as the panel: a narrow window beside
             // the picture, read top to bottom, with every button the same size
             // and easy to hit while the eye is on the view.
             let width = ui.available_width();
-            for b in &buttons {
+            for b in buttons {
+                if !matches!(b.kind, ParamKind::Action) {
+                    column(ui, std::slice::from_ref(b), values);
+                    ui.add_space(4.0);
+                    continue;
+                }
                 let r = ui.add_enabled(
                     !busy,
                     egui::Button::new(&b.label).min_size(egui::vec2(width, 0.0)),
@@ -448,6 +454,19 @@ fn control(ui: &mut egui::Ui, d: &ParamDecl, values: &mut Params) {
             if ui.checkbox(&mut v, "").changed() {
                 values.set(d.key.clone(), ParamValue::Bool(v));
             }
+        }
+        ParamKind::Radio { default, options } => {
+            label(ui, d);
+            let sel = values
+                .choice(&d.key, *default)
+                .min(options.len().saturating_sub(1));
+            ui.vertical(|ui| {
+                for (i, o) in options.iter().enumerate() {
+                    if ui.radio(i == sel, o).clicked() {
+                        values.set(d.key.clone(), ParamValue::Choice(i));
+                    }
+                }
+            });
         }
         ParamKind::Choice { default, options } => {
             label(ui, d);

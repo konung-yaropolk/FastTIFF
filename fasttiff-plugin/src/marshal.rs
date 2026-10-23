@@ -14,8 +14,8 @@
 use crate::abi::*;
 use crate::api::{
     Animation, AnimationOutput, Confidence, ExportRequest, Exporter, ImportHost, ImportRequest,
-    Importer, Outcome, ParamDecl, ParamKind, ParamValue, Params, PixelType, PlaneData, Plugin,
-    SelectionKind,
+    Importer, MovieResolution, Outcome, ParamDecl, ParamKind, ParamValue, Params, PixelType,
+    PlaneData, Plugin, SelectionKind,
 };
 use crate::{guard, status_of, CHost};
 
@@ -645,7 +645,7 @@ unsafe fn push_decls(sink: &FtParamSink, decls: &[ParamDecl]) -> FtStatus {
     for d in decls {
         // The option strings must outlive the push, so they live here.
         let opts: Vec<FtStr> = match &d.kind {
-            ParamKind::Choice { options, .. } => {
+            ParamKind::Choice { options, .. } | ParamKind::Radio { options, .. } => {
                 options.iter().map(|o| FtStr::from_str(o)).collect()
             }
             _ => Vec::new(),
@@ -691,6 +691,10 @@ unsafe fn push_decls(sink: &FtParamSink, decls: &[ParamDecl]) -> FtStatus {
             }
             ParamKind::Choice { default, .. } => {
                 c.kind = FtParamKind::Choice;
+                c.i_default = *default as i64;
+            }
+            ParamKind::Radio { default, .. } => {
+                c.kind = FtParamKind::Radio;
                 c.i_default = *default as i64;
             }
             ParamKind::Text { default } => {
@@ -810,6 +814,11 @@ pub unsafe fn write_outcome(sink: &FtSink, outcome: Outcome) -> FtStatus {
             };
             (sink.set_outcome)(sink.ctx, kind, FtStr::EMPTY)
         }
+        Outcome::SelectRegion { prompt } => (sink.set_outcome)(
+            sink.ctx,
+            FtOutcomeKind::SelectRegion,
+            FtStr::from_str(&prompt),
+        ),
     }
 }
 
@@ -838,7 +847,13 @@ unsafe fn write_animation(sink: &FtSink, animation: &Animation) -> FtStatus {
         .flat_map(|p| p.rotation.iter().flatten().copied())
         .collect();
     let (output, path) = match &animation.output {
-        AnimationOutput::SaveTiff { path } => (FT_ANIMATION_SAVE_TIFF, path.as_str()),
+        AnimationOutput::SaveTiff { path } => (
+            match animation.resolution {
+                MovieResolution::Window => FT_ANIMATION_SAVE_TIFF_WINDOW,
+                _ => FT_ANIMATION_SAVE_TIFF,
+            },
+            path.as_str(),
+        ),
         _ => (FT_ANIMATION_PLAY, ""),
     };
     let st = (sink.set_animation)(

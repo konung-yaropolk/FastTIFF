@@ -242,7 +242,7 @@ impl Plugin for ZProject {
             planes,
             channel_colors: Vec::new(),
             metadata: None,
-            name: format!("{}-{}{label}", host.stack_info().name, axis.tag()),
+            name: format!("{}-{}{label}", host.stack_info().stem(), axis.tag()),
         })))
     }
 }

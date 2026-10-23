@@ -186,6 +186,19 @@ pub enum AnimationOutput {
     },
 }
 
+/// How large the frames of a saved movie are.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MovieResolution {
+    /// As large as it takes for every pixel of the stack in view to be at
+    /// least a pixel of the movie, and never smaller than the 3D view is on
+    /// screen. The host caps the long side at what it can render.
+    #[default]
+    Max,
+    /// The 3D view's own size on screen, in pixels.
+    Window,
+}
+
 /// A motion of the 3D view, declared for the host to carry out.
 ///
 /// See the [module documentation](self).
@@ -198,6 +211,8 @@ pub struct Animation {
     /// Frames per second, both on screen and in a saved movie.
     pub fps: f32,
     pub output: AnimationOutput,
+    /// The size of a saved movie's frames. Not used when playing.
+    pub resolution: MovieResolution,
 }
 
 impl Animation {
@@ -220,6 +235,7 @@ impl Animation {
             poses,
             fps,
             output: AnimationOutput::Play,
+            resolution: MovieResolution::Max,
         }
     }
 
@@ -242,6 +258,12 @@ impl Animation {
     /// the user where.
     pub fn save_tiff(mut self, path: impl Into<String>) -> Animation {
         self.output = AnimationOutput::SaveTiff { path: path.into() };
+        self
+    }
+
+    /// Save the movie at this size. See [`MovieResolution`].
+    pub fn resolution(mut self, resolution: MovieResolution) -> Animation {
+        self.resolution = resolution;
         self
     }
 
