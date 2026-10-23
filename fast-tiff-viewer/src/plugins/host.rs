@@ -264,11 +264,26 @@ pub fn describe_image(stack: &Stack) -> ImageInfo {
     ImageInfo {
         width,
         height,
-        channels: stack.display.dims.channels.max(1),
+        channels: file_channels(stack),
         slices: stack.display.dims.slices.max(1),
         frames: stack.display.dims.frames.max(1),
         samples_per_pixel: f0.map(|f| f.samples_per_pixel).unwrap_or(1),
         pixel_type,
+    }
+}
+
+/// The channels a plugin can read. For chunky RGB that is the samples of each
+/// pixel: the viewer's dimensions count one channel there, because the three
+/// colours share an IFD, and the plane reader addresses them as samples (see
+/// `plane_index`). Reporting that one channel left every plugin reading red
+/// alone and writing it back as a grayscale stack. CMYK is left as it was:
+/// its samples are inks, which are not what is shown.
+fn file_channels(stack: &Stack) -> usize {
+    let display = &stack.display;
+    if display.rgb && !display.cmyk {
+        display.channel_count().max(1)
+    } else {
+        display.dims.channels.max(1)
     }
 }
 
@@ -291,7 +306,10 @@ pub fn describe_stack(stack: &Stack) -> StackInfo {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| stack.path.display().to_string()),
         path,
+        // RGB is shown composited, its channels red, green and blue, whatever
+        // the file says; a result made from it should open looking the same.
         mode: match meta.mode {
+            _ if stack.display.rgb && !stack.display.cmyk => DisplayMode::Composite,
             fast_tiff_lib::DisplayMode::Composite => DisplayMode::Composite,
             fast_tiff_lib::DisplayMode::Color => DisplayMode::Color,
             _ => DisplayMode::Grayscale,
