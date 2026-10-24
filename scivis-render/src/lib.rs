@@ -205,6 +205,43 @@ pub struct VolumeParams {
     pub aspect: f32,
     /// Half-extents of the volume box (largest scaled axis = 0.5).
     pub box_he: [f32; 3],
+    /// The most samples one ray may take; see [`max_steps`]. Fewer than the
+    /// ray would take at half-voxel spacing means a coarser spacing for that
+    /// ray. `0` or less means only the shaders' own ceiling of 4096 applies.
+    pub max_steps: i32,
+}
+
+/// Texture reads one frame of the ray-march may make, across every pixel,
+/// channel and sample.
+///
+/// The ceiling that keeps a frame finite. Without it a large volume shown
+/// large asks for whatever its voxels add up to: 4096 x 4096 x 69 planes of
+/// two channels, on a two-million-pixel panel, came to some fifteen billion
+/// reads a frame, which a modest GPU takes many seconds over, and Windows
+/// resets a GPU that is busy for more than two (the device is lost, and the
+/// app's next draw panics). At this many a frame takes a fraction of a second
+/// even on a small workstation card, and an ordinary volume never comes near
+/// it.
+pub const FRAME_SAMPLE_BUDGET: f64 = 1.5e9;
+
+/// The ceiling the shaders put on steps per ray, whatever `max_steps` says.
+pub const SHADER_MAX_STEPS: i32 = 4096;
+
+/// The fewest steps [`max_steps`] allows, so a huge panel still shows a
+/// volume rather than a smear.
+pub const MIN_STEPS: i32 = 32;
+
+/// [`VolumeParams::max_steps`] for a frame of `pixels` pixels compositing
+/// `channels` channels with `interp`: as many steps as keep the frame within
+/// [`FRAME_SAMPLE_BUDGET`]. Tricubic sampling reads eight texels a sample,
+/// the others one.
+pub fn max_steps(pixels: f64, channels: usize, interp: VolumeInterp) -> i32 {
+    let taps = match interp {
+        VolumeInterp::Cubic => 8.0,
+        VolumeInterp::Nearest | VolumeInterp::Linear => 1.0,
+    };
+    let per_step = pixels.max(1.0) * channels.clamp(1, MAX_CHANNELS) as f64 * taps;
+    (FRAME_SAMPLE_BUDGET / per_step).clamp(MIN_STEPS as f64, SHADER_MAX_STEPS as f64) as i32
 }
 
 /// The side of the square tiles an off-screen capture is rendered in, in

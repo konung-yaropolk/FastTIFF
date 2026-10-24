@@ -146,6 +146,10 @@ pub struct VolumeView {
     /// The volume viewport aspect ratio (width/height), set by the frontend each
     /// frame so the ray-march projection matches the on-screen rect.
     pub aspect: f32,
+    /// How many pixels the volume viewport covers, set by the frontend each
+    /// frame beside [`aspect`](Self::aspect). What bounds the work of a frame:
+    /// see `scivis_render::max_steps`.
+    pub pixels: f32,
     /// Which timepoint the currently-uploaded volume holds (`Some(frame_index)`
     /// in the 4D case, else `Some(0)`); `None` means no volume is uploaded yet,
     /// so a frontend should show a loading state until the first build lands. A
@@ -186,6 +190,7 @@ impl Default for VolumeView {
             volume_brightness: 1.0,
             volume_autolevel: true,
             aspect: 1.0,
+            pixels: 1920.0 * 1080.0,
             built_frame: None,
             generation: 0,
             requested: None,

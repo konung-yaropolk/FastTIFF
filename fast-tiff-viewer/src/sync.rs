@@ -687,7 +687,7 @@ fn sync_volume(
         // own shading constants.
         scivis_render::VolumeRender::Surface => 1.0,
     };
-    let params = build_volume_params(
+    let mut params = build_volume_params(
         &cam,
         windows,
         view.aspect,
@@ -696,6 +696,9 @@ fn sync_volume(
         view.iso,
         brightness,
     );
+    // However large the volume and the panel, a frame stays a bounded amount
+    // of GPU work: see `scivis_render::FRAME_SAMPLE_BUDGET`.
+    params.max_steps = scivis_render::max_steps(view.pixels as f64, windows.len(), view.interp);
     renderer.set_volume_params(params);
     needs_repaint
 }

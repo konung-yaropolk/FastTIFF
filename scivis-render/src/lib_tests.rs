@@ -19,6 +19,7 @@ fn params(aspect: f32) -> VolumeParams {
         tan_half_fov: 0.414_213_57,
         aspect,
         box_he: [0.5, 0.4, 0.2],
+        max_steps: 0,
     }
 }
 
@@ -84,4 +85,44 @@ fn the_whole_picture_as_one_tile_is_the_picture_at_its_own_aspect() {
     assert!((t.aspect - 1.5).abs() < 1e-6);
     assert!((t.tan_half_fov - p.tan_half_fov).abs() < 1e-7);
     assert_eq!(t.forward, p.forward);
+}
+
+/// A frame's reads stay within the budget, whatever the panel and the data.
+#[test]
+fn the_step_cap_keeps_a_frame_within_its_budget() {
+    for (pixels, channels, interp) in [
+        (1920.0 * 1080.0, 2, VolumeInterp::Linear),
+        (3840.0 * 2160.0, 6, VolumeInterp::Cubic),
+        (800.0 * 600.0, 1, VolumeInterp::Nearest),
+    ] {
+        let steps = max_steps(pixels, channels, interp) as f64;
+        let taps = if interp == VolumeInterp::Cubic {
+            8.0
+        } else {
+            1.0
+        };
+        let reads = pixels * channels as f64 * taps * steps;
+        assert!(
+            reads <= FRAME_SAMPLE_BUDGET || steps == MIN_STEPS as f64,
+            "{pixels} px, {channels} ch, {interp:?}: {steps} steps, {reads:e} reads"
+        );
+    }
+}
+
+/// An ordinary view is not touched: the shaders' own ceiling is the limit.
+#[test]
+fn an_ordinary_view_keeps_full_sampling() {
+    assert_eq!(
+        max_steps(640.0 * 480.0, 1, VolumeInterp::Linear),
+        SHADER_MAX_STEPS
+    );
+}
+
+/// The case that crashed: a 4096 x 4096 x 69 two-channel stack on a 1080p
+/// panel asked for ~4000 steps a ray, about 1.6e10 reads a frame.
+#[test]
+fn the_crashing_case_is_capped() {
+    let steps = max_steps(1920.0 * 1080.0, 2, VolumeInterp::Linear);
+    assert!(steps < 400, "{steps}");
+    assert!(steps >= MIN_STEPS);
 }

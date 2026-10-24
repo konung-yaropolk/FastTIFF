@@ -3956,6 +3956,8 @@ impl ViewerApp {
                 if self.core.view_mode == ViewMode::Volume {
                     self.core.volume.aspect =
                         (panel_rect.width() / panel_rect.height().max(1.0)).clamp(0.1, 10.0);
+                    let ppp = ui.ctx().pixels_per_point();
+                    self.core.volume.pixels = panel_rect.area() * ppp * ppp;
 
                     // Until the first volume is built, show a black loading screen so
                     // the heavy decode doesn't freeze on the previous view (`sync_gpu`

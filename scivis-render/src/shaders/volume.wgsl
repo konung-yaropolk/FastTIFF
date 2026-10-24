@@ -38,7 +38,7 @@ struct VolParams {
     box_he: vec4<f32>,
     misc: vec4<f32>,   // tan_half_fov, aspect, density, iso
     gain: vec4<f32>,   // brightness, unused x3
-    modes: vec4<i32>,  // num_channels, render_mode (0=MIP,1=alpha,2=surface), interp (0=nearest,1=linear,2=cubic), unused
+    modes: vec4<i32>,  // num_channels, render_mode (0=MIP,1=alpha,2=surface), interp (0=nearest,1=linear,2=cubic), max steps (<= 0: MAX_STEPS)
 };
 
 @group(0) @binding(0) var<uniform> P: VolParams;
@@ -221,12 +221,18 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     t0 = max(t0, 0.0);
 
-    // Even sample spacing from the actual voxel size (view-independent).
+    // Half a voxel along every axis the ray crosses, measured along the ray:
+    // a ray down through a stack of thick slices needs a step per half slice,
+    // not per half of the fine in-plane pixel. Then capped by the host's
+    // per-frame budget (`max_steps`), which coarsens the spacing instead.
     let tdim = vec3<f32>(textureDimensions(vol0));
     let voxel = 2.0 * he / max(tdim, vec3<f32>(1.0));
-    let base_step = max(min(voxel.x, min(voxel.y, voxel.z)) * 0.5, 1e-4);
+    let ard = max(abs(rd), vec3<f32>(1e-6));
+    let along = voxel / ard;
+    let base_step = max(0.5 * min(along.x, min(along.y, along.z)), 1e-4);
     let span = t1 - t0;
-    let n = clamp(i32(span / base_step) + 1, 1, MAX_STEPS);
+    let cap = select(MAX_STEPS, min(P.modes.w, MAX_STEPS), P.modes.w > 0);
+    let n = clamp(i32(span / base_step) + 1, 1, cap);
     let dt = span / f32(n);
 
     // Jitter the start within one step: decorrelates slice-aligned banding.

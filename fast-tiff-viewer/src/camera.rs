@@ -650,6 +650,8 @@ pub fn build_volume_params(
         tan_half_fov: cam.tan_half_fov,
         aspect,
         box_he: cam.box_he,
+        // No cap of its own: the caller knows how large the frame is.
+        max_steps: 0,
     }
 }
 

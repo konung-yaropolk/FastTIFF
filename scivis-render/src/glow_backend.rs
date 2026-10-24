@@ -219,6 +219,7 @@ uniform float u_density;     // alpha-DVR opacity scale (higher = more solid)
 uniform float u_iso;         // isosurface threshold in windowed units (0..1)
 uniform float u_brightness;  // gain on the composited colour (MIP and alpha DVR)
 uniform int u_interp;        // 0 = point/linear (GL filter), 1 = in-shader tricubic
+uniform int u_max_steps;     // steps per ray at most (<= 0: MAX_STEPS)
 
 // ---------------------------------------------------------------------------
 // Isosurface appearance (u_mode == 2). Both are compile-time constants: they
@@ -366,12 +367,15 @@ void main() {
     }
     t0 = max(t0, 0.0);
 
-    // Even sample spacing from the actual voxel size (view-independent).
+    // Half a voxel along every axis the ray crosses, measured along the ray,
+    // then capped by the host's per-frame budget. See the WGSL twin.
     ivec3 tdim = (ch_is_float[0] > 0.5) ? textureSize(volf0, 0) : textureSize(vol0, 0);
     vec3 voxel = 2.0 * box_he / max(vec3(tdim), vec3(1.0));
-    float base_step = max(min(voxel.x, min(voxel.y, voxel.z)) * 0.5, 1e-4);
+    vec3 along = voxel / max(abs(rd), vec3(1e-6));
+    float base_step = max(0.5 * min(along.x, min(along.y, along.z)), 1e-4);
     float span = t1 - t0;
-    int n = clamp(int(span / base_step) + 1, 1, MAX_STEPS);
+    int cap = (u_max_steps > 0) ? min(u_max_steps, MAX_STEPS) : MAX_STEPS;
+    int n = clamp(int(span / base_step) + 1, 1, cap);
     float dt = span / float(n);
 
     // Jitter the start within one step: decorrelates slice-aligned banding and
@@ -533,6 +537,7 @@ struct VolumeGl {
     u_density: Option<glow::NativeUniformLocation>,
     u_iso: Option<glow::NativeUniformLocation>,
     u_brightness: Option<glow::NativeUniformLocation>,
+    u_max_steps: Option<glow::NativeUniformLocation>,
     u_interp: Option<glow::NativeUniformLocation>,
     params: Option<VolumeParams>,
 }
@@ -567,6 +572,7 @@ impl VolumeGl {
             u_density: gl.get_uniform_location(program, "u_density"),
             u_iso: gl.get_uniform_location(program, "u_iso"),
             u_brightness: gl.get_uniform_location(program, "u_brightness"),
+            u_max_steps: gl.get_uniform_location(program, "u_max_steps"),
             u_interp: gl.get_uniform_location(program, "u_interp"),
             params: None,
         }
@@ -790,6 +796,7 @@ impl ImageRenderResources {
             gl.uniform_1_f32(v.u_density.as_ref(), p.density);
             gl.uniform_1_f32(v.u_iso.as_ref(), p.iso);
             gl.uniform_1_f32(v.u_brightness.as_ref(), p.brightness);
+            gl.uniform_1_i32(v.u_max_steps.as_ref(), p.max_steps);
             gl.uniform_1_i32(v.u_interp.as_ref(), v.interp_mode);
 
             gl.disable(glow::BLEND);
