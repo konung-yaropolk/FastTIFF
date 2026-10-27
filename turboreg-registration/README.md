@@ -21,6 +21,18 @@ the tests) and is reproducible run to run on the same card. A backend that
 cannot run — a feature left out, no usable adapter, a browser — is refused by
 `Backend::unavailable_reason` rather than quietly swapped for another.
 
+A host that draws with wgpu should hand the crate its own device before the
+first GPU run — `gpu::use_device(device, queue, &adapter.get_info())` — rather
+than let it open one. A second device opened beside a renderer's, on a card
+whose memory the two have overrun, can deadlock both, and the system then
+resets the GPU and every device in the process is lost. On the one device,
+everything the registration allocates or submits runs inside error scopes: a
+card with no room left for its buffers fails the batch (its frames are
+reported as not fitted, and `gpu::take_trouble` says why) instead of
+panicking. wgpu still treats running out of memory for its own staging, a
+pipeline or a submission as losing the device — the host's, when it is shared
+— so uploads go a slab at a time to keep that staging small.
+
 ## Licensing
 
 GPL-3.0-only. The algorithm is Thevenaz, Ruttimann & Unser's, shipped by EPFL as

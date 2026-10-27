@@ -278,12 +278,16 @@ impl Plugin for Stabilize {
             lx,
             frames: &sample,
         };
+        // An earlier run's trouble is not this one's.
+        #[cfg(feature = "gpu-registration")]
+        let _ = suite2p_registration::gpu::take_trouble();
         let Some(reference) = compute_reference(&sample_movie, &settings, &mut |f| {
             host.progress(at(reading + f as f64 * referencing))
         }) else {
             return Ok(Outcome::Cancelled);
         };
         drop(sample);
+        gpu_trouble(&settings)?;
 
         // Now one pass over the recording: measure each timepoint's shift on
         // the chosen channel, then apply it to every channel of that timepoint.
@@ -401,6 +405,7 @@ impl Plugin for Stabilize {
                 &batch_frames,
                 &settings,
             );
+            gpu_trouble(&settings)?;
             done += frames_here * work::CORRELATION;
             if !host.progress(at(done)) {
                 return Ok(Outcome::Cancelled);
@@ -516,6 +521,27 @@ impl Plugin for Stabilize {
             name: format!("{}-stabilized", host.stack_info().stem()),
         })))
     }
+}
+
+/// Stop the run, saying why, if the device failed part of it.
+///
+/// A batch the device could not take goes to the processor, and one it lost
+/// part-way comes back as no shift at all — quietly, inside the registration.
+/// Someone who chose the GPU would get either a CPU run or unregistered frames
+/// with no way to tell, so the device's own account of it ends the run.
+fn gpu_trouble(settings: &suite2p_registration::Settings) -> Result<(), PluginError> {
+    #[cfg(feature = "gpu-registration")]
+    if settings.backend == suite2p_registration::Backend::Gpu {
+        if let Some(why) = suite2p_registration::gpu::take_trouble() {
+            return Err(PluginError::failed(format!(
+                "stabilizing on the GPU failed: {why}. {} runs on the processor and \
+                 needs no GPU memory.",
+                suite2p_registration::Backend::MultiThread.label()
+            )));
+        }
+    }
+    let _ = settings;
+    Ok(())
 }
 
 #[cfg(test)]

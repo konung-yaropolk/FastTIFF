@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.26.2"
+version = "1.26.3"
 dependencies = [
  "anyhow",
  "eframe",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.26.2"
+version = "0.26.3"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -881,6 +881,7 @@ dependencies = [
  "scivis-render",
  "suite2p-registration",
  "turboreg-registration",
+ "wgpu",
  "zune-jpeg",
 ]
 
@@ -902,7 +903,7 @@ version = "0.26.1"
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "1.26.2"
+version = "1.26.3"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",
@@ -2802,7 +2803,7 @@ checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
 
 [[package]]
 name = "suite2p-registration"
-version = "0.22.1"
+version = "0.26.3"
 dependencies = [
  "bytemuck",
  "pollster 1.0.1",
@@ -2985,7 +2986,7 @@ dependencies = [
 
 [[package]]
 name = "turboreg-registration"
-version = "0.24.4"
+version = "0.26.3"
 dependencies = [
  "bytemuck",
  "pollster 1.0.1",

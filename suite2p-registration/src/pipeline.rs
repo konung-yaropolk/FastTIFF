@@ -101,10 +101,12 @@ pub fn measure_batch(
     let clip = filters.clip;
 
     // On the device, when that was asked for. An unavailable GPU is refused by
-    // the caller (see `Backend::unavailable_reason`), so the only way to arrive
-    // here and fail to open one is an adapter that vanished between the check
-    // and the run — which takes the CPU path rather than failing the whole
-    // registration part-way through.
+    // the caller (see `Backend::unavailable_reason`), so arriving here without
+    // a context means an adapter that vanished between the check and the run,
+    // or a card with no room left for the batch buffers. Either way the batch
+    // takes the CPU path rather than failing the whole registration part-way
+    // through, and `gpu::take_trouble` says it happened, for a caller that
+    // would rather stop.
     #[cfg(feature = "gpu")]
     let on_device = (settings.backend == Backend::Gpu)
         .then(|| crate::gpu::maps_of(ly, lx, filters, frames, settings.maxregshift))

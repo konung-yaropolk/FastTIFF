@@ -144,6 +144,11 @@ mod glue {
         // So the renderer can ask the driver how much GPU memory a volume may
         // take, rather than guess.
         resources.set_adapter(rs.adapter.clone());
+        // And the GPU registrations run on this device rather than opening
+        // their own: a second device can deadlock against this one on a card
+        // short of memory (see `share_gpu_device`).
+        #[cfg(not(target_arch = "wasm32"))]
+        fast_tiff_viewer::share_gpu_device(&rs.device, &rs.queue, &rs.adapter.get_info());
         Arc::new(Mutex::new(resources))
     }
 

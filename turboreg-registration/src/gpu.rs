@@ -61,6 +61,33 @@
 //! the backend reports itself unavailable rather than quietly running on the
 //! CPU. In a browser it always does: the device would have to be awaited, and
 //! there is nothing here that could wait for it without freezing the page.
+//!
+//! # Whose device
+//!
+//! A host that draws with wgpu should hand this crate its own device with
+//! [`use_device`] before the first run, and the registration then runs on it.
+//! Left alone, the crate opens a device of its own — and opening one beside a
+//! renderer's, on a card whose memory the two of them have overrun, can
+//! deadlock both: measured on a Quadro P620 (2 GB, Vulkan), with a 1.2 GB
+//! volume resident on the renderer's device, opening this crate's never
+//! returned, and the renderer's next frame never completed either. In an
+//! application that ends with the system resetting the GPU, and every device
+//! in the process lost.
+//!
+//! Sharing a device puts the registration's memory next to the renderer's on
+//! the same card, and on a small card the two can overrun it. So nothing here
+//! fails the way wgpu fails by default, which is to panic: every allocation
+//! and every round runs inside error scopes, and a level the device has no
+//! room for fails its batch — its frames are reported as not fitted, and
+//! [`take_trouble`] says why.
+//!
+//! What a scope cannot do is keep the device. wgpu (29) survives running out
+//! of memory for a buffer or a texture, which is where nearly all of this
+//! crate's memory goes; out of memory for its own staging memory, a pipeline
+//! or a submission it treats as the device lost, and a shared device is the
+//! renderer's. The planes go up a slab at a time so that the staging an upload
+//! asks for stays small at any frame size, and on Vulkan that memory falls
+//! back to the host's when the card's is gone.
 
 use crate::optimize::{Prepared, Sums};
 use bytemuck::{Pod, Zeroable};
@@ -68,7 +95,6 @@ use std::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::OnceLock;
 use std::time::Duration;
-use wgpu::util::DeviceExt;
 
 /// Invocations per workgroup. Must match `WG` in `gpu.wgsl`.
 const WG: usize = 256;
@@ -85,6 +111,10 @@ pub const MOST_LANES: usize = 32;
 
 /// How much device memory one batch's coefficient planes may take.
 const BATCH_MEMORY: u64 = 256 << 20;
+
+/// The most bytes of planes in one write: the staging memory an upload needs is
+/// two of these, whatever the frame size (see [`upload_planes`]).
+const UPLOAD_SLAB: usize = 32 << 20;
 
 /// Pyramid levels with fewer pixels than this are fitted on the CPU.
 ///
@@ -123,7 +153,17 @@ struct LaneGpu {
     dm: [f32; 64],
 }
 
-/// The one device this crate uses, opened the first time it is needed.
+/// The device this crate runs on, and its adapter's name.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+struct Shared {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    name: String,
+}
+
+/// The one device this crate uses: the host's, given with [`use_device`], or
+/// else one of its own, opened the first time it is needed.
 ///
 /// One for the process rather than one per batch. Several devices opened side
 /// by side in one process, each driven from its own thread, hang on the drivers
@@ -135,7 +175,59 @@ struct LaneGpu {
 /// Not in a browser build, where there is never a device to keep (see
 /// [`shared_device`]) and wgpu's browser objects cannot sit in a `static`.
 #[cfg(not(target_arch = "wasm32"))]
-static DEVICE: OnceLock<Option<(wgpu::Device, wgpu::Queue)>> = OnceLock::new();
+static DEVICE: OnceLock<Option<Shared>> = OnceLock::new();
+
+/// Run on `device` instead of opening a device of this crate's own: the
+/// host's, typically the one its renderer draws with, which then carries the
+/// registration's work between its own frames. See the module docs for why a
+/// host that has one should.
+///
+/// Takes effect only before the first GPU run (or [`available`] call), and
+/// says whether it did. A software adapter counts as no device, as it would
+/// for one this crate opened. The device should have the adapter's own limits
+/// (`required_limits: adapter.limits()`): the batch size is derived from them.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn use_device(device: wgpu::Device, queue: wgpu::Queue, adapter: &wgpu::AdapterInfo) -> bool {
+    let shared = (adapter.device_type != wgpu::DeviceType::Cpu).then(|| Shared {
+        device,
+        queue,
+        name: adapter.name.clone(),
+    });
+    DEVICE.set(shared).is_ok()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn shared() -> Option<Shared> {
+    DEVICE
+        .get_or_init(|| {
+            let instance = wgpu::Instance::default();
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    ..Default::default()
+                }))
+                .ok()?;
+            let info = adapter.get_info();
+            if info.device_type == wgpu::DeviceType::Cpu {
+                return None;
+            }
+            // Whatever the adapter can do: the batch size is derived from
+            // these, and the defaults would cap it well below the card.
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                    label: Some("turboreg-registration"),
+                    required_limits: adapter.limits(),
+                    ..Default::default()
+                }))
+                .ok()?;
+            Some(Shared {
+                device,
+                queue,
+                name: info.name,
+            })
+        })
+        .clone()
+}
 
 fn shared_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     // Requesting an adapter is asynchronous, and in a browser it resolves
@@ -147,28 +239,7 @@ fn shared_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        DEVICE
-            .get_or_init(|| {
-                let instance = wgpu::Instance::default();
-                let adapter =
-                    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                        power_preference: wgpu::PowerPreference::HighPerformance,
-                        ..Default::default()
-                    }))
-                    .ok()?;
-                if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
-                    return None;
-                }
-                // Whatever the adapter can do: the batch size is derived from
-                // these, and the defaults would cap it well below the card.
-                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                    label: Some("turboreg-registration"),
-                    required_limits: adapter.limits(),
-                    ..Default::default()
-                }))
-                .ok()
-            })
-            .clone()
+        shared().map(|s| (s.device, s.queue))
     }
 }
 
@@ -185,16 +256,10 @@ pub fn adapter_name() -> Option<String> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // The device itself does not carry its adapter's name, so ask for the
-        // same adapter again. Cheap, and only for reporting.
-        shared_device()?;
-        let instance = wgpu::Instance::default();
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }))
-        .ok()?;
-        Some(adapter.get_info().name)
+        // Kept from when the device was opened or handed over, rather than
+        // asked of a new instance: enumerating adapters again is opening
+        // drivers again, which is the step that can deadlock (module docs).
+        shared().map(|s| s.name)
     }
 }
 
@@ -268,6 +333,114 @@ fn pipeline(device: &wgpu::Device, n: usize) -> Option<wgpu::ComputePipeline> {
 /// and the device's behaviour predictable.
 static ROUND: Mutex<()> = Mutex::new(());
 
+/// Why the device last failed a batch, until [`take_trouble`] takes it.
+static TROUBLE: Mutex<Option<String>> = Mutex::new(None);
+
+fn note_trouble(why: String) {
+    *TROUBLE.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+}
+
+/// Why the device failed a batch since this was last asked, if it did: no
+/// room on it for a level's planes, or a device that stopped answering. The
+/// batch's frames are reported as not fitted (`Registered::failed`); this is
+/// the sentence that says why. Ask after a run, and once before it to forget
+/// an earlier one's.
+pub fn take_trouble() -> Option<String> {
+    TROUBLE.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// Run `work` with the device's out-of-memory and validation errors caught,
+/// and say which was raised, if one was.
+///
+/// Without a scope wgpu hands an error to the device's handler, which by
+/// default panics — on a device shared with a renderer, taking the
+/// application with it for want of memory a registration could do without.
+/// Scopes are per thread in wgpu, so these catch this thread's errors only,
+/// never the renderer's.
+fn scoped<T>(device: &wgpu::Device, work: impl FnOnce() -> T) -> Result<T, String> {
+    let no_room = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let done = work();
+    // Innermost first.
+    let invalid = pollster::block_on(invalid.pop());
+    let no_room = pollster::block_on(no_room.pop());
+    match no_room.or(invalid) {
+        None => Ok(done),
+        Some(e) => Err(e.to_string()),
+    }
+}
+
+/// Copy each slot's four planes into `coeffs`, [`UPLOAD_SLAB`] bytes a
+/// write, each write submitted and the one before it waited for.
+///
+/// A write is staged in memory of the queue's own until the submission that
+/// carries it is done. All of a 4096 x 4096 level at once is 256 MB of that,
+/// asked for at the moment a card short of memory can least spare it, and a
+/// staging allocation that fails can lose the device. Two slabs in flight
+/// keep it to 64 MB at any size, and the waits are short: a slab is a copy.
+/// A buffer of `contents`, for inside a [`scoped`] call: made unmapped and
+/// filled by the queue. `create_buffer_init` maps the buffer at creation
+/// instead, and wgpu treats mapping a buffer that could not be made as fatal,
+/// past any scope; this way a buffer there was no room for is an error the
+/// scope returns.
+fn filled(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    contents: &[u8],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    let size = (contents.len() as u64)
+        .next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
+        .max(4);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage: usage | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut padded = contents.to_vec();
+    padded.resize(size as usize, 0);
+    queue.write_buffer(&buffer, 0, &padded);
+    buffer
+}
+
+fn upload_planes(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    coeffs: &wgpu::Buffer,
+    planes: &[[&[f32]; 4]],
+    pixels: usize,
+    slab: usize,
+) -> Result<(), String> {
+    let per = (slab / 4).max(1);
+    let mut before: Option<wgpu::SubmissionIndex> = None;
+    for (slot, four) in planes.iter().enumerate() {
+        for (p, plane) in four.iter().enumerate() {
+            let at = ((slot * 4 + p) * pixels * 4) as u64;
+            for (k, slab) in plane[..pixels].chunks(per).enumerate() {
+                let submitted = scoped(device, || {
+                    queue.write_buffer(
+                        coeffs,
+                        at + (k * per * 4) as u64,
+                        bytemuck::cast_slice(slab),
+                    );
+                    queue.submit([])
+                })?;
+                if let Some(previous) = before.replace(submitted) {
+                    device
+                        .poll(wgpu::PollType::Wait {
+                            submission_index: Some(previous),
+                            timeout: Some(ROUND_TIMEOUT),
+                        })
+                        .map_err(|e| format!("the GPU stopped answering ({e})"))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// One pyramid level of one batch, on the device.
 ///
 /// Built once per level: the reference samples, and each lane's three
@@ -299,8 +472,22 @@ impl GpuLevel {
     /// `None` when there is no device, the shader will not build, or the batch
     /// does not fit.
     pub fn new(n: usize, w: usize, h: usize, planes: &[[&[f32]; 4]]) -> Option<GpuLevel> {
+        Self::build(n, w, h, planes, UPLOAD_SLAB)
+    }
+
+    /// [`new`](Self::new), the planes uploaded `slab` bytes a write.
+    fn build(
+        n: usize,
+        w: usize,
+        h: usize,
+        planes: &[[&[f32]; 4]],
+        slab: usize,
+    ) -> Option<GpuLevel> {
         let (device, queue) = shared_device()?;
-        let pipeline = pipeline(&device, n)?;
+        let Some(pipeline) = pipeline(&device, n) else {
+            note_trouble("the GPU rejected the registration shader".to_string());
+            return None;
+        };
         let pixels = w * h;
         let slots = planes.len();
         if pixels == 0 || slots == 0 {
@@ -311,78 +498,99 @@ impl GpuLevel {
         if coeff_bytes > limits.max_storage_buffer_binding_size
             || coeff_bytes > limits.max_buffer_size
         {
+            note_trouble(format!(
+                "a {w} x {h} level of {slots} frame(s) ({} MB) is more than one GPU buffer holds",
+                coeff_bytes >> 20
+            ));
             return None;
         }
         let groups = pixels.div_ceil(WG).clamp(1, MOST_GROUPS_PER_LANE);
         let k = 1 + n + n * (n + 1) / 2;
 
-        let info = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("turboreg info"),
-            contents: bytemuck::bytes_of(&Info {
-                w: w as u32,
-                h: h as u32,
-                pixels: pixels as u32,
-                groups: groups as u32,
-            }),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let coeffs = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("turboreg planes"),
-            size: coeff_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        for (slot, four) in planes.iter().enumerate() {
-            for (p, plane) in four.iter().enumerate() {
-                if plane.len() < pixels {
-                    return None;
-                }
-                let at = ((slot * 4 + p) * pixels * 4) as u64;
-                queue.write_buffer(&coeffs, at, bytemuck::cast_slice(&plane[..pixels]));
-            }
+        if planes.iter().flatten().any(|plane| plane.len() < pixels) {
+            return None;
         }
-        let lanes = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("turboreg lanes"),
-            size: (slots * std::mem::size_of::<LaneGpu>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+
         // Rounded up to 8 bytes, which a mapped range has to be.
         let out_bytes = ((slots * groups * k * 4) as u64).next_multiple_of(8);
-        let partials = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("turboreg partials"),
-            size: out_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
+        let made = scoped(&device, || {
+            let info = filled(
+                &device,
+                &queue,
+                "turboreg info",
+                bytemuck::bytes_of(&Info {
+                    w: w as u32,
+                    h: h as u32,
+                    pixels: pixels as u32,
+                    groups: groups as u32,
+                }),
+                wgpu::BufferUsages::UNIFORM,
+            );
+            let coeffs = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("turboreg planes"),
+                size: coeff_bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let lanes = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("turboreg lanes"),
+                size: (slots * std::mem::size_of::<LaneGpu>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let partials = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("turboreg partials"),
+                size: out_bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("turboreg readback"),
+                size: out_bytes,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("turboreg level"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: info.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: coeffs.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: lanes.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: partials.as_entire_binding(),
+                    },
+                ],
+            });
+            (coeffs, lanes, partials, readback, bind)
         });
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("turboreg readback"),
-            size: out_bytes,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("turboreg level"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: info.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: coeffs.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: lanes.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: partials.as_entire_binding(),
-                },
-            ],
-        });
+        // Nothing is written to a buffer that came back invalid: that would be
+        // an error of its own, outside any scope.
+        let (coeffs, lanes, partials, readback, bind) = match made {
+            Ok(made) => made,
+            Err(why) => {
+                note_trouble(format!(
+                    "the GPU had no room for a {w} x {h} level of {slots} frame(s) \
+                     ({} MB): {why}",
+                    coeff_bytes >> 20
+                ));
+                return None;
+            }
+        };
+        if let Err(why) = upload_planes(&device, &queue, &coeffs, planes, pixels, slab) {
+            note_trouble(format!("uploading a {w} x {h} level failed: {why}"));
+            return None;
+        }
         Some(GpuLevel {
             device,
             queue,
@@ -437,25 +645,34 @@ impl GpuLevel {
             .collect();
 
         let _one_at_a_time = ROUND.lock().unwrap_or_else(|e| e.into_inner());
-        self.queue
-            .write_buffer(&self.lanes, 0, bytemuck::cast_slice(&lanes));
         let bytes = ((batch.len() * self.groups * self.k * 4) as u64).next_multiple_of(8);
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("turboreg round"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("turboreg evaluate"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind, &[]);
-            pass.dispatch_workgroups(self.groups as u32, batch.len() as u32, 1);
-        }
-        encoder.copy_buffer_to_buffer(&self.partials, 0, &self.readback, 0, bytes);
-        let submitted = self.queue.submit(Some(encoder.finish()));
+        let submitted = scoped(&self.device, || {
+            self.queue
+                .write_buffer(&self.lanes, 0, bytemuck::cast_slice(&lanes));
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("turboreg round"),
+                });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("turboreg evaluate"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind, &[]);
+                pass.dispatch_workgroups(self.groups as u32, batch.len() as u32, 1);
+            }
+            encoder.copy_buffer_to_buffer(&self.partials, 0, &self.readback, 0, bytes);
+            self.queue.submit(Some(encoder.finish()))
+        });
+        let submitted = match submitted {
+            Ok(submitted) => submitted,
+            Err(why) => {
+                note_trouble(format!("a round failed on the GPU: {why}"));
+                return None;
+            }
+        };
 
         let slice = self.readback.slice(..bytes);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -469,6 +686,7 @@ impl GpuLevel {
         let mapped =
             finished.is_ok() && matches!(rx.recv_timeout(Duration::from_secs(1)), Ok(Ok(())));
         if !mapped {
+            note_trouble("the GPU stopped answering".to_string());
             return None;
         }
         let view = slice.get_mapped_range();

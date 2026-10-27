@@ -101,6 +101,18 @@ everywhere. In every one of those cases it is **refused rather than silently
 downgraded** — a run that said GPU and used the processor is indistinguishable
 from a slow one — so ask `unavailable_reason` first.
 
+A host that draws with wgpu should hand the crate its own device before the
+first GPU run, `gpu::use_device(device, queue, &adapter.get_info())`, rather
+than let it open one: a second device opened beside a renderer's, on a card
+whose memory the two have overrun, can deadlock both. On the one device,
+everything the registration allocates or submits runs inside error scopes, so
+a card with no room left for the registration's buffers sends the batch to the
+processor (or, part-way through, back as flat maps) rather than panicking, and
+`gpu::take_trouble` says what happened. wgpu still treats running out of
+memory for its own staging, a pipeline or a submission as losing the device —
+the host's, when it is shared — so uploads go a slab at a time to keep that
+staging small.
+
 ```toml
 suite2p-registration = { version = "0.19", features = ["gpu"] }
 ```

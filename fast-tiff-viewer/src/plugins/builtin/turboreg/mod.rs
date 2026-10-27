@@ -182,12 +182,30 @@ impl Plugin for TurboReg {
             frames: &movie,
         };
         let registering = info.frames as f64 * work::REGISTER;
+        // An earlier run's trouble is not this one's.
+        #[cfg(feature = "gpu-registration")]
+        let _ = turboreg_registration::gpu::take_trouble();
         let Some(result) = register_stack(&frames, &settings, &mut |f| {
             host.progress(at(reading + f as f64 * registering))
         }) else {
             return Ok(Outcome::Cancelled);
         };
         drop(movie);
+        // Frames the device failed are not fitted for want of the device, not
+        // because the data would not fit: a stack that came back with them
+        // unmoved would be no result, so the run fails and says why.
+        #[cfg(feature = "gpu-registration")]
+        if settings.backend == Backend::Gpu && !result.failed.is_empty() {
+            if let Some(why) = turboreg_registration::gpu::take_trouble() {
+                return Err(PluginError::failed(format!(
+                    "{} of {} frames could not be registered on the GPU: {why}. {} \
+                     runs on the processor and needs no GPU memory.",
+                    result.failed.len(),
+                    info.frames,
+                    Backend::MultiThread.label()
+                )));
+            }
+        }
 
         // Now one pass over the recording, applying each timepoint's
         // transformation to every plane of that timepoint.

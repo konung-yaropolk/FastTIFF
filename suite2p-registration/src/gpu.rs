@@ -70,7 +70,6 @@ use bytemuck::{Pod, Zeroable};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use wgpu::util::DeviceExt;
 
 /// The longest side the device path takes. Two lines of that length fit the
 /// 16 KiB of workgroup storage every WebGPU device must provide.
@@ -83,6 +82,10 @@ const MOST_FRAMES_PER_SUBMIT: usize = 32;
 
 /// How much device memory the batch buffers may take between them.
 const BATCH_MEMORY: u64 = 256 << 20;
+
+/// The most bytes of frames in one submission of their upload: the staging
+/// memory an upload needs is two of these (see [`upload_frames`]).
+const UPLOAD_SLAB: usize = 32 << 20;
 
 /// How long one batch may take on the device before it is given up for lost.
 ///
@@ -152,7 +155,6 @@ struct Pass {
 /// so is rebuilt only when that changes.
 struct Window {
     lcorr: usize,
-    width: usize,
     out: wgpu::Buffer,
     readback: wgpu::Buffer,
     /// Only ever reached through `bind`; held so it lives as long as that does.
@@ -201,8 +203,140 @@ pub struct GpuContext {
 ///
 /// Not in a browser build, where there is never a device to keep (see
 /// [`shared_device`]) and wgpu's browser objects cannot sit in a `static`.
+///
+/// Or the host's own, given with [`use_device`].
 #[cfg(not(target_arch = "wasm32"))]
 static DEVICE: OnceLock<Option<(wgpu::Device, wgpu::Queue)>> = OnceLock::new();
+
+/// Run on `device` instead of opening a device of this crate's own: the
+/// host's, typically the one its renderer draws with, which then carries the
+/// registration's work between its own frames.
+///
+/// A host that draws with wgpu should, before the first GPU run (or
+/// [`available`] call): opening a second device beside a renderer's, on a
+/// card whose memory the two have overrun, can deadlock both — measured on a
+/// Quadro P620 (2 GB, Vulkan) with `turboreg-registration`, which opened its
+/// device the same way, and ending in the system resetting the GPU. Every
+/// allocation and submission here then runs inside error scopes, so a card
+/// with no room left for the registration's buffers fails its batch rather
+/// than panicking ([`take_trouble`] says why). wgpu still treats running out of
+/// memory for its own staging, a pipeline or a submission as losing the device
+/// — the host's, when it is shared — so uploads go a slab at a time to keep
+/// that staging small.
+///
+/// Takes effect only before a device is first asked for, and says whether it
+/// did. A software adapter counts as no device, as it would for one this crate
+/// opened. The device should have the adapter's own limits
+/// (`required_limits: adapter.limits()`): the batch size is derived from them.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn use_device(device: wgpu::Device, queue: wgpu::Queue, adapter: &wgpu::AdapterInfo) -> bool {
+    let shared = (adapter.device_type != wgpu::DeviceType::Cpu).then_some((device, queue));
+    DEVICE.set(shared).is_ok()
+}
+
+/// Run `work` with the device's out-of-memory and validation errors caught,
+/// and say which was raised, if one was.
+///
+/// Without a scope wgpu hands an error to the device's handler, which by
+/// default panics — on a device shared with a renderer, taking the host with
+/// it. Scopes are per thread in wgpu, so these catch this thread's errors only.
+fn scoped<T>(device: &wgpu::Device, work: impl FnOnce() -> T) -> Result<T, String> {
+    let no_room = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let done = work();
+    // Innermost first.
+    let invalid = pollster::block_on(invalid.pop());
+    let no_room = pollster::block_on(no_room.pop());
+    match no_room.or(invalid) {
+        None => Ok(done),
+        Some(e) => Err(e.to_string()),
+    }
+}
+
+/// Why the device last failed, until [`take_trouble`] takes it.
+static TROUBLE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn note_trouble(why: String) {
+    *TROUBLE.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+}
+
+/// Why the device failed since this was last asked, if it did: no room on it
+/// for a context's buffers, or a batch that never came back.
+///
+/// A context that cannot be made sends its batch to the processor
+/// (`pipeline::measure_batch`), and a batch lost part-way through comes back as
+/// flat correlation maps — no shift, no correlation. Either way a GPU run
+/// quietly became something else, so a caller that asked for the device
+/// should ask this after each batch, and once before the run to forget an
+/// earlier one's.
+pub fn take_trouble() -> Option<String> {
+    TROUBLE.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// A buffer of `contents`, for inside a [`scoped`] call: made unmapped and
+/// filled by the queue. `create_buffer_init` maps the buffer at creation
+/// instead, and wgpu treats mapping a buffer that could not be made as fatal,
+/// past any scope; this way a buffer there was no room for is an error the
+/// scope returns.
+fn filled(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    contents: &[u8],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    let size = (contents.len() as u64)
+        .next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
+        .max(4);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage: usage | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut padded = contents.to_vec();
+    padded.resize(size as usize, 0);
+    queue.write_buffer(&buffer, 0, &padded);
+    buffer
+}
+
+/// Copy `frames` into `raw`, one after another, submitting every
+/// [`UPLOAD_SLAB`] bytes and waiting for the submission before.
+///
+/// A write is staged in memory of the queue's own until the submission that
+/// carries it is done, and a whole batch at once is a hundred megabytes and
+/// more of it, asked for when a card short of memory can least spare it. A
+/// staging allocation that fails can lose the device.
+fn upload_frames(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    raw: &wgpu::Buffer,
+    frames: &[Vec<f32>],
+    pixels: usize,
+) -> Result<(), String> {
+    let mut pending = 0usize;
+    let mut before: Option<wgpu::SubmissionIndex> = None;
+    for (i, frame) in frames.iter().enumerate() {
+        let samples = &frame[..pixels.min(frame.len())];
+        scoped(device, || {
+            queue.write_buffer(raw, (i * pixels * 4) as u64, bytemuck::cast_slice(samples))
+        })?;
+        pending += samples.len() * 4;
+        if pending >= UPLOAD_SLAB || i + 1 == frames.len() {
+            pending = 0;
+            let submitted = scoped(device, || queue.submit([]))?;
+            if let Some(previous) = before.replace(submitted) {
+                device
+                    .poll(wgpu::PollType::Wait {
+                        submission_index: Some(previous),
+                        timeout: Some(BATCH_TIMEOUT),
+                    })
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
 
 fn shared_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     // Requesting an adapter is asynchronous, and in a browser it resolves
@@ -252,8 +386,10 @@ pub fn available() -> bool {
 impl GpuContext {
     /// Open a device and build everything for `ly * lx` frames.
     ///
-    /// `None` when there is no adapter, or the size is not one this can take —
-    /// the caller reports that rather than falling back.
+    /// `None` when there is no adapter, the size is not one this can take, or
+    /// the device has no room for the batch buffers ([`take_trouble`] then says
+    /// so). The caller decides what that means; `pipeline::measure_batch`
+    /// runs the batch on the processor.
     pub fn new(ly: usize, lx: usize) -> Option<GpuContext> {
         Self::with_submit_limit(ly, lx, MOST_FRAMES_PER_SUBMIT)
     }
@@ -287,170 +423,189 @@ impl GpuContext {
         let most_lanes = (limits.max_compute_invocations_per_workgroup as usize).clamp(1, 256);
         let lanes = (longest / 2).clamp(1, most_lanes);
         let per = (longest / 2).div_ceil(lanes).max(1);
-        let source = include_str!("gpu.wgsl")
-            .replace("__TWICE_LONGEST_LINE__", &(2 * longest).to_string())
-            .replace("__LONGEST_LINE__", &longest.to_string())
-            .replace("__LANES__", &lanes.to_string())
-            .replace("__PER__", &per.to_string());
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("registration"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
-        });
-        let pipeline = |entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(entry),
-                layout: None,
-                module: &shader,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: None,
-            })
-        };
-        let expand = pipeline("expand");
-        let line = pipeline("fft_line");
-        let phase = pipeline("phase");
-        let crop = pipeline("crop");
-
-        let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
-        let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: size.max(4),
-                usage,
-                mapped_at_creation: false,
-            })
-        };
-        let batch = frames_per_submit as u64;
-        let raw = buffer("raw", batch * pixels as u64 * 4, storage);
-        let data = buffer("data", batch * plane, wgpu::BufferUsages::STORAGE);
-        let refs = buffer("refs", pixels as u64 * 16, storage);
-
-        // exp(-i*pi*j/s) for every stage half-size s < longest and j < s, stage
-        // s starting at s - 1. The same for rows and columns: a twiddle depends
-        // on the stage, not on the length of the line.
-        let mut twiddles: Vec<[f32; 2]> = Vec::with_capacity(longest);
-        let mut span = 1usize;
-        while span < longest {
-            for j in 0..span {
-                let angle = std::f64::consts::PI * j as f64 / span as f64;
-                twiddles.push([angle.cos() as f32, -angle.sin() as f32]);
-            }
-            span *= 2;
-        }
-        let twiddles = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("twiddles"),
-            contents: bytemuck::cast_slice(&twiddles),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-
-        let uniform = |label: &str, contents: &[u8]| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            })
-        };
-        fn entries<'a>(pairs: &[(u32, &'a wgpu::Buffer)]) -> Vec<wgpu::BindGroupEntry<'a>> {
-            pairs
-                .iter()
-                .map(|&(binding, buffer)| wgpu::BindGroupEntry {
-                    binding,
-                    resource: buffer.as_entire_binding(),
+        // All of it inside error scopes: a card with no room for the batch
+        // buffers is a context that cannot be made — the caller then runs the
+        // CPU path — rather than a panic in the host's device handler.
+        let built = scoped(&device, || {
+            let source = include_str!("gpu.wgsl")
+                .replace("__TWICE_LONGEST_LINE__", &(2 * longest).to_string())
+                .replace("__LONGEST_LINE__", &longest.to_string())
+                .replace("__LANES__", &lanes.to_string())
+                .replace("__PER__", &per.to_string());
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("registration"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            let pipeline = |entry: &str| {
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: None,
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
                 })
-                .collect()
-        }
-
-        let expand_params = uniform(
-            "expand",
-            bytemuck::bytes_of(&ExpandParams {
-                pixels: pixels as u32,
-                clip: 0,
-                lo: 0.0,
-                hi: 0.0,
-            }),
-        );
-        let expand_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("expand"),
-            layout: &expand.get_bind_group_layout(0),
-            entries: &entries(&[(0, &data), (1, &refs), (2, &raw), (3, &expand_params)]),
-        });
-
-        let phase_params = uniform(
-            "phase",
-            bytemuck::bytes_of(&PhaseParams {
-                pixels: pixels as u32,
-                _pad0: 0,
-                _pad1: 0,
-                _pad2: 0,
-            }),
-        );
-        let phase_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("phase"),
-            layout: &phase.get_bind_group_layout(0),
-            entries: &entries(&[(0, &data), (1, &refs), (6, &phase_params)]),
-        });
-
-        // Rows are lx long, ly of them, a sample apart; columns ly long, lx of
-        // them, a row apart. Every pass starts out covering every line; the last
-        // is narrowed to the search window by `window_for`.
-        let pass = |rows: bool, inverse: bool| -> Pass {
-            let (n, lines, stride, line_stride) = if rows {
-                (lx, ly, 1, lx)
-            } else {
-                (ly, lx, lx, 1)
             };
-            let params = uniform(
-                "line",
-                bytemuck::bytes_of(&LineParams {
-                    n: n as u32,
-                    lines: lines as u32,
-                    stride: stride as u32,
-                    line_stride: line_stride as u32,
-                    conjugate: if inverse { -1.0 } else { 1.0 },
+            let expand = pipeline("expand");
+            let line = pipeline("fft_line");
+            let phase = pipeline("phase");
+            let crop = pipeline("crop");
+
+            let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+            let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: size.max(4),
+                    usage,
+                    mapped_at_creation: false,
+                })
+            };
+            let batch = frames_per_submit as u64;
+            let raw = buffer("raw", batch * pixels as u64 * 4, storage);
+            let data = buffer("data", batch * plane, wgpu::BufferUsages::STORAGE);
+            let refs = buffer("refs", pixels as u64 * 16, storage);
+
+            // exp(-i*pi*j/s) for every stage half-size s < longest and j < s, stage
+            // s starting at s - 1. The same for rows and columns: a twiddle depends
+            // on the stage, not on the length of the line.
+            let mut twiddles: Vec<[f32; 2]> = Vec::with_capacity(longest);
+            let mut span = 1usize;
+            while span < longest {
+                for j in 0..span {
+                    let angle = std::f64::consts::PI * j as f64 / span as f64;
+                    twiddles.push([angle.cos() as f32, -angle.sin() as f32]);
+                }
+                span *= 2;
+            }
+            let twiddles = filled(
+                &device,
+                &queue,
+                "twiddles",
+                bytemuck::cast_slice(&twiddles),
+                wgpu::BufferUsages::STORAGE,
+            );
+
+            let uniform = |label: &str, contents: &[u8]| {
+                filled(
+                    &device,
+                    &queue,
+                    label,
+                    contents,
+                    wgpu::BufferUsages::UNIFORM,
+                )
+            };
+            fn entries<'a>(pairs: &[(u32, &'a wgpu::Buffer)]) -> Vec<wgpu::BindGroupEntry<'a>> {
+                pairs
+                    .iter()
+                    .map(|&(binding, buffer)| wgpu::BindGroupEntry {
+                        binding,
+                        resource: buffer.as_entire_binding(),
+                    })
+                    .collect()
+            }
+
+            let expand_params = uniform(
+                "expand",
+                bytemuck::bytes_of(&ExpandParams {
                     pixels: pixels as u32,
-                    first: 0,
-                    all: lines as u32,
+                    clip: 0,
+                    lo: 0.0,
+                    hi: 0.0,
                 }),
             );
-            Pass {
-                bind: device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("line"),
-                    layout: &line.get_bind_group_layout(0),
-                    entries: &entries(&[(0, &data), (4, &params), (5, &twiddles)]),
-                }),
-                params,
-                lines: lines as u32,
-            }
-        };
-        // The order the CPU path runs them in, so the two accumulate their
-        // rounding the same way.
-        let passes = [
-            pass(true, false),
-            pass(false, false),
-            pass(true, true),
-            pass(false, true),
-        ];
+            let expand_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("expand"),
+                layout: &expand.get_bind_group_layout(0),
+                entries: &entries(&[(0, &data), (1, &refs), (2, &raw), (3, &expand_params)]),
+            });
 
-        Some(GpuContext {
-            device,
-            queue,
-            ly,
-            lx,
-            frames_per_submit,
-            expand,
-            line,
-            phase,
-            crop,
-            raw,
-            data,
-            refs,
-            expand_params,
-            expand_bind,
-            phase_bind,
-            passes,
-            window: None,
-            lost: false,
-        })
+            let phase_params = uniform(
+                "phase",
+                bytemuck::bytes_of(&PhaseParams {
+                    pixels: pixels as u32,
+                    _pad0: 0,
+                    _pad1: 0,
+                    _pad2: 0,
+                }),
+            );
+            let phase_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("phase"),
+                layout: &phase.get_bind_group_layout(0),
+                entries: &entries(&[(0, &data), (1, &refs), (6, &phase_params)]),
+            });
+
+            // Rows are lx long, ly of them, a sample apart; columns ly long, lx of
+            // them, a row apart. Every pass starts out covering every line; the last
+            // is narrowed to the search window by `window_for`.
+            let pass = |rows: bool, inverse: bool| -> Pass {
+                let (n, lines, stride, line_stride) = if rows {
+                    (lx, ly, 1, lx)
+                } else {
+                    (ly, lx, lx, 1)
+                };
+                let params = uniform(
+                    "line",
+                    bytemuck::bytes_of(&LineParams {
+                        n: n as u32,
+                        lines: lines as u32,
+                        stride: stride as u32,
+                        line_stride: line_stride as u32,
+                        conjugate: if inverse { -1.0 } else { 1.0 },
+                        pixels: pixels as u32,
+                        first: 0,
+                        all: lines as u32,
+                    }),
+                );
+                Pass {
+                    bind: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("line"),
+                        layout: &line.get_bind_group_layout(0),
+                        entries: &entries(&[(0, &data), (4, &params), (5, &twiddles)]),
+                    }),
+                    params,
+                    lines: lines as u32,
+                }
+            };
+            // The order the CPU path runs them in, so the two accumulate their
+            // rounding the same way.
+            let passes = [
+                pass(true, false),
+                pass(false, false),
+                pass(true, true),
+                pass(false, true),
+            ];
+
+            GpuContext {
+                device: device.clone(),
+                queue: queue.clone(),
+                ly,
+                lx,
+                frames_per_submit,
+                expand,
+                line,
+                phase,
+                crop,
+                raw,
+                data,
+                refs,
+                expand_params,
+                expand_bind,
+                phase_bind,
+                passes,
+                window: None,
+                lost: false,
+            }
+        });
+        match built {
+            Ok(context) => Some(context),
+            Err(why) => {
+                note_trouble(format!(
+                    "the GPU could not set up a {lx} x {ly} registration of {frames_per_submit} \
+                     frame(s) at a time: {why}"
+                ));
+                None
+            }
+        }
     }
 
     /// The frame size this context was built for.
@@ -474,47 +629,59 @@ impl GpuContext {
             .zip(&filters.mask_offset)
             .map(|((c, &m), &o)| [c.re, c.im, m, o])
             .collect();
-        self.queue
-            .write_buffer(&self.refs, 0, bytemuck::cast_slice(&pixels));
         let (clip, lo, hi) = match filters.clip {
             Some((lo, hi)) => (1, lo, hi),
             None => (0, 0.0, 0.0),
         };
-        self.queue.write_buffer(
-            &self.expand_params,
-            0,
-            bytemuck::bytes_of(&ExpandParams {
-                pixels: (self.ly * self.lx) as u32,
-                clip,
-                lo,
-                hi,
-            }),
-        );
+        let written = scoped(&self.device, || {
+            self.queue
+                .write_buffer(&self.refs, 0, bytemuck::cast_slice(&pixels));
+            self.queue.write_buffer(
+                &self.expand_params,
+                0,
+                bytemuck::bytes_of(&ExpandParams {
+                    pixels: (self.ly * self.lx) as u32,
+                    clip,
+                    lo,
+                    hi,
+                }),
+            );
+        });
+        // A reference that did not arrive would correlate every frame with
+        // whatever was there before: the context is finished with instead.
+        if let Err(why) = written {
+            note_trouble(format!("uploading the reference failed on the GPU: {why}"));
+            self.lost = true;
+        }
     }
 
     /// The output buffers for a window of half-width `lcorr`, built on first
-    /// use and whenever the window grows.
-    fn window_for(&mut self, lcorr: usize) -> &Window {
+    /// use and whenever the window grows. `None` when the device had no room
+    /// for them.
+    fn window_for(&mut self, lcorr: usize) -> Option<&Window> {
         if self.window.as_ref().is_none_or(|w| w.lcorr != lcorr) {
+            // The old window goes first, so two are never alive at once.
+            self.window = None;
             let width = 2 * lcorr + 1;
             let bytes = (self.frames_per_submit * width * width * 4) as u64;
-            let out = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("windows"),
-                size: bytes,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-            let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("windows readback"),
-                size: bytes,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let params = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("crop"),
-                    contents: bytemuck::bytes_of(&CropParams {
+            let made = scoped(&self.device, || {
+                let out = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("windows"),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                });
+                let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("windows readback"),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let params = filled(
+                    &self.device,
+                    &self.queue,
+                    "crop",
+                    bytemuck::bytes_of(&CropParams {
                         ly: self.ly as u32,
                         lx: self.lx as u32,
                         lcorr: lcorr as u32,
@@ -524,26 +691,29 @@ impl GpuContext {
                         _pad1: 0,
                         _pad2: 0,
                     }),
-                    usage: wgpu::BufferUsages::UNIFORM,
+                    wgpu::BufferUsages::UNIFORM,
+                );
+                let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("crop"),
+                    layout: &self.crop.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.data.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: params.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: out.as_entire_binding(),
+                        },
+                    ],
                 });
-            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("crop"),
-                layout: &self.crop.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.data.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: params.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
-                        resource: out.as_entire_binding(),
-                    },
-                ],
+                (out, readback, params, bind)
             });
+            let (out, readback, params, bind) = made.ok()?;
             // The crop reads `width` columns, wrapping round from `lx - lcorr`,
             // and the columns' inverse is the last transform before it — so
             // that pass need only touch those. Every other column's inverse
@@ -568,14 +738,13 @@ impl GpuContext {
             );
             self.window = Some(Window {
                 lcorr,
-                width,
                 out,
                 readback,
                 _params: params,
                 bind,
             });
         }
-        self.window.as_ref().expect("built just above")
+        self.window.as_ref()
     }
 
     /// The correlation window of every frame against the uploaded reference.
@@ -588,8 +757,12 @@ impl GpuContext {
         let pixels = ly * lx;
         let lcorr = lcorr_for(ly, lx, max_shift);
         let per_submit = self.frames_per_submit;
-        let width = self.window_for(lcorr).width;
+        let width = 2 * lcorr + 1;
         let area = width * width;
+        if self.window_for(lcorr).is_none() {
+            note_trouble("the GPU had no room for the correlation windows".to_string());
+            self.lost = true;
+        }
 
         let mut out = Vec::with_capacity(frames.len());
         for chunk in frames.chunks(per_submit) {
@@ -601,54 +774,66 @@ impl GpuContext {
                 out.extend((0..count).map(|_| vec![0.0; area]));
                 continue;
             }
-            // Straight into the queue's staging memory: one copy per frame, and
-            // no allocation of our own.
-            if let Some(size) = wgpu::BufferSize::new((count * pixels * 4) as u64) {
-                if let Some(mut view) = self.queue.write_buffer_with(&self.raw, 0, size) {
-                    for (i, frame) in chunk.iter().enumerate() {
-                        view.slice(i * pixels * 4..(i + 1) * pixels * 4)
-                            .copy_from_slice(bytemuck::cast_slice(frame));
+            // A batch whose frames did not all arrive would be correlated
+            // against what the buffer held before; it is treated as one that
+            // never came back.
+            if let Err(why) = upload_frames(&self.device, &self.queue, &self.raw, chunk, pixels) {
+                note_trouble(format!("uploading frames failed on the GPU: {why}"));
+                self.lost = true;
+                out.extend((0..count).map(|_| vec![0.0; area]));
+                continue;
+            }
+
+            let submitted = scoped(&self.device, || {
+                let mut encoder = self
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                let window = self.window.as_ref().expect("built above");
+                {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("correlate"),
+                        timestamp_writes: None,
+                    });
+                    let across = (pixels as u32).div_ceil(256);
+                    pass.set_pipeline(&self.expand);
+                    pass.set_bind_group(0, &self.expand_bind, &[]);
+                    pass.dispatch_workgroups(across, count as u32, 1);
+
+                    pass.set_pipeline(&self.line);
+                    for axis in &self.passes[..2] {
+                        pass.set_bind_group(0, &axis.bind, &[]);
+                        pass.dispatch_workgroups(axis.lines, count as u32, 1);
                     }
-                }
-            }
 
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                    pass.set_pipeline(&self.phase);
+                    pass.set_bind_group(0, &self.phase_bind, &[]);
+                    pass.dispatch_workgroups(across, count as u32, 1);
+
+                    pass.set_pipeline(&self.line);
+                    for axis in &self.passes[2..] {
+                        pass.set_bind_group(0, &axis.bind, &[]);
+                        pass.dispatch_workgroups(axis.lines, count as u32, 1);
+                    }
+
+                    pass.set_pipeline(&self.crop);
+                    pass.set_bind_group(0, &window.bind, &[]);
+                    pass.dispatch_workgroups((area as u32).div_ceil(256), count as u32, 1);
+                }
+                let bytes = (count * area * 4) as u64;
+                encoder.copy_buffer_to_buffer(&window.out, 0, &window.readback, 0, bytes);
+                self.queue.submit(Some(encoder.finish()))
+            });
+            let submitted = match submitted {
+                Ok(submitted) => submitted,
+                Err(why) => {
+                    note_trouble(format!("a batch failed on the GPU: {why}"));
+                    self.lost = true;
+                    out.extend((0..count).map(|_| vec![0.0; area]));
+                    continue;
+                }
+            };
             let window = self.window.as_ref().expect("built above");
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("correlate"),
-                    timestamp_writes: None,
-                });
-                let across = (pixels as u32).div_ceil(256);
-                pass.set_pipeline(&self.expand);
-                pass.set_bind_group(0, &self.expand_bind, &[]);
-                pass.dispatch_workgroups(across, count as u32, 1);
-
-                pass.set_pipeline(&self.line);
-                for axis in &self.passes[..2] {
-                    pass.set_bind_group(0, &axis.bind, &[]);
-                    pass.dispatch_workgroups(axis.lines, count as u32, 1);
-                }
-
-                pass.set_pipeline(&self.phase);
-                pass.set_bind_group(0, &self.phase_bind, &[]);
-                pass.dispatch_workgroups(across, count as u32, 1);
-
-                pass.set_pipeline(&self.line);
-                for axis in &self.passes[2..] {
-                    pass.set_bind_group(0, &axis.bind, &[]);
-                    pass.dispatch_workgroups(axis.lines, count as u32, 1);
-                }
-
-                pass.set_pipeline(&self.crop);
-                pass.set_bind_group(0, &window.bind, &[]);
-                pass.dispatch_workgroups((area as u32).div_ceil(256), count as u32, 1);
-            }
             let bytes = (count * area * 4) as u64;
-            encoder.copy_buffer_to_buffer(&window.out, 0, &window.readback, 0, bytes);
-            let submitted = self.queue.submit(Some(encoder.finish()));
 
             let slice = window.readback.slice(..bytes);
             let (tx, rx) = std::sync::mpsc::channel();
@@ -672,6 +857,7 @@ impl GpuContext {
                 // The batch never came back. Its buffer may still be waiting on
                 // a mapping that will not arrive, so this context is finished;
                 // `maps_of` builds a new one next time.
+                note_trouble("a batch never came back from the GPU".to_string());
                 self.lost = true;
                 out.extend((0..count).map(|_| vec![0.0; area]));
             }
@@ -738,3 +924,7 @@ pub fn maps_of(
     context.set_reference(filters);
     Some(context.maps(frames, max_shift))
 }
+
+#[cfg(test)]
+#[path = "gpu_tests.rs"]
+mod tests;

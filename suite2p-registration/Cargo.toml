@@ -6,7 +6,7 @@
 # travels with the algorithm whoever retypes it.
 [package]
 name = "suite2p-registration"
-version = "0.22.1"
+version = "0.26.3"
 edition = "2021"
 # `Option::is_none_or`, in the GPU backend's context cache.
 rust-version = "1.82"

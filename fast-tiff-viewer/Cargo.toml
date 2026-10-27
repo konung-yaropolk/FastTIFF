@@ -1,6 +1,6 @@
 [package]
 name = "fast-tiff-viewer"
-version = "0.26.2"
+version = "0.26.3"
 edition = "2021"
 description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
 # GPL-3.0, not MPL-2.0 as the rest of the library crates are. The built-in
@@ -124,7 +124,7 @@ backend-glow = ["scivis-render/backend-glow"]
 # `?/`: each GPU path belongs to a plugin that may not be here. Without the weak
 # form this would pull a registration crate back in on its own, which is the
 # one thing `plugin-suite2p-stabilize = off` / `plugin-turboreg-stabilize = off` is for.
-gpu-registration = ["suite2p-registration?/gpu", "turboreg-registration?/gpu"]
+gpu-registration = ["suite2p-registration?/gpu", "turboreg-registration?/gpu", "dep:wgpu"]
 # Background worker threads (read-ahead decode + 3D volume assembly). On by
 # default; a single-threaded host — notably `wasm32-unknown-unknown`, where
 # `std::thread::spawn` is unavailable — turns this off and gets the synchronous
@@ -181,6 +181,9 @@ fasttiff-plugin = { path = "../fasttiff-plugin" }
 # below; a browser gets the same arithmetic on one thread and is told so.
 suite2p-registration = { path = "../suite2p-registration", default-features = false, optional = true }
 turboreg-registration = { path = "../turboreg-registration", default-features = false, optional = true }
+# Only to hand the renderer's device to the two above (`share_gpu_device`):
+# the same wgpu they and the renderer use, so it adds nothing to the build.
+wgpu = { version = "29", optional = true }
 
 # Two built-ins that the browser build also gets, so their dependencies are no
 # longer desktop-only either: `png` for the PNG importer/exporter, `rustfft` for

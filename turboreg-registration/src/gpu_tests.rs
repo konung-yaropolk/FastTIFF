@@ -255,6 +255,82 @@ fn repeated_rounds_are_identical() {
     }
 }
 
+/// The planes go up a slab at a time; how many slabs makes no difference to
+/// what is scored.
+#[test]
+fn a_level_uploaded_in_many_slabs_scores_the_same() {
+    if !available() {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    }
+    let (w, h) = (90, 70);
+    let lv = level(w, h);
+    let sampler = Sampler::of(&lv, false);
+    let model = Transformation::RigidBody;
+    let (fixed, moved) = nudged(model, w, h);
+    let prep = prepare(model, &fixed, &moved, true).expect("candidate");
+    let planes = [[
+        &lv.img[..],
+        &sampler.img[..],
+        &sampler.gx[..],
+        &sampler.gy[..],
+    ]];
+    let whole = GpuLevel::new(model.dof(), w, h, &planes).expect("level");
+    // 64 samples a write: about a hundred slabs a plane, the last one short.
+    let sliced = GpuLevel::build(model.dof(), w, h, &planes, 256).expect("level");
+    assert_eq!(
+        sliced.evaluate(&[(0, &prep)]).expect("round"),
+        whole.evaluate(&[(0, &prep)]).expect("round")
+    );
+}
+
+/// What would be a panic in the device's error handler comes back from a
+/// scope as a value: on a device shared with a renderer, the difference
+/// between a failed batch and a failed application.
+#[test]
+fn an_error_in_a_scope_is_returned_not_raised() {
+    let Some((device, _)) = shared_device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let too_big = device.limits().max_buffer_size.saturating_add(4);
+    let made = scoped(&device, || {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("too big"),
+            size: too_big,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        })
+    });
+    assert!(made.is_err());
+    // And the device carries on.
+    assert!(
+        scoped(&device, || device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fine"),
+            size: 256,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        }))
+        .is_ok()
+    );
+}
+
+/// A host's device is taken only before the crate has one: a registration
+/// never swaps devices under a run.
+#[test]
+fn a_device_is_not_replaced_once_in_use() {
+    if !available() {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    }
+    let (device, queue) = shared_device().expect("available");
+    let adapter = pollster::block_on(
+        wgpu::Instance::default().request_adapter(&wgpu::RequestAdapterOptions::default()),
+    )
+    .expect("adapter");
+    assert!(!use_device(device, queue, &adapter.get_info()));
+}
+
 /// More lanes than the level was built for, or a slot it has no planes for, is
 /// refused rather than read or written past the end of a buffer.
 #[test]
