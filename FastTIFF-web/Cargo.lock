@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.26.1"
+version = "1.26.2"
 dependencies = [
  "anyhow",
  "eframe",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.26.1"
+version = "0.26.2"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -902,7 +902,7 @@ version = "0.26.1"
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "1.26.1"
+version = "1.26.2"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",
@@ -2577,11 +2577,15 @@ dependencies = [
 
 [[package]]
 name = "scivis-render"
-version = "0.26.0"
+version = "0.26.2"
 dependencies = [
+ "ash",
  "bytemuck",
  "half",
+ "rayon",
+ "wasm-bindgen-futures",
  "wgpu",
+ "windows",
 ]
 
 [[package]]

@@ -15,6 +15,38 @@ use fast_tiff_viewer::camera::{CameraState, NavMode, FLY_UNITS_PER_SEC, KEY_ROT}
 const PINCH_DOLLY: f32 = 260.0;
 
 impl ViewerApp {
+    /// Render the 3D view at reduced size (the user's choice,
+    /// `moving_downscale`) while the user moves it, and at full size again
+    /// [`super::VOLUME_SETTLE_S`] after they stop. Moving is the camera
+    /// changing from one frame to the next — every gesture, key, wheel click
+    /// and button that moves the view does that — and nothing else: an
+    /// animation turns the volume, not the camera, and is watched at full
+    /// size.
+    pub(super) fn volume_motion(&mut self, ctx: &egui::Context) {
+        let mark = super::animation::CameraMark::of(&self.core.volume.cam);
+        let now = ctx.input(|i| i.time);
+        let frame = ctx.cumulative_frame_nr();
+        // Against the 3D frame just before only: the camera reset for a stack
+        // opened in 2D, or set up while the view was elsewhere, moved nothing
+        // the user was watching.
+        if self
+            .volume_last_camera
+            .is_some_and(|(last, at)| frame <= at + 1 && !last.same_pose(&mark))
+        {
+            self.volume_moved_at = Some(now);
+        }
+        self.volume_last_camera = Some((mark, frame));
+        let since = self.volume_moved_at.map(|t| now - t);
+        self.core.volume.downscale = downscale_after(since, self.moving_downscale);
+        if let Some(s) = since.filter(|_| self.core.volume.downscale > 1) {
+            // The sharp frame is due when the settle time runs out, input or
+            // not.
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                (super::VOLUME_SETTLE_S - s).max(0.0) + 0.001,
+            ));
+        }
+    }
+
     /// Apply this frame's mouse/keyboard to the 3D camera per the active nav mode.
     /// Returns whether the camera is actively moving (so the caller keeps
     /// repainting while a drag or a held key continues).
@@ -245,3 +277,17 @@ impl ViewerApp {
         animating
     }
 }
+
+/// How many times smaller to render the 3D view, `since` seconds after the
+/// user last moved it (`None`: never): `moving` until the settle time is up.
+pub(super) fn downscale_after(since: Option<f64>, moving: u32) -> u32 {
+    if since.is_some_and(|s| (0.0..super::VOLUME_SETTLE_S).contains(&s)) {
+        moving.max(1)
+    } else {
+        1
+    }
+}
+
+#[cfg(test)]
+#[path = "camera_tests.rs"]
+mod tests;

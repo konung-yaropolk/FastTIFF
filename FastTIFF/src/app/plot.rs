@@ -367,6 +367,7 @@ pub(super) fn plot_window(ctx: &egui::Context, win: &mut PlotWindow, busy: bool)
         // needs height of its own for it to claim.
         size: egui::vec2(480.0, 320.0) / super::scale::UI_SCALE,
         scroll: false,
+        fit_height: false,
         resizable: true,
         // A plot is a result to read beside the picture, not a control acting
         // on it — and with a canvas tool armed it is the *picture* that has to

@@ -218,6 +218,7 @@ fn panel(
             // height it is allowed, and a three-control panel would stand the
             // height of the canvas over the view it is animating.
             scroll: false,
+            fit_height: false,
             // And fixed, for the same reason: a resizable window keeps a size
             // of its own rather than its content's. In the browser only — a
             // desktop window is resizable whatever this says.

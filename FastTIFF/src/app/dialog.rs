@@ -36,6 +36,17 @@ pub(super) struct Dialog<'a> {
     /// whatever the controls leave — measures infinity inside a scroll area and
     /// collapses. Those bodies manage their own overflow.
     pub scroll: bool,
+    /// Make the window exactly as tall as its body, following it as it grows
+    /// and shrinks — the 3D settings, whose rows change with the render mode.
+    /// Up to most of the screen's height, past which the body scrolls; needs
+    /// `scroll`. `size` is then only the width, and the height the window
+    /// opens at the first time.
+    ///
+    /// Neither host does this by itself. A native window keeps the size it was
+    /// opened at, whatever is in it, and an egui window grows to fit its
+    /// content but never shrinks back: open the settings in Volume mode, switch
+    /// to Max intensity, and the rows that went leave a blank space behind.
+    pub fit_height: bool,
     /// Whether the user can resize it. Honoured only in the browser: a native
     /// window is always resizable, and refusing to be would leave a user whose
     /// screen is shorter than the content with no way to reach the rest of it.
@@ -77,9 +88,20 @@ pub(super) fn show(
     // choosing to resize the window when the open file changes shape. For that
     // one it is the right call, since a window kept at the old file's height
     // would clip the controls of a file with more channels.
+    //
+    // A window that fits its height opens at the height it last fitted, so it
+    // does not open at `size` and jump to its content a frame later. That is
+    // the only height the builder is given: it has to stay the same while the
+    // window is open, or the diff above would resize it to that height, and to
+    // `size`'s width with it.
+    let fit_key = egui::Id::new(dialog.id).with("fit_height");
+    let mut fit = dialog
+        .fit_height
+        .then(|| FitHeight::load(ctx, fit_key, dialog.size.y));
+    let height = fit.map_or(dialog.size.y, |f| f.opened_at);
     let mut builder = egui::ViewportBuilder::default()
         .with_title(dialog.title)
-        .with_inner_size(dialog.size);
+        .with_inner_size(egui::vec2(dialog.size.x, height));
     if dialog.always_on_top {
         // The window manager's own always-on-top, so it holds against every
         // other application too — which is the point when the other
@@ -98,13 +120,24 @@ pub(super) fn show(
             //
             // The callback hands us a bare root `Ui` with no background or
             // margin, so the panel is what makes the window look like a window.
+            let window = ui
+                .ctx()
+                .input(|i| i.viewport().inner_rect)
+                .unwrap_or_else(|| ui.max_rect());
+            let mut wanted = None;
             egui::CentralPanel::default().show_inside(ui, |ui| {
+                // What the window adds around the body: the panel's margins.
+                let chrome = window.height() - ui.max_rect().height();
                 if dialog.scroll {
-                    egui::ScrollArea::vertical().show(ui, &mut body);
+                    let shown = egui::ScrollArea::vertical().show(ui, &mut body);
+                    wanted = Some(shown.content_size.y + chrome);
                 } else {
                     body(ui);
                 }
             });
+            if let (Some(fit), Some(wanted)) = (fit.as_mut(), wanted) {
+                fit.apply(ui.ctx(), window, wanted);
+            }
             if ui.ctx().input(|i| i.viewport().close_requested()) {
                 dismissed = true;
             }
@@ -114,8 +147,75 @@ pub(super) fn show(
             super::clipboard::to_system_line_endings(ui.ctx());
         },
     );
+    if let Some(fit) = fit {
+        ctx.data_mut(|d| d.insert_temp(fit_key, fit));
+    }
     if dismissed {
         *open = false;
+    }
+}
+
+/// What a native [`Dialog::fit_height`] window keeps between frames.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+struct FitHeight {
+    /// The height its content last asked for, in points.
+    fitted: f32,
+    /// The height this opening of the window started at.
+    opened_at: f32,
+    /// The main window's frame it was last drawn in. A window not drawn in
+    /// the frame before has just been opened.
+    frame: u64,
+    /// The height last asked of the window manager: at opening, the height
+    /// the window was opened at.
+    asked: f32,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FitHeight {
+    fn load(ctx: &egui::Context, key: egui::Id, first: f32) -> Self {
+        let frame = ctx.cumulative_frame_nr();
+        let mut fit = ctx.data(|d| d.get_temp::<Self>(key)).unwrap_or(Self {
+            fitted: first,
+            opened_at: first,
+            frame,
+            asked: first,
+        });
+        if frame > fit.frame + 1 {
+            fit.opened_at = fit.fitted;
+            fit.asked = fit.opened_at;
+        }
+        fit.frame = frame;
+        fit
+    }
+
+    /// Size `window` to `wanted`, its body's height plus what goes around it.
+    ///
+    /// Asked once per change of height, not every frame the window is some
+    /// other height. A window manager may decline — a tiling one, or any for a
+    /// maximized window, and a minimized window has no height to compare — and
+    /// asking again each frame would then never stop: every request schedules
+    /// another frame. So a window the user has made another height stays so
+    /// until its content changes.
+    fn apply(&mut self, ctx: &egui::Context, window: egui::Rect, wanted: f32) {
+        // Most of the screen at the most, leaving room for the title bar and
+        // the taskbar; past that the body scrolls.
+        let most = ctx
+            .input(|i| i.viewport().monitor_size)
+            .map_or(f32::INFINITY, |m| m.y * 0.85);
+        let height = wanted.min(most).max(64.0).ceil();
+        self.fitted = height;
+        let held = ctx.input(|i| {
+            let v = i.viewport();
+            [v.minimized, v.maximized, v.fullscreen].contains(&Some(true))
+        });
+        if !held && (height - self.asked).abs() > 0.5 {
+            self.asked = height;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                window.width(),
+                height,
+            )));
+        }
     }
 }
 
@@ -130,11 +230,22 @@ pub(super) fn show(
     mut body: impl FnMut(&mut egui::Ui),
 ) {
     unscaled(ctx, |ctx| {
+        // A window that fits its height scrolls its own body, to measure it,
+        // and is held to that height, which is how it shrinks: egui only ever
+        // grows a window to its content. The measurement is a frame old, so a
+        // body that grows shows a scroll bar for that one frame.
+        let fit = dialog.fit_height && dialog.scroll;
+        let fit_key = egui::Id::new(dialog.id).with("fit_height");
+        let fitted = ctx.data(|d| d.get_temp::<f32>(fit_key)).filter(|_| fit);
         let mut win = egui::Window::new(dialog.title)
             .id(egui::Id::new(dialog.id))
             .open(open)
             .resizable(dialog.resizable)
-            .vscroll(dialog.scroll);
+            .vscroll(dialog.scroll && !fit);
+        if let Some(height) = fitted {
+            // At most the canvas: the window clamps its own maximum to that.
+            win = win.min_height(height).max_height(height);
+        }
         if dialog.always_on_top {
             // In the browser there is no window manager to ask, only egui's own
             // layer order — so "on top" means the foreground layer, above the
@@ -153,6 +264,19 @@ pub(super) fn show(
         } else {
             win.default_size(dialog.size)
         };
-        win.show(ctx, |ui| body(ui));
+        win.show(ctx, |ui| {
+            if !fit {
+                body(ui);
+                return;
+            }
+            let shown = egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .show(ui, &mut body);
+            let height = shown.content_size.y.ceil();
+            if fitted != Some(height) {
+                ctx.data_mut(|d| d.insert_temp(fit_key, height));
+                ctx.request_repaint();
+            }
+        });
     });
 }

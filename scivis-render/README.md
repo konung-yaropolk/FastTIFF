@@ -169,23 +169,85 @@ scissor to the target rect — that's host state, and this crate won't touch it.
 ```rust,ignore
 fn max_3d_texture_size(&self) -> u32
 ```
-The device's per-axis 3D-texture limit. Subsample your volume to fit it before
+The device's per-axis 3D-texture limit. Reduce your volume to fit it before
 uploading; there is no automatic downscale.
 
-```rust,ignore
-fn upload_volumes(&mut self, w: u32, h: u32, d: u32, channels: &[(VolumeKind, Vec<u8>)])
-```
-Upload the whole volume, one entry per channel, each `w * h * d` samples in
-native-endian bytes of its `VolumeKind`, z-major. Channels past `channels.len()`
-shrink to 1×1×1 dummies. Re-uploading the same shape and kind refills in place
-with no reallocation — which is what makes stepping through 4D timepoints cheap.
+### Packing a volume (`pack`)
+
+A volume reaches the GPU **packed**: up to four channels share one RGBA texture
+(channels 5 and 6 a second one), so a single texture read returns every channel
+at a point. The packed volume also carries a mip chain and per-brick maxima.
+Building all that costs time in proportion to the volume, so do it where it
+won't stall a frame — FastTIFF does it on its volume-building thread — and the
+upload is then a plain copy.
 
 ```rust,ignore
-fn volume_gpu_bps(kind: VolumeKind) -> usize   // free function, per backend
+fn volume_texel_format(&self, kind: VolumeKind) -> pack::TexelFormat
 ```
-GPU bytes per sample on this backend — wgpu stores everything as 16-bit, glow
-stores natively. Budget on `max(cpu_bps, volume_gpu_bps(kind))` so an 8-bit
-source doesn't silently double past your limit in VRAM.
+How this device stores a volume of `kind` (use `pack::common_kind` for mixed
+channels). wgpu: 8-bit → `Unorm8`; 16-bit → `Unorm16` with the
+`TEXTURE_FORMAT_16BIT_NORM` feature, else `Float16`; float → `Float16`. glow:
+native widths (`Unorm8`, `Unorm16`, `Float32`).
+
+```rust,ignore
+let layout = pack::VolumeLayout::new((w, h, d), channels, format);
+let mut volume = pack::PackedVolume::new(layout);
+// fill volume.level0_mut() — slice z of texture t is the `layout.slice_bytes(t)`
+// chunk at z, so slices can be written in parallel with chunks_mut — then:
+volume.finish(); // mip chain + brick maxima
+// or, with whole channels in hand: PackedVolume::from_channels(dims, &channels, format)
+```
+Values are in **texture units**: `raw/255` or `raw/65535` for integer sources,
+the raw value for float ones. `pack::bytes_per_voxel(channels, format)` is what
+a budget divides by (packing padding and the mip chain included).
+
+The mip levels hold the **maximum** of the voxels below them, not the mean: they
+are read by the maximum-intensity projection where a voxel is smaller than a
+pixel, and averaging would dim the thin bright structures a MIP is for.
+
+```rust,ignore
+fn upload_packed_volume(&mut self, volume: &PackedVolume) -> Result<(), VolumeUploadError>
+fn upload_volumes(&mut self, w: u32, h: u32, d: u32, channels: &[(VolumeKind, Vec<u8>)])
+    -> Result<(), VolumeUploadError>   // packs on the calling thread, then uploads
+```
+Re-uploading the same shape and format refills in place with no reallocation —
+which is what makes stepping through 4D timepoints cheap; a volume of another
+shape frees the old one's memory before it asks for its own. A volume whose
+buffers are not the sizes its layout says (`PackedVolume::check`: one never
+`finish`ed, say) is refused as `Unsupported`. Fails with
+`VolumeUploadError::OutOfMemory` when the GPU has no room (wgpu reports it per
+texture, before anything is written to it), leaving placeholders and no volume:
+build a smaller one and try again. Don't rely on that alone, though: a driver
+may overcommit rather than fail (DX12 does, by several GB on a 2 GB card, and
+OpenGL only fails for absurd sizes).
+
+```rust,ignore
+fn take_late_upload_error(&mut self) -> Option<(VolumeUploadError, usize)>
+```
+In a browser, WebGPU says whether there was room through a promise an upload
+cannot wait for. The upload then returns `Ok`, the volume is not drawn until
+the answer is in (a texture there was no room for would invalidate the whole
+frame, the host's UI included), and a refusal turns up here, with the bytes
+the volume took: the volume is gone, as after a failed upload. Ask once a
+frame. Always `None` elsewhere.
+
+Size the volume against:
+
+```rust,ignore
+fn volume_memory_available(&self) -> Option<u64>
+fn set_adapter(&mut self, adapter: wgpu::Adapter)   // wgpu only: what to ask
+```
+GPU memory a new volume could take: the driver's budget less what the process
+uses, plus what the current volume holds (a new one replaces it). wgpu asks
+`VK_EXT_memory_budget` on Vulkan and DXGI on DX12 (and DXGI for Vulkan on
+Windows when the extension is missing); glow asks `GL_NVX_gpu_memory_info` or
+`GL_ATI_meminfo`. `None` where there's no way to ask (Metal, the browser), the
+wgpu adapter wasn't handed over, or the GPU is integrated: its memory is the
+host's RAM, which the volume already takes once on the CPU side, and the
+drivers' figures for it are the carve-out (or nothing). Take a share of it,
+not all of it.
+
+### Drawing it
 
 ```rust,ignore
 fn set_volume_interp(&mut self, interp: VolumeInterp)
@@ -198,12 +260,51 @@ call them every 3D frame.
 unorm-normalized**, so divide a `0..65535` window by `65535`. Float volumes keep
 their own units. The camera arrives as an explicit basis (`eye`, `forward`,
 `right`, `up`, `tan_half_fov`) rather than matrices, so the shader builds rays
-with no matrix inverse.
+with no matrix inverse. `max_steps` caps the samples per ray: `max_steps(pixels,
+channels, interp)` keeps a frame within `FRAME_SAMPLE_BUDGET` reads, so no frame
+runs long enough for the system to reset the GPU.
 
 ```rust,ignore
-fn paint_volume(&self, render_pass: &mut wgpu::RenderPass)   // wgpu
-fn paint_volume(&self, gl: &glow::Context)                   // glow
+fn set_volume_target(&mut self, width_px: u32, height_px: u32, downscale: u32)
 ```
+The size the view is painted at, and how many times smaller per axis to render
+it: `MOVING_DOWNSCALE` (4) while the user is moving the view renders a sixteenth
+of the rays into a texture of its own, which `paint_volume` scales up; 1 renders
+every pixel. Set it every frame. Until it is set, wgpu does not know how large
+a pixel is and reads no coarser mip level. (glow takes the size from the
+viewport the host has set and uses only `downscale`.) Work out
+`VolumeParams::max_steps` from the full size even when reduced: a reduced frame
+then takes as many steps per ray as a sharp one and a sixteenth of the work.
+
+```rust,ignore
+fn set_volume_acceleration(&mut self, skip_empty: bool, mip_levels: bool)
+```
+Both on unless switched off, for comparing, measuring or ruling them out:
+
+- **Empty-space skipping.** From the brick maxima and the current windows the
+  renderer works out which 16³ bricks can contribute anything (grown by one
+  brick, so filtering across a face is covered), and rays jump over the rest,
+  staying on the sample lattice they would have walked. **Exact**: the picture
+  is the same either way, in every mode.
+- **Mip levels** (MIP only). Where a voxel is smaller than a pixel across the
+  ray at the ray's nearest sample, the ray reads a coarser level and steps
+  accordingly. Conservative on anisotropic stacks: a thick-sliced stack seen
+  from the side keeps its full resolution.
+
+A MIP ray also stops once every channel is at the top of its window.
+
+```rust,ignore
+fn prepare_volume(&mut self, encoder: &mut wgpu::CommandEncoder)   // wgpu
+fn paint_volume(&self, render_pass: &mut wgpu::RenderPass)         // wgpu
+fn paint_volume(&mut self, gl: &glow::Context)                     // glow
+```
+**wgpu ordering:** `prepare_volume` must run once per 3D frame *before*
+`paint_volume`: it writes the uniform and, when reduced, records the reduced
+render into `encoder` so it runs ahead of your pass. Under `egui_wgpu` that's
+the callback's `prepare` (with the encoder it is handed), then `paint`.
+`write_volume_uniform(&mut self)` remains for a host that never reduces the
+view. glow does it all in `paint_volume`, inside the viewport the host has set,
+and leaves the host's framebuffer, viewport and scissor as they were.
 
 ```rust,ignore
 fn capture_volume(&mut self, width: u32, height: u32) -> Result<(), String>
@@ -216,7 +317,7 @@ and nothing the host draws over its view is included. Call `capture_volume`
 after `set_volume_params`, then call `take_volume_capture` once per frame until
 it returns the RGBA picture. On wgpu the readback lands a frame or more later,
 and a browser cannot wait for it; glow reads back at once. Only one capture can
-be in flight at a time.
+be in flight at a time. Always full size, whatever `set_volume_target` says.
 
 A capture is rendered in tiles of `CAPTURE_TILE` (1024) pixels, each read back
 before the next is drawn. Each GPU job then costs about what a frame of the view
@@ -227,16 +328,7 @@ device. GPU memory holds one tile, not the whole picture. `capture_tiles` and
 
 ## Backend-specific extras
 
-Two members exist only on `wgpu_backend`:
-
-```rust,ignore
-fn write_volume_uniform(&self)
-```
-**Ordering requirement:** must run once per 3D frame *before* `paint_volume`.
-`set_volume_params` only stashes; this is what reaches the GPU. Under
-`egui_wgpu` that's the callback's `prepare` step, then `paint`. The glow backend
-has no separate uniform buffer and applies everything inside `paint_volume`, so
-it needs no equivalent.
+Only on `wgpu_backend`:
 
 ```rust,ignore
 fn optional_features(adapter: &wgpu::Adapter) -> wgpu::Features
@@ -248,7 +340,11 @@ instead of rounding through f16's ~11 bits. Everything degrades cleanly without
 it, so this is a quality knob, not a requirement.
 
 Also `BACKEND: &str` on both (`"wgpu"` / `"glow"`), for a UI that wants to show
-which one is live.
+which one is live, and `volume_gpu_bps(kind)` (bytes per channel sample before
+packing and mips) for a rough figure.
+
+Features: `backend-wgpu` and `backend-glow` (additive), and `rayon` to build a
+packed volume's mip chain and brick maxima across threads.
 
 ## Worked example
 

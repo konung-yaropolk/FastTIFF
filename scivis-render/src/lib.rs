@@ -41,6 +41,9 @@
 
 #[cfg(feature = "backend-glow")]
 pub mod glow_backend;
+pub mod pack;
+#[cfg(feature = "backend-wgpu")]
+pub mod vram;
 #[cfg(feature = "backend-wgpu")]
 pub mod wgpu_backend;
 
@@ -307,6 +310,32 @@ pub fn tile_params(
         ..*params
     }
 }
+
+/// Why a volume could not be uploaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VolumeUploadError {
+    /// The GPU had no room for it. A smaller volume may fit: build one and try
+    /// again.
+    OutOfMemory(String),
+    /// Anything else: a format this backend cannot hold, a size beyond its
+    /// limits.
+    Unsupported(String),
+}
+
+impl std::fmt::Display for VolumeUploadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VolumeUploadError::OutOfMemory(m) => write!(f, "out of GPU memory: {m}"),
+            VolumeUploadError::Unsupported(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for VolumeUploadError {}
+
+/// How much smaller than its target the 3D view is rendered while it moves,
+/// per axis (then scaled up): a quarter, so a sixteenth of the rays.
+pub const MOVING_DOWNSCALE: u32 = 1;
 
 /// The volume rendered off screen, read back: what `capture_volume` produces.
 ///

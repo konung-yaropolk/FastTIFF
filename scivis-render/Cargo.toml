@@ -1,6 +1,6 @@
 [package]
 name = "scivis-render"
-version = "0.26.0"
+version = "0.26.2"
 edition = "2021"
 description = "Scientific visualization on the GPU: per-channel window/level + LUT compositing of multi-channel image stacks in 2D, and volume ray-marching in 3D, on wgpu or OpenGL. No GUI toolkit, no file format — you bring the pixels."
 license = "MPL-2.0"
@@ -31,8 +31,12 @@ include = [
 # window/level math) needs.
 [features]
 default = []
-backend-wgpu = ["dep:wgpu", "dep:half", "dep:bytemuck"]
+backend-wgpu = ["dep:wgpu", "dep:bytemuck", "dep:windows", "dep:ash", "dep:wasm-bindgen-futures"]
 backend-glow = ["dep:glow", "dep:bytemuck"]
+# Builds a packed volume's mip chain and brick maxima across threads (see
+# `pack`). Off, the same work runs on the calling thread; a host with no
+# threads (a browser) leaves it off.
+rayon = ["dep:rayon"]
 
 [dependencies]
 # Version-critical: the host hands us its own `wgpu::Device`/`Queue` (or
@@ -42,9 +46,28 @@ backend-glow = ["dep:glow", "dep:bytemuck"]
 # major would get a type mismatch at the `new()` call, not a subtle bug.
 wgpu = { version = "29", optional = true }
 glow = { version = "0.17", optional = true }
-# f32 -> f16 for the wgpu volume textures (R16Float); already in wgpu's tree.
-half = { version = "2", optional = true }
+# f32 <-> f16 for half-float volume texels (`pack`); already in wgpu's tree.
+half = "2"
+rayon = { version = "1.10", optional = true }
 bytemuck = { version = "1.25", optional = true }
+
+# Asking the driver how much GPU memory there is (`vram`), on the backends
+# wgpu uses there. Both are already in wgpu's tree at these versions, so they
+# add no code to the build; `windows` must be the version wgpu-hal's DX12
+# backend uses and `ash` the one its Vulkan backend uses, since raw handles
+# pass between them. `ash` only where wgpu builds that backend by default
+# (`wgpu-core-deps-windows-linux-android`): Apple platforms have none.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", default-features = false, features = ["Win32_Graphics_Dxgi"], optional = true }
+
+[target.'cfg(any(windows, target_os = "linux", target_os = "android", target_os = "freebsd"))'.dependencies]
+ash = { version = "0.38", optional = true }
+
+# In a browser, wgpu answers whether there was room for a volume through a
+# promise, which the upload waits for (`wgpu_backend`). Already in wgpu's
+# tree there, for its WebGPU backend.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = { version = "0.4", optional = true }
 
 # WGSL is only validated by wgpu at runtime (shader-module creation), so this
 # lets `cargo test` catch shader errors offline, with no GPU and regardless of

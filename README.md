@@ -602,6 +602,30 @@ with the same per-channel LUTs and contrast as the 2D view.
   anything else drawn over it, in window-sized tiles so that a large frame of
   a large volume never asks the GPU for one job long enough for Windows to
   reset it.
+- **Fast on large stacks, at any size of GPU**:
+  - **A quarter of the resolution while you move the view.** A drag, a key,
+    the wheel: the view renders a sixteenth of the rays and scales up, and the
+    sharp frame follows 0.15 s after you stop. 50%, or full resolution, in the
+    3D render settings under *Performance*.
+  - **Empty space is skipped.** The volume keeps the brightest value of every
+    16³ block; under the current contrast, rays jump over blocks that cannot
+    show anything. The picture is exactly the same.
+  - **Channels share a texture**: one read returns up to four channels.
+  - **Maximum intensity projections read coarser levels** where a voxel is
+    smaller than a pixel. The levels hold maxima, so thin bright structures
+    do not fade when zoomed out.
+  - **Rays step by the voxel size along their own direction**, and a frame
+    has a fixed ceiling on its work, so no view of any volume runs long enough
+    for the system to reset the GPU.
+- **Sized to the GPU's real memory.** The volume's budget is half of what the
+  driver says is free (Vulkan, DX12 and NVIDIA/AMD OpenGL can say; elsewhere,
+  and on integrated GPUs, whose memory is the computer's own, 768 MB). If an
+  upload still runs out, the volume is rebuilt at half its size. A stack too
+  large is reduced by **averaging** boxes of voxels
+  rather than keeping one in so many; the axis reduced first is the one
+  whose voxels are physically finest, so a stack of thick optical sections
+  gives up in-plane detail before depth. No axis keeps more than about twice
+  the screen's resolution, however much memory there is.
 - Runs on both the glow and wgpu backends.
 
 ## Plugins
@@ -958,6 +982,7 @@ this is the one-line formula to change.
 - Done: 3D animation plugin (rotate about X/Y, precession), saved as a seamless TIFF movie; plugin API for animating the 3D view and for dialog buttons
 - Done: Crop (Plugins ▸ Image ▸ Crop): drag a rectangle, Enter to crop every channel, slice and frame in X and Y; plugin API for asking the user for a region
 - Done: result names drop the source file's extension
+- Done: 3D view for large stacks: quarter resolution while moving, empty-space skipping, packed channels, max-reduced mip levels, a per-frame work ceiling, a memory budget from the driver with out-of-memory retry, averaged reduction
 - publish in Brew
 - Add 3D volume save in best suitable format for the gpu rendering (not necessary now, need to study the idea)
 

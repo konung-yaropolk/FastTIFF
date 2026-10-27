@@ -8,23 +8,27 @@
 //! shader which to sample). Float channels skip the per-frame CPU rescale —
 //! window/level is done on the GPU in the data's own units.
 //!
-//! The 3D volume view shares the same resources: per-channel R16Float 3D
-//! textures (all channels normalized to a common unit, so window/level applies
-//! directly), a separate ray-march pipeline (`volume.wgsl`), and its own
-//! uniform. R16Float is core-filterable, so linear/cubic sampling use the
-//! hardware sampler.
+//! The 3D volume view shares the LUT and sampler: the channels packed four to
+//! an RGBA 3D texture with a mip chain (see [`crate::pack`]), a small 3D
+//! texture saying which bricks of the volume can be seen, a separate ray-march
+//! pipeline (`volume.wgsl`), and its own uniform. Every format used is
+//! filterable, so linear/cubic sampling use the hardware sampler.
 //!
 //! # Host responsibilities
 //!
 //! The host creates the device and queue (both are cheap `Clone` handles, so we
 //! keep our own) and owns the render pass. Two entry points need its
-//! cooperation each 3D frame: [`ImageRenderResources::write_volume_uniform`]
-//! must run before [`ImageRenderResources::paint_volume`] — under egui_wgpu
-//! that's `prepare` then `paint`, elsewhere just call them in order.
+//! cooperation each 3D frame: [`ImageRenderResources::prepare_volume`] must run
+//! before [`ImageRenderResources::paint_volume`] — under egui_wgpu that's
+//! `prepare` then `paint`, elsewhere just call them in order. `prepare_volume`
+//! is also where the view is rendered at reduced size while it moves (see
+//! [`ImageRenderResources::set_volume_target`]), into a texture `paint_volume`
+//! then scales up.
 
+use crate::pack::{self, BrickMaxima, PackedVolume, TexelFormat, Visibility, VolumeLayout};
 use crate::{
     capture_tiles, tile_params, ChannelKind, ChannelUniform, Lut, VolumeImage, VolumeInterp,
-    VolumeKind, VolumeParams, CAPTURE_TILE, MAX_CHANNELS,
+    VolumeKind, VolumeParams, VolumeUploadError, CAPTURE_TILE, MAX_CHANNELS,
 };
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
@@ -46,12 +50,15 @@ const KIND_FLOAT: u8 = 3; // float channel: R32F full-size, int texture dummy
 /// Short human-readable backend name, for a host that wants to show it.
 pub const BACKEND: &str = "wgpu";
 
-/// GPU bytes per volume sample on this backend: every channel is stored as a
-/// 16-bit texel (R16Unorm or R16Float), whatever the source kind. A volume
-/// builder should budget on the larger of CPU/GPU footprint, so 8-bit sources
-/// count as 2 bytes here instead of silently doubling past the budget in VRAM.
-pub fn volume_gpu_bps(_kind: VolumeKind) -> usize {
-    2
+/// GPU bytes per volume sample on this backend, per channel and before the
+/// mip chain: 8-bit sources stay 8-bit, everything else is stored in 16 bits
+/// (unorm or half float). See [`ImageRenderResources::volume_texel_format`]
+/// for the exact format, which a volume builder should use instead.
+pub fn volume_gpu_bps(kind: VolumeKind) -> usize {
+    match kind {
+        VolumeKind::U8 => 1,
+        VolumeKind::U16 | VolumeKind::F32 => 2,
+    }
 }
 
 /// The optional device features this backend benefits from, intersected with
@@ -102,6 +109,9 @@ struct VolParamsGpu {
     gain: [f32; 4],
     /// `(num_channels, render_mode, interp, max_steps)`.
     modes: [i32; 4],
+    /// `(size of one pixel at unit distance, highest mip level a MIP may read,
+    /// brick size, skip empty bricks)`.
+    accel: [f32; 4],
 }
 
 pub struct ImageRenderResources {
@@ -129,18 +139,51 @@ pub struct ImageRenderResources {
     volume_bind_group_layout: wgpu::BindGroupLayout,
     volume_bind_group: wgpu::BindGroup,
     volume_uniform_buffer: wgpu::Buffer,
-    /// Per-channel 16-bit 3D textures (1x1x1 dummies until a volume is built):
-    /// R16Unorm for integer sources when the device has the 16-bit-norm feature
-    /// (full 16-bit precision, and u16 uploads become plain memcpys), else
-    /// R16Float; float sources are always R16Float.
-    volume_textures: [wgpu::Texture; MAX_CHANNELS],
+    /// The packed volume: channels 0..3 and channels 4..5 (1x1x1 dummies until
+    /// a volume is uploaded, and the second one whenever there are at most four
+    /// channels). See [`crate::pack`].
+    volume_textures: [wgpu::Texture; 2],
+    /// One texel per brick of the volume: whether a ray must sample there.
+    occupancy_texture: wgpu::Texture,
+    /// The uploaded volume's layout and brick maxima.
+    volume_layout: Option<VolumeLayout>,
+    volume_bricks: Option<BrickMaxima>,
+    /// What `occupancy_texture` was last worked out for.
+    occupancy_for: Option<Visibility>,
+    /// Per volume texture, the device's answer to whether there was room for
+    /// it, when that had not come by the time the upload returned: on WebGPU
+    /// it comes through a promise. The volume is not drawn until both have
+    /// come, since a texture there was no room for is invalid, and drawing it
+    /// would invalidate the host's whole frame, its own UI included.
+    volume_checks: [Option<LateCheck>; 2],
+    /// An upload that returned `Ok` and was refused after all, with the bytes
+    /// its volume took, for `take_late_upload_error`.
+    volume_lost: Option<(VolumeUploadError, usize)>,
     /// Whether the device has `TEXTURE_FORMAT_16BIT_NORM` (see `optional_features`).
     volume_unorm16: bool,
     /// `interp` for the shader: 0 = nearest, 1 = linear, 2 = cubic.
     volume_interp_mode: i32,
+    /// Empty-space skipping and mip levels on (both, unless switched off with
+    /// `set_volume_acceleration`).
+    accel_skip: bool,
+    accel_lod: bool,
     /// The camera/window params, stashed by `set_volume_params` and marshalled
-    /// into the uniform buffer by `write_volume_uniform`.
+    /// into the uniform buffer by `prepare_volume`.
     volume_params: Option<VolumeParams>,
+    /// The size the view is painted at, in pixels, and how much smaller to
+    /// render it (see `set_volume_target`).
+    volume_target: (u32, u32),
+    volume_downscale: u32,
+    /// The reduced-size render and what scales it up.
+    lowres: Option<LowRes>,
+    blit_pipeline: wgpu::RenderPipeline,
+    blit_bind_group_layout: wgpu::BindGroupLayout,
+    /// Whether `prepare_volume` rendered this frame at reduced size, for
+    /// `paint_volume` to scale up instead of ray-marching.
+    lowres_ready: bool,
+    /// The adapter the device came from, for asking how much memory it has
+    /// (see `set_adapter`).
+    adapter: Option<wgpu::Adapter>,
     /// The format the pipelines were built for, which an offscreen render has
     /// to use too.
     target_format: wgpu::TextureFormat,
@@ -149,6 +192,12 @@ pub struct ImageRenderResources {
     capture_target: Option<CaptureTarget>,
     /// The capture under way, if one is.
     capture: Option<CaptureJob>,
+}
+
+/// The 3D view rendered at reduced size, and the bind group that reads it.
+struct LowRes {
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
 }
 
 /// One tile's worth of render target, and the buffer it is read back through.
@@ -173,6 +222,9 @@ struct CaptureJob {
     /// Set by the map callback when the tile's readback has landed (or
     /// failed). `None` while it is on its way.
     mapped: Arc<Mutex<Option<Result<(), String>>>>,
+    /// Whether the first tile has been submitted: held back while the device
+    /// has not yet said there was room for the volume (`volume_checks`).
+    started: bool,
 }
 
 impl ImageRenderResources {
@@ -294,13 +346,8 @@ impl ImageRenderResources {
             &sampler,
         );
 
-        let (
-            volume_pipeline,
-            volume_bind_group_layout,
-            volume_bind_group,
-            volume_uniform_buffer,
-            volume_textures,
-        ) = create_volume_resources(device, target_format, &lut_texture, &sampler);
+        let volume = create_volume_resources(device, target_format, &lut_texture, &sampler);
+        let (blit_pipeline, blit_bind_group_layout) = create_blit_pipeline(device, target_format);
         let volume_unorm16 = device
             .features()
             .contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM);
@@ -318,14 +365,29 @@ impl ImageRenderResources {
             sampler,
             current_size: (1, 1),
             current_kinds: [KIND_UNUSED; MAX_CHANNELS],
-            volume_pipeline,
-            volume_bind_group_layout,
-            volume_bind_group,
-            volume_uniform_buffer,
-            volume_textures,
+            volume_pipeline: volume.pipeline,
+            volume_bind_group_layout: volume.layout,
+            volume_bind_group: volume.bind_group,
+            volume_uniform_buffer: volume.uniform_buffer,
+            volume_textures: volume.textures,
+            occupancy_texture: volume.occupancy,
+            volume_layout: None,
+            volume_bricks: None,
+            occupancy_for: None,
+            volume_checks: [None, None],
+            volume_lost: None,
             volume_unorm16,
             volume_interp_mode: 1, // linear
+            accel_skip: true,
+            accel_lod: true,
             volume_params: None,
+            volume_target: (0, 0),
+            volume_downscale: 1,
+            lowres: None,
+            blit_pipeline,
+            blit_bind_group_layout,
+            lowres_ready: false,
+            adapter: None,
             target_format,
             capture_target: None,
             capture: None,
@@ -340,129 +402,349 @@ impl ImageRenderResources {
         self.device.limits().max_texture_dimension_3d
     }
 
-    /// (Re)upload the volume, one entry per channel: each `bytes` is `w*h*d`
-    /// samples in native `kind` format, uploaded to 16-bit 3D textures (see the
-    /// `volume_textures` field for the format choice). Channels past
-    /// `channels.len()` become 1x1x1 dummies. Textures whose size + format are
-    /// unchanged (a 4D timepoint step) are refilled in place; the bind group is
-    /// only rebuilt when a texture was recreated. Conversion happens in bounded
-    /// z-slab chunks (or not at all: u16 -> R16Unorm is a straight copy).
-    pub fn upload_volumes(&mut self, w: u32, h: u32, d: u32, channels: &[(VolumeKind, Vec<u8>)]) {
-        let device = &self.device;
+    /// Hand over the adapter the device came from, so the renderer can ask
+    /// the driver how much GPU memory there is ([`volume_memory_available`]).
+    /// Optional: without it the answer is "unknown".
+    ///
+    /// [`volume_memory_available`]: Self::volume_memory_available
+    pub fn set_adapter(&mut self, adapter: wgpu::Adapter) {
+        self.adapter = Some(adapter);
+    }
+
+    /// GPU memory a new volume could take, in bytes: what the driver says is
+    /// left of this process's budget, plus what the current volume holds (a
+    /// new one replaces it). `None` when the driver will not say — no adapter
+    /// was handed over, or the backend has no way to ask (Metal, the browser).
+    /// A builder should take a share of this, not all of it.
+    pub fn volume_memory_available(&self) -> Option<u64> {
+        let budget = crate::vram::wgpu_budget(self.adapter.as_ref()?)?;
+        let current = self
+            .volume_layout
+            .as_ref()
+            .map_or(0, |l| l.total_bytes() as u64);
+        Some(budget.headroom() + current)
+    }
+
+    /// How this device stores a volume whose channels are `kind`: what a
+    /// builder should pack it as (see [`crate::pack`]). 8-bit stays 8-bit;
+    /// 16-bit is a 16-bit unorm when the device has the 16-bit-norm feature
+    /// and a half float when it has not; float is a half float (a full float
+    /// is not filterable without an optional feature).
+    pub fn volume_texel_format(&self, kind: VolumeKind) -> TexelFormat {
+        match kind {
+            VolumeKind::U8 => TexelFormat::Unorm8,
+            VolumeKind::U16 if self.volume_unorm16 => TexelFormat::Unorm16,
+            VolumeKind::U16 | VolumeKind::F32 => TexelFormat::Float16,
+        }
+    }
+
+    /// Upload a volume packed by [`crate::pack`], every level of every texture,
+    /// and the brick maxima the renderer skips empty space with. Textures whose
+    /// size and format are unchanged (a 4D timepoint step) are refilled in
+    /// place; the bind group is only rebuilt when one was recreated.
+    ///
+    /// Fails with [`VolumeUploadError::OutOfMemory`] when the GPU had no room,
+    /// leaving 1x1x1 placeholders and no volume: build a smaller one and try
+    /// again.
+    pub fn upload_packed_volume(&mut self, volume: &PackedVolume) -> Result<(), VolumeUploadError> {
+        volume.check().map_err(VolumeUploadError::Unsupported)?;
+        let layout = &volume.layout;
+        match layout.format {
+            TexelFormat::Float32 => {
+                return Err(VolumeUploadError::Unsupported(
+                    "this device stores float volumes as half floats; pack them as Float16".into(),
+                ))
+            }
+            TexelFormat::Unorm16 if !self.volume_unorm16 => {
+                return Err(VolumeUploadError::Unsupported(
+                    "this device has no 16-bit normalized textures; pack 16-bit volumes as Float16"
+                        .into(),
+                ))
+            }
+            _ => {}
+        }
+        let max = self.max_3d_texture_size();
+        let (w, h, d) = layout.dims;
+        if w > max || h > max || d > max {
+            return Err(VolumeUploadError::Unsupported(format!(
+                "a {w} x {h} x {d} volume is beyond this GPU's 3D texture limit of {max}"
+            )));
+        }
+
+        // Per texture, what it must be, and whether the one there is not that.
+        let specs: [_; 2] = std::array::from_fn(|t| {
+            let (size, format, levels) = match layout.textures.get(t) {
+                Some(tex) => (
+                    layout.dims,
+                    packed_format(layout.format, tex.components),
+                    layout.levels,
+                ),
+                None => ((1, 1, 1), wgpu::TextureFormat::R8Unorm, 1),
+            };
+            let current = &self.volume_textures[t];
+            let stale = current.size()
+                != wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: size.2,
+                }
+                || current.format() != format
+                || current.mip_level_count() != levels;
+            (size, format, levels, stale)
+        });
+        if specs.iter().any(|s| s.3) {
+            // Let go of the textures being replaced before asking for room for
+            // their successors, and wait until the GPU has: the old volume and
+            // the new are then never in memory together. A budget counts the
+            // old one as free (`volume_memory_available`), and holding both
+            // would spend the margin it leaves.
+            for (t, spec) in specs.iter().enumerate() {
+                if spec.3 {
+                    self.volume_textures[t].destroy();
+                }
+            }
+            let _ = self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+        }
+
         let mut rebind = false;
-        for c in 0..MAX_CHANNELS {
-            let entry = channels.get(c);
-            let (want_w, want_h, want_d) = if entry.is_some() {
-                (w, h, d)
-            } else {
-                (1, 1, 1)
-            };
-            let want = wgpu::Extent3d {
-                width: want_w,
-                height: want_h,
-                depth_or_array_layers: want_d,
-            };
-            let want_fmt = match entry {
-                Some((kind, _)) => self.volume_format(*kind),
-                None => wgpu::TextureFormat::R16Float,
-            };
-            if self.volume_textures[c].size() != want
-                || self.volume_textures[c].format() != want_fmt
-            {
-                self.volume_textures[c] = create_volume_texture(
-                    device,
-                    want_w,
-                    want_h,
-                    want_d,
-                    want_fmt,
-                    &format!("FastTIFFvol {c}"),
+        for (t, &(size, format, levels, stale)) in specs.iter().enumerate() {
+            if stale {
+                // Each texture made inside a scope of its own, and checked
+                // before anything is written to it: a texture the device had
+                // no room for comes back invalid, and writing to it would be a
+                // validation error nothing catches, which wgpu treats as fatal.
+                let scope = OutOfMemoryScope::push(&self.device);
+                let texture = create_volume_texture(
+                    &self.device,
+                    size,
+                    format,
+                    levels,
+                    if t == 0 {
+                        "FastTIFFvol a"
+                    } else {
+                        "FastTIFFvol b"
+                    },
                 );
+                match scope.pop() {
+                    Ok(check) => self.volume_checks[t] = check,
+                    Err(why) => {
+                        drop(texture);
+                        self.clear_volume();
+                        return Err(why);
+                    }
+                }
+                self.volume_textures[t] = texture;
                 rebind = true;
-                if entry.is_none() {
+                if layout.textures.get(t).is_none() {
                     write_volume_region(
                         &self.queue,
-                        &self.volume_textures[c],
-                        1,
+                        &self.volume_textures[t],
+                        0,
+                        (1, 1),
                         1,
                         0,
                         1,
-                        &[0u8, 0u8],
+                        &[0],
                     );
                 }
             }
-            if let Some((kind, bytes)) = entry {
-                self.upload_volume_channel(c, (w, h, d), *kind, bytes);
+            if layout.textures.get(t).is_some() {
+                let texel = layout.texel_bytes(t);
+                for (level, data) in volume.levels[t].iter().enumerate() {
+                    let dims = layout.level_dims(level as u32);
+                    write_volume_level(
+                        &self.queue,
+                        &self.volume_textures[t],
+                        level as u32,
+                        dims,
+                        texel,
+                        data,
+                    );
+                }
             }
         }
+        self.volume_layout = Some(layout.clone());
+        self.volume_bricks = Some(volume.bricks.clone());
+        self.occupancy_for = None;
+        self.refresh_occupancy();
         if rebind {
-            self.volume_bind_group = build_volume_bind_group(
-                device,
-                &self.volume_bind_group_layout,
-                &self.volume_uniform_buffer,
-                &self.volume_textures,
-                &self.lut_texture,
-                &self.sampler,
+            self.rebuild_volume_bind_group();
+        }
+        Ok(())
+    }
+
+    /// Drop the volume: placeholders in its place and nothing bound that a
+    /// failed upload left half made.
+    fn clear_volume(&mut self) {
+        for (t, label) in ["FastTIFFvol a", "FastTIFFvol b"].into_iter().enumerate() {
+            self.volume_textures[t] = create_volume_texture(
+                &self.device,
+                (1, 1, 1),
+                wgpu::TextureFormat::R8Unorm,
+                1,
+                label,
+            );
+            write_volume_region(
+                &self.queue,
+                &self.volume_textures[t],
+                0,
+                (1, 1),
+                1,
+                0,
+                1,
+                &[0],
             );
         }
+        self.volume_layout = None;
+        self.volume_bricks = None;
+        self.occupancy_for = None;
+        self.volume_checks = [None, None];
+        self.rebuild_volume_bind_group();
     }
 
-    /// The texture format a volume channel of `kind` uses on this device.
-    fn volume_format(&self, kind: VolumeKind) -> wgpu::TextureFormat {
-        match kind {
-            VolumeKind::U8 | VolumeKind::U16 if self.volume_unorm16 => {
-                wgpu::TextureFormat::R16Unorm
+    /// Collect the answers of [`volume_checks`](Self::volume_checks) that have
+    /// come. A refusal drops the volume, as a failed upload does, and is kept
+    /// for [`take_late_upload_error`](Self::take_late_upload_error). Returns
+    /// whether the volume may be drawn: every answer is in.
+    fn settle_volume_checks(&mut self) -> bool {
+        let mut refused = None;
+        for check in &mut self.volume_checks {
+            let answer = check
+                .as_ref()
+                .and_then(|c| c.lock().ok().and_then(|a| a.clone()));
+            match answer {
+                None => {}
+                Some(None) => *check = None,
+                Some(Some(why)) => refused = Some(why),
             }
-            _ => wgpu::TextureFormat::R16Float,
         }
+        if let Some(why) = refused {
+            let bytes = self.volume_layout.as_ref().map_or(0, |l| l.total_bytes());
+            self.clear_volume();
+            self.volume_lost = Some((VolumeUploadError::OutOfMemory(why), bytes));
+        }
+        self.volume_checks.iter().all(Option::is_none)
     }
 
-    /// Fill one channel's volume texture from native-format samples. u16 data on
-    /// an R16Unorm texture uploads verbatim (no conversion pass at all); every
-    /// other combination converts z-slab by z-slab into a reused buffer, so the
-    /// transient allocation is bounded by `VOLUME_UPLOAD_CHUNK_BYTES` instead of
-    /// a second full-volume copy.
-    fn upload_volume_channel(
-        &self,
-        c: usize,
-        dims: (u32, u32, u32),
-        kind: VolumeKind,
-        bytes: &[u8],
-    ) {
-        let queue = &self.queue;
-        let (w, h, d) = dims;
-        let texture = &self.volume_textures[c];
-        let unorm = texture.format() == wgpu::TextureFormat::R16Unorm;
-        if kind == VolumeKind::U16 && unorm {
-            // Raw u16 samples are exactly R16Unorm texels: one straight upload.
-            write_volume_region(queue, texture, w, h, 0, d, bytes);
+    /// An upload that returned `Ok` and was then refused for want of memory,
+    /// and the bytes its volume took. Only WebGPU does this: it says whether
+    /// there was room through a promise an upload cannot wait for. The volume
+    /// is gone, as after an upload that failed, and `None` is returned from
+    /// then on: build a smaller one. Ask once a frame; until the answer is in,
+    /// the volume is not drawn.
+    pub fn take_late_upload_error(&mut self) -> Option<(VolumeUploadError, usize)> {
+        self.settle_volume_checks();
+        self.volume_lost.take()
+    }
+
+    /// Whether the volume is waiting for the device to say there was room for
+    /// it (WebGPU only; see [`take_late_upload_error`]). It is not drawn until
+    /// then, and nothing but the host can ask for the frame that draws it:
+    /// keep frames coming while this is true.
+    ///
+    /// [`take_late_upload_error`]: Self::take_late_upload_error
+    pub fn volume_pending(&mut self) -> bool {
+        !self.settle_volume_checks()
+    }
+
+    /// (Re)upload the volume, one entry per channel: each `bytes` is `w*h*d`
+    /// samples in native `kind` format. Packs it here, on the calling thread —
+    /// a builder with a thread of its own should pack it there instead (see
+    /// [`crate::pack`]) and call [`upload_packed_volume`].
+    ///
+    /// [`upload_packed_volume`]: Self::upload_packed_volume
+    pub fn upload_volumes(
+        &mut self,
+        w: u32,
+        h: u32,
+        d: u32,
+        channels: &[(VolumeKind, Vec<u8>)],
+    ) -> Result<(), VolumeUploadError> {
+        let kinds: Vec<VolumeKind> = channels.iter().map(|(k, _)| *k).collect();
+        let format = self.volume_texel_format(pack::common_kind(&kinds));
+        let borrowed: Vec<(VolumeKind, &[u8])> =
+            channels.iter().map(|(k, b)| (*k, b.as_slice())).collect();
+        let packed = PackedVolume::from_channels((w, h, d), &borrowed, format);
+        self.upload_packed_volume(&packed)
+    }
+
+    /// Rebuild the volume bind group after a texture was recreated.
+    fn rebuild_volume_bind_group(&mut self) {
+        self.volume_bind_group = build_volume_bind_group(
+            &self.device,
+            &self.volume_bind_group_layout,
+            &self.volume_uniform_buffer,
+            &self.volume_textures,
+            &self.occupancy_texture,
+            &self.lut_texture,
+            &self.sampler,
+        );
+    }
+
+    /// Work out which bricks can be seen under the current params, if that
+    /// changed, and upload it.
+    fn refresh_occupancy(&mut self) {
+        let (Some(bricks), Some(params)) = (&self.volume_bricks, &self.volume_params) else {
+            return;
+        };
+        let vis = Visibility::of(params);
+        if self.occupancy_for == Some(vis) {
             return;
         }
-        let slice_texels = w as usize * h as usize;
-        let src_bps = match kind {
-            VolumeKind::U8 => 1,
-            VolumeKind::U16 => 2,
-            VolumeKind::F32 => 4,
+        let occ = pack::occupancy(bricks, &vis);
+        let (bx, by, bz) = bricks.dims;
+        let want = wgpu::Extent3d {
+            width: bx,
+            height: by,
+            depth_or_array_layers: bz,
         };
-        let slices_per_chunk =
-            (VOLUME_UPLOAD_CHUNK_BYTES / (slice_texels * 2).max(1)).clamp(1, d as usize);
-        let mut buf: Vec<u16> = Vec::with_capacity(slices_per_chunk * slice_texels);
-        let mut z0 = 0usize;
-        while z0 < d as usize {
-            let zn = slices_per_chunk.min(d as usize - z0);
-            let src = &bytes[z0 * slice_texels * src_bps..(z0 + zn) * slice_texels * src_bps];
-            buf.clear();
-            convert_volume_texels(kind, unorm, src, &mut buf);
-            write_volume_region(
-                queue,
-                texture,
-                w,
-                h,
-                z0 as u32,
-                zn as u32,
-                bytemuck::cast_slice(&buf),
+        if self.occupancy_texture.size() != want {
+            self.occupancy_texture = create_volume_texture(
+                &self.device,
+                (bx, by, bz),
+                wgpu::TextureFormat::R8Unorm,
+                1,
+                "FastTIFFvol occupancy",
             );
-            z0 += zn;
+            self.rebuild_volume_bind_group();
         }
+        write_volume_level(
+            &self.queue,
+            &self.occupancy_texture,
+            0,
+            (bx, by, bz),
+            1,
+            &occ,
+        );
+        self.occupancy_for = Some(vis);
+    }
+
+    /// Switch the two accelerations on or off: skipping parts of the volume
+    /// that cannot be seen (exact: the picture is the same either way) and, in
+    /// the maximum projection, reading coarser mip levels where a voxel is
+    /// smaller than a pixel. Both are on unless switched off; off is for
+    /// comparing, measuring, or ruling them out.
+    pub fn set_volume_acceleration(&mut self, skip_empty: bool, mip_levels: bool) {
+        self.accel_skip = skip_empty;
+        self.accel_lod = mip_levels;
+    }
+
+    /// The size the 3D view is painted at, in pixels, and how many times
+    /// smaller per axis to render it: 1 renders every pixel, and more renders a
+    /// reduced picture that [`paint_volume`] scales up — for a view that is
+    /// moving, where a sharp frame is wasted (see [`crate::MOVING_DOWNSCALE`]).
+    /// Set every frame, before [`prepare_volume`]. Until it is set the size of
+    /// a pixel is unknown, so the view renders full size and reads no coarser
+    /// mip level than the finest.
+    ///
+    /// [`paint_volume`]: Self::paint_volume
+    /// [`prepare_volume`]: Self::prepare_volume
+    pub fn set_volume_target(&mut self, width: u32, height: u32, downscale: u32) {
+        self.volume_target = (width, height);
+        self.volume_downscale = downscale.max(1);
     }
 
     /// Store the sampling mode for the shader (0 = nearest, 1 = linear, 2 = cubic).
@@ -476,23 +758,128 @@ impl ImageRenderResources {
         };
     }
 
-    /// Stash the ray-march params. They reach the GPU in `write_volume_uniform`,
+    /// Stash the ray-march params. They reach the GPU in `prepare_volume`,
     /// which the host must call before `paint_volume`.
     pub fn set_volume_params(&mut self, params: VolumeParams) {
         self.volume_params = Some(params);
+        self.refresh_occupancy();
     }
 
-    /// Marshal the stashed params + interp mode into the volume uniform buffer.
-    /// Call once per 3D frame, before `paint_volume` (under egui_wgpu this is
-    /// the callback's `prepare` step). No-op until `set_volume_params` has run.
-    pub fn write_volume_uniform(&self) {
+    /// Marshal the stashed params into the volume uniform buffer for a
+    /// full-size render. Kept for a host that does not reduce the view: it is
+    /// [`prepare_volume`] with nothing to record. No-op until
+    /// `set_volume_params` has run.
+    ///
+    /// [`prepare_volume`]: Self::prepare_volume
+    pub fn write_volume_uniform(&mut self) {
+        self.lowres_ready = false;
+        self.settle_volume_checks();
         if let Some(p) = self.volume_params {
-            self.write_volume_uniform_with(&p);
+            self.write_volume_uniform_with(&p, self.volume_target.1);
         }
     }
 
-    /// Marshal `p` + the interp mode into the volume uniform buffer.
-    fn write_volume_uniform_with(&self, p: &VolumeParams) {
+    /// Get the frame ready: marshal the params into the uniform buffer and,
+    /// when [`set_volume_target`] asked for a reduced render, record that
+    /// render into `encoder` (it then runs ahead of the host's own pass, which
+    /// [`paint_volume`] scales it into). Under egui_wgpu this is the
+    /// callback's `prepare`, with the encoder it is handed.
+    ///
+    /// [`set_volume_target`]: Self::set_volume_target
+    /// [`paint_volume`]: Self::paint_volume
+    pub fn prepare_volume(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        self.lowres_ready = false;
+        if !self.settle_volume_checks() {
+            return;
+        }
+        let Some(p) = self.volume_params else { return };
+        let (w, h) = self.volume_target;
+        let f = self.volume_downscale;
+        if f <= 1 || w == 0 || h == 0 {
+            self.write_volume_uniform_with(&p, h);
+            return;
+        }
+        let size = (w.div_ceil(f).max(1), h.div_ceil(f).max(1));
+        self.write_volume_uniform_with(&p, size.1);
+        self.ensure_lowres(size);
+        let lowres = self.lowres.as_ref().expect("made above");
+        let view = lowres.texture.create_view(&Default::default());
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("FastTIFFvolume reduced"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.volume_pipeline);
+        pass.set_bind_group(0, &self.volume_bind_group, &[]);
+        pass.draw(0..6, 0..1);
+        drop(pass);
+        self.lowres_ready = true;
+    }
+
+    /// The reduced-size render target, `size` pixels, made or remade to fit.
+    fn ensure_lowres(&mut self, size: (u32, u32)) {
+        let fits = self.lowres.as_ref().is_some_and(|l| {
+            let s = l.texture.size();
+            (s.width, s.height) == size
+        });
+        if fits {
+            return;
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("FastTIFFvolume reduced"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.target_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("FastTIFFvolume reduced bind group"),
+            layout: &self.blit_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        self.lowres = Some(LowRes {
+            texture,
+            bind_group,
+        });
+    }
+
+    /// Marshal `p` + the interp mode and the accelerations into the volume
+    /// uniform buffer, for a render `height` pixels tall (0: not known, and
+    /// then no coarser mip level is read).
+    ///
+    /// Empty space is skipped only where the occupancy was worked out for
+    /// `p`'s own windows: a capture renders the params it was asked for over
+    /// several frames, while the view's change underneath it.
+    fn write_volume_uniform_with(&self, p: &VolumeParams, height: u32) {
+        let levels = self.volume_layout.as_ref().map_or(1, |l| l.levels);
         let mut gpu = VolParamsGpu {
             channels: [[0.0; 4]; MAX_CHANNELS],
             cam_eye: [p.eye[0], p.eye[1], p.eye[2], 0.0],
@@ -508,6 +895,16 @@ impl ImageRenderResources {
                 self.volume_interp_mode,
                 p.max_steps,
             ],
+            accel: accel_uniform(
+                p,
+                height,
+                if self.accel_lod && height > 0 {
+                    levels - 1
+                } else {
+                    0
+                },
+                self.accel_skip && self.occupancy_for == Some(Visibility::of(p)),
+            ),
         };
         for c in 0..MAX_CHANNELS {
             gpu.channels[c] = [
@@ -521,9 +918,19 @@ impl ImageRenderResources {
             .write_buffer(&self.volume_uniform_buffer, 0, bytemuck::bytes_of(&gpu));
     }
 
-    /// Ray-march the current volume. `prepare` has already written the uniform.
+    /// Draw the volume into the host's pass: the ray-march itself, or — when
+    /// `prepare_volume` rendered a reduced picture this frame — that picture,
+    /// scaled up to fill the pass's viewport.
     pub fn paint_volume(&self, render_pass: &mut wgpu::RenderPass<'_>) {
-        if self.volume_params.is_none() {
+        // Nothing until the device has said there was room for the volume
+        // (see `volume_checks`), which `prepare_volume` waits for.
+        if self.volume_params.is_none() || self.volume_checks.iter().any(Option::is_some) {
+            return;
+        }
+        if let (true, Some(lowres)) = (self.lowres_ready, &self.lowres) {
+            render_pass.set_pipeline(&self.blit_pipeline);
+            render_pass.set_bind_group(0, &lowres.bind_group, &[]);
+            render_pass.draw(0..3, 0..1);
             return;
         }
         render_pass.set_pipeline(&self.volume_pipeline);
@@ -581,8 +988,13 @@ impl ImageRenderResources {
             next: 0,
             rgba: vec![0; width as usize * height as usize * 4],
             mapped: Arc::new(Mutex::new(None)),
+            started: false,
         });
-        self.submit_capture_tile();
+        // Not before the device has said there was room for the volume:
+        // `take_volume_capture` starts it then.
+        if self.settle_volume_checks() {
+            self.submit_capture_tile();
+        }
         Ok(())
     }
 
@@ -593,7 +1005,18 @@ impl ImageRenderResources {
     ///
     /// [`capture_volume`]: Self::capture_volume
     pub fn take_volume_capture(&mut self) -> Option<Result<VolumeImage, String>> {
-        self.capture.as_ref()?;
+        if !self.capture.as_ref()?.started {
+            if !self.settle_volume_checks() {
+                return None;
+            }
+            if self.volume_layout.is_none() {
+                // Refused after its upload returned: gone, not black.
+                self.capture = None;
+                return Some(Err("the GPU had no room for the volume".into()));
+            }
+            self.submit_capture_tile();
+            return None;
+        }
         // Drives the map callback on native; in a browser the browser does.
         let _ = self.device.poll(wgpu::PollType::Poll);
         let job = self.capture.as_mut().expect("checked above");
@@ -641,16 +1064,18 @@ impl ImageRenderResources {
     /// Render the job's next tile into the tile texture, copy it to the
     /// readback buffer and start mapping it.
     fn submit_capture_tile(&mut self) {
-        let Some(job) = self.capture.as_ref() else {
+        let Some(job) = self.capture.as_mut() else {
             return;
         };
+        job.started = true;
+        let job = &*job;
         let tile = job.tiles[job.next];
         let params = tile_params(&job.params, (job.width, job.height), tile);
         let mapped = Arc::clone(&job.mapped);
         let (_, _, w, h) = tile;
         // This tile's uniform, ahead of its submit. The view's own paint
         // writes the uniform again before its draw, from its own params.
-        self.write_volume_uniform_with(&params);
+        self.write_volume_uniform_with(&params, h);
 
         let target = self.capture_target.as_ref().expect("made with the job");
         let view = target.texture.create_view(&Default::default());
@@ -1108,6 +1533,49 @@ fn build_bind_group(
 
 // --- 3D volume helpers -----------------------------------------------------
 
+/// The `accel` uniform: the size of a pixel at unit distance for a render
+/// `height` pixels tall (a capture tile's narrowed params give the same value
+/// as the whole picture's), the highest mip level a MIP may read, the brick
+/// size, and whether to skip empty bricks.
+fn accel_uniform(p: &VolumeParams, height: u32, max_level: u32, skip: bool) -> [f32; 4] {
+    [
+        2.0 * p.tan_half_fov / height.max(1) as f32,
+        max_level as f32,
+        pack::BRICK as f32,
+        if skip { 1.0 } else { 0.0 },
+    ]
+}
+
+/// The texture format for a packed texture of `components` components stored
+/// as `format`. One or two components keep their own; three or four are RGBA.
+fn packed_format(format: TexelFormat, components: usize) -> wgpu::TextureFormat {
+    use wgpu::TextureFormat as F;
+    match (format, components) {
+        (TexelFormat::Unorm8, 1) => F::R8Unorm,
+        (TexelFormat::Unorm8, 2) => F::Rg8Unorm,
+        (TexelFormat::Unorm8, _) => F::Rgba8Unorm,
+        (TexelFormat::Unorm16, 1) => F::R16Unorm,
+        (TexelFormat::Unorm16, 2) => F::Rg16Unorm,
+        (TexelFormat::Unorm16, _) => F::Rgba16Unorm,
+        (TexelFormat::Float16, 1) => F::R16Float,
+        (TexelFormat::Float16, 2) => F::Rg16Float,
+        (TexelFormat::Float16, _) => F::Rgba16Float,
+        (TexelFormat::Float32, 1) => F::R32Float,
+        (TexelFormat::Float32, 2) => F::Rg32Float,
+        (TexelFormat::Float32, _) => F::Rgba32Float,
+    }
+}
+
+/// What `create_volume_resources` makes.
+struct VolumeResources {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+    uniform_buffer: wgpu::Buffer,
+    textures: [wgpu::Texture; 2],
+    occupancy: wgpu::Texture,
+}
+
 /// Build the volume pipeline, its bind-group layout + initial (1x1x1 dummy)
 /// bind group, and the uniform buffer. Reuses the 2D LUT texture + sampler.
 fn create_volume_resources(
@@ -1115,47 +1583,43 @@ fn create_volume_resources(
     target_format: wgpu::TextureFormat,
     lut_texture: &wgpu::Texture,
     sampler: &wgpu::Sampler,
-) -> (
-    wgpu::RenderPipeline,
-    wgpu::BindGroupLayout,
-    wgpu::BindGroup,
-    wgpu::Buffer,
-    [wgpu::Texture; MAX_CHANNELS],
-) {
+) -> VolumeResources {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("FastTIFFvolume shader"),
         source: wgpu::ShaderSource::Wgsl(include_str!("shaders/volume.wgsl").into()),
     });
 
-    let mut entries = vec![wgpu::BindGroupLayoutEntry {
-        binding: 0,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: NonZeroU64::new(std::mem::size_of::<VolParamsGpu>() as u64),
+    let entries = [
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(std::mem::size_of::<VolParamsGpu>() as u64),
+            },
+            count: None,
         },
-        count: None,
-    }];
-    for c in 0..MAX_CHANNELS as u32 {
-        entries.push(volume_texture_entry(c + 1));
-    }
-    entries.push(wgpu::BindGroupLayoutEntry {
-        binding: MAX_CHANNELS as u32 + 1,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-            view_dimension: wgpu::TextureViewDimension::D2Array,
-            multisampled: false,
+        volume_texture_entry(1),
+        volume_texture_entry(2),
+        volume_texture_entry(3),
+        wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
         },
-        count: None,
-    });
-    entries.push(wgpu::BindGroupLayoutEntry {
-        binding: MAX_CHANNELS as u32 + 2,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-        count: None,
-    });
+        wgpu::BindGroupLayoutEntry {
+            binding: 5,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+    ];
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("FastTIFFvolume bind group layout"),
         entries: &entries,
@@ -1195,26 +1659,89 @@ fn create_volume_resources(
         mapped_at_creation: false,
     });
 
-    let textures = std::array::from_fn(|c| {
-        create_volume_texture(
-            device,
-            1,
-            1,
-            1,
-            wgpu::TextureFormat::R16Float,
-            &format!("FastTIFFvol {c}"),
-        )
-    });
+    let placeholder = |label: &str| {
+        create_volume_texture(device, (1, 1, 1), wgpu::TextureFormat::R8Unorm, 1, label)
+    };
+    let textures = [placeholder("FastTIFFvol a"), placeholder("FastTIFFvol b")];
+    let occupancy = placeholder("FastTIFFvol occupancy");
     let bind_group = build_volume_bind_group(
         device,
         &layout,
         &uniform_buffer,
         &textures,
+        &occupancy,
         lut_texture,
         sampler,
     );
 
-    (pipeline, layout, bind_group, uniform_buffer, textures)
+    VolumeResources {
+        pipeline,
+        layout,
+        bind_group,
+        uniform_buffer,
+        textures,
+        occupancy,
+    }
+}
+
+/// The pipeline that scales a reduced render of the view up into the host's
+/// pass, and its bind-group layout (the render, a sampler).
+fn create_blit_pipeline(
+    device: &wgpu::Device,
+    target_format: wgpu::TextureFormat,
+) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("FastTIFFvolume blit shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
+    });
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("FastTIFFvolume blit bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("FastTIFFvolume blit pipeline layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("FastTIFFvolume blit pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(target_format.into())],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    (pipeline, layout)
 }
 
 fn volume_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -1222,8 +1749,9 @@ fn volume_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Texture {
-            // R16Float is core-filterable; R16Unorm is filterable under the
-            // TEXTURE_FORMAT_16BIT_NORM feature. Both fit this entry.
+            // Every volume format used here is filterable: the 8-bit unorms
+            // and half floats in core, the 16-bit unorms under the
+            // TEXTURE_FORMAT_16BIT_NORM feature they need anyway.
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             view_dimension: wgpu::TextureViewDimension::D3,
             multisampled: false,
@@ -1234,10 +1762,9 @@ fn volume_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 
 fn create_volume_texture(
     device: &wgpu::Device,
-    w: u32,
-    h: u32,
-    d: u32,
+    (w, h, d): (u32, u32, u32),
     format: wgpu::TextureFormat,
+    levels: u32,
     label: &str,
 ) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
@@ -1247,7 +1774,7 @@ fn create_volume_texture(
             height: h.max(1),
             depth_or_array_layers: d.max(1),
         },
-        mip_level_count: 1,
+        mip_level_count: levels.max(1),
         sample_count: 1,
         dimension: wgpu::TextureDimension::D3,
         format,
@@ -1256,16 +1783,54 @@ fn create_volume_texture(
     })
 }
 
-/// Bound on the converted-texel scratch buffer for chunked volume uploads.
+/// Bound on one write of a volume level: a level is written in z-slabs of at
+/// most this many bytes, so no single staging copy is the whole volume.
 const VOLUME_UPLOAD_CHUNK_BYTES: usize = 32 << 20;
 
-/// Write a z-slab of 16-bit texels (`data` = `w*h*d` texels starting at `z0`)
-/// into a 3D texture.
+/// Write one whole mip `level` (`dims` texels of `texel` bytes, x fastest) of a
+/// 3D texture, in z-slabs, each submitted before the next is written.
+///
+/// The submit is what bounds the staging memory: a write is copied into a
+/// staging buffer that is only freed once a submit has carried it to the GPU,
+/// so without one every slab of a large volume is staged at once — and a
+/// staging buffer the device has no room for loses the device.
+fn write_volume_level(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    level: u32,
+    (w, h, d): (u32, u32, u32),
+    texel: usize,
+    data: &[u8],
+) {
+    let slice = w as usize * h as usize * texel;
+    let per_chunk = (VOLUME_UPLOAD_CHUNK_BYTES / slice.max(1)).clamp(1, d.max(1) as usize);
+    let mut z0 = 0usize;
+    while z0 < d as usize {
+        let zn = per_chunk.min(d as usize - z0);
+        write_volume_region(
+            queue,
+            texture,
+            level,
+            (w, h),
+            texel,
+            z0 as u32,
+            zn as u32,
+            &data[z0 * slice..(z0 + zn) * slice],
+        );
+        queue.submit(std::iter::empty());
+        z0 += zn;
+    }
+}
+
+/// Write a z-slab of level `level` (`data` = `w*h*d` texels of `texel` bytes,
+/// starting at `z0`) into a 3D texture.
+#[allow(clippy::too_many_arguments)]
 fn write_volume_region(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
-    w: u32,
-    h: u32,
+    level: u32,
+    (w, h): (u32, u32),
+    texel: usize,
     z0: u32,
     d: u32,
     data: &[u8],
@@ -1273,14 +1838,14 @@ fn write_volume_region(
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture,
-            mip_level: 0,
+            mip_level: level,
             origin: wgpu::Origin3d { x: 0, y: 0, z: z0 },
             aspect: wgpu::TextureAspect::All,
         },
         data,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(w * 2),
+            bytes_per_row: Some(w * texel as u32),
             rows_per_image: Some(h),
         },
         wgpu::Extent3d {
@@ -1291,75 +1856,98 @@ fn write_volume_region(
     );
 }
 
-/// Convert native-format samples to 16-bit texels, appended to `out`:
-///   * R16Unorm target: U8 widens ×257 (exact: 255·257 = 65535).
-///   * R16Float target: U8 -> raw/255, U16 -> raw/65535, F32 -> raw — matching
-///     the glow unorm/float units, so the per-channel window applies unchanged.
-///
-/// The input holds native-endian samples (filled via `bytemuck` casts).
-fn convert_volume_texels(kind: VolumeKind, unorm: bool, bytes: &[u8], out: &mut Vec<u16>) {
-    use half::f16;
-    match kind {
-        VolumeKind::U8 if unorm => out.extend(bytes.iter().map(|&b| b as u16 * 257)),
-        VolumeKind::U8 => out.extend(
-            bytes
-                .iter()
-                .map(|&b| f16::from_f32(b as f32 / 255.0).to_bits()),
-        ),
-        VolumeKind::U16 => {
-            out.extend(bytes.chunks_exact(2).map(|c| {
-                f16::from_f32(u16::from_ne_bytes([c[0], c[1]]) as f32 / 65535.0).to_bits()
-            }))
-        }
-        VolumeKind::F32 => out.extend(
-            bytes
-                .chunks_exact(4)
-                .map(|c| f16::from_f32(f32::from_ne_bytes([c[0], c[1], c[2], c[3]])).to_bits()),
-        ),
-    }
-}
-
 fn build_volume_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     uniform_buffer: &wgpu::Buffer,
-    textures: &[wgpu::Texture; MAX_CHANNELS],
+    textures: &[wgpu::Texture; 2],
+    occupancy: &wgpu::Texture,
     lut_texture: &wgpu::Texture,
     sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
-    let views: Vec<wgpu::TextureView> = textures
-        .iter()
-        .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()))
-        .collect();
+    let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+    let (a, b, occ) = (view(&textures[0]), view(&textures[1]), view(occupancy));
     let lut_view = lut_texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     });
-
-    let mut entries = vec![wgpu::BindGroupEntry {
-        binding: 0,
-        resource: uniform_buffer.as_entire_binding(),
-    }];
-    for (i, view) in views.iter().enumerate() {
-        entries.push(wgpu::BindGroupEntry {
-            binding: i as u32 + 1,
-            resource: wgpu::BindingResource::TextureView(view),
-        });
-    }
-    entries.push(wgpu::BindGroupEntry {
-        binding: MAX_CHANNELS as u32 + 1,
-        resource: wgpu::BindingResource::TextureView(&lut_view),
-    });
-    entries.push(wgpu::BindGroupEntry {
-        binding: MAX_CHANNELS as u32 + 2,
-        resource: wgpu::BindingResource::Sampler(sampler),
-    });
-
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("FastTIFFvolume bind group"),
         layout,
-        entries: &entries,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&a),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&b),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&occ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&lut_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
     })
+}
+
+/// Where an out-of-memory answer that comes late is left: `None` until it
+/// comes, then `Some(None)` for room and `Some(Some(why))` for none.
+type LateCheck = std::sync::Arc<std::sync::Mutex<Option<Option<String>>>>;
+
+/// Catches the device running out of memory while a volume is made, so the
+/// upload can say so instead of the device being lost.
+struct OutOfMemoryScope {
+    guard: wgpu::ErrorScopeGuard,
+}
+
+impl OutOfMemoryScope {
+    fn push(device: &wgpu::Device) -> Self {
+        OutOfMemoryScope {
+            guard: device.push_error_scope(wgpu::ErrorFilter::OutOfMemory),
+        }
+    }
+
+    /// The device's answer: an error if there was no room. Natively it is
+    /// there at once. WebGPU gives it through a promise, which resolves only
+    /// once the page's code yields; then this returns where it will be left
+    /// (see `volume_checks`).
+    fn pop(self) -> Result<Option<LateCheck>, VolumeUploadError> {
+        use std::future::Future as _;
+        let mut answer = Box::pin(self.guard.pop());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match answer.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(Some(e)) => Err(VolumeUploadError::OutOfMemory(e.to_string())),
+            std::task::Poll::Ready(None) => Ok(None),
+            #[cfg(target_arch = "wasm32")]
+            std::task::Poll::Pending => {
+                let check = LateCheck::default();
+                let slot = check.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let why = answer.await.map(|e| e.to_string());
+                    if let Ok(mut slot) = slot.lock() {
+                        *slot = Some(why);
+                    }
+                });
+                Ok(Some(check))
+            }
+            // Never pending off the web: wgpu-core answers synchronously.
+            #[cfg(not(target_arch = "wasm32"))]
+            std::task::Poll::Pending => Ok(None),
+        }
+    }
 }
 
 /// Where red, green and blue sit in a pixel of `format`, for the formats a

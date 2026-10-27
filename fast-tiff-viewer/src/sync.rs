@@ -91,7 +91,8 @@ impl Viewer {
             // and a volume build wants every byte it can get. Same argument as
             // cutting the band-cache budget once the window worker starts.
             loaded.overview = None;
-            outcome.needs_repaint = sync_volume(loaded, &mut self.volume, renderer);
+            outcome.needs_repaint =
+                sync_volume(loaded, &mut self.volume, renderer, &mut self.status);
             return outcome;
         }
 
@@ -571,10 +572,27 @@ fn sync_volume(
     loaded: &mut Stack,
     view: &mut crate::viewer::VolumeView,
     renderer: &mut Renderer,
+    status: &mut Option<String>,
 ) -> bool {
     let mut needs_repaint = false;
     let is_4d = loaded.display.dims.slices > 1;
     let time = if is_4d { loaded.frame_index } else { 0 };
+
+    let generation = view.generation;
+    // In a browser the GPU can refuse a volume after its upload returned (see
+    // `take_late_upload_error`): handled as if the upload had failed — when it
+    // is the volume still wanted. One of a stack since closed is already being
+    // replaced, and the new one owes it nothing.
+    if let Some((error, bytes)) = renderer.take_late_upload_error() {
+        if view.uploaded_generation == Some(view.generation) {
+            out_of_memory(view, status, &error, bytes);
+        }
+    }
+    // Until the GPU has said there was room for the volume, it is not drawn,
+    // and nothing else may ask for the frame that will draw it.
+    if renderer.volume_pending() {
+        needs_repaint = true;
+    }
 
     if view.built_frame != Some(time) {
         // Lazily spawn the background builder on first 3D use (it opens its own
@@ -596,17 +614,24 @@ fn sync_volume(
             loaded.volume_builder = None;
             view.requested = None;
         }
-        let plan = plan_volume(loaded, renderer.max_3d_texture_size(), time);
+        let budget = *view
+            .planned_budget
+            .get_or_insert_with(|| volume_budget(renderer, view.budget_cap));
+        let plan = plan_volume(loaded, renderer, time, budget, view);
         let mut handled = false;
         if let Some(builder) = &loaded.volume_builder {
             if let Some(built) = builder.take_matching(view.generation, time) {
-                if let Some((vw, vh, vd, chans)) = built {
-                    renderer.upload_volumes(vw, vh, vd, &chans);
+                let generation = view.generation;
+                if let Some(volume) = built {
+                    upload_volume(renderer, &volume, view, status);
                 }
                 // Mark built even on failure so we don't retry every frame (the
-                // canvas just stays black).
-                view.built_frame = Some(time);
-                view.requested = None;
+                // canvas just stays black) — unless the upload ran out of
+                // memory and started a smaller rebuild, a new generation.
+                if view.generation == generation {
+                    view.built_frame = Some(time);
+                    view.requested = None;
+                }
                 handled = true;
             } else {
                 let queued = view.requested == Some((view.generation, time))
@@ -623,14 +648,18 @@ fn sync_volume(
             }
         }
         if !handled {
-            if let Some((vw, vh, vd, chans)) = crate::volume::build_volume(&loaded.tiff, &plan) {
-                renderer.upload_volumes(vw, vh, vd, &chans);
+            let generation = view.generation;
+            if let Some(volume) = crate::volume::build_volume(&loaded.tiff, &plan) {
+                upload_volume(renderer, &volume, view, status);
             }
-            view.built_frame = Some(time);
+            if view.generation == generation {
+                view.built_frame = Some(time);
+            }
         }
     }
 
     renderer.set_volume_interp(view.interp);
+    renderer.set_volume_target(view.viewport_px[0], view.viewport_px[1], view.downscale);
 
     // Per-channel window/level, in the sampled texture's units: raw for float,
     // else the 0..65535 display window divided by 65535 (both U8 and U16 volumes
@@ -698,24 +727,112 @@ fn sync_volume(
     );
     // However large the volume and the panel, a frame stays a bounded amount
     // of GPU work: see `scivis_render::FRAME_SAMPLE_BUDGET`.
-    params.max_steps = scivis_render::max_steps(view.pixels as f64, windows.len(), view.interp);
+    params.max_steps = view.max_steps(windows.len());
     renderer.set_volume_params(params);
-    needs_repaint
+    // A rebuild started this frame (the GPU ran out of memory): its loading
+    // and its result need frames of their own, wherever the view is.
+    needs_repaint || view.generation != generation
 }
 
 /// Snapshot everything the volume builder needs (see [`VolumePlan`]): the
 /// dimensions come from the stack's (possibly manually overridden) metadata so a
-/// channels/frames swap is honored, `time` is the 4D timepoint to build.
-pub fn plan_volume(loaded: &Stack, max_dim: u32, time: usize) -> VolumePlan {
+/// channels/frames swap is honored, `time` is the 4D timepoint to build, and
+/// `budget` the bytes it may take on the GPU.
+pub fn plan_volume(
+    loaded: &Stack,
+    renderer: &Renderer,
+    time: usize,
+    budget: usize,
+    view: &crate::viewer::VolumeView,
+) -> VolumePlan {
+    let kinds: Vec<ChannelKind> = loaded.display.settings.iter().map(|s| s.kind).collect();
+    let volume_kinds: Vec<scivis_render::VolumeKind> = kinds
+        .iter()
+        .map(|k| match k {
+            ChannelKind::Int8 => scivis_render::VolumeKind::U8,
+            ChannelKind::Int16 => scivis_render::VolumeKind::U16,
+            ChannelKind::Float => scivis_render::VolumeKind::F32,
+        })
+        .collect();
     VolumePlan {
-        kinds: loaded.display.settings.iter().map(|s| s.kind).collect(),
+        format: renderer.volume_texel_format(scivis_render::pack::common_kind(&volume_kinds)),
+        kinds,
         rgb: loaded.display.rgb,
         channels: loaded.display.dims.channels,
         slices: loaded.display.dims.slices,
         frames: loaded.display.dims.frames,
         time,
-        max_dim,
+        max_dim: renderer.max_3d_texture_size(),
+        budget,
+        scale: view.scale,
+        detail_cap: crate::volume::detail_cap(view.screen_px),
     }
+}
+
+/// The share of the GPU memory the renderer reports free that a volume may
+/// take; the rest is left for the frame textures, the window and everyone
+/// else on the GPU.
+pub const VOLUME_SHARE_OF_FREE: f64 = 0.5;
+
+/// The bytes a volume may take on the GPU: half of what the renderer reports
+/// free (the current volume counted as free, since it is replaced), or
+/// [`crate::volume::DEFAULT_VOLUME_BUDGET`] when it cannot tell; within
+/// [`crate::volume::MIN_VOLUME_BUDGET`]..=[`crate::volume::MAX_VOLUME_BUDGET`],
+/// and no more than `cap` (set after an upload ran out of memory).
+pub fn volume_budget(renderer: &Renderer, cap: Option<usize>) -> usize {
+    let base = renderer
+        .volume_memory_available()
+        .map(|free| (free as f64 * VOLUME_SHARE_OF_FREE) as usize)
+        .unwrap_or(crate::volume::DEFAULT_VOLUME_BUDGET);
+    base.clamp(
+        crate::volume::MIN_VOLUME_BUDGET,
+        crate::volume::MAX_VOLUME_BUDGET,
+    )
+    .min(cap.unwrap_or(usize::MAX))
+}
+
+/// Upload a built volume. When the GPU ran out of memory, rebuild it at no
+/// more than half the size that failed (and say so), unless that is below the
+/// smallest budget there is.
+fn upload_volume(
+    renderer: &mut Renderer,
+    volume: &crate::volume::BuiltVolume,
+    view: &mut crate::viewer::VolumeView,
+    status: &mut Option<String>,
+) {
+    match renderer.upload_packed_volume(volume) {
+        Ok(()) => view.uploaded_generation = Some(view.generation),
+        Err(e @ scivis_render::VolumeUploadError::OutOfMemory(_)) => {
+            out_of_memory(view, status, &e, volume.layout.total_bytes());
+        }
+        Err(e) => *status = Some(format!("3D: {e}")),
+    }
+}
+
+/// A volume of `bytes` did not fit in GPU memory: rebuild it at no more than
+/// half that, and say so, unless that is below the smallest budget there is.
+///
+/// Half of what failed, not half the budget: a volume smaller than its budget
+/// (the stack is that small) or than the ceiling would otherwise come back
+/// the same size and fail the same way.
+fn out_of_memory(
+    view: &mut crate::viewer::VolumeView,
+    status: &mut Option<String>,
+    why: &scivis_render::VolumeUploadError,
+    bytes: usize,
+) {
+    let cap = bytes / 2;
+    if cap < crate::volume::MIN_VOLUME_BUDGET {
+        *status = Some(format!(
+            "3D: not enough GPU memory even for a small volume ({why})"
+        ));
+        return;
+    }
+    log::warn!("3D volume upload ran out of GPU memory ({why}); rebuilding smaller");
+    *status =
+        Some("3D: the volume did not fit in GPU memory; showing it at a lower resolution".into());
+    view.budget_cap = Some(cap);
+    view.rebuild();
 }
 
 /// Whether a prefetched result still matches the wanted jobs (same channels, in

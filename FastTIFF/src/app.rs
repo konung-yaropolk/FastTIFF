@@ -1348,6 +1348,9 @@ pub struct ViewerApp {
     /// Space / Shift translation; `scroll_speed` scales the mouse-wheel fly.
     move_speed: f32,
     scroll_speed: f32,
+    /// How many times smaller, per axis, the 3D view renders while the user
+    /// moves it: 1 (full), 2 or 4. Set in the render-settings window.
+    moving_downscale: u32,
 
     // --- copying the view ---------------------------------------------------
     /// The 3-D panel's rect, recorded as it is painted.
@@ -1374,7 +1377,19 @@ pub struct ViewerApp {
     /// frame's animation step: grabbing a turning volume is how people stop
     /// it, whether or not the grab goes on to move anything.
     volume_pressed: bool,
+    /// The 3D camera as it was in the last 3D frame, and that frame's number
+    /// (`cumulative_frame_nr`), to tell a frame that moved it.
+    volume_last_camera: Option<(animation::CameraMark, u64)>,
+    /// When the user last moved the 3D view (the frontend clock, seconds).
+    /// Until [`VOLUME_SETTLE_S`] after it, the view renders at reduced size.
+    volume_moved_at: Option<f64>,
 }
+
+/// How long the 3D view stays at reduced resolution after the user last moved
+/// it, in seconds: long enough that a drag with pauses in it, or a run of wheel
+/// clicks, does not flick between sharp and coarse frames; short enough that
+/// the sharp frame arrives as soon as the hand stops.
+const VOLUME_SETTLE_S: f64 = 0.15;
 
 /// Reveal a directory in the platform's file manager.
 ///
@@ -1465,12 +1480,15 @@ impl ViewerApp {
             show_coord_box: false,
             move_speed: 1.0,
             scroll_speed: 1.0,
+            moving_downscale: render::MOVING_DOWNSCALE,
             volume_rect: None,
             pending_copy: None,
             animation: None,
             animation_saving: None,
             volume_capture: Default::default(),
             volume_pressed: false,
+            volume_last_camera: None,
+            volume_moved_at: None,
         };
         if let Some(opened) = initial {
             app.apply_opened(opened);
@@ -3763,6 +3781,7 @@ impl ViewerApp {
                 &mut self.show_render_settings,
                 &mut self.core.volume.scale,
                 &mut self.core.volume.interp,
+                &mut self.moving_downscale,
                 &mut self.core.volume.cam.nav,
                 &mut self.core.volume.cam.orbit_point,
                 &mut self.move_speed,
@@ -3957,7 +3976,15 @@ impl ViewerApp {
                     self.core.volume.aspect =
                         (panel_rect.width() / panel_rect.height().max(1.0)).clamp(0.1, 10.0);
                     let ppp = ui.ctx().pixels_per_point();
-                    self.core.volume.pixels = panel_rect.area() * ppp * ppp;
+                    self.core.volume.viewport_px = [
+                        (panel_rect.width() * ppp).round().max(1.0) as u32,
+                        (panel_rect.height() * ppp).round().max(1.0) as u32,
+                    ];
+                    // The screen, for how much detail a volume is worth keeping.
+                    if let Some(monitor) = ui.ctx().input(|i| i.viewport().monitor_size) {
+                        self.core.volume.screen_px =
+                            (monitor.x.max(monitor.y) * ppp).round().max(0.0) as u32;
+                    }
 
                     // Until the first volume is built, show a black loading screen so
                     // the heavy decode doesn't freeze on the previous view (`sync_gpu`
@@ -3982,6 +4009,7 @@ impl ViewerApp {
                     if response.is_pointer_button_down_on() {
                         self.volume_pressed = true;
                     }
+                    self.volume_motion(ui.ctx());
                     // Where the view is, for a copy of it. Recorded at the one
                     // place that knows — a copy happens a frame later, by which
                     // time this panel may not be being laid out at all.

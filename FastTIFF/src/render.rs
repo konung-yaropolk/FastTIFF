@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 // The two parameter types the UI itself names (the 3D settings pop-up edits
 // them). The rest of the renderer's vocabulary reaches the app through
 // `fast_tiff_viewer`, which is what actually drives the GPU.
-pub use scivis_render::{VolumeInterp, VolumeRender};
+pub use scivis_render::{VolumeInterp, VolumeRender, MOVING_DOWNSCALE};
 
 // Pick the one backend the selected eframe renderer can drive. The
 // `not(renderer-glow)` guard on the wgpu arm means enabling *both* features (a
@@ -92,7 +92,9 @@ mod glue {
         shape(render, rect, |r, gl| r.paint(gl))
     }
 
-    /// The egui paint callback that ray-marches the 3D volume into `rect`.
+    /// The egui paint callback that ray-marches the 3D volume into `rect` —
+    /// at reduced size and scaled up, while the view is moving (the renderer
+    /// does both; see `set_volume_target`).
     pub fn paint_volume_callback(render: &Render, rect: egui::Rect) -> egui::Shape {
         shape(render, rect, |r, gl| r.paint_volume(gl))
     }
@@ -102,12 +104,12 @@ mod glue {
     fn shape(
         render: &Render,
         rect: egui::Rect,
-        draw: impl Fn(&ImageRenderResources, &eframe::glow::Context) + Send + Sync + 'static,
+        draw: impl Fn(&mut ImageRenderResources, &eframe::glow::Context) + Send + Sync + 'static,
     ) -> egui::Shape {
         let res = render.clone();
         let callback = egui_glow::CallbackFn::new(move |_info, painter| {
-            if let Ok(r) = res.lock() {
-                draw(&r, painter.gl());
+            if let Ok(mut r) = res.lock() {
+                draw(&mut r, painter.gl());
             }
         });
         egui::Shape::Callback(egui::PaintCallback {
@@ -137,11 +139,12 @@ mod glue {
             .wgpu_render_state
             .as_ref()
             .expect("FastTIFF requires the wgpu backend (NativeOptions::renderer = Wgpu)");
-        Arc::new(Mutex::new(ImageRenderResources::new(
-            rs.device.clone(),
-            rs.queue.clone(),
-            rs.target_format,
-        )))
+        let mut resources =
+            ImageRenderResources::new(rs.device.clone(), rs.queue.clone(), rs.target_format);
+        // So the renderer can ask the driver how much GPU memory a volume may
+        // take, rather than guess.
+        resources.set_adapter(rs.adapter.clone());
+        Arc::new(Mutex::new(resources))
     }
 
     /// The egui paint callback that draws the current image into `rect`.
@@ -212,7 +215,9 @@ mod glue {
     }
 
     /// The volume-view callback. `prepare` marshals the stashed camera/window
-    /// params into the uniform buffer, then `paint` draws.
+    /// params into the uniform buffer and, while the view is moving, renders
+    /// it at reduced size into egui's encoder — which runs ahead of egui's own
+    /// pass — then `paint` draws it (or scales the reduced render up).
     struct VolumePaintCallback {
         resources: Render,
     }
@@ -223,11 +228,11 @@ mod glue {
             _device: &wgpu::Device,
             _queue: &wgpu::Queue,
             _screen: &egui_wgpu::ScreenDescriptor,
-            _encoder: &mut wgpu::CommandEncoder,
+            encoder: &mut wgpu::CommandEncoder,
             _resources: &mut egui_wgpu::CallbackResources,
         ) -> Vec<wgpu::CommandBuffer> {
-            if let Ok(r) = self.resources.lock() {
-                r.write_volume_uniform();
+            if let Ok(mut r) = self.resources.lock() {
+                r.prepare_volume(encoder);
             }
             Vec::new()
         }

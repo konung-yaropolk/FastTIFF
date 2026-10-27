@@ -31,3 +31,8 @@ fn composite_shader_is_valid() {
         "composite.wgsl",
     );
 }
+
+#[test]
+fn blit_shader_is_valid() {
+    validate(include_str!("../src/shaders/blit.wgsl"), "blit.wgsl");
+}

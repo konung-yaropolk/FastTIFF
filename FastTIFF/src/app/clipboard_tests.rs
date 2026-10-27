@@ -94,6 +94,7 @@ fn frame_with_a_dialog(copies: bool) -> (Vec<egui::OutputCommand>, Vec<egui::Out
             title: "File metadata",
             size: egui::vec2(360.0, 600.0),
             scroll: false,
+            fit_height: false,
             resizable: true,
             // Irrelevant here, and false is the honest value: this is the
             // metadata dialog, which is not one of the always-on-top ones.

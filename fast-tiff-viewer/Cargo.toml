@@ -1,6 +1,6 @@
 [package]
 name = "fast-tiff-viewer"
-version = "0.26.1"
+version = "0.26.2"
 edition = "2021"
 description = "GUI-agnostic viewer core for multi-frame TIFF stacks: stack state, channel/contrast/LUT settings, c/z/t interpretation, 3D camera math, and the per-frame decode-to-GPU pipeline."
 # GPL-3.0, not MPL-2.0 as the rest of the library crates are. The built-in
@@ -129,8 +129,9 @@ gpu-registration = ["suite2p-registration?/gpu", "turboreg-registration?/gpu"]
 # default; a single-threaded host — notably `wasm32-unknown-unknown`, where
 # `std::thread::spawn` is unavailable — turns this off and gets the synchronous
 # fallback paths, which are already the code path taken whenever a worker fails
-# to spawn.
-threads = ["dep:rayon"]
+# to spawn. It also builds a packed volume's mip chain and brick maxima across
+# threads (`scivis-render/rayon`).
+threads = ["dep:rayon", "scivis-render/rayon"]
 # Forwarded to fast-tiff-lib and, where the OIR importer is built, to its
 # reader, so `mmap` means "this build memory-maps the files it opens" for both.
 # It brings `Viewer::open` (a path); without it only `Viewer::load_bytes`

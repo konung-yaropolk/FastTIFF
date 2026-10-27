@@ -76,6 +76,19 @@ fn every_camera_move_is_noticed_and_the_renderers_cache_is_not() {
     let moved_mark = CameraMark::of(&reset);
     reset.reset();
     assert!(moved_mark.moved(&reset), "Reset is a move too");
+
+    // The picture, though, is the pose alone: the navigation style and the
+    // orbiting point change the next gesture, not what is on screen, so the
+    // view is not drawn coarse for them.
+    for (i, m) in moves.iter().enumerate() {
+        let mut c = cam;
+        m(&mut c);
+        assert_eq!(
+            mark.same_pose(&CameraMark::of(&c)),
+            i >= 5,
+            "move {i}: only the last two leave the pose"
+        );
+    }
 }
 
 #[test]

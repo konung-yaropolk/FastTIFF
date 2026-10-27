@@ -14,8 +14,9 @@ use fast_tiff_viewer::camera::{NavMode, OrbitPoint};
 use fast_tiff_viewer::histogram::{fill_alpha, fill_tint, Histogram, BINS};
 
 /// The 3D render-settings pop-up: rendering method and the controls belonging
-/// to it, per-axis voxel scale (x:y:z), interpolation, navigation style, and a
-/// camera-reset button. Scale defaults to the stack's pixel calibration (with a
+/// to it, per-axis voxel scale (x:y:z), interpolation, the resolution while the
+/// view moves (`moving_downscale`: how many times smaller per axis, 1 for
+/// full), navigation style, and a camera-reset button. Scale defaults to the stack's pixel calibration (with a
 /// button to re-seed it). `reset_position` is set true when the user clicks
 /// Reset position.
 ///
@@ -36,6 +37,7 @@ pub(super) fn render_settings_window(
     open: &mut bool,
     scale: &mut [f32; 3],
     interp: &mut render::VolumeInterp,
+    moving_downscale: &mut u32,
     nav: &mut NavMode,
     orbit_point: &mut OrbitPoint,
     move_speed: &mut f32,
@@ -53,8 +55,12 @@ pub(super) fn render_settings_window(
     let spec = dialog::Dialog {
         id: "render_settings",
         title: "3D render settings",
-        size: egui::vec2(300.0, 560.0),
+        // The height only the first time it opens; then it is the content's.
+        size: egui::vec2(300.0, 520.0),
         scroll: true,
+        // The rows change with the render mode, and a window kept at the
+        // tallest mode's height would sit half empty in the others.
+        fit_height: true,
         resizable: false,
         // Every slider in here changes the render while it is being dragged, so
         // the picture and the controls have to be visible at once.
@@ -182,6 +188,32 @@ pub(super) fn render_settings_window(
         });
 
         ui.separator();
+        ui.label(RichText::new("Performance").strong());
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Resolution while moving");
+            // Per axis, as the view's size is: 50% is a quarter of the rays.
+            for (downscale, label, help) in [
+                (1, "Full", "Every pixel, moving or not"),
+                (
+                    2,
+                    "50%",
+                    "Half the resolution while the view moves (a quarter of the \
+                     rays), sharp again as soon as it stops",
+                ),
+                (
+                    4,
+                    "25%",
+                    "A quarter of the resolution while the view moves (a \
+                     sixteenth of the rays), sharp again as soon as it stops. \
+                     The most responsive on large stacks",
+                ),
+            ] {
+                ui.selectable_value(moving_downscale, downscale, label)
+                    .on_hover_text(help);
+            }
+        });
+
+        ui.separator();
         ui.label(RichText::new("Navigation").strong());
         ui.horizontal_wrapped(|ui| {
             for mode in [
@@ -254,6 +286,7 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Sta
         title: "File metadata",
         size: egui::vec2(360.0, 600.0),
         scroll: true,
+        fit_height: false,
         resizable: true,
         // Read *about* the picture rather than used to change it, so it
         // stays an ordinary window a user can put behind the app.
@@ -551,6 +584,7 @@ pub(super) fn histogram_window(
         // No scroll area: the plot sizes itself from the height left over after
         // the controls, and inside a scroll area that is unbounded.
         scroll: false,
+        fit_height: false,
         resizable: true,
         // Read *about* the picture rather than used to change it, so it
         // stays an ordinary window a user can put behind the app.

@@ -15,9 +15,10 @@
 //! bound framebuffer) for the target rect — that setup is the host's job, and
 //! this backend deliberately does not second-guess it.
 
+use crate::pack::{self, BrickMaxima, PackedVolume, TexelFormat, Visibility, VolumeLayout};
 use crate::{
     capture_tiles, tile_params, ChannelKind, ChannelUniform, Lut, VolumeImage, VolumeInterp,
-    VolumeKind, VolumeParams, CAPTURE_TILE, MAX_CHANNELS,
+    VolumeKind, VolumeParams, VolumeUploadError, CAPTURE_TILE, MAX_CHANNELS,
 };
 use glow::HasContext as _;
 use std::sync::Arc;
@@ -154,17 +155,22 @@ void main() {
 
 // --- 3D volume ray-march ---------------------------------------------------
 // A fullscreen pass that, per pixel, builds a camera ray and marches it through
-// the 3D texture(s). Three compositing modes (`u_mode`): maximum-intensity
+// the packed 3D textures. Three compositing modes (`u_mode`): maximum-intensity
 // projection (order-independent), emission-absorption alpha compositing (the
 // ImageJ 3D Viewer's "Volume" look), and an opaque gradient-shaded isosurface.
 // The camera arrives as an explicit basis (eye/forward/right/up + fov), avoiding
 // any matrix inverse in-shader.
 //
-// Sample spacing is derived from the actual voxel size (via `textureSize`) so
-// it's the same regardless of the view direction — this, plus a per-pixel
-// jitter of the ray start, is what kills the slice-aligned banding that showed
-// up when looking down an axis. Keeping every sample strictly inside the box
-// (jitter < one step) plus a zero texture border avoids the edge artifacts.
+// Sample spacing is derived from the actual voxel size (via `textureSize`),
+// half a voxel along every axis the ray crosses — this, plus a per-pixel jitter
+// of the ray start, is what kills the slice-aligned banding that showed up when
+// looking down an axis. Keeping every sample strictly inside the box (jitter <
+// one step) plus a zero texture border avoids the edge artifacts.
+//
+// The same accelerations as the WGSL twin (`volume.wgsl`, whose header says
+// more): channels packed four to a texture, empty bricks skipped on the sample
+// lattice, a MIP stopping once every channel is saturated, and a MIP reading a
+// coarser (max-reduced) mip level where a voxel is smaller than a pixel.
 
 const VOL_VERTEX_SRC: &str = r#"#version 140
 out vec2 v_ndc;
@@ -177,27 +183,13 @@ void main() {
 }
 "#;
 
-// One MIP pass per channel, summed — the 3D analog of the 2D compositor. Each
-// channel has an unorm sampler (`volN`, integer sources) and a float sampler
-// (`volfN`, R32F); `ch_is_float[N]` selects which carries the data (the other is
-// a 1x1x1 dummy). `num_channels` is a uniform, so the per-channel `if` guards are
-// uniform control flow (texture sampling inside them is well-defined).
 const VOL_FRAGMENT_SRC: &str = r#"#version 140
 in vec2 v_ndc;
 out vec4 frag_color;
 
-uniform sampler3D vol0;
-uniform sampler3D vol1;
-uniform sampler3D vol2;
-uniform sampler3D vol3;
-uniform sampler3D vol4;
-uniform sampler3D vol5;
-uniform sampler3D volf0;
-uniform sampler3D volf1;
-uniform sampler3D volf2;
-uniform sampler3D volf3;
-uniform sampler3D volf4;
-uniform sampler3D volf5;
+uniform sampler3D vol_a;     // channels 0..3, packed into the components
+uniform sampler3D vol_b;     // channels 4, 5
+uniform sampler3D occ;       // one texel per brick: may a ray need to sample there
 uniform sampler2D lut_tex;
 uniform vec3 cam_eye;
 uniform vec3 cam_forward;
@@ -208,7 +200,6 @@ uniform float aspect;
 uniform vec3 box_he;         // volume box half-extents (scaled dims)
 uniform vec2 ch_window[6];   // per-channel min, max in sampled-texture units
 uniform float ch_enabled[6];
-uniform float ch_is_float[6];
 // Where to sample each channel's LUT for the isosurface albedo. Not always
 // the top entry: a LUT that peaks early and ends dark (a contrast-stretched
 // palette) would otherwise paint a black surface.
@@ -220,6 +211,9 @@ uniform float u_iso;         // isosurface threshold in windowed units (0..1)
 uniform float u_brightness;  // gain on the composited colour (MIP and alpha DVR)
 uniform int u_interp;        // 0 = point/linear (GL filter), 1 = in-shader tricubic
 uniform int u_max_steps;     // steps per ray at most (<= 0: MAX_STEPS)
+// (size of one pixel at unit distance, highest mip level a MIP may read,
+//  brick size in voxels, skip empty bricks: 1 or 0)
+uniform vec4 u_accel;
 
 // ---------------------------------------------------------------------------
 // Isosurface appearance (u_mode == 2). Both are compile-time constants: they
@@ -243,17 +237,17 @@ const float SURFACE_CONTRAST = 0.85;
 // for the headroom.
 const int MAX_STEPS = 4096;
 
-// NOTE: every texture read in this shader uses textureLod (explicit LOD 0).
-// The march loop's trip count and the early return are per-fragment, i.e.
-// non-uniform control flow, where implicit-LOD texture() is undefined in GLSL
-// — the textures are single-level so most drivers cope, but explicit LOD makes
-// it well-defined everywhere (and skips the LOD calculation).
+// NOTE: every texture read in this shader uses textureLod (explicit LOD) or
+// texelFetch. The march loop's trip count and the early return are
+// per-fragment, i.e. non-uniform control flow, where implicit-LOD texture() is
+// undefined in GLSL.
 
-// Fast tricubic B-spline reconstruction: 8 hardware-linear taps (Sigg &
-// Hadwiger). Smoother than trilinear; used when u_interp == 1 (the GL filter is
-// LINEAR then, so each tap is a bilinear-in-3D fetch).
-float sampleCubic(sampler3D tex, vec3 coord) {
-    vec3 n = vec3(textureSize(tex, 0));
+// Fast tricubic B-spline reconstruction at mip level `lvl`: 8 hardware-linear
+// taps (Sigg & Hadwiger), every component at once. Used when u_interp == 1 (the
+// GL filter is LINEAR then, so each tap is a bilinear-in-3D fetch).
+vec4 sampleCubic(sampler3D tex, vec3 coord, int lvl) {
+    vec3 n = vec3(textureSize(tex, lvl));
+    float l = float(lvl);
     vec3 cg = coord * n - 0.5;
     vec3 idx = floor(cg);
     vec3 f = cg - idx;
@@ -267,35 +261,40 @@ float sampleCubic(sampler3D tex, vec3 coord) {
     vec3 g1 = w2 + w3;
     vec3 h0 = (w1 / g0 - 0.5 + idx) / n;
     vec3 h1 = (w3 / g1 + 1.5 + idx) / n;
-    float s000 = textureLod(tex, vec3(h0.x, h0.y, h0.z), 0.0).r;
-    float s100 = textureLod(tex, vec3(h1.x, h0.y, h0.z), 0.0).r;
-    float s010 = textureLod(tex, vec3(h0.x, h1.y, h0.z), 0.0).r;
-    float s110 = textureLod(tex, vec3(h1.x, h1.y, h0.z), 0.0).r;
-    float s001 = textureLod(tex, vec3(h0.x, h0.y, h1.z), 0.0).r;
-    float s101 = textureLod(tex, vec3(h1.x, h0.y, h1.z), 0.0).r;
-    float s011 = textureLod(tex, vec3(h0.x, h1.y, h1.z), 0.0).r;
-    float s111 = textureLod(tex, vec3(h1.x, h1.y, h1.z), 0.0).r;
-    float x00 = mix(s100, s000, g0.x);
-    float x10 = mix(s110, s010, g0.x);
-    float x01 = mix(s101, s001, g0.x);
-    float x11 = mix(s111, s011, g0.x);
-    float y0 = mix(x10, x00, g0.y);
-    float y1 = mix(x11, x01, g0.y);
+    vec4 s000 = textureLod(tex, vec3(h0.x, h0.y, h0.z), l);
+    vec4 s100 = textureLod(tex, vec3(h1.x, h0.y, h0.z), l);
+    vec4 s010 = textureLod(tex, vec3(h0.x, h1.y, h0.z), l);
+    vec4 s110 = textureLod(tex, vec3(h1.x, h1.y, h0.z), l);
+    vec4 s001 = textureLod(tex, vec3(h0.x, h0.y, h1.z), l);
+    vec4 s101 = textureLod(tex, vec3(h1.x, h0.y, h1.z), l);
+    vec4 s011 = textureLod(tex, vec3(h0.x, h1.y, h1.z), l);
+    vec4 s111 = textureLod(tex, vec3(h1.x, h1.y, h1.z), l);
+    vec4 x00 = mix(s100, s000, g0.x);
+    vec4 x10 = mix(s110, s010, g0.x);
+    vec4 x01 = mix(s101, s001, g0.x);
+    vec4 x11 = mix(s111, s011, g0.x);
+    vec4 y0 = mix(x10, x00, g0.y);
+    vec4 y1 = mix(x11, x01, g0.y);
     return mix(y1, y0, g0.z);
 }
 
-// One texel value: GL-filtered fetch (nearest/linear) or the tricubic above.
-float smp(sampler3D tex, vec3 c) {
-    return (u_interp == 1) ? sampleCubic(tex, c) : textureLod(tex, c, 0.0).r;
+// Every component at a point: GL-filtered fetch (nearest/linear) or the
+// tricubic above.
+vec4 smp(sampler3D tex, vec3 c, int lvl) {
+    if (u_interp == 1) {
+        return sampleCubic(tex, c, lvl);
+    }
+    return textureLod(tex, c, float(lvl));
 }
 
-// Raw sampled value for each channel (its unorm or float texture).
-float raw0(vec3 tc) { return ch_is_float[0] > 0.5 ? smp(volf0, tc) : smp(vol0, tc); }
-float raw1(vec3 tc) { return ch_is_float[1] > 0.5 ? smp(volf1, tc) : smp(vol1, tc); }
-float raw2(vec3 tc) { return ch_is_float[2] > 0.5 ? smp(volf2, tc) : smp(vol2, tc); }
-float raw3(vec3 tc) { return ch_is_float[3] > 0.5 ? smp(volf3, tc) : smp(vol3, tc); }
-float raw4(vec3 tc) { return ch_is_float[4] > 0.5 ? smp(volf4, tc) : smp(vol4, tc); }
-float raw5(vec3 tc) { return ch_is_float[5] > 0.5 ? smp(volf5, tc) : smp(vol5, tc); }
+// The six channels at a point: one fetch of each packed texture that holds an
+// enabled channel. Unfetched components read as 0.
+void fetch(vec3 tc, int lvl, bool need_a, bool need_b, out vec4 a, out vec4 b) {
+    a = vec4(0.0);
+    b = vec4(0.0);
+    if (need_a) { a = smp(vol_a, tc, lvl); }
+    if (need_b) { b = smp(vol_b, tc, lvl); }
+}
 
 float norm_ch(float v, int idx) {
     vec2 mm = ch_window[idx];
@@ -303,6 +302,10 @@ float norm_ch(float v, int idx) {
 }
 vec3 lut_col(float t, int idx) {
     return textureLod(lut_tex, vec2(t, (float(idx) + 0.5) / 6.0), 0.0).rgb;
+}
+// Whether channel `idx` is present and switched on.
+bool on(int idx) {
+    return idx < num_channels && ch_enabled[idx] > 0.5;
 }
 
 // World point -> volume texcoord, with Y and Z flipped so the volume matches the
@@ -313,37 +316,66 @@ vec3 vol_coord(vec3 p) {
     return clamp(vec3(tc.x, 1.0 - tc.y, 1.0 - tc.z), 0.0, 1.0);
 }
 
+// Whether the brick at `tc` may contribute. `dims0` is the level-0 size.
+bool occupied(vec3 tc, vec3 dims0) {
+    vec3 grid = vec3(textureSize(occ, 0));
+    vec3 b = min(floor(tc * dims0 / u_accel.z), grid - 1.0);
+    return texelFetch(occ, ivec3(b), 0).r > 0.5;
+}
+
+// How many steps of `dt` take the ray from `tc` (moving `dtc` in texture
+// coordinates per unit of t) to the first sample past the brick it is in: at
+// least one, so the march always advances, and at most `n` + 1. See the WGSL
+// twin: GLSL leaves int() of an infinity undefined, and drivers wrap it.
+int steps_past_brick(vec3 tc, vec3 dtc, vec3 dims0, float dt, int n) {
+    float bs = u_accel.z;
+    vec3 b = floor(tc * dims0 / bs);
+    vec3 lo = b * bs / dims0;
+    vec3 hi = min((b + 1.0) * bs, dims0) / dims0;
+    float t = 1e30;
+    if (dtc.x > 1e-9) t = min(t, (hi.x - tc.x) / dtc.x);
+    if (dtc.x < -1e-9) t = min(t, (lo.x - tc.x) / dtc.x);
+    if (dtc.y > 1e-9) t = min(t, (hi.y - tc.y) / dtc.y);
+    if (dtc.y < -1e-9) t = min(t, (lo.y - tc.y) / dtc.y);
+    if (dtc.z > 1e-9) t = min(t, (hi.z - tc.z) / dtc.z);
+    if (dtc.z < -1e-9) t = min(t, (lo.z - tc.z) / dtc.z);
+    return int(min(floor(max(t, 0.0) / dt), float(n))) + 1;
+}
+
 // Composite scalar field for the isosurface: the max windowed value across every
 // enabled channel, plus (via `col`) the *full-intensity* LUT color of whichever
 // channel is the maximum there. Using the LUT's top color (not the color at the
 // crossing value) as the surface albedo keeps the surface equally bright at every
 // threshold — the iso level chooses only where the surface is, the lighting term
 // does the shading. Returns the field value in [0,1].
-float field_col(vec3 tc, out vec3 col) {
+float field_col(vec3 tc, bool need_a, bool need_b, out vec3 col) {
+    vec4 a;
+    vec4 b;
+    fetch(tc, 0, need_a, need_b, a, b);
     float f = 0.0;
     col = vec3(0.0);
-    if (ch_enabled[0] > 0.5)                     { float t = norm_ch(raw0(tc), 0); if (t > f) { f = t; col = lut_col(ch_albedo[0], 0); } }
-    if (num_channels > 1 && ch_enabled[1] > 0.5) { float t = norm_ch(raw1(tc), 1); if (t > f) { f = t; col = lut_col(ch_albedo[1], 1); } }
-    if (num_channels > 2 && ch_enabled[2] > 0.5) { float t = norm_ch(raw2(tc), 2); if (t > f) { f = t; col = lut_col(ch_albedo[2], 2); } }
-    if (num_channels > 3 && ch_enabled[3] > 0.5) { float t = norm_ch(raw3(tc), 3); if (t > f) { f = t; col = lut_col(ch_albedo[3], 3); } }
-    if (num_channels > 4 && ch_enabled[4] > 0.5) { float t = norm_ch(raw4(tc), 4); if (t > f) { f = t; col = lut_col(ch_albedo[4], 4); } }
-    if (num_channels > 5 && ch_enabled[5] > 0.5) { float t = norm_ch(raw5(tc), 5); if (t > f) { f = t; col = lut_col(ch_albedo[5], 5); } }
+    if (on(0)) { float t = norm_ch(a.x, 0); if (t > f) { f = t; col = lut_col(ch_albedo[0], 0); } }
+    if (on(1)) { float t = norm_ch(a.y, 1); if (t > f) { f = t; col = lut_col(ch_albedo[1], 1); } }
+    if (on(2)) { float t = norm_ch(a.z, 2); if (t > f) { f = t; col = lut_col(ch_albedo[2], 2); } }
+    if (on(3)) { float t = norm_ch(a.w, 3); if (t > f) { f = t; col = lut_col(ch_albedo[3], 3); } }
+    if (on(4)) { float t = norm_ch(b.x, 4); if (t > f) { f = t; col = lut_col(ch_albedo[4], 4); } }
+    if (on(5)) { float t = norm_ch(b.y, 5); if (t > f) { f = t; col = lut_col(ch_albedo[5], 5); } }
     return f;
 }
 
-float field_scalar(vec3 tc) {
+float field_scalar(vec3 tc, bool need_a, bool need_b) {
     vec3 ignore;
-    return field_col(tc, ignore);
+    return field_col(tc, need_a, need_b, ignore);
 }
 
 // World-space gradient of the field (central differences, one voxel apart). It
 // points toward increasing intensity; used (normalized, two-sided) as the
 // surface normal for shading.
-vec3 field_grad(vec3 wp, vec3 voxel) {
+vec3 field_grad(vec3 wp, vec3 voxel, bool need_a, bool need_b) {
     return vec3(
-        field_scalar(vol_coord(wp + vec3(voxel.x, 0.0, 0.0))) - field_scalar(vol_coord(wp - vec3(voxel.x, 0.0, 0.0))),
-        field_scalar(vol_coord(wp + vec3(0.0, voxel.y, 0.0))) - field_scalar(vol_coord(wp - vec3(0.0, voxel.y, 0.0))),
-        field_scalar(vol_coord(wp + vec3(0.0, 0.0, voxel.z))) - field_scalar(vol_coord(wp - vec3(0.0, 0.0, voxel.z)))
+        field_scalar(vol_coord(wp + vec3(voxel.x, 0.0, 0.0)), need_a, need_b) - field_scalar(vol_coord(wp - vec3(voxel.x, 0.0, 0.0)), need_a, need_b),
+        field_scalar(vol_coord(wp + vec3(0.0, voxel.y, 0.0)), need_a, need_b) - field_scalar(vol_coord(wp - vec3(0.0, voxel.y, 0.0)), need_a, need_b),
+        field_scalar(vol_coord(wp + vec3(0.0, 0.0, voxel.z)), need_a, need_b) - field_scalar(vol_coord(wp - vec3(0.0, 0.0, voxel.z)), need_a, need_b)
     );
 }
 
@@ -367,11 +399,29 @@ void main() {
     }
     t0 = max(t0, 0.0);
 
+    // Which packed textures hold a channel that is on: the other is not read.
+    bool need_a = on(0) || on(1) || on(2) || on(3);
+    bool need_b = on(4) || on(5);
+
+    vec3 dims0 = vec3(textureSize(vol_a, 0));
+    vec3 voxel0 = 2.0 * box_he / max(dims0, vec3(1.0));
+    vec3 ard = max(abs(rd), vec3(1e-6));
+
+    // The mip level this ray reads (MIP only); see the WGSL twin.
+    int lvl = 0;
+    if (u_mode == 0 && u_accel.y > 0.5) {
+        float foot = t0 * u_accel.x;
+        vec3 lat = voxel0 * sqrt(max(vec3(1.0) - rd * rd, vec3(0.0)));
+        float lateral = max(lat.x, max(lat.y, lat.z));
+        if (lateral > 0.0 && foot > lateral) {
+            lvl = int(clamp(floor(log2(foot / lateral)), 0.0, u_accel.y));
+        }
+    }
+    vec3 voxel = 2.0 * box_he / max(vec3(textureSize(vol_a, lvl)), vec3(1.0));
+
     // Half a voxel along every axis the ray crosses, measured along the ray,
     // then capped by the host's per-frame budget. See the WGSL twin.
-    ivec3 tdim = (ch_is_float[0] > 0.5) ? textureSize(volf0, 0) : textureSize(vol0, 0);
-    vec3 voxel = 2.0 * box_he / max(vec3(tdim), vec3(1.0));
-    vec3 along = voxel / max(abs(rd), vec3(1e-6));
+    vec3 along = voxel / ard;
     float base_step = max(0.5 * min(along.x, min(along.y, along.z)), 1e-4);
     float span = t1 - t0;
     int cap = (u_max_steps > 0) ? min(u_max_steps, MAX_STEPS) : MAX_STEPS;
@@ -381,30 +431,43 @@ void main() {
     // Jitter the start within one step: decorrelates slice-aligned banding and
     // keeps all n samples strictly inside [t0, t1].
     float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    vec3 p0 = ro + rd * (t0 + jitter * dt);
     vec3 dp = rd * dt;
-    vec3 p = ro + rd * (t0 + jitter * dt);
+    // Sample i is at p0 + i * dp, worked out afresh each step, so a ray that
+    // skips lands exactly where one that walked would.
+    // Not for a ray of no length, which has no step to count bricks in.
+    bool skip = u_accel.w > 0.5 && dt > 0.0;
+    vec3 dtc = vec3(rd.x, -rd.y, -rd.z) * (0.5 / box_he);
 
     if (u_mode == 1) {
         // Alpha DVR (ImageJ 3D Viewer "Volume"): emission-absorption, front-to-back.
         // Disabled channels are skipped entirely (uniform branch, no sampling cost).
         vec3 col = vec3(0.0);
         float acc = 0.0;
-        for (int i = 0; i < n; i++) {
-            vec3 tc = vol_coord(p);
+        int i = 0;
+        while (i < n) {
+            vec3 tc = vol_coord(p0 + dp * float(i));
+            if (skip && !occupied(tc, dims0)) {
+                i += steps_past_brick(tc, dtc, dims0, dt, n);
+                continue;
+            }
+            vec4 a;
+            vec4 b;
+            fetch(tc, 0, need_a, need_b, a, b);
             vec3 emit = vec3(0.0);
             float wsum = 0.0;
-            if (ch_enabled[0] > 0.5)                       { float t = norm_ch(raw0(tc), 0); emit += t * lut_col(t, 0); wsum += t; }
-            if (num_channels > 1 && ch_enabled[1] > 0.5) { float t = norm_ch(raw1(tc), 1); emit += t * lut_col(t, 1); wsum += t; }
-            if (num_channels > 2 && ch_enabled[2] > 0.5) { float t = norm_ch(raw2(tc), 2); emit += t * lut_col(t, 2); wsum += t; }
-            if (num_channels > 3 && ch_enabled[3] > 0.5) { float t = norm_ch(raw3(tc), 3); emit += t * lut_col(t, 3); wsum += t; }
-            if (num_channels > 4 && ch_enabled[4] > 0.5) { float t = norm_ch(raw4(tc), 4); emit += t * lut_col(t, 4); wsum += t; }
-            if (num_channels > 5 && ch_enabled[5] > 0.5) { float t = norm_ch(raw5(tc), 5); emit += t * lut_col(t, 5); wsum += t; }
-            float a = 1.0 - exp(-u_density * wsum * dt);
+            if (on(0)) { float t = norm_ch(a.x, 0); emit += t * lut_col(t, 0); wsum += t; }
+            if (on(1)) { float t = norm_ch(a.y, 1); emit += t * lut_col(t, 1); wsum += t; }
+            if (on(2)) { float t = norm_ch(a.z, 2); emit += t * lut_col(t, 2); wsum += t; }
+            if (on(3)) { float t = norm_ch(a.w, 3); emit += t * lut_col(t, 3); wsum += t; }
+            if (on(4)) { float t = norm_ch(b.x, 4); emit += t * lut_col(t, 4); wsum += t; }
+            if (on(5)) { float t = norm_ch(b.y, 5); emit += t * lut_col(t, 5); wsum += t; }
+            float al = 1.0 - exp(-u_density * wsum * dt);
             vec3 albedo = (wsum > 1e-6) ? emit / wsum : vec3(0.0);
-            col += (1.0 - acc) * a * albedo;
-            acc += (1.0 - acc) * a;
+            col += (1.0 - acc) * al * albedo;
+            acc += (1.0 - acc) * al;
             if (acc > 0.995) break;
-            p += dp;
+            i += 1;
         }
         frag_color = vec4(clamp(col * u_brightness, vec3(0.0), vec3(1.0)), 1.0);
     } else if (u_mode == 2) {
@@ -413,16 +476,27 @@ void main() {
         // hit from the field gradient with a camera headlight (two-sided, so both
         // faces are lit and silhouettes fall off to the ambient term).
         float prev_f = 0.0;
+        bool skipped = false;
         vec3 hit_col = vec3(0.0);
         bool hit = false;
-        for (int i = 0; i < n; i++) {
+        int i = 0;
+        while (i < n) {
+            vec3 p = p0 + dp * float(i);
             vec3 tc = vol_coord(p);
+            if (skip && !occupied(tc, dims0)) {
+                i += steps_past_brick(tc, dtc, dims0, dt, n);
+                skipped = true;
+                continue;
+            }
             vec3 fcol;
-            float f = field_col(tc, fcol);
+            float f = field_col(tc, need_a, need_b, fcol);
             if (f >= u_iso) {
-                float frac = clamp((u_iso - prev_f) / max(f - prev_f, 1e-6), 0.0, 1.0);
+                // Refined against the sample before, read now if a skip
+                // jumped over it; see the WGSL twin.
+                float before = skipped ? field_scalar(vol_coord(p - dp), need_a, need_b) : prev_f;
+                float frac = clamp((u_iso - before) / max(f - before, 1e-6), 0.0, 1.0);
                 vec3 hp = p - dp * (1.0 - frac);
-                vec3 g = field_grad(hp, voxel);
+                vec3 g = field_grad(hp, voxel0, need_a, need_b);
                 vec3 nrm = (length(g) > 1e-6) ? normalize(g) : vec3(0.0, 0.0, 1.0);
                 float diff = abs(dot(nrm, -rd));
                 float shade = (1.0 - SURFACE_CONTRAST) + SURFACE_CONTRAST * diff;
@@ -431,7 +505,8 @@ void main() {
                 break;
             }
             prev_f = f;
-            p += dp;
+            skipped = false;
+            i += 1;
         }
         frag_color = vec4(hit ? hit_col : vec3(0.0), 1.0);
     } else {
@@ -440,24 +515,59 @@ void main() {
         // with negative values, where a raw-space max seeded at 0 would be wrong),
         // then color + sum. Disabled channels are skipped entirely.
         float m0 = 0.0, m1 = 0.0, m2 = 0.0, m3 = 0.0, m4 = 0.0, m5 = 0.0;
-        for (int i = 0; i < n; i++) {
-            vec3 tc = vol_coord(p);
-            if (ch_enabled[0] > 0.5) m0 = max(m0, norm_ch(raw0(tc), 0));
-            if (num_channels > 1 && ch_enabled[1] > 0.5) m1 = max(m1, norm_ch(raw1(tc), 1));
-            if (num_channels > 2 && ch_enabled[2] > 0.5) m2 = max(m2, norm_ch(raw2(tc), 2));
-            if (num_channels > 3 && ch_enabled[3] > 0.5) m3 = max(m3, norm_ch(raw3(tc), 3));
-            if (num_channels > 4 && ch_enabled[4] > 0.5) m4 = max(m4, norm_ch(raw4(tc), 4));
-            if (num_channels > 5 && ch_enabled[5] > 0.5) m5 = max(m5, norm_ch(raw5(tc), 5));
-            p += dp;
+        int i = 0;
+        while (i < n) {
+            vec3 tc = vol_coord(p0 + dp * float(i));
+            if (skip && !occupied(tc, dims0)) {
+                i += steps_past_brick(tc, dtc, dims0, dt, n);
+                continue;
+            }
+            vec4 a;
+            vec4 b;
+            fetch(tc, lvl, need_a, need_b, a, b);
+            if (on(0)) m0 = max(m0, norm_ch(a.x, 0));
+            if (on(1)) m1 = max(m1, norm_ch(a.y, 1));
+            if (on(2)) m2 = max(m2, norm_ch(a.z, 2));
+            if (on(3)) m3 = max(m3, norm_ch(a.w, 3));
+            if (on(4)) m4 = max(m4, norm_ch(b.x, 4));
+            if (on(5)) m5 = max(m5, norm_ch(b.y, 5));
+            // Every channel at the top of its window: nothing further can raise it.
+            if ((!on(0) || m0 >= 1.0) && (!on(1) || m1 >= 1.0) && (!on(2) || m2 >= 1.0)
+                && (!on(3) || m3 >= 1.0) && (!on(4) || m4 >= 1.0) && (!on(5) || m5 >= 1.0)) {
+                break;
+            }
+            i += 1;
         }
-        vec3 color = ch_enabled[0] * lut_col(m0, 0);
-        if (num_channels > 1) color += ch_enabled[1] * lut_col(m1, 1);
-        if (num_channels > 2) color += ch_enabled[2] * lut_col(m2, 2);
-        if (num_channels > 3) color += ch_enabled[3] * lut_col(m3, 3);
-        if (num_channels > 4) color += ch_enabled[4] * lut_col(m4, 4);
-        if (num_channels > 5) color += ch_enabled[5] * lut_col(m5, 5);
+        vec3 color = vec3(0.0);
+        if (on(0)) color += lut_col(m0, 0);
+        if (on(1)) color += lut_col(m1, 1);
+        if (on(2)) color += lut_col(m2, 2);
+        if (on(3)) color += lut_col(m3, 3);
+        if (on(4)) color += lut_col(m4, 4);
+        if (on(5)) color += lut_col(m5, 5);
         frag_color = vec4(clamp(color * u_brightness, vec3(0.0), vec3(1.0)), 1.0);
     }
+}
+"#;
+
+// Scale a reduced-size render of the 3D view up to the view's own size: one
+// full-screen triangle sampling the render bilinearly (the WGSL twin is
+// `blit.wgsl`).
+const BLIT_VERTEX_SRC: &str = r#"#version 140
+out vec2 v_uv;
+void main() {
+    vec2 c = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    gl_Position = vec4(c * 2.0 - 1.0, 0.0, 1.0);
+    v_uv = c;
+}
+"#;
+
+const BLIT_FRAGMENT_SRC: &str = r#"#version 140
+in vec2 v_uv;
+out vec4 frag_color;
+uniform sampler2D src;
+void main() {
+    frag_color = textureLod(src, v_uv, 0.0);
 }
 "#;
 
@@ -506,20 +616,29 @@ pub struct ImageRenderResources {
     capture: Option<Result<VolumeImage, String>>,
 }
 
-/// The 3D volume pipeline: its own program, per-channel unorm (R8/R16) and R32F
-/// 3D textures (one of each pair carries the data, the other is a 1x1x1 dummy —
-/// mirroring the 2D int/float split), and the marshalled draw params.
+/// The 3D volume pipeline: its own program, the packed volume textures (see
+/// [`crate::pack`]), the brick occupancy texture, and the marshalled draw
+/// params — plus the reduced-size render target the view uses while it moves.
 struct VolumeGl {
     program: glow::NativeProgram,
-    tex_unorm: [glow::NativeTexture; MAX_CHANNELS],
-    tex_float: [glow::NativeTexture; MAX_CHANNELS],
-    dims: (u32, u32, u32),
-    /// Per-channel kind (`None` = unused: both textures are 1x1x1 dummies).
-    kinds: [Option<VolumeKind>; MAX_CHANNELS],
+    /// Channels 0..3 and channels 4..5 (1x1x1 dummies until a volume is
+    /// uploaded, and the second whenever there are at most four channels).
+    tex: [glow::NativeTexture; 2],
+    occupancy: glow::NativeTexture,
+    /// What each texture is allocated as: size, internal format, levels.
+    tex_alloc: [((u32, u32, u32), u32, u32); 2],
+    occupancy_dims: (u32, u32, u32),
+    layout: Option<VolumeLayout>,
+    bricks: Option<BrickMaxima>,
+    occupancy_for: Option<Visibility>,
     interp: i32,      // GL_NEAREST / GL_LINEAR
     interp_mode: i32, // shader `u_interp`: 0 = point/linear, 1 = tricubic
-    u_vol: [Option<glow::NativeUniformLocation>; MAX_CHANNELS],
-    u_volf: [Option<glow::NativeUniformLocation>; MAX_CHANNELS],
+    accel_skip: bool,
+    accel_lod: bool,
+    downscale: u32,
+    u_vol_a: Option<glow::NativeUniformLocation>,
+    u_vol_b: Option<glow::NativeUniformLocation>,
+    u_occ: Option<glow::NativeUniformLocation>,
     u_lut: Option<glow::NativeUniformLocation>,
     u_eye: Option<glow::NativeUniformLocation>,
     u_forward: Option<glow::NativeUniformLocation>,
@@ -530,7 +649,6 @@ struct VolumeGl {
     u_box_he: Option<glow::NativeUniformLocation>,
     u_window: Option<glow::NativeUniformLocation>,
     u_enabled: Option<glow::NativeUniformLocation>,
-    u_is_float: Option<glow::NativeUniformLocation>,
     u_albedo: Option<glow::NativeUniformLocation>,
     u_num_channels: Option<glow::NativeUniformLocation>,
     u_mode: Option<glow::NativeUniformLocation>,
@@ -539,42 +657,66 @@ struct VolumeGl {
     u_brightness: Option<glow::NativeUniformLocation>,
     u_max_steps: Option<glow::NativeUniformLocation>,
     u_interp: Option<glow::NativeUniformLocation>,
+    u_accel: Option<glow::NativeUniformLocation>,
     params: Option<VolumeParams>,
+    blit_program: glow::NativeProgram,
+    u_blit_src: Option<glow::NativeUniformLocation>,
+    /// The reduced-size render target: framebuffer, colour texture, size.
+    lowres: Option<(glow::NativeFramebuffer, glow::NativeTexture, (u32, u32))>,
 }
 
 impl VolumeGl {
     unsafe fn new(gl: &glow::Context) -> Self {
         let program = link_program(gl, VOL_VERTEX_SRC, VOL_FRAGMENT_SRC);
+        let blit_program = link_program(gl, BLIT_VERTEX_SRC, BLIT_FRAGMENT_SRC);
+        let placeholder = || {
+            let tex = gl.create_texture().expect("create volume texture");
+            gl.bind_texture(glow::TEXTURE_3D, Some(tex));
+            set_volume_filter(gl, glow::NEAREST as i32, 1);
+            alloc_volume_dummy(gl);
+            tex
+        };
+        let u = |name: &str| gl.get_uniform_location(program, name);
         VolumeGl {
             program,
-            tex_unorm: std::array::from_fn(|_| create_volume_texture(gl, false)),
-            tex_float: std::array::from_fn(|_| create_volume_texture(gl, true)),
-            dims: (1, 1, 1),
-            kinds: [None; MAX_CHANNELS],
+            tex: [placeholder(), placeholder()],
+            occupancy: placeholder(),
+            tex_alloc: [((1, 1, 1), glow::R8, 1); 2],
+            occupancy_dims: (1, 1, 1),
+            layout: None,
+            bricks: None,
+            occupancy_for: None,
             interp: glow::NEAREST as i32,
             interp_mode: 0,
-            u_vol: std::array::from_fn(|c| gl.get_uniform_location(program, &format!("vol{c}"))),
-            u_volf: std::array::from_fn(|c| gl.get_uniform_location(program, &format!("volf{c}"))),
-            u_lut: gl.get_uniform_location(program, "lut_tex"),
-            u_eye: gl.get_uniform_location(program, "cam_eye"),
-            u_forward: gl.get_uniform_location(program, "cam_forward"),
-            u_right: gl.get_uniform_location(program, "cam_right"),
-            u_up: gl.get_uniform_location(program, "cam_up"),
-            u_tan: gl.get_uniform_location(program, "tan_half_fov"),
-            u_aspect: gl.get_uniform_location(program, "aspect"),
-            u_box_he: gl.get_uniform_location(program, "box_he"),
-            u_window: gl.get_uniform_location(program, "ch_window"),
-            u_enabled: gl.get_uniform_location(program, "ch_enabled"),
-            u_is_float: gl.get_uniform_location(program, "ch_is_float"),
-            u_albedo: gl.get_uniform_location(program, "ch_albedo"),
-            u_num_channels: gl.get_uniform_location(program, "num_channels"),
-            u_mode: gl.get_uniform_location(program, "u_mode"),
-            u_density: gl.get_uniform_location(program, "u_density"),
-            u_iso: gl.get_uniform_location(program, "u_iso"),
-            u_brightness: gl.get_uniform_location(program, "u_brightness"),
-            u_max_steps: gl.get_uniform_location(program, "u_max_steps"),
-            u_interp: gl.get_uniform_location(program, "u_interp"),
+            accel_skip: true,
+            accel_lod: true,
+            downscale: 1,
+            u_vol_a: u("vol_a"),
+            u_vol_b: u("vol_b"),
+            u_occ: u("occ"),
+            u_lut: u("lut_tex"),
+            u_eye: u("cam_eye"),
+            u_forward: u("cam_forward"),
+            u_right: u("cam_right"),
+            u_up: u("cam_up"),
+            u_tan: u("tan_half_fov"),
+            u_aspect: u("aspect"),
+            u_box_he: u("box_he"),
+            u_window: u("ch_window"),
+            u_enabled: u("ch_enabled"),
+            u_albedo: u("ch_albedo"),
+            u_num_channels: u("num_channels"),
+            u_mode: u("u_mode"),
+            u_density: u("u_density"),
+            u_iso: u("u_iso"),
+            u_brightness: u("u_brightness"),
+            u_max_steps: u("u_max_steps"),
+            u_interp: u("u_interp"),
+            u_accel: u("u_accel"),
             params: None,
+            u_blit_src: gl.get_uniform_location(blit_program, "src"),
+            blit_program,
+            lowres: None,
         }
     }
 }
@@ -633,89 +775,267 @@ impl ImageRenderResources {
         unsafe { self.gl.get_parameter_i32(glow::MAX_3D_TEXTURE_SIZE).max(0) as u32 }
     }
 
-    /// (Re)upload the whole volume, one entry per channel: each `bytes` is
-    /// `w*h*d` samples, z-major, in the units of its `kind` (U8/U16 unorm, F32).
-    /// Channels past `channels.len()` are shrunk to 1x1x1 dummies. When a
-    /// channel's dims + kind are unchanged (a 4D timepoint step), the existing
-    /// storage is refilled with `tex_sub_image_3d` instead of reallocated.
-    pub fn upload_volumes(&mut self, w: u32, h: u32, d: u32, channels: &[(VolumeKind, Vec<u8>)]) {
+    /// GPU memory a new volume could take, in bytes: what the driver says is
+    /// free (`GL_NVX_gpu_memory_info` on NVIDIA, `GL_ATI_meminfo` on AMD), plus
+    /// what the current volume holds (a new one replaces it). `None` on a
+    /// driver with neither. Both count the whole device, other programs
+    /// included, so they are the cautious figure. A builder should take a
+    /// share of this, not all of it.
+    ///
+    /// Also `None` for a GPU without memory of its own worth the name. Mesa
+    /// answers both extensions with dedicated memory only, which on an
+    /// integrated GPU is a small carve-out of system RAM (or nothing at all,
+    /// on Intel's), while textures there live in system RAM anyway: going by
+    /// it would cut a volume to a fraction for no gain.
+    pub fn volume_memory_available(&self) -> Option<u64> {
+        /// `GL_NVX_gpu_memory_info`: the dedicated memory, and the free part
+        /// of it, KiB.
+        const DEDICATED_VIDMEM_NVX: u32 = 0x9047;
+        const CURRENT_AVAILABLE_VIDMEM_NVX: u32 = 0x9049;
+        /// `GL_ATI_meminfo`: four KiB figures, the first the free pool.
+        const TEXTURE_FREE_MEMORY_ATI: u32 = 0x87FC;
+        /// Less dedicated memory than this is taken for an integrated GPU's.
+        const DEDICATED_KIB_MIN: i32 = 1 << 20;
         let gl: &glow::Context = &self.gl;
-        let v = &mut self.volume;
-        unsafe {
-            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-            for c in 0..MAX_CHANNELS {
-                match channels.get(c) {
-                    Some((kind, bytes)) => {
-                        let (data_tex, dummy_tex) = if *kind == VolumeKind::F32 {
-                            (v.tex_float[c], v.tex_unorm[c])
-                        } else {
-                            (v.tex_unorm[c], v.tex_float[c])
-                        };
-                        let (internal, fmt, ty) = match kind {
-                            VolumeKind::U8 => (glow::R8, glow::RED, glow::UNSIGNED_BYTE),
-                            VolumeKind::U16 => (glow::R16, glow::RED, glow::UNSIGNED_SHORT),
-                            VolumeKind::F32 => (glow::R32F, glow::RED, glow::FLOAT),
-                        };
-                        gl.bind_texture(glow::TEXTURE_3D, Some(data_tex));
-                        if v.kinds[c] == Some(*kind) && v.dims == (w, h, d) {
-                            // Same shape: refill in place (no driver realloc).
-                            gl.tex_sub_image_3d(
-                                glow::TEXTURE_3D,
-                                0,
-                                0,
-                                0,
-                                0,
-                                w as i32,
-                                h as i32,
-                                d as i32,
-                                fmt,
-                                ty,
-                                glow::PixelUnpackData::Slice(Some(bytes)),
-                            );
-                        } else {
-                            set_volume_filter(gl, v.interp, *kind);
-                            gl.tex_image_3d(
-                                glow::TEXTURE_3D,
-                                0,
-                                internal as i32,
-                                w as i32,
-                                h as i32,
-                                d as i32,
-                                0,
-                                fmt,
-                                ty,
-                                glow::PixelUnpackData::Slice(Some(bytes)),
-                            );
-                            // Shrink the unused sibling texture to a 1x1x1 dummy.
-                            gl.bind_texture(glow::TEXTURE_3D, Some(dummy_tex));
-                            let dummy_kind = if *kind == VolumeKind::F32 {
-                                VolumeKind::U8
-                            } else {
-                                VolumeKind::F32
-                            };
-                            alloc_volume_dummy(gl, dummy_kind);
-                            v.kinds[c] = Some(*kind);
-                        }
-                    }
-                    None => {
-                        if v.kinds[c].is_some() {
-                            // Absent channel: both textures back to 1x1x1 dummies.
-                            gl.bind_texture(glow::TEXTURE_3D, Some(v.tex_unorm[c]));
-                            alloc_volume_dummy(gl, VolumeKind::U8);
-                            gl.bind_texture(glow::TEXTURE_3D, Some(v.tex_float[c]));
-                            alloc_volume_dummy(gl, VolumeKind::F32);
-                            v.kinds[c] = None;
-                        }
-                    }
-                }
+        let extensions = gl.supported_extensions();
+        let free_kib = if extensions.contains("GL_NVX_gpu_memory_info") {
+            if unsafe { gl.get_parameter_i32(DEDICATED_VIDMEM_NVX) } < DEDICATED_KIB_MIN {
+                return None;
             }
+            unsafe { gl.get_parameter_i32(CURRENT_AVAILABLE_VIDMEM_NVX) }
+        } else if extensions.contains("GL_ATI_meminfo") {
+            // glGetIntegerv writes all four: the slice must hold them.
+            let mut v = [0i32; 4];
+            unsafe { gl.get_parameter_i32_slice(TEXTURE_FREE_MEMORY_ATI, &mut v) };
+            v[0]
+        } else {
+            return None;
+        };
+        if free_kib <= 0 {
+            return None;
         }
-        v.dims = (w, h, d);
+        let current = self
+            .volume
+            .layout
+            .as_ref()
+            .map_or(0, |l| l.total_bytes() as u64);
+        Some(free_kib as u64 * 1024 + current)
     }
 
-    /// Switch every present volume channel's sampling filter without re-uploading.
-    /// Cubic uses the GL linear filter (its 8-tap reconstruction is in-shader).
-    /// No-op when nothing changed (this is called every 3D frame).
+    /// An upload that returned `Ok` and was refused after all. Never, here:
+    /// OpenGL says at once (see the wgpu backend, where WebGPU does not).
+    pub fn take_late_upload_error(&mut self) -> Option<(VolumeUploadError, usize)> {
+        None
+    }
+
+    /// Whether the volume is waiting to hear there was room for it. Never,
+    /// here (see `take_late_upload_error`).
+    pub fn volume_pending(&mut self) -> bool {
+        false
+    }
+
+    /// How this context stores a volume whose channels are `kind`: what a
+    /// builder should pack it as (see [`crate::pack`]). Every kind keeps its
+    /// own width: 8-bit and 16-bit as normalized integers, float as `f32`.
+    pub fn volume_texel_format(&self, kind: VolumeKind) -> TexelFormat {
+        match kind {
+            VolumeKind::U8 => TexelFormat::Unorm8,
+            VolumeKind::U16 => TexelFormat::Unorm16,
+            VolumeKind::F32 => TexelFormat::Float32,
+        }
+    }
+
+    /// Upload a volume packed by [`crate::pack`], every level of every texture,
+    /// and the brick maxima the renderer skips empty space with. When a
+    /// texture's size and format are unchanged (a 4D timepoint step), its
+    /// storage is refilled with `tex_sub_image_3d` instead of reallocated.
+    ///
+    /// Fails with [`VolumeUploadError::OutOfMemory`] when the driver had no
+    /// room, leaving 1x1x1 placeholders and no volume: build a smaller one and
+    /// try again.
+    pub fn upload_packed_volume(&mut self, volume: &PackedVolume) -> Result<(), VolumeUploadError> {
+        // The driver reads as many bytes as each level's size says, from
+        // wherever the slice starts: one too short is read past.
+        volume.check().map_err(VolumeUploadError::Unsupported)?;
+        let layout = &volume.layout;
+        if layout.format == TexelFormat::Float16 {
+            return Err(VolumeUploadError::Unsupported(
+                "this context stores float volumes as f32; pack them as Float32".into(),
+            ));
+        }
+        let max = self.max_3d_texture_size();
+        let (w, h, d) = layout.dims;
+        if w > max || h > max || d > max {
+            return Err(VolumeUploadError::Unsupported(format!(
+                "a {w} x {h} x {d} volume is beyond this GPU's 3D texture limit of {max}"
+            )));
+        }
+        let gl: &glow::Context = &self.gl;
+        let v = &mut self.volume;
+        let mut out_of_memory = false;
+        unsafe {
+            drain_errors(gl);
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            for t in 0..2 {
+                let Some(tex) = layout.textures.get(t) else {
+                    if v.tex_alloc[t] != ((1, 1, 1), glow::R8, 1) {
+                        v.tex[t] = renew_texture(gl, v.tex[t]);
+                        set_volume_filter(gl, v.interp, 1);
+                        alloc_volume_dummy(gl);
+                        v.tex_alloc[t] = ((1, 1, 1), glow::R8, 1);
+                    }
+                    continue;
+                };
+                let (internal, fmt, ty) = gl_format(layout.format, tex.components);
+                let want = (layout.dims, internal, layout.levels);
+                let refill = v.tex_alloc[t] == want;
+                if refill {
+                    gl.bind_texture(glow::TEXTURE_3D, Some(v.tex[t]));
+                } else {
+                    v.tex[t] = renew_texture(gl, v.tex[t]);
+                    set_volume_filter(gl, v.interp, layout.levels);
+                }
+                for (level, data) in volume.levels[t].iter().enumerate() {
+                    let (lw, lh, ld) = layout.level_dims(level as u32);
+                    if refill {
+                        gl.tex_sub_image_3d(
+                            glow::TEXTURE_3D,
+                            level as i32,
+                            0,
+                            0,
+                            0,
+                            lw as i32,
+                            lh as i32,
+                            ld as i32,
+                            fmt,
+                            ty,
+                            glow::PixelUnpackData::Slice(Some(data)),
+                        );
+                    } else {
+                        gl.tex_image_3d(
+                            glow::TEXTURE_3D,
+                            level as i32,
+                            internal as i32,
+                            lw as i32,
+                            lh as i32,
+                            ld as i32,
+                            0,
+                            fmt,
+                            ty,
+                            glow::PixelUnpackData::Slice(Some(data)),
+                        );
+                    }
+                    if gl.get_error() == glow::OUT_OF_MEMORY {
+                        out_of_memory = true;
+                        break;
+                    }
+                }
+                if out_of_memory {
+                    break;
+                }
+                v.tex_alloc[t] = want;
+            }
+            if out_of_memory {
+                // Nothing half-made stays bound: placeholders, and no volume.
+                for t in 0..2 {
+                    v.tex[t] = renew_texture(gl, v.tex[t]);
+                    set_volume_filter(gl, v.interp, 1);
+                    alloc_volume_dummy(gl);
+                    v.tex_alloc[t] = ((1, 1, 1), glow::R8, 1);
+                }
+                drain_errors(gl);
+                v.layout = None;
+                v.bricks = None;
+                v.occupancy_for = None;
+                return Err(VolumeUploadError::OutOfMemory(format!(
+                    "a {w} x {h} x {d} volume of {} MB did not fit",
+                    layout.total_bytes() >> 20
+                )));
+            }
+        }
+        v.layout = Some(layout.clone());
+        v.bricks = Some(volume.bricks.clone());
+        v.occupancy_for = None;
+        self.refresh_occupancy();
+        Ok(())
+    }
+
+    /// (Re)upload the whole volume, one entry per channel: each `bytes` is
+    /// `w*h*d` samples, z-major, in the units of its `kind` (U8/U16 unorm, F32).
+    /// Packs it here, on the calling thread — a builder with a thread of its own
+    /// should pack it there instead (see [`crate::pack`]) and call
+    /// [`upload_packed_volume`].
+    ///
+    /// [`upload_packed_volume`]: Self::upload_packed_volume
+    pub fn upload_volumes(
+        &mut self,
+        w: u32,
+        h: u32,
+        d: u32,
+        channels: &[(VolumeKind, Vec<u8>)],
+    ) -> Result<(), VolumeUploadError> {
+        let kinds: Vec<VolumeKind> = channels.iter().map(|(k, _)| *k).collect();
+        let format = self.volume_texel_format(pack::common_kind(&kinds));
+        let borrowed: Vec<(VolumeKind, &[u8])> =
+            channels.iter().map(|(k, b)| (*k, b.as_slice())).collect();
+        let packed = PackedVolume::from_channels((w, h, d), &borrowed, format);
+        self.upload_packed_volume(&packed)
+    }
+
+    /// Work out which bricks can be seen under the current params, if that
+    /// changed, and upload it.
+    fn refresh_occupancy(&mut self) {
+        let v = &mut self.volume;
+        let (Some(bricks), Some(params)) = (&v.bricks, &v.params) else {
+            return;
+        };
+        let vis = Visibility::of(params);
+        if v.occupancy_for == Some(vis) {
+            return;
+        }
+        let occ = pack::occupancy(bricks, &vis);
+        let dims = bricks.dims;
+        let gl: &glow::Context = &self.gl;
+        unsafe {
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.bind_texture(glow::TEXTURE_3D, Some(v.occupancy));
+            if v.occupancy_dims != dims {
+                set_volume_filter(gl, glow::NEAREST as i32, 1);
+                gl.tex_image_3d(
+                    glow::TEXTURE_3D,
+                    0,
+                    glow::R8 as i32,
+                    dims.0 as i32,
+                    dims.1 as i32,
+                    dims.2 as i32,
+                    0,
+                    glow::RED,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&occ)),
+                );
+                v.occupancy_dims = dims;
+            } else {
+                gl.tex_sub_image_3d(
+                    glow::TEXTURE_3D,
+                    0,
+                    0,
+                    0,
+                    0,
+                    dims.0 as i32,
+                    dims.1 as i32,
+                    dims.2 as i32,
+                    glow::RED,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&occ)),
+                );
+            }
+        }
+        v.occupancy_for = Some(vis);
+    }
+
+    /// Switch every present volume texture's sampling filter without
+    /// re-uploading. Cubic uses the GL linear filter (its 8-tap reconstruction
+    /// is in-shader). No-op when nothing changed (this is called every 3D frame).
     pub fn set_volume_interp(&mut self, interp: VolumeInterp) {
         let gl_interp = match interp {
             VolumeInterp::Nearest => glow::NEAREST as i32,
@@ -727,17 +1047,12 @@ impl ImageRenderResources {
         }
         self.volume.interp = gl_interp;
         self.volume.interp_mode = mode;
-        for c in 0..MAX_CHANNELS {
-            if let Some(kind) = self.volume.kinds[c] {
-                let tex = if kind == VolumeKind::F32 {
-                    self.volume.tex_float[c]
-                } else {
-                    self.volume.tex_unorm[c]
-                };
-                unsafe {
-                    self.gl.bind_texture(glow::TEXTURE_3D, Some(tex));
-                    set_volume_filter(&self.gl, gl_interp, kind);
-                }
+        for t in 0..2 {
+            let levels = self.volume.tex_alloc[t].2;
+            unsafe {
+                self.gl
+                    .bind_texture(glow::TEXTURE_3D, Some(self.volume.tex[t]));
+                set_volume_filter(&self.gl, gl_interp, levels);
             }
         }
     }
@@ -746,34 +1061,187 @@ impl ImageRenderResources {
     /// `paint_volume`.
     pub fn set_volume_params(&mut self, params: VolumeParams) {
         self.volume.params = Some(params);
+        self.refresh_occupancy();
     }
 
-    /// Ray-march the current volume, compositing every channel. Assumes the
-    /// host has already set the viewport/scissor to the target rect.
-    pub fn paint_volume(&self, gl: &glow::Context) {
+    /// Switch the two accelerations on or off: skipping parts of the volume
+    /// that cannot be seen (exact: the picture is the same either way) and, in
+    /// the maximum projection, reading coarser mip levels where a voxel is
+    /// smaller than a pixel. Both are on unless switched off; off is for
+    /// comparing, measuring, or ruling them out.
+    pub fn set_volume_acceleration(&mut self, skip_empty: bool, mip_levels: bool) {
+        self.volume.accel_skip = skip_empty;
+        self.volume.accel_lod = mip_levels;
+    }
+
+    /// How many times smaller per axis to render the 3D view than it is
+    /// painted: 1 renders every pixel, and more renders a reduced picture
+    /// `paint_volume` scales up — for a view that is moving, where a sharp
+    /// frame is wasted (see [`crate::MOVING_DOWNSCALE`]). The size itself is
+    /// the viewport the host has set when `paint_volume` runs; the two numbers
+    /// before `downscale` are taken for the wgpu backend's sake and unused.
+    pub fn set_volume_target(&mut self, _width: u32, _height: u32, downscale: u32) {
+        self.volume.downscale = downscale.max(1);
+    }
+
+    /// Draw the 3D view into the viewport the host has set (egui_glow sets it
+    /// to the callback's rect): the ray-march itself, or — when
+    /// [`set_volume_target`] asked for a reduced render — a picture that many
+    /// times smaller per axis, rendered into a framebuffer of its own and then
+    /// scaled up. The host's framebuffer, viewport and scissor are as they
+    /// were afterwards.
+    ///
+    /// [`set_volume_target`]: Self::set_volume_target
+    pub fn paint_volume(&mut self, gl: &glow::Context) {
+        let Some(p) = self.volume.params else { return };
+        let mut viewport = [0i32; 4];
+        unsafe { gl.get_parameter_i32_slice(glow::VIEWPORT, &mut viewport) };
+        let [vx, vy, vw, vh] = viewport;
+        let f = self.volume.downscale;
+        if f <= 1 {
+            self.draw_raymarch(gl, &p, vh.max(1) as u32);
+            return;
+        }
+        let size = (
+            (vw.max(1) as u32).div_ceil(f),
+            (vh.max(1) as u32).div_ceil(f),
+        );
+        unsafe {
+            let Some((fb, tex)) = self.ensure_lowres(gl, size) else {
+                // No framebuffer to render into: draw at full size instead.
+                self.draw_raymarch(gl, &p, vh.max(1) as u32);
+                return;
+            };
+            let previous_fb = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);
+            let scissor = gl.is_enabled(glow::SCISSOR_TEST);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fb));
+            gl.disable(glow::SCISSOR_TEST);
+            gl.viewport(0, 0, size.0 as i32, size.1 as i32);
+            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+            self.draw_raymarch(gl, &p, size.1);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, previous_fb);
+            gl.viewport(vx, vy, vw, vh);
+            if scissor {
+                gl.enable(glow::SCISSOR_TEST);
+            }
+            // Scale it up over the host's viewport.
+            let v = &self.volume;
+            gl.use_program(Some(v.blit_program));
+            gl.bind_vertex_array(Some(self.vao));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.uniform_1_i32(v.u_blit_src.as_ref(), 0);
+            gl.disable(glow::BLEND);
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            // Not left bound to a unit while it is the framebuffer's
+            // attachment next frame: that is a feedback loop to some drivers.
+            gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+    }
+
+    /// The reduced-size render target, `size` pixels, made or remade to fit.
+    /// `None` when the driver will not make one.
+    unsafe fn ensure_lowres(
+        &mut self,
+        gl: &glow::Context,
+        size: (u32, u32),
+    ) -> Option<(glow::NativeFramebuffer, glow::NativeTexture)> {
+        if let Some((fb, tex, have)) = self.volume.lowres {
+            if have == size {
+                return Some((fb, tex));
+            }
+            gl.delete_framebuffer(fb);
+            gl.delete_texture(tex);
+            self.volume.lowres = None;
+        }
+        let tex = gl.create_texture().ok()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+        for (pname, value) in [
+            (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+            (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+            (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, pname, value as i32);
+        }
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            size.0 as i32,
+            size.1 as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        let previous_fb = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);
+        let fb = match gl.create_framebuffer() {
+            Ok(fb) => fb,
+            Err(_) => {
+                gl.delete_texture(tex);
+                return None;
+            }
+        };
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fb));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(tex),
+            0,
+        );
+        let complete = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
+        gl.bind_framebuffer(glow::FRAMEBUFFER, previous_fb);
+        if !complete {
+            gl.delete_framebuffer(fb);
+            gl.delete_texture(tex);
+            return None;
+        }
+        self.volume.lowres = Some((fb, tex, size));
+        Some((fb, tex))
+    }
+
+    /// Ray-march the volume with params `p` into the bound framebuffer's
+    /// viewport, which is `height` pixels tall.
+    fn draw_raymarch(&self, gl: &glow::Context, p: &VolumeParams, height: u32) {
         let v = &self.volume;
-        let Some(p) = v.params else { return };
+        let levels = v.layout.as_ref().map_or(1, |l| l.levels);
+        let accel = [
+            2.0 * p.tan_half_fov / height.max(1) as f32,
+            if v.accel_lod {
+                (levels - 1) as f32
+            } else {
+                0.0
+            },
+            pack::BRICK as f32,
+            // Only where the occupancy is `p`'s own; see the wgpu backend.
+            if v.accel_skip && v.occupancy_for == Some(Visibility::of(p)) {
+                1.0
+            } else {
+                0.0
+            },
+        ];
         unsafe {
             gl.use_program(Some(v.program));
             gl.bind_vertex_array(Some(self.vao));
-            // Unorm channel textures → units 0..MAX_CHANNELS.
-            for c in 0..MAX_CHANNELS {
-                gl.active_texture(glow::TEXTURE0 + c as u32);
-                gl.bind_texture(glow::TEXTURE_3D, Some(v.tex_unorm[c]));
-                gl.uniform_1_i32(v.u_vol[c].as_ref(), c as i32);
+            // Packed volume → units 0 and 1, occupancy → 2, LUT → 3.
+            for (unit, (tex, loc)) in [
+                (v.tex[0], &v.u_vol_a),
+                (v.tex[1], &v.u_vol_b),
+                (v.occupancy, &v.u_occ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                gl.active_texture(glow::TEXTURE0 + unit as u32);
+                gl.bind_texture(glow::TEXTURE_3D, Some(tex));
+                gl.uniform_1_i32(loc.as_ref(), unit as i32);
             }
-            // LUT → unit MAX_CHANNELS.
-            let lut_unit = MAX_CHANNELS as u32;
-            gl.active_texture(glow::TEXTURE0 + lut_unit);
+            gl.active_texture(glow::TEXTURE3);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.lut_texture));
-            gl.uniform_1_i32(v.u_lut.as_ref(), lut_unit as i32);
-            // Float channel textures → units MAX_CHANNELS+1 .. 2*MAX_CHANNELS+1.
-            for c in 0..MAX_CHANNELS {
-                let unit = MAX_CHANNELS as u32 + 1 + c as u32;
-                gl.active_texture(glow::TEXTURE0 + unit);
-                gl.bind_texture(glow::TEXTURE_3D, Some(v.tex_float[c]));
-                gl.uniform_1_i32(v.u_volf[c].as_ref(), unit as i32);
-            }
+            gl.uniform_1_i32(v.u_lut.as_ref(), 3);
 
             gl.uniform_3_f32(v.u_eye.as_ref(), p.eye[0], p.eye[1], p.eye[2]);
             gl.uniform_3_f32(
@@ -789,7 +1257,6 @@ impl ImageRenderResources {
             gl.uniform_3_f32(v.u_box_he.as_ref(), p.box_he[0], p.box_he[1], p.box_he[2]);
             gl.uniform_2_f32_slice(v.u_window.as_ref(), &p.windows);
             gl.uniform_1_f32_slice(v.u_enabled.as_ref(), &p.enabled);
-            gl.uniform_1_f32_slice(v.u_is_float.as_ref(), &p.is_float);
             gl.uniform_1_f32_slice(v.u_albedo.as_ref(), &p.albedo_t);
             gl.uniform_1_i32(v.u_num_channels.as_ref(), p.num_channels);
             gl.uniform_1_i32(v.u_mode.as_ref(), p.render_mode);
@@ -798,6 +1265,7 @@ impl ImageRenderResources {
             gl.uniform_1_f32(v.u_brightness.as_ref(), p.brightness);
             gl.uniform_1_i32(v.u_max_steps.as_ref(), p.max_steps);
             gl.uniform_1_i32(v.u_interp.as_ref(), v.interp_mode);
+            gl.uniform_4_f32(v.u_accel.as_ref(), accel[0], accel[1], accel[2], accel[3]);
 
             gl.disable(glow::BLEND);
             gl.draw_arrays(glow::TRIANGLES, 0, 6);
@@ -835,8 +1303,6 @@ impl ImageRenderResources {
             return Err("the last capture has not been taken yet".into());
         }
         let result = unsafe { self.render_offscreen(&params, width, height) };
-        // Each tile set its own; the view's are put back for its next paint.
-        self.volume.params = Some(params);
         self.capture = Some(result);
         Ok(())
     }
@@ -850,7 +1316,7 @@ impl ImageRenderResources {
     }
 
     unsafe fn render_offscreen(
-        &mut self,
+        &self,
         params: &VolumeParams,
         width: u32,
         height: u32,
@@ -904,11 +1370,12 @@ impl ImageRenderResources {
             let mut pixels = vec![0u8; (CAPTURE_TILE * CAPTURE_TILE * 4) as usize];
             for tile in capture_tiles(width, height) {
                 let (x, y, w, h) = tile;
-                self.volume.params = Some(tile_params(&whole, (width, height), tile));
                 gl.viewport(0, 0, w as i32, h as i32);
                 gl.clear_color(0.0, 0.0, 0.0, 1.0);
                 gl.clear(glow::COLOR_BUFFER_BIT);
-                self.paint_volume(&gl);
+                // Always the ray-march itself, at full size, whatever the
+                // view on screen is doing.
+                self.draw_raymarch(&gl, &tile_params(&whole, (width, height), tile), h);
                 let tile_bytes = &mut pixels[..(w * h * 4) as usize];
                 // Waits for the tile: the next is not drawn until this one is
                 // done, which is what keeps each job short.
@@ -1260,53 +1727,95 @@ unsafe fn set_nearest_clamp(gl: &glow::Context) {
     );
 }
 
-/// Allocate a 1x1x1 dummy for the currently-bound 3D texture in `kind`'s format
-/// (the volume's unused int/float sibling always shrinks to this).
-unsafe fn alloc_volume_dummy(gl: &glow::Context, kind: VolumeKind) {
-    let (internal, fmt, ty) = match kind {
-        VolumeKind::U8 => (glow::R8, glow::RED, glow::UNSIGNED_BYTE),
-        VolumeKind::U16 => (glow::R16, glow::RED, glow::UNSIGNED_SHORT),
-        VolumeKind::F32 => (glow::R32F, glow::RED, glow::FLOAT),
-    };
-    gl.tex_image_3d(
-        glow::TEXTURE_3D,
-        0,
-        internal as i32,
-        1,
-        1,
-        1,
-        0,
-        fmt,
-        ty,
-        glow::PixelUnpackData::Slice(None),
-    );
-}
-
-/// Create a 3D texture (clamped, NEAREST) with a 1x1x1 dummy allocation.
-/// `is_float` picks R32F, else R8 (re-specified to R8/R16 at upload time).
-unsafe fn create_volume_texture(gl: &glow::Context, is_float: bool) -> glow::NativeTexture {
+/// Allocate a 1x1x1 single-level R8 placeholder for the currently-bound 3D
+/// texture.
+/// Delete `old` and make a new texture in its place, bound to `TEXTURE_3D`
+/// with nothing in it.
+///
+/// For a volume texture whose storage changes. Redefining a texture's levels
+/// in place frees only the levels redefined: a 1x1x1 placeholder written over
+/// level 0 leaves the old levels 1 and up defined, and some drivers (Mesa's,
+/// for one) keep the whole old allocation alive for them. A new object has
+/// none. The draw binds the textures afresh each time, so nothing else holds
+/// the old name.
+unsafe fn renew_texture(gl: &glow::Context, old: glow::NativeTexture) -> glow::NativeTexture {
+    gl.delete_texture(old);
     let tex = gl.create_texture().expect("create volume texture");
     gl.bind_texture(glow::TEXTURE_3D, Some(tex));
-    let kind = if is_float {
-        VolumeKind::F32
-    } else {
-        VolumeKind::U8
-    };
-    set_volume_filter(gl, glow::NEAREST as i32, kind);
-    alloc_volume_dummy(gl, kind);
     tex
 }
 
-/// Set the currently-bound 3D texture's filter (`gl_interp` = NEAREST/LINEAR)
-/// and a **zero border** on all three axes. `CLAMP_TO_BORDER` (border = 0)
-/// rather than `CLAMP_TO_EDGE` means samples at/just outside a face fade to 0
+unsafe fn alloc_volume_dummy(gl: &glow::Context) {
+    gl.tex_image_3d(
+        glow::TEXTURE_3D,
+        0,
+        glow::R8 as i32,
+        1,
+        1,
+        1,
+        0,
+        glow::RED,
+        glow::UNSIGNED_BYTE,
+        glow::PixelUnpackData::Slice(Some(&[0])),
+    );
+}
+
+/// The `(internal format, format, type)` of a packed texture of `components`
+/// components stored as `format`. One or two components keep their own; three
+/// or four are RGBA.
+fn gl_format(format: TexelFormat, components: usize) -> (u32, u32, u32) {
+    let fmt = match components {
+        1 => glow::RED,
+        2 => glow::RG,
+        _ => glow::RGBA,
+    };
+    let (internal, ty) = match (format, components) {
+        (TexelFormat::Unorm8, 1) => (glow::R8, glow::UNSIGNED_BYTE),
+        (TexelFormat::Unorm8, 2) => (glow::RG8, glow::UNSIGNED_BYTE),
+        (TexelFormat::Unorm8, _) => (glow::RGBA8, glow::UNSIGNED_BYTE),
+        (TexelFormat::Unorm16, 1) => (glow::R16, glow::UNSIGNED_SHORT),
+        (TexelFormat::Unorm16, 2) => (glow::RG16, glow::UNSIGNED_SHORT),
+        (TexelFormat::Unorm16, _) => (glow::RGBA16, glow::UNSIGNED_SHORT),
+        (TexelFormat::Float16, 1) => (glow::R16F, glow::HALF_FLOAT),
+        (TexelFormat::Float16, 2) => (glow::RG16F, glow::HALF_FLOAT),
+        (TexelFormat::Float16, _) => (glow::RGBA16F, glow::HALF_FLOAT),
+        (TexelFormat::Float32, 1) => (glow::R32F, glow::FLOAT),
+        (TexelFormat::Float32, 2) => (glow::RG32F, glow::FLOAT),
+        (TexelFormat::Float32, _) => (glow::RGBA32F, glow::FLOAT),
+    };
+    (internal, fmt, ty)
+}
+
+/// Clear the GL error flags, so the next `get_error` speaks only for what
+/// follows. Bounded: a lost context can report errors for ever.
+unsafe fn drain_errors(gl: &glow::Context) {
+    for _ in 0..32 {
+        if gl.get_error() == glow::NO_ERROR {
+            break;
+        }
+    }
+}
+
+/// Set the currently-bound 3D texture's filter (`gl_interp` = NEAREST/LINEAR,
+/// choosing within one of its `levels` mip levels — the shader picks the level
+/// itself) and a **zero border** on all three axes. `CLAMP_TO_BORDER` (border =
+/// 0) rather than `CLAMP_TO_EDGE` means samples at/just outside a face fade to 0
 /// instead of smearing the boundary voxel — no bright edge shell on MIP, and a
-/// clean silhouette on the alpha DVR. `kind` is unused today but kept so a
-/// future nearest-only fallback for unfilterable float formats stays a one-line
-/// change.
-unsafe fn set_volume_filter(gl: &glow::Context, gl_interp: i32, _kind: VolumeKind) {
-    gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_MIN_FILTER, gl_interp);
+/// clean silhouette on the alpha DVR.
+unsafe fn set_volume_filter(gl: &glow::Context, gl_interp: i32, levels: u32) {
+    let min_filter = match (levels > 1, gl_interp == glow::NEAREST as i32) {
+        (false, _) => gl_interp,
+        (true, true) => glow::NEAREST_MIPMAP_NEAREST as i32,
+        (true, false) => glow::LINEAR_MIPMAP_NEAREST as i32,
+    };
+    gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_MIN_FILTER, min_filter);
     gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_MAG_FILTER, gl_interp);
+    gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_BASE_LEVEL, 0);
+    gl.tex_parameter_i32(
+        glow::TEXTURE_3D,
+        glow::TEXTURE_MAX_LEVEL,
+        levels.max(1) as i32 - 1,
+    );
     gl.tex_parameter_i32(
         glow::TEXTURE_3D,
         glow::TEXTURE_WRAP_S,

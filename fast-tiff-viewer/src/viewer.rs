@@ -146,20 +146,47 @@ pub struct VolumeView {
     /// The volume viewport aspect ratio (width/height), set by the frontend each
     /// frame so the ray-march projection matches the on-screen rect.
     pub aspect: f32,
-    /// How many pixels the volume viewport covers, set by the frontend each
-    /// frame beside [`aspect`](Self::aspect). What bounds the work of a frame:
-    /// see `scivis_render::max_steps`.
-    pub pixels: f32,
+    /// The volume viewport's size in physical pixels, set by the frontend each
+    /// frame beside [`aspect`](Self::aspect). What bounds the work of a frame
+    /// (see `scivis_render::max_steps`), and what the renderer renders at.
+    pub viewport_px: [u32; 2],
+    /// How many times smaller per axis to render the view than it is shown:
+    /// 1 renders every pixel. A frontend sets
+    /// [`scivis_render::MOVING_DOWNSCALE`] while the user is moving the view,
+    /// where a sharp frame is wasted, and 1 once it is still.
+    pub downscale: u32,
+    /// The longest side of the screen in physical pixels, set by the frontend
+    /// (0 when it cannot tell). A volume keeps at most about twice this many
+    /// voxels along any axis — more than that cannot be seen even zoomed in
+    /// twofold — however much GPU memory there is.
+    pub screen_px: u32,
+    /// The most bytes the volume may take after an upload ran out of GPU
+    /// memory: half the volume that failed, so the next one is smaller
+    /// whatever limited the last one's size. `None` for each new stack.
+    pub budget_cap: Option<usize>,
+    /// The GPU memory budget worked out for the current generation, so every
+    /// timepoint of a 4D stack is built at the same size.
+    pub planned_budget: Option<usize>,
     /// Which timepoint the currently-uploaded volume holds (`Some(frame_index)`
     /// in the 4D case, else `Some(0)`); `None` means no volume is uploaded yet,
     /// so a frontend should show a loading state until the first build lands. A
     /// mismatch with the current timepoint queues a rebuild — this is what makes
     /// 4D playback advance the volume through time.
     pub built_frame: Option<usize>,
-    /// Generation for background builds: bumped when the plan changes shape (new
-    /// file, dimension-order swap) so an in-flight build for the old layout is
-    /// recognized as stale and ignored.
+    /// Generation for background builds: bumped whenever the volume has to be
+    /// built again — a new file, a dimension-order swap, a smaller rebuild
+    /// after the GPU ran out of memory — so an in-flight build for the old one
+    /// is recognized as stale and ignored.
     pub generation: u64,
+    /// Bumped with [`generation`](Self::generation) for a new file or a
+    /// dimension-order swap, and only then: a different volume, where
+    /// `generation` also moves for the same one rebuilt smaller. What a
+    /// frontend compares to tell that what it was showing has gone.
+    pub stack_generation: u64,
+    /// The [`generation`](Self::generation) of the volume last uploaded, to
+    /// tell whether an error the renderer reports late is about the volume
+    /// the view still wants.
+    pub uploaded_generation: Option<u64>,
     /// The `(generation, time)` currently queued on the background builder, so
     /// the request isn't re-sent on every polling frame.
     pub requested: Option<(u64, usize)>,
@@ -190,9 +217,15 @@ impl Default for VolumeView {
             volume_brightness: 1.0,
             volume_autolevel: true,
             aspect: 1.0,
-            pixels: 1920.0 * 1080.0,
+            viewport_px: [1920, 1080],
+            downscale: 1,
+            screen_px: 0,
+            budget_cap: None,
+            planned_budget: None,
             built_frame: None,
             generation: 0,
+            stack_generation: 0,
+            uploaded_generation: None,
             requested: None,
             pose: None,
         }
@@ -230,9 +263,32 @@ impl VolumeView {
     /// next 3D draw rebuilds. Call after anything that changes the volume's
     /// shape (new file, dimension-order swap).
     pub fn invalidate(&mut self) {
+        self.rebuild();
+        self.stack_generation = self.stack_generation.wrapping_add(1);
+    }
+
+    /// Build the same volume again, from a fresh plan (a smaller budget, say),
+    /// dropping any build in flight. Not a different volume: see
+    /// [`stack_generation`](Self::stack_generation).
+    pub fn rebuild(&mut self) {
         self.built_frame = None;
         self.generation = self.generation.wrapping_add(1);
         self.requested = None;
+        self.planned_budget = None;
+    }
+
+    /// The most samples a ray of this view may take
+    /// (`VolumeParams::max_steps`): what keeps a frame of the whole viewport
+    /// within the frame budget (see `scivis_render::max_steps`).
+    ///
+    /// The whole viewport's even while the view renders reduced, so a reduced
+    /// frame takes as many steps along each ray as a sharp one and does a
+    /// fraction of the work, which is what reducing it is for. Worked out
+    /// from the reduced size, its rays could take up to sixteen times the
+    /// steps, and a large volume would move barely faster than it stands.
+    pub fn max_steps(&self, channels: usize) -> i32 {
+        let [w, h] = self.viewport_px;
+        scivis_render::max_steps(w as f64 * h as f64, channels, self.interp)
     }
 }
 
@@ -451,6 +507,9 @@ impl Viewer {
                 // this stack's data.
                 self.volume.scale = stack.tiff.meta.voxel_scale();
                 self.volume.cam.reset();
+                // A fresh budget: what did not fit before may have been
+                // another stack's problem.
+                self.volume.budget_cap = None;
                 self.volume.invalidate();
                 // Always start a newly-opened file in the 2D movie view.
                 self.view_mode = ViewMode::Movie;
