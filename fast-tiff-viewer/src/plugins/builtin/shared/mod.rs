@@ -48,6 +48,60 @@ pub(crate) fn in_new_window() -> ParamDecl {
     )
 }
 
+#[cfg(any(feature = "plugin-suite2p-stabilize", feature = "plugin-turboreg-stabilize"))]
+/// What a stabilizer writes where a moved frame no longer covers the frame.
+///
+/// Both registration plugins offer the same three, and each maps them onto its
+/// own crate's `Border`: the two crates share the idea, not a type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Edges {
+    /// Zero: plainly no data, and easy to mask out. The default here.
+    Zero,
+    /// The nearest edge pixel, repeated outward.
+    Replicate,
+    /// Whatever the algorithm writes by itself.
+    Raw,
+}
+
+#[cfg(any(feature = "plugin-suite2p-stabilize", feature = "plugin-turboreg-stabilize"))]
+/// The key of the edge choice.
+pub(crate) const EDGES: &str = "edges";
+
+/// The edge choice, as both stabilizers offer it. `raw` says what the
+/// algorithm's own output is, which differs between them.
+#[cfg(any(feature = "plugin-suite2p-stabilize", feature = "plugin-turboreg-stabilize"))]
+pub(crate) fn edges_param(raw: &str) -> ParamDecl {
+    ParamDecl::new(
+        EDGES,
+        "Uncovered edges",
+        ParamKind::Choice {
+            default: 0,
+            options: vec![
+                "Fill with 0".to_string(),
+                "Edge replicate".to_string(),
+                "Algorithm's raw output".to_string(),
+            ],
+        },
+    )
+    .help(format!(
+        "Moving a frame onto the reference uncovers a strip along the edge it moved away \
+         from, with nothing measured behind it. Fill with 0 marks it as no data, which an \
+         analysis can mask out. Edge replicate repeats the nearest edge pixel: it looks \
+         continuous, but copies real values into the strip. The raw output is what the \
+         algorithm writes by itself: {raw}."
+    ))
+}
+
+/// Read the edge choice back.
+#[cfg(any(feature = "plugin-suite2p-stabilize", feature = "plugin-turboreg-stabilize"))]
+pub(crate) fn edges_from(params: &Params) -> Edges {
+    match params.choice(EDGES, 0) {
+        1 => Edges::Replicate,
+        2 => Edges::Raw,
+        _ => Edges::Zero,
+    }
+}
+
 /// Hand an image back the way the dialog asked for it.
 pub(crate) fn deliver(image: ImageResult, params: &Params) -> Outcome {
     if params.bool(NEW_WINDOW, true) {

@@ -123,3 +123,80 @@ fn serialize_escapes_special_characters_in_names() {
     // And it must still parse back cleanly (quick-xml unescapes on read).
     assert!(parse(&xml, 1, None, None).is_some());
 }
+
+// ------------------------------------------------------------- the whole tree
+
+const RICH: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06"
+     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     Creator="scope &amp; co">
+  <Instrument ID="Instrument:0">
+    <Objective ID="Objective:0" NominalMagnification="20" LensNA="0.8"/>
+  </Instrument>
+  <Image ID="Image:0" Name="field">
+    <AcquisitionDate>2026-10-27T12:00:00</AcquisitionDate>
+    <Pixels ID="Pixels:0" DimensionOrder="XYCZT" Type="uint16" SizeX="4" SizeY="3" SizeC="2" SizeZ="1" SizeT="2">
+      <Channel ID="Channel:0:0" Name="GFP"/>
+      <Channel ID="Channel:0:1" Name="RFP"/>
+      <TiffData IFD="0" PlaneCount="4"/>
+      <Plane TheC="0" TheZ="0" TheT="0" DeltaT="0.0"/>
+      <Plane TheC="1" TheZ="0" TheT="0" DeltaT="0.0"/>
+      <Plane TheC="0" TheZ="0" TheT="1" DeltaT="0.5"/>
+      <Plane TheC="1" TheZ="0" TheT="1" DeltaT="0.5"/>
+    </Pixels>
+  </Image>
+  <StructuredAnnotations>
+    <XMLAnnotation ID="Annotation:0"><Value><![CDATA[a < b]]></Value></XMLAnnotation>
+  </StructuredAnnotations>
+</OME>"#;
+
+fn attr<'a>(el: &'a XmlElement, key: &str) -> Option<&'a str> {
+    el.attributes.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+}
+
+/// Everything is kept: elements in order, attributes decoded, text and CDATA.
+#[test]
+fn the_whole_document_is_kept() {
+    let root = xml_tree(RICH).expect("parses");
+    assert_eq!(root.name, "OME");
+    // Namespace declarations are not attributes of the image.
+    assert_eq!(root.attributes, vec![("Creator".to_string(), "scope & co".to_string())]);
+    let names: Vec<&str> = root.children.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["Instrument", "Image", "StructuredAnnotations"]);
+
+    let image = &root.children[1];
+    assert_eq!(attr(image, "Name"), Some("field"));
+    assert_eq!(image.children[0].text, "2026-10-27T12:00:00");
+    let pixels = &image.children[1];
+    assert_eq!(attr(pixels, "SizeC"), Some("2"));
+    let kinds: Vec<&str> = pixels.children.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(kinds, ["Channel", "Channel", "TiffData", "Plane", "Plane", "Plane", "Plane"]);
+    assert_eq!(attr(&pixels.children[6], "DeltaT"), Some("0.5"));
+
+    let value = &root.children[2].children[0].children[0];
+    assert_eq!((value.name.as_str(), value.text.as_str()), ("Value", "a < b"));
+}
+
+/// What the writer emits reads back as a tree too.
+#[test]
+fn the_writers_own_document_is_a_tree() {
+    let geom = WriteGeometry {
+        width: 4,
+        height: 3,
+        samples_per_pixel: 1,
+        ome_pixel_type: "uint16",
+    };
+    let xml = serialize(2, &StackMetaWrite::new(1, 1).channel("GFP", [0, 255, 0]), &geom).unwrap();
+    let root = xml_tree(&xml).expect("parses");
+    assert_eq!(root.name, "OME");
+    assert!(root.children.iter().any(|c| c.name == "Image"));
+}
+
+/// Not XML, or XML cut short, is no tree rather than half of one.
+#[test]
+fn broken_documents_are_no_tree() {
+    assert_eq!(xml_tree(""), None);
+    assert_eq!(xml_tree("ImageJ=1.54f\nimages=3"), None);
+    assert_eq!(xml_tree("<OME><Image></OME>"), None);
+    assert_eq!(xml_tree("<OME><Image>"), None);
+}

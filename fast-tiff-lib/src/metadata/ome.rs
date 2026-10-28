@@ -289,6 +289,107 @@ fn generate_uuid() -> String {
     )
 }
 
+/// One element of an XML document, kept whole.
+///
+/// [`parse`] reads the few things a stack needs out of an OME-XML document
+/// and drops the rest. This keeps the rest — instruments, objectives, light
+/// paths, per-plane positions and timestamps, annotations — for showing to
+/// someone who wants to read what the file says about itself.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct XmlElement {
+    /// The local name, namespace prefix dropped: `Pixels`, not `ome:Pixels`.
+    pub name: String,
+    /// The attributes in document order, by local name, entity escapes
+    /// decoded. Namespace declarations (`xmlns`, `xmlns:*`) are left out:
+    /// they say how the document is written, not anything about the image.
+    pub attributes: Vec<(String, String)>,
+    /// The element's own text, whitespace-trimmed, pieces joined by a space;
+    /// empty when it has none.
+    pub text: String,
+    /// The child elements, in document order.
+    pub children: Vec<XmlElement>,
+}
+
+/// Parse a whole XML document into its element tree, for showing rather than
+/// interpreting: every element, attribute and piece of text is kept, and
+/// nothing is checked against the OME schema.
+///
+/// The root element, or `None` when the text is not well-formed XML — a tag
+/// left open, an end tag that does not match — or holds no element at all.
+pub fn xml_tree(xml: &str) -> Option<XmlElement> {
+    let mut reader = Reader::from_str(xml);
+    // The elements still open, innermost last.
+    let mut open: Vec<XmlElement> = Vec::new();
+    let mut root = None;
+    let mut close = |el: XmlElement, open: &mut Vec<XmlElement>| match open.last_mut() {
+        Some(parent) => parent.children.push(el),
+        None => {
+            root.get_or_insert(el);
+        }
+    };
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => open.push(element_of(&e)),
+            Ok(Event::Empty(e)) => close(element_of(&e), &mut open),
+            Ok(Event::End(_)) => {
+                let el = open.pop()?;
+                close(el, &mut open);
+            }
+            Ok(Event::Text(t)) => {
+                if let (Some(el), Ok(text)) = (open.last_mut(), t.unescape()) {
+                    push_text(&mut el.text, &text);
+                }
+            }
+            Ok(Event::CData(t)) => {
+                if let Some(el) = open.last_mut() {
+                    push_text(&mut el.text, &String::from_utf8_lossy(&t));
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return None,
+            _ => {}
+        }
+    }
+    // A document that ends with elements still open was cut short.
+    if !open.is_empty() {
+        return None;
+    }
+    root
+}
+
+fn element_of(e: &BytesStart) -> XmlElement {
+    let attributes = e
+        .attributes()
+        .flatten()
+        .filter(|a| {
+            let key = a.key.as_ref();
+            key != b"xmlns" && !key.starts_with(b"xmlns:")
+        })
+        .filter_map(|a| {
+            let key = String::from_utf8_lossy(a.key.local_name().as_ref()).into_owned();
+            a.unescape_value().ok().map(|v| (key, v.into_owned()))
+        })
+        .collect();
+    XmlElement {
+        name: String::from_utf8_lossy(e.local_name().as_ref()).into_owned(),
+        attributes,
+        ..XmlElement::default()
+    }
+}
+
+/// Add a piece of an element's text: trimmed, and kept apart from what came
+/// before it (an element's text can be split around its children).
+fn push_text(into: &mut String, piece: &str) {
+    let piece = piece.trim();
+    if piece.is_empty() {
+        return;
+    }
+    if !into.is_empty() {
+        into.push(' ');
+    }
+    into.push_str(piece);
+}
+
 #[cfg(test)]
 #[path = "ome_tests.rs"]
 mod tests;

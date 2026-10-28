@@ -21,7 +21,8 @@
 //! One picks a channel, the other picks a target in time. The labels say so.
 
 use fasttiff_plugin_api::{ImageInfo, ParamDecl, ParamKind, Params};
-use turboreg_registration::{Backend, Reference, Settings, Transformation};
+use crate::plugins::builtin::shared::{edges_from, edges_param, Edges};
+use turboreg_registration::{Backend, Border, Reference, Settings, Transformation};
 
 /// A group heading, drawn by the host as bold text with a rule under it.
 fn section(key: &str, text: &str) -> ParamDecl {
@@ -128,6 +129,10 @@ pub(super) fn declare(info: &ImageInfo, chosen: &Params) -> Vec<ParamDecl> {
              drifted does not need rotation taken out of it.",
         ),
     );
+    decls.push(edges_param(
+        "the spline's mirrored extension, which repeats the picture backwards, cells \
+         included",
+    ));
 
     // Which channel is measured. Always offered, so the answer to "what was
     // this measured on" is always on screen; a single-channel stack gets one
@@ -256,6 +261,18 @@ pub(super) fn measure_channel(params: &Params, channels: usize) -> Option<usize>
     match params.choice("ref_channel", 0) {
         0 => None,
         n => Some((n - 1).min(channels - 1)),
+    }
+}
+
+/// What the moved frames show where they no longer cover the frame.
+///
+/// Not part of [`Settings`]: the crate measures without it and applies with
+/// it, so it is set on the result (`Registered::border`) before applying.
+pub(super) fn border_from(params: &Params) -> Border {
+    match edges_from(params) {
+        Edges::Zero => Border::Constant,
+        Edges::Replicate => Border::Edge,
+        Edges::Raw => Border::Native,
     }
 }
 

@@ -185,11 +185,12 @@ impl Plugin for TurboReg {
         // An earlier run's trouble is not this one's.
         #[cfg(feature = "gpu-registration")]
         let _ = turboreg_registration::gpu::take_trouble();
-        let Some(result) = register_stack(&frames, &settings, &mut |f| {
+        let Some(mut result) = register_stack(&frames, &settings, &mut |f| {
             host.progress(at(reading + f as f64 * registering))
         }) else {
             return Ok(Outcome::Cancelled);
         };
+        result.border = params::border_from(params);
         drop(movie);
         // Frames the device failed are not fitted for want of the device, not
         // because the data would not fit: a stack that came back with them

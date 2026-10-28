@@ -240,3 +240,17 @@ fn the_dialog_is_grouped() {
         .count();
     assert!(sections >= 2, "expected grouping, got {sections} sections");
 }
+
+/// Each edge option is the border it names, and an untouched dialog fills
+/// with 0 rather than the crate's own mirror.
+#[test]
+fn the_edge_choice_is_the_border_it_names() {
+    use turboreg_registration::Border;
+    assert_eq!(params::border_from(&Params::new()), Border::Constant);
+    for (choice, want) in [(0, Border::Constant), (1, Border::Edge), (2, Border::Native)] {
+        let mut p = Params::new();
+        p.set("edges", ParamValue::Choice(choice));
+        assert_eq!(params::border_from(&p), want, "option {choice}");
+    }
+    assert!(keys(&decls_with(&info(1, 1, 10), &[])).contains(&"edges".to_string()));
+}

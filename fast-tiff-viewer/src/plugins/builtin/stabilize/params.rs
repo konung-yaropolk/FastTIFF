@@ -7,7 +7,8 @@
 //! thing.
 
 use fasttiff_plugin_api::{ImageInfo, ParamDecl, ParamKind, Params};
-use suite2p_registration::{Backend, Settings};
+use crate::plugins::builtin::shared::{edges_from, edges_param, Edges};
+use suite2p_registration::{Backend, Border, Settings};
 
 /// A group heading, drawn by the host as bold text with a rule under it.
 fn section(key: &str, text: &str) -> ParamDecl {
@@ -95,6 +96,10 @@ pub(super) fn declare(info: &ImageInfo, chosen: &Params) -> Vec<ParamDecl> {
              appear below when it is on.",
         ),
     );
+    decls.push(edges_param(
+        "a rigid shift wraps the far side of the picture round into the strip, as \
+         suite2p's np.roll does, and a non-rigid warp repeats the edge",
+    ));
 
     // ---- what is registered, and how far it may move -----------------------
 
@@ -385,6 +390,11 @@ pub(super) fn settings_from(params: &Params) -> Settings {
         backend: *Backend::all()
             .get(params.choice("backend", 1))
             .unwrap_or(&Backend::MultiThread),
+        border: match edges_from(params) {
+            Edges::Zero => Border::Constant,
+            Edges::Replicate => Border::Edge,
+            Edges::Raw => Border::Native,
+        },
         ..d
     }
 }

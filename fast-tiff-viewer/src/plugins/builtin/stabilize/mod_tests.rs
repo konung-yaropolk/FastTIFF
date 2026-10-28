@@ -127,11 +127,19 @@ fn the_channel_switch_appears_only_for_a_multichannel_stack() {
         .any(|d| d.key == "align_by_chan2"));
 }
 
-/// An untouched dialog reads back as suite2p's defaults exactly.
+/// An untouched dialog reads back as suite2p's defaults exactly — but for the
+/// uncovered edges, which the dialog fills with 0 where the crate, unasked,
+/// keeps suite2p's own wrap.
 #[test]
 fn an_unanswered_dialog_reads_back_as_the_defaults() {
     let read = super::params::settings_from(&Params::new());
-    assert_eq!(read, suite2p_registration::Settings::default());
+    assert_eq!(
+        read,
+        suite2p_registration::Settings {
+            border: suite2p_registration::Border::Constant,
+            ..suite2p_registration::Settings::default()
+        }
+    );
 }
 
 /// And a changed control reaches the settings rather than being dropped.
@@ -422,4 +430,16 @@ fn hiding_a_control_does_not_change_what_runs() {
     assert_eq!(with_dead_keys.subpixel, without.subpixel);
     assert_eq!(with_dead_keys.snr_thresh, without.snr_thresh);
     assert_eq!(with_dead_keys.maxregshift_nr, without.maxregshift_nr);
+}
+
+/// Each edge option reaches the settings as the border it names.
+#[test]
+fn the_edge_choice_reaches_the_settings() {
+    use suite2p_registration::Border;
+    for (choice, want) in [(0, Border::Constant), (1, Border::Edge), (2, Border::Native)] {
+        let mut p = Params::new();
+        p.set("edges", ParamValue::Choice(choice));
+        assert_eq!(super::params::settings_from(&p).border, want, "option {choice}");
+    }
+    assert!(offered(&decls_for(&info(1, 1, 10))).contains(&"edges".to_string()));
 }

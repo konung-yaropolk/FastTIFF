@@ -10,6 +10,7 @@ use super::*;
 
 use crate::render;
 use egui::RichText;
+use std::sync::Arc;
 use fast_tiff_viewer::camera::{NavMode, OrbitPoint};
 use fast_tiff_viewer::histogram::{fill_alpha, fill_tint, Histogram, BINS};
 
@@ -424,6 +425,11 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Sta
             });
 
         ui.add_space(12.0);
+        egui::CollapsingHeader::new("OME-TIFF metadata")
+            .default_open(false)
+            .show(ui, |ui| ome_metadata(ui, tiff));
+
+        ui.add_space(12.0);
         ui.heading("ImageJ metadata");
         let meta = &tiff.meta;
         egui::Grid::new("meta_ij")
@@ -490,6 +496,224 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Sta
                 }
             });
     });
+}
+
+type OmeElement = fast_tiff_lib::metadata::ome::XmlElement;
+
+/// The OME-XML an OME-TIFF keeps in its ImageDescription, as tables: each
+/// element's attributes, a table for a run of same-named elements (a `Plane`
+/// for every plane, a `Channel` for every channel), and a section for anything
+/// nested deeper.
+///
+/// Parsed when the section is first opened, and once per file: the XML of a
+/// long recording carries a `Plane` per plane and runs to megabytes, and this
+/// window is drawn every frame.
+fn ome_metadata(ui: &mut egui::Ui, tiff: &Arc<fast_tiff_lib::TiffStack>) {
+    let Some(desc) = tiff.description.as_deref().filter(|d| {
+        fast_tiff_lib::metadata::detect(Some(d)) == fast_tiff_lib::MetadataFormat::Ome
+    }) else {
+        ui.label(RichText::new("(this file carries no OME-XML)").weak());
+        return;
+    };
+    match ome_tree(ui.ctx(), tiff, desc).as_ref() {
+        Some(root) => {
+            ui.label(RichText::new(&root.name).strong());
+            ome_element(ui, root, egui::Id::new("ome_tree"), 0);
+        }
+        None => {
+            ui.label(
+                RichText::new(
+                    "(the OME-XML is not well-formed, so it cannot be laid out as a table; \
+                     ImageDescription above shows it as text)",
+                )
+                .weak(),
+            );
+        }
+    }
+}
+
+/// The parsed tree of `desc`, from the last time it was parsed if that was
+/// this file's. Keyed by where the stack and its description live, so a file
+/// opened in its place is parsed afresh.
+fn ome_tree(
+    ctx: &egui::Context,
+    tiff: &Arc<fast_tiff_lib::TiffStack>,
+    desc: &str,
+) -> Arc<Option<OmeElement>> {
+    type Cached = ((usize, usize, usize), Arc<Option<OmeElement>>);
+    let key = (Arc::as_ptr(tiff) as usize, desc.as_ptr() as usize, desc.len());
+    let id = egui::Id::new("ome_tree_cache");
+    if let Some((k, tree)) = ctx.data(|d| d.get_temp::<Cached>(id)) {
+        if k == key {
+            return tree;
+        }
+    }
+    let tree = Arc::new(fast_tiff_lib::metadata::ome::xml_tree(desc));
+    ctx.data_mut(|d| d.insert_temp::<Cached>(id, (key, tree.clone())));
+    tree
+}
+
+fn ome_attr<'a>(el: &'a OmeElement, key: &str) -> Option<&'a str> {
+    el.attributes
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+
+/// What a section is called: the element, and its `Name` or `ID` when it has
+/// one, which is what tells one `Image` or `Objective` from the next.
+fn ome_title(el: &OmeElement) -> String {
+    match ome_attr(el, "Name").or_else(|| ome_attr(el, "ID")) {
+        Some(tag) => format!("{} \u{2014} {tag}", el.name),
+        None => el.name.clone(),
+    }
+}
+
+/// A value, wrapped at a fixed width. A `schemaLocation` or an annotation runs
+/// to hundreds of characters, and unwrapped it widens the window for good —
+/// an egui window grows to fit and never shrinks back.
+fn ome_value(ui: &mut egui::Ui, text: &str) {
+    ui.scope(|ui| {
+        ui.set_max_width(260.0);
+        ui.add(egui::Label::new(text).wrap());
+    });
+}
+
+/// One element: its attributes and text-only children as a grid, then its
+/// other children grouped by name.
+fn ome_element(ui: &mut egui::Ui, el: &OmeElement, id: egui::Id, depth: usize) {
+    // Children by name, in the order each name first appears.
+    let mut groups: Vec<(&str, Vec<&OmeElement>)> = Vec::new();
+    for child in &el.children {
+        match groups.iter_mut().find(|(name, _)| *name == child.name) {
+            Some((_, members)) => members.push(child),
+            None => groups.push((&child.name, vec![child])),
+        }
+    }
+    // A lone child that is only a value, like `AcquisitionDate`, reads better
+    // as a row than as a section of one line.
+    let is_value = |members: &[&OmeElement]| {
+        members.len() == 1 && members[0].attributes.is_empty() && members[0].children.is_empty()
+    };
+    let values: Vec<_> = groups.iter().filter(|(_, m)| is_value(m)).collect();
+    if !el.attributes.is_empty() || !el.text.is_empty() || !values.is_empty() {
+        egui::Grid::new(id.with("attributes"))
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
+                for (k, v) in &el.attributes {
+                    ui.label(RichText::new(k).strong());
+                    ome_value(ui, v);
+                    ui.end_row();
+                }
+                for (name, members) in &values {
+                    ui.label(RichText::new(*name).strong());
+                    ome_value(ui, &members[0].text);
+                    ui.end_row();
+                }
+                if !el.text.is_empty() {
+                    ui.label(RichText::new("(text)").weak());
+                    ome_value(ui, &el.text);
+                    ui.end_row();
+                }
+            });
+    }
+
+    for (name, members) in groups.iter().filter(|(_, m)| !is_value(m)) {
+        let gid = id.with(name);
+        if let [only] = members.as_slice() {
+            egui::CollapsingHeader::new(ome_title(only))
+                .id_salt(gid)
+                .default_open(depth < 2)
+                .show(ui, |ui| ome_element(ui, only, gid, depth + 1));
+        } else if members.iter().all(|m| m.children.is_empty()) {
+            egui::CollapsingHeader::new(format!("{name} ({})", members.len()))
+                .id_salt(gid)
+                .default_open(false)
+                .show(ui, |ui| ome_table(ui, members, gid));
+        } else {
+            egui::CollapsingHeader::new(format!("{name} ({})", members.len()))
+                .id_salt(gid)
+                .default_open(false)
+                .show(ui, |ui| {
+                    for (i, m) in members.iter().enumerate() {
+                        let mid = gid.with(i);
+                        egui::CollapsingHeader::new(format!("{i}: {}", ome_title(m)))
+                            .id_salt(mid)
+                            .default_open(false)
+                            .show(ui, |ui| ome_element(ui, m, mid, depth + 2));
+                    }
+                });
+        }
+    }
+}
+
+/// A run of same-named elements with nothing nested in them: a row each and
+/// a column per attribute any of them has. Only the rows in view are laid
+/// out, because a recording's `Plane` table can be tens of thousands long.
+fn ome_table(ui: &mut egui::Ui, members: &[&OmeElement], id: egui::Id) {
+    use egui_extras::{Column, TableBuilder};
+
+    let mut columns: Vec<&str> = Vec::new();
+    for m in members {
+        for (k, _) in &m.attributes {
+            if !columns.contains(&k.as_str()) {
+                columns.push(k);
+            }
+        }
+    }
+    let any_text = members.iter().any(|m| !m.text.is_empty());
+    let row_height = ui.spacing().interact_size.y;
+    let spaced = row_height + ui.spacing().item_spacing.y;
+    // A cell keeps its value on one line; a wide table scrolls sideways.
+    let cell = |ui: &mut egui::Ui, text: &str| {
+        ui.add(egui::Label::new(text).extend());
+    };
+    egui::ScrollArea::horizontal()
+        .id_salt(id.with("sideways"))
+        .show(ui, |ui| {
+            TableBuilder::new(ui)
+                .id_salt(id.with("table"))
+                .striped(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .max_scroll_height(320.0)
+                // Inside the window's own scroll area the space left is
+                // whatever is below this point, and a table falls back to its
+                // minimum there: two or three rows. A dozen, or all of them.
+                .min_scrolled_height(spaced * members.len().min(12) as f32)
+                .column(Column::auto())
+                .columns(Column::auto().resizable(true), columns.len() + usize::from(any_text))
+                .header(row_height, |mut header| {
+                    header.col(|ui| {
+                        ui.strong("#");
+                    });
+                    for c in &columns {
+                        header.col(|ui| {
+                            ui.strong(*c);
+                        });
+                    }
+                    if any_text {
+                        header.col(|ui| {
+                            ui.strong("(text)");
+                        });
+                    }
+                })
+                .body(|body| {
+                    body.rows(row_height, members.len(), |mut row| {
+                        let m = members[row.index()];
+                        let i = row.index();
+                        row.col(|ui| {
+                            ui.label(RichText::new(i.to_string()).weak());
+                        });
+                        for c in &columns {
+                            row.col(|ui| cell(ui, ome_attr(m, c).unwrap_or("")));
+                        }
+                        if any_text {
+                            row.col(|ui| cell(ui, &m.text));
+                        }
+                    });
+                });
+        });
 }
 
 /// `1234567` -> `"1.2 MiB (1234567 bytes)"`.
