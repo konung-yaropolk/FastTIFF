@@ -1241,6 +1241,11 @@ fn stabilize_keeps_signed_samples_signed() {
     let mut params = Params::new();
     params.set("spatial_taper", ParamValue::Float(5.0));
     params.set("nonrigid", ParamValue::Bool(false));
+    // suite2p's own edges: a rigid shift that wraps, so a frame keeps exactly
+    // its samples (below). The dialog's default fills the uncovered strip with
+    // 0 instead, which adds zeros that are not a lost sign but would read as
+    // one here.
+    params.set("edges", ParamValue::Choice(2));
     let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
         panic!("expected a document");
     };
@@ -1271,6 +1276,28 @@ fn stabilize_keeps_signed_samples_signed() {
             got, want,
             "frame {t}: the samples themselves changed, not just their places"
         );
+    }
+
+    // And under the dialog's default, which fills the strip a shift uncovers
+    // with 0: every sample is one the frame had, or that 0. A lost sign would
+    // still show, as values near +32768 that are neither.
+    let mut h = host(&s, 0);
+    params.set("edges", ParamValue::Choice(0));
+    let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
+        panic!("expected a document");
+    };
+    assert_eq!(out.pixel_type, PixelType::I16);
+    for (t, plane) in out.planes.iter().enumerate() {
+        let PlaneData::U16(bits) = plane else {
+            panic!("frame {t} is {:?}, not the U16 lane", plane.pixel_type());
+        };
+        for &v in bits {
+            let v = v as i16;
+            assert!(
+                v == 0 || samples.contains(&v),
+                "frame {t}: {v} is neither one of its samples nor the fill"
+            );
+        }
     }
 }
 
