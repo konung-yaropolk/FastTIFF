@@ -78,8 +78,9 @@
 //!
 //! // Put a frame back where it belongs — the rigid shift, or the warp with the
 //! // rigid shift folded in when there is a block field. One call, so it cannot
-//! // be applied twice or the deformation forgotten.
-//! let corrected: Vec<f32> = out.apply(&movie[1], ly, lx, 1);
+//! // be applied twice or the deformation forgotten. It can fail only under
+//! // `Border::Crop`, when the frames share no area to crop to.
+//! let corrected: Vec<f32> = out.apply(&movie[1], ly, lx, 1).expect("no crop asked for");
 //! # let _ = corrected;
 //! ```
 //!
@@ -130,6 +131,7 @@
 // A published crate, so every public item says what it is.
 #![warn(missing_docs)]
 
+pub mod area;
 pub mod bidiphase;
 #[cfg(feature = "capi")]
 pub mod capi;
@@ -152,6 +154,7 @@ use crate::par::*;
 
 use fft::Fft2;
 use masks::reference_filters_normed;
+pub use area::{Area, Cut, NoCommonArea};
 pub use rigid::{shift_frame, shift_frame_bordered, Shift};
 pub use settings::{Backend, Border, Settings};
 
@@ -459,6 +462,10 @@ pub struct Registered {
     /// the frame: [`Settings::border`] from the run — suite2p's own output
     /// unless that asked otherwise — and free to change before applying.
     pub border: Border,
+    /// [`Registered::common_area`], once asked for, with the frame size it was
+    /// asked for at. Kept because [`Border::Crop`] needs it for every frame
+    /// and finding it reads every frame's correction.
+    area: std::sync::OnceLock<((usize, usize), Result<Area, NoCommonArea>)>,
 }
 
 /// The block field a non-rigid pass measured.
@@ -475,17 +482,70 @@ impl Registered {
     /// The rigid shift alone when there is no block field, and the warp — which
     /// folds the rigid shift in — when there is. One call, so a caller cannot
     /// apply the rigid part twice or forget the deformation.
-    pub fn apply(&self, frame: &[f32], ly: usize, lx: usize, t: usize) -> Vec<f32> {
+    ///
+    /// Under [`Border::Crop`] the frame comes back cut to
+    /// [`common_area`](Self::common_area) — and when the frames moved so far
+    /// apart that there is none, this is [`NoCommonArea`] rather than a frame:
+    /// there is no way to crop them that keeps anything, and a frame with its
+    /// edges handled some other way would not be what was asked for. Under
+    /// every other border it cannot fail.
+    pub fn apply(
+        &self,
+        frame: &[f32],
+        ly: usize,
+        lx: usize,
+        t: usize,
+    ) -> Result<Vec<f32>, NoCommonArea> {
         let rigid = self.shifts.get(t).copied().unwrap_or(Shift {
             dy: 0,
             dx: 0,
             corr: 0.0,
         });
-        match &self.nonrigid {
+        if self.border == Border::Crop {
+            let area = self.common_area(ly, lx)?;
+            return Ok(Cut::new(ly, lx, area, &self.shifts, self.warp()).apply(frame, t));
+        }
+        Ok(match &self.nonrigid {
             Some(nr) if t < nr.shifts.len() => {
                 nonrigid::warp(frame, ly, lx, &nr.blocks, &nr.shifts[t], rigid, self.border)
             }
             _ => shift_frame_bordered(frame, ly, lx, rigid.dy, rigid.dx, self.border),
+        })
+    }
+
+    /// The block field as the area module takes it.
+    fn warp(&self) -> Option<(&nonrigid::Blocks, &[Vec<nonrigid::BlockShift>])> {
+        self.nonrigid
+            .as_ref()
+            .map(|nr| (&nr.blocks, nr.shifts.as_slice()))
+    }
+
+    /// The largest rectangle every frame covers once moved, at any angle
+    /// ([`area::common_area`]) — what [`Border::Crop`] keeps — or
+    /// [`NoCommonArea`] when the frames share no pixel.
+    ///
+    /// Found from every frame's shift and block field the first time it is
+    /// asked for, and kept: changing [`shifts`](Self::shifts) or
+    /// [`nonrigid`](Self::nonrigid) afterwards is not seen.
+    pub fn common_area(&self, ly: usize, lx: usize) -> Result<Area, NoCommonArea> {
+        if let Some(((h, w), area)) = self.area.get() {
+            if (*h, *w) == (ly, lx) {
+                return *area;
+            }
+        }
+        let area = area::common_area(ly, lx, &self.shifts, self.warp(), self.bidiphase, true);
+        let _ = self.area.set(((ly, lx), area));
+        area
+    }
+
+    /// The size, `(rows, columns)`, of what [`apply`](Self::apply) hands back
+    /// for frames of `ly * lx`: the same, except under [`Border::Crop`], where
+    /// it is the common area's — or [`NoCommonArea`] when there is none.
+    pub fn output_size(&self, ly: usize, lx: usize) -> Result<(usize, usize), NoCommonArea> {
+        if self.border == Border::Crop {
+            self.common_area(ly, lx).map(|a| (a.height, a.width))
+        } else {
+            Ok((ly, lx))
         }
     }
 }
@@ -714,6 +774,7 @@ fn register_once(
         bad_frames: Vec::new(),
         nonrigid: None,
         border: settings.border,
+        area: Default::default(),
     })
 }
 

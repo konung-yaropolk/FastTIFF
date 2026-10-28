@@ -208,6 +208,35 @@ impl Plugin for TurboReg {
             }
         }
 
+        // What comes out: the frame, or under a crop the common area — found
+        // from every frame's transformation before anything is resampled, so
+        // a stack with nothing in common stops here.
+        const IF_NOT_REAL: &str = "a fit ran away: a transformation with fewer degrees of \
+                                   freedom, or another reference, may hold";
+        let (height, width) = result
+            .output_size(ly, lx)
+            .map_err(|none| shared::no_common_area(none, IF_NOT_REAL))?;
+        if result.border == turboreg_registration::Border::Crop {
+            if let Ok(area) = result.common_area(ly, lx) {
+                host.log(&if area.is_upright() {
+                    format!(
+                        "cropping to the common area: {} x {} pixels from ({}, {})",
+                        area.width, area.height, area.x, area.y
+                    )
+                } else {
+                    format!(
+                        "cropping to the common area: {} x {} pixels, turned {:.1} degrees, \
+                         from ({:.1}, {:.1})",
+                        area.width,
+                        area.height,
+                        area.angle.to_degrees(),
+                        area.x,
+                        area.y
+                    )
+                });
+            }
+        }
+
         // Now one pass over the recording, applying each timepoint's
         // transformation to every plane of that timepoint.
         let store = Store::of(info.pixel_type);
@@ -219,7 +248,9 @@ impl Plugin for TurboReg {
                 for c in 0..channels {
                     host.read_plane_f32(Plane::new(c, z, t), &mut scratch)?;
                     done += work::READ;
-                    let moved = result.apply(&scratch, ly, lx, t);
+                    let moved = result
+                        .apply(&scratch, ly, lx, t)
+                        .map_err(|none| shared::no_common_area(none, IF_NOT_REAL))?;
                     done += work::WARP;
                     out.push(store.plane(moved));
                 }
@@ -258,8 +289,8 @@ impl Plugin for TurboReg {
 
         Ok(shared::deliver(
             ImageResult {
-                width: info.width,
-                height: info.height,
+                width: width as u32,
+                height: height as u32,
                 channels,
                 slices,
                 frames: info.frames,

@@ -39,6 +39,7 @@ extern "C" {
 #define S2P_INVALID_ARGUMENT 2 /* a pointer, size, index or setting it cannot take */
 #define S2P_UNAVAILABLE 3      /* the backend cannot run here (see s2p_backend_available) */
 #define S2P_FAILED 4           /* the registration failed: a panic, or the GPU could not finish */
+#define S2P_NO_COMMON_AREA 5   /* the frames moved too far apart to share any pixel: nothing to crop to */
 
 /* S2pSettings.backend: where the arithmetic runs. Same answer on each. */
 #define S2P_BACKEND_SINGLE_THREAD 0
@@ -49,6 +50,7 @@ extern "C" {
 #define S2P_BORDER_NATIVE 0   /* the default: suite2p's own (a rigid shift wraps; a warp repeats the edge) */
 #define S2P_BORDER_EDGE 1     /* the nearest edge pixel, repeated */
 #define S2P_BORDER_CONSTANT 2 /* zero */
+#define S2P_BORDER_CROP 3     /* the largest rectangle all frames cover, at any angle, turned upright: smaller frames */
 
 /*
  * The registration parameters, under suite2p's own names and with its
@@ -135,10 +137,32 @@ int s2p_registered_reference(const S2pRegistered *r, float *out, size_t len);
 int s2p_registered_set_border(S2pRegistered *r, int border);
 
 /*
+ * The size of the frames s2p_registered_apply writes: ly x lx, or under
+ * S2P_BORDER_CROP the common area's (S2P_NO_COMMON_AREA when there is none).
+ * Either output may be NULL.
+ */
+int s2p_registered_output_size(const S2pRegistered *r, size_t *ly, size_t *lx);
+
+/*
+ * The largest rectangle every frame covers once moved, at any angle: what
+ * S2P_BORDER_CROP keeps. Where its first pixel sits in the frame (y, x;
+ * fractional when turned), its height and width, and its angle in radians
+ * (0 upright; positive turns its rows clockwise as an image is shown, rows
+ * running down). Result pixel (row, col) sits at
+ *   (y + col sin(angle) + row cos(angle), x + col cos(angle) - row sin(angle)).
+ * Under any border; S2P_NO_COMMON_AREA when the frames share no pixel. Any
+ * output may be NULL.
+ */
+int s2p_registered_common_area(const S2pRegistered *r, double *y, double *x,
+                               size_t *height, size_t *width, double *angle);
+
+/*
  * Put frame t back where it belongs: the bidirectional correction, then the
- * shift or warp. `frame` and `out` hold ly * lx floats each and may be the
- * same buffer. Any channel's frame t can be passed: that is how a second
- * channel moves with the first.
+ * shift or warp. `frame` holds ly * lx floats; `out` holds the output size
+ * (s2p_registered_output_size), which is ly * lx unless the border is
+ * S2P_BORDER_CROP. They may be the same buffer. Any channel's frame t can be
+ * passed: that is how a second channel moves with the first. Under
+ * S2P_BORDER_CROP with no common area: S2P_NO_COMMON_AREA, `out` untouched.
  */
 int s2p_registered_apply(const S2pRegistered *r, const float *frame, size_t t, float *out);
 

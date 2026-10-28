@@ -80,6 +80,17 @@ pub const TR_BORDER_NATIVE: c_int = 0;
 pub const TR_BORDER_EDGE: c_int = 1;
 /// [`Border::Constant`].
 pub const TR_BORDER_CONSTANT: c_int = 2;
+/// [`Border::Crop`]: frames come back cut to the common area, smaller than
+/// they went in; [`tr_registered_output_size`] says how big.
+pub const TR_BORDER_CROP: c_int = 3;
+
+/// The frames moved so far apart that no pixel is covered by all of them
+/// ([`NoCommonArea`](crate::NoCommonArea)): there is no common area, so
+/// [`Border::Crop`] has nothing to crop to. From anything that needs the area
+/// — a crop's frames or size, or the area itself under any border. The
+/// registration itself stands; a border that fills does not have this
+/// problem.
+pub const TR_NO_COMMON_AREA: c_int = 5;
 
 /// [`Settings`], in C's terms, plus the [`Border`] the result applies with.
 /// Enumerations are the `TR_TRANSFORMATION_*`, `TR_REFERENCE_*`,
@@ -529,17 +540,98 @@ pub unsafe extern "C" fn tr_registered_set_border(r: *mut TrRegistered, border: 
     }
 }
 
+/// The size, rows then columns, of a frame [`tr_registered_apply`] writes:
+/// the frame size the run measured, or under `TR_BORDER_CROP` the common
+/// area's — and `TR_NO_COMMON_AREA` when there is none. Either output may be
+/// NULL.
+///
+/// # Safety
+///
+/// `r` is null or a live result; `ly` and `lx` are each null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn tr_registered_output_size(
+    r: *const TrRegistered,
+    ly: *mut usize,
+    lx: *mut usize,
+) -> c_int {
+    guarded(|| {
+        let r = match handle(r) {
+            Ok(r) => r,
+            Err(status) => return status,
+        };
+        match r.inner.output_size(r.ly, r.lx) {
+            Ok((h, w)) => {
+                if !ly.is_null() {
+                    ly.write(h);
+                }
+                if !lx.is_null() {
+                    lx.write(w);
+                }
+                TR_OK
+            }
+            Err(none) => fail(TR_NO_COMMON_AREA, none.to_string()),
+        }
+    })
+}
+
+/// The largest rectangle every frame covers once moved, at any angle — what
+/// `TR_BORDER_CROP` keeps ([`Area`](crate::Area)). Where its first pixel sits
+/// in the frame (`y`, `x`, fractional for a turned area), its size, and its
+/// angle in radians (0 upright; positive turns its rows clockwise as an image
+/// is shown). Asked under any border; `TR_NO_COMMON_AREA` when the frames
+/// share no pixel. Any output may be NULL.
+///
+/// # Safety
+///
+/// `r` is null or a live result; each output is null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn tr_registered_common_area(
+    r: *const TrRegistered,
+    y: *mut f64,
+    x: *mut f64,
+    height: *mut usize,
+    width: *mut usize,
+    angle: *mut f64,
+) -> c_int {
+    guarded(|| {
+        let r = match handle(r) {
+            Ok(r) => r,
+            Err(status) => return status,
+        };
+        match r.inner.common_area(r.ly, r.lx) {
+            Ok(a) => {
+                for (out, v) in [(y, a.y), (x, a.x), (angle, a.angle)] {
+                    if !out.is_null() {
+                        out.write(v);
+                    }
+                }
+                for (out, v) in [(height, a.height), (width, a.width)] {
+                    if !out.is_null() {
+                        out.write(v);
+                    }
+                }
+                TR_OK
+            }
+            Err(none) => fail(TR_NO_COMMON_AREA, none.to_string()),
+        }
+    })
+}
+
 /// Put frame `t` back where it belongs: resample it through its
-/// transformation. `frame` and `out` each hold one frame of the size the run
-/// measured, and may be the same buffer.
+/// transformation. `frame` holds one frame of the size the run measured;
+/// `out` holds what [`tr_registered_output_size`] says, which is the same
+/// size unless the border is `TR_BORDER_CROP`. They may be the same buffer.
 ///
 /// Any frame of timepoint `t` can be passed, not only the one measured: that
 /// is how a second channel is moved with the first.
 ///
+/// Under `TR_BORDER_CROP` with no common area this is `TR_NO_COMMON_AREA`,
+/// and `out` is left alone.
+///
 /// # Safety
 ///
 /// `r` is null or a live result; `frame` points to `ly * lx` readable floats
-/// and `out` to as many writable ones.
+/// and `out` to as many writable ones as the output size.
 #[no_mangle]
 pub unsafe extern "C" fn tr_registered_apply(
     r: *const TrRegistered,
@@ -560,8 +652,11 @@ pub unsafe extern "C" fn tr_registered_apply(
         }
         let (ly, lx) = (r.ly, r.lx);
         // Read in full before anything is written, so `out` may be `frame`.
-        let moved = r.inner.apply(std::slice::from_raw_parts(frame, ly * lx), ly, lx, t);
-        std::ptr::copy(moved.as_ptr(), out, ly * lx);
+        let moved = match r.inner.apply(std::slice::from_raw_parts(frame, ly * lx), ly, lx, t) {
+            Ok(moved) => moved,
+            Err(none) => return fail(TR_NO_COMMON_AREA, none.to_string()),
+        };
+        std::ptr::copy(moved.as_ptr(), out, moved.len());
         TR_OK
     })
 }

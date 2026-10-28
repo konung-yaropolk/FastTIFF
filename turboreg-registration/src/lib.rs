@@ -64,6 +64,7 @@
 //! has the rest: what lands where, how to link it, and what a C caller should
 //! know.
 
+pub mod area;
 #[cfg(feature = "capi")]
 pub mod capi;
 #[cfg(feature = "gpu")]
@@ -75,6 +76,7 @@ pub mod settings;
 pub mod spline;
 pub mod transform;
 
+pub use area::{Area, NoCommonArea};
 pub use optimize::{register_pair, Fit};
 pub use settings::{Backend, Border, Reference, Settings, Transformation};
 pub use transform::{Matrix, Point};
@@ -113,14 +115,64 @@ pub struct Registered {
     /// the frame. [`Border::Native`] from a run, TurboReg's own mirror; set it
     /// before applying for another.
     pub border: Border,
+    /// [`Registered::common_area`], once asked for, with the frame size it was
+    /// asked for at. Kept because [`Border::Crop`] needs it for every frame
+    /// and finding it reads every frame's transformation.
+    area: std::sync::OnceLock<((usize, usize), Result<Area, NoCommonArea>)>,
 }
 
 impl Registered {
     /// Put frame `t` back where it belongs, filling what the move uncovers as
     /// [`Registered::border`] says.
-    pub fn apply(&self, frame: &[f32], ly: usize, lx: usize, t: usize) -> Vec<f32> {
+    ///
+    /// Under [`Border::Crop`] the frame comes back cut to
+    /// [`common_area`](Self::common_area) — and when the frames moved so far
+    /// apart that there is none, this is [`NoCommonArea`] rather than a frame:
+    /// there is no way to crop them that keeps anything, and a frame with its
+    /// edges handled some other way would not be what was asked for. Under
+    /// every other border it cannot fail.
+    pub fn apply(
+        &self,
+        frame: &[f32],
+        ly: usize,
+        lx: usize,
+        t: usize,
+    ) -> Result<Vec<f32>, NoCommonArea> {
         let m = self.matrices.get(t).copied().unwrap_or_default();
-        transform::warp_bordered(frame, lx, ly, &m, self.border, self.threaded)
+        if self.border == Border::Crop {
+            let area = self.common_area(ly, lx)?;
+            return Ok(transform::warp_area(frame, lx, ly, &m, &area, self.threaded));
+        }
+        Ok(transform::warp_bordered(frame, lx, ly, &m, self.border, self.threaded))
+    }
+
+    /// The largest rectangle every frame covers once moved, at any angle
+    /// ([`area::common_area`]) — what [`Border::Crop`] keeps — or
+    /// [`NoCommonArea`] when the frames share no pixel.
+    ///
+    /// Found from every frame's transformation the first time it is asked
+    /// for, and kept: changing [`matrices`](Self::matrices) afterwards is not
+    /// seen.
+    pub fn common_area(&self, ly: usize, lx: usize) -> Result<Area, NoCommonArea> {
+        if let Some(((h, w), area)) = self.area.get() {
+            if (*h, *w) == (ly, lx) {
+                return *area;
+            }
+        }
+        let area = area::common_area(&self.matrices, ly, lx, self.threaded);
+        let _ = self.area.set(((ly, lx), area));
+        area
+    }
+
+    /// The size, `(rows, columns)`, of what [`apply`](Self::apply) hands back
+    /// for frames of `ly * lx`: the same, except under [`Border::Crop`], where
+    /// it is the common area's — or [`NoCommonArea`] when there is none.
+    pub fn output_size(&self, ly: usize, lx: usize) -> Result<(usize, usize), NoCommonArea> {
+        if self.border == Border::Crop {
+            self.common_area(ly, lx).map(|a| (a.height, a.width))
+        } else {
+            Ok((ly, lx))
+        }
     }
 }
 
@@ -210,6 +262,7 @@ pub fn register_stack(
             failed: Vec::new(),
             threaded,
             border: Border::default(),
+            area: Default::default(),
         });
     }
     // Bilinear cannot be chained: the composition of two bilinear maps is not
@@ -300,6 +353,7 @@ pub fn register_stack(
         failed,
         threaded,
         border: Border::default(),
+        area: Default::default(),
     })
 }
 

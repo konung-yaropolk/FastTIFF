@@ -77,7 +77,7 @@ fn every_reference_mode_removes_a_drift() {
         let aligned: Vec<Vec<f32>> = frames
             .iter()
             .enumerate()
-            .map(|(t, f)| out.apply(f, h, w, t))
+            .map(|(t, f)| out.apply(f, h, w, t).expect("no crop asked for"))
             .collect();
         let mut worst = 0.0f32;
         for t in 1..n {
@@ -262,4 +262,51 @@ fn both_backends_register_a_stack_identically() {
         assert!(!single.threaded);
         assert_eq!(multi.threaded, Backend::MultiThread.available());
     }
+}
+
+/// Under `Border::Crop` every frame comes back cut to the common area — the
+/// zero-filled frame with its strip cut off — and frames with nothing in
+/// common are an error rather than something else.
+#[test]
+fn a_cropped_stack_hands_back_the_common_area() {
+    let (w, h) = (48, 40);
+    let frames = drifting(w, h, 5, 0.8);
+    let movie = Frames {
+        ly: h,
+        lx: w,
+        frames: &frames,
+    };
+    let mut out =
+        register_stack(&movie, &stack_settings(Reference::First), &mut |_| true).expect("ran");
+    out.border = Border::Crop;
+    let area = out.common_area(h, w).expect("an area");
+    assert!(area.is_upright(), "a translation leaves an upright area: {area:?}");
+    assert!(area.height < h && area.width < w, "a drift uncovers both edges: {area:?}");
+    let (y0, x0) = (area.y as usize, area.x as usize);
+    assert_eq!(out.output_size(h, w), Ok((area.height, area.width)));
+    for (t, frame) in frames.iter().enumerate() {
+        let cut = out.apply(frame, h, w, t).expect("an area");
+        let filled = transform::warp_bordered(
+            frame,
+            w,
+            h,
+            &out.matrices[t],
+            Border::Constant,
+            out.threaded,
+        );
+        let want: Vec<f32> = (y0..y0 + area.height)
+            .flat_map(|y| filled[y * w + x0..y * w + x0 + area.width].to_vec())
+            .collect();
+        assert_eq!(cut, want, "frame {t}");
+    }
+
+    let mut apart = register_stack(&movie, &stack_settings(Reference::First), &mut |_| true)
+        .expect("ran");
+    apart.border = Border::Crop;
+    apart.matrices[1].c[0] = 100.0;
+    let err = apart.common_area(h, w).expect_err("nothing in common");
+    assert_eq!(err.frames, 5);
+    assert_eq!(apart.apply(&frames[0], h, w, 0), Err(err));
+    apart.border = Border::Edge;
+    assert!(apart.apply(&frames[0], h, w, 0).is_ok());
 }

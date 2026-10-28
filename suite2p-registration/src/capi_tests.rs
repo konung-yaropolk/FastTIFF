@@ -2,6 +2,7 @@
 //! refusal a status with a reason rather than a crash.
 
 use super::*;
+use crate::Area;
 use std::ffi::CStr;
 
 /// A field with three blobs, moved along a known path.
@@ -82,7 +83,7 @@ fn a_registration_through_c_matches_the_rust_one() {
         let mut frame = frames[t].clone();
         let p = frame.as_mut_ptr();
         assert_eq!(unsafe { s2p_registered_apply(r, p, t, p) }, S2P_OK);
-        assert_eq!(frame, direct.apply(&frames[t], ly, lx, t));
+        assert_eq!(frame, direct.apply(&frames[t], ly, lx, t).unwrap());
     }
     let mut reference = vec![0.0f32; ly * lx];
     assert_eq!(
@@ -128,7 +129,7 @@ fn apply_includes_the_bidiphase_correction() {
     let frame = pixels[ly * lx..2 * ly * lx].to_vec();
     let mut combed = frame.clone();
     bidiphase::shift(&mut combed, ly, lx, 2);
-    let want = unsafe { &*r }.inner.apply(&combed, ly, lx, 1);
+    let want = unsafe { &*r }.inner.apply(&combed, ly, lx, 1).unwrap();
     let mut got = vec![0.0f32; ly * lx];
     assert_eq!(unsafe { s2p_registered_apply(r, frame.as_ptr(), 1, got.as_mut_ptr()) }, S2P_OK);
     assert_eq!(got, want);
@@ -211,7 +212,8 @@ fn bad_arguments_are_refused_with_a_reason() {
         unsafe { s2p_registered_reference(r, out.as_mut_ptr(), out.len() - 1) },
         S2P_INVALID_ARGUMENT
     );
-    assert_eq!(unsafe { s2p_registered_set_border(r, 3) }, S2P_INVALID_ARGUMENT);
+    // 3 is S2P_BORDER_CROP; 4 is nothing.
+    assert_eq!(unsafe { s2p_registered_set_border(r, 4) }, S2P_INVALID_ARGUMENT);
     unsafe { s2p_registered_free(r) };
     unsafe { s2p_registered_free(std::ptr::null_mut()) };
 }
@@ -261,7 +263,7 @@ fn the_header_matches_this_module() {
             (name, it.next().and_then(|v| v.parse().ok()).expect(name))
         })
         .collect();
-    let want: &[(&str, c_int)] = &[("OK", S2P_OK), ("CANCELLED", S2P_CANCELLED), ("INVALID_ARGUMENT", S2P_INVALID_ARGUMENT), ("UNAVAILABLE", S2P_UNAVAILABLE), ("FAILED", S2P_FAILED), ("BACKEND_SINGLE_THREAD", S2P_BACKEND_SINGLE_THREAD), ("BACKEND_MULTI_THREAD", S2P_BACKEND_MULTI_THREAD), ("BACKEND_GPU", S2P_BACKEND_GPU), ("BORDER_NATIVE", S2P_BORDER_NATIVE), ("BORDER_EDGE", S2P_BORDER_EDGE), ("BORDER_CONSTANT", S2P_BORDER_CONSTANT)];
+    let want: &[(&str, c_int)] = &[("OK", S2P_OK), ("CANCELLED", S2P_CANCELLED), ("INVALID_ARGUMENT", S2P_INVALID_ARGUMENT), ("UNAVAILABLE", S2P_UNAVAILABLE), ("FAILED", S2P_FAILED), ("NO_COMMON_AREA", S2P_NO_COMMON_AREA), ("BACKEND_SINGLE_THREAD", S2P_BACKEND_SINGLE_THREAD), ("BACKEND_MULTI_THREAD", S2P_BACKEND_MULTI_THREAD), ("BACKEND_GPU", S2P_BACKEND_GPU), ("BORDER_NATIVE", S2P_BORDER_NATIVE), ("BORDER_EDGE", S2P_BORDER_EDGE), ("BORDER_CONSTANT", S2P_BORDER_CONSTANT), ("BORDER_CROP", S2P_BORDER_CROP)];
     assert_eq!(defines.len(), want.len(), "{defines:?}");
     for (name, value) in want {
         let found = defines.iter().find(|(n, _)| n == name);
@@ -314,7 +316,78 @@ fn the_header_matches_this_module() {
         .collect();
     declared.sort_unstable();
     declared.dedup();
-    let mut exported = Vec::from(["s2p_last_error", "s2p_version", "s2p_settings_default", "s2p_backend_available", "s2p_register", "s2p_registered_free", "s2p_registered_frames", "s2p_registered_shift", "s2p_registered_is_bad", "s2p_registered_bidiphase", "s2p_registered_is_nonrigid", "s2p_registered_reference", "s2p_registered_set_border", "s2p_registered_apply"]);
+    let mut exported = Vec::from(["s2p_last_error", "s2p_version", "s2p_settings_default", "s2p_backend_available", "s2p_register", "s2p_registered_free", "s2p_registered_frames", "s2p_registered_shift", "s2p_registered_is_bad", "s2p_registered_bidiphase", "s2p_registered_is_nonrigid", "s2p_registered_reference", "s2p_registered_set_border", "s2p_registered_output_size", "s2p_registered_common_area", "s2p_registered_apply"]);
     exported.sort_unstable();
     assert_eq!(declared, exported);
+}
+
+/// `S2P_BORDER_CROP` through C: the output size is the common area's, the
+/// frames come back that size, and frames with nothing in common are
+/// `S2P_NO_COMMON_AREA` with a reason.
+#[test]
+fn a_crop_through_c_is_the_rust_one() {
+    let (ly, lx) = (64, 64);
+    let pixels = movie(ly, lx, &PATH);
+    let s = S2pSettings {
+        border: S2P_BORDER_CROP,
+        ..settings()
+    };
+    let mut r = std::ptr::null_mut();
+    let status = unsafe {
+        s2p_register(pixels.as_ptr(), PATH.len(), ly, lx, &s, None, std::ptr::null_mut(), &mut r)
+    };
+    assert_eq!(status, S2P_OK, "{}", last_error());
+    let inner = unsafe { &*r }.inner.common_area(ly, lx).expect("an area");
+
+    let (mut oly, mut olx) = (0, 0);
+    assert_eq!(unsafe { s2p_registered_output_size(r, &mut oly, &mut olx) }, S2P_OK);
+    assert_eq!((oly, olx), (inner.height, inner.width));
+    let (mut y, mut x, mut h, mut w, mut angle) = (9.0, 9.0, 9, 9, 9.0);
+    assert_eq!(
+        unsafe { s2p_registered_common_area(r, &mut y, &mut x, &mut h, &mut w, &mut angle) },
+        S2P_OK
+    );
+    assert_eq!(
+        Area {
+            y,
+            x,
+            height: h,
+            width: w,
+            angle
+        },
+        inner
+    );
+    // In place, into the start of the frame's own buffer.
+    let mut frame = pixels[ly * lx..2 * ly * lx].to_vec();
+    let want = unsafe { &*r }.inner.apply(&frame, ly, lx, 1).unwrap();
+    let p = frame.as_mut_ptr();
+    assert_eq!(unsafe { s2p_registered_apply(r, p, 1, p) }, S2P_OK);
+    assert_eq!(&frame[..oly * olx], want.as_slice());
+
+    // Frames that share nothing: every crop call says so.
+    let mut fresh = std::ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            s2p_register(pixels.as_ptr(), PATH.len(), ly, lx, &s, None, std::ptr::null_mut(), &mut fresh)
+        },
+        S2P_OK
+    );
+    unsafe { &mut *fresh }.inner.shifts[0].dy = 100;
+    let mut out = vec![0.0f32; ly * lx];
+    for status in [
+        unsafe { s2p_registered_output_size(fresh, &mut oly, &mut olx) },
+        unsafe { s2p_registered_common_area(fresh, &mut y, &mut x, &mut h, &mut w, &mut angle) },
+        unsafe { s2p_registered_apply(fresh, pixels.as_ptr(), 0, out.as_mut_ptr()) },
+    ] {
+        assert_eq!(status, S2P_NO_COMMON_AREA);
+        assert!(last_error().contains("no common area"), "{}", last_error());
+    }
+    // A border that fills still works on the same result.
+    assert_eq!(unsafe { s2p_registered_set_border(fresh, S2P_BORDER_CONSTANT) }, S2P_OK);
+    assert_eq!(
+        unsafe { s2p_registered_apply(fresh, pixels.as_ptr(), 0, out.as_mut_ptr()) },
+        S2P_OK
+    );
+    unsafe { s2p_registered_free(r) };
+    unsafe { s2p_registered_free(fresh) };
 }

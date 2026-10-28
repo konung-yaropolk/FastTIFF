@@ -23,13 +23,14 @@
 
 mod params;
 
+use super::shared;
 use fasttiff_plugin_api::{
     HostContext, ImageResult, Outcome, ParamDecl, Params, PixelType, Plane, PlaneData, Plugin,
     PluginError, PluginInfo,
 };
 use suite2p_registration::{
-    compute_reference, fft::Fft2, masks::reference_filters_normed, nonrigid, work, Frames,
-    Settings, Shift,
+    area::common_area, compute_reference, fft::Fft2, masks::reference_filters_normed, nonrigid,
+    work, Border, Cut, Frames, Settings, Shift,
 };
 
 /// How many workers a parallel backend should spread the block filters over.
@@ -237,8 +238,10 @@ impl Plugin for Stabilize {
         // recording, so it raced, froze for seconds, and raced again.
         let planes_per_frame = info.channels.max(1) * info.slices.max(1);
         // A single-plane recording's measurement plane is the one corrected,
-        // so it is not read a second time. See the pass below.
-        let reread = planes_per_frame > 1;
+        // so it is not read a second time. See the pass below. A crop reads
+        // every plane again: it moves them only once every frame is measured.
+        let cropping = settings.border == Border::Crop;
+        let reread = planes_per_frame > 1 || cropping;
         let measure_work =
             work::READ + work::CORRELATION + if settings.nonrigid { work::BLOCKS } else { 0.0 };
         let plane_work = if settings.nonrigid {
@@ -337,6 +340,10 @@ impl Plugin for Stabilize {
         let mut planes: Vec<PlaneData> = Vec::with_capacity(channels * slices * info.frames);
         let mut shifts: Vec<Shift> = Vec::with_capacity(info.frames);
         let mut plane = Vec::new();
+        // Every frame's block field, for a crop: the area to cut to depends on
+        // the whole recording, so the frames are measured first and moved
+        // after, each once — straight from the raw plane into the area.
+        let mut fields_kept: Vec<Vec<nonrigid::BlockShift>> = Vec::new();
 
         // One pass over the recording, a batch at a time.
         //
@@ -362,7 +369,8 @@ impl Plugin for Stabilize {
             // smooths within a batch, so a smaller batch is a shorter window;
             // with it off, the batch is a scheduling detail and nothing else.
             host.log(&format!(
-                "batch size reduced from {} to {batch} to bound memory at this frame size;                  smooth_sigma_time smooths within a batch, so its window is shorter",
+                "batch size reduced from {} to {batch} to bound memory at this frame size; \
+                 smooth_sigma_time smooths within a batch, so its window is shorter",
                 settings.batch_size
             ));
         }
@@ -433,6 +441,12 @@ impl Plugin for Stabilize {
                     return Ok(Outcome::Cancelled);
                 }
             }
+            if cropping {
+                fields_kept.extend(fields.unwrap_or_default());
+                shifts.extend_from_slice(&batch_shifts);
+                t0 = t1;
+                continue;
+            }
             let correction = Correction {
                 ly,
                 lx,
@@ -481,6 +495,64 @@ impl Plugin for Stabilize {
             shifts.extend_from_slice(&batch_shifts);
             t0 = t1;
         }
+        // A crop: every frame measured, so the area is known — then every
+        // plane read again, moved and cut in one resampling.
+        let (mut width, mut height) = (info.width, info.height);
+        if cropping {
+            let warp = nonrigid
+                .as_ref()
+                .map(|(blocks, _)| (blocks, fields_kept.as_slice()));
+            let parallel = settings.backend != suite2p_registration::Backend::SingleThread;
+            let area = common_area(ly, lx, &shifts, warp, bidi, parallel).map_err(|none| {
+                shared::no_common_area(
+                    none,
+                    "a smaller Max shift — and Max block shift for a non-rigid run — keeps the \
+                     search in bounds",
+                )
+            })?;
+            let cut = Cut::new(ly, lx, area, &shifts, warp);
+            for t in 0..info.frames {
+                for z in 0..slices {
+                    for c in 0..channels {
+                        host.read_plane_f32(Plane::new(c, z, t), &mut plane)?;
+                        if bidi != 0 {
+                            suite2p_registration::bidiphase::shift(&mut plane, ly, lx, bidi);
+                        }
+                        pending.push(std::mem::take(&mut plane));
+                        pending_at.push(t);
+                        if pending.len() >= APPLY_CHUNK {
+                            done += pending.len() as f64 * plane_work;
+                            let moved = cut.apply_batch(&pending, &pending_at, parallel);
+                            planes.extend(moved.into_iter().map(|v| store.plane(v)));
+                            pending.clear();
+                            pending_at.clear();
+                            if !host.progress(at(done)) {
+                                return Ok(Outcome::Cancelled);
+                            }
+                        }
+                    }
+                }
+            }
+            let moved = cut.apply_batch(&pending, &pending_at, parallel);
+            planes.extend(moved.into_iter().map(|v| store.plane(v)));
+            (width, height) = (area.width as u32, area.height as u32);
+            host.log(&if area.is_upright() {
+                format!(
+                    "cropped to the common area: {} x {} pixels from ({}, {})",
+                    area.width, area.height, area.x, area.y
+                )
+            } else {
+                format!(
+                    "cropped to the common area: {} x {} pixels, turned {:.1} degrees, from \
+                     ({:.1}, {:.1})",
+                    area.width,
+                    area.height,
+                    area.angle.to_degrees(),
+                    area.x,
+                    area.y
+                )
+            });
+        }
         // The estimate only divides the bar; the end of the work is the end of
         // it, whatever the sum came to.
         host.progress(1.0);
@@ -507,8 +579,8 @@ impl Plugin for Stabilize {
         ));
 
         Ok(Outcome::NewDocument(Box::new(ImageResult {
-            width: info.width,
-            height: info.height,
+            width,
+            height,
             channels,
             slices,
             frames: info.frames,

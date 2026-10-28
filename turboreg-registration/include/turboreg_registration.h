@@ -39,6 +39,7 @@ extern "C" {
 #define TR_INVALID_ARGUMENT 2 /* a pointer, size, index or setting it cannot take */
 #define TR_UNAVAILABLE 3      /* the backend cannot run here: no GPU, a frame too large for it, no threads */
 #define TR_FAILED 4           /* the registration failed: a panic, or frames the GPU could not register */
+#define TR_NO_COMMON_AREA 5   /* the frames moved too far apart to share any pixel: nothing to crop to */
 
 /* TrSettings.transformation: the model fitted, fewest degrees of freedom first.
  * Not pystackreg's numbers (2, 3, 4, 6, 8): numbered from 0 like every enum here. */
@@ -62,6 +63,7 @@ extern "C" {
 #define TR_BORDER_NATIVE 0   /* the default: TurboReg's own mirrored extension */
 #define TR_BORDER_EDGE 1     /* the nearest edge pixel, repeated */
 #define TR_BORDER_CONSTANT 2 /* zero */
+#define TR_BORDER_CROP 3     /* the largest rectangle all frames cover, at any angle, turned upright: smaller frames */
 
 /* The registration parameters. Always start from tr_settings_default(): the field list can grow. */
 typedef struct TrSettings {
@@ -130,9 +132,31 @@ int tr_registered_reference(const TrRegistered *r, float *out, size_t len);
 int tr_registered_set_border(TrRegistered *r, int border);
 
 /*
- * Put frame t back where it belongs. `frame` and `out` hold ly * lx floats
- * each and may be the same buffer. Any channel's frame t can be passed: that
- * is how a second channel moves with the first.
+ * The size of the frames tr_registered_apply writes: ly x lx, or under
+ * TR_BORDER_CROP the common area's (TR_NO_COMMON_AREA when there is none).
+ * Either output may be NULL.
+ */
+int tr_registered_output_size(const TrRegistered *r, size_t *ly, size_t *lx);
+
+/*
+ * The largest rectangle every frame covers once moved, at any angle: what
+ * TR_BORDER_CROP keeps. Where its first pixel sits in the frame (y, x;
+ * fractional when turned), its height and width, and its angle in radians
+ * (0 upright; positive turns its rows clockwise as an image is shown, rows
+ * running down). Result pixel (row, col) sits at
+ *   (y + col sin(angle) + row cos(angle), x + col cos(angle) - row sin(angle)).
+ * Under any border; TR_NO_COMMON_AREA when the frames share no pixel. Any
+ * output may be NULL.
+ */
+int tr_registered_common_area(const TrRegistered *r, double *y, double *x,
+                              size_t *height, size_t *width, double *angle);
+
+/*
+ * Put frame t back where it belongs. `frame` holds ly * lx floats; `out` holds
+ * the output size (tr_registered_output_size), which is ly * lx unless the
+ * border is TR_BORDER_CROP. They may be the same buffer. Any channel's frame t
+ * can be passed: that is how a second channel moves with the first. Under
+ * TR_BORDER_CROP with no common area: TR_NO_COMMON_AREA, `out` untouched.
  */
 int tr_registered_apply(const TrRegistered *r, const float *frame, size_t t, float *out);
 

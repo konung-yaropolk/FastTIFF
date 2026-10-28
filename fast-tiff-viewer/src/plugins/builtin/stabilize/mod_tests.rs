@@ -436,7 +436,12 @@ fn hiding_a_control_does_not_change_what_runs() {
 #[test]
 fn the_edge_choice_reaches_the_settings() {
     use suite2p_registration::Border;
-    for (choice, want) in [(0, Border::Constant), (1, Border::Edge), (2, Border::Native)] {
+    for (choice, want) in [
+        (0, Border::Constant),
+        (1, Border::Edge),
+        (2, Border::Crop),
+        (3, Border::Native),
+    ] {
         let mut p = Params::new();
         p.set("edges", ParamValue::Choice(choice));
         assert_eq!(super::params::settings_from(&p).border, want, "option {choice}");

@@ -86,7 +86,7 @@ fn a_registration_through_c_matches_the_rust_one() {
             let mut moved = frame.clone();
             let p = moved.as_mut_ptr();
             assert_eq!(unsafe { tr_registered_apply(r, p, t, p) }, TR_OK);
-            assert_eq!(moved, direct.apply(frame, H, W, t));
+            assert_eq!(moved, direct.apply(frame, H, W, t).unwrap());
         }
         let mut out = vec![0.0f32; W * H];
         let has = unsafe { tr_registered_has_reference(r) };
@@ -204,7 +204,8 @@ fn bad_arguments_are_refused_with_a_reason() {
         unsafe { tr_registered_reference(r, out.as_mut_ptr(), 3) },
         TR_INVALID_ARGUMENT
     );
-    assert_eq!(unsafe { tr_registered_set_border(r, 3) }, TR_INVALID_ARGUMENT);
+    // 3 is TR_BORDER_CROP; 4 is nothing.
+    assert_eq!(unsafe { tr_registered_set_border(r, 4) }, TR_INVALID_ARGUMENT);
     unsafe { tr_registered_free(r) };
     unsafe { tr_registered_free(std::ptr::null_mut()) };
 }
@@ -234,7 +235,7 @@ fn the_header_matches_this_module() {
             (name, it.next().and_then(|v| v.parse().ok()).expect(name))
         })
         .collect();
-    let want: &[(&str, c_int)] = &[("OK", TR_OK), ("CANCELLED", TR_CANCELLED), ("INVALID_ARGUMENT", TR_INVALID_ARGUMENT), ("UNAVAILABLE", TR_UNAVAILABLE), ("FAILED", TR_FAILED), ("TRANSFORMATION_TRANSLATION", TR_TRANSFORMATION_TRANSLATION), ("TRANSFORMATION_RIGID_BODY", TR_TRANSFORMATION_RIGID_BODY), ("TRANSFORMATION_SCALED_ROTATION", TR_TRANSFORMATION_SCALED_ROTATION), ("TRANSFORMATION_AFFINE", TR_TRANSFORMATION_AFFINE), ("TRANSFORMATION_BILINEAR", TR_TRANSFORMATION_BILINEAR), ("REFERENCE_PREVIOUS", TR_REFERENCE_PREVIOUS), ("REFERENCE_FIRST", TR_REFERENCE_FIRST), ("REFERENCE_MEAN", TR_REFERENCE_MEAN), ("BACKEND_SINGLE_THREAD", TR_BACKEND_SINGLE_THREAD), ("BACKEND_MULTI_THREAD", TR_BACKEND_MULTI_THREAD), ("BACKEND_GPU", TR_BACKEND_GPU), ("BORDER_NATIVE", TR_BORDER_NATIVE), ("BORDER_EDGE", TR_BORDER_EDGE), ("BORDER_CONSTANT", TR_BORDER_CONSTANT)];
+    let want: &[(&str, c_int)] = &[("OK", TR_OK), ("CANCELLED", TR_CANCELLED), ("INVALID_ARGUMENT", TR_INVALID_ARGUMENT), ("UNAVAILABLE", TR_UNAVAILABLE), ("FAILED", TR_FAILED), ("NO_COMMON_AREA", TR_NO_COMMON_AREA), ("TRANSFORMATION_TRANSLATION", TR_TRANSFORMATION_TRANSLATION), ("TRANSFORMATION_RIGID_BODY", TR_TRANSFORMATION_RIGID_BODY), ("TRANSFORMATION_SCALED_ROTATION", TR_TRANSFORMATION_SCALED_ROTATION), ("TRANSFORMATION_AFFINE", TR_TRANSFORMATION_AFFINE), ("TRANSFORMATION_BILINEAR", TR_TRANSFORMATION_BILINEAR), ("REFERENCE_PREVIOUS", TR_REFERENCE_PREVIOUS), ("REFERENCE_FIRST", TR_REFERENCE_FIRST), ("REFERENCE_MEAN", TR_REFERENCE_MEAN), ("BACKEND_SINGLE_THREAD", TR_BACKEND_SINGLE_THREAD), ("BACKEND_MULTI_THREAD", TR_BACKEND_MULTI_THREAD), ("BACKEND_GPU", TR_BACKEND_GPU), ("BORDER_NATIVE", TR_BORDER_NATIVE), ("BORDER_EDGE", TR_BORDER_EDGE), ("BORDER_CONSTANT", TR_BORDER_CONSTANT), ("BORDER_CROP", TR_BORDER_CROP)];
     assert_eq!(defines.len(), want.len(), "{defines:?}");
     for (name, value) in want {
         let found = defines.iter().find(|(n, _)| n == name);
@@ -275,7 +276,64 @@ fn the_header_matches_this_module() {
         .collect();
     declared.sort_unstable();
     declared.dedup();
-    let mut exported = Vec::from(["tr_last_error", "tr_version", "tr_settings_default", "tr_backend_available", "tr_register", "tr_registered_free", "tr_registered_frames", "tr_registered_matrix", "tr_registered_failed", "tr_registered_has_reference", "tr_registered_reference", "tr_registered_set_border", "tr_registered_apply"]);
+    let mut exported = Vec::from(["tr_last_error", "tr_version", "tr_settings_default", "tr_backend_available", "tr_register", "tr_registered_free", "tr_registered_frames", "tr_registered_matrix", "tr_registered_failed", "tr_registered_has_reference", "tr_registered_reference", "tr_registered_set_border", "tr_registered_output_size", "tr_registered_common_area", "tr_registered_apply"]);
     exported.sort_unstable();
     assert_eq!(declared, exported);
+}
+
+/// `TR_BORDER_CROP` through C: the output size is the common area's, frames
+/// come back that size, and frames with nothing in common are
+/// `TR_NO_COMMON_AREA` with a reason.
+#[test]
+fn a_crop_through_c_is_the_rust_one() {
+    let pixels = stack();
+    let s = TrSettings {
+        border: TR_BORDER_CROP,
+        ..settings()
+    };
+    let mut r = std::ptr::null_mut();
+    assert_eq!(run(&s, &pixels, &mut r), TR_OK, "{}", last_error());
+    let inner = unsafe { &*r }.inner.common_area(H, W).expect("an area");
+    assert!(inner.height < H || inner.width < W, "the stack drifts: {inner:?}");
+
+    let (mut oly, mut olx) = (0, 0);
+    assert_eq!(unsafe { tr_registered_output_size(r, &mut oly, &mut olx) }, TR_OK);
+    assert_eq!((oly, olx), (inner.height, inner.width));
+    let (mut y, mut x, mut h, mut w, mut angle) = (9.0, 9.0, 9, 9, 9.0);
+    assert_eq!(
+        unsafe { tr_registered_common_area(r, &mut y, &mut x, &mut h, &mut w, &mut angle) },
+        TR_OK
+    );
+    assert_eq!(
+        (y, x, h, w, angle),
+        (inner.y, inner.x, inner.height, inner.width, inner.angle)
+    );
+    let last = &pixels[(N - 1) * W * H..];
+    let want = unsafe { &*r }.inner.apply(last, H, W, N - 1).unwrap();
+    assert_eq!(want.len(), oly * olx);
+    let mut frame = last.to_vec();
+    let p = frame.as_mut_ptr();
+    assert_eq!(unsafe { tr_registered_apply(r, p, N - 1, p) }, TR_OK);
+    assert_eq!(&frame[..oly * olx], want.as_slice());
+    unsafe { tr_registered_free(r) };
+
+    // Frames that share nothing: every crop call says so.
+    let mut r = std::ptr::null_mut();
+    assert_eq!(run(&s, &pixels, &mut r), TR_OK);
+    unsafe { &mut *r }.inner.matrices[0].c[0] = 1000.0;
+    let mut out = vec![0.0f32; W * H];
+    for status in [
+        unsafe { tr_registered_output_size(r, &mut oly, &mut olx) },
+        unsafe { tr_registered_common_area(r, &mut y, &mut x, &mut h, &mut w, &mut angle) },
+        unsafe { tr_registered_apply(r, pixels.as_ptr(), 0, out.as_mut_ptr()) },
+    ] {
+        assert_eq!(status, TR_NO_COMMON_AREA);
+        assert!(last_error().contains("no common area"), "{}", last_error());
+    }
+    assert_eq!(unsafe { tr_registered_set_border(r, TR_BORDER_CONSTANT) }, TR_OK);
+    assert_eq!(
+        unsafe { tr_registered_apply(r, pixels.as_ptr(), 0, out.as_mut_ptr()) },
+        TR_OK
+    );
+    unsafe { tr_registered_free(r) };
 }
