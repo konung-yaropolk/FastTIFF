@@ -108,6 +108,8 @@ fn a_zero_field_is_the_identity() {
             dx: 0,
             corr: 1.0,
         },
+   
+        Border::Edge,
     );
     for (a, c) in out.iter().zip(&f) {
         assert!((a - c).abs() < 1e-4, "{a} vs {c}");
@@ -140,6 +142,8 @@ fn a_uniform_field_is_a_translation() {
             dx: 0,
             corr: 1.0,
         },
+   
+        Border::Edge,
     );
     // The ramp is the column index, so sampling from x+2 reads 2 higher —
     // away from the right edge, where the clamp holds it.
@@ -177,11 +181,51 @@ fn the_warp_clamps_at_the_edge() {
             dx: 0,
             corr: 1.0,
         },
+   
+        Border::Edge,
     );
     // Sampling from x-8: the left edge clamps to column 0 rather than wrapping
     // round to column 24.
     assert!((out[0] - 0.0).abs() < 1e-3, "left edge wrapped: {}", out[0]);
     assert!(out[..8].iter().all(|&v| v < 1.0), "{:?}", &out[..8]);
+}
+
+/// Under [`Border::Constant`] what the warp uncovers is zero — and only that:
+/// every pixel it still covers reads the same as under [`Border::Edge`].
+#[test]
+fn a_constant_border_zeroes_only_what_the_warp_uncovers() {
+    let (ly, lx) = (32, 32);
+    // One higher than the column index, so a zero cannot be a column of data.
+    let f: Vec<f32> = ramp(ly, lx).iter().map(|v| v + 1.0).collect();
+    let b = make_blocks(ly, lx, [16, 16], 10);
+    let push = vec![
+        BlockShift {
+            dy: 0.0,
+            dx: -7.5,
+            corr: 1.0
+        };
+        b.blocks.len()
+    ];
+    let none = Shift {
+        dy: 0,
+        dx: 0,
+        corr: 1.0,
+    };
+    let zeroed = warp(&f, ly, lx, &b, &push, none, Border::Constant);
+    let edged = warp(&f, ly, lx, &b, &push, none, Border::Edge);
+    for y in 0..ly {
+        for x in 0..lx {
+            let (z, e) = (zeroed[y * lx + x], edged[y * lx + x]);
+            // Sampled from x - 7.5: columns 0..=7 need a pixel left of column
+            // 0 — column 7 half of one — and have none.
+            if x <= 7 {
+                assert_eq!(z, 0.0, "({y},{x}) not filled");
+                assert!(e >= 1.0, "({y},{x}) edge fill {e}");
+            } else {
+                assert_eq!(z, e, "({y},{x}) covered, but changed");
+            }
+        }
+    }
 }
 
 /// The rigid shift is applied on top of the block field, not instead of it.
@@ -209,6 +253,8 @@ fn the_rigid_shift_is_added_to_the_field() {
             dx: 3,
             corr: 1.0,
         },
+   
+        Border::Edge,
     );
     for (x, &got) in out.iter().enumerate().take(lx - 8) {
         assert!((got - (x as f32 + 4.0)).abs() < 1e-3, "x {x}: {got}");

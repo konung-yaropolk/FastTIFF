@@ -356,8 +356,8 @@ impl Part {
         self.block_count
     }
 
-    /// Image planes first seen in this part. Zero is ordinary for the first
-    /// part of a split recording, which carries the metadata.
+    /// Image planes first seen in this part. Zero for a part that carries
+    /// only metadata, which the first part of a split recording can be.
     pub fn planes_added(&self) -> usize {
         self.planes_added
     }

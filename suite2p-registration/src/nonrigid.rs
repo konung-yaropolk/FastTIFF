@@ -41,6 +41,7 @@ use crate::fft::Fft2;
 use crate::masks::{gaussian_fft, spatial_taper};
 use crate::par::*;
 use crate::rigid::Shift;
+use crate::settings::{Border, ON_FRAME};
 use rustfft::num_complex::Complex32;
 
 /// How wide the kriging window around a peak is, in pixels. suite2p's `lpad`.
@@ -567,9 +568,10 @@ fn refine_peak(cc: &[f32], lcorr: usize, blocks: &Blocks, subpixel: usize) -> Bl
 /// interpolations, both linear, because the alternative — nearest neighbour —
 /// would quantise the warp back into the block grid it is trying to smooth out.
 ///
-/// Out-of-frame samples clamp to the edge rather than wrapping. Unlike the
-/// rigid shift, a non-rigid warp moves each part of the frame differently, so a
-/// wrap would bring the far side of the picture into the middle of it.
+/// Out-of-frame samples never wrap: a non-rigid warp moves each part of the
+/// frame differently, so a wrap would bring the far side of the picture into
+/// the middle of it. They read the nearest edge pixel, for [`Border::Native`]
+/// as for [`Border::Edge`], or zero for [`Border::Constant`].
 pub fn warp(
     frame: &[f32],
     ly: usize,
@@ -577,6 +579,7 @@ pub fn warp(
     blocks: &Blocks,
     shifts: &[BlockShift],
     rigid: Shift,
+    border: Border,
 ) -> Vec<f32> {
     let (ny, nx) = (blocks.ny, blocks.nx);
     // Block centres, which is where each shift is treated as measured.
@@ -621,14 +624,20 @@ pub fn warp(
             // pixel's own share of the deformation.
             let sy = y as f64 + dy + rigid.dy as f64;
             let sx = x as f64 + dx + rigid.dx as f64;
-            out[y * lx + x] = sample(frame, ly, lx, sy, sx);
+            out[y * lx + x] = sample(frame, ly, lx, sy, sx, border);
         }
     }
     out
 }
 
-/// Bilinear sample, clamped to the frame.
-fn sample(frame: &[f32], ly: usize, lx: usize, y: f64, x: f64) -> f32 {
+/// Bilinear sample, clamped to the frame — or zero off it, under
+/// [`Border::Constant`]. A position between the last pixel and the one past it
+/// counts as off: half of what it would blend is not there.
+fn sample(frame: &[f32], ly: usize, lx: usize, y: f64, x: f64, border: Border) -> f32 {
+    let on = |v: f64, n: usize| v >= -ON_FRAME && v <= (n - 1) as f64 + ON_FRAME;
+    if border == Border::Constant && !(on(y, ly) && on(x, lx)) {
+        return 0.0;
+    }
     let y = y.clamp(0.0, (ly - 1) as f64);
     let x = x.clamp(0.0, (lx - 1) as f64);
     let (y0, x0) = (y.floor() as usize, x.floor() as usize);

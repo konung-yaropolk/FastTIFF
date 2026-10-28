@@ -291,6 +291,54 @@ fn gpu_unavailable_reason(_ly: usize, _lx: usize) -> Option<String> {
     })
 }
 
+/// What a registered frame shows where its content has moved out of view.
+///
+/// Moving a frame onto the reference uncovers a strip along the edge it moved
+/// away from: output pixels with no measurement behind them. Something has to
+/// be written there, and this is the choice of what. Only the frames handed
+/// back are affected; how frames move while the registration measures is part
+/// of the method and stays as it is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Border {
+    /// What TurboReg's own output shows, and the default: the spline's
+    /// mirrored extension, the same one the registration measures with. It
+    /// has no seam, but past the edge it repeats the picture backwards, cells
+    /// included, so the strip shows tissue that is not there.
+    #[default]
+    Native,
+    /// The nearest edge pixel, repeated outward. The frame keeps the look of
+    /// the frame, with no far-side content and no dark band; but what it
+    /// writes is a copy of a real pixel, so an analysis that averages over the
+    /// strip still takes in a value that was not measured there.
+    Edge,
+    /// Zero. Unmistakably not a measurement, and easy to mask out afterwards;
+    /// a pixel only partly covered by the frame counts as uncovered, so the
+    /// strip ends in a hard edge rather than a ramp from data to zero.
+    Constant,
+}
+
+impl Border {
+    /// What to call this option in an interface.
+    pub fn label(self) -> &'static str {
+        match self {
+            Border::Native => "As TurboReg (mirror)",
+            Border::Edge => "Edge replicate",
+            Border::Constant => "Constant (0)",
+        }
+    }
+
+    /// Every option, in the order a selector should offer them.
+    pub fn all() -> [Border; 3] {
+        [Border::Native, Border::Edge, Border::Constant]
+    }
+}
+
+/// How far past the outermost sample a position may land and still count as
+/// on the frame: rounding, not motion. A fitted transformation that is the
+/// identity to within `1e-12` would otherwise blank the last row and column
+/// under [`Border::Constant`].
+pub(crate) const ON_FRAME: f64 = 1e-6;
+
 /// Everything a run needs beyond the pixels.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Settings {

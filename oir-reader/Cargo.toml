@@ -7,7 +7,7 @@
 # crate.
 [package]
 name = "oir-reader"
-version = "0.25.1"
+version = "0.26.3"
 edition = "2021"
 # `usize::is_multiple_of` (deciding the shape) is 1.87; `Option::is_none_or`
 # (finding the first block) is 1.82.
@@ -32,7 +32,12 @@ include = [
     "Cargo.toml",
     "README.md",
     "LICENSE",
+    "include/**/*.h",
 ]
+# The C interface is behind a feature, so docs.rs is told to build it — a module
+# that is not in the documentation may as well not exist.
+[package.metadata.docs.rs]
+features = ["capi"]
 
 [features]
 default = ["mmap"]
@@ -40,6 +45,13 @@ default = ["mmap"]
 # is target-gated, so a wasm build needs no --no-default-features, compiles no
 # memmap2 stub, and reads every part through the buffered reader.
 mmap = ["dep:memmap2"]
+
+# A C interface — `src/capi.rs`, declared in `include/oir_reader.h` — for linking
+# into C and C++ programs as a shared or static library. Adds no dependency.
+# The crate type is chosen when building (`cargo rustc --crate-type`; see the
+# README's "From C and C++") rather than listed under `[lib]`, because a
+# `cdylib` listed there is built by every crate that depends on this one.
+capi = []
 
 [dependencies]
 # The acquisition record's XML. The same version as fast-tiff-lib's OME reader,

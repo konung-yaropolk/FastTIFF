@@ -146,8 +146,92 @@ frame:
 | [`pipeline`] | `measure_batch`, `apply_batch`, `smooth_in_time`, `bad_frames` |
 | [`bidiphase`] | `compute` and `shift` for the scanner comb |
 | [`fft`] | the cached 2D transform, `fftshift`, `ifftshift` |
-| [`settings`] | `Settings`, `Backend` |
+| [`settings`] | `Settings`, `Backend`, `Border` |
 | [`work`] | relative stage costs, for dividing a progress bar |
+
+## From C and C++
+
+With the `capi` feature the crate builds as a C library, shared or static, and
+[`include/suite2p_registration.h`](include/suite2p_registration.h) declares it. The crate type is chosen on
+the command line rather than fixed in `Cargo.toml`, so a Rust program that
+depends on this crate never builds a C library it has no use for:
+
+```sh
+cargo rustc -p suite2p-registration --release --features capi --crate-type cdylib,staticlib
+```
+
+`-p suite2p-registration` is for this repository's workspace; in an unpacked crate,
+leave it out. Add `gpu` to the features (`--features capi,gpu`) for `S2P_BACKEND_GPU`. The libraries land in `target/release/`:
+
+| platform | shared library | link against | static library |
+|---|---|---|---|
+| Windows (MSVC) | `suite2p_registration.dll` | `suite2p_registration.dll.lib` | `suite2p_registration.lib` |
+| Linux | `libsuite2p_registration.so` | the same | `libsuite2p_registration.a` |
+| macOS | `libsuite2p_registration.dylib` | the same | `libsuite2p_registration.a` |
+
+A static library leaves the system libraries it needs to the final link; add
+`-- --print native-static-libs` to the command above for the list on your
+platform (on Windows it is `kernel32 ntdll userenv ws2_32 dbghelp`). Build the
+program against the C runtime that list names: `/defaultlib:libcmt` is the
+static one, so `cl /MT` — which is what you get from this repository, whose
+`.cargo/config.toml` builds Windows targets with `+crt-static` — and `msvcrt`
+is the DLL one, `cl /MD`.
+
+```c
+#include <stdio.h>
+#include "suite2p_registration.h"
+
+/* `stack`: n_frames frames of ly x lx floats, one after another, row-major. */
+int stabilise(float *stack, size_t n_frames, size_t ly, size_t lx) {
+    S2pSettings s;
+    s2p_settings_default(&s); /* always start here: the struct can grow */
+    s.nonrigid = false;
+    s.border = S2P_BORDER_EDGE;
+    S2pRegistered *r = NULL;
+    int status = s2p_register(stack, n_frames, ly, lx, &s, NULL, NULL, &r);
+    if (status != S2P_OK) {
+        fprintf(stderr, "registration failed: %s\n", s2p_last_error());
+        return status;
+    }
+    for (size_t t = 0; t < n_frames; t++) {
+        float *frame = stack + t * ly * lx;
+        s2p_registered_apply(r, frame, t, frame); /* in place is allowed */
+    }
+    s2p_registered_free(r);
+    return S2P_OK;
+}
+```
+
+```sh
+# Linux and macOS, from the workspace root (in an unpacked crate: -I include)
+cc main.c -I suite2p-registration/include -L target/release -lsuite2p_registration
+# Windows, MSVC, likewise
+cl main.c /I suite2p-registration\include target\release\suite2p_registration.dll.lib
+```
+
+The shared library has to be findable when the program runs: beside the `.exe`
+on Windows, on `LD_LIBRARY_PATH` (or an rpath) on Linux, on
+`DYLD_LIBRARY_PATH` on macOS.
+
+What a C caller should know:
+
+- **Statuses, not crashes.** Every call returns `S2P_OK` or the reason it
+  did not, and `s2p_last_error()` says it in words. A panic inside the
+  registration comes back as `S2P_FAILED` instead of unwinding into C — as
+  long as the library is built with `panic = "unwind"`, the default.
+- **Measure once, apply to every channel.** `s2p_registered_apply` takes any
+  frame of timepoint `t`, which is how a second channel follows the first.
+- **The frames are copied** by `s2p_register`, and the registration keeps
+  working copies of its own: while it runs it needs about four times the stack's
+  size in memory, counting the caller's. The caller's buffer is free once it
+  returns.
+- **Threads.** Separate results can be used on separate threads; one result
+  can be applied from several at once, but not while
+  `s2p_registered_set_border` changes it. `s2p_last_error` is per thread.
+  GPU runs started from several threads take turns on the one device.
+- **One header per version.** The header describes the library it shipped
+  with; check `s2p_version()` if they may have come apart.
+- **Licence.** The library is GPL-3.0-only, and so is a program distributed with it linked in, statically or dynamically.
 
 ## Licence
 

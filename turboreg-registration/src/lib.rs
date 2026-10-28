@@ -50,7 +50,22 @@
 //! the moving image there. Inverting it first is the mistake this paragraph
 //! exists to prevent — the result looks registered, in the wrong direction, and
 //! only a comparison against a known answer shows it.
+//!
+//! # From C and C++
+//!
+//! With the `capi` feature the crate is also a C library: `capi` is the
+//! interface, `include/turboreg_registration.h` declares it, and
+//!
+//! ```text
+//! cargo rustc -p turboreg-registration --release --features capi --crate-type cdylib,staticlib
+//! ```
+//!
+//! builds it as a shared and a static library. The README's "From C and C++"
+//! has the rest: what lands where, how to link it, and what a C caller should
+//! know.
 
+#[cfg(feature = "capi")]
+pub mod capi;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod optimize;
@@ -61,7 +76,7 @@ pub mod spline;
 pub mod transform;
 
 pub use optimize::{register_pair, Fit};
-pub use settings::{Backend, Reference, Settings, Transformation};
+pub use settings::{Backend, Border, Reference, Settings, Transformation};
 pub use transform::{Matrix, Point};
 
 /// A movie to register: frames of `ly * lx`, row-major.
@@ -94,13 +109,18 @@ pub struct Registered {
     /// and when it ignored the backend it was what kept a "multi-thread" run of
     /// such a stack on one core for most of its length.
     pub threaded: bool,
+    /// What [`Registered::apply`] writes where a moved frame no longer covers
+    /// the frame. [`Border::Native`] from a run, TurboReg's own mirror; set it
+    /// before applying for another.
+    pub border: Border,
 }
 
 impl Registered {
-    /// Put frame `t` back where it belongs.
+    /// Put frame `t` back where it belongs, filling what the move uncovers as
+    /// [`Registered::border`] says.
     pub fn apply(&self, frame: &[f32], ly: usize, lx: usize, t: usize) -> Vec<f32> {
         let m = self.matrices.get(t).copied().unwrap_or_default();
-        transform::warp_with(frame, lx, ly, &m, self.threaded)
+        transform::warp_bordered(frame, lx, ly, &m, self.border, self.threaded)
     }
 }
 
@@ -189,6 +209,7 @@ pub fn register_stack(
             reference: None,
             failed: Vec::new(),
             threaded,
+            border: Border::default(),
         });
     }
     // Bilinear cannot be chained: the composition of two bilinear maps is not
@@ -278,6 +299,7 @@ pub fn register_stack(
         reference,
         failed,
         threaded,
+        border: Border::default(),
     })
 }
 

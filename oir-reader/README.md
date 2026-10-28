@@ -90,8 +90,8 @@ the first missing part, because reading across a gap would join time points
 that are not adjacent. `acquisition_parts` lists the files without reading
 them, and a continuation passed on its own is read on its own.
 
-Only the first part usually carries the metadata, and its planes are in the
-siblings. If they are not found, the error says so, and says where they were
+The first part carries the metadata, and may carry no planes of its own,
+with all of them in the siblings. If they are not found, the error says so, and says where they were
 looked for.
 
 ## Recordings still being written
@@ -179,6 +179,123 @@ rather than the whole acquisition; axes other than time (`t`) and z (`z`).
 | feature | default | what it does |
 |---|---|---|
 | `mmap` | on | memory-maps parts on unix and Windows. It changes how parts are read, never the API. Elsewhere it does nothing, so a wasm build needs no `--no-default-features`. |
+| `capi` | off | the C interface, `include/oir_reader.h`: see "From C and C++". Adds no dependency. |
+
+## From C and C++
+
+With the `capi` feature the crate builds as a C library, shared or static, and
+[`include/oir_reader.h`](include/oir_reader.h) declares it. The crate type is chosen on
+the command line rather than fixed in `Cargo.toml`, so a Rust program that
+depends on this crate never builds a C library it has no use for:
+
+```sh
+cargo rustc -p oir-reader --release --features capi --crate-type cdylib,staticlib
+```
+
+`-p oir-reader` is for this repository's workspace; in an unpacked crate,
+leave it out. The libraries land in `target/release/`:
+
+| platform | shared library | link against | static library |
+|---|---|---|---|
+| Windows (MSVC) | `oir_reader.dll` | `oir_reader.dll.lib` | `oir_reader.lib` |
+| Linux | `liboir_reader.so` | the same | `liboir_reader.a` |
+| macOS | `liboir_reader.dylib` | the same | `liboir_reader.a` |
+
+A static library leaves the system libraries it needs to the final link; add
+`-- --print native-static-libs` to the command above for the list on your
+platform (on Windows it is `kernel32 ntdll userenv ws2_32 dbghelp`). Build the
+program against the C runtime that list names: `/defaultlib:libcmt` is the
+static one, so `cl /MT` — which is what you get from this repository, whose
+`.cargo/config.toml` builds Windows targets with `+crt-static` — and `msvcrt`
+is the DLL one, `cl /MD`.
+
+```c
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "oir_reader.h"
+
+int main(int argc, char **argv) {
+    if (argc < 2) return 2;
+    OirAcquisition *a = NULL;
+    int status = oir_read(argv[1], NULL, NULL, NULL, &a); /* every part of a split recording */
+    if (status != OIR_OK) {
+        fprintf(stderr, "%s\n", oir_last_error());
+        return 1;
+    }
+    OirShape s;
+    oir_shape(a, &s);
+    printf("%ux%u, %zu channel(s), %zu slice(s), %zu frame(s)\n",
+           s.width, s.height, s.channels, s.slices, s.frames);
+
+    /* Channel 0 of slice 0 at the last time point, copied out. */
+    size_t i;
+    oir_plane_index(a, 0, 0, s.frames - 1, &i);
+    size_t bytes = s.plane_len * s.bytes_per_sample;
+    void *plane = malloc(bytes);
+    if (plane && oir_plane_copy(a, i, plane, bytes) == OIR_OK && s.sample_type == OIR_SAMPLE_U16)
+        printf("first pixel %u\n", (unsigned)((const uint16_t *)plane)[0]);
+    free(plane);
+
+    /* Text comes back the way snprintf writes it. */
+    char objective[64];
+    oir_record_string(a, OIR_FIELD_OBJECTIVE, objective, sizeof objective);
+    OirRecordInfo r;
+    oir_record_info(a, &r);
+    printf("%g um/pixel, objective %s, %g s between frames\n",
+           r.pixel_x_um, objective, r.frame_interval_s);
+
+    oir_acquisition_free(a);
+    return 0;
+}
+```
+
+```sh
+# Linux and macOS, from the workspace root (in an unpacked crate: -I include)
+cc main.c -I oir-reader/include -L target/release -loir_reader
+# Windows, MSVC, likewise
+cl main.c /I oir-reader\include target\release\oir_reader.dll.lib
+```
+
+The shared library has to be findable when the program runs: beside the `.exe`
+on Windows, on `LD_LIBRARY_PATH` (or an rpath) on Linux, on
+`DYLD_LIBRARY_PATH` on macOS.
+
+What a C caller should know:
+
+- **Statuses, not crashes.** Every call that can fail returns `OIR_OK` or the
+  reason it did not — `OIR_IO_ERROR`, `OIR_NOT_OIR`, `OIR_MALFORMED` and
+  `OIR_NO_PLANES` are the reader's own errors — and `oir_last_error()` says it
+  in words, with the file it was reading. A panic inside the reader comes back
+  as `OIR_FAILED` instead of unwinding into C, as long as the library is built
+  with `panic = "unwind"`, the default.
+- **Text is `snprintf`'s convention.** A function that returns text takes a
+  buffer and its size, writes what fits with a NUL after it, and returns the
+  length of the whole; `NULL, 0` asks for the length. A negative return is
+  minus a status. A value the file does not state is the empty string, and a
+  number it does not state is NaN (or 0, for a count).
+- **Everything is in memory**, as with the Rust API: `oir_read` reads the whole
+  acquisition. `oir_plane_data` hands out a pointer to a plane where it
+  already is, valid until `oir_acquisition_free`; `oir_plane_copy` copies one
+  out.
+- **Progress and cancelling.** `oir_read` and `oir_read_bytes` take an
+  optional callback, called with the fraction of the bytes read; returning 0
+  stops the read with `OIR_CANCELLED`. It is asked every thousand or so
+  blocks, so a small file is read before it can be stopped.
+- **No filesystem, no paths.** In a build for `wasm32-unknown-unknown`,
+  `oir_read` and the part listing return `OIR_UNAVAILABLE`; `oir_read_bytes`
+  works everywhere. The header is the same on every target.
+- **Threads.** An acquisition is never changed once read, so one can be used
+  from any number of threads at once. `oir_last_error` is per thread.
+- **Unsafe code.** The crate is `#![deny(unsafe_code)]`. The C interface,
+  `src/capi.rs`, is allowed it, to take C's pointers; the only other `unsafe`
+  is the one call that maps a file. The reader behind the interface is the
+  same safe code with or without the feature.
+- **One header per version.** The header describes the library it shipped
+  with; check `oir_version()` if they may have come apart.
+- **Licence.** MPL-2.0 is per file: a C or C++ program may link the library,
+  statically or dynamically, under any licence of its own. Changes to the
+  library's own files stay MPL-2.0 and have to be made available.
 
 ## License
 

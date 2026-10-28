@@ -475,9 +475,21 @@ impl<W: Write + Seek> TiffWriter<W> {
         // chunky is one image of `width * spp`-sample rows. Either way the
         // frame is the same total size — only the strip split differs.
         let n_planes = if planar { spp } else { 1 };
-        let row_bytes = width as usize * (spp / n_planes) * sample_type.bytes();
-        let plane_bytes = row_bytes * height as usize;
-        let frame_bytes = plane_bytes * n_planes;
+        // Checked: a geometry whose frame does not fit in memory would wrap in
+        // a release build to some small size, every frame of that size would
+        // be accepted, and the file left behind is one the reader refuses.
+        let overflow = || {
+            anyhow!(
+                "frame geometry overflows address space: {width}x{height} x {spp} sample(s)/px x {} byte(s)/sample",
+                sample_type.bytes()
+            )
+        };
+        let row_bytes = (width as usize)
+            .checked_mul(spp / n_planes)
+            .and_then(|v| v.checked_mul(sample_type.bytes()))
+            .ok_or_else(overflow)?;
+        let plane_bytes = row_bytes.checked_mul(height as usize).ok_or_else(overflow)?;
+        let frame_bytes = plane_bytes.checked_mul(n_planes).ok_or_else(overflow)?;
         let rows_per_strip = match rows_per_strip {
             Some(r) => r.clamp(1, height),
             // Uncompressed: one strip per frame — the reader's zero-copy fast

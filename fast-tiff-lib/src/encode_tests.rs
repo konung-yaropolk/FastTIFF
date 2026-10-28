@@ -664,3 +664,21 @@ fn rejects_invalid_configurations_and_data() {
     w.write_frame_u8(&[3]).unwrap();
     assert!(w.finish().is_err(), "3 planes into 2 channels must fail");
 }
+
+/// A frame whose size in bytes does not fit in memory is refused when the
+/// writer is made. Unchecked, the multiplication wrapped in a release build to
+/// a small size, every frame of that size was accepted, and the file left
+/// behind was one the reader refuses.
+#[test]
+fn a_frame_too_large_to_address_is_refused() {
+    for (w, h, spp, ty) in [
+        (u32::MAX, u32::MAX, 1, SampleType::F64),
+        // 968973220 * 384773 * 49477 is 2^64 + 4: wraps to four bytes.
+        (968_973_220, 384_773, 49_477, SampleType::U8),
+    ] {
+        let options = WriterOptions::new(w, h, ty).samples_per_pixel(spp);
+        let made = TiffWriter::new(Cursor::new(Vec::new()), options);
+        let err = made.err().expect("refused").to_string();
+        assert!(err.contains("overflows"), "{err}");
+    }
+}

@@ -181,8 +181,17 @@ pub fn apply_batch(
             return;
         };
         *plane = match warp.and_then(|(blocks, fields)| fields.get(t).map(|f| (blocks, f))) {
-            Some((blocks, field)) => crate::nonrigid::warp(plane, ly, lx, blocks, field, shift),
-            None => crate::rigid::shift_frame(plane, ly, lx, shift.dy, shift.dx),
+            Some((blocks, field)) => {
+                crate::nonrigid::warp(plane, ly, lx, blocks, field, shift, settings.border)
+            }
+            None => crate::rigid::shift_frame_bordered(
+                plane,
+                ly,
+                lx,
+                shift.dy,
+                shift.dx,
+                settings.border,
+            ),
         };
     };
     // `Single-thread CPU` means one thread for the whole registration, not just

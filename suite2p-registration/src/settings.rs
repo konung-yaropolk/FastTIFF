@@ -126,6 +126,55 @@ impl Backend {
     }
 }
 
+/// What a registered frame shows where its content has moved out of view.
+///
+/// Moving a frame onto the reference uncovers a strip along the edge it moved
+/// away from: output pixels with no measurement behind them. Something has to
+/// be written there, and this is the choice of what. Only the frames handed
+/// back are affected; how frames move while the registration measures is part
+/// of the method and stays as it is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Border {
+    /// What suite2p's own output shows, and the default. A rigid shift rolls
+    /// the frame (`np.roll`), so the strip shows the far side of the picture;
+    /// a non-rigid warp cannot wrap — it moves each part of the frame
+    /// differently, and a wrap would put the far side into the middle — so it
+    /// repeats the edge, as [`Border::Edge`] does.
+    #[default]
+    Native,
+    /// The nearest edge pixel, repeated outward. The frame keeps the look of
+    /// the frame, with no far-side content and no dark band; but what it
+    /// writes is a copy of a real pixel, so an analysis that averages over the
+    /// strip still takes in a value that was not measured there.
+    Edge,
+    /// Zero. Unmistakably not a measurement, and easy to mask out afterwards;
+    /// a pixel only partly covered by the frame counts as uncovered, so the
+    /// strip ends in a hard edge rather than a ramp from data to zero.
+    Constant,
+}
+
+impl Border {
+    /// What to call this option in an interface.
+    pub fn label(self) -> &'static str {
+        match self {
+            Border::Native => "As suite2p (wrap)",
+            Border::Edge => "Edge replicate",
+            Border::Constant => "Constant (0)",
+        }
+    }
+
+    /// Every option, in the order a selector should offer them.
+    pub fn all() -> [Border; 3] {
+        [Border::Native, Border::Edge, Border::Constant]
+    }
+}
+
+/// How far past the outermost sample a position may land and still count as
+/// on the frame: rounding, not motion. A fitted transformation that is the
+/// identity to within `1e-12` would otherwise blank the last row and column
+/// under [`Border::Constant`].
+pub(crate) const ON_FRAME: f64 = 1e-6;
+
 /// Registration parameters.
 ///
 /// Every field carries the name it has in suite2p's `default_ops`, so a value
@@ -210,6 +259,12 @@ pub struct Settings {
     /// choice, because "it was slower than I expected" and "it gave a different
     /// answer" are questions worth being able to answer separately.
     pub backend: Backend,
+
+    // --- the output -------------------------------------------------------
+    /// Not a suite2p option either: what the moved frames show where they no
+    /// longer cover the frame. suite2p's own behaviour unless asked otherwise;
+    /// see [`Border`].
+    pub border: Border,
 }
 
 impl Default for Settings {
@@ -234,6 +289,7 @@ impl Default for Settings {
             subpixel: 10,
             th_badframes: 1.0,
             backend: Backend::default(),
+            border: Border::default(),
         }
     }
 }

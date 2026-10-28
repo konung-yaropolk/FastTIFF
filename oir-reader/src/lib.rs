@@ -139,11 +139,28 @@
 //! this was built against is about thirteen gigabytes of pixels. It does not
 //! write OIR, read the older OIB/OIF formats, or know axes other than `t` and
 //! `z`.
+//!
+//! # From C and C++
+//!
+//! With the `capi` feature the crate is also a C library: `capi` is the
+//! interface, `include/oir_reader.h` declares it, and
+//!
+//! ```text
+//! cargo rustc -p oir-reader --release --features capi --crate-type cdylib,staticlib
+//! ```
+//!
+//! builds it as a shared and a static library. That module is allowed
+//! `unsafe`, to take C's pointers — the crate's only other `unsafe` is the one
+//! call that maps a file — and the reader it calls is the same safe code
+//! either way. The README's "From C and C++" has the rest: what
+//! lands where, how to link it, and what a C caller should know.
 
 #![warn(missing_docs)]
 #![deny(unsafe_code)]
 
 mod acquisition;
+#[cfg(feature = "capi")]
+pub mod capi;
 mod container;
 mod error;
 #[cfg(test)]

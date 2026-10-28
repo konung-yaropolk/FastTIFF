@@ -13,6 +13,7 @@
 
 use crate::fft::Fft2;
 use crate::masks::RefFilters;
+use crate::settings::Border;
 use rustfft::num_complex::Complex32;
 
 /// What a frame's correlation against the reference found.
@@ -127,10 +128,11 @@ pub fn phase_correlate(
 
 /// Move a frame by `(dy, dx)`, wrapping at the edges.
 ///
-/// Wrapping rather than filling, because that is what suite2p does (`np.roll`)
-/// and because the alternative — a border of zeros or of edge pixels — invents
-/// values that later analysis would average in as if they were measurements.
-/// A wrapped strip is obviously wrong to a reader; a zero strip is not.
+/// Wrapping, because that is what suite2p does (`np.roll`) while it measures:
+/// the reference is built from wrapped frames and recentred by a wrap, and
+/// the correlation it feeds is an FFT, which wraps anyway. A frame handed back
+/// to a caller goes through [`shift_frame_bordered`], which does the same
+/// unless asked to fill the strip instead.
 ///
 /// The sign matches suite2p: a frame found at `+dy` is rolled by `-dy` to bring
 /// it back onto the reference.
@@ -142,6 +144,45 @@ pub fn shift_frame(frame: &[f32], ly: usize, lx: usize, dy: i32, dx: i32) -> Vec
         for x in 0..lx {
             let sx = wrap(x as i32 + dx, lx);
             out[y * lx + x] = frame[sy * lx + sx];
+        }
+    }
+    out
+}
+
+/// Move a frame by `(dy, dx)`, filling what it uncovers as `border` says.
+///
+/// The same sign as [`shift_frame`]: output `(y, x)` comes from input
+/// `(y + dy, x + dx)`. Where that is off the frame, [`Border::Native`] wraps,
+/// exactly as [`shift_frame`] does; [`Border::Edge`] takes the nearest edge
+/// pixel and [`Border::Constant`] writes zero.
+pub fn shift_frame_bordered(
+    frame: &[f32],
+    ly: usize,
+    lx: usize,
+    dy: i32,
+    dx: i32,
+    border: Border,
+) -> Vec<f32> {
+    if border == Border::Native {
+        return shift_frame(frame, ly, lx, dy, dx);
+    }
+    let mut out = vec![0.0f32; ly * lx];
+    if ly == 0 || lx == 0 {
+        return out;
+    }
+    let (ny, nx) = (ly as i64, lx as i64);
+    for y in 0..ly {
+        let sy = y as i64 + dy as i64;
+        if border == Border::Constant && !(0..ny).contains(&sy) {
+            continue;
+        }
+        let sy = sy.clamp(0, ny - 1) as usize;
+        for x in 0..lx {
+            let sx = x as i64 + dx as i64;
+            if border == Border::Constant && !(0..nx).contains(&sx) {
+                continue;
+            }
+            out[y * lx + x] = frame[sy * lx + sx.clamp(0, nx - 1) as usize];
         }
     }
     out

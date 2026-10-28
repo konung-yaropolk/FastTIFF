@@ -104,6 +104,19 @@
 //!   a small test frame away entirely, which is why the example above lowers
 //!   it.
 //!
+//! # From C and C++
+//!
+//! With the `capi` feature the crate is also a C library: `capi` is the
+//! interface, `include/suite2p_registration.h` declares it, and
+//!
+//! ```text
+//! cargo rustc -p suite2p-registration --release --features capi --crate-type cdylib,staticlib
+//! ```
+//!
+//! builds it as a shared and a static library. The README's "From C and C++"
+//! has the rest: what lands where, how to link it, and what a C caller should
+//! know.
+//!
 //! # Doing it by hand
 //!
 //! [`register`] is the whole pipeline, and it wants every frame in memory at
@@ -118,6 +131,8 @@
 #![warn(missing_docs)]
 
 pub mod bidiphase;
+#[cfg(feature = "capi")]
+pub mod capi;
 pub mod fft;
 /// Phase correlation on the graphics card. Behind the `gpu` feature so the
 /// algorithm crate does not pull a graphics stack into a CPU-only build.
@@ -137,8 +152,8 @@ use crate::par::*;
 
 use fft::Fft2;
 use masks::reference_filters_normed;
-pub use rigid::{shift_frame, Shift};
-pub use settings::{Backend, Settings};
+pub use rigid::{shift_frame, shift_frame_bordered, Shift};
+pub use settings::{Backend, Border, Settings};
 
 /// A movie to register: frames of `ly * lx`, row-major.
 pub struct Frames<'a> {
@@ -440,6 +455,10 @@ pub struct Registered {
     pub bad_frames: Vec<bool>,
     /// The per-block deformation, when `nonrigid` was on.
     pub nonrigid: Option<NonRigid>,
+    /// What [`Registered::apply`] writes where a moved frame no longer covers
+    /// the frame: [`Settings::border`] from the run — suite2p's own output
+    /// unless that asked otherwise — and free to change before applying.
+    pub border: Border,
 }
 
 /// The block field a non-rigid pass measured.
@@ -464,9 +483,9 @@ impl Registered {
         });
         match &self.nonrigid {
             Some(nr) if t < nr.shifts.len() => {
-                nonrigid::warp(frame, ly, lx, &nr.blocks, &nr.shifts[t], rigid)
+                nonrigid::warp(frame, ly, lx, &nr.blocks, &nr.shifts[t], rigid, self.border)
             }
-            _ => shift_frame(frame, ly, lx, rigid.dy, rigid.dx),
+            _ => shift_frame_bordered(frame, ly, lx, rigid.dy, rigid.dx, self.border),
         }
     }
 }
@@ -485,7 +504,36 @@ pub fn register(
     on_progress: &mut dyn FnMut(f32) -> bool,
 ) -> Option<Registered> {
     let passes = if settings.two_step_registration { 2 } else { 1 };
-    let mut working: Vec<Vec<f32>> = movie.frames.to_vec();
+    let (ly, lx) = (movie.ly, movie.lx);
+
+    // The bidirectional phase once, for every pass and for the block field.
+    // A second pass that measured it again would measure frames the first
+    // pass had already shifted, and a shift by an odd number of rows swaps
+    // which lines are the odd ones: the comb it found came out mirrored, and
+    // applying that doubled the comb instead of removing it. So it is measured
+    // and corrected here, and each pass runs on corrected frames with nothing
+    // left to measure.
+    let bidi = if settings.do_bidiphase && settings.bidiphase == 0 {
+        bidiphase::compute(movie.frames, ly, lx)
+    } else {
+        settings.bidiphase
+    };
+    let corrected: Vec<Vec<f32>> = movie
+        .frames
+        .iter()
+        .map(|f| {
+            let mut f = f.clone();
+            bidiphase::shift(&mut f, ly, lx, bidi);
+            f
+        })
+        .collect();
+    let per_pass = Settings {
+        do_bidiphase: false,
+        bidiphase: 0,
+        ..*settings
+    };
+    // The second pass's input: the corrected frames moved by the first.
+    let mut shifted: Option<Vec<Vec<f32>>> = None;
     let mut total: Vec<Shift> = vec![
         Shift {
             dy: 0,
@@ -499,13 +547,14 @@ pub fn register(
     for pass in 0..passes {
         let span = 1.0 / passes as f32;
         let base = pass as f32 * span;
+        let working = shifted.as_deref().unwrap_or(&corrected);
         let out = register_once(
             &Frames {
-                ly: movie.ly,
-                lx: movie.lx,
-                frames: &working,
+                ly,
+                lx,
+                frames: working,
             },
-            settings,
+            &per_pass,
             &mut |f| on_progress(base + f * span),
         )?;
 
@@ -518,18 +567,21 @@ pub fn register(
             total[t].corr = s.corr;
         }
         if pass + 1 < passes {
-            working = working
-                .iter()
-                .zip(&out.shifts)
-                .map(|(f, s)| shift_frame(f, movie.ly, movie.lx, s.dy, s.dx))
-                .collect();
+            shifted = Some(
+                working
+                    .iter()
+                    .zip(&out.shifts)
+                    .map(|(f, s)| shift_frame(f, ly, lx, s.dy, s.dx))
+                    .collect(),
+            );
         }
         last = Some(out);
     }
 
     let mut out = last?;
     out.shifts = total;
-    out.bad_frames = crate::pipeline::bad_frames(&out.shifts, movie.ly, movie.lx, settings);
+    out.bidiphase = bidi;
+    out.bad_frames = crate::pipeline::bad_frames(&out.shifts, ly, lx, settings);
 
     // The deformation is measured *after* the rigid shift, on frames already
     // brought onto the reference — so a block is looking for the few pixels the
@@ -537,7 +589,6 @@ pub fn register(
     // would need every block's search window to cover the whole motion, and a
     // 64-pixel block cannot see 50 pixels of travel.
     if settings.nonrigid {
-        let (ly, lx) = (movie.ly, movie.lx);
         let blocks = nonrigid::make_blocks(ly, lx, settings.block_size, settings.subpixel);
         let mut filters = nonrigid::block_filters(
             &out.reference,
@@ -550,8 +601,10 @@ pub fn register(
             .norm_frames
             .then(|| crate::pipeline::percentile_range(&out.reference));
 
-        let mut per_frame = Vec::with_capacity(movie.frames.len());
-        for (t, frame) in movie.frames.iter().enumerate() {
+        // The corrected frames: the reference has no comb, so a block matched
+        // against a combed frame would be measuring the comb too.
+        let mut per_frame = Vec::with_capacity(corrected.len());
+        for (t, frame) in corrected.iter().enumerate() {
             if !on_progress(0.9 + 0.1 * t as f32 / movie.frames.len().max(1) as f32) {
                 return None;
             }
@@ -660,6 +713,7 @@ fn register_once(
         bidiphase: bidi,
         bad_frames: Vec::new(),
         nonrigid: None,
+        border: settings.border,
     })
 }
 

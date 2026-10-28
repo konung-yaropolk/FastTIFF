@@ -123,7 +123,16 @@ fn apply_batch_matches_a_serial_loop() {
     let expected: Vec<Vec<f32>> = planes
         .iter()
         .zip(&frame_of)
-        .map(|(p, &t)| crate::rigid::shift_frame(p, ly, lx, shifts[t].dy, shifts[t].dx))
+        .map(|(p, &t)| {
+            crate::rigid::shift_frame_bordered(
+                p,
+                ly,
+                lx,
+                shifts[t].dy,
+                shifts[t].dx,
+                Settings::default().border,
+            )
+        })
         .collect();
 
     for backend in Backend::all() {

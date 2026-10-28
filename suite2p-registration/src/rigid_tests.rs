@@ -131,6 +131,49 @@ fn shifting_wraps_rather_than_filling() {
     );
 }
 
+/// The frames handed back fill instead of wrapping: the edge pixel repeated,
+/// or zero.
+#[test]
+fn a_bordered_shift_fills_rather_than_wraps() {
+    let (ly, lx) = (2, 3);
+    // 1 2 3
+    // 4 5 6
+    let f: Vec<f32> = (1..=6).map(|i| i as f32).collect();
+    // dx = 1: column 0 becomes old column 1, and the last column has nothing
+    // to its right.
+    assert_eq!(
+        shift_frame_bordered(&f, ly, lx, 0, 1, Border::Edge),
+        vec![2.0, 3.0, 3.0, 5.0, 6.0, 6.0]
+    );
+    assert_eq!(
+        shift_frame_bordered(&f, ly, lx, 0, 1, Border::Constant),
+        vec![2.0, 3.0, 0.0, 5.0, 6.0, 0.0]
+    );
+    // dy = -1: the top row has nothing above it.
+    assert_eq!(
+        shift_frame_bordered(&f, ly, lx, -1, 0, Border::Edge),
+        vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
+    );
+    assert_eq!(
+        shift_frame_bordered(&f, ly, lx, -1, 0, Border::Constant),
+        vec![0.0, 0.0, 0.0, 1.0, 2.0, 3.0]
+    );
+    // A shift past the whole frame leaves nothing of it.
+    assert_eq!(
+        shift_frame_bordered(&f, ly, lx, 5, -9, Border::Constant),
+        vec![0.0; 6]
+    );
+    // Unless asked, it is suite2p's roll.
+    assert_eq!(
+        shift_frame_bordered(&f, ly, lx, 1, -2, Border::Native),
+        shift_frame(&f, ly, lx, 1, -2)
+    );
+    // And no shift is no change, whatever the border.
+    for border in Border::all() {
+        assert_eq!(shift_frame_bordered(&f, ly, lx, 0, 0, border), f);
+    }
+}
+
 #[test]
 fn a_zero_shift_changes_nothing() {
     let (ly, lx) = (4, 5);

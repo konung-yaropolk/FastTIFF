@@ -1,3 +1,22 @@
+//! Lazy, memory-mapped reading and streaming writing of multi-frame TIFF
+//! stacks: IFD indexing, ImageJ and OME-TIFF metadata, and per-frame decoding.
+//! The README has the tour.
+//!
+//! # From C and C++
+//!
+//! With the `capi` feature the crate is also a C library: `capi` is the
+//! interface, `include/fast_tiff_lib.h` declares it, and
+//!
+//! ```text
+//! cargo rustc -p fast-tiff-lib --release --features capi --crate-type cdylib,staticlib
+//! ```
+//!
+//! builds it as a shared and a static library. The README's "From C and C++"
+//! has the rest: what lands where, how to link it, and what a C caller should
+//! know.
+
+#[cfg(feature = "capi")]
+pub mod capi;
 pub mod decode;
 pub mod encode;
 pub mod ifd;

@@ -1,4 +1,5 @@
-//! Memory-mapping a part. The crate's one piece of `unsafe`.
+//! Memory-mapping a part. One of the crate's two places allowed `unsafe`; the
+//! other is the C interface, `capi.rs`, when the `capi` feature builds it.
 
 use std::fs::File;
 use std::io;

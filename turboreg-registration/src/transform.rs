@@ -30,7 +30,7 @@
 //! image and it says where to look in the one being registered. That is the
 //! direction a pull-resampler wants, so [`warp`] uses it as it stands.
 
-use crate::settings::Transformation;
+use crate::settings::{Border, Transformation, ON_FRAME};
 
 /// A point, in pixels, `x` across and `y` down.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -407,6 +407,37 @@ pub fn warp(moving: &[f32], w: usize, h: usize, m: &Matrix) -> Vec<f32> {
 /// run after the measurement — and when it ran on one thread, it was the reason
 /// a multi-channel stack scaled worse than a single-channel one.
 pub fn warp_with(moving: &[f32], w: usize, h: usize, m: &Matrix, parallel: bool) -> Vec<f32> {
+    resample(moving, w, h, m, None, parallel)
+}
+
+/// [`warp_with`], with what lands off the frame read as `border` says.
+///
+/// [`Border::Native`] is [`warp_with`] itself, the mirrored extension. The
+/// other two fill instead, because past the edge the extension repeats the
+/// picture backwards, cells included. Inside the frame all three read the
+/// same.
+pub fn warp_bordered(
+    moving: &[f32],
+    w: usize,
+    h: usize,
+    m: &Matrix,
+    border: Border,
+    parallel: bool,
+) -> Vec<f32> {
+    let fill = (border != Border::Native).then_some(border);
+    resample(moving, w, h, m, fill, parallel)
+}
+
+/// The pull both warps share: `border` of `None` reads the mirrored extension,
+/// as does [`Border::Native`].
+fn resample(
+    moving: &[f32],
+    w: usize,
+    h: usize,
+    m: &Matrix,
+    border: Option<Border>,
+    parallel: bool,
+) -> Vec<f32> {
     let mut out = vec![0.0f32; w * h];
     if w == 0 || h == 0 {
         return out;
@@ -418,7 +449,19 @@ pub fn warp_with(moving: &[f32], w: usize, h: usize, m: &Matrix, parallel: bool)
         let yf = y as f64;
         for (x, o) in row.iter_mut().enumerate() {
             let p = m.apply(Point::new(x as f64, yf));
-            *o = crate::spline::interpolate(coeff, w, h, p.x, p.y) as f32;
+            let Some(border) = border else {
+                *o = crate::spline::interpolate(coeff, w, h, p.x, p.y) as f32;
+                continue;
+            };
+            let on = |v: f64, n: usize| v >= -ON_FRAME && v <= (n - 1) as f64 + ON_FRAME;
+            if border == Border::Constant && !(on(p.x, w) && on(p.y, h)) {
+                *o = 0.0;
+                continue;
+            }
+            // On the edge itself the spline is the edge sample, so clamping
+            // the position repeats the edge outward.
+            let (px, py) = (p.x.clamp(0.0, (w - 1) as f64), p.y.clamp(0.0, (h - 1) as f64));
+            *o = crate::spline::interpolate(coeff, w, h, px, py) as f32;
         }
     });
     out

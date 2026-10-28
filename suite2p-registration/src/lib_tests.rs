@@ -241,6 +241,48 @@ fn a_fixed_bidiphase_is_applied_without_measuring() {
     assert_eq!(off.bidiphase, 0);
 }
 
+/// Two-step measures the comb once, on the frames as recorded. Measured
+/// again on frames the first pass had shifted by an odd number of rows, the
+/// odd and even lines trade places and the comb comes out mirrored — which is
+/// what it did, and applying that doubled the comb instead of removing it.
+#[test]
+fn two_step_keeps_the_bidiphase_of_one_step() {
+    let (ly, lx) = (128, 128);
+    let base = textured(ly, lx);
+    // Odd row shifts, so the second pass would see swapped lines.
+    let path = [(0, 0), (7, 5), (3, -1), (-3, 4), (1, 3), (5, -2)];
+    let frames: Vec<Vec<f32>> = path
+        .iter()
+        .map(|&(dy, dx)| {
+            let mut f = shift_frame(&base, ly, lx, -dy, -dx);
+            bidiphase::shift(&mut f, ly, lx, 2);
+            f
+        })
+        .collect();
+    let movie = Frames {
+        ly,
+        lx,
+        frames: &frames,
+    };
+    let one = Settings {
+        do_bidiphase: true,
+        nonrigid: false,
+        spatial_taper: 5.0,
+        backend: Backend::SingleThread,
+        ..Settings::default()
+    };
+    let two = Settings {
+        two_step_registration: true,
+        ..one
+    };
+    let a = register(&movie, &one, &mut |_| true).expect("not cancelled");
+    let b = register(&movie, &two, &mut |_| true).expect("not cancelled");
+    assert_ne!(a.bidiphase, 0, "the comb was not found at all");
+    assert_eq!(b.bidiphase, a.bidiphase, "two-step measured a different comb");
+    let pairs = |r: &Registered| r.shifts.iter().map(|s| (s.dy, s.dx)).collect::<Vec<_>>();
+    assert_eq!(pairs(&b), pairs(&a));
+}
+
 // ------------------------------------------------------------- the backends
 
 /// The claim the selector rests on: which backend runs the arithmetic changes
@@ -581,9 +623,18 @@ fn no_block_field_without_asking_for_one() {
     )
     .unwrap();
     assert!(out.nonrigid.is_none());
-    // `apply` then agrees with `shift_frame` exactly.
+    // `apply` then agrees with the rigid shift exactly, filled as the run's
+    // settings say.
+    assert_eq!(out.border, Border::Native);
     let a = out.apply(&frames[1], ly, lx, 1);
-    let b = shift_frame(&frames[1], ly, lx, out.shifts[1].dy, out.shifts[1].dx);
+    let b = shift_frame_bordered(
+        &frames[1],
+        ly,
+        lx,
+        out.shifts[1].dy,
+        out.shifts[1].dx,
+        out.border,
+    );
     assert_eq!(a, b);
 }
 

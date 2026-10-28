@@ -14,7 +14,7 @@
 //! recovery test would notice if it were dropped.
 
 use super::*;
-use crate::settings::Transformation;
+use crate::settings::{Border, Transformation};
 
 fn through(m: &Matrix, pts: &[Point]) -> Vec<Point> {
     pts.iter().map(|p| m.apply(*p)).collect()
@@ -318,6 +318,60 @@ fn warping_by_a_whole_pixel_shift_moves_the_image() {
         (7, 4),
         "a reference->moving offset of -2 should move the feature right by 2"
     );
+}
+
+/// The output warp fills what the move uncovers instead of mirroring into it:
+/// the edge pixel repeated, or zero. What it still covers reads exactly what
+/// the mirrored warp reads.
+#[test]
+fn a_bordered_warp_fills_what_the_move_uncovers() {
+    let (w, h) = (10, 6);
+    // Bright on the left, so a mirror would bring it back in on the left.
+    let img: Vec<f32> = (0..w * h).map(|i| (10 - (i % w)) as f32).collect();
+    // Output x reads input x - 3: the three left columns are uncovered.
+    let m = Matrix {
+        c: [-3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+    };
+    let mirrored = warp(&img, w, h, &m);
+    let edged = warp_bordered(&img, w, h, &m, Border::Edge, false);
+    let zeroed = warp_bordered(&img, w, h, &m, Border::Constant, false);
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if x < 3 {
+                assert!((edged[i] - 10.0).abs() < 2e-3, "({x},{y}) edge {}", edged[i]);
+                assert_eq!(zeroed[i], 0.0, "({x},{y}) not filled");
+                // The mirror reads -1 as column 0, so it differs from a fill
+                // only further out.
+                if x < 2 {
+                    assert!((mirrored[i] - 10.0).abs() > 0.5, "the mirror is not a fill");
+                }
+            } else {
+                assert_eq!(edged[i], mirrored[i], "({x},{y}) covered, but changed");
+                assert_eq!(zeroed[i], mirrored[i], "({x},{y}) covered, but changed");
+            }
+        }
+    }
+    // Unless asked, it is TurboReg's mirror.
+    assert_eq!(warp_bordered(&img, w, h, &m, Border::Native, false), mirrored);
+    // The identity uncovers nothing, whatever the border — rounding included.
+    for border in Border::all() {
+        assert_eq!(
+            warp_bordered(&img, w, h, &Matrix::identity(), border, false),
+            warp(&img, w, h, &Matrix::identity())
+        );
+    }
+    // And threads change nothing here either.
+    let a: f64 = 0.07;
+    let r = Matrix {
+        c: [2.3, a.cos(), -a.sin(), 0.0, -1.1, a.sin(), a.cos(), 0.0],
+    };
+    for border in Border::all() {
+        assert_eq!(
+            warp_bordered(&img, w, h, &r, border, false),
+            warp_bordered(&img, w, h, &r, border, true)
+        );
+    }
 }
 
 /// Resampling gives the same image on every core as on one. Every output

@@ -6,7 +6,7 @@
 # travels with the algorithm whoever retypes it.
 [package]
 name = "suite2p-registration"
-version = "0.26.3"
+version = "0.26.4"
 edition = "2021"
 # `Option::is_none_or`, in the GPU backend's context cache.
 rust-version = "1.82"
@@ -24,7 +24,7 @@ categories = ["science", "algorithms", "multimedia::images"]
 # The GPU backend is behind a feature, so docs.rs is told to build it — a module
 # that is not in the documentation may as well not exist.
 [package.metadata.docs.rs]
-features = ["gpu"]
+features = ["gpu", "capi"]
 
 [dependencies]
 # Phase correlation is FFT-based, so an FFT is not optional. `rustfft` is
@@ -60,3 +60,10 @@ default = ["threads"]
 # `src/par.rs` says what that costs and why it costs nothing else.
 threads = ["dep:rayon"]
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+
+# A C interface — `src/capi.rs`, declared in `include/suite2p_registration.h` — for linking
+# into C and C++ programs as a shared or static library. Adds no dependency.
+# The crate type is chosen when building (`cargo rustc --crate-type`; see the
+# README's "From C and C++") rather than listed under `[lib]`, because a
+# `cdylib` listed there is built by every crate that depends on this one.
+capi = []

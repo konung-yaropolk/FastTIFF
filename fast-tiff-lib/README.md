@@ -698,8 +698,9 @@ a *lower bound*. Methodology, machine details, and how to run are in
 |---|---|---|
 | `mmap` | ✅ | Memory-mapped file access, and with it `TiffStack::open`. Pulls in `memmap2`. |
 | `codec-zstd` | ✅ | The ZSTD codec (compression 50000). Pulls in `zstd`, which builds a C library via `zstd-sys`. |
+| `capi` | | A C interface, for linking the crate into C and C++ programs — see [From C and C++](#from-c-and-c). Adds no dependency. |
 
-Both are on by default, so nothing changes for an ordinary native build.
+`mmap` and `codec-zstd` are on by default, so nothing changes for an ordinary native build.
 
 Turning one off narrows what the crate can do, and says so clearly rather than
 failing obscurely:
@@ -725,6 +726,147 @@ parallel path is ever entered there — `should_parallelize` returns `false` on
 
 Both configurations are covered in CI, and `tests/from_bytes.rs` deliberately
 runs in each so the filesystem-free path can't silently rot.
+
+## From C and C++
+
+With the `capi` feature the crate builds as a C library, shared or static, and
+[`include/fast_tiff_lib.h`](include/fast_tiff_lib.h) declares it. The crate type is chosen on
+the command line rather than fixed in `Cargo.toml`, so a Rust program that
+depends on this crate never builds a C library it has no use for:
+
+```sh
+cargo rustc -p fast-tiff-lib --release --features capi --crate-type cdylib,staticlib
+```
+
+`-p fast-tiff-lib` is for this repository's workspace; in an unpacked crate,
+leave it out. The libraries land in `target/release/`:
+
+| platform | shared library | link against | static library |
+|---|---|---|---|
+| Windows (MSVC) | `fast_tiff_lib.dll` | `fast_tiff_lib.dll.lib` | `fast_tiff_lib.lib` |
+| Linux | `libfast_tiff_lib.so` | the same | `libfast_tiff_lib.a` |
+| macOS | `libfast_tiff_lib.dylib` | the same | `libfast_tiff_lib.a` |
+
+A static library leaves the system libraries it needs to the final link; add
+`-- --print native-static-libs` to the command above for the list on your
+platform (on Windows it is `kernel32 ntdll userenv ws2_32 dbghelp`). Build the
+program against the C runtime that list names: `/defaultlib:libcmt` is the
+static one, so `cl /MT` — which is what you get from this repository, whose
+`.cargo/config.toml` builds Windows targets with `+crt-static` — and `msvcrt`
+is the DLL one, `cl /MD`. The ZSTD codec's C code is inside the library
+already.
+
+```c
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "fast_tiff_lib.h"
+
+static int fail(const char *what) {
+    fprintf(stderr, "%s: %s\n", what, ftl_last_error());
+    return 1;
+}
+
+/* Print a stack's shape, then save a Deflate-compressed 16-bit copy of it. */
+int main(int argc, char **argv) {
+    if (argc != 3) return 2;
+    FtlStack *in = NULL;
+    if (ftl_open(argv[1], &in) != FTL_OK) return fail("open");
+
+    FtlFrameInfo f;
+    FtlMetadata m;
+    char unit[64];
+    size_t n = 0, count = ftl_frame_count(in);
+    ftl_frame_info(in, 0, &f);
+    ftl_metadata(in, &m);
+    ftl_metadata_unit(in, unit, sizeof unit); /* snprintf-style */
+    ftl_sample_count(in, 0, &n);              /* every frame is frame 0's size */
+    printf("%zu frames of %u x %u x %u, %u-bit: %zu channel(s), %zu slice(s), %zu time point(s)\n",
+           count, f.width, f.height, f.samples_per_pixel, f.bits_per_sample,
+           m.channels, m.slices, m.frames);
+
+    FtlWriterOptions o;
+    ftl_writer_options_default(&o); /* always start here: the struct can grow */
+    o.width = f.width;
+    o.height = f.height;
+    o.samples_per_pixel = f.samples_per_pixel;
+    o.planar = f.samples_per_pixel > 1; /* the readers hand back plane after plane */
+    o.compression = FTL_COMPRESSION_DEFLATE;
+    o.predictor = true;
+    o.metadata_format = FTL_METADATA_IMAGEJ;
+    o.channels = m.channels;
+    o.slices = m.slices;
+    if (!isnan(m.pixel_width) && !isnan(m.pixel_height)) { /* NaN: the file did not say */
+        o.pixel_width = m.pixel_width;
+        o.pixel_height = m.pixel_height;
+        o.unit = unit[0] ? unit : NULL;
+    }
+    FtlWriter *out = NULL;
+    if (ftl_writer_create(argv[2], &o, &out) != FTL_OK) return fail("create");
+
+    uint16_t *pixels = malloc(n * sizeof *pixels);
+    for (size_t i = 0; i < count; i++) {
+        if (ftl_read_u16(in, i, NULL, pixels, n) != FTL_OK) return fail("read");
+        if (ftl_writer_write_u16(out, pixels, n) != FTL_OK) return fail("write");
+    }
+    free(pixels);
+    ftl_stack_free(in);
+    return ftl_writer_finish(out) == FTL_OK ? 0 : fail("finish");
+}
+```
+
+```sh
+# Linux and macOS, from the workspace root (in an unpacked crate: -I include)
+cc main.c -I fast-tiff-lib/include -L target/release -lfast_tiff_lib
+# Windows, MSVC, likewise
+cl main.c /I fast-tiff-lib\include target\release\fast_tiff_lib.dll.lib
+```
+
+The shared library has to be findable when the program runs: beside the `.exe`
+on Windows, on `LD_LIBRARY_PATH` (or an rpath) on Linux, on
+`DYLD_LIBRARY_PATH` on macOS.
+
+What a C caller should know:
+
+- **Statuses, not crashes.** Every call that can fail returns `FTL_OK` or the
+  reason it did not — `FTL_IO`, `FTL_NOT_TIFF`, `FTL_FORMAT` for a TIFF it
+  cannot read (or not as asked), `FTL_INVALID_ARGUMENT`, `FTL_UNAVAILABLE` —
+  and `ftl_last_error()` says it in words. A panic comes back as `FTL_FAILED`
+  instead of unwinding into C, as long as the library is built with
+  `panic = "unwind"`, the default.
+- **Buffers are the caller's.** `ftl_sample_count()` says how many values a
+  frame decodes to; a smaller buffer is refused. A frame comes back as its
+  sample planes one after another — an RGB frame as its red, green and blue
+  planes, whichever way the file interleaves them — and a writer with
+  `planar` set takes the same layout back.
+- **Pick the reader by depth.** `ftl_read_u16` takes every depth and gives
+  display values (8-bit widened, signed offset, 32/64-bit rescaled);
+  `ftl_read_u8` is for 8-bit frames as they are and `ftl_read_f32` for 32-
+  and 64-bit ones, and each refuses the others with `FTL_FORMAT`.
+- **Strings** go in as NUL-terminated UTF-8, and come out snprintf-style: a
+  buffer and its capacity in, the whole length back, so `NULL, 0` asks for
+  the size. A number the file does not give is NaN.
+- **Copies.** `ftl_open` maps the file — it must not change while open —
+  and decoding copies each frame out of the mapping once, into your buffer;
+  `ftl_open_bytes` copies the bytes it is given.
+- **Finish the writer.** The file is not a TIFF until `ftl_writer_finish`
+  returns `FTL_OK`; it frees the writer either way, and `ftl_writer_free`
+  abandons one unfinished.
+- **Threads.** A stack can be read from several threads at once; a writer
+  is one thread's at a time. `ftl_last_error` is per thread.
+- **Every symbol, everywhere.** A build without `mmap` still has `ftl_open`,
+  which returns `FTL_UNAVAILABLE` (use `ftl_open_bytes`); so does
+  `ftl_writer_create` on a target with no filesystem, and for ZSTD without
+  `codec-zstd`.
+- **Not here:** the display side of the metadata (LUTs, contrast windows,
+  display helpers), partial-frame reads (`crop`, row bands), prefetch,
+  `preload_frames_*`, and writing to memory.
+- **One header per version.** The header describes the library it shipped
+  with; check `ftl_version()` if they may have come apart.
+- **Licence.** The library is MPL-2.0, which is file-level: a C or C++ program
+  may link it, statically or dynamically, under any licence of its own.
+  Changes to the library's own files stay MPL-2.0 and have to be made
+  available.
 
 ## Dependencies
 

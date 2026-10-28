@@ -26,7 +26,7 @@
 #   vol. 7, no. 1, pp. 27-41, January 1998.
 [package]
 name = "turboreg-registration"
-version = "0.26.3"
+version = "0.26.4"
 edition = "2021"
 # `let ... else`, used throughout the optimizer.
 rust-version = "1.82"
@@ -74,7 +74,14 @@ threads = ["dep:rayon"]
 # and a build that has no use for a GPU should not link one.
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 
+# A C interface — `src/capi.rs`, declared in `include/turboreg_registration.h` — for linking
+# into C and C++ programs as a shared or static library. Adds no dependency.
+# The crate type is chosen when building (`cargo rustc --crate-type`; see the
+# README's "From C and C++") rather than listed under `[lib]`, because a
+# `cdylib` listed there is built by every crate that depends on this one.
+capi = []
+
 # docs.rs builds the GPU module too — a module missing from the documentation
 # may as well not exist.
 [package.metadata.docs.rs]
-features = ["gpu"]
+features = ["gpu", "capi"]
