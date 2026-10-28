@@ -151,6 +151,19 @@ pub enum Border {
     /// a pixel only partly covered by the frame counts as uncovered, so the
     /// strip ends in a hard edge rather than a ramp from data to zero.
     Constant,
+    /// No strip at all: every frame is cut down to the largest rectangle that
+    /// every frame of the recording covers. What is kept was measured in every
+    /// frame, and what any one frame lost is gone from all of them.
+    ///
+    /// The rectangle is the largest at any angle; when a turned one holds
+    /// clearly more than any upright one, it is turned upright in the result,
+    /// whose rows then run along it rather than along the frame's. The frames
+    /// come back smaller, with the same pixel spacing. Which rectangle depends
+    /// on the whole recording, so it is known once every frame is measured:
+    /// [`Registered::common_area`](crate::Registered::common_area), or
+    /// [`common_area`](crate::area::common_area) and
+    /// [`Cut`](crate::area::Cut) for a recording measured in batches.
+    Crop,
 }
 
 impl Border {
@@ -160,12 +173,20 @@ impl Border {
             Border::Native => "As suite2p (wrap)",
             Border::Edge => "Edge replicate",
             Border::Constant => "Constant (0)",
+            Border::Crop => "Crop to the common area",
         }
     }
 
     /// Every option, in the order a selector should offer them.
-    pub fn all() -> [Border; 3] {
-        [Border::Native, Border::Edge, Border::Constant]
+    pub fn all() -> [Border; 4] {
+        [Border::Native, Border::Edge, Border::Constant, Border::Crop]
+    }
+
+    /// Whether a sample off the frame reads zero: [`Border::Constant`], and
+    /// [`Border::Crop`], whose frames are resampled the same way before the
+    /// strip is cut off.
+    pub(crate) fn fills_zero(self) -> bool {
+        matches!(self, Border::Constant | Border::Crop)
     }
 }
 

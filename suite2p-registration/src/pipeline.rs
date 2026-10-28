@@ -161,6 +161,12 @@ pub fn measure_batch(
 /// This is the other half of the run, next to [`measure_batch`]: a whole
 /// recording is resampled here, one output pixel at a time, and leaving it on
 /// one thread was enough on its own to hide which backend the measuring used.
+///
+/// Under [`Border::Crop`](crate::Border::Crop) the planes are resampled as
+/// under `Constant`, at full size: the area to cut them to depends on every
+/// frame of the recording, and a batch is only some of them. Measure every
+/// batch first, find the area with [`common_area`](crate::area::common_area),
+/// and move and cut the planes with a [`Cut`](crate::area::Cut) instead.
 pub fn apply_batch(
     planes: &mut [Vec<f32>],
     ly: usize,

@@ -571,7 +571,8 @@ fn refine_peak(cc: &[f32], lcorr: usize, blocks: &Blocks, subpixel: usize) -> Bl
 /// Out-of-frame samples never wrap: a non-rigid warp moves each part of the
 /// frame differently, so a wrap would bring the far side of the picture into
 /// the middle of it. They read the nearest edge pixel, for [`Border::Native`]
-/// as for [`Border::Edge`], or zero for [`Border::Constant`].
+/// as for [`Border::Edge`], or zero for [`Border::Constant`] and
+/// [`Border::Crop`] (which a caller then cuts off; see [`crate::area`]).
 pub fn warp(
     frame: &[f32],
     ly: usize,
@@ -581,45 +582,12 @@ pub fn warp(
     rigid: Shift,
     border: Border,
 ) -> Vec<f32> {
-    let (ny, nx) = (blocks.ny, blocks.nx);
-    // Block centres, which is where each shift is treated as measured.
-    let ys: Vec<f64> = (0..ny)
-        .map(|iy| blocks.blocks[iy * nx].centre().0)
-        .collect();
-    let xs: Vec<f64> = (0..nx).map(|ix| blocks.blocks[ix].centre().1).collect();
-
-    // Bilinear lookup into the block grid, clamped at the edges — a pixel
-    // outside the outermost block centres takes that block's shift.
-    let at = |v: f64, axis: &[f64]| -> (usize, usize, f64) {
-        if axis.len() == 1 {
-            return (0, 0, 0.0);
-        }
-        if v <= axis[0] {
-            return (0, 0, 0.0);
-        }
-        if v >= axis[axis.len() - 1] {
-            let i = axis.len() - 1;
-            return (i, i, 0.0);
-        }
-        let mut i = 0;
-        while i + 1 < axis.len() && axis[i + 1] < v {
-            i += 1;
-        }
-        let t = (v - axis[i]) / (axis[i + 1] - axis[i]).max(1e-9);
-        (i, i + 1, t)
-    };
-
+    let grid = Grid::of(blocks);
     let mut out = vec![0.0f32; ly * lx];
     for y in 0..ly {
-        let (iy0, iy1, ty) = at(y as f64, &ys);
+        let row = grid.row(y as f64);
         for x in 0..lx {
-            let (ix0, ix1, tx) = at(x as f64, &xs);
-            let s = |iy: usize, ix: usize| shifts[iy * nx + ix];
-            let (a, b, c, d) = (s(iy0, ix0), s(iy0, ix1), s(iy1, ix0), s(iy1, ix1));
-            let lerp = |p: f32, q: f32, t: f64| p as f64 * (1.0 - t) + q as f64 * t;
-            let dy = lerp(lerp(a.dy, b.dy, tx) as f32, lerp(c.dy, d.dy, tx) as f32, ty);
-            let dx = lerp(lerp(a.dx, b.dx, tx) as f32, lerp(c.dx, d.dx, tx) as f32, ty);
-
+            let (dy, dx) = grid.shift(shifts, row, grid.col(x as f64));
             // Where this output pixel came from: the rigid shift plus this
             // pixel's own share of the deformation.
             let sy = y as f64 + dy + rigid.dy as f64;
@@ -630,12 +598,89 @@ pub fn warp(
     out
 }
 
-/// Bilinear sample, clamped to the frame — or zero off it, under
-/// [`Border::Constant`]. A position between the last pixel and the one past it
-/// counts as off: half of what it would blend is not there.
-fn sample(frame: &[f32], ly: usize, lx: usize, y: f64, x: f64, border: Border) -> f32 {
+/// The block grid as [`warp`] reads it: where each block's shift is taken to
+/// have been measured, and the bilinear lookup between those places.
+///
+/// Its own type so that [`crate::area`] reads a field exactly as the warp
+/// does — which pixels a frame covers is a question about this arithmetic,
+/// and two copies of it would drift.
+pub(crate) struct Grid {
+    ys: Vec<f64>,
+    xs: Vec<f64>,
+    nx: usize,
+}
+
+impl Grid {
+    pub(crate) fn of(blocks: &Blocks) -> Grid {
+        let (ny, nx) = (blocks.ny, blocks.nx);
+        // Block centres, which is where each shift is treated as measured.
+        let ys = (0..ny)
+            .map(|iy| blocks.blocks[iy * nx].centre().0)
+            .collect();
+        let xs = (0..nx).map(|ix| blocks.blocks[ix].centre().1).collect();
+        Grid { ys, xs, nx }
+    }
+
+    /// Where row `y` falls between the block centres.
+    pub(crate) fn row(&self, y: f64) -> (usize, usize, f64) {
+        between(y, &self.ys)
+    }
+
+    /// Where column `x` falls between the block centres.
+    pub(crate) fn col(&self, x: f64) -> (usize, usize, f64) {
+        between(x, &self.xs)
+    }
+
+    /// The deformation `(dy, dx)` at a pixel, from where its row and column
+    /// fall: the block shifts around it, interpolated bilinearly.
+    pub(crate) fn shift(
+        &self,
+        shifts: &[BlockShift],
+        (iy0, iy1, ty): (usize, usize, f64),
+        (ix0, ix1, tx): (usize, usize, f64),
+    ) -> (f64, f64) {
+        let s = |iy: usize, ix: usize| shifts[iy * self.nx + ix];
+        let (a, b, c, d) = (s(iy0, ix0), s(iy0, ix1), s(iy1, ix0), s(iy1, ix1));
+        let lerp = |p: f32, q: f32, t: f64| p as f64 * (1.0 - t) + q as f64 * t;
+        let dy = lerp(lerp(a.dy, b.dy, tx) as f32, lerp(c.dy, d.dy, tx) as f32, ty);
+        let dx = lerp(lerp(a.dx, b.dx, tx) as f32, lerp(c.dx, d.dx, tx) as f32, ty);
+        (dy, dx)
+    }
+}
+
+/// Bilinear lookup into the block grid, clamped at the edges — a pixel
+/// outside the outermost block centres takes that block's shift.
+fn between(v: f64, axis: &[f64]) -> (usize, usize, f64) {
+    if axis.len() == 1 {
+        return (0, 0, 0.0);
+    }
+    if v <= axis[0] {
+        return (0, 0, 0.0);
+    }
+    if v >= axis[axis.len() - 1] {
+        let i = axis.len() - 1;
+        return (i, i, 0.0);
+    }
+    let mut i = 0;
+    while i + 1 < axis.len() && axis[i + 1] < v {
+        i += 1;
+    }
+    let t = (v - axis[i]) / (axis[i + 1] - axis[i]).max(1e-9);
+    (i, i + 1, t)
+}
+
+/// Whether a sample at `(y, x)` lands on an `ly * lx` frame. A position
+/// between the last pixel and the one past it counts as off: half of what it
+/// would blend is not there.
+pub(crate) fn on_frame(y: f64, x: f64, ly: usize, lx: usize) -> bool {
     let on = |v: f64, n: usize| v >= -ON_FRAME && v <= (n - 1) as f64 + ON_FRAME;
-    if border == Border::Constant && !(on(y, ly) && on(x, lx)) {
+    on(y, ly) && on(x, lx)
+}
+
+/// Bilinear sample, clamped to the frame — or zero off it ([`on_frame`]),
+/// under [`Border::Constant`] and [`Border::Crop`].
+pub(crate) fn sample(frame: &[f32], ly: usize, lx: usize, y: f64, x: f64, border: Border) -> f32 {
+    if border.fills_zero() && !on_frame(y, x, ly, lx) {
         return 0.0;
     }
     let y = y.clamp(0.0, (ly - 1) as f64);

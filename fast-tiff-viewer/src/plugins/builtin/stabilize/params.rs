@@ -394,6 +394,7 @@ pub(super) fn settings_from(params: &Params) -> Settings {
             Edges::Zero => Border::Constant,
             Edges::Replicate => Border::Edge,
             Edges::Raw => Border::Native,
+            Edges::Crop => Border::Crop,
         },
         ..d
     }

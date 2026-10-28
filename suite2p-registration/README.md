@@ -57,8 +57,9 @@ for (t, shift) in out.shifts.iter().enumerate() {
 println!("{} frame(s) flagged", out.bad_frames.iter().filter(|b| **b).count());
 
 // Put a frame back where it belongs. One call, so the rigid shift cannot be
-// applied twice or the deformation forgotten.
-let corrected: Vec<f32> = out.apply(&movie[1], ly, lx, 1);
+// applied twice or the deformation forgotten. It can fail only under
+// `Border::Crop`, when the frames share no area to crop to.
+let corrected: Vec<f32> = out.apply(&movie[1], ly, lx, 1).expect("no crop asked for");
 # let _ = corrected;
 # }
 ```

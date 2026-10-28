@@ -62,6 +62,17 @@ pub const S2P_BORDER_NATIVE: c_int = 0;
 pub const S2P_BORDER_EDGE: c_int = 1;
 /// [`Border::Constant`].
 pub const S2P_BORDER_CONSTANT: c_int = 2;
+/// [`Border::Crop`]: frames come back cut to the common area, smaller than
+/// they went in; [`s2p_registered_output_size`] says how big.
+pub const S2P_BORDER_CROP: c_int = 3;
+
+/// The frames moved so far apart that no pixel is covered by all of them
+/// ([`NoCommonArea`](crate::NoCommonArea)): there is no common area, so
+/// [`Border::Crop`] has nothing to crop to. From anything that needs the area
+/// — a crop's frames or size, or the area itself under any border. The
+/// registration itself stands; a border that fills does not have this
+/// problem.
+pub const S2P_NO_COMMON_AREA: c_int = 5;
 
 /// [`Settings`], in C's terms. Field for field the same meaning, under the
 /// same suite2p names; enumerations are `S2P_BACKEND_*` and `S2P_BORDER_*`.
@@ -138,6 +149,7 @@ impl From<&Settings> for S2pSettings {
                 Border::Native => S2P_BORDER_NATIVE,
                 Border::Edge => S2P_BORDER_EDGE,
                 Border::Constant => S2P_BORDER_CONSTANT,
+                Border::Crop => S2P_BORDER_CROP,
             },
             norm_frames: s.norm_frames,
             two_step_registration: s.two_step_registration,
@@ -217,6 +229,7 @@ fn border_of(v: c_int) -> Result<Border, String> {
         S2P_BORDER_NATIVE => Ok(Border::Native),
         S2P_BORDER_EDGE => Ok(Border::Edge),
         S2P_BORDER_CONSTANT => Ok(Border::Constant),
+        S2P_BORDER_CROP => Ok(Border::Crop),
         _ => Err(format!("border {v} is not one of the S2P_BORDER_* values")),
     }
 }
@@ -585,18 +598,99 @@ pub unsafe extern "C" fn s2p_registered_set_border(r: *mut S2pRegistered, border
     }
 }
 
+/// The size, rows then columns, of a frame [`s2p_registered_apply`] writes:
+/// the frame size the run measured, or under `S2P_BORDER_CROP` the common
+/// area's — and `S2P_NO_COMMON_AREA` when there is none. Either output may be
+/// NULL.
+///
+/// # Safety
+///
+/// `r` is null or a live result; `ly` and `lx` are each null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn s2p_registered_output_size(
+    r: *const S2pRegistered,
+    ly: *mut usize,
+    lx: *mut usize,
+) -> c_int {
+    guarded(|| {
+        let r = match handle(r) {
+            Ok(r) => r,
+            Err(status) => return status,
+        };
+        match r.inner.output_size(r.ly, r.lx) {
+            Ok((h, w)) => {
+                if !ly.is_null() {
+                    ly.write(h);
+                }
+                if !lx.is_null() {
+                    lx.write(w);
+                }
+                S2P_OK
+            }
+            Err(none) => fail(S2P_NO_COMMON_AREA, none.to_string()),
+        }
+    })
+}
+
+/// The largest rectangle every frame covers once moved, at any angle — what
+/// `S2P_BORDER_CROP` keeps ([`Area`](crate::Area)). Where its first pixel sits
+/// in the frame (`y`, `x`, fractional for a turned area), its size, and its
+/// angle in radians (0 upright; positive turns its rows clockwise as an image
+/// is shown). Asked under any border; `S2P_NO_COMMON_AREA` when the frames
+/// share no pixel. Any output may be NULL.
+///
+/// # Safety
+///
+/// `r` is null or a live result; each output is null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn s2p_registered_common_area(
+    r: *const S2pRegistered,
+    y: *mut f64,
+    x: *mut f64,
+    height: *mut usize,
+    width: *mut usize,
+    angle: *mut f64,
+) -> c_int {
+    guarded(|| {
+        let r = match handle(r) {
+            Ok(r) => r,
+            Err(status) => return status,
+        };
+        match r.inner.common_area(r.ly, r.lx) {
+            Ok(a) => {
+                for (out, v) in [(y, a.y), (x, a.x), (angle, a.angle)] {
+                    if !out.is_null() {
+                        out.write(v);
+                    }
+                }
+                for (out, v) in [(height, a.height), (width, a.width)] {
+                    if !out.is_null() {
+                        out.write(v);
+                    }
+                }
+                S2P_OK
+            }
+            Err(none) => fail(S2P_NO_COMMON_AREA, none.to_string()),
+        }
+    })
+}
+
 /// Put frame `t` back where it belongs: the run's bidirectional-phase
 /// correction, then its shift — or its warp, when there is a block field.
-/// `frame` and `out` each hold one frame of the size the run measured, and
-/// may be the same buffer.
+/// `frame` holds one frame of the size the run measured; `out` holds what
+/// [`s2p_registered_output_size`] says, which is the same size unless the
+/// border is `S2P_BORDER_CROP`. They may be the same buffer.
 ///
 /// Any frame of timepoint `t` can be passed, not only the one measured: that
 /// is how a second channel is moved with the first.
 ///
+/// Under `S2P_BORDER_CROP` with no common area this is `S2P_NO_COMMON_AREA`,
+/// and `out` is left alone.
+///
 /// # Safety
 ///
 /// `r` is null or a live result; `frame` points to `ly * lx` readable floats
-/// and `out` to as many writable ones.
+/// and `out` to as many writable ones as the output size.
 #[no_mangle]
 pub unsafe extern "C" fn s2p_registered_apply(
     r: *const S2pRegistered,
@@ -619,8 +713,11 @@ pub unsafe extern "C" fn s2p_registered_apply(
         // Copied first, so `out` may be `frame`.
         let mut moved = std::slice::from_raw_parts(frame, ly * lx).to_vec();
         bidiphase::shift(&mut moved, ly, lx, r.inner.bidiphase);
-        let moved = r.inner.apply(&moved, ly, lx, t);
-        std::ptr::copy(moved.as_ptr(), out, ly * lx);
+        let moved = match r.inner.apply(&moved, ly, lx, t) {
+            Ok(moved) => moved,
+            Err(none) => return fail(S2P_NO_COMMON_AREA, none.to_string()),
+        };
+        std::ptr::copy(moved.as_ptr(), out, moved.len());
         S2P_OK
     })
 }

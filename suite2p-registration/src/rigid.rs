@@ -154,7 +154,8 @@ pub fn shift_frame(frame: &[f32], ly: usize, lx: usize, dy: i32, dx: i32) -> Vec
 /// The same sign as [`shift_frame`]: output `(y, x)` comes from input
 /// `(y + dy, x + dx)`. Where that is off the frame, [`Border::Native`] wraps,
 /// exactly as [`shift_frame`] does; [`Border::Edge`] takes the nearest edge
-/// pixel and [`Border::Constant`] writes zero.
+/// pixel and [`Border::Constant`] writes zero. [`Border::Crop`] writes zero
+/// too, for the caller to cut off ([`crate::area`]).
 pub fn shift_frame_bordered(
     frame: &[f32],
     ly: usize,
@@ -173,13 +174,13 @@ pub fn shift_frame_bordered(
     let (ny, nx) = (ly as i64, lx as i64);
     for y in 0..ly {
         let sy = y as i64 + dy as i64;
-        if border == Border::Constant && !(0..ny).contains(&sy) {
+        if border.fills_zero() && !(0..ny).contains(&sy) {
             continue;
         }
         let sy = sy.clamp(0, ny - 1) as usize;
         for x in 0..lx {
             let sx = x as i64 + dx as i64;
-            if border == Border::Constant && !(0..nx).contains(&sx) {
+            if border.fills_zero() && !(0..nx).contains(&sx) {
                 continue;
             }
             out[y * lx + x] = frame[sy * lx + sx.clamp(0, nx - 1) as usize];

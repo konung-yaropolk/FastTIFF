@@ -580,7 +580,7 @@ fn non_rigid_corrects_a_shear_that_rigid_cannot() {
     // And applying the field brings a sheared frame back onto the reference
     // better than the rigid shift alone could.
     let rigid_only = shift_frame(&frames[1], ly, lx, out.shifts[1].dy, out.shifts[1].dx);
-    let warped = out.apply(&frames[1], ly, lx, 1);
+    let warped = out.apply(&frames[1], ly, lx, 1).expect("no crop asked for");
     let err = |v: &[f32]| -> f64 {
         let mut e = 0.0;
         let mut n = 0;
@@ -626,7 +626,7 @@ fn no_block_field_without_asking_for_one() {
     // `apply` then agrees with the rigid shift exactly, filled as the run's
     // settings say.
     assert_eq!(out.border, Border::Native);
-    let a = out.apply(&frames[1], ly, lx, 1);
+    let a = out.apply(&frames[1], ly, lx, 1).expect("no crop asked for");
     let b = shift_frame_bordered(
         &frames[1],
         ly,
@@ -764,4 +764,75 @@ fn the_gpu_backend_is_refused_without_an_adapter() {
             assert!(why.contains("`gpu`"), "{why}");
         }
     }
+}
+
+/// Under `Border::Crop` every frame comes back cut to the common area — for a
+/// rigid run upright, so the zero-filled frame with its strip cut off — the
+/// same size for every frame.
+#[test]
+fn a_cropped_run_hands_back_the_common_area() {
+    let (ly, lx) = (64, 64);
+    let path = [(0, 0), (2, -1), (-3, 2), (1, 4), (0, -2), (3, 3)];
+    let frames = wandering(ly, lx, &path);
+    let movie = Frames {
+        ly,
+        lx,
+        frames: &frames,
+    };
+    let settings = Settings {
+        nonrigid: false,
+        spatial_taper: 5.0,
+        border: Border::Crop,
+        ..Settings::default()
+    };
+    let out = register(&movie, &settings, &mut |_| true).expect("not cancelled");
+    let area = out.common_area(ly, lx).expect("a common area");
+    assert!(area.is_upright(), "{area:?}");
+    // Six pixels of travel each way at most, so most of the frame is shared.
+    assert!(area.height >= ly - 8 && area.width >= lx - 8, "{area:?}");
+    assert_eq!(out.output_size(ly, lx), Ok((area.height, area.width)));
+    let (y0, x0) = (area.y as usize, area.x as usize);
+    for (t, frame) in frames.iter().enumerate() {
+        let cut = out.apply(frame, ly, lx, t).expect("an area");
+        let s = out.shifts[t];
+        let filled = shift_frame_bordered(frame, ly, lx, s.dy, s.dx, Border::Constant);
+        let want: Vec<f32> = (y0..y0 + area.height)
+            .flat_map(|y| filled[y * lx + x0..y * lx + x0 + area.width].to_vec())
+            .collect();
+        assert_eq!(cut, want, "frame {t}");
+    }
+}
+
+/// Frames that share no pixel cannot be cropped, and say so rather than hand
+/// back something else.
+#[test]
+fn a_crop_with_no_common_area_is_an_error() {
+    let (ly, lx) = (32, 32);
+    let frames = wandering(ly, lx, &[(0, 0), (1, 1)]);
+    let movie = Frames {
+        ly,
+        lx,
+        frames: &frames,
+    };
+    let mut out = register(
+        &movie,
+        &Settings {
+            nonrigid: false,
+            spatial_taper: 5.0,
+            border: Border::Crop,
+            ..Settings::default()
+        },
+        &mut |_| true,
+    )
+    .expect("not cancelled");
+    // As if the search had run away: further apart than the frame is high.
+    out.shifts[0].dy = 20;
+    out.shifts[1].dy = -20;
+    let err = out.common_area(ly, lx).expect_err("nothing in common");
+    assert_eq!(err.frames, 2);
+    assert_eq!(out.output_size(ly, lx), Err(err));
+    assert_eq!(out.apply(&frames[0], ly, lx, 0), Err(err));
+    // A border that fills has no such problem.
+    out.border = Border::Constant;
+    assert!(out.apply(&frames[0], ly, lx, 0).is_ok());
 }

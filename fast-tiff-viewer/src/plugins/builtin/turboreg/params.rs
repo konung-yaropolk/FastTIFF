@@ -273,6 +273,7 @@ pub(super) fn border_from(params: &Params) -> Border {
         Edges::Zero => Border::Constant,
         Edges::Replicate => Border::Edge,
         Edges::Raw => Border::Native,
+        Edges::Crop => Border::Crop,
     }
 }
 

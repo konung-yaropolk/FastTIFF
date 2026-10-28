@@ -413,9 +413,10 @@ pub fn warp_with(moving: &[f32], w: usize, h: usize, m: &Matrix, parallel: bool)
 /// [`warp_with`], with what lands off the frame read as `border` says.
 ///
 /// [`Border::Native`] is [`warp_with`] itself, the mirrored extension. The
-/// other two fill instead, because past the edge the extension repeats the
-/// picture backwards, cells included. Inside the frame all three read the
-/// same.
+/// others fill instead, because past the edge the extension repeats the
+/// picture backwards, cells included; [`Border::Crop`] fills as
+/// [`Border::Constant`] does, for the caller to cut off ([`crate::area`]).
+/// Inside the frame they all read the same.
 pub fn warp_bordered(
     moving: &[f32],
     w: usize,
@@ -426,6 +427,48 @@ pub fn warp_bordered(
 ) -> Vec<f32> {
     let fill = (border != Border::Native).then_some(border);
     resample(moving, w, h, m, fill, parallel)
+}
+
+/// `moving` resampled onto `area` of the reference's grid: each of the area's
+/// pixels, [`Area::at`](crate::area::Area::at), sent through `m` and read from
+/// the spline there. One resampling, so a turned area costs no second
+/// interpolation; an upright one reads exactly what [`warp_bordered`] reads
+/// at those pixels. `area.height * area.width` samples, row by row.
+///
+/// Inside a common area every read lands on the frame; one that does not —
+/// an area found for other transformations — reads the nearest edge.
+pub fn warp_area(
+    moving: &[f32],
+    w: usize,
+    h: usize,
+    m: &Matrix,
+    area: &crate::area::Area,
+    parallel: bool,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; area.height * area.width];
+    if w == 0 || h == 0 || out.is_empty() {
+        return out;
+    }
+    let mut coeff = moving.to_vec();
+    crate::spline::prefilter_2d_with(&mut coeff, w, h, &crate::spline::POLES_3, parallel);
+    let coeff = &coeff;
+    crate::par::for_each_chunk_mut(&mut out, area.width, parallel, |row, line| {
+        for (col, o) in line.iter_mut().enumerate() {
+            let (y, x) = area.at(row, col);
+            let p = m.apply(Point::new(x, y));
+            let (px, py) = (p.x.clamp(0.0, (w - 1) as f64), p.y.clamp(0.0, (h - 1) as f64));
+            *o = crate::spline::interpolate(coeff, w, h, px, py) as f32;
+        }
+    });
+    out
+}
+
+/// Whether a position lands on a `w * h` frame. A position between the last
+/// pixel and the one past it counts as off: part of what the spline reads
+/// there is the mirrored extension, not the frame.
+pub(crate) fn on_frame(p: Point, w: usize, h: usize) -> bool {
+    let on = |v: f64, n: usize| v >= -ON_FRAME && v <= (n - 1) as f64 + ON_FRAME;
+    on(p.x, w) && on(p.y, h)
 }
 
 /// The pull both warps share: `border` of `None` reads the mirrored extension,
@@ -453,8 +496,7 @@ fn resample(
                 *o = crate::spline::interpolate(coeff, w, h, p.x, p.y) as f32;
                 continue;
             };
-            let on = |v: f64, n: usize| v >= -ON_FRAME && v <= (n - 1) as f64 + ON_FRAME;
-            if border == Border::Constant && !(on(p.x, w) && on(p.y, h)) {
+            if border.fills_zero() && !on_frame(p, w, h) {
                 *o = 0.0;
                 continue;
             }

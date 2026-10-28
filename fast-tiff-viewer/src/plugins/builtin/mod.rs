@@ -134,6 +134,8 @@ pub mod png;
     feature = "plugin-invert",
     feature = "plugin-stack-tools",
     feature = "plugin-deconvolve",
+    feature = "plugin-crop",
+    feature = "plugin-suite2p-stabilize",
     feature = "plugin-turboreg-stabilize",
 ))]
 pub(crate) mod shared;

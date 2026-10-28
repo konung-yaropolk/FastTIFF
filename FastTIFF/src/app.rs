@@ -4533,6 +4533,13 @@ impl ViewerApp {
 
 impl eframe::App for ViewerApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // The graphics device is gone, and egui would panic drawing this frame
+        // without it. Ending here instead puts the reason in words; the panic
+        // hook shows it (see `render::explain_gpu_failure`).
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(why) = crate::render::gpu_lost() {
+            panic!("{why}");
+        }
         self.draw(ui, frame);
         // This window's copies, in the system's line endings. Every pop-out
         // dialog does the same for its own — see `clipboard`.

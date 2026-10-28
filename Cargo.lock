@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.26.4"
+version = "1.27.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -866,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.26.3"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2824,7 +2824,7 @@ checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
 
 [[package]]
 name = "suite2p-registration"
-version = "0.26.4"
+version = "0.27.0"
 dependencies = [
  "bytemuck",
  "pollster 1.0.1",
@@ -2996,7 +2996,7 @@ dependencies = [
 
 [[package]]
 name = "turboreg-registration"
-version = "0.26.4"
+version = "0.27.0"
 dependencies = [
  "bytemuck",
  "pollster 1.0.1",

@@ -149,6 +149,15 @@ mod glue {
         // short of memory (see `share_gpu_device`).
         #[cfg(not(target_arch = "wasm32"))]
         fast_tiff_viewer::share_gpu_device(&rs.device, &rs.queue, &rs.adapter.get_info());
+        // A lost device is noted, so the app can close saying why rather than
+        // let egui panic on its next draw (see `gpu_lost`). Dropping the device
+        // at exit reports `Destroyed`, which is not news.
+        #[cfg(not(target_arch = "wasm32"))]
+        rs.device.set_device_lost_callback(|reason, message| {
+            if !matches!(reason, wgpu::DeviceLostReason::Destroyed) {
+                super::note_gpu_lost(message);
+            }
+        });
         Arc::new(Mutex::new(resources))
     }
 
@@ -275,6 +284,104 @@ mod glue {
                 r.paint(render_pass);
             }
         }
+    }
+}
+
+// --- a lost graphics device -------------------------------------------------
+
+/// What wgpu said when the graphics device was lost, once it has been.
+///
+/// A lost device cannot be got back: eframe has no way to make a new one, and
+/// nothing in the window can be drawn without it — egui panics on its next
+/// draw ("Failed to create staging buffer"). What can be done is to close
+/// saying why, in words, rather than with a renderer's internals.
+#[cfg(not(target_arch = "wasm32"))]
+static GPU_LOST: Mutex<Option<String>> = Mutex::new(None);
+
+#[cfg(all(
+    feature = "renderer-wgpu",
+    not(feature = "renderer-glow"),
+    not(target_arch = "wasm32")
+))]
+fn note_gpu_lost(message: String) {
+    *GPU_LOST.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
+}
+
+/// What to close with, once the graphics device is gone: for the frame loop,
+/// which ends there rather than let egui draw.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn gpu_lost() -> Option<String> {
+    let lost = GPU_LOST.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    Some(gpu_failure_text(&lost))
+}
+
+/// For the panic hook: whether `panic` (its text) is the graphics device going
+/// away, and if so what to say instead of it.
+///
+/// Three ways it shows: the frame loop ending on a loss it was told about
+/// ([`gpu_lost`]); egui panicking first, on a device lost before anyone
+/// heard; and wgpu's own panic for running out of video memory.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn explain_gpu_failure(panic: &str) -> Option<String> {
+    let recorded = GPU_LOST.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    explain(recorded.as_deref(), panic)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn explain(recorded: Option<&str>, panic: &str) -> Option<String> {
+    // egui-wgpu's words when the device it writes to is gone, and wgpu's
+    // default handler's when an allocation found no video memory.
+    let egui_lost = panic.contains("Failed to create staging buffer");
+    let out_of_memory = panic.contains("wgpu error") && panic.contains("Out of Memory");
+    match recorded {
+        Some(message) => Some(gpu_failure_text(message)),
+        None if egui_lost || out_of_memory => Some(gpu_failure_text(panic)),
+        None => None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn gpu_failure_text(detail: &str) -> String {
+    let detail = detail.trim();
+    format!(
+        "The graphics card stopped working for FastTIFF, so it cannot draw any more and \
+         has to close.\n\n\
+         This usually means the card ran out of video memory: two FastTIFF windows each \
+         showing a large 3D view can fill a card between them, and so can other programs \
+         using the GPU. It can also mean the system reset the card because one job on it \
+         took too long.\n\n\
+         Reopen the file to carry on. To avoid it, show large stacks in 3D in one window \
+         at a time, or close other programs that use the GPU.{}",
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nDetails: {detail}")
+        }
+    )
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod gpu_lost_tests {
+    use super::explain;
+
+    #[test]
+    fn a_lost_device_is_explained_whichever_way_it_shows() {
+        // Told of by wgpu, with or without a message.
+        let told = explain(Some("device lost: timeout"), "anything").expect("explained");
+        assert!(told.contains("ran out of video memory") && told.contains("device lost: timeout"));
+        assert!(!explain(Some(""), "x").expect("explained").contains("Details"));
+        // egui first, on a device nobody had heard was lost.
+        let egui = "panicked at egui-wgpu-0.34.3\\src\\renderer.rs:971:17:\n\
+                    Failed to create staging buffer for index data. Index count: 3480.";
+        assert!(explain(None, egui).expect("explained").contains("Index count: 3480"));
+        // wgpu's own out-of-memory panic.
+        assert!(explain(None, "wgpu error: Out of Memory\n\nCaused by: ...").is_some());
+    }
+
+    #[test]
+    fn any_other_panic_is_left_as_it_is() {
+        assert_eq!(explain(None, "index out of bounds: the len is 3 but the index is 7"), None);
+        assert_eq!(explain(None, "wgpu error: Validation Error"), None);
     }
 }
 

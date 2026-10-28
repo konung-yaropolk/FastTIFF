@@ -159,6 +159,22 @@ fn host(s: &Stack, frame_index: usize) -> StackHost {
     StackHost::new(s, describe_view(s, frame_index, false, view()))
 }
 
+/// The "Uncovered edges" option a plugin's dialog labels `label`, as the
+/// dialog would set it: looked up by label, so a test asks for what a user
+/// picks rather than for a position in the list.
+fn edges(plugin: &dyn Plugin, s: &Stack, label: &str) -> ParamValue {
+    let h = host(s, 0);
+    let decls = plugin.params(&h);
+    let decl = decls
+        .iter()
+        .find(|d| d.key == "edges")
+        .expect("an edge choice");
+    let ParamKind::Choice { options, .. } = &decl.kind else {
+        panic!("the edge choice is a choice");
+    };
+    ParamValue::Choice(options.iter().position(|o| o == label).expect(label))
+}
+
 fn planes_f32(r: &ImageResult) -> Vec<&Vec<f32>> {
     r.planes
         .iter()
@@ -932,6 +948,48 @@ fn stabilize_removes_a_known_motion() {
     }
 }
 
+/// "Crop to the common area" keeps the part of the field every frame covers:
+/// for a rigid run smaller by exactly the motion, for a warped one at least
+/// that, and in either case with no filled pixel left in it.
+#[test]
+fn stabilize_can_crop_to_the_common_area() {
+    let (ly, lx) = (64u32, 64u32);
+    let path = [(0i32, 0i32), (3, -2), (-4, 1), (2, 3), (-1, -3), (4, 2)];
+    let s = wandering_stack(ly, lx, &path, 1);
+    for nonrigid in [false, true] {
+        let mut h = host(&s, 0);
+        let mut params = Params::new();
+        params.set("spatial_taper", ParamValue::Float(5.0));
+        params.set("maxregshift", ParamValue::Float(0.3));
+        params.set("nonrigid", ParamValue::Bool(nonrigid));
+        params.set("edges", edges(&builtin::Stabilize, &s, "Crop to the common area"));
+        let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run")
+        else {
+            panic!("stabilization should produce a new document");
+        };
+        out.validate().expect("the cropped result's shape must be valid");
+        assert_eq!(out.frames, path.len());
+        // Eight rows of travel (-4 to 4) and six columns (-3 to 3).
+        if nonrigid {
+            assert!(
+                out.width <= lx - 6 && out.height <= ly - 8 && out.width > lx / 2,
+                "non-rigid: {} x {}",
+                out.width,
+                out.height
+            );
+        } else {
+            assert_eq!((out.width, out.height), (lx - 6, ly - 8));
+        }
+        // The field is never below 10, so a 0 is fill that the crop missed.
+        for (t, p) in planes_f32(&out).iter().enumerate() {
+            assert!(
+                p.iter().all(|&v| v >= 9.0),
+                "frame {t} (non-rigid {nonrigid}): a filled pixel survived the crop"
+            );
+        }
+    }
+}
+
 /// The channels must move together. Measuring on one and applying to all is
 /// what keeps a two-channel recording in register with itself.
 #[test]
@@ -1245,7 +1303,7 @@ fn stabilize_keeps_signed_samples_signed() {
     // its samples (below). The dialog's default fills the uncovered strip with
     // 0 instead, which adds zeros that are not a lost sign but would read as
     // one here.
-    params.set("edges", ParamValue::Choice(2));
+    params.set("edges", edges(&builtin::Stabilize, &s, "Algorithm's raw output"));
     let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
         panic!("expected a document");
     };
@@ -1282,7 +1340,7 @@ fn stabilize_keeps_signed_samples_signed() {
     // with 0: every sample is one the frame had, or that 0. A lost sign would
     // still show, as values near +32768 that are neither.
     let mut h = host(&s, 0);
-    params.set("edges", ParamValue::Choice(0));
+    params.set("edges", edges(&builtin::Stabilize, &s, "Fill with 0"));
     let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
         panic!("expected a document");
     };
@@ -1396,6 +1454,115 @@ fn turboreg_removes_a_known_drift() {
         gap_after < gap_before / 10.0,
         "registering took the worst gap to the first frame from {gap_before} to only {gap_after}"
     );
+}
+
+/// "Crop to the common area": the drift trims about as many rows and columns
+/// as it spans, and nothing filled is left.
+#[test]
+fn turboreg_can_crop_to_the_common_area() {
+    let frames = drift_frames(96, &DRIFT);
+    let s = drifting_stack(96, &frames);
+    let mut h = host(&s, 0);
+    let mut params = Params::new();
+    params.set("edges", edges(&builtin::TurboReg, &s, "Crop to the common area"));
+    let Outcome::NewDocument(out) = builtin::TurboReg.run(&mut h, &params).expect("run") else {
+        panic!("registration should produce a new document");
+    };
+    out.validate().expect("the cropped result's shape must be valid");
+    assert_eq!(out.frames, DRIFT.len());
+    // DRIFT spans 5.75 rows and 5.75 columns; a fit that lands a little off
+    // trims a pixel either way.
+    assert!(
+        (88..=91).contains(&out.width) && (88..=91).contains(&out.height),
+        "{} x {}",
+        out.width,
+        out.height
+    );
+    // The texture is never below 240, so a 0 is fill that the crop missed.
+    for (t, p) in planes_f32(&out).iter().enumerate() {
+        assert!(p.iter().all(|&v| v > 100.0), "frame {t}: a filled pixel survived");
+    }
+}
+
+/// A wide field that turned under the objective: frames of one texture turned
+/// by known angles about the middle. Each is the texture *evaluated* where it
+/// has turned to, so the motion is exact.
+fn turning_frames(h: u32, w: u32, degrees: &[f64]) -> Vec<Vec<f32>> {
+    let texture = |y: f64, x: f64| {
+        400.0 + ((x * 0.031).sin() * (y * 0.027).cos()) * 120.0 + (x * 0.11 + y * 0.07).sin() * 40.0
+    };
+    let (cy, cx) = (h as f64 / 2.0, w as f64 / 2.0);
+    degrees
+        .iter()
+        .map(|d| {
+            let (sin, cos) = d.to_radians().sin_cos();
+            (0..h * w)
+                .map(|i| {
+                    let (y, x) = ((i / w) as f64 - cy, (i % w) as f64 - cx);
+                    texture(cy + x * sin + y * cos, cx + x * cos - y * sin) as f32
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// A stack that turned is cropped at an angle: the result holds more than the
+/// best upright cut of the same registration could, and nothing filled.
+#[test]
+fn turboreg_crops_a_turned_stack_at_an_angle() {
+    let (h, w) = (72u32, 216u32);
+    let frames = turning_frames(h, w, &[0.0, 8.0, 16.0]);
+    let opts = WriterOptions::new(w, h, SampleType::F32).metadata(StackMetaWrite::new(1, 1));
+    let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for f in &frames {
+        writer.write_frame_f32(f).unwrap();
+    }
+    let s = Stack::from_bytes(writer.finish().unwrap().into_inner(), "turning.tif".into(), false)
+        .expect("open");
+    let run = |label: &str| {
+        let mut h = host(&s, 0);
+        let mut params = Params::new();
+        params.set("edges", edges(&builtin::TurboReg, &s, label));
+        let Outcome::NewDocument(out) = builtin::TurboReg.run(&mut h, &params).expect("run")
+        else {
+            panic!("registration should produce a new document");
+        };
+        out
+    };
+
+    // The best an upright cut could do: the largest rectangle no frame filled.
+    let filled = run("Fill with 0");
+    let planes = planes_f32(&filled);
+    let (fh, fw) = (filled.height as usize, filled.width as usize);
+    let mut heights = vec![0usize; fw];
+    let mut upright = 0;
+    for y in 0..fh {
+        for x in 0..fw {
+            let kept = planes.iter().all(|p| p[y * fw + x] != 0.0);
+            heights[x] = if kept { heights[x] + 1 } else { 0 };
+        }
+        for x0 in 0..fw {
+            let mut tallest = usize::MAX;
+            for (width, &bar) in heights[x0..].iter().enumerate() {
+                tallest = tallest.min(bar);
+                upright = upright.max(tallest * (width + 1));
+            }
+        }
+    }
+
+    let cropped = run("Crop to the common area");
+    cropped.validate().expect("the cropped result's shape must be valid");
+    let kept = (cropped.width * cropped.height) as usize;
+    assert!(
+        kept > upright,
+        "a turned crop of {} x {} keeps {kept}, no more than the {upright} of an upright one",
+        cropped.width,
+        cropped.height
+    );
+    // The texture is never below 240, so a 0 is fill that the crop missed.
+    for (t, p) in planes_f32(&cropped).iter().enumerate() {
+        assert!(p.iter().all(|&v| v > 100.0), "frame {t}: a filled pixel survived");
+    }
 }
 
 /// The GPU option either runs — and lands where the CPU does, to the tolerance

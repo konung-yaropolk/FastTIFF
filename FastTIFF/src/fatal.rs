@@ -67,10 +67,18 @@ pub const GPU_HINT: &str = "This build needs a GPU backend the system can \
 /// from a console — or with a debugger attached — keeps the full message and
 /// backtrace it would otherwise print. This only adds the copy that a windowed
 /// process can actually show.
+///
+/// A lost graphics device gets its own title and an explanation in place of
+/// the renderer's own words, which name egui's staging buffers and say nothing
+/// of what happened.
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         previous(info);
-        show("FastTIFF stopped unexpectedly", &info.to_string());
+        let text = info.to_string();
+        match fasttiff::render::explain_gpu_failure(&text) {
+            Some(why) => show("FastTIFF lost the graphics card", &why),
+            None => show("FastTIFF stopped unexpectedly", &text),
+        }
     }));
 }
