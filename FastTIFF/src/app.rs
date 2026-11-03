@@ -16,6 +16,7 @@
 //!   * `camera`  — egui input → the core camera
 //!   * `minimap` — the 2D navigator: where the view sits in the whole frame
 //!   * `overlay` — the 3D coordinate-box overlay, drawn with the egui painter
+//!   * `point_counter` — clicking points onto the picture, counted in groups
 //!   * `scale`   — how large the chrome is drawn (the web build runs bigger)
 //!   * `widgets` — the contrast range slider + value formatting
 //!   * `windows` — the render-settings, metadata and histogram pop-ups
@@ -52,6 +53,7 @@ mod overlay;
 // which the browser build does not have.
 mod plot;
 mod plugins_ui;
+mod point_counter;
 mod region_pick;
 mod scale;
 mod scroll;
@@ -1299,6 +1301,10 @@ pub struct ViewerApp {
     /// The rectangle a plugin asked for, drawn and confirmed, waiting for the
     /// run it is the selection of: which plugin, and the regions.
     picked: Option<(usize, Vec<fasttiff_plugin_api::Roi>)>,
+    /// The point counter, while its window is open. Like the plot's regions,
+    /// the points belong to the window: closing it takes them, and their
+    /// marks, away. See [`point_counter`].
+    point_counter: Option<point_counter::Session>,
 
     // --- window chrome ------------------------------------------------------
     /// The window title last sent via `ViewportCommand::Title`. Native only —
@@ -1469,6 +1475,7 @@ impl ViewerApp {
             plot: None,
             region_pick: None,
             picked: None,
+            point_counter: None,
             last_title: None,
             good_status: None,
             show_metadata: false,
@@ -1617,6 +1624,9 @@ impl ViewerApp {
         }
         // A rectangle being drawn for a plugin was drawn on the last picture.
         self.region_pick = None;
+        // And so were the counted points: they are positions in that picture,
+        // and counting on into this one would mix two images in one table.
+        self.point_counter = None;
         self.view.resize_to_zoom = false;
         // A glide belongs to the picture that was on screen; carrying one into
         // a new file would slide the fresh image away from the zoom it just
@@ -2964,6 +2974,7 @@ impl ViewerApp {
         let mut copy_requested = false;
         let mut render_settings_toggle = false;
         let mut plugin_to_start: Option<usize> = None;
+        let mut open_point_counter = false;
         #[cfg(not(target_arch = "wasm32"))]
         let mut open_plugin_folder = false;
 
@@ -3032,8 +3043,10 @@ impl ViewerApp {
                 }
                 {
                     let available = self.plugins.as_ref().filter(|_| self.job.is_none());
-                    match plugins_ui::plugins_menu(ui, available) {
+                    let has_stack = self.core.stack.is_some();
+                    match plugins_ui::plugins_menu(ui, available, has_stack) {
                         plugins_ui::MenuAction::Run(i) => plugin_to_start = Some(i),
+                        plugins_ui::MenuAction::PointCounter => open_point_counter = true,
                         // The entry that produces this is itself desktop-only,
                         // so on the web the variant is simply never sent.
                         #[cfg(not(target_arch = "wasm32"))]
@@ -3226,13 +3239,27 @@ impl ViewerApp {
         if let Some(index) = plugin_to_start {
             self.start_plugin(index);
         }
+        if open_point_counter {
+            self.open_point_counter(ui.ctx());
+        }
         self.poll_plugin_dialog(ui.ctx());
         self.poll_plot(ui.ctx());
+        self.poll_point_counter(ui.ctx());
         // Ctrl/Cmd+C, after the buttons so an explicit click this frame is not
         // also counted as a chord, and before the poll so a copy asked for by
         // key is picked up on the same schedule as one asked for by button.
         if copy_view::hotkey(ui.ctx()) {
             self.copy_view(ui.ctx());
+        }
+        // Ctrl/Cmd+Z, the point counter's undo, while the main window has the
+        // keyboard. Before the picture handles this frame's pointer, so an
+        // undo that ends a drag in flight is not followed by one more step of
+        // it. The counter's own window takes the chord when it has the
+        // keyboard instead — see `point_counter::counter_window`.
+        if let Some(tool) = self.point_counter.as_mut() {
+            if point_counter::undo_hotkey(ui.ctx()) {
+                tool.undo();
+            }
         }
         self.poll_copy(ui.ctx());
         if let Some(mode) = mode_request {
@@ -3464,7 +3491,10 @@ impl ViewerApp {
                 });
             });
 
-            if !view_is_volume {
+            // Not while a text field has the caret, where the arrows move it: a
+            // group's name being edited in the point counter's window, which in
+            // a browser shares this viewport's keyboard.
+            if !view_is_volume && !ui.ctx().text_edit_focused() {
                 ui.input(|i| {
                     // Shift jumps ~5% of the stack at a time (min 1 frame) instead
                     // of 1, matching the Shift+wheel fast-scroll step.
@@ -3883,7 +3913,20 @@ impl ViewerApp {
         // Reassigning the axes also refreshes LUTs + status and invalidates the
         // volume (the frame axis, i.e. the volume depth, just changed).
         if let Some((c, z, f)) = dimension_override {
+            // The counter's points are on frames of the axes as they were.
+            let before = self
+                .point_counter
+                .as_ref()
+                .and(self.core.stack.as_ref())
+                .map(fast_tiff_viewer::plugins::builtin::point_counter::frame_starts);
             self.core.set_dimension_order(c, z, f);
+            if let (Some(before), Some(tool), Some(stack)) = (
+                before,
+                self.point_counter.as_mut(),
+                self.core.stack.as_ref(),
+            ) {
+                tool.follow_axes(&before, stack);
+            }
         }
 
         // A dimension swap can collapse the stack to a single frame (e.g.
@@ -4058,9 +4101,15 @@ impl ViewerApp {
                 //
                 // A rectangle a plugin asked for takes it the same way, and
                 // ahead of a plot: it is what the user was just asked to do.
+                // The point counter takes it too while its window is open,
+                // after a rectangle and ahead of a plot: clicking points on is
+                // a tool the user opened by hand, and a plot's regions can be
+                // drawn again once the counter is closed.
                 let selecting = (self.region_pick.is_some()
+                    || self.point_counter.is_some()
                     || self.plot.as_ref().is_some_and(|p| p.wants_regions()))
                     && !pinching;
+                let frame = loaded.frame_index;
 
                 // The navigator's frame box, worked out before anything acts on a
                 // drag: a press that lands on the map has to claim the gesture
@@ -4146,6 +4195,11 @@ impl ViewerApp {
                 // a pointer that travelled past its click threshold, so the two
                 // are mutually exclusive by construction rather than by a guard
                 // that could be got wrong.
+                //
+                // Whether it was on as this frame began is kept for the point
+                // counter: a left-click or a drag that ends the mode below is
+                // spent on that, and must not also add or move a point.
+                let autoscroll_was_on = self.view.autoscroll.is_some();
                 if response.clicked_by(egui::PointerButton::Middle) {
                     // Toggling off from anywhere, so a second middle-click always
                     // means stop — including the one that would otherwise re-anchor
@@ -4270,6 +4324,30 @@ impl ViewerApp {
                     if let Some(roi) = pick.track(px, pressed, buttons, (w, h)) {
                         self.core.status = Some(pick.drawn_message(&roi));
                     }
+                } else if let (true, Some(tool)) =
+                    (selecting && !on_map, self.point_counter.as_mut())
+                {
+                    // In image pixels, continuous: a click mid-pixel is x.5,
+                    // which is where the mark is drawn and what ImageJ gets.
+                    let zoom = self.view.zoom;
+                    let to_image = |pos| point_counter::image_at(pos, origin, zoom);
+                    let primary = egui::PointerButton::Primary;
+                    let at = response.interact_pointer_pos();
+                    let gesture = point_counter::Gesture {
+                        at: at.map(to_image),
+                        pressed_at: ui.input(|i| i.pointer.press_origin()).map(to_image),
+                        clicked: response.clicked_by(primary),
+                        alt: ui.input(|i| i.modifiers.alt),
+                        drag_started: response.drag_started_by(primary),
+                        dragging: response.dragged_by(primary),
+                        drag_stopped: response.drag_stopped(),
+                        // A click on the navigator moves the view (a drag
+                        // that began there never reaches here: `on_map`), and
+                        // one that ends autoscroll only ends it.
+                        taken: autoscroll_was_on
+                            || map.zip(at).is_some_and(|(outer, at)| outer.contains(at)),
+                    };
+                    tool.track(gesture, frame, point_counter::HIT_RADIUS / zoom, (w, h));
                 } else if selecting && !on_map {
                     let zoom = self.view.zoom;
                     let add = ui.input(|i| i.modifiers.shift);
@@ -4341,6 +4419,17 @@ impl ViewerApp {
                         (w, h),
                     );
                 }
+                // The counted points, over any regions: they are what the
+                // pointer is acting on while the counter is open.
+                if let Some(tool) = self.point_counter.as_ref() {
+                    point_counter::draw(
+                        &ui.painter().with_clip_rect(panel_rect),
+                        &tool.counter,
+                        frame,
+                        origin,
+                        self.view.zoom,
+                    );
+                }
 
                 // Where the view sits in the frame, once that stops being obvious.
                 // Drawn after the image so it is over it, and clipped to the panel
@@ -4390,9 +4479,8 @@ impl ViewerApp {
                 // the order of what has the gesture: the autoscroll mode owns the
                 // pointer wherever it is, the navigator owns it over the map, and
                 // otherwise it is the picture's.
-                let over_map = map
-                    .zip(response.hover_pos())
-                    .is_some_and(|(outer, at)| outer.contains(at));
+                let hover = response.hover_pos();
+                let over_map = map.zip(hover).is_some_and(|(outer, at)| outer.contains(at));
                 response.on_hover_cursor(if self.view.autoscroll.is_some() {
                     egui::CursorIcon::AllScroll
                 } else if over_map || on_map {
@@ -4400,6 +4488,20 @@ impl ViewerApp {
                     // map what moves is the view somewhere else. The four-way arrow
                     // is what every navigator uses for that.
                     egui::CursorIcon::Move
+                } else if let Some(tool) = self
+                    .point_counter
+                    .as_ref()
+                    .filter(|_| selecting && self.region_pick.is_none())
+                {
+                    // The left button places and moves points here, not the
+                    // picture, so the hand is for a point under the pointer.
+                    let zoom = self.view.zoom;
+                    point_counter::cursor(
+                        tool,
+                        hover.map(|pos| point_counter::image_at(pos, origin, zoom)),
+                        frame,
+                        point_counter::HIT_RADIUS / zoom,
+                    )
                 } else if pannable {
                     egui::CursorIcon::Grab
                 } else {

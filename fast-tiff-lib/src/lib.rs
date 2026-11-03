@@ -38,6 +38,7 @@ pub use ifd::{ByteOrder, NotTiff, TiffFlavor};
 pub use index::{
     Compression, FrameInfo, Region, RowBand, SampleFormat, SampledBand, Strips, TiffStack,
 };
+pub use metadata::roi::{point_rois_from_imagej, roi_set_zip, PointRoi, RoiPoint, RoiSetTooLarge};
 pub use metadata::{
     color_ramp_lut, colormap_to_lut, composite_color, default_composite_lut, default_lut_for,
     grayscale_lut, resolve_dimensions, ChannelDisplay, DisplayMode, MetadataFormat,

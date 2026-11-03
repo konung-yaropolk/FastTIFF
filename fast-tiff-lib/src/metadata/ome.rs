@@ -100,6 +100,8 @@ pub fn parse(
         pixel_height,
         has_explicit_luts: any_colored,
         source_format: MetadataFormat::Ome,
+        // An overlay is an ImageJ `IJMetadata` thing; OME's ROIs are not read.
+        overlay: Vec::new(),
     })
 }
 

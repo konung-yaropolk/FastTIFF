@@ -143,6 +143,15 @@ pub struct Stack {
     /// builds then fall back to running synchronously.
     pub volume_builder: Option<VolumeBuilder>,
     pub volume_builder_tried: bool,
+    /// The ImageJ overlay a save writes into the TIFF. Opening a file fills it
+    /// with the point ROIs of the file's own overlay
+    /// ([`StackMeta::overlay`](fast_tiff_lib::StackMeta::overlay)), so that a
+    /// save keeps them; the point counter's "Add into TIFF's overlay" replaces
+    /// it, and its window starts from it. Only point ROIs are read, so a
+    /// file's other shapes are not kept. While it is empty a save is exactly
+    /// what it was without one; see [`crate::save`] for what a non-empty one
+    /// changes.
+    pub overlay: Vec<fast_tiff_lib::PointRoi>,
 }
 
 impl Stack {
@@ -223,6 +232,9 @@ impl Stack {
         let prefetch = Prefetcher::new(path.clone(), !compressed);
         #[cfg(not(feature = "mmap"))]
         let prefetch = None;
+        // A copy: `tiff.meta` stays as the file was parsed, and this is the
+        // document's, which the point counter may replace.
+        let overlay = tiff.meta.overlay.clone();
 
         let mut stack = Stack {
             tiff: Arc::new(tiff),
@@ -245,6 +257,7 @@ impl Stack {
             prefetch_gen: 0,
             volume_builder: None,
             volume_builder_tried: false,
+            overlay,
         };
 
         let (c, z, f) = (

@@ -181,7 +181,32 @@ pub fn shift_sync(settings: &mut [ChannelSettings], before: &[(f32, f32)]) {
 /// serves 8- and 16-bit data alike, but an `Int8` channel's texture holds the
 /// raw 0..255 samples. 257 is the widening factor (`0xFF * 257 == 0xFFFF`), so
 /// dividing by it puts the window back in the units the samples are in.
-const WIDEN_8BIT: f32 = 257.0;
+pub(crate) const WIDEN_8BIT: f32 = 257.0;
+
+/// How many of the interface's window units one of a file's sample units is,
+/// for samples of `bits_per_sample` in `format`: [`WIDEN_8BIT`] for unsigned
+/// 4- and 8-bit samples, which the decoder widens onto 0..65535
+/// (`v -> (v << 8) | v`), and 1 for the rest.
+///
+/// A file states its display range (ImageJ's `min=`/`max=`) in its own sample
+/// units, so this is the factor between what it declares and the window the
+/// interface holds — both ways: opening multiplies by it, saving divides. Left
+/// out, an 8-bit file declaring `min=10 max=200` opens with a window of 10..200
+/// out of 65535, which is all but black-to-white at the bottom of the range,
+/// and a save writes `min=5140` for a window that starts at sample 20.
+///
+/// The rest are 1 on purpose. Unsigned 16-bit samples are the interface's
+/// units; signed 16-bit ones keep their window in ImageJ's offset display
+/// space, the units ImageJ itself writes it in; a float window is in the data's
+/// own units; and 32-bit integers are rescaled per channel, with no fixed
+/// factor to apply.
+pub fn window_scale(bits_per_sample: u16, format: fast_tiff_lib::SampleFormat) -> f32 {
+    if format == fast_tiff_lib::SampleFormat::UnsignedInt && matches!(bits_per_sample, 4 | 8) {
+        WIDEN_8BIT
+    } else {
+        1.0
+    }
+}
 
 /// A channel's contrast window in the units its *samples* are in.
 ///
@@ -457,8 +482,11 @@ fn build_one(tiff: &TiffStack, c: usize, channels: usize) -> ChannelSettings {
             }
         } else {
             let data = channel_minmax(tiff, c, channels);
+            // The file's window is in its sample units, the data range above
+            // in the widened ones the interface keeps (`window_scale`).
+            let scale = frame.map_or(1.0, |f| window_scale(f.bits_per_sample, f.sample_format));
             let (min, max) = meta_range
-                .map(|(lo, hi)| (lo as f32, hi as f32))
+                .map(|(lo, hi)| (lo as f32 * scale, hi as f32 * scale))
                 // No display range in metadata at all (not even
                 // ImageDescription min=/max=) — fall back to the actual
                 // min/max of channel c's first frame.

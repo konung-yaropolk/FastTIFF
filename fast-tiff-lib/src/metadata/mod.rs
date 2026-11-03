@@ -13,9 +13,14 @@
 //!   dialect, and records which one ran in [`StackMeta::source_format`].
 //! - **Write**: callers fill a neutral [`StackMetaWrite`] builder and pick a
 //!   [`MetadataFormat`]; [`serialize_description`] renders it in that dialect.
+//!
+//! [`roi`] is not a dialect but a payload one of them carries: ImageJ's binary
+//! ROI format, which its `IJMetadata` block holds as an overlay and its ROI
+//! Manager saves as a `.zip`.
 
 pub mod imagej;
 pub mod ome;
+pub mod roi;
 
 use anyhow::Result;
 
@@ -87,6 +92,13 @@ pub struct StackMeta {
     /// Which dialect produced this metadata (`None` if the description carried
     /// no recognized format and dimensions were inferred from the IFD count).
     pub source_format: MetadataFormat,
+    /// The point ROIs of the file's ImageJ overlay — the `over` entries of its
+    /// `IJMetadata` block, in file order, each read with
+    /// [`roi::point_rois_from_imagej`] (so a ROI with several counters is
+    /// several here). ROIs of any other shape, and entries that cannot be read,
+    /// are left out. Empty when there is no overlay, and for a file that is not
+    /// ImageJ's: only that dialect has one.
+    pub overlay: Vec<roi::PointRoi>,
 }
 
 impl StackMeta {
@@ -113,6 +125,7 @@ impl StackMeta {
             pixel_height: None,
             has_explicit_luts: false,
             source_format,
+            overlay: Vec::new(),
         }
     }
 
@@ -252,6 +265,9 @@ pub struct StackMetaWrite {
     pub(crate) channel_info: Vec<ChannelWrite>,
     pub(crate) extra: Vec<(String, String)>,
     pub(crate) trailing: Option<String>,
+    /// Overlay ROIs, already in ImageJ's `.roi` encoding — see
+    /// [`overlay`](Self::overlay).
+    pub(crate) overlay: Vec<Vec<u8>>,
 }
 
 impl StackMetaWrite {
@@ -274,6 +290,7 @@ impl StackMetaWrite {
             channel_info: Vec::new(),
             extra: Vec::new(),
             trailing: None,
+            overlay: Vec::new(),
         }
     }
 
@@ -394,6 +411,29 @@ impl StackMetaWrite {
     pub fn trailing(mut self, text: impl Into<String>) -> Self {
         let text: String = text.into();
         self.trailing = Some(text.replace('\0', ""));
+        self
+    }
+
+    /// Add point ROIs to the file's ImageJ overlay: one `over` entry each in the
+    /// binary `IJMetadata` block, which ImageJ draws over the image when it
+    /// opens the file — each point on its own slice when it has one (see
+    /// [`roi::RoiPoint::position`]). Each call appends, in order. A ROI with no
+    /// points is skipped, ImageJ having no empty point selection. Only the
+    /// ImageJ metadata format writes it.
+    ///
+    /// ImageJ reads the overlay of a multi-image TIFF only when it can open the
+    /// file as one contiguous stack, which needs the frames **uncompressed**
+    /// (`TiffDecoder` takes `images=` from the description only then). A
+    /// writer that wants the overlay seen in ImageJ should therefore use
+    /// [`Compression::None`](crate::Compression::None); this writer's default
+    /// uncompressed layout — one strip per frame, frames back to back — is the
+    /// contiguous one. A single-image file has no such condition.
+    pub fn overlay(mut self, rois: impl IntoIterator<Item = roi::PointRoi>) -> Self {
+        self.overlay.extend(
+            rois.into_iter()
+                .filter(|r| !r.points.is_empty())
+                .map(|r| r.to_imagej_bytes()),
+        );
         self
     }
 

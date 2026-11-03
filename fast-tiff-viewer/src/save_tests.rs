@@ -565,3 +565,385 @@ fn encoding_to_memory_reports_progress_and_can_be_stopped() {
         "stopping is reported as cancellation: {err:#}"
     );
 }
+
+// ------------------------------------------------------------------ overlay
+
+/// Two point ROIs, as the counter hands them over: one on two slices, one on
+/// every slice.
+fn two_rois() -> Vec<fast_tiff_lib::PointRoi> {
+    use fast_tiff_lib::{PointRoi, RoiPoint};
+    vec![
+        PointRoi {
+            hyperstack_position: [0; 3],
+            name: "Group 1".into(),
+            color: [0xe4, 0x1a, 0x1c],
+            points: vec![
+                RoiPoint {
+                    x: 1.5,
+                    y: 1.5,
+                    position: 1,
+                },
+                RoiPoint {
+                    x: 4.5,
+                    y: 2.5,
+                    position: 3,
+                },
+            ],
+        },
+        PointRoi {
+            hyperstack_position: [0; 3],
+            name: "Group 2".into(),
+            color: [0x37, 0x7e, 0xb8],
+            points: vec![RoiPoint {
+                x: 2.5,
+                y: 0.5,
+                position: 0,
+            }],
+        },
+    ]
+}
+
+/// The first IFD's raw IJMetadata tags — byte counts (50838) and blob (50839) —
+/// read with the library's own IFD reader, and the `(type, count)` directory
+/// the blob opens with, its codes un-reversed (the file is little-endian).
+struct IjMetadata {
+    counts: Vec<u32>,
+    blob: Vec<u8>,
+    directory: Vec<([u8; 4], u32)>,
+}
+
+fn ij_metadata(bytes: &[u8]) -> IjMetadata {
+    use fast_tiff_lib::ifd::{read_header, read_ifd};
+    let (order, flavor, first) = read_header(bytes).expect("a TIFF header");
+    assert_eq!(order, fast_tiff_lib::ByteOrder::Little);
+    let ifd0 = read_ifd(bytes, first as usize, order, flavor).expect("the first IFD");
+    let tag = |t: u16| {
+        ifd0.entries
+            .iter()
+            .find(|e| e.tag == t)
+            .unwrap_or_else(|| panic!("tag {t} on the first IFD"))
+    };
+    let counts = tag(50838).as_u32_array(bytes, order).unwrap();
+    let blob = tag(50839).owned_bytes(bytes, order).unwrap();
+    assert_eq!(&blob[..4], b"JIJI", "the little-endian magic");
+    let directory = blob[4..counts[0] as usize]
+        .chunks_exact(8)
+        .map(|rec| {
+            let mut code = [rec[0], rec[1], rec[2], rec[3]];
+            code.reverse();
+            (code, u32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]))
+        })
+        .collect();
+    IjMetadata {
+        counts,
+        blob,
+        directory,
+    }
+}
+
+/// With an overlay the file is written uncompressed and contiguous — the only
+/// shape in which ImageJ reads a multi-image TIFF's overlay — and its first
+/// IFD carries one `over` entry per ROI, after the channel LUTs.
+#[test]
+fn an_overlay_is_saved_uncompressed_with_its_over_entries() {
+    let mut stack = open(source(SampleType::U16, 2, 1, 3));
+    stack.overlay = two_rois();
+    let path = temp("overlay");
+    save_stack(&stack, &path).expect("save");
+    let bytes = std::fs::read(&path).expect("the saved file");
+    let _ = std::fs::remove_file(&path);
+
+    // The block: two LUTs (one per channel, as always), then the two ROIs
+    // exactly as the library encodes them.
+    let ij = ij_metadata(&bytes);
+    assert_eq!(ij.directory, vec![(*b"luts", 2), (*b"over", 2)]);
+    let rois: Vec<Vec<u8>> = stack.overlay.iter().map(|r| r.to_imagej_bytes()).collect();
+    assert_eq!(
+        ij.counts,
+        vec![20, 768, 768, rois[0].len() as u32, rois[1].len() as u32]
+    );
+    let after_luts = 20 + 2 * 768;
+    assert_eq!(
+        &ij.blob[after_luts..after_luts + rois[0].len()],
+        &rois[0][..]
+    );
+    assert_eq!(&ij.blob[after_luts + rois[0].len()..], &rois[1][..]);
+
+    // Uncompressed, one strip a frame, frames back to back from offset 16:
+    // what ImageJ reads `images=6` frames from.
+    let back = TiffStack::from_bytes(bytes).expect("the saved file should open");
+    let desc = back.description.as_deref().unwrap_or_default();
+    assert!(
+        desc.starts_with("ImageJ=") && desc.contains("images=6\n"),
+        "{desc}"
+    );
+    let frame_bytes = (W * H * 2) as u64;
+    for (i, f) in back.frames.iter().enumerate() {
+        assert_eq!(f.compression, fast_tiff_lib::Compression::None, "frame {i}");
+        assert_eq!(f.strip_offsets.len(), 1, "frame {i}: one strip");
+        assert_eq!(f.strip_offsets[0], 16 + i as u64 * frame_bytes, "frame {i}");
+        assert_eq!(f.strip_byte_counts[0], frame_bytes, "frame {i}");
+    }
+    // …and the pixels and the LUTs are what they were.
+    for (i, (a, b)) in stack.tiff.frames.iter().zip(&back.frames).enumerate() {
+        let want = read_frame_u16(&stack.tiff.data, a, stack.tiff.byte_order, None).unwrap();
+        let got = read_frame_u16(&back.data, b, back.byte_order, None).unwrap();
+        assert_eq!(want, got, "frame {i} changed");
+    }
+    assert_eq!(back.meta.channels, 2);
+}
+
+/// Without an overlay nothing changes: Deflate, and a block of LUTs alone.
+#[test]
+fn without_an_overlay_the_save_is_unchanged() {
+    let stack = open(source(SampleType::U16, 2, 1, 3));
+    assert!(stack.overlay.is_empty());
+    let bytes = save_to_bytes(&SaveSource::of(&stack), &mut |_| true).expect("save");
+    let ij = ij_metadata(&bytes);
+    assert_eq!(ij.directory, vec![(*b"luts", 2)]);
+    assert_eq!(ij.counts, vec![12, 768, 768]);
+    let back = TiffStack::from_bytes(bytes).expect("the saved file should open");
+    assert!(back
+        .frames
+        .iter()
+        .all(|f| f.compression == fast_tiff_lib::Compression::Deflate));
+}
+
+/// The browser's in-memory save is the same encode, overlay included.
+#[test]
+fn the_in_memory_save_carries_the_overlay_too() {
+    let mut stack = open(source(SampleType::U8, 1, 1, 4));
+    stack.overlay = two_rois();
+    let path = temp("overlay-same");
+    save_stack(&stack, &path).expect("save");
+    let on_disk = std::fs::read(&path).expect("the saved file");
+    let _ = std::fs::remove_file(&path);
+    let in_memory = save_to_bytes(&SaveSource::of(&stack), &mut |_| true).expect("save");
+    assert_eq!(in_memory, on_disk);
+    assert_eq!(ij_metadata(&in_memory).directory[1], (*b"over", 2));
+}
+
+/// The overlay is part of the snapshot: setting or clearing it after the save
+/// started does not reach the file being written.
+#[test]
+fn the_snapshot_holds_the_overlay_it_was_taken_with() {
+    let mut stack = open(source(SampleType::U16, 1, 1, 2));
+    stack.overlay = two_rois();
+    let with = SaveSource::of(&stack);
+    stack.overlay.clear();
+    let without = SaveSource::of(&stack);
+    stack.overlay = two_rois();
+
+    let bytes = save_to_bytes(&with, &mut |_| true).unwrap();
+    assert_eq!(ij_metadata(&bytes).directory[1], (*b"over", 2));
+    let bytes = save_to_bytes(&without, &mut |_| true).unwrap();
+    assert_eq!(ij_metadata(&bytes).directory, vec![(*b"luts", 1)]);
+}
+
+/// A file's own overlay is the document's when it opens, so saving it again —
+/// with nothing touched — writes it back, uncompressed, as it would one the
+/// counter added. The points come back as they were.
+#[test]
+fn a_files_own_overlay_is_kept_by_a_save() {
+    let mut first = open(source(SampleType::U16, 2, 1, 3));
+    first.overlay = two_rois();
+    let saved = save_to_bytes(&SaveSource::of(&first), &mut |_| true).expect("save");
+
+    let reopened = open(saved);
+    assert_eq!(reopened.overlay, two_rois(), "opening reads the overlay");
+    assert_eq!(reopened.tiff.meta.overlay, two_rois());
+
+    let again = save_to_bytes(&SaveSource::of(&reopened), &mut |_| true).expect("save");
+    assert_eq!(ij_metadata(&again).directory[1], (*b"over", 2));
+    let back = TiffStack::from_bytes(again).expect("the saved file should open");
+    assert!(back
+        .frames
+        .iter()
+        .all(|f| f.compression == fast_tiff_lib::Compression::None));
+    assert_eq!(back.meta.overlay, two_rois());
+}
+
+/// An overlay makes a save uncompressed only while that still fits a classic
+/// TIFF: past 4 GiB the writer would turn to BigTIFF, which ImageJ cannot
+/// open at all, and the stack is compressed as any other.
+#[test]
+fn an_overlay_is_saved_uncompressed_only_below_4_gib() {
+    let frame = 512 * 512 * 2;
+    assert!(fits_classic_uncompressed(1, frame));
+    assert!(
+        fits_classic_uncompressed(8_000, frame),
+        "about 4 GB less the slack"
+    );
+    assert!(!fits_classic_uncompressed(8_200, frame), "past 4 GiB");
+    assert!(
+        !fits_classic_uncompressed(usize::MAX, usize::MAX),
+        "no overflow"
+    );
+}
+
+/// A point ROI on one plane of a hyperstack, saved without a hyperstack
+/// position — read from a file, say — is given that plane's, so that ImageJ
+/// draws it there; one spread over planes, on every plane, or on a stack that
+/// is not a hyperstack is written as it was.
+#[test]
+fn an_overlay_roi_is_placed_for_imagej_on_a_hyperstack() {
+    use fast_tiff_lib::{PointRoi, RoiPoint};
+    let roi = |positions: &[u32]| PointRoi {
+        name: "R".into(),
+        color: [0; 3],
+        points: positions
+            .iter()
+            .map(|&position| RoiPoint {
+                x: 1.5,
+                y: 1.5,
+                position,
+            })
+            .collect(),
+        hyperstack_position: [0; 3],
+    };
+    let dims = |channels, slices, frames| Dims {
+        channels,
+        slices,
+        frames,
+    };
+    // 2 channels x 3 slices x 2 frames: IFD 9 is channel 2, slice 2, frame 2.
+    let d = dims(2, 3, 2);
+    let place = |roi, dims| placed_for_imagej(roi, dims, false, d);
+    assert_eq!(place(roi(&[10, 10]), d).hyperstack_position, [2, 2, 2]);
+    assert_eq!(place(roi(&[1]), d).hyperstack_position, [1, 1, 1]);
+    for left in [roi(&[1, 10]), roi(&[0, 0])] {
+        assert_eq!(place(left.clone(), d), left);
+    }
+    // One worked out for other axes is worked out again from the shared
+    // position, which the axes do not move.
+    let mut stale = roi(&[10]);
+    stale.hyperstack_position = [0, 1, 2];
+    assert_eq!(place(stale, d).hyperstack_position, [2, 2, 2]);
+    // A time series is not a hyperstack, and needs none; an RGB one with
+    // slices and frames is, with its samples for channels.
+    assert_eq!(place(roi(&[4]), dims(1, 1, 5)), roi(&[4]));
+    assert_eq!(
+        placed_for_imagej(roi(&[4]), dims(3, 2, 3), true, d).hyperstack_position,
+        [0, 2, 2]
+    );
+}
+
+/// A ROI tied to a plane by its hyperstack position alone is moved from the
+/// axes it was read in to the ones being saved: a 2-channel z-stack of 5,
+/// opened as 2 channels x 5 frames, keeps a ROI ImageJ put on slice 3 on that
+/// plane — every channel of it, as it was — rather than on a slice 3 that the
+/// saved file does not have.
+#[test]
+fn a_hyperstack_position_moves_with_the_axes() {
+    use fast_tiff_lib::{PointRoi, RoiPoint};
+    let dims = |channels, slices, frames| Dims {
+        channels,
+        slices,
+        frames,
+    };
+    let file = dims(2, 5, 1);
+    let roi = PointRoi {
+        name: "FM".into(),
+        color: [0; 3],
+        points: vec![RoiPoint {
+            x: 1.5,
+            y: 1.5,
+            position: 0,
+        }],
+        hyperstack_position: [0, 3, 1],
+    };
+    let saved = placed_for_imagej(roi.clone(), dims(2, 1, 5), false, file);
+    assert_eq!(saved.hyperstack_position, [0, 1, 3]);
+    // Read and saved in the same axes, it is left as it was.
+    assert_eq!(placed_for_imagej(roi.clone(), file, false, file), roi);
+    assert_eq!(hyperstack_to_flat([0, 3, 1], file, false, false), Some(5));
+    assert_eq!(hyperstack_to_flat([0, 3, 1], file, false, true), Some(6));
+    assert_eq!(hyperstack_to_flat([0, 6, 1], file, false, false), None);
+    for p in 1..=10 {
+        let back = hyperstack_to_flat(flat_to_hyperstack(p, file, false), file, false, false);
+        assert_eq!(back, Some(p));
+    }
+}
+
+/// ImageJ reads an overlay back only from an uncompressed save, which a
+/// stack gets only while it fits a classic TIFF.
+#[test]
+fn the_overlay_is_readable_by_imagej_below_4_gib() {
+    let opts = WriterOptions::new(4, 4, SampleType::U8);
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    w.write_frame_u8(&[0; 16]).unwrap();
+    let s = Stack::from_bytes(w.finish().unwrap().into_inner(), "x.tif".into(), false).unwrap();
+    assert!(overlay_readable_by_imagej(&s));
+}
+
+/// A stack of `T` samples with display range `range` in its description, and
+/// the samples `0, 1, 2, ...` (wrapping).
+fn ranged(sample: SampleType, range: (f64, f64)) -> Stack {
+    let opts = WriterOptions::new(16, 16, sample)
+        .metadata(StackMetaWrite::new(1, 1).range(range.0, range.1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for _ in 0..2 {
+        match sample {
+            SampleType::U8 => w
+                .write_frame_u8(&(0..256).map(|i| i as u8).collect::<Vec<_>>())
+                .unwrap(),
+            SampleType::U16 => w
+                .write_frame_u16(&(0..256).map(|i| i as u16 * 100).collect::<Vec<_>>())
+                .unwrap(),
+            _ => unreachable!(),
+        }
+    }
+    Stack::from_bytes(w.finish().unwrap().into_inner(), "ranged.tif".into(), false).unwrap()
+}
+
+/// The `min=`/`max=` a saved file's description declares.
+fn declared_range(bytes: Vec<u8>) -> (String, String) {
+    let back = Stack::from_bytes(bytes, "again.tif".into(), false).unwrap();
+    let desc = back.tiff.description.clone().unwrap_or_default();
+    let get = |key: &str| {
+        desc.lines()
+            .find_map(|l| l.strip_prefix(key))
+            .unwrap_or("")
+            .to_string()
+    };
+    (get("min="), get("max="))
+}
+
+/// An 8-bit file's display range is in its own 0..255 units both ways: it
+/// opens as that window on its samples, a save writes it back as it was —
+/// not 257 times it, which ImageJ would show saturated — and a window the
+/// user set is written in sample units too.
+#[test]
+fn an_8_bit_window_is_in_sample_units_both_ways() {
+    let mut s = ranged(SampleType::U8, (10.0, 200.0));
+    let c = &s.display.settings[0];
+    assert_eq!(
+        crate::channels::sample_window(c.kind, c.min, c.max),
+        (10.0, 200.0),
+        "opens on samples 10..200"
+    );
+    let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
+    assert_eq!(declared_range(bytes), ("10".into(), "200".into()));
+
+    // Auto-contrast, or a drag: the window as the interface holds it.
+    (s.display.settings[0].min, s.display.settings[0].max) = (20.0 * 257.0, 147.0 * 257.0);
+    let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
+    assert_eq!(declared_range(bytes.clone()), ("20".into(), "147".into()));
+    let back = Stack::from_bytes(bytes, "again.tif".into(), false).unwrap();
+    let c = &back.display.settings[0];
+    assert_eq!(
+        (c.min, c.max),
+        (20.0 * 257.0, 147.0 * 257.0),
+        "and reopens the same"
+    );
+}
+
+/// A 16-bit file's window was in sample units already, and still is.
+#[test]
+fn a_16_bit_window_is_unchanged() {
+    let s = ranged(SampleType::U16, (1000.0, 30000.0));
+    let c = &s.display.settings[0];
+    assert_eq!((c.min, c.max), (1000.0, 30000.0));
+    let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
+    assert_eq!(declared_range(bytes), ("1000".into(), "30000".into()));
+}

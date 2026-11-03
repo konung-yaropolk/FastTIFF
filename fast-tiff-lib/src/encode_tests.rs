@@ -682,3 +682,124 @@ fn a_frame_too_large_to_address_is_refused() {
         assert!(err.contains("overflows"), "{err}");
     }
 }
+
+/// An IJMetadata tag pair as read: the byte counts (50838) and the blob (50839).
+type IjMetadataTags = (Vec<u32>, Vec<u8>);
+
+/// The raw IJMetadata pair of the first IFD, and whether any later IFD carries
+/// either tag.
+fn ij_metadata_tags(bytes: &[u8]) -> (Option<IjMetadataTags>, bool) {
+    let (order, flavor, first) = ifd::read_header(bytes).unwrap();
+    let ifd0 = ifd::read_ifd(bytes, first as usize, order, flavor).unwrap();
+    let find = |tag: u16| ifd0.entries.iter().find(|e| e.tag == tag);
+    let pair = find(50838).zip(find(50839)).map(|(counts, blob)| {
+        (
+            counts.as_u32_array(bytes, order).unwrap(),
+            blob.owned_bytes(bytes, order).unwrap(),
+        )
+    });
+    let mut later = false;
+    let mut next = ifd0.next_offset;
+    while next != 0 {
+        let parsed = ifd::read_ifd(bytes, next as usize, order, flavor).unwrap();
+        later |= parsed
+            .entries
+            .iter()
+            .any(|e| e.tag == 50838 || e.tag == 50839);
+        next = parsed.next_offset;
+    }
+    (pair, later)
+}
+
+/// An overlay set on the metadata reaches the file: one `over` entry per ROI
+/// with points, after the LUTs, on the first IFD only — and the file still
+/// opens with its LUTs.
+#[test]
+fn an_overlay_is_written_into_the_first_ifds_ij_metadata() {
+    use crate::metadata::roi::{PointRoi, RoiPoint};
+    let mut magenta = [[0u8; 3]; 256];
+    for (i, px) in magenta.iter_mut().enumerate() {
+        *px = [i as u8, 0, i as u8];
+    }
+    let points = vec![
+        RoiPoint {
+            x: 0.5,
+            y: 0.5,
+            position: 1,
+        },
+        RoiPoint {
+            x: 1.5,
+            y: 0.5,
+            position: 3,
+        },
+    ];
+    let rois = vec![
+        PointRoi {
+            hyperstack_position: [0; 3],
+            name: "Group 1".into(),
+            color: [0xe4, 0x1a, 0x1c],
+            points,
+        },
+        // No points: nothing ImageJ could show, so nothing written.
+        PointRoi {
+            hyperstack_position: [0; 3],
+            name: "Group 2".into(),
+            color: [0x37, 0x7e, 0xb8],
+            points: vec![],
+        },
+    ];
+    let encoded = rois[0].to_imagej_bytes();
+    let opts = WriterOptions::new(2, 1, SampleType::U16).metadata(
+        StackMetaWrite::new(1, 1)
+            .channel_lut(magenta)
+            .overlay(rois.clone()),
+    );
+    let frame = le_bytes_u16(&[1, 2]);
+    let bytes = write_stack(opts, &[frame.clone(), frame.clone(), frame]);
+
+    let (pair, later) = ij_metadata_tags(&bytes);
+    let (counts, blob) = pair.expect("the first IFD carries the IJMetadata pair");
+    assert!(!later, "only the first IFD carries it");
+    assert_eq!(counts, vec![20, 768, encoded.len() as u32]);
+    assert_eq!(&blob[..4], b"JIJI");
+    assert_eq!(&blob[4..12], b"stul\x01\0\0\0");
+    assert_eq!(&blob[12..20], b"revo\x01\0\0\0");
+    assert_eq!(&blob[20 + 768..], &encoded[..]);
+
+    let stack = crate::TiffStack::from_bytes(bytes).unwrap();
+    assert!(stack.meta.has_explicit_luts, "the LUT still reads back");
+    assert_eq!(stack.meta.channel_display[0].lut[255], [255, 0, 255]);
+    // And so does the overlay, the empty ROI that was never written aside.
+    assert_eq!(stack.meta.overlay, vec![rois[0].clone()]);
+}
+
+/// No overlay and no LUT: no block at all, as before.
+#[test]
+fn no_overlay_and_no_luts_writes_no_ij_metadata() {
+    let opts = WriterOptions::new(2, 1, SampleType::U16).metadata(StackMetaWrite::new(1, 1));
+    let bytes = write_stack(opts, &[le_bytes_u16(&[1, 2])]);
+    assert!(ij_metadata_tags(&bytes).0.is_none());
+}
+
+/// The overlay is an ImageJ thing: written as OME, the file has no block.
+#[test]
+fn an_ome_file_carries_no_overlay() {
+    use crate::metadata::roi::{PointRoi, RoiPoint};
+    let roi = PointRoi {
+        hyperstack_position: [0; 3],
+        name: "G".into(),
+        color: [1, 2, 3],
+        points: vec![RoiPoint {
+            x: 0.5,
+            y: 0.5,
+            position: 0,
+        }],
+    };
+    let opts = WriterOptions::new(2, 1, SampleType::U16)
+        .metadata(StackMetaWrite::new(1, 1).overlay([roi]))
+        .metadata_format(MetadataFormat::Ome);
+    let bytes = write_stack(opts, &[le_bytes_u16(&[1, 2])]);
+    assert!(ij_metadata_tags(&bytes).0.is_none());
+    let stack = crate::TiffStack::from_bytes(bytes).unwrap();
+    assert!(stack.meta.overlay.is_empty());
+}
