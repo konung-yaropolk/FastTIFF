@@ -94,18 +94,50 @@ pub(super) fn crop(
 
 /// Whether the copy hotkey was pressed this frame.
 ///
-/// `Modifiers::COMMAND` is egui's platform-correct chord — ⌘ on macOS, Ctrl
-/// everywhere else — so this is one line rather than a `cfg` per platform.
+/// The chord arrives in one of two shapes. On the desktop egui-winit turns it
+/// into [`egui::Event::Copy`] and sends no key event for it at all, so waiting
+/// for the C key alone is waiting for something that never comes there — which
+/// is how Ctrl+C once did nothing on the desktop while the button worked. A
+/// browser sends the key, and a `copy` event as well when the page lets it
+/// through; either, or both in one frame, is one copy. `Modifiers::COMMAND` is
+/// egui's platform-correct chord — ⌘ on macOS, Ctrl everywhere else.
 ///
-/// Skipped while a widget holds keyboard focus, because there the same chord
-/// means "copy the text I have selected" and a text field's own copy must win.
-/// Taking it unconditionally would make Ctrl+C in the frame-number box copy the
-/// picture instead of the number, which reads as the box being broken.
+/// Skipped while text has the keyboard ([`text_has_the_keyboard`]), because
+/// there the same chord means "copy the text I have selected" and that copy
+/// must win. Taking it unconditionally would make Ctrl+C in the frame-number
+/// box copy the picture instead of the number, which reads as the box being
+/// broken.
+///
+/// Skipped too while egui holds a label selection. egui copies that label's
+/// text on the same chord whatever this does — the whole label, after a plain
+/// click on it — so copying the view as well would leave the clipboard to
+/// whichever landed last while the status line said the view was copied. A
+/// press anywhere but on a label ends the selection, and the chord is the
+/// view's again.
 pub(super) fn hotkey(ctx: &egui::Context) -> bool {
-    if ctx.memory(|m| m.focused()).is_some() {
+    let label_selected = ctx
+        .with_plugin(|s: &mut egui::text_selection::LabelSelectionState| s.has_selection())
+        .unwrap_or(false);
+    if text_has_the_keyboard(ctx) || label_selected {
         return false;
     }
-    ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C))
+    ctx.input_mut(|i| {
+        let key = i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
+        let event = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
+        key || event
+    })
+}
+
+/// Whether a chord pressed now belongs to text rather than to the picture: a
+/// text field holding the caret.
+///
+/// A text field, not any widget with focus. A button, a slider or a checkbox
+/// can hold the keyboard focus too (Tab moves it there), and none of them has
+/// anything of its own to copy or undo — so treating them like a text field
+/// leaves the chord doing nothing at all. (A label selection is the copy
+/// chord's business alone — see [`hotkey`]; a label has no undo.)
+pub(super) fn text_has_the_keyboard(ctx: &egui::Context) -> bool {
+    ctx.text_edit_focused()
 }
 
 /// An [`egui::ColorImage`] of a composed 2-D snapshot.
