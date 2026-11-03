@@ -42,6 +42,24 @@
 //! higher level can do better, so this is a choice for the data this viewer is
 //! mostly pointed at, not a universal one.
 //!
+//! # Except with an overlay: uncompressed
+//!
+//! A stack carrying an ImageJ overlay ([`Stack::overlay`]: the points the file
+//! came with, or the point counter's) is written uncompressed instead, and the
+//! overlay with it. ImageJ reads the overlay of a multi-image TIFF only when it
+//! opens the file as one contiguous stack, and it does that only for an
+//! uncompressed one: its `TiffDecoder` takes `images=` from the description
+//! only when the compression is none, and its other route through a
+//! multi-image file never looks at the overlay. Compressed, the points would be
+//! in the file and ImageJ would not show them. The writer's uncompressed layout
+//! is the contiguous one it needs — see [`write_all`].
+//!
+//! Unless uncompressed is too big for a classic TIFF. Past 4 GiB the writer
+//! turns to BigTIFF, which ImageJ 1.x does not open at all, so such a stack is
+//! compressed as any other: the overlay is still written, for this viewer to
+//! read back, and ImageJ — when the compressed file is small enough for it to
+//! open — shows the image without it.
+//!
 //! # Two destinations, one encoder
 //!
 //! [`save_source`] writes a file; [`save_to_bytes`] fills a `Vec<u8>`. They are
@@ -57,6 +75,7 @@
 //! real difference between the two. A stack larger than the tab can hold fails
 //! here where the desktop would have streamed it.
 
+use crate::display::Dims;
 use crate::stack::Stack;
 use anyhow::{bail, Context, Result};
 use fast_tiff_lib::metadata::{self, MetadataFormat};
@@ -135,6 +154,8 @@ impl Samples {
 pub struct SaveSource {
     tiff: std::sync::Arc<fast_tiff_lib::TiffStack>,
     display: crate::display::Display,
+    /// [`Stack::overlay`], as it was when the snapshot was taken.
+    overlay: Vec<fast_tiff_lib::PointRoi>,
 }
 
 impl SaveSource {
@@ -147,6 +168,7 @@ impl SaveSource {
         SaveSource {
             tiff: std::sync::Arc::clone(&stack.tiff),
             display: stack.display.clone(),
+            overlay: stack.overlay.clone(),
         }
     }
 
@@ -327,11 +349,28 @@ fn write_all<W: std::io::Write + std::io::Seek>(
         }
     }
 
+    let bytes_per_frame = frame_bytes(first, samples);
+
     let options = WriterOptions::new(first.width, first.height, samples.sample_type())
         .samples_per_pixel(spp)
-        .compression(COMPRESSION)
-        .compression_level(COMPRESSION_LEVEL)
         .metadata(metadata_of(stack));
+    // An overlay is only seen by ImageJ in an uncompressed stack (module docs).
+    // Uncompressed, the writer puts each frame in one strip (no
+    // `rows_per_strip` is set here), every strip straight after the last from
+    // offset 16, and the IFDs after all of them at `finish` — so frame `i`
+    // starts at `16 + i * frame_bytes`, which is the contiguous layout ImageJ
+    // reads `images=N` frames from.
+    //
+    // Not when that is past what a classic TIFF holds (module docs).
+    let uncompressed = !stack.overlay.is_empty()
+        && fits_classic_uncompressed(stack.tiff.frames.len(), bytes_per_frame);
+    let options = if !uncompressed {
+        options
+            .compression(COMPRESSION)
+            .compression_level(COMPRESSION_LEVEL)
+    } else {
+        options.compression(Compression::None)
+    };
     let mut writer = TiffWriter::new(sink, options).context("starting the TIFF")?;
 
     let data = &stack.tiff.data;
@@ -339,14 +378,6 @@ fn write_all<W: std::io::Write + std::io::Seek>(
     let mut u8s: Vec<u8> = Vec::new();
     let mut u16s: Vec<u16> = Vec::new();
     let mut f32s: Vec<f32> = Vec::new();
-
-    let bytes_per_frame = (first.width as usize * first.height as usize * spp as usize)
-        .saturating_mul(match samples {
-            Samples::U8 => 1,
-            Samples::U16 | Samples::I16 => 2,
-            Samples::F32 => 4,
-        })
-        .max(1);
     let per_batch = (batch_bytes / bytes_per_frame).max(1);
     // Buffers reused from batch to batch; `filled` of them hold this batch.
     let mut batch: Vec<Vec<u8>> = Vec::with_capacity(per_batch);
@@ -427,6 +458,143 @@ fn extend_le<T: bytemuck::Pod>(out: &mut Vec<u8>, samples: &[T]) {
     }
 }
 
+/// Whether `frames` frames of `bytes_per_frame` each fit a classic TIFF
+/// uncompressed — under 4 GiB, with room to spare for the IFDs (a kilobyte a
+/// frame is several times what one takes), the description and the overlay.
+/// Past it the writer would make a BigTIFF, which ImageJ 1.x cannot open.
+fn fits_classic_uncompressed(frames: usize, bytes_per_frame: usize) -> bool {
+    let size = (frames as u64)
+        .saturating_mul((bytes_per_frame as u64).saturating_add(1024))
+        .saturating_add(64 << 20);
+    size <= u64::from(u32::MAX)
+}
+
+/// Whether ImageJ opens a stack of these axes, as a save writes them, as a
+/// hyperstack: one with more than one channel (a composite), or with slices
+/// and frames both. An RGB stack's channels are its samples, not an axis.
+pub fn opens_as_imagej_hyperstack(dims: Dims, rgb: bool) -> bool {
+    let channels = if rgb { 1 } else { dims.channels };
+    channels > 1 || (dims.slices > 1 && dims.frames > 1)
+}
+
+/// The hyperstack position — channel, slice, frame, each from 1 — of flat
+/// stack position `position` (the IFD index plus one) in a stack of `dims`,
+/// whose IFDs are in the channel-fastest order [`plane_index`](crate::plane_index)
+/// gives. In RGB the channels are samples of one IFD, and ImageJ has a single
+/// channel: 0 for it, which is "all".
+pub fn flat_to_hyperstack(position: u32, dims: Dims, rgb: bool) -> [u32; 3] {
+    let ifd = position.saturating_sub(1) as usize;
+    let (channels, slices) = (dims.channels.max(1), dims.slices.max(1));
+    let (c, rest) = if rgb {
+        (0, ifd)
+    } else {
+        (ifd % channels + 1, ifd / channels)
+    };
+    let (z, t) = (rest % slices + 1, rest / slices + 1);
+    let n = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+    [n(c), n(z), n(t)]
+}
+
+/// The flat stack position (the IFD index plus one) of hyperstack position
+/// `[c, z, t]` in a stack of `dims`: [`flat_to_hyperstack`] the other way. An
+/// axis at 0 — all of it — is taken at its first index, or at its last with
+/// `last`, so the two give the span such a position covers. `None` for an
+/// index past the axes.
+pub fn hyperstack_to_flat([c, z, t]: [u32; 3], dims: Dims, rgb: bool, last: bool) -> Option<u32> {
+    let channels = if rgb { 1 } else { dims.channels.max(1) };
+    let (slices, frames) = (dims.slices.max(1), dims.frames.max(1));
+    let index = |v: u32, n: usize| -> Option<usize> {
+        match v as usize {
+            0 if last => Some(n - 1),
+            0 => Some(0),
+            v if v <= n => Some(v - 1),
+            _ => None,
+        }
+    };
+    let (c, z, t) = (index(c, channels)?, index(z, slices)?, index(t, frames)?);
+    let ifd = (t * slices + z) * channels + c;
+    u32::try_from(ifd + 1).ok()
+}
+
+/// `roi` placed so that ImageJ draws it where its points are, on a stack
+/// saved with axes `dims`; `read_in` are the axes its hyperstack position, if
+/// it has one, is in — the file's own, for a ROI read from it.
+///
+/// On a hyperstack ImageJ reads a point ROI's one shared position as a slice
+/// or frame number rather than the flat stack index it is, and draws the ROI
+/// on no plane or the wrong one (see
+/// [`PointRoi::hyperstack_position`](fast_tiff_lib::PointRoi::hyperstack_position)).
+/// So:
+///
+/// * a ROI whose points share one position gets the hyperstack position of
+///   that plane, worked out afresh for `dims` — the flat position is what
+///   stays put when the axes are reassigned, where a hyperstack position
+///   worked out for other axes would point at a plane that is not there;
+/// * a ROI tied to a plane by its hyperstack position alone, or whose points
+///   are spread over planes, keeps it, moved from `read_in` to `dims` when
+///   they differ — an axis that was "all" stays all;
+/// * on a stack that is not a hyperstack, ImageJ goes by the ROI's position,
+///   and a ROI that has one carries no hyperstack position to mislead it.
+fn placed_for_imagej(
+    mut roi: fast_tiff_lib::PointRoi,
+    dims: Dims,
+    rgb: bool,
+    read_in: Dims,
+) -> fast_tiff_lib::PointRoi {
+    let shared = roi
+        .points
+        .first()
+        .map(|p| p.position)
+        .filter(|&first| first != 0 && roi.points.iter().all(|p| p.position == first));
+    if !opens_as_imagej_hyperstack(dims, rgb) {
+        if shared.is_some() {
+            roi.hyperstack_position = [0; 3];
+        }
+        return roi;
+    }
+    if let Some(position) = shared {
+        roi.hyperstack_position = flat_to_hyperstack(position, dims, rgb);
+    } else if roi.hyperstack_position != [0; 3] && read_in != dims {
+        let old = roi.hyperstack_position;
+        if let Some(flat) = hyperstack_to_flat(old, read_in, rgb, false) {
+            let mut new = flat_to_hyperstack(flat, dims, rgb);
+            for (axis, was) in new.iter_mut().zip(old) {
+                if was == 0 {
+                    *axis = 0;
+                }
+            }
+            roi.hyperstack_position = new;
+        }
+    }
+    roi
+}
+
+/// Whether ImageJ will read the overlay back from a save of `stack`: whether
+/// the save is uncompressed, which it is only while that fits a classic TIFF
+/// (see the module docs). Past that the overlay is still in the file, for this
+/// viewer, but ImageJ shows the image without it.
+pub fn overlay_readable_by_imagej(stack: &Stack) -> bool {
+    let Some(first) = stack.tiff.frames.first() else {
+        return true;
+    };
+    let Ok(samples) = Samples::of(first) else {
+        // Not a stack this writer saves at all.
+        return true;
+    };
+    fits_classic_uncompressed(stack.tiff.frames.len(), frame_bytes(first, samples))
+}
+
+/// One frame's uncompressed size as the writer writes it.
+fn frame_bytes(first: &FrameInfo, samples: Samples) -> usize {
+    (first.width as usize * first.height as usize * first.samples_per_pixel.max(1) as usize)
+        .saturating_mul(match samples {
+            Samples::U8 => 1,
+            Samples::U16 | Samples::I16 => 2,
+            Samples::F32 => 4,
+        })
+        .max(1)
+}
+
 /// The metadata to write beside the pixels.
 ///
 /// Taken from the *display* rather than from the file's own header wherever the
@@ -462,9 +630,16 @@ fn metadata_of(stack: &SaveSource) -> StackMetaWrite {
     // The window on screen. The format carries one for the stack, so the first
     // channel's speaks for it — the alternative is to write none and have the
     // file open on auto-contrast, which is a visible change to something the
-    // user did not touch.
+    // user did not touch. In the samples' units, as the file is written: the
+    // interface keeps an 8-bit window widened onto 0..65535
+    // (`channels::window_scale`), which ImageJ would read as 257 times the
+    // range and show the image saturated.
     if let Some(first) = stack.display.settings.first() {
-        out = out.range(first.min as f64, first.max as f64);
+        let scale = match stack.tiff.frames.first().map(Samples::of) {
+            Some(Ok(Samples::U8)) => f64::from(crate::channels::WIDEN_8BIT),
+            _ => 1.0,
+        };
+        out = out.range(first.min as f64 / scale, first.max as f64 / scale);
     }
     // Every channel's LUT, always — including plain grayscale ones. They are
     // 768 bytes each, and writing them is what makes a saved file open in the
@@ -475,6 +650,24 @@ fn metadata_of(stack: &SaveSource) -> StackMetaWrite {
     }
     if let Some(text) = carried_description(stack) {
         out = out.trailing(text);
+    }
+    // The overlay — the file's own points, or the point counter's — as ImageJ
+    // overlay ROIs, each where ImageJ will draw it on these axes.
+    if !stack.overlay.is_empty() {
+        let rgb = stack.display.rgb;
+        // The axes the file was written with, which a hyperstack position read
+        // from it is in.
+        let read_in = Dims {
+            channels: meta.channels,
+            slices: meta.slices,
+            frames: meta.frames,
+        };
+        out = out.overlay(
+            stack
+                .overlay
+                .iter()
+                .map(|roi| placed_for_imagej(roi.clone(), dims, rgb, read_in)),
+        );
     }
     out
 }

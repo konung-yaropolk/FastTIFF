@@ -13,6 +13,8 @@ use fasttiff_plugin_api::{ParamDecl, ParamKind, ParamValue, Params, PluginInfo};
 pub(super) enum MenuAction {
     /// Run this plugin, showing its dialog first if it declared one.
     Run(usize),
+    /// Open the point counter, the app's own tool (see `point_counter`).
+    PointCounter,
     /// Open the folder plugins are installed into. Desktop-only, like the
     /// menu entry that produces it.
     #[cfg(not(target_arch = "wasm32"))]
@@ -20,8 +22,63 @@ pub(super) enum MenuAction {
     None,
 }
 
-/// The Plugins menu button and its contents.
-pub(super) fn plugins_menu(ui: &mut egui::Ui, registry: Option<&Registry>) -> MenuAction {
+/// The submenu the point counter is listed in.
+const ANALYSIS: &str = "Analysis";
+
+/// One entry of the menu: a plugin from the registry, or a tool of the app's
+/// own listed among them.
+#[derive(Clone, Copy)]
+enum Item<'a> {
+    Plugin(usize, &'a PluginInfo),
+    PointCounter,
+}
+
+impl Item<'_> {
+    fn name(&self) -> &str {
+        match self {
+            Item::Plugin(_, info) => &info.name,
+            Item::PointCounter => super::point_counter::NAME,
+        }
+    }
+}
+
+/// The registry's groups, as [`Registry::grouped`] gives them, with the app's
+/// own tools merged in.
+///
+/// The point counter is not a plugin — a plugin keeps nothing between runs,
+/// and the counter is a session (see `point_counter`) — but it is used like
+/// one, so it is listed like one: under "Analysis", in name order among any
+/// plugins that chose the same submenu, and in a submenu of its own, in its
+/// sorted place, when none did. The registry's own order is by
+/// `(menu_path, name)`, compared the same way.
+fn with_app_tools<'a>(
+    groups: Vec<(&'a str, Vec<(usize, &'a PluginInfo)>)>,
+) -> Vec<(&'a str, Vec<Item<'a>>)> {
+    let mut groups: Vec<(&str, Vec<Item>)> = groups
+        .into_iter()
+        .map(|(path, items)| {
+            let items = items.into_iter().map(|(i, info)| Item::Plugin(i, info));
+            (path, items.collect())
+        })
+        .collect();
+    let at = groups.partition_point(|(path, _)| *path < ANALYSIS);
+    if groups.get(at).is_none_or(|(path, _)| *path != ANALYSIS) {
+        groups.insert(at, (ANALYSIS, Vec::new()));
+    }
+    let items = &mut groups[at].1;
+    let tool = Item::PointCounter;
+    let at = items.partition_point(|item| item.name() < tool.name());
+    items.insert(at, tool);
+    groups
+}
+
+/// The Plugins menu button and its contents. `has_stack`: whether an image is
+/// open, which the app's own tools need.
+pub(super) fn plugins_menu(
+    ui: &mut egui::Ui,
+    registry: Option<&Registry>,
+    has_stack: bool,
+) -> MenuAction {
     // `None` means an import has the registry — see `ViewerApp::plugins`. The
     // button stays, greyed, rather than vanishing: a toolbar that loses an item
     // for the duration of a long read is a toolbar whose other buttons move
@@ -34,28 +91,40 @@ pub(super) fn plugins_menu(ui: &mut egui::Ui, registry: Option<&Registry>) -> Me
     };
     let mut action = MenuAction::None;
     ui.menu_button(icon(), |ui| {
-        if registry.is_empty() {
-            ui.label(RichText::new("No plugins installed").italics());
-        } else {
-            for (path, items) in registry.grouped() {
-                if path.is_empty() {
-                    for (i, info) in items {
-                        if entry(ui, info).clicked() {
-                            action = MenuAction::Run(i);
-                            ui.close();
-                        }
+        let mut list = |ui: &mut egui::Ui, items: &[Item]| {
+            for item in items {
+                let clicked = match *item {
+                    Item::Plugin(i, info) => {
+                        entry(ui, info).clicked().then_some(MenuAction::Run(i))
                     }
-                } else {
-                    ui.menu_button(path, |ui| {
-                        for (i, info) in items {
-                            if entry(ui, info).clicked() {
-                                action = MenuAction::Run(i);
-                                ui.close();
-                            }
-                        }
-                    });
+                    Item::PointCounter => ui
+                        .add_enabled(has_stack, egui::Button::new(item.name()))
+                        .on_hover_text(
+                            "Click on the image to count points, in named groups; export \
+                             them as ImageJ ROIs",
+                        )
+                        .on_disabled_hover_text("Open an image first")
+                        .clicked()
+                        .then_some(MenuAction::PointCounter),
+                };
+                if let Some(chosen) = clicked {
+                    action = chosen;
+                    ui.close();
                 }
             }
+        };
+        for (path, group) in with_app_tools(registry.grouped()) {
+            if path.is_empty() {
+                list(ui, &group);
+            } else {
+                ui.menu_button(path, |ui| list(ui, &group));
+            }
+        }
+        // Still said with the app's own tools listed above: they are not
+        // plugins, and the menu should not suggest that something is installed.
+        if registry.is_empty() {
+            ui.separator();
+            ui.label(RichText::new("No plugins installed").italics());
         }
 
         // Importers do not appear as menu entries — they run from opening a
@@ -547,3 +616,7 @@ fn label(ui: &mut egui::Ui, d: &ParamDecl) {
         r.on_hover_text(h);
     }
 }
+
+#[cfg(test)]
+#[path = "plugins_ui_tests.rs"]
+mod tests;

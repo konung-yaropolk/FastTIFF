@@ -126,47 +126,101 @@ fn non_finite_geometry_is_survivable() {
     assert_eq!([cut.width(), cut.height()], [10, 10]);
 }
 
-/// Run one frame with the copy chord held, and report what `hotkey` decided.
-fn chord_taken(focus_a_widget: bool) -> bool {
+/// The chord as the browser sends it: the C key with Ctrl/Cmd.
+fn key_c() -> egui::Event {
+    egui::Event::Key {
+        key: egui::Key::C,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::COMMAND,
+    }
+}
+
+/// What has the keyboard while the chord is pressed.
+#[derive(Clone, Copy)]
+enum Holder {
+    Nothing,
+    /// A text field with the caret in it.
+    TextField,
+    /// A widget that is not text — a button reached with Tab.
+    Button,
+}
+
+/// Run one frame with `events` in it, and report what `hotkey` decided.
+fn chord_taken_with(events: Vec<egui::Event>, holder: Holder) -> bool {
     let ctx = egui::Context::default();
     let input = egui::RawInput {
-        events: vec![egui::Event::Key {
-            key: egui::Key::C,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::COMMAND,
-        }],
+        events,
+        modifiers: egui::Modifiers::COMMAND,
         ..Default::default()
     };
     let mut taken = false;
     let _ = ctx.run_ui(input, |ui| {
-        let ctx = ui.ctx();
-        if focus_a_widget {
-            // Stand in for a text field holding the caret.
-            let id = egui::Id::new("a text field");
-            ctx.memory_mut(|m| m.request_focus(id));
+        match holder {
+            Holder::Nothing => {}
+            Holder::TextField => {
+                let mut text = String::from("12");
+                ui.add(egui::TextEdit::singleline(&mut text))
+                    .request_focus();
+            }
+            Holder::Button => {
+                ui.button("Fit").request_focus();
+            }
         }
-        taken = hotkey(ctx);
+        taken = hotkey(ui.ctx());
     });
     taken
+}
+
+fn chord_taken(holder: Holder) -> bool {
+    chord_taken_with(vec![key_c()], holder)
 }
 
 /// The chord copies the view when the picture is what the user is looking at.
 #[test]
 fn the_copy_chord_is_taken_when_nothing_has_focus() {
-    assert!(chord_taken(false), "Ctrl/Cmd+C should copy the view");
+    assert!(
+        chord_taken(Holder::Nothing),
+        "Ctrl/Cmd+C should copy the view"
+    );
 }
 
-/// And is left alone when a widget holds the caret, so typing in the frame
-/// number box and copying the number still works. This is the precedence that
-/// matters: the picture is the fallback, not the priority.
+/// On the desktop the chord is only ever an `Event::Copy`: egui-winit sends
+/// that in place of the key. Listening for the key alone is the bug where
+/// Ctrl+C did nothing on the desktop and only the button copied.
 #[test]
-fn a_focused_widget_keeps_the_copy_chord() {
+fn the_desktop_copy_event_is_the_chord() {
+    assert!(chord_taken_with(vec![egui::Event::Copy], Holder::Nothing));
+    // A browser can send both in one frame; that is still the chord.
+    assert!(chord_taken_with(
+        vec![key_c(), egui::Event::Copy],
+        Holder::Nothing
+    ));
+}
+
+/// And is left alone when a text field holds the caret, so typing in the frame
+/// number box and copying the number still works — in either shape the chord
+/// comes in. This is the precedence that matters: the picture is the
+/// fallback, not the priority.
+#[test]
+fn a_focused_text_field_keeps_the_copy_chord() {
     assert!(
-        !chord_taken(true),
+        !chord_taken(Holder::TextField),
         "a text field's own copy must win over copying the view"
     );
+    assert!(!chord_taken_with(
+        vec![egui::Event::Copy],
+        Holder::TextField
+    ));
+}
+
+/// A focused widget that is not text has nothing of its own to copy, so the
+/// chord still copies the view rather than doing nothing.
+#[test]
+fn a_focused_button_does_not_keep_the_copy_chord() {
+    assert!(chord_taken(Holder::Button));
+    assert!(chord_taken_with(vec![egui::Event::Copy], Holder::Button));
 }
 
 /// A frame with no chord in it copies nothing — the guard is reading the input,

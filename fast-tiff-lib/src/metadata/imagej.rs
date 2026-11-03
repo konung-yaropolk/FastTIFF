@@ -17,10 +17,17 @@
 //!    specifies. Every step is defensive and requires an exact channel-count
 //!    match before trusting the block.
 //!
-//! The write side ([`serialize`]) emits only the `key=value` description block,
-//! never the binary LUT block (ranges go in the description; colors follow the
-//! display mode).
+//! The block's overlay (`over` entries, one ImageJ `.roi` each) is read too:
+//! its point ROIs become [`StackMeta::overlay`]. Other shapes are dropped.
+//!
+//! The write side is two functions, one per tag. [`serialize`] renders the
+//! `key=value` description (the display range goes there, as `min=`/`max=`);
+//! `serialize_ij_metadata` renders the binary block, which this crate writes
+//! for two things the text cannot carry — per-channel LUTs and an overlay of
+//! point ROIs (see [`super::roi`]). Its ranges, labels and info entries are
+//! read but never written.
 
+use super::roi::{point_rois_from_imagej, PointRoi};
 use super::{
     default_lut_for, resolution_to_pixel, ChannelDisplay, DisplayMode, MetadataFormat, StackMeta,
     StackMetaWrite,
@@ -171,6 +178,7 @@ pub fn parse(
     // exact count match before trusting it (a mismatched block is stale — e.g.
     // left over from before the file was reduced to fewer channels).
     let mut has_explicit_luts = false;
+    let mut overlay = Vec::new();
     if let (Some(data), Some(counts)) = (ij_metadata, ij_metadata_counts) {
         // Byte order is self-describing (the block's magic), so one call.
         if let Some(blocks) = try_parse_ij_blocks(data, counts) {
@@ -202,6 +210,9 @@ pub fn parse(
                 }
                 has_explicit_luts = colored;
             }
+            // The overlay's points, whatever the channel count: a position is
+            // an IFD of the file, not a channel.
+            overlay = blocks.overlay;
         }
     }
 
@@ -221,13 +232,14 @@ pub fn parse(
         pixel_height: resolution_to_pixel(y_resolution),
         has_explicit_luts,
         source_format: MetadataFormat::ImageJ,
+        overlay,
     }
 }
 
 /// Serialize `meta` as an ImageJ `key=value` ImageDescription block. `planes`
 /// is the total plane count (the derived time-frame count is `planes /
 /// (channels * slices)`, which must divide evenly). Emits the description text
-/// only — never the binary LUT block.
+/// only; the binary block (LUTs, overlay) is `serialize_ij_metadata`'s.
 pub(crate) fn serialize(planes: usize, meta: &StackMetaWrite) -> Result<String> {
     let frames = meta.derive_frames(planes)?;
 
@@ -343,24 +355,45 @@ fn owns(line: &str) -> bool {
         .is_some_and(|(k, _)| OWNED_KEYS.contains(&k.trim()))
 }
 
-/// Serialize per-channel color LUTs into an ImageJ `IJMetadata` block — the
-/// binary `(IJMetadata, IJMetadataByteCounts)` tag pair (50839 / 50838) that
-/// ImageJ (and tifffile) store LUTs in, so a colorized 16-/32-bit stack keeps
-/// its colors on round-trip. Emitted in the little-endian form this crate's
-/// writer uses: the `JIJI` magic, one byte-reversed `stul` (`luts`) directory
-/// entry, then a 768-byte planar R,G,B block per channel. Returns
-/// `(blob, byte_counts)` for the two tags, or `None` when there are no LUTs.
-/// The exact inverse of [`try_parse_ij_blocks`] for the `luts` type.
-pub(crate) fn serialize_ij_metadata(luts: &[[[u8; 3]; 256]]) -> Option<(Vec<u8>, Vec<u32>)> {
-    if luts.is_empty() {
+/// Serialize per-channel color LUTs and overlay ROIs into an ImageJ
+/// `IJMetadata` block — the binary `(IJMetadata, IJMetadataByteCounts)` tag
+/// pair (50839 / 50838) that ImageJ (and tifffile) store them in, so a
+/// colorized 16-/32-bit stack keeps its colors on round-trip and ImageJ draws
+/// the overlay over the image.
+///
+/// Emitted in the little-endian form this crate's writer uses: the `JIJI`
+/// magic, then one directory entry per type present — `stul` (`luts`) and then
+/// `revo` (`over`), byte-reversed for little-endian, each with its count —
+/// then the bodies in the same order: a 768-byte planar R,G,B block per
+/// channel, then each ROI's `.roi` bytes verbatim (those are big-endian
+/// whatever the file is: `RoiEncoder` output, which ImageJ reads as-is). LUTs
+/// before overlay is ImageJ's own order (info, labels, ranges, luts, plot, roi,
+/// overlay, properties). The header is 12 or 20 bytes, well inside the 804 the
+/// readers allow.
+///
+/// Returns `(blob, byte_counts)` for the two tags — `byte_counts` is
+/// `[header, 768…, roi length…]` — or `None` when there is neither. The exact
+/// inverse of [`try_parse_ij_blocks`] for both types (the overlay's points to
+/// f32 rounding, as [`point_rois_from_imagej`] reads them).
+pub(crate) fn serialize_ij_metadata(
+    luts: &[[[u8; 3]; 256]],
+    overlay: &[Vec<u8>],
+) -> Option<(Vec<u8>, Vec<u32>)> {
+    if luts.is_empty() && overlay.is_empty() {
         return None;
     }
-    // Header: "JIJI" magic + one directory entry ("luts" reversed for LE + count).
+    // Header: the magic, then (type, count) per type present.
     let mut blob = Vec::new();
     blob.extend_from_slice(b"JIJI");
-    blob.extend_from_slice(b"stul"); // "luts" reversed for little-endian
-    blob.extend_from_slice(&(luts.len() as u32).to_le_bytes());
-    let mut byte_counts = vec![blob.len() as u32]; // [0] = header length (12)
+    if !luts.is_empty() {
+        blob.extend_from_slice(b"stul"); // "luts" reversed for little-endian
+        blob.extend_from_slice(&(luts.len() as u32).to_le_bytes());
+    }
+    if !overlay.is_empty() {
+        blob.extend_from_slice(b"revo"); // "over" reversed for little-endian
+        blob.extend_from_slice(&(overlay.len() as u32).to_le_bytes());
+    }
+    let mut byte_counts = vec![blob.len() as u32]; // [0] = header length (12 or 20)
 
     for lut in luts {
         let start = blob.len();
@@ -369,17 +402,29 @@ pub(crate) fn serialize_ij_metadata(luts: &[[[u8; 3]; 256]]) -> Option<(Vec<u8>,
         blob.extend(lut.iter().map(|px| px[2])); // 256 B
         byte_counts.push((blob.len() - start) as u32); // 768
     }
+    for roi in overlay {
+        blob.extend_from_slice(roi);
+        byte_counts.push(roi.len() as u32);
+    }
     Some((blob, byte_counts))
 }
 
 struct IjBlocks {
     ranges: Option<Vec<(f64, f64)>>,
     luts: Vec<[[u8; 3]; 256]>,
+    /// The point ROIs of the `over` entries, in order.
+    overlay: Vec<PointRoi>,
 }
 
 /// Best-effort parse of the IJMetadata directory format. Returns `None` on any
 /// structural inconsistency rather than guessing — callers fall back to
 /// defaults in that case. See module docs for the honesty caveat here.
+///
+/// A block is worth returning when it has ranges, LUTs or overlay points. The
+/// last alone is common: ImageJ saves a grey stack with an overlay as `info`
+/// and `over` entries and nothing else. An `over` entry that is not a point
+/// ROI, or not a readable one, adds nothing and costs the rest nothing — the
+/// directory's byte counts, not the entry, say where the next one starts.
 fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32]) -> Option<IjBlocks> {
     if byte_counts.is_empty() {
         return None;
@@ -426,6 +471,7 @@ fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32]) -> Option<IjBlocks> {
     let mut block_idx = 1; // byte_counts[0] was the header itself
     let mut ranges: Option<Vec<(f64, f64)>> = None;
     let mut luts: Vec<[[u8; 3]; 256]> = Vec::new();
+    let mut overlay: Vec<PointRoi> = Vec::new();
 
     for (code, n) in plan {
         for _ in 0..n {
@@ -456,12 +502,14 @@ fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32]) -> Option<IjBlocks> {
                         }
                         luts.push(lut);
                     }
-                _ => { /* info / labl / roi / over / plot: not needed for rendering */ }
+                // One `.roi` per entry, big-endian whatever the block's order.
+                b"over" => overlay.extend(point_rois_from_imagej(block)),
+                _ => { /* info / labl / roi / plot: not needed for rendering */ }
             }
         }
     }
 
-    if ranges.is_none() && luts.is_empty() {
+    if ranges.is_none() && luts.is_empty() && overlay.is_empty() {
         return None;
     }
     if cursor != data.len() {
@@ -469,7 +517,11 @@ fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32]) -> Option<IjBlocks> {
         // Landing short or overrunning means the directory was misinterpreted.
         return None;
     }
-    Some(IjBlocks { ranges, luts })
+    Some(IjBlocks {
+        ranges,
+        luts,
+        overlay,
+    })
 }
 
 #[cfg(test)]

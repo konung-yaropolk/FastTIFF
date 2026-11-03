@@ -52,7 +52,8 @@ const TAG_EXTRA_SAMPLES: u16 = 338;
 const TAG_RESOLUTION_UNIT: u16 = 296;
 /// ImageJ's binary per-channel LUT/range block (tag 50839) and the array of its
 /// sub-block byte lengths (tag 50838) — written on the first IFD when the
-/// metadata carries per-channel LUTs. See `metadata::imagej::serialize_ij_metadata`.
+/// metadata carries per-channel LUTs or an overlay. See
+/// `metadata::imagej::serialize_ij_metadata`.
 const TAG_IJ_METADATA_BYTE_COUNTS: u16 = 50838;
 const TAG_IJ_METADATA: u16 = 50839;
 
@@ -747,11 +748,12 @@ impl<W: Write + Seek> TiffWriter<W> {
             (None, None) => None,
         };
 
-        // ImageJ per-channel color LUTs go in the binary IJMetadata tag pair
-        // (50839/50838) on the first IFD — only for the ImageJ dialect.
+        // ImageJ per-channel color LUTs and overlay ROIs go in the binary
+        // IJMetadata tag pair (50839/50838) on the first IFD — only for the
+        // ImageJ dialect.
         let ij_metadata: Option<(Vec<u8>, Vec<u32>)> = match &self.metadata {
             Some(meta) if self.metadata_format == MetadataFormat::ImageJ => {
-                metadata::imagej::serialize_ij_metadata(&meta.channel_luts())
+                metadata::imagej::serialize_ij_metadata(&meta.channel_luts(), &meta.overlay)
             }
             _ => None,
         };
@@ -769,7 +771,7 @@ impl<W: Write + Seek> TiffWriter<W> {
         let build_all = |big: bool| -> Vec<Vec<Entry>> {
             (0..self.frames.len())
                 .map(|i| {
-                    // First-IFD-only metadata: the description and the binary LUT block.
+                    // First-IFD-only metadata: the description and the binary block.
                     let (desc, ij) = if i == 0 {
                         (description.as_deref(), ij_metadata.as_ref())
                     } else {
@@ -879,7 +881,7 @@ impl<W: Write + Seek> TiffWriter<W> {
     }
 
     /// The IFD entries for frame `i`, in ascending tag order (required by the
-    /// TIFF spec). `description` and `ij_metadata` (the binary LUT block) are
+    /// TIFF spec). `description` and `ij_metadata` (the binary LUT/overlay block) are
     /// only passed for the first frame. `big` selects LONG8 (BigTIFF) vs LONG
     /// storage for the strip locations.
     fn build_entries(
@@ -983,8 +985,8 @@ impl<W: Write + Seek> TiffWriter<W> {
             TAG_SAMPLE_FORMAT,
             &vec![self.sample_type.format_code(); spp as usize],
         ));
-        // ImageJ's binary per-channel LUT block (first IFD only): the byte-count
-        // array (50838) and the blob (50839).
+        // ImageJ's binary block — LUTs, overlay — (first IFD only): the
+        // byte-count array (50838) and the blob (50839).
         if let Some((blob, byte_counts)) = ij_metadata {
             entries.push(Entry::longs(TAG_IJ_METADATA_BYTE_COUNTS, byte_counts));
             entries.push(Entry::bytes(TAG_IJ_METADATA, blob));

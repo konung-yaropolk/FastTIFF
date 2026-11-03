@@ -66,6 +66,13 @@ const REVOKE_AFTER_MS: i32 = 10_000;
 /// encode has already succeeded and the work is not lost, merely undelivered.
 #[cfg(target_arch = "wasm32")]
 pub fn download(bytes: &[u8], name: &str) -> Result<(), String> {
+    download_as(bytes, name, "image/tiff")
+}
+
+/// [`download`] for a file that is not a TIFF: `mime` is its media type, which
+/// a download manager may go by in naming or opening it.
+#[cfg(target_arch = "wasm32")]
+pub fn download_as(bytes: &[u8], name: &str, mime: &str) -> Result<(), String> {
     let window = web_sys::window().ok_or("there is no window to save from")?;
     let document = window.document().ok_or("there is no page to save from")?;
 
@@ -80,7 +87,7 @@ pub fn download(bytes: &[u8], name: &str) -> Result<(), String> {
     // Stated, unlike in `web_open`, where the only reader was our own `fetch`.
     // Here the reader is the browser's download manager, which may use it to
     // decide what it has.
-    options.set_type("image/tiff");
+    options.set_type(mime);
     let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options)
         .map_err(|e| format!("could not wrap the file for download: {e:?}"))?;
     let url = web_sys::Url::create_object_url_with_blob(&blob)
