@@ -200,6 +200,16 @@ attaches a `FastTIFF-win7-x86_64.exe` only if it passes.
 
 ## Test and lint
 
+Everything CI checks, in one go, before a merge (bash; Git Bash on Windows):
+```sh
+scripts/ci-local.sh           # every CI job, plus clippy
+scripts/ci-local.sh --quick   # without the slow ones (web bundle, oir package)
+scripts/ci-local.sh --list    # the steps; name some to run only those
+```
+It runs every step even after a failure, writes each one's output to
+`target/ci-local/<step>.log`, and ends with a table. `--fuzz` adds the fuzz
+jobs (nightly and `cargo-fuzz` needed).
+
 Unit Test:
 ```sh
 cargo test --workspace
