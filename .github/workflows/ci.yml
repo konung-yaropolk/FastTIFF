@@ -77,6 +77,15 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      # The C interfaces sit behind each crate's off-by-default `capi` feature,
+      # tests and header-sync checks included, so the run above never compiles
+      # them. `gpu` rides along for the registration crates, matching what
+      # docs.rs builds.
+      - name: Test the C APIs
+        run: >
+          cargo test -p fast-tiff-lib -p oir-reader -p suite2p-registration -p turboreg-registration
+          --features fast-tiff-lib/capi,oir-reader/capi,suite2p-registration/capi,suite2p-registration/gpu,turboreg-registration/capi,turboreg-registration/gpu
+
       # The test run above exercises the default (wgpu) backend. glow is the
       # Linux release backend; the compile check here (in addition to the Linux
       # job below) catches Windows-specific glow breakage cheaply.
