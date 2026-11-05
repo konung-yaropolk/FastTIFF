@@ -39,13 +39,13 @@ codec-zstd = ["dep:zstd"]
 capi = []
 
 [dependencies]
-memmap2 = { version = "0.9", optional = true }
+memmap2 = { workspace = true, optional = true }
 weezl = "0.2"      # LZW codec (compression = 5)
-flate2 = "1.1"     # Deflate/Zip codec (compression = 8 / 32946)
+flate2 = { workspace = true }     # Deflate/Zip codec (compression = 8 / 32946)
 zstd = { version = "0.14", optional = true } # ZSTD codec (50000, libtiff/GDAL ext)
-anyhow = "1.0"
-bytemuck = { version = "1.25", features = ["extern_crate_alloc"] }
-rayon = "1.10"     # data-parallel strip decompression + 32-bit conversion
-quick-xml = "0.37" # OME-TIFF metadata (OME-XML in ImageDescription)
+anyhow = { workspace = true }
+bytemuck = { workspace = true, features = ["extern_crate_alloc"] }
+rayon = { workspace = true }     # data-parallel strip decompression + 32-bit conversion
+quick-xml = { workspace = true } # OME-TIFF metadata (OME-XML in ImageDescription)
 
 [dev-dependencies]

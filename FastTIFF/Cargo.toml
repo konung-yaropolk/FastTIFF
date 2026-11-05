@@ -113,12 +113,12 @@ egui = "0.34"
 # put and only the rows in view laid out, which a recording's thousands of
 # OME `Plane` records need. Default features off: no image loaders.
 egui_extras = { version = "0.34", default-features = false }
-anyhow = "1.0"
+anyhow = { workspace = true }
 rfd = "0.17"
 # The plugin contract. Shared, like the plugin system itself now is: the
 # browser build runs the built-in plugins and so needs the dialog types.
 fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
-log = "0.4"
+log = { workspace = true }
 env_logger = "0.11"
 # Decodes the bundled PNG into RGBA for the application icon (see `window_icon`
 # in main.rs). Needed on every native platform including macOS: eframe installs

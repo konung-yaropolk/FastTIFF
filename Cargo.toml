@@ -37,6 +37,30 @@ exclude = [
     "plugins/example",
 ]
 
+# Versions more than one member depends on, named once.
+#
+# wgpu above all. The registration crates are handed the renderer's own device
+# (`use_device` takes a `wgpu::Device`), which only type-checks while every
+# member names the same wgpu — and that has to be the one eframe's `egui-wgpu`
+# is built on. A bump here moves them together; a bump made in one member's
+# manifest, as a dependency bot does, would split the build in two.
+#
+# naga is the shader compiler that wgpu carries. The shader test
+# (`scivis-render/tests/wgsl.rs`) validates the WGSL with the same one, so a
+# shader it passes is a shader the shipped wgpu accepts.
+[workspace.dependencies]
+wgpu = "29"
+naga = { version = "29", features = ["wgsl-in"] }
+rayon = "1.10"
+bytemuck = "1.25"
+pollster = "1.0"
+quick-xml = "0.37"
+memmap2 = "0.9"
+flate2 = "1.1"
+rustfft = "6"
+log = "0.4"
+anyhow = "1.0"
+
 [profile.release]
 opt-level = 3
 lto = "fat"        # Enable Link-Time Optimization

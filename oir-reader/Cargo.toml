@@ -56,9 +56,9 @@ capi = []
 [dependencies]
 # The acquisition record's XML. The same version as fast-tiff-lib's OME reader,
 # so a build with both carries one copy.
-quick-xml = "0.37"
+quick-xml = { workspace = true }
 # A plane's u16 buffer seen as the bytes it is reassembled from, without unsafe.
-bytemuck = "1.25"
+bytemuck = { workspace = true }
 
 [target.'cfg(any(unix, windows))'.dependencies]
-memmap2 = { version = "0.9", optional = true }
+memmap2 = { workspace = true, optional = true }

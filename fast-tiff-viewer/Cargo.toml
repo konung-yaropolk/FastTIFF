@@ -148,12 +148,12 @@ codec-zstd = ["fast-tiff-lib/codec-zstd"]
 fast-tiff-lib = { path = "../fast-tiff-lib", default-features = false }
 
 scivis-render = { path = "../scivis-render" }
-anyhow = "1.0"
-bytemuck = "1.25"
-log = "0.4"
+anyhow = { workspace = true }
+bytemuck = { workspace = true }
+log = { workspace = true }
 # Parallel-across-slices 3D volume assembly. Gated with `threads` because rayon
 # needs real threads to build, let alone run.
-rayon = { version = "1.10", optional = true }
+rayon = { workspace = true, optional = true }
 
 # The plugin contract. Not target-gated: the browser build runs the built-in
 # plugins too, and they are written against this crate like any other. Only the
@@ -183,7 +183,7 @@ suite2p-registration = { path = "../suite2p-registration", default-features = fa
 turboreg-registration = { path = "../turboreg-registration", default-features = false, optional = true }
 # Only to hand the renderer's device to the two above (`share_gpu_device`):
 # the same wgpu they and the renderer use, so it adds nothing to the build.
-wgpu = { version = "29", optional = true }
+wgpu = { workspace = true, optional = true }
 
 # Two built-ins that the browser build also gets, so their dependencies are no
 # longer desktop-only either: `png` for the PNG importer/exporter, `rustfft` for
@@ -194,7 +194,7 @@ png = { version = "0.18", optional = true }
 # a pair of FFTs it is seconds, so an FFT is no more optional here than it is
 # for registration. Same crate and same major version `suite2p-registration`
 # already pulls in, so the workspace builds one copy of it.
-rustfft = { version = "6", optional = true }
+rustfft = { workspace = true, optional = true }
 
 # Desktop-only. Target-gated rather than put behind a feature: a `plugins`
 # feature in `default` would silently vanish from the glow build, which is
@@ -228,7 +228,7 @@ oir-reader = { path = "../oir-reader", default-features = false, optional = true
 # Here rather than in the shared table because the importer lane is native-only
 # — see `plugins/builtin/nifti/mod.rs` for why — and a dependency for a module
 # that cannot be reached on a target has no business being compiled for it.
-flate2 = { version = "1.1", optional = true }
+flate2 = { workspace = true, optional = true }
 # Baseline JPEG, for the DICOM transfer syntax that uses it. Pure Rust, and
 # already in this workspace's tree via `image` (which `FastTIFF` uses to decode
 # its own icon), so the same version is built once.
