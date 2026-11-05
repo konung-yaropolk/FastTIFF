@@ -194,6 +194,10 @@ impl Plugin for Stabilize {
     }
 
     fn run(&mut self, host: &mut dyn HostContext, params: &Params) -> Result<Outcome, PluginError> {
+        // The GPU context suite2p keeps between batches goes when the run
+        // does, however it ends.
+        #[cfg(feature = "gpu-registration")]
+        let _release = ReleaseGpuOnDrop;
         let info = host.image();
         // The time axis is what moves. A single frame has no motion to correct,
         // and a Z stack's slices are different depths rather than the same
@@ -614,6 +618,19 @@ fn gpu_trouble(settings: &suite2p_registration::Settings) -> Result<(), PluginEr
     }
     let _ = settings;
     Ok(())
+}
+
+/// Lets go of suite2p's resident GPU context when dropped: the batch buffers
+/// a run kept between batches are of no use once it has ended, and on a small
+/// card they are memory the renderer and the next run need.
+#[cfg(feature = "gpu-registration")]
+struct ReleaseGpuOnDrop;
+
+#[cfg(feature = "gpu-registration")]
+impl Drop for ReleaseGpuOnDrop {
+    fn drop(&mut self) {
+        suite2p_registration::gpu::release_resident();
+    }
 }
 
 #[cfg(test)]

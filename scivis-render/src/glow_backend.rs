@@ -960,6 +960,28 @@ impl ImageRenderResources {
         Ok(())
     }
 
+    /// Give the volume's GPU memory back: 1x1x1 placeholders in its place,
+    /// until the next upload makes a new one. See the wgpu backend's
+    /// `release_volume` for why a host calls it.
+    pub fn release_volume(&mut self) {
+        let gl: &glow::Context = &self.gl;
+        let v = &mut self.volume;
+        unsafe {
+            for t in 0..2 {
+                if v.tex_alloc[t] != ((1, 1, 1), glow::R8, 1) {
+                    v.tex[t] = renew_texture(gl, v.tex[t]);
+                    set_volume_filter(gl, v.interp, 1);
+                    alloc_volume_dummy(gl);
+                    v.tex_alloc[t] = ((1, 1, 1), glow::R8, 1);
+                }
+            }
+            drain_errors(gl);
+        }
+        v.layout = None;
+        v.bricks = None;
+        v.occupancy_for = None;
+    }
+
     /// (Re)upload the whole volume, one entry per channel: each `bytes` is
     /// `w*h*d` samples, z-major, in the units of its `kind` (U8/U16 unorm, F32).
     /// Packs it here, on the calling thread — a builder with a thread of its own

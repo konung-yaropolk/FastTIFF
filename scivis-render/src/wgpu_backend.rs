@@ -576,6 +576,18 @@ impl ImageRenderResources {
         Ok(())
     }
 
+    /// Give the volume's GPU memory back: 1x1x1 placeholders in its place,
+    /// until the next upload makes a new one.
+    ///
+    /// For a host whose volume has no further use — the stack it was built
+    /// from closed or replaced. Without it the textures stayed resident until
+    /// the next volume arrived, which for a session that never returned to 3D
+    /// was never: up to half the free VRAM of a 2 GB card, held for nothing,
+    /// and taken from everything else on it.
+    pub fn release_volume(&mut self) {
+        self.clear_volume();
+    }
+
     /// Drop the volume: placeholders in its place and nothing bound that a
     /// failed upload left half made.
     fn clear_volume(&mut self) {

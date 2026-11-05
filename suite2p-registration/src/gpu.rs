@@ -885,6 +885,19 @@ impl GpuContext {
 #[cfg(not(target_arch = "wasm32"))]
 static RESIDENT: Mutex<Option<GpuContext>> = Mutex::new(None);
 
+/// Let go of the context kept between batches, and the GPU buffers it holds —
+/// for a host whose run is over. The next correlation builds a new one.
+///
+/// Kept, the context stays resident for the life of the process once a run
+/// has used it: a few hundred megabytes of batch buffers at 2048 x 2048, an
+/// eighth of a 2 GB card, held for a registration that has finished.
+pub fn release_resident() {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        *RESIDENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
 /// Correlation windows for `frames` against `filters`, on the resident device.
 ///
 /// `None` when no device can be opened for this size, which the caller treats

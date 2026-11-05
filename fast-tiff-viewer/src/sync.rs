@@ -42,6 +42,9 @@ impl Viewer {
     /// slice.
     pub fn sync(&mut self, renderer: &mut Renderer) -> SyncOutcome {
         let mut outcome = SyncOutcome::default();
+        if std::mem::take(&mut self.release_volume_gpu) {
+            renderer.release_volume();
+        }
         // Read before the stack is borrowed mutably: residency depends on which
         // part of the image is on screen, which is the frontend's business.
         let (uv_offset, uv_scale) = (self.uv_offset, self.uv_scale);
