@@ -83,7 +83,7 @@ plugin-crop = ["_shared-store"]
 # `suite2p-registration` is the registration algorithm; `rustfft` the
 # deconvolution transforms; `png` the PNG importer/exporter; `oir-reader` the
 # OIR container reader.
-plugin-suite2p-stabilize = ["dep:suite2p-registration", "_shared-edges"]
+plugin-suite2p-stabilize = ["dep:suite2p-registration", "_shared-edges", "_shared-store"]
 # StackReg registration. A second registration crate rather than an option on
 # the first: the two answer different questions (a shift by phase correlation
 # versus a transformation by optimisation) and share no code. Also GPL-3, for

@@ -9,8 +9,8 @@
 use super::*;
 use crate::stack::Stack;
 use fast_tiff_lib::{
-    read_frame_f32, read_frame_u16, SampleType, StackMetaWrite, TiffStack, TiffWriter,
-    WriterOptions,
+    read_frame_f32, read_frame_u16, read_planes_f32, SampleType, StackMetaWrite, TiffStack,
+    TiffWriter, WriterOptions,
 };
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -35,6 +35,13 @@ fn source(sample: SampleType, channels: usize, slices: usize, frames: usize) -> 
             SampleType::U8 => {
                 let px: Vec<u8> = (0..W * H).map(|i| (p as u32 * 7 + i) as u8).collect();
                 w.write_frame_u8(&px).expect("frame");
+            }
+            // Bytes again, running from negative to positive.
+            SampleType::I8 => {
+                let px: Vec<u8> = (0..W * H)
+                    .map(|i| (p as i32 * 50 + i as i32 * 9 - 120) as i8 as u8)
+                    .collect();
+                w.write_frame_bytes(&px).expect("frame");
             }
             SampleType::F32 => {
                 let px: Vec<f32> = (0..W * H)
@@ -136,6 +143,65 @@ fn signed_samples_come_back_signed() {
         let want = read_frame_u16(&stack.tiff.data, a, stack.tiff.byte_order, None).unwrap();
         let got = read_frame_u16(&back.data, b, back.byte_order, None).unwrap();
         assert_eq!(want, got, "frame {i} shifted");
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Signed 8-bit is written as signed 8-bit, every value intact. It used to be
+/// written as unsigned with the same bits, so -1 read back as 255.
+#[test]
+fn signed_8_bit_samples_come_back_signed() {
+    let stack = open(source(SampleType::I8, 1, 1, 2));
+    let path = temp("signed8");
+    save_stack(&stack, &path).expect("save");
+
+    let back = reopen(&path);
+    let f = &back.frames[0];
+    assert_eq!(
+        (f.bits_per_sample, f.sample_format),
+        (8, fast_tiff_lib::SampleFormat::SignedInt),
+        "the file no longer says it is signed 8-bit"
+    );
+    for (i, (a, b)) in stack.tiff.frames.iter().zip(&back.frames).enumerate() {
+        let want = read_frame_f32(&stack.tiff.data, a, stack.tiff.byte_order).unwrap();
+        let got = read_frame_f32(&back.data, b, back.byte_order).unwrap();
+        assert!(
+            want.iter().any(|&v| v < 0.0),
+            "the source has negative samples"
+        );
+        assert_eq!(want, got, "frame {i} changed");
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A planar RGB stack is written planar: its frames are copied as the file
+/// lays them out, so writing them as interleaved would scramble every pixel.
+#[test]
+fn a_planar_rgb_stack_keeps_its_planes() {
+    let opts = WriterOptions::new(W, H, SampleType::U8)
+        .samples_per_pixel(3)
+        .planar(true);
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).expect("writer");
+    for f in 0..2u32 {
+        // Each plane its own ramp, so a mixed-up plane shows.
+        let px: Vec<u8> = (0..3 * W * H)
+            .map(|i| (f * 90 + i * 3 + i / (W * H) * 70) as u8)
+            .collect();
+        w.write_frame_u8(&px).expect("frame");
+    }
+    let stack = open(w.finish().expect("finish").into_inner());
+    assert!(
+        stack.tiff.frames[0].is_planar(),
+        "the source should be planar"
+    );
+    let path = temp("planar-rgb");
+    save_stack(&stack, &path).expect("save");
+
+    let back = reopen(&path);
+    for (i, (a, b)) in stack.tiff.frames.iter().zip(&back.frames).enumerate() {
+        let want = read_planes_f32(&stack.tiff.data, a, stack.tiff.byte_order).unwrap();
+        let got = read_planes_f32(&back.data, b, back.byte_order).unwrap();
+        assert_eq!(want, got, "frame {i}: the planes changed");
     }
     let _ = std::fs::remove_file(&path);
 }

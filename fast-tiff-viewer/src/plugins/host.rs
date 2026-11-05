@@ -46,7 +46,6 @@ pub struct StackHost {
     /// case — an uncompressed, native-order, unsigned 16-bit frame, which is
     /// what this library's own writer and ImageJ both produce — converts
     /// straight from the memory map and leaves this empty.
-    scratch: crate::planes::Scratch,
     /// The regions the user has drawn, if any. See
     /// [`HostContext::selection`](fasttiff_plugin_api::HostContext::selection).
     selection: Vec<fasttiff_plugin_api::Roi>,
@@ -73,7 +72,6 @@ impl StackHost {
             tiff: Arc::clone(&stack.tiff),
             dims: stack.display.dims,
             rgb: stack.display.rgb,
-            scratch: Default::default(),
             selection: Vec::new(),
             pending: Default::default(),
             animating: false,
@@ -219,14 +217,12 @@ impl HostContext for StackHost {
         let (ifd, sample) = self.locate(plane)?;
         // Shared with `crate::measure`, so a plugin's mean and the app's own
         // plot of the same pixels cannot disagree. See `crate::planes`.
-        crate::planes::plane_f32_into(&self.tiff, ifd, sample, &mut self.scratch, out).map_err(
-            |e| {
-                PluginError::failed(format!(
-                    "decoding (c{}, z{}, t{}): {e:#}",
-                    plane.c, plane.z, plane.t
-                ))
-            },
-        )
+        crate::planes::plane_f32_into(&self.tiff, ifd, sample, out).map_err(|e| {
+            PluginError::failed(format!(
+                "decoding (c{}, z{}, t{}): {e:#}",
+                plane.c, plane.z, plane.t
+            ))
+        })
     }
 
     fn progress(&mut self, fraction: f32) -> bool {

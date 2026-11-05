@@ -288,6 +288,46 @@ pub fn read_frame_u8_into(
     Ok(())
 }
 
+/// A frame's samples exactly as the file stores them: decompressed and with the
+/// predictor undone, but with no widening, offset or rescale, as bytes in byte
+/// order `want`, laid out as the file lays them out (chunky, or one plane after
+/// another for a planar frame). 4-bit palette indices come back one per byte.
+///
+/// For writing a frame back out without changing a value, and for reading it
+/// as `&[i16]`, `&[u32]`, ... through bytemuck (pass [`ByteOrder::host`]). One
+/// decode pass, plus a byte swap only when `want` is not the file's order;
+/// uncompressed predictor-free frames are copied straight from the strips.
+pub fn read_frame_bytes_into(
+    mmap: &[u8],
+    frame: &FrameInfo,
+    file_order: ByteOrder,
+    want: ByteOrder,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    read_frame_u8_into(mmap, frame, file_order, out)?;
+    if frame.bits_per_sample != 4 && file_order != want {
+        match sample_bytes(frame)? {
+            2 => out
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
+                .for_each(|c| c.reverse()),
+            4 => out
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .for_each(|c| c.reverse()),
+            8 => out
+                .as_chunks_mut::<8>()
+                .0
+                .iter_mut()
+                .for_each(|c| c.reverse()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Bytes per sample from the frame's bit depth (the widths this crate decodes).
 fn sample_bytes(frame: &FrameInfo) -> Result<usize> {
     bytes_for_bits(frame.bits_per_sample)
