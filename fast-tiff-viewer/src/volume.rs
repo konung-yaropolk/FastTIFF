@@ -34,13 +34,11 @@ use fast_tiff_lib::TiffStack;
 use rayon::prelude::*;
 use scivis_render::pack::{self, PackedVolume, TexelFormat, VolumeLayout};
 use scivis_render::{ChannelKind, MAX_CHANNELS};
-use std::path::PathBuf;
-#[cfg(feature = "threads")]
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "threads")]
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 #[cfg(feature = "threads")]
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 #[cfg(feature = "threads")]
 use std::thread::JoinHandle;
 
@@ -446,59 +444,32 @@ struct BuiltReply {
 pub struct VolumeBuilder {
     tx: Sender<Request>,
     result: Arc<Mutex<Option<BuiltReply>>>,
-    /// Set by the worker when it could not open the file and gave up.
-    ///
-    /// A dead worker cannot be detected by *asking* it: `request` only fails
-    /// once the receiver has been dropped, which is a frame or two after the
-    /// open failed, and by then a request has already been queued and is being
-    /// polled for a reply that will never come. This is the flag that says so
-    /// on every frame after, rather than only on the one that happened to send.
-    failed: Arc<AtomicBool>,
     _handle: JoinHandle<()>,
 }
 
 #[cfg(feature = "threads")]
 impl VolumeBuilder {
-    /// Spawn a worker that opens its own map of `path` (shares the OS page
-    /// cache — no duplicate pixel RAM). Returns `None` if the thread fails to
-    /// spawn; if the worker's file open fails the thread exits and `request`
-    /// starts returning `false` — callers then build synchronously instead.
-    pub fn new(path: PathBuf) -> Option<Self> {
+    /// Spawn a worker over `stack` — the window's own, shared, so a stack held
+    /// in memory (a plugin's result, an import, every file in a browser) gets
+    /// one as well as a mapped file does. Returns `None` if the thread fails
+    /// to spawn — callers then build synchronously instead.
+    pub fn new(stack: Arc<TiffStack>) -> Option<Self> {
         let (tx, rx) = channel::<Request>();
         let result = Arc::new(Mutex::new(None));
         let result_worker = Arc::clone(&result);
-        let failed = Arc::new(AtomicBool::new(false));
-        let failed_worker = Arc::clone(&failed);
         let handle = std::thread::Builder::new()
             .name("fasttiff-volume".to_owned())
-            .spawn(move || match TiffStack::open(&path) {
-                Ok(stack) => worker_loop(stack, rx, result_worker),
-                Err(e) => {
-                    // Not always a problem worth reporting: a stack a plugin
-                    // imported has no file on disk at all, and its `path` is
-                    // the name it is shown under. The caller builds volumes
-                    // here on the main thread instead.
-                    log::debug!("volume builder: can't open {}: {e:#}", path.display());
-                    failed_worker.store(true, Ordering::Release);
-                }
-            })
+            .spawn(move || worker_loop(stack, rx, result_worker))
             .ok()?;
         Some(Self {
             tx,
             result,
-            failed,
             _handle: handle,
         })
     }
 
-    /// Whether the worker gave up before it started: its file could not be
-    /// opened, and it will never answer anything.
-    pub fn failed(&self) -> bool {
-        self.failed.load(Ordering::Acquire)
-    }
-
-    /// Queue a build. Returns `false` when the worker is gone (its file open
-    /// failed) — the caller should build synchronously instead.
+    /// Queue a build. Returns `false` when the worker is gone — the caller
+    /// should build synchronously instead.
     pub fn request(&self, generation: u64, plan: VolumePlan) -> bool {
         self.tx.send(Request { generation, plan }).is_ok()
     }
@@ -522,7 +493,11 @@ impl VolumeBuilder {
 }
 
 #[cfg(feature = "threads")]
-fn worker_loop(stack: TiffStack, rx: Receiver<Request>, result: Arc<Mutex<Option<BuiltReply>>>) {
+fn worker_loop(
+    stack: Arc<TiffStack>,
+    rx: Receiver<Request>,
+    result: Arc<Mutex<Option<BuiltReply>>>,
+) {
     // Block for a request; channel closed (VolumeBuilder dropped) -> exit.
     while let Ok(mut req) = rx.recv() {
         // Only the most recent request matters: a 4D scrub queues many
@@ -555,15 +530,11 @@ pub struct VolumeBuilder(std::convert::Infallible);
 
 #[cfg(not(feature = "threads"))]
 impl VolumeBuilder {
-    pub fn new(_path: PathBuf) -> Option<Self> {
+    pub fn new(_stack: Arc<TiffStack>) -> Option<Self> {
         None
     }
 
     pub fn request(&self, _generation: u64, _plan: VolumePlan) -> bool {
-        match self.0 {}
-    }
-
-    pub fn failed(&self) -> bool {
         match self.0 {}
     }
 

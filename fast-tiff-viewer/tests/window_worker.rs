@@ -405,7 +405,8 @@ mod worker {
         let mut bands = BandCache::default();
         let inline = window::assemble(&tiff, &mut bands, &jobs, &kinds, &want, 0).unwrap();
 
-        let worker = WindowWorker::new(path).expect("worker should start");
+        let worker = WindowWorker::new(std::sync::Arc::new(TiffStack::open(&path).unwrap()))
+            .expect("worker should start");
         worker.request(0, want, jobs.clone(), kinds.clone());
         let built = wait_for(&worker, 0, &want, &[0]).expect("worker produced nothing");
 
@@ -436,7 +437,8 @@ mod worker {
         let jobs = jobs_for(&tiff);
         let want = roi(16, 16, 48, 32, 1);
 
-        let worker = WindowWorker::new(path).expect("worker should start");
+        let worker = WindowWorker::new(std::sync::Arc::new(TiffStack::open(&path).unwrap()))
+            .expect("worker should start");
         worker.request(0, want, jobs, vec![ChannelKind::Int16]);
 
         for _ in 0..600 {
@@ -482,7 +484,8 @@ mod worker {
         let jobs = jobs_for(&tiff);
         let built_for = roi(0, 0, 96, 64, 1);
 
-        let worker = WindowWorker::new(path).expect("worker should start");
+        let worker = WindowWorker::new(std::sync::Arc::new(TiffStack::open(&path).unwrap()))
+            .expect("worker should start");
         worker.request(0, built_for, jobs, vec![ChannelKind::Int16]);
 
         // The view has moved on to something smaller and inside it — which is
@@ -511,7 +514,8 @@ mod worker {
         let jobs = jobs_for(&tiff);
         let built_for = roi(0, 0, 48, 32, 1);
 
-        let worker = WindowWorker::new(path).expect("worker should start");
+        let worker = WindowWorker::new(std::sync::Arc::new(TiffStack::open(&path).unwrap()))
+            .expect("worker should start");
         worker.request(0, built_for, jobs, vec![ChannelKind::Int16]);
 
         for _ in 0..600 {
@@ -549,7 +553,8 @@ mod worker {
         let jobs = jobs_for(&tiff);
         let kinds = vec![ChannelKind::Int16];
 
-        let worker = WindowWorker::new(path).expect("worker should start");
+        let worker = WindowWorker::new(std::sync::Arc::new(TiffStack::open(&path).unwrap()))
+            .expect("worker should start");
         let last = roi(0, 0, 100, 70, 1);
         for stride in [8u32, 4, 2] {
             worker.request(0, roi(0, 0, 100, 70, stride), jobs.clone(), kinds.clone());

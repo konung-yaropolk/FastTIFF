@@ -391,11 +391,11 @@ fn sync_movie(
         let jobs = build_jobs(loaded, frame_index, &enabled, kinds);
         let channels: Vec<usize> = jobs.iter().map(|j| j.channel).collect();
 
-        // Spawn on first need rather than at load: a thread and a second map of
-        // the file are only worth it for a frame too large to upload whole,
-        // which is a small minority of what gets opened.
+        // Spawn on first need rather than at load: a thread is only worth it
+        // for a frame too large to upload whole, which is a small minority of
+        // what gets opened.
         if loaded.window_worker.is_none() {
-            loaded.window_worker = window::WindowWorker::new(loaded.path.clone());
+            loaded.window_worker = window::WindowWorker::new(std::sync::Arc::clone(&loaded.tiff));
             if loaded.window_worker.is_some() {
                 // The worker keeps its own bands, and from here on it is the
                 // one decoding windows. Holding a second full cache here would
@@ -595,24 +595,12 @@ fn sync_volume(
     }
 
     if view.built_frame != Some(time) {
-        // Lazily spawn the background builder on first 3D use (it opens its own
-        // mmap of the file, like the prefetch worker).
+        // Lazily spawn the background builder on first 3D use, over the same
+        // stack as the window — so a stack held in memory gets one too.
         if loaded.volume_builder.is_none() && !loaded.volume_builder_tried {
-            loaded.volume_builder = crate::volume::VolumeBuilder::new(loaded.path.clone());
+            loaded.volume_builder =
+                crate::volume::VolumeBuilder::new(std::sync::Arc::clone(&loaded.tiff));
             loaded.volume_builder_tried = true;
-        }
-        // A worker that could not open the file is gone for good, and a stack a
-        // plugin imported has no file to open — its `path` is the name it is
-        // shown under. Drop it and build here instead.
-        //
-        // Noticing this needs its own flag rather than a failed `request`: the
-        // request that queued the first build was sent while the worker was
-        // still starting up, so it succeeded, and the frames after it never ask
-        // again — they poll for a reply. Which is why an imported stack sat on
-        // "Loading 3D…" and stayed there.
-        if loaded.volume_builder.as_ref().is_some_and(|b| b.failed()) {
-            loaded.volume_builder = None;
-            view.requested = None;
         }
         let budget = *view
             .planned_budget

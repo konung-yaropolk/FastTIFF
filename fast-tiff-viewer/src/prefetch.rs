@@ -17,24 +17,24 @@
 //! serial-decode regime). When playback falls behind, the adaptive parallel
 //! decode takes over instead.
 //!
-//! The worker is self-contained: it opens its **own** memory map of the same
-//! file (a second mmap shares the OS page cache — no duplicate RAM), so it never
-//! touches the app's `TiffStack` and needs no shared/locked state beyond a
-//! request channel and a result slot. Correctness is defensive: a prefetched
+//! The worker reads the window's own `TiffStack` through a shared `Arc`. Nothing
+//! mutates a stack once it is indexed, so that needs no lock: the only shared
+//! state beyond the stack is a request channel and a result slot. Sharing it
+//! also means the pages the worker touches are the ones the window then reads,
+//! and that a stack held in memory, with no file behind it, gets a worker too. Correctness is defensive: a prefetched
 //! result is used only when its `(generation, frame_index)` and channel layout
 //! exactly match what's wanted; any mismatch falls back to inline decode, so a
 //! stale prefetch can cost a little work but can never show the wrong frame.
 
 use crate::stack::Stack;
-#[cfg(feature = "threads")]
 use fast_tiff_lib::TiffStack;
 use fast_tiff_lib::{ByteOrder, FrameInfo};
 use scivis_render::ChannelKind;
-use std::path::PathBuf;
 #[cfg(feature = "threads")]
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 #[cfg(feature = "threads")]
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 #[cfg(feature = "threads")]
 use std::thread::JoinHandle;
 
@@ -437,7 +437,7 @@ pub struct Prefetcher(std::convert::Infallible);
 
 #[cfg(not(feature = "threads"))]
 impl Prefetcher {
-    pub fn new(_path: PathBuf, _touch_only: bool) -> Option<Self> {
+    pub fn new(_stack: Arc<TiffStack>, _touch_only: bool) -> Option<Self> {
         None
     }
 
@@ -461,24 +461,19 @@ pub struct Prefetcher {
 
 #[cfg(feature = "threads")]
 impl Prefetcher {
-    /// Spawn a worker that opens its own map of `path`. `touch_only` selects
-    /// the page-touch mode (uncompressed stacks — see module docs); otherwise
-    /// the worker decodes ahead. Returns `None` if the thread or the worker's
-    /// file open fails — callers then just decode inline.
-    pub fn new(path: PathBuf, touch_only: bool) -> Option<Self> {
+    /// Spawn a worker over `stack` — the window's own, shared: no second map,
+    /// no second walk of the IFD chain, and the pages it touches are the ones
+    /// the window then reads. `touch_only` selects the page-touch mode
+    /// (uncompressed stacks — see module docs); otherwise the worker decodes
+    /// ahead. Returns `None` if the thread fails to spawn — callers then just
+    /// decode inline.
+    pub fn new(stack: Arc<TiffStack>, touch_only: bool) -> Option<Self> {
         let (tx, rx) = channel::<Request>();
         let result = Arc::new(Mutex::new(None));
         let result_worker = Arc::clone(&result);
         let handle = std::thread::Builder::new()
             .name("fasttiff-prefetch".to_owned())
-            .spawn(move || {
-                // Second mmap of the same file: shares the OS page cache, so no
-                // duplicate pixel RAM; the IFD walk is a one-time cost.
-                match TiffStack::open(&path) {
-                    Ok(stack) => worker_loop(stack, rx, result_worker, touch_only),
-                    Err(e) => log::warn!("prefetch worker: can't open {}: {e:#}", path.display()),
-                }
-            })
+            .spawn(move || worker_loop(stack, rx, result_worker, touch_only))
             .ok()?;
         Some(Self {
             tx,
@@ -516,7 +511,7 @@ impl Prefetcher {
 
 #[cfg(feature = "threads")]
 fn worker_loop(
-    stack: TiffStack,
+    stack: Arc<TiffStack>,
     rx: Receiver<Request>,
     result: Arc<Mutex<Option<PrefetchResult>>>,
     touch_only: bool,

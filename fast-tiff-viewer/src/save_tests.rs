@@ -60,6 +60,20 @@ fn open(bytes: Vec<u8>) -> Stack {
     Stack::from_bytes(bytes, "probe.tif".into(), false).expect("the source should open")
 }
 
+/// `bytes` opened, with one more frame of a different shape on the end — what
+/// a scanner's thumbnail IFD looks like to the reader. The writer will not
+/// make such a file, so the frame's geometry is faked, on a `TiffStack` of its
+/// own: the stack's is shared with its workers and is not this test's to edit.
+fn with_odd_frame(bytes: Vec<u8>) -> Stack {
+    let mut stack = open(bytes.clone());
+    let mut tiff = TiffStack::from_bytes(bytes).expect("parse");
+    let mut odd = tiff.frames[0].clone();
+    odd.width = W + 2;
+    tiff.frames.push(odd);
+    stack.tiff = std::sync::Arc::new(tiff);
+    stack
+}
+
 /// Read a saved file back. Through its bytes rather than `TiffStack::open`,
 /// which needs the `mmap` feature — the wasm-shaped build is tested without it,
 /// and every assertion here is about what was written rather than how it is
@@ -229,19 +243,7 @@ fn the_instruments_record_is_carried_and_the_imagej_block_is_not_doubled() {
 fn a_stack_of_mixed_frame_shapes_is_refused_with_a_reason() {
     // Two frames of different sizes, written by hand — the writer will not do
     // it, so the bytes are assembled from two single-frame files.
-    let a = source(SampleType::U16, 1, 1, 1);
-    let stack = open(a);
-    // Fake the second frame's geometry, which is what a scanner's thumbnail
-    // IFD looks like to the reader.
-    let mut stack = stack;
-    let mut odd = stack.tiff.frames[0].clone();
-    odd.width = W + 2;
-    // Through `get_mut` because the stack shares its `TiffStack` with anything
-    // running on a worker; here nothing else holds it, so this always succeeds.
-    std::sync::Arc::get_mut(&mut stack.tiff)
-        .expect("the fixture holds the only reference")
-        .frames
-        .push(odd);
+    let stack = with_odd_frame(source(SampleType::U16, 1, 1, 1));
 
     let path = temp("mixed");
     let err = save_stack(&stack, &path).expect_err("mixed shapes cannot be saved");
@@ -333,14 +335,7 @@ fn a_stopped_save_leaves_no_file_behind() {
 fn a_failed_save_leaves_no_file_behind() {
     // A stack whose second frame is a different shape: refused, but only after
     // the writer has been created and the file exists.
-    let stack = open(source(SampleType::U16, 1, 1, 2));
-    let mut stack = stack;
-    let mut odd = stack.tiff.frames[0].clone();
-    odd.width = W + 2;
-    std::sync::Arc::get_mut(&mut stack.tiff)
-        .expect("the fixture holds the only reference")
-        .frames
-        .push(odd);
+    let stack = with_odd_frame(source(SampleType::U16, 1, 1, 2));
 
     let path = temp("failed");
     save_source(&SaveSource::of(&stack), &path, &mut |_| true).expect_err("mixed shapes");
@@ -383,14 +378,7 @@ fn a_failed_save_leaves_an_existing_file_untouched() {
 
     // Mixed frame shapes: refused, but only after a writer would have been
     // created — which is what would truncate the target if it were the target.
-    let stack = open(source(SampleType::U16, 1, 1, 2));
-    let mut stack = stack;
-    let mut odd = stack.tiff.frames[0].clone();
-    odd.width = W + 2;
-    std::sync::Arc::get_mut(&mut stack.tiff)
-        .expect("the fixture holds the only reference")
-        .frames
-        .push(odd);
+    let stack = with_odd_frame(source(SampleType::U16, 1, 1, 2));
 
     save_source(&SaveSource::of(&stack), &path, &mut |_| true).expect_err("mixed shapes");
     assert_eq!(

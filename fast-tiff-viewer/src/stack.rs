@@ -129,7 +129,7 @@ pub struct Stack {
     /// [`tiff`](Self::tiff)`.meta` stays exactly as the file was parsed — see
     /// [`crate::display`].
     pub display: Display,
-    /// Background read-ahead worker (own mmap): decode-ahead for compressed
+    /// Background read-ahead worker over [`tiff`](Self::tiff): decode-ahead for compressed
     /// stacks, page-touch for uncompressed ones. `None` when the worker failed
     /// to start, or always under `--no-default-features` (no `threads`); the
     /// inline decode path covers both. See [`crate::prefetch`].
@@ -138,8 +138,7 @@ pub struct Stack {
     /// change) so an in-flight prefetch decoded under the old plan is recognized
     /// as stale and ignored rather than uploaded.
     pub prefetch_gen: u64,
-    /// Background 3D-volume builder (own mmap), spawned lazily on the first 3D
-    /// use. `None` after a failed spawn (`volume_builder_tried` set) — volume
+    /// Background 3D-volume builder, spawned lazily on the first 3D use. `None` after a failed spawn (`volume_builder_tried` set) — volume
     /// builds then fall back to running synchronously.
     pub volume_builder: Option<VolumeBuilder>,
     pub volume_builder_tried: bool,
@@ -217,27 +216,22 @@ impl Stack {
         apply_pseudocolor: bool,
         on_stage: &mut dyn FnMut(LoadStage),
     ) -> anyhow::Result<Self> {
-        // Spin up the read-ahead worker: decode-ahead for compressed stacks,
-        // page-touch for uncompressed (see the `prefetch` field).
-        // Only the read-ahead worker cares, and it only exists with `mmap`.
-        #[cfg(feature = "mmap")]
+        // A copy: `tiff.meta` stays as the file was parsed, and this is the
+        // document's, which the point counter may replace.
+        let overlay = tiff.meta.overlay.clone();
+        let tiff = Arc::new(tiff);
+        // Spin up the read-ahead worker over the same stack: decode-ahead for
+        // compressed stacks, page-touch for uncompressed (see the `prefetch`
+        // field). Without threads there is none, and every frame decodes
+        // inline — the same path taken whenever a spawn fails.
         let compressed = tiff
             .frames
             .first()
             .is_some_and(|f| f.compression != fast_tiff_lib::Compression::None);
-        // The worker reopens the file by path, so it only exists where there is
-        // a filesystem. Without it every frame decodes inline — the same path
-        // taken whenever a spawn fails.
-        #[cfg(feature = "mmap")]
-        let prefetch = Prefetcher::new(path.clone(), !compressed);
-        #[cfg(not(feature = "mmap"))]
-        let prefetch = None;
-        // A copy: `tiff.meta` stays as the file was parsed, and this is the
-        // document's, which the point counter may replace.
-        let overlay = tiff.meta.overlay.clone();
+        let prefetch = Prefetcher::new(Arc::clone(&tiff), !compressed);
 
         let mut stack = Stack {
-            tiff: Arc::new(tiff),
+            tiff,
             path,
             display: Display::default(),
             frame_index: 0,

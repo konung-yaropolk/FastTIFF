@@ -527,22 +527,18 @@ pub struct WindowWorker {
 
 #[cfg(feature = "threads")]
 impl WindowWorker {
-    /// Spawn a worker with its own map of `path`. `None` if the thread or the
-    /// open fails, in which case the caller builds windows inline as before.
-    pub fn new(path: std::path::PathBuf) -> Option<Self> {
+    /// Spawn a worker over `tiff` — the window's own, shared. `None` if the
+    /// thread fails to spawn, in which case the caller builds windows inline
+    /// as before.
+    pub fn new(tiff: std::sync::Arc<TiffStack>) -> Option<Self> {
         let (tx, rx) = std::sync::mpsc::channel::<Job>();
         let result = std::sync::Arc::new(std::sync::Mutex::new(None));
         let slot = std::sync::Arc::clone(&result);
         let handle = std::thread::Builder::new()
             .name("fasttiff-window".to_owned())
             .spawn(move || {
-                // Its own map of the same file: shares the OS page cache, so no
-                // duplicate pixel memory, and its own band cache so the two
-                // threads never contend over one.
-                let Ok(tiff) = TiffStack::open(&path) else {
-                    log::warn!("window worker: can't open {}", path.display());
-                    return;
-                };
+                // The window's own stack, shared, and a band cache of its own so
+                // the two threads never contend over one.
                 let mut bands = BandCache::default();
                 while let Ok(job) = rx.recv() {
                     // Drain to the newest request: while one window was being
@@ -638,7 +634,7 @@ pub struct WindowWorker(std::convert::Infallible);
 
 #[cfg(not(feature = "threads"))]
 impl WindowWorker {
-    pub fn new(_path: std::path::PathBuf) -> Option<Self> {
+    pub fn new(_tiff: std::sync::Arc<TiffStack>) -> Option<Self> {
         None
     }
     pub fn request(
