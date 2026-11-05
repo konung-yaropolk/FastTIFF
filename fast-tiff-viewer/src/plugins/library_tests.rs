@@ -338,7 +338,7 @@ fn a_name_that_is_not_utf8_is_reported_rather_than_shown() {
 #[test]
 fn an_absurd_string_length_is_refused_rather_than_read() {
     unsafe extern "C" fn query(reg: *mut abi::FtRegistrar) -> abi::FtStatus {
-        static ONE: [u8; 1] = [b'x'];
+        static ONE: [u8; 1] = *b"x";
         static VT: abi::FtPluginVtable = abi::FtPluginVtable {
             struct_size: 0,
             _pad: 0,

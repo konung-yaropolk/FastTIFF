@@ -481,7 +481,7 @@ fn swatch(ui: &mut egui::Ui, [r, g, b]: [u8; 3]) {
     painter.rect_stroke(
         rect,
         2.0,
-        Stroke::new(1.0, ui.visuals().weak_text_color()),
+        Stroke::new(1.0_f32, ui.visuals().weak_text_color()),
         egui::StrokeKind::Inside,
     );
 }

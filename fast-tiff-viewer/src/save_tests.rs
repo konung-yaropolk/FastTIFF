@@ -615,7 +615,9 @@ fn ij_metadata(bytes: &[u8]) -> IjMetadata {
     let blob = tag(50839).owned_bytes(bytes, order).unwrap();
     assert_eq!(&blob[..4], b"JIJI", "the little-endian magic");
     let directory = blob[4..counts[0] as usize]
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|rec| {
             let mut code = [rec[0], rec[1], rec[2], rec[3]];
             code.reverse();

@@ -672,7 +672,9 @@ fn read_name(d: &[u8], h: usize) -> Option<String> {
     let len = usize::try_from(len).ok()?;
     let bytes = d.get(at..at.checked_add(len.checked_mul(2)?)?)?;
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
     Some(String::from_utf16_lossy(&units))
@@ -688,7 +690,9 @@ fn read_counters(d: &[u8], h: usize, n: usize) -> Option<Option<Vec<i32>>> {
     let at = usize::try_from(at).ok()?;
     let bytes = d.get(at..at.checked_add(n.checked_mul(4)?)?)?;
     let words = bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|w| i32::from_be_bytes([w[0], w[1], w[2], w[3]]))
         .collect();
     Some(Some(words))

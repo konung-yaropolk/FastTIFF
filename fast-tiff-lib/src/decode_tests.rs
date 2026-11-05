@@ -60,7 +60,7 @@ fn predictor_undo_le_roundtrip() {
 
     let restored = undo_predictor(bytes, &frame, 2, ByteOrder::Little).unwrap();
     let mut out = [0u16; 8];
-    for (i, chunk) in restored.chunks_exact(2).enumerate() {
+    for (i, chunk) in restored.as_chunks::<2>().0.iter().enumerate() {
         out[i] = ByteOrder::Little.u16(chunk);
     }
     assert_eq!(out, original);
@@ -86,7 +86,7 @@ fn predictor_undo_be_roundtrip() {
 
     let restored = undo_predictor(bytes, &frame, 2, ByteOrder::Big).unwrap();
     let mut out = [0u16; 4];
-    for (i, chunk) in restored.chunks_exact(2).enumerate() {
+    for (i, chunk) in restored.as_chunks::<2>().0.iter().enumerate() {
         out[i] = ByteOrder::Big.u16(chunk);
     }
     assert_eq!(out, original);
@@ -377,7 +377,7 @@ fn planar_predictor2_differences_per_plane_row() {
 
     // Horizontal-difference each 3-sample row independently.
     let mut differenced = original;
-    for row in differenced.chunks_exact_mut(3) {
+    for row in differenced.as_chunks_mut::<3>().0.iter_mut() {
         for i in (1..3).rev() {
             row[i] = row[i].wrapping_sub(row[i - 1]);
         }

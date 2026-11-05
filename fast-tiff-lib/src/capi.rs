@@ -566,7 +566,7 @@ impl FtlWriterOptions {
             }
             let names = std::slice::from_raw_parts(self.channel_names, self.named_channels);
             let colors = std::slice::from_raw_parts(self.channel_colors, 3 * self.named_channels);
-            for (i, (&name, rgb)) in names.iter().zip(colors.chunks_exact(3)).enumerate() {
+            for (i, (&name, rgb)) in names.iter().zip(colors.as_chunks::<3>().0).enumerate() {
                 let name = c_str("a channel name", name)?
                     .ok_or_else(|| format!("channel_names[{i}] is NULL"))?;
                 m = m.channel(name, [rgb[0], rgb[1], rgb[2]]);

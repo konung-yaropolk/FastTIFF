@@ -1054,7 +1054,12 @@ impl ImageRenderResources {
             {
                 let at = (y as usize + r) * stride + x as usize * 4;
                 let out = &mut job.rgba[at..at + w as usize * 4];
-                for (o, px) in out.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+                for (o, px) in out
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(row.as_chunks::<4>().0)
+                {
                     o.copy_from_slice(&[px[order[0]], px[order[1]], px[order[2]], 255]);
                 }
             }

@@ -102,7 +102,7 @@ impl Exporter for Png {
             } else {
                 1.0
             };
-            for (px, &v) in rgb.chunks_exact_mut(3).zip(plane.iter()) {
+            for (px, &v) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(plane.iter()) {
                 let t01 = if windowed_on_read {
                     v as f32 / 65535.0
                 } else {

@@ -81,7 +81,9 @@ fn sixteen_bit_samples_are_stored_exactly() {
     );
     let level0 = &p.levels[0][0];
     let back: Vec<u16> = level0
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_ne_bytes([c[0], c[1]]))
         .collect();
     assert_eq!(back, samples);
@@ -98,7 +100,9 @@ fn two_channels_interleave_in_one_texture() {
     );
     assert_eq!(p.levels.len(), 1);
     let raw: Vec<u16> = p.levels[0][0]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_ne_bytes([c[0], c[1]]))
         .collect();
     assert_eq!(raw, [0, 65535, 1000, 4, 2000, 5, 3000, 6]);

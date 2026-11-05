@@ -68,9 +68,7 @@ fn with(stack: &mut Stack, lut: Lut, min: f32, max: f32) {
             "the window helper should round-trip {min}..{max}, got {lo}..{hi}"
         );
     }
-    for l in &mut stack.display.luts {
-        *l = lut;
-    }
+    stack.display.luts.fill(lut);
 }
 
 /// The copy is the image's own size, not the window's. This is the property

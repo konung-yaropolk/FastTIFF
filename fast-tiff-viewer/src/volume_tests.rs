@@ -179,7 +179,9 @@ fn a_volume_that_fits_is_packed_sample_for_sample() {
     let p = build_volume(&tiff, &u16_plan(4, usize::MAX)).expect("built");
     assert_eq!(p.layout.dims, (5, 3, 4));
     let got: Vec<u16> = p.levels[0][0]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_ne_bytes([c[0], c[1]]))
         .collect();
     let want: Vec<u16> = (0..4)
@@ -262,7 +264,12 @@ fn a_nan_is_left_out_of_an_average() {
     );
     let mut slab = vec![0u8; layout.slice_bytes(0)];
     boxes.write(&layout, &mut [&mut slab[..]], 2);
-    let got: Vec<f32> = slab.chunks_exact(4).map(|b| format.decode(b)).collect();
+    let got: Vec<f32> = slab
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| format.decode(b))
+        .collect();
     assert_eq!(got[0], 3.0, "(1 + 3 + 5) / 3");
     assert!(got[1].is_nan(), "a box of nothing but NaN stays NaN");
 
@@ -274,7 +281,12 @@ fn a_nan_is_left_out_of_an_average() {
     boxes.add(0, &Decoded::F32(vec![2.0, ninf, inf, ninf, ninf, nan]));
     let mut slab = vec![0u8; layout.slice_bytes(0)];
     boxes.write(&layout, &mut [&mut slab[..]], 1);
-    let got: Vec<f32> = slab.chunks_exact(4).map(|b| format.decode(b)).collect();
+    let got: Vec<f32> = slab
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| format.decode(b))
+        .collect();
     assert_eq!(
         got,
         vec![2.0, inf, ninf],

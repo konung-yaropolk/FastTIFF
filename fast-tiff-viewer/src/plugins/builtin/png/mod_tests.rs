@@ -160,12 +160,12 @@ fn each_channel_goes_through_the_lut_it_is_displayed_with() {
     let path = temp("lut");
     export(&stack, &path);
     let (_, _, rgb) = read_png(&path);
-    for (i, px) in rgb.chunks_exact(3).enumerate() {
+    for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
         assert_eq!(px[0], 0, "pixel {i} has red in a green-only LUT");
         assert_eq!(px[2], 0, "pixel {i} has blue in a green-only LUT");
     }
     assert!(
-        rgb.chunks_exact(3).any(|px| px[1] > 200),
+        rgb.as_chunks::<3>().0.iter().any(|px| px[1] > 200),
         "nothing is bright, so the LUT was not reached at all"
     );
     let _ = std::fs::remove_file(&path);

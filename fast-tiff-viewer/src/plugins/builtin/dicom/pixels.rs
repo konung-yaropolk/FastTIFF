@@ -292,7 +292,7 @@ pub(super) fn planes_of_frame(
 /// wrong — it is noise, which at least fails loudly.
 pub(super) fn to_little_endian(data: &mut [u8], fmt: Format) {
     if fmt.sample_bytes() == 2 {
-        for pair in data.chunks_exact_mut(2) {
+        for pair in data.as_chunks_mut::<2>().0.iter_mut() {
             pair.swap(0, 1);
         }
     }

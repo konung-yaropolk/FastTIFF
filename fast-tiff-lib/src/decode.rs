@@ -212,12 +212,12 @@ pub fn read_frame_u16_into(
             } else {
                 match file_order {
                     ByteOrder::Little => {
-                        for (o, c) in dst.iter_mut().zip(src.chunks_exact(2)) {
+                        for (o, c) in dst.iter_mut().zip(src.as_chunks::<2>().0) {
                             *o = u16::from_le_bytes([c[0], c[1]]) ^ flip;
                         }
                     }
                     ByteOrder::Big => {
-                        for (o, c) in dst.iter_mut().zip(src.chunks_exact(2)) {
+                        for (o, c) in dst.iter_mut().zip(src.as_chunks::<2>().0) {
                             *o = u16::from_be_bytes([c[0], c[1]]) ^ flip;
                         }
                     }
@@ -721,7 +721,7 @@ fn plane_u16_from_native(
                 // indexing (the sign-bit flip folds in branchlessly: xor with
                 // 0 is a no-op).
                 let flip = if signed { 0x8000 } else { 0 };
-                let pairs = native[base * 2..(base + n_pixels) * 2].chunks_exact(2);
+                let pairs = native[base * 2..(base + n_pixels) * 2].as_chunks::<2>().0;
                 match file_order {
                     ByteOrder::Little => {
                         for (o, c) in out.iter_mut().zip(pairs) {
@@ -1138,7 +1138,7 @@ pub fn read_frame_f32_into(
             if memcpyable {
                 bytemuck::cast_slice_mut::<f32, u8>(dst).copy_from_slice(src);
             } else {
-                for (o, c) in dst.iter_mut().zip(src.chunks_exact(4)) {
+                for (o, c) in dst.iter_mut().zip(src.as_chunks::<4>().0) {
                     *o = sample_f32(c, file_order, format);
                 }
             }
