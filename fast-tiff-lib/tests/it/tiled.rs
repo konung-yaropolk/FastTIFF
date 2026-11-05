@@ -24,7 +24,7 @@
 //! `common::open_tiff` maps the file when `mmap` is on and reads its bytes when
 //! it is off.
 
-mod common;
+use crate::common;
 use common::open_tiff;
 
 use std::path::{Path, PathBuf};

@@ -1,6 +1,6 @@
 //! The public API, used the way a caller outside the crate uses it.
 
-#[path = "../src/fixture.rs"]
+#[path = "../../src/fixture.rs"]
 mod fixture;
 
 use fixture::Scratch;

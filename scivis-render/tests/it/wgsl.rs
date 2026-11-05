@@ -21,18 +21,18 @@ fn validate(src: &str, name: &str) {
 
 #[test]
 fn volume_shader_is_valid() {
-    validate(include_str!("../src/shaders/volume.wgsl"), "volume.wgsl");
+    validate(include_str!("../../src/shaders/volume.wgsl"), "volume.wgsl");
 }
 
 #[test]
 fn composite_shader_is_valid() {
     validate(
-        include_str!("../src/shaders/composite.wgsl"),
+        include_str!("../../src/shaders/composite.wgsl"),
         "composite.wgsl",
     );
 }
 
 #[test]
 fn blit_shader_is_valid() {
-    validate(include_str!("../src/shaders/blit.wgsl"), "blit.wgsl");
+    validate(include_str!("../../src/shaders/blit.wgsl"), "blit.wgsl");
 }

@@ -379,7 +379,7 @@ r.paint(&mut render_pass);
 ## Threading
 
 On native platforms `ImageRenderResources` is both `Send` and `Sync` — asserted
-at compile time in `tests/markers.rs`, so a dependency bump that drops either
+at compile time in `tests/it/markers.rs`, so a dependency bump that drops either
 fails this crate's build rather than yours. On wasm the glow backend is neither,
 because a WebGL context is bound to one thread.
 

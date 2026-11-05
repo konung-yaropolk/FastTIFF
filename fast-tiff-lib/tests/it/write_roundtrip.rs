@@ -8,7 +8,7 @@
 //! it is off. These used to be gated off entirely without `mmap`, which cost
 //! the wasm-shaped build every test here and said nothing about it.
 
-mod common;
+use crate::common;
 use common::open_tiff;
 
 use fast_tiff_lib::{

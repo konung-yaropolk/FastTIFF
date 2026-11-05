@@ -80,7 +80,7 @@
 //!   `_any-builtin`, which keeps that crate's no-plugins guard true) and
 //!   listed in its `builtin-plugins`, and forwarded in
 //!   `FastTIFF-web/Cargo.toml` if it can run in a browser;
-//! * a case in `tests/plugin_parity.rs`, which fails until every installed
+//! * a case in `tests/it/plugin_parity.rs`, which fails until every installed
 //!   built-in is checked through the C boundary.
 //!
 //! A directory each rather than a file each, even for the two that are one file

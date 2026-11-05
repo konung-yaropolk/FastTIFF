@@ -173,7 +173,7 @@ before anything is allocated:
   `try_reserve`, so a genuinely large frame on a memory-starved machine returns
   an error instead of aborting.
 
-This is enforced two ways. [`tests/malformed_robustness.rs`](tests/malformed_robustness.rs)
+This is enforced two ways. [`tests/it/malformed_robustness.rs`](tests/it/malformed_robustness.rs)
 pins the known cases — truncation at every prefix, single-byte corruption at
 every offset, a seeded mutation sweep, hostile metadata, and inflated
 geometry — and runs in ordinary CI on every platform. [`fuzz/`](fuzz/) adds
@@ -724,7 +724,7 @@ cargo build -p fast-tiff-lib --target wasm32-unknown-unknown --no-default-featur
 parallel path is ever entered there — `should_parallelize` returns `false` on
 `wasm32`, since the target has no threads to fork onto.
 
-Both configurations are covered in CI, and `tests/from_bytes.rs` deliberately
+Both configurations are covered in CI, and `tests/it/from_bytes.rs` deliberately
 runs in each so the filesystem-free path can't silently rot.
 
 ## From C and C++

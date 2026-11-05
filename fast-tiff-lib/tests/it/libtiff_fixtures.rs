@@ -25,7 +25,7 @@
 //! it is off. These used to be gated off entirely without `mmap`, which cost
 //! the wasm-shaped build every test here and said nothing about it.
 
-mod common;
+use crate::common;
 use common::open_tiff;
 
 use fast_tiff_lib::{
@@ -174,7 +174,7 @@ fn every_fixture_decodes_correctly() {
 
         // `tld_` fixtures are tiled on a geometry of their own — a grid more
         // than one tile deep, which this matrix cannot express because its
-        // frames are shorter than a tile. `tests/tiled.rs` verifies them.
+        // frames are shorter than a tile. `tests/it/tiled.rs` verifies them.
         if gen == "tld" {
             continue;
         }
@@ -221,7 +221,7 @@ fn reference_component(ink: f32, black: f32, full: f32) -> f32 {
 
 /// The CMYK fixtures again, this time through the *converting* readers.
 ///
-/// The swatch tests in `tests/cmyk.rs` pin the formula itself against Pillow on
+/// The swatch tests in `tests/it/cmyk.rs` pin the formula itself against Pillow on
 /// hand-built files. What this adds is that the same answer comes out of every
 /// real-encoder variant: chunky and planar, LZW and Deflate-with-predictor,
 /// 8-bit and 16-bit, tifffile and libtiff. A conversion that quietly depended

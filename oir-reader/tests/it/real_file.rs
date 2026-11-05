@@ -5,7 +5,7 @@
 //! OIR samples are unpublished research data. Point it at some to run it —
 //!
 //! ```text
-//! FASTTIFF_OIR_SAMPLE="a.oir;b.oir" cargo test -p oir-reader --release --test real_file -- --ignored --nocapture
+//! FASTTIFF_OIR_SAMPLE="a.oir;b.oir" cargo test -p oir-reader --release --test it real_file:: -- --ignored --nocapture
 //! ```
 //!
 //! Each acquisition is read whole, twice, and only a hash of each is kept: the

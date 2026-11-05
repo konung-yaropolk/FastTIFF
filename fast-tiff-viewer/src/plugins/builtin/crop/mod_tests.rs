@@ -1,5 +1,5 @@
 //! The crop's arithmetic. The whole run, on a real stack and through the
-//! plugin boundary, is in `tests/plugin_parity.rs`.
+//! plugin boundary, is in `tests/it/plugin_parity.rs`.
 
 use super::*;
 use fasttiff_plugin_api::Shape;

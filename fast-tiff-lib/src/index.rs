@@ -116,7 +116,7 @@ pub enum Strips {
 /// which is a trap for a type whose whole point is that it has two spellings
 /// for the same one-element list. Everything the crate builds goes through
 /// `From`, which normalises — but `Many` is a public variant, so a caller can
-/// spell it the other way, and `tests/row_bands.rs` really does `assert_eq!`
+/// spell it the other way, and `tests/it/row_bands.rs` really does `assert_eq!`
 /// two of these against each other.
 impl PartialEq for Strips {
     #[inline]

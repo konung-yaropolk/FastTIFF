@@ -11,7 +11,7 @@ Three things are not acceptable:
 | **unbounded memory** | A few hundred bytes must not be able to demand gigabytes. |
 
 These targets explore for such inputs. Their always-on counterpart is
-[`tests/malformed_robustness.rs`](../tests/malformed_robustness.rs), which pins
+[`tests/it/malformed_robustness.rs`](../tests/it/malformed_robustness.rs), which pins
 the cases already found and runs in ordinary CI on every platform with no
 nightly toolchain.
 
@@ -90,7 +90,7 @@ on an input that reliably kills CI. This is the single easiest way to waste an
 afternoon here.
 
 Once you have a crashing input, drop it in `../tests/fuzz-regressions/`. That
-directory is replayed by `tests/fuzz_regressions.rs` through the same reader
+directory is replayed by `tests/it/fuzz_regressions.rs` through the same reader
 sequence as the `tiff_decode` target, on stable and on every platform, as part
 of the ordinary `cargo test` run — so the bug stays fixed even for contributors
 who never run the fuzzer.
