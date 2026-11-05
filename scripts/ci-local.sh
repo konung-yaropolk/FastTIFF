@@ -96,6 +96,13 @@ no_pinned_paths() {
 
 in_dir() { local d=$1; shift; (cd "$d" && "$@"); }
 
+# The same three runs as ci.yml's clippy step, which says why there are three.
+clippy_all() {
+    cargo clippy --workspace --all-targets -- -D warnings &&
+    cargo clippy --workspace --exclude FastTIFF --all-features --all-targets -- -D warnings &&
+    cargo clippy -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins,plugin-netpbm --all-targets -- -D warnings
+}
+
 fuzz() {
     local target=$1 seconds=$2
     mkdir -p "fast-tiff-lib/fuzz/corpus/$target"
@@ -130,7 +137,7 @@ step viewer-no-threads   -- cargo test -p fast-tiff-viewer --no-default-features
 step viewer-no-backend   -- cargo check -p fast-tiff-viewer --no-default-features
 step web-bundle slow     -- in_dir FastTIFF-web wasm-pack build --target web --out-dir pkg --release
 step fmt                 -- cargo fmt --all --check
-step clippy              -- cargo clippy --workspace --all-targets -- -D warnings
+step clippy              -- clippy_all
 step fuzz-open fuzz      -- fuzz tiff_open 120
 step fuzz-decode fuzz    -- fuzz tiff_decode 180
 
@@ -150,11 +157,6 @@ done
 if [ ${#NAMES[@]} -eq 0 ]; then
     echo "  no step ran (see --list)"
     exit 2
-fi
-# Clippy passes with warnings; say how many, since CI would not catch them.
-if [[ " ${NAMES[*]} " == *" clippy "* ]]; then
-    warnings=$(grep '^warning: ' "$LOGS/clippy.log" | grep -vc 'generated [0-9]* warning')
-    echo "  clippy: $warnings warning(s); see $LOGS/clippy.log"
 fi
 echo "  total ${total}s"
 if [ $FAILED -eq 0 ]; then echo "All passed."; else echo "Something failed."; fi

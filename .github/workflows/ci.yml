@@ -94,8 +94,18 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      # Three runs, because a lint only sees the code its features compile.
+      # The default build leaves out the glow renderer, the C APIs, the GPU
+      # registration paths and the example importer; the glow renderer's
+      # `as_chunks` lints sat unseen behind that until this step was widened.
+      # Every library goes in the second run with all its features; the app
+      # cannot, its two renderers being mutually exclusive, so it gets the
+      # other one in a third.
       - name: Clippy, with warnings as errors
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --workspace --exclude FastTIFF --all-features --all-targets -- -D warnings
+          cargo clippy -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins,plugin-netpbm --all-targets -- -D warnings
 
       # The test run above exercises the default (wgpu) backend. glow is the
       # Linux release backend; the compile check here (in addition to the Linux

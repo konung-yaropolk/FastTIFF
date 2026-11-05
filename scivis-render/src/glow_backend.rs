@@ -1418,8 +1418,13 @@ impl ImageRenderResources {
                 {
                     let at = (y as usize + r) * stride + x as usize * 4;
                     let out = &mut rgba[at..at + w as usize * 4];
-                    for (o, px) in out.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
-                        o.copy_from_slice(&[px[0], px[1], px[2], 255]);
+                    for (o, px) in out
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(row.as_chunks::<4>().0)
+                    {
+                        *o = [px[0], px[1], px[2], 255];
                     }
                 }
             }
@@ -1468,17 +1473,17 @@ impl ImageRenderResources {
         }
         let gl: &glow::Context = &self.gl;
         unsafe {
-            for c in 0..MAX_CHANNELS {
+            for (c, &kind) in want.iter().enumerate() {
                 // Integer texture: R8Uint or R16Uint at full size for an integer
                 // channel, else a 1x1 R16Uint dummy.
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_textures[c]));
-                match want[c] {
+                match kind {
                     KIND_INT8 => alloc_int(gl, width, height, true),
                     KIND_INT16 => alloc_int(gl, width, height, false),
                     _ => alloc_int(gl, 1, 1, false),
                 }
                 // Float texture: full size for a float channel, else 1x1 dummy.
-                let (fw, fh) = if want[c] == KIND_FLOAT {
+                let (fw, fh) = if kind == KIND_FLOAT {
                     (width, height)
                 } else {
                     (1, 1)
