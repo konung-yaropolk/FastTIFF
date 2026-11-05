@@ -47,13 +47,15 @@ extern "C" {
 #endif
 
 /* Statuses. */
+/* 0 to 4 mean the same in OIR_, S2P_ and TR_; this library's own statuses follow from 5. */
 #define FTL_OK 0               /* done */
-#define FTL_INVALID_ARGUMENT 1 /* a pointer, size, index, buffer or option it cannot take */
-#define FTL_UNAVAILABLE 2      /* not in this build or on this target (ftl_open without `mmap`, ZSTD without `codec-zstd`) */
-#define FTL_FAILED 3           /* something inside the library went wrong (a panic) */
-#define FTL_IO 4               /* a file could not be opened, created, read or written */
-#define FTL_NOT_TIFF 5         /* the bytes are not a TIFF at all */
-#define FTL_FORMAT 6           /* a TIFF it cannot read, or not as asked (a 16-bit frame through ftl_read_u8) */
+#define FTL_CANCELLED 1        /* reserved: never returned here, kept so 0-4 match the other C APIs */
+#define FTL_INVALID_ARGUMENT 2 /* a pointer, size, index, buffer or option it cannot take */
+#define FTL_UNAVAILABLE 3      /* not in this build or on this target (ftl_open without `mmap`, ZSTD without `codec-zstd`) */
+#define FTL_FAILED 4           /* something inside the library went wrong (a panic) */
+#define FTL_IO 5               /* a file could not be opened, created, read or written */
+#define FTL_NOT_TIFF 6         /* the bytes are not a TIFF at all */
+#define FTL_FORMAT 7           /* a TIFF it cannot read, or not as asked (a 16-bit frame through ftl_read_u8) */
 
 /* FtlFrameInfo.sample_format: TIFF's SampleFormat codes. */
 #define FTL_SAMPLE_UNSIGNED 1
@@ -219,11 +221,13 @@ int ftl_frame_info(const FtlStack *s, size_t index, FtlFrameInfo *out);
 /* What the file's metadata says. */
 int ftl_metadata(const FtlStack *s, FtlMetadata *out);
 
-/* The calibration unit (UTF-8, so a micron is "\xC2\xB5m"), snprintf-style; 0 when there is none. */
-size_t ftl_metadata_unit(const FtlStack *s, char *buf, size_t cap);
-
-/* The first IFD's ImageDescription, verbatim, snprintf-style; 0 when there is none. */
-size_t ftl_description(const FtlStack *s, char *buf, size_t cap);
+/*
+ * The calibration unit (UTF-8, so a micron is "\xC2\xB5m") and the first IFD's ImageDescription,
+ * verbatim, snprintf-style: the whole length back, 0 when there is none, and a cut never splits a
+ * character. A NULL stack, or buf NULL with cap > 0, is -FTL_INVALID_ARGUMENT.
+ */
+ptrdiff_t ftl_metadata_unit(const FtlStack *s, char *buf, size_t cap);
+ptrdiff_t ftl_description(const FtlStack *s, char *buf, size_t cap);
 
 /*
  * channels x slices x frames as a viewer reads them: classified by size rather
@@ -249,7 +253,8 @@ int ftl_sample_count(const FtlStack *s, size_t index, size_t *count);
  * ftl_read_u16: any depth for display: 8-bit widened onto 0-65535, signed offset to unsigned,
  *               32/64-bit rescaled from range[0]..range[1], or each plane's own min..max when
  *               `range` is NULL (ftl_float_minmax gives one range for the whole frame).
- * ftl_read_f32: 32- and 64-bit frames, integer or float, as float; narrower is FTL_FORMAT.
+ * ftl_read_f32: any depth as float in the file's own units (8-bit 200 is 200.0, signed 16-bit
+ *               -1 is -1.0): no widening, offset or rescale. 16-bit floating point is FTL_FORMAT.
  */
 int ftl_read_u8(const FtlStack *s, size_t index, uint8_t *out, size_t len);
 int ftl_read_u16(const FtlStack *s, size_t index, const float *range, uint16_t *out, size_t len);

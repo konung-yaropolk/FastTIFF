@@ -6,7 +6,7 @@
 //! no time axis is refused rather than silently "registered".
 
 use super::*;
-use fasttiff_plugin_api::{ImageInfo, ParamKind, ParamValue, Params};
+use fasttiff_plugin_api::{ImageInfo, ParamKind, ParamValue, Params, PixelType};
 
 /// The declarations for a stack of this shape, with nothing chosen yet.
 fn decls_for(info: &ImageInfo) -> Vec<fasttiff_plugin_api::ParamDecl> {
@@ -444,7 +444,11 @@ fn the_edge_choice_reaches_the_settings() {
     ] {
         let mut p = Params::new();
         p.set("edges", ParamValue::Choice(choice));
-        assert_eq!(super::params::settings_from(&p).border, want, "option {choice}");
+        assert_eq!(
+            super::params::settings_from(&p).border,
+            want,
+            "option {choice}"
+        );
     }
     assert!(offered(&decls_for(&info(1, 1, 10))).contains(&"edges".to_string()));
 }

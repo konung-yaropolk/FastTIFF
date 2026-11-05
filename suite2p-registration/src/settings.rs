@@ -191,10 +191,8 @@ impl Border {
 }
 
 /// How far past the outermost sample a position may land and still count as
-/// on the frame: rounding, not motion. A fitted transformation that is the
-/// identity to within `1e-12` would otherwise blank the last row and column
-/// under [`Border::Constant`].
-pub(crate) const ON_FRAME: f64 = 1e-6;
+/// on the frame (see `image_registration_support::area::ON_FRAME`).
+pub(crate) use image_registration_support::area::ON_FRAME;
 
 /// Registration parameters.
 ///

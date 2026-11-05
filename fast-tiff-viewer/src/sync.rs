@@ -13,7 +13,9 @@
 
 use crate::bandcache;
 use crate::camera::{build_volume_params, VolumeChannel};
-use crate::prefetch::{build_jobs, decode_jobs, ChannelJob, Decoded, PrefetchResult};
+use crate::prefetch::{
+    build_jobs, decode_jobs_borrowed, ChannelJob, Decoded, PrefetchResult, Samples,
+};
 use crate::roi::{self, Roi, Serving};
 use crate::stack::Stack;
 use crate::viewer::{DecodeMode, ViewMode, Viewer};
@@ -40,6 +42,9 @@ impl Viewer {
     /// slice.
     pub fn sync(&mut self, renderer: &mut Renderer) -> SyncOutcome {
         let mut outcome = SyncOutcome::default();
+        if std::mem::take(&mut self.release_volume_gpu) {
+            renderer.release_volume();
+        }
         // Read before the stack is borrowed mutably: residency depends on which
         // part of the image is on screen, which is the frontend's business.
         let (uv_offset, uv_scale) = (self.uv_offset, self.uv_scale);
@@ -56,7 +61,7 @@ impl Viewer {
         // Per-channel GPU texture kind (R8Uint / R16Uint / R32F), picked from the
         // source format at load time — drives both texture allocation and the
         // decode path below.
-        let kinds: Vec<ChannelKind> = loaded.display.settings.iter().map(|s| s.kind).collect();
+        let kinds: Vec<ChannelKind> = loaded.display.settings.iter().map(|s| s.kind()).collect();
 
         // Work out what should be resident for this view, and size the textures
         // to it. For everything that fits a texture this is the whole frame at
@@ -96,8 +101,10 @@ impl Viewer {
             return outcome;
         }
 
-        // Push the decode-parallelism choice to fast-tiff-lib: Auto follows the
-        // playback-keeping-up latch, Serial/Threaded force it off/on.
+        // The decode-parallelism choice for this thread's decodes: Auto follows
+        // the playback-keeping-up latch, Serial/Threaded force it off/on. This
+        // thread's own, so a save or a volume build running elsewhere keeps its
+        // own; the workers serving this view are handed it with each request.
         // A frame too large for one texture is decoded a band at a time, with
         // the user waiting on each one — a second of wall clock that threads cut
         // to a fraction. `Auto` is otherwise driven by the playback latch, which
@@ -108,7 +115,7 @@ impl Viewer {
             target.is_some_and(|r| !window::covers_whole_frame(&r.show, frame_w, frame_h));
         let parallel = self.decode_mode.parallel(self.decode_parallel)
             || (windowed && self.decode_mode == DecodeMode::Auto);
-        fast_tiff_lib::set_parallel_decode(parallel);
+        fast_tiff_lib::set_thread_parallel_decode(Some(parallel));
 
         if let Some(r) = target {
             let read_ahead = self.playback.playing && !self.decode_parallel;
@@ -120,24 +127,24 @@ impl Viewer {
         }
 
         // Window/level goes to the shader in the units its texture actually
-        // holds: 16-bit ints in raw 0..65535, floats in their own units (R32F
-        // holds raw samples), and 8-bit ints in 0..255 — the slider keeps the
-        // window in 0..65535, so an 8-bit channel's bounds are rescaled by the
-        // widening factor. That conversion is
-        // [`crate::channels::sample_window`], shared with the CPU compositor so
-        // the two cannot drift. `is_float` tells the shader which texture to
-        // sample; the two integer formats share one sampler.
+        // holds: the file's own for 8-bit (R8Uint holds the raw bytes) and
+        // float (R32F holds the raw values), the decoder's 16-bit display scale
+        // for everything on R16Uint. The window is held in file units, so that
+        // conversion is [`crate::units::SampleUnits::to_texture`], shared with
+        // the CPU compositor so the two cannot drift. `is_float` tells the
+        // shader which texture to sample; the two integer formats share one
+        // sampler.
         let uniforms: Vec<ChannelUniform> = loaded
             .display
             .settings
             .iter()
             .map(|s| {
-                let (min, max) = crate::channels::sample_window(s.kind, s.min, s.max);
+                let (min, max) = s.units.to_texture(s.window);
                 ChannelUniform {
                     min,
                     max,
                     enabled: s.enabled,
-                    is_float: s.kind == ChannelKind::Float,
+                    is_float: s.kind() == ChannelKind::Float,
                 }
             })
             .collect();
@@ -187,7 +194,7 @@ fn plan_residency(
 
     // Every display channel gets a full-size texture, disabled or not, so the
     // per-texel cost is the sum over all of them.
-    let bytes_per_texel: usize = kinds.iter().map(|k| gpu_bytes_per_texel(*k)).sum();
+    let bytes_per_texel: usize = kinds.iter().map(|k| k.bytes_per_sample()).sum();
 
     // The ordinary case: it fits, so keep doing exactly what was done before.
     // Nothing below this line runs for an image of ordinary size — no planning,
@@ -232,15 +239,6 @@ fn plan_residency(
     let serving = roi::serve(loaded.roi, overview, &plan);
     loaded.gpu_stride = serving.show.stride;
     Some(serving)
-}
-
-/// Bytes one texel of a channel occupies in VRAM.
-fn gpu_bytes_per_texel(kind: ChannelKind) -> usize {
-    match kind {
-        ChannelKind::Int8 => 1,
-        ChannelKind::Int16 => 2,
-        ChannelKind::Float => 4,
-    }
 }
 
 /// 2D path: decode and upload this frame's enabled channels (from the prefetch
@@ -338,7 +336,14 @@ fn sync_movie(
                 if let Some(ready) = p.take_matching(want_gen, frame_index) {
                     if prefetch_matches(&ready, &jobs) {
                         for ch in &ready.channels {
-                            upload(renderer, ch.channel, ch.width, ch.height, &roi, &ch.data);
+                            upload(
+                                renderer,
+                                ch.channel,
+                                ch.width,
+                                ch.height,
+                                &roi,
+                                ch.data.view(),
+                            );
                         }
                         used_prefetch = true;
                     }
@@ -346,8 +351,9 @@ fn sync_movie(
             }
             if !used_prefetch {
                 // One call decodes every enabled channel; RGB planes share a
-                // single decompression pass inside `decode_jobs`.
-                match decode_jobs(
+                // single decompression pass. Borrowed: an uncompressed plane
+                // goes from the mapping straight into its texture.
+                match decode_jobs_borrowed(
                     &loaded.tiff.data,
                     &loaded.tiff.frames,
                     loaded.tiff.byte_order,
@@ -355,7 +361,14 @@ fn sync_movie(
                 ) {
                     Ok(decoded) => {
                         for (job, data) in jobs.iter().zip(&decoded) {
-                            upload(renderer, job.channel, job.width, job.height, &roi, data);
+                            upload(
+                                renderer,
+                                job.channel,
+                                job.width,
+                                job.height,
+                                &roi,
+                                data.view(),
+                            );
                         }
                     }
                     Err(e) => result = Err(e),
@@ -391,11 +404,11 @@ fn sync_movie(
         let jobs = build_jobs(loaded, frame_index, &enabled, kinds);
         let channels: Vec<usize> = jobs.iter().map(|j| j.channel).collect();
 
-        // Spawn on first need rather than at load: a thread and a second map of
-        // the file are only worth it for a frame too large to upload whole,
-        // which is a small minority of what gets opened.
+        // Spawn on first need rather than at load: a thread is only worth it
+        // for a frame too large to upload whole, which is a small minority of
+        // what gets opened.
         if loaded.window_worker.is_none() {
-            loaded.window_worker = window::WindowWorker::new(loaded.path.clone());
+            loaded.window_worker = window::WindowWorker::new(std::sync::Arc::clone(&loaded.tiff));
             if loaded.window_worker.is_some() {
                 // The worker keeps its own bands, and from here on it is the
                 // one decoding windows. Holding a second full cache here would
@@ -528,13 +541,13 @@ fn upload(
     width: u32,
     height: u32,
     roi: &Roi,
-    data: &Decoded,
+    data: Samples<'_>,
 ) {
     if window::covers_whole_frame(roi, width, height) {
         match data {
-            Decoded::U8(v) => renderer.upload_channel_u8(channel, width, height, v),
-            Decoded::U16(v) => renderer.upload_channel_u16(channel, width, height, v),
-            Decoded::F32(v) => renderer.upload_channel_f32(channel, width, height, v),
+            Samples::U8(v) => renderer.upload_channel_u8(channel, width, height, v),
+            Samples::U16(v) => renderer.upload_channel_u16(channel, width, height, v),
+            Samples::F32(v) => renderer.upload_channel_f32(channel, width, height, v),
         }
         return;
     }
@@ -595,24 +608,12 @@ fn sync_volume(
     }
 
     if view.built_frame != Some(time) {
-        // Lazily spawn the background builder on first 3D use (it opens its own
-        // mmap of the file, like the prefetch worker).
+        // Lazily spawn the background builder on first 3D use, over the same
+        // stack as the window — so a stack held in memory gets one too.
         if loaded.volume_builder.is_none() && !loaded.volume_builder_tried {
-            loaded.volume_builder = crate::volume::VolumeBuilder::new(loaded.path.clone());
+            loaded.volume_builder =
+                crate::volume::VolumeBuilder::new(std::sync::Arc::clone(&loaded.tiff));
             loaded.volume_builder_tried = true;
-        }
-        // A worker that could not open the file is gone for good, and a stack a
-        // plugin imported has no file to open — its `path` is the name it is
-        // shown under. Drop it and build here instead.
-        //
-        // Noticing this needs its own flag rather than a failed `request`: the
-        // request that queued the first build was sent while the worker was
-        // still starting up, so it succeeded, and the frames after it never ask
-        // again — they poll for a reply. Which is why an imported stack sat on
-        // "Loading 3D…" and stayed there.
-        if loaded.volume_builder.as_ref().is_some_and(|b| b.failed()) {
-            loaded.volume_builder = None;
-            view.requested = None;
         }
         let budget = *view
             .planned_budget
@@ -661,9 +662,10 @@ fn sync_volume(
     renderer.set_volume_interp(view.interp);
     renderer.set_volume_target(view.viewport_px[0], view.viewport_px[1], view.downscale);
 
-    // Per-channel window/level, in the sampled texture's units: raw for float,
-    // else the 0..65535 display window divided by 65535 (both U8 and U16 volumes
-    // are unorm-normalized — see scivis_render::VolumeKind).
+    // Per-channel window/level, in the sampled texture's units: normalized the
+    // way the volume builder normalized the voxels (integers as unorm, floats
+    // over the channel's span), which is
+    // [`crate::units::SampleUnits::to_unorm`].
     // Bounded by MAX_CHANNELS, so it lives on the stack — this runs every 3D
     // frame and has no business calling the allocator.
     let blank = VolumeChannel {
@@ -676,12 +678,8 @@ fn sync_volume(
     let mut windows = [blank; MAX_CHANNELS];
     let n = loaded.display.settings.len().min(MAX_CHANNELS);
     for (c, (slot, s)) in windows.iter_mut().zip(&loaded.display.settings).enumerate() {
-        let is_float = s.kind == ChannelKind::Float;
-        let (min, max) = if is_float {
-            (s.min, s.max)
-        } else {
-            (s.min / 65535.0, s.max / 65535.0)
-        };
+        let is_float = s.kind() == ChannelKind::Float;
+        let (min, max) = s.units.to_unorm(s.window);
         // The isosurface paints one fixed colour, taken from the LUT's
         // brightest point rather than its top entry — a contrast-stretched
         // palette ends black, and sampling the top would render nothing at all.
@@ -745,18 +743,12 @@ pub fn plan_volume(
     budget: usize,
     view: &crate::viewer::VolumeView,
 ) -> VolumePlan {
-    let kinds: Vec<ChannelKind> = loaded.display.settings.iter().map(|s| s.kind).collect();
-    let volume_kinds: Vec<scivis_render::VolumeKind> = kinds
-        .iter()
-        .map(|k| match k {
-            ChannelKind::Int8 => scivis_render::VolumeKind::U8,
-            ChannelKind::Int16 => scivis_render::VolumeKind::U16,
-            ChannelKind::Float => scivis_render::VolumeKind::F32,
-        })
-        .collect();
+    let kinds: Vec<ChannelKind> = loaded.display.settings.iter().map(|s| s.kind()).collect();
+    let volume_kinds: Vec<scivis_render::VolumeKind> =
+        kinds.iter().map(|k| k.volume_kind()).collect();
     VolumePlan {
         format: renderer.volume_texel_format(scivis_render::pack::common_kind(&volume_kinds)),
-        kinds,
+        units: loaded.display.settings.iter().map(|s| s.units).collect(),
         rgb: loaded.display.rgb,
         channels: loaded.display.dims.channels,
         slices: loaded.display.dims.slices,

@@ -107,13 +107,14 @@ pub fn lut_sample(lut: &Lut, t: f32) -> [f32; 3] {
     })
 }
 
-/// One decoded sample, as an `f32` in the units the contrast window is in.
+/// One decoded sample, as an `f32` in the units the channel's texture holds.
 ///
 /// The shader reads its integer textures with `f32(textureLoad(...).r)` — the
-/// stored integer, widened, not normalised — so an 8-bit channel's window is in
-/// 0..255 and a 16-bit channel's in 0..65535. Matching that is the whole point
-/// of taking the samples from [`decode_jobs`] rather than re-reading the file
-/// in its own units, where an 8-bit plane would arrive 257x off.
+/// stored integer, widened, not normalised — and compares it with the window
+/// [`SampleUnits::to_texture`](crate::units::SampleUnits::to_texture) gave it.
+/// Taking the samples from [`decode_jobs`], as the upload does, and the window
+/// from the same conversion is what makes this compose the picture the shader
+/// draws rather than one that merely resembles it.
 fn sample(data: &Decoded, i: usize) -> Option<f32> {
     match data {
         Decoded::U8(v) => v.get(i).map(|&s| s as f32),
@@ -137,7 +138,7 @@ pub fn of_frame(stack: &Stack) -> Result<Snapshot> {
         .context("nothing is open, so there is no view to copy")?;
     let settings = &stack.display.settings;
     let enabled: Vec<bool> = settings.iter().map(|s| s.enabled).collect();
-    let kinds: Vec<ChannelKind> = settings.iter().map(|s| s.kind).collect();
+    let kinds: Vec<ChannelKind> = settings.iter().map(|s| s.kind()).collect();
 
     let jobs = build_jobs(stack, stack.frame_index, &enabled, &kinds);
     let decoded = decode_jobs(
@@ -160,11 +161,11 @@ pub fn of_frame(stack: &Stack) -> Result<Snapshot> {
         let Some(lut) = stack.display.luts.get(job.channel) else {
             continue;
         };
-        // The window as the *samples* are scaled, not as the slider holds it.
-        // An 8-bit channel's window is kept in 0..65535 by the interface while
-        // its samples are raw 0..255; pairing the two directly composes the
-        // image at 1/257 of its contrast, which is black.
-        let (min, max) = crate::channels::sample_window(s.kind, s.min, s.max);
+        // The window as the *samples* are scaled, not as the slider holds it:
+        // an Int16 channel's texture is on the decoder's 16-bit scale while
+        // its window is in the file's units, and pairing the two directly
+        // composes an 8-bit-widened image far too bright, a signed one shifted.
+        let (min, max) = s.units.to_texture(s.window);
         for (i, out) in acc.iter_mut().enumerate() {
             // A plane shorter than the frame is a damaged file, not a reason to
             // panic or to refuse the copy: the pixels that exist are composed

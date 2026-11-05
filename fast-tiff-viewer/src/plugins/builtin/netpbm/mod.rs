@@ -16,6 +16,7 @@ use fasttiff_plugin_api::{
 };
 use std::path::Path;
 
+#[derive(Default)]
 pub struct Netpbm;
 
 /// The header of a binary Netpbm file.

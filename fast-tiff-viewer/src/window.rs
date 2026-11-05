@@ -11,7 +11,7 @@
 //! somewhere other than the thread drawing the interface.
 
 use crate::bandcache::{self, BandCache};
-use crate::prefetch::{decode_jobs_region, decode_jobs_stepped, ChannelJob, Decoded};
+use crate::prefetch::{decode_jobs_region, decode_jobs_stepped, ChannelJob, Decoded, Samples};
 use crate::roi::{self, Roi};
 use fast_tiff_lib::{FrameInfo, TiffStack};
 use scivis_render::ChannelKind;
@@ -62,11 +62,11 @@ fn step_for(frame: &FrameInfo, stride: u32) -> Option<u32> {
 }
 
 /// Cut a window out of a decoded plane, whatever its format.
-pub fn cut(data: &Decoded, width: u32, height: u32, roi: &Roi) -> Decoded {
+pub fn cut(data: Samples<'_>, width: u32, height: u32, roi: &Roi) -> Decoded {
     match data {
-        Decoded::U8(v) => Decoded::U8(roi::extract(v, width, height, roi)),
-        Decoded::U16(v) => Decoded::U16(roi::extract(v, width, height, roi)),
-        Decoded::F32(v) => Decoded::F32(roi::extract(v, width, height, roi)),
+        Samples::U8(v) => Decoded::U8(roi::extract(v, width, height, roi)),
+        Samples::U16(v) => Decoded::U16(roi::extract(v, width, height, roi)),
+        Samples::F32(v) => Decoded::F32(roi::extract(v, width, height, roi)),
     }
 }
 
@@ -130,7 +130,10 @@ fn trim_to(
         stride: 1,
     };
     let h = actual.end - actual.start;
-    decoded.iter().map(|d| cut(d, width, h, &keep)).collect()
+    decoded
+        .iter()
+        .map(|d| cut(d.view(), width, h, &keep))
+        .collect()
 }
 
 /// Cut texel rows `t0..t1` of the window out of one contiguously decoded band.
@@ -161,7 +164,11 @@ fn blit_band(
     };
     let band_h = rows.end - rows.start;
     for (plane, data) in planes.iter_mut().zip(band) {
-        blit(plane, &cut(data, band_w, band_h, &sub), (t0 * tw) as usize);
+        blit(
+            plane,
+            &cut(data.view(), band_w, band_h, &sub),
+            (t0 * tw) as usize,
+        );
     }
 }
 
@@ -503,6 +510,9 @@ struct Job {
     roi: Roi,
     jobs: Vec<ChannelJob>,
     kinds: Vec<ChannelKind>,
+    /// Whether the requester decodes in parallel: the worker decodes the
+    /// window the way the view would have.
+    parallel: bool,
 }
 
 /// Builds windows on a thread of its own, so the interface keeps drawing while
@@ -527,22 +537,18 @@ pub struct WindowWorker {
 
 #[cfg(feature = "threads")]
 impl WindowWorker {
-    /// Spawn a worker with its own map of `path`. `None` if the thread or the
-    /// open fails, in which case the caller builds windows inline as before.
-    pub fn new(path: std::path::PathBuf) -> Option<Self> {
+    /// Spawn a worker over `tiff` — the window's own, shared. `None` if the
+    /// thread fails to spawn, in which case the caller builds windows inline
+    /// as before.
+    pub fn new(tiff: std::sync::Arc<TiffStack>) -> Option<Self> {
         let (tx, rx) = std::sync::mpsc::channel::<Job>();
         let result = std::sync::Arc::new(std::sync::Mutex::new(None));
         let slot = std::sync::Arc::clone(&result);
         let handle = std::thread::Builder::new()
             .name("fasttiff-window".to_owned())
             .spawn(move || {
-                // Its own map of the same file: shares the OS page cache, so no
-                // duplicate pixel memory, and its own band cache so the two
-                // threads never contend over one.
-                let Ok(tiff) = TiffStack::open(&path) else {
-                    log::warn!("window worker: can't open {}", path.display());
-                    return;
-                };
+                // The window's own stack, shared, and a band cache of its own so
+                // the two threads never contend over one.
                 let mut bands = BandCache::default();
                 while let Ok(job) = rx.recv() {
                     // Drain to the newest request: while one window was being
@@ -552,6 +558,7 @@ impl WindowWorker {
                     while let Ok(newer) = rx.try_recv() {
                         job = newer;
                     }
+                    fast_tiff_lib::set_thread_parallel_decode(Some(job.parallel));
                     match assemble(
                         &tiff,
                         &mut bands,
@@ -596,6 +603,7 @@ impl WindowWorker {
             roi,
             jobs,
             kinds,
+            parallel: fast_tiff_lib::parallel_decode_enabled(),
         });
     }
 
@@ -638,7 +646,7 @@ pub struct WindowWorker(std::convert::Infallible);
 
 #[cfg(not(feature = "threads"))]
 impl WindowWorker {
-    pub fn new(_path: std::path::PathBuf) -> Option<Self> {
+    pub fn new(_tiff: std::sync::Arc<TiffStack>) -> Option<Self> {
         None
     }
     pub fn request(

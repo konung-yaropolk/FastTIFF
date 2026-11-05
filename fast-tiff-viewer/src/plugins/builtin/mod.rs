@@ -69,134 +69,142 @@
 //!
 //! Give it a directory here — `<name>/mod.rs`, its tests in `mod_tests.rs`
 //! beside that, and any further files it needs alongside them — write it using
-//! nothing but `fasttiff_plugin_api`, add a `plugin-<name>` feature to the
-//! manifest (with any dependency of its own named by that feature and nothing
-//! else), put it in `builtin-plugins`, derive `Default` on its type, and add
-//! it to [`register`] below. That is this crate's part.
+//! nothing but `fasttiff_plugin_api`, and derive `Default` on its type. Then:
 //!
-//! The applications choose their plugins by feature too, so the feature has
-//! to reach them: forward it, and list it in `builtin-plugins`, in
-//! `FastTIFF/Cargo.toml`; add it to the no-plugins guard in
-//! `FastTIFF/src/lib.rs`; and forward it in `FastTIFF-web/Cargo.toml` if it
-//! can run in a browser. Miss those and the plugin builds, passes its tests and
-//! appears in neither application. Last, add it to
-//! `tests/plugin_parity.rs`, which fails until every installed built-in is
-//! checked through the C boundary.
+//! * one line in the `builtins!` table below, which declares the module,
+//!   re-exports its types and registers them;
+//! * a `plugin-<name>` feature in this crate's manifest, naming any dependency
+//!   of its own and any `_shared-*` facility it uses, and an entry in
+//!   `builtin-plugins`;
+//! * the same feature forwarded in `FastTIFF/Cargo.toml` (with
+//!   `_any-builtin`, which keeps that crate's no-plugins guard true) and
+//!   listed in its `builtin-plugins`, and forwarded in
+//!   `FastTIFF-web/Cargo.toml` if it can run in a browser;
+//! * a case in `tests/it/plugin_parity.rs`, which fails until every installed
+//!   built-in is checked through the C boundary.
 //!
 //! A directory each rather than a file each, even for the two that are one file
 //! long. A plugin grows parts — [`deconvolve`] has its algorithms, its
 //! transforms, its optics and its point-spread functions, and would have had
-//! them as `deconvolve.rs`, `deconvolve_fft.rs`, `deconvolve_psf.rs` and so on
-//! in a shared directory, files whose relationship is a naming convention.
+//! them as a run of `deconvolve_*.rs` files in a shared directory, files whose
+//! relationship is a naming convention.
 //! Keeping the boundary in the filesystem is also what makes the last step here
 //! cheap: if a plugin would rather ship separately, its directory becomes a
 //! `cdylib` crate's `src/` and nothing inside it has to change. [`oir`] went
 //! one step further and gave its reader away: the container and record code
 //! became the `oir-reader` crate, and the directory kept the importer.
 
-/// Every target: it computes poses and the host plays them, so it needs
-/// nothing a browser lacks.
-#[cfg(feature = "plugin-animation-3d")]
-pub mod animation_3d;
-#[cfg(feature = "plugin-crop")]
-pub mod crop;
-#[cfg(feature = "plugin-deconvolve")]
-pub mod deconvolve;
-/// Desktop-only on top of its feature, as every importer is: an
-/// [`ImportRequest`](fasttiff_plugin_api::ImportRequest) carries a filesystem
-/// path, and a browser tab has none. See the module for what that costs and why
-/// the contract is right to be that way.
-#[cfg(all(feature = "plugin-dicom", not(target_arch = "wasm32")))]
-pub mod dicom;
-#[cfg(feature = "plugin-invert")]
-pub mod invert;
-#[cfg(feature = "plugin-netpbm")]
-pub mod netpbm;
-/// Desktop-only on top of its feature, for the reason [`dicom`] is.
-#[cfg(all(feature = "plugin-nifti", not(target_arch = "wasm32")))]
-pub mod nifti;
-/// Desktop-only on top of its feature, for the reason [`dicom`] is. The reader
-/// itself is the `oir-reader` crate, which does build for wasm; only this
-/// importer around it is gated.
-#[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
-pub mod oir;
-#[cfg(feature = "plugin-plot-axis")]
-pub mod plot_axis;
+/// The one table of built-ins: for each, the condition it is compiled under,
+/// its module, and the plugins, importers and exporters it registers.
+///
+/// Everything else is made from it — the `pub mod` and `pub use` for each,
+/// and the body of [`register`], in table order — so a plugin is added by one
+/// entry here and its feature, and cannot be declared but left out of the
+/// registry, or registered under a condition its module was not compiled
+/// under. The condition is a `cfg` predicate, with the target gate written
+/// next to the feature when a plugin cannot run everywhere.
+macro_rules! builtins {
+    ($(
+        $(#[$doc:meta])*
+        $module:ident if ($cfg:meta) =>
+            $(plugins($($plugin:ident),+))?
+            $(importers($($importer:ident),+))?
+            $(exporters($($exporter:ident),+))?;
+    )*) => {
+        $(
+            $(#[$doc])*
+            #[cfg($cfg)]
+            pub mod $module;
+            #[cfg($cfg)]
+            pub use $module::{
+                $($($plugin,)+)?
+                $($($importer,)+)?
+                $($($exporter,)+)?
+            };
+        )*
+
+        /// [`register`]'s body: every entry of the table, in its order.
+        fn register_table(reg: &mut Registry, o: Origin) {
+            // Every line is conditional, so a build with every plugin left
+            // out uses neither — and must still build without a warning.
+            let _ = (&reg, o);
+            $(
+                #[cfg($cfg)]
+                {
+                    $($(reg.add::<$plugin>(o);)+)?
+                    $($(reg.add_importer::<$importer>(o);)+)?
+                    $($(reg.add_exporter::<$exporter>(o);)+)?
+                }
+            )*
+        }
+    };
+}
+
+builtins! {
+    // ---- filters
+    invert if (feature = "plugin-invert") => plugins(Invert);
+    zproject if (feature = "plugin-zproject") => plugins(ZProject);
+    plot_axis if (feature = "plugin-plot-axis") => plugins(PlotAxis);
+    stabilize if (feature = "plugin-suite2p-stabilize") => plugins(Stabilize);
+    /// Every target, now that `suite2p-registration` can be built without rayon.
+    ///
+    /// This was desktop-only, on the grounds that the registration crate depended
+    /// on rayon unconditionally and would therefore panic in a browser. That was
+    /// wrong twice over: rayon documents a fallback that runs a `par_iter`
+    /// sequentially on `wasm32-unknown-unknown` rather than failing, and nothing in
+    /// that crate spawns a thread directly. The plugin would have worked.
+    ///
+    /// What it would not have done is tell the truth, because under that fallback
+    /// `Backend::MultiThread` is single-threaded and still calls itself
+    /// multi-threaded. So rayon is now behind the registration crate's `threads`
+    /// feature, which this crate asks for only on targets that have threads; a
+    /// browser gets the same arithmetic on one thread, and `MultiThread` reports
+    /// itself unavailable there the way the GPU backend already does.
+    ///
+    /// One thing to know before reaching for it in a browser: a plugin run on the
+    /// web is synchronous, so a long registration will hold the tab.
+    turboreg if (feature = "plugin-turboreg-stabilize") => plugins(TurboReg);
+    stack_tools if (feature = "plugin-stack-tools")
+        => plugins(SliceKeeper, SliceRemover, SliceOrderInvert);
+    /// Every target: it computes poses and the host plays them, so it needs
+    /// nothing a browser lacks.
+    animation_3d if (feature = "plugin-animation-3d") => plugins(Animation3d);
+    crop if (feature = "plugin-crop") => plugins(Crop);
+    deconvolve if (feature = "plugin-deconvolve") => plugins(GeneratePsf, Deconvolve);
+
+    // ---- importers, most specific first (see `register`)
+    /// Desktop-only on top of its feature, for the reason [`dicom`] is. The reader
+    /// itself is the `oir-reader` crate, which does build for wasm; only this
+    /// importer around it is gated.
+    oir if (all(feature = "plugin-oir", not(target_arch = "wasm32"))) => importers(Oir);
+    /// Desktop-only on top of its feature, as every importer is: an
+    /// [`ImportRequest`](fasttiff_plugin_api::ImportRequest) carries a filesystem
+    /// path, and a browser tab has none. See the module for what that costs and why
+    /// the contract is right to be that way.
+    dicom if (all(feature = "plugin-dicom", not(target_arch = "wasm32"))) => importers(Dicom);
+    /// Desktop-only on top of its feature, for the reason [`dicom`] is.
+    nifti if (all(feature = "plugin-nifti", not(target_arch = "wasm32"))) => importers(Nifti);
+    png if (feature = "plugin-png") => importers(PngImport) exporters(Png);
+    netpbm if (feature = "plugin-netpbm") => importers(Netpbm);
+}
+
 /// The one directory here that is not a registry plugin, and so has no
 /// feature and no entry in [`register`]: a tool on the picture, kept with the
 /// built-ins because it is listed with them. See the module for why.
 pub mod point_counter;
-#[cfg(feature = "plugin-png")]
-pub mod png;
 /// What more than one of them is built from, and the reason each of them can be
 /// chosen on its own.
 ///
-/// The condition is its users, so that a build with none of them does not carry
-/// it and warn that it is unused. Nothing has to remember to update this list:
-/// a fourth user that forgot would fail to find the module.
+/// Compiled when a plugin that uses one of its facilities is. Each plugin's
+/// feature names the facilities it uses (`_shared-deliver`, `_shared-store`,
+/// `_shared-edges` in the manifest), so the conditions here and inside the
+/// module name three facilities rather than lists of plugins to keep in step.
 #[cfg(any(
-    feature = "plugin-invert",
-    feature = "plugin-stack-tools",
-    feature = "plugin-deconvolve",
-    feature = "plugin-crop",
-    feature = "plugin-suite2p-stabilize",
-    feature = "plugin-turboreg-stabilize",
+    feature = "_shared-deliver",
+    feature = "_shared-store",
+    feature = "_shared-edges"
 ))]
 pub(crate) mod shared;
-#[cfg(feature = "plugin-suite2p-stabilize")]
-pub mod stabilize;
-#[cfg(feature = "plugin-stack-tools")]
-pub mod stack_tools;
-/// Every target, now that `suite2p-registration` can be built without rayon.
-///
-/// This was desktop-only, on the grounds that the registration crate depended
-/// on rayon unconditionally and would therefore panic in a browser. That was
-/// wrong twice over: rayon documents a fallback that runs a `par_iter`
-/// sequentially on `wasm32-unknown-unknown` rather than failing, and nothing in
-/// that crate spawns a thread directly. The plugin would have worked.
-///
-/// What it would not have done is tell the truth, because under that fallback
-/// `Backend::MultiThread` is single-threaded and still calls itself
-/// multi-threaded. So rayon is now behind the registration crate's `threads`
-/// feature, which this crate asks for only on targets that have threads; a
-/// browser gets the same arithmetic on one thread, and `MultiThread` reports
-/// itself unavailable there the way the GPU backend already does.
-///
-/// One thing to know before reaching for it in a browser: a plugin run on the
-/// web is synchronous, so a long registration will hold the tab.
-#[cfg(feature = "plugin-turboreg-stabilize")]
-pub mod turboreg;
-#[cfg(feature = "plugin-zproject")]
-pub mod zproject;
-
-#[cfg(feature = "plugin-animation-3d")]
-pub use animation_3d::Animation3d;
-#[cfg(feature = "plugin-crop")]
-pub use crop::Crop;
-#[cfg(feature = "plugin-deconvolve")]
-pub use deconvolve::{Deconvolve, GeneratePsf};
-#[cfg(all(feature = "plugin-dicom", not(target_arch = "wasm32")))]
-pub use dicom::Dicom;
-#[cfg(feature = "plugin-invert")]
-pub use invert::Invert;
-#[cfg(feature = "plugin-netpbm")]
-pub use netpbm::Netpbm;
-#[cfg(all(feature = "plugin-nifti", not(target_arch = "wasm32")))]
-pub use nifti::Nifti;
-#[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
-pub use oir::Oir;
-#[cfg(feature = "plugin-plot-axis")]
-pub use plot_axis::PlotAxis;
-#[cfg(feature = "plugin-png")]
-pub use png::{Png, PngImport};
-#[cfg(feature = "plugin-suite2p-stabilize")]
-pub use stabilize::Stabilize;
-#[cfg(feature = "plugin-stack-tools")]
-pub use stack_tools::{SliceKeeper, SliceOrderInvert, SliceRemover};
-#[cfg(feature = "plugin-turboreg-stabilize")]
-pub use turboreg::TurboReg;
-#[cfg(feature = "plugin-zproject")]
-pub use zproject::ZProject;
 
 use super::{Origin, Registry};
 
@@ -220,53 +228,8 @@ use super::{Origin, Registry};
 /// * **Exporters**, when two claim one extension. An exporter cannot be
 ///   probed, so order is the *only* tie-break.
 ///
-/// Each plugin is pushed under its own `cfg` because any of them may be
-/// absent; see the feature note above.
+/// The order is the `builtins!` table's above; each plugin is installed under
+/// its own `cfg`, since any of them may be absent (see the feature note above).
 pub fn register(reg: &mut Registry) {
-    let o = Origin::BuiltIn;
-    // Every line below is conditional, so a build with every plugin left out
-    // uses neither of these — and must still build without a warning.
-    let _ = (&reg, o);
-    // ---- filters
-    #[cfg(feature = "plugin-invert")]
-    reg.add::<Invert>(o);
-    #[cfg(feature = "plugin-zproject")]
-    reg.add::<ZProject>(o);
-    #[cfg(feature = "plugin-plot-axis")]
-    reg.add::<PlotAxis>(o);
-    #[cfg(feature = "plugin-suite2p-stabilize")]
-    reg.add::<Stabilize>(o);
-    #[cfg(feature = "plugin-turboreg-stabilize")]
-    reg.add::<TurboReg>(o);
-    #[cfg(feature = "plugin-stack-tools")]
-    {
-        reg.add::<SliceKeeper>(o);
-        reg.add::<SliceRemover>(o);
-        reg.add::<SliceOrderInvert>(o);
-    }
-    #[cfg(feature = "plugin-animation-3d")]
-    reg.add::<Animation3d>(o);
-    #[cfg(feature = "plugin-crop")]
-    reg.add::<Crop>(o);
-    #[cfg(feature = "plugin-deconvolve")]
-    {
-        reg.add::<GeneratePsf>(o);
-        reg.add::<Deconvolve>(o);
-    }
-
-    // ---- importers, most specific first
-    #[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
-    reg.add_importer::<Oir>(o);
-    #[cfg(all(feature = "plugin-dicom", not(target_arch = "wasm32")))]
-    reg.add_importer::<Dicom>(o);
-    #[cfg(all(feature = "plugin-nifti", not(target_arch = "wasm32")))]
-    reg.add_importer::<Nifti>(o);
-    #[cfg(feature = "plugin-png")]
-    reg.add_importer::<PngImport>(o);
-    #[cfg(feature = "plugin-netpbm")]
-    reg.add_importer::<Netpbm>(o);
-
-    // ---- exporters
-    #[cfg(feature = "plugin-png")]
-    reg.add_exporter::<Png>(o);
+    register_table(reg, Origin::BuiltIn);
 }

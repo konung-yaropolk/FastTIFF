@@ -591,9 +591,9 @@ pub fn volume_camera(cam: &CameraState, scale: [f32; 3], dims: (u32, u32, u32)) 
 /// One channel's contribution to the ray-march uniforms.
 #[derive(Clone, Copy, Debug)]
 pub struct VolumeChannel {
-    /// Window low/high, in the sampled texture's units: raw for a float
-    /// channel, else the 0..65535 display window divided by 65535 (U8 and U16
-    /// volumes are both unorm-normalized — see [`scivis_render::VolumeKind`]).
+    /// Window low/high, in the sampled texture's units: normalized as the
+    /// voxels are, integers as unorm and floats over the channel's span — see
+    /// [`SampleUnits::to_unorm`](crate::units::SampleUnits::to_unorm).
     pub min: f32,
     pub max: f32,
     pub is_float: bool,
@@ -607,9 +607,8 @@ pub struct VolumeChannel {
 /// and the volume's render settings.
 ///
 /// `windows` is one `(min, max, is_float, enabled)` tuple per channel, already
-/// in the sampled texture's units: raw for a float channel, else the 0..65535
-/// display window divided by 65535 (both U8 and U16 volumes are unorm-normalized
-/// — see [`scivis_render::VolumeKind`]).
+/// in the sampled texture's units: normalized as the voxels are, integers as
+/// unorm and floats over the channel's span (see [`VolumeChannel::min`]).
 pub fn build_volume_params(
     cam: &VolumeCamera,
     channels: &[VolumeChannel],

@@ -20,8 +20,8 @@
 //!
 //! One picks a channel, the other picks a target in time. The labels say so.
 
-use fasttiff_plugin_api::{ImageInfo, ParamDecl, ParamKind, Params};
 use crate::plugins::builtin::shared::{edges_from, edges_param, Edges};
+use fasttiff_plugin_api::{ImageInfo, ParamDecl, ParamKind, Params};
 use turboreg_registration::{Backend, Border, Reference, Settings, Transformation};
 
 /// A group heading, drawn by the host as bold text with a rule under it.

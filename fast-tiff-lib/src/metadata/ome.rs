@@ -105,10 +105,13 @@ pub fn parse(
     })
 }
 
+/// One element's attributes, by name.
+type Attributes = HashMap<String, String>;
+
 /// Pull the first `<Pixels>` element's attributes and its `<Channel>` children's
 /// attributes out of an OME-XML document. `None` if no `<Pixels>` is found or
 /// the XML doesn't parse.
-fn read_pixels(xml: &str) -> Option<(HashMap<String, String>, Vec<HashMap<String, String>>)> {
+fn read_pixels(xml: &str) -> Option<(Attributes, Vec<Attributes>)> {
     let mut reader = Reader::from_str(xml);
     let mut pixels: Option<HashMap<String, String>> = None;
     let mut channels: Vec<HashMap<String, String>> = Vec::new();

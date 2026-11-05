@@ -588,8 +588,10 @@ pub(super) fn fragments(b: &[u8], at: usize) -> Result<Vec<Vec<u8>>, PluginError
                     // The Basic Offset Table: `len / 4` little-endian offsets,
                     // and `len == 0` for the common empty one.
                     table = b[from..w.at]
-                        .chunks_exact(4)
-                        .map(|c| u32::from_le_bytes(c.try_into().expect("exact chunks")))
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| u32::from_le_bytes(*c))
                         .collect();
                     base = w.at;
                     first = false;

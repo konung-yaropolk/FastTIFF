@@ -9,9 +9,7 @@
 name = "oir-reader"
 version = "0.26.3"
 edition = "2021"
-# `usize::is_multiple_of` (deciding the shape) is 1.87; `Option::is_none_or`
-# (finding the first block) is 1.82.
-rust-version = "1.87"
+rust-version.workspace = true
 description = """
 Reader for Olympus/Evident FluoView OIR microscopy files: reassembles the \
 scattered image planes of a single or split acquisition, recovers recordings \
@@ -47,18 +45,24 @@ default = ["mmap"]
 mmap = ["dep:memmap2"]
 
 # A C interface — `src/capi.rs`, declared in `include/oir_reader.h` — for linking
-# into C and C++ programs as a shared or static library. Adds no dependency.
+# into C and C++ programs as a shared or static library. Adds one small
+# dependency of this repository's own, `c-api-support`, which has none.
 # The crate type is chosen when building (`cargo rustc --crate-type`; see the
 # README's "From C and C++") rather than listed under `[lib]`, because a
 # `cdylib` listed there is built by every crate that depends on this one.
-capi = []
+capi = ["dep:c-api-support"]
 
 [dependencies]
+# The C interface's scaffolding (last-error slot, panic guard, string
+# convention), shared with this repository's other C APIs; only with `capi`.
+# A version as well as the path: this crate is published, and so must its
+# dependencies be.
+c-api-support = { path = "../c-api-support", version = "0.1.0", optional = true }
 # The acquisition record's XML. The same version as fast-tiff-lib's OME reader,
 # so a build with both carries one copy.
-quick-xml = "0.37"
+quick-xml = { workspace = true }
 # A plane's u16 buffer seen as the bytes it is reassembled from, without unsafe.
-bytemuck = "1.25"
+bytemuck = { workspace = true }
 
 [target.'cfg(any(unix, windows))'.dependencies]
-memmap2 = { version = "0.9", optional = true }
+memmap2 = { workspace = true, optional = true }

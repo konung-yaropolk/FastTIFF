@@ -28,7 +28,9 @@ pub mod result;
 #[cfg(not(target_arch = "wasm32"))]
 pub use discover::{install_dir, is_library, search_paths, user_plugin_dir, LIBRARY_EXT};
 pub use host::{describe_image, describe_stack, describe_view, describe_volume, StackHost};
-pub use result::{to_stack, to_tiff_bytes, to_tiff_bytes_reporting};
+pub use result::{
+    into_tiff_bytes, into_tiff_bytes_reporting, to_stack, to_tiff_bytes, to_tiff_bytes_reporting,
+};
 
 pub use library::{LoadedExporter, LoadedImporter, LoadedPlugin};
 
@@ -275,6 +277,25 @@ impl Registry {
             }
         }
         out
+    }
+
+    /// The extensions some importer claims, lowercase and without the dot,
+    /// sorted: what [`claims_extension`](Self::claims_extension) checks a path
+    /// against, for a host to keep while the registry itself is away — with a
+    /// job, say — so that a file no importer wants can still be opened.
+    pub fn claimed_extensions(&self) -> Vec<String> {
+        let mut all: Vec<String> = self
+            .importers
+            .iter()
+            .flat_map(|e| {
+                e.file_types
+                    .iter()
+                    .flat_map(|t| t.extensions.iter().cloned())
+            })
+            .collect();
+        all.sort();
+        all.dedup();
+        all
     }
 
     /// Whether any importer claims this path by extension. Opens no file, so it

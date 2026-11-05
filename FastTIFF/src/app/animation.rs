@@ -417,7 +417,7 @@ pub(super) fn pose_index(elapsed: f64, fps: f32, n: usize) -> usize {
 /// The ray-march is opaque, so the alpha carries nothing.
 pub(super) fn rgb_of(image: &VolumeImage) -> Vec<u8> {
     let mut out = Vec::with_capacity(image.rgba.len() / 4 * 3);
-    for p in image.rgba.chunks_exact(4) {
+    for p in image.rgba.as_chunks::<4>().0.iter() {
         out.extend_from_slice(&p[..3]);
     }
     out

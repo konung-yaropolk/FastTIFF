@@ -1,0 +1,32 @@
+[package]
+name = "image-registration-support"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+description = """
+What the suite2p-registration and turboreg-registration crates share that is \
+not an algorithm: the threads-optional parallel shim, and from there on the \
+coverage search, border and backend types and GPU device plumbing they used \
+to keep a copy each of.\
+"""
+license = "GPL-3.0-only"
+repository = "https://github.com/konung-yaropolk/FastTIFF"
+readme = "README.md"
+keywords = ["image-registration", "microscopy"]
+categories = ["science"]
+
+[dependencies]
+# Behind `threads`, as in the crates that use this: rayon builds for wasm but
+# runs sequentially there, and a crate that cannot run threads should say so
+# rather than carry a thread pool that never starts (see `par`).
+rayon = { workspace = true, optional = true }
+
+# The one GPU device both registration crates run on (`gpu`). The workspace's
+# wgpu, which every registration must share with the renderer.
+wgpu = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+
+[features]
+default = ["threads"]
+threads = ["dep:rayon"]
+gpu = ["dep:wgpu", "dep:pollster"]

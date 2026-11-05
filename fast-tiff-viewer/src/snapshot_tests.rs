@@ -7,8 +7,8 @@
 //! the pipeline is pinned here by value rather than by eye.
 
 use super::*;
-use crate::stack::Stack;
-use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
+use crate::stack::{SampleUnits, Stack, Window};
+use fast_tiff_lib::{DisplayMap, SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use std::io::Cursor;
 
 const W: u32 = 4;
@@ -45,32 +45,26 @@ fn stack_u8(channels: usize, f: impl Fn(usize, u32) -> u8) -> Stack {
 /// window or the LUT is unaffected by whatever the file declared.
 ///
 /// `min`/`max` are in **sample** units — the units the test reasons in, where a
-/// full 8-bit window is 0..255 — and are stored in the units the field actually
-/// holds, which for an 8-bit channel is the 0..65535 the slider keeps. Writing
-/// sample units straight into the field is what the first version of this did,
-/// and it made every test agree with a compositor that was off by 257. So the
-/// helper goes *through* the conversion rather than around it: the tests state
-/// intent, and the units are the code's problem.
+/// full 8-bit window is 0..255 — which are the units the field holds. They
+/// once were not: the field kept an 8-bit window on the 16-bit scale, and a
+/// first version of this helper that wrote sample units straight into it made
+/// every test agree with a compositor that was off by a factor of the
+/// widening. So the helper still checks that the window reaches the texture's
+/// units as the test meant it.
 fn with(stack: &mut Stack, lut: Lut, min: f32, max: f32) {
     for s in &mut stack.display.settings {
-        let widen = match s.kind {
-            ChannelKind::Int8 => 257.0,
-            ChannelKind::Int16 | ChannelKind::Float => 1.0,
-        };
-        s.min = min * widen;
-        s.max = max * widen;
+        s.window = Window::new(min, max);
         s.enabled = true;
-        // The round trip has to land back where the test asked, or the helper
-        // is quietly testing something else.
-        let (lo, hi) = crate::channels::sample_window(s.kind, s.min, s.max);
+        // These stacks are 8-bit, whose texture holds the samples themselves:
+        // if the window does not arrive there as given, the helper is quietly
+        // testing something else.
+        let (lo, hi) = s.units.to_texture(s.window);
         assert!(
             (lo - min).abs() < 0.01 && (hi - max).abs() < 0.01,
-            "the window helper should round-trip {min}..{max}, got {lo}..{hi}"
+            "the window helper should reach the texture as {min}..{max}, got {lo}..{hi}"
         );
     }
-    for l in &mut stack.display.luts {
-        *l = lut;
-    }
+    stack.display.luts.fill(lut);
 }
 
 /// The copy is the image's own size, not the window's. This is the property
@@ -292,28 +286,38 @@ fn the_snapshot_follows_the_current_frame() {
     }
 }
 
-/// The window is in slider units and the samples are in texture units, and for
-/// an 8-bit channel those differ by 257.
+/// The window is in the file's units and the samples are in texture units, and
+/// for a channel on the 16-bit texture those differ.
 ///
-/// This is the conversion [`crate::channels::sample_window`] exists for, and it
-/// is asserted here because its consumer is this module. Every test above sets
-/// the window by hand and so cannot see it — which is exactly how the bug it
-/// fixes got in: the compositor paired a 0..65535 window with 0..255 samples
-/// and every 8-bit image came out black, while the synthetic tests all passed.
+/// This is the conversion [`SampleUnits::to_texture`] exists for, and it is
+/// asserted here because its consumer is this module. Every test above sets
+/// the window by hand on 8-bit data, whose texture holds the samples
+/// themselves, and so cannot see it — which is exactly how the bug it once
+/// fixed got in: the compositor paired a window on one scale with samples on
+/// another and every 8-bit image came out black, while the synthetic tests all
+/// passed.
 #[test]
-fn an_eight_bit_window_is_converted_into_sample_units() {
-    use crate::channels::sample_window;
+fn a_window_is_converted_into_the_textures_units() {
+    let full8 = Window::new(0.0, 255.0);
     assert_eq!(
-        sample_window(ChannelKind::Int8, 0.0, 65535.0),
+        SampleUnits::RAW8.to_texture(full8),
         (0.0, 255.0),
-        "a full 8-bit window is 0..255 in the units the samples are in"
+        "an R8 texture holds the 8-bit samples themselves"
     );
-    // 16-bit and float windows are already in their samples' units.
+    let widened = SampleUnits::display(DisplayMap::Widen8);
     assert_eq!(
-        sample_window(ChannelKind::Int16, 17.0, 33029.0),
+        widened.to_texture(full8),
+        (0.0, 65_535.0),
+        "8-bit samples widened onto R16 take the window with them"
+    );
+    assert_eq!(
+        SampleUnits::display(DisplayMap::Identity).to_texture(Window::new(17.0, 33029.0)),
         (17.0, 33029.0)
     );
-    assert_eq!(sample_window(ChannelKind::Float, -1.5, 2.5), (-1.5, 2.5));
+    assert_eq!(
+        SampleUnits::float(Window::new(-4.0, 4.0)).to_texture(Window::new(-1.5, 2.5)),
+        (-1.5, 2.5)
+    );
 }
 
 /// An 8-bit image composed with the window the *file* produced is not black.
@@ -331,7 +335,7 @@ fn an_eight_bit_file_composes_with_its_own_window() {
     let last = W * H - 1;
     let stack = stack_u8(1, |_, i| (i * 255 / last) as u8);
     assert_eq!(
-        stack.display.settings[0].kind,
+        stack.display.settings[0].kind(),
         ChannelKind::Int8,
         "an 8-bit file should take the 8-bit texture path, or this tests nothing"
     );
@@ -340,7 +344,41 @@ fn an_eight_bit_file_composes_with_its_own_window() {
     let bright = snap.pixel(W - 1, H - 1).expect("in range")[0];
     assert!(
         bright > 200,
-        "the top of the ramp composed to {bright}; at 1/257 of its contrast the          whole image would be black"
+        "the top of the ramp composed to {bright}; with the window on the 16-bit \
+         scale the whole image would be black"
     );
     assert!(dark < 56, "and the bottom should stay dark: {dark}");
+}
+
+/// A signed 16-bit channel rides the 16-bit texture offset into unsigned,
+/// while its window is in the signed values: the compositor has to put the one
+/// on the other's scale. Samples -6..=5 here, window -4..0, so -4 and below are
+/// black, -2 is mid-grey and 0 and above are white. Composed without the
+/// conversion, every sample would sit far above the window and come out white.
+#[test]
+fn a_signed_window_composes_on_the_offset_texture() {
+    let opts = WriterOptions::new(W, H, SampleType::I16).metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).expect("writer");
+    let px: Vec<u8> = (0..(W * H) as i16)
+        .flat_map(|i| (i - 6).to_le_bytes())
+        .collect();
+    w.write_frame_bytes(&px).expect("frame");
+    let bytes = w.finish().expect("finish").into_inner();
+    let mut stack = Stack::from_bytes(bytes, "signed.tif".into(), false).expect("open");
+    assert_eq!(stack.display.settings[0].kind(), ChannelKind::Int16);
+    stack.display.settings[0].window = Window::new(-4.0, 0.0);
+    stack.display.luts.fill(ramp());
+
+    let snap = of_frame(&stack).expect("compose");
+    let grey = |i: u32| snap.pixel(i % W, i / W).expect("in range")[0];
+    // Sample i - 6: pixel 2 is -4, pixel 4 is -2, pixel 6 is 0.
+    assert_eq!(grey(0), 0, "below the window is black");
+    assert_eq!(grey(2), 0, "the window's low end is black");
+    assert!(
+        (120..=136).contains(&grey(4)),
+        "mid-window is mid-grey: {}",
+        grey(4)
+    );
+    assert_eq!(grey(6), 255, "the window's high end is white");
+    assert_eq!(grey(11), 255, "above the window is white");
 }

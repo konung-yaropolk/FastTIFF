@@ -5,6 +5,7 @@
 use crate::channels::build_channel_settings_reporting;
 use crate::display::Dims;
 use crate::stack::{ChannelSettings, Stack};
+use crate::units::SampleUnits;
 use scivis_render::{ChannelKind, MAX_CHANNELS};
 
 /// Which IFD, and which sample plane inside it, holds channel `c` of slice `z`
@@ -255,24 +256,21 @@ pub fn setup_rgb(loaded: &mut Stack) {
     // Unsigned 8-bit RGB deinterleaves into raw u8 planes (`read_plane_u8`) and
     // rides the R8Uint path — half the texture memory + upload of widening each
     // plane to u16. Deeper or signed RGB still widens to u16 via `read_plane_u16`.
-    // The window stays in 0..65535 either way; `sync_gpu` rescales it to 0..255
-    // for an 8-bit (Int8) channel.
-    let kind = if loaded.tiff.frames.first().is_some_and(|f| {
+    // Either way each component opens on the whole of its type's range.
+    let first = loaded.tiff.frames.first();
+    let kind = if first.is_some_and(|f| {
         f.bits_per_sample == 8 && f.sample_format == fast_tiff_lib::SampleFormat::UnsignedInt
     }) {
         ChannelKind::Int8
     } else {
         ChannelKind::Int16
     };
+    let units = SampleUnits::of(kind, first, None);
     loaded.display.settings = plan
         .iter()
         .map(|&enabled| ChannelSettings {
-            min: 0.0,
-            max: 65535.0,
             enabled,
-            bounds: (0.0, 65535.0),
-            initial: (0.0, 65535.0),
-            kind,
+            ..ChannelSettings::new(units.full_range(), units)
         })
         .collect();
     loaded.frame_index = 0;
@@ -302,28 +300,25 @@ pub fn setup_cmyk(loaded: &mut Stack) {
     loaded.display.rgb = true;
     loaded.display.cmyk = true;
     loaded.display.mode = fast_tiff_lib::DisplayMode::Color;
-    loaded.display.luts = (0..3).map(fast_tiff_lib::default_composite_lut).collect(); // R, G, B
-                                                                                      // The conversion outputs in the source's own width: 8-bit inks give 8-bit
-                                                                                      // components (the zero-widening R8Uint upload), 16-bit gives 16.
-    let kind = if loaded
+    // R, G, B.
+    loaded.display.luts = (0..3).map(fast_tiff_lib::default_composite_lut).collect();
+    // The conversion outputs in the source's own width: 8-bit inks give 8-bit
+    // components (the zero-widening R8Uint upload), 16-bit gives 16. The
+    // components are the conversion's output rather than the file's inks, so
+    // their units are that output's: raw bytes on the 8-bit path, the 16-bit
+    // scale itself otherwise. Each opens on the whole of it.
+    let units = if loaded
         .tiff
         .frames
         .first()
         .is_some_and(|f| f.bits_per_sample == 8)
     {
-        ChannelKind::Int8
+        SampleUnits::RAW8
     } else {
-        ChannelKind::Int16
+        SampleUnits::display(fast_tiff_lib::DisplayMap::Identity)
     };
     loaded.display.settings = (0..3)
-        .map(|_| ChannelSettings {
-            min: 0.0,
-            max: 65535.0,
-            enabled: true,
-            bounds: (0.0, 65535.0),
-            initial: (0.0, 65535.0),
-            kind,
-        })
+        .map(|_| ChannelSettings::new(units.full_range(), units))
         .collect();
     loaded.frame_index = 0;
     loaded.last_uploaded = None;

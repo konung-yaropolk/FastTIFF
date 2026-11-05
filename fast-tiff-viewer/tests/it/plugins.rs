@@ -1,0 +1,2328 @@
+//! Running a plugin end to end against a real stack.
+//!
+//! The registry's own bookkeeping is unit-tested next to it; this is the part
+//! that matters — that a plugin reaches the right pixels through
+//! [`StackHost`] and hands back a result the host can use. When the `.dll` lane
+//! lands these same assertions become its oracle: the identical filter, run
+//! through the C boundary, must produce byte-identical output.
+//!
+//! # Why the whole file is behind one feature
+//!
+//! Each `plugin-*` feature decides whether that plugin exists, so a test naming
+//! one would not compile without it. Gating per test is the obvious answer and
+//! the wrong one here: most of what is below reaches the host *through* a
+//! plugin — plane addressing, bit depths, cancellation, buffer reuse — so the
+//! gates would attach the host's coverage to whichever plugin happened to be
+//! the vehicle, and a reader could no longer tell which was being tested.
+//!
+//! So this file is the full set or nothing, and `builtin-plugins` is the full
+//! set. That is the configuration that ships and the one CI runs; a build that
+//! trims plugins is a product decision taken *after* this suite has passed, not
+//! a configuration this suite has an opinion about. The registry's own
+//! bookkeeping — including that a plugin left out really is gone — is unit-
+//! tested next to it in `src/plugins/mod_tests.rs`, which does gate per feature.
+#![cfg(feature = "builtin-plugins")]
+
+use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
+use fast_tiff_viewer::plugins::{builtin, describe_view, StackHost};
+use fast_tiff_viewer::Stack;
+use fasttiff_plugin_api::{
+    DisplayMode, HostContext, ImageResult, Outcome, ParamKind, ParamValue, Params, PixelType,
+    Plane, PlaneData, Plugin, PluginError, Spacing, StackInfo, VolumeMode, VolumeView,
+};
+use std::io::Cursor;
+
+const W: u32 = 8;
+const H: u32 = 4;
+
+/// A stack with `channels x slices x frames` planes whose every pixel encodes
+/// which plane it came from, so a mis-addressed read is visible rather than
+/// merely wrong-looking.
+///
+/// To keep a real Z axis, every one of the three counts must exceed 1:
+/// `resolve_dimensions` folds Z into time unconditionally otherwise, because a
+/// single-timepoint z-stack is indistinguishable from a movie and the movie
+/// reading is right far more often. The assertion below holds callers to that.
+fn stack(channels: usize, slices: usize, frames: usize) -> Stack {
+    let opts = WriterOptions::new(W, H, SampleType::F32)
+        // Frames are derived from the plane count when writing, so the
+        // metadata states only channels and slices.
+        .metadata(StackMetaWrite::new(channels, slices));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    // xyczt order: channel fastest, then z, then t — the order the reader uses.
+    for t in 0..frames.max(1) {
+        for z in 0..slices.max(1) {
+            for c in 0..channels.max(1) {
+                let tag = plane_tag(c, z, t);
+                let px: Vec<f32> = (0..W * H).map(|i| tag + i as f32 / 1000.0).collect();
+                let bytes: Vec<u8> = px.iter().flat_map(|v| v.to_le_bytes()).collect();
+                w.write_frame_bytes(&bytes).unwrap();
+            }
+        }
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    let s = Stack::from_bytes(bytes, "probe.tif".into(), false).expect("stack should open");
+    // `resolve_dimensions` reclassifies a mislabelled axis on purpose, and a
+    // single-timepoint z-stack reads as a movie. Assert the shape here so a
+    // test never silently exercises a different one than its name claims.
+    assert_eq!(
+        (
+            s.display.dims.channels,
+            s.display.dims.slices,
+            s.display.dims.frames
+        ),
+        (channels.max(1), slices.max(1), frames.max(1)),
+        "the stack did not resolve to the requested shape"
+    );
+    s
+}
+
+/// A value unique to each (c, z, t).
+fn plane_tag(c: usize, z: usize, t: usize) -> f32 {
+    (c * 100 + z * 10 + t) as f32
+}
+
+/// As [`stack`], but 16-bit — so a tool that must give back the width it was
+/// handed has a width other than float to give back.
+///
+/// Pixel 0 of each plane is [`plane_tag`] again, so the same addressing
+/// assertions work; the rest ramps so that an inversion is visible.
+fn stack_u16(channels: usize, slices: usize, frames: usize) -> Stack {
+    let opts =
+        WriterOptions::new(W, H, SampleType::U16).metadata(StackMetaWrite::new(channels, slices));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for t in 0..frames.max(1) {
+        for z in 0..slices.max(1) {
+            for c in 0..channels.max(1) {
+                let tag = plane_tag(c, z, t) as u16;
+                let px: Vec<u16> = (0..W * H).map(|i| tag.wrapping_add(i as u16)).collect();
+                let bytes: Vec<u8> = px.iter().flat_map(|v| v.to_le_bytes()).collect();
+                w.write_frame_bytes(&bytes).unwrap();
+            }
+        }
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    let s = Stack::from_bytes(bytes, "probe16.tif".into(), false).expect("stack should open");
+    assert_eq!(
+        (
+            s.display.dims.channels,
+            s.display.dims.slices,
+            s.display.dims.frames
+        ),
+        (channels.max(1), slices.max(1), frames.max(1)),
+        "the stack did not resolve to the requested shape"
+    );
+    s
+}
+
+fn planes_u16(r: &ImageResult) -> Vec<&Vec<u16>> {
+    r.planes
+        .iter()
+        .map(|p| match p {
+            PlaneData::U16(v) => v,
+            other => panic!("expected u16 planes, got {:?}", other.pixel_type()),
+        })
+        .collect()
+}
+
+/// Answer a tool's dialog: the axis by index, then the three numbers.
+fn slice_params(
+    p: &dyn Plugin,
+    h: &StackHost,
+    axis: usize,
+    first: i64,
+    last: i64,
+    increment: i64,
+) -> Params {
+    let decls = p.params(h);
+    let mut params = Params::defaults(&decls);
+    params.set("axis", ParamValue::Choice(axis));
+    params.set("first", ParamValue::Int(first));
+    params.set("last", ParamValue::Int(last));
+    params.set("increment", ParamValue::Int(increment));
+    params.clamp_to(&decls)
+}
+
+fn view() -> VolumeView {
+    VolumeView {
+        mode: VolumeMode::Mip,
+        density: 1.0,
+        iso: 0.5,
+        eye: [0.0; 3],
+        forward: [0.0, 0.0, 1.0],
+        up: [0.0, 1.0, 0.0],
+        right: [1.0, 0.0, 0.0],
+    }
+}
+
+fn host(s: &Stack, frame_index: usize) -> StackHost {
+    StackHost::new(s, describe_view(s, frame_index, false, view()))
+}
+
+/// The "Uncovered edges" option a plugin's dialog labels `label`, as the
+/// dialog would set it: looked up by label, so a test asks for what a user
+/// picks rather than for a position in the list.
+fn edges(plugin: &dyn Plugin, s: &Stack, label: &str) -> ParamValue {
+    let h = host(s, 0);
+    let decls = plugin.params(&h);
+    let decl = decls
+        .iter()
+        .find(|d| d.key == "edges")
+        .expect("an edge choice");
+    let ParamKind::Choice { options, .. } = &decl.kind else {
+        panic!("the edge choice is a choice");
+    };
+    ParamValue::Choice(options.iter().position(|o| o == label).expect(label))
+}
+
+fn planes_f32(r: &ImageResult) -> Vec<&Vec<f32>> {
+    r.planes
+        .iter()
+        .map(|p| match p {
+            PlaneData::F32(v) => v,
+            other => panic!("expected f32 planes, got {:?}", other.pixel_type()),
+        })
+        .collect()
+}
+
+/// The whole point of file-plane addressing: every (c, z, t) must reach its own
+/// plane, including the channels past the renderer's six-slot display cap.
+#[test]
+fn every_plane_is_reachable_and_distinct() {
+    let s = stack(3, 4, 2);
+    let mut h = host(&s, 0);
+    let info = h.image();
+    assert_eq!((info.channels, info.slices, info.frames), (3, 4, 2));
+
+    let mut buf = Vec::new();
+    for t in 0..info.frames {
+        for z in 0..info.slices {
+            for c in 0..info.channels {
+                h.read_plane_f32(Plane::new(c, z, t), &mut buf).unwrap();
+                assert_eq!(buf.len(), info.plane_len(), "short read at c{c} z{z} t{t}");
+                assert_eq!(
+                    buf[0],
+                    plane_tag(c, z, t),
+                    "c{c} z{z} t{t} decoded some other plane"
+                );
+            }
+        }
+    }
+}
+
+/// A plugin asking for a plane that does not exist gets a stated error, not a
+/// panic and not silently plane zero.
+#[test]
+fn an_out_of_range_plane_is_an_error() {
+    let s = stack(2, 2, 2);
+    let mut h = host(&s, 0);
+    let mut buf = Vec::new();
+    for bad in [
+        Plane::new(9, 0, 0),
+        Plane::new(0, 9, 0),
+        Plane::new(0, 0, 9),
+    ] {
+        match h.read_plane_f32(bad, &mut buf) {
+            Err(PluginError::OutOfRange(_)) => {}
+            other => panic!("{bad:?} should be out of range, got {other:?}"),
+        }
+    }
+}
+
+/// A single-plane float file inverts about the range it has.
+///
+/// `Invert` reflects about the sample *type's* range, but float has none, so it
+/// measures — and for a file of one plane the stack's range and the plane's
+/// range are the same number, which is why this reads like the old per-plane
+/// rule and still passes. `a_float_stack_is_inverted_about_its_whole_measured_range`
+/// is the case that tells the two apart.
+#[test]
+fn invert_reflects_a_single_float_plane_about_its_own_range() {
+    let s = stack(1, 1, 1);
+    let mut h = host(&s, 0);
+    let mut original = Vec::new();
+    h.read_plane_f32(Plane::new(0, 0, 0), &mut original)
+        .unwrap();
+
+    let mut p = builtin::Invert;
+    let decls = p.params(&h);
+    let out = p.run(&mut h, &Params::defaults(&decls)).unwrap();
+
+    let Outcome::NewDocument(img) = out else {
+        panic!("Invert should open a document")
+    };
+    img.validate()
+        .expect("a plugin result must describe itself correctly");
+    assert_eq!((img.width, img.height), (W, H));
+    assert_eq!(img.pixel_type, PixelType::F32);
+
+    let (lo, hi) = original
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(l, h), &v| {
+            (l.min(v), h.max(v))
+        });
+    let got = planes_f32(&img);
+    for (i, (&o, &g)) in original.iter().zip(got[0].iter()).enumerate() {
+        assert!((g - (hi - (o - lo))).abs() < 1e-4, "pixel {i}: {o} -> {g}");
+    }
+    // Inverting twice is the identity, which is the property rather than the
+    // arithmetic.
+    let re: Vec<f32> = got[0].iter().map(|&v| hi - (v - lo)).collect();
+    for (&o, &r) in original.iter().zip(re.iter()) {
+        assert!((o - r).abs() < 1e-3);
+    }
+}
+
+/// The axis selector offers only the axes the stack actually has.
+///
+/// An axis one plane deep has nothing to project — flattening it is a copy —
+/// and offering it would be offering a mistake. When only one is left the
+/// dialog draws the selector inactive rather than hiding it, so the projection
+/// still says which axis it is about to work on.
+#[test]
+fn z_project_offers_the_axes_the_stack_has() {
+    let axis_options = |s: &Stack| -> Vec<String> {
+        let h = host(s, 0);
+        let decls = builtin::ZProject.params(&h);
+        let d = decls
+            .iter()
+            .find(|d| d.key == "axis")
+            .expect("an axis selector");
+        match &d.kind {
+            ParamKind::Choice { options, .. } => options.clone(),
+            other => panic!("expected a choice, got {other:?}"),
+        }
+    };
+
+    // There is no "Z only" case to test: `resolve_dimensions` folds a
+    // single-timepoint z-stack into a movie, so a stack the viewer presents
+    // with slices > 1 always has frames > 1 as well. The code offers Z alone if
+    // it ever sees one; nothing here can build one to show it.
+    //
+    // A timelapse of one slice: nothing to project along Z.
+    assert_eq!(axis_options(&stack(2, 1, 3)), vec!["T (frames)"]);
+    // Both, Z first — the axis this plugin has always projected.
+    assert_eq!(
+        axis_options(&stack(2, 4, 3)),
+        vec!["Z (slices)", "T (frames)"]
+    );
+    // Neither: the selector still shows what it would have done, and the run
+    // refuses with a reason rather than the dialog being empty.
+    assert_eq!(axis_options(&stack(1, 1, 1)), vec!["Z (slices)"]);
+}
+
+/// Projecting T averages across time, not across slices — and it does it at
+/// every slice, because the view says which timepoint is on screen but not
+/// which slice, so there is no current one to pick and dropping the rest would
+/// be a choice made on the user's behalf.
+#[test]
+fn z_project_along_t_flattens_time_at_every_slice() {
+    let s = stack(2, 2, 3);
+    let mut h = host(&s, 0);
+    let mut p = builtin::ZProject;
+    let decls = p.params(&h);
+    let mut params = Params::defaults(&decls);
+    // Both axes are on offer here, so index 1 is T.
+    params.set("axis", ParamValue::Choice(1));
+    params.set("method", ParamValue::Choice(3)); // Sum
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params.clamp_to(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    // One plane per channel per slice, time flattened away.
+    assert_eq!((img.channels, img.slices, img.frames), (2, 2, 1));
+    let planes = planes_f32(&img);
+    assert_eq!(planes.len(), 4);
+    // Channel fastest, then Z — the plane order the contract asks for, and the
+    // one thing a nested loop gets backwards without anything looking wrong.
+    for z in 0..2 {
+        for c in 0..2 {
+            let want: f32 = (0..3).map(|t| plane_tag(c, z, t)).sum();
+            let got = planes[z * 2 + c][0];
+            assert!(
+                (got - want).abs() < 1e-3,
+                "c{c} z{z} summed the wrong planes: {got} vs {want}"
+            );
+        }
+    }
+}
+
+/// The declared range has to span the longer axis, because the declarations are
+/// made before the dialog is answered. Choosing the shorter one then has to
+/// clamp, or a Z projection would ask for slices a timelapse's frame count made
+/// look available.
+#[test]
+fn z_project_clamps_the_range_to_the_axis_that_was_chosen() {
+    let s = stack(2, 2, 5);
+    let mut h = host(&s, 0);
+    let mut p = builtin::ZProject;
+    let decls = p.params(&h);
+    let mut params = Params::defaults(&decls);
+    params.set("axis", ParamValue::Choice(0)); // Z, which is 2 deep
+    params.set("method", ParamValue::Choice(3)); // Sum
+    params.set("first", ParamValue::Int(1));
+    params.set("last", ParamValue::Int(5)); // past the end of Z
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params.clamp_to(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    // Slices 1..=2 of the timepoint on screen, not five of anything.
+    let want: f32 = (0..2).map(|z| plane_tag(0, z, 0)).sum();
+    assert!((planes_f32(&img)[0][0] - want).abs() < 1e-3);
+}
+
+/// A stack with one Z slice has nothing to project; saying so is different from
+/// failing, and the host shows it differently.
+#[test]
+fn z_project_refuses_a_stack_with_one_slice() {
+    let s = stack(1, 1, 1);
+    let mut h = host(&s, 0);
+    let mut p = builtin::ZProject;
+    let decls = p.params(&h);
+    match p.run(&mut h, &Params::defaults(&decls)) {
+        Err(PluginError::Unsupported(_)) => {}
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
+
+#[test]
+fn z_project_computes_each_statistic_over_the_chosen_slices() {
+    let s = stack(2, 4, 2);
+    // Timepoint 1, so a plugin that ignored frame_index would be caught.
+    let mut h = host(&s, 1);
+    let mut p = builtin::ZProject;
+    let decls = p.params(&h);
+
+    for (method, name) in [(0usize, "max"), (1, "mean"), (2, "min"), (3, "sum")] {
+        let mut params = Params::defaults(&decls);
+        params.set("method", ParamValue::Choice(method));
+        let Outcome::NewDocument(img) = p.run(&mut h, &params.clamp_to(&decls)).unwrap() else {
+            panic!("{name}: expected a document")
+        };
+        img.validate().unwrap();
+        assert_eq!(img.channels, 2, "{name}: all channels by default");
+        assert_eq!((img.slices, img.frames), (1, 1), "{name}: Z is flattened");
+
+        let got = planes_f32(&img);
+        for (c, plane) in got.iter().enumerate() {
+            // The reference, straight from the tags: slices 0..=3 at t = 1.
+            let vals: Vec<f32> = (0..4).map(|z| plane_tag(c, z, 1)).collect();
+            let want = match method {
+                0 => vals.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+                1 => vals.iter().sum::<f32>() / vals.len() as f32,
+                2 => vals.iter().copied().fold(f32::INFINITY, f32::min),
+                _ => vals.iter().sum::<f32>(),
+            };
+            // Pixel 0 of each plane carries the tag exactly.
+            assert!(
+                (plane[0] - want).abs() < 1e-3,
+                "{name} c{c}: got {} want {want}",
+                plane[0]
+            );
+        }
+    }
+}
+
+/// The slice range is 1-based in the dialog, as ImageJ's is, and inclusive.
+#[test]
+fn z_project_honours_the_slice_range() {
+    let s = stack(2, 4, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::ZProject;
+    let decls = p.params(&h);
+
+    let mut params = Params::defaults(&decls);
+    params.set("method", ParamValue::Choice(3)); // Sum
+    params.set("first", ParamValue::Int(2));
+    params.set("last", ParamValue::Int(3));
+    let Outcome::NewDocument(img) = p.run(&mut h, &params.clamp_to(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    // 1-based 2..=3 is z = 1 and z = 2.
+    let want = plane_tag(0, 1, 0) + plane_tag(0, 2, 0);
+    assert!((planes_f32(&img)[0][0] - want).abs() < 1e-3);
+}
+
+/// A reversed range is the user's slip, not a reason to fail or to read out of
+/// bounds.
+#[test]
+fn z_project_tolerates_a_reversed_range() {
+    let s = stack(2, 4, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::ZProject;
+    let decls = p.params(&h);
+    let mut params = Params::defaults(&decls);
+    params.set("method", ParamValue::Choice(3));
+    params.set("first", ParamValue::Int(3));
+    params.set("last", ParamValue::Int(2));
+    let Outcome::NewDocument(img) = p.run(&mut h, &params.clamp_to(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    let want = plane_tag(0, 1, 0) + plane_tag(0, 2, 0);
+    assert!((planes_f32(&img)[0][0] - want).abs() < 1e-3);
+}
+
+/// Cancelling stops the run and yields nothing to apply.
+#[test]
+fn a_cancelled_run_returns_cancelled() {
+    use std::sync::atomic::{AtomicBool, AtomicU32};
+    use std::sync::Arc;
+
+    let s = stack(2, 4, 2);
+    let flag = Arc::new(AtomicBool::new(true)); // already cancelled
+    let progress = Arc::new(AtomicU32::new(0));
+    let mut h = StackHost::new(&s, describe_view(&s, 0, false, view())).with_cancel(flag, progress);
+
+    let mut p = builtin::ZProject;
+    let decls = p.params(&h);
+    assert_eq!(
+        p.run(&mut h, &Params::defaults(&decls)).unwrap(),
+        Outcome::Cancelled
+    );
+}
+
+/// A result whose planes do not match its declared shape must be caught before
+/// the host tries to build a document out of it.
+#[test]
+fn a_malformed_result_is_rejected() {
+    let base = ImageResult {
+        width: 2,
+        height: 2,
+        channels: 1,
+        slices: 1,
+        frames: 1,
+        pixel_type: PixelType::F32,
+        planes: vec![PlaneData::F32(vec![0.0; 4])],
+        channel_colors: Vec::new(),
+        metadata: None,
+        name: "ok".into(),
+    };
+    base.validate().expect("the well-formed case must pass");
+
+    let mut short = base.clone();
+    short.planes = vec![PlaneData::F32(vec![0.0; 3])];
+    assert!(short.validate().is_err(), "a short plane must be caught");
+
+    let mut miscounted = base.clone();
+    miscounted.slices = 4;
+    assert!(
+        miscounted.validate().is_err(),
+        "too few planes must be caught"
+    );
+
+    let mut mistyped = base.clone();
+    mistyped.planes = vec![PlaneData::U16(vec![0; 4])];
+    assert!(
+        mistyped.validate().is_err(),
+        "a plane of the wrong type must be caught"
+    );
+
+    let mut empty = base.clone();
+    empty.width = 0;
+    assert!(empty.validate().is_err(), "a zero dimension must be caught");
+}
+
+/// Every bit depth must reach a plugin through `read_plane_f32`, in the file's
+/// own units.
+///
+/// The whole existing suite used f32 stacks, so it never noticed that
+/// `read_plane_f32_into` accepts 32- and 64-bit samples only — running Invert
+/// on an imported 8-bit PPM in the actual application is what surfaced it.
+/// An 8-bit sample must arrive as 0..255, *not* widened to 16-bit the way the
+/// display path widens it: a plugin computing a mean has to get the number that
+/// is in the file.
+#[test]
+fn every_bit_depth_reaches_a_plugin_as_f32() {
+    use fast_tiff_lib::SampleType;
+
+    for (ty, raw, want) in [
+        (
+            SampleType::U8,
+            vec![0u8, 1, 128, 255],
+            vec![0.0f32, 1.0, 128.0, 255.0],
+        ),
+        (
+            SampleType::U16,
+            vec![0u8, 0, 1, 0, 0, 1, 255, 255],
+            vec![0.0f32, 1.0, 256.0, 65535.0],
+        ),
+    ] {
+        let opts = WriterOptions::new(2, 2, ty).metadata(StackMetaWrite::new(1, 1));
+        let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+        w.write_frame_bytes(&raw).unwrap();
+        let bytes = w.finish().unwrap().into_inner();
+        let s = Stack::from_bytes(bytes, "depth.tif".into(), false).unwrap();
+
+        let mut h = host(&s, 0);
+        let mut got = Vec::new();
+        h.read_plane_f32(Plane::new(0, 0, 0), &mut got)
+            .unwrap_or_else(|e| panic!("{ty:?}: {e}"));
+        assert_eq!(got, want, "{ty:?} did not arrive in the file's own units");
+    }
+}
+
+/// And the plugins themselves must run on those depths, not only on float.
+#[test]
+fn invert_runs_on_an_8_bit_stack() {
+    let opts =
+        WriterOptions::new(2, 2, fast_tiff_lib::SampleType::U8).metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    w.write_frame_bytes(&[0u8, 85, 170, 255]).unwrap();
+    let bytes = w.finish().unwrap().into_inner();
+    let s = Stack::from_bytes(bytes, "eight.tif".into(), false).unwrap();
+
+    let mut h = host(&s, 0);
+    let mut p = builtin::Invert;
+    let decls = p.params(&h);
+    let Outcome::NewDocument(img) = p.run(&mut h, &Params::defaults(&decls)).unwrap() else {
+        panic!("Invert should open a document")
+    };
+    img.validate().unwrap();
+    // Reflected about the *type's* range, and still 8-bit: an 8-bit file that
+    // came back as float would have doubled on disk for nothing.
+    assert_eq!(img.pixel_type, PixelType::U8);
+    match &img.planes[0] {
+        PlaneData::U8(v) => assert_eq!(v, &vec![255u8, 170, 85, 0]),
+        other => panic!("expected u8 planes, got {:?}", other.pixel_type()),
+    }
+}
+
+/// The borrow shortcut in `read_plane_f32` must produce the same numbers as the
+/// decode it skips.
+///
+/// For the common shape — uncompressed, one strip, native order, unsigned
+/// 16-bit — the host now converts straight out of the memory map instead of
+/// decoding into a scratch buffer first. That is a second code path for the
+/// most common kind of file there is, and the only thing that makes it safe is
+/// that both paths agree exactly. Compression forces the slow path, so writing
+/// the same pixels twice gives an oracle for free.
+#[test]
+fn the_borrowed_and_decoded_plane_paths_agree() {
+    use fast_tiff_lib::{Compression, SampleType};
+
+    // Values chosen to catch a sign-extension or byte-order slip: 0, 1, the
+    // byte boundary, and the top of the range.
+    let px: Vec<u16> = vec![0, 1, 255, 256, 32767, 32768, 65534, 65535];
+    let raw: Vec<u8> = px.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let mut planes = Vec::new();
+    for compression in [Compression::None, Compression::Deflate] {
+        let opts = WriterOptions::new(4, 2, SampleType::U16)
+            .compression(compression)
+            .metadata(StackMetaWrite::new(1, 1));
+        let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+        w.write_frame_bytes(&raw).unwrap();
+        let bytes = w.finish().unwrap().into_inner();
+        let s = Stack::from_bytes(bytes, "cmp.tif".into(), false).unwrap();
+
+        // Not vacuous: the two files must genuinely differ in how they are
+        // stored, or both would be taking the same path.
+        assert_eq!(s.tiff.frames[0].compression, compression);
+
+        let mut h = host(&s, 0);
+        let mut got = Vec::new();
+        h.read_plane_f32(Plane::new(0, 0, 0), &mut got).unwrap();
+        planes.push(got);
+    }
+
+    let want: Vec<f32> = px.iter().map(|&v| v as f32).collect();
+    assert_eq!(planes[0], want, "the borrowed path");
+    assert_eq!(planes[1], want, "the decoded path");
+    assert_eq!(planes[0], planes[1]);
+}
+
+/// Reading many planes must not allocate a buffer per plane. The scratch the
+/// slow path uses lives on the host and is reused; the fast path uses none at
+/// all. Checked by capacity rather than by a counter: after N reads the host
+/// holds at most one buffer's worth.
+#[test]
+fn repeated_plane_reads_reuse_one_buffer() {
+    use fast_tiff_lib::{Compression, SampleType};
+
+    // Compressed, so the scratch path is the one under test.
+    let opts = WriterOptions::new(4, 2, SampleType::U16)
+        .compression(Compression::Deflate)
+        .metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for _ in 0..8 {
+        w.write_frame_bytes(&[7u8; 16]).unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    let s = Stack::from_bytes(bytes, "many.tif".into(), false).unwrap();
+
+    let mut h = host(&s, 0);
+    let mut out = Vec::new();
+    for t in 0..8 {
+        h.read_plane_f32(Plane::new(0, 0, t), &mut out).unwrap();
+        assert_eq!(out.len(), 8);
+    }
+    // The plugin's own buffer was reused too — `read_plane_f32` must not leave
+    // it growing by a plane each call.
+    assert!(
+        out.capacity() < 64,
+        "capacity {} after 8 reads",
+        out.capacity()
+    );
+}
+
+// ------------------------------------------------- Plot third axis, end to end
+//
+// The fixture's pixel `i` of plane (c, z, t) is `c*100 + z*10 + t + i/1000`,
+// over an 8x4 plane. So a whole-frame mean is the tag plus the mean of
+// `i/1000` for i in 0..32, which is 31/2/1000 = 0.0155.
+
+/// The mean of the fixture's plane `(c, z, t)`, worked out from the fixture's
+/// own definition rather than from the code under test.
+fn expected_mean(c: usize, z: usize, t: usize) -> f32 {
+    let n = (W * H) as usize;
+    let frac: f32 = (0..n).map(|i| i as f32 / 1000.0).sum::<f32>() / n as f32;
+    plane_tag(c, z, t) + frac
+}
+
+#[test]
+fn plot_third_axis_is_installed() {
+    let reg = fast_tiff_viewer::plugins::Registry::new();
+    let i = reg
+        .find("dev.fasttiff.plot-axis")
+        .expect("Plot third axis should be a built-in");
+    assert_eq!(reg.entries()[i].info.name, "Plot third axis");
+}
+
+/// A stack that is one plane in both Z and T has nothing to plot against, and
+/// the refusal has to say so in those words.
+#[test]
+fn plot_third_axis_refuses_a_stack_with_no_third_dimension() {
+    let s = stack(1, 1, 1);
+    assert_eq!(s.display.dims.slices, 1);
+    assert_eq!(s.display.dims.frames, 1);
+
+    let mut h = host(&s, 0);
+    let err = builtin::PlotAxis
+        .run(&mut h, &Params::new())
+        .expect_err("a single plane has no third axis");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no third dimension"),
+        "the reason must name what is missing: {msg}"
+    );
+}
+
+/// Nothing selected: one trace over the whole frame, one point per frame.
+#[test]
+fn plot_third_axis_measures_the_whole_frame_by_default() {
+    let s = stack(1, 1, 4);
+    let mut h = host(&s, 0);
+    let Outcome::Plot(plot) = builtin::PlotAxis.run(&mut h, &Params::new()).expect("run") else {
+        panic!("Plot third axis should return a plot");
+    };
+
+    assert_eq!(plot.series.len(), 1);
+    assert_eq!(plot.series[0].label, "Whole frame");
+    assert_eq!(plot.y_label, "Mean pixel value");
+    assert_eq!(plot.series[0].values.len(), 4);
+    for (t, v) in plot.series[0].values.iter().enumerate() {
+        assert!(
+            (v - expected_mean(0, 0, t)).abs() < 1e-3,
+            "frame {t}: {v} vs {}",
+            expected_mean(0, 0, t)
+        );
+    }
+    // And it asks for the tool that lets the user replace this with regions.
+    assert_eq!(plot.wants, fasttiff_plugin_api::SelectionKind::Regions);
+}
+
+/// With regions selected the whole-frame trace is replaced by one per region —
+/// the behaviour the feature was asked for.
+#[test]
+fn plot_third_axis_replaces_the_whole_frame_with_the_regions() {
+    let s = stack(1, 1, 2);
+    // Two single-pixel regions whose values are known exactly: pixel (0,0) is
+    // index 0, and pixel (7,3) is index 31 of an 8-wide plane.
+    let rois = vec![
+        fasttiff_plugin_api::Roi {
+            shape: fasttiff_plugin_api::Shape::Rect,
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+        },
+        fasttiff_plugin_api::Roi {
+            shape: fasttiff_plugin_api::Shape::Rect,
+            x: 7,
+            y: 3,
+            w: 1,
+            h: 1,
+        },
+    ];
+    let mut h = StackHost::new(&s, describe_view(&s, 0, false, view())).with_selection(rois);
+
+    let Outcome::Plot(plot) = builtin::PlotAxis.run(&mut h, &Params::new()).expect("run") else {
+        panic!("expected a plot");
+    };
+    assert_eq!(plot.series.len(), 2, "one trace per region");
+    assert_eq!(plot.series[0].label, "ROI 1");
+    assert_eq!(plot.series[1].label, "ROI 2");
+    assert!(
+        !plot.series.iter().any(|s| s.label == "Whole frame"),
+        "a selection replaces the whole-frame trace rather than joining it"
+    );
+
+    for t in 0..2 {
+        let tag = plane_tag(0, 0, t);
+        assert!((plot.series[0].values[t] - tag).abs() < 1e-4);
+        assert!((plot.series[1].values[t] - (tag + 31.0 / 1000.0)).abs() < 1e-4);
+    }
+}
+
+/// The axis is calibrated when the file says how long a frame took, so the plot
+/// reads in seconds rather than in frame numbers.
+#[test]
+fn plot_third_axis_uses_the_files_frame_interval() {
+    let s = stack(1, 1, 4);
+    let info = fasttiff_plugin_api::StackInfo {
+        frame_interval_s: Some(0.25),
+        ..fast_tiff_viewer::plugins::describe_stack(&s)
+    };
+    let mut h = StackHost::new(&s, describe_view(&s, 0, false, view())).with_info(info);
+
+    let Outcome::Plot(plot) = builtin::PlotAxis.run(&mut h, &Params::new()).expect("run") else {
+        panic!("expected a plot");
+    };
+    assert_eq!(plot.x_step, 0.25);
+    assert_eq!(plot.x_at(2), 0.5);
+    assert_eq!(plot.x_label, "Time (s)");
+}
+
+/// Without a stated interval it plots against the index rather than inventing a
+/// calibration.
+#[test]
+fn plot_third_axis_falls_back_to_frame_numbers() {
+    let s = stack(1, 1, 3);
+    let mut h = host(&s, 0);
+    let Outcome::Plot(plot) = builtin::PlotAxis.run(&mut h, &Params::new()).expect("run") else {
+        panic!("expected a plot");
+    };
+    assert_eq!(plot.x_step, 1.0);
+    assert_eq!(plot.x_label, "T (frames)");
+}
+
+/// A 4D stack really can be walked along Z, and that is a different set of
+/// planes from walking along T.
+#[test]
+fn plot_third_axis_can_walk_z_on_a_4d_stack() {
+    let s = stack(2, 3, 2);
+    assert_eq!((s.display.dims.slices, s.display.dims.frames), (3, 2));
+
+    // `axes` offers the longer first, so Z (3) precedes T (2) and is index 0.
+    let mut h = host(&s, 0);
+    let Outcome::Plot(z) = builtin::PlotAxis.run(&mut h, &Params::new()).expect("run") else {
+        panic!("expected a plot");
+    };
+    assert_eq!(z.x_label, "Z (slices)");
+    assert_eq!(z.series[0].values.len(), 3);
+    for (i, v) in z.series[0].values.iter().enumerate() {
+        assert!((v - expected_mean(0, i, 0)).abs() < 1e-3, "slice {i}");
+    }
+
+    // And T, chosen explicitly, walks timepoints instead.
+    let mut params = Params::new();
+    params.set("axis", ParamValue::Choice(1));
+    let mut h = host(&s, 0);
+    let Outcome::Plot(t) = builtin::PlotAxis.run(&mut h, &params).expect("run") else {
+        panic!("expected a plot");
+    };
+    assert_eq!(t.x_label, "T (frames)");
+    assert_eq!(t.series[0].values.len(), 2);
+    for (i, v) in t.series[0].values.iter().enumerate() {
+        assert!((v - expected_mean(0, 0, i)).abs() < 1e-3, "frame {i}");
+    }
+}
+
+// ------------------------------------------------ suite2p stabilization
+
+/// A movie of one field wandering along a known path, written as a real TIFF
+/// and opened as a real stack — so this exercises the plugin exactly as the
+/// menu does.
+fn wandering_stack(ly: u32, lx: u32, path: &[(i32, i32)], channels: usize) -> Stack {
+    // Blobs, so there is something to lock onto. Flat noise registers nowhere.
+    let base: Vec<f32> = {
+        let mut f = vec![10.0f32; (ly * lx) as usize];
+        for (cy, cx, amp) in [
+            (20.0f32, 24.0f32, 200.0f32),
+            (40.0, 44.0, 150.0),
+            (28.0, 12.0, 120.0),
+        ] {
+            for y in 0..ly {
+                for x in 0..lx {
+                    let d2 = ((y as f32 - cy).powi(2) + (x as f32 - cx).powi(2)) / 8.0;
+                    f[(y * lx + x) as usize] += amp * (-d2).exp();
+                }
+            }
+        }
+        f
+    };
+    let at = |dy: i32, dx: i32, y: u32, x: u32| -> f32 {
+        let sy = (y as i32 - dy).rem_euclid(ly as i32) as u32;
+        let sx = (x as i32 - dx).rem_euclid(lx as i32) as u32;
+        base[(sy * lx + sx) as usize]
+    };
+
+    let opts =
+        WriterOptions::new(lx, ly, SampleType::F32).metadata(StackMetaWrite::new(channels, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for &(dy, dx) in path {
+        for c in 0..channels {
+            // Every channel moves together, as a real two-channel recording
+            // does — one field photographed twice at once.
+            let px: Vec<f32> = (0..ly * lx)
+                .map(|i| at(dy, dx, i / lx, i % lx) + c as f32 * 1000.0)
+                .collect();
+            w.write_frame_f32(&px).unwrap();
+        }
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    Stack::from_bytes(bytes, "moving.tif".into(), false).expect("open")
+}
+
+#[test]
+fn stabilize_is_installed_in_its_own_submenu() {
+    let reg = fast_tiff_viewer::plugins::Registry::new();
+    let i = reg
+        .find("dev.fasttiff.stabilize")
+        .expect("suite2p stabilization should be a built-in");
+    assert_eq!(reg.entries()[i].info.name, "suite2p stabilization");
+    assert_eq!(reg.entries()[i].info.menu_path, "Stabilization");
+}
+
+/// A stack with one timepoint has no motion to correct, and saying so beats
+/// handing back a copy that looks registered.
+#[test]
+fn stabilize_refuses_a_stack_with_no_time_axis() {
+    let s = stack(1, 1, 1);
+    let mut h = host(&s, 0);
+    let err = builtin::Stabilize
+        .run(&mut h, &Params::new())
+        .expect_err("one timepoint is not a time series");
+    assert!(err.to_string().contains("time series"), "{err}");
+}
+
+/// The headline: a movie that wanders comes back still.
+#[test]
+fn stabilize_removes_a_known_motion() {
+    let (ly, lx) = (64u32, 64u32);
+    let path = [(0i32, 0i32), (3, -2), (-4, 1), (2, 3), (-1, -3), (4, 2)];
+    let s = wandering_stack(ly, lx, &path, 1);
+    let mut h = host(&s, 0);
+
+    let mut params = Params::new();
+    // A taper sized for a 64-pixel test frame; the default 40 is for a
+    // 512-pixel two-photon frame and would fade this one away entirely.
+    params.set("spatial_taper", ParamValue::Float(5.0));
+    // And headroom on the search. The reference lands wherever the
+    // best-correlated frames sit — with six frames that can be a few pixels off
+    // centre — so the budget has to cover the motion *plus* that offset. The
+    // default 0.1 of a 64-pixel frame is 6 pixels, and this path needs 7.
+    params.set("maxregshift", ParamValue::Float(0.3));
+    let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
+        panic!("stabilization should produce a new document");
+    };
+    assert_eq!(out.frames, path.len());
+    assert_eq!((out.width, out.height), (lx, ly));
+    out.validate().expect("the result's shape must be valid");
+
+    // Every registered frame should agree with the first, away from the border
+    // the wrap brings the far side into.
+    let planes = planes_f32(&out);
+    for y in 12..(ly - 12) as usize {
+        for x in 12..(lx - 12) as usize {
+            let first = planes[0][y * lx as usize + x];
+            for (t, p) in planes.iter().enumerate().skip(1) {
+                let v = p[y * lx as usize + x];
+                assert!(
+                    (v - first).abs() < 1.0,
+                    "frame {t} at ({y},{x}) is {v}, frame 0 is {first} — the movie \
+                     is still moving after stabilization"
+                );
+            }
+        }
+    }
+}
+
+/// "Crop to the common area" keeps the part of the field every frame covers:
+/// for a rigid run smaller by exactly the motion, for a warped one at least
+/// that, and in either case with no filled pixel left in it.
+#[test]
+fn stabilize_can_crop_to_the_common_area() {
+    let (ly, lx) = (64u32, 64u32);
+    let path = [(0i32, 0i32), (3, -2), (-4, 1), (2, 3), (-1, -3), (4, 2)];
+    let s = wandering_stack(ly, lx, &path, 1);
+    for nonrigid in [false, true] {
+        let mut h = host(&s, 0);
+        let mut params = Params::new();
+        params.set("spatial_taper", ParamValue::Float(5.0));
+        params.set("maxregshift", ParamValue::Float(0.3));
+        params.set("nonrigid", ParamValue::Bool(nonrigid));
+        params.set(
+            "edges",
+            edges(&builtin::Stabilize, &s, "Crop to the common area"),
+        );
+        let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run")
+        else {
+            panic!("stabilization should produce a new document");
+        };
+        out.validate()
+            .expect("the cropped result's shape must be valid");
+        assert_eq!(out.frames, path.len());
+        // Eight rows of travel (-4 to 4) and six columns (-3 to 3).
+        if nonrigid {
+            assert!(
+                out.width <= lx - 6 && out.height <= ly - 8 && out.width > lx / 2,
+                "non-rigid: {} x {}",
+                out.width,
+                out.height
+            );
+        } else {
+            assert_eq!((out.width, out.height), (lx - 6, ly - 8));
+        }
+        // The field is never below 10, so a 0 is fill that the crop missed.
+        for (t, p) in planes_f32(&out).iter().enumerate() {
+            assert!(
+                p.iter().all(|&v| v >= 9.0),
+                "frame {t} (non-rigid {nonrigid}): a filled pixel survived the crop"
+            );
+        }
+    }
+}
+
+/// The channels must move together. Measuring on one and applying to all is
+/// what keeps a two-channel recording in register with itself.
+#[test]
+fn stabilize_moves_every_channel_by_the_same_amount() {
+    let (ly, lx) = (64u32, 64u32);
+    let path = [(0i32, 0i32), (3, -2), (-4, 1)];
+    let s = wandering_stack(ly, lx, &path, 2);
+    assert_eq!(s.display.dims.channels, 2);
+
+    let mut h = host(&s, 0);
+    let mut params = Params::new();
+    params.set("spatial_taper", ParamValue::Float(5.0));
+    params.set("maxregshift", ParamValue::Float(0.3));
+    let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
+        panic!("expected a document");
+    };
+    assert_eq!(out.channels, 2);
+    let planes = planes_f32(&out);
+
+    // Channel 1 is channel 0 plus 1000 everywhere, by construction. If the two
+    // had been registered independently they would have drifted apart.
+    for t in 0..path.len() {
+        let (c0, c1) = (planes[t * 2], planes[t * 2 + 1]);
+        for y in 12..(ly - 12) as usize {
+            for x in 12..(lx - 12) as usize {
+                let i = y * lx as usize + x;
+                assert!(
+                    (c1[i] - c0[i] - 1000.0).abs() < 1.0,
+                    "frame {t} at ({y},{x}): the channels moved apart"
+                );
+            }
+        }
+    }
+}
+
+/// A still movie must not be "corrected" into moving.
+#[test]
+fn stabilize_leaves_a_still_movie_alone() {
+    let (ly, lx) = (64u32, 64u32);
+    let s = wandering_stack(ly, lx, &[(0, 0), (0, 0), (0, 0), (0, 0)], 1);
+    let mut h = host(&s, 0);
+    let mut params = Params::new();
+    params.set("spatial_taper", ParamValue::Float(5.0));
+    params.set("maxregshift", ParamValue::Float(0.3));
+    let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
+        panic!("expected a document");
+    };
+    let planes = planes_f32(&out);
+    for (t, p) in planes.iter().enumerate() {
+        for (i, v) in p.iter().enumerate() {
+            assert!(
+                (v - planes[0][i]).abs() < 1e-3,
+                "frame {t} was moved for no reason"
+            );
+        }
+    }
+}
+
+/// Stabilization changes pixel positions but not what those pixels mean. The
+/// result must retain every metadata field the host handed the plugin, and the
+/// writer must embed the calibration and original record in the new TIFF.
+#[test]
+fn stabilize_copies_the_source_metadata_to_its_result() {
+    let (ly, lx) = (64u32, 64u32);
+    let s = wandering_stack(ly, lx, &[(0, 0), (2, -1), (-1, 3)], 1);
+    let source = StackInfo {
+        path: Some("C:/data/acquisition.tif".into()),
+        name: "acquisition.tif".into(),
+        mode: DisplayMode::Composite,
+        unit: Some("micron".into()),
+        spacing: Spacing {
+            x: Some(0.65),
+            y: Some(0.70),
+            z: Some(2.5),
+        },
+        frame_interval_s: Some(0.25),
+        channel_names: vec!["GCaMP".into()],
+        calibration: Some((12.0, 0.5)),
+        description: Some("Instrument=two-photon\nAcquisition=42".into()),
+    };
+    let mut h = host(&s, 0).with_info(source.clone());
+    let mut params = Params::new();
+    params.set("spatial_taper", ParamValue::Float(5.0));
+    params.set("maxregshift", ParamValue::Float(0.3));
+    params.set("nonrigid", ParamValue::Bool(false));
+
+    let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
+        panic!("expected a document");
+    };
+    assert_eq!(out.metadata.as_ref(), Some(&source));
+
+    let written = fast_tiff_viewer::plugins::to_stack(&out, None, false).expect("open result");
+    let meta = &written.tiff.meta;
+    assert_eq!(meta.unit.as_deref(), Some("micron"));
+    assert_eq!(meta.frame_interval_s, Some(0.25));
+    assert_eq!(meta.spacing, Some(2.5));
+    assert_eq!(meta.calibration, Some((12.0, 0.5)));
+    assert!(
+        (meta.pixel_width.unwrap() - 0.65).abs() < 1e-9
+            && (meta.pixel_height.unwrap() - 0.70).abs() < 1e-9,
+        "physical pixel size was not preserved: {:?} x {:?}",
+        meta.pixel_width,
+        meta.pixel_height
+    );
+    assert!(
+        written
+            .tiff
+            .description
+            .as_deref()
+            .is_some_and(|text| text.contains("Instrument=two-photon\nAcquisition=42")),
+        "the source record was not carried into ImageDescription"
+    );
+}
+
+/// Non-rigid produces a different result from rigid — if it did not, the switch
+/// would be doing nothing.
+#[test]
+fn stabilize_non_rigid_differs_from_rigid() {
+    let (ly, lx) = (128u32, 128u32);
+    let path = [(0i32, 0i32), (3, -2), (-2, 1), (1, 2)];
+    let s = wandering_stack(ly, lx, &path, 1);
+
+    let run = |nonrigid: bool| {
+        let mut h = host(&s, 0);
+        let mut params = Params::new();
+        params.set("spatial_taper", ParamValue::Float(10.0));
+        params.set("maxregshift", ParamValue::Float(0.3));
+        params.set("nonrigid", ParamValue::Bool(nonrigid));
+        params.set("block_size", ParamValue::Int(32));
+        params.set("snr_thresh", ParamValue::Float(1.0));
+        match builtin::Stabilize.run(&mut h, &params).expect("run") {
+            Outcome::NewDocument(out) => out,
+            other => panic!("expected a document, got {other:?}"),
+        }
+    };
+
+    let rigid = run(false);
+    let warped = run(true);
+    assert_eq!(rigid.frames, warped.frames);
+    assert_eq!((rigid.width, rigid.height), (warped.width, warped.height));
+    warped
+        .validate()
+        .expect("the warped result's shape must be valid");
+
+    // The warp is a resample, so it cannot be bit-identical to a whole-pixel
+    // roll. If it were, the block field was empty and the switch did nothing.
+    let a = planes_f32(&rigid);
+    let b = planes_f32(&warped);
+    let differing = a
+        .iter()
+        .zip(&b)
+        .flat_map(|(p, q)| p.iter().zip(q.iter()))
+        .filter(|(x, y)| (*x - *y).abs() > 1e-4)
+        .count();
+    assert!(
+        differing > 0,
+        "non-rigid produced exactly the rigid result; the block field did nothing"
+    );
+}
+
+/// A GPU backend that cannot take this stack is refused with a reason, not
+/// quietly swapped for the CPU — the two are indistinguishable to the user
+/// otherwise, one just being slower.
+///
+/// A frame that is not a power of two in both axes cannot go through the
+/// device's radix-2 FFT. That holds whether or not the `gpu` feature is
+/// compiled in, which is what makes this test say the same thing in every
+/// build.
+#[test]
+fn stabilize_refuses_a_gpu_run_it_cannot_do() {
+    let s = wandering_stack(48, 48, &[(0, 0), (1, 1)], 1);
+    let mut h = host(&s, 0);
+    let mut params = Params::new();
+    // Index 2 is GPU in the selector's order.
+    params.set("backend", ParamValue::Choice(2));
+    let err = builtin::Stabilize
+        .run(&mut h, &params)
+        .expect_err("a GPU run it cannot do must be refused, not silently swapped");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("GPU"),
+        "the reason must name the backend: {msg}"
+    );
+}
+
+/// And the CPU backends take that same stack without complaint — so the refusal
+/// above is about the GPU, not about the stack being unregisterable.
+#[test]
+fn stabilize_runs_the_same_stack_on_the_cpu() {
+    let s = wandering_stack(48, 48, &[(0, 0), (1, 1)], 1);
+    for backend in [0, 1] {
+        let mut h = host(&s, 0);
+        let mut params = Params::new();
+        params.set("backend", ParamValue::Choice(backend));
+        params.set("spatial_taper", ParamValue::Float(5.0));
+        assert!(
+            builtin::Stabilize.run(&mut h, &params).is_ok(),
+            "backend {backend} refused a stack it should take"
+        );
+    }
+}
+
+/// A 16-bit source, so the width the result comes back at can be checked.
+///
+/// `wandering_stack` writes float samples; a two-photon recording is 16-bit,
+/// and that is the case the result's width has to match.
+fn wandering_u16_stack(ly: u32, lx: u32, path: &[(i32, i32)]) -> Stack {
+    let base: Vec<u16> = (0..ly * lx)
+        .map(|i| {
+            let (y, x) = ((i / lx) as f32, (i % lx) as f32);
+            let mut v = 300.0f32;
+            for (cy, cx, amp) in [(20.0f32, 24.0f32, 4000.0f32), (40.0, 44.0, 2500.0)] {
+                let d2 = ((y - cy).powi(2) + (x - cx).powi(2)) / 8.0;
+                v += amp * (-d2).exp();
+            }
+            v as u16
+        })
+        .collect();
+    let at = |dy: i32, dx: i32, y: u32, x: u32| -> u16 {
+        let sy = (y as i32 - dy).rem_euclid(ly as i32) as u32;
+        let sx = (x as i32 - dx).rem_euclid(lx as i32) as u32;
+        base[(sy * lx + sx) as usize]
+    };
+    let opts = WriterOptions::new(lx, ly, SampleType::U16).metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for &(dy, dx) in path {
+        let bytes: Vec<u8> = (0..ly * lx)
+            .flat_map(|i| at(dy, dx, i / lx, i % lx).to_le_bytes())
+            .collect();
+        w.write_frame_bytes(&bytes).unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    Stack::from_bytes(bytes, "moving16.tif".into(), false).expect("open")
+}
+
+/// A stabilised 16-bit recording comes back 16-bit — rigid or non-rigid.
+///
+/// It used to widen to float whenever `nonrigid` was on, which is the default,
+/// so every stabilised file was twice the size of the recording it came from.
+#[test]
+fn stabilize_keeps_the_sources_bit_depth() {
+    let (ly, lx) = (64u32, 64u32);
+    let path = [(0i32, 0i32), (3, -2), (-4, 1), (2, 3)];
+    let s = wandering_u16_stack(ly, lx, &path);
+    assert_eq!(
+        s.tiff.frames[0].bits_per_sample, 16,
+        "the fixture is 16-bit"
+    );
+
+    for nonrigid in [false, true] {
+        let mut h = host(&s, 0);
+        let mut params = Params::new();
+        params.set("spatial_taper", ParamValue::Float(5.0));
+        params.set("maxregshift", ParamValue::Float(0.3));
+        params.set("nonrigid", ParamValue::Bool(nonrigid));
+        // A block small enough to fit a 64-pixel test frame.
+        params.set("block_size", ParamValue::Int(16));
+        let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run")
+        else {
+            panic!("expected a document");
+        };
+        assert_eq!(
+            out.pixel_type,
+            PixelType::U16,
+            "non-rigid {nonrigid}: a 16-bit recording came back as {:?}",
+            out.pixel_type
+        );
+        for (i, plane) in out.planes.iter().enumerate() {
+            assert!(
+                matches!(plane, PlaneData::U16(_)),
+                "non-rigid {nonrigid}: plane {i} is {:?}",
+                plane.pixel_type()
+            );
+        }
+        out.validate().expect("the result's shape must be valid");
+    }
+}
+
+/// A signed 16-bit recording comes back signed, with its samples unchanged.
+///
+/// The case that looks fine and is wrong. The decoder hands a plugin true
+/// signed values, and a signed result travels as the same bits in the `U16`
+/// lane declaring `PixelType::I16`. Getting either half backwards shifts every
+/// pixel by half the range — an image that still looks like an image. The
+/// frames here do not move, so a correct run returns exactly what it was given.
+#[test]
+fn stabilize_keeps_signed_samples_signed() {
+    let (ly, lx) = (32u32, 32u32);
+    let samples: Vec<i16> = (0..ly * lx)
+        .map(|i| {
+            let (y, x) = ((i / lx) as f32, (i % lx) as f32);
+            let d2 = ((y - 16.0).powi(2) + (x - 16.0).powi(2)) / 8.0;
+            // Straddling zero, so a lost sign is visible.
+            (-8000.0 + 15000.0 * (-d2).exp()) as i16
+        })
+        .collect();
+    let opts = WriterOptions::new(lx, ly, SampleType::I16).metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for _ in 0..4 {
+        let bytes: Vec<u8> = samples.iter().flat_map(|v| v.to_le_bytes()).collect();
+        w.write_frame_bytes(&bytes).unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    let s = Stack::from_bytes(bytes, "signed.tif".into(), false).expect("open");
+
+    let mut h = host(&s, 0);
+    let mut params = Params::new();
+    params.set("spatial_taper", ParamValue::Float(5.0));
+    params.set("nonrigid", ParamValue::Bool(false));
+    // suite2p's own edges: a rigid shift that wraps, so a frame keeps exactly
+    // its samples (below). The dialog's default fills the uncovered strip with
+    // 0 instead, which adds zeros that are not a lost sign but would read as
+    // one here.
+    params.set(
+        "edges",
+        edges(&builtin::Stabilize, &s, "Algorithm's raw output"),
+    );
+    let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
+        panic!("expected a document");
+    };
+    assert_eq!(
+        out.pixel_type,
+        PixelType::I16,
+        "the result stopped being signed"
+    );
+    out.validate()
+        .expect("I16 declared with U16 planes is what the contract asks for");
+
+    for (t, plane) in out.planes.iter().enumerate() {
+        let PlaneData::U16(bits) = plane else {
+            panic!("frame {t} is {:?}, not the U16 lane", plane.pixel_type());
+        };
+        // Sorted, not positional. A rigid correction is a roll, so the frame
+        // holds exactly the samples it started with, in some other order — and
+        // the whole recording may legitimately come back shifted by a pixel or
+        // two, because it is aligned to a reference that lands where the
+        // best-correlated frames put it, not to the origin. What must not
+        // change is the samples themselves: lose the sign and every negative
+        // one lands near +32768, which no reordering can hide.
+        let mut got: Vec<i16> = bits.iter().map(|&v| v as i16).collect();
+        let mut want = samples.clone();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(
+            got, want,
+            "frame {t}: the samples themselves changed, not just their places"
+        );
+    }
+
+    // And under the dialog's default, which fills the strip a shift uncovers
+    // with 0: every sample is one the frame had, or that 0. A lost sign would
+    // still show, as values near +32768 that are neither.
+    let mut h = host(&s, 0);
+    params.set("edges", edges(&builtin::Stabilize, &s, "Fill with 0"));
+    let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
+        panic!("expected a document");
+    };
+    assert_eq!(out.pixel_type, PixelType::I16);
+    for (t, plane) in out.planes.iter().enumerate() {
+        let PlaneData::U16(bits) = plane else {
+            panic!("frame {t} is {:?}, not the U16 lane", plane.pixel_type());
+        };
+        for &v in bits {
+            let v = v as i16;
+            assert!(
+                v == 0 || samples.contains(&v),
+                "frame {t}: {v} is neither one of its samples nor the fill"
+            );
+        }
+    }
+}
+
+// ------------------------------------------------ TurboReg stabilization
+
+/// A smooth texture drifting by known sub-pixel amounts, one frame per step.
+///
+/// Each frame is the texture *evaluated* where it has moved to, not resampled,
+/// so the motion is exact. `side` is at least 128 for a run that should reach
+/// the graphics card: smaller pyramid levels are fitted on the CPU whatever the
+/// backend.
+fn drift_frames(side: u32, path: &[(f32, f32)]) -> Vec<Vec<f32>> {
+    let texture = |y: f32, x: f32| {
+        400.0 + ((x * 0.031).sin() * (y * 0.027).cos()) * 120.0 + (x * 0.11 + y * 0.07).sin() * 40.0
+    };
+    path.iter()
+        .map(|&(dy, dx)| {
+            (0..side * side)
+                .map(|i| texture((i / side) as f32 - dy, (i % side) as f32 - dx))
+                .collect()
+        })
+        .collect()
+}
+
+/// Those frames written as a real TIFF and opened as a real stack.
+fn drifting_stack(side: u32, frames: &[Vec<f32>]) -> Stack {
+    let opts = WriterOptions::new(side, side, SampleType::F32).metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for f in frames {
+        w.write_frame_f32(f).unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    Stack::from_bytes(bytes, "drifting.tif".into(), false).expect("open")
+}
+
+/// The dialog's index for a compute backend.
+fn turboreg_backend(b: turboreg_registration::Backend) -> Params {
+    let mut params = Params::new();
+    let i = turboreg_registration::Backend::all()
+        .iter()
+        .position(|x| *x == b)
+        .expect("offered");
+    params.set("backend", ParamValue::Choice(i));
+    params
+}
+
+/// The largest difference between two results, away from the border — where
+/// a registered frame shows the mirrored extension and the original does not.
+fn interior_gap(a: &[&Vec<f32>], b: &[&Vec<f32>], side: usize, margin: usize) -> f32 {
+    assert_eq!(a.len(), b.len());
+    let mut gap = 0.0f32;
+    for (pa, pb) in a.iter().zip(b) {
+        for y in margin..side - margin {
+            for x in margin..side - margin {
+                gap = gap.max((pa[y * side + x] - pb[y * side + x]).abs());
+            }
+        }
+    }
+    gap
+}
+
+const DRIFT: [(f32, f32); 4] = [(0.0, 0.0), (1.5, -2.25), (-3.0, 1.0), (2.75, 3.5)];
+
+#[test]
+fn turboreg_is_installed_next_to_stabilize() {
+    let reg = fast_tiff_viewer::plugins::Registry::new();
+    let i = reg
+        .find("dev.fasttiff.turboreg")
+        .expect("TurboReg stabilization should be a built-in");
+    assert_eq!(reg.entries()[i].info.name, "TurboReg stabilization");
+    assert_eq!(reg.entries()[i].info.menu_path, "Stabilization");
+}
+
+/// A drift the test put in comes back out: against the first frame, the
+/// default, every registered frame lands on it.
+///
+/// Held to a tenfold improvement rather than to a fixed number of grey levels:
+/// the fit stops at TurboReg's own schedule, which on this texture leaves about
+/// a tenth of a pixel, and the test is of the plugin's wiring, not of that.
+#[test]
+fn turboreg_removes_a_known_drift() {
+    let frames = drift_frames(96, &DRIFT);
+    let s = drifting_stack(96, &frames);
+    let mut h = host(&s, 0);
+    let Outcome::NewDocument(out) = builtin::TurboReg.run(&mut h, &Params::new()).expect("run")
+    else {
+        panic!("registration should produce a new document");
+    };
+    assert_eq!(out.frames, DRIFT.len());
+    out.validate().expect("the result's shape must be valid");
+    let before: Vec<&Vec<f32>> = frames.iter().collect();
+    let after = planes_f32(&out);
+    let gap_before = interior_gap(&before, &vec![&frames[0]; frames.len()], 96, 12);
+    let gap_after = interior_gap(&after, &vec![after[0]; after.len()], 96, 12);
+    assert!(
+        gap_after < gap_before / 10.0,
+        "registering took the worst gap to the first frame from {gap_before} to only {gap_after}"
+    );
+}
+
+/// "Crop to the common area": the drift trims about as many rows and columns
+/// as it spans, and nothing filled is left.
+#[test]
+fn turboreg_can_crop_to_the_common_area() {
+    let frames = drift_frames(96, &DRIFT);
+    let s = drifting_stack(96, &frames);
+    let mut h = host(&s, 0);
+    let mut params = Params::new();
+    params.set(
+        "edges",
+        edges(&builtin::TurboReg, &s, "Crop to the common area"),
+    );
+    let Outcome::NewDocument(out) = builtin::TurboReg.run(&mut h, &params).expect("run") else {
+        panic!("registration should produce a new document");
+    };
+    out.validate()
+        .expect("the cropped result's shape must be valid");
+    assert_eq!(out.frames, DRIFT.len());
+    // DRIFT spans 5.75 rows and 5.75 columns; a fit that lands a little off
+    // trims a pixel either way.
+    assert!(
+        (88..=91).contains(&out.width) && (88..=91).contains(&out.height),
+        "{} x {}",
+        out.width,
+        out.height
+    );
+    // The texture is never below 240, so a 0 is fill that the crop missed.
+    for (t, p) in planes_f32(&out).iter().enumerate() {
+        assert!(
+            p.iter().all(|&v| v > 100.0),
+            "frame {t}: a filled pixel survived"
+        );
+    }
+}
+
+/// A wide field that turned under the objective: frames of one texture turned
+/// by known angles about the middle. Each is the texture *evaluated* where it
+/// has turned to, so the motion is exact.
+fn turning_frames(h: u32, w: u32, degrees: &[f64]) -> Vec<Vec<f32>> {
+    let texture = |y: f64, x: f64| {
+        400.0 + ((x * 0.031).sin() * (y * 0.027).cos()) * 120.0 + (x * 0.11 + y * 0.07).sin() * 40.0
+    };
+    let (cy, cx) = (h as f64 / 2.0, w as f64 / 2.0);
+    degrees
+        .iter()
+        .map(|d| {
+            let (sin, cos) = d.to_radians().sin_cos();
+            (0..h * w)
+                .map(|i| {
+                    let (y, x) = ((i / w) as f64 - cy, (i % w) as f64 - cx);
+                    texture(cy + x * sin + y * cos, cx + x * cos - y * sin) as f32
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// A stack that turned is cropped at an angle: the result holds more than the
+/// best upright cut of the same registration could, and nothing filled.
+#[test]
+fn turboreg_crops_a_turned_stack_at_an_angle() {
+    let (h, w) = (72u32, 216u32);
+    let frames = turning_frames(h, w, &[0.0, 8.0, 16.0]);
+    let opts = WriterOptions::new(w, h, SampleType::F32).metadata(StackMetaWrite::new(1, 1));
+    let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for f in &frames {
+        writer.write_frame_f32(f).unwrap();
+    }
+    let s = Stack::from_bytes(
+        writer.finish().unwrap().into_inner(),
+        "turning.tif".into(),
+        false,
+    )
+    .expect("open");
+    let run = |label: &str| {
+        let mut h = host(&s, 0);
+        let mut params = Params::new();
+        params.set("edges", edges(&builtin::TurboReg, &s, label));
+        let Outcome::NewDocument(out) = builtin::TurboReg.run(&mut h, &params).expect("run") else {
+            panic!("registration should produce a new document");
+        };
+        out
+    };
+
+    // The best an upright cut could do: the largest rectangle no frame filled.
+    let filled = run("Fill with 0");
+    let planes = planes_f32(&filled);
+    let (fh, fw) = (filled.height as usize, filled.width as usize);
+    let mut heights = vec![0usize; fw];
+    let mut upright = 0;
+    for y in 0..fh {
+        for x in 0..fw {
+            let kept = planes.iter().all(|p| p[y * fw + x] != 0.0);
+            heights[x] = if kept { heights[x] + 1 } else { 0 };
+        }
+        for x0 in 0..fw {
+            let mut tallest = usize::MAX;
+            for (width, &bar) in heights[x0..].iter().enumerate() {
+                tallest = tallest.min(bar);
+                upright = upright.max(tallest * (width + 1));
+            }
+        }
+    }
+
+    let cropped = run("Crop to the common area");
+    cropped
+        .validate()
+        .expect("the cropped result's shape must be valid");
+    let kept = (cropped.width * cropped.height) as usize;
+    assert!(
+        kept > upright,
+        "a turned crop of {} x {} keeps {kept}, no more than the {upright} of an upright one",
+        cropped.width,
+        cropped.height
+    );
+    // The texture is never below 240, so a 0 is fill that the crop missed.
+    for (t, p) in planes_f32(&cropped).iter().enumerate() {
+        assert!(
+            p.iter().all(|&v| v > 100.0),
+            "frame {t}: a filled pixel survived"
+        );
+    }
+}
+
+/// The GPU option either runs — and lands where the CPU does, to the tolerance
+/// the crate promises — or is refused, saying why and what to use instead. It
+/// is never quietly run on the processor.
+#[test]
+fn turboreg_on_the_gpu_matches_the_cpu_or_says_why_not() {
+    use turboreg_registration::Backend;
+    // Large enough that the full-resolution level goes to the device.
+    let s = drifting_stack(160, &drift_frames(160, &DRIFT));
+    let mut cpu_host = host(&s, 0);
+    let Outcome::NewDocument(cpu) = builtin::TurboReg
+        .run(&mut cpu_host, &turboreg_backend(Backend::SingleThread))
+        .expect("cpu run")
+    else {
+        panic!("registration should produce a new document");
+    };
+    let mut gpu_host = host(&s, 0);
+    match builtin::TurboReg.run(&mut gpu_host, &turboreg_backend(Backend::Gpu)) {
+        Ok(Outcome::NewDocument(gpu)) => {
+            let gap = interior_gap(&planes_f32(&cpu), &planes_f32(&gpu), 160, 12);
+            assert!(
+                gap < 0.5,
+                "the GPU result is {gap} grey levels off the CPU's"
+            );
+            assert!(
+                gpu_host.messages.iter().any(|m| m.contains("on the GPU")),
+                "the log should say where the run went: {:?}",
+                gpu_host.messages
+            );
+        }
+        Ok(_) => panic!("registration should produce a new document"),
+        Err(e) => {
+            assert!(!Backend::Gpu.available());
+            assert!(e.to_string().contains("CPU backend"), "{e}");
+        }
+    }
+}
+
+// --------------------------------------------------------------- Stack Tools
+
+/// Slice Keeper keeps exactly the planes the dialog named, every channel of
+/// them, in the right order.
+///
+/// The ordering is the assertion that matters: a tool that kept the right
+/// planes and emitted them channel-slowest would produce a stack with every
+/// plane present and the channels interleaved wrongly — which looks like a
+/// stack, and is not one.
+#[test]
+fn slice_keeper_keeps_exactly_the_planes_it_was_given() {
+    let s = stack(2, 4, 3);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceKeeper;
+    // Z is index 0 when both axes are on offer. Slices 1..=3, every one.
+    let params = slice_params(&p, &h, 0, 1, 3, 1);
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!((img.channels, img.slices, img.frames), (2, 3, 3));
+    let planes = planes_f32(&img);
+    assert_eq!(planes.len(), 2 * 3 * 3);
+    for t in 0..3 {
+        for z in 0..3 {
+            for c in 0..2 {
+                // z of the result is z of the source, the selection starting
+                // at the first slice.
+                let want = plane_tag(c, z, t);
+                let got = planes[t * 3 * 2 + z * 2 + c][0];
+                assert_eq!(got, want, "result c{c} z{z} t{t} holds the wrong plane");
+            }
+        }
+    }
+}
+
+/// Slice Remover keeps exactly the complement, which here is the one slice the
+/// dialog did not name.
+#[test]
+fn slice_remover_keeps_exactly_the_complement() {
+    let s = stack(2, 4, 3);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceRemover;
+    let params = slice_params(&p, &h, 0, 1, 3, 1);
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!((img.channels, img.slices, img.frames), (2, 1, 3));
+    let planes = planes_f32(&img);
+    for t in 0..3 {
+        for c in 0..2 {
+            // Only source slice 3 survives.
+            let want = plane_tag(c, 3, t);
+            assert_eq!(planes[t * 2 + c][0], want, "c{c} t{t}");
+        }
+    }
+}
+
+/// The increment makes the selection sparse, for both tools — so Remover
+/// leaves the planes between rather than deleting through them.
+#[test]
+fn the_increment_leaves_the_planes_between() {
+    let s = stack(2, 4, 2);
+    // Slices 1..=4 step 2 selects source slices 0 and 2.
+    let at = |z: usize, c: usize| z * 2 + c; // t0 of a 2-channel, 2-slice result
+
+    let mut h = host(&s, 0);
+    let mut keeper = builtin::SliceKeeper;
+    let params = slice_params(&keeper, &h, 0, 1, 4, 2);
+    let Outcome::NewDocument(kept) = keeper.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!(kept.slices, 2);
+    let kp = planes_f32(&kept);
+    assert_eq!(kp[at(0, 0)][0], plane_tag(0, 0, 0));
+    assert_eq!(kp[at(1, 0)][0], plane_tag(0, 2, 0));
+
+    let mut h = host(&s, 0);
+    let mut remover = builtin::SliceRemover;
+    let params = slice_params(&remover, &h, 0, 1, 4, 2);
+    let Outcome::NewDocument(left) = remover.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!(left.slices, 2, "the planes between must survive");
+    let lp = planes_f32(&left);
+    assert_eq!(lp[at(0, 0)][0], plane_tag(0, 1, 0));
+    assert_eq!(lp[at(1, 0)][0], plane_tag(0, 3, 0));
+}
+
+/// Taking planes out along T leaves Z whole, and vice versa.
+#[test]
+fn taking_planes_out_along_one_axis_leaves_the_other_whole() {
+    let s = stack(2, 3, 4);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceKeeper;
+    // Index 1 is T when both axes are offered. Frames 2..=3.
+    let params = slice_params(&p, &h, 1, 2, 3, 1);
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!((img.channels, img.slices, img.frames), (2, 3, 2));
+    let planes = planes_f32(&img);
+    for t in 0..2 {
+        for z in 0..3 {
+            for c in 0..2 {
+                let want = plane_tag(c, z, t + 1);
+                assert_eq!(planes[t * 3 * 2 + z * 2 + c][0], want, "c{c} z{z} t{t}");
+            }
+        }
+    }
+}
+
+/// A selection that would leave nothing is refused rather than producing a
+/// stack with no planes in it.
+#[test]
+fn leaving_no_planes_at_all_is_refused() {
+    let s = stack(2, 4, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceRemover;
+    // Every slice.
+    let params = slice_params(&p, &h, 0, 1, 4, 1);
+    let err = p.run(&mut h, &params).expect_err("must refuse");
+    assert!(err.to_string().contains("no planes"), "{err}");
+}
+
+/// An axis one plane deep is refused with a reason, rather than copied.
+#[test]
+fn an_axis_with_nothing_to_take_out_is_refused() {
+    // A single plane: neither axis is deeper than one, so the selector offers
+    // Z and the run refuses it. An empty dropdown would read as broken.
+    let s = stack(1, 1, 1);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceKeeper;
+    let params = slice_params(&p, &h, 0, 1, 1, 1);
+    let err = p.run(&mut h, &params).expect_err("must refuse");
+    assert!(err.to_string().contains("nothing to take out"), "{err}");
+}
+
+/// The tools give back the sample width they were handed.
+#[test]
+fn taking_planes_out_keeps_the_stacks_bit_depth() {
+    let s = stack_u16(2, 4, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceKeeper;
+    let params = slice_params(&p, &h, 0, 1, 2, 1);
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!(img.pixel_type, PixelType::U16, "a 16-bit stack widened");
+    let planes = planes_u16(&img);
+    // t0, channel 0, of a 2-channel 2-slice result.
+    assert_eq!(planes[0][0], plane_tag(0, 0, 0) as u16);
+    assert_eq!(planes[2][0], plane_tag(0, 1, 0) as u16);
+}
+
+/// Unchecking the box replaces the open document instead of opening a window.
+#[test]
+fn unchecking_the_window_box_replaces_the_document() {
+    let s = stack(2, 3, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceKeeper;
+    let decls = p.params(&h);
+    let mut params = Params::defaults(&decls);
+    params.set("axis", ParamValue::Choice(0));
+    params.set("first", ParamValue::Int(1));
+    params.set("last", ParamValue::Int(2));
+    params.set("increment", ParamValue::Int(1));
+    params.set("new_window", ParamValue::Bool(false));
+
+    match p.run(&mut h, &params.clamp_to(&decls)).unwrap() {
+        Outcome::ReplaceDocument(img) => assert_eq!(img.slices, 2),
+        other => panic!("expected a replacement, got {other:?}"),
+    }
+}
+
+// --------------------------------------------------------------- Invert Stack
+
+/// Invert Stack reflects a 16-bit stack about its type's range, keeps the
+/// width, and does it to every plane.
+#[test]
+fn invert_stack_reflects_a_16_bit_stack_about_its_type_range() {
+    let s = stack_u16(2, 2, 2);
+    let mut h = host(&s, 0);
+    let mut before = Vec::new();
+    h.read_plane_f32(Plane::new(1, 1, 1), &mut before).unwrap();
+
+    let mut p = builtin::Invert;
+    let decls = p.params(&h);
+    let Outcome::NewDocument(img) = p.run(&mut h, &Params::defaults(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!(img.pixel_type, PixelType::U16);
+    assert_eq!((img.channels, img.slices, img.frames), (2, 2, 2));
+
+    // The last plane, which a tool that only did the frame on screen would
+    // have left alone.
+    let planes = planes_u16(&img);
+    let at = |c: usize, z: usize, t: usize| t * 2 * 2 + z * 2 + c;
+    let last = planes[at(1, 1, 1)];
+    for (i, &got) in last.iter().enumerate() {
+        let want = 65535.0 - before[i];
+        assert_eq!(got as f32, want, "sample {i} of the last plane");
+    }
+}
+
+/// Inverting twice is the identity, which is the property a type-range
+/// reflection has and a per-plane one does not.
+#[test]
+fn inverting_a_stack_twice_gives_it_back() {
+    let s = stack_u16(2, 2, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::Invert;
+    let decls = p.params(&h);
+    let Outcome::NewDocument(once) = p.run(&mut h, &Params::defaults(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+
+    // Round-trip the result back into a stack and invert it again. This is
+    // also what checks the result is a stack the host can actually reopen.
+    let s2 = fast_tiff_viewer::plugins::to_stack(&once, None, false).expect("result should open");
+    let mut h2 = host(&s2, 0);
+    let Outcome::NewDocument(twice) = p.run(&mut h2, &Params::defaults(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+
+    let mut original = Vec::new();
+    let mut h = host(&s, 0);
+    let back = planes_u16(&twice);
+    for t in 0..2 {
+        for z in 0..2 {
+            for c in 0..2 {
+                h.read_plane_f32(Plane::new(c, z, t), &mut original)
+                    .unwrap();
+                let want: Vec<u16> = original.iter().map(|&v| v as u16).collect();
+                assert_eq!(
+                    back[t * 2 * 2 + z * 2 + c],
+                    &want,
+                    "c{c} z{z} t{t} did not come back"
+                );
+            }
+        }
+    }
+}
+
+/// A float stack has no range of its own, so it is inverted about the range it
+/// actually has — measured over the whole stack, not per plane.
+///
+/// Per-plane would make a dim plane and a bright plane come back equally
+/// bright, which destroys exactly the signal a timelapse is of.
+#[test]
+fn a_float_stack_is_inverted_about_its_whole_measured_range() {
+    let s = stack(2, 2, 2);
+    let mut h = host(&s, 0);
+
+    // The stack's own extremes, over every plane.
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    let mut buf = Vec::new();
+    for t in 0..2 {
+        for z in 0..2 {
+            for c in 0..2 {
+                h.read_plane_f32(Plane::new(c, z, t), &mut buf).unwrap();
+                for &v in &buf {
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+        }
+    }
+
+    let mut p = builtin::Invert;
+    let decls = p.params(&h);
+    let Outcome::NewDocument(img) = p.run(&mut h, &Params::defaults(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!(img.pixel_type, PixelType::F32);
+
+    let planes = planes_f32(&img);
+    for t in 0..2 {
+        for z in 0..2 {
+            for c in 0..2 {
+                h.read_plane_f32(Plane::new(c, z, t), &mut buf).unwrap();
+                for (i, &src) in buf.iter().enumerate() {
+                    let want = lo + hi - src;
+                    let got = planes[t * 2 * 2 + z * 2 + c][i];
+                    assert!(
+                        (got - want).abs() < 1e-3,
+                        "c{c} z{z} t{t} sample {i}: {got} vs {want}"
+                    );
+                }
+            }
+        }
+    }
+    // Not vacuous: a per-plane range would agree with a global one on a stack
+    // whose planes all span the same values. These do not.
+    assert!(hi - lo > 1.0, "the fixture has no range to speak of");
+}
+
+/// Cancelling a Stack Tools run is a cancellation, not an error.
+///
+/// The distinction is visible to the user: `Outcome::Cancelled` leaves the
+/// window alone quietly, where an `Err` puts its message in the status bar
+/// styled as a failure — so returning one for something the user asked for
+/// reads as "the tool broke". Every one of these tools is a long walk over
+/// every plane, so cancelling them is the ordinary case, not the rare one.
+#[test]
+fn cancelling_a_stack_tool_is_not_reported_as_a_failure() {
+    use std::sync::atomic::{AtomicBool, AtomicU32};
+    use std::sync::Arc;
+
+    let s = stack(2, 4, 2);
+    for (name, run) in [
+        ("Slice Keeper", 0usize),
+        ("Slice Remover", 1),
+        ("Invert Stack", 2),
+    ] {
+        let flag = Arc::new(AtomicBool::new(true)); // already cancelled
+        let progress = Arc::new(AtomicU32::new(0));
+        let mut h =
+            StackHost::new(&s, describe_view(&s, 0, false, view())).with_cancel(flag, progress);
+        let got = match run {
+            0 => {
+                let mut p = builtin::SliceKeeper;
+                let params = slice_params(&p, &h, 0, 1, 2, 1);
+                p.run(&mut h, &params)
+            }
+            1 => {
+                let mut p = builtin::SliceRemover;
+                let params = slice_params(&p, &h, 0, 1, 2, 1);
+                p.run(&mut h, &params)
+            }
+            _ => {
+                let mut p = builtin::Invert;
+                let decls = p.params(&h);
+                p.run(&mut h, &Params::defaults(&decls))
+            }
+        };
+        assert_eq!(
+            got.unwrap_or_else(|e| panic!("{name} reported a cancel as an error: {e}")),
+            Outcome::Cancelled,
+            "{name}"
+        );
+    }
+}
+
+// ---------------------------------------------------------- Slice Order Invert
+
+/// Reversing the order along an axis reverses that axis and nothing else.
+///
+/// The pixels are untouched, so every plane must arrive byte-identical to one
+/// of the source's — just in the opposite order. The channels keep their order
+/// within each plane, which is the part a reversal of the flat plane list would
+/// get wrong: reversing `planes` wholesale would also swap channel 0 and
+/// channel 1 of every plane, and the picture would still look like a picture.
+#[test]
+fn slice_order_invert_reverses_one_axis_and_leaves_the_rest() {
+    let s = stack(2, 4, 3);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceOrderInvert;
+    let decls = p.params(&h);
+    let mut params = Params::defaults(&decls);
+    params.set("axis", ParamValue::Choice(0)); // Z
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params.clamp_to(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    // Same shape: nothing is added or dropped.
+    assert_eq!((img.channels, img.slices, img.frames), (2, 4, 3));
+    let planes = planes_f32(&img);
+    for t in 0..3 {
+        for z in 0..4 {
+            for c in 0..2 {
+                // Z runs backwards; C and T do not.
+                let want = plane_tag(c, 3 - z, t);
+                assert_eq!(planes[t * 4 * 2 + z * 2 + c][0], want, "c{c} z{z} t{t}");
+            }
+        }
+    }
+}
+
+/// And along T, with Z left alone.
+#[test]
+fn slice_order_invert_reverses_time_when_asked() {
+    let s = stack(2, 3, 4);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceOrderInvert;
+    let decls = p.params(&h);
+    let mut params = Params::defaults(&decls);
+    params.set("axis", ParamValue::Choice(1)); // T
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params.clamp_to(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!((img.channels, img.slices, img.frames), (2, 3, 4));
+    let planes = planes_f32(&img);
+    for t in 0..4 {
+        for z in 0..3 {
+            for c in 0..2 {
+                let want = plane_tag(c, z, 3 - t);
+                assert_eq!(planes[t * 3 * 2 + z * 2 + c][0], want, "c{c} z{z} t{t}");
+            }
+        }
+    }
+}
+
+/// Reversing twice gives the stack back, which is the property rather than the
+/// arithmetic.
+#[test]
+fn reversing_the_order_twice_gives_the_stack_back() {
+    let s = stack(2, 4, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceOrderInvert;
+    let decls = p.params(&h);
+    let params = Params::defaults(&decls);
+
+    let Outcome::NewDocument(once) = p.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    let s2 = fast_tiff_viewer::plugins::to_stack(&once, None, false).expect("result should open");
+    let mut h2 = host(&s2, 0);
+    let Outcome::NewDocument(twice) = p.run(&mut h2, &params).unwrap() else {
+        panic!("expected a document")
+    };
+
+    let back = planes_f32(&twice);
+    for t in 0..2 {
+        for z in 0..4 {
+            for c in 0..2 {
+                assert_eq!(
+                    back[t * 4 * 2 + z * 2 + c][0],
+                    plane_tag(c, z, t),
+                    "c{c} z{z} t{t} did not come back"
+                );
+            }
+        }
+    }
+}
+
+/// An axis with one plane has no order to reverse, and is refused rather than
+/// copied.
+#[test]
+fn an_axis_with_no_order_to_reverse_is_refused() {
+    let s = stack(1, 1, 1);
+    let mut h = host(&s, 0);
+    let mut p = builtin::SliceOrderInvert;
+    let decls = p.params(&h);
+    let err = p
+        .run(&mut h, &Params::defaults(&decls))
+        .expect_err("must refuse");
+    assert!(err.to_string().contains("no order to reverse"), "{err}");
+}
+
+/// A plugin result opens in its new window without a damaged-file warning.
+///
+/// The path every new window takes: run a filter, encode the result to TIFF,
+/// reopen it. A filter that carries its source's metadata — which the ones that
+/// preserve geometry all do — carries the source's `ImageDescription` with it,
+/// and that description describes the *source's* shape.
+///
+/// It went wrong for a z-stack. 101 slices resolve to 101 frames, so the result
+/// is 101 frames with one slice; the writer stated `frames=101` and omitted
+/// `slices=` because there was nothing to say; and the source's `slices=101`
+/// rode along in the carried text as the only `slices=` in the file. Reopened,
+/// that read as 101 x 101 = 10,201 planes declared against 101 present, and
+/// every window a plugin opened said the file was truncated.
+#[test]
+fn a_plugin_result_reopens_without_a_plane_mismatch() {
+    // A z-stack described the way ImageJ describes one, which is the shape that
+    // produced the bug: `slices=` set, `frames=` absent.
+    let (w, h, n) = (4u32, 2u32, 6usize);
+    let opts = WriterOptions::new(w, h, SampleType::U16)
+        .metadata(StackMetaWrite::new(1, n).unit("micron").spacing(0.2));
+    let mut wr = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for i in 0..n {
+        let px: Vec<u16> = (0..w * h).map(|j| (i as u16) * 100 + j as u16).collect();
+        wr.write_frame_bytes(&px.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>())
+            .unwrap();
+    }
+    let bytes = wr.finish().unwrap().into_inner();
+    let s = Stack::from_bytes(bytes, "zstack.tif".into(), false).expect("opens");
+    assert_eq!(s.display.plane_mismatch, None, "the source should be clean");
+    // Z folds into time, which is what makes the result's shape differ from
+    // the description it carries.
+    assert_eq!(
+        (s.display.dims.slices, s.display.dims.frames),
+        (1, n),
+        "the fixture must be the folded shape the bug needed"
+    );
+
+    let mut host = host(&s, 0);
+    let mut p = builtin::Invert;
+    let decls = p.params(&host);
+    let Outcome::NewDocument(img) = p.run(&mut host, &Params::defaults(&decls)).unwrap() else {
+        panic!("expected a document")
+    };
+    // The filter carries the source's record, including its description.
+    assert!(
+        img.metadata.is_some(),
+        "the case only arises when metadata is carried"
+    );
+
+    // Exactly what the app does on the way to a new window.
+    let encoded = fast_tiff_viewer::plugins::to_tiff_bytes(&img, None).expect("encode");
+    let reopened =
+        Stack::from_bytes(encoded, "result.tif".into(), false).expect("the result should reopen");
+    assert_eq!(
+        reopened.display.plane_mismatch, None,
+        "the new window reported a damaged file"
+    );
+    assert_eq!(
+        (
+            reopened.display.dims.channels,
+            reopened.display.dims.slices,
+            reopened.display.dims.frames
+        ),
+        (1, 1, n)
+    );
+    // And the calibration the carried record was there for still arrived.
+    assert_eq!(reopened.tiff.meta.unit.as_deref(), Some("micron"));
+}
+
+// ---------------------------------------------------------- deconvolution
+
+/// A PSF file on disk, for the deconvolution tests to point at.
+fn psf_file(name: &str, w: u32, h: u32, planes: &[Vec<f32>]) -> String {
+    let opts = WriterOptions::new(w, h, SampleType::F32)
+        .metadata(StackMetaWrite::new(1, planes.len().max(1)));
+    let mut wr = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for p in planes {
+        wr.write_frame_f32(p).unwrap();
+    }
+    let dir = std::env::temp_dir().join(format!("fasttiff-deconv-it-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, wr.finish().unwrap().into_inner()).unwrap();
+    path.display().to_string()
+}
+
+/// Through the real host, against a real file: every plane of a three-axis
+/// stack must come back as itself.
+///
+/// `StackHost` resolves `(c, z, t)` to an IFD and a sample plane through
+/// `plane_index`, which the in-module tests do not exercise — they hand the
+/// plugin a buffer. With a one-voxel PSF the arithmetic is the identity, so
+/// anything that does not match has been addressed wrongly on the way in or
+/// written back wrongly on the way out.
+#[test]
+fn deconvolving_reaches_every_plane_through_the_real_host() {
+    let s = stack(3, 4, 2);
+    let mut h = host(&s, 0);
+    let mut p = builtin::Deconvolve;
+    let decls = p.params(&h);
+    let mut params = Params::defaults(&decls);
+    params.set(
+        "psf_path",
+        ParamValue::Path(psf_file("delta.tif", 1, 1, &[vec![1.0]])),
+    );
+    let params = params.clamp_to(&decls);
+
+    let Outcome::NewDocument(img) = p.run(&mut h, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!((img.channels, img.slices, img.frames), (3, 4, 2));
+    img.validate().expect("self-consistent");
+
+    let planes = planes_f32(&img);
+    for t in 0..2 {
+        for z in 0..4 {
+            for c in 0..3 {
+                let at = t * (4 * 3) + z * 3 + c;
+                assert!(
+                    (planes[at][0] - plane_tag(c, z, t)).abs() < 0.01,
+                    "plane (c{c}, z{z}, t{t}) came back as {} not {}",
+                    planes[at][0],
+                    plane_tag(c, z, t)
+                );
+            }
+        }
+    }
+}
+
+/// A deconvolved stack keeps its calibration and reopens clean.
+///
+/// The same path that produced the 10,201-plane warning: a filter that
+/// carries the source's record, encoded and reopened as a new window. A
+/// deconvolution preserves geometry exactly, so the calibration must survive
+/// — a result that lost its pixel size is no longer something to measure.
+#[test]
+fn a_deconvolved_stack_reopens_calibrated_and_undamaged() {
+    let (w, h, n) = (8u32, 6u32, 6usize);
+    let opts = WriterOptions::new(w, h, SampleType::U16)
+        .metadata(StackMetaWrite::new(1, n).unit("micron").spacing(0.2));
+    let mut wr = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for i in 0..n {
+        let px: Vec<u16> = (0..w * h)
+            .map(|j| (i as u16) * 100 + j as u16 + 10)
+            .collect();
+        wr.write_frame_bytes(&px.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>())
+            .unwrap();
+    }
+    let s = Stack::from_bytes(
+        wr.finish().unwrap().into_inner(),
+        "zstack.tif".into(),
+        false,
+    )
+    .expect("opens");
+    assert_eq!(s.display.plane_mismatch, None, "the source should be clean");
+
+    let mut host = host(&s, 0);
+    let mut p = builtin::Deconvolve;
+    let decls = p.params(&host);
+    let mut params = Params::defaults(&decls);
+    params.set(
+        "psf_path",
+        ParamValue::Path(psf_file("blur.tif", 3, 3, &[vec![1.0f32; 9]])),
+    );
+    params.set("iterations", ParamValue::Int(5));
+    let params = params.clamp_to(&decls);
+
+    let Outcome::NewDocument(img) = p.run(&mut host, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    let encoded = fast_tiff_viewer::plugins::to_tiff_bytes(&img, None).expect("encode");
+    let reopened =
+        Stack::from_bytes(encoded, "result.tif".into(), false).expect("the result should reopen");
+
+    assert_eq!(
+        reopened.display.plane_mismatch, None,
+        "the new window reported a damaged file"
+    );
+    assert_eq!(
+        (
+            reopened.display.dims.channels,
+            reopened.display.dims.slices,
+            reopened.display.dims.frames
+        ),
+        (1, 1, n)
+    );
+    assert_eq!(reopened.tiff.meta.unit.as_deref(), Some("micron"));
+}
+
+/// A generated PSF reopens as the volume it says it is, calibrated in microns.
+///
+/// It is the input to the other plugin, so "it looks right on screen" is not
+/// enough: the spacing it carries is what tells the user whether it matches
+/// the stack they are about to deconvolve.
+#[test]
+fn a_generated_psf_reopens_as_the_volume_it_describes() {
+    // All three axes above 1, as `stack` requires: what this needs from the
+    // host is only that it has a Z axis, so that the slice count defaults to
+    // a volume.
+    let s = stack(2, 5, 3);
+    let mut host = host(&s, 0);
+    let mut p = builtin::GeneratePsf;
+    let decls = p.params(&host);
+    let mut params = Params::defaults(&decls);
+    params.set("model", ParamValue::Choice(2)); // Gaussian: the quick one.
+    params.set("width", ParamValue::Int(11));
+    params.set("height", ParamValue::Int(11));
+    params.set("slices", ParamValue::Int(7));
+    params.set("pixel", ParamValue::Float(90.0));
+    params.set("step", ParamValue::Float(350.0));
+    let params = params.clamp_to(&decls);
+
+    let Outcome::NewDocument(img) = p.run(&mut host, &params).unwrap() else {
+        panic!("expected a document")
+    };
+    assert_eq!(img.pixel_type, PixelType::F32);
+
+    let encoded = fast_tiff_viewer::plugins::to_tiff_bytes(&img, None).expect("encode");
+    let reopened =
+        Stack::from_bytes(encoded, "psf.tif".into(), false).expect("the PSF should reopen");
+    assert_eq!(reopened.display.plane_mismatch, None);
+    assert_eq!(reopened.dimensions(), Some((11, 11)));
+    assert_eq!(reopened.tiff.frames.len(), 7);
+    assert_eq!(reopened.tiff.meta.unit.as_deref(), Some("micron"));
+    // `spacing=` is ImageJ's Z step; the lateral size travels in the
+    // resolution tags.
+    assert_eq!(reopened.tiff.meta.spacing, Some(0.35));
+
+    // And it is still a PSF after the round trip: normalised, and peaked in
+    // the middle of the middle slice.
+    let mut total = 0.0f64;
+    let mut peak = (0usize, 0usize, f32::MIN);
+    for (z, frame) in reopened.tiff.frames.iter().enumerate() {
+        let px =
+            fast_tiff_lib::read_plane_f32(&reopened.tiff.data, frame, reopened.tiff.byte_order, 0)
+                .expect("decode");
+        for (i, &v) in px.iter().enumerate() {
+            total += v as f64;
+            if v > peak.2 {
+                peak = (i, z, v);
+            }
+        }
+    }
+    assert!((total - 1.0).abs() < 1e-5, "the PSF sums to {total}");
+    assert_eq!(peak.1, 3, "the peak belongs on the middle slice");
+    assert_eq!(peak.0, 11 * 5 + 5, "and in the middle of it");
+}

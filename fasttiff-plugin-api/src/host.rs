@@ -33,9 +33,11 @@ pub trait HostContext {
     /// Decode one plane as `u16`.
     ///
     /// 8-bit data is widened (`v << 8 | v`, matching how the viewer treats it),
-    /// signed data is offset into unsigned, float is rescaled through the
-    /// channel's contrast window. A plugin that needs the untouched values
-    /// should use [`read_plane_f32`](Self::read_plane_f32).
+    /// signed data is offset into unsigned, and 32- or 64-bit data — float or
+    /// integer — is rescaled through the channel's contrast window
+    /// ([`ChannelView`](crate::ChannelView), in the file's units). A plugin
+    /// that needs the untouched values should use
+    /// [`read_plane_f32`](Self::read_plane_f32).
     ///
     /// `out` is resized to `image().plane_len()`.
     fn read_plane_u16(&mut self, plane: Plane, out: &mut Vec<u16>) -> Result<(), PluginError>;

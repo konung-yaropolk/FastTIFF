@@ -1,86 +1,47 @@
-//! The background volume builder's failure, which is not a rare case.
+//! The background volume builder, and the stacks it has to serve.
 //!
-//! The worker opens its own map of the file — which a stack that came from a
-//! plugin does not have. An imported OIR is held in memory and its `path` is
-//! the name it is shown under, so the open fails every time, and what the
-//! caller does about that decides whether 3D works at all for imported data.
-//!
-//! It used to sit on "Loading 3D…" forever. The caller's check was "did
-//! `request` succeed", and it succeeded: the request was sent while the worker
-//! was still starting, before the open had been tried. Every frame after that
-//! polled for a reply from a thread that had already exited.
+//! The worker shares the window's own stack rather than opening the file again,
+//! which matters most for a stack that has no file: an imported OIR or a
+//! plugin's result is held in memory, and its `path` is only the name it is
+//! shown under. A worker that re-opened by path failed on every one of them,
+//! and 3D for imported data was built on the interface thread — or, before
+//! that was noticed, sat on "Loading 3D…" for ever.
 
 use super::*;
 
-/// Wait for `f`, up to a second. The worker has to be scheduled and try to open
-/// a file first, so there is nothing to assert synchronously.
-fn within_a_second(what: &str, mut f: impl FnMut() -> bool) {
+/// Wait for `f`, up to five seconds: the worker has to be scheduled and build
+/// the volume first, so there is nothing to assert synchronously.
+fn within_seconds(what: &str, mut f: impl FnMut() -> bool) {
     let start = std::time::Instant::now();
-    while start.elapsed() < std::time::Duration::from_secs(1) {
+    while start.elapsed() < std::time::Duration::from_secs(5) {
         if f() {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    panic!("{what} did not happen within a second");
+    panic!("{what} did not happen within five seconds");
 }
 
-/// A file that is not there is the ordinary case for an imported stack, and the
-/// builder has to *say* it gave up rather than leaving the caller to infer it.
+/// A stack held only in memory — the imported case — gets its volume built in
+/// the background and answered under the request's key.
 #[test]
-fn a_builder_that_cannot_open_its_file_reports_it() {
-    let path = std::env::temp_dir().join("fasttiff-no-such-stack-9f3a.tif");
-    let _ = std::fs::remove_file(&path);
-    let builder = VolumeBuilder::new(path).expect("the thread should spawn");
-
-    within_a_second("the builder should report that it gave up", || {
-        builder.failed()
+fn a_stack_held_in_memory_is_built_in_the_background() {
+    let stack = Arc::new(TiffStack::from_bytes(tiny_tiff()).expect("parse"));
+    let builder = VolumeBuilder::new(stack).expect("the thread should spawn");
+    assert!(builder.request(7, plan()));
+    let mut answer = None;
+    within_seconds("the builder should answer", || {
+        answer = builder.take_matching(7, 0);
+        answer.is_some()
     });
-}
-
-/// Why the flag exists rather than a failed `request`.
-///
-/// A request sent before the worker has finished failing is *accepted* — the
-/// channel is open until the thread exits and drops the receiver. A caller
-/// that reads that as "the worker is fine" waits for a reply forever, which is
-/// exactly what the loading screen was doing.
-#[test]
-fn a_request_can_succeed_against_a_worker_that_is_already_doomed() {
-    let path = std::env::temp_dir().join("fasttiff-no-such-stack-4b21.tif");
-    let _ = std::fs::remove_file(&path);
-    let builder = VolumeBuilder::new(path).expect("the thread should spawn");
-
-    // Whether this particular send wins the race is a scheduling detail, so it
-    // is not asserted either way. What is asserted is that the flag settles on
-    // "gave up" regardless — the caller has something reliable to read.
-    let _accepted = builder.request(0, plan());
-    within_a_second("the builder should report that it gave up", || {
-        builder.failed()
-    });
-    // And nothing is ever going to arrive for it.
-    assert!(builder.take_matching(0, 0).is_none());
-}
-
-/// A builder over a real file does not claim to have failed.
-#[test]
-fn a_builder_over_a_readable_file_does_not_report_failure() {
-    let path = std::env::temp_dir().join("fasttiff-volume-builder-ok.tif");
-    std::fs::write(&path, tiny_tiff()).expect("write a stack to open");
-    let builder = VolumeBuilder::new(path.clone()).expect("the thread should spawn");
-
-    // Give the worker the same chance to fail that the tests above give it.
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    assert!(
-        !builder.failed(),
-        "a file that opens should not be reported as unopenable"
-    );
-    drop(builder);
-    let _ = std::fs::remove_file(&path);
+    // Another key gets nothing: the reply was taken, and it was not theirs.
+    assert!(builder.take_matching(7, 0).is_none());
+    assert!(builder.take_matching(8, 0).is_none());
 }
 
 fn plan() -> VolumePlan {
     VolumePlan {
-        kinds: vec![ChannelKind::Int8],
+        units: vec![SampleUnits::RAW8],
         rgb: false,
         channels: 1,
         slices: 1,
@@ -127,7 +88,7 @@ fn u16_stack(w: u32, h: u32, frames: u32, value: impl Fn(u32, u32) -> u16) -> Ti
 
 fn u16_plan(frames: usize, budget: usize) -> VolumePlan {
     VolumePlan {
-        kinds: vec![ChannelKind::Int16],
+        units: vec![SampleUnits::display(fast_tiff_lib::DisplayMap::Identity)],
         frames,
         format: scivis_render::pack::TexelFormat::Unorm16,
         budget,
@@ -218,7 +179,9 @@ fn a_volume_that_fits_is_packed_sample_for_sample() {
     let p = build_volume(&tiff, &u16_plan(4, usize::MAX)).expect("built");
     assert_eq!(p.layout.dims, (5, 3, 4));
     let got: Vec<u16> = p.levels[0][0]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_ne_bytes([c[0], c[1]]))
         .collect();
     let want: Vec<u16> = (0..4)
@@ -300,8 +263,13 @@ fn a_nan_is_left_out_of_an_average() {
         &Decoded::F32(vec![nan, nan, nan, nan, nan, nan, nan, nan]),
     );
     let mut slab = vec![0u8; layout.slice_bytes(0)];
-    boxes.write(&layout, &mut [&mut slab[..]], 2);
-    let got: Vec<f32> = slab.chunks_exact(4).map(|b| format.decode(b)).collect();
+    boxes.write(&layout, &mut [&mut slab[..]], 2, &[(1.0, 0.0)]);
+    let got: Vec<f32> = slab
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| format.decode(b))
+        .collect();
     assert_eq!(got[0], 3.0, "(1 + 3 + 5) / 3");
     assert!(got[1].is_nan(), "a box of nothing but NaN stays NaN");
 
@@ -312,8 +280,13 @@ fn a_nan_is_left_out_of_an_average() {
     let mut boxes = SliceBoxes::new(1, (6, 1), (2, 1), (3, 1));
     boxes.add(0, &Decoded::F32(vec![2.0, ninf, inf, ninf, ninf, nan]));
     let mut slab = vec![0u8; layout.slice_bytes(0)];
-    boxes.write(&layout, &mut [&mut slab[..]], 1);
-    let got: Vec<f32> = slab.chunks_exact(4).map(|b| format.decode(b)).collect();
+    boxes.write(&layout, &mut [&mut slab[..]], 1, &[(1.0, 0.0)]);
+    let got: Vec<f32> = slab
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| format.decode(b))
+        .collect();
     assert_eq!(
         got,
         vec![2.0, inf, ninf],
@@ -325,8 +298,53 @@ fn a_nan_is_left_out_of_an_average() {
     let mut boxes = SliceBoxes::new(1, (2, 1), (2, 1), (1, 1));
     boxes.add(0, &Decoded::U16(vec![0, 65535]));
     let mut slab = vec![0u8; layout.slice_bytes(0)];
-    boxes.write(&layout, &mut [&mut slab[..]], 1);
+    let identity16 = SampleUnits::display(fast_tiff_lib::DisplayMap::Identity);
+    boxes.write(
+        &layout,
+        &mut [&mut slab[..]],
+        1,
+        &[identity16.volume_affine()],
+    );
     assert_eq!(TexelFormat::Unorm16.decode(&slab), 32768.0 / 65535.0);
+}
+
+/// A float volume is stored as half floats on wgpu, which hold nothing past
+/// 65504. Normalized over the channel's span first, a stack of photon counts
+/// in the hundreds of thousands stays finite and keeps its order, and the
+/// window goes through the same map; stored raw, all of it was infinity, which
+/// rendered white whatever the window.
+#[test]
+fn a_float_volume_past_the_half_float_range_stays_finite() {
+    let format = TexelFormat::Float16;
+    let layout = VolumeLayout::new((4, 1, 1), 1, format);
+    let span = crate::units::Window::new(0.0, 400_000.0);
+    let units = SampleUnits::float(span);
+    let values = vec![0.0f32, 100_000.0, 250_000.0, 400_000.0];
+    let mut slab = vec![0u8; layout.slice_bytes(0)];
+    encode_slice(
+        &layout,
+        &mut [&mut slab[..]],
+        0,
+        &Decoded::F32(values.clone()),
+        units.volume_affine(),
+    );
+    let got: Vec<f32> = slab
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| format.decode(b))
+        .collect();
+    assert!(got.iter().all(|v| v.is_finite()), "{got:?}");
+    assert!(got.windows(2).all(|w| w[0] < w[1]), "order kept: {got:?}");
+    for (v, g) in values.iter().zip(&got) {
+        assert!((g - v / 400_000.0).abs() < 1e-3, "{v} stored as {g}");
+    }
+    // The window lands on the voxels' scale: 100k..250k selects the middle two.
+    let (lo, hi) = units.to_unorm(crate::units::Window::new(100_000.0, 250_000.0));
+    assert!(
+        (lo - got[1]).abs() < 1e-3 && (hi - got[2]).abs() < 1e-3,
+        "{lo}..{hi} vs {got:?}"
+    );
 }
 
 /// A smaller rebuild after the GPU ran out of memory is the same volume: a

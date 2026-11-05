@@ -28,8 +28,7 @@
 name = "turboreg-registration"
 version = "0.27.0"
 edition = "2021"
-# `let ... else`, used throughout the optimizer.
-rust-version = "1.82"
+rust-version.workspace = true
 description = """
 Rigid-body, affine and bilinear image registration by the TurboReg/StackReg \
 pyramid method: cubic B-spline interpolation, a least-squares spline pyramid, \
@@ -44,42 +43,47 @@ keywords = ["microscopy", "registration", "stackreg", "turboreg", "imaging"]
 categories = ["science", "algorithms", "multimedia::images"]
 
 [dependencies]
+# The C interface's scaffolding (last-error slot, panic guard), shared with this
+# repository's other C APIs; only with `capi`. With a version as well as the
+# path, as a published crate's dependency must be.
+c-api-support = { path = "../c-api-support", version = "0.1.0", optional = true }
 # Parallel CPU registration. Frames are independent once the reference is
 # fixed, so a stack is an embarrassingly parallel map — except under
-# `Reference::Previous`, which is a chain and cannot be (see `par.rs`).
+# `Reference::Previous`, which is a chain and cannot be. It goes through the
+# `par` of `image-registration-support` (re-exported as this crate's): rayon
+# behind `threads`, sequential stand-ins without it, for the browser's sake, as
+# in `suite2p-registration`.
 #
-# Optional, and behind `threads`, for the browser's sake: rayon does build for
-# `wasm32-unknown-unknown`, falling back to running a `par_iter` on the calling
-# thread, but a thread pool that can never run is a large thing to send over a
-# network and `Backend::MultiThread` would then be a label with nothing behind
-# it. Same reasoning, and the same shape, as `suite2p-registration`.
-rayon = { version = "1.10", optional = true }
+# A version as well as the path: this crate is published, and a published
+# crate's dependencies must be on crates.io too.
+image-registration-support = { path = "../image-registration-support", version = "0.1.0", default-features = false }
 
 # The GPU backend, behind a feature so the algorithm crate does not drag a
 # graphics stack into anything that only wants the CPU path. The same wgpu,
 # bytemuck and pollster `suite2p-registration` and the renderer already use, so
 # turning it on adds no new dependency to the project.
-wgpu = { version = "29", optional = true }
-bytemuck = { version = "1", features = ["derive"], optional = true }
-pollster = { version = "1.0", optional = true }
+wgpu = { workspace = true, optional = true }
+bytemuck = { workspace = true, features = ["derive"], optional = true }
+pollster = { workspace = true, optional = true }
 
 [features]
 default = ["threads"]
 # Parallel CPU registration. On by default: every native build wants it, and a
 # crate that had to be asked for its usual behaviour would be a trap. Turning it
 # off leaves the arithmetic untouched and `Backend::MultiThread` unavailable.
-threads = ["dep:rayon"]
+threads = ["image-registration-support/threads"]
 # The criterion's sum over pixels on the graphics card. Off by default: it is
 # not faster everywhere (see `src/gpu.rs` for what it was measured against),
 # and a build that has no use for a GPU should not link one.
-gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster", "image-registration-support/gpu"]
 
 # A C interface — `src/capi.rs`, declared in `include/turboreg_registration.h` — for linking
-# into C and C++ programs as a shared or static library. Adds no dependency.
+# into C and C++ programs as a shared or static library. Adds one small
+# dependency of this repository's own, `c-api-support`, which has none.
 # The crate type is chosen when building (`cargo rustc --crate-type`; see the
 # README's "From C and C++") rather than listed under `[lib]`, because a
 # `cdylib` listed there is built by every crate that depends on this one.
-capi = []
+capi = ["dep:c-api-support"]
 
 # docs.rs builds the GPU module too — a module missing from the documentation
 # may as well not exist.

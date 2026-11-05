@@ -7,6 +7,7 @@
 name = "fasttiff-plugin"
 version = "0.26.1"
 edition = "2021"
+rust-version.workspace = true
 description = "Write a FastTIFF plugin as an ordinary Rust type; this generates the extern \"C\" boundary."
 license = "MPL-2.0"
 readme = "README.md"

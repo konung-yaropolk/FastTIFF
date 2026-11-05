@@ -91,7 +91,9 @@ fn samples(b: &[u8], f: Format) -> Vec<u16> {
     if f.sample_bytes() == 1 {
         out.into_iter().map(u16::from).collect()
     } else {
-        out.chunks_exact(2)
+        out.as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect()
     }

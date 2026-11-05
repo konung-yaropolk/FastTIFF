@@ -92,8 +92,6 @@
 use crate::optimize::{Prepared, Sums};
 use bytemuck::{Pod, Zeroable};
 use std::sync::Mutex;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Invocations per workgroup. Must match `WG` in `gpu.wgsl`.
@@ -108,13 +106,6 @@ const MOST_GROUPS_PER_LANE: usize = 64;
 /// already shared thinly enough that more lanes buy little, and the batch's
 /// coefficients have to fit next to the viewer's own textures.
 pub const MOST_LANES: usize = 32;
-
-/// How much device memory one batch's coefficient planes may take.
-const BATCH_MEMORY: u64 = 256 << 20;
-
-/// The most bytes of planes in one write: the staging memory an upload needs is
-/// two of these, whatever the frame size (see [`upload_planes`]).
-const UPLOAD_SLAB: usize = 32 << 20;
 
 /// Pyramid levels with fewer pixels than this are fitted on the CPU.
 ///
@@ -153,99 +144,20 @@ struct LaneGpu {
     dm: [f32; 64],
 }
 
-/// The device this crate runs on, and its adapter's name.
+/// The device, its use by the host and the scoped habits are shared with
+/// `suite2p-registration`: one device for every registration in the process.
+/// See [`image_registration_support::gpu`].
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone)]
-struct Shared {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    name: String,
-}
-
-/// The one device this crate uses: the host's, given with [`use_device`], or
-/// else one of its own, opened the first time it is needed.
-///
-/// One for the process rather than one per batch. Several devices opened side
-/// by side in one process, each driven from its own thread, hang on the drivers
-/// this workspace was measured against — `suite2p-registration` found that out
-/// first — and a registration only ever needs one anyway.
-///
-/// `None`, remembered, when there is no usable adapter.
-///
-/// Not in a browser build, where there is never a device to keep (see
-/// [`shared_device`]) and wgpu's browser objects cannot sit in a `static`.
-#[cfg(not(target_arch = "wasm32"))]
-static DEVICE: OnceLock<Option<Shared>> = OnceLock::new();
-
-/// Run on `device` instead of opening a device of this crate's own: the
-/// host's, typically the one its renderer draws with, which then carries the
-/// registration's work between its own frames. See the module docs for why a
-/// host that has one should.
-///
-/// Takes effect only before the first GPU run (or [`available`] call), and
-/// says whether it did. A software adapter counts as no device, as it would
-/// for one this crate opened. The device should have the adapter's own limits
-/// (`required_limits: adapter.limits()`): the batch size is derived from them.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn use_device(device: wgpu::Device, queue: wgpu::Queue, adapter: &wgpu::AdapterInfo) -> bool {
-    let shared = (adapter.device_type != wgpu::DeviceType::Cpu).then(|| Shared {
-        device,
-        queue,
-        name: adapter.name.clone(),
-    });
-    DEVICE.set(shared).is_ok()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn shared() -> Option<Shared> {
-    DEVICE
-        .get_or_init(|| {
-            let instance = wgpu::Instance::default();
-            let adapter =
-                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    ..Default::default()
-                }))
-                .ok()?;
-            let info = adapter.get_info();
-            if info.device_type == wgpu::DeviceType::Cpu {
-                return None;
-            }
-            // Whatever the adapter can do: the batch size is derived from
-            // these, and the defaults would cap it well below the card.
-            let (device, queue) =
-                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                    label: Some("turboreg-registration"),
-                    required_limits: adapter.limits(),
-                    ..Default::default()
-                }))
-                .ok()?;
-            Some(Shared {
-                device,
-                queue,
-                name: info.name,
-            })
-        })
-        .clone()
-}
+pub use image_registration_support::gpu::use_device;
+use image_registration_support::gpu::{filled, scoped, Trouble, BATCH_MEMORY, UPLOAD_SLAB};
 
 fn shared_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    // Requesting an adapter is asynchronous, and in a browser it resolves
-    // through the page's event loop — which `block_on` would be blocking. So
-    // there is no device to offer there; the backend says so instead.
-    #[cfg(target_arch = "wasm32")]
-    {
-        None
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        shared().map(|s| (s.device, s.queue))
-    }
+    image_registration_support::gpu::device().map(|d| (d.device, d.queue))
 }
 
 /// Whether this machine has a device the GPU backend can use.
 pub fn available() -> bool {
-    shared_device().is_some()
+    image_registration_support::gpu::available()
 }
 
 /// The device's name, for a log line saying where a run went.
@@ -259,7 +171,7 @@ pub fn adapter_name() -> Option<String> {
         // Kept from when the device was opened or handed over, rather than
         // asked of a new instance: enumerating adapters again is opening
         // drivers again, which is the step that can deadlock (module docs).
-        shared().map(|s| s.name)
+        image_registration_support::gpu::device().map(|d| d.name)
     }
 }
 
@@ -334,10 +246,10 @@ fn pipeline(device: &wgpu::Device, n: usize) -> Option<wgpu::ComputePipeline> {
 static ROUND: Mutex<()> = Mutex::new(());
 
 /// Why the device last failed a batch, until [`take_trouble`] takes it.
-static TROUBLE: Mutex<Option<String>> = Mutex::new(None);
+static TROUBLE: Trouble = Trouble::new();
 
 fn note_trouble(why: String) {
-    *TROUBLE.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+    TROUBLE.note(why);
 }
 
 /// Why the device failed a batch since this was last asked, if it did: no
@@ -346,28 +258,7 @@ fn note_trouble(why: String) {
 /// the sentence that says why. Ask after a run, and once before it to forget
 /// an earlier one's.
 pub fn take_trouble() -> Option<String> {
-    TROUBLE.lock().unwrap_or_else(|e| e.into_inner()).take()
-}
-
-/// Run `work` with the device's out-of-memory and validation errors caught,
-/// and say which was raised, if one was.
-///
-/// Without a scope wgpu hands an error to the device's handler, which by
-/// default panics — on a device shared with a renderer, taking the
-/// application with it for want of memory a registration could do without.
-/// Scopes are per thread in wgpu, so these catch this thread's errors only,
-/// never the renderer's.
-fn scoped<T>(device: &wgpu::Device, work: impl FnOnce() -> T) -> Result<T, String> {
-    let no_room = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-    let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let done = work();
-    // Innermost first.
-    let invalid = pollster::block_on(invalid.pop());
-    let no_room = pollster::block_on(no_room.pop());
-    match no_room.or(invalid) {
-        None => Ok(done),
-        Some(e) => Err(e.to_string()),
-    }
+    TROUBLE.take()
 }
 
 /// Copy each slot's four planes into `coeffs`, [`UPLOAD_SLAB`] bytes a
@@ -378,33 +269,6 @@ fn scoped<T>(device: &wgpu::Device, work: impl FnOnce() -> T) -> Result<T, Strin
 /// asked for at the moment a card short of memory can least spare it, and a
 /// staging allocation that fails can lose the device. Two slabs in flight
 /// keep it to 64 MB at any size, and the waits are short: a slab is a copy.
-/// A buffer of `contents`, for inside a [`scoped`] call: made unmapped and
-/// filled by the queue. `create_buffer_init` maps the buffer at creation
-/// instead, and wgpu treats mapping a buffer that could not be made as fatal,
-/// past any scope; this way a buffer there was no room for is an error the
-/// scope returns.
-fn filled(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    label: &str,
-    contents: &[u8],
-    usage: wgpu::BufferUsages,
-) -> wgpu::Buffer {
-    let size = (contents.len() as u64)
-        .next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
-        .max(4);
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some(label),
-        size,
-        usage: usage | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let mut padded = contents.to_vec();
-    padded.resize(size as usize, 0);
-    queue.write_buffer(&buffer, 0, &padded);
-    buffer
-}
-
 fn upload_planes(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

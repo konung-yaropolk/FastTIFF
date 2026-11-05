@@ -29,18 +29,17 @@
 //! an exact match, so a stale build can cost work but never show wrong data.
 
 use crate::prefetch::{decode_jobs, ChannelJob, Decoded};
+use crate::units::SampleUnits;
 use fast_tiff_lib::TiffStack;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
 use scivis_render::pack::{self, PackedVolume, TexelFormat, VolumeLayout};
 use scivis_render::{ChannelKind, MAX_CHANNELS};
-use std::path::PathBuf;
-#[cfg(feature = "threads")]
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "threads")]
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 #[cfg(feature = "threads")]
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 #[cfg(feature = "threads")]
 use std::thread::JoinHandle;
 
@@ -82,7 +81,10 @@ pub fn detail_cap(screen_px: u32) -> u32 {
 /// parse, so a channels/frames swap in the UI is honored by background builds.
 #[derive(Clone)]
 pub struct VolumePlan {
-    pub kinds: Vec<ChannelKind>,
+    /// Each channel's units, which say both how it decodes (its kind) and how
+    /// its samples are normalized into the volume
+    /// ([`SampleUnits::volume_affine`]).
+    pub units: Vec<SampleUnits>,
     pub rgb: bool,
     pub channels: usize,
     pub slices: usize,
@@ -162,11 +164,12 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
         plan.frames.max(1) as u32
     };
     let time = if is_4d { plan.time } else { 0 };
-    let n = plan.kinds.len().min(MAX_CHANNELS);
+    let n = plan.units.len().min(MAX_CHANNELS);
     if w == 0 || h == 0 || depth < 2 || n == 0 {
         return None;
     }
-    let ckinds = &plan.kinds[..n];
+    let ckinds: Vec<ChannelKind> = plan.units[..n].iter().map(|u| u.kind()).collect();
+    let affines: Vec<(f32, f32)> = plan.units[..n].iter().map(|u| u.volume_affine()).collect();
 
     let (sx, sy, sz) = choose_strides(
         (w, h, depth),
@@ -253,14 +256,14 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
             let decoded = decode_jobs(&tiff.data, &tiff.frames, tiff.byte_order, &jobs)?;
             for (c, dec) in decoded.iter().enumerate() {
                 if direct {
-                    encode_slice(&layout, &mut slabs, c, dec);
+                    encode_slice(&layout, &mut slabs, c, dec, affines[c]);
                 } else {
                     boxes.add(c, dec);
                 }
             }
         }
         if !direct {
-            boxes.write(&layout, &mut slabs, z_to - z_from);
+            boxes.write(&layout, &mut slabs, z_to - z_from, &affines);
         }
         Ok(())
     });
@@ -274,7 +277,18 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
 
 /// Store one decoded slice of channel `c`, at full size, into its slab of the
 /// packed texture that holds it. A short decode leaves the rest zero.
-fn encode_slice(layout: &VolumeLayout, slabs: &mut [&mut [u8]], c: usize, dec: &Decoded) {
+///
+/// Samples go through the channel's `(scale, offset)`
+/// ([`SampleUnits::volume_affine`]), the map
+/// [`SampleUnits::to_unorm`](crate::units::SampleUnits::to_unorm) puts the
+/// channel's window on the same scale with.
+fn encode_slice(
+    layout: &VolumeLayout,
+    slabs: &mut [&mut [u8]],
+    c: usize,
+    dec: &Decoded,
+    (scale, offset): (f32, f32),
+) {
     let (t, k) = layout.place(c);
     let texel = layout.texel_bytes(t);
     let fb = layout.format.bytes();
@@ -289,17 +303,17 @@ fn encode_slice(layout: &VolumeLayout, slabs: &mut [&mut [u8]], c: usize, dec: &
             .iter()
             .take(voxels)
             .enumerate()
-            .for_each(|(i, &x)| put(i, x as f32 / 255.0)),
+            .for_each(|(i, &x)| put(i, x as f32 * scale + offset)),
         Decoded::U16(v) => v
             .iter()
             .take(voxels)
             .enumerate()
-            .for_each(|(i, &x)| put(i, x as f32 / 65535.0)),
+            .for_each(|(i, &x)| put(i, x as f32 * scale + offset)),
         Decoded::F32(v) => v
             .iter()
             .take(voxels)
             .enumerate()
-            .for_each(|(i, &x)| put(i, x)),
+            .for_each(|(i, &x)| put(i, x * scale + offset)),
     }
 }
 
@@ -331,11 +345,13 @@ impl SliceBoxes {
         }
     }
 
-    /// Add one decoded source slice of channel `c`, in texture units.
+    /// Add one decoded source slice of channel `c`, in texture units. The
+    /// volume's normalization is applied to the average, in
+    /// [`write`](Self::write): it is affine, so it commutes with averaging.
     fn add(&mut self, c: usize, dec: &Decoded) {
         match dec {
-            Decoded::U8(v) => self.add_samples(c, v, |x| x as f32 / 255.0),
-            Decoded::U16(v) => self.add_samples(c, v, |x| x as f32 / 65535.0),
+            Decoded::U8(v) => self.add_samples(c, v, |x| x as f32),
+            Decoded::U16(v) => self.add_samples(c, v, |x| x as f32),
             Decoded::F32(v) => self.add_floats(c, v),
         }
     }
@@ -390,15 +406,23 @@ impl SliceBoxes {
     }
 
     /// Divide every sum by the number of source voxels behind it (`slices`
-    /// source slices deep, the box clipped at the far edges) and store it into
-    /// this output slice's slab of every packed texture.
-    fn write(&self, layout: &VolumeLayout, slabs: &mut [&mut [u8]], slices: u32) {
+    /// source slices deep, the box clipped at the far edges), normalize it by
+    /// its channel's `affines` entry, and store it into this output slice's
+    /// slab of every packed texture.
+    fn write(
+        &self,
+        layout: &VolumeLayout,
+        slabs: &mut [&mut [u8]],
+        slices: u32,
+        affines: &[(f32, f32)],
+    ) {
         let (w, h) = self.src;
         let (sx, sy) = self.stride;
         let (ow, oh) = self.out;
         let fb = layout.format.bytes();
         let count = |o: u32, s: u32, n: u32| (n - o * s).min(s);
         for (c, sums) in self.sums.iter().enumerate() {
+            let (scale, offset) = affines[c];
             let (t, k) = layout.place(c);
             let texel = layout.texel_bytes(t);
             let slab = &mut slabs[t];
@@ -416,7 +440,9 @@ impl SliceBoxes {
                         None => sums[i] / (nx * ny * slices.max(1)) as f32,
                     };
                     let at = i * texel + k * fb;
-                    layout.format.encode(v, &mut slab[at..at + fb]);
+                    layout
+                        .format
+                        .encode(v * scale + offset, &mut slab[at..at + fb]);
                 }
             }
         }
@@ -446,59 +472,32 @@ struct BuiltReply {
 pub struct VolumeBuilder {
     tx: Sender<Request>,
     result: Arc<Mutex<Option<BuiltReply>>>,
-    /// Set by the worker when it could not open the file and gave up.
-    ///
-    /// A dead worker cannot be detected by *asking* it: `request` only fails
-    /// once the receiver has been dropped, which is a frame or two after the
-    /// open failed, and by then a request has already been queued and is being
-    /// polled for a reply that will never come. This is the flag that says so
-    /// on every frame after, rather than only on the one that happened to send.
-    failed: Arc<AtomicBool>,
     _handle: JoinHandle<()>,
 }
 
 #[cfg(feature = "threads")]
 impl VolumeBuilder {
-    /// Spawn a worker that opens its own map of `path` (shares the OS page
-    /// cache — no duplicate pixel RAM). Returns `None` if the thread fails to
-    /// spawn; if the worker's file open fails the thread exits and `request`
-    /// starts returning `false` — callers then build synchronously instead.
-    pub fn new(path: PathBuf) -> Option<Self> {
+    /// Spawn a worker over `stack` — the window's own, shared, so a stack held
+    /// in memory (a plugin's result, an import, every file in a browser) gets
+    /// one as well as a mapped file does. Returns `None` if the thread fails
+    /// to spawn — callers then build synchronously instead.
+    pub fn new(stack: Arc<TiffStack>) -> Option<Self> {
         let (tx, rx) = channel::<Request>();
         let result = Arc::new(Mutex::new(None));
         let result_worker = Arc::clone(&result);
-        let failed = Arc::new(AtomicBool::new(false));
-        let failed_worker = Arc::clone(&failed);
         let handle = std::thread::Builder::new()
             .name("fasttiff-volume".to_owned())
-            .spawn(move || match TiffStack::open(&path) {
-                Ok(stack) => worker_loop(stack, rx, result_worker),
-                Err(e) => {
-                    // Not always a problem worth reporting: a stack a plugin
-                    // imported has no file on disk at all, and its `path` is
-                    // the name it is shown under. The caller builds volumes
-                    // here on the main thread instead.
-                    log::debug!("volume builder: can't open {}: {e:#}", path.display());
-                    failed_worker.store(true, Ordering::Release);
-                }
-            })
+            .spawn(move || worker_loop(stack, rx, result_worker))
             .ok()?;
         Some(Self {
             tx,
             result,
-            failed,
             _handle: handle,
         })
     }
 
-    /// Whether the worker gave up before it started: its file could not be
-    /// opened, and it will never answer anything.
-    pub fn failed(&self) -> bool {
-        self.failed.load(Ordering::Acquire)
-    }
-
-    /// Queue a build. Returns `false` when the worker is gone (its file open
-    /// failed) — the caller should build synchronously instead.
+    /// Queue a build. Returns `false` when the worker is gone — the caller
+    /// should build synchronously instead.
     pub fn request(&self, generation: u64, plan: VolumePlan) -> bool {
         self.tx.send(Request { generation, plan }).is_ok()
     }
@@ -522,7 +521,11 @@ impl VolumeBuilder {
 }
 
 #[cfg(feature = "threads")]
-fn worker_loop(stack: TiffStack, rx: Receiver<Request>, result: Arc<Mutex<Option<BuiltReply>>>) {
+fn worker_loop(
+    stack: Arc<TiffStack>,
+    rx: Receiver<Request>,
+    result: Arc<Mutex<Option<BuiltReply>>>,
+) {
     // Block for a request; channel closed (VolumeBuilder dropped) -> exit.
     while let Ok(mut req) = rx.recv() {
         // Only the most recent request matters: a 4D scrub queues many
@@ -555,15 +558,11 @@ pub struct VolumeBuilder(std::convert::Infallible);
 
 #[cfg(not(feature = "threads"))]
 impl VolumeBuilder {
-    pub fn new(_path: PathBuf) -> Option<Self> {
+    pub fn new(_stack: Arc<TiffStack>) -> Option<Self> {
         None
     }
 
     pub fn request(&self, _generation: u64, _plan: VolumePlan) -> bool {
-        match self.0 {}
-    }
-
-    pub fn failed(&self) -> bool {
         match self.0 {}
     }
 

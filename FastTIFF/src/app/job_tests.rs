@@ -6,7 +6,7 @@
 //! parked at 0% for thirty seconds reads as a hang, and a plugin is under no
 //! obligation to call `progress` at all.
 
-use super::{Job, PROGRESS_UNKNOWN};
+use super::{due, Job, PROGRESS_UNKNOWN};
 use std::sync::atomic::Ordering;
 
 #[test]
@@ -402,4 +402,21 @@ fn a_plugins_progress_reaches_the_bar_at_the_same_scale() {
             "the plugin said {f}, the bar drew {drawn}"
         );
     }
+}
+
+/// Progress wakes the interface at most every 100 ms: the first report after
+/// that long is due, the ones inside the next 100 ms are not, and only one of
+/// several reports at the same instant claims the wake.
+#[test]
+fn progress_wakes_are_spaced() {
+    let last = std::sync::atomic::AtomicU64::new(0);
+    assert!(!due(&last, 50, 100), "not yet 100 ms in");
+    assert!(due(&last, 100, 100));
+    assert!(!due(&last, 100, 100), "the same instant claims it once");
+    assert!(!due(&last, 199, 100));
+    assert!(due(&last, 200, 100));
+    assert!(
+        !due(&last, 150, 100),
+        "a clock read late does not wake again"
+    );
 }

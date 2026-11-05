@@ -5,7 +5,7 @@ use super::*;
 use fasttiff_plugin_api::ParamValue;
 
 // The plane order these tools rely on — channel fastest, then Z, then T — is
-// pinned where it can actually be got wrong: in `tests/plugins.rs`, against a
+// pinned where it can actually be got wrong: in `tests/it/plugins.rs`, against a
 // real stack whose every plane carries its own `(c, z, t)`. There is no
 // formula here to unit-test, because none of the tools computes an index.
 // Each chooses which `(z, t)` pairs to walk and hands them to `map_planes`

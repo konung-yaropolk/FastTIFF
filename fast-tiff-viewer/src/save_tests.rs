@@ -7,10 +7,10 @@
 //! offset below — looks perfectly plausible until someone measures something.
 
 use super::*;
-use crate::stack::Stack;
+use crate::stack::{Stack, Window};
 use fast_tiff_lib::{
-    read_frame_f32, read_frame_u16, SampleType, StackMetaWrite, TiffStack, TiffWriter,
-    WriterOptions,
+    read_frame_f32, read_frame_u16, read_planes_f32, SampleType, StackMetaWrite, TiffStack,
+    TiffWriter, WriterOptions,
 };
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -19,7 +19,9 @@ const W: u32 = 6;
 const H: u32 = 4;
 
 fn temp(name: &str) -> PathBuf {
-    let p = std::env::temp_dir().join(format!("fasttiff-save-{name}.tif"));
+    // The process id keeps two test runs on one machine (two checkouts, or the
+    // default and glow suites) from writing over each other's files.
+    let p = std::env::temp_dir().join(format!("fasttiff-save-{}-{name}.tif", std::process::id()));
     let _ = std::fs::remove_file(&p);
     p
 }
@@ -33,6 +35,13 @@ fn source(sample: SampleType, channels: usize, slices: usize, frames: usize) -> 
             SampleType::U8 => {
                 let px: Vec<u8> = (0..W * H).map(|i| (p as u32 * 7 + i) as u8).collect();
                 w.write_frame_u8(&px).expect("frame");
+            }
+            // Bytes again, running from negative to positive.
+            SampleType::I8 => {
+                let px: Vec<u8> = (0..W * H)
+                    .map(|i| (p as i32 * 50 + i as i32 * 9 - 120) as i8 as u8)
+                    .collect();
+                w.write_frame_bytes(&px).expect("frame");
             }
             SampleType::F32 => {
                 let px: Vec<f32> = (0..W * H)
@@ -58,6 +67,20 @@ fn source(sample: SampleType, channels: usize, slices: usize, frames: usize) -> 
 
 fn open(bytes: Vec<u8>) -> Stack {
     Stack::from_bytes(bytes, "probe.tif".into(), false).expect("the source should open")
+}
+
+/// `bytes` opened, with one more frame of a different shape on the end — what
+/// a scanner's thumbnail IFD looks like to the reader. The writer will not
+/// make such a file, so the frame's geometry is faked, on a `TiffStack` of its
+/// own: the stack's is shared with its workers and is not this test's to edit.
+fn with_odd_frame(bytes: Vec<u8>) -> Stack {
+    let mut stack = open(bytes.clone());
+    let mut tiff = TiffStack::from_bytes(bytes).expect("parse");
+    let mut odd = tiff.frames[0].clone();
+    odd.width = W + 2;
+    tiff.frames.push(odd);
+    stack.tiff = std::sync::Arc::new(tiff);
+    stack
 }
 
 /// Read a saved file back. Through its bytes rather than `TiffStack::open`,
@@ -120,6 +143,65 @@ fn signed_samples_come_back_signed() {
         let want = read_frame_u16(&stack.tiff.data, a, stack.tiff.byte_order, None).unwrap();
         let got = read_frame_u16(&back.data, b, back.byte_order, None).unwrap();
         assert_eq!(want, got, "frame {i} shifted");
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Signed 8-bit is written as signed 8-bit, every value intact. It used to be
+/// written as unsigned with the same bits, so -1 read back as 255.
+#[test]
+fn signed_8_bit_samples_come_back_signed() {
+    let stack = open(source(SampleType::I8, 1, 1, 2));
+    let path = temp("signed8");
+    save_stack(&stack, &path).expect("save");
+
+    let back = reopen(&path);
+    let f = &back.frames[0];
+    assert_eq!(
+        (f.bits_per_sample, f.sample_format),
+        (8, fast_tiff_lib::SampleFormat::SignedInt),
+        "the file no longer says it is signed 8-bit"
+    );
+    for (i, (a, b)) in stack.tiff.frames.iter().zip(&back.frames).enumerate() {
+        let want = read_frame_f32(&stack.tiff.data, a, stack.tiff.byte_order).unwrap();
+        let got = read_frame_f32(&back.data, b, back.byte_order).unwrap();
+        assert!(
+            want.iter().any(|&v| v < 0.0),
+            "the source has negative samples"
+        );
+        assert_eq!(want, got, "frame {i} changed");
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A planar RGB stack is written planar: its frames are copied as the file
+/// lays them out, so writing them as interleaved would scramble every pixel.
+#[test]
+fn a_planar_rgb_stack_keeps_its_planes() {
+    let opts = WriterOptions::new(W, H, SampleType::U8)
+        .samples_per_pixel(3)
+        .planar(true);
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).expect("writer");
+    for f in 0..2u32 {
+        // Each plane its own ramp, so a mixed-up plane shows.
+        let px: Vec<u8> = (0..3 * W * H)
+            .map(|i| (f * 90 + i * 3 + i / (W * H) * 70) as u8)
+            .collect();
+        w.write_frame_u8(&px).expect("frame");
+    }
+    let stack = open(w.finish().expect("finish").into_inner());
+    assert!(
+        stack.tiff.frames[0].is_planar(),
+        "the source should be planar"
+    );
+    let path = temp("planar-rgb");
+    save_stack(&stack, &path).expect("save");
+
+    let back = reopen(&path);
+    for (i, (a, b)) in stack.tiff.frames.iter().zip(&back.frames).enumerate() {
+        let want = read_planes_f32(&stack.tiff.data, a, stack.tiff.byte_order).unwrap();
+        let got = read_planes_f32(&back.data, b, back.byte_order).unwrap();
+        assert_eq!(want, got, "frame {i}: the planes changed");
     }
     let _ = std::fs::remove_file(&path);
 }
@@ -229,19 +311,7 @@ fn the_instruments_record_is_carried_and_the_imagej_block_is_not_doubled() {
 fn a_stack_of_mixed_frame_shapes_is_refused_with_a_reason() {
     // Two frames of different sizes, written by hand — the writer will not do
     // it, so the bytes are assembled from two single-frame files.
-    let a = source(SampleType::U16, 1, 1, 1);
-    let stack = open(a);
-    // Fake the second frame's geometry, which is what a scanner's thumbnail
-    // IFD looks like to the reader.
-    let mut stack = stack;
-    let mut odd = stack.tiff.frames[0].clone();
-    odd.width = W + 2;
-    // Through `get_mut` because the stack shares its `TiffStack` with anything
-    // running on a worker; here nothing else holds it, so this always succeeds.
-    std::sync::Arc::get_mut(&mut stack.tiff)
-        .expect("the fixture holds the only reference")
-        .frames
-        .push(odd);
+    let stack = with_odd_frame(source(SampleType::U16, 1, 1, 1));
 
     let path = temp("mixed");
     let err = save_stack(&stack, &path).expect_err("mixed shapes cannot be saved");
@@ -333,14 +403,7 @@ fn a_stopped_save_leaves_no_file_behind() {
 fn a_failed_save_leaves_no_file_behind() {
     // A stack whose second frame is a different shape: refused, but only after
     // the writer has been created and the file exists.
-    let stack = open(source(SampleType::U16, 1, 1, 2));
-    let mut stack = stack;
-    let mut odd = stack.tiff.frames[0].clone();
-    odd.width = W + 2;
-    std::sync::Arc::get_mut(&mut stack.tiff)
-        .expect("the fixture holds the only reference")
-        .frames
-        .push(odd);
+    let stack = with_odd_frame(source(SampleType::U16, 1, 1, 2));
 
     let path = temp("failed");
     save_source(&SaveSource::of(&stack), &path, &mut |_| true).expect_err("mixed shapes");
@@ -383,14 +446,7 @@ fn a_failed_save_leaves_an_existing_file_untouched() {
 
     // Mixed frame shapes: refused, but only after a writer would have been
     // created — which is what would truncate the target if it were the target.
-    let stack = open(source(SampleType::U16, 1, 1, 2));
-    let mut stack = stack;
-    let mut odd = stack.tiff.frames[0].clone();
-    odd.width = W + 2;
-    std::sync::Arc::get_mut(&mut stack.tiff)
-        .expect("the fixture holds the only reference")
-        .frames
-        .push(odd);
+    let stack = with_odd_frame(source(SampleType::U16, 1, 1, 2));
 
     save_source(&SaveSource::of(&stack), &path, &mut |_| true).expect_err("mixed shapes");
     assert_eq!(
@@ -627,7 +683,9 @@ fn ij_metadata(bytes: &[u8]) -> IjMetadata {
     let blob = tag(50839).owned_bytes(bytes, order).unwrap();
     assert_eq!(&blob[..4], b"JIJI", "the little-endian magic");
     let directory = blob[4..counts[0] as usize]
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|rec| {
             let mut code = [rec[0], rec[1], rec[2], rec[3]];
             code.reverse();
@@ -890,6 +948,16 @@ fn ranged(sample: SampleType, range: (f64, f64)) -> Stack {
             SampleType::U16 => w
                 .write_frame_u16(&(0..256).map(|i| i as u16 * 100).collect::<Vec<_>>())
                 .unwrap(),
+            SampleType::I16 => w
+                .write_frame_bytes(
+                    &(0..256i32)
+                        .flat_map(|i| ((i - 128) as i16 * 100).to_le_bytes())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+            SampleType::I8 => w
+                .write_frame_bytes(&(0..256i32).map(|i| i as u8).collect::<Vec<_>>())
+                .unwrap(),
             _ => unreachable!(),
         }
     }
@@ -910,30 +978,31 @@ fn declared_range(bytes: Vec<u8>) -> (String, String) {
 }
 
 /// An 8-bit file's display range is in its own 0..255 units both ways: it
-/// opens as that window on its samples, a save writes it back as it was —
-/// not 257 times it, which ImageJ would show saturated — and a window the
+/// opens as that window on its samples — the window the interface holds, and
+/// the one the 8-bit texture is shown with — a save writes it back as it was,
+/// not on the 16-bit scale, which ImageJ would show saturated, and a window the
 /// user set is written in sample units too.
 #[test]
 fn an_8_bit_window_is_in_sample_units_both_ways() {
     let mut s = ranged(SampleType::U8, (10.0, 200.0));
     let c = &s.display.settings[0];
     assert_eq!(
-        crate::channels::sample_window(c.kind, c.min, c.max),
-        (10.0, 200.0),
+        c.window,
+        Window::new(10.0, 200.0),
         "opens on samples 10..200"
     );
+    assert_eq!(c.units.to_texture(c.window), (10.0, 200.0));
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
     assert_eq!(declared_range(bytes), ("10".into(), "200".into()));
 
-    // Auto-contrast, or a drag: the window as the interface holds it.
-    (s.display.settings[0].min, s.display.settings[0].max) = (20.0 * 257.0, 147.0 * 257.0);
+    // Auto-contrast, or a drag.
+    s.display.settings[0].window = Window::new(20.0, 147.0);
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
     assert_eq!(declared_range(bytes.clone()), ("20".into(), "147".into()));
     let back = Stack::from_bytes(bytes, "again.tif".into(), false).unwrap();
-    let c = &back.display.settings[0];
     assert_eq!(
-        (c.min, c.max),
-        (20.0 * 257.0, 147.0 * 257.0),
+        back.display.settings[0].window,
+        Window::new(20.0, 147.0),
         "and reopens the same"
     );
 }
@@ -943,7 +1012,48 @@ fn an_8_bit_window_is_in_sample_units_both_ways() {
 fn a_16_bit_window_is_unchanged() {
     let s = ranged(SampleType::U16, (1000.0, 30000.0));
     let c = &s.display.settings[0];
-    assert_eq!((c.min, c.max), (1000.0, 30000.0));
+    assert_eq!(c.window, Window::new(1000.0, 30000.0));
+    assert_eq!(c.units.to_texture(c.window), (1000.0, 30000.0));
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
     assert_eq!(declared_range(bytes), ("1000".into(), "30000".into()));
+}
+
+/// ImageJ states a signed 16-bit image's range offset into unsigned, the way
+/// it holds the pixels. Such a range opens as the signed window it means —
+/// shown with exactly the texture window it always was — and a save writes it
+/// back in ImageJ's units, unchanged.
+#[test]
+fn a_signed_16_bit_window_is_in_imagejs_offset_units_in_the_file() {
+    // -100..500 in the samples, as ImageJ writes it.
+    let declared = (32_668.0, 33_268.0);
+    let mut s = ranged(SampleType::I16, declared);
+    let c = &s.display.settings[0];
+    assert_eq!(c.window, Window::new(-100.0, 500.0), "the signed values");
+    assert_eq!(
+        c.units.to_texture(c.window),
+        (declared.0 as f32, declared.1 as f32),
+        "on the texture's offset scale, as before"
+    );
+    let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
+    assert_eq!(declared_range(bytes), ("32668".into(), "33268".into()));
+
+    s.display.settings[0].window = Window::new(-12_800.0, 0.0);
+    let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
+    assert_eq!(
+        declared_range(bytes.clone()),
+        ("19968".into(), "32768".into())
+    );
+    let back = Stack::from_bytes(bytes, "again.tif".into(), false).unwrap();
+    assert_eq!(back.display.settings[0].window, Window::new(-12_800.0, 0.0));
+}
+
+/// Signed 8-bit has no offset in ImageJ's convention: its range is in the
+/// samples' own values, opened and saved as they are.
+#[test]
+fn a_signed_8_bit_window_is_in_sample_units_both_ways() {
+    let s = ranged(SampleType::I8, (-10.0, 100.0));
+    let c = &s.display.settings[0];
+    assert_eq!(c.window, Window::new(-10.0, 100.0));
+    let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
+    assert_eq!(declared_range(bytes), ("-10".into(), "100".into()));
 }

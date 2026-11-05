@@ -23,3 +23,17 @@ fn an_error_in_a_scope_is_returned_not_raised() {
     });
     assert!(made.is_err());
 }
+
+/// Releasing the resident context drops it, and with it its buffers; and
+/// releasing when nothing is resident is harmless.
+#[test]
+fn a_released_context_is_gone() {
+    release_resident();
+    let Some(context) = GpuContext::new(64, 64) else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    *RESIDENT.lock().unwrap() = Some(context);
+    release_resident();
+    assert!(RESIDENT.lock().unwrap().is_none());
+}

@@ -448,7 +448,7 @@ fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32]) -> Option<IjBlocks> {
         return None;
     }
     let mut plan: Vec<([u8; 4], usize)> = Vec::new();
-    for chunk in header[4..].chunks_exact(8) {
+    for chunk in header[4..].as_chunks::<8>().0.iter() {
         let mut code = [0u8; 4];
         code.copy_from_slice(&chunk[0..4]);
         if order == ByteOrder::Little {
@@ -484,7 +484,7 @@ fn try_parse_ij_blocks(data: &[u8], byte_counts: &[u32]) -> Option<IjBlocks> {
                 b"rang" => {
                     // n channel pairs of f64 (min, max), same endianness as the directory.
                     let mut parsed = Vec::new();
-                    for pair in block.chunks_exact(16) {
+                    for pair in block.as_chunks::<16>().0.iter() {
                         let lo = header_order.f64_from(&pair[0..8]);
                         let hi = header_order.f64_from(&pair[8..16]);
                         parsed.push((lo, hi));

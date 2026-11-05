@@ -11,7 +11,7 @@
 
 //! Measuring a batch of frames, on whichever backend was asked for.
 
-use crate::fft::Fft2;
+use crate::fft::{Fft2, FftPlans2};
 use crate::masks::RefFilters;
 use crate::par::*;
 use crate::rigid::{correlation_map, lcorr_for, peak_of, Shift};
@@ -124,21 +124,23 @@ pub fn measure_batch(
                 .map(|f| correlation_map(&mut fft, filters, f, settings.maxregshift, clip))
                 .collect()
         }
-        // A frame per core. Each worker needs its own plan and scratch — an
-        // `Fft2` is stateful — so one is built per chunk rather than per frame.
+        // A frame at a time, to whichever core is free. The plans are built
+        // once and shared; each worker keeps only its own scratch (`map_init`
+        // makes one per piece of work rayon splits off, which is cheap now that
+        // it is scratch alone).
         //
         // `Gpu` reaches here only in a build without the feature, or when the
         // device could not be opened; both are already reported to the user.
-        (None, Backend::MultiThread | Backend::Gpu) => frames
-            .par_chunks(8.max(frames.len().div_ceil(crate::par::workers())))
-            .flat_map_iter(|chunk| {
-                let mut fft = Fft2::new(ly, lx);
-                chunk
-                    .iter()
-                    .map(|f| correlation_map(&mut fft, filters, f, settings.maxregshift, clip))
-                    .collect::<Vec<_>>()
-            })
-            .collect(),
+        (None, Backend::MultiThread | Backend::Gpu) => {
+            let plans = FftPlans2::new(ly, lx);
+            frames
+                .par_iter()
+                .map_init(
+                    || Fft2::with_plans(&plans),
+                    |fft, f| correlation_map(fft, filters, f, settings.maxregshift, clip),
+                )
+                .collect()
+        }
     };
 
     smooth_in_time(&mut maps, settings.smooth_sigma_time);

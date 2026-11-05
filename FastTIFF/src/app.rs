@@ -285,14 +285,16 @@ fn import_with_plugin(
         .import(&request, &mut Host(progress, cancel))
         .map_err(|e| format!("{name}: {e}"))?;
 
-    let bytes = fast_tiff_viewer::plugins::to_tiff_bytes(&imported.image, imported.info.as_ref())
-        .map_err(|e| format!("{name}: {e:#}"))?;
     let fallback = imported
         .info
         .as_ref()
         .map(|i| i.name.clone())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| imported.image.name.clone());
+    // The planes go into the encode, and each is freed once written: the
+    // import is then held about once, not twice.
+    let bytes = fast_tiff_viewer::plugins::into_tiff_bytes(imported.image, imported.info.as_ref())
+        .map_err(|e| format!("{name}: {e:#}"))?;
     Ok(Opened::Bytes(bytes, imported_label(path, &fallback)))
 }
 
@@ -491,7 +493,7 @@ const HIST_PLAYBACK_INTERVAL: f64 = 0.25;
 struct HistCache {
     frame: usize,
     generation: u64,
-    bounds: Vec<(f32, f32)>,
+    bounds: Vec<fast_tiff_viewer::Window>,
     hists: Vec<fast_tiff_viewer::Histogram>,
 }
 
@@ -651,12 +653,18 @@ struct PluginRun {
 
 /// Turn what a plugin returned into something the interface can apply in a
 /// frame — encoding and writing on the way, since this runs on the worker.
+///
+/// `same_document` says whether the window still shows the document the run
+/// started on. A replacement for one that has since been closed goes to a new
+/// window, as a new document would: replacing what the user opened meanwhile
+/// would throw that away and show a result of something else in its place.
 fn finish_outcome(
     outcome: fasttiff_plugin_api::Outcome,
     label: &std::sync::Mutex<String>,
     progress: &std::sync::atomic::AtomicU32,
     cancel: &std::sync::atomic::AtomicBool,
     luts: &[fasttiff_plugin_api::Lut],
+    same_document: &dyn Fn() -> bool,
 ) -> Result<PluginProduct, String> {
     use fasttiff_plugin_api::Outcome;
     let stopped = || cancel.load(std::sync::atomic::Ordering::Relaxed);
@@ -673,8 +681,11 @@ fn finish_outcome(
         Outcome::SelectRegion { prompt } => Ok(PluginProduct::SelectRegion(prompt)),
         Outcome::NewDocument(image) => {
             Job::begin_phase(label, progress, "Encoding result");
-            let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
-                &image,
+            // Taken, not borrowed: each plane is freed as soon as it is
+            // written, so the result is held about once while it is encoded.
+            let image_name = image.name.clone();
+            let bytes = match fast_tiff_viewer::plugins::into_tiff_bytes_reporting(
+                *image,
                 None,
                 luts,
                 &mut |f| {
@@ -690,8 +701,7 @@ fn finish_outcome(
             // A file name from the image's own name, with anything a filesystem
             // would object to replaced. Needed even for the handover that never
             // touches a filesystem: it is what the new window is titled.
-            let stem: String = image
-                .name
+            let stem: String = image_name
                 .chars()
                 .map(|c| {
                     if c.is_alphanumeric() || "-_. ".contains(c) {
@@ -716,7 +726,7 @@ fn finish_outcome(
             #[cfg(target_arch = "wasm32")]
             {
                 let name = format!("{stem}.tif");
-                return match crate::web_open::open_bytes_in_new_tab(&bytes, &name) {
+                match crate::web_open::open_bytes_in_new_tab(&bytes, &name) {
                     Ok(()) => Ok(PluginProduct::NewWindow(name)),
                     // A refused popup is the expected failure, not an
                     // exceptional one, and it is already handled: the result
@@ -726,10 +736,10 @@ fn finish_outcome(
                     // through.
                     Err(why) => Ok(PluginProduct::Inline {
                         bytes,
-                        name: image.name.clone(),
+                        name: image_name,
                         why,
                     }),
-                };
+                }
             }
 
             #[cfg(not(target_arch = "wasm32"))]
@@ -774,16 +784,27 @@ fn finish_outcome(
                     // whole and is shown in this window instead.
                     Err(e) => Ok(PluginProduct::Inline {
                         bytes,
-                        name: image.name.clone(),
+                        name: image_name,
                         why: e.to_string(),
                     }),
                 }
             }
         }
+        Outcome::ReplaceDocument(image) if !same_document() => finish_outcome(
+            Outcome::NewDocument(image),
+            label,
+            progress,
+            cancel,
+            luts,
+            same_document,
+        ),
         Outcome::ReplaceDocument(image) => {
             Job::begin_phase(label, progress, "Encoding result");
-            let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
-                &image,
+            // Taken, not borrowed: each plane is freed as soon as it is
+            // written, so the result is held about once while it is encoded.
+            let image_name = image.name.clone();
+            let bytes = match fast_tiff_viewer::plugins::into_tiff_bytes_reporting(
+                *image,
                 None,
                 luts,
                 &mut |f| {
@@ -799,13 +820,15 @@ fn finish_outcome(
             // this one, so the bytes only have to reach the interface thread.
             Ok(PluginProduct::Replace {
                 bytes,
-                name: image.name.clone(),
+                name: image_name,
             })
         }
         Outcome::SaveToFile { image, path } => {
             Job::begin_phase(label, progress, "Writing result");
-            let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
-                &image,
+            // Taken, not borrowed: each plane is freed as soon as it is
+            // written, so the result is held about once while it is encoded.
+            let bytes = match fast_tiff_viewer::plugins::into_tiff_bytes_reporting(
+                *image,
                 None,
                 luts,
                 &mut |f| {
@@ -825,13 +848,14 @@ fn finish_outcome(
             #[cfg(target_arch = "wasm32")]
             {
                 let name = crate::web_save::name_from_path(&path);
-                return crate::web_save::download(&bytes, &name)
-                    .map(|()| PluginProduct::Saved(name));
+                crate::web_save::download(&bytes, &name).map(|()| PluginProduct::Saved(name))
             }
             #[cfg(not(target_arch = "wasm32"))]
-            std::fs::write(&path, bytes)
-                .map(|()| PluginProduct::Saved(path))
-                .map_err(|e| e.to_string())
+            {
+                std::fs::write(&path, bytes)
+                    .map(|()| PluginProduct::Saved(path))
+                    .map_err(|e| e.to_string())
+            }
         }
     }
 }
@@ -992,7 +1016,63 @@ impl Job {
     /// that only has the `Arc` can call it.
     fn report(progress: &std::sync::atomic::AtomicU32, fraction: f32) {
         fast_tiff_viewer::plugins::progress::store(progress, fraction);
+        wake_ui_for_progress();
     }
+}
+
+/// The interface's egui context, for a worker to wake it with.
+///
+/// A worker cannot draw, and nothing makes the interface look at a job but a
+/// frame. Before this, a frame was asked for on every vsync for as long as any
+/// job was alive: a ten-minute registration was some 36,000 full redraws, each
+/// the whole of `draw`, to move a bar a percent at a time — a core taken from
+/// the registration, and a GPU kept out of idle. Now a frame comes when there
+/// is something to show: a result arriving ([`wake_ui`]) or the bar moving
+/// ([`wake_ui_for_progress`]), with a slow poll as a safety net.
+///
+/// Recorded on the first frame, before any worker can exist.
+static UI: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
+
+/// Ask the interface for a frame, from any thread: a result has arrived.
+fn wake_ui() {
+    if let Some(ctx) = UI.get() {
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+}
+
+/// [`wake_ui`] for a progress report, at most every 100 ms: a bar shows no
+/// finer steps than that, and a plugin that reports once a row would otherwise
+/// redraw the window thousands of times a second.
+///
+/// Not in the browser, where a job runs on the interface thread itself and
+/// there is no clock to throttle by (`Instant` has none on wasm32).
+fn wake_ui_for_progress() {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        static LAST_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis() as u64;
+        if due(&LAST_MS, now, 100) {
+            wake_ui();
+        }
+    }
+}
+
+/// Whether at least `every` ms have passed since the time in `last`, claiming
+/// `now` as the new last time when they have — once, however many threads ask
+/// at the same moment. `last` starts at 0, so the first ask after `every` ms
+/// of running is due.
+#[cfg(not(target_arch = "wasm32"))]
+fn due(last: &std::sync::atomic::AtomicU64, now: u64, every: u64) -> bool {
+    use std::sync::atomic::Ordering;
+    let then = last.load(Ordering::Relaxed);
+    now.saturating_sub(then) >= every
+        && last
+            .compare_exchange(then, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
 }
 
 pub enum Opened {
@@ -1227,6 +1307,10 @@ impl PanelLayout {
     /// `Some` disarms. `None` means either nothing was armed or the change has
     /// not shown up yet — [`waiting`](Self::waiting) tells those apart, and the
     /// wait is bounded so a change that never comes stops asking for frames.
+    ///
+    /// Native only, like its caller: in a browser the window is the page's,
+    /// and nothing here resizes it.
+    #[cfg(not(target_arch = "wasm32"))]
     fn grow_delta(&mut self, height: f32) -> Option<f32> {
         if self.grow_armed == 0 {
             return None;
@@ -1242,6 +1326,7 @@ impl PanelLayout {
 
     /// Whether a grow is still expecting the bar's height to change, and the
     /// caller should keep frames coming so it can see it.
+    #[cfg(not(target_arch = "wasm32"))]
     fn waiting(&self) -> bool {
         self.grow_armed > 0
     }
@@ -1269,6 +1354,15 @@ pub struct ViewerApp {
     /// get off the interface thread. Handing the registry over and taking it
     /// back makes "busy" a state the code can see rather than a wait it cannot.
     plugins: Option<fast_tiff_viewer::plugins::Registry>,
+    /// What [`plugins`](Self::plugins) claims to import, by extension, kept for
+    /// when the registry is with a job: a file none of them wants is the TIFF
+    /// reader's either way, and opening it need not wait for the job to end.
+    claimed_extensions: Vec<String>,
+    /// Bumped each time a document lands in this window. A plugin run notes it
+    /// when it starts, so a result meant to replace the document it ran on can
+    /// tell that the user has opened another one since — and go to a window of
+    /// its own instead of over the one the user is now looking at.
+    document: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The plugin whose dialog is open, and the values entered so far.
     plugin_dialog: Option<PluginDialog>,
     /// Files opened asynchronously arrive here. Only the web picker uses it —
@@ -1469,6 +1563,8 @@ impl ViewerApp {
             #[cfg(target_arch = "wasm32")]
             plugins: Some(fast_tiff_viewer::plugins::Registry::new()),
             plugin_dialog: None,
+            claimed_extensions: Vec::new(),
+            document: Default::default(),
             open_tx,
             open_rx,
             job: None,
@@ -1497,6 +1593,11 @@ impl ViewerApp {
             volume_last_camera: None,
             volume_moved_at: None,
         };
+        app.claimed_extensions = app
+            .plugins
+            .as_ref()
+            .map(|r| r.claimed_extensions())
+            .unwrap_or_default();
         if let Some(opened) = initial {
             app.apply_opened(opened);
         }
@@ -1595,6 +1696,8 @@ impl ViewerApp {
     /// Reset everything that described the previous file, once a load has
     /// landed. The other half of [`apply_opened`](Self::apply_opened).
     fn finish_open(&mut self) {
+        self.document
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Start at 1:1; on native the next frame computes a fit-to-screen zoom
         // and sizes the window once. On the web `pending_initial_fit` is
         // consumed by the canvas layout instead.
@@ -1680,7 +1783,8 @@ impl ViewerApp {
             self.hist = None;
             return;
         };
-        let bounds: Vec<(f32, f32)> = loaded.display.settings.iter().map(|s| s.bounds).collect();
+        let bounds: Vec<fast_tiff_viewer::Window> =
+            loaded.display.settings.iter().map(|s| s.bounds).collect();
         let fresh = self.hist.as_ref().is_some_and(|c| {
             c.frame == loaded.frame_index
                 && c.generation == loaded.prefetch_gen
@@ -2023,6 +2127,10 @@ impl ViewerApp {
         let (progress, cancel, label) = self.begin_job(job);
 
         let tx = self.open_tx.clone();
+        // Which document this ran on, to tell if it is still the one on show
+        // when the result arrives (see `finish_outcome`).
+        let document = std::sync::Arc::clone(&self.document);
+        let run_on = document.load(std::sync::atomic::Ordering::Relaxed);
         // The run itself, as one closure, so that the only difference between
         // the platforms is whether a thread carries it.
         let work = move || {
@@ -2042,7 +2150,9 @@ impl ViewerApp {
             // interface thread once the result came back — which is why the bar
             // reached 100% and the window then froze until it was done.
             let outcome = match outcome {
-                Ok(o) => finish_outcome(o, &label, &progress, &cancel, &luts),
+                Ok(o) => finish_outcome(o, &label, &progress, &cancel, &luts, &|| {
+                    document.load(std::sync::atomic::Ordering::Relaxed) == run_on
+                }),
                 Err(e) => Err(e.to_string()),
             };
             let run = PluginRun {
@@ -2053,6 +2163,7 @@ impl ViewerApp {
                 outcome,
             };
             let _ = tx.send(Incoming::Ran(Box::new(registry), Box::new(run)));
+            wake_ui();
         };
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -2164,13 +2275,24 @@ impl ViewerApp {
     /// hands the path back, unclaimed, for the ordinary TIFF reader.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_import(&mut self, path: std::path::PathBuf) -> Result<(), std::path::PathBuf> {
-        // One at a time. The registry is with the worker, and a second import
-        // would have nothing to read the file with — better to say so than to
-        // hand an OIR to the TIFF reader and report that it is not a TIFF.
+        // One import at a time. The registry is with the worker, and a second
+        // import would have nothing to read the file with — better to say so
+        // than to hand an OIR to the TIFF reader and report that it is not a
+        // TIFF. A file no importer claims needs no importer, though: it is the
+        // TIFF reader's whether a job is running or not, and refusing it made
+        // every file unopenable for the length of an hour-long filter.
         let Some(registry) = self.plugins.take() else {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_lowercase);
+            if ext.is_none_or(|e| !self.claimed_extensions.contains(&e)) {
+                return Err(path);
+            }
             self.core.status = Some(self.busy_message());
             return Ok(());
         };
+        self.claimed_extensions = registry.claimed_extensions();
         // Cheap rejection first: no file is opened unless an extension matches,
         // so the common case of a TIFF costs one string compare — and costs no
         // thread.
@@ -2190,6 +2312,7 @@ impl ViewerApp {
             // If the send fails the window is gone, and so is anyone who wanted
             // the result.
             let _ = tx.send(Incoming::Imported(Box::new(registry), result));
+            wake_ui();
         });
         Ok(())
     }
@@ -2277,6 +2400,7 @@ impl ViewerApp {
             let outcome = WriteOutcome::of(result, &cancel);
             // The registry was never taken: a plain save is the app's own code.
             let _ = tx.send(Incoming::Wrote(None, name, outcome));
+            wake_ui();
         });
     }
 
@@ -2468,6 +2592,7 @@ impl ViewerApp {
             }
             let outcome = WriteOutcome::of(result, &cancel);
             let _ = tx.send(Incoming::Wrote(Some(Box::new(registry)), name, outcome));
+            wake_ui();
         });
     }
 
@@ -2828,17 +2953,22 @@ impl ViewerApp {
         if self.core.poll_open() {
             self.finish_open();
         }
-        // A worker counts as much as a load here — an import, a plugin, a save
-        // or an export. None of them can wake the interface, and the frame that
-        // notices one has finished is this same one. Without this the readout
-        // would only move when the mouse did, and the result would land
-        // whenever the user next happened to touch something.
+        // A worker — an import, a plugin, a save or an export — wakes the
+        // interface itself when its result is sent and as its progress moves
+        // (`wake_ui`). The slow poll here is only a safety net, for a wake
+        // that raced the frame. A load cannot wake anything (the core knows no
+        // toolkit), so it is polled, at a rate a readout needs rather than at
+        // the display's.
         #[cfg(not(target_arch = "wasm32"))]
-        let importing = self.job.is_some();
+        let working = self.job.is_some();
         #[cfg(target_arch = "wasm32")]
-        let importing = false;
-        if importing || self.core.load_stage().is_some() {
-            ui.ctx().request_repaint();
+        let working = false;
+        if self.core.load_stage().is_some() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+        } else if working {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
         }
 
         // Collect zoom input before panels consume events.
@@ -4635,6 +4765,7 @@ impl ViewerApp {
 
 impl eframe::App for ViewerApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        UI.get_or_init(|| ui.ctx().clone());
         // The graphics device is gone, and egui would panic drawing this frame
         // without it. Ending here instead puts the reason in words; the panic
         // hook shows it (see `render::explain_gpu_failure`).

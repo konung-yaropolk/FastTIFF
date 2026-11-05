@@ -16,7 +16,7 @@ impl ImportHost for NoHost {
 }
 
 fn tmp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("fasttiff-raw-{name}"));
+    let p = std::env::temp_dir().join(format!("fasttiff-raw-{}-{name}", std::process::id()));
     std::fs::write(&p, bytes).unwrap();
     p
 }

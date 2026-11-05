@@ -46,7 +46,6 @@ pub struct StackHost {
     /// case — an uncompressed, native-order, unsigned 16-bit frame, which is
     /// what this library's own writer and ImageJ both produce — converts
     /// straight from the memory map and leaves this empty.
-    scratch: crate::planes::Scratch,
     /// The regions the user has drawn, if any. See
     /// [`HostContext::selection`](fasttiff_plugin_api::HostContext::selection).
     selection: Vec<fasttiff_plugin_api::Roi>,
@@ -73,7 +72,6 @@ impl StackHost {
             tiff: Arc::clone(&stack.tiff),
             dims: stack.display.dims,
             rgb: stack.display.rgb,
-            scratch: Default::default(),
             selection: Vec::new(),
             pending: Default::default(),
             animating: false,
@@ -195,8 +193,10 @@ impl HostContext for StackHost {
     fn read_plane_u16(&mut self, plane: Plane, out: &mut Vec<u16>) -> Result<(), PluginError> {
         let (ifd, sample) = self.locate(plane)?;
         let frame = &self.tiff.frames[ifd];
-        // The contrast window is what a float plane is rescaled through; a
-        // plugin wanting the raw values asks for f32 instead.
+        // The contrast window is what a 32- or 64-bit plane is rescaled
+        // through. It is in the channel's own units, which for such a plane are
+        // the values being rescaled, so it can be handed to the decoder as it
+        // is. A plugin wanting the raw values asks for f32 instead.
         let range = self.view.channels.get(plane.c).map(|c| (c.min, c.max));
         read_plane_u16_into(
             &self.tiff.data,
@@ -206,6 +206,7 @@ impl HostContext for StackHost {
             sample,
             out,
         )
+        .map(|_map| ())
         .map_err(|e| {
             PluginError::failed(format!(
                 "decoding (c{}, z{}, t{}): {e:#}",
@@ -218,14 +219,12 @@ impl HostContext for StackHost {
         let (ifd, sample) = self.locate(plane)?;
         // Shared with `crate::measure`, so a plugin's mean and the app's own
         // plot of the same pixels cannot disagree. See `crate::planes`.
-        crate::planes::plane_f32_into(&self.tiff, ifd, sample, &mut self.scratch, out).map_err(
-            |e| {
-                PluginError::failed(format!(
-                    "decoding (c{}, z{}, t{}): {e:#}",
-                    plane.c, plane.z, plane.t
-                ))
-            },
-        )
+        crate::planes::plane_f32_into(&self.tiff, ifd, sample, out).map_err(|e| {
+            PluginError::failed(format!(
+                "decoding (c{}, z{}, t{}): {e:#}",
+                plane.c, plane.z, plane.t
+            ))
+        })
     }
 
     fn progress(&mut self, fraction: f32) -> bool {
@@ -328,6 +327,10 @@ pub fn describe_stack(stack: &Stack) -> StackInfo {
 }
 
 /// The viewer's display state, snapshotted for the run.
+///
+/// The windows go out in the file's own sample units, which is what the
+/// contract promises ([`ChannelView::min`]) and what the viewer holds them in,
+/// so they are copied rather than converted.
 pub fn describe_view(
     stack: &Stack,
     frame_index: usize,
@@ -339,8 +342,8 @@ pub fn describe_view(
         .settings
         .iter()
         .map(|s| ChannelView {
-            min: s.min,
-            max: s.max,
+            min: s.window.lo,
+            max: s.window.hi,
             enabled: s.enabled,
         })
         .collect();

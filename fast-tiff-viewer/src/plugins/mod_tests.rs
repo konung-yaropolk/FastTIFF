@@ -369,3 +369,24 @@ fn the_mri_importers_are_installed_exactly_when_their_features_are() {
         }
     }
 }
+
+/// The claimed extensions are what `claims_extension` decides by — each once,
+/// sorted — so a host holding the list while the registry is away decides the
+/// same way. A TIFF is never among them unless an importer asks for it.
+#[test]
+fn the_claimed_extensions_agree_with_claims_extension() {
+    let reg = Registry::new();
+    let claimed = reg.claimed_extensions();
+    let mut sorted = claimed.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(claimed, sorted, "sorted, each once");
+    for ext in &claimed {
+        assert!(
+            reg.claims_extension(std::path::Path::new(&format!("a.{ext}"))),
+            "{ext}"
+        );
+    }
+    assert!(!claimed.iter().any(|e| e == "tif" || e == "tiff"));
+    assert!(!reg.claims_extension(std::path::Path::new("a.tif")));
+}

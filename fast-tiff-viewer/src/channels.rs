@@ -5,8 +5,10 @@
 use crate::display::Display;
 use crate::histogram::{auto_window, Histogram};
 use crate::stack::{ChannelSettings, Stack};
-use fast_tiff_lib::TiffStack;
+use crate::units::{SampleUnits, Window};
+use fast_tiff_lib::{DisplayMap, TiffStack};
 use scivis_render::{ChannelKind, Lut};
+use std::borrow::Cow;
 
 /// How many samples an auto-contrast scan looks at, at most. The scan runs once
 /// per channel while a file is opening — six of them for a 6-channel stack,
@@ -16,18 +18,47 @@ use scivis_render::{ChannelKind, Lut};
 /// drag, and a range off by one outlier pixel is imperceptible.
 const MINMAX_SAMPLE_BUDGET: usize = 1 << 18; // 262144
 
-/// Actual pixel min/max of channel `c`'s first frame, for integer-format
-/// data. Used as the auto-contrast fallback when no display range came
-/// from the file's metadata.
+/// Actual pixel min/max of channel `c`'s first frame with contrast in it, for
+/// integer-format data, in the file's own units — with the map the plane was
+/// decoded through. Used as the auto-contrast fallback when no display range
+/// came from the file's metadata.
+///
+/// The map is the plane's [`DisplayMap`], which an `Int16` channel's texture
+/// holds: fixed for 8- and 16-bit data, and for a 32- or 64-bit integer plane
+/// the range the decoder rescaled it through — which only the decoder knows,
+/// since it picks the range from the plane itself.
 ///
 /// Scans at most [`MINMAX_SAMPLE_BUDGET`] samples, striding across the frame
 /// when it is larger. Decoding still costs a frame, but the scan itself stops
 /// being O(pixels) on a 4K image.
-pub fn channel_minmax(tiff: &TiffStack, channel: usize, step: usize) -> Option<(f32, f32)> {
-    let one = |idx: usize| -> Option<(f32, f32)> {
+pub fn channel_minmax(
+    tiff: &TiffStack,
+    channel: usize,
+    step: usize,
+) -> Option<(Window, DisplayMap)> {
+    let one = |idx: usize| -> Option<((f32, f32), DisplayMap)> {
         let frame = tiff.frames.get(idx)?;
-        let pixels =
-            fast_tiff_lib::read_frame_u16(&tiff.data, frame, tiff.byte_order, None).ok()?;
+        // An 8- or 16-bit frame's map is fixed, and its plane can be borrowed
+        // straight from the file. A wide one is ranged on its own plane, and
+        // the reader that ranges it is the one that says what it picked.
+        let mut owned = Vec::new();
+        let (pixels, map) = match DisplayMap::of(frame, None) {
+            Some(map) => (
+                fast_tiff_lib::read_frame_u16(&tiff.data, frame, tiff.byte_order, None).ok()?,
+                map,
+            ),
+            None => {
+                let map = fast_tiff_lib::read_frame_u16_into(
+                    &tiff.data,
+                    frame,
+                    tiff.byte_order,
+                    None,
+                    &mut owned,
+                )
+                .ok()?;
+                (Cow::Borrowed(&owned[..]), map)
+            }
+        };
         let (mut lo, mut hi) = (u16::MAX, 0u16);
         // A prime-ish stride avoids landing on the same column of every row,
         // which a power-of-two stride would do on a power-of-two-wide image and
@@ -37,19 +68,26 @@ pub fn channel_minmax(tiff: &TiffStack, channel: usize, step: usize) -> Option<(
             lo = lo.min(p);
             hi = hi.max(p);
         }
-        Some((lo as f32, hi as f32))
+        Some(((lo as f32, hi as f32), map))
     };
-    scan_for_contrast(tiff, channel, step, one)
+    // Scanned, and widened when flat, on the decoder's display scale; only the
+    // answer is put into file units.
+    let ((lo, hi), map) = scan_for_contrast(tiff, channel, step, one)?;
+    let file = |v: f32| map.to_file(v as f64) as f32;
+    Some((Window::new(file(lo), file(hi)), map))
 }
 
-/// Actual float min/max of channel `c`'s first frame, for 32-bit float
-/// data — matches ImageJ auto-ranging a float image to its own values
-/// rather than assuming a fixed integer-shaped scale.
-pub fn channel_float_minmax(tiff: &TiffStack, channel: usize, step: usize) -> Option<(f32, f32)> {
-    scan_for_contrast(tiff, channel, step, |idx| {
+/// Actual float min/max of channel `c`'s first frame with contrast in it, for
+/// 32-bit float data — matches ImageJ auto-ranging a float image to its own
+/// values rather than assuming a fixed integer-shaped scale.
+pub fn channel_float_minmax(tiff: &TiffStack, channel: usize, step: usize) -> Option<Window> {
+    let measure = |idx: usize| {
         let frame = tiff.frames.get(idx)?;
-        fast_tiff_lib::frame_float_minmax(&tiff.data, frame, tiff.byte_order).ok()?
-    })
+        let range =
+            fast_tiff_lib::frame_float_minmax(&tiff.data, frame, tiff.byte_order).ok()??;
+        Some((range, ()))
+    };
+    scan_for_contrast(tiff, channel, step, measure).map(|(range, ())| range.into())
 }
 
 /// Where to look for a plane with contrast in it, as fractions of the
@@ -101,12 +139,16 @@ const PROBES: [(usize, usize); 8] = [
 /// If every probe is flat, the first answer stands, widened by the smallest
 /// amount that is still a window — which is what a genuinely uniform image
 /// should get and what this has always done.
-fn scan_for_contrast(
+///
+/// `measure` returns the plane's range and whatever else the caller needs to
+/// read it by (the map an integer plane was decoded through), which comes back
+/// with the probe that was chosen.
+fn scan_for_contrast<T: Copy>(
     tiff: &TiffStack,
     channel: usize,
     step: usize,
-    measure: impl Fn(usize) -> Option<(f32, f32)>,
-) -> Option<(f32, f32)> {
+    measure: impl Fn(usize) -> Option<((f32, f32), T)>,
+) -> Option<((f32, f32), T)> {
     let step = step.max(1);
     let total = tiff.frames.len();
     if total == 0 {
@@ -127,24 +169,24 @@ fn scan_for_contrast(
             continue;
         }
         tried[slot] = n;
-        let Some((lo, hi)) = measure(start + n * step) else {
+        let Some(((lo, hi), with)) = measure(start + n * step) else {
             continue;
         };
         if hi > lo {
-            return Some((lo, hi));
+            return Some(((lo, hi), with));
         }
-        first = first.or(Some((lo, hi)));
+        first = first.or(Some(((lo, hi), with)));
     }
-    first.map(|(lo, hi)| (lo, if hi > lo { hi } else { lo + 1.0 }))
+    first.map(|((lo, hi), with)| ((lo, if hi > lo { hi } else { lo + 1.0 }), with))
 }
 
 /// Apply a Shift-drag's delta from one channel's contrast handles to all the
 /// others.
 ///
-/// `before` is every channel's `(min, max)` as of the start of the frame, same
-/// order as `settings`. Whichever channel differs now is the one the user
-/// dragged, and each *enabled* other channel moves by the same amount, clamped
-/// to its own bounds.
+/// `before` is every channel's window as of the start of the frame, same order
+/// as `settings`. Whichever channel differs now is the one the user dragged,
+/// and each *enabled* other channel moves by the same amount, in file units,
+/// clamped to its own bounds.
 ///
 /// Switched-off channels are deliberately left alone. A frontend shows their
 /// handles as inert and takes no input on them, so dragging a neighbour would
@@ -154,77 +196,21 @@ fn scan_for_contrast(
 ///
 /// A no-op when nothing moved, so a caller can run it unconditionally on any
 /// frame the modifier is held.
-pub fn shift_sync(settings: &mut [ChannelSettings], before: &[(f32, f32)]) {
+pub fn shift_sync(settings: &mut [ChannelSettings], before: &[Window]) {
     let moved = settings.iter().enumerate().find_map(|(c, s)| {
-        let (bmin, bmax) = before.get(c).copied()?;
-        let (dmin, dmax) = (s.min - bmin, s.max - bmax);
-        (dmin != 0.0 || dmax != 0.0).then_some((c, dmin, dmax))
+        let b = before.get(c)?;
+        let (dlo, dhi) = (s.window.lo - b.lo, s.window.hi - b.hi);
+        (dlo != 0.0 || dhi != 0.0).then_some((c, dlo, dhi))
     });
-    let Some((src, dmin, dmax)) = moved else {
+    let Some((src, dlo, dhi)) = moved else {
         return;
     };
     for (i, s) in settings.iter_mut().enumerate() {
         if i == src || !s.enabled {
             continue;
         }
-        s.min = (s.min + dmin).clamp(s.bounds.0, s.bounds.1);
-        s.max = (s.max + dmax).clamp(s.bounds.0, s.bounds.1);
-        if s.min > s.max {
-            s.min = s.max;
-        }
-    }
-}
-
-/// The factor an 8-bit channel's contrast window is scaled down by.
-///
-/// The interface keeps every integer channel's window in 0..65535 so one slider
-/// serves 8- and 16-bit data alike, but an `Int8` channel's texture holds the
-/// raw 0..255 samples. 257 is the widening factor (`0xFF * 257 == 0xFFFF`), so
-/// dividing by it puts the window back in the units the samples are in.
-pub(crate) const WIDEN_8BIT: f32 = 257.0;
-
-/// How many of the interface's window units one of a file's sample units is,
-/// for samples of `bits_per_sample` in `format`: [`WIDEN_8BIT`] for unsigned
-/// 4- and 8-bit samples, which the decoder widens onto 0..65535
-/// (`v -> (v << 8) | v`), and 1 for the rest.
-///
-/// A file states its display range (ImageJ's `min=`/`max=`) in its own sample
-/// units, so this is the factor between what it declares and the window the
-/// interface holds — both ways: opening multiplies by it, saving divides. Left
-/// out, an 8-bit file declaring `min=10 max=200` opens with a window of 10..200
-/// out of 65535, which is all but black-to-white at the bottom of the range,
-/// and a save writes `min=5140` for a window that starts at sample 20.
-///
-/// The rest are 1 on purpose. Unsigned 16-bit samples are the interface's
-/// units; signed 16-bit ones keep their window in ImageJ's offset display
-/// space, the units ImageJ itself writes it in; a float window is in the data's
-/// own units; and 32-bit integers are rescaled per channel, with no fixed
-/// factor to apply.
-pub fn window_scale(bits_per_sample: u16, format: fast_tiff_lib::SampleFormat) -> f32 {
-    if format == fast_tiff_lib::SampleFormat::UnsignedInt && matches!(bits_per_sample, 4 | 8) {
-        WIDEN_8BIT
-    } else {
-        1.0
-    }
-}
-
-/// A channel's contrast window in the units its *samples* are in.
-///
-/// Two readers of the same pixels disagreeing by a factor of 257 is the exact
-/// hazard [`crate::planes`] warns about, and it is invisible: an 8-bit image
-/// composed with a 16-bit window comes out black, and one composed the other
-/// way comes out blown out, and both look like a contrast bug rather than a
-/// unit bug. So the conversion lives here, once, and everything that pairs a
-/// window with samples goes through it — the GPU uniforms in `crate::sync` and
-/// the CPU compositor in [`crate::snapshot`].
-///
-/// `Int16` needs no conversion (the window is already in raw 0..65535) and
-/// neither does `Float` (an R32F texture holds the samples in their own units,
-/// and so does the window).
-pub fn sample_window(kind: ChannelKind, min: f32, max: f32) -> (f32, f32) {
-    match kind {
-        ChannelKind::Int8 => (min / WIDEN_8BIT, max / WIDEN_8BIT),
-        ChannelKind::Int16 | ChannelKind::Float => (min, max),
+        let w = Window::new(s.window.lo + dlo, s.window.hi + dhi).clamp_to(s.bounds);
+        s.window = Window::new(w.lo.min(w.hi), w.hi);
     }
 }
 
@@ -233,19 +219,17 @@ pub fn sample_window(kind: ChannelKind, min: f32, max: f32) -> (f32, f32) {
 /// always land on the track and the user has a little headroom to widen the
 /// window past the metadata defaults. Falls back to the window alone when the
 /// data range is unknown, and pads a degenerate (zero-width) range so the
-/// slider stays usable.
-pub fn slider_bounds(window: (f32, f32), data: Option<(f32, f32)>) -> (f32, f32) {
-    let (mut lo, mut hi) = window;
-    if let Some((dlo, dhi)) = data {
-        lo = lo.min(dlo);
-        hi = hi.max(dhi);
-    }
-    if !(hi > lo) {
+/// slider stays usable. File units in, file units out.
+pub fn slider_bounds(window: Window, data: Option<Window>) -> Window {
+    let Window { mut lo, mut hi } = data.map_or(window, |d| window.union(d));
+    // Not `hi <= lo`: a NaN bound compares false both ways, and has to be
+    // padded like an empty range rather than let through.
+    if hi.partial_cmp(&lo) != Some(std::cmp::Ordering::Greater) {
         let pad = lo.abs().max(1.0);
         lo -= pad;
         hi += pad;
     }
-    (lo, hi)
+    Window::new(lo, hi)
 }
 
 /// The channel's display color for tinting its contrast slider, taken from the
@@ -435,19 +419,9 @@ fn build_one(tiff: &TiffStack, c: usize, channels: usize) -> ChannelSettings {
         // texel-centered identity so index i maps to LUT entry i exactly —
         // t = (i + 0.5)/256 lands on texel i's center, so even a linearly
         // filtered LUT returns entry i with no blend into a neighbour. The
-        // window is in the 0..65535 UI space that `sync_gpu` divides by 257
-        // for the 8-bit texture, so -0.5 and 255.5 in index space are:
+        // indices are the file's samples, so the window is in index space.
         if frame.is_some_and(|f| f.is_palette()) {
-            const W: f32 = 257.0; // the 8-bit → 0..65535 widening sync_gpu undoes
-            let (lo, hi) = (-0.5 * W, 255.5 * W);
-            return ChannelSettings {
-                min: lo,
-                max: hi,
-                enabled: true,
-                bounds: (lo, hi),
-                initial: (lo, hi),
-                kind: ChannelKind::Int8,
-            };
+            return ChannelSettings::new(Window::new(-0.5, 255.5), SampleUnits::RAW8);
         }
         // 32- and 64-bit IEEE floats both go to the R32F GPU path (64-bit is
         // downcast to f32 on decode). Integer data of every width — including
@@ -465,50 +439,43 @@ fn build_one(tiff: &TiffStack, c: usize, channels: usize) -> ChannelSettings {
                 && f.samples_per_pixel == 1
         });
 
-        if is_float {
+        let (units, data) = if is_float {
             let data = channel_float_minmax(tiff, c, channels);
-            let (lo, hi) = meta_range
-                .map(|(lo, hi)| (lo as f32, hi as f32))
-                .or(data)
-                .unwrap_or((0.0, 1.0));
-            let bounds = slider_bounds((lo, hi), data);
-            ChannelSettings {
-                min: lo,
-                max: hi,
-                enabled: true,
-                bounds,
-                initial: (lo, hi),
-                kind: ChannelKind::Float,
-            }
+            (
+                SampleUnits::float(data.unwrap_or(Window::new(0.0, 1.0))),
+                data,
+            )
         } else {
-            let data = channel_minmax(tiff, c, channels);
-            // The file's window is in its sample units, the data range above
-            // in the widened ones the interface keeps (`window_scale`).
-            let scale = frame.map_or(1.0, |f| window_scale(f.bits_per_sample, f.sample_format));
-            let (min, max) = meta_range
-                .map(|(lo, hi)| (lo as f32 * scale, hi as f32 * scale))
-                // No display range in metadata at all (not even
-                // ImageDescription min=/max=) — fall back to the actual
-                // min/max of channel c's first frame.
-                .or(data)
-                .unwrap_or((0.0, 65535.0));
-            let bounds = slider_bounds((min, max), data);
-            // min/max stay in the widened 0..65535 space (slider unchanged);
-            // for an 8-bit (R8Uint) channel `sync_gpu` rescales them to the
-            // 0..255 the texture actually holds.
-            let kind = if is_u8 {
-                ChannelKind::Int8
+            let scan = channel_minmax(tiff, c, channels);
+            let units = if is_u8 {
+                SampleUnits::RAW8
             } else {
-                ChannelKind::Int16
+                // What the texture will hold. A 32- or 64-bit integer plane is
+                // rescaled through a range taken from the plane itself, so the
+                // one the scan's plane was read with is the channel's.
+                //
+                // The decode still ranges every plane on its own, as it always
+                // has; this records the scale the window was measured on, so
+                // the window reaches the shader exactly as it did before units
+                // were types.
+                let range = match scan {
+                    Some((_, DisplayMap::Linear { lo, hi })) => Some((lo, hi)),
+                    _ => None,
+                };
+                SampleUnits::of(ChannelKind::Int16, frame, range)
             };
-            ChannelSettings {
-                min,
-                max,
-                enabled: true,
-                bounds,
-                initial: (min, max),
-                kind,
-            }
+            (units, scan.map(|(window, _)| window))
+        };
+        // The file's own window when it declares one (ImageJ's `min=`/`max=`,
+        // in ImageJ's units for the type), else the data's range, else the
+        // whole of what the texture can show. All in file units.
+        let window = meta_range
+            .map(|range| units.from_imagej(range))
+            .or(data)
+            .unwrap_or_else(|| units.full_range());
+        ChannelSettings {
+            bounds: slider_bounds(window, data),
+            ..ChannelSettings::new(window, units)
         }
     }
 }
@@ -536,19 +503,18 @@ pub fn auto_contrast(loaded: &mut Stack, hists: &[Histogram]) {
         let Some(s) = loaded.display.settings.get_mut(h.channel) else {
             continue;
         };
-        let Some((lo, hi)) = auto_window(h) else {
+        let Some(fitted) = auto_window(h) else {
             continue;
         };
         // The histogram spans the union of every channel track, so a window
         // fitted on it can reach past this one. Clamping keeps both handles
         // somewhere the slider can actually draw them.
-        s.min = lo.clamp(s.bounds.0, s.bounds.1);
-        s.max = hi.clamp(s.bounds.0, s.bounds.1);
+        s.window = fitted.clamp_to(s.bounds);
         // Both ends landing on the same side of the track would leave an empty
         // window, which divides by zero on the way to the shader. Fall back to
         // showing everything, which is at least a picture.
-        if s.max <= s.min {
-            (s.min, s.max) = s.bounds;
+        if s.window.hi <= s.window.lo {
+            s.window = s.bounds;
         }
     }
 }
@@ -573,7 +539,7 @@ pub fn reset_contrast(loaded: &mut Stack) {
         return;
     }
     for s in loaded.display.settings.iter_mut() {
-        (s.min, s.max) = s.initial;
+        s.window = s.initial;
     }
 }
 

@@ -1,15 +1,15 @@
 //! The PNG exporter, checked by decoding the PNG it wrote.
 //!
 //! The assertion that matters is not "a file appeared" but "the file is the
-//! picture". The contrast window is applied in different units depending on
-//! whether the samples are float or integer (see the module docs), and getting
-//! that backwards produces a uniformly black image, a uniformly white one, or —
+//! picture". The contrast window is applied differently depending on whether
+//! the samples are wide or not (see the module docs), and getting the units of
+//! either wrong produces a uniformly black image, a uniformly white one, or —
 //! worst — one that merely looks like a different contrast setting. Only
 //! reading the pixels back catches that.
 
 use super::*;
 use crate::plugins::{describe_view, StackHost};
-use crate::stack::Stack;
+use crate::stack::{Stack, Window};
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fasttiff_plugin_api::{Params, VolumeMode, VolumeView};
 use std::io::Cursor;
@@ -30,7 +30,7 @@ fn view() -> VolumeView {
 }
 
 fn temp(name: &str) -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("fasttiff-png-{name}.png"));
+    let p = std::env::temp_dir().join(format!("fasttiff-png-{}-{name}.png", std::process::id()));
     let _ = std::fs::remove_file(&p);
     p
 }
@@ -74,16 +74,16 @@ fn export(stack: &Stack, path: &std::path::Path) {
     .expect("export");
 }
 
-/// An integer channel's window is in the same `0..65535` space the samples come
-/// back in, and has to be applied here — the decoder does not do it.
+/// An integer channel's window is in the file's own units, the units
+/// `read_plane_f32` gives the samples in, and has to be applied here — the
+/// decoder does not do it.
 #[test]
 fn the_contrast_window_on_screen_is_the_contrast_in_the_file() {
     let mut stack = ramp_stack();
     // A window over the lower half of the range: everything at or above 32768
     // should come out white, and the bottom of the ramp black.
     for s in &mut stack.display.settings {
-        s.min = 0.0;
-        s.max = 32768.0;
+        s.window = Window::new(0.0, 32768.0);
     }
     let path = temp("window");
     export(&stack, &path);
@@ -115,8 +115,7 @@ fn a_wider_window_writes_a_darker_image() {
     let path = temp("narrow");
     let mut stack = ramp_stack();
     for s in &mut stack.display.settings {
-        s.min = 0.0;
-        s.max = 16384.0;
+        s.window = Window::new(0.0, 16384.0);
     }
     export(&stack, &path);
     let (_, _, narrow) = read_png(&path);
@@ -124,8 +123,7 @@ fn a_wider_window_writes_a_darker_image() {
     let path2 = temp("wide");
     let mut stack = ramp_stack();
     for s in &mut stack.display.settings {
-        s.min = 0.0;
-        s.max = 65535.0;
+        s.window = Window::new(0.0, 65535.0);
     }
     export(&stack, &path2);
     let (_, _, wide) = read_png(&path2);
@@ -147,8 +145,7 @@ fn a_wider_window_writes_a_darker_image() {
 fn each_channel_goes_through_the_lut_it_is_displayed_with() {
     let mut stack = ramp_stack();
     for s in &mut stack.display.settings {
-        s.min = 0.0;
-        s.max = 65535.0;
+        s.window = Window::new(0.0, 65535.0);
     }
     // Pure green: entry i is (0, i, 0).
     let mut green = [[0u8; 3]; 256];
@@ -160,12 +157,12 @@ fn each_channel_goes_through_the_lut_it_is_displayed_with() {
     let path = temp("lut");
     export(&stack, &path);
     let (_, _, rgb) = read_png(&path);
-    for (i, px) in rgb.chunks_exact(3).enumerate() {
+    for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
         assert_eq!(px[0], 0, "pixel {i} has red in a green-only LUT");
         assert_eq!(px[2], 0, "pixel {i} has blue in a green-only LUT");
     }
     assert!(
-        rgb.chunks_exact(3).any(|px| px[1] > 200),
+        rgb.as_chunks::<3>().0.iter().any(|px| px[1] > 200),
         "nothing is bright, so the LUT was not reached at all"
     );
     let _ = std::fs::remove_file(&path);
@@ -176,8 +173,7 @@ fn each_channel_goes_through_the_lut_it_is_displayed_with() {
 fn a_channel_that_is_switched_off_is_not_composited() {
     let mut stack = ramp_stack();
     for s in &mut stack.display.settings {
-        s.min = 0.0;
-        s.max = 65535.0;
+        s.window = Window::new(0.0, 65535.0);
         s.enabled = false;
     }
     let path = temp("disabled");
@@ -188,6 +184,51 @@ fn a_channel_that_is_switched_off_is_not_composited() {
         "a channel that is not shown reached the file"
     );
     let _ = std::fs::remove_file(&path);
+}
+
+/// A one-channel stack of `T` samples `0, 1, 2, …` (one per pixel) with
+/// `window` set on it, exported and read back: the grey of each pixel.
+fn export_ramp_of(sample: SampleType, window: Window) -> Vec<u8> {
+    let opts = WriterOptions::new(W, H, sample).metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).expect("writer");
+    let n = (W * H) as usize;
+    match sample {
+        SampleType::U8 => w.write_frame_u8(&(0..n as u8).collect::<Vec<_>>()),
+        SampleType::I16 => w.write_frame_bytes(
+            &(0..n as i16)
+                .flat_map(|v| (v - 4).to_le_bytes())
+                .collect::<Vec<_>>(),
+        ),
+        _ => unreachable!(),
+    }
+    .expect("frame");
+    let bytes = w.finish().expect("finish").into_inner();
+    let mut stack = Stack::from_bytes(bytes, "ramp.tif".into(), false).expect("open");
+    stack.display.settings[0].window = window;
+    stack.display.luts = vec![grayscale_ramp()];
+    let path = temp(&format!("{sample:?}"));
+    export(&stack, &path);
+    let (_, _, rgb) = read_png(&path);
+    let _ = std::fs::remove_file(&path);
+    rgb.as_chunks::<3>().0.iter().map(|px| px[0]).collect()
+}
+
+/// An 8-bit channel's window reaches a plugin as the 8-bit values it is, and
+/// the export applies it to the 8-bit samples: a window of 0..4 makes sample 2
+/// mid-grey and 4 and up white. Handed the window on the 16-bit scale, as the
+/// view once did, every pixel here would be all but black.
+#[test]
+fn an_8_bit_window_is_applied_in_8_bit_units() {
+    let grey = export_ramp_of(SampleType::U8, Window::new(0.0, 4.0));
+    assert_eq!(grey, [0, 64, 128, 191, 255, 255, 255, 255]);
+}
+
+/// A signed 16-bit window is in the signed values, not offset into unsigned:
+/// samples run -4..=3 here and a window of -4..0 puts -2 at mid-grey.
+#[test]
+fn a_signed_16_bit_window_is_applied_in_signed_units() {
+    let grey = export_ramp_of(SampleType::I16, Window::new(-4.0, 0.0));
+    assert_eq!(grey, [0, 64, 128, 191, 255, 255, 255, 255]);
 }
 
 /// The format it offers is what the Save-as dialog will show.

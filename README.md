@@ -224,9 +224,10 @@ reader, and that takes a line of its own:
 cargo test -p oir-reader --no-default-features
 ```
 
-Two things sit outside the workspace on purpose and so are missed by the line
-above — both are worked examples rather than parts of the app, and both are
-kept building so they cannot quietly rot:
+Two things sit outside the default build on purpose and so are missed by the
+line above. Both are worked examples rather than parts of the app, and CI
+builds and tests both so they cannot quietly rot (the second in its
+`viewer-no-threads` step):
 
 ```sh
 cargo test --manifest-path plugins/example/Cargo.toml
@@ -241,7 +242,7 @@ cargo clippy --workspace --all-targets
 The web build is a different target and has its own `#[cfg]` paths, so lint it
 separately:
 ```sh
-cargo clippy --manifest-path FastTIFF-web/Cargo.toml --target wasm32-unknown-unknown --all-targets
+cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
 ```
 
 

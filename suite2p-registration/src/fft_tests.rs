@@ -79,3 +79,65 @@ fn fftshift_puts_the_origin_in_the_middle() {
     assert_eq!(shifted[(ly / 2) * lx + lx / 2], 1.0);
     assert_eq!(shifted.iter().filter(|v| **v != 0.0).count(), 1);
 }
+
+/// The transform by its definition, one output sample at a time.
+fn naive_dft(data: &[Complex32], ly: usize, lx: usize) -> Vec<Complex32> {
+    let tau = std::f64::consts::TAU;
+    (0..ly * lx)
+        .map(|k| {
+            let (ky, kx) = (k / lx, k % lx);
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, v) in data.iter().enumerate() {
+                let (y, x) = (i / lx, i % lx);
+                let a = -tau * ((ky * y) as f64 / ly as f64 + (kx * x) as f64 / lx as f64);
+                re += v.re as f64 * a.cos() - v.im as f64 * a.sin();
+                im += v.re as f64 * a.sin() + v.im as f64 * a.cos();
+            }
+            Complex32::new(re as f32, im as f32)
+        })
+        .collect()
+}
+
+/// The forward transform is the DFT, sample for sample, on sizes whose width is
+/// not a multiple of the column tile (so the last tile is short) and on one
+/// narrower than a tile. A gather that put a column back in the wrong place
+/// would still round-trip; it would not match this.
+#[test]
+fn the_forward_transform_is_the_dft() {
+    for (ly, lx) in [(5, 11), (4, 8), (3, 19), (6, 3), (1, 9), (9, 1)] {
+        let original = plane(ly, lx, |y, x| ((y * 5 + x * 3) % 7) as f32 - 2.5);
+        let want = naive_dft(&original, ly, lx);
+        let mut got = original.clone();
+        Fft2::new(ly, lx).forward(&mut got);
+        for (i, (a, b)) in got.iter().zip(&want).enumerate() {
+            assert!((a - b).norm() < 1e-3, "{ly}x{lx} at {i}: {a:?} vs {b:?}");
+        }
+    }
+}
+
+/// Workers sharing one set of plans, each with its own scratch, compute what a
+/// transform with plans of its own does — on threads at once.
+#[test]
+fn shared_plans_transform_like_private_ones() {
+    let (ly, lx) = (12, 20);
+    let plans = FftPlans2::new(ly, lx);
+    let original = plane(ly, lx, |y, x| (y * x % 13) as f32);
+    let mut want = original.clone();
+    Fft2::new(ly, lx).forward(&mut want);
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            s.spawn(|| {
+                let mut fft = Fft2::with_plans(&plans);
+                for _ in 0..3 {
+                    let mut got = original.clone();
+                    fft.forward(&mut got);
+                    assert_eq!(got, want);
+                    fft.inverse(&mut got);
+                    for (a, b) in got.iter().zip(&original) {
+                        assert!((a - b).norm() < 1e-3);
+                    }
+                }
+            });
+        }
+    });
+}

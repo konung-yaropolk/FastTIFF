@@ -18,19 +18,22 @@
 #[cfg(feature = "capi")]
 pub mod capi;
 pub mod decode;
+pub mod display;
 pub mod encode;
 pub mod ifd;
 pub mod index;
 pub mod metadata;
 
 pub use decode::{
-    frame_float_minmax, preload_frames_f32, preload_frames_u16, preload_frames_u8, read_frame_f32,
+    frame_float_minmax, parallel_decode_enabled, parallel_decode_scope, preload_frames_f32,
+    preload_frames_u16, preload_frames_u8, read_frame_bytes_into, read_frame_f32,
     read_frame_f32_into, read_frame_u16, read_frame_u16_into, read_frame_u8, read_frame_u8_into,
     read_plane_f32, read_plane_f32_into, read_plane_rgb_u16, read_plane_rgb_u8, read_plane_u16,
     read_plane_u16_into, read_plane_u8, read_plane_u8_into, read_planes_f32, read_planes_f32_into,
     read_planes_rgb_u16, read_planes_rgb_u8, read_planes_u16, read_planes_u16_into, read_planes_u8,
-    read_planes_u8_into, set_parallel_decode,
+    read_planes_u8_into, set_parallel_decode, set_thread_parallel_decode, ParallelDecodeScope,
 };
+pub use display::DisplayMap;
 pub use encode::{
     SampleType, TiffWriter, WriterOptions, DEFAULT_DEFLATE_LEVEL, DEFAULT_ZSTD_LEVEL,
 };

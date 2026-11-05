@@ -248,3 +248,34 @@ fn luts_and_channel_names_both_survive() {
     assert_eq!(written[0], luts[0]);
     assert_eq!(written[1], luts[1]);
 }
+
+/// Taking the result writes the same file as borrowing it: dropping each plane
+/// once it is written changes the memory the encode needs, not what it makes.
+/// A malformed result is refused the same way, and a stop is still a stop.
+#[test]
+fn taking_the_result_encodes_the_same_file() {
+    let img = result(2, 3, 2, 7, 5);
+    let luts = [odd_lut(3), odd_lut(9)];
+    let borrowed = to_tiff_bytes_reporting(&img, None, &luts, &mut |_| true)
+        .unwrap()
+        .unwrap();
+    let taken = into_tiff_bytes_reporting(img.clone(), None, &luts, &mut |_| true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(borrowed, taken);
+    assert_eq!(
+        to_tiff_bytes(&img, None).unwrap(),
+        into_tiff_bytes(img.clone(), None).unwrap()
+    );
+
+    let mut bad = img.clone();
+    bad.planes.pop();
+    assert!(into_tiff_bytes(bad, None).is_err());
+    let mut calls = 0;
+    let stopped = into_tiff_bytes_reporting(img, None, &[], &mut |_| {
+        calls += 1;
+        calls < 3
+    })
+    .unwrap();
+    assert!(stopped.is_none(), "stopped on the third plane");
+}

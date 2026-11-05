@@ -125,8 +125,10 @@ fn assert_planes_match(a: *const OirAcquisition, want: &Acquisition) {
             Planes::U16(p) => {
                 assert_eq!(s.sample_type, OIR_SAMPLE_U16);
                 let samples: Vec<u16> = copy
-                    .chunks_exact(2)
-                    .map(|b| u16::from_ne_bytes([b[0], b[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| u16::from_ne_bytes(*b))
                     .collect();
                 assert_eq!(samples, p[i]);
                 let view = unsafe { std::slice::from_raw_parts(data.cast::<u16>(), s.plane_len) };
@@ -399,9 +401,15 @@ fn text_follows_snprintf() {
 
     // "héllo": the é is two bytes, and cutting at 2 would split it.
     let mut buf = [0x55u8; 4];
-    assert_eq!(unsafe { put_text("héllo", buf.as_mut_ptr().cast(), 3) }, 6);
+    assert_eq!(
+        unsafe { ERRORS.put_text("héllo", buf.as_mut_ptr().cast(), 3) },
+        6
+    );
     assert_eq!(&buf[..3], b"h\0\x55");
-    assert_eq!(unsafe { put_text("héllo", buf.as_mut_ptr().cast(), 4) }, 6);
+    assert_eq!(
+        unsafe { ERRORS.put_text("héllo", buf.as_mut_ptr().cast(), 4) },
+        6
+    );
     assert_eq!(&buf[..4], "hé\0".as_bytes());
 }
 
@@ -805,9 +813,12 @@ fn the_signature_check_is_the_crates() {
 /// A panic is a status, not an unwind into C.
 #[test]
 fn a_panic_comes_back_as_failed() {
-    assert_eq!(guarded(|| panic!("on purpose")), OIR_FAILED);
+    assert_eq!(ERRORS.guarded(|| panic!("on purpose")), OIR_FAILED);
     assert!(last_error().contains("on purpose"), "{}", last_error());
-    assert_eq!(guarded_len(|| panic!("again")), -(OIR_FAILED as isize));
+    assert_eq!(
+        ERRORS.guarded_len(|| panic!("again")),
+        -(OIR_FAILED as isize)
+    );
     assert!(last_error().contains("again"), "{}", last_error());
 }
 

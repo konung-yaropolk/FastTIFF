@@ -10,9 +10,9 @@ use super::*;
 
 use crate::render;
 use egui::RichText;
-use std::sync::Arc;
 use fast_tiff_viewer::camera::{NavMode, OrbitPoint};
 use fast_tiff_viewer::histogram::{fill_alpha, fill_tint, Histogram, BINS};
+use std::sync::Arc;
 
 /// The 3D render-settings pop-up: rendering method and the controls belonging
 /// to it, per-axis voxel scale (x:y:z), interpolation, the resolution while the
@@ -509,9 +509,11 @@ type OmeElement = fast_tiff_lib::metadata::ome::XmlElement;
 /// long recording carries a `Plane` per plane and runs to megabytes, and this
 /// window is drawn every frame.
 fn ome_metadata(ui: &mut egui::Ui, tiff: &Arc<fast_tiff_lib::TiffStack>) {
-    let Some(desc) = tiff.description.as_deref().filter(|d| {
-        fast_tiff_lib::metadata::detect(Some(d)) == fast_tiff_lib::MetadataFormat::Ome
-    }) else {
+    let Some(desc) = tiff
+        .description
+        .as_deref()
+        .filter(|d| fast_tiff_lib::metadata::detect(Some(d)) == fast_tiff_lib::MetadataFormat::Ome)
+    else {
         ui.label(RichText::new("(this file carries no OME-XML)").weak());
         return;
     };
@@ -541,7 +543,11 @@ fn ome_tree(
     desc: &str,
 ) -> Arc<Option<OmeElement>> {
     type Cached = ((usize, usize, usize), Arc<Option<OmeElement>>);
-    let key = (Arc::as_ptr(tiff) as usize, desc.as_ptr() as usize, desc.len());
+    let key = (
+        Arc::as_ptr(tiff) as usize,
+        desc.as_ptr() as usize,
+        desc.len(),
+    );
     let id = egui::Id::new("ome_tree_cache");
     if let Some((k, tree)) = ctx.data(|d| d.get_temp::<Cached>(id)) {
         if k == key {
@@ -682,7 +688,10 @@ fn ome_table(ui: &mut egui::Ui, members: &[&OmeElement], id: egui::Id) {
                 // minimum there: two or three rows. A dozen, or all of them.
                 .min_scrolled_height(spaced * members.len().min(12) as f32)
                 .column(Column::auto())
-                .columns(Column::auto().resizable(true), columns.len() + usize::from(any_text))
+                .columns(
+                    Column::auto().resizable(true),
+                    columns.len() + usize::from(any_text),
+                )
                 .header(row_height, |mut header| {
                     header.col(|ui| {
                         ui.strong("#");
@@ -970,8 +979,7 @@ fn draw_plot(
         let (win_min, win_max) = display
             .settings
             .get(h.channel)
-            .map(|s| (s.min, s.max))
-            .unwrap_or((h.lo, h.hi));
+            .map_or((h.lo, h.hi), |s| s.window.into());
         let kept = egui::Rect::from_x_y_ranges(
             egui::Rangef::new(x_of(win_min), x_of(win_max)),
             area.y_range(),

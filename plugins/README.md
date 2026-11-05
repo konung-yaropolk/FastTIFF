@@ -24,7 +24,7 @@ than a reason to reach sideways into the viewer.
 The fence is the same one, too. The app registers its built-ins through the C
 ABI — the same `fasttiff-plugin` registration a `.dll` runs, done in its own
 process — so a built-in and a library are one kind of plugin, called the same
-way and held to the same rules. `fast-tiff-viewer/tests/plugin_parity.rs` runs
+way and held to the same rules. `fast-tiff-viewer/tests/it/plugin_parity.rs` runs
 every built-in both directly and through the boundary and requires the same
 answer to the bit, which is what keeps that true.
 

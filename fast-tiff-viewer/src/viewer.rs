@@ -326,6 +326,10 @@ pub struct Viewer {
     pub large_image_mode: crate::roi::LargeImageMode,
     /// Latched once playback falls behind in `Auto` mode. Reset per stack.
     pub decode_parallel: bool,
+    /// A stack was replaced, and the GPU volume built from the old one is to
+    /// be given back on the next [`sync`](Self::sync) — the first call that
+    /// has the renderer.
+    pub(crate) release_volume_gpu: bool,
     /// The visible UV sub-rect of the 2D image (`offset`, `scale`), computed by
     /// the frontend from its zoom + pan and uploaded to the shader. The image is
     /// always drawn into the on-screen visible rect with pan/zoom done via these
@@ -521,6 +525,9 @@ impl Viewer {
                 // New stack: re-evaluate decode parallelism from scratch (its
                 // per-frame decode cost is different).
                 self.decode_parallel = false;
+                // The last stack's volume is no use to this one; its GPU memory
+                // goes back on the next sync, which has the renderer.
+                self.release_volume_gpu = true;
                 self.stack = Some(stack);
                 Ok(())
             }
