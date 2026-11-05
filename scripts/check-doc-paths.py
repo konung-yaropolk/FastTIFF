@@ -23,8 +23,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Extensions of files this repository is made of. A token ending in one of
-# these is taken to be a path; anything else (`foo.bar`, `v0.15.0`, `wgpu.rs`
-# as a URL host) is not looked at.
+# these is taken to be a path; anything else (`foo.bar`, `v0.15.0`) is not
+# looked at.
 EXTS = ('rs', 'toml', 'md', 'yml', 'yaml', 'sh', 'py', 'wgsl', 'h', 'json',
         'html', 'svg', 'ico', 'bat', 'ps1', 'lock', 'txt')
 
