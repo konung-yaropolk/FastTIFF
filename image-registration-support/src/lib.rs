@@ -13,4 +13,5 @@
 //! is the union of what both used, and both crates now depend on it rather than
 //! keeping their own.
 
+pub mod area;
 pub mod par;

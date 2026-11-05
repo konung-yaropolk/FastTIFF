@@ -8,6 +8,9 @@ algorithms, kept once instead of once per crate.
   `threads` feature (the default) it is rayon's prelude plus a few ordered
   helpers; without it the same names are sequential stand-ins, and rayon is
   not compiled at all, which is what a wasm build wants.
+- `area`: the largest rectangle every registered frame covers, upright or at
+  an angle (the search behind a crop to the common area), given each crate's
+  own test of whether a frame reads a point from inside itself.
 
 It exists for those two crates; its API follows what they need.
 
