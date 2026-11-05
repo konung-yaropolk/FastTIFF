@@ -29,6 +29,10 @@
 # it rewrites it; it is put back afterwards if it was unmodified before.
 
 set -u
+# This script, by a path that still holds after the `cd` below: run as
+# `bash some/dir/scripts/ci-local.sh` from elsewhere, "$0" is relative to where
+# it was started, not to the repository root.
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 cd "$(dirname "$0")/.." || exit 1
 ROOT=$(pwd)
 LOGS="$ROOT/target/ci-local"
@@ -43,7 +47,7 @@ for arg in "$@"; do
         --quick) QUICK=1 ;;
         --fuzz) FUZZ=1 ;;
         --list) LIST=1 ;;
-        -h|--help) awk 'NR > 1 && !/^#/ { exit } NR > 1' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) awk 'NR > 1 && !/^#/ { exit } NR > 1' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "unknown option: $arg" >&2; exit 2 ;;
         *) ONLY+=("$arg") ;;
     esac
@@ -52,7 +56,7 @@ done
 # A misspelled name would otherwise just not run, which a CI job naming a
 # second, real step would never notice.
 for n in ${ONLY[@]+"${ONLY[@]}"}; do
-    grep -qE "^step $n( |\$)" "$0" || { echo "no step named '$n' (see --list)" >&2; exit 2; }
+    grep -qE "^step $n( |\$)" "$SELF" || { echo "no step named '$n' (see --list)" >&2; exit 2; }
 done
 
 NAMES=()
@@ -154,7 +158,7 @@ msrv() {
 # the whole list.
 every_step_in_ci() {
     local n missing=0
-    for n in $(bash "$ROOT/scripts/ci-local.sh" --list | sed -n 's/^  \([a-z0-9-]*\) .*/\1/p'); do
+    for n in $(bash "$SELF" --list | sed -n 's/^  \([a-z0-9-]*\) .*/\1/p'); do
         grep -qE "^[[:space:]]*run: bash scripts/ci-local\.sh( [a-z0-9-]+)* $n( |\$)" .github/workflows/*.yml .github/actions/*/action.yml ||
             { echo "no workflow runs the step '$n'"; missing=1; }
     done
