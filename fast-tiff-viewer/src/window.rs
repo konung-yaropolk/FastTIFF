@@ -11,7 +11,7 @@
 //! somewhere other than the thread drawing the interface.
 
 use crate::bandcache::{self, BandCache};
-use crate::prefetch::{decode_jobs_region, decode_jobs_stepped, ChannelJob, Decoded};
+use crate::prefetch::{decode_jobs_region, decode_jobs_stepped, ChannelJob, Decoded, Samples};
 use crate::roi::{self, Roi};
 use fast_tiff_lib::{FrameInfo, TiffStack};
 use scivis_render::ChannelKind;
@@ -62,11 +62,11 @@ fn step_for(frame: &FrameInfo, stride: u32) -> Option<u32> {
 }
 
 /// Cut a window out of a decoded plane, whatever its format.
-pub fn cut(data: &Decoded, width: u32, height: u32, roi: &Roi) -> Decoded {
+pub fn cut(data: Samples<'_>, width: u32, height: u32, roi: &Roi) -> Decoded {
     match data {
-        Decoded::U8(v) => Decoded::U8(roi::extract(v, width, height, roi)),
-        Decoded::U16(v) => Decoded::U16(roi::extract(v, width, height, roi)),
-        Decoded::F32(v) => Decoded::F32(roi::extract(v, width, height, roi)),
+        Samples::U8(v) => Decoded::U8(roi::extract(v, width, height, roi)),
+        Samples::U16(v) => Decoded::U16(roi::extract(v, width, height, roi)),
+        Samples::F32(v) => Decoded::F32(roi::extract(v, width, height, roi)),
     }
 }
 
@@ -130,7 +130,10 @@ fn trim_to(
         stride: 1,
     };
     let h = actual.end - actual.start;
-    decoded.iter().map(|d| cut(d, width, h, &keep)).collect()
+    decoded
+        .iter()
+        .map(|d| cut(d.view(), width, h, &keep))
+        .collect()
 }
 
 /// Cut texel rows `t0..t1` of the window out of one contiguously decoded band.
@@ -161,7 +164,11 @@ fn blit_band(
     };
     let band_h = rows.end - rows.start;
     for (plane, data) in planes.iter_mut().zip(band) {
-        blit(plane, &cut(data, band_w, band_h, &sub), (t0 * tw) as usize);
+        blit(
+            plane,
+            &cut(data.view(), band_w, band_h, &sub),
+            (t0 * tw) as usize,
+        );
     }
 }
 

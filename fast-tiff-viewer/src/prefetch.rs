@@ -30,6 +30,7 @@ use crate::stack::Stack;
 use fast_tiff_lib::TiffStack;
 use fast_tiff_lib::{ByteOrder, FrameInfo};
 use scivis_render::ChannelKind;
+use std::borrow::Cow;
 #[cfg(feature = "threads")]
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
@@ -57,65 +58,141 @@ impl Decoded {
             Decoded::F32(v) => v.len() * 4,
         }
     }
+
+    /// The samples, borrowed.
+    pub fn view(&self) -> Samples<'_> {
+        match self {
+            Decoded::U8(v) => Samples::U8(v),
+            Decoded::U16(v) => Samples::U16(v),
+            Decoded::F32(v) => Samples::F32(v),
+        }
+    }
 }
 
-/// Decode one channel of a frame into owned pixels.
-/// `plane`/`rgb` select the RGB-plane deinterleave; otherwise the whole image.
-fn decode_channel(
-    mmap: &[u8],
+/// One channel's pixels, borrowed: what an upload, a cut or a histogram reads,
+/// whoever owns them — a [`Decoded`] plane, or the file's own mapping.
+#[derive(Clone, Copy)]
+pub enum Samples<'a> {
+    U8(&'a [u8]),
+    U16(&'a [u16]),
+    F32(&'a [f32]),
+}
+
+/// One channel's decoded pixels that may still be the file's own bytes.
+///
+/// An uncompressed, single-strip frame in the host's byte order is already the
+/// plane the GPU wants, and the decoder hands it back as a borrow of the
+/// mapping. Keeping that borrow until the upload is what makes the display of
+/// such a frame one copy (into the texture) instead of two: owning it first
+/// meant an allocation, a memcpy out of the mapping and a free per channel per
+/// frame — 8 MiB each way for a 2048 x 2048 16-bit plane, and on Windows about
+/// two thousand fresh pages to fault in. Only data that has to outlive the
+/// frame — a prefetched result, a cache entry — is made owned
+/// ([`into_owned`](Self::into_owned)).
+pub enum DecodedRef<'a> {
+    U8(Cow<'a, [u8]>),
+    U16(Cow<'a, [u16]>),
+    F32(Cow<'a, [f32]>),
+}
+
+impl DecodedRef<'_> {
+    /// The samples, borrowed.
+    pub fn view(&self) -> Samples<'_> {
+        match self {
+            DecodedRef::U8(v) => Samples::U8(v),
+            DecodedRef::U16(v) => Samples::U16(v),
+            DecodedRef::F32(v) => Samples::F32(v),
+        }
+    }
+
+    /// Owned pixels, copying out of the mapping only if they still borrow it.
+    pub fn into_owned(self) -> Decoded {
+        match self {
+            DecodedRef::U8(v) => Decoded::U8(v.into_owned()),
+            DecodedRef::U16(v) => Decoded::U16(v.into_owned()),
+            DecodedRef::F32(v) => Decoded::F32(v.into_owned()),
+        }
+    }
+}
+
+impl From<Decoded> for DecodedRef<'_> {
+    fn from(d: Decoded) -> Self {
+        match d {
+            Decoded::U8(v) => DecodedRef::U8(Cow::Owned(v)),
+            Decoded::U16(v) => DecodedRef::U16(Cow::Owned(v)),
+            Decoded::F32(v) => DecodedRef::F32(Cow::Owned(v)),
+        }
+    }
+}
+
+/// Decode one channel of a frame, borrowing the file's bytes where the decoder
+/// can (see [`DecodedRef`]). `plane`/`rgb` select the RGB-plane deinterleave;
+/// otherwise the whole image.
+fn decode_channel<'a>(
+    mmap: &'a [u8],
     frame: &FrameInfo,
     order: ByteOrder,
     kind: ChannelKind,
     plane: usize,
     rgb: bool,
-) -> anyhow::Result<Decoded> {
+) -> anyhow::Result<DecodedRef<'a>> {
     // CMYK frames read through the converting reader, which turns the four ink
     // planes into an R/G/B triple. `plane` indexes the *converted* triple here,
     // not the file's samples.
     let cmyk = frame.is_cmyk();
     Ok(match kind {
-        ChannelKind::Int8 => {
-            if cmyk {
-                Decoded::U8(fast_tiff_lib::read_plane_rgb_u8(mmap, frame, order, plane)?)
-            } else if rgb {
-                Decoded::U8(fast_tiff_lib::read_plane_u8(mmap, frame, order, plane)?)
-            } else {
-                Decoded::U8(fast_tiff_lib::read_frame_u8(mmap, frame, order)?.into_owned())
-            }
-        }
-        ChannelKind::Float => {
-            Decoded::F32(fast_tiff_lib::read_frame_f32(mmap, frame, order)?.into_owned())
-        }
-        ChannelKind::Int16 => {
-            if cmyk {
-                Decoded::U16(fast_tiff_lib::read_plane_rgb_u16(
-                    mmap, frame, order, plane,
-                )?)
-            } else if rgb {
-                Decoded::U16(fast_tiff_lib::read_plane_u16(
-                    mmap, frame, order, None, plane,
-                )?)
-            } else {
-                Decoded::U16(fast_tiff_lib::read_frame_u16(mmap, frame, order, None)?.into_owned())
-            }
-        }
+        ChannelKind::Int8 => DecodedRef::U8(if cmyk {
+            Cow::Owned(fast_tiff_lib::read_plane_rgb_u8(mmap, frame, order, plane)?)
+        } else if rgb {
+            Cow::Owned(fast_tiff_lib::read_plane_u8(mmap, frame, order, plane)?)
+        } else {
+            fast_tiff_lib::read_frame_u8(mmap, frame, order)?
+        }),
+        ChannelKind::Float => DecodedRef::F32(fast_tiff_lib::read_frame_f32(mmap, frame, order)?),
+        ChannelKind::Int16 => DecodedRef::U16(if cmyk {
+            Cow::Owned(fast_tiff_lib::read_plane_rgb_u16(
+                mmap, frame, order, plane,
+            )?)
+        } else if rgb {
+            Cow::Owned(fast_tiff_lib::read_plane_u16(
+                mmap, frame, order, None, plane,
+            )?)
+        } else {
+            fast_tiff_lib::read_frame_u16(mmap, frame, order, None)?
+        }),
     })
 }
 
-/// Decode all of one frame-request's channels, returning results in `jobs`
-/// order. Shared by the inline path (in `app.rs`) and the prefetch worker so
-/// both produce byte-identical results.
-///
-/// RGB channels are sample planes of the *same* IFD, so they're decoded with a
-/// single decompression pass (`read_planes_*`) instead of one full decode per
-/// channel — ~3x cheaper on compressed RGB. Non-RGB (and float) jobs decode
-/// per-channel as before.
+/// Decode all of one frame-request's channels into owned pixels, in `jobs`
+/// order: [`decode_jobs_borrowed`], for a result that outlives the frame —
+/// the prefetch worker's, a cache entry, a histogram source.
 pub fn decode_jobs(
     mmap: &[u8],
     frames: &[FrameInfo],
     order: ByteOrder,
     jobs: &[ChannelJob],
 ) -> anyhow::Result<Vec<Decoded>> {
+    Ok(decode_jobs_borrowed(mmap, frames, order, jobs)?
+        .into_iter()
+        .map(DecodedRef::into_owned)
+        .collect())
+}
+
+/// Decode all of one frame-request's channels, in `jobs` order, borrowing the
+/// file's bytes wherever they already are the plane (see [`DecodedRef`]).
+/// Shared by the inline upload and, through [`decode_jobs`], the prefetch
+/// worker, so both produce byte-identical results.
+///
+/// RGB channels are sample planes of the *same* IFD, so they're decoded with a
+/// single decompression pass (`read_planes_*`) instead of one full decode per
+/// channel — ~3x cheaper on compressed RGB. Non-RGB (and float) jobs decode
+/// per-channel as before.
+pub fn decode_jobs_borrowed<'a>(
+    mmap: &'a [u8],
+    frames: &[FrameInfo],
+    order: ByteOrder,
+    jobs: &[ChannelJob],
+) -> anyhow::Result<Vec<DecodedRef<'a>>> {
     // Batched RGB path: every job is a plane of one IFD with one integer kind.
     if jobs.len() > 1
         && jobs
@@ -139,7 +216,12 @@ pub fn decode_jobs(
                     fast_tiff_lib::read_planes_u8(mmap, frame, order)?
                 };
                 jobs.iter()
-                    .map(|j| Ok(Decoded::U8(take_plane(&mut planes, j.plane)?)))
+                    .map(|j| {
+                        Ok(DecodedRef::U8(Cow::Owned(take_plane(
+                            &mut planes,
+                            j.plane,
+                        )?)))
+                    })
                     .collect()
             }
             _ => {
@@ -149,7 +231,12 @@ pub fn decode_jobs(
                     fast_tiff_lib::read_planes_u16(mmap, frame, order, None)?
                 };
                 jobs.iter()
-                    .map(|j| Ok(Decoded::U16(take_plane(&mut planes, j.plane)?)))
+                    .map(|j| {
+                        Ok(DecodedRef::U16(Cow::Owned(take_plane(
+                            &mut planes,
+                            j.plane,
+                        )?)))
+                    })
                     .collect()
             }
         };
@@ -560,3 +647,7 @@ fn worker_loop(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "prefetch_tests.rs"]
+mod tests;

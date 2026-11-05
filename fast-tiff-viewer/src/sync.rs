@@ -13,7 +13,9 @@
 
 use crate::bandcache;
 use crate::camera::{build_volume_params, VolumeChannel};
-use crate::prefetch::{build_jobs, decode_jobs, ChannelJob, Decoded, PrefetchResult};
+use crate::prefetch::{
+    build_jobs, decode_jobs_borrowed, ChannelJob, Decoded, PrefetchResult, Samples,
+};
 use crate::roi::{self, Roi, Serving};
 use crate::stack::Stack;
 use crate::viewer::{DecodeMode, ViewMode, Viewer};
@@ -338,7 +340,14 @@ fn sync_movie(
                 if let Some(ready) = p.take_matching(want_gen, frame_index) {
                     if prefetch_matches(&ready, &jobs) {
                         for ch in &ready.channels {
-                            upload(renderer, ch.channel, ch.width, ch.height, &roi, &ch.data);
+                            upload(
+                                renderer,
+                                ch.channel,
+                                ch.width,
+                                ch.height,
+                                &roi,
+                                ch.data.view(),
+                            );
                         }
                         used_prefetch = true;
                     }
@@ -346,8 +355,9 @@ fn sync_movie(
             }
             if !used_prefetch {
                 // One call decodes every enabled channel; RGB planes share a
-                // single decompression pass inside `decode_jobs`.
-                match decode_jobs(
+                // single decompression pass. Borrowed: an uncompressed plane
+                // goes from the mapping straight into its texture.
+                match decode_jobs_borrowed(
                     &loaded.tiff.data,
                     &loaded.tiff.frames,
                     loaded.tiff.byte_order,
@@ -355,7 +365,14 @@ fn sync_movie(
                 ) {
                     Ok(decoded) => {
                         for (job, data) in jobs.iter().zip(&decoded) {
-                            upload(renderer, job.channel, job.width, job.height, &roi, data);
+                            upload(
+                                renderer,
+                                job.channel,
+                                job.width,
+                                job.height,
+                                &roi,
+                                data.view(),
+                            );
                         }
                     }
                     Err(e) => result = Err(e),
@@ -528,13 +545,13 @@ fn upload(
     width: u32,
     height: u32,
     roi: &Roi,
-    data: &Decoded,
+    data: Samples<'_>,
 ) {
     if window::covers_whole_frame(roi, width, height) {
         match data {
-            Decoded::U8(v) => renderer.upload_channel_u8(channel, width, height, v),
-            Decoded::U16(v) => renderer.upload_channel_u16(channel, width, height, v),
-            Decoded::F32(v) => renderer.upload_channel_f32(channel, width, height, v),
+            Samples::U8(v) => renderer.upload_channel_u8(channel, width, height, v),
+            Samples::U16(v) => renderer.upload_channel_u16(channel, width, height, v),
+            Samples::F32(v) => renderer.upload_channel_f32(channel, width, height, v),
         }
         return;
     }
