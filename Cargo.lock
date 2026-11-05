@@ -891,6 +891,7 @@ dependencies = [
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
  "flate2",
+ "image-registration-support",
  "libloading 0.9.0",
  "log",
  "oir-reader",
@@ -1382,7 +1383,9 @@ dependencies = [
 name = "image-registration-support"
 version = "0.1.0"
 dependencies = [
+ "pollster",
  "rayon",
+ "wgpu",
 ]
 
 [[package]]

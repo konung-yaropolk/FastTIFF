@@ -62,7 +62,7 @@ default = ["threads"]
 # off leaves the arithmetic untouched and `Backend::MultiThread` unavailable —
 # `src/par.rs` says what that costs and why it costs nothing else.
 threads = ["image-registration-support/threads"]
-gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster", "image-registration-support/gpu"]
 
 # A C interface — `src/capi.rs`, declared in `include/suite2p_registration.h` — for linking
 # into C and C++ programs as a shared or static library. Adds one small

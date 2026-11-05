@@ -21,6 +21,12 @@ categories = ["science"]
 # rather than carry a thread pool that never starts (see `par`).
 rayon = { workspace = true, optional = true }
 
+# The one GPU device both registration crates run on (`gpu`). The workspace's
+# wgpu, which every registration must share with the renderer.
+wgpu = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+
 [features]
 default = ["threads"]
 threads = ["dep:rayon"]
+gpu = ["dep:wgpu", "dep:pollster"]

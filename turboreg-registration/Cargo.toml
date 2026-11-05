@@ -75,7 +75,7 @@ threads = ["image-registration-support/threads"]
 # The criterion's sum over pixels on the graphics card. Off by default: it is
 # not faster everywhere (see `src/gpu.rs` for what it was measured against),
 # and a build that has no use for a GPU should not link one.
-gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster", "image-registration-support/gpu"]
 
 # A C interface — `src/capi.rs`, declared in `include/turboreg_registration.h` — for linking
 # into C and C++ programs as a shared or static library. Adds one small

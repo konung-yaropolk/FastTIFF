@@ -11,6 +11,10 @@ algorithms, kept once instead of once per crate.
 - `area`: the largest rectangle every registered frame covers, upright or at
   an angle (the search behind a crop to the common area), given each crate's
   own test of whether a frame reads a point from inside itself.
+- `gpu` (feature `gpu`): the one GPU device every registration in the process
+  runs on (a host's, given once with `use_device`, or one opened on first
+  use), and the error-scoped habits that keep a card shared with a renderer
+  alive.
 
 It exists for those two crates; its API follows what they need.
 

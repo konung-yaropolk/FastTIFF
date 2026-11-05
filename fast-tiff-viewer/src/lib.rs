@@ -96,16 +96,19 @@ pub type Renderer = backend::ImageRenderResources;
 /// and every device in the process is lost — which is how a TurboReg run on a
 /// 4096 x 4096 stack, with a 3D volume resident, took the application down.
 /// On the one device a registration short of memory fails its batch and says
-/// so instead (see each crate's `use_device`).
+/// so instead (see `image_registration_support::gpu::use_device`).
+///
+/// One call for every registration: the registration crates share one device
+/// slot, so a GPU path added to either is on the renderer's device without
+/// being added here.
 #[cfg(all(feature = "gpu-registration", not(target_arch = "wasm32")))]
 pub fn share_gpu_device(device: &wgpu::Device, queue: &wgpu::Queue, adapter: &wgpu::AdapterInfo) {
-    #[cfg(feature = "plugin-turboreg-stabilize")]
-    if !turboreg_registration::gpu::use_device(device.clone(), queue.clone(), adapter) {
-        log::warn!("TurboReg had opened a GPU device of its own already");
-    }
-    #[cfg(feature = "plugin-suite2p-stabilize")]
-    if !suite2p_registration::gpu::use_device(device.clone(), queue.clone(), adapter) {
-        log::warn!("suite2p had opened a GPU device of its own already");
+    #[cfg(any(
+        feature = "plugin-suite2p-stabilize",
+        feature = "plugin-turboreg-stabilize"
+    ))]
+    if !image_registration_support::gpu::use_device(device.clone(), queue.clone(), adapter) {
+        log::warn!("a registration had opened a GPU device of its own already");
     }
     // Both plugins may be compiled out.
     let _ = (device, queue, adapter);

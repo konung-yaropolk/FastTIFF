@@ -14,4 +14,6 @@
 //! keeping their own.
 
 pub mod area;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod par;
