@@ -67,7 +67,7 @@ ash = { version = "0.38", optional = true }
 # promise, which the upload waits for (`wgpu_backend`). Already in wgpu's
 # tree there, for its WebGPU backend.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen-futures = { version = "0.4", optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
 
 # WGSL is only validated by wgpu at runtime (shader-module creation), so this
 # lets `cargo test` catch shader errors offline, with no GPU and regardless of

@@ -241,7 +241,7 @@ cargo clippy --workspace --all-targets
 The web build is a different target and has its own `#[cfg]` paths, so lint it
 separately:
 ```sh
-cargo clippy --manifest-path FastTIFF-web/Cargo.toml --target wasm32-unknown-unknown --all-targets
+cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
 ```
 
 

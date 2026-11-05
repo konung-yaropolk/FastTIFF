@@ -110,12 +110,12 @@ scivis-render = { path = "../scivis-render" }
 # `renderer-*` features above pick exactly one. `default_fonts` keeps the
 # bundled text fonts. (egui still pulls the passive `accesskit` data-types crate
 # as an unavoidable core dependency.)
-eframe = { version = "0.34", default-features = false, features = ["default_fonts"] }
-egui = "0.34"
+eframe = { workspace = true, features = ["default_fonts"] }
+egui = { workspace = true }
 # egui's own table, for the metadata window's OME tables: a header that stays
 # put and only the rows in view laid out, which a recording's thousands of
 # OME `Plane` records need. Default features off: no image loaders.
-egui_extras = { version = "0.34", default-features = false }
+egui_extras = { workspace = true }
 anyhow = { workspace = true }
 rfd = "0.17"
 # The plugin contract. Shared, like the plugin system itself now is: the
@@ -146,10 +146,10 @@ fast-tiff-lib = { path = "../fast-tiff-lib", features = ["mmap", "codec-zstd"] }
 # the desktop hands one to a second process. That is `src/web_open.rs`, and
 # these are what it is written against.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-js-sys = "0.3"
-web-sys = { version = "0.3", features = [
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = [
     # The blob a result travels in, and the URL that names it.
     "Blob",
     "Url",
@@ -187,7 +187,7 @@ winres = "0.1.12"
 # Only needed on Linux. Linux windowing backends for winit. Cargo unions these with the eframe
 # features above; target-gating keeps X11/Wayland out of Windows/macOS builds.
 [target.'cfg(target_os = "linux")'.dependencies]
-eframe = { version = "0.34", default-features = false, features = ["x11", "wayland"] }
+eframe = { workspace = true, features = ["x11", "wayland"] }
 
 
 [package.metadata.winres]

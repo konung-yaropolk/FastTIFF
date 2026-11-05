@@ -15,11 +15,21 @@ on:
     paths:
       - "FastTIFF-web/**"
       # The shared egui UI lives in the desktop crate's library half, so the
-      # deployed bundle changes when it does.
+      # deployed bundle changes when it does, and when anything under it does:
+      # the built-in plugins run in the browser too.
       - "FastTIFF/**"
       - "fast-tiff-lib/**"
       - "fast-tiff-viewer/**"
       - "scivis-render/**"
+      - "fasttiff-plugin-api/**"
+      - "fasttiff-plugin-abi/**"
+      - "suite2p-registration/**"
+      - "turboreg-registration/**"
+      # The web crate is a workspace member: the root lock is its lock, and the
+      # root manifest holds its profile and its dependency versions.
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
       - ".github/workflows/deploy-web.yml"
   workflow_dispatch:
 
@@ -56,8 +66,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            FastTIFF-web/target
-          key: egui-wasm-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'FastTIFF-web/Cargo.toml') }}
+            target
+          key: egui-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: egui-wasm-${{ runner.os }}-
 
       # Pinned, and the pin is the whole fix for the deploy that failed with

@@ -7,6 +7,11 @@
 //!
 //! The desktop entry point is `FastTIFF/src/main.rs`; compare the two and the
 //! whole difference between the platforms is visible at a glance.
+//!
+//! Empty on every other target. `eframe::WebRunner` exists only on wasm32, and
+//! this crate is a workspace member, so a host `cargo test --workspace` has to
+//! be able to build it — as nothing.
+#![cfg(target_arch = "wasm32")]
 
 use wasm_bindgen::prelude::*;
 

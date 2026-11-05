@@ -726,7 +726,7 @@ fn finish_outcome(
             #[cfg(target_arch = "wasm32")]
             {
                 let name = format!("{stem}.tif");
-                return match crate::web_open::open_bytes_in_new_tab(&bytes, &name) {
+                match crate::web_open::open_bytes_in_new_tab(&bytes, &name) {
                     Ok(()) => Ok(PluginProduct::NewWindow(name)),
                     // A refused popup is the expected failure, not an
                     // exceptional one, and it is already handled: the result
@@ -739,7 +739,7 @@ fn finish_outcome(
                         name: image_name,
                         why,
                     }),
-                };
+                }
             }
 
             #[cfg(not(target_arch = "wasm32"))]
@@ -848,13 +848,14 @@ fn finish_outcome(
             #[cfg(target_arch = "wasm32")]
             {
                 let name = crate::web_save::name_from_path(&path);
-                return crate::web_save::download(&bytes, &name)
-                    .map(|()| PluginProduct::Saved(name));
+                crate::web_save::download(&bytes, &name).map(|()| PluginProduct::Saved(name))
             }
             #[cfg(not(target_arch = "wasm32"))]
-            std::fs::write(&path, bytes)
-                .map(|()| PluginProduct::Saved(path))
-                .map_err(|e| e.to_string())
+            {
+                std::fs::write(&path, bytes)
+                    .map(|()| PluginProduct::Saved(path))
+                    .map_err(|e| e.to_string())
+            }
         }
     }
 }
@@ -1306,6 +1307,10 @@ impl PanelLayout {
     /// `Some` disarms. `None` means either nothing was armed or the change has
     /// not shown up yet — [`waiting`](Self::waiting) tells those apart, and the
     /// wait is bounded so a change that never comes stops asking for frames.
+    ///
+    /// Native only, like its caller: in a browser the window is the page's,
+    /// and nothing here resizes it.
+    #[cfg(not(target_arch = "wasm32"))]
     fn grow_delta(&mut self, height: f32) -> Option<f32> {
         if self.grow_armed == 0 {
             return None;
@@ -1321,6 +1326,7 @@ impl PanelLayout {
 
     /// Whether a grow is still expecting the bar's height to change, and the
     /// caller should keep frames coming so it can see it.
+    #[cfg(not(target_arch = "wasm32"))]
     fn waiting(&self) -> bool {
         self.grow_armed > 0
     }

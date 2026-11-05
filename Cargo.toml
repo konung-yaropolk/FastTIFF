@@ -5,10 +5,15 @@ resolver = "2"
 #   oir-reader        the Olympus OIR container reader, standalone beside it
 #   scivis-render     GPU pipelines, textures, ray-marching
 #   fast-tiff-viewer  stack model, channel settings, decode -> GPU sync
-#   FastTIFF          the eframe desktop frontend
-# A future wasm frontend becomes a fifth member alongside `FastTIFF`, reusing
-# the lower three unchanged.
-members = ["fast-tiff-lib", "oir-reader", "scivis-render", "fast-tiff-viewer", "fasttiff-plugin-api", "fasttiff-plugin-abi", "fasttiff-plugin", "FastTIFF", "plugins/PI-derivatives-check", "suite2p-registration", "turboreg-registration"]
+#   FastTIFF          the egui UI (its library) and the desktop host (its binary)
+#   FastTIFF-web      the browser host around that same library
+#
+# The browser host is a member like the others, so the bundle the site serves
+# is built from the lock `cargo test --workspace` runs against. Being a member
+# costs the desktop build nothing: everything that crate depends on is behind
+# `cfg(target_arch = "wasm32")`, and under resolver 2 a dependency for a target
+# that is not being built adds no features to the ones that are.
+members = ["fast-tiff-lib", "oir-reader", "scivis-render", "fast-tiff-viewer", "fasttiff-plugin-api", "fasttiff-plugin-abi", "fasttiff-plugin", "FastTIFF", "FastTIFF-web", "plugins/PI-derivatives-check", "suite2p-registration", "turboreg-registration"]
 # The fuzz harness is its own crate: it needs nightly + libFuzzer, so keeping it
 # out of the workspace means `cargo build/test --workspace` stays stable-only.
 # Run it with `cargo +nightly fuzz run <target>` from `fast-tiff-lib/`.
@@ -48,9 +53,21 @@ exclude = [
 # naga is the shader compiler that wgpu carries. The shader test
 # (`scivis-render/tests/wgsl.rs`) validates the WGSL with the same one, so a
 # shader it passes is a shader the shipped wgpu accepts.
+#
+# eframe, egui and egui_extras are one release train, and eframe's renderer is
+# the reason wgpu is pinned above: bump the four together. Default features off
+# for eframe and egui_extras everywhere, so a member names exactly the ones it
+# wants (each has a note on why).
 [workspace.dependencies]
 wgpu = "29"
 naga = { version = "29", features = ["wgsl-in"] }
+eframe = { version = "0.34", default-features = false }
+egui = "0.34"
+egui_extras = { version = "0.34", default-features = false }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
 rayon = "1.10"
 bytemuck = "1.25"
 pollster = "1.0"
@@ -67,6 +84,16 @@ lto = "fat"        # Enable Link-Time Optimization
 codegen-units = 1  # Helps LTO optimize more effectively
 strip = true       # Automatically strip symbols from the binary.
 panic = 'unwind'   # 'abort' to kill process or 'unwind' for safe memory cleanup
+
+# Except the web bundle, which must keep its `target_features` section.
+# `strip = true` makes wasm-ld drop every custom section, that one included, and
+# wasm-opt reads it to learn which features the module uses. Without it,
+# wasm-opt validates the module as MVP wasm and rejects the bulk-memory
+# instructions rustc has emitted by default for wasm32 since 1.87 ("Bulk memory
+# operations require bulk memory"). Stripping debug info only, which is the
+# release default, leaves the section alone.
+[profile.release.package.fasttiff-web-egui]
+strip = "debuginfo"
 
 [profile.dev]
 # Keep IFD-walking / decode fast even in debug builds — these are the

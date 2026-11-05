@@ -148,12 +148,13 @@ jobs:
 
       # The egui UI is shared between the desktop binary and the browser build,
       # so a desktop-only edit can break the wasm side. This is the check that
-      # catches it — `FastTIFF-web` is its own workspace, hence the separate
-      # invocation. The *bundle* is built in `test-linux`, on the deploy's own
-      # operating system; see the note there.
-      - name: Check the shared UI builds for the web
-        working-directory: FastTIFF-web
-        run: cargo check --target wasm32-unknown-unknown
+      # catches it, and clippy rather than check so that the code only wasm
+      # compiles (`cfg(target_arch = "wasm32")` in the UI, and all of
+      # FastTIFF-web) is linted too; the workspace clippy step is host-only.
+      # The *bundle* is built in `test-linux`, on the deploy's own operating
+      # system; see the note there.
+      - name: Check and lint the shared UI for the web
+        run: cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
 
       # The single-threaded shape of fast-tiff-viewer — no read-ahead worker, no
       # background volume builder, no rayon — which is what a wasm frontend will

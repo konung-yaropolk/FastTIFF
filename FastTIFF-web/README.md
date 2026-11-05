@@ -151,6 +151,16 @@ is smaller than this renderer needs (the composite pass binds 13 sampled
 textures; the volume pass allocates 3D textures). It's the web twin of the
 desktop adapter's `tune_native_options`.
 
-This crate is deliberately **not** a workspace member — Cargo unifies features
-across a workspace, and one build covering this and the desktop app would union
-`threads`/`mmap`/`codec-zstd` back in and break the wasm build.
+This crate is a workspace member, so it builds from the root `Cargo.lock` and
+into the root `target/`. Everything it depends on, and all of its source, is
+behind `cfg(target_arch = "wasm32")`: on the host it is an empty crate, which is
+what lets `cargo test --workspace` include it. The desktop-only features
+(`threads`, `mmap`, `codec-zstd`) do not leak into the wasm build, because the
+desktop crate asks for them under `cfg(not(target_arch = "wasm32"))` and
+resolver 2 does not add features from a target that is not being built.
+
+To check or lint it without building the bundle:
+
+```bash
+cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
+```
