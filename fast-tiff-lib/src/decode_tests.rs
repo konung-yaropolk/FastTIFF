@@ -700,3 +700,37 @@ fn planar_u8_planes_are_read_contiguously() {
         }
     }
 }
+
+/// A thread's own parallelism choice wins over the process-wide hint, a scope
+/// restores what the thread had, and one thread's choice is not another's.
+#[test]
+fn parallel_decoding_is_chosen_per_thread() {
+    set_thread_parallel_decode(Some(true));
+    assert!(parallel_decode_enabled());
+    {
+        let _serial = parallel_decode_scope(false);
+        assert!(!parallel_decode_enabled());
+        {
+            let _again = parallel_decode_scope(true);
+            assert!(parallel_decode_enabled());
+        }
+        assert!(
+            !parallel_decode_enabled(),
+            "the inner scope restored the outer"
+        );
+    }
+    assert!(
+        parallel_decode_enabled(),
+        "and the outer restored the thread's own"
+    );
+
+    let other = std::thread::spawn(|| {
+        set_thread_parallel_decode(Some(false));
+        parallel_decode_enabled()
+    })
+    .join()
+    .unwrap();
+    assert!(!other, "the other thread decided for itself");
+    assert!(parallel_decode_enabled(), "and did not decide for this one");
+    set_thread_parallel_decode(None);
+}

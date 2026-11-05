@@ -510,6 +510,9 @@ struct Job {
     roi: Roi,
     jobs: Vec<ChannelJob>,
     kinds: Vec<ChannelKind>,
+    /// Whether the requester decodes in parallel: the worker decodes the
+    /// window the way the view would have.
+    parallel: bool,
 }
 
 /// Builds windows on a thread of its own, so the interface keeps drawing while
@@ -555,6 +558,7 @@ impl WindowWorker {
                     while let Ok(newer) = rx.try_recv() {
                         job = newer;
                     }
+                    fast_tiff_lib::set_thread_parallel_decode(Some(job.parallel));
                     match assemble(
                         &tiff,
                         &mut bands,
@@ -599,6 +603,7 @@ impl WindowWorker {
             roi,
             jobs,
             kinds,
+            parallel: fast_tiff_lib::parallel_decode_enabled(),
         });
     }
 

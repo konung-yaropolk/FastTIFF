@@ -98,8 +98,10 @@ impl Viewer {
             return outcome;
         }
 
-        // Push the decode-parallelism choice to fast-tiff-lib: Auto follows the
-        // playback-keeping-up latch, Serial/Threaded force it off/on.
+        // The decode-parallelism choice for this thread's decodes: Auto follows
+        // the playback-keeping-up latch, Serial/Threaded force it off/on. This
+        // thread's own, so a save or a volume build running elsewhere keeps its
+        // own; the workers serving this view are handed it with each request.
         // A frame too large for one texture is decoded a band at a time, with
         // the user waiting on each one — a second of wall clock that threads cut
         // to a fraction. `Auto` is otherwise driven by the playback latch, which
@@ -110,7 +112,7 @@ impl Viewer {
             target.is_some_and(|r| !window::covers_whole_frame(&r.show, frame_w, frame_h));
         let parallel = self.decode_mode.parallel(self.decode_parallel)
             || (windowed && self.decode_mode == DecodeMode::Auto);
-        fast_tiff_lib::set_parallel_decode(parallel);
+        fast_tiff_lib::set_thread_parallel_decode(Some(parallel));
 
         if let Some(r) = target {
             let read_ahead = self.playback.playing && !self.decode_parallel;

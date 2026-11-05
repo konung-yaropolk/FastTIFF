@@ -319,6 +319,9 @@ fn write_all<W: std::io::Write + std::io::Seek>(
     on_progress: &mut dyn FnMut(f32) -> bool,
     batch_bytes: usize,
 ) -> Result<W> {
+    // A save is something the user waits for, on a thread of its own: its
+    // decodes and its compression use every core, whatever the view is doing.
+    let _parallel = fast_tiff_lib::parallel_decode_scope(true);
     let stack = source;
     let first = stack
         .tiff

@@ -513,6 +513,9 @@ struct Request {
     generation: u64,
     frame_index: usize,
     jobs: Vec<ChannelJob>,
+    /// Whether the requester decodes in parallel: read-ahead decodes the way
+    /// the view would have.
+    parallel: bool,
 }
 
 /// Read-ahead is a pure optimization, so a host without threads (notably
@@ -577,6 +580,7 @@ impl Prefetcher {
             generation,
             frame_index,
             jobs,
+            parallel: fast_tiff_lib::parallel_decode_enabled(),
         });
     }
 
@@ -609,6 +613,7 @@ fn worker_loop(
         while let Ok(newer) = rx.try_recv() {
             req = newer;
         }
+        fast_tiff_lib::set_thread_parallel_decode(Some(req.parallel));
         // Page-touch mode: absorb the next frame's soft page faults here and
         // store no result — the UI thread's inline decode is then fault-free
         // (and stays zero-copy, which decoding ahead would have forfeited).

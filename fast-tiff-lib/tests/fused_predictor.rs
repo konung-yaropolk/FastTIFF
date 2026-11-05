@@ -201,11 +201,13 @@ fn roundtrip(w: u32, h: u32, rps: u32, comp: Compression, pred: bool) {
         frame.strip_offsets.len()
     );
     for &par in &[false, true] {
-        fast_tiff_lib::set_parallel_decode(par);
+        // This thread's own choice: a process-wide switch would race every
+        // other test decoding in this binary.
+        let scope = fast_tiff_lib::parallel_decode_scope(par);
         let got = fast_tiff_lib::read_frame_u16(&stack.data, frame, stack.byte_order, None)
             .unwrap()
             .into_owned();
-        fast_tiff_lib::set_parallel_decode(false);
+        drop(scope);
         let bad = got.iter().zip(src.iter()).position(|(a, b)| a != b);
         assert!(
             bad.is_none(),
@@ -251,10 +253,10 @@ fn float_predictor_multi_strip() {
         assert_eq!(frame.predictor, 3);
         assert!(frame.strip_offsets.len() > 1);
         for &par in &[false, true] {
-            fast_tiff_lib::set_parallel_decode(par);
+            let scope = fast_tiff_lib::parallel_decode_scope(par);
             let got =
                 fast_tiff_lib::read_plane_f32(&stack.data, frame, stack.byte_order, 0).unwrap();
-            fast_tiff_lib::set_parallel_decode(false);
+            drop(scope);
             let bad = got
                 .iter()
                 .zip(src.iter())
