@@ -285,14 +285,16 @@ fn import_with_plugin(
         .import(&request, &mut Host(progress, cancel))
         .map_err(|e| format!("{name}: {e}"))?;
 
-    let bytes = fast_tiff_viewer::plugins::to_tiff_bytes(&imported.image, imported.info.as_ref())
-        .map_err(|e| format!("{name}: {e:#}"))?;
     let fallback = imported
         .info
         .as_ref()
         .map(|i| i.name.clone())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| imported.image.name.clone());
+    // The planes go into the encode, and each is freed once written: the
+    // import is then held about once, not twice.
+    let bytes = fast_tiff_viewer::plugins::into_tiff_bytes(imported.image, imported.info.as_ref())
+        .map_err(|e| format!("{name}: {e:#}"))?;
     Ok(Opened::Bytes(bytes, imported_label(path, &fallback)))
 }
 
@@ -673,8 +675,11 @@ fn finish_outcome(
         Outcome::SelectRegion { prompt } => Ok(PluginProduct::SelectRegion(prompt)),
         Outcome::NewDocument(image) => {
             Job::begin_phase(label, progress, "Encoding result");
-            let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
-                &image,
+            // Taken, not borrowed: each plane is freed as soon as it is
+            // written, so the result is held about once while it is encoded.
+            let image_name = image.name.clone();
+            let bytes = match fast_tiff_viewer::plugins::into_tiff_bytes_reporting(
+                *image,
                 None,
                 luts,
                 &mut |f| {
@@ -690,8 +695,7 @@ fn finish_outcome(
             // A file name from the image's own name, with anything a filesystem
             // would object to replaced. Needed even for the handover that never
             // touches a filesystem: it is what the new window is titled.
-            let stem: String = image
-                .name
+            let stem: String = image_name
                 .chars()
                 .map(|c| {
                     if c.is_alphanumeric() || "-_. ".contains(c) {
@@ -726,7 +730,7 @@ fn finish_outcome(
                     // through.
                     Err(why) => Ok(PluginProduct::Inline {
                         bytes,
-                        name: image.name.clone(),
+                        name: image_name,
                         why,
                     }),
                 };
@@ -774,7 +778,7 @@ fn finish_outcome(
                     // whole and is shown in this window instead.
                     Err(e) => Ok(PluginProduct::Inline {
                         bytes,
-                        name: image.name.clone(),
+                        name: image_name,
                         why: e.to_string(),
                     }),
                 }
@@ -782,8 +786,11 @@ fn finish_outcome(
         }
         Outcome::ReplaceDocument(image) => {
             Job::begin_phase(label, progress, "Encoding result");
-            let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
-                &image,
+            // Taken, not borrowed: each plane is freed as soon as it is
+            // written, so the result is held about once while it is encoded.
+            let image_name = image.name.clone();
+            let bytes = match fast_tiff_viewer::plugins::into_tiff_bytes_reporting(
+                *image,
                 None,
                 luts,
                 &mut |f| {
@@ -799,13 +806,15 @@ fn finish_outcome(
             // this one, so the bytes only have to reach the interface thread.
             Ok(PluginProduct::Replace {
                 bytes,
-                name: image.name.clone(),
+                name: image_name,
             })
         }
         Outcome::SaveToFile { image, path } => {
             Job::begin_phase(label, progress, "Writing result");
-            let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
-                &image,
+            // Taken, not borrowed: each plane is freed as soon as it is
+            // written, so the result is held about once while it is encoded.
+            let bytes = match fast_tiff_viewer::plugins::into_tiff_bytes_reporting(
+                *image,
                 None,
                 luts,
                 &mut |f| {

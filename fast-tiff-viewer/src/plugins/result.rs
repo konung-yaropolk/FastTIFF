@@ -35,6 +35,17 @@ pub fn to_tiff_bytes(image: &ImageResult, info: Option<&StackInfo>) -> anyhow::R
         .unwrap_or_else(|| Err(anyhow::anyhow!("cancelled")))
 }
 
+/// [`to_tiff_bytes`], taking the result: each plane is dropped as soon as it
+/// has been written, so encoding holds the result about once, plus the file
+/// it is becoming, rather than both in full. On a stabilised recording of
+/// several gigabytes that is the difference between needing the result's size
+/// in spare memory once or twice.
+pub fn into_tiff_bytes(image: ImageResult, info: Option<&StackInfo>) -> anyhow::Result<Vec<u8>> {
+    into_tiff_bytes_reporting(image, info, &[], &mut |_| true)
+        .transpose()
+        .unwrap_or_else(|| Err(anyhow::anyhow!("cancelled")))
+}
+
 /// [`to_tiff_bytes`], reporting how far through the planes it is.
 ///
 /// Encoding a plugin's result is not a rounding error on the run that produced
@@ -50,6 +61,31 @@ pub fn to_tiff_bytes_reporting(
     luts: &[Lut],
     on_progress: &mut dyn FnMut(f32) -> bool,
 ) -> anyhow::Result<Option<Vec<u8>>> {
+    let (opts, room) = writer_for(image, info, luts)?;
+    write_planes(opts, room, image.planes.iter(), on_progress)
+}
+
+/// [`to_tiff_bytes_reporting`], taking the result and dropping each plane once
+/// it is written — see [`into_tiff_bytes`]. What a caller that has no further
+/// use for the planes should call.
+pub fn into_tiff_bytes_reporting(
+    mut image: ImageResult,
+    info: Option<&StackInfo>,
+    luts: &[Lut],
+    on_progress: &mut dyn FnMut(f32) -> bool,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let (opts, room) = writer_for(&image, info, luts)?;
+    let planes = std::mem::take(&mut image.planes);
+    drop(image);
+    write_planes(opts, room, planes.into_iter(), on_progress)
+}
+
+/// The writer options for `image`, and how many bytes the file will take.
+fn writer_for(
+    image: &ImageResult,
+    info: Option<&StackInfo>,
+    luts: &[Lut],
+) -> anyhow::Result<(WriterOptions, usize)> {
     image
         .validate()
         .map_err(|e| anyhow::anyhow!("the plugin returned an unusable image: {e}"))?;
@@ -141,22 +177,33 @@ pub fn to_tiff_bytes_reporting(
     }
 
     let opts = WriterOptions::new(image.width, image.height, sample).metadata(meta);
+    let payload: usize = image.planes.iter().map(plane_bytes).sum();
+    // A generous IFD per plane, plus the header. Over-reserving a little costs
+    // one allocation that is never grown; under-reserving costs the doubling
+    // the up-front size exists to avoid (see `write_planes`).
+    let room = payload.saturating_add(image.planes.len().saturating_mul(512) + 4096);
+    Ok((opts, room))
+}
+
+/// Write `planes` into a TIFF of `room` bytes. Each plane is let go once it
+/// has been written, which for owned planes frees it there and then.
+fn write_planes<P: std::borrow::Borrow<PlaneData>>(
+    opts: WriterOptions,
+    room: usize,
+    planes: impl ExactSizeIterator<Item = P>,
+    on_progress: &mut dyn FnMut(f32) -> bool,
+) -> anyhow::Result<Option<Vec<u8>>> {
     // Sized up front. The buffer would otherwise double its way to the finished
     // size, and every doubling copies everything written so far — on a
     // stabilised recording that is several gigabytes of memcpy, all of it after
     // the plugin's own progress had reached the end.
-    let payload: usize = image.planes.iter().map(plane_bytes).sum();
-    // A generous IFD per plane, plus the header. Over-reserving a little costs
-    // one allocation that is never grown; under-reserving costs the doubling
-    // this exists to avoid.
-    let room = payload.saturating_add(image.planes.len().saturating_mul(512) + 4096);
     let mut w = TiffWriter::new(Cursor::new(Vec::with_capacity(room)), opts)?;
-    let total = image.planes.len().max(1);
-    for (i, plane) in image.planes.iter().enumerate() {
+    let total = planes.len().max(1);
+    for (i, plane) in planes.enumerate() {
         if !on_progress(i as f32 / total as f32) {
             return Ok(None);
         }
-        match plane {
+        match plane.borrow() {
             PlaneData::U8(v) => w.write_frame_bytes(v)?,
             PlaneData::U16(v) => w.write_frame_bytes(&le_bytes_u16(v))?,
             PlaneData::F32(v) => w.write_frame_bytes(&le_bytes_f32(v))?,

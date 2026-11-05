@@ -28,7 +28,9 @@ pub mod result;
 #[cfg(not(target_arch = "wasm32"))]
 pub use discover::{install_dir, is_library, search_paths, user_plugin_dir, LIBRARY_EXT};
 pub use host::{describe_image, describe_stack, describe_view, describe_volume, StackHost};
-pub use result::{to_stack, to_tiff_bytes, to_tiff_bytes_reporting};
+pub use result::{
+    into_tiff_bytes, into_tiff_bytes_reporting, to_stack, to_tiff_bytes, to_tiff_bytes_reporting,
+};
 
 pub use library::{LoadedExporter, LoadedImporter, LoadedPlugin};
 
