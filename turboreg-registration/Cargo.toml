@@ -45,14 +45,14 @@ categories = ["science", "algorithms", "multimedia::images"]
 [dependencies]
 # Parallel CPU registration. Frames are independent once the reference is
 # fixed, so a stack is an embarrassingly parallel map — except under
-# `Reference::Previous`, which is a chain and cannot be (see `par.rs`).
+# `Reference::Previous`, which is a chain and cannot be. It goes through the
+# `par` of `image-registration-support` (re-exported as this crate's): rayon
+# behind `threads`, sequential stand-ins without it, for the browser's sake, as
+# in `suite2p-registration`.
 #
-# Optional, and behind `threads`, for the browser's sake: rayon does build for
-# `wasm32-unknown-unknown`, falling back to running a `par_iter` on the calling
-# thread, but a thread pool that can never run is a large thing to send over a
-# network and `Backend::MultiThread` would then be a label with nothing behind
-# it. Same reasoning, and the same shape, as `suite2p-registration`.
-rayon = { workspace = true, optional = true }
+# A version as well as the path: this crate is published, and a published
+# crate's dependencies must be on crates.io too.
+image-registration-support = { path = "../image-registration-support", version = "0.1.0", default-features = false }
 
 # The GPU backend, behind a feature so the algorithm crate does not drag a
 # graphics stack into anything that only wants the CPU path. The same wgpu,
@@ -67,7 +67,7 @@ default = ["threads"]
 # Parallel CPU registration. On by default: every native build wants it, and a
 # crate that had to be asked for its usual behaviour would be a trap. Turning it
 # off leaves the arithmetic untouched and `Backend::MultiThread` unavailable.
-threads = ["dep:rayon"]
+threads = ["image-registration-support/threads"]
 # The criterion's sum over pixels on the graphics card. Off by default: it is
 # not faster everywhere (see `src/gpu.rs` for what it was measured against),
 # and a build that has no use for a GPU should not link one.

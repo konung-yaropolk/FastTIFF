@@ -108,13 +108,26 @@ step() {
     TIMES+=($((SECONDS - start)))
 }
 
+# A path dependency that also carries `version` is a requirement against the
+# crate next door, so bumping that crate breaks this one, and the resolver
+# reports it as a missing candidate. Only a crate that is published needs the
+# field: crates.io wants every dependency of a published crate published too,
+# with a version. The published ones are those publish-lib.yml publishes, so a
+# pin anywhere else fails here.
 no_pinned_paths() {
-    local pinned
-    pinned=$(grep -rnE '^[a-zA-Z0-9_-]+ *= *\{.*(path.*version|version.*path) *=' --include=Cargo.toml --exclude-dir=target --exclude-dir=.git . || true)
-    if [ -n "$pinned" ]; then
-        echo "$pinned"
-        echo "A path dependency above also pins a version; drop the 'version' field"
-        echo "unless the crate holding it is published."
+    local published file name bad=0
+    published=$(sed -n 's/.*cargo publish -p \([a-z0-9_-]*\).*/\1/p' .github/workflows/publish-lib.yml)
+    for file in $(grep -rlE '^[a-zA-Z0-9_-]+ *= *\{.*(path.*version|version.*path) *=' \
+                      --include=Cargo.toml --exclude-dir=target --exclude-dir=.git .); do
+        name=$(sed -n 's/^name = "\(.*\)"/\1/p' "$file" | head -n 1)
+        if ! printf '%s\n' $published | grep -qx "$name"; then
+            grep -nE '^[a-zA-Z0-9_-]+ *= *\{.*(path.*version|version.*path) *=' "$file" | sed "s|^|$file:|"
+            bad=1
+        fi
+    done
+    if [ $bad -ne 0 ]; then
+        echo "A path dependency above also pins a version, in a crate that is not published"
+        echo "(publish-lib.yml); drop the 'version' field."
         return 1
     fi
 }
@@ -157,11 +170,15 @@ doc_paths() {
     "$py" scripts/check-doc-paths.py
 }
 
-oir_package() {
+# `cargo package`, as a release would: in CI on the clean checkout, locally
+# with `--allow-dirty` so it can be run on uncommitted work. Several `-p` at
+# once package together, so a crate whose dependency is not on crates.io yet
+# is verified against the one beside it.
+package() {
     if [ -n "${CI:-}" ]; then
-        cargo package -p oir-reader
+        cargo package "$@"
     else
-        cargo package -p oir-reader --allow-dirty
+        cargo package --allow-dirty "$@"
     fi
 }
 
@@ -215,7 +232,8 @@ step oir-no-default      -- env RUSTDOCFLAGS="-D warnings" cargo test -p oir-rea
 step oir-wasm            -- cargo check -p oir-reader --target wasm32-unknown-unknown --all-targets
 step oir-wasm-no-default -- cargo check -p oir-reader --target wasm32-unknown-unknown --no-default-features
 step oir-doc             -- env RUSTDOCFLAGS="-D warnings" cargo doc -p oir-reader --no-deps
-step oir-package slow    -- oir_package
+step oir-package slow    -- package -p oir-reader
+step registration-package slow -- package -p image-registration-support -p suite2p-registration -p turboreg-registration
 step web-check           -- cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
 step viewer-no-threads   -- cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu,builtin-plugins,plugin-netpbm
 step viewer-no-backend   -- cargo check -p fast-tiff-viewer --no-default-features

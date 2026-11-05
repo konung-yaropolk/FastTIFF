@@ -70,7 +70,7 @@ pub mod capi;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod optimize;
-pub mod par;
+pub(crate) use image_registration_support::par;
 pub mod pyramid;
 pub mod settings;
 pub mod spline;

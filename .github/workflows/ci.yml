@@ -270,6 +270,13 @@ jobs:
       - name: Run tests (glow backend)
         run: bash scripts/ci-local.sh glow-tests
 
+      # The registration crates are published after image-registration-support, which
+      # they depend on, so `cargo package` alone could not verify them before
+      # it is on crates.io. Packaged together, each is built against the other
+      # as it would be published.
+      - name: Package the registration crates as they would be published
+        run: bash scripts/ci-local.sh registration-package
+
       # A rationale comment that names another file ("see `tests/it/plugins.rs`")
       # is a claim nothing else checks, and it goes on reading as true after the
       # file moves. This fails on any comment or doc naming a file or directory

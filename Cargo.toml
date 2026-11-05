@@ -13,7 +13,7 @@ resolver = "2"
 # costs the desktop build nothing: everything that crate depends on is behind
 # `cfg(target_arch = "wasm32")`, and under resolver 2 a dependency for a target
 # that is not being built adds no features to the ones that are.
-members = ["fast-tiff-lib", "oir-reader", "scivis-render", "fast-tiff-viewer", "fasttiff-plugin-api", "fasttiff-plugin-abi", "fasttiff-plugin", "FastTIFF", "FastTIFF-web", "plugins/PI-derivatives-check", "suite2p-registration", "turboreg-registration"]
+members = ["fast-tiff-lib", "oir-reader", "scivis-render", "fast-tiff-viewer", "fasttiff-plugin-api", "fasttiff-plugin-abi", "fasttiff-plugin", "FastTIFF", "FastTIFF-web", "plugins/PI-derivatives-check", "image-registration-support", "suite2p-registration", "turboreg-registration"]
 # The fuzz harness is its own crate: it needs nightly + libFuzzer, so keeping it
 # out of the workspace means `cargo build/test --workspace` stays stable-only.
 # Run it with `cargo +nightly fuzz run <target>` from `fast-tiff-lib/`.

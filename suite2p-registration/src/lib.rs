@@ -144,7 +144,7 @@ pub mod masks;
 pub mod nonrigid;
 /// Parallel loops, or sequential stand-ins for them when the `threads` feature
 /// is off. Every `par_` call in this crate resolves through here.
-pub mod par;
+pub(crate) use image_registration_support::par;
 pub mod pipeline;
 pub mod rigid;
 pub mod settings;

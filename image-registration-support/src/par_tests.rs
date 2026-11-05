@@ -127,3 +127,25 @@ fn paired_chunks_stay_in_step() {
         }
     }
 }
+
+/// Without threads, `map_init` builds its state once and maps every item with
+/// it, in order. (With threads it is rayon's, which is tested there.)
+#[cfg(not(feature = "threads"))]
+#[test]
+fn map_init_builds_one_state_and_keeps_order() {
+    let mut builds = 0;
+    let out: Vec<usize> = (0..5)
+        .map_init(
+            || {
+                builds += 1;
+                10
+            },
+            |state, x| {
+                *state += 1;
+                *state + x
+            },
+        )
+        .collect();
+    assert_eq!(builds, 1);
+    assert_eq!(out, vec![11, 13, 15, 17, 19]);
+}

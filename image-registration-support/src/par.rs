@@ -7,7 +7,8 @@
 
 //! Parallelism, or the lack of it.
 //!
-//! Every parallel loop in this crate goes through `use crate::par::*` rather
+//! Every parallel loop in the registration crates goes through
+//! `use crate::par::*` (each re-exports this module as its own `par`) rather
 //! than `use rayon::prelude::*`. With the `threads` feature on — which is the
 //! default, and what every desktop build uses — that import *is* rayon's
 //! prelude and nothing has changed. With it off, the same names resolve to
@@ -21,9 +22,9 @@
 //! compiled for a browser. It is a crate that should not carry rayon there,
 //! for two reasons.
 //!
-//! The first is honesty. Under the fallback, [`Backend::MultiThread`] is a
+//! The first is honesty. Under the fallback, `Backend::MultiThread` is a
 //! label with nothing behind it: the run is single-threaded and says it is not.
-//! That is the same complaint [`Backend::Gpu`] already answers by reporting
+//! That is the same complaint `Backend::Gpu` already answers by reporting
 //! itself unavailable, and a slow run indistinguishable from a correct one is
 //! precisely what that mechanism exists to prevent. With the feature off,
 //! `MultiThread` says so instead.
@@ -32,16 +33,15 @@
 //! state machine are a large thing to link into a bundle shipped over the
 //! network when none of it can ever run.
 //!
-//! [`Backend::Gpu`]: crate::Backend::Gpu
-//! [`Backend::MultiThread`]: crate::Backend::MultiThread
+//! (`Backend` is each registration crate's own: `MultiThread`, `SingleThread`
+//! and `Gpu` are the backends they offer.)
 //!
 //! Turning threads off does not change what the crate *computes*.
-//! Every call site here already had a sequential path — [`Backend::SingleThread`]
+//! Every call site here already had a sequential path — `Backend::SingleThread`
 //! is a backend a user can pick, and it exists precisely so a result can be
 //! reproduced without scheduling in the picture. This module only makes that
 //! path the one the compiler can see, so that the parallel one need not exist.
 //!
-//! [`Backend::SingleThread`]: crate::Backend::SingleThread
 //!
 //! # What the sequential shapes guarantee
 //!
@@ -52,7 +52,7 @@
 //! and the reason is worth stating because it is a rule rather than luck.
 //!
 //! Most reductions here accumulate inside one item of a parallel loop and
-//! never across items. The one that does cross items — the optimiser's sum of
+//! never across items. The one that does cross items — TurboReg's optimiser's sum of
 //! squared differences, taken over chunks of rows — splits its work into
 //! pieces fixed by the *image*, never by the thread count, collects the partial
 //! sums in piece order with [`map_in_order`], and adds them in that order on
@@ -136,6 +136,24 @@ pub trait FlatMapIter: Iterator + Sized {
 
 #[cfg(not(feature = "threads"))]
 impl<I: Iterator> FlatMapIter for I {}
+
+/// rayon's `map_init`, which is one state for the whole loop once there is one
+/// thread: `init` runs once, and every item is mapped with that state.
+#[cfg(not(feature = "threads"))]
+pub trait MapInit: Iterator + Sized {
+    /// Map each item with a state built once, in order.
+    fn map_init<S, R>(
+        self,
+        init: impl FnOnce() -> S,
+        mut f: impl FnMut(&mut S, Self::Item) -> R,
+    ) -> impl Iterator<Item = R> {
+        let mut state = init();
+        self.map(move |item| f(&mut state, item))
+    }
+}
+
+#[cfg(not(feature = "threads"))]
+impl<I: Iterator> MapInit for I {}
 
 /// `f` over each of `items`, on every core or on this one, results in input
 /// order either way.

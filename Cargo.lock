@@ -1374,6 +1374,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "image-registration-support"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2807,8 +2814,8 @@ name = "suite2p-registration"
 version = "0.27.0"
 dependencies = [
  "bytemuck",
+ "image-registration-support",
  "pollster",
- "rayon",
  "rustfft",
  "wgpu",
 ]
@@ -2979,8 +2986,8 @@ name = "turboreg-registration"
 version = "0.27.0"
 dependencies = [
  "bytemuck",
+ "image-registration-support",
  "pollster",
- "rayon",
  "wgpu",
 ]
 
