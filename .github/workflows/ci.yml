@@ -15,7 +15,7 @@ name: CI
 # behind another platform's gate stays green until its release build fails.
 #
 # build.rs embeds the committed icon/icon.ico into the .exe via winres; the icon
-# is pre-rendered from icon.svg by tools/generate-icons.bat and committed, so no
+# is pre-rendered from icon.svg by icon/generate-icons.bat and committed, so no
 # rasterization happens here.
 on:
   push:
@@ -269,6 +269,14 @@ jobs:
 
       - name: Run tests (glow backend)
         run: bash scripts/ci-local.sh glow-tests
+
+      # A rationale comment that names another file ("see `tests/it/plugins.rs`")
+      # is a claim nothing else checks, and it goes on reading as true after the
+      # file moves. This fails on any comment or doc naming a file or directory
+      # the repository does not have. Here because it needs only a Python 3,
+      # which every Linux runner has.
+      - name: Comments name files that exist
+        run: bash scripts/ci-local.sh doc-paths
 
       # The deploy's own build, run before the merge instead of after it.
       #

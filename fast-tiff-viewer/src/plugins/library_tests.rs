@@ -1,7 +1,7 @@
 //! Plugins that lie.
 //!
-//! `plugin_library.rs` proves the boundary is correct for a plugin that
-//! behaves. This proves it is *safe* for one that does not — which is the case
+//! `plugins/example/tests/boundary.rs` proves the boundary is correct for a
+//! plugin that behaves. This proves it is *safe* for one that does not — which is the case
 //! that actually matters, because a plugin is third-party code the host has no
 //! control over, and "it crashed the microscope software" is not an acceptable
 //! outcome for any of it.
@@ -396,8 +396,8 @@ fn a_query_that_fails_is_reported_with_its_status() {
 /// terminates the process inside the **plugin**, before any host frame runs.
 /// No `catch_unwind` on this side can change that, which is precisely why
 /// `fasttiff_plugin::export_plugin!` wraps every entry point in its own guard
-/// and converts the panic to this status. `plugin_library.rs` tests that guard
-/// against the real example plugin; this tests what the host does with the
+/// and converts the panic to this status. `plugins/example/tests/boundary.rs`
+/// tests that guard against the real example plugin; this tests what the host does with the
 /// answer.
 #[test]
 fn a_query_that_reports_a_panic_is_not_loaded() {

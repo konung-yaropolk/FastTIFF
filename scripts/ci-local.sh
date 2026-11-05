@@ -148,6 +148,15 @@ every_step_in_ci() {
     return $missing
 }
 
+# Comments and docs that name a file this repository does not have; see the
+# script for what counts. `python3` where there is one, which on Windows can
+# be a store alias that only prints an advert, so `python` there.
+doc_paths() {
+    local py=python3
+    case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) py=python ;; esac
+    "$py" scripts/check-doc-paths.py
+}
+
 oir_package() {
     if [ -n "${CI:-}" ]; then
         cargo package -p oir-reader
@@ -189,6 +198,7 @@ git diff --quiet -- "$EXAMPLE_LOCK" 2>/dev/null && lock_was_clean=1
 
 step ci-coverage         -- every_step_in_ci
 step pinned-paths        -- no_pinned_paths
+step doc-paths           -- doc_paths
 step example-build       -- cargo build --manifest-path plugins/example/Cargo.toml
 step example-test        -- cargo test --manifest-path plugins/example/Cargo.toml
 step example-lint        -- example_lint

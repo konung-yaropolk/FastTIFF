@@ -8,7 +8,7 @@ name: Release
 # artifact to the release that triggered the run. Jobs are independent: a failing packager attaches nothing but never
 # blocks the release or the other packages.
 #
-# Icons are committed, pre-rendered from icon.svg by tools/generate-icons.bat
+# Icons are committed, pre-rendered from icon.svg by icon/generate-icons.bat
 # (run once at dev time). icon.svg uses an SVG mesh gradient that headless CLI
 # rasterizers can't render, so CI does NOT rasterize the SVG — it consumes the
 # committed icon/icon.ico and icon/icon<size>.png files directly.

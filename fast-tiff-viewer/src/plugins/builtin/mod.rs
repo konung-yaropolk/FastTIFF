@@ -86,8 +86,8 @@
 //! A directory each rather than a file each, even for the two that are one file
 //! long. A plugin grows parts — [`deconvolve`] has its algorithms, its
 //! transforms, its optics and its point-spread functions, and would have had
-//! them as `deconvolve.rs`, `deconvolve_fft.rs`, `deconvolve_psf.rs` and so on
-//! in a shared directory, files whose relationship is a naming convention.
+//! them as a run of `deconvolve_*.rs` files in a shared directory, files whose
+//! relationship is a naming convention.
 //! Keeping the boundary in the filesystem is also what makes the last step here
 //! cheap: if a plugin would rather ship separately, its directory becomes a
 //! `cdylib` crate's `src/` and nothing inside it has to change. [`oir`] went

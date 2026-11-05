@@ -86,22 +86,13 @@ the enlarged scale while the text around it shrinks back.
 The panel's control row wraps to as many lines as it needs, which is what keeps
 the enlarged chrome usable in a narrow window.
 
-## Two web builds, one core
+## One interface, two hosts
 
-| | `FastTIFF-web-React-frontend-example/` | `FastTIFF-web/` (this, deployed) |
-|---|---|---|
-| UI | React + TypeScript, DOM widgets | egui, drawn on the canvas |
-| Bundle | 2.3 MB wasm + 219 kB JS | 6.6 MB wasm, no JS framework |
-| Toolchain | wasm-pack + npm + Vite | wasm-pack only |
-| UI code | reimplemented (~700 lines TSX) | **literally the desktop app's** |
-| Fixing a UI bug | fix it twice | fix it once |
-| Native-feeling DOM (a11y, text selection, mobile) | yes | limited |
-
-Both sit on the identical `fast-tiff-viewer` core and neither reimplements any
-stack, channel, contrast, dimension-order, playback or camera logic. The React
-build is kept as a worked example of driving the core from JavaScript — useful
-if you want a DOM UI — but it does duplicate the interface, which is why the
-egui build is the one deployed.
+The UI code is **literally the desktop app's**: this crate is only the browser
+host around `FastTIFF`'s library, so a UI bug is fixed once, for both. An
+earlier React + TypeScript front end drove the same `fast-tiff-viewer` core
+from JavaScript but reimplemented the interface (about 700 lines of TSX). It
+was removed, and this is the one web build.
 
 ## Build
 
@@ -138,13 +129,14 @@ Same as the desktop app, minus window management:
 
 ## Notes on the wasm build
 
-Identical to the React build's constraints, and for the same reasons — no
-threads, no filesystem, no ZSTD. See
-[`../FastTIFF-web-React-frontend-example/README.md`](../FastTIFF-web-React-frontend-example/README.md#notes-on-the-wasm-build)
-for the detail; both crates depend on `fast-tiff-viewer` with
-`default-features = false`.
+A browser tab has no threads, no filesystem and no C compiler, so the core is
+built without the `threads`, `mmap` and `codec-zstd` features: the desktop
+crate asks for them only under `cfg(not(target_arch = "wasm32"))`, and this
+crate depends on it with `default-features = false`. Files arrive as bytes
+(the picker, a drop, or `?open=`), decoding runs on the one thread, and
+ZSTD-compressed TIFFs are not readable.
 
-One extra thing this build needs that the React one didn't:
+One more thing this build needs:
 `render::tune_web_options` replaces eframe's default device limits with the
 adapter's real ones. eframe otherwise requests `wgpu::Limits::default()`, which
 is smaller than this renderer needs (the composite pass binds 13 sampled
