@@ -28,17 +28,6 @@ const LUT_WIDTH: i32 = 256;
 /// Short human-readable backend name, for a host that wants to show it.
 pub const BACKEND: &str = "glow";
 
-/// GPU bytes per volume sample for `kind` on this backend — glow stores each
-/// kind natively (R8/R16/R32F), so it matches the CPU-side size exactly. A
-/// volume builder should budget on the larger of CPU/GPU footprint.
-pub fn volume_gpu_bps(kind: VolumeKind) -> usize {
-    match kind {
-        VolumeKind::U8 => 1,
-        VolumeKind::U16 => 2,
-        VolumeKind::F32 => 4,
-    }
-}
-
 /// Targets a desktop GL 3.x context with GLSL `#version 140` — what egui_glow
 /// and most native GL hosts provide — so usampler2D / texelFetch / gl_VertexID
 /// are available.
@@ -571,13 +560,6 @@ void main() {
 }
 "#;
 
-/// Per-channel texture-allocation kind, tracked so `ensure_size` only
-/// reallocates when something actually changes.
-const KIND_UNUSED: u8 = 0; // channel not present: both textures are 1x1 dummies
-const KIND_INT8: u8 = 1; // integer channel: R8Uint full-size, R32F dummy
-const KIND_INT16: u8 = 2; // integer channel: R16Uint full-size, R32F dummy
-const KIND_FLOAT: u8 = 3; // float channel: R32F full-size, int texture dummy
-
 pub struct ImageRenderResources {
     /// Our handle on the host's GL context, so uploads need no per-call
     /// context argument. `paint` still takes one explicitly — see the module
@@ -589,7 +571,9 @@ pub struct ImageRenderResources {
     channel_ftextures: [glow::NativeTexture; MAX_CHANNELS], // R32F (float channels)
     lut_texture: glow::NativeTexture,
     current_size: (u32, u32),
-    current_kinds: [u8; MAX_CHANNELS],
+    /// What each channel's textures were last allocated for; `None` for a
+    /// channel that is not there, whose textures are 1x1 dummies.
+    current_kinds: [Option<ChannelKind>; MAX_CHANNELS],
 
     u_ch_tex: [Option<glow::NativeUniformLocation>; MAX_CHANNELS],
     u_ch_ftex: [Option<glow::NativeUniformLocation>; MAX_CHANNELS],
@@ -747,7 +731,7 @@ impl ImageRenderResources {
                 channel_ftextures,
                 lut_texture,
                 current_size: (1, 1),
-                current_kinds: [KIND_UNUSED; MAX_CHANNELS],
+                current_kinds: [None; MAX_CHANNELS],
                 u_ch_tex,
                 u_ch_ftex,
                 u_lut: gl.get_uniform_location(program, "lut_tex"),
@@ -1459,15 +1443,8 @@ impl ImageRenderResources {
     }
 
     pub fn ensure_size(&mut self, width: u32, height: u32, kinds: &[ChannelKind]) {
-        let mut want = [KIND_UNUSED; MAX_CHANNELS];
-        for (c, slot) in want.iter_mut().enumerate() {
-            *slot = match kinds.get(c) {
-                None => KIND_UNUSED,
-                Some(ChannelKind::Int8) => KIND_INT8,
-                Some(ChannelKind::Int16) => KIND_INT16,
-                Some(ChannelKind::Float) => KIND_FLOAT,
-            };
-        }
+        let want: [Option<ChannelKind>; MAX_CHANNELS] =
+            std::array::from_fn(|c| kinds.get(c).copied());
         if self.current_size == (width, height) && self.current_kinds == want {
             return;
         }
@@ -1478,12 +1455,12 @@ impl ImageRenderResources {
                 // channel, else a 1x1 R16Uint dummy.
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.channel_textures[c]));
                 match kind {
-                    KIND_INT8 => alloc_int(gl, width, height, true),
-                    KIND_INT16 => alloc_int(gl, width, height, false),
+                    Some(ChannelKind::Int8) => alloc_int(gl, width, height, true),
+                    Some(ChannelKind::Int16) => alloc_int(gl, width, height, false),
                     _ => alloc_int(gl, 1, 1, false),
                 }
                 // Float texture: full size for a float channel, else 1x1 dummy.
-                let (fw, fh) = if kind == KIND_FLOAT {
+                let (fw, fh) = if kind == Some(ChannelKind::Float) {
                     (width, height)
                 } else {
                     (1, 1)

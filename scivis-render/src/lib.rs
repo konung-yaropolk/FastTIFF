@@ -86,6 +86,33 @@ pub enum ChannelKind {
     Float,
 }
 
+impl ChannelKind {
+    /// Bytes one sample of this kind takes in its 2D texture.
+    pub const fn bytes_per_sample(self) -> usize {
+        match self {
+            ChannelKind::Int8 => 1,
+            ChannelKind::Int16 => 2,
+            ChannelKind::Float => 4,
+        }
+    }
+
+    /// How a channel of this kind is stored in the 3D volume, which mirrors
+    /// the 2D display.
+    pub const fn volume_kind(self) -> VolumeKind {
+        match self {
+            ChannelKind::Int8 => VolumeKind::U8,
+            ChannelKind::Int16 => VolumeKind::U16,
+            ChannelKind::Float => VolumeKind::F32,
+        }
+    }
+}
+
+impl From<ChannelKind> for VolumeKind {
+    fn from(kind: ChannelKind) -> Self {
+        kind.volume_kind()
+    }
+}
+
 /// How the 3D volume's scalar samples are stored in its GPU texture. Chosen
 /// from channel 0's `ChannelKind` so the volume mirrors the 2D display:
 ///   * `U8` — `R8` unorm (8-bit source)

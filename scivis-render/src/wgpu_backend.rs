@@ -40,26 +40,8 @@ const LUT_BINDING: u32 = MAX_CHANNELS as u32 + 1;
 const SAMPLER_BINDING: u32 = MAX_CHANNELS as u32 + 2;
 const FTEX_BINDING_BASE: u32 = MAX_CHANNELS as u32 + 3;
 
-/// Per-channel texture-allocation kind (which set is full-size + the integer
-/// format), tracked so `ensure_size` only rebuilds when something changes.
-const KIND_UNUSED: u8 = 0; // channel not present: both textures are 1x1 dummies
-const KIND_INT8: u8 = 1; // integer channel: R8Uint full-size, R32F dummy
-const KIND_INT16: u8 = 2; // integer channel: R16Uint full-size, R32F dummy
-const KIND_FLOAT: u8 = 3; // float channel: R32F full-size, int texture dummy
-
 /// Short human-readable backend name, for a host that wants to show it.
 pub const BACKEND: &str = "wgpu";
-
-/// GPU bytes per volume sample on this backend, per channel and before the
-/// mip chain: 8-bit sources stay 8-bit, everything else is stored in 16 bits
-/// (unorm or half float). See [`ImageRenderResources::volume_texel_format`]
-/// for the exact format, which a volume builder should use instead.
-pub fn volume_gpu_bps(kind: VolumeKind) -> usize {
-    match kind {
-        VolumeKind::U8 => 1,
-        VolumeKind::U16 | VolumeKind::F32 => 2,
-    }
-}
 
 /// The optional device features this backend benefits from, intersected with
 /// what `adapter` actually offers — pass the result as `required_features` when
@@ -132,7 +114,9 @@ pub struct ImageRenderResources {
     /// Cached so we only rebuild textures + bind group when the frame size or the
     /// per-channel int/float layout changes (e.g. opening a different stack).
     current_size: (u32, u32),
-    current_kinds: [u8; MAX_CHANNELS],
+    /// What each channel's textures were last allocated for; `None` for a
+    /// channel that is not there, whose textures are 1x1 dummies.
+    current_kinds: [Option<ChannelKind>; MAX_CHANNELS],
 
     // --- 3D volume ---------------------------------------------------------
     volume_pipeline: wgpu::RenderPipeline,
@@ -364,7 +348,7 @@ impl ImageRenderResources {
             lut_texture,
             sampler,
             current_size: (1, 1),
-            current_kinds: [KIND_UNUSED; MAX_CHANNELS],
+            current_kinds: [None; MAX_CHANNELS],
             volume_pipeline: volume.pipeline,
             volume_bind_group_layout: volume.layout,
             volume_bind_group: volume.bind_group,
@@ -1200,15 +1184,8 @@ impl ImageRenderResources {
     }
 
     pub fn ensure_size(&mut self, width: u32, height: u32, kinds: &[ChannelKind]) {
-        let mut want = [KIND_UNUSED; MAX_CHANNELS];
-        for (c, slot) in want.iter_mut().enumerate() {
-            *slot = match kinds.get(c) {
-                None => KIND_UNUSED,
-                Some(ChannelKind::Int8) => KIND_INT8,
-                Some(ChannelKind::Int16) => KIND_INT16,
-                Some(ChannelKind::Float) => KIND_FLOAT,
-            };
-        }
+        let want: [Option<ChannelKind>; MAX_CHANNELS] =
+            std::array::from_fn(|c| kinds.get(c).copied());
         if self.current_size == (width, height) && self.current_kinds == want {
             return;
         }
@@ -1218,17 +1195,17 @@ impl ImageRenderResources {
             // R8Uint or R16Uint at full size for an integer channel, else a 1x1
             // R16Uint dummy. Both are sampled through the same `texture_2d<u32>`.
             match want[c] {
-                KIND_INT8 => {
+                Some(ChannelKind::Int8) => {
                     create_int_texture(device, width, height, wgpu::TextureFormat::R8Uint, &label)
                 }
-                KIND_INT16 => {
+                Some(ChannelKind::Int16) => {
                     create_int_texture(device, width, height, wgpu::TextureFormat::R16Uint, &label)
                 }
                 _ => create_int_texture(device, 1, 1, wgpu::TextureFormat::R16Uint, &label),
             }
         });
         self.channel_ftextures = std::array::from_fn(|c| {
-            let (w, h) = if want[c] == KIND_FLOAT {
+            let (w, h) = if want[c] == Some(ChannelKind::Float) {
                 (width, height)
             } else {
                 (1, 1)

@@ -194,7 +194,7 @@ fn plan_residency(
 
     // Every display channel gets a full-size texture, disabled or not, so the
     // per-texel cost is the sum over all of them.
-    let bytes_per_texel: usize = kinds.iter().map(|k| gpu_bytes_per_texel(*k)).sum();
+    let bytes_per_texel: usize = kinds.iter().map(|k| k.bytes_per_sample()).sum();
 
     // The ordinary case: it fits, so keep doing exactly what was done before.
     // Nothing below this line runs for an image of ordinary size — no planning,
@@ -239,15 +239,6 @@ fn plan_residency(
     let serving = roi::serve(loaded.roi, overview, &plan);
     loaded.gpu_stride = serving.show.stride;
     Some(serving)
-}
-
-/// Bytes one texel of a channel occupies in VRAM.
-fn gpu_bytes_per_texel(kind: ChannelKind) -> usize {
-    match kind {
-        ChannelKind::Int8 => 1,
-        ChannelKind::Int16 => 2,
-        ChannelKind::Float => 4,
-    }
 }
 
 /// 2D path: decode and upload this frame's enabled channels (from the prefetch
@@ -753,14 +744,8 @@ pub fn plan_volume(
     view: &crate::viewer::VolumeView,
 ) -> VolumePlan {
     let kinds: Vec<ChannelKind> = loaded.display.settings.iter().map(|s| s.kind()).collect();
-    let volume_kinds: Vec<scivis_render::VolumeKind> = kinds
-        .iter()
-        .map(|k| match k {
-            ChannelKind::Int8 => scivis_render::VolumeKind::U8,
-            ChannelKind::Int16 => scivis_render::VolumeKind::U16,
-            ChannelKind::Float => scivis_render::VolumeKind::F32,
-        })
-        .collect();
+    let volume_kinds: Vec<scivis_render::VolumeKind> =
+        kinds.iter().map(|k| k.volume_kind()).collect();
     VolumePlan {
         format: renderer.volume_texel_format(scivis_render::pack::common_kind(&volume_kinds)),
         kinds,
