@@ -129,6 +129,24 @@ pub trait FlatMapIter: Iterator + Sized {
 #[cfg(not(feature = "threads"))]
 impl<I: Iterator> FlatMapIter for I {}
 
+/// rayon's `map_init`, which is one state for the whole loop once there is one
+/// thread: `init` runs once, and every item is mapped with that state.
+#[cfg(not(feature = "threads"))]
+pub trait MapInit: Iterator + Sized {
+    /// Map each item with a state built once, in order.
+    fn map_init<S, R>(
+        self,
+        init: impl FnOnce() -> S,
+        mut f: impl FnMut(&mut S, Self::Item) -> R,
+    ) -> impl Iterator<Item = R> {
+        let mut state = init();
+        self.map(move |item| f(&mut state, item))
+    }
+}
+
+#[cfg(not(feature = "threads"))]
+impl<I: Iterator> MapInit for I {}
+
 #[cfg(test)]
 #[path = "par_tests.rs"]
 mod tests;
