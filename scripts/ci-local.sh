@@ -174,12 +174,28 @@ doc_paths() {
 # with `--allow-dirty` so it can be run on uncommitted work. Several `-p` at
 # once package together, so a crate whose dependency is not on crates.io yet
 # is verified against the one beside it.
+#
+# Locally, each run starts clean. Cargo takes a crate from a registry, which
+# the overlay that packaging builds is, as unchanging for its version: once
+# `image-registration-support 0.1.0` has been extracted and built there, a
+# later run verifies the others against that old build, not the edited one.
+# So the target directory is a fresh one, and the overlay's extractions of the
+# crates being packaged (and nothing else of cargo's cache) are removed first.
 package() {
     if [ -n "${CI:-}" ]; then
         cargo package "$@"
-    else
-        cargo package --allow-dirty "$@"
+        return
     fi
+    local arg want=0 home="${CARGO_HOME:-$HOME/.cargo}"
+    for arg in "$@"; do
+        if [ $want -eq 1 ]; then
+            rm -rf "$home"/registry/src/-*/"$arg"-[0-9]*
+            want=0
+        fi
+        [ "$arg" = -p ] && want=1
+    done
+    rm -rf "$ROOT/target/package-check"
+    CARGO_TARGET_DIR="$ROOT/target/package-check" cargo package --allow-dirty "$@"
 }
 
 # The example plugin is outside the workspace, so `cargo fmt --all` and the
