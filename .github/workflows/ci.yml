@@ -32,6 +32,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -85,6 +87,15 @@ jobs:
         run: >
           cargo test -p fast-tiff-lib -p oir-reader -p suite2p-registration -p turboreg-registration
           --features fast-tiff-lib/capi,oir-reader/capi,suite2p-registration/capi,suite2p-registration/gpu,turboreg-registration/capi,turboreg-registration/gpu
+
+      # Formatting and lints, as gates. Run by hand they were run by nobody:
+      # 27 files had drifted from rustfmt, and clippy warnings sat in the tree
+      # until someone happened to look.
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy, with warnings as errors
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # The test run above exercises the default (wgpu) backend. glow is the
       # Linux release backend; the compile check here (in addition to the Linux

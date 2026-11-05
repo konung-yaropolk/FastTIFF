@@ -240,7 +240,9 @@ pub fn slider_bounds(window: (f32, f32), data: Option<(f32, f32)>) -> (f32, f32)
         lo = lo.min(dlo);
         hi = hi.max(dhi);
     }
-    if !(hi > lo) {
+    // Not `hi <= lo`: a NaN bound compares false both ways, and has to be
+    // padded like an empty range rather than let through.
+    if hi.partial_cmp(&lo) != Some(std::cmp::Ordering::Greater) {
         let pad = lo.abs().max(1.0);
         lo -= pad;
         hi += pad;

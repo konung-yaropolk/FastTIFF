@@ -69,6 +69,9 @@ const HANDLE_RADIUS: f32 = 6.0;
 /// Returns the rect the track was drawn in, so a caller can align something
 /// above it — the histogram window plots each channel across exactly the span
 /// its own slider covers.
+// Nine plain values, all of them the slider's own: bundling them into a struct
+// for one caller would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn range_slider(
     ui: &mut egui::Ui,
     salt: u64,

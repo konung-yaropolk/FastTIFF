@@ -12,11 +12,10 @@
 # when an earlier one fails; each one's output goes to target/ci-local/<step>.log
 # and the end prints a table and exits non-zero if anything failed.
 #
-# Two things differ from CI, on purpose:
-# * `cargo clippy --workspace --all-targets` is added. CI does not run it, but
-#   a new warning is cheapest to fix before the merge.
-# * `cargo package -p oir-reader` gets `--allow-dirty`, so the script can be run
-#   on uncommitted work. CI packages a clean checkout.
+# One thing differs from CI, on purpose: `cargo package -p oir-reader` gets
+# `--allow-dirty`, so the script can be run on uncommitted work. CI packages a
+# clean checkout. Keep the steps below in step with ci.yml: CI is the gate, and
+# a check that passes here and fails there is this list falling behind.
 # Left out: the macOS-only Intel cross-check (needs the Apple SDK), and the
 # Linux job's system packages (the glow tests run on any OS here).
 #
@@ -124,13 +123,14 @@ step viewer-wasm         -- cargo check -p fast-tiff-viewer --target wasm32-unkn
 step oir-no-default      -- cargo test -p oir-reader --no-default-features
 step oir-wasm            -- cargo check -p oir-reader --target wasm32-unknown-unknown --all-targets
 step oir-wasm-no-default -- cargo check -p oir-reader --target wasm32-unknown-unknown --no-default-features
-step oir-doc             -- cargo doc -p oir-reader --no-deps
+step oir-doc             -- env RUSTDOCFLAGS="-D warnings" cargo doc -p oir-reader --no-deps
 step oir-package slow    -- cargo package -p oir-reader --allow-dirty
 step web-check           -- in_dir FastTIFF-web cargo check --target wasm32-unknown-unknown
 step viewer-no-threads   -- cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu,builtin-plugins
 step viewer-no-backend   -- cargo check -p fast-tiff-viewer --no-default-features
 step web-bundle slow     -- in_dir FastTIFF-web wasm-pack build --target web --out-dir pkg --release
-step clippy              -- cargo clippy --workspace --all-targets
+step fmt                 -- cargo fmt --all --check
+step clippy              -- cargo clippy --workspace --all-targets -- -D warnings
 step fuzz-open fuzz      -- fuzz tiff_open 120
 step fuzz-decode fuzz    -- fuzz tiff_decode 180
 
