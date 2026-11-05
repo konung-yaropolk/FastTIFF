@@ -27,23 +27,7 @@
 // original objection to putting plugins behind a feature at all was exactly
 // that CI would not notice, because a release step only compiles — so this is
 // the thing that notices, at the only moment where noticing is free.
-#[cfg(not(any(
-    feature = "plugin-invert",
-    feature = "plugin-zproject",
-    feature = "plugin-plot-axis",
-    feature = "plugin-stack-tools",
-    feature = "plugin-animation-3d",
-    feature = "plugin-crop",
-    feature = "plugin-suite2p-stabilize",
-    feature = "plugin-turboreg-stabilize",
-    feature = "plugin-deconvolve",
-    feature = "plugin-png",
-    feature = "plugin-oir",
-    feature = "plugin-nifti",
-    feature = "plugin-dicom",
-    feature = "plugin-netpbm",
-    feature = "plugins-none",
-)))]
+#[cfg(not(any(feature = "_any-builtin", feature = "plugins-none")))]
 compile_error!(
     "FastTIFF is being built with no built-in plugins, which is almost always a \
      `--no-default-features` that forgot to name them again: add `builtin-plugins` \

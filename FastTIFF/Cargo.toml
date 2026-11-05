@@ -62,24 +62,27 @@ builtin-plugins = [
     "plugin-nifti",
     "plugin-dicom",
 ]
-plugin-invert = ["fast-tiff-viewer/plugin-invert"]
-plugin-zproject = ["fast-tiff-viewer/plugin-zproject"]
-plugin-plot-axis = ["fast-tiff-viewer/plugin-plot-axis"]
-plugin-stack-tools = ["fast-tiff-viewer/plugin-stack-tools"]
-plugin-animation-3d = ["fast-tiff-viewer/plugin-animation-3d"]
-plugin-crop = ["fast-tiff-viewer/plugin-crop"]
-plugin-suite2p-stabilize = ["fast-tiff-viewer/plugin-suite2p-stabilize"]
-plugin-turboreg-stabilize = ["fast-tiff-viewer/plugin-turboreg-stabilize"]
-plugin-deconvolve = ["fast-tiff-viewer/plugin-deconvolve"]
-plugin-png = ["fast-tiff-viewer/plugin-png"]
-plugin-oir = ["fast-tiff-viewer/plugin-oir"]
-plugin-nifti = ["fast-tiff-viewer/plugin-nifti"]
-plugin-dicom = ["fast-tiff-viewer/plugin-dicom"]
+plugin-invert = ["fast-tiff-viewer/plugin-invert", "_any-builtin"]
+plugin-zproject = ["fast-tiff-viewer/plugin-zproject", "_any-builtin"]
+plugin-plot-axis = ["fast-tiff-viewer/plugin-plot-axis", "_any-builtin"]
+plugin-stack-tools = ["fast-tiff-viewer/plugin-stack-tools", "_any-builtin"]
+plugin-animation-3d = ["fast-tiff-viewer/plugin-animation-3d", "_any-builtin"]
+plugin-crop = ["fast-tiff-viewer/plugin-crop", "_any-builtin"]
+plugin-suite2p-stabilize = ["fast-tiff-viewer/plugin-suite2p-stabilize", "_any-builtin"]
+plugin-turboreg-stabilize = ["fast-tiff-viewer/plugin-turboreg-stabilize", "_any-builtin"]
+plugin-deconvolve = ["fast-tiff-viewer/plugin-deconvolve", "_any-builtin"]
+plugin-png = ["fast-tiff-viewer/plugin-png", "_any-builtin"]
+plugin-oir = ["fast-tiff-viewer/plugin-oir", "_any-builtin"]
+plugin-nifti = ["fast-tiff-viewer/plugin-nifti", "_any-builtin"]
+plugin-dicom = ["fast-tiff-viewer/plugin-dicom", "_any-builtin"]
 # The worked example for plugin authors; off by default there and here.
-plugin-netpbm = ["fast-tiff-viewer/plugin-netpbm"]
+plugin-netpbm = ["fast-tiff-viewer/plugin-netpbm", "_any-builtin"]
 # "Yes, really, no plugins." It enables nothing; it exists so that the guard in
 # `src/lib.rs` can tell a deliberate build from a forgotten feature.
 plugins-none = []
+# Set by every plugin feature above, for the no-plugins guard in `src/lib.rs`,
+# which then needs no list of its own to keep in step. Not for choosing directly.
+_any-builtin = []
 # ---------------------------------------------------------------------------
 
 

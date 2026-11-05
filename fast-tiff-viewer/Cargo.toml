@@ -67,28 +67,33 @@ builtin-plugins = [
 ]
 
 # The five that cost nothing but their own code.
-plugin-invert = []
+plugin-invert = ["_shared-deliver", "_shared-store"]
 plugin-zproject = []
 plugin-plot-axis = []
-plugin-stack-tools = []
+plugin-stack-tools = ["_shared-deliver", "_shared-store"]
 # The 3D animation is poses and nothing else: the host plays them, so the
 # plugin needs no renderer and no dependency of its own.
 plugin-animation-3d = []
 # Crop asks the host for a rectangle and cuts every plane to it.
-plugin-crop = []
+plugin-crop = ["_shared-store"]
 
 # And the four that bring a dependency with them. Each names only what *it*
 # needs, so the dependency arrives with the plugin and leaves with it.
 # `suite2p-registration` is the registration algorithm; `rustfft` the
 # deconvolution transforms; `png` the PNG importer/exporter; `oir-reader` the
 # OIR container reader.
-plugin-suite2p-stabilize = ["dep:suite2p-registration"]
+plugin-suite2p-stabilize = ["dep:suite2p-registration", "_shared-edges"]
 # StackReg registration. A second registration crate rather than an option on
 # the first: the two answer different questions (a shift by phase correlation
 # versus a transformation by optimisation) and share no code. Also GPL-3, for
 # its own reasons — see that crate's manifest.
-plugin-turboreg-stabilize = ["dep:turboreg-registration"]
-plugin-deconvolve = ["dep:rustfft"]
+plugin-turboreg-stabilize = [
+    "dep:turboreg-registration",
+    "_shared-deliver",
+    "_shared-store",
+    "_shared-edges",
+]
+plugin-deconvolve = ["dep:rustfft", "_shared-deliver", "_shared-store"]
 plugin-png = ["dep:png"]
 plugin-oir = ["dep:oir-reader"]
 # The two MRI readers. `plugin-dicom` brings nothing with it — the format is
@@ -100,6 +105,14 @@ plugin-nifti = ["dep:flate2"]
 # hand-rolled in `dicom/lossless.rs` — no crate on crates.io decodes it, zune
 # included, and it is the one medical archives actually use.
 plugin-dicom = ["dep:zune-jpeg"]
+
+# What `plugins/builtin/shared` is compiled for: the facilities several
+# built-ins share. Each plugin feature above names the ones it uses, so the
+# code's conditions name a facility rather than a list of plugins that has to
+# be kept in step by hand. Not for choosing directly.
+_shared-deliver = []
+_shared-store = []
+_shared-edges = []
 
 # A worked example for plugin authors rather than a format this viewer needs;
 # see `plugins/builtin/mod.rs`. Off by default — deliberately not in
