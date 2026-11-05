@@ -2,7 +2,12 @@ name: CI
 
 # Runs the full workspace test suite on pushes to main (and PRs targeting it),
 # so the "tests" badge reflects current health between releases — not just the
-# last published release. One job per OS, because each platform compiles code
+# last published release.
+#
+# Every check is a step of `scripts/ci-local.sh`, called here by name: the
+# commands are defined there once, and running the script locally runs the
+# same ones. What stays in this file is the rest of CI — runners, toolchains,
+# caches, system packages — and the reasons for each check. One job per OS, because each platform compiles code
 # the others exclude (`#[cfg(target_os = ...)]` gates + target-gated deps in
 # FastTIFF/Cargo.toml): Windows = winres build script; macOS = the
 # macos_open.rs open-file FFI (+ its unit tests); Linux = the x11/wayland
@@ -26,6 +31,10 @@ jobs:
   # no extra system packages.
   test:
     runs-on: windows-latest
+    # Git Bash, for the script.
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -38,6 +47,9 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
+      - name: Every check the script defines is run by a workflow
+        run: bash scripts/ci-local.sh ci-coverage
+
       # A path dependency that also carries `version` is a version requirement
       # against the crate next door, so bumping that crate breaks this one --
       # and the resolver reports it as a missing candidate, which reads like a
@@ -49,17 +61,7 @@ jobs:
       # path dependencies and this check will fail on it. That is the moment to
       # narrow the check to the crates that are not published, not to delete it.
       - name: No path dependency pins a version
-        shell: bash
-        run: |
-          pinned=$(grep -rnE '^[a-zA-Z0-9_-]+ *= *\{.*(path.*version|version.*path) *=' --include=Cargo.toml . || true)
-          if [ -n "$pinned" ]; then
-            echo "$pinned"
-            echo
-            echo "A path dependency above also pins a version, so bumping the"
-            echo "crate it points at will break this build. Drop the 'version'"
-            echo "field unless the crate holding it is published."
-            exit 1
-          fi
+        run: bash scripts/ci-local.sh pinned-paths
 
       # The example plugin is deliberately *excluded* from the workspace — it
       # is a worked example rather than part of the product — so `-p` cannot
@@ -72,40 +74,31 @@ jobs:
       # part of the plugin contract that has to be exercised per OS —
       # LoadLibrary, dlopen and dyld are three different loaders.
       - name: Build and test the example plugin across the C boundary
-        run: |
-          cargo build --manifest-path plugins/example/Cargo.toml
-          cargo test --manifest-path plugins/example/Cargo.toml
+        run: bash scripts/ci-local.sh example-build example-test
 
       - name: Run tests
-        run: cargo test --workspace
+        run: bash scripts/ci-local.sh workspace-tests
 
       # The C interfaces sit behind each crate's off-by-default `capi` feature,
       # tests and header-sync checks included, so the run above never compiles
       # them. `gpu` rides along for the registration crates, matching what
       # docs.rs builds.
       - name: Test the C APIs
-        run: >
-          cargo test -p fast-tiff-lib -p oir-reader -p suite2p-registration -p turboreg-registration
-          --features fast-tiff-lib/capi,oir-reader/capi,suite2p-registration/capi,suite2p-registration/gpu,turboreg-registration/capi,turboreg-registration/gpu
+        run: bash scripts/ci-local.sh capi-tests
 
       # Formatting and lints, as gates. Run by hand they were run by nobody:
       # 27 files had drifted from rustfmt, and clippy warnings sat in the tree
       # until someone happened to look.
       - name: Check formatting
-        run: cargo fmt --all --check
+        run: bash scripts/ci-local.sh fmt
 
-      # Three runs, because a lint only sees the code its features compile.
-      # The default build leaves out the glow renderer, the C APIs, the GPU
-      # registration paths and the example importer; the glow renderer's
-      # `as_chunks` lints sat unseen behind that until this step was widened.
-      # Every library goes in the second run with all its features; the app
-      # cannot, its two renderers being mutually exclusive, so it gets the
-      # other one in a third.
+      # Three clippy runs, because a lint only sees the code its features
+      # compile (see `clippy_all` in the script); the glow renderer's
+      # `as_chunks` lints sat unseen behind the default features until they
+      # were widened. And the example plugin, which is outside the workspace
+      # and so in neither the fmt step nor these.
       - name: Clippy, with warnings as errors
-        run: |
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo clippy --workspace --exclude FastTIFF --all-features --all-targets -- -D warnings
-          cargo clippy -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins,plugin-netpbm --all-targets -- -D warnings
+        run: bash scripts/ci-local.sh clippy example-lint
 
       # The test run above exercises the default (wgpu) backend. glow is the
       # Linux release backend; the compile check here (in addition to the Linux
@@ -117,7 +110,7 @@ jobs:
       # ship a plugin-less binary — `FastTIFF/src/lib.rs` refuses to compile one
       # that was not asked for — but it would stop the build, so it is named.
       - name: Build glow backend
-        run: cargo build -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins
+        run: bash scripts/ci-local.sh glow-build
 
       # fast-tiff-lib without memmap or the C zstd codec — the shape the wasm
       # build uses. This runs the *same* suite as the default build: the
@@ -125,15 +118,12 @@ jobs:
       # silently cost this step every one of them (a test binary with zero
       # tests still prints `ok`); they now go through `tests/common::open_tiff`.
       - name: Test lib with no default features (wasm-shaped)
-        run: cargo test -p fast-tiff-lib --no-default-features
+        run: bash scripts/ci-local.sh lib-no-default
 
       # And that it genuinely builds for the wasm target, not just with the
       # features off on a native host.
       - name: Check the wasm target
-        run: |
-          rustup target add wasm32-unknown-unknown
-          cargo check -p fast-tiff-lib --target wasm32-unknown-unknown --no-default-features
-          cargo check -p fast-tiff-viewer --target wasm32-unknown-unknown --no-default-features --features backend-wgpu,builtin-plugins
+        run: bash scripts/ci-local.sh wasm-target lib-wasm viewer-wasm
 
       # The OIR reader on its own. `cargo test --workspace` above reads every
       # fixture mapped; this reads them through the buffered path alone, as a
@@ -146,15 +136,7 @@ jobs:
       # without threads" step below builds the viewer without `mmap`, and its
       # tests read every importer fixture both ways and compare.
       - name: OIR reader without mmap, for the browser, and as packaged
-        shell: bash
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: |
-          cargo test -p oir-reader --no-default-features
-          cargo check -p oir-reader --target wasm32-unknown-unknown --all-targets
-          cargo check -p oir-reader --target wasm32-unknown-unknown --no-default-features
-          cargo doc -p oir-reader --no-deps
-          cargo package -p oir-reader
+        run: bash scripts/ci-local.sh oir-no-default oir-wasm oir-wasm-no-default oir-doc oir-package
 
       # The egui UI is shared between the desktop binary and the browser build,
       # so a desktop-only edit can break the wasm side. This is the check that
@@ -164,7 +146,7 @@ jobs:
       # The *bundle* is built in `test-linux`, on the deploy's own operating
       # system; see the note there.
       - name: Check and lint the shared UI for the web
-        run: cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
+        run: bash scripts/ci-local.sh web-check
 
       # The single-threaded shape of fast-tiff-viewer — no read-ahead worker, no
       # background volume builder, no rayon — which is what the web build
@@ -179,7 +161,7 @@ jobs:
       # worked-example importer, off by default and outside `builtin-plugins`,
       # and it went a month not compiling before anything noticed.
       - name: Check core without threads (wasm-shaped)
-        run: cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu,builtin-plugins,plugin-netpbm
+        run: bash scripts/ci-local.sh viewer-no-threads
 
       # And with no GPU backend at all, and no plugins: the CPU-side model must
       # stand alone, so headless tooling can use it without pulling in wgpu,
@@ -187,7 +169,7 @@ jobs:
       # features honest — with every one of them off, nothing outside
       # `plugins/builtin/` may still refer to a plugin.
       - name: Check core with no backend
-        run: cargo check -p fast-tiff-viewer --no-default-features
+        run: bash scripts/ci-local.sh viewer-no-backend
 
   # macOS compiles the `#[cfg(target_os = "macos")]` code no other job sees —
   # the macos_open.rs "Open With" FFI — and runs its unit tests. arm64, which is
@@ -195,6 +177,9 @@ jobs:
   # actually exercise.
   test-macos:
     runs-on: macos-14
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -223,12 +208,10 @@ jobs:
       # part of the plugin contract that has to be exercised per OS —
       # LoadLibrary, dlopen and dyld are three different loaders.
       - name: Build and test the example plugin across the C boundary
-        run: |
-          cargo build --manifest-path plugins/example/Cargo.toml
-          cargo test --manifest-path plugins/example/Cargo.toml
+        run: bash scripts/ci-local.sh example-build example-test
 
       - name: Run tests
-        run: cargo test --workspace
+        run: bash scripts/ci-local.sh workspace-tests
 
       # The Intel half of the release's universal .dmg, which is cross-built on
       # an arm64 runner (see `build-macos-dmg` in release.yml) and therefore
@@ -243,11 +226,7 @@ jobs:
       # only — an arch-specific *behaviour* difference would still reach the
       # release untested, which is the standing cost of cross-building a slice.
       - name: Check the Intel slice of the universal build compiles
-        env:
-          MACOSX_DEPLOYMENT_TARGET: "11.0"
-        run: >
-          cargo check --release --target x86_64-apple-darwin
-          -p FastTIFF --no-default-features --features renderer-wgpu,builtin-plugins
+        run: bash scripts/ci-local.sh macos-intel
 
   # Linux compiles the target-gated x11/wayland eframe features with the glow
   # backend — the exact configuration the .deb / Arch release jobs ship. Same
@@ -286,12 +265,10 @@ jobs:
       # part of the plugin contract that has to be exercised per OS —
       # LoadLibrary, dlopen and dyld are three different loaders.
       - name: Build and test the example plugin across the C boundary
-        run: |
-          cargo build --manifest-path plugins/example/Cargo.toml
-          cargo test --manifest-path plugins/example/Cargo.toml
+        run: bash scripts/ci-local.sh example-build example-test
 
       - name: Run tests (glow backend)
-        run: cargo test --workspace --no-default-features --features FastTIFF/renderer-glow,FastTIFF/builtin-plugins
+        run: bash scripts/ci-local.sh glow-tests
 
       # The deploy's own build, run before the merge instead of after it.
       #
@@ -307,13 +284,10 @@ jobs:
       # Binaryen asset per host, and the one that broke was `x86-linux`. A
       # Windows guard would have stayed green through the whole incident. Same
       # OS as the deploy, same pinned wasm-pack, same command — otherwise it
-      # is not a guard.
-      - uses: jetli/wasm-pack-action@v0.4.0
-        with:
-          version: v0.15.0
+      # is not a guard. The deploy and this step use the same action, which
+      # holds the pinned wasm-pack and calls the script's `web-bundle` step.
       - name: Build the web bundle the way the deploy does
-        working-directory: FastTIFF-web
-        run: wasm-pack build --target web --out-dir pkg --release
+        uses: ./.github/actions/web-bundle
 
   # The libraries are published with a `rust-version`, and a claim no build
   # checks is a guess: two crates claimed 1.82 while their GPU feature needed
@@ -326,12 +300,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # The pinned toolchain too, not only the old one: the cache step runs
+      # cargo, which reads rust-toolchain.toml.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
       - name: Build the libraries with their declared minimum Rust
-        shell: bash
-        run: scripts/ci-local.sh msrv
+        run: bash scripts/ci-local.sh msrv
 
   # `fast-tiff-lib` parses completely untrusted files, so a malformed TIFF must
   # never panic, abort (an oversized allocation calls abort(), which no caller
@@ -364,16 +342,10 @@ jobs:
       # seeds pristine. -rss_limit_mb turns runaway memory into a reported crash
       # rather than letting the runner OOM-kill the job with no artifact.
       - name: Fuzz the indexer
-        working-directory: fast-tiff-lib
-        run: |
-          mkdir -p fuzz/corpus/tiff_open
-          cargo +nightly fuzz run tiff_open fuzz/corpus/tiff_open fuzz/seeds -- -max_total_time=120 -rss_limit_mb=2048 -malloc_limit_mb=512
+        run: bash scripts/ci-local.sh fuzz-open
 
       - name: Fuzz the decoders
-        working-directory: fast-tiff-lib
-        run: |
-          mkdir -p fuzz/corpus/tiff_decode
-          cargo +nightly fuzz run tiff_decode fuzz/corpus/tiff_decode fuzz/seeds -- -max_total_time=180 -rss_limit_mb=2048 -malloc_limit_mb=512
+        run: bash scripts/ci-local.sh fuzz-decode
 
       # A crashing input is the whole point — keep it when one is found.
       - name: Upload crash artifacts

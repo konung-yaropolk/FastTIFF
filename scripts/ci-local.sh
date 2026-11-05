@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Run the CI checks locally, before a merge: the same commands as
-# .github/workflows/ci.yml, one after another, in this checkout.
+# The CI checks, defined once. Each CI job calls this script with the names
+# of the steps it runs, so the commands live here and nowhere else; run it
+# locally to get the same checks, one after another, in this checkout.
 #
 #   scripts/ci-local.sh            every job CI runs on every push
 #   scripts/ci-local.sh --quick    skip the slow ones (web bundle, oir package)
@@ -12,12 +13,17 @@
 # when an earlier one fails; each one's output goes to target/ci-local/<step>.log
 # and the end prints a table and exits non-zero if anything failed.
 #
-# One thing differs from CI, on purpose: `cargo package -p oir-reader` gets
-# `--allow-dirty`, so the script can be run on uncommitted work. CI packages a
-# clean checkout. Keep the steps below in step with ci.yml: CI is the gate, and
-# a check that passes here and fails there is this list falling behind.
-# Left out: the macOS-only Intel cross-check (needs the Apple SDK), and the
-# Linux job's system packages (the glow tests run on any OS here).
+# Under CI (`CI` set, as GitHub sets it) each step's output is streamed in a
+# folded group instead of only going to its log.
+#
+# What stays in the workflows is what is not a check: installing toolchains,
+# caches, the Linux job's system packages. The `ci-coverage` step fails if a
+# step here is not named by any workflow, so a check cannot be added here and
+# silently run only on one machine. `cargo package -p oir-reader` gets
+# `--allow-dirty` locally so the script can be run on uncommitted work, and
+# not in CI, where a file an earlier step dirtied should fail it. Steps marked
+# `explicit` only run when named, since they need a particular host (the macOS
+# Intel cross-check needs the Apple SDK).
 #
 # The example plugin's Cargo.lock is not part of the workspace and a build of
 # it rewrites it; it is put back afterwards if it was unmodified before.
@@ -37,10 +43,16 @@ for arg in "$@"; do
         --quick) QUICK=1 ;;
         --fuzz) FUZZ=1 ;;
         --list) LIST=1 ;;
-        -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) awk 'NR > 1 && !/^#/ { exit } NR > 1' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "unknown option: $arg" >&2; exit 2 ;;
         *) ONLY+=("$arg") ;;
     esac
+done
+
+# A misspelled name would otherwise just not run, which a CI job naming a
+# second, real step would never notice.
+for n in ${ONLY[@]+"${ONLY[@]}"}; do
+    grep -qE "^step $n( |\$)" "$0" || { echo "no step named '$n' (see --list)" >&2; exit 2; }
 done
 
 NAMES=()
@@ -55,17 +67,18 @@ wanted() {
     return 1
 }
 
-# step NAME [slow|fuzz] -- COMMAND...
+# step NAME [slow|fuzz|explicit] -- COMMAND...
 step() {
     local name=$1; shift
     local kind=normal
-    if [ "$1" = slow ] || [ "$1" = fuzz ]; then kind=$1; shift; fi
+    if [ "$1" = slow ] || [ "$1" = fuzz ] || [ "$1" = explicit ]; then kind=$1; shift; fi
     [ "$1" = -- ] && shift
     if [ $LIST -eq 1 ]; then printf '  %-22s %s\n' "$name" "$*"; return; fi
     wanted "$name" || return
     if [ ${#ONLY[@]} -eq 0 ]; then
         [ "$kind" = slow ] && [ $QUICK -eq 1 ] && return
         [ "$kind" = fuzz ] && [ $FUZZ -eq 0 ] && return
+        [ "$kind" = explicit ] && return
     fi
     local log="$LOGS/$name.log"
     local start=$SECONDS rc
@@ -123,7 +136,38 @@ msrv() {
     cargo "+$v" check "${crates[@]}" --all-features
 }
 
-# The same three runs as ci.yml's clippy step, which says why there are three.
+# Every step is named by some workflow. The workflows call this script by step
+# name, so a step no workflow names would run only on whoever's machine runs
+# the whole list.
+every_step_in_ci() {
+    local n missing=0
+    for n in $(bash "$ROOT/scripts/ci-local.sh" --list | sed -n 's/^  \([a-z0-9-]*\) .*/\1/p'); do
+        grep -qE "^[[:space:]]*run: bash scripts/ci-local\.sh( [a-z0-9-]+)* $n( |\$)" .github/workflows/*.yml .github/actions/*/action.yml ||
+            { echo "no workflow runs the step '$n'"; missing=1; }
+    done
+    return $missing
+}
+
+oir_package() {
+    if [ -n "${CI:-}" ]; then
+        cargo package -p oir-reader
+    else
+        cargo package -p oir-reader --allow-dirty
+    fi
+}
+
+# The example plugin is outside the workspace, so `cargo fmt --all` and the
+# workspace clippy runs never see it.
+example_lint() {
+    cargo fmt --manifest-path plugins/example/Cargo.toml --check &&
+    cargo clippy --manifest-path plugins/example/Cargo.toml --all-targets -- -D warnings
+}
+
+# The three clippy runs. A lint only sees the code its features compile: the
+# default build leaves out the glow renderer, the C APIs, the GPU registration
+# paths and the example importer. Every crate but the app goes in the second
+# run with all its features; the app's two renderers exclude each other, so it
+# gets the other one in a third.
 clippy_all() {
     cargo clippy --workspace --all-targets -- -D warnings &&
     cargo clippy --workspace --exclude FastTIFF --all-features --all-targets -- -D warnings &&
@@ -141,11 +185,13 @@ EXAMPLE_LOCK=plugins/example/Cargo.lock
 lock_was_clean=0
 git diff --quiet -- "$EXAMPLE_LOCK" 2>/dev/null && lock_was_clean=1
 
-[ $LIST -eq 1 ] && echo "Steps (slow ones are skipped by --quick, fuzz ones need --fuzz):"
+[ $LIST -eq 1 ] && echo "Steps (slow ones are skipped by --quick, fuzz ones need --fuzz, explicit ones need naming):"
 
+step ci-coverage         -- every_step_in_ci
 step pinned-paths        -- no_pinned_paths
 step example-build       -- cargo build --manifest-path plugins/example/Cargo.toml
 step example-test        -- cargo test --manifest-path plugins/example/Cargo.toml
+step example-lint        -- example_lint
 step workspace-tests     -- cargo test --workspace
 step capi-tests          -- cargo test -p fast-tiff-lib -p oir-reader -p suite2p-registration -p turboreg-registration --features fast-tiff-lib/capi,oir-reader/capi,suite2p-registration/capi,suite2p-registration/gpu,turboreg-registration/capi,turboreg-registration/gpu
 step glow-build          -- cargo build -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins
@@ -155,14 +201,15 @@ step msrv                -- msrv
 step wasm-target         -- rustup target add wasm32-unknown-unknown
 step lib-wasm            -- cargo check -p fast-tiff-lib --target wasm32-unknown-unknown --no-default-features
 step viewer-wasm         -- cargo check -p fast-tiff-viewer --target wasm32-unknown-unknown --no-default-features --features backend-wgpu,builtin-plugins
-step oir-no-default      -- cargo test -p oir-reader --no-default-features
+step oir-no-default      -- env RUSTDOCFLAGS="-D warnings" cargo test -p oir-reader --no-default-features
 step oir-wasm            -- cargo check -p oir-reader --target wasm32-unknown-unknown --all-targets
 step oir-wasm-no-default -- cargo check -p oir-reader --target wasm32-unknown-unknown --no-default-features
 step oir-doc             -- env RUSTDOCFLAGS="-D warnings" cargo doc -p oir-reader --no-deps
-step oir-package slow    -- cargo package -p oir-reader --allow-dirty
+step oir-package slow    -- oir_package
 step web-check           -- cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
 step viewer-no-threads   -- cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu,builtin-plugins,plugin-netpbm
 step viewer-no-backend   -- cargo check -p fast-tiff-viewer --no-default-features
+step macos-intel explicit -- env MACOSX_DEPLOYMENT_TARGET=11.0 cargo check --release --target x86_64-apple-darwin -p FastTIFF --no-default-features --features renderer-wgpu,builtin-plugins
 step web-bundle slow     -- in_dir FastTIFF-web wasm-pack build --target web --out-dir pkg --release
 step fmt                 -- cargo fmt --all --check
 step clippy              -- clippy_all
