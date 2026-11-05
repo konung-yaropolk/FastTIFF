@@ -126,7 +126,7 @@ step oir-wasm-no-default -- cargo check -p oir-reader --target wasm32-unknown-un
 step oir-doc             -- env RUSTDOCFLAGS="-D warnings" cargo doc -p oir-reader --no-deps
 step oir-package slow    -- cargo package -p oir-reader --allow-dirty
 step web-check           -- cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
-step viewer-no-threads   -- cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu,builtin-plugins
+step viewer-no-threads   -- cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu,builtin-plugins,plugin-netpbm
 step viewer-no-backend   -- cargo check -p fast-tiff-viewer --no-default-features
 step web-bundle slow     -- in_dir FastTIFF-web wasm-pack build --target web --out-dir pkg --release
 step fmt                 -- cargo fmt --all --check

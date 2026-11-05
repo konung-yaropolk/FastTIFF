@@ -157,15 +157,19 @@ jobs:
         run: cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
 
       # The single-threaded shape of fast-tiff-viewer — no read-ahead worker, no
-      # background volume builder, no rayon — which is what a wasm frontend will
-      # build. Nothing in the desktop app selects it, so without this step the
+      # background volume builder, no rayon — which is what the web build
+      # compiles. Nothing in the desktop app selects it, so without this step the
       # `#[cfg(not(feature = "threads"))]` fallbacks would rot unnoticed.
       #
       # With the plugins, deliberately: deconvolution has single-threaded
       # fallbacks of its own (`deconvolve/par.rs`) and this is the only step
       # that runs them. The no-plugins shape is the step after this one.
+      #
+      # `plugin-netpbm` rides along because it is in no other build: it is the
+      # worked-example importer, off by default and outside `builtin-plugins`,
+      # and it went a month not compiling before anything noticed.
       - name: Check core without threads (wasm-shaped)
-        run: cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu,builtin-plugins
+        run: cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu,builtin-plugins,plugin-netpbm
 
       # And with no GPU backend at all, and no plugins: the CPU-side model must
       # stand alone, so headless tooling can use it without pulling in wgpu,
