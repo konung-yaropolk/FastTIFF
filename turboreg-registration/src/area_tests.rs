@@ -129,7 +129,10 @@ fn the_common_area_is_covered_and_largest() {
                 if a.is_upright() {
                     assert_eq!(a.height * a.width, upright, "case {case}: {a:?}");
                 } else {
-                    assert!(a.height * a.width > upright, "case {case}: {a:?} vs {upright}");
+                    assert!(
+                        a.height * a.width > upright,
+                        "case {case}: {a:?} vs {upright}"
+                    );
                 }
                 assert_eq!(common_area(&matrices, ly, lx, false), Ok(a), "case {case}");
             }
@@ -154,7 +157,10 @@ fn a_turned_stack_is_cut_at_an_angle() {
         largest_rectangle(&mask, ly, lx).map_or(0, |r| r.height * r.width)
     };
     assert!(!area.is_upright(), "{area:?} against an upright {up}");
-    assert!(area.height * area.width > up + up / 10, "{area:?} against {up}");
+    assert!(
+        area.height * area.width > up + up / 10,
+        "{area:?} against {up}"
+    );
 }
 
 /// Translation and scale only: upright, without searching.

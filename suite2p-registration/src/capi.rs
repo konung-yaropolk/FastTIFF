@@ -220,7 +220,9 @@ fn backend_of(v: c_int) -> Result<Backend, String> {
         S2P_BACKEND_SINGLE_THREAD => Ok(Backend::SingleThread),
         S2P_BACKEND_MULTI_THREAD => Ok(Backend::MultiThread),
         S2P_BACKEND_GPU => Ok(Backend::Gpu),
-        _ => Err(format!("backend {v} is not one of the S2P_BACKEND_* values")),
+        _ => Err(format!(
+            "backend {v} is not one of the S2P_BACKEND_* values"
+        )),
     }
 }
 
@@ -385,7 +387,10 @@ pub unsafe extern "C" fn s2p_register(
             .and_then(|v| v.checked_mul(lx))
             .filter(|&v| v <= isize::MAX as usize / std::mem::size_of::<f32>())
         else {
-            return fail(S2P_INVALID_ARGUMENT, "the movie is larger than memory can address");
+            return fail(
+                S2P_INVALID_ARGUMENT,
+                "the movie is larger than memory can address",
+            );
         };
         if frames.is_null() {
             return fail(S2P_INVALID_ARGUMENT, "frames is NULL");
@@ -436,7 +441,10 @@ pub unsafe extern "C" fn s2p_register(
         #[cfg(feature = "gpu")]
         if settings.backend == Backend::Gpu {
             if let Some(why) = crate::gpu::take_trouble() {
-                return fail(S2P_FAILED, format!("the GPU could not finish the run: {why}"));
+                return fail(
+                    S2P_FAILED,
+                    format!("the GPU could not finish the run: {why}"),
+                );
             }
         }
         out.write(Box::into_raw(Box::new(S2pRegistered { inner, ly, lx })));

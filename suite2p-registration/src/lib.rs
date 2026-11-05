@@ -152,9 +152,9 @@ pub mod work;
 
 use crate::par::*;
 
+pub use area::{Area, Cut, NoCommonArea};
 use fft::Fft2;
 use masks::reference_filters_normed;
-pub use area::{Area, Cut, NoCommonArea};
 pub use rigid::{shift_frame, shift_frame_bordered, Shift};
 pub use settings::{Backend, Border, Settings};
 

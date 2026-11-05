@@ -14,13 +14,23 @@ fn stack() -> Vec<f32> {
     let base: Vec<f32> = (0..W * H)
         .map(|i| {
             let (x, y) = ((i % W) as f32, (i / W) as f32);
-            128.0 + (x * 0.23).sin() * 50.0 + (y * 0.19).cos() * 40.0 + (x * 0.7 + y * 0.5).sin() * 15.0
+            128.0
+                + (x * 0.23).sin() * 50.0
+                + (y * 0.19).cos() * 40.0
+                + (x * 0.7 + y * 0.5).sin() * 15.0
         })
         .collect();
     (0..N)
         .flat_map(|t| {
             let d = 0.8 * t as f64;
-            transform::warp(&base, W, H, &Matrix { c: [d, 1.0, 0.0, 0.0, d * 0.5, 0.0, 1.0, 0.0] })
+            transform::warp(
+                &base,
+                W,
+                H,
+                &Matrix {
+                    c: [d, 1.0, 0.0, 0.0, d * 0.5, 0.0, 1.0, 0.0],
+                },
+            )
         })
         .collect()
 }
@@ -49,7 +59,10 @@ fn the_defaults_are_the_crates() {
     let mut s = std::mem::MaybeUninit::<TrSettings>::uninit();
     assert_eq!(unsafe { tr_settings_default(s.as_mut_ptr()) }, TR_OK);
     let s = unsafe { s.assume_init() };
-    assert_eq!(s.to_settings(), Ok((Settings::default(), Border::default())));
+    assert_eq!(
+        s.to_settings(),
+        Ok((Settings::default(), Border::default()))
+    );
     // And the numbering is the header's.
     assert_eq!(s.transformation, TR_TRANSFORMATION_RIGID_BODY);
     assert_eq!(s.reference, TR_REFERENCE_FIRST);
@@ -70,8 +83,16 @@ fn a_registration_through_c_matches_the_rust_one() {
 
         let frames: Vec<Vec<f32>> = pixels.chunks(W * H).map(<[f32]>::to_vec).collect();
         let (rs, _) = s.to_settings().unwrap();
-        let direct = register_stack(&Frames { ly: H, lx: W, frames: &frames }, &rs, &mut |_| true)
-            .expect("not cancelled");
+        let direct = register_stack(
+            &Frames {
+                ly: H,
+                lx: W,
+                frames: &frames,
+            },
+            &rs,
+            &mut |_| true,
+        )
+        .expect("not cancelled");
 
         assert_eq!(unsafe { tr_registered_frames(r) }, N);
         for (t, frame) in frames.iter().enumerate() {
@@ -115,10 +136,16 @@ fn the_border_reaches_apply() {
     assert_eq!(run(&s, &pixels, &mut r), TR_OK, "{}", last_error());
     let frame = &pixels[(N - 1) * W * H..];
     let mut c = [0.0f64; 8];
-    assert_eq!(unsafe { tr_registered_matrix(r, N - 1, c.as_mut_ptr()) }, TR_OK);
+    assert_eq!(
+        unsafe { tr_registered_matrix(r, N - 1, c.as_mut_ptr()) },
+        TR_OK
+    );
     let m = Matrix { c };
     let mut out = vec![0.0f32; W * H];
-    for (border, b) in [(TR_BORDER_CONSTANT, Border::Constant), (TR_BORDER_EDGE, Border::Edge)] {
+    for (border, b) in [
+        (TR_BORDER_CONSTANT, Border::Constant),
+        (TR_BORDER_EDGE, Border::Edge),
+    ] {
         assert_eq!(unsafe { tr_registered_set_border(r, border) }, TR_OK);
         assert_eq!(
             unsafe { tr_registered_apply(r, frame.as_ptr(), N - 1, out.as_mut_ptr()) },
@@ -163,29 +190,71 @@ fn bad_arguments_are_refused_with_a_reason() {
     let pixels = stack();
     let mut r = std::ptr::null_mut();
     for broken in [
-        TrSettings { transformation: 5, ..settings() },
-        TrSettings { reference: -1, ..settings() },
-        TrSettings { backend: 3, ..settings() },
-        TrSettings { border: 9, ..settings() },
-        TrSettings { n_frames: 0, ..settings() },
+        TrSettings {
+            transformation: 5,
+            ..settings()
+        },
+        TrSettings {
+            reference: -1,
+            ..settings()
+        },
+        TrSettings {
+            backend: 3,
+            ..settings()
+        },
+        TrSettings {
+            border: 9,
+            ..settings()
+        },
+        TrSettings {
+            n_frames: 0,
+            ..settings()
+        },
         TrSettings {
             transformation: TR_TRANSFORMATION_BILINEAR,
             reference: TR_REFERENCE_PREVIOUS,
             ..settings()
         },
     ] {
-        assert_eq!(run(&broken, &pixels, &mut r), TR_INVALID_ARGUMENT, "{broken:?}");
+        assert_eq!(
+            run(&broken, &pixels, &mut r),
+            TR_INVALID_ARGUMENT,
+            "{broken:?}"
+        );
         assert!(!last_error().is_empty());
         assert!(r.is_null());
     }
     assert!(last_error().contains("bilinear"), "{}", last_error());
-    let null = unsafe { tr_register(std::ptr::null(), N, H, W, std::ptr::null(), None, std::ptr::null_mut(), &mut r) };
+    let null = unsafe {
+        tr_register(
+            std::ptr::null(),
+            N,
+            H,
+            W,
+            std::ptr::null(),
+            None,
+            std::ptr::null_mut(),
+            &mut r,
+        )
+    };
     assert_eq!(null, TR_INVALID_ARGUMENT);
     let huge = unsafe {
-        tr_register(pixels.as_ptr(), usize::MAX, 2, 2, std::ptr::null(), None, std::ptr::null_mut(), &mut r)
+        tr_register(
+            pixels.as_ptr(),
+            usize::MAX,
+            2,
+            2,
+            std::ptr::null(),
+            None,
+            std::ptr::null_mut(),
+            &mut r,
+        )
     };
     assert_eq!(huge, TR_INVALID_ARGUMENT);
-    assert_eq!(unsafe { tr_settings_default(std::ptr::null_mut()) }, TR_INVALID_ARGUMENT);
+    assert_eq!(
+        unsafe { tr_settings_default(std::ptr::null_mut()) },
+        TR_INVALID_ARGUMENT
+    );
     assert_eq!(tr_backend_available(-3, H, W), TR_INVALID_ARGUMENT);
     assert_eq!(tr_backend_available(TR_BACKEND_SINGLE_THREAD, H, W), TR_OK);
 
@@ -205,7 +274,10 @@ fn bad_arguments_are_refused_with_a_reason() {
         TR_INVALID_ARGUMENT
     );
     // 3 is TR_BORDER_CROP; 4 is nothing.
-    assert_eq!(unsafe { tr_registered_set_border(r, 4) }, TR_INVALID_ARGUMENT);
+    assert_eq!(
+        unsafe { tr_registered_set_border(r, 4) },
+        TR_INVALID_ARGUMENT
+    );
     unsafe { tr_registered_free(r) };
     unsafe { tr_registered_free(std::ptr::null_mut()) };
 }
@@ -235,7 +307,32 @@ fn the_header_matches_this_module() {
             (name, it.next().and_then(|v| v.parse().ok()).expect(name))
         })
         .collect();
-    let want: &[(&str, c_int)] = &[("OK", TR_OK), ("CANCELLED", TR_CANCELLED), ("INVALID_ARGUMENT", TR_INVALID_ARGUMENT), ("UNAVAILABLE", TR_UNAVAILABLE), ("FAILED", TR_FAILED), ("NO_COMMON_AREA", TR_NO_COMMON_AREA), ("TRANSFORMATION_TRANSLATION", TR_TRANSFORMATION_TRANSLATION), ("TRANSFORMATION_RIGID_BODY", TR_TRANSFORMATION_RIGID_BODY), ("TRANSFORMATION_SCALED_ROTATION", TR_TRANSFORMATION_SCALED_ROTATION), ("TRANSFORMATION_AFFINE", TR_TRANSFORMATION_AFFINE), ("TRANSFORMATION_BILINEAR", TR_TRANSFORMATION_BILINEAR), ("REFERENCE_PREVIOUS", TR_REFERENCE_PREVIOUS), ("REFERENCE_FIRST", TR_REFERENCE_FIRST), ("REFERENCE_MEAN", TR_REFERENCE_MEAN), ("BACKEND_SINGLE_THREAD", TR_BACKEND_SINGLE_THREAD), ("BACKEND_MULTI_THREAD", TR_BACKEND_MULTI_THREAD), ("BACKEND_GPU", TR_BACKEND_GPU), ("BORDER_NATIVE", TR_BORDER_NATIVE), ("BORDER_EDGE", TR_BORDER_EDGE), ("BORDER_CONSTANT", TR_BORDER_CONSTANT), ("BORDER_CROP", TR_BORDER_CROP)];
+    let want: &[(&str, c_int)] = &[
+        ("OK", TR_OK),
+        ("CANCELLED", TR_CANCELLED),
+        ("INVALID_ARGUMENT", TR_INVALID_ARGUMENT),
+        ("UNAVAILABLE", TR_UNAVAILABLE),
+        ("FAILED", TR_FAILED),
+        ("NO_COMMON_AREA", TR_NO_COMMON_AREA),
+        ("TRANSFORMATION_TRANSLATION", TR_TRANSFORMATION_TRANSLATION),
+        ("TRANSFORMATION_RIGID_BODY", TR_TRANSFORMATION_RIGID_BODY),
+        (
+            "TRANSFORMATION_SCALED_ROTATION",
+            TR_TRANSFORMATION_SCALED_ROTATION,
+        ),
+        ("TRANSFORMATION_AFFINE", TR_TRANSFORMATION_AFFINE),
+        ("TRANSFORMATION_BILINEAR", TR_TRANSFORMATION_BILINEAR),
+        ("REFERENCE_PREVIOUS", TR_REFERENCE_PREVIOUS),
+        ("REFERENCE_FIRST", TR_REFERENCE_FIRST),
+        ("REFERENCE_MEAN", TR_REFERENCE_MEAN),
+        ("BACKEND_SINGLE_THREAD", TR_BACKEND_SINGLE_THREAD),
+        ("BACKEND_MULTI_THREAD", TR_BACKEND_MULTI_THREAD),
+        ("BACKEND_GPU", TR_BACKEND_GPU),
+        ("BORDER_NATIVE", TR_BORDER_NATIVE),
+        ("BORDER_EDGE", TR_BORDER_EDGE),
+        ("BORDER_CONSTANT", TR_BORDER_CONSTANT),
+        ("BORDER_CROP", TR_BORDER_CROP),
+    ];
     assert_eq!(defines.len(), want.len(), "{defines:?}");
     for (name, value) in want {
         let found = defines.iter().find(|(n, _)| n == name);
@@ -267,7 +364,18 @@ fn the_header_matches_this_module() {
         border: Default::default(),
     };
     let _ = s;
-    assert_eq!(fields, ["n_frames", "moving_average", "max_pyramid_depth", "transformation", "reference", "backend", "border"]);
+    assert_eq!(
+        fields,
+        [
+            "n_frames",
+            "moving_average",
+            "max_pyramid_depth",
+            "transformation",
+            "reference",
+            "backend",
+            "border"
+        ]
+    );
 
     // Functions: what the header declares is what this module exports.
     let mut declared: Vec<&str> = header
@@ -276,7 +384,23 @@ fn the_header_matches_this_module() {
         .collect();
     declared.sort_unstable();
     declared.dedup();
-    let mut exported = Vec::from(["tr_last_error", "tr_version", "tr_settings_default", "tr_backend_available", "tr_register", "tr_registered_free", "tr_registered_frames", "tr_registered_matrix", "tr_registered_failed", "tr_registered_has_reference", "tr_registered_reference", "tr_registered_set_border", "tr_registered_output_size", "tr_registered_common_area", "tr_registered_apply"]);
+    let mut exported = Vec::from([
+        "tr_last_error",
+        "tr_version",
+        "tr_settings_default",
+        "tr_backend_available",
+        "tr_register",
+        "tr_registered_free",
+        "tr_registered_frames",
+        "tr_registered_matrix",
+        "tr_registered_failed",
+        "tr_registered_has_reference",
+        "tr_registered_reference",
+        "tr_registered_set_border",
+        "tr_registered_output_size",
+        "tr_registered_common_area",
+        "tr_registered_apply",
+    ]);
     exported.sort_unstable();
     assert_eq!(declared, exported);
 }
@@ -294,10 +418,16 @@ fn a_crop_through_c_is_the_rust_one() {
     let mut r = std::ptr::null_mut();
     assert_eq!(run(&s, &pixels, &mut r), TR_OK, "{}", last_error());
     let inner = unsafe { &*r }.inner.common_area(H, W).expect("an area");
-    assert!(inner.height < H || inner.width < W, "the stack drifts: {inner:?}");
+    assert!(
+        inner.height < H || inner.width < W,
+        "the stack drifts: {inner:?}"
+    );
 
     let (mut oly, mut olx) = (0, 0);
-    assert_eq!(unsafe { tr_registered_output_size(r, &mut oly, &mut olx) }, TR_OK);
+    assert_eq!(
+        unsafe { tr_registered_output_size(r, &mut oly, &mut olx) },
+        TR_OK
+    );
     assert_eq!((oly, olx), (inner.height, inner.width));
     let (mut y, mut x, mut h, mut w, mut angle) = (9.0, 9.0, 9, 9, 9.0);
     assert_eq!(
@@ -330,7 +460,10 @@ fn a_crop_through_c_is_the_rust_one() {
         assert_eq!(status, TR_NO_COMMON_AREA);
         assert!(last_error().contains("no common area"), "{}", last_error());
     }
-    assert_eq!(unsafe { tr_registered_set_border(r, TR_BORDER_CONSTANT) }, TR_OK);
+    assert_eq!(
+        unsafe { tr_registered_set_border(r, TR_BORDER_CONSTANT) },
+        TR_OK
+    );
     assert_eq!(
         unsafe { tr_registered_apply(r, pixels.as_ptr(), 0, out.as_mut_ptr()) },
         TR_OK

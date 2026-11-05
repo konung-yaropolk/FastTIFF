@@ -117,7 +117,13 @@ fn a_rigid_area_is_what_no_shift_fills() {
             Ok(a) => {
                 assert!(a.is_upright(), "case {case}: {a:?}");
                 assert_eq!(a.height * a.width, count, "case {case}: {a:?}");
-                assert!(all_covered(&a, ly, lx, &Moves::new(&shifts, None, 0, lx), shifts.len()));
+                assert!(all_covered(
+                    &a,
+                    ly,
+                    lx,
+                    &Moves::new(&shifts, None, 0, lx),
+                    shifts.len()
+                ));
             }
         }
     }
@@ -148,7 +154,17 @@ fn a_warped_area_is_covered_and_largest() {
             .collect();
         let ones = vec![1.0f32; ly * lx];
         let moved: Vec<Vec<f32>> = (0..frames)
-            .map(|t| warp(&ones, ly, lx, &blocks, &fields[t], shifts[t], Border::Constant))
+            .map(|t| {
+                warp(
+                    &ones,
+                    ly,
+                    lx,
+                    &blocks,
+                    &fields[t],
+                    shifts[t],
+                    Border::Constant,
+                )
+            })
             .collect();
         let covered = never_filled(&moved);
         // The fast search, checked against every rectangle above.
@@ -159,11 +175,17 @@ fn a_warped_area_is_covered_and_largest() {
         match found {
             Err(_) => assert_eq!(upright, 0, "case {case}"),
             Ok(a) => {
-                assert!(all_covered(&a, ly, lx, &moves, frames), "case {case}: {a:?}");
+                assert!(
+                    all_covered(&a, ly, lx, &moves, frames),
+                    "case {case}: {a:?}"
+                );
                 if a.is_upright() {
                     assert_eq!(a.height * a.width, upright, "case {case}: {a:?}");
                 } else {
-                    assert!(a.height * a.width > upright, "case {case}: {a:?} vs {upright}");
+                    assert!(
+                        a.height * a.width > upright,
+                        "case {case}: {a:?} vs {upright}"
+                    );
                 }
             }
         }
@@ -204,7 +226,10 @@ fn a_turned_region_is_cut_at_its_own_angle() {
         for c in 0..area.width {
             let (y, x) = area.at(r, c);
             let (sy, sx) = source(0, y, x);
-            assert!(on_frame(y, x, ly, lx) && on_frame(sy, sx, ly, lx), "({r}, {c})");
+            assert!(
+                on_frame(y, x, ly, lx) && on_frame(sy, sx, ly, lx),
+                "({r}, {c})"
+            );
         }
     }
 }
@@ -281,7 +306,10 @@ fn a_cut_reads_where_the_correction_says() {
             assert_eq!(rigid[r * 6 + c], ramp[sy * lx + sx], "({r}, {c})");
         }
     }
-    assert_eq!(cut.apply_batch(std::slice::from_ref(&ramp), &[0], true), vec![out]);
+    assert_eq!(
+        cut.apply_batch(std::slice::from_ref(&ramp), &[0], true),
+        vec![out]
+    );
 }
 
 /// The bidirectional-phase correction slides alternate lines and leaves the
@@ -293,7 +321,11 @@ fn a_crop_keeps_clear_of_the_bidiphase_strip() {
     let still = [shift(0, 0), shift(0, 0)];
     for (bidi, x0, width) in [(3, 3.0, 47), (-4, 0.0, 46), (0, 0.0, 50), (60, 0.0, 50)] {
         let a = common_area(ly, lx, &still, None, bidi, true).expect("an area");
-        assert_eq!((a.x, a.width, a.height), (x0, width, ly), "bidiphase {bidi}");
+        assert_eq!(
+            (a.x, a.width, a.height),
+            (x0, width, ly),
+            "bidiphase {bidi}"
+        );
     }
     // A warped run keeps clear of it too.
     let blocks = make_blocks(ly, lx, [16, 16], 10);

@@ -339,7 +339,11 @@ fn a_bordered_warp_fills_what_the_move_uncovers() {
         for x in 0..w {
             let i = y * w + x;
             if x < 3 {
-                assert!((edged[i] - 10.0).abs() < 2e-3, "({x},{y}) edge {}", edged[i]);
+                assert!(
+                    (edged[i] - 10.0).abs() < 2e-3,
+                    "({x},{y}) edge {}",
+                    edged[i]
+                );
                 assert_eq!(zeroed[i], 0.0, "({x},{y}) not filled");
                 // The mirror reads -1 as column 0, so it differs from a fill
                 // only further out.
@@ -353,7 +357,10 @@ fn a_bordered_warp_fills_what_the_move_uncovers() {
         }
     }
     // Unless asked, it is TurboReg's mirror.
-    assert_eq!(warp_bordered(&img, w, h, &m, Border::Native, false), mirrored);
+    assert_eq!(
+        warp_bordered(&img, w, h, &m, Border::Native, false),
+        mirrored
+    );
     // The identity uncovers nothing, whatever the border — rounding included.
     for border in Border::all() {
         assert_eq!(

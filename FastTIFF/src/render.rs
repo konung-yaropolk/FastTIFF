@@ -369,18 +369,25 @@ mod gpu_lost_tests {
         // Told of by wgpu, with or without a message.
         let told = explain(Some("device lost: timeout"), "anything").expect("explained");
         assert!(told.contains("ran out of video memory") && told.contains("device lost: timeout"));
-        assert!(!explain(Some(""), "x").expect("explained").contains("Details"));
+        assert!(!explain(Some(""), "x")
+            .expect("explained")
+            .contains("Details"));
         // egui first, on a device nobody had heard was lost.
         let egui = "panicked at egui-wgpu-0.34.3\\src\\renderer.rs:971:17:\n\
                     Failed to create staging buffer for index data. Index count: 3480.";
-        assert!(explain(None, egui).expect("explained").contains("Index count: 3480"));
+        assert!(explain(None, egui)
+            .expect("explained")
+            .contains("Index count: 3480"));
         // wgpu's own out-of-memory panic.
         assert!(explain(None, "wgpu error: Out of Memory\n\nCaused by: ...").is_some());
     }
 
     #[test]
     fn any_other_panic_is_left_as_it_is() {
-        assert_eq!(explain(None, "index out of bounds: the len is 3 but the index is 7"), None);
+        assert_eq!(
+            explain(None, "index out of bounds: the len is 3 but the index is 7"),
+            None
+        );
         assert_eq!(explain(None, "wgpu error: Validation Error"), None);
     }
 }

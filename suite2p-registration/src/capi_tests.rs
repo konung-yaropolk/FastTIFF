@@ -8,7 +8,11 @@ use std::ffi::CStr;
 /// A field with three blobs, moved along a known path.
 fn movie(ly: usize, lx: usize, path: &[(i32, i32)]) -> Vec<f32> {
     let mut base = vec![10.0f32; ly * lx];
-    for (cy, cx, amp) in [(20.0f32, 24.0f32, 200.0f32), (40.0, 44.0, 150.0), (28.0, 12.0, 120.0)] {
+    for (cy, cx, amp) in [
+        (20.0f32, 24.0f32, 200.0f32),
+        (40.0, 44.0, 150.0),
+        (28.0, 12.0, 120.0),
+    ] {
         for y in 0..ly {
             for x in 0..lx {
                 let d2 = ((y as f32 - cy).powi(2) + (x as f32 - cx).powi(2)) / 8.0;
@@ -61,19 +65,39 @@ fn a_registration_through_c_matches_the_rust_one() {
     let s = settings();
     let mut r = std::ptr::null_mut();
     let status = unsafe {
-        s2p_register(pixels.as_ptr(), PATH.len(), ly, lx, &s, None, std::ptr::null_mut(), &mut r)
+        s2p_register(
+            pixels.as_ptr(),
+            PATH.len(),
+            ly,
+            lx,
+            &s,
+            None,
+            std::ptr::null_mut(),
+            &mut r,
+        )
     };
     assert_eq!(status, S2P_OK, "{}", last_error());
     assert!(!r.is_null());
 
     let frames: Vec<Vec<f32>> = pixels.chunks(ly * lx).map(<[f32]>::to_vec).collect();
-    let direct = register(&Frames { ly, lx, frames: &frames }, &s.to_settings().unwrap(), &mut |_| true)
-        .expect("not cancelled");
+    let direct = register(
+        &Frames {
+            ly,
+            lx,
+            frames: &frames,
+        },
+        &s.to_settings().unwrap(),
+        &mut |_| true,
+    )
+    .expect("not cancelled");
 
     assert_eq!(unsafe { s2p_registered_frames(r) }, PATH.len());
     for (t, want) in direct.shifts.iter().enumerate() {
         let (mut dy, mut dx, mut corr) = (0, 0, 0.0);
-        assert_eq!(unsafe { s2p_registered_shift(r, t, &mut dy, &mut dx, &mut corr) }, S2P_OK);
+        assert_eq!(
+            unsafe { s2p_registered_shift(r, t, &mut dy, &mut dx, &mut corr) },
+            S2P_OK
+        );
         assert_eq!((dy, dx, corr), (want.dy, want.dx, want.corr));
         let mut bad = true;
         assert_eq!(unsafe { s2p_registered_is_bad(r, t, &mut bad) }, S2P_OK);
@@ -94,7 +118,10 @@ fn a_registration_through_c_matches_the_rust_one() {
     assert!(!unsafe { s2p_registered_is_nonrigid(r) });
 
     // The border can be changed after the run, and apply follows it.
-    assert_eq!(unsafe { s2p_registered_set_border(r, S2P_BORDER_CONSTANT) }, S2P_OK);
+    assert_eq!(
+        unsafe { s2p_registered_set_border(r, S2P_BORDER_CONSTANT) },
+        S2P_OK
+    );
     let mut moved = vec![0.0f32; ly * lx];
     assert_eq!(
         unsafe { s2p_registered_apply(r, frames[5].as_ptr(), 5, moved.as_mut_ptr()) },
@@ -121,7 +148,16 @@ fn apply_includes_the_bidiphase_correction() {
     };
     let mut r = std::ptr::null_mut();
     let status = unsafe {
-        s2p_register(pixels.as_ptr(), PATH.len(), ly, lx, &s, None, std::ptr::null_mut(), &mut r)
+        s2p_register(
+            pixels.as_ptr(),
+            PATH.len(),
+            ly,
+            lx,
+            &s,
+            None,
+            std::ptr::null_mut(),
+            &mut r,
+        )
     };
     assert_eq!(status, S2P_OK, "{}", last_error());
     assert_eq!(unsafe { s2p_registered_bidiphase(r) }, 2);
@@ -131,7 +167,10 @@ fn apply_includes_the_bidiphase_correction() {
     bidiphase::shift(&mut combed, ly, lx, 2);
     let want = unsafe { &*r }.inner.apply(&combed, ly, lx, 1).unwrap();
     let mut got = vec![0.0f32; ly * lx];
-    assert_eq!(unsafe { s2p_registered_apply(r, frame.as_ptr(), 1, got.as_mut_ptr()) }, S2P_OK);
+    assert_eq!(
+        unsafe { s2p_registered_apply(r, frame.as_ptr(), 1, got.as_mut_ptr()) },
+        S2P_OK
+    );
     assert_eq!(got, want);
     unsafe { s2p_registered_free(r) };
 }
@@ -176,33 +215,80 @@ fn bad_arguments_are_refused_with_a_reason() {
     };
 
     for broken in [
-        S2pSettings { backend: 7, ..settings() },
-        S2pSettings { border: -1, ..settings() },
-        S2pSettings { subpixel: 0, ..settings() },
-        S2pSettings { maxregshift: f64::NAN, ..settings() },
+        S2pSettings {
+            backend: 7,
+            ..settings()
+        },
+        S2pSettings {
+            border: -1,
+            ..settings()
+        },
+        S2pSettings {
+            subpixel: 0,
+            ..settings()
+        },
+        S2pSettings {
+            maxregshift: f64::NAN,
+            ..settings()
+        },
     ] {
-        assert_eq!(run(&broken, pixels.as_ptr(), PATH.len(), &mut r), S2P_INVALID_ARGUMENT);
+        assert_eq!(
+            run(&broken, pixels.as_ptr(), PATH.len(), &mut r),
+            S2P_INVALID_ARGUMENT
+        );
         assert!(!last_error().is_empty());
         assert!(r.is_null());
     }
-    assert_eq!(run(&settings(), std::ptr::null(), PATH.len(), &mut r), S2P_INVALID_ARGUMENT);
+    assert_eq!(
+        run(&settings(), std::ptr::null(), PATH.len(), &mut r),
+        S2P_INVALID_ARGUMENT
+    );
     assert!(last_error().contains("NULL"), "{}", last_error());
-    assert_eq!(run(&settings(), pixels.as_ptr(), 0, &mut r), S2P_INVALID_ARGUMENT);
+    assert_eq!(
+        run(&settings(), pixels.as_ptr(), 0, &mut r),
+        S2P_INVALID_ARGUMENT
+    );
     let huge = unsafe {
-        s2p_register(pixels.as_ptr(), usize::MAX, 2, 2, std::ptr::null(), None, std::ptr::null_mut(), &mut r)
+        s2p_register(
+            pixels.as_ptr(),
+            usize::MAX,
+            2,
+            2,
+            std::ptr::null(),
+            None,
+            std::ptr::null_mut(),
+            &mut r,
+        )
     };
     assert_eq!(huge, S2P_INVALID_ARGUMENT);
-    assert_eq!(unsafe { s2p_settings_default(std::ptr::null_mut()) }, S2P_INVALID_ARGUMENT);
+    assert_eq!(
+        unsafe { s2p_settings_default(std::ptr::null_mut()) },
+        S2P_INVALID_ARGUMENT
+    );
     assert_eq!(s2p_backend_available(42, ly, lx), S2P_INVALID_ARGUMENT);
-    assert_eq!(s2p_backend_available(S2P_BACKEND_SINGLE_THREAD, ly, lx), S2P_OK);
+    assert_eq!(
+        s2p_backend_available(S2P_BACKEND_SINGLE_THREAD, ly, lx),
+        S2P_OK
+    );
 
     // A handle's accessors refuse NULL and an index past the end.
     assert_eq!(unsafe { s2p_registered_frames(std::ptr::null()) }, 0);
     assert_eq!(
-        unsafe { s2p_registered_shift(std::ptr::null(), 0, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) },
+        unsafe {
+            s2p_registered_shift(
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
         S2P_INVALID_ARGUMENT
     );
-    assert_eq!(run(&settings(), pixels.as_ptr(), PATH.len(), &mut r), S2P_OK);
+    assert_eq!(
+        run(&settings(), pixels.as_ptr(), PATH.len(), &mut r),
+        S2P_OK
+    );
     let mut out = vec![0.0f32; ly * lx];
     assert_eq!(
         unsafe { s2p_registered_apply(r, pixels.as_ptr(), PATH.len(), out.as_mut_ptr()) },
@@ -213,7 +299,10 @@ fn bad_arguments_are_refused_with_a_reason() {
         S2P_INVALID_ARGUMENT
     );
     // 3 is S2P_BORDER_CROP; 4 is nothing.
-    assert_eq!(unsafe { s2p_registered_set_border(r, 4) }, S2P_INVALID_ARGUMENT);
+    assert_eq!(
+        unsafe { s2p_registered_set_border(r, 4) },
+        S2P_INVALID_ARGUMENT
+    );
     unsafe { s2p_registered_free(r) };
     unsafe { s2p_registered_free(std::ptr::null_mut()) };
 }
@@ -232,7 +321,16 @@ fn an_unavailable_backend_is_refused_before_running() {
     };
     let mut r = std::ptr::null_mut();
     let status = unsafe {
-        s2p_register(pixels.as_ptr(), PATH.len(), ly, lx, &s, None, std::ptr::null_mut(), &mut r)
+        s2p_register(
+            pixels.as_ptr(),
+            PATH.len(),
+            ly,
+            lx,
+            &s,
+            None,
+            std::ptr::null_mut(),
+            &mut r,
+        )
     };
     assert_eq!(status, S2P_UNAVAILABLE);
     assert!(!last_error().is_empty());
@@ -263,7 +361,21 @@ fn the_header_matches_this_module() {
             (name, it.next().and_then(|v| v.parse().ok()).expect(name))
         })
         .collect();
-    let want: &[(&str, c_int)] = &[("OK", S2P_OK), ("CANCELLED", S2P_CANCELLED), ("INVALID_ARGUMENT", S2P_INVALID_ARGUMENT), ("UNAVAILABLE", S2P_UNAVAILABLE), ("FAILED", S2P_FAILED), ("NO_COMMON_AREA", S2P_NO_COMMON_AREA), ("BACKEND_SINGLE_THREAD", S2P_BACKEND_SINGLE_THREAD), ("BACKEND_MULTI_THREAD", S2P_BACKEND_MULTI_THREAD), ("BACKEND_GPU", S2P_BACKEND_GPU), ("BORDER_NATIVE", S2P_BORDER_NATIVE), ("BORDER_EDGE", S2P_BORDER_EDGE), ("BORDER_CONSTANT", S2P_BORDER_CONSTANT), ("BORDER_CROP", S2P_BORDER_CROP)];
+    let want: &[(&str, c_int)] = &[
+        ("OK", S2P_OK),
+        ("CANCELLED", S2P_CANCELLED),
+        ("INVALID_ARGUMENT", S2P_INVALID_ARGUMENT),
+        ("UNAVAILABLE", S2P_UNAVAILABLE),
+        ("FAILED", S2P_FAILED),
+        ("NO_COMMON_AREA", S2P_NO_COMMON_AREA),
+        ("BACKEND_SINGLE_THREAD", S2P_BACKEND_SINGLE_THREAD),
+        ("BACKEND_MULTI_THREAD", S2P_BACKEND_MULTI_THREAD),
+        ("BACKEND_GPU", S2P_BACKEND_GPU),
+        ("BORDER_NATIVE", S2P_BORDER_NATIVE),
+        ("BORDER_EDGE", S2P_BORDER_EDGE),
+        ("BORDER_CONSTANT", S2P_BORDER_CONSTANT),
+        ("BORDER_CROP", S2P_BORDER_CROP),
+    ];
     assert_eq!(defines.len(), want.len(), "{defines:?}");
     for (name, value) in want {
         let found = defines.iter().find(|(n, _)| n == name);
@@ -307,7 +419,30 @@ fn the_header_matches_this_module() {
         nonrigid: Default::default(),
     };
     let _ = s;
-    assert_eq!(fields, ["nimg_init", "reference_iterations", "batch_size", "block_size", "subpixel", "maxregshift", "maxregshift_nr", "smooth_sigma", "smooth_sigma_time", "spatial_taper", "snr_thresh", "th_badframes", "bidiphase", "backend", "border", "norm_frames", "two_step_registration", "do_bidiphase", "nonrigid"]);
+    assert_eq!(
+        fields,
+        [
+            "nimg_init",
+            "reference_iterations",
+            "batch_size",
+            "block_size",
+            "subpixel",
+            "maxregshift",
+            "maxregshift_nr",
+            "smooth_sigma",
+            "smooth_sigma_time",
+            "spatial_taper",
+            "snr_thresh",
+            "th_badframes",
+            "bidiphase",
+            "backend",
+            "border",
+            "norm_frames",
+            "two_step_registration",
+            "do_bidiphase",
+            "nonrigid"
+        ]
+    );
 
     // Functions: what the header declares is what this module exports.
     let mut declared: Vec<&str> = header
@@ -316,7 +451,24 @@ fn the_header_matches_this_module() {
         .collect();
     declared.sort_unstable();
     declared.dedup();
-    let mut exported = Vec::from(["s2p_last_error", "s2p_version", "s2p_settings_default", "s2p_backend_available", "s2p_register", "s2p_registered_free", "s2p_registered_frames", "s2p_registered_shift", "s2p_registered_is_bad", "s2p_registered_bidiphase", "s2p_registered_is_nonrigid", "s2p_registered_reference", "s2p_registered_set_border", "s2p_registered_output_size", "s2p_registered_common_area", "s2p_registered_apply"]);
+    let mut exported = Vec::from([
+        "s2p_last_error",
+        "s2p_version",
+        "s2p_settings_default",
+        "s2p_backend_available",
+        "s2p_register",
+        "s2p_registered_free",
+        "s2p_registered_frames",
+        "s2p_registered_shift",
+        "s2p_registered_is_bad",
+        "s2p_registered_bidiphase",
+        "s2p_registered_is_nonrigid",
+        "s2p_registered_reference",
+        "s2p_registered_set_border",
+        "s2p_registered_output_size",
+        "s2p_registered_common_area",
+        "s2p_registered_apply",
+    ]);
     exported.sort_unstable();
     assert_eq!(declared, exported);
 }
@@ -334,13 +486,25 @@ fn a_crop_through_c_is_the_rust_one() {
     };
     let mut r = std::ptr::null_mut();
     let status = unsafe {
-        s2p_register(pixels.as_ptr(), PATH.len(), ly, lx, &s, None, std::ptr::null_mut(), &mut r)
+        s2p_register(
+            pixels.as_ptr(),
+            PATH.len(),
+            ly,
+            lx,
+            &s,
+            None,
+            std::ptr::null_mut(),
+            &mut r,
+        )
     };
     assert_eq!(status, S2P_OK, "{}", last_error());
     let inner = unsafe { &*r }.inner.common_area(ly, lx).expect("an area");
 
     let (mut oly, mut olx) = (0, 0);
-    assert_eq!(unsafe { s2p_registered_output_size(r, &mut oly, &mut olx) }, S2P_OK);
+    assert_eq!(
+        unsafe { s2p_registered_output_size(r, &mut oly, &mut olx) },
+        S2P_OK
+    );
     assert_eq!((oly, olx), (inner.height, inner.width));
     let (mut y, mut x, mut h, mut w, mut angle) = (9.0, 9.0, 9, 9, 9.0);
     assert_eq!(
@@ -368,7 +532,16 @@ fn a_crop_through_c_is_the_rust_one() {
     let mut fresh = std::ptr::null_mut();
     assert_eq!(
         unsafe {
-            s2p_register(pixels.as_ptr(), PATH.len(), ly, lx, &s, None, std::ptr::null_mut(), &mut fresh)
+            s2p_register(
+                pixels.as_ptr(),
+                PATH.len(),
+                ly,
+                lx,
+                &s,
+                None,
+                std::ptr::null_mut(),
+                &mut fresh,
+            )
         },
         S2P_OK
     );
@@ -383,7 +556,10 @@ fn a_crop_through_c_is_the_rust_one() {
         assert!(last_error().contains("no common area"), "{}", last_error());
     }
     // A border that fills still works on the same result.
-    assert_eq!(unsafe { s2p_registered_set_border(fresh, S2P_BORDER_CONSTANT) }, S2P_OK);
+    assert_eq!(
+        unsafe { s2p_registered_set_border(fresh, S2P_BORDER_CONSTANT) },
+        S2P_OK
+    );
     assert_eq!(
         unsafe { s2p_registered_apply(fresh, pixels.as_ptr(), 0, out.as_mut_ptr()) },
         S2P_OK

@@ -33,7 +33,9 @@ use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use crate::{register_stack, Backend, Border, Frames, Reference, Registered, Settings, Transformation};
+use crate::{
+    register_stack, Backend, Border, Frames, Reference, Registered, Settings, Transformation,
+};
 
 /// The call did what it was asked.
 pub const TR_OK: c_int = 0;
@@ -143,7 +145,11 @@ impl TrSettings {
     /// cannot: an enumeration value out of range, a count of zero, and the
     /// one combination the registration itself refuses.
     fn to_settings(self) -> Result<(Settings, Border), String> {
-        let transformation = pick(&Transformation::all(), self.transformation, "TRANSFORMATION")?;
+        let transformation = pick(
+            &Transformation::all(),
+            self.transformation,
+            "TRANSFORMATION",
+        )?;
         let reference = pick(&Reference::all(), self.reference, "REFERENCE")?;
         let backend = backend_of(self.backend)?;
         let border = border_of(self.border)?;
@@ -176,7 +182,12 @@ fn pick<T: Copy>(all: &[T], index: c_int, what: &str) -> Result<T, String> {
     usize::try_from(index)
         .ok()
         .and_then(|i| all.get(i).copied())
-        .ok_or_else(|| format!("{} {index} is not one of the TR_{what}_* values", what.to_lowercase()))
+        .ok_or_else(|| {
+            format!(
+                "{} {index} is not one of the TR_{what}_* values",
+                what.to_lowercase()
+            )
+        })
 }
 
 fn backend_of(v: c_int) -> Result<Backend, String> {
@@ -277,7 +288,10 @@ pub unsafe extern "C" fn tr_settings_default(out: *mut TrSettings) -> c_int {
     if out.is_null() {
         return fail(TR_INVALID_ARGUMENT, "out is NULL");
     }
-    out.write(TrSettings::from_settings(&Settings::default(), Border::default()));
+    out.write(TrSettings::from_settings(
+        &Settings::default(),
+        Border::default(),
+    ));
     TR_OK
 }
 
@@ -342,7 +356,10 @@ pub unsafe extern "C" fn tr_register(
             .and_then(|v| v.checked_mul(lx))
             .filter(|&v| v <= isize::MAX as usize / std::mem::size_of::<f32>())
         else {
-            return fail(TR_INVALID_ARGUMENT, "the stack is larger than memory can address");
+            return fail(
+                TR_INVALID_ARGUMENT,
+                "the stack is larger than memory can address",
+            );
         };
         if frames.is_null() {
             return fail(TR_INVALID_ARGUMENT, "frames is NULL");
@@ -443,7 +460,11 @@ pub unsafe extern "C" fn tr_registered_frames(r: *const TrRegistered) -> usize {
 ///
 /// `r` is null or a live result; `c` points to 8 writable doubles.
 #[no_mangle]
-pub unsafe extern "C" fn tr_registered_matrix(r: *const TrRegistered, t: usize, c: *mut f64) -> c_int {
+pub unsafe extern "C" fn tr_registered_matrix(
+    r: *const TrRegistered,
+    t: usize,
+    c: *mut f64,
+) -> c_int {
     let r = match handle(r) {
         Ok(r) => r,
         Err(status) => return status,
@@ -465,7 +486,11 @@ pub unsafe extern "C" fn tr_registered_matrix(r: *const TrRegistered, t: usize, 
 ///
 /// `r` is null or a live result; `failed` points to one writable `bool`.
 #[no_mangle]
-pub unsafe extern "C" fn tr_registered_failed(r: *const TrRegistered, t: usize, failed: *mut bool) -> c_int {
+pub unsafe extern "C" fn tr_registered_failed(
+    r: *const TrRegistered,
+    t: usize,
+    failed: *mut bool,
+) -> c_int {
     let r = match handle(r) {
         Ok(r) => r,
         Err(status) => return status,
@@ -499,7 +524,11 @@ pub unsafe extern "C" fn tr_registered_has_reference(r: *const TrRegistered) -> 
 ///
 /// `r` is null or a live result; `out` points to `len` writable floats.
 #[no_mangle]
-pub unsafe extern "C" fn tr_registered_reference(r: *const TrRegistered, out: *mut f32, len: usize) -> c_int {
+pub unsafe extern "C" fn tr_registered_reference(
+    r: *const TrRegistered,
+    out: *mut f32,
+    len: usize,
+) -> c_int {
     let r = match handle(r) {
         Ok(r) => r,
         Err(status) => return status,
@@ -652,7 +681,10 @@ pub unsafe extern "C" fn tr_registered_apply(
         }
         let (ly, lx) = (r.ly, r.lx);
         // Read in full before anything is written, so `out` may be `frame`.
-        let moved = match r.inner.apply(std::slice::from_raw_parts(frame, ly * lx), ly, lx, t) {
+        let moved = match r
+            .inner
+            .apply(std::slice::from_raw_parts(frame, ly * lx), ly, lx, t)
+        {
             Ok(moved) => moved,
             Err(none) => return fail(TR_NO_COMMON_AREA, none.to_string()),
         };

@@ -263,8 +263,14 @@ pub fn common_area(
         });
     }
     let reach: Vec<f64> = (0..shifts.len()).map(|t| moves.reach(t)).collect();
-    largest_turned(ly, lx, &reach, &|t, y, x| moves.reads(t, y, x, ly, lx), parallel)
-        .ok_or(none)
+    largest_turned(
+        ly,
+        lx,
+        &reach,
+        &|t, y, x| moves.reads(t, y, x, ly, lx),
+        parallel,
+    )
+    .ok_or(none)
 }
 
 /// Frames moved onto the reference and cut to an [`Area`], in one resampling:
@@ -591,7 +597,10 @@ fn roughly_covered(covered: &[bool], ly: usize, lx: usize, y: f64, x: f64) -> bo
     if !(inside(y, ly) && inside(x, lx)) {
         return false;
     }
-    let (y, x) = (y.round().clamp(0.0, (ly - 1) as f64), x.round().clamp(0.0, (lx - 1) as f64));
+    let (y, x) = (
+        y.round().clamp(0.0, (ly - 1) as f64),
+        x.round().clamp(0.0, (lx - 1) as f64),
+    );
     covered[y as usize * lx + x as usize]
 }
 

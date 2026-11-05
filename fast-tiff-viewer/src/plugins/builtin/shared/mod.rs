@@ -24,6 +24,11 @@
 // Each piece is compiled for the plugins that use it, so a build with only
 // some of them carries no unused code — and no warnings saying so.
 #[cfg(any(
+    feature = "plugin-suite2p-stabilize",
+    feature = "plugin-turboreg-stabilize"
+))]
+use fasttiff_plugin_api::PluginError;
+#[cfg(any(
     feature = "plugin-invert",
     feature = "plugin-stack-tools",
     feature = "plugin-deconvolve",
@@ -46,8 +51,6 @@ use fasttiff_plugin_api::{ParamDecl, ParamKind, Params};
     feature = "plugin-crop",
 ))]
 use fasttiff_plugin_api::{PixelType, PlaneData};
-#[cfg(any(feature = "plugin-suite2p-stabilize", feature = "plugin-turboreg-stabilize"))]
-use fasttiff_plugin_api::PluginError;
 
 /// The key of the "open in a new window" checkbox.
 #[cfg(any(
@@ -84,7 +87,10 @@ pub(crate) fn in_new_window() -> ParamDecl {
     )
 }
 
-#[cfg(any(feature = "plugin-suite2p-stabilize", feature = "plugin-turboreg-stabilize"))]
+#[cfg(any(
+    feature = "plugin-suite2p-stabilize",
+    feature = "plugin-turboreg-stabilize"
+))]
 /// What a stabilizer writes where a moved frame no longer covers the frame.
 ///
 /// Both registration plugins offer the same four, and each maps them onto its
@@ -101,13 +107,19 @@ pub(crate) enum Edges {
     Crop,
 }
 
-#[cfg(any(feature = "plugin-suite2p-stabilize", feature = "plugin-turboreg-stabilize"))]
+#[cfg(any(
+    feature = "plugin-suite2p-stabilize",
+    feature = "plugin-turboreg-stabilize"
+))]
 /// The key of the edge choice.
 pub(crate) const EDGES: &str = "edges";
 
 /// The edge choice, as both stabilizers offer it. `raw` says what the
 /// algorithm's own output is, which differs between them.
-#[cfg(any(feature = "plugin-suite2p-stabilize", feature = "plugin-turboreg-stabilize"))]
+#[cfg(any(
+    feature = "plugin-suite2p-stabilize",
+    feature = "plugin-turboreg-stabilize"
+))]
 pub(crate) fn edges_param(raw: &str) -> ParamDecl {
     ParamDecl::new(
         EDGES,
@@ -137,7 +149,10 @@ pub(crate) fn edges_param(raw: &str) -> ParamDecl {
 }
 
 /// Read the edge choice back.
-#[cfg(any(feature = "plugin-suite2p-stabilize", feature = "plugin-turboreg-stabilize"))]
+#[cfg(any(
+    feature = "plugin-suite2p-stabilize",
+    feature = "plugin-turboreg-stabilize"
+))]
 pub(crate) fn edges_from(params: &Params) -> Edges {
     match params.choice(EDGES, 0) {
         1 => Edges::Replicate,
@@ -153,7 +168,10 @@ pub(crate) fn edges_from(params: &Params) -> Edges {
 /// whole, so any of the other three runs where this one cannot. `if_not_real`
 /// is the plugin's own advice for a recording that did not really move that
 /// far — the settings that keep its search in bounds.
-#[cfg(any(feature = "plugin-suite2p-stabilize", feature = "plugin-turboreg-stabilize"))]
+#[cfg(any(
+    feature = "plugin-suite2p-stabilize",
+    feature = "plugin-turboreg-stabilize"
+))]
 pub(crate) fn no_common_area(why: impl std::fmt::Display, if_not_real: &str) -> PluginError {
     PluginError::failed(format!(
         "cannot crop to the common area: {why}. Fill with 0, Edge replicate or the \
@@ -287,6 +305,15 @@ fn whole(x: f32, lo: f32, hi: f32) -> f32 {
 #[cfg(all(
     test,
     any(
+        feature = "plugin-suite2p-stabilize",
+        feature = "plugin-turboreg-stabilize"
+    )
+))]
+#[path = "edges_tests.rs"]
+mod edges_tests;
+#[cfg(all(
+    test,
+    any(
         feature = "plugin-invert",
         feature = "plugin-stack-tools",
         feature = "plugin-deconvolve",
@@ -295,9 +322,3 @@ fn whole(x: f32, lo: f32, hi: f32) -> f32 {
 ))]
 #[path = "mod_tests.rs"]
 mod tests;
-#[cfg(all(
-    test,
-    any(feature = "plugin-suite2p-stabilize", feature = "plugin-turboreg-stabilize")
-))]
-#[path = "edges_tests.rs"]
-mod edges_tests;

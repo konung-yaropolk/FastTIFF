@@ -122,12 +122,12 @@ pub mod nifti;
 pub mod oir;
 #[cfg(feature = "plugin-plot-axis")]
 pub mod plot_axis;
+#[cfg(feature = "plugin-png")]
+pub mod png;
 /// The one directory here that is not a registry plugin, and so has no
 /// feature and no entry in [`register`]: a tool on the picture, kept with the
 /// built-ins because it is listed with them. See the module for why.
 pub mod point_counter;
-#[cfg(feature = "plugin-png")]
-pub mod png;
 /// What more than one of them is built from, and the reason each of them can be
 /// chosen on its own.
 ///

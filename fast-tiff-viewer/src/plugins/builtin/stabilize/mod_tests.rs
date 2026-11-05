@@ -444,7 +444,11 @@ fn the_edge_choice_reaches_the_settings() {
     ] {
         let mut p = Params::new();
         p.set("edges", ParamValue::Choice(choice));
-        assert_eq!(super::params::settings_from(&p).border, want, "option {choice}");
+        assert_eq!(
+            super::params::settings_from(&p).border,
+            want,
+            "option {choice}"
+        );
     }
     assert!(offered(&decls_for(&info(1, 1, 10))).contains(&"edges".to_string()));
 }

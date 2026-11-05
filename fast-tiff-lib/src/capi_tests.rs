@@ -1196,7 +1196,10 @@ fn the_reviewed_edges_are_refused() {
             FTL_INVALID_ARGUMENT,
         );
     }
-    assert_eq!(unsafe { ftl_resolve_dimensions(2, 3, 4, d.as_mut_ptr()) }, FTL_OK);
+    assert_eq!(
+        unsafe { ftl_resolve_dimensions(2, 3, 4, d.as_mut_ptr()) },
+        FTL_OK
+    );
 }
 
 /// Reading ZSTD in a build without the codec is the build's limit, not the

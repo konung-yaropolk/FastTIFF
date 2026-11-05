@@ -6,8 +6,8 @@
 //! in `default_ops`, so a value copied from a lab's `ops.npy` means the same
 //! thing.
 
-use fasttiff_plugin_api::{ImageInfo, ParamDecl, ParamKind, Params};
 use crate::plugins::builtin::shared::{edges_from, edges_param, Edges};
+use fasttiff_plugin_api::{ImageInfo, ParamDecl, ParamKind, Params};
 use suite2p_registration::{Backend, Border, Settings};
 
 /// A group heading, drawn by the host as bold text with a rule under it.

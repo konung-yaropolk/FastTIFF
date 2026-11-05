@@ -952,7 +952,11 @@ pub unsafe extern "C" fn ftl_resolve_dimensions(
                 format!("{channels} x {slices} x {frames}: every count has to be at least 1"),
             );
         }
-        if channels.checked_mul(slices).and_then(|v| v.checked_mul(frames)).is_none() {
+        if channels
+            .checked_mul(slices)
+            .and_then(|v| v.checked_mul(frames))
+            .is_none()
+        {
             return fail(
                 FTL_INVALID_ARGUMENT,
                 format!("{channels} x {slices} x {frames} is more frames than size_t counts"),

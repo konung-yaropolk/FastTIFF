@@ -962,12 +962,16 @@ fn stabilize_can_crop_to_the_common_area() {
         params.set("spatial_taper", ParamValue::Float(5.0));
         params.set("maxregshift", ParamValue::Float(0.3));
         params.set("nonrigid", ParamValue::Bool(nonrigid));
-        params.set("edges", edges(&builtin::Stabilize, &s, "Crop to the common area"));
+        params.set(
+            "edges",
+            edges(&builtin::Stabilize, &s, "Crop to the common area"),
+        );
         let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run")
         else {
             panic!("stabilization should produce a new document");
         };
-        out.validate().expect("the cropped result's shape must be valid");
+        out.validate()
+            .expect("the cropped result's shape must be valid");
         assert_eq!(out.frames, path.len());
         // Eight rows of travel (-4 to 4) and six columns (-3 to 3).
         if nonrigid {
@@ -1303,7 +1307,10 @@ fn stabilize_keeps_signed_samples_signed() {
     // its samples (below). The dialog's default fills the uncovered strip with
     // 0 instead, which adds zeros that are not a lost sign but would read as
     // one here.
-    params.set("edges", edges(&builtin::Stabilize, &s, "Algorithm's raw output"));
+    params.set(
+        "edges",
+        edges(&builtin::Stabilize, &s, "Algorithm's raw output"),
+    );
     let Outcome::NewDocument(out) = builtin::Stabilize.run(&mut h, &params).expect("run") else {
         panic!("expected a document");
     };
@@ -1464,11 +1471,15 @@ fn turboreg_can_crop_to_the_common_area() {
     let s = drifting_stack(96, &frames);
     let mut h = host(&s, 0);
     let mut params = Params::new();
-    params.set("edges", edges(&builtin::TurboReg, &s, "Crop to the common area"));
+    params.set(
+        "edges",
+        edges(&builtin::TurboReg, &s, "Crop to the common area"),
+    );
     let Outcome::NewDocument(out) = builtin::TurboReg.run(&mut h, &params).expect("run") else {
         panic!("registration should produce a new document");
     };
-    out.validate().expect("the cropped result's shape must be valid");
+    out.validate()
+        .expect("the cropped result's shape must be valid");
     assert_eq!(out.frames, DRIFT.len());
     // DRIFT spans 5.75 rows and 5.75 columns; a fit that lands a little off
     // trims a pixel either way.
@@ -1480,7 +1491,10 @@ fn turboreg_can_crop_to_the_common_area() {
     );
     // The texture is never below 240, so a 0 is fill that the crop missed.
     for (t, p) in planes_f32(&out).iter().enumerate() {
-        assert!(p.iter().all(|&v| v > 100.0), "frame {t}: a filled pixel survived");
+        assert!(
+            p.iter().all(|&v| v > 100.0),
+            "frame {t}: a filled pixel survived"
+        );
     }
 }
 
@@ -1517,14 +1531,17 @@ fn turboreg_crops_a_turned_stack_at_an_angle() {
     for f in &frames {
         writer.write_frame_f32(f).unwrap();
     }
-    let s = Stack::from_bytes(writer.finish().unwrap().into_inner(), "turning.tif".into(), false)
-        .expect("open");
+    let s = Stack::from_bytes(
+        writer.finish().unwrap().into_inner(),
+        "turning.tif".into(),
+        false,
+    )
+    .expect("open");
     let run = |label: &str| {
         let mut h = host(&s, 0);
         let mut params = Params::new();
         params.set("edges", edges(&builtin::TurboReg, &s, label));
-        let Outcome::NewDocument(out) = builtin::TurboReg.run(&mut h, &params).expect("run")
-        else {
+        let Outcome::NewDocument(out) = builtin::TurboReg.run(&mut h, &params).expect("run") else {
             panic!("registration should produce a new document");
         };
         out
@@ -1551,7 +1568,9 @@ fn turboreg_crops_a_turned_stack_at_an_angle() {
     }
 
     let cropped = run("Crop to the common area");
-    cropped.validate().expect("the cropped result's shape must be valid");
+    cropped
+        .validate()
+        .expect("the cropped result's shape must be valid");
     let kept = (cropped.width * cropped.height) as usize;
     assert!(
         kept > upright,
@@ -1561,7 +1580,10 @@ fn turboreg_crops_a_turned_stack_at_an_angle() {
     );
     // The texture is never below 240, so a 0 is fill that the crop missed.
     for (t, p) in planes_f32(&cropped).iter().enumerate() {
-        assert!(p.iter().all(|&v| v > 100.0), "frame {t}: a filled pixel survived");
+        assert!(
+            p.iter().all(|&v| v > 100.0),
+            "frame {t}: a filled pixel survived"
+        );
     }
 }
 

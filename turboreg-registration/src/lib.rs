@@ -141,9 +141,23 @@ impl Registered {
         let m = self.matrices.get(t).copied().unwrap_or_default();
         if self.border == Border::Crop {
             let area = self.common_area(ly, lx)?;
-            return Ok(transform::warp_area(frame, lx, ly, &m, &area, self.threaded));
+            return Ok(transform::warp_area(
+                frame,
+                lx,
+                ly,
+                &m,
+                &area,
+                self.threaded,
+            ));
         }
-        Ok(transform::warp_bordered(frame, lx, ly, &m, self.border, self.threaded))
+        Ok(transform::warp_bordered(
+            frame,
+            lx,
+            ly,
+            &m,
+            self.border,
+            self.threaded,
+        ))
     }
 
     /// The largest rectangle every frame covers once moved, at any angle

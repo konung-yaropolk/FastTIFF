@@ -280,8 +280,14 @@ fn a_cropped_stack_hands_back_the_common_area() {
         register_stack(&movie, &stack_settings(Reference::First), &mut |_| true).expect("ran");
     out.border = Border::Crop;
     let area = out.common_area(h, w).expect("an area");
-    assert!(area.is_upright(), "a translation leaves an upright area: {area:?}");
-    assert!(area.height < h && area.width < w, "a drift uncovers both edges: {area:?}");
+    assert!(
+        area.is_upright(),
+        "a translation leaves an upright area: {area:?}"
+    );
+    assert!(
+        area.height < h && area.width < w,
+        "a drift uncovers both edges: {area:?}"
+    );
     let (y0, x0) = (area.y as usize, area.x as usize);
     assert_eq!(out.output_size(h, w), Ok((area.height, area.width)));
     for (t, frame) in frames.iter().enumerate() {
@@ -300,8 +306,8 @@ fn a_cropped_stack_hands_back_the_common_area() {
         assert_eq!(cut, want, "frame {t}");
     }
 
-    let mut apart = register_stack(&movie, &stack_settings(Reference::First), &mut |_| true)
-        .expect("ran");
+    let mut apart =
+        register_stack(&movie, &stack_settings(Reference::First), &mut |_| true).expect("ran");
     apart.border = Border::Crop;
     apart.matrices[1].c[0] = 100.0;
     let err = apart.common_area(h, w).expect_err("nothing in common");

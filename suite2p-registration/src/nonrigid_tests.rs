@@ -108,7 +108,6 @@ fn a_zero_field_is_the_identity() {
             dx: 0,
             corr: 1.0,
         },
-   
         Border::Edge,
     );
     for (a, c) in out.iter().zip(&f) {
@@ -142,7 +141,6 @@ fn a_uniform_field_is_a_translation() {
             dx: 0,
             corr: 1.0,
         },
-   
         Border::Edge,
     );
     // The ramp is the column index, so sampling from x+2 reads 2 higher —
@@ -181,7 +179,6 @@ fn the_warp_clamps_at_the_edge() {
             dx: 0,
             corr: 1.0,
         },
-   
         Border::Edge,
     );
     // Sampling from x-8: the left edge clamps to column 0 rather than wrapping
@@ -253,7 +250,6 @@ fn the_rigid_shift_is_added_to_the_field() {
             dx: 3,
             corr: 1.0,
         },
-   
         Border::Edge,
     );
     for (x, &got) in out.iter().enumerate().take(lx - 8) {

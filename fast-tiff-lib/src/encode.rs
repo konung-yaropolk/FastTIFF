@@ -489,7 +489,9 @@ impl<W: Write + Seek> TiffWriter<W> {
             .checked_mul(spp / n_planes)
             .and_then(|v| v.checked_mul(sample_type.bytes()))
             .ok_or_else(overflow)?;
-        let plane_bytes = row_bytes.checked_mul(height as usize).ok_or_else(overflow)?;
+        let plane_bytes = row_bytes
+            .checked_mul(height as usize)
+            .ok_or_else(overflow)?;
         let frame_bytes = plane_bytes.checked_mul(n_planes).ok_or_else(overflow)?;
         let rows_per_strip = match rows_per_strip {
             Some(r) => r.clamp(1, height),
