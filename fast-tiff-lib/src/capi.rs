@@ -49,26 +49,34 @@ use crate::{
     WriterOptions,
 };
 
+// Statuses 0 to 4 mean the same in all four of this repository's C APIs
+// (`FTL_`, `OIR_`, `S2P_`, `TR_`), so a host that opens a file with one and
+// registers it with another handles the common cases once. Each library's own
+// statuses follow from 5.
+
 /// The call did what it was asked.
 pub const FTL_OK: c_int = 0;
+/// Reserved: never returned by this library, which has no call to stop. The
+/// number is kept so that statuses 0 to 4 match the other C APIs.
+pub const FTL_CANCELLED: c_int = 1;
 /// A pointer, size, index, buffer or option the call cannot take.
-pub const FTL_INVALID_ARGUMENT: c_int = 1;
+pub const FTL_INVALID_ARGUMENT: c_int = 2;
 /// Not in this build or on this target: `ftl_open` without the `mmap`
 /// feature, a file written on a target with no filesystem, ZSTD without
 /// `codec-zstd`.
-pub const FTL_UNAVAILABLE: c_int = 2;
+pub const FTL_UNAVAILABLE: c_int = 3;
 /// Something inside the library went wrong: a panic, or a decoder that
 /// produced a size it should not have.
-pub const FTL_FAILED: c_int = 3;
+pub const FTL_FAILED: c_int = 4;
 /// A file could not be opened, created, mapped, read or written.
-pub const FTL_IO: c_int = 4;
+pub const FTL_IO: c_int = 5;
 /// The bytes are not a TIFF at all (no `II`/`MM` byte-order mark, or a magic
 /// number other than 42 and 43).
-pub const FTL_NOT_TIFF: c_int = 5;
+pub const FTL_NOT_TIFF: c_int = 6;
 /// A TIFF this library cannot read, or not the way asked: malformed, an
 /// unsupported codec or bit depth, or a frame of the wrong depth for the
 /// reader called (a 16-bit frame through [`ftl_read_u8`]).
-pub const FTL_FORMAT: c_int = 6;
+pub const FTL_FORMAT: c_int = 7;
 
 /// TIFF `SampleFormat` 1, [`SampleFormat::UnsignedInt`].
 pub const FTL_SAMPLE_UNSIGNED: u16 = 1;
@@ -673,12 +681,18 @@ unsafe fn frame_at<'a>(
 /// The snprintf convention: as much of `s` as fits in `cap` bytes,
 /// NUL-terminated, and the whole length back.
 ///
+/// Cut at a character boundary, never inside one: a unit (`µm`) or a channel
+/// name cut through a multi-byte character would hand C invalid UTF-8.
+///
 /// # Safety
 ///
 /// `buf` is null or points to `cap` writable bytes.
 unsafe fn copy_str(s: &str, buf: *mut c_char, cap: usize) -> usize {
     if !buf.is_null() && cap > 0 {
-        let n = s.len().min(cap - 1);
+        let mut n = s.len().min(cap - 1);
+        while !s.is_char_boundary(n) {
+            n -= 1;
+        }
         std::ptr::copy_nonoverlapping(s.as_ptr(), buf.cast::<u8>(), n);
         buf.add(n).write(0);
     }

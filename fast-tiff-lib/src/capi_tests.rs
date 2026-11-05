@@ -750,6 +750,30 @@ fn every_layout_and_type_matches_rust() {
     }
 }
 
+/// A string cut short is cut between characters, so C always gets valid
+/// UTF-8: a `µ` (two bytes) that does not fit is left out whole.
+#[test]
+fn a_string_cut_short_is_still_utf8() {
+    let opts = WriterOptions::new(2, 2, crate::SampleType::U8).description("ab\u{b5}m and more");
+    let mut w = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+    w.write_frame_u8(&[0; 4]).unwrap();
+    let bytes = w.finish().unwrap().into_inner();
+    let s = open_c_bytes(&bytes);
+    let full = description(s);
+    assert!(full.starts_with("ab\u{b5}m"), "{full:?}");
+    // cap 4 leaves room for 3 bytes: "ab" and the first byte of the µ.
+    for (cap, want) in [(3, "ab"), (4, "ab"), (5, "ab\u{b5}")] {
+        let mut buf = vec![0x55u8; cap];
+        assert_eq!(
+            unsafe { ftl_description(s, buf.as_mut_ptr().cast(), cap) },
+            full.len()
+        );
+        let got = CStr::from_bytes_until_nul(&buf).unwrap();
+        assert_eq!(got.to_str(), Ok(want), "cap {cap}");
+    }
+    unsafe { ftl_stack_free(s) };
+}
+
 /// The snprintf convention, at every edge.
 #[test]
 fn strings_follow_the_snprintf_convention() {

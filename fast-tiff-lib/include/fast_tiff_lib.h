@@ -47,13 +47,15 @@ extern "C" {
 #endif
 
 /* Statuses. */
+/* 0 to 4 mean the same in OIR_, S2P_ and TR_; this library's own statuses follow from 5. */
 #define FTL_OK 0               /* done */
-#define FTL_INVALID_ARGUMENT 1 /* a pointer, size, index, buffer or option it cannot take */
-#define FTL_UNAVAILABLE 2      /* not in this build or on this target (ftl_open without `mmap`, ZSTD without `codec-zstd`) */
-#define FTL_FAILED 3           /* something inside the library went wrong (a panic) */
-#define FTL_IO 4               /* a file could not be opened, created, read or written */
-#define FTL_NOT_TIFF 5         /* the bytes are not a TIFF at all */
-#define FTL_FORMAT 6           /* a TIFF it cannot read, or not as asked (a 16-bit frame through ftl_read_u8) */
+#define FTL_CANCELLED 1        /* reserved: never returned here, kept so 0-4 match the other C APIs */
+#define FTL_INVALID_ARGUMENT 2 /* a pointer, size, index, buffer or option it cannot take */
+#define FTL_UNAVAILABLE 3      /* not in this build or on this target (ftl_open without `mmap`, ZSTD without `codec-zstd`) */
+#define FTL_FAILED 4           /* something inside the library went wrong (a panic) */
+#define FTL_IO 5               /* a file could not be opened, created, read or written */
+#define FTL_NOT_TIFF 6         /* the bytes are not a TIFF at all */
+#define FTL_FORMAT 7           /* a TIFF it cannot read, or not as asked (a 16-bit frame through ftl_read_u8) */
 
 /* FtlFrameInfo.sample_format: TIFF's SampleFormat codes. */
 #define FTL_SAMPLE_UNSIGNED 1
