@@ -315,7 +315,7 @@ fn a_window_is_converted_into_the_textures_units() {
         (17.0, 33029.0)
     );
     assert_eq!(
-        SampleUnits::FLOAT.to_texture(Window::new(-1.5, 2.5)),
+        SampleUnits::float(Window::new(-4.0, 4.0)).to_texture(Window::new(-1.5, 2.5)),
         (-1.5, 2.5)
     );
 }

@@ -19,7 +19,11 @@ use std::io::Cursor;
 fn every_unit() -> Vec<(&'static str, SampleUnits)> {
     vec![
         ("raw 8-bit", SampleUnits::RAW8),
-        ("float", SampleUnits::FLOAT),
+        ("float", SampleUnits::float(Window::new(0.0, 1.0))),
+        (
+            "float, wide span",
+            SampleUnits::float(Window::new(-3.0, 70_000.0)),
+        ),
         ("16-bit", SampleUnits::display(DisplayMap::Identity)),
         ("widened 8-bit", SampleUnits::display(DisplayMap::Widen8)),
         (
@@ -35,6 +39,11 @@ fn every_unit() -> Vec<(&'static str, SampleUnits)> {
             }),
         ),
     ]
+}
+
+/// Whether `v` survives a trip through a half float without becoming infinite.
+fn half_float_holds(v: f32) -> bool {
+    v.is_finite() && v.abs() <= 65504.0
 }
 
 fn close(a: f32, b: f32) -> bool {
@@ -93,35 +102,51 @@ fn the_whole_range_fills_the_texture() {
         assert_eq!(units.to_texture(full), texture, "{units:?}");
     }
     // A float texture has no whole range; it opens on the unit one.
-    assert_eq!(SampleUnits::FLOAT.full_range(), Window::new(0.0, 1.0));
+    assert_eq!(
+        SampleUnits::float(Window::new(-3.0, 70_000.0)).full_range(),
+        Window::new(0.0, 1.0)
+    );
 }
 
-/// The 3D view's integer volumes are normalized; the window has to be on the
-/// scale the voxels were normalized to, which for both widths is "the whole
-/// range is 0..1". A float volume is left in its own values.
+/// The 3D view's volumes are normalized; the window has to be on the scale the
+/// voxels were normalized to. For an integer channel "the whole range is
+/// 0..1"; for a float one its span is.
 #[test]
 fn the_volume_window_is_normalized_as_the_voxels_are() {
     for (what, units) in every_unit() {
-        let (lo, hi) = units.to_unorm(units.full_range());
-        if units.kind() == ChannelKind::Float {
-            assert_eq!((lo, hi), (0.0, 1.0), "{what}");
+        let (lo, hi) = if units.kind() == ChannelKind::Float {
+            units.to_unorm(match what {
+                "float" => Window::new(0.0, 1.0),
+                _ => Window::new(-3.0, 70_000.0),
+            })
         } else {
-            assert!(close(lo, 0.0) && close(hi, 1.0), "{what}: {lo}..{hi}");
-        }
+            units.to_unorm(units.full_range())
+        };
+        assert!(close(lo, 0.0) && close(hi, 1.0), "{what}: {lo}..{hi}");
+        // The window and the voxels go through one map.
+        let (scale, offset) = units.volume_affine();
+        let w = Window::new(7.0, 11.0);
+        let (t_lo, t_hi) = units.to_texture(w);
+        assert_eq!(
+            units.to_unorm(w),
+            (t_lo * scale + offset, t_hi * scale + offset),
+            "{what}"
+        );
     }
     // And the divisor is the one the volume builder encodes with.
-    assert_eq!(
-        SampleUnits::RAW8.to_unorm(Window::new(51.0, 102.0)),
-        (51.0 / UNORM8_MAX, 102.0 / UNORM8_MAX)
+    let (lo, hi) = SampleUnits::RAW8.to_unorm(Window::new(51.0, 102.0));
+    assert!(close(lo, 51.0 / UNORM8_MAX) && close(hi, 102.0 / UNORM8_MAX));
+    let (lo, hi) = SampleUnits::display(DisplayMap::Identity).to_unorm(Window::new(100.0, 200.0));
+    assert!(close(lo, 100.0 / UNORM16_MAX) && close(hi, 200.0 / UNORM16_MAX));
+    // A float window is normalized over the span, so a value no half float
+    // can hold raw (past 65504) still lands inside 0..1.
+    let (lo, hi) =
+        SampleUnits::float(Window::new(-3.0, 70_000.0)).to_unorm(Window::new(0.0, 66_000.0));
+    assert!(
+        close(lo, 3.0 / 70_003.0) && close(hi, 66_003.0 / 70_003.0),
+        "{lo}..{hi}"
     );
-    assert_eq!(
-        SampleUnits::display(DisplayMap::Identity).to_unorm(Window::new(100.0, 200.0)),
-        (100.0 / UNORM16_MAX, 200.0 / UNORM16_MAX)
-    );
-    assert_eq!(
-        SampleUnits::FLOAT.to_unorm(Window::new(-3.0, 70_000.0)),
-        (-3.0, 70_000.0)
-    );
+    assert!(half_float_holds(hi), "{hi}");
 }
 
 /// ImageJ keeps a signed 16-bit image offset into unsigned and states its
@@ -153,7 +178,10 @@ fn imagej_ranges_are_offset_for_signed_16_bit_only() {
 #[test]
 fn each_unit_names_its_texture_kind() {
     assert_eq!(SampleUnits::RAW8.kind(), ChannelKind::Int8);
-    assert_eq!(SampleUnits::FLOAT.kind(), ChannelKind::Float);
+    assert_eq!(
+        SampleUnits::float(Window::new(0.0, 1.0)).kind(),
+        ChannelKind::Float
+    );
     assert_eq!(
         SampleUnits::display(DisplayMap::Signed16).kind(),
         ChannelKind::Int16

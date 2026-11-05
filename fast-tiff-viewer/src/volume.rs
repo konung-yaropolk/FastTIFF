@@ -29,7 +29,7 @@
 //! an exact match, so a stale build can cost work but never show wrong data.
 
 use crate::prefetch::{decode_jobs, ChannelJob, Decoded};
-use crate::units::{UNORM16_MAX, UNORM8_MAX};
+use crate::units::SampleUnits;
 use fast_tiff_lib::TiffStack;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
@@ -81,7 +81,10 @@ pub fn detail_cap(screen_px: u32) -> u32 {
 /// parse, so a channels/frames swap in the UI is honored by background builds.
 #[derive(Clone)]
 pub struct VolumePlan {
-    pub kinds: Vec<ChannelKind>,
+    /// Each channel's units, which say both how it decodes (its kind) and how
+    /// its samples are normalized into the volume
+    /// ([`SampleUnits::volume_affine`]).
+    pub units: Vec<SampleUnits>,
     pub rgb: bool,
     pub channels: usize,
     pub slices: usize,
@@ -161,11 +164,12 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
         plan.frames.max(1) as u32
     };
     let time = if is_4d { plan.time } else { 0 };
-    let n = plan.kinds.len().min(MAX_CHANNELS);
+    let n = plan.units.len().min(MAX_CHANNELS);
     if w == 0 || h == 0 || depth < 2 || n == 0 {
         return None;
     }
-    let ckinds = &plan.kinds[..n];
+    let ckinds: Vec<ChannelKind> = plan.units[..n].iter().map(|u| u.kind()).collect();
+    let affines: Vec<(f32, f32)> = plan.units[..n].iter().map(|u| u.volume_affine()).collect();
 
     let (sx, sy, sz) = choose_strides(
         (w, h, depth),
@@ -252,14 +256,14 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
             let decoded = decode_jobs(&tiff.data, &tiff.frames, tiff.byte_order, &jobs)?;
             for (c, dec) in decoded.iter().enumerate() {
                 if direct {
-                    encode_slice(&layout, &mut slabs, c, dec);
+                    encode_slice(&layout, &mut slabs, c, dec, affines[c]);
                 } else {
                     boxes.add(c, dec);
                 }
             }
         }
         if !direct {
-            boxes.write(&layout, &mut slabs, z_to - z_from);
+            boxes.write(&layout, &mut slabs, z_to - z_from, &affines);
         }
         Ok(())
     });
@@ -274,10 +278,17 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
 /// Store one decoded slice of channel `c`, at full size, into its slab of the
 /// packed texture that holds it. A short decode leaves the rest zero.
 ///
-/// Integer samples are normalized by the largest value their 2D texture holds,
-/// the divisor [`SampleUnits::to_unorm`](crate::units::SampleUnits::to_unorm)
-/// puts the channel's window on the same scale with.
-fn encode_slice(layout: &VolumeLayout, slabs: &mut [&mut [u8]], c: usize, dec: &Decoded) {
+/// Samples go through the channel's `(scale, offset)`
+/// ([`SampleUnits::volume_affine`]), the map
+/// [`SampleUnits::to_unorm`](crate::units::SampleUnits::to_unorm) puts the
+/// channel's window on the same scale with.
+fn encode_slice(
+    layout: &VolumeLayout,
+    slabs: &mut [&mut [u8]],
+    c: usize,
+    dec: &Decoded,
+    (scale, offset): (f32, f32),
+) {
     let (t, k) = layout.place(c);
     let texel = layout.texel_bytes(t);
     let fb = layout.format.bytes();
@@ -292,17 +303,17 @@ fn encode_slice(layout: &VolumeLayout, slabs: &mut [&mut [u8]], c: usize, dec: &
             .iter()
             .take(voxels)
             .enumerate()
-            .for_each(|(i, &x)| put(i, x as f32 / UNORM8_MAX)),
+            .for_each(|(i, &x)| put(i, x as f32 * scale + offset)),
         Decoded::U16(v) => v
             .iter()
             .take(voxels)
             .enumerate()
-            .for_each(|(i, &x)| put(i, x as f32 / UNORM16_MAX)),
+            .for_each(|(i, &x)| put(i, x as f32 * scale + offset)),
         Decoded::F32(v) => v
             .iter()
             .take(voxels)
             .enumerate()
-            .for_each(|(i, &x)| put(i, x)),
+            .for_each(|(i, &x)| put(i, x * scale + offset)),
     }
 }
 
@@ -334,11 +345,13 @@ impl SliceBoxes {
         }
     }
 
-    /// Add one decoded source slice of channel `c`, in texture units.
+    /// Add one decoded source slice of channel `c`, in texture units. The
+    /// volume's normalization is applied to the average, in
+    /// [`write`](Self::write): it is affine, so it commutes with averaging.
     fn add(&mut self, c: usize, dec: &Decoded) {
         match dec {
-            Decoded::U8(v) => self.add_samples(c, v, |x| x as f32 / UNORM8_MAX),
-            Decoded::U16(v) => self.add_samples(c, v, |x| x as f32 / UNORM16_MAX),
+            Decoded::U8(v) => self.add_samples(c, v, |x| x as f32),
+            Decoded::U16(v) => self.add_samples(c, v, |x| x as f32),
             Decoded::F32(v) => self.add_floats(c, v),
         }
     }
@@ -393,15 +406,23 @@ impl SliceBoxes {
     }
 
     /// Divide every sum by the number of source voxels behind it (`slices`
-    /// source slices deep, the box clipped at the far edges) and store it into
-    /// this output slice's slab of every packed texture.
-    fn write(&self, layout: &VolumeLayout, slabs: &mut [&mut [u8]], slices: u32) {
+    /// source slices deep, the box clipped at the far edges), normalize it by
+    /// its channel's `affines` entry, and store it into this output slice's
+    /// slab of every packed texture.
+    fn write(
+        &self,
+        layout: &VolumeLayout,
+        slabs: &mut [&mut [u8]],
+        slices: u32,
+        affines: &[(f32, f32)],
+    ) {
         let (w, h) = self.src;
         let (sx, sy) = self.stride;
         let (ow, oh) = self.out;
         let fb = layout.format.bytes();
         let count = |o: u32, s: u32, n: u32| (n - o * s).min(s);
         for (c, sums) in self.sums.iter().enumerate() {
+            let (scale, offset) = affines[c];
             let (t, k) = layout.place(c);
             let texel = layout.texel_bytes(t);
             let slab = &mut slabs[t];
@@ -419,7 +440,9 @@ impl SliceBoxes {
                         None => sums[i] / (nx * ny * slices.max(1)) as f32,
                     };
                     let at = i * texel + k * fb;
-                    layout.format.encode(v, &mut slab[at..at + fb]);
+                    layout
+                        .format
+                        .encode(v * scale + offset, &mut slab[at..at + fb]);
                 }
             }
         }

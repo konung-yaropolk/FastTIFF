@@ -662,9 +662,9 @@ fn sync_volume(
     renderer.set_volume_interp(view.interp);
     renderer.set_volume_target(view.viewport_px[0], view.viewport_px[1], view.downscale);
 
-    // Per-channel window/level, in the sampled texture's units: raw for float,
-    // else normalized the way the volume builder normalized the voxels (both
-    // U8 and U16 volumes are unorm — see scivis_render::VolumeKind), which is
+    // Per-channel window/level, in the sampled texture's units: normalized the
+    // way the volume builder normalized the voxels (integers as unorm, floats
+    // over the channel's span), which is
     // [`crate::units::SampleUnits::to_unorm`].
     // Bounded by MAX_CHANNELS, so it lives on the stack — this runs every 3D
     // frame and has no business calling the allocator.
@@ -748,7 +748,7 @@ pub fn plan_volume(
         kinds.iter().map(|k| k.volume_kind()).collect();
     VolumePlan {
         format: renderer.volume_texel_format(scivis_render::pack::common_kind(&volume_kinds)),
-        kinds,
+        units: loaded.display.settings.iter().map(|s| s.units).collect(),
         rgb: loaded.display.rgb,
         channels: loaded.display.dims.channels,
         slices: loaded.display.dims.slices,

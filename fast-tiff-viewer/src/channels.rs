@@ -440,7 +440,11 @@ fn build_one(tiff: &TiffStack, c: usize, channels: usize) -> ChannelSettings {
         });
 
         let (units, data) = if is_float {
-            (SampleUnits::FLOAT, channel_float_minmax(tiff, c, channels))
+            let data = channel_float_minmax(tiff, c, channels);
+            (
+                SampleUnits::float(data.unwrap_or(Window::new(0.0, 1.0))),
+                data,
+            )
         } else {
             let scan = channel_minmax(tiff, c, channels);
             let units = if is_u8 {

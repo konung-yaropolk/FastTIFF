@@ -128,8 +128,9 @@ enum Texture {
     /// ones one to a byte. The texture's units are the file's.
     Raw8,
     /// `R32F` of the file's own values (64-bit ones narrowed). The texture's
-    /// units are the file's.
-    Float,
+    /// units are the file's. `span` is what the 3D volume normalizes the
+    /// values by (see [`SampleUnits::volume_affine`]).
+    Float { span: Window },
     /// `R16Uint` of the `*_u16` readers' display scale: the map's
     /// [`to_display`](DisplayMap::to_display) of the file's values.
     Display(DisplayMap),
@@ -145,9 +146,19 @@ impl SampleUnits {
 
     /// A [`Float`](ChannelKind::Float) channel's: an `R32F` texture of the
     /// file's own values, so here too the window goes to the shader as it is.
-    pub const FLOAT: SampleUnits = SampleUnits {
-        texture: Texture::Float,
-    };
+    ///
+    /// `span` is the range the channel's 3D volume is normalized over: its
+    /// data's range, fixed when the channel's settings are built. A float
+    /// volume is stored as half floats on wgpu, which hold nothing past 65504
+    /// and only about three significant digits; stored raw, photon counts or a
+    /// deconvolution's output saturated to white, and data far from zero kept
+    /// a dozen levels across its range. Normalized to its span it sits near
+    /// `0..=1`, where the half float is at its finest.
+    pub const fn float(span: Window) -> SampleUnits {
+        SampleUnits {
+            texture: Texture::Float { span },
+        }
+    }
 
     /// An [`Int16`](ChannelKind::Int16) channel's: an `R16Uint` texture
     /// holding the decoder's `u16` display scale of the file's values, `map`.
@@ -168,7 +179,9 @@ impl SampleUnits {
     pub fn of(kind: ChannelKind, frame: Option<&FrameInfo>, range: Option<(f32, f32)>) -> Self {
         match kind {
             ChannelKind::Int8 => Self::RAW8,
-            ChannelKind::Float => Self::FLOAT,
+            // No data to take a span from: the unit one, the window a float
+            // channel opens on when there is nothing to measure.
+            ChannelKind::Float => Self::float(Window::new(0.0, 1.0)),
             ChannelKind::Int16 => Self::display(
                 frame
                     .and_then(|f| DisplayMap::of(f, range))
@@ -181,7 +194,7 @@ impl SampleUnits {
     pub fn kind(self) -> ChannelKind {
         match self.texture {
             Texture::Raw8 => ChannelKind::Int8,
-            Texture::Float => ChannelKind::Float,
+            Texture::Float { .. } => ChannelKind::Float,
             Texture::Display(_) => ChannelKind::Int16,
         }
     }
@@ -192,7 +205,7 @@ impl SampleUnits {
     pub fn display_map(self) -> Option<DisplayMap> {
         match self.texture {
             Texture::Display(map) => Some(map),
-            Texture::Raw8 | Texture::Float => None,
+            Texture::Raw8 | Texture::Float { .. } => None,
         }
     }
 
@@ -203,16 +216,37 @@ impl SampleUnits {
         (self.file_to_texture(w.lo), self.file_to_texture(w.hi))
     }
 
-    /// `w` for the 3D view, whose integer volumes are normalized: the texture
-    /// window over [`UNORM8_MAX`] or [`UNORM16_MAX`], the same divisor the
-    /// volume builder encodes that channel's samples with. A float channel's
-    /// volume holds its values unnormalized, and so does its window.
+    /// `w` for the 3D view, whose volumes are normalized: the texture window
+    /// put through [`volume_affine`](Self::volume_affine), the same map the
+    /// volume builder encodes that channel's samples with.
     pub fn to_unorm(self, w: Window) -> (f32, f32) {
         let (lo, hi) = self.to_texture(w);
+        let (scale, offset) = self.volume_affine();
+        (lo * scale + offset, hi * scale + offset)
+    }
+
+    /// The map from a value in the channel's texture units to the value its 3D
+    /// volume stores: `v * scale + offset`, returned as `(scale, offset)`.
+    ///
+    /// One map for the voxels and the window both, so the two cannot be put on
+    /// different scales. An integer channel is divided by the largest value
+    /// its texture holds ([`UNORM8_MAX`], [`UNORM16_MAX`]), as a unorm texel
+    /// is; a float channel is normalized over its span (see
+    /// [`float`](Self::float)), `lo` to 0 and `hi` to 1.
+    pub fn volume_affine(self) -> (f32, f32) {
         match self.texture {
-            Texture::Raw8 => (lo / UNORM8_MAX, hi / UNORM8_MAX),
-            Texture::Display(_) => (lo / UNORM16_MAX, hi / UNORM16_MAX),
-            Texture::Float => (lo, hi),
+            Texture::Raw8 => (1.0 / UNORM8_MAX, 0.0),
+            Texture::Display(_) => (1.0 / UNORM16_MAX, 0.0),
+            Texture::Float { span } => {
+                let width = span.width();
+                let width = if width.is_finite() && width > 0.0 {
+                    width
+                } else {
+                    1.0
+                };
+                let lo = if span.lo.is_finite() { span.lo } else { 0.0 };
+                (1.0 / width, -lo / width)
+            }
         }
     }
 
@@ -221,7 +255,7 @@ impl SampleUnits {
     /// are worth. The inverse of [`to_texture`](Self::to_texture).
     pub fn texture_to_file(self, v: f32) -> f32 {
         match self.texture {
-            Texture::Raw8 | Texture::Float => v,
+            Texture::Raw8 | Texture::Float { .. } => v,
             Texture::Display(map) => map.to_file(v as f64) as f32,
         }
     }
@@ -238,7 +272,7 @@ impl SampleUnits {
     pub fn full_range(self) -> Window {
         match self.texture {
             Texture::Raw8 => Window::new(0.0, UNORM8_MAX),
-            Texture::Float => Window::new(0.0, 1.0),
+            Texture::Float { .. } => Window::new(0.0, 1.0),
             Texture::Display(_) => {
                 Window::new(self.texture_to_file(0.0), self.texture_to_file(UNORM16_MAX))
             }
@@ -277,7 +311,7 @@ impl SampleUnits {
     /// One file value on the texture's scale; see [`to_texture`](Self::to_texture).
     fn file_to_texture(self, v: f32) -> f32 {
         match self.texture {
-            Texture::Raw8 | Texture::Float => v,
+            Texture::Raw8 | Texture::Float { .. } => v,
             Texture::Display(map) => map.to_display(v as f64) as f32,
         }
     }

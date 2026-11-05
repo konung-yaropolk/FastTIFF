@@ -41,7 +41,7 @@ fn a_stack_held_in_memory_is_built_in_the_background() {
 
 fn plan() -> VolumePlan {
     VolumePlan {
-        kinds: vec![ChannelKind::Int8],
+        units: vec![SampleUnits::RAW8],
         rgb: false,
         channels: 1,
         slices: 1,
@@ -88,7 +88,7 @@ fn u16_stack(w: u32, h: u32, frames: u32, value: impl Fn(u32, u32) -> u16) -> Ti
 
 fn u16_plan(frames: usize, budget: usize) -> VolumePlan {
     VolumePlan {
-        kinds: vec![ChannelKind::Int16],
+        units: vec![SampleUnits::display(fast_tiff_lib::DisplayMap::Identity)],
         frames,
         format: scivis_render::pack::TexelFormat::Unorm16,
         budget,
@@ -263,7 +263,7 @@ fn a_nan_is_left_out_of_an_average() {
         &Decoded::F32(vec![nan, nan, nan, nan, nan, nan, nan, nan]),
     );
     let mut slab = vec![0u8; layout.slice_bytes(0)];
-    boxes.write(&layout, &mut [&mut slab[..]], 2);
+    boxes.write(&layout, &mut [&mut slab[..]], 2, &[(1.0, 0.0)]);
     let got: Vec<f32> = slab
         .as_chunks::<4>()
         .0
@@ -280,7 +280,7 @@ fn a_nan_is_left_out_of_an_average() {
     let mut boxes = SliceBoxes::new(1, (6, 1), (2, 1), (3, 1));
     boxes.add(0, &Decoded::F32(vec![2.0, ninf, inf, ninf, ninf, nan]));
     let mut slab = vec![0u8; layout.slice_bytes(0)];
-    boxes.write(&layout, &mut [&mut slab[..]], 1);
+    boxes.write(&layout, &mut [&mut slab[..]], 1, &[(1.0, 0.0)]);
     let got: Vec<f32> = slab
         .as_chunks::<4>()
         .0
@@ -298,8 +298,53 @@ fn a_nan_is_left_out_of_an_average() {
     let mut boxes = SliceBoxes::new(1, (2, 1), (2, 1), (1, 1));
     boxes.add(0, &Decoded::U16(vec![0, 65535]));
     let mut slab = vec![0u8; layout.slice_bytes(0)];
-    boxes.write(&layout, &mut [&mut slab[..]], 1);
+    let identity16 = SampleUnits::display(fast_tiff_lib::DisplayMap::Identity);
+    boxes.write(
+        &layout,
+        &mut [&mut slab[..]],
+        1,
+        &[identity16.volume_affine()],
+    );
     assert_eq!(TexelFormat::Unorm16.decode(&slab), 32768.0 / 65535.0);
+}
+
+/// A float volume is stored as half floats on wgpu, which hold nothing past
+/// 65504. Normalized over the channel's span first, a stack of photon counts
+/// in the hundreds of thousands stays finite and keeps its order, and the
+/// window goes through the same map; stored raw, all of it was infinity, which
+/// rendered white whatever the window.
+#[test]
+fn a_float_volume_past_the_half_float_range_stays_finite() {
+    let format = TexelFormat::Float16;
+    let layout = VolumeLayout::new((4, 1, 1), 1, format);
+    let span = crate::units::Window::new(0.0, 400_000.0);
+    let units = SampleUnits::float(span);
+    let values = vec![0.0f32, 100_000.0, 250_000.0, 400_000.0];
+    let mut slab = vec![0u8; layout.slice_bytes(0)];
+    encode_slice(
+        &layout,
+        &mut [&mut slab[..]],
+        0,
+        &Decoded::F32(values.clone()),
+        units.volume_affine(),
+    );
+    let got: Vec<f32> = slab
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| format.decode(b))
+        .collect();
+    assert!(got.iter().all(|v| v.is_finite()), "{got:?}");
+    assert!(got.windows(2).all(|w| w[0] < w[1]), "order kept: {got:?}");
+    for (v, g) in values.iter().zip(&got) {
+        assert!((g - v / 400_000.0).abs() < 1e-3, "{v} stored as {g}");
+    }
+    // The window lands on the voxels' scale: 100k..250k selects the middle two.
+    let (lo, hi) = units.to_unorm(crate::units::Window::new(100_000.0, 250_000.0));
+    assert!(
+        (lo - got[1]).abs() < 1e-3 && (hi - got[2]).abs() < 1e-3,
+        "{lo}..{hi} vs {got:?}"
+    );
 }
 
 /// A smaller rebuild after the GPU ran out of memory is the same volume: a

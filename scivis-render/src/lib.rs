@@ -117,7 +117,11 @@ impl From<ChannelKind> for VolumeKind {
 /// from channel 0's `ChannelKind` so the volume mirrors the 2D display:
 ///   * `U8` — `R8` unorm (8-bit source)
 ///   * `U16` — `R16` unorm (16-bit source, or CPU-widened 8-bit/rescaled ints)
-///   * `F32` — `R32F` (32-bit float source, window/level in its own units)
+///   * `F32` — a float texture (32-bit float source): `R32F` on glow, and a
+///     half float on wgpu, where full float is not filterable without an
+///     optional feature. A builder should normalize float samples to a span of
+///     about `0..=1` before packing them, as the viewer does, since a half
+///     float holds nothing past 65504.
 ///
 /// Unlike the 2D integer path (which uses `usampler`, NEAREST-only), the volume
 /// uses *normalized* textures so trilinear interpolation is available.
