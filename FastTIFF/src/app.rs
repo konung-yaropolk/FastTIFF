@@ -653,12 +653,18 @@ struct PluginRun {
 
 /// Turn what a plugin returned into something the interface can apply in a
 /// frame — encoding and writing on the way, since this runs on the worker.
+///
+/// `same_document` says whether the window still shows the document the run
+/// started on. A replacement for one that has since been closed goes to a new
+/// window, as a new document would: replacing what the user opened meanwhile
+/// would throw that away and show a result of something else in its place.
 fn finish_outcome(
     outcome: fasttiff_plugin_api::Outcome,
     label: &std::sync::Mutex<String>,
     progress: &std::sync::atomic::AtomicU32,
     cancel: &std::sync::atomic::AtomicBool,
     luts: &[fasttiff_plugin_api::Lut],
+    same_document: &dyn Fn() -> bool,
 ) -> Result<PluginProduct, String> {
     use fasttiff_plugin_api::Outcome;
     let stopped = || cancel.load(std::sync::atomic::Ordering::Relaxed);
@@ -784,6 +790,14 @@ fn finish_outcome(
                 }
             }
         }
+        Outcome::ReplaceDocument(image) if !same_document() => finish_outcome(
+            Outcome::NewDocument(image),
+            label,
+            progress,
+            cancel,
+            luts,
+            same_document,
+        ),
         Outcome::ReplaceDocument(image) => {
             Job::begin_phase(label, progress, "Encoding result");
             // Taken, not borrowed: each plane is freed as soon as it is
@@ -1334,6 +1348,15 @@ pub struct ViewerApp {
     /// get off the interface thread. Handing the registry over and taking it
     /// back makes "busy" a state the code can see rather than a wait it cannot.
     plugins: Option<fast_tiff_viewer::plugins::Registry>,
+    /// What [`plugins`](Self::plugins) claims to import, by extension, kept for
+    /// when the registry is with a job: a file none of them wants is the TIFF
+    /// reader's either way, and opening it need not wait for the job to end.
+    claimed_extensions: Vec<String>,
+    /// Bumped each time a document lands in this window. A plugin run notes it
+    /// when it starts, so a result meant to replace the document it ran on can
+    /// tell that the user has opened another one since — and go to a window of
+    /// its own instead of over the one the user is now looking at.
+    document: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The plugin whose dialog is open, and the values entered so far.
     plugin_dialog: Option<PluginDialog>,
     /// Files opened asynchronously arrive here. Only the web picker uses it —
@@ -1534,6 +1557,8 @@ impl ViewerApp {
             #[cfg(target_arch = "wasm32")]
             plugins: Some(fast_tiff_viewer::plugins::Registry::new()),
             plugin_dialog: None,
+            claimed_extensions: Vec::new(),
+            document: Default::default(),
             open_tx,
             open_rx,
             job: None,
@@ -1562,6 +1587,11 @@ impl ViewerApp {
             volume_last_camera: None,
             volume_moved_at: None,
         };
+        app.claimed_extensions = app
+            .plugins
+            .as_ref()
+            .map(|r| r.claimed_extensions())
+            .unwrap_or_default();
         if let Some(opened) = initial {
             app.apply_opened(opened);
         }
@@ -1660,6 +1690,8 @@ impl ViewerApp {
     /// Reset everything that described the previous file, once a load has
     /// landed. The other half of [`apply_opened`](Self::apply_opened).
     fn finish_open(&mut self) {
+        self.document
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Start at 1:1; on native the next frame computes a fit-to-screen zoom
         // and sizes the window once. On the web `pending_initial_fit` is
         // consumed by the canvas layout instead.
@@ -2088,6 +2120,10 @@ impl ViewerApp {
         let (progress, cancel, label) = self.begin_job(job);
 
         let tx = self.open_tx.clone();
+        // Which document this ran on, to tell if it is still the one on show
+        // when the result arrives (see `finish_outcome`).
+        let document = std::sync::Arc::clone(&self.document);
+        let run_on = document.load(std::sync::atomic::Ordering::Relaxed);
         // The run itself, as one closure, so that the only difference between
         // the platforms is whether a thread carries it.
         let work = move || {
@@ -2107,7 +2143,9 @@ impl ViewerApp {
             // interface thread once the result came back — which is why the bar
             // reached 100% and the window then froze until it was done.
             let outcome = match outcome {
-                Ok(o) => finish_outcome(o, &label, &progress, &cancel, &luts),
+                Ok(o) => finish_outcome(o, &label, &progress, &cancel, &luts, &|| {
+                    document.load(std::sync::atomic::Ordering::Relaxed) == run_on
+                }),
                 Err(e) => Err(e.to_string()),
             };
             let run = PluginRun {
@@ -2230,13 +2268,24 @@ impl ViewerApp {
     /// hands the path back, unclaimed, for the ordinary TIFF reader.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_import(&mut self, path: std::path::PathBuf) -> Result<(), std::path::PathBuf> {
-        // One at a time. The registry is with the worker, and a second import
-        // would have nothing to read the file with — better to say so than to
-        // hand an OIR to the TIFF reader and report that it is not a TIFF.
+        // One import at a time. The registry is with the worker, and a second
+        // import would have nothing to read the file with — better to say so
+        // than to hand an OIR to the TIFF reader and report that it is not a
+        // TIFF. A file no importer claims needs no importer, though: it is the
+        // TIFF reader's whether a job is running or not, and refusing it made
+        // every file unopenable for the length of an hour-long filter.
         let Some(registry) = self.plugins.take() else {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_lowercase);
+            if ext.is_none_or(|e| !self.claimed_extensions.contains(&e)) {
+                return Err(path);
+            }
             self.core.status = Some(self.busy_message());
             return Ok(());
         };
+        self.claimed_extensions = registry.claimed_extensions();
         // Cheap rejection first: no file is opened unless an extension matches,
         // so the common case of a TIFF costs one string compare — and costs no
         // thread.
