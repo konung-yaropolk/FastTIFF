@@ -9,9 +9,7 @@
 name = "oir-reader"
 version = "0.26.3"
 edition = "2021"
-# `usize::is_multiple_of` (deciding the shape) is 1.87; `Option::is_none_or`
-# (finding the first block) is 1.82.
-rust-version = "1.87"
+rust-version.workspace = true
 description = """
 Reader for Olympus/Evident FluoView OIR microscopy files: reassembles the \
 scattered image planes of a single or split acquisition, recovers recordings \

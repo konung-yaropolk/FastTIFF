@@ -166,7 +166,7 @@ fn the_callback_can_stop_a_run() {
     let pixels = stack();
     let s = settings();
     let mut calls = 0usize;
-    let mut r = 1 as *mut TrRegistered;
+    let mut r = std::ptr::dangling_mut::<TrRegistered>();
     let status = unsafe {
         tr_register(
             pixels.as_ptr(),

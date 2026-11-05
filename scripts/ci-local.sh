@@ -68,9 +68,21 @@ step() {
         [ "$kind" = fuzz ] && [ $FUZZ -eq 0 ] && return
     fi
     local log="$LOGS/$name.log"
-    printf '%-22s ... ' "$name"
-    local start=$SECONDS
-    if (cd "$ROOT" && "$@") >"$log" 2>&1; then
+    local start=$SECONDS rc
+    if [ -n "${CI:-}" ]; then
+        # In CI, where nobody reads the log files: the output in full, folded
+        # under the step's name, and still kept in the log.
+        echo "::group::$name"
+        (cd "$ROOT" && "$@") 2>&1 | tee "$log"
+        rc=${PIPESTATUS[0]}
+        echo "::endgroup::"
+        printf '%-22s ... ' "$name"
+    else
+        printf '%-22s ... ' "$name"
+        (cd "$ROOT" && "$@") >"$log" 2>&1
+        rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then
         RESULTS+=(PASS)
         echo "pass ($((SECONDS - start))s)"
     else
@@ -95,6 +107,21 @@ no_pinned_paths() {
 }
 
 in_dir() { local d=$1; shift; (cd "$d" && "$@"); }
+
+# The libraries, all features on, built with the oldest Rust they claim. The
+# number and the crate list both come from the manifests: `rust-version` in the
+# root `[workspace.package]`, and every member that inherits it.
+msrv() {
+    local v crates=()
+    v=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+    [ -n "$v" ] || { echo "no rust-version in the root Cargo.toml"; return 1; }
+    for m in $(grep -l '^rust-version.workspace = true' */Cargo.toml); do
+        crates+=(-p "$(sed -n 's/^name = "\(.*\)"/\1/p' "$m" | head -n 1)")
+    done
+    echo "Rust $v: ${crates[*]}"
+    rustup toolchain install "$v" --profile minimal --no-self-update &&
+    cargo "+$v" check "${crates[@]}" --all-features
+}
 
 # The same three runs as ci.yml's clippy step, which says why there are three.
 clippy_all() {
@@ -124,6 +151,7 @@ step capi-tests          -- cargo test -p fast-tiff-lib -p oir-reader -p suite2p
 step glow-build          -- cargo build -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins
 step glow-tests          -- cargo test --workspace --no-default-features --features FastTIFF/renderer-glow,FastTIFF/builtin-plugins
 step lib-no-default      -- cargo test -p fast-tiff-lib --no-default-features
+step msrv                -- msrv
 step wasm-target         -- rustup target add wasm32-unknown-unknown
 step lib-wasm            -- cargo check -p fast-tiff-lib --target wasm32-unknown-unknown --no-default-features
 step viewer-wasm         -- cargo check -p fast-tiff-viewer --target wasm32-unknown-unknown --no-default-features --features backend-wgpu,builtin-plugins

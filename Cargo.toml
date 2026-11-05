@@ -42,6 +42,17 @@ exclude = [
     "plugins/example",
 ]
 
+# The oldest Rust every library crate builds with, all features on; the CI
+# `msrv` step builds them with exactly this toolchain, reading the number from
+# here. The floor is real twice over: fast-tiff-lib's LZW decoder (weezl 0.2)
+# needs 1.88, and so does `as_chunks`, which the decoders use.
+#
+# The applications (FastTIFF, FastTIFF-web, the PI plugin) declare none: they
+# are built with the toolchain `rust-toolchain.toml` pins, and eframe alone
+# needs 1.92, so a number here would be one nothing checks.
+[workspace.package]
+rust-version = "1.88"
+
 # Versions more than one member depends on, named once.
 #
 # wgpu above all. The registration crates are handed the renderer's own device
@@ -70,7 +81,8 @@ js-sys = "0.3"
 web-sys = "0.3"
 rayon = "1.10"
 bytemuck = "1.25"
-pollster = "1.0"
+# 0.4, the one eframe and rfd use, so the app carries one pollster, not two.
+pollster = "0.4"
 quick-xml = "0.37"
 memmap2 = "0.9"
 flate2 = "1.1"

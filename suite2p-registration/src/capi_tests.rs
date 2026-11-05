@@ -186,7 +186,7 @@ fn the_callback_can_stop_a_run() {
     let pixels = movie(ly, lx, &PATH);
     let s = settings();
     let mut calls = 0usize;
-    let mut r = 1 as *mut S2pRegistered;
+    let mut r = std::ptr::dangling_mut::<S2pRegistered>();
     let status = unsafe {
         s2p_register(
             pixels.as_ptr(),

@@ -315,6 +315,24 @@ jobs:
         working-directory: FastTIFF-web
         run: wasm-pack build --target web --out-dir pkg --release
 
+  # The libraries are published with a `rust-version`, and a claim no build
+  # checks is a guess: two crates claimed 1.82 while their GPU feature needed
+  # 1.87. This builds every library, all features on, with exactly the
+  # toolchain the root manifest names; the script reads the number and the
+  # crate list from the manifests.
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the libraries with their declared minimum Rust
+        shell: bash
+        run: scripts/ci-local.sh msrv
+
   # `fast-tiff-lib` parses completely untrusted files, so a malformed TIFF must
   # never panic, abort (an oversized allocation calls abort(), which no caller
   # can catch), or exhaust memory. `tests/malformed_robustness.rs` pins the

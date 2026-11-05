@@ -125,8 +125,10 @@ fn assert_planes_match(a: *const OirAcquisition, want: &Acquisition) {
             Planes::U16(p) => {
                 assert_eq!(s.sample_type, OIR_SAMPLE_U16);
                 let samples: Vec<u16> = copy
-                    .chunks_exact(2)
-                    .map(|b| u16::from_ne_bytes([b[0], b[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| u16::from_ne_bytes(*b))
                     .collect();
                 assert_eq!(samples, p[i]);
                 let view = unsafe { std::slice::from_raw_parts(data.cast::<u16>(), s.plane_len) };

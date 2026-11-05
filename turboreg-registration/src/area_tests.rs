@@ -43,7 +43,9 @@ fn the_largest_rectangle_is_the_largest() {
     let mut rng = Lcg(5);
     for case in 0..300 {
         let (rows, cols) = (1 + rng.next() as usize % 8, 1 + rng.next() as usize % 9);
-        let mask: Vec<bool> = (0..rows * cols).map(|_| rng.next() % 5 != 0).collect();
+        let mask: Vec<bool> = (0..rows * cols)
+            .map(|_| !rng.next().is_multiple_of(5))
+            .collect();
         let want = brute_largest(&mask, rows, cols);
         match largest_rectangle(&mask, rows, cols) {
             None => assert_eq!(want, 0, "case {case}"),
@@ -83,7 +85,7 @@ fn wobble(rng: &mut Lcg, ly: usize, lx: usize) -> Matrix {
     m.c[1] *= s;
     m.c[6] *= s;
     m.c[2] += rng.within(0.02);
-    if rng.next() % 3 == 0 {
+    if rng.next().is_multiple_of(3) {
         m.c[3] = rng.within(0.0005);
         m.c[7] = -m.c[3];
     }
