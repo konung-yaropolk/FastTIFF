@@ -30,7 +30,7 @@ fn view() -> VolumeView {
 }
 
 fn temp(name: &str) -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("fasttiff-png-{name}.png"));
+    let p = std::env::temp_dir().join(format!("fasttiff-png-{}-{name}.png", std::process::id()));
     let _ = std::fs::remove_file(&p);
     p
 }

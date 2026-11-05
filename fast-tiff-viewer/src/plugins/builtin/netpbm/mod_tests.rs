@@ -10,7 +10,7 @@ impl ImportHost for Silent {
 }
 
 fn write(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("fasttiff_netpbm_tests");
+    let dir = std::env::temp_dir().join(format!("fasttiff_netpbm_tests_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let p = dir.join(name);
     std::fs::write(&p, bytes).unwrap();

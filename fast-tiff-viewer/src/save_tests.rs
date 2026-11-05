@@ -19,7 +19,9 @@ const W: u32 = 6;
 const H: u32 = 4;
 
 fn temp(name: &str) -> PathBuf {
-    let p = std::env::temp_dir().join(format!("fasttiff-save-{name}.tif"));
+    // The process id keeps two test runs on one machine (two checkouts, or the
+    // default and glow suites) from writing over each other's files.
+    let p = std::env::temp_dir().join(format!("fasttiff-save-{}-{name}.tif", std::process::id()));
     let _ = std::fs::remove_file(&p);
     p
 }

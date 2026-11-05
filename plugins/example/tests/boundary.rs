@@ -268,7 +268,7 @@ impl ImportHost for Silent {
 }
 
 fn tmp(name: &str, bytes: &[u8]) -> PathBuf {
-    let p = std::env::temp_dir().join(format!("fasttiff-boundary-{name}"));
+    let p = std::env::temp_dir().join(format!("fasttiff-boundary-{}-{name}", std::process::id()));
     std::fs::write(&p, bytes).expect("write fixture");
     p
 }
@@ -357,7 +357,10 @@ fn an_exporter_in_a_library_writes_a_file_end_to_end() {
     let view = plugins::describe_view(&s, 1, false, volume());
     let mut host = plugins::StackHost::new(&s, view);
 
-    let path = std::env::temp_dir().join("fasttiff-boundary-export.csv");
+    let path = std::env::temp_dir().join(format!(
+        "fasttiff-boundary-{}-export.csv",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&path);
     let mut params = Params::new();
     // Both non-default, so a value that failed to cross shows up as the
@@ -452,7 +455,10 @@ fn an_exporter_stops_when_the_host_says_to() {
         std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
     );
 
-    let path = std::env::temp_dir().join("fasttiff-boundary-cancelled.csv");
+    let path = std::env::temp_dir().join(format!(
+        "fasttiff-boundary-{}-cancelled.csv",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&path);
     let err = csv
         .export(
@@ -789,8 +795,11 @@ fn an_importers_metadata_reaches_the_document() {
         info.description
     );
     // The host fills these in, because it is the side that knows them.
-    // The importer names it from the file stem, which tmp() prefixes.
-    assert_eq!(info.name, "fasttiff-boundary-meta");
+    // The importer names it from the file stem (which tmp() prefixes).
+    assert_eq!(
+        Some(info.name.as_str()),
+        file.file_stem().and_then(|s| s.to_str())
+    );
     assert_eq!(info.path.as_deref(), Some(file.to_string_lossy().as_ref()));
 
     // And it survives being turned into a real document.
