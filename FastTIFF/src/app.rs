@@ -1001,7 +1001,63 @@ impl Job {
     /// that only has the `Arc` can call it.
     fn report(progress: &std::sync::atomic::AtomicU32, fraction: f32) {
         fast_tiff_viewer::plugins::progress::store(progress, fraction);
+        wake_ui_for_progress();
     }
+}
+
+/// The interface's egui context, for a worker to wake it with.
+///
+/// A worker cannot draw, and nothing makes the interface look at a job but a
+/// frame. Before this, a frame was asked for on every vsync for as long as any
+/// job was alive: a ten-minute registration was some 36,000 full redraws, each
+/// the whole of `draw`, to move a bar a percent at a time — a core taken from
+/// the registration, and a GPU kept out of idle. Now a frame comes when there
+/// is something to show: a result arriving ([`wake_ui`]) or the bar moving
+/// ([`wake_ui_for_progress`]), with a slow poll as a safety net.
+///
+/// Recorded on the first frame, before any worker can exist.
+static UI: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
+
+/// Ask the interface for a frame, from any thread: a result has arrived.
+fn wake_ui() {
+    if let Some(ctx) = UI.get() {
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+}
+
+/// [`wake_ui`] for a progress report, at most every 100 ms: a bar shows no
+/// finer steps than that, and a plugin that reports once a row would otherwise
+/// redraw the window thousands of times a second.
+///
+/// Not in the browser, where a job runs on the interface thread itself and
+/// there is no clock to throttle by (`Instant` has none on wasm32).
+fn wake_ui_for_progress() {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        static LAST_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis() as u64;
+        if due(&LAST_MS, now, 100) {
+            wake_ui();
+        }
+    }
+}
+
+/// Whether at least `every` ms have passed since the time in `last`, claiming
+/// `now` as the new last time when they have — once, however many threads ask
+/// at the same moment. `last` starts at 0, so the first ask after `every` ms
+/// of running is due.
+#[cfg(not(target_arch = "wasm32"))]
+fn due(last: &std::sync::atomic::AtomicU64, now: u64, every: u64) -> bool {
+    use std::sync::atomic::Ordering;
+    let then = last.load(Ordering::Relaxed);
+    now.saturating_sub(then) >= every
+        && last
+            .compare_exchange(then, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
 }
 
 pub enum Opened {
@@ -2062,6 +2118,7 @@ impl ViewerApp {
                 outcome,
             };
             let _ = tx.send(Incoming::Ran(Box::new(registry), Box::new(run)));
+            wake_ui();
         };
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -2199,6 +2256,7 @@ impl ViewerApp {
             // If the send fails the window is gone, and so is anyone who wanted
             // the result.
             let _ = tx.send(Incoming::Imported(Box::new(registry), result));
+            wake_ui();
         });
         Ok(())
     }
@@ -2286,6 +2344,7 @@ impl ViewerApp {
             let outcome = WriteOutcome::of(result, &cancel);
             // The registry was never taken: a plain save is the app's own code.
             let _ = tx.send(Incoming::Wrote(None, name, outcome));
+            wake_ui();
         });
     }
 
@@ -2477,6 +2536,7 @@ impl ViewerApp {
             }
             let outcome = WriteOutcome::of(result, &cancel);
             let _ = tx.send(Incoming::Wrote(Some(Box::new(registry)), name, outcome));
+            wake_ui();
         });
     }
 
@@ -2837,17 +2897,22 @@ impl ViewerApp {
         if self.core.poll_open() {
             self.finish_open();
         }
-        // A worker counts as much as a load here — an import, a plugin, a save
-        // or an export. None of them can wake the interface, and the frame that
-        // notices one has finished is this same one. Without this the readout
-        // would only move when the mouse did, and the result would land
-        // whenever the user next happened to touch something.
+        // A worker — an import, a plugin, a save or an export — wakes the
+        // interface itself when its result is sent and as its progress moves
+        // (`wake_ui`). The slow poll here is only a safety net, for a wake
+        // that raced the frame. A load cannot wake anything (the core knows no
+        // toolkit), so it is polled, at a rate a readout needs rather than at
+        // the display's.
         #[cfg(not(target_arch = "wasm32"))]
-        let importing = self.job.is_some();
+        let working = self.job.is_some();
         #[cfg(target_arch = "wasm32")]
-        let importing = false;
-        if importing || self.core.load_stage().is_some() {
-            ui.ctx().request_repaint();
+        let working = false;
+        if self.core.load_stage().is_some() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+        } else if working {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
         }
 
         // Collect zoom input before panels consume events.
@@ -4644,6 +4709,7 @@ impl ViewerApp {
 
 impl eframe::App for ViewerApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        UI.get_or_init(|| ui.ctx().clone());
         // The graphics device is gone, and egui would panic drawing this frame
         // without it. Ending here instead puts the reason in words; the panic
         // hook shows it (see `render::explain_gpu_failure`).
