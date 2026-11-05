@@ -129,14 +129,14 @@ jobs:
       # fixture mapped; this reads them through the buffered path alone, as a
       # build without `mmap` does. The browser target is checked *with* default
       # features, which is what proves memmap2 is gated on the target and not
-      # only on the feature. Then the docs, with no broken links, and the crate
-      # as it would be published.
+      # only on the feature. Then the docs, with no broken links. (The crate as
+      # published is checked with the others, in `published-package`.)
       #
       # The viewer's importer gets the buffered path too, for free: the "core
       # without threads" step below builds the viewer without `mmap`, and its
       # tests read every importer fixture both ways and compare.
       - name: OIR reader without mmap, for the browser, and as packaged
-        run: bash scripts/ci-local.sh oir-no-default oir-wasm oir-wasm-no-default oir-doc oir-package
+        run: bash scripts/ci-local.sh oir-no-default oir-wasm oir-wasm-no-default oir-doc
 
       # The egui UI is shared between the desktop binary and the browser build,
       # so a desktop-only edit can break the wasm side. This is the check that
@@ -270,12 +270,13 @@ jobs:
       - name: Run tests (glow backend)
         run: bash scripts/ci-local.sh glow-tests
 
-      # The registration crates are published after image-registration-support, which
-      # they depend on, so `cargo package` alone could not verify them before
-      # it is on crates.io. Packaged together, each is built against the other
-      # as it would be published.
-      - name: Package the registration crates as they would be published
-        run: bash scripts/ci-local.sh registration-package
+      # Every published crate, packaged together as a release would publish
+      # it. The libraries depend on c-api-support and the registration crates
+      # on image-registration-support too, so `cargo package` of one alone
+      # could not verify it before its dependency is on crates.io; packaged
+      # together, each is built against the others as published.
+      - name: Package the published crates as they would be published
+        run: bash scripts/ci-local.sh published-package
 
       # A rationale comment that names another file ("see `tests/it/plugins.rs`")
       # is a claim nothing else checks, and it goes on reading as true after the

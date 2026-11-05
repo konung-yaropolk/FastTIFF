@@ -401,9 +401,15 @@ fn text_follows_snprintf() {
 
     // "héllo": the é is two bytes, and cutting at 2 would split it.
     let mut buf = [0x55u8; 4];
-    assert_eq!(unsafe { put_text("héllo", buf.as_mut_ptr().cast(), 3) }, 6);
+    assert_eq!(
+        unsafe { ERRORS.put_text("héllo", buf.as_mut_ptr().cast(), 3) },
+        6
+    );
     assert_eq!(&buf[..3], b"h\0\x55");
-    assert_eq!(unsafe { put_text("héllo", buf.as_mut_ptr().cast(), 4) }, 6);
+    assert_eq!(
+        unsafe { ERRORS.put_text("héllo", buf.as_mut_ptr().cast(), 4) },
+        6
+    );
     assert_eq!(&buf[..4], "hé\0".as_bytes());
 }
 
@@ -807,9 +813,12 @@ fn the_signature_check_is_the_crates() {
 /// A panic is a status, not an unwind into C.
 #[test]
 fn a_panic_comes_back_as_failed() {
-    assert_eq!(guarded(|| panic!("on purpose")), OIR_FAILED);
+    assert_eq!(ERRORS.guarded(|| panic!("on purpose")), OIR_FAILED);
     assert!(last_error().contains("on purpose"), "{}", last_error());
-    assert_eq!(guarded_len(|| panic!("again")), -(OIR_FAILED as isize));
+    assert_eq!(
+        ERRORS.guarded_len(|| panic!("again")),
+        -(OIR_FAILED as isize)
+    );
     assert!(last_error().contains("again"), "{}", last_error());
 }
 

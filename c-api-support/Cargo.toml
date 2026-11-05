@@ -1,0 +1,19 @@
+[package]
+name = "c-api-support"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+description = """
+The scaffolding shared by the C APIs of fast-tiff-lib, oir-reader and the \
+registration crates: a per-library last-error slot, panic guards, the snprintf \
+string convention cut on character boundaries, and one base set of statuses.\
+"""
+license = "MPL-2.0"
+repository = "https://github.com/konung-yaropolk/FastTIFF"
+readme = "README.md"
+keywords = ["ffi", "c-api"]
+categories = ["development-tools::ffi"]
+
+# No dependencies, on purpose: every C API in this repository depends on it,
+# and oir-reader in particular is meant to stay light.
+[dependencies]

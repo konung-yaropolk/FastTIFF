@@ -43,6 +43,10 @@ keywords = ["microscopy", "registration", "stackreg", "turboreg", "imaging"]
 categories = ["science", "algorithms", "multimedia::images"]
 
 [dependencies]
+# The C interface's scaffolding (last-error slot, panic guard), shared with this
+# repository's other C APIs; only with `capi`. With a version as well as the
+# path, as a published crate's dependency must be.
+c-api-support = { path = "../c-api-support", version = "0.1.0", optional = true }
 # Parallel CPU registration. Frames are independent once the reference is
 # fixed, so a stack is an embarrassingly parallel map — except under
 # `Reference::Previous`, which is a chain and cannot be. It goes through the
@@ -74,11 +78,12 @@ threads = ["image-registration-support/threads"]
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 
 # A C interface — `src/capi.rs`, declared in `include/turboreg_registration.h` — for linking
-# into C and C++ programs as a shared or static library. Adds no dependency.
+# into C and C++ programs as a shared or static library. Adds one small
+# dependency of this repository's own, `c-api-support`, which has none.
 # The crate type is chosen when building (`cargo rustc --crate-type`; see the
 # README's "From C and C++") rather than listed under `[lib]`, because a
 # `cdylib` listed there is built by every crate that depends on this one.
-capi = []
+capi = ["dep:c-api-support"]
 
 # docs.rs builds the GPU module too — a module missing from the documentation
 # may as well not exist.

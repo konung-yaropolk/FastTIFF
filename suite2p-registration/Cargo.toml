@@ -26,6 +26,10 @@ categories = ["science", "algorithms", "multimedia::images"]
 features = ["gpu", "capi"]
 
 [dependencies]
+# The C interface's scaffolding (last-error slot, panic guard), shared with this
+# repository's other C APIs; only with `capi`. With a version as well as the
+# path, as a published crate's dependency must be.
+c-api-support = { path = "../c-api-support", version = "0.1.0", optional = true }
 # Phase correlation is FFT-based, so an FFT is not optional. `rustfft` is
 # MIT OR Apache-2.0, which combines into a GPL-3 work without friction, and it
 # handles non-power-of-two sizes (Bluestein) — which matters, because a
@@ -61,8 +65,9 @@ threads = ["image-registration-support/threads"]
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 
 # A C interface — `src/capi.rs`, declared in `include/suite2p_registration.h` — for linking
-# into C and C++ programs as a shared or static library. Adds no dependency.
+# into C and C++ programs as a shared or static library. Adds one small
+# dependency of this repository's own, `c-api-support`, which has none.
 # The crate type is chosen when building (`cargo rustc --crate-type`; see the
 # README's "From C and C++") rather than listed under `[lib]`, because a
 # `cdylib` listed there is built by every crate that depends on this one.
-capi = []
+capi = ["dep:c-api-support"]

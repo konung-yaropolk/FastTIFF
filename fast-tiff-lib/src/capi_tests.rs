@@ -89,10 +89,12 @@ fn flat<T: Clone>(planes: Vec<Vec<T>>) -> Vec<T> {
 
 fn description(s: *const FtlStack) -> String {
     let n = unsafe { ftl_description(s, null_mut(), 0) };
+    assert!(n >= 0, "{n}: {}", last_error());
+    let n = n as usize;
     let mut buf = vec![0u8; n + 1];
     assert_eq!(
         unsafe { ftl_description(s, buf.as_mut_ptr().cast(), buf.len()) },
-        n
+        n as isize
     );
     assert_eq!(buf[n], 0);
     String::from_utf8(buf[..n].to_vec()).unwrap()
@@ -101,7 +103,8 @@ fn description(s: *const FtlStack) -> String {
 fn unit(s: *const FtlStack) -> String {
     let mut buf = [0u8; 64];
     let n = unsafe { ftl_metadata_unit(s, buf.as_mut_ptr().cast(), buf.len()) };
-    String::from_utf8(buf[..n].to_vec()).unwrap()
+    assert!(n >= 0, "{n}: {}", last_error());
+    String::from_utf8(buf[..n as usize].to_vec()).unwrap()
 }
 
 fn metadata(s: *const FtlStack) -> FtlMetadata {
@@ -766,7 +769,7 @@ fn a_string_cut_short_is_still_utf8() {
         let mut buf = vec![0x55u8; cap];
         assert_eq!(
             unsafe { ftl_description(s, buf.as_mut_ptr().cast(), cap) },
-            full.len()
+            full.len() as isize
         );
         let got = CStr::from_bytes_until_nul(&buf).unwrap();
         assert_eq!(got.to_str(), Ok(want), "cap {cap}");
@@ -780,16 +783,22 @@ fn strings_follow_the_snprintf_convention() {
     let s = open_c(&fixture("ij_u16_spp1_p6_hyperstack.tif"));
     let full = description(s);
     assert!(full.len() > 8);
-    assert_eq!(unsafe { ftl_description(s, null_mut(), 0) }, full.len());
+    let len = full.len() as isize;
+    assert_eq!(unsafe { ftl_description(s, null_mut(), 0) }, len);
     let mut buf = [0x55u8; 6];
     assert_eq!(
         unsafe { ftl_description(s, buf.as_mut_ptr().cast(), 0) },
-        full.len()
+        len
     );
     assert_eq!(buf, [0x55; 6], "cap 0 writes nothing");
     assert_eq!(
         unsafe { ftl_description(s, buf.as_mut_ptr().cast(), 5) },
-        full.len()
+        len
+    );
+    // A NULL buffer with room claimed is refused rather than ignored.
+    assert_eq!(
+        unsafe { ftl_description(s, null_mut(), 5) },
+        -(FTL_INVALID_ARGUMENT as isize)
     );
     assert_eq!(&buf[..4], &full.as_bytes()[..4]);
     assert_eq!(buf[4], 0, "cut short, still terminated");
@@ -805,11 +814,16 @@ fn strings_follow_the_snprintf_convention() {
     );
     assert_eq!(buf[0], 0);
     unsafe { ftl_stack_free(s) };
+    // A NULL stack is an invalid argument, with a reason.
     assert_eq!(
         unsafe { ftl_description(null(), buf.as_mut_ptr().cast(), buf.len()) },
-        0
+        -(FTL_INVALID_ARGUMENT as isize)
     );
-    assert_eq!(unsafe { ftl_metadata_unit(null(), null_mut(), 0) }, 0);
+    assert!(last_error().contains("NULL"), "{}", last_error());
+    assert_eq!(
+        unsafe { ftl_metadata_unit(null(), null_mut(), 0) },
+        -(FTL_INVALID_ARGUMENT as isize)
+    );
 }
 
 /// What C can say and Rust cannot, and what neither accepts, comes back as a

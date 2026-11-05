@@ -296,6 +296,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 
 [[package]]
+name = "c-api-support"
+version = "0.1.0"
+
+[[package]]
 name = "calloop"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -867,6 +871,7 @@ version = "0.27.1"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "c-api-support",
  "flate2",
  "memmap2",
  "quick-xml 0.37.5",
@@ -2098,6 +2103,7 @@ name = "oir-reader"
 version = "0.26.3"
 dependencies = [
  "bytemuck",
+ "c-api-support",
  "memmap2",
  "quick-xml 0.37.5",
 ]
@@ -2814,6 +2820,7 @@ name = "suite2p-registration"
 version = "0.27.0"
 dependencies = [
  "bytemuck",
+ "c-api-support",
  "image-registration-support",
  "pollster",
  "rustfft",
@@ -2986,6 +2993,7 @@ name = "turboreg-registration"
 version = "0.27.0"
 dependencies = [
  "bytemuck",
+ "c-api-support",
  "image-registration-support",
  "pollster",
  "wgpu",

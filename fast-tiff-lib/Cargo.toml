@@ -37,9 +37,14 @@ codec-zstd = ["dep:zstd"]
 # The crate type is chosen when building (`cargo rustc --crate-type`; see the
 # README's "From C and C++") rather than listed under `[lib]`, because a
 # `cdylib` listed there is built by every crate that depends on this one.
-capi = []
+capi = ["dep:c-api-support"]
 
 [dependencies]
+# The C interface's scaffolding (last-error slot, panic guard, string
+# convention), shared with this repository's other C APIs; only with `capi`.
+# A version as well as the path: this crate is published, and so must its
+# dependencies be.
+c-api-support = { path = "../c-api-support", version = "0.1.0", optional = true }
 memmap2 = { workspace = true, optional = true }
 weezl = "0.2"      # LZW codec (compression = 5)
 flate2 = { workspace = true }     # Deflate/Zip codec (compression = 8 / 32946)

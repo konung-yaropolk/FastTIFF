@@ -221,11 +221,13 @@ int ftl_frame_info(const FtlStack *s, size_t index, FtlFrameInfo *out);
 /* What the file's metadata says. */
 int ftl_metadata(const FtlStack *s, FtlMetadata *out);
 
-/* The calibration unit (UTF-8, so a micron is "\xC2\xB5m"), snprintf-style; 0 when there is none. */
-size_t ftl_metadata_unit(const FtlStack *s, char *buf, size_t cap);
-
-/* The first IFD's ImageDescription, verbatim, snprintf-style; 0 when there is none. */
-size_t ftl_description(const FtlStack *s, char *buf, size_t cap);
+/*
+ * The calibration unit (UTF-8, so a micron is "\xC2\xB5m") and the first IFD's ImageDescription,
+ * verbatim, snprintf-style: the whole length back, 0 when there is none, and a cut never splits a
+ * character. A NULL stack, or buf NULL with cap > 0, is -FTL_INVALID_ARGUMENT.
+ */
+ptrdiff_t ftl_metadata_unit(const FtlStack *s, char *buf, size_t cap);
+ptrdiff_t ftl_description(const FtlStack *s, char *buf, size_t cap);
 
 /*
  * channels x slices x frames as a viewer reads them: classified by size rather

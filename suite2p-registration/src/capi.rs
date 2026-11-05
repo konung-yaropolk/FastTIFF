@@ -29,25 +29,25 @@
 //! built with `panic = "unwind"` (the default, and this workspace's release
 //! profile).
 
+use c_api_support::{status, Errors};
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CString};
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use crate::{bidiphase, register, Backend, Border, Frames, Registered, Settings};
 
 /// The call did what it was asked.
-pub const S2P_OK: c_int = 0;
+pub const S2P_OK: c_int = status::OK;
 /// The progress callback asked to stop; nothing was produced.
-pub const S2P_CANCELLED: c_int = 1;
+pub const S2P_CANCELLED: c_int = status::CANCELLED;
 /// A pointer, size, index or setting the call cannot take.
-pub const S2P_INVALID_ARGUMENT: c_int = 2;
+pub const S2P_INVALID_ARGUMENT: c_int = status::INVALID_ARGUMENT;
 /// The backend asked for cannot run here: no GPU in this build or on this
 /// machine, no threads in this build, or a frame size the GPU path does not
 /// take.
-pub const S2P_UNAVAILABLE: c_int = 3;
+pub const S2P_UNAVAILABLE: c_int = status::UNAVAILABLE;
 /// The registration itself failed: a panic inside it, or a GPU run the device
 /// could not finish.
-pub const S2P_FAILED: c_int = 4;
+pub const S2P_FAILED: c_int = status::FAILED;
 
 /// [`Backend::SingleThread`].
 pub const S2P_BACKEND_SINGLE_THREAD: c_int = 0;
@@ -254,37 +254,18 @@ thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
 }
 
+/// This library's failure reporting: its own last-error slot above, the
+/// shared scaffolding in [`c_api_support::Errors`].
+static ERRORS: Errors = Errors::new(
+    &LAST_ERROR,
+    S2P_INVALID_ARGUMENT,
+    S2P_FAILED,
+    "the registration",
+);
+
 /// Held for the length of a GPU run; see [`s2p_register`].
 #[cfg(feature = "gpu")]
 static GPU_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Record why a call failed, for [`s2p_last_error`], and return its status.
-///
-/// `try_with`, not `with`: a call made while the thread is being torn down —
-/// from a C++ `thread_local` destructor, say — finds the slot already gone,
-/// and `with` would panic there, which past `extern "C"` is an abort. The
-/// status still comes back; only the message is lost.
-fn fail(status: c_int, why: impl Into<String>) -> c_int {
-    let why = CString::new(why.into().replace('\0', " ")).unwrap_or_default();
-    let _ = LAST_ERROR.try_with(|e| *e.borrow_mut() = why);
-    status
-}
-
-/// Run `work`, turning a panic into [`S2P_FAILED`] rather than letting it
-/// unwind into a caller that has no idea what one is.
-fn guarded(work: impl FnOnce() -> c_int) -> c_int {
-    match catch_unwind(AssertUnwindSafe(work)) {
-        Ok(status) => status,
-        Err(panic) => {
-            let why = panic
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "no message".to_string());
-            fail(S2P_FAILED, format!("the registration panicked: {why}"))
-        }
-    }
-}
 
 /// The handle behind `r`, or the status to return for a null one.
 ///
@@ -293,7 +274,7 @@ fn guarded(work: impl FnOnce() -> c_int) -> c_int {
 /// `r` is null or came from [`s2p_register`] and has not been freed.
 unsafe fn handle<'a>(r: *const S2pRegistered) -> Result<&'a S2pRegistered, c_int> {
     r.as_ref()
-        .ok_or_else(|| fail(S2P_INVALID_ARGUMENT, "the result handle is NULL"))
+        .ok_or_else(|| ERRORS.fail(S2P_INVALID_ARGUMENT, "the result handle is NULL"))
 }
 
 /// Why the last call on this thread that did not return `S2P_OK` failed, as
@@ -303,9 +284,7 @@ unsafe fn handle<'a>(r: *const S2pRegistered) -> Result<&'a S2pRegistered, c_int
 /// the text to keep it. Empty, too, on a thread being torn down.
 #[no_mangle]
 pub extern "C" fn s2p_last_error() -> *const c_char {
-    LAST_ERROR
-        .try_with(|e| e.borrow().as_ptr())
-        .unwrap_or(c"".as_ptr())
+    ERRORS.last_error()
 }
 
 /// The library's version, `"major.minor.patch"`, NUL-terminated and static.
@@ -323,7 +302,7 @@ pub extern "C" fn s2p_version() -> *const c_char {
 #[no_mangle]
 pub unsafe extern "C" fn s2p_settings_default(out: *mut S2pSettings) -> c_int {
     if out.is_null() {
-        return fail(S2P_INVALID_ARGUMENT, "out is NULL");
+        return ERRORS.fail(S2P_INVALID_ARGUMENT, "out is NULL");
     }
     out.write(S2pSettings::from(&Settings::default()));
     S2P_OK
@@ -335,10 +314,10 @@ pub unsafe extern "C" fn s2p_settings_default(out: *mut S2pSettings) -> c_int {
 /// For `S2P_BACKEND_GPU` this opens the device the first time it is asked.
 #[no_mangle]
 pub extern "C" fn s2p_backend_available(backend: c_int, ly: usize, lx: usize) -> c_int {
-    guarded(|| match backend_of(backend) {
-        Err(why) => fail(S2P_INVALID_ARGUMENT, why),
+    ERRORS.guarded(|| match backend_of(backend) {
+        Err(why) => ERRORS.fail(S2P_INVALID_ARGUMENT, why),
         Ok(backend) => match backend.unavailable_reason(ly, lx) {
-            Some(why) => fail(S2P_UNAVAILABLE, why),
+            Some(why) => ERRORS.fail(S2P_UNAVAILABLE, why),
             None => S2P_OK,
         },
     })
@@ -371,13 +350,13 @@ pub unsafe extern "C" fn s2p_register(
     user: *mut c_void,
     out: *mut *mut S2pRegistered,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         if out.is_null() {
-            return fail(S2P_INVALID_ARGUMENT, "out is NULL");
+            return ERRORS.fail(S2P_INVALID_ARGUMENT, "out is NULL");
         }
         out.write(std::ptr::null_mut());
         if n_frames == 0 || ly == 0 || lx == 0 {
-            return fail(
+            return ERRORS.fail(
                 S2P_INVALID_ARGUMENT,
                 format!("{n_frames} frame(s) of {lx} x {ly} is nothing to register"),
             );
@@ -387,23 +366,23 @@ pub unsafe extern "C" fn s2p_register(
             .and_then(|v| v.checked_mul(lx))
             .filter(|&v| v <= isize::MAX as usize / std::mem::size_of::<f32>())
         else {
-            return fail(
+            return ERRORS.fail(
                 S2P_INVALID_ARGUMENT,
                 "the movie is larger than memory can address",
             );
         };
         if frames.is_null() {
-            return fail(S2P_INVALID_ARGUMENT, "frames is NULL");
+            return ERRORS.fail(S2P_INVALID_ARGUMENT, "frames is NULL");
         }
         let settings = match settings.as_ref() {
             None => Settings::default(),
             Some(s) => match s.to_settings() {
                 Ok(s) => s,
-                Err(why) => return fail(S2P_INVALID_ARGUMENT, why),
+                Err(why) => return ERRORS.fail(S2P_INVALID_ARGUMENT, why),
             },
         };
         if let Some(why) = settings.backend.unavailable_reason(ly, lx) {
-            return fail(S2P_UNAVAILABLE, why);
+            return ERRORS.fail(S2P_UNAVAILABLE, why);
         }
 
         let movie: Vec<Vec<f32>> = std::slice::from_raw_parts(frames, len)
@@ -433,7 +412,7 @@ pub unsafe extern "C" fn s2p_register(
             &settings,
             &mut on_progress,
         ) else {
-            return fail(S2P_CANCELLED, "the progress callback asked to stop");
+            return ERRORS.fail(S2P_CANCELLED, "the progress callback asked to stop");
         };
         // A batch the device could not take ran on the processor instead, or
         // came back unmeasured; either way it is not the run that was asked
@@ -441,7 +420,7 @@ pub unsafe extern "C" fn s2p_register(
         #[cfg(feature = "gpu")]
         if settings.backend == Backend::Gpu {
             if let Some(why) = crate::gpu::take_trouble() {
-                return fail(
+                return ERRORS.fail(
                     S2P_FAILED,
                     format!("the GPU could not finish the run: {why}"),
                 );
@@ -498,7 +477,7 @@ pub unsafe extern "C" fn s2p_registered_shift(
         Err(status) => return status,
     };
     let Some(s) = r.inner.shifts.get(t) else {
-        return fail(S2P_INVALID_ARGUMENT, format!("frame {t} is past the end"));
+        return ERRORS.fail(S2P_INVALID_ARGUMENT, format!("frame {t} is past the end"));
     };
     if !dy.is_null() {
         dy.write(s.dy);
@@ -529,10 +508,10 @@ pub unsafe extern "C" fn s2p_registered_is_bad(
         Err(status) => return status,
     };
     if bad.is_null() {
-        return fail(S2P_INVALID_ARGUMENT, "bad is NULL");
+        return ERRORS.fail(S2P_INVALID_ARGUMENT, "bad is NULL");
     }
     let Some(&b) = r.inner.bad_frames.get(t) else {
-        return fail(S2P_INVALID_ARGUMENT, format!("frame {t} is past the end"));
+        return ERRORS.fail(S2P_INVALID_ARGUMENT, format!("frame {t} is past the end"));
     };
     bad.write(b);
     S2P_OK
@@ -577,7 +556,7 @@ pub unsafe extern "C" fn s2p_registered_reference(
         Err(status) => return status,
     };
     if out.is_null() || len != r.ly * r.lx {
-        return fail(
+        return ERRORS.fail(
             S2P_INVALID_ARGUMENT,
             format!("the reference needs {} floats, not {len}", r.ly * r.lx),
         );
@@ -595,14 +574,14 @@ pub unsafe extern "C" fn s2p_registered_reference(
 #[no_mangle]
 pub unsafe extern "C" fn s2p_registered_set_border(r: *mut S2pRegistered, border: c_int) -> c_int {
     let Some(r) = r.as_mut() else {
-        return fail(S2P_INVALID_ARGUMENT, "the result handle is NULL");
+        return ERRORS.fail(S2P_INVALID_ARGUMENT, "the result handle is NULL");
     };
     match border_of(border) {
         Ok(b) => {
             r.inner.border = b;
             S2P_OK
         }
-        Err(why) => fail(S2P_INVALID_ARGUMENT, why),
+        Err(why) => ERRORS.fail(S2P_INVALID_ARGUMENT, why),
     }
 }
 
@@ -620,7 +599,7 @@ pub unsafe extern "C" fn s2p_registered_output_size(
     ly: *mut usize,
     lx: *mut usize,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         let r = match handle(r) {
             Ok(r) => r,
             Err(status) => return status,
@@ -635,7 +614,7 @@ pub unsafe extern "C" fn s2p_registered_output_size(
                 }
                 S2P_OK
             }
-            Err(none) => fail(S2P_NO_COMMON_AREA, none.to_string()),
+            Err(none) => ERRORS.fail(S2P_NO_COMMON_AREA, none.to_string()),
         }
     })
 }
@@ -659,7 +638,7 @@ pub unsafe extern "C" fn s2p_registered_common_area(
     width: *mut usize,
     angle: *mut f64,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         let r = match handle(r) {
             Ok(r) => r,
             Err(status) => return status,
@@ -678,7 +657,7 @@ pub unsafe extern "C" fn s2p_registered_common_area(
                 }
                 S2P_OK
             }
-            Err(none) => fail(S2P_NO_COMMON_AREA, none.to_string()),
+            Err(none) => ERRORS.fail(S2P_NO_COMMON_AREA, none.to_string()),
         }
     })
 }
@@ -706,16 +685,16 @@ pub unsafe extern "C" fn s2p_registered_apply(
     t: usize,
     out: *mut f32,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         let r = match handle(r) {
             Ok(r) => r,
             Err(status) => return status,
         };
         if frame.is_null() || out.is_null() {
-            return fail(S2P_INVALID_ARGUMENT, "frame or out is NULL");
+            return ERRORS.fail(S2P_INVALID_ARGUMENT, "frame or out is NULL");
         }
         if t >= r.inner.shifts.len() {
-            return fail(S2P_INVALID_ARGUMENT, format!("frame {t} is past the end"));
+            return ERRORS.fail(S2P_INVALID_ARGUMENT, format!("frame {t} is past the end"));
         }
         let (ly, lx) = (r.ly, r.lx);
         // Copied first, so `out` may be `frame`.
@@ -723,7 +702,7 @@ pub unsafe extern "C" fn s2p_registered_apply(
         bidiphase::shift(&mut moved, ly, lx, r.inner.bidiphase);
         let moved = match r.inner.apply(&moved, ly, lx, t) {
             Ok(moved) => moved,
-            Err(none) => return fail(S2P_NO_COMMON_AREA, none.to_string()),
+            Err(none) => return ERRORS.fail(S2P_NO_COMMON_AREA, none.to_string()),
         };
         std::ptr::copy(moved.as_ptr(), out, moved.len());
         S2P_OK
