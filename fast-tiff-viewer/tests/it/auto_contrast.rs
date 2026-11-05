@@ -11,7 +11,7 @@
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::channels::{auto_contrast, reset_contrast};
 use fast_tiff_viewer::histogram::{auto_window, frame_histograms, Histogram, BINS};
-use fast_tiff_viewer::Stack;
+use fast_tiff_viewer::{Stack, Window};
 use std::io::Cursor;
 
 /// A one-frame u16 stack of `w * h` pixels: `outliers` of them pinned to 0,
@@ -117,9 +117,9 @@ fn windowed_u16_stack(w: u32, h: u32, bulk: u16, outliers: usize, window: (f64, 
 }
 
 /// The float counterpart of [`windowed_u16_stack`]. Float channels take their
-/// own branch when the settings are built — they keep their window in the
-/// source units instead of being rescaled onto 0..=65535 — so an integer stack
-/// says nothing about whether that branch remembers where it started.
+/// own branch when the settings are built — their own scan, their own texture
+/// kind — so an integer stack says nothing about whether that branch remembers
+/// where it started.
 fn windowed_f32_stack(
     w: u32,
     h: u32,
@@ -156,7 +156,7 @@ fn auto_window_discards_the_outliers_and_keeps_the_bulk() {
     let hists = frame_histograms(&stack);
     assert_eq!(hists.len(), 1);
 
-    let (lo, hi) = auto_window(&hists[0]).expect("a counted histogram has a window");
+    let Window { lo, hi } = auto_window(&hists[0]).expect("a counted histogram has a window");
     assert!(
         lo > 0.0,
         "the dark spike at 0 should have been clipped, got lo={lo}"
@@ -189,7 +189,7 @@ fn outliers_too_numerous_to_be_noise_are_kept() {
     // 500 at each end of 10_000 is 5%, far past the 0.35% budget.
     let stack = load(spiked_u16_stack(W, H, 30_000, 500));
     let hists = frame_histograms(&stack);
-    let (lo, hi) = auto_window(&hists[0]).unwrap();
+    let Window { lo, hi } = auto_window(&hists[0]).unwrap();
     let bin = (u16::MAX as f32) / BINS as f32;
     assert!(lo < bin, "the low spike is too big to discard, got lo={lo}");
     assert!(
@@ -205,7 +205,7 @@ fn outliers_too_numerous_to_be_noise_are_kept() {
 fn a_single_valued_frame_yields_a_non_empty_window() {
     let stack = load(spiked_u16_stack(W, H, 1234, 0));
     let hists = frame_histograms(&stack);
-    let (lo, hi) = auto_window(&hists[0]).unwrap();
+    let Window { lo, hi } = auto_window(&hists[0]).unwrap();
     assert!(hi > lo, "window {lo}..{hi} must not be empty");
     assert!(
         lo <= 1234.0 && 1234.0 <= hi,
@@ -238,18 +238,18 @@ fn auto_narrows_the_window_and_reset_restores_it() {
     auto_contrast(&mut stack, &hists);
     let s = &stack.display.settings[0];
     assert!(
-        s.max - s.min < (bounds.1 - bounds.0) * 0.5,
+        s.window.hi - s.window.lo < (bounds.hi - bounds.lo) * 0.5,
         "auto should have narrowed {:?} well inside {bounds:?}",
-        (s.min, s.max)
+        (s.window.lo, s.window.hi)
     );
     assert!(
-        s.min >= bounds.0 && s.max <= bounds.1,
+        s.window.lo >= bounds.lo && s.window.hi <= bounds.hi,
         "both handles must stay on the track"
     );
 
     reset_contrast(&mut stack);
     let s = &stack.display.settings[0];
-    assert_eq!((s.min, s.max), initial, "reset should undo auto");
+    assert_eq!(s.window, initial, "reset should undo auto");
 }
 
 /// Reset is the undo for any amount of dragging, not just for Auto.
@@ -257,20 +257,18 @@ fn auto_narrows_the_window_and_reset_restores_it() {
 fn reset_recovers_from_an_arbitrary_window() {
     let mut stack = load(spiked_u16_stack(W, H, 30_000, OUTLIERS));
     let initial = stack.display.settings[0].initial;
-    stack.display.settings[0].min = 12_345.0;
-    stack.display.settings[0].max = 12_346.0;
+    stack.display.settings[0].window.lo = 12_345.0;
+    stack.display.settings[0].window.hi = 12_346.0;
 
     reset_contrast(&mut stack);
-    assert_eq!(
-        (stack.display.settings[0].min, stack.display.settings[0].max),
-        initial
-    );
+    assert_eq!(stack.display.settings[0].window, initial);
 }
 
-/// The same, for a float stack. Float channels keep their contrast window in
-/// the data's own units rather than being rescaled onto 0..=65535, which is a
-/// separate branch of the settings builder — and one where "where this channel
-/// started" is easy to conflate with the data range it was measured from.
+/// The same, for a float stack. Float channels are measured for their opening
+/// window by a scan of their own (the data's own float range rather than an
+/// integer one), which is a separate branch of the settings builder — and one
+/// where "where this channel started" is easy to conflate with the data range
+/// it was measured from.
 #[test]
 fn reset_returns_to_the_file_window_for_float_channels_too() {
     let declared = (10.0f32, 40.0f32);
@@ -283,34 +281,33 @@ fn reset_returns_to_the_file_window_for_float_channels_too() {
     ));
     let s = &stack.display.settings[0];
     assert_eq!(
-        s.kind,
+        s.kind(),
         fast_tiff_viewer::ChannelKind::Float,
         "this must exercise the float branch"
     );
     assert_eq!(
-        (s.min, s.max),
+        (s.window.lo, s.window.hi),
         declared,
         "float windows stay in the data units"
     );
     let bounds = s.bounds;
     assert!(
-        bounds.0 < declared.0 && bounds.1 > declared.1,
+        bounds.lo < declared.0 && bounds.hi > declared.1,
         "the track {bounds:?} should be widened to the data, past the declared {declared:?}"
     );
 
-    stack.display.settings[0].min = 100.0;
-    stack.display.settings[0].max = 150.0;
+    stack.display.settings[0].window.lo = 100.0;
+    stack.display.settings[0].window.hi = 150.0;
     reset_contrast(&mut stack);
 
     let s = &stack.display.settings[0];
     assert_eq!(
-        (s.min, s.max),
+        (s.window.lo, s.window.hi),
         declared,
         "reset should restore the file window"
     );
     assert_ne!(
-        (s.min, s.max),
-        bounds,
+        s.window, bounds,
         "reset should NOT open the window to the full track"
     );
 }
@@ -334,31 +331,30 @@ fn reset_returns_to_the_file_window_not_the_full_track() {
     ));
     let s = &stack.display.settings[0];
     assert_eq!(
-        (s.min, s.max),
+        (s.window.lo, s.window.hi),
         declared,
         "the file window should be what the stack opens with"
     );
-    assert_eq!(s.initial, declared);
+    assert_eq!(s.initial, Window::from(declared));
     let bounds = s.bounds;
     assert!(
-        bounds.0 < declared.0 && bounds.1 > declared.1,
+        bounds.lo < declared.0 && bounds.hi > declared.1,
         "the track {bounds:?} should be wider than the declared window {declared:?},          or this test cannot tell the two resets apart"
     );
 
     // Drag both handles somewhere else entirely, then reset.
-    stack.display.settings[0].min = 55_000.0;
-    stack.display.settings[0].max = 60_000.0;
+    stack.display.settings[0].window.lo = 55_000.0;
+    stack.display.settings[0].window.hi = 60_000.0;
     reset_contrast(&mut stack);
 
     let s = &stack.display.settings[0];
     assert_eq!(
-        (s.min, s.max),
+        (s.window.lo, s.window.hi),
         declared,
         "reset should restore the file window"
     );
     assert_ne!(
-        (s.min, s.max),
-        bounds,
+        s.window, bounds,
         "reset should NOT open the window to the full track"
     );
 }
@@ -380,19 +376,19 @@ fn auto_fits_the_frame_on_screen_not_frame_zero() {
 
     let s = &stack.display.settings[0];
     assert!(
-        s.min <= 50_000.0 && 50_000.0 <= s.max,
+        s.window.lo <= 50_000.0 && 50_000.0 <= s.window.hi,
         "frame 1 sits at 50000, window is {:?}",
-        (s.min, s.max)
+        (s.window.lo, s.window.hi)
     );
     assert!(
-        !(s.min <= 10_000.0 && 10_000.0 <= s.max),
+        !(s.window.lo <= 10_000.0 && 10_000.0 <= s.window.hi),
         "frame 0 at 10000 should be outside the window fitted to frame 1, got {:?}",
-        (s.min, s.max)
+        (s.window.lo, s.window.hi)
     );
 }
 
-/// A palette stack has no contrast window to fit. Its `min`/`max` are a pinned
-/// index-to-LUT identity, and nudging them would remap every colour in the
+/// A palette stack has no contrast window to fit. Its window is a pinned
+/// index-to-LUT identity, and nudging it would remap every colour in the
 /// image — so both buttons must leave it exactly as it was.
 #[test]
 fn palette_windows_are_left_alone_by_both() {
@@ -405,24 +401,13 @@ fn palette_windows_are_left_alone_by_both() {
     // equals its bounds, so a Reset that ignored the guard would coincidentally
     // do nothing and the test would pass whether the guard were there or not.
     // A distinguishable window tests the contract instead of the coincidence.
-    stack.display.settings[0].min = -128.5;
-    stack.display.settings[0].max = 65_407.5;
-    let before: Vec<(f32, f32)> = stack
-        .display
-        .settings
-        .iter()
-        .map(|s| (s.min, s.max))
-        .collect();
+    stack.display.settings[0].window = Window::new(-0.5, 254.5);
+    let before: Vec<Window> = stack.display.settings.iter().map(|s| s.window).collect();
 
     auto_contrast(&mut stack, &hists);
     reset_contrast(&mut stack);
 
-    let after: Vec<(f32, f32)> = stack
-        .display
-        .settings
-        .iter()
-        .map(|s| (s.min, s.max))
-        .collect();
+    let after: Vec<Window> = stack.display.settings.iter().map(|s| s.window).collect();
     assert_eq!(
         before, after,
         "a palette window is an identity mapping, not a contrast choice"
@@ -455,7 +440,7 @@ fn a_window_fitted_past_the_track_is_pulled_back_onto_it() {
     );
     let bounds = stack.display.settings[0].bounds;
     assert!(
-        bounds.1 < 60_000.0,
+        bounds.hi < 60_000.0,
         "channel 0 track should be too narrow for 60000, got {bounds:?}"
     );
 
@@ -465,11 +450,14 @@ fn a_window_fitted_past_the_track_is_pulled_back_onto_it() {
 
     let s = &stack.display.settings[0];
     assert!(
-        s.min >= bounds.0 && s.max <= bounds.1,
+        s.window.lo >= bounds.lo && s.window.hi <= bounds.hi,
         "handles left the track: {:?} is not inside {bounds:?}",
-        (s.min, s.max)
+        (s.window.lo, s.window.hi)
     );
-    assert!(s.max > s.min, "the window must not collapse to nothing");
+    assert!(
+        s.window.hi > s.window.lo,
+        "the window must not collapse to nothing"
+    );
 }
 
 /// The low end of the track, clamped on its own.
@@ -493,7 +481,7 @@ fn the_low_handle_is_clamped_without_the_window_collapsing() {
     ));
     let bounds = stack.display.settings[0].bounds;
     assert!(
-        bounds.0 > 1_000.0,
+        bounds.lo > 1_000.0,
         "channel 0 track should start well above zero, got {bounds:?}"
     );
 
@@ -503,21 +491,21 @@ fn the_low_handle_is_clamped_without_the_window_collapsing() {
 
     let s = &stack.display.settings[0];
     assert!(
-        s.min >= bounds.0,
+        s.window.lo >= bounds.lo,
         "the low handle fell off the track: {} < {}",
-        s.min,
-        bounds.0
+        s.window.lo,
+        bounds.lo
     );
     assert!(
-        s.max <= bounds.1,
+        s.window.hi <= bounds.hi,
         "the high handle fell off the track: {} > {}",
-        s.max,
-        bounds.1
+        s.window.hi,
+        bounds.hi
     );
     assert!(
-        s.max > s.min && (s.min, s.max) != bounds,
+        s.window.hi > s.window.lo && s.window != bounds,
         "this case should clamp one handle, not collapse to the fallback: {:?}",
-        (s.min, s.max)
+        (s.window.lo, s.window.hi)
     );
 }
 
@@ -531,14 +519,14 @@ fn channels_without_a_histogram_keep_their_window() {
         .display
         .settings
         .iter()
-        .map(|s| (s.min, s.max))
+        .map(|s| (s.window.lo, s.window.hi))
         .collect();
     auto_contrast(&mut stack, &[]);
     let after: Vec<(f32, f32)> = stack
         .display
         .settings
         .iter()
-        .map(|s| (s.min, s.max))
+        .map(|s| (s.window.lo, s.window.hi))
         .collect();
     assert_eq!(before, after);
 }
@@ -574,7 +562,7 @@ fn capped_u16_stack(planes: usize, blank: usize, w: u32, h: u32) -> Vec<u8> {
 fn opening_window(bytes: Vec<u8>) -> (f32, f32) {
     let s = Stack::from_bytes(bytes, "probe.tif".into(), false).expect("should open");
     let c = s.display.settings.first().expect("one channel");
-    (c.min, c.max)
+    (c.window.lo, c.window.hi)
 }
 
 /// The bug: a volume whose first plane is empty opened with a window one unit

@@ -15,8 +15,8 @@
 //! window it came from.
 //!
 //! What it does *not* do is re-interpret the samples. A frame goes out in the
-//! type it came in as, which is why the signed case below undoes the decoder's
-//! offset instead of writing the offset values.
+//! type it came in as, its samples copied as the file's own bytes rather than
+//! through any of the decoders' display transforms.
 //!
 //! # Compressed: Deflate, level 1, no predictor
 //!
@@ -98,11 +98,9 @@ use std::path::Path;
 
 /// How a frame's samples travel from the file to the file.
 ///
-/// The decoders normalise on the way in — 8-bit is widened, floats are rescaled
-/// into the display window, signed integers are offset — so a save has to pick
-/// the reader whose normalisation it can undo, rather than the most convenient
-/// one. Reading an 8-bit frame as `u16` and writing it as `u16` would double
-/// the file and change every value.
+/// The frames are copied as the file's own bytes, so this only names the type
+/// they are written as — and refuses the ones the writer cannot reproduce
+/// without changing the samples.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Samples {
     U8,
@@ -602,21 +600,12 @@ fn metadata_of(stack: &SaveSource) -> StackMetaWrite {
     // The window on screen. The format carries one for the stack, so the first
     // channel's speaks for it — the alternative is to write none and have the
     // file open on auto-contrast, which is a visible change to something the
-    // user did not touch. In the samples' units, as the file is written: the
-    // interface keeps an 8-bit window widened onto 0..65535
-    // (`channels::window_scale`), which ImageJ would read as 257 times the
-    // range and show the image saturated. A 16-bit window stays as it is,
-    // signed included: ImageJ holds signed 16-bit offset into unsigned, and
-    // its range is in that space, which is the interface's too.
+    // user did not touch. In ImageJ's units for the samples, which are the
+    // file's own except for signed 16-bit (see `SampleUnits::to_imagej`), and
+    // the same definition opening a file reads the range back with.
     if let Some(first) = stack.display.settings.first() {
-        let map = stack
-            .tiff
-            .frames
-            .first()
-            .filter(|f| f.bits_per_sample == 8)
-            .and_then(|f| fast_tiff_lib::DisplayMap::of(f, None));
-        let file = |v: f32| map.map_or(v as f64, |m| m.to_file(v as f64));
-        out = out.range(file(first.min), file(first.max));
+        let (lo, hi) = first.units.to_imagej(first.window);
+        out = out.range(lo, hi);
     }
     // Every channel's LUT, always — including plain grayscale ones. They are
     // 768 bytes each, and writing them is what makes a saved file open in the

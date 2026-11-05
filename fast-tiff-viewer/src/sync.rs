@@ -61,7 +61,7 @@ impl Viewer {
         // Per-channel GPU texture kind (R8Uint / R16Uint / R32F), picked from the
         // source format at load time — drives both texture allocation and the
         // decode path below.
-        let kinds: Vec<ChannelKind> = loaded.display.settings.iter().map(|s| s.kind).collect();
+        let kinds: Vec<ChannelKind> = loaded.display.settings.iter().map(|s| s.kind()).collect();
 
         // Work out what should be resident for this view, and size the textures
         // to it. For everything that fits a texture this is the whole frame at
@@ -127,24 +127,24 @@ impl Viewer {
         }
 
         // Window/level goes to the shader in the units its texture actually
-        // holds: 16-bit ints in raw 0..65535, floats in their own units (R32F
-        // holds raw samples), and 8-bit ints in 0..255 — the slider keeps the
-        // window in 0..65535, so an 8-bit channel's bounds are rescaled by the
-        // widening factor. That conversion is
-        // [`crate::channels::sample_window`], shared with the CPU compositor so
-        // the two cannot drift. `is_float` tells the shader which texture to
-        // sample; the two integer formats share one sampler.
+        // holds: the file's own for 8-bit (R8Uint holds the raw bytes) and
+        // float (R32F holds the raw values), the decoder's 16-bit display scale
+        // for everything on R16Uint. The window is held in file units, so that
+        // conversion is [`crate::units::SampleUnits::to_texture`], shared with
+        // the CPU compositor so the two cannot drift. `is_float` tells the
+        // shader which texture to sample; the two integer formats share one
+        // sampler.
         let uniforms: Vec<ChannelUniform> = loaded
             .display
             .settings
             .iter()
             .map(|s| {
-                let (min, max) = crate::channels::sample_window(s.kind, s.min, s.max);
+                let (min, max) = s.units.to_texture(s.window);
                 ChannelUniform {
                     min,
                     max,
                     enabled: s.enabled,
-                    is_float: s.kind == ChannelKind::Float,
+                    is_float: s.kind() == ChannelKind::Float,
                 }
             })
             .collect();
@@ -672,8 +672,9 @@ fn sync_volume(
     renderer.set_volume_target(view.viewport_px[0], view.viewport_px[1], view.downscale);
 
     // Per-channel window/level, in the sampled texture's units: raw for float,
-    // else the 0..65535 display window divided by 65535 (both U8 and U16 volumes
-    // are unorm-normalized — see scivis_render::VolumeKind).
+    // else normalized the way the volume builder normalized the voxels (both
+    // U8 and U16 volumes are unorm — see scivis_render::VolumeKind), which is
+    // [`crate::units::SampleUnits::to_unorm`].
     // Bounded by MAX_CHANNELS, so it lives on the stack — this runs every 3D
     // frame and has no business calling the allocator.
     let blank = VolumeChannel {
@@ -686,12 +687,8 @@ fn sync_volume(
     let mut windows = [blank; MAX_CHANNELS];
     let n = loaded.display.settings.len().min(MAX_CHANNELS);
     for (c, (slot, s)) in windows.iter_mut().zip(&loaded.display.settings).enumerate() {
-        let is_float = s.kind == ChannelKind::Float;
-        let (min, max) = if is_float {
-            (s.min, s.max)
-        } else {
-            (s.min / 65535.0, s.max / 65535.0)
-        };
+        let is_float = s.kind() == ChannelKind::Float;
+        let (min, max) = s.units.to_unorm(s.window);
         // The isosurface paints one fixed colour, taken from the LUT's
         // brightest point rather than its top entry — a contrast-stretched
         // palette ends black, and sampling the top would render nothing at all.
@@ -755,7 +752,7 @@ pub fn plan_volume(
     budget: usize,
     view: &crate::viewer::VolumeView,
 ) -> VolumePlan {
-    let kinds: Vec<ChannelKind> = loaded.display.settings.iter().map(|s| s.kind).collect();
+    let kinds: Vec<ChannelKind> = loaded.display.settings.iter().map(|s| s.kind()).collect();
     let volume_kinds: Vec<scivis_render::VolumeKind> = kinds
         .iter()
         .map(|k| match k {

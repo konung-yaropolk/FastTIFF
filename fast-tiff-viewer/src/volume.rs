@@ -29,6 +29,7 @@
 //! an exact match, so a stale build can cost work but never show wrong data.
 
 use crate::prefetch::{decode_jobs, ChannelJob, Decoded};
+use crate::units::{UNORM16_MAX, UNORM8_MAX};
 use fast_tiff_lib::TiffStack;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
@@ -272,6 +273,10 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
 
 /// Store one decoded slice of channel `c`, at full size, into its slab of the
 /// packed texture that holds it. A short decode leaves the rest zero.
+///
+/// Integer samples are normalized by the largest value their 2D texture holds,
+/// the divisor [`SampleUnits::to_unorm`](crate::units::SampleUnits::to_unorm)
+/// puts the channel's window on the same scale with.
 fn encode_slice(layout: &VolumeLayout, slabs: &mut [&mut [u8]], c: usize, dec: &Decoded) {
     let (t, k) = layout.place(c);
     let texel = layout.texel_bytes(t);
@@ -287,12 +292,12 @@ fn encode_slice(layout: &VolumeLayout, slabs: &mut [&mut [u8]], c: usize, dec: &
             .iter()
             .take(voxels)
             .enumerate()
-            .for_each(|(i, &x)| put(i, x as f32 / 255.0)),
+            .for_each(|(i, &x)| put(i, x as f32 / UNORM8_MAX)),
         Decoded::U16(v) => v
             .iter()
             .take(voxels)
             .enumerate()
-            .for_each(|(i, &x)| put(i, x as f32 / 65535.0)),
+            .for_each(|(i, &x)| put(i, x as f32 / UNORM16_MAX)),
         Decoded::F32(v) => v
             .iter()
             .take(voxels)
@@ -332,8 +337,8 @@ impl SliceBoxes {
     /// Add one decoded source slice of channel `c`, in texture units.
     fn add(&mut self, c: usize, dec: &Decoded) {
         match dec {
-            Decoded::U8(v) => self.add_samples(c, v, |x| x as f32 / 255.0),
-            Decoded::U16(v) => self.add_samples(c, v, |x| x as f32 / 65535.0),
+            Decoded::U8(v) => self.add_samples(c, v, |x| x as f32 / UNORM8_MAX),
+            Decoded::U16(v) => self.add_samples(c, v, |x| x as f32 / UNORM16_MAX),
             Decoded::F32(v) => self.add_floats(c, v),
         }
     }

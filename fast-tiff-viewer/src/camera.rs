@@ -592,8 +592,9 @@ pub fn volume_camera(cam: &CameraState, scale: [f32; 3], dims: (u32, u32, u32)) 
 #[derive(Clone, Copy, Debug)]
 pub struct VolumeChannel {
     /// Window low/high, in the sampled texture's units: raw for a float
-    /// channel, else the 0..65535 display window divided by 65535 (U8 and U16
-    /// volumes are both unorm-normalized — see [`scivis_render::VolumeKind`]).
+    /// channel, else normalized as the voxels are (U8 and U16 volumes are both
+    /// unorm — see [`scivis_render::VolumeKind`]); see
+    /// [`SampleUnits::to_unorm`](crate::units::SampleUnits::to_unorm).
     pub min: f32,
     pub max: f32,
     pub is_float: bool,
@@ -607,9 +608,9 @@ pub struct VolumeChannel {
 /// and the volume's render settings.
 ///
 /// `windows` is one `(min, max, is_float, enabled)` tuple per channel, already
-/// in the sampled texture's units: raw for a float channel, else the 0..65535
-/// display window divided by 65535 (both U8 and U16 volumes are unorm-normalized
-/// — see [`scivis_render::VolumeKind`]).
+/// in the sampled texture's units: raw for a float channel, else normalized as
+/// the voxels are (both U8 and U16 volumes are unorm — see
+/// [`scivis_render::VolumeKind`] and [`VolumeChannel::min`]).
 pub fn build_volume_params(
     cam: &VolumeCamera,
     channels: &[VolumeChannel],

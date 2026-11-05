@@ -3,7 +3,9 @@
 //!
 //! Every channel is binned over **one shared track** — the union of all the
 //! channels' slider bounds (`ChannelSettings::bounds`) — rather than over the
-//! raw sample type or each channel's own range.
+//! raw sample type or each channel's own range. Like the bounds, the track is
+//! in the file's own sample units, so a bin edge, a slider handle and a
+//! contrast window all mean the same value.
 //!
 //! The shared axis is the whole point. These are drawn overlaid on a single
 //! canvas, and curves plotted on per-channel axes would each be centred in their
@@ -18,6 +20,7 @@
 
 use crate::prefetch::{build_jobs, decode_jobs, Decoded};
 use crate::stack::Stack;
+use crate::units::{SampleUnits, Window};
 use scivis_render::{ChannelKind, Lut};
 
 /// Bins per histogram. Matches the 256 entries of a [`Lut`], so one bin is
@@ -40,9 +43,9 @@ pub struct Histogram {
     pub channel: usize,
     /// Sample counts, low track value first. Always [`BINS`] long.
     pub bins: Vec<u32>,
-    /// The shared track this was binned over: `lo` is bin 0's left edge and `hi`
-    /// the last bin's right edge. The same for every channel in one call, which
-    /// is what makes the bins comparable across channels.
+    /// The shared track this was binned over, in file units: `lo` is bin 0's
+    /// left edge and `hi` the last bin's right edge. The same for every channel
+    /// in one call, which is what makes the bins comparable across channels.
     pub lo: f32,
     pub hi: f32,
     /// The tallest bin, for scaling the plot. Never zero once any sample landed.
@@ -66,8 +69,8 @@ pub fn frame_histograms(stack: &Stack) -> Vec<Histogram> {
     // instead of decoding the frame again, which is what makes toggling one
     // feel instant.
     let enabled = vec![true; n];
-    let kinds: Vec<ChannelKind> = stack.display.settings.iter().map(|s| s.kind).collect();
-    let (lo, hi) = shared_track(stack);
+    let kinds: Vec<ChannelKind> = stack.display.settings.iter().map(|s| s.kind()).collect();
+    let track = shared_track(stack);
     let jobs = build_jobs(stack, stack.frame_index, &enabled, &kinds);
     let Ok(decoded) = decode_jobs(
         &stack.tiff.data,
@@ -79,34 +82,46 @@ pub fn frame_histograms(stack: &Stack) -> Vec<Histogram> {
     };
     jobs.iter()
         .zip(decoded)
-        .map(|(job, data)| bin(job.channel, &data, lo, hi))
+        .map(|(job, data)| {
+            let units = stack.display.settings[job.channel].units;
+            bin(job.channel, &data, track, units)
+        })
         .collect()
 }
 
-/// The axis every channel is binned onto: the union of their slider tracks, so
-/// no channel's data falls off either end.
+/// The axis every channel is binned onto, in file units: the union of their
+/// slider tracks, so no channel's data falls off either end.
 ///
 /// Public because a frontend drawing the plot needs the same number to label an
 /// axis or place a marker, and recomputing it there would be one more place for
 /// the two to disagree.
-pub fn shared_track(stack: &Stack) -> (f32, f32) {
-    let mut lo = f32::INFINITY;
-    let mut hi = f32::NEG_INFINITY;
-    for s in &stack.display.settings {
-        lo = lo.min(s.bounds.0);
-        hi = hi.max(s.bounds.1);
-    }
+pub fn shared_track(stack: &Stack) -> Window {
+    let settings = &stack.display.settings;
+    let track = settings
+        .iter()
+        .map(|s| s.bounds)
+        .reduce(Window::union)
+        .unwrap_or(Window::new(f32::INFINITY, f32::NEG_INFINITY));
     // No channels, or bounds that are somehow not finite: a degenerate track
-    // would divide by zero in `bin`, so hand back something usable instead.
-    if !(lo.is_finite() && hi.is_finite() && hi > lo) {
-        return (0.0, u16::MAX as f32);
+    // would divide by zero in `bin`, so hand back something usable instead —
+    // the whole of what the first channel's texture can show.
+    if !(track.lo.is_finite() && track.hi.is_finite() && track.hi > track.lo) {
+        return settings
+            .first()
+            .map_or(Window::new(0.0, 1.0), |s| s.units.full_range());
     }
-    (lo, hi)
+    track
 }
 
-/// Bin one decoded channel over the track `lo..hi`.
-fn bin(channel: usize, data: &Decoded, lo: f32, hi: f32) -> Histogram {
+/// Bin one decoded channel, whose samples are in `units`' texture units, over
+/// the file-units `track`.
+fn bin(channel: usize, data: &Decoded, track: Window, units: SampleUnits) -> Histogram {
     let mut bins = vec![0u32; BINS];
+    // The samples are binned as decoded, against the track put into the same
+    // units once, rather than each sample being converted: the conversion is
+    // affine and increasing, so every sample lands in the bin it would have,
+    // and a histogram of a 4K frame costs no extra pass.
+    let (lo, hi) = units.to_texture(track);
     let span = (hi - lo).max(f32::EPSILON);
     let mut counted = 0u64;
 
@@ -122,14 +137,9 @@ fn bin(channel: usize, data: &Decoded, lo: f32, hi: f32) -> Histogram {
     };
 
     match data {
-        // 8-bit channels keep their raw 0..255 samples, while their slider
-        // track lives in the widened 0..65535 space every other integer channel
-        // uses (see `build_channel_settings`). 257 is that widening: it is what
-        // `(v << 8) | v` computes, so this lands on the same axis the 16-bit
-        // path produces for identical data.
         Decoded::U8(v) => {
             for &s in v.iter().step_by(stride(v.len())) {
-                add(s as f32 * 257.0);
+                add(s as f32);
             }
         }
         Decoded::U16(v) => {
@@ -137,8 +147,7 @@ fn bin(channel: usize, data: &Decoded, lo: f32, hi: f32) -> Histogram {
                 add(s as f32);
             }
         }
-        // Float channels are binned in their own units, matching how their
-        // contrast window is expressed. NaNs and infinities belong to no bin.
+        // NaNs and infinities belong to no bin.
         Decoded::F32(v) => {
             for &s in v.iter().step_by(stride(v.len())) {
                 if s.is_finite() {
@@ -152,8 +161,8 @@ fn bin(channel: usize, data: &Decoded, lo: f32, hi: f32) -> Histogram {
     Histogram {
         channel,
         bins,
-        lo,
-        hi,
+        lo: track.lo,
+        hi: track.hi,
         peak,
         counted,
     }
@@ -183,7 +192,7 @@ pub const AUTO_SATURATION: f64 = 0.0035;
 /// A contrast window fitted to where this channel of data actually is: the
 /// narrowest span that keeps all but [`AUTO_SATURATION`] of the samples at each
 /// end, in the same units as [`Histogram::lo`]/[`Histogram::hi`] and therefore
-/// as [`crate::ChannelSettings::min`]/`max`.
+/// as [`crate::ChannelSettings::window`] — the file's own.
 ///
 /// `None` when nothing was counted, which is the one case with no defensible
 /// answer — an empty frame, or a decode that failed. Callers should leave the
@@ -192,7 +201,7 @@ pub const AUTO_SATURATION: f64 = 0.0035;
 /// The result is never empty: a channel of one single value still yields a
 /// one-bin-wide window rather than a zero-width one that would divide by zero
 /// downstream and blank the image.
-pub fn auto_window(hist: &Histogram) -> Option<(f32, f32)> {
+pub fn auto_window(hist: &Histogram) -> Option<Window> {
     if hist.counted == 0 {
         return None;
     }
@@ -234,7 +243,7 @@ pub fn auto_window(hist: &Histogram) -> Option<(f32, f32)> {
     // to there, and a window ending at its start would clip the very samples
     // that earned it a place.
     let hi = hist.lo + (hi_bin + 1) as f32 * width;
-    Some((lo, hi.max(lo + width)))
+    Some(Window::new(lo, hi.max(lo + width)))
 }
 
 /// Fill colour for a channel's histogram: the brightest colour that channel is

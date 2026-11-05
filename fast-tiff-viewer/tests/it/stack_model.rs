@@ -75,17 +75,17 @@ fn opens_an_imagej_hyperstack_with_derived_channel_settings() {
     // 16-bit unsigned planes take the R16Uint path, and each channel starts
     // enabled with a contrast window that sits inside its slider track.
     for (c, s) in stack.display.settings.iter().enumerate() {
-        assert_eq!(s.kind, ChannelKind::Int16, "channel {c}");
+        assert_eq!(s.kind(), ChannelKind::Int16, "channel {c}");
         assert!(s.enabled, "channel {c} should start enabled");
-        let (lo, hi) = s.bounds;
+        let (lo, hi): (f32, f32) = s.bounds.into();
         assert!(hi > lo, "channel {c}: degenerate slider track {lo}..{hi}");
         assert!(
-            s.min >= lo && s.max <= hi,
+            s.window.lo >= lo && s.window.hi <= hi,
             "channel {c}: window {}..{} outside track {lo}..{hi}",
-            s.min,
-            s.max
+            s.window.lo,
+            s.window.hi
         );
-        assert!(s.min <= s.max, "channel {c}: inverted window");
+        assert!(s.window.lo <= s.window.hi, "channel {c}: inverted window");
     }
 
     // A display LUT exists for every channel the settings cover.
@@ -113,7 +113,7 @@ fn rgb_stack_becomes_three_display_channels() {
         .display
         .settings
         .iter()
-        .all(|s| s.kind == ChannelKind::Int8));
+        .all(|s| s.kind() == ChannelKind::Int8));
     // The channels/time guess and the pseudocolor toggle are meaningless here.
     assert!(!pseudocolor_applicable(&stack));
     assert!(!gray_lut_applicable(&stack));
@@ -128,18 +128,18 @@ fn float_stack_windows_in_its_own_units() {
 
     let s = stack.display.settings.first().expect("one channel");
     assert_eq!(
-        s.kind,
+        s.kind(),
         ChannelKind::Float,
         "32-bit float takes the R32F path"
     );
     // Contrast is defined over the data's actual range, not an assumed
     // 0..65535 integer scale (matching how ImageJ treats float images).
     assert!(
-        s.bounds.1 <= 65535.0 || s.bounds.0 < 0.0,
+        s.bounds.hi <= 65535.0 || s.bounds.lo < 0.0,
         "float bounds look integer-shaped: {:?}",
         s.bounds
     );
-    assert!(s.min <= s.max);
+    assert!(s.window.lo <= s.window.hi);
 }
 
 /// Reassigning the axes changes which IFD each display channel reads. The
@@ -167,7 +167,7 @@ fn reassigning_the_axes_drops_everything_decoded_under_the_old_mapping() {
     // overview, both held under display channel 0 of frame 0.
     let stack = viewer.stack.as_mut().unwrap();
     let (w, h) = (stack.tiff.frames[0].width, stack.tiff.frames[0].height);
-    let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind).collect();
+    let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind()).collect();
     let enabled: Vec<bool> = stack.display.settings.iter().map(|s| s.enabled).collect();
 
     stack

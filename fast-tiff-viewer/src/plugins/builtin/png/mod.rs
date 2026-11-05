@@ -9,24 +9,17 @@
 //!
 //! # Reproducing the display
 //!
-//! The contrast window is in different units depending on the data, and getting
-//! that backwards is the whole difficulty here. The host hands a plugin planes
-//! through `read_plane_u16`, which:
+//! The contrast window the view describes is in the channel's own sample units
+//! — the file's values, what `read_plane_f32` returns — so applying it is a
+//! matter of reading the plane in those units too. That is what this does for
+//! integer data: `read_plane_f32`, and the window over that.
 //!
-//! * rescales **float** samples through the channel's window into `0..65535` —
-//!   so the window has already been applied and the value is the display value;
-//! * widens **integer** samples to `0..65535` untouched — so the window, which
-//!   is itself in that same `0..65535` space, still has to be applied here.
-//!
-//! Treating one as the other produces an image that is uniformly black, or
-//! uniformly white, or merely wrong in a way that looks like a contrast
-//! setting. Which case applies is read from [`ImageInfo::pixel_type`].
-//!
-//! One corner is worth naming: the host reports any 32-bit sample as `F32`,
-//! including a 32-bit *integer* stack, whose window is nonetheless in the
-//! integer space. That inconsistency is in the host's description rather than
-//! here, and 32-bit integer microscopy data is rare enough that it has not been
-//! worth widening the contract over.
+//! A 32- or 64-bit plane ([`PixelType::F32`], which the host reports for wide
+//! integers as well as floats) is read through `read_plane_u16` instead, which
+//! rescales it through the channel's window onto the 16-bit scale: the window
+//! is then already applied and the value is the display value, exactly as the
+//! renderer's own float path quantizes it. Which case applies is read from
+//! [`ImageInfo::pixel_type`].
 
 /// Reading one in, which is the other half of the format.
 mod import;
@@ -81,7 +74,8 @@ impl Exporter for Png {
         }
 
         let mut rgb = vec![0u8; w * h * 3];
-        let mut plane: Vec<u16> = Vec::new();
+        let mut windowed: Vec<u16> = Vec::new();
+        let mut plane: Vec<f32> = Vec::new();
         // The displayed channels, which is what `view` describes — the file may
         // have more than the renderer can show, and an export of the picture
         // should contain what the picture contains.
@@ -94,7 +88,6 @@ impl Exporter for Png {
             if !host.progress(c as f32 / shown.max(1) as f32) {
                 return Err(PluginError::unsupported("cancelled"));
             }
-            host.read_plane_u16(Plane::new(c, z, t), &mut plane)?;
             let lut = view.luts.get(c).copied().unwrap_or_else(grayscale_ramp);
             let (lo, hi) = (channel.min, channel.max);
             let span = if (hi - lo).abs() > f32::EPSILON {
@@ -102,18 +95,15 @@ impl Exporter for Png {
             } else {
                 1.0
             };
-            for (px, &v) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(plane.iter()) {
-                let t01 = if windowed_on_read {
-                    v as f32 / 65535.0
-                } else {
-                    ((v as f32 - lo) / span).clamp(0.0, 1.0)
-                };
-                let entry = lut[(t01 * 255.0).round().clamp(0.0, 255.0) as usize];
-                // Additive, like the composite on screen: two channels lit at
-                // one pixel make the sum, and white where they overlap.
-                for (out, add) in px.iter_mut().zip(entry) {
-                    *out = out.saturating_add(add);
-                }
+            // Where each pixel sits in the window, 0..=1.
+            if windowed_on_read {
+                host.read_plane_u16(Plane::new(c, z, t), &mut windowed)?;
+                let scale = f32::from(u16::MAX);
+                add_channel(&mut rgb, &lut, windowed.iter().map(|&v| v as f32 / scale));
+            } else {
+                host.read_plane_f32(Plane::new(c, z, t), &mut plane)?;
+                let fractions = plane.iter().map(|&v| ((v - lo) / span).clamp(0.0, 1.0));
+                add_channel(&mut rgb, &lut, fractions);
             }
         }
 
@@ -133,6 +123,19 @@ impl Exporter for Png {
             .finish()
             .map_err(|e| PluginError::failed(format!("finishing the PNG: {e}")))?;
         Ok(())
+    }
+}
+
+/// Composite one channel into `rgb`: each pixel's place in the window
+/// (`fractions`, `0..=1`) looked up in `lut` and added on.
+fn add_channel(rgb: &mut [u8], lut: &[[u8; 3]; 256], fractions: impl Iterator<Item = f32>) {
+    for (px, t01) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(fractions) {
+        let entry = lut[(t01 * 255.0).round().clamp(0.0, 255.0) as usize];
+        // Additive, like the composite on screen: two channels lit at one
+        // pixel make the sum, and white where they overlap.
+        for (out, add) in px.iter_mut().zip(entry) {
+            *out = out.saturating_add(add);
+        }
     }
 }
 

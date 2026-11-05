@@ -67,6 +67,7 @@ pub mod roi;
 pub mod save;
 pub mod snapshot;
 pub mod stack;
+pub mod units;
 pub mod viewer;
 pub mod volume;
 pub mod window;
@@ -114,7 +115,7 @@ pub use dimensions::{plane_index, planes_addressed};
 pub use display::{Dims, Display};
 pub use histogram::Histogram;
 pub use loader::{LoadSource, LoadStage};
-pub use stack::{ChannelSettings, Stack};
+pub use stack::{ChannelSettings, SampleUnits, Stack, Window};
 pub use viewer::{DecodeMode, Playback, ViewMode, Viewer, VolumeView, DEFAULT_FPS};
 
 // Re-exported so a frontend needs only this crate in its imports for the common

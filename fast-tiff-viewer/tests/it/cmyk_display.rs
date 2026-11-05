@@ -43,7 +43,7 @@ fn open_stack(path: PathBuf) -> anyhow::Result<Stack> {
 
 /// Decode `frame` with exactly the channels in `enabled` switched on.
 fn decode(stack: &Stack, frame: usize, enabled: &[bool]) -> Vec<Decoded> {
-    let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind).collect();
+    let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind()).collect();
     let jobs = fast_tiff_viewer::prefetch::build_jobs(stack, frame, enabled, &kinds);
     fast_tiff_viewer::prefetch::decode_jobs(
         &stack.tiff.data,
@@ -106,7 +106,7 @@ fn cmyk_stack_becomes_three_converted_display_channels() {
         .display
         .settings
         .iter()
-        .all(|s| s.kind == ChannelKind::Int8));
+        .all(|s| s.kind() == ChannelKind::Int8));
     assert!(
         stack.display.settings.iter().all(|s| s.enabled),
         "all three start visible"
@@ -127,7 +127,7 @@ fn sixteen_bit_cmyk_keeps_its_width() {
         .display
         .settings
         .iter()
-        .all(|s| s.kind == ChannelKind::Int16));
+        .all(|s| s.kind() == ChannelKind::Int16));
 
     let decoded = decode(&stack, 0, &[true, true, true]);
     assert_eq!(decoded.len(), 3);

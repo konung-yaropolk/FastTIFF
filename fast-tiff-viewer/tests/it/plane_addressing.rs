@@ -57,7 +57,7 @@ fn every_frame_maps_to_an_ifd_that_exists() {
     assert_eq!(n, 10);
 
     let enabled = vec![true; stack.display.settings.len()];
-    let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind).collect();
+    let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind()).collect();
 
     // Scrubbing the whole stack must only ever address planes that are there.
     // Computing the stride from the raw metadata gives `frame * 10`, which is
@@ -80,7 +80,7 @@ fn every_frame_actually_decodes() {
     // sufficient — each plane must also decode, and to *different* pixels.
     let stack = load(mislabeled_stack(8, 4, 3));
     let enabled = vec![true; stack.display.settings.len()];
-    let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind).collect();
+    let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind()).collect();
 
     let mut first_pixels = Vec::new();
     for frame in 0..stack.frame_count() {

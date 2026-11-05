@@ -76,10 +76,10 @@ fn bins_span_the_slider_track_for_a_single_channel_stack() {
     let stack = load(flat_u16_stack(1, 16, 16, 4000, 0));
     let settings = stack.display.settings[0];
     let h = &frame_histograms(&stack)[0];
-    assert_eq!((h.lo, h.hi), settings.bounds);
+    assert_eq!((h.lo, h.hi), (settings.bounds.lo, settings.bounds.hi));
 
     // And the spike lands where that mapping says it should.
-    let (lo, hi) = settings.bounds;
+    let (lo, hi): (f32, f32) = settings.bounds.into();
     let expected = (((4000.0 - lo) / (hi - lo) * BINS as f32) as usize).min(BINS - 1);
     let occupied: Vec<usize> = h
         .bins
@@ -98,7 +98,7 @@ fn eight_bit_channels_are_widened_onto_the_slider_axis() {
     // pile every pixel of a full-range ramp into bin 0.
     let stack = load(ramp_u8_stack());
     assert_eq!(
-        stack.display.settings[0].kind,
+        stack.display.settings[0].kind(),
         fast_tiff_viewer::ChannelKind::Int8
     );
     let h = &frame_histograms(&stack)[0];
@@ -183,7 +183,10 @@ fn channels_share_one_axis_and_land_at_different_places_on_it() {
         hists.iter().all(|h| (h.lo, h.hi) == axis),
         "channels binned on different axes"
     );
-    assert_eq!(axis, fast_tiff_viewer::histogram::shared_track(&stack));
+    assert_eq!(
+        axis,
+        fast_tiff_viewer::histogram::shared_track(&stack).into()
+    );
 
     // And on that axis the three spikes are ordered dim -> bright, distinctly.
     let spikes: Vec<usize> = hists
@@ -203,10 +206,10 @@ fn channels_share_one_axis_and_land_at_different_places_on_it() {
 #[test]
 fn the_shared_track_covers_every_channels_bounds() {
     let stack = load(multichannel_u16_stack(&[4_000, 30_000, 60_000], 16, 16));
-    let (lo, hi) = fast_tiff_viewer::histogram::shared_track(&stack);
+    let (lo, hi): (f32, f32) = fast_tiff_viewer::histogram::shared_track(&stack).into();
     for s in &stack.display.settings {
         assert!(
-            s.bounds.0 >= lo && s.bounds.1 <= hi,
+            s.bounds.lo >= lo && s.bounds.hi <= hi,
             "{:?} escapes the track {lo}..{hi}",
             s.bounds
         );

@@ -504,6 +504,11 @@ pub struct FtImageInfo {
 }
 
 /// One displayed channel's contrast window.
+///
+/// `min` (shown black) and `max` (shown at full intensity) are in the
+/// channel's own sample units: the file's values, as `read_plane_f32` returns
+/// them — `0..=255` for 8-bit data, possibly negative for signed data, the
+/// data's own values for float. Not the `read_plane_u16` display scale.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FtChannelView {

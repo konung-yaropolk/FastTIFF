@@ -193,8 +193,10 @@ impl HostContext for StackHost {
     fn read_plane_u16(&mut self, plane: Plane, out: &mut Vec<u16>) -> Result<(), PluginError> {
         let (ifd, sample) = self.locate(plane)?;
         let frame = &self.tiff.frames[ifd];
-        // The contrast window is what a float plane is rescaled through; a
-        // plugin wanting the raw values asks for f32 instead.
+        // The contrast window is what a 32- or 64-bit plane is rescaled
+        // through. It is in the channel's own units, which for such a plane are
+        // the values being rescaled, so it can be handed to the decoder as it
+        // is. A plugin wanting the raw values asks for f32 instead.
         let range = self.view.channels.get(plane.c).map(|c| (c.min, c.max));
         read_plane_u16_into(
             &self.tiff.data,
@@ -325,6 +327,10 @@ pub fn describe_stack(stack: &Stack) -> StackInfo {
 }
 
 /// The viewer's display state, snapshotted for the run.
+///
+/// The windows go out in the file's own sample units, which is what the
+/// contract promises ([`ChannelView::min`]) and what the viewer holds them in,
+/// so they are copied rather than converted.
 pub fn describe_view(
     stack: &Stack,
     frame_index: usize,
@@ -336,8 +342,8 @@ pub fn describe_view(
         .settings
         .iter()
         .map(|s| ChannelView {
-            min: s.min,
-            max: s.max,
+            min: s.window.lo,
+            max: s.window.hi,
             enabled: s.enabled,
         })
         .collect();

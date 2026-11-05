@@ -979,8 +979,7 @@ fn draw_plot(
         let (win_min, win_max) = display
             .settings
             .get(h.channel)
-            .map(|s| (s.min, s.max))
-            .unwrap_or((h.lo, h.hi));
+            .map_or((h.lo, h.hi), |s| s.window.into());
         let kept = egui::Rect::from_x_y_ranges(
             egui::Rangef::new(x_of(win_min), x_of(win_max)),
             area.y_range(),

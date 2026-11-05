@@ -7,7 +7,7 @@
 //! offset below — looks perfectly plausible until someone measures something.
 
 use super::*;
-use crate::stack::Stack;
+use crate::stack::{Stack, Window};
 use fast_tiff_lib::{
     read_frame_f32, read_frame_u16, read_planes_f32, SampleType, StackMetaWrite, TiffStack,
     TiffWriter, WriterOptions,
@@ -948,6 +948,16 @@ fn ranged(sample: SampleType, range: (f64, f64)) -> Stack {
             SampleType::U16 => w
                 .write_frame_u16(&(0..256).map(|i| i as u16 * 100).collect::<Vec<_>>())
                 .unwrap(),
+            SampleType::I16 => w
+                .write_frame_bytes(
+                    &(0..256i32)
+                        .flat_map(|i| ((i - 128) as i16 * 100).to_le_bytes())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+            SampleType::I8 => w
+                .write_frame_bytes(&(0..256i32).map(|i| i as u8).collect::<Vec<_>>())
+                .unwrap(),
             _ => unreachable!(),
         }
     }
@@ -968,30 +978,31 @@ fn declared_range(bytes: Vec<u8>) -> (String, String) {
 }
 
 /// An 8-bit file's display range is in its own 0..255 units both ways: it
-/// opens as that window on its samples, a save writes it back as it was —
-/// not 257 times it, which ImageJ would show saturated — and a window the
+/// opens as that window on its samples — the window the interface holds, and
+/// the one the 8-bit texture is shown with — a save writes it back as it was,
+/// not on the 16-bit scale, which ImageJ would show saturated, and a window the
 /// user set is written in sample units too.
 #[test]
 fn an_8_bit_window_is_in_sample_units_both_ways() {
     let mut s = ranged(SampleType::U8, (10.0, 200.0));
     let c = &s.display.settings[0];
     assert_eq!(
-        crate::channels::sample_window(c.kind, c.min, c.max),
-        (10.0, 200.0),
+        c.window,
+        Window::new(10.0, 200.0),
         "opens on samples 10..200"
     );
+    assert_eq!(c.units.to_texture(c.window), (10.0, 200.0));
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
     assert_eq!(declared_range(bytes), ("10".into(), "200".into()));
 
-    // Auto-contrast, or a drag: the window as the interface holds it.
-    (s.display.settings[0].min, s.display.settings[0].max) = (20.0 * 257.0, 147.0 * 257.0);
+    // Auto-contrast, or a drag.
+    s.display.settings[0].window = Window::new(20.0, 147.0);
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
     assert_eq!(declared_range(bytes.clone()), ("20".into(), "147".into()));
     let back = Stack::from_bytes(bytes, "again.tif".into(), false).unwrap();
-    let c = &back.display.settings[0];
     assert_eq!(
-        (c.min, c.max),
-        (20.0 * 257.0, 147.0 * 257.0),
+        back.display.settings[0].window,
+        Window::new(20.0, 147.0),
         "and reopens the same"
     );
 }
@@ -1001,7 +1012,48 @@ fn an_8_bit_window_is_in_sample_units_both_ways() {
 fn a_16_bit_window_is_unchanged() {
     let s = ranged(SampleType::U16, (1000.0, 30000.0));
     let c = &s.display.settings[0];
-    assert_eq!((c.min, c.max), (1000.0, 30000.0));
+    assert_eq!(c.window, Window::new(1000.0, 30000.0));
+    assert_eq!(c.units.to_texture(c.window), (1000.0, 30000.0));
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
     assert_eq!(declared_range(bytes), ("1000".into(), "30000".into()));
+}
+
+/// ImageJ states a signed 16-bit image's range offset into unsigned, the way
+/// it holds the pixels. Such a range opens as the signed window it means —
+/// shown with exactly the texture window it always was — and a save writes it
+/// back in ImageJ's units, unchanged.
+#[test]
+fn a_signed_16_bit_window_is_in_imagejs_offset_units_in_the_file() {
+    // -100..500 in the samples, as ImageJ writes it.
+    let declared = (32_668.0, 33_268.0);
+    let mut s = ranged(SampleType::I16, declared);
+    let c = &s.display.settings[0];
+    assert_eq!(c.window, Window::new(-100.0, 500.0), "the signed values");
+    assert_eq!(
+        c.units.to_texture(c.window),
+        (declared.0 as f32, declared.1 as f32),
+        "on the texture's offset scale, as before"
+    );
+    let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
+    assert_eq!(declared_range(bytes), ("32668".into(), "33268".into()));
+
+    s.display.settings[0].window = Window::new(-12_800.0, 0.0);
+    let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
+    assert_eq!(
+        declared_range(bytes.clone()),
+        ("19968".into(), "32768".into())
+    );
+    let back = Stack::from_bytes(bytes, "again.tif".into(), false).unwrap();
+    assert_eq!(back.display.settings[0].window, Window::new(-12_800.0, 0.0));
+}
+
+/// Signed 8-bit has no offset in ImageJ's convention: its range is in the
+/// samples' own values, opened and saved as they are.
+#[test]
+fn a_signed_8_bit_window_is_in_sample_units_both_ways() {
+    let s = ranged(SampleType::I8, (-10.0, 100.0));
+    let c = &s.display.settings[0];
+    assert_eq!(c.window, Window::new(-10.0, 100.0));
+    let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
+    assert_eq!(declared_range(bytes), ("-10".into(), "100".into()));
 }

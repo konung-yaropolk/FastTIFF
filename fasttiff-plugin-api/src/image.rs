@@ -87,9 +87,16 @@ pub type Lut = [[u8; 3]; 256];
 /// One channel's display state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChannelView {
-    /// Contrast window low end, in the channel's own sample units.
+    /// Contrast window low end — the value shown black — in the channel's own
+    /// sample units: the file's values, as
+    /// [`read_plane_f32`](crate::HostContext::read_plane_f32) returns them. An
+    /// 8-bit channel's window is within `0..=255`, a signed channel's can be
+    /// negative, a float channel's is in the data's own values. Compare it with
+    /// `read_plane_f32` samples, not with `read_plane_u16` ones, which are on a
+    /// display scale of their own.
     pub min: f32,
-    /// Contrast window high end.
+    /// Contrast window high end — the value shown at full intensity — in the
+    /// same units as [`min`](Self::min).
     pub max: f32,
     /// Whether the channel is currently composited.
     pub enabled: bool,

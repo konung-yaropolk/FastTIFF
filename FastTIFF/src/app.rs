@@ -493,7 +493,7 @@ const HIST_PLAYBACK_INTERVAL: f64 = 0.25;
 struct HistCache {
     frame: usize,
     generation: u64,
-    bounds: Vec<(f32, f32)>,
+    bounds: Vec<fast_tiff_viewer::Window>,
     hists: Vec<fast_tiff_viewer::Histogram>,
 }
 
@@ -1783,7 +1783,8 @@ impl ViewerApp {
             self.hist = None;
             return;
         };
-        let bounds: Vec<(f32, f32)> = loaded.display.settings.iter().map(|s| s.bounds).collect();
+        let bounds: Vec<fast_tiff_viewer::Window> =
+            loaded.display.settings.iter().map(|s| s.bounds).collect();
         let fresh = self.hist.as_ref().is_some_and(|c| {
             c.frame == loaded.frame_index
                 && c.generation == loaded.prefetch_gen

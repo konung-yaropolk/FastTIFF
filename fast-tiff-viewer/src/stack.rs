@@ -11,6 +11,7 @@ use crate::dimensions::{apply_resolved_dimensions_reporting, setup_cmyk, setup_r
 use crate::display::Display;
 use crate::loader::LoadStage;
 use crate::prefetch::Prefetcher;
+pub use crate::units::{SampleUnits, Window};
 use crate::volume::VolumeBuilder;
 use fast_tiff_lib::TiffStack;
 use scivis_render::ChannelKind;
@@ -18,18 +19,23 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// One display channel's contrast window and GPU upload format.
+///
+/// Every window here — [`window`](Self::window), [`bounds`](Self::bounds),
+/// [`initial`](Self::initial) — is in the file's own sample units, what
+/// [`read_plane_f32`](fast_tiff_lib::read_plane_f32) returns: `0..=255` for an
+/// 8-bit channel, possibly negative for a signed one, the data's own values for
+/// a float one. [`units`](Self::units) is the one place they are converted to
+/// anything else; see [`crate::units`].
 #[derive(Clone, Copy, Debug)]
 pub struct ChannelSettings {
-    pub min: f32,
-    pub max: f32,
+    /// The contrast window: `lo` shows black, `hi` full intensity.
+    pub window: Window,
     pub enabled: bool,
-    /// The full track range `(lo, hi)` a contrast range-slider should span, in
-    /// raw sample units. Derived from the channel's data range (and widened to
-    /// include any metadata window) at load time so both handles always sit
-    /// somewhere on the track.
-    pub bounds: (f32, f32),
-    /// The window this channel started with, in the same units as
-    /// [`min`](Self::min)/[`max`](Self::max) — what the file asked for, or what
+    /// The full track a contrast range-slider should span. Derived from the
+    /// channel's data range (and widened to include any metadata window) at
+    /// load time so both handles always sit somewhere on the track.
+    pub bounds: Window,
+    /// The window this channel started with — what the file asked for, or what
     /// was derived for it when no window was declared.
     ///
     /// Kept per channel rather than as a snapshot held elsewhere because every
@@ -40,15 +46,37 @@ pub struct ChannelSettings {
     /// stale window paired with the wrong channel — or a list of the wrong
     /// length. As a field it cannot drift: whatever constructs a channel states
     /// where it began.
-    pub initial: (f32, f32),
-    /// Which GPU texture format this channel uploads to (picked from the source
-    /// pixel format): `Int8` (R8Uint, raw 8-bit — zero-copy), `Float` (R32F, raw
-    /// float, window/level on the GPU), or `Int16` (R16Uint — the default, incl.
-    /// RGB planes and any data the CPU widens/rescales into 0..65535). Drives
-    /// both texture allocation and the decode path in [`crate::sync`]. For float
-    /// channels `min`/`max` are the contrast window in the data's own float
-    /// units (matching how ImageJ shows float-image contrast).
-    pub kind: ChannelKind,
+    pub initial: Window,
+    /// How this channel's samples are written down in the file and in its GPU
+    /// texture. It says which texture format the channel uploads to
+    /// ([`kind`](Self::kind)): `Int8` (R8Uint, raw 8-bit — zero-copy), `Float`
+    /// (R32F, raw float, window/level on the GPU), or `Int16` (R16Uint — the
+    /// default, incl. RGB planes and any data the CPU widens, offsets or
+    /// rescales onto the 16-bit scale). That drives both texture allocation and
+    /// the decode path in `crate::sync`. And it holds the conversions the
+    /// window goes through on its way to the shader, the 3D view and a saved
+    /// file.
+    pub units: SampleUnits,
+}
+
+impl ChannelSettings {
+    /// A switched-on channel opening at `window`, with a slider track of just
+    /// that window.
+    pub fn new(window: Window, units: SampleUnits) -> Self {
+        ChannelSettings {
+            window,
+            enabled: true,
+            bounds: window,
+            initial: window,
+            units,
+        }
+    }
+
+    /// Which GPU texture format this channel uploads to; see
+    /// [`units`](Self::units).
+    pub fn kind(&self) -> ChannelKind {
+        self.units.kind()
+    }
 }
 
 /// An open TIFF stack plus everything the viewer derives from it.
