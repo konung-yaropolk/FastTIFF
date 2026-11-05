@@ -1,0 +1,20 @@
+# The toolchain every build of this repository uses: CI's, a release's and a
+# developer's alike, so that a check which passes locally passes in CI.
+#
+# CI used to take whatever stable was current. A new release's lints then
+# failed the clippy gate on code nobody had touched: clippy 1.99 brought
+# `chunks_exact_to_as_chunks`, and a green local run met a red CI one. Move
+# this on purpose, in a commit of its own, with whatever the new version's
+# lints ask for fixed in the same commit.
+#
+# Every workflow installs exactly this (`rustup toolchain install`, which reads
+# this file). The two exceptions name their nightly explicitly: the fuzz job
+# (`cargo +nightly fuzz`) and the Windows 7 release (`+nightly-2026-09-08`).
+#
+# A `rustup override` set for this directory wins over this file; run
+# `rustup override unset` here to follow it.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

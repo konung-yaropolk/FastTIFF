@@ -27,8 +27,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: rustup toolchain install
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -200,8 +202,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: rustup toolchain install
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -266,8 +270,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: rustup toolchain install
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -453,8 +459,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: rustup toolchain install
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -566,12 +574,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          # Both halves of the universal binary. Named explicitly rather than
-          # relying on the host default, which only ever gives one of them.
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
+        run: rustup toolchain install
+
+      # Both halves of the universal binary. Named explicitly rather than
+      # relying on the host default, which only ever gives one of them.
+      - name: Add the Apple targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2

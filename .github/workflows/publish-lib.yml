@@ -9,7 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
 
       - name: Read lib version
         id: ver
@@ -45,7 +48,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
 
       - name: Read crate version
         id: ver
@@ -103,7 +109,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
 
       - name: Read crate version
         id: ver
@@ -160,7 +169,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
 
       - name: Read crate version
         id: ver

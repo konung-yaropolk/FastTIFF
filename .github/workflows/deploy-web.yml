@@ -45,10 +45,10 @@ jobs:
       # Pinned, like every other workflow here. This job used to take whatever
       # Rust the runner image happened to ship, which is the one toolchain in
       # the repository nobody had chosen.
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
 
       - name: Cache cargo + target
         uses: actions/cache@v4

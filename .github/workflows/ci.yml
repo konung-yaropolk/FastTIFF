@@ -30,10 +30,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+        run: rustup toolchain install
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -184,12 +184,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          # The second half of the release's universal binary, for the check at
-          # the end of this job.
-          targets: x86_64-apple-darwin
+        run: rustup toolchain install
+
+      # The second half of the release's universal binary, for the check at
+      # the end of this job.
+      - name: Add the Apple target
+        run: rustup target add x86_64-apple-darwin
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -240,13 +243,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # `targets:` because the web-bundle step at the end of this job builds
-      # for wasm32. The Windows job adds the target with a `rustup target add`
-      # line of its own instead; either works, this one is fewer steps.
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists — wasm32 among them, for the web-bundle step at the
+      # end of this job.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+        run: rustup toolchain install
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -323,7 +324,7 @@ jobs:
           workspaces: ". -> target\nfast-tiff-lib/fuzz -> fast-tiff-lib/fuzz/target"
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo +nightly install cargo-fuzz --locked
 
       # The corpus directory goes first — libFuzzer writes discoveries into it
       # and treats later directories as read-only, which keeps the committed
@@ -333,13 +334,13 @@ jobs:
         working-directory: fast-tiff-lib
         run: |
           mkdir -p fuzz/corpus/tiff_open
-          cargo fuzz run tiff_open fuzz/corpus/tiff_open fuzz/seeds -- -max_total_time=120 -rss_limit_mb=2048 -malloc_limit_mb=512
+          cargo +nightly fuzz run tiff_open fuzz/corpus/tiff_open fuzz/seeds -- -max_total_time=120 -rss_limit_mb=2048 -malloc_limit_mb=512
 
       - name: Fuzz the decoders
         working-directory: fast-tiff-lib
         run: |
           mkdir -p fuzz/corpus/tiff_decode
-          cargo fuzz run tiff_decode fuzz/corpus/tiff_decode fuzz/seeds -- -max_total_time=180 -rss_limit_mb=2048 -malloc_limit_mb=512
+          cargo +nightly fuzz run tiff_decode fuzz/corpus/tiff_decode fuzz/seeds -- -max_total_time=180 -rss_limit_mb=2048 -malloc_limit_mb=512
 
       # A crashing input is the whole point — keep it when one is found.
       - name: Upload crash artifacts
