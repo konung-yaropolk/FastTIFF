@@ -10,6 +10,7 @@
 
 mod cmyk;
 mod common;
+mod display_map;
 mod from_bytes;
 mod fused_predictor;
 mod fuzz_regressions;

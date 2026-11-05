@@ -206,6 +206,7 @@ impl HostContext for StackHost {
             sample,
             out,
         )
+        .map(|_map| ())
         .map_err(|e| {
             PluginError::failed(format!(
                 "decoding (c{}, z{}, t{}): {e:#}",

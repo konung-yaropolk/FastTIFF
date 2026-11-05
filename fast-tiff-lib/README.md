@@ -342,6 +342,8 @@ All decoders take the file's bytes (`&stack.data`), the `FrameInfo`, and the fil
 // into unsigned display space; 32- and 64-bit (int/float) are linearly rescaled
 // into 0..=65535 using `float_range` (or the frame's own min/max when `None`).
 // Zero-copy (Cow::Borrowed) for uncompressed, single-strip, native-order 16-bit.
+// `DisplayMap::of(frame, float_range)` names that mapping, with exact
+// to_display / to_file conversions; the `_into` forms return the map they used.
 fn read_frame_u16(mmap, frame, order, float_range: Option<(f32, f32)>) -> Result<Cow<[u16]>>;
 
 // As above but for a single sample plane of a chunky multi-sample (e.g. RGB)
@@ -358,10 +360,12 @@ fn read_frame_u8(mmap, frame, order) -> Result<Cow<[u8]>>;
 // a strided gather, so no zero-copy borrow). 8-bit only.
 fn read_plane_u8(mmap, frame, order, plane: usize) -> Result<Vec<u8>>;
 
-// Raw 32-bit float samples, *no* rescaling — for callers that do window/level
-// themselves (e.g. on the GPU). Zero-copy for uncompressed, single-strip,
-// native-order f32; 32-bit int is cast, and 64-bit int/float is down-converted,
-// to f32.
+// Every depth as f32 in the file's own units: an 8-bit 200 is 200.0, a signed
+// 16-bit -1 is -1.0, 4-bit palette indices are 0.0..=15.0, 64-bit is narrowed
+// to f32. No widening, offset or rescale — for measuring pixels, and for callers
+// that do window/level themselves (e.g. on the GPU). One pass from the file's
+// bytes; zero-copy for uncompressed, single-strip, native-order f32. 16-bit
+// floats are refused.
 fn read_frame_f32(mmap, frame, order) -> Result<Cow<[f32]>>;
 fn read_plane_f32(mmap, frame, order, plane: usize) -> Result<Vec<f32>>;
 
@@ -839,10 +843,10 @@ What a C caller should know:
   sample planes one after another — an RGB frame as its red, green and blue
   planes, whichever way the file interleaves them — and a writer with
   `planar` set takes the same layout back.
-- **Pick the reader by depth.** `ftl_read_u16` takes every depth and gives
-  display values (8-bit widened, signed offset, 32/64-bit rescaled);
-  `ftl_read_u8` is for 8-bit frames as they are and `ftl_read_f32` for 32-
-  and 64-bit ones, and each refuses the others with `FTL_FORMAT`.
+- **Pick the reader by what you want.** `ftl_read_f32` gives every depth in
+  the file's own units; `ftl_read_u16` gives every depth as display values
+  (8-bit widened, signed offset, 32/64-bit rescaled); `ftl_read_u8` is for
+  8-bit frames as they are and refuses the others with `FTL_FORMAT`.
 - **Strings** go in as NUL-terminated UTF-8, and come out snprintf-style: a
   buffer and its capacity in, the whole length back, so `NULL, 0` asks for
   the size. A number the file does not give is NaN.

@@ -930,17 +930,24 @@ fn bad_reads_are_refused_with_a_reason() {
     );
     assert_eq!(&roomy[n..], &[7, 7, 7]);
 
-    // A 16-bit frame through the 8-bit and float readers.
+    // A 16-bit frame through the 8-bit reader, which refuses it, and the
+    // float one, which gives the file's own values.
     let mut bytes8 = vec![0u8; 3 * n];
     let mut floats = vec![0f32; n];
     refused(
         unsafe { ftl_read_u8(s, 0, bytes8.as_mut_ptr(), n) },
         FTL_FORMAT,
     );
-    refused(
+    assert_eq!(
         unsafe { ftl_read_f32(s, 0, floats.as_mut_ptr(), n) },
-        FTL_FORMAT,
+        FTL_OK
     );
+    let mut words = vec![0u16; n];
+    assert_eq!(
+        unsafe { ftl_read_u16(s, 0, null(), words.as_mut_ptr(), n) },
+        FTL_OK
+    );
+    assert!(floats.iter().zip(&words).all(|(&f, &w)| f == w as f32));
     refused(
         unsafe { ftl_read_rgb_u8(s, 0, bytes8.as_mut_ptr(), 3 * n) },
         FTL_FORMAT,

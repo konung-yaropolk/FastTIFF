@@ -249,7 +249,8 @@ int ftl_sample_count(const FtlStack *s, size_t index, size_t *count);
  * ftl_read_u16: any depth for display: 8-bit widened onto 0-65535, signed offset to unsigned,
  *               32/64-bit rescaled from range[0]..range[1], or each plane's own min..max when
  *               `range` is NULL (ftl_float_minmax gives one range for the whole frame).
- * ftl_read_f32: 32- and 64-bit frames, integer or float, as float; narrower is FTL_FORMAT.
+ * ftl_read_f32: any depth as float in the file's own units (8-bit 200 is 200.0, signed 16-bit
+ *               -1 is -1.0): no widening, offset or rescale. 16-bit floating point is FTL_FORMAT.
  */
 int ftl_read_u8(const FtlStack *s, size_t index, uint8_t *out, size_t len);
 int ftl_read_u16(const FtlStack *s, size_t index, const float *range, uint16_t *out, size_t len);

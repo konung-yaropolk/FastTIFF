@@ -18,6 +18,7 @@
 #[cfg(feature = "capi")]
 pub mod capi;
 pub mod decode;
+pub mod display;
 pub mod encode;
 pub mod ifd;
 pub mod index;
@@ -32,6 +33,7 @@ pub use decode::{
     read_planes_rgb_u8, read_planes_u16, read_planes_u16_into, read_planes_u8, read_planes_u8_into,
     set_parallel_decode, set_thread_parallel_decode, ParallelDecodeScope,
 };
+pub use display::DisplayMap;
 pub use encode::{
     SampleType, TiffWriter, WriterOptions, DEFAULT_DEFLATE_LEVEL, DEFAULT_ZSTD_LEVEL,
 };

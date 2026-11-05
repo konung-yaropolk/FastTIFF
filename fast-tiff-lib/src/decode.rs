@@ -5,6 +5,7 @@
 //! (LZW/Deflate/PackBits, multi-strip, predictor, byte-swap, 8-bit upcast,
 //! 32-bit float) falls back to an owned `Vec<u16>`.
 
+use crate::display::DisplayMap;
 use crate::ifd::ByteOrder;
 use crate::index::{Compression, FrameInfo, SampleFormat, TiffStack};
 use anyhow::{anyhow, bail, Result};
@@ -184,13 +185,16 @@ pub fn read_frame_u16<'a>(
 /// Uncompressed predictor-free 16-bit frames convert straight from the
 /// mapping's strips into `out` (a plain memcpy when the byte order is native
 /// and the data unsigned) — no intermediate buffer, no per-frame allocation.
+///
+/// Returns the [`DisplayMap`] it applied, which for a wide frame read without
+/// a `float_range` is the only record of the range it chose.
 pub fn read_frame_u16_into(
     mmap: &[u8],
     frame: &FrameInfo,
     file_order: ByteOrder,
     float_range: Option<(f32, f32)>,
     out: &mut Vec<u16>,
-) -> Result<()> {
+) -> Result<DisplayMap> {
     let spp = (frame.samples_per_pixel as usize).max(1);
     if spp == 1
         && frame.bits_per_sample == 16
@@ -205,7 +209,12 @@ pub fn read_frame_u16_into(
         let signed = frame.sample_format == SampleFormat::SignedInt;
         let flip = if signed { 0x8000u16 } else { 0 };
         let memcpyable = !signed && file_order == ByteOrder::host();
-        return for_each_raw_strip(mmap, frame, 2, |src, start, n| {
+        let map = if signed {
+            DisplayMap::Signed16
+        } else {
+            DisplayMap::Identity
+        };
+        for_each_raw_strip(mmap, frame, 2, |src, start, n| {
             let dst = &mut out[start..start + n];
             if memcpyable {
                 bytemuck::cast_slice_mut::<u16, u8>(dst).copy_from_slice(src);
@@ -223,7 +232,8 @@ pub fn read_frame_u16_into(
                     }
                 }
             }
-        });
+        })?;
+        return Ok(map);
     }
     read_plane_u16_into(mmap, frame, file_order, float_range, 0, out)
 }
@@ -524,12 +534,15 @@ fn for_each_raw_strip(
 /// Decode a single sample plane (`plane`, `< samples_per_pixel`) of a frame
 /// into `width * height` u16 values, deinterleaving chunky multi-sample data
 /// such as RGB. For single-sample frames `plane` is 0 and this returns the
-/// whole image. Handling per bit depth:
+/// whole image. The values are in display space, not the file's units; the
+/// [`DisplayMap`] for the frame says how:
 /// - 8-bit is upcast (`v -> (v << 8) | v`) onto 0..65535.
 /// - signed integers are offset into ImageJ's unsigned display space (sign-bit
 ///   flip), so signed and unsigned+calibration files render the same.
 /// - 32-bit samples (int *or* float) are linearly rescaled into 0..65535 using
 ///   `float_range` (or this plane's own min/max when `None`).
+///
+/// For the file's own values use [`read_plane_f32`].
 pub fn read_plane_u16(
     mmap: &[u8],
     frame: &FrameInfo,
@@ -545,6 +558,8 @@ pub fn read_plane_u16(
 /// [`read_plane_u16`] into a caller-provided buffer, reusing its allocation —
 /// for hot per-frame loops this avoids the allocation, the zero-fill, and (on
 /// Windows especially) fresh-page faults of a new `Vec` every frame.
+///
+/// Returns the [`DisplayMap`] it applied (see [`read_frame_u16_into`]).
 pub fn read_plane_u16_into(
     mmap: &[u8],
     frame: &FrameInfo,
@@ -552,7 +567,7 @@ pub fn read_plane_u16_into(
     float_range: Option<(f32, f32)>,
     plane: usize,
     out: &mut Vec<u16>,
-) -> Result<()> {
+) -> Result<DisplayMap> {
     let native = decode_native_bytes(mmap, frame, file_order)?;
     ensure_len(out, frame.pixel_count()?);
     plane_u16_from_native(&native, frame, file_order, float_range, plane, out)
@@ -616,7 +631,7 @@ pub fn read_planes_u16_into(
         if fuse {
             plane_u16_fused_pred2(&native, frame, file_order, p, plane_out);
         } else {
-            plane_u16_from_native(&native, frame, file_order, float_range, p, plane_out)?;
+            let _ = plane_u16_from_native(&native, frame, file_order, float_range, p, plane_out)?;
         }
     }
     Ok(())
@@ -698,7 +713,10 @@ fn plane_u16_fused_pred2(
 
 /// The conversion core shared by the u16 plane readers: deinterleave +
 /// widen/offset/rescale one plane out of already-decoded native bytes, into
-/// `out` (pre-sized to `width * height`).
+/// `out` (pre-sized to `width * height`). Returns the map it applied.
+///
+/// The per-depth arms below are [`DisplayMap`]'s definitions written as bulk
+/// loops; `display_tests` pins the two against each other for every depth.
 fn plane_u16_from_native(
     native: &[u8],
     frame: &FrameInfo,
@@ -706,7 +724,7 @@ fn plane_u16_from_native(
     float_range: Option<(f32, f32)>,
     plane: usize,
     out: &mut [u16],
-) -> Result<()> {
+) -> Result<DisplayMap> {
     let (base, stride) = plane_layout(frame, plane);
     let n_pixels = frame.pixel_count()?;
     let signed = frame.sample_format == SampleFormat::SignedInt;
@@ -780,6 +798,7 @@ fn plane_u16_from_native(
             };
             let (lo, hi) = float_range.unwrap_or_else(|| minmax_f32(&floats));
             let span = (hi - lo).max(f32::EPSILON);
+            let map = DisplayMap::Linear { lo, hi };
             if parallel {
                 out.par_iter_mut()
                     .zip(floats.par_iter())
@@ -793,10 +812,11 @@ fn plane_u16_from_native(
                     *o = (t * 65535.0).round() as u16;
                 }
             }
+            return Ok(map);
         }
         other => bail!("unsupported bits_per_sample: {other}"),
     }
-    Ok(())
+    Ok(DisplayMap::of(frame, None).expect("8- and 16-bit frames have a fixed map"))
 }
 
 /// Decode a single sample plane (`plane`, `< samples_per_pixel`) of a frame as
@@ -1070,16 +1090,18 @@ fn gather_u8(native: &[u8], base: usize, stride: usize, out: &mut [u8]) -> Resul
     Ok(())
 }
 
-/// Decode a 32-bit-float frame's samples as **raw `f32`**, without the
-/// rescale-to-u16 step `read_frame_u16` does. This is for channels uploaded to
-/// a float (R32F) GPU texture, where window/level happens on the GPU — so the
-/// per-frame CPU cost drops to a borrow (fast path) or a single decode pass.
+/// Decode a frame's samples as `f32` **in the file's own units**: an 8-bit
+/// 200 is 200.0, a signed 16-bit -1 is -1.0, a float is itself. No widening,
+/// no offset, no rescale — none of what the display-space `*_u16` readers do
+/// (see [`DisplayMap`]). Every depth this crate decodes: 4-bit palette indices,
+/// 8- and 16-bit integers, signed or not, 32- and 64-bit integers and floats
+/// (64-bit narrowed to `f32`). 16-bit floats are refused.
 ///
-/// Zero-copy (`Cow::Borrowed` over the memory map) when the data is
-/// uncompressed, 32-bit float, single-sample, native byte order and a single
-/// strip; otherwise an owned `Vec<f32>`. Mirrors `read_frame_u16`'s fast path.
-/// Only valid for 32-bit data (4 bytes/sample); callers use it for float
-/// channels.
+/// For a float (R32F) GPU texture, where window/level happens on the GPU, and
+/// for anything that measures pixels. Zero-copy (`Cow::Borrowed` over the
+/// memory map) when the data is uncompressed 32-bit float, single-sample,
+/// native byte order and a single strip; otherwise an owned `Vec<f32>`
+/// decoded in one pass from the file's bytes.
 pub fn read_frame_f32<'a>(
     mmap: &'a [u8],
     frame: &FrameInfo,
@@ -1112,9 +1134,9 @@ pub fn read_frame_f32<'a>(
 }
 
 /// [`read_frame_f32`] into a caller-provided buffer, reusing its allocation.
-/// Uncompressed predictor-free float frames convert straight from the
-/// mapping's strips into `out` (a plain memcpy in native byte order) — no
-/// intermediate buffer, no per-frame allocation.
+/// Uncompressed predictor-free single-sample frames convert straight from the
+/// mapping's strips into `out` (a plain memcpy for native-order floats) — no
+/// intermediate buffer, no per-frame allocation, at every depth but 4-bit.
 pub fn read_frame_f32_into(
     mmap: &[u8],
     frame: &FrameInfo,
@@ -1123,33 +1145,35 @@ pub fn read_frame_f32_into(
 ) -> Result<()> {
     let spp = (frame.samples_per_pixel as usize).max(1);
     if spp == 1
-        && frame.bits_per_sample == 32
+        && matches!(frame.bits_per_sample, 8 | 16 | 32 | 64)
         && frame.compression == Compression::None
         && frame.predictor == 1
     {
+        require_f32_samples(frame, "read_frame_f32")?;
         // Vet the header-declared size before sizing `out` from it (see
         // `guard_frame_size`).
         guard_frame_size(frame)?;
         ensure_len(out, frame.pixel_count()?);
+        let bits = frame.bits_per_sample;
         let format = frame.sample_format;
-        let memcpyable = format == SampleFormat::Float && file_order == ByteOrder::host();
-        return for_each_raw_strip(mmap, frame, 4, |src, start, n| {
+        let sb = bits as usize / 8;
+        let memcpyable =
+            bits == 32 && format == SampleFormat::Float && file_order == ByteOrder::host();
+        return for_each_raw_strip(mmap, frame, sb, |src, start, n| {
             let dst = &mut out[start..start + n];
             if memcpyable {
                 bytemuck::cast_slice_mut::<f32, u8>(dst).copy_from_slice(src);
             } else {
-                for (o, c) in dst.iter_mut().zip(src.as_chunks::<4>().0) {
-                    *o = sample_f32(c, file_order, format);
-                }
+                contiguous_to_f32(src, bits, format, file_order, dst);
             }
         });
     }
     read_plane_f32_into(mmap, frame, file_order, 0, out)
 }
 
-/// Decode a single sample plane of a 32-bit frame into raw `f32` values
-/// (deinterleaving chunky multi-sample data), with integer 32-bit samples cast
-/// to `f32`. The per-pixel read is parallelized across cores.
+/// Decode a single sample plane of a frame as `f32` in the file's own units
+/// (see [`read_frame_f32`]), deinterleaving chunky multi-sample data. One pass
+/// from the decoded bytes, parallelized across cores for large planes.
 pub fn read_plane_f32(
     mmap: &[u8],
     frame: &FrameInfo,
@@ -1169,16 +1193,26 @@ pub fn read_plane_f32_into(
     plane: usize,
     out: &mut Vec<f32>,
 ) -> Result<()> {
-    require_wide_samples(frame, "read_plane_f32")?;
+    if frame.bits_per_sample == 4 {
+        // Palette indices, packed two to a byte: their own unpacker, one
+        // plane only (multi-sample 4-bit is refused there).
+        let indices = decode_4bit_indices(mmap, frame)?;
+        ensure_len(out, indices.len());
+        for (o, &i) in out.iter_mut().zip(&indices) {
+            *o = i as f32;
+        }
+        return Ok(());
+    }
+    require_f32_samples(frame, "read_plane_f32")?;
     let native = decode_native_bytes(mmap, frame, file_order)?;
     ensure_len(out, frame.pixel_count()?);
     plane_f32_from_native(&native, frame, file_order, plane, out);
     Ok(())
 }
 
-/// Decode **all** sample planes as raw `f32` with a single decompression pass
-/// — the float sibling of [`read_planes_u16`]. Same validity rules as the
-/// per-plane call (32-bit data).
+/// Decode **all** sample planes as `f32` in the file's own units with a single
+/// decompression pass — the file-units sibling of [`read_planes_u16`]. Same
+/// depths as the per-plane call.
 pub fn read_planes_f32(
     mmap: &[u8],
     frame: &FrameInfo,
@@ -1196,7 +1230,11 @@ pub fn read_planes_f32_into(
     file_order: ByteOrder,
     out: &mut Vec<Vec<f32>>,
 ) -> Result<()> {
-    require_wide_samples(frame, "read_planes_f32")?;
+    if frame.bits_per_sample == 4 {
+        out.resize_with(1, Vec::new);
+        return read_plane_f32_into(mmap, frame, file_order, 0, &mut out[0]);
+    }
+    require_f32_samples(frame, "read_planes_f32")?;
     let native = decode_native_bytes(mmap, frame, file_order)?;
     let spp = (frame.samples_per_pixel as usize).max(1);
     let n_pixels = frame.pixel_count()?;
@@ -1208,21 +1246,57 @@ pub fn read_planes_f32_into(
     Ok(())
 }
 
-/// Guard the f32 readers' precondition. They reinterpret each sample as a 4- or
-/// 8-byte wide value, so pointing one at a narrower frame walks off the end of
-/// the decoded buffer. These are public entry points and the bit depth comes
-/// from an untrusted file, so a mis-gated call must return an error — never
-/// panic, which is what the unchecked `chunk[..4]` in `sample_f32` did.
-fn require_wide_samples(frame: &FrameInfo, method: &str) -> Result<()> {
-    match frame.bits_per_sample {
-        32 | 64 => Ok(()),
-        other => bail!("{method} requires 32- or 64-bit samples, but this frame is {other}-bit"),
+/// Guard the f32 readers' precondition: a depth and format they convert. The
+/// bit depth comes from an untrusted file and these are public entry points, so
+/// anything else must be an error, never a panic or a misread. 16-bit floats
+/// are refused rather than read as integers, which is what the display readers
+/// do with them.
+fn require_f32_samples(frame: &FrameInfo, method: &str) -> Result<()> {
+    match (frame.bits_per_sample, frame.sample_format) {
+        (8 | 16, SampleFormat::Float) => bail!(
+            "{method} does not read {}-bit floating-point samples",
+            frame.bits_per_sample
+        ),
+        (8 | 16 | 32 | 64, _) => Ok(()),
+        (other, _) => bail!("{method} cannot read {other}-bit samples"),
     }
 }
 
-/// The conversion core shared by the f32 plane readers (`out` pre-sized).
-/// 64-bit sources (f64 / i64 / u64) are downcast to f32 here; 32-bit sources
-/// take the unchanged 4-byte path.
+/// Convert a run of contiguous native samples to `f32` file units. `src`
+/// holds `out.len()` samples of `bits` bits; the depth and format were
+/// checked by [`require_f32_samples`].
+///
+/// One loop per depth, sign and byte order, each a plain map from a fixed-size
+/// chunk, so the conversion vectorizes rather than branching per sample.
+fn contiguous_to_f32(
+    src: &[u8],
+    bits: u16,
+    format: SampleFormat,
+    order: ByteOrder,
+    out: &mut [f32],
+) {
+    #[inline(always)]
+    fn run<const N: usize>(src: &[u8], out: &mut [f32], f: impl Fn([u8; N]) -> f32) {
+        for (o, c) in out.iter_mut().zip(src.as_chunks::<N>().0) {
+            *o = f(*c);
+        }
+    }
+    let signed = format == SampleFormat::SignedInt;
+    match (bits, signed, order) {
+        (8, true, _) => run::<1>(src, out, |[b]| b as i8 as f32),
+        (8, false, _) => run::<1>(src, out, |[b]| b as f32),
+        (16, true, ByteOrder::Little) => run::<2>(src, out, |c| i16::from_le_bytes(c) as f32),
+        (16, true, ByteOrder::Big) => run::<2>(src, out, |c| i16::from_be_bytes(c) as f32),
+        (16, false, ByteOrder::Little) => run::<2>(src, out, |c| u16::from_le_bytes(c) as f32),
+        (16, false, ByteOrder::Big) => run::<2>(src, out, |c| u16::from_be_bytes(c) as f32),
+        (64, _, _) => run::<8>(src, out, |c| sample_f32_64(&c, order, format)),
+        _ => run::<4>(src, out, |c| sample_f32(&c, order, format)),
+    }
+}
+
+/// The conversion core shared by the f32 plane readers (`out` pre-sized): one
+/// plane of already-decoded native bytes, to `f32` file units. 64-bit sources
+/// (f64 / i64 / u64) are narrowed to f32 here.
 fn plane_f32_from_native(
     native: &[u8],
     frame: &FrameInfo,
@@ -1234,15 +1308,36 @@ fn plane_f32_from_native(
     // `out` was sized by the caller from the checked count, so its length is
     // the pixel count — no need to recompute it from the file's own numbers.
     let n_pixels = out.len();
+    let bits = frame.bits_per_sample;
     let format = frame.sample_format;
-    let sb = if frame.bits_per_sample == 64 { 8 } else { 4 };
-    if should_parallelize(n_pixels) {
-        out.par_iter_mut().enumerate().for_each(|(i, o)| {
-            *o = wide_sample_f32(&native[(base + i * stride) * sb..], file_order, format, sb)
-        });
+    let sb = bits as usize / 8;
+    if stride == 1 {
+        // Contiguous: every single-sample frame, and every planar plane.
+        let src = &native[base * sb..(base + n_pixels) * sb];
+        if should_parallelize(n_pixels) {
+            const CHUNK: usize = 1 << 16;
+            out.par_chunks_mut(CHUNK)
+                .zip(src.par_chunks(CHUNK * sb))
+                .for_each(|(o, s)| contiguous_to_f32(s, bits, format, file_order, o));
+        } else {
+            contiguous_to_f32(src, bits, format, file_order, out);
+        }
     } else {
-        for (i, o) in out.iter_mut().enumerate() {
-            *o = wide_sample_f32(&native[(base + i * stride) * sb..], file_order, format, sb);
+        // A strided gather out of chunky multi-sample data.
+        let one = |i: usize, o: &mut f32| {
+            let off = (base + i * stride) * sb;
+            contiguous_to_f32(
+                &native[off..off + sb],
+                bits,
+                format,
+                file_order,
+                std::slice::from_mut(o),
+            );
+        };
+        if should_parallelize(n_pixels) {
+            out.par_iter_mut().enumerate().for_each(|(i, o)| one(i, o));
+        } else {
+            out.iter_mut().enumerate().for_each(|(i, o)| one(i, o));
         }
     }
 }

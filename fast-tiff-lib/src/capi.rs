@@ -1255,10 +1255,11 @@ pub unsafe extern "C" fn ftl_read_u16(
     read_into(s, index, range, out, len, all_samples, decode_u16)
 }
 
-/// Frame `index` as raw floats, every sample plane one after another
-/// ([`read_frame_f32`], [`read_planes_f32`]): 32- and 64-bit frames, integer
-/// or float, cast to `float`; 8- and 16-bit are `FTL_FORMAT`. `out` holds
-/// `len` values, at least [`ftl_sample_count`].
+/// Frame `index` as floats in the file's own units, every sample plane one
+/// after another ([`read_frame_f32`], [`read_planes_f32`]): any depth, integer
+/// or float, with no widening, offset or rescale (an 8-bit 200 is 200.0, a
+/// signed 16-bit -1 is -1.0); 16-bit floating point is `FTL_FORMAT`. `out`
+/// holds `len` values, at least [`ftl_sample_count`].
 ///
 /// # Safety
 ///
