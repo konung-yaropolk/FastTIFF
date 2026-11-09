@@ -74,7 +74,7 @@ fn bins_span_the_slider_track_for_a_single_channel_stack() {
     // handle parked at a fraction of the track sits above the same fraction of
     // the plot.
     let stack = load(flat_u16_stack(1, 16, 16, 4000, 0));
-    let settings = stack.display.settings[0];
+    let settings = stack.display.settings()[0];
     let h = &frame_histograms(&stack)[0];
     assert_eq!((h.lo, h.hi), (settings.bounds.lo, settings.bounds.hi));
 
@@ -98,7 +98,7 @@ fn eight_bit_channels_are_widened_onto_the_slider_axis() {
     // pile every pixel of a full-range ramp into bin 0.
     let stack = load(ramp_u8_stack());
     assert_eq!(
-        stack.display.settings[0].kind(),
+        stack.display.settings()[0].kind(),
         fast_tiff_viewer::ChannelKind::Int8
     );
     let h = &frame_histograms(&stack)[0];
@@ -159,7 +159,8 @@ fn overlay_alpha_thins_as_channels_are_added_but_stays_visible() {
 #[test]
 fn an_empty_stack_histograms_to_nothing_rather_than_panicking() {
     let mut stack = load(flat_u16_stack(1, 8, 8, 1, 0));
-    stack.display.settings.clear();
+    // A display with no channels at all.
+    stack.display = fast_tiff_viewer::Display::default();
     assert!(frame_histograms(&stack).is_empty());
     // A frame index past the end is a decode error, not a panic.
     let mut stack = load(flat_u16_stack(1, 8, 8, 1, 0));
@@ -207,7 +208,7 @@ fn channels_share_one_axis_and_land_at_different_places_on_it() {
 fn the_shared_track_covers_every_channels_bounds() {
     let stack = load(multichannel_u16_stack(&[4_000, 30_000, 60_000], 16, 16));
     let (lo, hi): (f32, f32) = fast_tiff_viewer::histogram::shared_track(&stack).into();
-    for s in &stack.display.settings {
+    for s in stack.display.settings() {
         assert!(
             s.bounds.lo >= lo && s.bounds.hi <= hi,
             "{:?} escapes the track {lo}..{hi}",
@@ -256,4 +257,53 @@ fn fill_tint_stays_visible_for_luts_with_a_dark_top_entry() {
         *e = [i as u8; 3];
     }
     assert_eq!(fill_tint(&grey), [255, 255, 255]);
+}
+
+/// The histograms are of every channel, on or off, so a checkbox is a redraw:
+/// what they are keyed on must not move when a channel is switched, or when a
+/// contrast handle is dragged along the distribution. It must move when the
+/// frame does, or when the axes are reassigned — each channel then reads
+/// another plane, and the old bins describe the wrong one.
+#[test]
+fn a_channel_toggle_keeps_the_histograms_and_a_dimension_override_does_not() {
+    use fast_tiff_viewer::histogram::HistogramKey;
+    // Three channels of one frame, which an override can lay out as three
+    // frames of one channel.
+    let mut stack = load(multichannel_u16_stack(&[4_000, 30_000, 60_000], 16, 16));
+    let key = HistogramKey::of(&stack);
+    assert!(key.describes(&stack));
+
+    assert!(stack.display.set_enabled(1, false));
+    assert!(
+        key.describes(&stack),
+        "switching a channel off re-decoded the histograms"
+    );
+    assert_eq!(key, HistogramKey::of(&stack));
+    assert_eq!(
+        frame_histograms(&stack).len(),
+        3,
+        "a channel switched off is still histogrammed, so the plot can leave it out"
+    );
+    assert!(stack
+        .display
+        .set_window(0, fast_tiff_viewer::Window::new(5_000.0, 6_000.0)));
+    assert!(
+        key.describes(&stack),
+        "a contrast drag re-decoded the histograms"
+    );
+
+    // The key is only numbers, so a frame index past this one-frame stack's
+    // end will do to show that the frame is part of it.
+    stack.frame_index = 1;
+    assert!(
+        !key.describes(&stack),
+        "another frame is another distribution"
+    );
+    stack.frame_index = 0;
+
+    fast_tiff_viewer::dimensions::apply_dimension_override(&mut stack, 1, 1, 3);
+    assert!(
+        !key.describes(&stack),
+        "the axes were reassigned and the old bins were kept"
+    );
 }

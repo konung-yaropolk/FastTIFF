@@ -341,8 +341,15 @@ mod worker {
     use fast_tiff_viewer::prefetch::{ChannelJob, Decoded};
     use fast_tiff_viewer::window::{self, Built, WindowWorker};
     use fast_tiff_viewer::worker::CancelToken;
+    use fast_tiff_viewer::Revision;
     use scivis_render::ChannelKind;
     use std::path::PathBuf;
+
+    /// Any one display revision, for a worker driven without a display.
+    const REV: Revision = Revision {
+        layout: 1,
+        enabled: 1,
+    };
 
     fn fixture(name: &str) -> Option<PathBuf> {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -369,9 +376,9 @@ mod worker {
 
     /// Wait for the worker's answer, but never for ever: a worker that silently
     /// produced nothing would otherwise hang the suite instead of failing it.
-    fn wait_for(w: &WindowWorker, frame: usize, want: &Roi, channels: &[usize]) -> Option<Built> {
+    fn wait_for(w: &WindowWorker, frame: usize, want: &Roi, rev: Revision) -> Option<Built> {
         for _ in 0..600 {
-            if let Some(b) = w.take_matching(frame, want, channels) {
+            if let Some(b) = w.take_matching(frame, want, rev) {
                 return Some(b);
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -398,7 +405,6 @@ mod worker {
         };
         let tiff = TiffStack::open(&path).unwrap();
         let jobs = jobs_for(&tiff);
-        let kinds = vec![ChannelKind::Int16];
         // A window off the tile grid and subsampled, so the assembly has to do
         // real work rather than hand back the frame.
         let want = roi(20, 20, 60, 40, 2);
@@ -407,8 +413,8 @@ mod worker {
         let inline = window::assemble(
             &tiff,
             &mut bands,
+            REV.layout,
             &jobs,
-            &kinds,
             &want,
             0,
             &CancelToken::never(),
@@ -417,8 +423,8 @@ mod worker {
 
         let worker = WindowWorker::new(std::sync::Arc::new(TiffStack::open(&path).unwrap()))
             .expect("worker should start");
-        worker.request(0, want, jobs.clone(), kinds.clone());
-        let built = wait_for(&worker, 0, &want, &[0]).expect("worker produced nothing");
+        worker.request(0, want, REV, jobs.clone());
+        let built = wait_for(&worker, 0, &want, REV).expect("worker produced nothing");
 
         assert_eq!(built.roi, want);
         assert_eq!(built.channels, vec![0]);
@@ -434,10 +440,10 @@ mod worker {
     }
 
     /// A finished window is identified by everything that would make it the
-    /// wrong picture — which frame, which rectangle, which channels — and a
-    /// mismatch on any of them must not be uploaded. It must also not be thrown
-    /// away: the view may be about to want it, and discarding it means building
-    /// it again.
+    /// wrong picture — which frame, which rectangle, and which display revision
+    /// (the channel mapping and the channels on) — and a mismatch on any of
+    /// them must not be uploaded. It must also not be thrown away: the view may
+    /// be about to want it, and discarding it means building it again.
     #[test]
     fn a_window_survives_being_asked_for_with_the_wrong_key() {
         let Some(path) = fixture("tld_u16_spp1_p1_grid.tif") else {
@@ -449,26 +455,35 @@ mod worker {
 
         let worker = WindowWorker::new(std::sync::Arc::new(TiffStack::open(&path).unwrap()))
             .expect("worker should start");
-        worker.request(0, want, jobs, vec![ChannelKind::Int16]);
+        worker.request(0, want, REV, jobs);
 
         for _ in 0..600 {
-            assert!(
-                worker.take_matching(1, &want, &[0]).is_none(),
-                "wrong frame"
-            );
+            assert!(worker.take_matching(1, &want, REV).is_none(), "wrong frame");
             assert!(
                 worker
-                    .take_matching(0, &roi(0, 0, 48, 32, 1), &[0])
+                    .take_matching(0, &roi(0, 0, 48, 32, 1), REV)
                     .is_none(),
                 "wrong rect"
             );
+            let toggled = Revision {
+                enabled: REV.enabled + 1,
+                ..REV
+            };
             assert!(
-                worker.take_matching(0, &want, &[0, 1]).is_none(),
-                "wrong channel set"
+                worker.take_matching(0, &want, toggled).is_none(),
+                "a channel was switched since"
+            );
+            let reassigned = Revision {
+                layout: REV.layout + 1,
+                ..REV
+            };
+            assert!(
+                worker.take_matching(0, &want, reassigned).is_none(),
+                "the axes were reassigned since"
             );
             // Every wrong key above has been refused; the right one must still
             // find the window there.
-            if worker.take_matching(0, &want, &[0]).is_some() {
+            if worker.take_matching(0, &want, REV).is_some() {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -496,7 +511,7 @@ mod worker {
 
         let worker = WindowWorker::new(std::sync::Arc::new(TiffStack::open(&path).unwrap()))
             .expect("worker should start");
-        worker.request(0, built_for, jobs, vec![ChannelKind::Int16]);
+        worker.request(0, built_for, REV, jobs);
 
         // The view has moved on to something smaller and inside it — which is
         // what a zoom does between the request and its answer.
@@ -505,7 +520,7 @@ mod worker {
             built_for.serves(&now_needs),
             "the test is only meaningful if it covers"
         );
-        let got = wait_for(&worker, 0, &now_needs, &[0]).expect("a covering window should serve");
+        let got = wait_for(&worker, 0, &now_needs, REV).expect("a covering window should serve");
         assert_eq!(
             got.roi, built_for,
             "and it arrives as the window that was actually built"
@@ -526,24 +541,24 @@ mod worker {
 
         let worker = WindowWorker::new(std::sync::Arc::new(TiffStack::open(&path).unwrap()))
             .expect("worker should start");
-        worker.request(0, built_for, jobs, vec![ChannelKind::Int16]);
+        worker.request(0, built_for, REV, jobs);
 
         for _ in 0..600 {
             // Off to one side: not covered.
             assert!(
                 worker
-                    .take_matching(0, &roi(52, 0, 40, 32, 1), &[0])
+                    .take_matching(0, &roi(52, 0, 40, 32, 1), REV)
                     .is_none(),
                 "not covered"
             );
             // Same ground, finer sampling than the built window holds.
             assert!(
                 worker
-                    .take_matching(0, &roi(0, 0, 48, 32, 2), &[0])
+                    .take_matching(0, &roi(0, 0, 48, 32, 2), REV)
                     .is_none(),
                 "a different stride is a different picture"
             );
-            if worker.take_matching(0, &built_for, &[0]).is_some() {
+            if worker.take_matching(0, &built_for, REV).is_some() {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -561,17 +576,92 @@ mod worker {
         };
         let tiff = TiffStack::open(&path).unwrap();
         let jobs = jobs_for(&tiff);
-        let kinds = vec![ChannelKind::Int16];
 
         let worker = WindowWorker::new(std::sync::Arc::new(TiffStack::open(&path).unwrap()))
             .expect("worker should start");
         let last = roi(0, 0, 100, 70, 1);
         for stride in [8u32, 4, 2] {
-            worker.request(0, roi(0, 0, 100, 70, stride), jobs.clone(), kinds.clone());
+            worker.request(0, roi(0, 0, 100, 70, stride), REV, jobs.clone());
         }
-        worker.request(0, last, jobs.clone(), kinds.clone());
+        worker.request(0, last, REV, jobs.clone());
 
-        let built = wait_for(&worker, 0, &last, &[0]).expect("the newest request was never served");
+        let built = wait_for(&worker, 0, &last, REV).expect("the newest request was never served");
         assert_eq!(built.roi, last);
+    }
+
+    /// Two channels by three timepoints of 64 x 64 u16, plane `i` filled with
+    /// `i * 1000 + 7`, so which IFD a window came from can be read off any of
+    /// its samples.
+    fn two_channel_movie() -> fast_tiff_viewer::Stack {
+        use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
+        let opts = WriterOptions::new(64, 64, SampleType::U16).metadata(StackMetaWrite::new(2, 1));
+        let mut w = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+        for plane in 0..6u16 {
+            w.write_frame_u16(&vec![plane * 1000 + 7; 64 * 64]).unwrap();
+        }
+        let bytes = w.finish().unwrap().into_inner();
+        fast_tiff_viewer::Stack::from_bytes(bytes, "movie.tif".into(), false).unwrap()
+    }
+
+    fn first_sample(plane: &Decoded) -> u16 {
+        match plane {
+            Decoded::U16(v) => v[0],
+            _ => panic!("16-bit samples should come back as U16"),
+        }
+    }
+
+    /// The gap the display revision closes. A window asked for before the axes
+    /// were reassigned — still being built, or finished and not yet taken —
+    /// holds the old mapping's planes, and once the override lands it must not
+    /// be shown: frame 1's channel 0 was IFD 2 and is now IFD 3. Before the
+    /// revision was part of the key, it was taken (same frame, same rectangle,
+    /// same channel list), and a repeat request for that key was a no-op, so
+    /// nothing even rebuilt it.
+    ///
+    /// Nor may the window asked for under the new mapping be cut from the bands
+    /// the worker decoded for the old one. They are keyed by display channel,
+    /// so the same channel list over the same rows looks like a hit; nothing
+    /// outside the worker can reach its cache to clear it.
+    #[test]
+    fn a_window_from_before_a_dimension_override_is_not_taken_after_it() {
+        use fast_tiff_viewer::prefetch::build_jobs;
+        let mut stack = two_channel_movie();
+        let worker =
+            WindowWorker::new(std::sync::Arc::clone(&stack.tiff)).expect("worker should start");
+        let whole = Roi::full(64, 64);
+        let before = stack.display.revision();
+        worker.request(1, whole, before, build_jobs(&stack, 1, &[true, true]));
+
+        fast_tiff_viewer::dimensions::apply_dimension_override(&mut stack, 3, 1, 2);
+        let after = stack.display.revision();
+        assert_ne!(after.layout, before.layout, "an override moves the layout");
+
+        let mut old = None;
+        for _ in 0..600 {
+            assert!(
+                worker.take_matching(1, &whole, after).is_none(),
+                "a window of the old channel mapping was taken after the override"
+            );
+            if let Some(b) = worker.take_matching(1, &whole, before) {
+                old = Some(b);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let old = old.expect("the window never arrived, so nothing was proved");
+        assert_eq!(first_sample(&old.planes[0]), 2007, "channel 0 read IFD 2");
+
+        // The same channel list as before, so the worker's bands for the old
+        // mapping would be a hit if they were still held.
+        let jobs = build_jobs(&stack, 1, &[true, true, false]);
+        assert_eq!(jobs.iter().map(|j| j.channel).collect::<Vec<_>>(), [0, 1]);
+        worker.request(1, whole, after, jobs);
+        let new = wait_for(&worker, 1, &whole, after).expect("the new window was never built");
+        assert_eq!(
+            first_sample(&new.planes[0]),
+            3007,
+            "channel 0 reads IFD 3 now, not a band decoded from IFD 2"
+        );
+        assert_eq!(first_sample(&new.planes[1]), 4007, "and channel 1 IFD 4");
     }
 }

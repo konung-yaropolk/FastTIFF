@@ -16,12 +16,13 @@
 //! channels that share a range the two are identical anyway.
 //!
 //! Decoding is the expensive part, so a caller should hold the result and
-//! recompute only when the frame — or the interpretation of it — changes.
+//! recompute only when the frame — or the interpretation of it — changes:
+//! [`HistogramKey`] says exactly when that is.
 
 use crate::prefetch::{build_jobs, decode_jobs, Decoded};
 use crate::stack::Stack;
 use crate::units::{SampleUnits, Window};
-use scivis_render::{ChannelKind, Lut};
+use scivis_render::{Lut, MAX_CHANNELS};
 
 /// Bins per histogram. Matches the 256 entries of a [`Lut`], so one bin is
 /// exactly one LUT entry for 8-bit and palette data.
@@ -54,24 +55,65 @@ pub struct Histogram {
     pub counted: u64,
 }
 
+/// What [`frame_histograms`] is a function of, for a frontend that holds the
+/// histograms and has to know when to build them again: the frame, the
+/// channel layout it is decoded through
+/// ([`Revision::layout`](crate::display::Revision::layout)), and each
+/// channel's slider track, the axis the bins are laid out on.
+///
+/// Not which channels are on: every channel is histogrammed, on or off, so a
+/// frontend that plots only the enabled ones honours a checkbox by redrawing
+/// rather than decoding the frame again. And not the contrast windows, which
+/// slide along the distribution rather than change it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HistogramKey {
+    frame: usize,
+    layout: u64,
+    bounds: Vec<Window>,
+}
+
+impl HistogramKey {
+    /// The key of `stack`'s histograms as it stands.
+    pub fn of(stack: &Stack) -> Self {
+        HistogramKey {
+            frame: stack.frame_index,
+            layout: stack.display.revision().layout,
+            bounds: stack.display.settings().iter().map(|s| s.bounds).collect(),
+        }
+    }
+
+    /// Whether histograms built under this key still describe `stack`: the
+    /// same as `*self == HistogramKey::of(stack)`, without building one, as a
+    /// frontend asks on every repaint.
+    pub fn describes(&self, stack: &Stack) -> bool {
+        self.frame == stack.frame_index
+            && self.layout == stack.display.revision().layout
+            && self
+                .bounds
+                .iter()
+                .eq(stack.display.settings().iter().map(|s| &s.bounds))
+    }
+}
+
 /// Histogram every display channel of the stack's current frame.
 ///
 /// Returns an empty vec when nothing is loaded or the frame fails to decode —
 /// a histogram is a read-only view, so a decode error here is not worth
 /// surfacing separately; the image itself will already be reporting it.
+/// What the result depends on, and so when to call this again, is
+/// [`HistogramKey`].
 pub fn frame_histograms(stack: &Stack) -> Vec<Histogram> {
-    let n = stack.display.settings.len();
-    if n == 0 {
+    let settings = stack.display.settings();
+    if settings.is_empty() {
         return Vec::new();
     }
     // Every channel, including any the user has switched off. A frontend that
     // only plots the enabled ones can then honour a checkbox by redrawing
     // instead of decoding the frame again, which is what makes toggling one
-    // feel instant.
-    let enabled = vec![true; n];
-    let kinds: Vec<ChannelKind> = stack.display.settings.iter().map(|s| s.kind()).collect();
+    // feel instant — and is why `HistogramKey` leaves the enabled set out.
+    let every = [true; MAX_CHANNELS];
     let track = shared_track(stack);
-    let jobs = build_jobs(stack, stack.frame_index, &enabled, &kinds);
+    let jobs = build_jobs(stack, stack.frame_index, &every);
     let Ok(decoded) = decode_jobs(
         &stack.tiff.data,
         &stack.tiff.frames,
@@ -83,7 +125,7 @@ pub fn frame_histograms(stack: &Stack) -> Vec<Histogram> {
     jobs.iter()
         .zip(decoded)
         .map(|(job, data)| {
-            let units = stack.display.settings[job.channel].units;
+            let units = settings[job.channel].units;
             bin(job.channel, &data, track, units)
         })
         .collect()
@@ -96,7 +138,7 @@ pub fn frame_histograms(stack: &Stack) -> Vec<Histogram> {
 /// axis or place a marker, and recomputing it there would be one more place for
 /// the two to disagree.
 pub fn shared_track(stack: &Stack) -> Window {
-    let settings = &stack.display.settings;
+    let settings = stack.display.settings();
     let track = settings
         .iter()
         .map(|s| s.bounds)

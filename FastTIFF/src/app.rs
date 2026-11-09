@@ -438,15 +438,15 @@ const HIST_PLAYBACK_INTERVAL: f64 = 0.25;
 ///
 /// Building these decodes every channel of the frame, which is far too much to
 /// redo per repaint, so they are held until something the plot is a *function
-/// of* moves: the frame, the plane interpretation (`prefetch_gen` bumps on a
-/// dimension-order change), or a channel's track — the axis the bins are laid
-/// out on. Contrast is deliberately not in the key: the handles slide along the
-/// distribution rather than changing it, which is the whole reason for showing
-/// the two together.
+/// of* moves: the frame, the channel layout (a dimension-order change), or a
+/// channel's track — the axis the bins are laid out on. That is
+/// [`HistogramKey`](fast_tiff_viewer::histogram::HistogramKey). Contrast is
+/// deliberately not in the key: the handles slide along the distribution rather
+/// than changing it, which is the whole reason for showing the two together.
+/// Nor is which channels are on: every channel is binned, and the plot leaves
+/// out the ones switched off, so a checkbox is a redraw.
 struct HistCache {
-    frame: usize,
-    generation: u64,
-    bounds: Vec<fast_tiff_viewer::Window>,
+    key: fast_tiff_viewer::histogram::HistogramKey,
     hists: Vec<fast_tiff_viewer::Histogram>,
 }
 
@@ -1620,9 +1620,10 @@ impl ViewerApp {
         if !self.core.can_show_volume() {
             self.show_render_settings = false;
         }
-        // The cached histograms describe the *previous* stack, and a new one
-        // starts at frame 0 generation 0 — exactly the key the old cache holds,
-        // so staleness alone would not catch it.
+        // The cached histograms describe the *previous* stack. Its key would
+        // not match the new one (display revisions are never reused), but
+        // there is no reason to keep the old bins until the next repaint finds
+        // that out.
         self.hist = None;
     }
 
@@ -1639,13 +1640,7 @@ impl ViewerApp {
             self.hist = None;
             return;
         };
-        let bounds: Vec<fast_tiff_viewer::Window> =
-            loaded.display.settings.iter().map(|s| s.bounds).collect();
-        let fresh = self.hist.as_ref().is_some_and(|c| {
-            c.frame == loaded.frame_index
-                && c.generation == loaded.prefetch_gen
-                && c.bounds == bounds
-        });
+        let fresh = self.hist.as_ref().is_some_and(|c| c.key.describes(loaded));
         if fresh {
             return;
         }
@@ -1655,9 +1650,7 @@ impl ViewerApp {
             return;
         }
         self.hist = Some(HistCache {
-            frame: loaded.frame_index,
-            generation: loaded.prefetch_gen,
-            bounds,
+            key: fast_tiff_viewer::histogram::HistogramKey::of(loaded),
             hists: fast_tiff_viewer::histogram::frame_histograms(loaded),
         });
         self.hist_built_at = now;
@@ -3128,7 +3121,7 @@ impl ViewerApp {
                     let meta = &loaded.tiff.meta;
                     // What the viewer is actually showing, which is not the
                     // file's raw claim whenever an axis was reclassified.
-                    let dims = loaded.display.dims;
+                    let dims = loaded.display.dims();
                     // Reflect a toggle click made earlier in this same toolbar
                     // (the 2D/3D buttons run before this), so the layout updates
                     // on the click frame rather than one frame later.
@@ -3155,7 +3148,7 @@ impl ViewerApp {
                             .on_hover_text("Zoom (Ctrl+scroll to change)");
                     }
                     ui.separator();
-                    let channels_desc = if loaded.display.cmyk {
+                    let channels_desc = if loaded.display.cmyk() {
                         // Say what was read *and* what is shown: the file holds
                         // four ink plates, the viewer shows three converted
                         // components, and a printing user will want to know the
@@ -3167,7 +3160,7 @@ impl ViewerApp {
                         // status line IS in the font, which makes that
                         // gap easy to assume away.
                         "CMYK->RGB".to_string()
-                    } else if loaded.display.rgb {
+                    } else if loaded.display.rgb() {
                         "RGB".to_string()
                     } else {
                         format!("{} channel(s)", dims.channels)
@@ -3293,7 +3286,7 @@ impl ViewerApp {
                     .core
                     .stack
                     .as_ref()
-                    .is_some_and(|l| l.display.dims.slices > 1);
+                    .is_some_and(|l| l.display.dims().slices > 1);
                 if !is_4d {
                     self.core.playback.playing = false;
                     self.core.playback.last_time = None;
@@ -3415,13 +3408,13 @@ impl ViewerApp {
             ui.add_space(4.0);
 
             ui.horizontal(|ui| {
-                let max_frame = loaded.display.dims.frames.saturating_sub(1);
-                let has_multiple_frames = loaded.display.dims.frames > 1;
+                let max_frame = loaded.display.dims().frames.saturating_sub(1);
+                let has_multiple_frames = loaded.display.dims().frames > 1;
                 // In 3D the frame axis is the volume's depth, so play/step/scrub
                 // are meaningless unless the stack has a separate time axis
                 // (`slices > 1`). Grey them out otherwise.
                 let frame_nav_enabled =
-                    has_multiple_frames && !(view_is_volume && loaded.display.dims.slices <= 1);
+                    has_multiple_frames && !(view_is_volume && loaded.display.dims().slices <= 1);
 
                 let toggle_size = egui::vec2(20.0, 20.0);
                 let toggle_response = ui
@@ -3520,11 +3513,11 @@ impl ViewerApp {
                     // Shift jumps ~5% of the stack at a time (min 1 frame) instead
                     // of 1, matching the Shift+wheel fast-scroll step.
                     let step = if i.modifiers.shift {
-                        ((loaded.display.dims.frames as f64 * FAST_SCROLL_RATE).round() as usize).max(1)
+                        ((loaded.display.dims().frames as f64 * FAST_SCROLL_RATE).round() as usize).max(1)
                     } else {
                         1
                     };
-                    let max_frame = loaded.display.dims.frames.saturating_sub(1);
+                    let max_frame = loaded.display.dims().frames.saturating_sub(1);
                     if i.key_pressed(egui::Key::ArrowRight) {
                         loaded.frame_index = (loaded.frame_index + step).min(max_frame);
                     }
@@ -3553,11 +3546,11 @@ impl ViewerApp {
                     // meaningless for RGB, where the "channels" are fixed color
                     // planes — so the dropdown and pseudocolor toggle are hidden
                     // there.
-                    if !loaded.display.rgb {
+                    if !loaded.display.rgb() {
                         ui.label("Dimension order:");
-                        let c = loaded.display.dims.channels;
-                        let z = loaded.display.dims.slices;
-                        let f = loaded.display.dims.frames;
+                        let c = loaded.display.dims().channels;
+                        let z = loaded.display.dims().slices;
+                        let f = loaded.display.dims().frames;
                         // When the file has a real Z axis (as loaded — see
                         // `has_z_axis`), offer every assignment of the three
                         // counts to the three roles; otherwise just the
@@ -3619,8 +3612,8 @@ impl ViewerApp {
                     // frames in 2D; in 3D the frame axis is the volume's depth,
                     // so time only exists for 4D stacks (`slices > 1`) — matches
                     // the play/scrub controls' enable logic above.
-                    let fps_playable = loaded.display.dims.frames > 1
-                        && !(view_is_volume && loaded.display.dims.slices <= 1);
+                    let fps_playable = loaded.display.dims().frames > 1
+                        && !(view_is_volume && loaded.display.dims().slices <= 1);
                     if fps_playable {
                         if row_has_items {
                             ui.separator();
@@ -3759,7 +3752,7 @@ impl ViewerApp {
                         metadata_toggle = true;
                     }
                 });
-                if !loaded.display.rgb {
+                if !loaded.display.rgb() {
                     ui.label(
                         RichText::new(
                             "Channels are guessed automatically (6 or fewer = channels, more = time); \
@@ -3962,7 +3955,7 @@ impl ViewerApp {
                 .core
                 .stack
                 .as_ref()
-                .is_some_and(|l| l.display.dims.frames < 2)
+                .is_some_and(|l| l.display.dims().frames < 2)
         {
             self.core.view_mode = ViewMode::Movie;
             self.core.playback.playing = false;
@@ -4553,7 +4546,7 @@ impl ViewerApp {
                                 .core
                                 .stack
                                 .as_ref()
-                                .map(|l| l.display.dims.frames)
+                                .map(|l| l.display.dims().frames)
                                 .unwrap_or(1);
                             let fast_step = (n_frames as f64 * FAST_SCROLL_RATE).max(1.0);
                             // glide < 0 is scroll-down → advance frames. Advance at a
@@ -4624,7 +4617,7 @@ impl ViewerApp {
 
         if scroll_step != 0 {
             if let Some(loaded) = &mut self.core.stack {
-                let max_frame = loaded.display.dims.frames.saturating_sub(1) as i64;
+                let max_frame = loaded.display.dims().frames.saturating_sub(1) as i64;
                 let target = (loaded.frame_index as i64 + scroll_step as i64).clamp(0, max_frame);
                 loaded.frame_index = target as usize;
             }

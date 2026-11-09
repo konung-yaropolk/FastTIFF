@@ -67,9 +67,9 @@ fn stack(channels: usize, slices: usize, frames: usize) -> Stack {
     // test never silently exercises a different one than its name claims.
     assert_eq!(
         (
-            s.display.dims.channels,
-            s.display.dims.slices,
-            s.display.dims.frames
+            s.display.dims().channels,
+            s.display.dims().slices,
+            s.display.dims().frames
         ),
         (channels.max(1), slices.max(1), frames.max(1)),
         "the stack did not resolve to the requested shape"
@@ -105,9 +105,9 @@ fn stack_u16(channels: usize, slices: usize, frames: usize) -> Stack {
     let s = Stack::from_bytes(bytes, "probe16.tif".into(), false).expect("stack should open");
     assert_eq!(
         (
-            s.display.dims.channels,
-            s.display.dims.slices,
-            s.display.dims.frames
+            s.display.dims().channels,
+            s.display.dims().slices,
+            s.display.dims().frames
         ),
         (channels.max(1), slices.max(1), frames.max(1)),
         "the stack did not resolve to the requested shape"
@@ -693,8 +693,8 @@ fn plot_third_axis_is_installed() {
 #[test]
 fn plot_third_axis_refuses_a_stack_with_no_third_dimension() {
     let s = stack(1, 1, 1);
-    assert_eq!(s.display.dims.slices, 1);
-    assert_eq!(s.display.dims.frames, 1);
+    assert_eq!(s.display.dims().slices, 1);
+    assert_eq!(s.display.dims().frames, 1);
 
     let mut h = host(&s, 0);
     let err = builtin::PlotAxis
@@ -811,7 +811,7 @@ fn plot_third_axis_falls_back_to_frame_numbers() {
 #[test]
 fn plot_third_axis_can_walk_z_on_a_4d_stack() {
     let s = stack(2, 3, 2);
-    assert_eq!((s.display.dims.slices, s.display.dims.frames), (3, 2));
+    assert_eq!((s.display.dims().slices, s.display.dims().frames), (3, 2));
 
     // `axes` offers the longer first, so Z (3) precedes T (2) and is index 0.
     let mut h = host(&s, 0);
@@ -1001,7 +1001,7 @@ fn stabilize_moves_every_channel_by_the_same_amount() {
     let (ly, lx) = (64u32, 64u32);
     let path = [(0i32, 0i32), (3, -2), (-4, 1)];
     let s = wandering_stack(ly, lx, &path, 2);
-    assert_eq!(s.display.dims.channels, 2);
+    assert_eq!(s.display.dims().channels, 2);
 
     let mut h = host(&s, 0);
     let mut params = Params::new();
@@ -2111,7 +2111,7 @@ fn a_plugin_result_reopens_without_a_plane_mismatch() {
     // Z folds into time, which is what makes the result's shape differ from
     // the description it carries.
     assert_eq!(
-        (s.display.dims.slices, s.display.dims.frames),
+        (s.display.dims().slices, s.display.dims().frames),
         (1, n),
         "the fixture must be the folded shape the bug needed"
     );
@@ -2138,9 +2138,9 @@ fn a_plugin_result_reopens_without_a_plane_mismatch() {
     );
     assert_eq!(
         (
-            reopened.display.dims.channels,
-            reopened.display.dims.slices,
-            reopened.display.dims.frames
+            reopened.display.dims().channels,
+            reopened.display.dims().slices,
+            reopened.display.dims().frames
         ),
         (1, 1, n)
     );
@@ -2259,9 +2259,9 @@ fn a_deconvolved_stack_reopens_calibrated_and_undamaged() {
     );
     assert_eq!(
         (
-            reopened.display.dims.channels,
-            reopened.display.dims.slices,
-            reopened.display.dims.frames
+            reopened.display.dims().channels,
+            reopened.display.dims().slices,
+            reopened.display.dims().frames
         ),
         (1, 1, n)
     );

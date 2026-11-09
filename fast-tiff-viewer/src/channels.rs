@@ -500,7 +500,7 @@ pub fn auto_contrast(loaded: &mut Stack, hists: &[Histogram]) {
         return;
     }
     for h in hists {
-        let Some(s) = loaded.display.settings.get_mut(h.channel) else {
+        let Some(bounds) = loaded.display.settings().get(h.channel).map(|s| s.bounds) else {
             continue;
         };
         let Some(fitted) = auto_window(h) else {
@@ -509,13 +509,14 @@ pub fn auto_contrast(loaded: &mut Stack, hists: &[Histogram]) {
         // The histogram spans the union of every channel track, so a window
         // fitted on it can reach past this one. Clamping keeps both handles
         // somewhere the slider can actually draw them.
-        s.window = fitted.clamp_to(s.bounds);
+        let mut window = fitted.clamp_to(bounds);
         // Both ends landing on the same side of the track would leave an empty
         // window, which divides by zero on the way to the shader. Fall back to
         // showing everything, which is at least a picture.
-        if s.window.hi <= s.window.lo {
-            s.window = s.bounds;
+        if window.hi <= window.lo {
+            window = bounds;
         }
+        loaded.display.set_window(h.channel, window);
     }
 }
 
@@ -538,8 +539,9 @@ pub fn reset_contrast(loaded: &mut Stack) {
     if loaded.display.palette {
         return;
     }
-    for s in loaded.display.settings.iter_mut() {
-        s.window = s.initial;
+    for c in 0..loaded.display.channel_count() {
+        let initial = loaded.display.settings()[c].initial;
+        loaded.display.set_window(c, initial);
     }
 }
 
@@ -547,7 +549,7 @@ pub fn reset_contrast(loaded: &mut Stack) {
 /// multi-channel grayscale stacks (composite files already carry colors; RGB is
 /// handled separately) can be optionally tinted with the channel palette.
 pub fn pseudocolor_applicable(loaded: &Stack) -> bool {
-    !loaded.display.rgb
+    !loaded.display.rgb()
         && loaded.display.channel_count() > 1
         && loaded.display.mode == fast_tiff_lib::DisplayMode::Grayscale
         // The file's own per-channel LUTs win: don't override them with the
@@ -562,7 +564,7 @@ pub fn pseudocolor_applicable(loaded: &Stack) -> bool {
 /// with grayscale / channel colors / colormaps available to override. The
 /// multi-channel case is covered by the pseudocolor toggle instead.
 pub fn gray_lut_applicable(loaded: &Stack) -> bool {
-    !loaded.display.rgb && loaded.display.channel_count() == 1
+    !loaded.display.rgb() && loaded.display.channel_count() == 1
 }
 
 /// Sets the per-channel LUTs of an applicable (multi-channel grayscale) stack:

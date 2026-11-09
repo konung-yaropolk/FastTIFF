@@ -38,9 +38,9 @@ fn a_result_round_trips_through_the_ordinary_reader() {
     assert_eq!(stack.dimensions(), Some((5, 4)));
     assert_eq!(
         (
-            stack.display.dims.channels,
-            stack.display.dims.slices,
-            stack.display.dims.frames
+            stack.display.dims().channels,
+            stack.display.dims().slices,
+            stack.display.dims().frames
         ),
         (2, 3, 2),
         "the declared axes must survive the round trip"

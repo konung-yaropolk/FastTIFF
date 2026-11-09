@@ -572,7 +572,7 @@ fn frame_bytes(first: &FrameInfo, samples: Samples) -> usize {
 /// recoloured, is saved as it is being looked at — which is the only reading of
 /// "save" that does not surprise someone who just changed something.
 fn metadata_of(stack: &SaveSource) -> StackMetaWrite {
-    let dims = stack.display.dims;
+    let dims = stack.display.dims();
     let meta = &stack.tiff.meta;
     let mut out = StackMetaWrite::new(dims.channels, dims.slices).mode(stack.display.mode);
 
@@ -603,7 +603,7 @@ fn metadata_of(stack: &SaveSource) -> StackMetaWrite {
     // user did not touch. In ImageJ's units for the samples, which are the
     // file's own except for signed 16-bit (see `SampleUnits::to_imagej`), and
     // the same definition opening a file reads the range back with.
-    if let Some(first) = stack.display.settings.first() {
+    if let Some(first) = stack.display.settings().first() {
         let (lo, hi) = first.units.to_imagej(first.window);
         out = out.range(lo, hi);
     }
@@ -620,7 +620,7 @@ fn metadata_of(stack: &SaveSource) -> StackMetaWrite {
     // The overlay — the file's own points, or the point counter's — as ImageJ
     // overlay ROIs, each where ImageJ will draw it on these axes.
     if !stack.overlay.is_empty() {
-        let rgb = stack.display.rgb;
+        let rgb = stack.display.rgb();
         // The axes the file was written with, which a hyperstack position read
         // from it is in.
         let read_in = Dims {

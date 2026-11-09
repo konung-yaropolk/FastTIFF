@@ -13,6 +13,7 @@
 
 use crate::bandcache;
 use crate::camera::{build_volume_params, VolumeChannel};
+use crate::display::{ChannelMasks, Revision};
 use crate::prefetch::{
     build_jobs, decode_jobs_borrowed, ChannelJob, Decoded, PrefetchResult, Samples,
 };
@@ -54,15 +55,25 @@ impl Viewer {
             return outcome;
         };
 
-        let n_channels = loaded.display.settings.len();
+        // The display model as of this call, read once: every cache consulted
+        // and every request made below is keyed on this revision, so they all
+        // agree on which version of the model they serve. Nothing in this call
+        // changes the model; the frontend's toggles and overrides have already
+        // moved it, at the moment they were made.
+        //
+        // With it, each channel's GPU texture kind (R8Uint / R16Uint / R32F),
+        // picked from the source format at load time — drives both texture
+        // allocation and the decode path below — and which channels are on.
+        // Held by the display and copied out, so no repaint collects them.
+        let current = Current {
+            revision: loaded.display.revision(),
+            masks: loaded.display.masks(),
+        };
+        let kinds = current.masks.kinds();
+        let n_channels = current.masks.len();
         if n_channels == 0 {
             return outcome;
         }
-
-        // Per-channel GPU texture kind (R8Uint / R16Uint / R32F), picked from the
-        // source format at load time — drives both texture allocation and the
-        // decode path below.
-        let kinds: Vec<ChannelKind> = loaded.display.settings.iter().map(|s| s.kind()).collect();
 
         // Work out what should be resident for this view, and size the textures
         // to it. For everything that fits a texture this is the whole frame at
@@ -75,14 +86,14 @@ impl Viewer {
             .map_or((0, 0), |f| (f.width, f.height));
         let large_mode = self.large_image_mode;
         let target = plan_residency(
-            loaded, renderer, &kinds, uv_offset, uv_scale, viewport, large_mode,
+            loaded, renderer, current, uv_offset, uv_scale, viewport, large_mode,
         );
         // Size the textures to what is being *shown*, not to what is being
         // prepared: resizing now would blank the picture for as long as the new
         // window takes to build, which is the stall this avoids.
         if let Some(r) = target {
             let (tw, th) = r.show.texture_size();
-            renderer.ensure_size(tw, th, &kinds);
+            renderer.ensure_size(tw, th, kinds);
         }
 
         if !loaded.luts_uploaded {
@@ -121,7 +132,7 @@ impl Viewer {
         if let Some(r) = target {
             let read_ahead = self.playback.playing && !self.decode_parallel;
             let moving = self.view_moving;
-            match sync_movie(loaded, renderer, &kinds, read_ahead, r, large_mode, moving) {
+            match sync_movie(loaded, renderer, current, read_ahead, r, large_mode, moving) {
                 Ok(pending) => outcome.needs_repaint |= pending,
                 Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
             }
@@ -134,21 +145,25 @@ impl Viewer {
         // conversion is [`crate::units::SampleUnits::to_texture`], shared with
         // the CPU compositor so the two cannot drift. `is_float` tells the
         // shader which texture to sample; the two integer formats share one
-        // sampler.
-        let uniforms: Vec<ChannelUniform> = loaded
-            .display
-            .settings
-            .iter()
-            .map(|s| {
-                let (min, max) = s.units.to_texture(s.window);
-                ChannelUniform {
-                    min,
-                    max,
-                    enabled: s.enabled,
-                    is_float: s.kind() == ChannelKind::Float,
-                }
-            })
-            .collect();
+        // sampler. Bounded by MAX_CHANNELS, so built on the stack: this runs
+        // every repaint.
+        let blank = ChannelUniform {
+            min: 0.0,
+            max: 0.0,
+            enabled: false,
+            is_float: false,
+        };
+        let mut uniforms = [blank; MAX_CHANNELS];
+        for (slot, s) in uniforms.iter_mut().zip(loaded.display.settings()) {
+            let (min, max) = s.units.to_texture(s.window);
+            *slot = ChannelUniform {
+                min,
+                max,
+                enabled: s.enabled,
+                is_float: s.kind() == ChannelKind::Float,
+            };
+        }
+        let uniforms = &uniforms[..n_channels];
         // The frontend asked in units of the whole image; the shader has to be
         // told where that lands on whatever is actually resident.
         //
@@ -162,9 +177,18 @@ impl Viewer {
             (Some(r), Some(f)) => r.map_uv(f.width, f.height, uv_offset, uv_scale),
             _ => (uv_offset, uv_scale),
         };
-        renderer.set_params(&uniforms, n_channels as u32, off, scale);
+        renderer.set_params(uniforms, n_channels as u32, off, scale);
         outcome
     }
+}
+
+/// The display model as one [`Viewer::sync`] call sees it, read once at the
+/// top: the revision every cache and request is keyed on, and the per-channel
+/// formats and flags that go with it.
+#[derive(Clone, Copy)]
+struct Current {
+    revision: Revision,
+    masks: ChannelMasks,
 }
 
 /// Decide which window of the current frame should be on the GPU, recording it
@@ -183,7 +207,7 @@ impl Viewer {
 fn plan_residency(
     loaded: &mut Stack,
     renderer: &Renderer,
-    kinds: &[ChannelKind],
+    current: Current,
     uv_offset: [f32; 2],
     uv_scale: [f32; 2],
     viewport: [f32; 2],
@@ -195,7 +219,12 @@ fn plan_residency(
 
     // Every display channel gets a full-size texture, disabled or not, so the
     // per-texel cost is the sum over all of them.
-    let bytes_per_texel: usize = kinds.iter().map(|k| k.bytes_per_sample()).sum();
+    let bytes_per_texel: usize = current
+        .masks
+        .kinds()
+        .iter()
+        .map(|k| k.bytes_per_sample())
+        .sum();
 
     // The ordinary case: it fits, so keep doing exactly what was done before.
     // Nothing below this line runs for an image of ordinary size — no planning,
@@ -221,13 +250,11 @@ fn plan_residency(
     // nobody holds — and the upload site, finding nothing to upload, would fall
     // through to assembling that frame-spanning window synchronously, which is
     // slower than the case this exists to avoid. Dropped rather than merely
-    // skipped, since a stale overview will never become fresh again and the
-    // memory is better returned.
+    // skipped, since a stale overview will never become fresh again (the
+    // revision only moves forward) and the memory is better returned.
     let frame_index = loaded.frame_index;
-    let gen = loaded.prefetch_gen;
-    let enabled: Vec<bool> = loaded.display.settings.iter().map(|s| s.enabled).collect();
     let overview = match &loaded.overview {
-        Some(o) if o.matches(frame_index, gen, &enabled, kinds) => Some(o.built.roi),
+        Some(o) if o.matches(frame_index, current.revision) => Some(o.built.roi),
         Some(_) => {
             loaded.overview = None;
             None
@@ -248,21 +275,15 @@ fn plan_residency(
 fn sync_movie(
     loaded: &mut Stack,
     renderer: &mut Renderer,
-    kinds: &[ChannelKind],
+    current: Current,
     read_ahead: bool,
     plan: Serving,
     mode: roi::LargeImageMode,
     view_moving: bool,
 ) -> anyhow::Result<bool> {
     let roi = plan.show;
-    // Skip disabled channels (the shader multiplies them out). Re-upload when
-    // the frame moves *or* the enabled set changes; an enabled-set change also
-    // bumps the prefetch generation so an in-flight prefetch under the old set
-    // is recognized as stale.
-    let enabled: Vec<bool> = loaded.display.settings.iter().map(|s| s.enabled).collect();
-    if loaded.last_enabled != enabled {
-        loaded.prefetch_gen = loaded.prefetch_gen.wrapping_add(1);
-    }
+    let revision = current.revision;
+    let (kinds, enabled) = (current.masks.kinds(), current.masks.enabled());
     let mut result = Ok(());
     let frame_index = loaded.frame_index;
     let (fw, fh) = loaded
@@ -270,13 +291,15 @@ fn sync_movie(
         .frames
         .first()
         .map_or((0, 0), |f| (f.width, f.height));
-    // A window smaller than the frame has to be re-cut when the view leaves it,
-    // as well as when the frame or the channel set changes.
+    // Skip disabled channels (the shader multiplies them out). Re-upload when
+    // the frame moves *or* the display revision does: a channel switched on
+    // has nothing in its texture yet, and after a reinterpretation of the axes
+    // every channel may read another IFD. A window smaller than the frame
+    // also has to be re-cut when the view leaves it.
     let window_moved = loaded.roi != Some(roi);
     let partial = !window::covers_whole_frame(&roi, fw, fh);
-    if loaded.last_uploaded != Some(frame_index) || loaded.last_enabled != enabled || window_moved {
-        let want_gen = loaded.prefetch_gen;
-        let jobs = build_jobs(loaded, frame_index, &enabled, kinds);
+    if loaded.last_uploaded != Some((frame_index, revision)) || window_moved {
+        let jobs = build_jobs(loaded, frame_index, enabled);
 
         let channels: Vec<usize> = jobs.iter().map(|j| j.channel).collect();
         // The window asked for is the overview already held, cut to exactly
@@ -288,7 +311,7 @@ fn sync_movie(
         let from_overview = loaded
             .overview
             .as_ref()
-            .is_some_and(|o| o.can_upload(&roi, frame_index, want_gen, &enabled, kinds, &channels));
+            .is_some_and(|o| o.can_upload(&roi, frame_index, revision));
         if from_overview {
             let (tw, th) = roi.texture_size();
             let o = loaded.overview.as_ref().expect("checked");
@@ -307,7 +330,8 @@ fn sync_movie(
             let assembled = {
                 let Stack { tiff, bands, .. } = &mut *loaded;
                 let inline = CancelToken::never();
-                window::assemble(tiff, bands, &jobs, kinds, &roi, frame_index, &inline)
+                let layout = revision.layout;
+                window::assemble(tiff, bands, layout, &jobs, &roi, frame_index, &inline)
             };
             match assembled {
                 Ok(planes) => {
@@ -323,19 +347,19 @@ fn sync_movie(
                         channels,
                         planes,
                     };
-                    capture_overview(loaded, built, fw, fh, &enabled, kinds, mode);
+                    capture_overview(loaded, built, fw, fh, revision, mode);
                 }
                 Err(e) => result = Err(e),
             }
         } else {
             // The whole frame is wanted, so take the ordinary path — including
             // the prefetched frame when one is ready and matches exactly
-            // (generation, frame index, and channel layout). A mismatch only
-            // costs a little redundant work; it can never upload the wrong
-            // frame.
+            // (display revision, frame index, and channel layout). A mismatch
+            // only costs a little redundant work; it can never upload the
+            // wrong frame.
             let mut used_prefetch = false;
             if let Some(p) = &loaded.prefetch {
-                if let Some(ready) = p.take_matching(want_gen, frame_index) {
+                if let Some(ready) = p.take_matching(revision, frame_index) {
                     if prefetch_matches(&ready, &jobs) {
                         for ch in &ready.channels {
                             upload(
@@ -378,7 +402,7 @@ fn sync_movie(
             }
         }
         loaded.roi = Some(roi);
-        loaded.last_uploaded = Some(frame_index);
+        loaded.last_uploaded = Some((frame_index, revision));
     }
 
     // Read-ahead: while playing and keeping up (serial regime), ask the worker
@@ -390,21 +414,21 @@ fn sync_movie(
             let n = loaded.frame_count();
             if n > 1 {
                 let next = (loaded.frame_index + 1) % n;
-                let next_jobs = build_jobs(loaded, next, &enabled, kinds);
-                p.request(loaded.prefetch_gen, next, next_jobs);
+                let next_jobs = build_jobs(loaded, next, enabled);
+                p.request(revision, next, next_jobs);
             }
         }
     }
-    loaded.last_enabled.clone_from(&enabled);
 
     // A finer window was asked for and what is on screen is the older, coarser
     // one. Take the finished article if it has landed, otherwise ask for it and
-    // keep drawing until it does.
+    // keep drawing until it does. All of it under this call's revision: a
+    // window built, or still being built, before an override or a toggle is
+    // neither taken nor counted as in flight.
     let mut pending = false;
     if !plan.ready && plan.want != plan.show {
         let frame_index = loaded.frame_index;
-        let jobs = build_jobs(loaded, frame_index, &enabled, kinds);
-        let channels: Vec<usize> = jobs.iter().map(|j| j.channel).collect();
+        let jobs = build_jobs(loaded, frame_index, enabled);
 
         // Spawn on first need rather than at load: a thread is only worth it
         // for a frame too large to upload whole, which is a small minority of
@@ -425,7 +449,7 @@ fn sync_movie(
         let ready = loaded
             .window_worker
             .as_ref()
-            .and_then(|w| w.take_matching(frame_index, &plan.required, &channels));
+            .and_then(|w| w.take_matching(frame_index, &plan.required, revision));
         match ready {
             Some(built) => {
                 // The built window's own geometry, which may be a little larger
@@ -437,9 +461,9 @@ fn sync_movie(
                     upload_texture(renderer, *channel, tw, th, plane);
                 }
                 loaded.roi = Some(roi);
-                loaded.last_uploaded = Some(frame_index);
+                loaded.last_uploaded = Some((frame_index, revision));
                 loaded.pending_window = None;
-                capture_overview(loaded, built, fw, fh, &enabled, kinds, mode);
+                capture_overview(loaded, built, fw, fh, revision, mode);
             }
             None => match &loaded.window_worker {
                 Some(worker) => {
@@ -448,8 +472,8 @@ fn sync_movie(
                     // fills with near-identical requests — 240 of them for 19
                     // distinct windows, measured — and the worker spends the
                     // whole gesture starting over.
-                    let in_flight = loaded.pending_window.as_ref().is_some_and(|(f, r, ch)| {
-                        *f == frame_index && ch == &channels && r.serves(&plan.required)
+                    let in_flight = loaded.pending_window.is_some_and(|(f, r, asked_under)| {
+                        f == frame_index && asked_under == revision && r.serves(&plan.required)
                     });
                     // While the view is still moving, whatever were started now
                     // would be planned against a zoom that has moved on before
@@ -458,8 +482,8 @@ fn sync_movie(
                     // them for a few frames; only the one it lands on is worth
                     // decoding.
                     if !in_flight && !view_moving {
-                        worker.request(frame_index, plan.want, jobs, kinds.to_vec());
-                        loaded.pending_window = Some((frame_index, plan.want, channels.clone()));
+                        worker.request(frame_index, plan.want, revision, jobs);
+                        loaded.pending_window = Some((frame_index, plan.want, revision));
                     }
                     // Keep the frames coming until it lands; nothing else would
                     // wake the interface once the user stops moving.
@@ -474,8 +498,8 @@ fn sync_movie(
                         window::assemble(
                             tiff,
                             bands,
+                            revision.layout,
                             &jobs,
-                            kinds,
                             &plan.want,
                             frame_index,
                             &inline,
@@ -490,14 +514,14 @@ fn sync_movie(
                         loaded.roi = Some(plan.want);
                         // Its twin above sets this; leaving it out here means
                         // the next sync re-decodes a window already uploaded.
-                        loaded.last_uploaded = Some(frame_index);
+                        loaded.last_uploaded = Some((frame_index, revision));
                         let built = window::Built {
                             frame_index,
                             roi: plan.want,
-                            channels: channels.clone(),
+                            channels: jobs.iter().map(|j| j.channel).collect(),
                             planes,
                         };
-                        capture_overview(loaded, built, fw, fh, &enabled, kinds, mode);
+                        capture_overview(loaded, built, fw, fh, revision, mode);
                     }
                 }
             },
@@ -515,20 +539,22 @@ fn sync_movie(
 ///
 /// A build that does not span the frame, or is too large to hold, leaves
 /// whatever is already there — an older, coarser overview is still usable, and
-/// it is checked against the current frame and channel set on every read
+/// it is checked against the current frame and display revision on every read
 /// anyway.
+///
+/// `revision` is the one `built` was decoded under, which is this sync's: the
+/// window worker's results are only taken under the revision they were asked
+/// for under.
 fn capture_overview(
     loaded: &mut Stack,
     built: window::Built,
     fw: u32,
     fh: u32,
-    enabled: &[bool],
-    kinds: &[ChannelKind],
+    revision: Revision,
     mode: roi::LargeImageMode,
 ) {
-    let gen = loaded.prefetch_gen;
     let budget = window::overview_budget(mode);
-    if let Some(o) = window::Overview::capture(built, fw, fh, gen, enabled, kinds, budget) {
+    if let Some(o) = window::Overview::capture(built, fw, fh, revision, budget) {
         let (tw, th) = o.built.roi.texture_size();
         log::debug!(
             "overview retained: {}x{} at 1/{}, {} MB",
@@ -599,7 +625,7 @@ fn sync_volume(
     status: &mut Option<String>,
 ) -> bool {
     let mut needs_repaint = false;
-    let is_4d = loaded.display.dims.slices > 1;
+    let is_4d = loaded.display.dims().slices > 1;
     let time = if is_4d { loaded.frame_index } else { 0 };
 
     let generation = view.generation;
@@ -687,8 +713,12 @@ fn sync_volume(
         albedo_t: 1.0,
     };
     let mut windows = [blank; MAX_CHANNELS];
-    let n = loaded.display.settings.len().min(MAX_CHANNELS);
-    for (c, (slot, s)) in windows.iter_mut().zip(&loaded.display.settings).enumerate() {
+    let n = loaded.display.channel_count().min(MAX_CHANNELS);
+    for (c, (slot, s)) in windows
+        .iter_mut()
+        .zip(loaded.display.settings())
+        .enumerate()
+    {
         let is_float = s.kind() == ChannelKind::Float;
         let (min, max) = s.units.to_unorm(s.window);
         // The isosurface paints one fixed colour, taken from the LUT's
@@ -754,16 +784,22 @@ pub fn plan_volume(
     budget: usize,
     view: &crate::viewer::VolumeView,
 ) -> VolumePlan {
-    let kinds: Vec<ChannelKind> = loaded.display.settings.iter().map(|s| s.kind()).collect();
-    let volume_kinds: Vec<scivis_render::VolumeKind> =
-        kinds.iter().map(|k| k.volume_kind()).collect();
+    // The volume format each channel's kind maps to, on the stack: bounded by
+    // MAX_CHANNELS, and asked for on every 3D frame a build is outstanding.
+    let masks = loaded.display.masks();
+    let mut volume_kinds = [scivis_render::VolumeKind::U8; MAX_CHANNELS];
+    for (slot, kind) in volume_kinds.iter_mut().zip(masks.kinds()) {
+        *slot = kind.volume_kind();
+    }
+    let volume_kinds = &volume_kinds[..masks.len()];
+    let dims = loaded.display.dims();
     VolumePlan {
-        format: renderer.volume_texel_format(scivis_render::pack::common_kind(&volume_kinds)),
-        units: loaded.display.settings.iter().map(|s| s.units).collect(),
-        rgb: loaded.display.rgb,
-        channels: loaded.display.dims.channels,
-        slices: loaded.display.dims.slices,
-        frames: loaded.display.dims.frames,
+        format: renderer.volume_texel_format(scivis_render::pack::common_kind(volume_kinds)),
+        units: loaded.display.settings().iter().map(|s| s.units).collect(),
+        rgb: loaded.display.rgb(),
+        channels: dims.channels,
+        slices: dims.slices,
+        frames: dims.frames,
         time,
         max_dim: renderer.max_3d_texture_size(),
         budget,
@@ -839,7 +875,7 @@ fn out_of_memory(
 }
 
 /// Whether a prefetched result still matches the wanted jobs (same channels, in
-/// order, with matching kind + dimensions). The generation/frame check happens
+/// order, with matching kind + dimensions). The revision/frame check happens
 /// first; this guards against any residual layout mismatch before upload.
 pub fn prefetch_matches(result: &PrefetchResult, jobs: &[ChannelJob]) -> bool {
     result.channels.len() == jobs.len()

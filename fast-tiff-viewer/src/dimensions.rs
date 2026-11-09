@@ -171,7 +171,7 @@ pub fn apply_resolved_dimensions_reporting(
     };
     // Chunky RGB and CMYK put their channels in one IFD's sample planes, which
     // changes how many IFDs a given shape addresses. Asked of the frame rather
-    // than of `display.rgb`, because on a fresh load `setup_rgb` has not run
+    // than of `display.rgb()`, because on a fresh load `setup_rgb` has not run
     // yet — it runs after this.
     let shares_an_ifd = loaded
         .tiff
@@ -186,28 +186,31 @@ pub fn apply_resolved_dimensions_reporting(
         frames: dims.frames,
         ..resolved
     };
-    loaded.display.dims = dims;
+    // Both move the display's layout revision, which is what everything
+    // decoded under the old interpretation — the frame on the GPU, a frame
+    // read ahead, a window being built, the retained overview, the decoded
+    // bands — is checked against before it is used again.
+    loaded.display.set_dims(dims);
     loaded.display.triple_axis_warning = resolved.triple_axis_warning;
     loaded.display.mode = loaded.tiff.meta.mode;
     let shown = crate::display::Display::shown_channels(resolved.channels);
     loaded.display.reseed_luts(&loaded.tiff.meta, shown);
-    loaded.display.settings =
-        build_channel_settings_reporting(&loaded.tiff, resolved.channels, on_channel);
+    loaded
+        .display
+        .set_settings(build_channel_settings_reporting(
+            &loaded.tiff,
+            resolved.channels,
+            on_channel,
+        ));
     loaded.frame_index = 0;
-    loaded.last_uploaded = None;
     loaded.luts_uploaded = false;
-    // Which IFD each display channel reads just changed, and the decoded-band
-    // cache is keyed by *display channel*, not by IFD — so every band it holds
-    // now describes the wrong plane. Keeping them would splice pixels from the
-    // old interpretation into the next window, which is worse than the decode
-    // they save: a wrong picture rather than a slow one. Only ever non-empty
-    // for a frame too large to upload whole, so this costs nothing for an
-    // ordinary image.
+    // Which IFD each display channel reads just changed, so every band held
+    // and the retained overview now describe the wrong planes. Both are
+    // checked against the layout revision before use and would never be
+    // used again; dropping them here only returns the memory now rather than
+    // at the next windowed decode. Only ever non-empty for a frame too large
+    // to upload whole, so this costs nothing for an ordinary image.
     loaded.bands.clear();
-    // Same argument for the retained overview: its planes were decoded through
-    // the old channel-to-IFD mapping. It is checked against `prefetch_gen` on
-    // every read as well, so this is belt and braces — but it returns the
-    // memory now rather than at the next sync.
     loaded.overview = None;
 }
 
@@ -247,7 +250,7 @@ pub fn setup_rgb(loaded: &mut Stack) {
         .unwrap_or(3);
     let plan = rgb_channel_plan(spp);
     let planes = plan.len();
-    loaded.display.rgb = true;
+    loaded.display.set_sample_planes(false);
     loaded.display.mode = fast_tiff_lib::DisplayMode::Color;
     // 0 = red, 1 = green, 2 = blue, then the composite palette for any extras.
     loaded.display.luts = (0..planes)
@@ -266,15 +269,15 @@ pub fn setup_rgb(loaded: &mut Stack) {
         ChannelKind::Int16
     };
     let units = SampleUnits::of(kind, first, None);
-    loaded.display.settings = plan
-        .iter()
-        .map(|&enabled| ChannelSettings {
-            enabled,
-            ..ChannelSettings::new(units.full_range(), units)
-        })
-        .collect();
+    loaded.display.set_settings(
+        plan.iter()
+            .map(|&enabled| ChannelSettings {
+                enabled,
+                ..ChannelSettings::new(units.full_range(), units)
+            })
+            .collect(),
+    );
     loaded.frame_index = 0;
-    loaded.last_uploaded = None;
     loaded.luts_uploaded = false;
 }
 
@@ -297,8 +300,7 @@ pub fn setup_rgb(loaded: &mut Stack) {
 pub fn setup_cmyk(loaded: &mut Stack) {
     // Both flags: `rgb` drives the plane-of-one-IFD decode addressing shared
     // with real RGB, `cmyk` records that these channels are derived.
-    loaded.display.rgb = true;
-    loaded.display.cmyk = true;
+    loaded.display.set_sample_planes(true);
     loaded.display.mode = fast_tiff_lib::DisplayMode::Color;
     // R, G, B.
     loaded.display.luts = (0..3).map(fast_tiff_lib::default_composite_lut).collect();
@@ -317,11 +319,12 @@ pub fn setup_cmyk(loaded: &mut Stack) {
     } else {
         SampleUnits::display(fast_tiff_lib::DisplayMap::Identity)
     };
-    loaded.display.settings = (0..3)
-        .map(|_| ChannelSettings::new(units.full_range(), units))
-        .collect();
+    loaded.display.set_settings(
+        (0..3)
+            .map(|_| ChannelSettings::new(units.full_range(), units))
+            .collect(),
+    );
     loaded.frame_index = 0;
-    loaded.last_uploaded = None;
     loaded.luts_uploaded = false;
 }
 
@@ -339,8 +342,7 @@ pub fn apply_dimension_override(loaded: &mut Stack, channels: usize, slices: usi
         frames,
         triple_axis_warning: loaded.display.triple_axis_warning,
     };
+    // Moves the layout revision, so a frame read ahead or a window built under
+    // the old channel-to-IFD mapping is refused when it arrives.
     apply_resolved_dimensions(loaded, resolved);
-    // The channel->IFD mapping just changed, so invalidate any in-flight prefetch
-    // decoded under the old mapping.
-    loaded.prefetch_gen = loaded.prefetch_gen.wrapping_add(1);
 }

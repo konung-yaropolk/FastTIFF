@@ -54,7 +54,7 @@ fn host(s: &Stack) -> StackHost {
 #[test]
 fn a_plugin_reads_every_colour_of_an_rgb_stack() {
     let s = rgb_stack();
-    assert!(s.display.rgb, "the fixture is chunky RGB");
+    assert!(s.display.rgb(), "the fixture is chunky RGB");
     let mut h = host(&s);
     assert_eq!(h.image().channels, 3);
     assert_eq!(h.stack_info().mode, DisplayMode::Composite);
@@ -91,7 +91,7 @@ fn slice_order_invert_keeps_the_colours_and_their_tables() {
             .unwrap()
             .unwrap();
     let out = Stack::from_bytes(bytes, "out.tif".into(), false).unwrap();
-    assert_eq!(out.display.dims.channels, 3);
+    assert_eq!(out.display.dims().channels, 3);
     assert_eq!(out.display.mode, fast_tiff_lib::DisplayMode::Composite);
     assert_eq!(out.display.luts, luts);
 }
@@ -125,6 +125,6 @@ fn a_multichannel_stack_still_crosses_whole() {
             .unwrap()
             .unwrap();
     let out = Stack::from_bytes(bytes, "out.tif".into(), false).unwrap();
-    assert_eq!(out.display.dims.channels, 2);
+    assert_eq!(out.display.dims().channels, 2);
     assert_eq!(out.display.luts, luts);
 }

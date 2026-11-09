@@ -339,7 +339,7 @@ fn loaded_points_start_shown_on_every_frame() {
     let ctx = egui::Context::default();
     for _ in 0..3 {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            counter_window(ui.ctx(), &mut t, stack.display.dims.frames, true);
+            counter_window(ui.ctx(), &mut t, stack.display.dims().frames, true);
         });
     }
     assert!(!t.counter.per_frame, "the window leaves it as it is");

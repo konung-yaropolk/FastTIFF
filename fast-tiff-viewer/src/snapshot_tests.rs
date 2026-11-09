@@ -9,6 +9,7 @@
 use super::*;
 use crate::stack::{SampleUnits, Stack, Window};
 use fast_tiff_lib::{DisplayMap, SampleType, StackMetaWrite, TiffWriter, WriterOptions};
+use scivis_render::ChannelKind;
 use std::io::Cursor;
 
 const W: u32 = 4;
@@ -52,12 +53,13 @@ fn stack_u8(channels: usize, f: impl Fn(usize, u32) -> u8) -> Stack {
 /// widening. So the helper still checks that the window reaches the texture's
 /// units as the test meant it.
 fn with(stack: &mut Stack, lut: Lut, min: f32, max: f32) {
-    for s in &mut stack.display.settings {
-        s.window = Window::new(min, max);
-        s.enabled = true;
+    for c in 0..stack.display.channel_count() {
+        stack.display.set_window(c, Window::new(min, max));
+        stack.display.set_enabled(c, true);
         // These stacks are 8-bit, whose texture holds the samples themselves:
         // if the window does not arrive there as given, the helper is quietly
         // testing something else.
+        let s = stack.display.settings()[c];
         let (lo, hi) = s.units.to_texture(s.window);
         assert!(
             (lo - min).abs() < 0.01 && (hi - max).abs() < 0.01,
@@ -120,12 +122,12 @@ fn channels_blend_additively_and_clamp_rather_than_wrap() {
     // Two channels, both at full scale everywhere: 1.0 + 1.0 clamped to 1.0.
     let mut stack = stack_u8(2, |_, _| 255);
     with(&mut stack, ramp(), 0.0, 255.0);
-    if stack.display.settings.len() < 2 {
+    if stack.display.settings().len() < 2 {
         // The file was interpreted as one channel; the blend is not under test
         // here and a wrong-axis file would make this assert nothing.
         panic!(
             "expected two display channels, got {}",
-            stack.display.settings.len()
+            stack.display.settings().len()
         );
     }
     let snap = of_frame(&stack).expect("compose");
@@ -142,8 +144,8 @@ fn channels_blend_additively_and_clamp_rather_than_wrap() {
 fn a_disabled_channel_contributes_nothing() {
     let mut stack = stack_u8(2, |c, _| if c == 0 { 100 } else { 255 });
     with(&mut stack, ramp(), 0.0, 255.0);
-    assert!(stack.display.settings.len() >= 2, "need two channels");
-    stack.display.settings[1].enabled = false;
+    assert!(stack.display.settings().len() >= 2, "need two channels");
+    stack.display.set_enabled(1, false);
     let snap = of_frame(&stack).expect("compose");
     assert_eq!(
         snap.pixel(0, 0).expect("in range"),
@@ -153,7 +155,7 @@ fn a_disabled_channel_contributes_nothing() {
 
     // And with both on, the same pixel is brighter — so the test above is
     // measuring the switch rather than a channel that was never there.
-    stack.display.settings[1].enabled = true;
+    stack.display.set_enabled(1, true);
     let both = of_frame(&stack).expect("compose");
     assert!(
         both.pixel(0, 0).expect("in range")[0] > 100,
@@ -248,7 +250,7 @@ fn narrowing_the_window_brightens_the_picture() {
 fn each_channel_is_coloured_by_its_own_lut() {
     let mut stack = stack_u8(2, |_, _| 255);
     with(&mut stack, ramp(), 0.0, 255.0);
-    assert!(stack.display.settings.len() >= 2, "need two channels");
+    assert!(stack.display.settings().len() >= 2, "need two channels");
     // Channel 0 red, channel 1 green: the sum must be yellow with no blue.
     stack.display.luts[0] = std::array::from_fn(|i| [i as u8, 0, 0]);
     stack.display.luts[1] = std::array::from_fn(|i| [0, i as u8, 0]);
@@ -335,7 +337,7 @@ fn an_eight_bit_file_composes_with_its_own_window() {
     let last = W * H - 1;
     let stack = stack_u8(1, |_, i| (i * 255 / last) as u8);
     assert_eq!(
-        stack.display.settings[0].kind(),
+        stack.display.settings()[0].kind(),
         ChannelKind::Int8,
         "an 8-bit file should take the 8-bit texture path, or this tests nothing"
     );
@@ -365,8 +367,8 @@ fn a_signed_window_composes_on_the_offset_texture() {
     w.write_frame_bytes(&px).expect("frame");
     let bytes = w.finish().expect("finish").into_inner();
     let mut stack = Stack::from_bytes(bytes, "signed.tif".into(), false).expect("open");
-    assert_eq!(stack.display.settings[0].kind(), ChannelKind::Int16);
-    stack.display.settings[0].window = Window::new(-4.0, 0.0);
+    assert_eq!(stack.display.settings()[0].kind(), ChannelKind::Int16);
+    stack.display.set_window(0, Window::new(-4.0, 0.0));
     stack.display.luts.fill(ramp());
 
     let snap = of_frame(&stack).expect("compose");

@@ -24,10 +24,12 @@
 //! it also means the pages the worker touches are the ones the window then
 //! reads, and that a stack held in memory, with no file behind it, gets a
 //! worker too. Correctness is defensive: a prefetched result is used only when
-//! its `(generation, frame_index)` and channel layout exactly match what's
-//! wanted; any mismatch falls back to inline decode, so a stale prefetch can
-//! cost a little work but can never show the wrong frame.
+//! its `(revision, frame_index)` — the display [`Revision`] it was asked for
+//! under — and its channel layout exactly match what's wanted; any mismatch
+//! falls back to inline decode, so a stale prefetch can cost a little work but
+//! can never show the wrong frame.
 
+use crate::display::Revision;
 use crate::stack::Stack;
 use crate::worker::{CancelToken, LatestWorker, Unclaimed};
 use fast_tiff_lib::TiffStack;
@@ -274,21 +276,17 @@ pub struct ChannelJob {
     pub height: u32,
 }
 
-/// The per-channel decode jobs for `frame_index`'s enabled channels, used to
-/// decode inline, to ask the prefetch worker for the next frame, and to
-/// histogram what is on screen.
+/// The per-channel decode jobs for `frame_index`'s channels that `enabled`
+/// selects (one flag per display channel), used to decode inline, to ask the
+/// prefetch worker for the next frame, and to histogram what is on screen.
+/// Each channel decodes to its own texture format, read from the display.
 ///
 /// Addressing itself lives in [`crate::dimensions::plane_index`], the single
 /// definition every reader of pixel data shares — including the ones that never
 /// touch a GPU. This function decides only *which* channels to fetch for the 2D
 /// view and at which timepoint; it asks for slice 0, because the 2D scrub axis
 /// is time and Z is a stride there.
-pub fn build_jobs(
-    loaded: &Stack,
-    frame_index: usize,
-    enabled: &[bool],
-    kinds: &[ChannelKind],
-) -> Vec<ChannelJob> {
+pub fn build_jobs(loaded: &Stack, frame_index: usize, enabled: &[bool]) -> Vec<ChannelJob> {
     let Some((width, height)) = loaded.dimensions() else {
         return Vec::new();
     };
@@ -296,22 +294,26 @@ pub fn build_jobs(
     // the act of reclassifying a mislabeled axis — a file claiming
     // `channels = 100` that is really a 100-frame movie — so the raw metadata
     // gives the wrong stride and addresses planes past the end of the chain.
-    let dims = &loaded.display.dims;
-    (0..loaded.display.settings.len())
-        .filter(|&c| enabled.get(c).copied().unwrap_or(false))
-        .map(|c| {
+    let dims = loaded.display.dims();
+    let rgb = loaded.display.rgb();
+    loaded
+        .display
+        .settings()
+        .iter()
+        .enumerate()
+        .filter(|&(c, _)| enabled.get(c).copied().unwrap_or(false))
+        .map(|(c, s)| {
             // z = 0 explicitly: the 2D view's scrub axis is time, and Z acts
             // only as a stride (see `planes_addressed`). Writing the zero here
             // rather than folding it into the arithmetic is what keeps this
             // from reading like a general plane lookup, which it is not.
-            let (ifd_idx, plane) =
-                crate::dimensions::plane_index(*dims, loaded.display.rgb, c, 0, frame_index);
+            let (ifd_idx, plane) = crate::dimensions::plane_index(dims, rgb, c, 0, frame_index);
             ChannelJob {
                 channel: c,
                 ifd_idx,
                 plane,
-                kind: kinds[c],
-                rgb: loaded.display.rgb,
+                kind: s.kind(),
+                rgb,
                 width,
                 height,
             }
@@ -500,13 +502,18 @@ pub struct DecodedChannel {
 /// A fully-decoded frame produced by the worker, tagged so the app can confirm
 /// it still matches what's wanted before using it.
 pub struct PrefetchResult {
-    pub generation: u64,
+    /// The display revision the frame was asked for under: its channel layout
+    /// and which channels were on.
+    pub revision: Revision,
     pub frame_index: usize,
     pub channels: Vec<DecodedChannel>,
 }
 
-/// What the read-ahead worker is asked for, besides the `(generation,
-/// frame_index)` its answer is keyed by.
+/// What a read-ahead is asked for by: the display revision and the frame.
+type Key = (Revision, usize);
+
+/// What the read-ahead worker is asked for, besides the [`Key`] its answer is
+/// keyed by.
 struct Request {
     jobs: Vec<ChannelJob>,
     /// Whether the requester decodes in parallel: read-ahead decodes the way
@@ -515,13 +522,19 @@ struct Request {
 }
 
 /// The read-ahead worker: a `LatestWorker` ([`crate::worker`]) keyed by
-/// `(generation, frame_index)`, so asking for the next frame again on every
+/// `(revision, frame_index)`, so asking for the next frame again on every
 /// repaint is free and asking for a different one cancels the old.
+///
+/// The whole [`Revision`], not only its layout: a frame is read ahead for the
+/// channels that are on, so one decoded before a channel was switched on lacks
+/// it, and one decoded before an override reads another mapping's planes.
+/// Either way a new request is a new key, which cancels the stale decode, and
+/// the stale answer is never taken.
 ///
 /// `new` returns `None` when the thread cannot start, and always without the
 /// `threads` feature (notably `wasm32-unknown-unknown`). Read-ahead is a pure
 /// optimization, so callers then decode inline and nothing downstream changes.
-pub struct Prefetcher(LatestWorker<(u64, usize), Request, PrefetchResult>);
+pub struct Prefetcher(LatestWorker<Key, Request, PrefetchResult>);
 
 impl Prefetcher {
     /// Spawn a worker over `stack` — the window's own, shared: no second map,
@@ -531,56 +544,56 @@ impl Prefetcher {
     /// ahead. Returns `None` if the thread fails to spawn — callers then just
     /// decode inline.
     pub fn new(stack: Arc<TiffStack>, touch_only: bool) -> Option<Self> {
-        let job =
-            move |&(generation, frame_index): &(u64, usize), req: Request, cancel: &CancelToken| {
-                fast_tiff_lib::set_thread_parallel_decode(Some(req.parallel));
-                // Page-touch mode: absorb the next frame's soft page faults here
-                // and publish nothing — the UI thread's inline decode is then
-                // fault-free (and stays zero-copy, which decoding ahead would have
-                // forfeited). A frame's channels are planes of their own, so a
-                // newer request stops it between them.
-                if touch_only {
-                    for job in &req.jobs {
-                        if cancel.is_cancelled() {
-                            break;
-                        }
-                        if let Some(frame) = stack.frames.get(job.ifd_idx) {
-                            stack.prefetch_frame(frame);
-                        }
+        let job = move |&(revision, frame_index): &Key, req: Request, cancel: &CancelToken| {
+            fast_tiff_lib::set_thread_parallel_decode(Some(req.parallel));
+            // Page-touch mode: absorb the next frame's soft page faults here
+            // and publish nothing — the UI thread's inline decode is then
+            // fault-free (and stays zero-copy, which decoding ahead would have
+            // forfeited). A frame's channels are planes of their own, so a
+            // newer request stops it between them.
+            if touch_only {
+                for job in &req.jobs {
+                    if cancel.is_cancelled() {
+                        break;
                     }
-                    return None;
+                    if let Some(frame) = stack.frames.get(job.ifd_idx) {
+                        stack.prefetch_frame(frame);
+                    }
                 }
-                // The step is the frame: a decode overtaken while it runs finishes,
-                // and the worker then drops it unpublished.
-                let decoded =
-                    decode_jobs(&stack.data, &stack.frames, stack.byte_order, &req.jobs).ok()?;
-                let channels = req
-                    .jobs
-                    .iter()
-                    .zip(decoded)
-                    .map(|(job, data)| DecodedChannel {
-                        channel: job.channel,
-                        width: job.width,
-                        height: job.height,
-                        kind: job.kind,
-                        data,
-                    })
-                    .collect();
-                Some(PrefetchResult {
-                    generation,
-                    frame_index,
-                    channels,
+                return None;
+            }
+            // The step is the frame: a decode overtaken while it runs finishes,
+            // and the worker then drops it unpublished.
+            let decoded =
+                decode_jobs(&stack.data, &stack.frames, stack.byte_order, &req.jobs).ok()?;
+            let channels = req
+                .jobs
+                .iter()
+                .zip(decoded)
+                .map(|(job, data)| DecodedChannel {
+                    channel: job.channel,
+                    width: job.width,
+                    height: job.height,
+                    kind: job.kind,
+                    data,
                 })
-            };
+                .collect();
+            Some(PrefetchResult {
+                revision,
+                frame_index,
+                channels,
+            })
+        };
         LatestWorker::spawn("fasttiff-prefetch", Unclaimed::Keep, job).map(Prefetcher)
     }
 
-    /// Ask the worker to decode `frame_index`'s `jobs`. Fire-and-forget. A
-    /// different frame (or generation) replaces whatever was asked before and
-    /// cancels it; the same one again is ignored while it is still pending.
-    pub fn request(&self, generation: u64, frame_index: usize, jobs: Vec<ChannelJob>) {
+    /// Ask the worker to decode `frame_index`'s `jobs`, built under display
+    /// `revision`. Fire-and-forget. A different frame (or revision) replaces
+    /// whatever was asked before and cancels it; the same one again is ignored
+    /// while it is still pending.
+    pub fn request(&self, revision: Revision, frame_index: usize, jobs: Vec<ChannelJob>) {
         self.0.request(
-            (generation, frame_index),
+            (revision, frame_index),
             Request {
                 jobs,
                 parallel: fast_tiff_lib::parallel_decode_enabled(),
@@ -588,11 +601,11 @@ impl Prefetcher {
         );
     }
 
-    /// Take the prefetched result iff it matches `(generation, frame_index)`;
+    /// Take the prefetched result iff it matches `(revision, frame_index)`;
     /// otherwise leave the slot untouched and return `None`. The caller still
     /// verifies the channel layout before using it.
-    pub fn take_matching(&self, generation: u64, frame_index: usize) -> Option<PrefetchResult> {
-        self.0.take_if(|key| *key == (generation, frame_index))
+    pub fn take_matching(&self, revision: Revision, frame_index: usize) -> Option<PrefetchResult> {
+        self.0.take_if(|key| *key == (revision, frame_index))
     }
 }
 

@@ -36,13 +36,12 @@ fn job() -> ChannelJob {
 fn a_cancelled_window_stops_at_the_next_band() {
     let (tiff, px) = tall_stack();
     let roi = Roi::full(W, H);
-    let kinds = [ChannelKind::Int8];
     let bands_in_frame = bandcache::bands_covering(0..H, bandcache::band_rows(W, 1)).len();
     assert_eq!(bands_in_frame, 8, "the test needs several bands");
 
     let mut bands = BandCache::default();
     let (token, asked) = CancelToken::after(1);
-    match assemble(&tiff, &mut bands, &[job()], &kinds, &roi, 0, &token) {
+    match assemble(&tiff, &mut bands, 1, &[job()], &roi, 0, &token) {
         Err(e) => assert!(e.is::<Cancelled>(), "{e:#}"),
         Ok(_) => panic!("a cancelled window came back built"),
     }
@@ -56,8 +55,8 @@ fn a_cancelled_window_stops_at_the_next_band() {
     let planes = assemble(
         &tiff,
         &mut bands,
+        1,
         &[job()],
-        &kinds,
         &roi,
         0,
         &CancelToken::never(),

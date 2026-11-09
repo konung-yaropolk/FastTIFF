@@ -450,7 +450,7 @@ pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Sta
                 // mislabeled `channels=100` is really a frame count, and the
                 // user can reassign the axes by hand. Show that only when the
                 // two disagree, so the panel stays quiet for ordinary files.
-                let shown = loaded.display.dims;
+                let shown = loaded.display.dims();
                 if (shown.channels, shown.slices, shown.frames)
                     != (meta.channels, meta.slices, meta.frames)
                 {
@@ -801,7 +801,7 @@ pub(super) fn histogram_window(
             text_h,
         )
     };
-    let rows = loaded.display.settings.len().max(1) as f32 * 2.0 + 2.0;
+    let rows = loaded.display.settings().len().max(1) as f32 * 2.0 + 2.0;
     let spec = dialog::Dialog {
         id: "histogram",
         title: "Histogram",
@@ -898,7 +898,7 @@ fn draw_plot(
     // redraw rather than another decode — toggling is instant.
     let shown: Vec<&Histogram> = hists
         .iter()
-        .filter(|h| display.settings.get(h.channel).is_none_or(|s| s.enabled))
+        .filter(|h| display.settings().get(h.channel).is_none_or(|s| s.enabled))
         .collect();
 
     if shown.is_empty() {
@@ -977,7 +977,7 @@ fn draw_plot(
         let span = (h.hi - h.lo).max(f32::EPSILON);
         let x_of = |v: f32| area.left() + ((v - h.lo) / span).clamp(0.0, 1.0) * area.width();
         let (win_min, win_max) = display
-            .settings
+            .settings()
             .get(h.channel)
             .map_or((h.lo, h.hi), |s| s.window.into());
         let kept = egui::Rect::from_x_y_ranges(

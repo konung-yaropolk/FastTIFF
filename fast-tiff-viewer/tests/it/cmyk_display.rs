@@ -43,8 +43,7 @@ fn open_stack(path: PathBuf) -> anyhow::Result<Stack> {
 
 /// Decode `frame` with exactly the channels in `enabled` switched on.
 fn decode(stack: &Stack, frame: usize, enabled: &[bool]) -> Vec<Decoded> {
-    let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind()).collect();
-    let jobs = fast_tiff_viewer::prefetch::build_jobs(stack, frame, enabled, &kinds);
+    let jobs = fast_tiff_viewer::prefetch::build_jobs(stack, frame, enabled);
     fast_tiff_viewer::prefetch::decode_jobs(
         &stack.tiff.data,
         &stack.tiff.frames,
@@ -89,26 +88,26 @@ fn cmyk_stack_becomes_three_converted_display_channels() {
     let stack = open_stack(path).expect("cmyk should open");
 
     assert!(
-        stack.display.cmyk,
+        stack.display.cmyk(),
         "a Separated frame should set the cmyk flag"
     );
     assert!(
-        stack.display.rgb,
+        stack.display.rgb(),
         "cmyk also sets rgb: the display channels are sample planes of one IFD either way, \
          which is what the decode addressing keys on"
     );
     assert_eq!(
-        stack.display.settings.len(),
+        stack.display.settings().len(),
         3,
         "four inks become three components, not four channels"
     );
     assert!(stack
         .display
-        .settings
+        .settings()
         .iter()
         .all(|s| s.kind() == ChannelKind::Int8));
     assert!(
-        stack.display.settings.iter().all(|s| s.enabled),
+        stack.display.settings().iter().all(|s| s.enabled),
         "all three start visible"
     );
 }
@@ -121,11 +120,11 @@ fn sixteen_bit_cmyk_keeps_its_width() {
         return;
     };
     let stack = open_stack(path).expect("16-bit cmyk should open");
-    assert!(stack.display.cmyk);
-    assert_eq!(stack.display.settings.len(), 3);
+    assert!(stack.display.cmyk());
+    assert_eq!(stack.display.settings().len(), 3);
     assert!(stack
         .display
-        .settings
+        .settings()
         .iter()
         .all(|s| s.kind() == ChannelKind::Int16));
 
@@ -200,7 +199,7 @@ fn planar_cmyk_decodes_every_page() {
         return;
     };
     let stack = open_stack(path).expect("planar cmyk should open");
-    assert!(stack.display.cmyk);
+    assert!(stack.display.cmyk());
     assert!(stack.tiff.frames[0].is_planar());
 
     let mut first_pixels = Vec::new();
@@ -237,6 +236,6 @@ fn the_viewer_only_converts_what_the_library_calls_cmyk() {
         !stack.tiff.frames[0].is_cmyk(),
         "a photometric-2 RGB frame is not CMYK"
     );
-    assert!(!stack.display.cmyk, "and must not be flagged as such");
-    assert!(stack.display.rgb, "it is still ordinary RGB");
+    assert!(!stack.display.cmyk(), "and must not be flagged as such");
+    assert!(stack.display.rgb(), "it is still ordinary RGB");
 }

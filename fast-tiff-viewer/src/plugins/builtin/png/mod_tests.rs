@@ -82,8 +82,8 @@ fn the_contrast_window_on_screen_is_the_contrast_in_the_file() {
     let mut stack = ramp_stack();
     // A window over the lower half of the range: everything at or above 32768
     // should come out white, and the bottom of the ramp black.
-    for s in &mut stack.display.settings {
-        s.window = Window::new(0.0, 32768.0);
+    for c in 0..stack.display.channel_count() {
+        stack.display.set_window(c, Window::new(0.0, 32768.0));
     }
     let path = temp("window");
     export(&stack, &path);
@@ -114,16 +114,16 @@ fn the_contrast_window_on_screen_is_the_contrast_in_the_file() {
 fn a_wider_window_writes_a_darker_image() {
     let path = temp("narrow");
     let mut stack = ramp_stack();
-    for s in &mut stack.display.settings {
-        s.window = Window::new(0.0, 16384.0);
+    for c in 0..stack.display.channel_count() {
+        stack.display.set_window(c, Window::new(0.0, 16384.0));
     }
     export(&stack, &path);
     let (_, _, narrow) = read_png(&path);
 
     let path2 = temp("wide");
     let mut stack = ramp_stack();
-    for s in &mut stack.display.settings {
-        s.window = Window::new(0.0, 65535.0);
+    for c in 0..stack.display.channel_count() {
+        stack.display.set_window(c, Window::new(0.0, 65535.0));
     }
     export(&stack, &path2);
     let (_, _, wide) = read_png(&path2);
@@ -144,8 +144,8 @@ fn a_wider_window_writes_a_darker_image() {
 #[test]
 fn each_channel_goes_through_the_lut_it_is_displayed_with() {
     let mut stack = ramp_stack();
-    for s in &mut stack.display.settings {
-        s.window = Window::new(0.0, 65535.0);
+    for c in 0..stack.display.channel_count() {
+        stack.display.set_window(c, Window::new(0.0, 65535.0));
     }
     // Pure green: entry i is (0, i, 0).
     let mut green = [[0u8; 3]; 256];
@@ -172,9 +172,9 @@ fn each_channel_goes_through_the_lut_it_is_displayed_with() {
 #[test]
 fn a_channel_that_is_switched_off_is_not_composited() {
     let mut stack = ramp_stack();
-    for s in &mut stack.display.settings {
-        s.window = Window::new(0.0, 65535.0);
-        s.enabled = false;
+    for c in 0..stack.display.channel_count() {
+        stack.display.set_window(c, Window::new(0.0, 65535.0));
+        stack.display.set_enabled(c, false);
     }
     let path = temp("disabled");
     export(&stack, &path);
@@ -204,7 +204,7 @@ fn export_ramp_of(sample: SampleType, window: Window) -> Vec<u8> {
     .expect("frame");
     let bytes = w.finish().expect("finish").into_inner();
     let mut stack = Stack::from_bytes(bytes, "ramp.tif".into(), false).expect("open");
-    stack.display.settings[0].window = window;
+    stack.display.set_window(0, window);
     stack.display.luts = vec![grayscale_ramp()];
     let path = temp(&format!("{sample:?}"));
     export(&stack, &path);

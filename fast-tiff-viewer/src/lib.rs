@@ -116,7 +116,7 @@ pub fn share_gpu_device(device: &wgpu::Device, queue: &wgpu::Queue, adapter: &wg
 }
 
 pub use dimensions::{plane_index, planes_addressed};
-pub use display::{Dims, Display};
+pub use display::{Dims, Display, Revision};
 pub use histogram::Histogram;
 pub use loader::{LoadSource, LoadStage};
 pub use stack::{ChannelSettings, SampleUnits, Stack, Window};

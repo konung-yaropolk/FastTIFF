@@ -524,7 +524,7 @@ impl super::ViewerApp {
             return;
         };
         let imagej_reads_overlay = fast_tiff_viewer::save::overlay_readable_by_imagej(stack);
-        match counter_window(ctx, tool, stack.display.dims.frames, imagej_reads_overlay) {
+        match counter_window(ctx, tool, stack.display.dims().frames, imagej_reads_overlay) {
             CounterAction::None => {}
             CounterAction::Close => self.point_counter = None,
             CounterAction::SaveRois => self.save_point_rois(),

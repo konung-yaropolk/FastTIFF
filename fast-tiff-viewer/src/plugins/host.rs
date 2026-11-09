@@ -77,8 +77,8 @@ impl StackHost {
             info: describe_stack(stack),
             view,
             tiff: Arc::clone(&stack.tiff),
-            dims: stack.display.dims,
-            rgb: stack.display.rgb,
+            dims: stack.display.dims(),
+            rgb: stack.display.rgb(),
             selection: Vec::new(),
             pending: Default::default(),
             animating: false,
@@ -401,8 +401,8 @@ pub fn describe_image(stack: &Stack) -> ImageInfo {
         width,
         height,
         channels: file_channels(stack),
-        slices: stack.display.dims.slices.max(1),
-        frames: stack.display.dims.frames.max(1),
+        slices: stack.display.dims().slices.max(1),
+        frames: stack.display.dims().frames.max(1),
         samples_per_pixel: f0.map(|f| f.samples_per_pixel).unwrap_or(1),
         pixel_type,
     }
@@ -416,10 +416,10 @@ pub fn describe_image(stack: &Stack) -> ImageInfo {
 /// its samples are inks, which are not what is shown.
 fn file_channels(stack: &Stack) -> usize {
     let display = &stack.display;
-    if display.rgb && !display.cmyk {
+    if display.rgb() && !display.cmyk() {
         display.channel_count().max(1)
     } else {
-        display.dims.channels.max(1)
+        display.dims().channels.max(1)
     }
 }
 
@@ -444,7 +444,7 @@ pub fn describe_stack(stack: &Stack) -> StackInfo {
         // RGB is shown composited, its channels red, green and blue, whatever
         // the file says; a result made from it should open looking the same.
         mode: match meta.mode {
-            _ if stack.display.rgb && !stack.display.cmyk => DisplayMode::Composite,
+            _ if stack.display.rgb() && !stack.display.cmyk() => DisplayMode::Composite,
             fast_tiff_lib::DisplayMode::Composite => DisplayMode::Composite,
             fast_tiff_lib::DisplayMode::Color => DisplayMode::Color,
             _ => DisplayMode::Grayscale,
@@ -475,7 +475,7 @@ pub fn describe_view(
 ) -> ViewParams {
     let channels = stack
         .display
-        .settings
+        .settings()
         .iter()
         .map(|s| ChannelView {
             min: s.window.lo,

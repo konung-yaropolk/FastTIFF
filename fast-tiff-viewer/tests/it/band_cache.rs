@@ -204,6 +204,29 @@ fn a_band_is_not_confused_with_a_different_frame_or_channel_set() {
     );
 }
 
+/// What the key cannot say: which IFD a display channel reads. After the axes
+/// are reassigned, channel 0 of frame 0 may be another plane under the very
+/// same key. So the cache remembers the channel layout (a display
+/// `Revision::layout`) its bands were decoded under, and asked to hold another
+/// it lets go of all of them. Asked for the one it holds, it keeps them: that
+/// is every build, and a cache that emptied itself each time would be none.
+#[test]
+fn a_cache_asked_for_another_channel_layout_lets_go_of_everything() {
+    let mut c = BandCache::default();
+    c.hold_layout(1);
+    c.put(0, vec![0], 3, ALL, plane(16));
+    c.hold_layout(1);
+    assert!(
+        c.get(0, &[0], 3, ALL).is_some(),
+        "the same layout keeps its bands"
+    );
+
+    c.hold_layout(2);
+    assert!(c.is_empty(), "nothing decoded under layout 1 may survive");
+    assert_eq!(c.bytes(), 0);
+    assert!(c.get(0, &[0], 3, ALL).is_none());
+}
+
 /// A tiled frame narrows the columns, so the same rows over different tile
 /// columns are different pixels and must not be confused. On a stripped frame
 /// the columns are always the full width, which is what keeps a sideways pan

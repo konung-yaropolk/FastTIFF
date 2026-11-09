@@ -68,13 +68,13 @@ fn opens_an_imagej_hyperstack_with_derived_channel_settings() {
     let (w, h) = stack.dimensions().expect("dimensions");
     assert!(w > 0 && h > 0);
     assert!(
-        !stack.display.settings.is_empty(),
+        !stack.display.settings().is_empty(),
         "every open stack gets channel settings"
     );
 
     // 16-bit unsigned planes take the R16Uint path, and each channel starts
     // enabled with a contrast window that sits inside its slider track.
-    for (c, s) in stack.display.settings.iter().enumerate() {
+    for (c, s) in stack.display.settings().iter().enumerate() {
         assert_eq!(s.kind(), ChannelKind::Int16, "channel {c}");
         assert!(s.enabled, "channel {c} should start enabled");
         let (lo, hi): (f32, f32) = s.bounds.into();
@@ -89,7 +89,7 @@ fn opens_an_imagej_hyperstack_with_derived_channel_settings() {
     }
 
     // A display LUT exists for every channel the settings cover.
-    assert!(stack.tiff.meta.channel_display.len() >= stack.display.settings.len());
+    assert!(stack.tiff.meta.channel_display.len() >= stack.display.settings().len());
 }
 
 #[test]
@@ -100,18 +100,18 @@ fn rgb_stack_becomes_three_display_channels() {
     let stack = open_stack(path, false).expect("rgb should open");
 
     assert!(
-        stack.display.rgb,
+        stack.display.rgb(),
         "a 3-sample photometric-RGB frame should set the rgb flag"
     );
     assert_eq!(
-        stack.display.settings.len(),
+        stack.display.settings().len(),
         3,
         "R/G/B become three display channels"
     );
     // 8-bit unsigned uploads raw, without the CPU widening pass.
     assert!(stack
         .display
-        .settings
+        .settings()
         .iter()
         .all(|s| s.kind() == ChannelKind::Int8));
     // The channels/time guess and the pseudocolor toggle are meaningless here.
@@ -126,7 +126,7 @@ fn float_stack_windows_in_its_own_units() {
     };
     let stack = open_stack(path, false).expect("float should open");
 
-    let s = stack.display.settings.first().expect("one channel");
+    let s = stack.display.settings().first().expect("one channel");
     assert_eq!(
         s.kind(),
         ChannelKind::Float,
@@ -167,8 +167,6 @@ fn reassigning_the_axes_drops_everything_decoded_under_the_old_mapping() {
     // overview, both held under display channel 0 of frame 0.
     let stack = viewer.stack.as_mut().unwrap();
     let (w, h) = (stack.tiff.frames[0].width, stack.tiff.frames[0].height);
-    let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind()).collect();
-    let enabled: Vec<bool> = stack.display.settings.iter().map(|s| s.enabled).collect();
 
     stack
         .bands
@@ -191,24 +189,22 @@ fn reassigning_the_axes_drops_everything_decoded_under_the_old_mapping() {
         channels: vec![0],
         planes: vec![Decoded::U16(vec![7; 64])],
     };
-    stack.overview = Overview::capture(
-        built,
-        w,
-        h,
-        stack.prefetch_gen,
-        &enabled,
-        &kinds,
-        OVERVIEW_MAX_BYTES,
-    );
+    let before = stack.display.revision();
+    stack.overview = Overview::capture(built, w, h, before, OVERVIEW_MAX_BYTES);
     assert!(
         stack.overview.is_some(),
         "the setup has to retain an overview"
     );
 
-    let shown = viewer.stack.as_ref().unwrap().display.dims;
+    let shown = viewer.stack.as_ref().unwrap().display.dims();
     viewer.set_dimension_order(shown.frames, shown.slices, shown.channels);
 
     let stack = viewer.stack.as_mut().unwrap();
+    assert_ne!(
+        stack.display.revision().layout,
+        before.layout,
+        "the override is recorded as a new channel layout"
+    );
     assert!(
         stack.bands.get(0, &[0], 0, (0, 4096)).is_none(),
         "channel 0 now reads a different IFD, so the band held for it is the wrong plane"
@@ -237,7 +233,7 @@ fn dimension_override_conserves_the_plane_count() {
         let m = &viewer.stack.as_ref().unwrap().tiff.meta;
         (m.channels, m.slices, m.frames)
     };
-    let shown = viewer.stack.as_ref().unwrap().display.dims;
+    let shown = viewer.stack.as_ref().unwrap().display.dims();
     let planes = shown.channels * shown.slices * shown.frames;
     let gen_before = viewer.volume.generation;
 
@@ -245,7 +241,7 @@ fn dimension_override_conserves_the_plane_count() {
     viewer.set_dimension_order(shown.frames, shown.slices, shown.channels);
 
     let stack = viewer.stack.as_ref().unwrap();
-    let after = stack.display.dims;
+    let after = stack.display.dims();
     assert_eq!(after.channels, shown.frames);
     assert_eq!(after.frames, shown.channels);
     assert_eq!(
@@ -266,7 +262,7 @@ fn dimension_override_conserves_the_plane_count() {
 
     // Channel settings and LUTs were rebuilt to match the new channel count...
     let shown_now = fast_tiff_viewer::Display::shown_channels(after.channels);
-    assert_eq!(stack.display.settings.len(), shown_now);
+    assert_eq!(stack.display.settings().len(), shown_now);
     assert_eq!(
         stack.display.luts.len(),
         shown_now,
@@ -441,7 +437,7 @@ fn cycling_luts_never_disturbs_the_parsed_metadata() {
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
     // Collapse to a single channel so the LUT selector applies.
-    let dims = viewer.stack.as_ref().unwrap().display.dims;
+    let dims = viewer.stack.as_ref().unwrap().display.dims();
     viewer.set_dimension_order(1, dims.slices, dims.channels * dims.frames);
     if !fast_tiff_viewer::channels::gray_lut_applicable(viewer.stack.as_ref().unwrap()) {
         return;

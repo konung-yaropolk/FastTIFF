@@ -1,7 +1,7 @@
 //! Regression tests for mapping a display frame to an IFD in the file.
 //!
 //! The failure these guard against: the stack's *resolved* interpretation
-//! (`Stack::display.dims`) and the file's *raw* metadata (`tiff.meta`) are
+//! (`Stack::display.dims()`) and the file's *raw* metadata (`tiff.meta`) are
 //! deliberately allowed to disagree — resolving is exactly the act of
 //! reclassifying a mislabeled axis, e.g. a file claiming `channels=10` that is
 //! really a 10-frame movie. Anything that addresses planes must use the
@@ -44,7 +44,7 @@ fn resolved_and_raw_dimensions_really_do_diverge() {
         "raw metadata keeps the file's own (mislabeled) claim"
     );
     assert_eq!(
-        (stack.display.dims.channels, stack.display.dims.frames),
+        (stack.display.dims().channels, stack.display.dims().frames),
         (1, 10),
         "the resolved view reclassifies it as a movie"
     );
@@ -56,14 +56,13 @@ fn every_frame_maps_to_an_ifd_that_exists() {
     let n = stack.frame_count();
     assert_eq!(n, 10);
 
-    let enabled = vec![true; stack.display.settings.len()];
-    let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind()).collect();
+    let enabled = vec![true; stack.display.settings().len()];
 
     // Scrubbing the whole stack must only ever address planes that are there.
     // Computing the stride from the raw metadata gives `frame * 10`, which is
     // in range only for frame 0 — the "stuck on the first frame" symptom.
     for frame in 0..n {
-        for job in fast_tiff_viewer::prefetch::build_jobs(&stack, frame, &enabled, &kinds) {
+        for job in fast_tiff_viewer::prefetch::build_jobs(&stack, frame, &enabled) {
             assert!(
                 job.ifd_idx < stack.tiff.frames.len(),
                 "frame {frame} -> IFD {} but the file has only {} planes",
@@ -79,12 +78,11 @@ fn every_frame_actually_decodes() {
     // The end-to-end version: the index being in range is necessary but not
     // sufficient — each plane must also decode, and to *different* pixels.
     let stack = load(mislabeled_stack(8, 4, 3));
-    let enabled = vec![true; stack.display.settings.len()];
-    let kinds: Vec<_> = stack.display.settings.iter().map(|s| s.kind()).collect();
+    let enabled = vec![true; stack.display.settings().len()];
 
     let mut first_pixels = Vec::new();
     for frame in 0..stack.frame_count() {
-        let jobs = fast_tiff_viewer::prefetch::build_jobs(&stack, frame, &enabled, &kinds);
+        let jobs = fast_tiff_viewer::prefetch::build_jobs(&stack, frame, &enabled);
         let decoded = fast_tiff_viewer::prefetch::decode_jobs(
             &stack.tiff.data,
             &stack.tiff.frames,

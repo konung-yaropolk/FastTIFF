@@ -21,18 +21,27 @@
 //! channel mapping it is another plane's pixels; under a different *format* it
 //! is a buffer that does not fit the texture, which is a validation failure that
 //! takes the process with it rather than merely looking wrong. So the key has to
-//! carry all of it, and each part is pinned separately below.
+//! carry all of it: the frame index, and the display
+//! [`Revision`](fast_tiff_viewer::Revision) — whose `layout` moves with the
+//! channel mapping and the formats, and whose `enabled` moves with the channel
+//! set. Each part is pinned separately below.
 
 use fast_tiff_viewer::prefetch::Decoded;
 use fast_tiff_viewer::roi::Roi;
 use fast_tiff_viewer::window::{
     covers_whole_frame, spans_whole_frame, Built, Overview, OVERVIEW_MAX_BYTES,
 };
-use scivis_render::ChannelKind;
+use fast_tiff_viewer::Revision;
 
 // The mosaic this exists for.
 const W: u32 = 40_000;
 const H: u32 = 12_788;
+
+/// The display revision the overviews below are captured under.
+const REV: Revision = Revision {
+    layout: 1,
+    enabled: 1,
+};
 
 fn roi(x: u32, y: u32, w: u32, h: u32, stride: u32) -> Roi {
     Roi { x, y, w, h, stride }
@@ -49,15 +58,7 @@ fn built(r: Roi, bytes: usize) -> Built {
 }
 
 fn capture(r: Roi, bytes: usize) -> Option<Overview> {
-    Overview::capture(
-        built(r, bytes),
-        W,
-        H,
-        0,
-        &[true],
-        &[ChannelKind::Int8],
-        OVERVIEW_MAX_BYTES,
-    )
+    Overview::capture(built(r, bytes), W, H, REV, OVERVIEW_MAX_BYTES)
 }
 
 // ---------------------------------------------------------------------------
@@ -134,16 +135,7 @@ fn the_cap_counts_bytes_rather_than_samples() {
         planes: vec![Decoded::F32(vec![0.0; samples])],
     };
     assert!(
-        Overview::capture(
-            float,
-            W,
-            H,
-            0,
-            &[true],
-            &[ChannelKind::Float],
-            OVERVIEW_MAX_BYTES
-        )
-        .is_none(),
+        Overview::capture(float, W, H, REV, OVERVIEW_MAX_BYTES).is_none(),
         "{samples} float samples is {} bytes, past the cap",
         samples * 4
     );
@@ -169,15 +161,8 @@ fn fresh() -> Overview {
 #[test]
 fn an_unchanged_stack_can_use_its_overview() {
     let o = fresh();
-    assert!(o.matches(0, 0, &[true], &[ChannelKind::Int8]));
-    assert!(o.can_upload(
-        &roi(0, 0, W, H, 16),
-        0,
-        0,
-        &[true],
-        &[ChannelKind::Int8],
-        &[0]
-    ));
+    assert!(o.matches(0, REV));
+    assert!(o.can_upload(&roi(0, 0, W, H, 16), 0, REV));
 }
 
 /// These are one frame's pixels. Shown for another they are simply the wrong
@@ -185,103 +170,64 @@ fn an_unchanged_stack_can_use_its_overview() {
 #[test]
 fn an_overview_for_another_frame_is_not_used() {
     let o = fresh();
-    assert!(!o.matches(1, 0, &[true], &[ChannelKind::Int8]));
-    assert!(!o.can_upload(
-        &roi(0, 0, W, H, 16),
-        1,
-        0,
-        &[true],
-        &[ChannelKind::Int8],
-        &[0]
-    ));
+    assert!(!o.matches(1, REV));
+    assert!(!o.can_upload(&roi(0, 0, W, H, 16), 1, REV));
 }
 
 /// A channel toggled on has no pixels in an overview decoded without it, and
-/// would render whatever the freshly allocated texture happened to hold.
+/// would render whatever the freshly allocated texture happened to hold; one
+/// toggled off has planes the upload has no use for.
 ///
-/// Checked independently of the decode-plan generation because the two disagree
-/// at exactly the moment that matters: residency is planned *before* the
-/// generation is bumped for a channel toggle, so at planning time the generation
-/// still reads as unchanged.
+/// The toggle moves the display's `enabled` revision at the moment it is made,
+/// before the next sync plans residency, so the revision alone is the check.
+/// (It used to be bumped inside the sync, after planning, which is why the
+/// overview once had to carry the enabled flags as a second key.)
 #[test]
 fn an_overview_under_another_enabled_set_is_not_used() {
     let o = fresh();
-    assert!(
-        !o.matches(0, 0, &[false], &[ChannelKind::Int8]),
-        "the channel was turned off"
-    );
-    assert!(
-        !o.matches(0, 0, &[true, true], &[ChannelKind::Int8]),
-        "a channel appeared"
-    );
+    let toggled = Revision {
+        enabled: REV.enabled + 1,
+        ..REV
+    };
+    assert!(!o.matches(0, toggled), "a channel was switched since");
+    assert!(!o.can_upload(&roi(0, 0, W, H, 16), 0, toggled));
 }
 
 /// Reassigning the axes changes which IFD each display channel reads, without
-/// changing the channel *list*. The decode-plan generation is what records that,
-/// so it has to be in the key — otherwise a reassignment landing back on frame 0
-/// splices in planes decoded under the old interpretation.
+/// changing the channel *list* — and rebuilding the channels for it can change
+/// their texture formats, the case that is worse than a wrong picture: a 16-bit
+/// plane uploaded to a channel that has become 8-bit is a buffer of the wrong
+/// length for the texture, which fails validation and takes the process with
+/// it. The display's `layout` revision records both, so it has to be in the
+/// key — otherwise a reassignment landing back on frame 0 splices in planes
+/// decoded under the old interpretation.
 #[test]
-fn an_overview_from_an_older_decode_plan_is_not_used() {
+fn an_overview_from_another_channel_layout_is_not_used() {
     let o = fresh();
-    assert!(!o.matches(0, 1, &[true], &[ChannelKind::Int8]));
-    assert!(!o.can_upload(
-        &roi(0, 0, W, H, 16),
-        0,
-        1,
-        &[true],
-        &[ChannelKind::Int8],
-        &[0]
-    ));
-}
-
-/// The one that is worse than a wrong picture. Each plane's `Decoded` variant
-/// was chosen to match its channel's texture format; uploading a 16-bit plane to
-/// a channel that has become 8-bit is a buffer of the wrong length for the
-/// texture, which fails validation and takes the process with it.
-#[test]
-fn an_overview_whose_channel_formats_changed_is_not_used() {
-    let o = fresh();
-    assert!(!o.matches(0, 0, &[true], &[ChannelKind::Int16]));
-    assert!(!o.matches(0, 0, &[true], &[ChannelKind::Float]));
-    assert!(!o.can_upload(
-        &roi(0, 0, W, H, 16),
-        0,
-        0,
-        &[true],
-        &[ChannelKind::Int16],
-        &[0]
-    ));
+    let reassigned = Revision {
+        layout: REV.layout + 1,
+        ..REV
+    };
+    assert!(!o.matches(0, reassigned));
+    assert!(!o.can_upload(&roi(0, 0, W, H, 16), 0, reassigned));
 }
 
 /// The planes were cut to one window's texture size, so they are the right bytes
 /// for that window and no other — a differing stride alone changes the texture
-/// dimensions, and the same is true of the channel list, which fixes both how
-/// many planes there are and which texture each goes to.
+/// dimensions. (Which channels they fill is fixed by the revision.)
 #[test]
 fn the_overview_is_only_uploaded_for_the_window_asked_for() {
     let o = fresh();
     let right = roi(0, 0, W, H, 16);
-    let k = [ChannelKind::Int8];
 
+    assert!(o.can_upload(&right, 0, REV), "the window it was cut for");
     assert!(
-        o.can_upload(&right, 0, 0, &[true], &k, &[0]),
-        "the window it was cut for"
-    );
-    assert!(
-        !o.can_upload(&roi(0, 0, W, H, 8), 0, 0, &[true], &k, &[0]),
+        !o.can_upload(&roi(0, 0, W, H, 8), 0, REV),
         "a different stride is a different texture size"
     );
     assert!(
-        !o.can_upload(&roi(100, 0, W, H, 16), 0, 0, &[true], &k, &[0]),
+        !o.can_upload(&roi(100, 0, W, H, 16), 0, REV),
         "a different origin is different pixels"
-    );
-    assert!(
-        !o.can_upload(&right, 0, 0, &[true], &k, &[1]),
-        "these planes belong to channel 0, not channel 1"
-    );
-    assert!(
-        !o.can_upload(&right, 0, 0, &[true], &k, &[0, 1]),
-        "one plane cannot fill two channels"
     );
 }
 
@@ -293,10 +239,9 @@ fn the_overview_is_only_uploaded_for_the_window_asked_for() {
 #[test]
 fn upload_is_stricter_than_validity() {
     let o = fresh();
-    let k = [ChannelKind::Int8];
     // Valid for the stack, but not the window that is being asked for.
-    assert!(o.matches(0, 0, &[true], &k));
-    assert!(!o.can_upload(&roi(0, 0, W, H, 4), 0, 0, &[true], &k, &[0]));
+    assert!(o.matches(0, REV));
+    assert!(!o.can_upload(&roi(0, 0, W, H, 4), 0, REV));
     // And nothing can_upload without also matching.
-    assert!(!o.can_upload(&roi(0, 0, W, H, 16), 9, 0, &[true], &k, &[0]));
+    assert!(!o.can_upload(&roi(0, 0, W, H, 16), 9, REV));
 }

@@ -233,7 +233,7 @@ fn the_result_is_an_ordinary_rgb_image() {
     // And they survive being written into a document, which is where they turn
     // into the LUTs the display reads.
     let s = plugins::to_stack(&img, None, false).expect("open the result");
-    assert_eq!(s.display.dims.channels, 3);
+    assert_eq!(s.display.dims().channels, 3);
     let luts: Vec<[u8; 3]> = s.display.luts.iter().map(|l| l[255]).collect();
     assert_eq!(
         luts,

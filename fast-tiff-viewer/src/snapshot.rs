@@ -42,7 +42,7 @@
 use crate::prefetch::{build_jobs, decode_jobs, Decoded};
 use crate::stack::Stack;
 use anyhow::{Context, Result};
-use scivis_render::{ChannelKind, Lut};
+use scivis_render::Lut;
 
 /// A composed image, ready for the clipboard: 8-bit RGBA, row-major, no padding.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -136,11 +136,9 @@ pub fn of_frame(stack: &Stack) -> Result<Snapshot> {
     let (width, height) = stack
         .dimensions()
         .context("nothing is open, so there is no view to copy")?;
-    let settings = &stack.display.settings;
-    let enabled: Vec<bool> = settings.iter().map(|s| s.enabled).collect();
-    let kinds: Vec<ChannelKind> = settings.iter().map(|s| s.kind()).collect();
-
-    let jobs = build_jobs(stack, stack.frame_index, &enabled, &kinds);
+    let settings = stack.display.settings();
+    let masks = stack.display.masks();
+    let jobs = build_jobs(stack, stack.frame_index, masks.enabled());
     let decoded = decode_jobs(
         &stack.tiff.data,
         &stack.tiff.frames,

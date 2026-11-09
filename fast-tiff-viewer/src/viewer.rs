@@ -527,7 +527,7 @@ impl Viewer {
                 // Always start a newly-opened file in the 2D movie view.
                 self.view_mode = ViewMode::Movie;
                 self.status = compute_status(
-                    stack.display.dims,
+                    stack.display.dims(),
                     stack.display.triple_axis_warning,
                     stack.display.plane_mismatch,
                 );
@@ -556,7 +556,7 @@ impl Viewer {
             // pseudocolor preference on top of the fresh LUTs.
             refresh_pseudocolor(stack, self.apply_pseudocolor);
             self.status = compute_status(
-                stack.display.dims,
+                stack.display.dims(),
                 stack.display.triple_axis_warning,
                 stack.display.plane_mismatch,
             );
@@ -598,7 +598,7 @@ impl Viewer {
     pub fn can_show_volume(&self) -> bool {
         self.stack
             .as_ref()
-            .is_some_and(|s| s.display.dims.frames >= 2)
+            .is_some_and(|s| s.display.dims().frames >= 2)
     }
 
     /// Whether the stack has a time axis *separate* from the volume's depth —
@@ -607,7 +607,7 @@ impl Viewer {
     pub fn is_4d(&self) -> bool {
         self.stack
             .as_ref()
-            .is_some_and(|s| s.display.dims.slices > 1)
+            .is_some_and(|s| s.display.dims().slices > 1)
     }
 
     /// Advance looped playback to match `now` (the frontend's monotonic clock, in

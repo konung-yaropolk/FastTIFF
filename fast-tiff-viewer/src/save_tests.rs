@@ -211,7 +211,7 @@ fn a_planar_rgb_stack_keeps_its_planes() {
 #[test]
 fn the_shape_on_screen_is_the_shape_that_is_written() {
     let stack = open(source(SampleType::U16, 2, 3, 2));
-    let dims = stack.display.dims;
+    let dims = stack.display.dims();
     assert_eq!((dims.channels, dims.slices, dims.frames), (2, 3, 2));
 
     let path = temp("shape");
@@ -220,9 +220,9 @@ fn the_shape_on_screen_is_the_shape_that_is_written() {
         Stack::from_bytes(std::fs::read(&path).unwrap(), "back.tif".into(), false).expect("reopen");
     assert_eq!(
         (
-            back.display.dims.channels,
-            back.display.dims.slices,
-            back.display.dims.frames
+            back.display.dims().channels,
+            back.display.dims().slices,
+            back.display.dims().frames
         ),
         (2, 3, 2),
         "the saved file does not describe the same stack"
@@ -420,11 +420,11 @@ fn the_snapshot_holds_the_shape_it_was_taken_with() {
 
     // Reinterpreting the axes after the snapshot must not reach it.
     let mut stack = stack;
-    stack.display.dims = crate::display::Dims {
+    stack.display.set_dims(crate::display::Dims {
         channels: 1,
         slices: 2,
         frames: 3,
-    };
+    });
     let path = temp("snapshot");
     save_source(&source_a, &path, &mut |_| true).expect("save");
     let back = reopen(&path);
@@ -985,7 +985,7 @@ fn declared_range(bytes: Vec<u8>) -> (String, String) {
 #[test]
 fn an_8_bit_window_is_in_sample_units_both_ways() {
     let mut s = ranged(SampleType::U8, (10.0, 200.0));
-    let c = &s.display.settings[0];
+    let c = &s.display.settings()[0];
     assert_eq!(
         c.window,
         Window::new(10.0, 200.0),
@@ -996,12 +996,12 @@ fn an_8_bit_window_is_in_sample_units_both_ways() {
     assert_eq!(declared_range(bytes), ("10".into(), "200".into()));
 
     // Auto-contrast, or a drag.
-    s.display.settings[0].window = Window::new(20.0, 147.0);
+    s.display.set_window(0, Window::new(20.0, 147.0));
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
     assert_eq!(declared_range(bytes.clone()), ("20".into(), "147".into()));
     let back = Stack::from_bytes(bytes, "again.tif".into(), false).unwrap();
     assert_eq!(
-        back.display.settings[0].window,
+        back.display.settings()[0].window,
         Window::new(20.0, 147.0),
         "and reopens the same"
     );
@@ -1011,7 +1011,7 @@ fn an_8_bit_window_is_in_sample_units_both_ways() {
 #[test]
 fn a_16_bit_window_is_unchanged() {
     let s = ranged(SampleType::U16, (1000.0, 30000.0));
-    let c = &s.display.settings[0];
+    let c = &s.display.settings()[0];
     assert_eq!(c.window, Window::new(1000.0, 30000.0));
     assert_eq!(c.units.to_texture(c.window), (1000.0, 30000.0));
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
@@ -1027,7 +1027,7 @@ fn a_signed_16_bit_window_is_in_imagejs_offset_units_in_the_file() {
     // -100..500 in the samples, as ImageJ writes it.
     let declared = (32_668.0, 33_268.0);
     let mut s = ranged(SampleType::I16, declared);
-    let c = &s.display.settings[0];
+    let c = &s.display.settings()[0];
     assert_eq!(c.window, Window::new(-100.0, 500.0), "the signed values");
     assert_eq!(
         c.units.to_texture(c.window),
@@ -1037,14 +1037,17 @@ fn a_signed_16_bit_window_is_in_imagejs_offset_units_in_the_file() {
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
     assert_eq!(declared_range(bytes), ("32668".into(), "33268".into()));
 
-    s.display.settings[0].window = Window::new(-12_800.0, 0.0);
+    s.display.set_window(0, Window::new(-12_800.0, 0.0));
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
     assert_eq!(
         declared_range(bytes.clone()),
         ("19968".into(), "32768".into())
     );
     let back = Stack::from_bytes(bytes, "again.tif".into(), false).unwrap();
-    assert_eq!(back.display.settings[0].window, Window::new(-12_800.0, 0.0));
+    assert_eq!(
+        back.display.settings()[0].window,
+        Window::new(-12_800.0, 0.0)
+    );
 }
 
 /// Signed 8-bit has no offset in ImageJ's convention: its range is in the
@@ -1052,7 +1055,7 @@ fn a_signed_16_bit_window_is_in_imagejs_offset_units_in_the_file() {
 #[test]
 fn a_signed_8_bit_window_is_in_sample_units_both_ways() {
     let s = ranged(SampleType::I8, (-10.0, 100.0));
-    let c = &s.display.settings[0];
+    let c = &s.display.settings()[0];
     assert_eq!(c.window, Window::new(-10.0, 100.0));
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
     assert_eq!(declared_range(bytes), ("-10".into(), "100".into()));

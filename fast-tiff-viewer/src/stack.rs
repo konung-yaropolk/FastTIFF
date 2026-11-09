@@ -6,9 +6,9 @@
 //! interpretation, contrast defaults, LUT selection and read-ahead wiring for
 //! free instead of reimplementing them.
 
-use crate::channels::{build_channel_settings, refresh_pseudocolor};
+use crate::channels::refresh_pseudocolor;
 use crate::dimensions::{apply_resolved_dimensions_reporting, setup_cmyk, setup_rgb};
-use crate::display::Display;
+use crate::display::{Display, Revision};
 use crate::loader::LoadStage;
 use crate::prefetch::Prefetcher;
 pub use crate::units::{SampleUnits, Window};
@@ -26,10 +26,18 @@ use std::sync::Arc;
 /// 8-bit channel, possibly negative for a signed one, the data's own values for
 /// a float one. [`units`](Self::units) is the one place they are converted to
 /// anything else; see [`crate::units`].
+///
+/// A plain value: the display hands these out by shared reference only
+/// ([`Display::settings`]), and its setters
+/// ([`set_enabled`](Display::set_enabled), [`set_window`](Display::set_window))
+/// are how a shown channel changes, so a toggle is always recorded in the
+/// display's [`Revision`].
 #[derive(Clone, Copy, Debug)]
 pub struct ChannelSettings {
     /// The contrast window: `lo` shows black, `hi` full intensity.
     pub window: Window,
+    /// Whether the channel is composited. A disabled channel is not decoded
+    /// for the frame on screen.
     pub enabled: bool,
     /// The full track a contrast range-slider should span. Derived from the
     /// channel's data range (and widened to include any metadata window) at
@@ -139,20 +147,22 @@ pub struct Stack {
     /// inputs change; validated at every use. See [`crate::window::Overview`].
     pub overview: Option<crate::window::Overview>,
     /// The window the background worker is currently building, if any, with the
-    /// frame and channel set it was asked for.
+    /// frame and the display [`Revision`] it was asked for under.
     ///
     /// Only so the same window is not asked for again on the next frame. A pan
     /// or zoom re-plans every frame, so the rectangle wanted drifts continuously
     /// even while the worker is part-way through one that would serve every one
-    /// of those frames.
-    pub pending_window: Option<(usize, crate::roi::Roi, Vec<usize>)>,
+    /// of those frames. The revision is what makes a window asked for before a
+    /// dimension override, or a channel toggle, no longer count as in flight.
+    pub pending_window: Option<(usize, crate::roi::Roi, Revision)>,
 
-    pub last_uploaded: Option<usize>,
-    /// The per-channel `enabled` flags as of the last GPU upload. A disabled
-    /// channel is skipped during upload (the shader multiplies it out anyway),
-    /// so re-enabling one must re-upload it even when the frame index is
-    /// unchanged — a difference here forces that.
-    pub last_enabled: Vec<bool>,
+    /// The frame on the GPU, and the display [`Revision`] it was decoded
+    /// under. A disabled channel is skipped during upload (the shader
+    /// multiplies it out anyway), so re-enabling one must re-upload the frame
+    /// even when its index is unchanged, and a reinterpretation of the axes
+    /// must re-upload it because every channel may now read another IFD: the
+    /// revision moving is what forces both.
+    pub last_uploaded: Option<(usize, Revision)>,
     pub luts_uploaded: bool,
     /// How the viewer is *showing* this stack: the c/z/t interpretation, the
     /// per-channel LUTs and contrast windows, and the layout facts derived at
@@ -165,11 +175,6 @@ pub struct Stack {
     /// to start, or always under `--no-default-features` (no `threads`); the
     /// inline decode path covers both. See [`crate::prefetch`].
     pub prefetch: Option<Prefetcher>,
-    /// Bumped whenever the decode plan changes (dimension-order swap, enabled-set
-    /// change) so an in-flight prefetch decoded under the old plan is recognized
-    /// as stale and ignored rather than uploaded — and, once the next frame is
-    /// asked for under the new generation, cancelled.
-    pub prefetch_gen: u64,
     /// Background 3D-volume builder, spawned lazily on the first 3D use.
     /// `None` after a failed spawn (`volume_builder_tried` set) — volume
     /// builds then fall back to running synchronously. Dropping it with the
@@ -295,10 +300,8 @@ impl Stack {
             window_worker: None,
             bands: Default::default(),
             last_uploaded: None,
-            last_enabled: Vec::new(),
             luts_uploaded: false,
             prefetch,
-            prefetch_gen: 0,
             volume_builder: None,
             volume_builder_tried: false,
             overlay,
@@ -315,7 +318,7 @@ impl Stack {
             fast_tiff_lib::resolve_dimensions(c, z, f),
             &mut |done, total| on_stage(LoadStage::Contrast { done, total }),
         );
-        stack.display.has_z_axis = stack.display.dims.slices > 1;
+        stack.display.has_z_axis = stack.display.dims().slices > 1;
         // Chunky RGB overrides the channel layout: the sample planes of each IFD
         // become red/green/blue display channels.
         if stack.tiff.frames.first().is_some_and(|f| f.is_rgb()) {
@@ -352,15 +355,9 @@ impl Stack {
         Ok(stack)
     }
 
-    /// Rebuild the per-channel settings from the current metadata. Called after
-    /// anything that changes the channel count or display info.
-    pub fn rebuild_channel_settings(&mut self) {
-        self.display.settings = build_channel_settings(&self.tiff, self.display.dims.channels);
-    }
-
     /// Frame count on the scrub/time axis (at least 1).
     pub fn frame_count(&self) -> usize {
-        self.display.dims.frames.max(1)
+        self.display.dims().frames.max(1)
     }
 
     /// The stack's pixel dimensions, from the first frame.
@@ -396,11 +393,12 @@ impl Stack {
     /// The volume's depth axis: Z for a 4D stack (`slices > 1`), else the whole
     /// frame axis. Mirrors what `volume::build_volume` assembles.
     pub fn volume_depth(&self) -> u32 {
-        let slices = self.display.dims.slices.max(1);
+        let dims = self.display.dims();
+        let slices = dims.slices.max(1);
         if slices > 1 {
             slices as u32
         } else {
-            self.display.dims.frames.max(1) as u32
+            dims.frames.max(1) as u32
         }
     }
 }

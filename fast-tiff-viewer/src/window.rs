@@ -11,6 +11,7 @@
 //! somewhere other than the thread drawing the interface.
 
 use crate::bandcache::{self, BandCache};
+use crate::display::Revision;
 use crate::prefetch::{decode_jobs_region, decode_jobs_stepped, ChannelJob, Decoded, Samples};
 use crate::roi::{self, Roi};
 use crate::worker::{CancelToken, Cancelled, LatestWorker, Unclaimed};
@@ -180,18 +181,24 @@ fn blit_band(
 /// [`crate::bandcache`]), which is what lets a moving view re-use what it has
 /// already decompressed. Peak memory is a band, not the frame.
 ///
+/// `layout` is the [`Revision::layout`](crate::display::Revision::layout) the
+/// `jobs` were built under: `bands` is emptied first if it holds bands of
+/// another one (see [`BandCache::hold_layout`]), since a band is keyed by
+/// display channel and the channel may now read another IFD.
+///
 /// `cancel` is asked before each band, and once it says stop the build ends
 /// with a [`Cancelled`] error (the bands already decoded stay cached). Inline
 /// callers pass [`CancelToken::never`].
 pub fn assemble(
     tiff: &TiffStack,
     bands: &mut BandCache,
+    layout: u64,
     jobs: &[ChannelJob],
-    kinds: &[ChannelKind],
     roi: &Roi,
     frame_index: usize,
     cancel: &CancelToken,
 ) -> anyhow::Result<Vec<Decoded>> {
+    bands.hold_layout(layout);
     let (frame_w, frame_h) = tiff.frames.first().map_or((0, 0), |f| (f.width, f.height));
     let (tw, th) = roi.texture_size();
     let stride = roi.stride.max(1);
@@ -199,22 +206,10 @@ pub fn assemble(
 
     let mut planes: Vec<Decoded> = jobs
         .iter()
-        .map(|j| {
-            let kind = kinds.get(j.channel).copied().unwrap_or(ChannelKind::Int16);
-            empty_plane(kind, tw as usize * th as usize)
-        })
+        .map(|j| empty_plane(j.kind, tw as usize * th as usize))
         .collect();
 
-    let per_sample: usize = jobs
-        .iter()
-        .map(
-            |j| match kinds.get(j.channel).copied().unwrap_or(ChannelKind::Int16) {
-                ChannelKind::Int8 => 1usize,
-                ChannelKind::Int16 => 2,
-                ChannelKind::Float => 4,
-            },
-        )
-        .sum();
+    let per_sample: usize = jobs.iter().map(|j| j.kind.bytes_per_sample()).sum();
     let rows_per_band = bandcache::band_rows(frame_w, per_sample.max(1));
     let grid = bandcache::bands_covering(roi.y..roi.y + roi.h, rows_per_band);
 
@@ -374,8 +369,9 @@ pub fn assemble(
 pub struct Built {
     pub frame_index: usize,
     pub roi: Roi,
-    /// Which display channels it holds, in order — the same list decides
-    /// whether it is still the right answer when it arrives.
+    /// Which display channels it holds, in order: the texture each plane goes
+    /// to. Whether they are still the channels wanted is the display
+    /// revision's question (see [`WindowWorker::take_matching`]).
     pub channels: Vec<usize>,
     pub planes: Vec<Decoded>,
 }
@@ -409,29 +405,21 @@ pub fn overview_budget(mode: roi::LargeImageMode) -> usize {
 /// has to be waited for.
 ///
 /// Validated where it is *used*, never invalidated where its inputs are written
-/// — the same contract as [`WindowWorker::take_matching`], and for the same
-/// reason: which frame is showing, which channels are on, and what format each
-/// one is in are written from a dozen places across two crates, and a scheme
-/// that has to remember them all is a scheme that will eventually forget one.
-/// Forgetting here means showing pixels from another frame or another channel
-/// mapping, so it is not allowed to depend on remembering.
+/// — the same contract as [`WindowWorker::take_matching`]. Which frame is
+/// showing is checked against the frame index, and everything else it depends
+/// on against the display [`Revision`] it was captured under: the
+/// channel-to-IFD mapping and each channel's texture format (its `layout`),
+/// and which channels are on (its `enabled`), since the planes are those of the
+/// channels that were on. Those revisions are moved by the only methods that
+/// can change what they cover, so nothing has to remember to drop this.
+/// Getting it wrong would show pixels from another frame or another channel
+/// mapping — or, for a channel whose format changed, upload a buffer of the
+/// wrong length, a failed validation that takes the process with it.
 pub struct Overview {
     /// The window itself.
     pub built: Built,
-    /// `Stack::prefetch_gen` when this was captured — the decode-plan
-    /// generation, which moves whenever the channel-to-IFD mapping does.
-    pub gen: u64,
-    /// The per-channel enabled flags at capture.
-    ///
-    /// Kept separately from `gen` rather than folded into it, because the
-    /// generation bump for a channel toggle happens *after* residency is
-    /// planned: at planning time the two disagree, and the stale one is the
-    /// generation.
-    pub enabled: Vec<bool>,
-    /// The texture format of each display channel at capture. A `Decoded::U16`
-    /// plane uploaded to a channel that has since become `Int8` is not a wrong
-    /// picture but a failed validation, which takes the process with it.
-    pub kinds: Vec<ChannelKind>,
+    /// The display revision when this was captured.
+    pub revision: Revision,
 }
 
 impl Overview {
@@ -452,9 +440,7 @@ impl Overview {
         built: Built,
         width: u32,
         height: u32,
-        gen: u64,
-        enabled: &[bool],
-        kinds: &[ChannelKind],
+        revision: Revision,
         budget: usize,
     ) -> Option<Overview> {
         if !spans_whole_frame(&built.roi, width, height) {
@@ -464,12 +450,7 @@ impl Overview {
         if bytes > budget {
             return None;
         }
-        Some(Overview {
-            built,
-            gen,
-            enabled: enabled.to_vec(),
-            kinds: kinds.to_vec(),
-        })
+        Some(Overview { built, revision })
     }
 
     /// Bytes the retained planes occupy.
@@ -477,50 +458,36 @@ impl Overview {
         self.built.planes.iter().map(Decoded::bytes).sum()
     }
 
-    /// Whether this still describes the stack as it is now — the same frame,
-    /// the same decode plan, the same channels on, in the same formats.
-    pub fn matches(
-        &self,
-        frame_index: usize,
-        gen: u64,
-        enabled: &[bool],
-        kinds: &[ChannelKind],
-    ) -> bool {
-        self.built.frame_index == frame_index
-            && self.gen == gen
-            && self.enabled == enabled
-            && self.kinds == kinds
+    /// Whether this still describes the stack as it is now: the same frame,
+    /// under the same display revision — the same channel mapping and
+    /// formats, the same channels on.
+    pub fn matches(&self, frame_index: usize, revision: Revision) -> bool {
+        self.built.frame_index == frame_index && self.revision == revision
     }
 
     /// Whether these planes can be uploaded as they stand for `roi`.
     ///
     /// Stricter than [`matches`](Self::matches): the planes were cut to one
     /// window's texture size, so they are the right bytes only for that exact
-    /// window and that exact channel list. A mismatch is a buffer that does not
-    /// fit the texture it is going into.
-    pub fn can_upload(
-        &self,
-        roi: &Roi,
-        frame_index: usize,
-        gen: u64,
-        enabled: &[bool],
-        kinds: &[ChannelKind],
-        channels: &[usize],
-    ) -> bool {
-        self.matches(frame_index, gen, enabled, kinds)
-            && self.built.roi == *roi
-            && self.built.channels == channels
+    /// window. A mismatch is a buffer that does not fit the texture it is
+    /// going into. (Which channels they fill is fixed by the revision.)
+    pub fn can_upload(&self, roi: &Roi, frame_index: usize, revision: Revision) -> bool {
+        self.matches(frame_index, revision) && self.built.roi == *roi
     }
 }
 
-/// What a window is asked for by: the frame, the window, and which display
-/// channels it holds, in order — the fields of the [`Built`] it becomes.
-type WindowKey = (usize, Roi, Vec<usize>);
+/// What a window is asked for by: the frame, the window, and the display
+/// revision it was asked under.
+///
+/// The whole [`Revision`]: a window is built from the planes of the channels
+/// that are on, through the channel-to-IFD mapping in effect, so one asked for
+/// before a dimension override is another mapping's pixels and one asked for
+/// before a channel was switched on lacks that channel.
+type WindowKey = (usize, Roi, Revision);
 
 /// What the window worker is asked for, besides its [`WindowKey`].
 struct Job {
     jobs: Vec<ChannelJob>,
-    kinds: Vec<ChannelKind>,
     /// Whether the requester decodes in parallel: the worker decodes the
     /// window the way the view would have.
     parallel: bool,
@@ -555,15 +522,17 @@ impl WindowWorker {
     /// as before.
     pub fn new(tiff: Arc<TiffStack>) -> Option<Self> {
         // A band cache of its own, so the two threads never contend over one.
+        // Nothing else can reach it, so it is `assemble` that empties it when
+        // a request arrives under another channel layout.
         let mut bands = BandCache::default();
         let build =
-            move |(frame_index, roi, channels): &WindowKey, job: Job, cancel: &CancelToken| {
+            move |(frame_index, roi, revision): &WindowKey, job: Job, cancel: &CancelToken| {
                 fast_tiff_lib::set_thread_parallel_decode(Some(job.parallel));
                 match assemble(
                     &tiff,
                     &mut bands,
+                    revision.layout,
                     &job.jobs,
-                    &job.kinds,
                     roi,
                     *frame_index,
                     cancel,
@@ -571,7 +540,7 @@ impl WindowWorker {
                     Ok(planes) => Some(Built {
                         frame_index: *frame_index,
                         roi: *roi,
-                        channels: channels.clone(),
+                        channels: job.jobs.iter().map(|j| j.channel).collect(),
                         planes,
                     }),
                     Err(e) if e.is::<Cancelled>() => None,
@@ -584,22 +553,15 @@ impl WindowWorker {
         LatestWorker::spawn("fasttiff-window", Unclaimed::Keep, build).map(WindowWorker)
     }
 
-    /// Ask for a window. Fire and forget: a request for a different window
+    /// Ask for a window of `jobs`, built under display `revision`. Fire and
+    /// forget: a request for a different window (or under another revision)
     /// cancels the one in progress, and the same one again is ignored while it
     /// is still pending.
-    pub fn request(
-        &self,
-        frame_index: usize,
-        roi: Roi,
-        jobs: Vec<ChannelJob>,
-        kinds: Vec<ChannelKind>,
-    ) {
-        let channels = jobs.iter().map(|j| j.channel).collect();
+    pub fn request(&self, frame_index: usize, roi: Roi, revision: Revision, jobs: Vec<ChannelJob>) {
         self.0.request(
-            (frame_index, roi, channels),
+            (frame_index, roi, revision),
             Job {
                 jobs,
-                kinds,
                 parallel: fast_tiff_lib::parallel_decode_enabled(),
             },
         );
@@ -618,16 +580,20 @@ impl WindowWorker {
     /// and every one of the other 11 would have served the view that discarded
     /// it.
     ///
+    /// The frame and the display revision, though, must be exactly the ones
+    /// the view is under: a window built before a dimension override, or a
+    /// channel toggle, is refused however well it covers.
+    ///
     /// A result that has not been asked about is still not discarded — the view
     /// may be about to want it, and building it again is the expensive thing.
     pub fn take_matching(
         &self,
         frame_index: usize,
         required: &Roi,
-        channels: &[usize],
+        revision: Revision,
     ) -> Option<Built> {
-        self.0.take_if(|(frame, roi, held)| {
-            *frame == frame_index && held == channels && roi.serves(required)
+        self.0.take_if(|(frame, roi, built_under)| {
+            *frame == frame_index && *built_under == revision && roi.serves(required)
         })
     }
 }
