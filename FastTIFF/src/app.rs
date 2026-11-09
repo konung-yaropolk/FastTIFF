@@ -298,53 +298,6 @@ fn import_with_plugin(
     Ok(Opened::Bytes(bytes, imported_label(path, &fallback)))
 }
 
-/// Write a plugin's result where a new window can open it, and say where.
-///
-/// Tries `<stem>.tif` first and falls back to `<stem>-2.tif`, `-3.tif` and so
-/// on. The fallback is not tidiness about overwriting: a window already showing
-/// an earlier result **memory-maps that file for as long as it is open**, and
-/// Windows refuses to write to a file with a mapped section. So running a
-/// plugin twice without closing the first result failed at the write, and the
-/// caller's last-resort path — show it in this window instead — then replaced
-/// the document the user was working from. A second result is a second thing to
-/// look at, exactly as the first was; it needs a name of its own.
-///
-/// Each name is *created*, never overwritten — `create_new` fails if the file
-/// is there, which is the whole mechanism. Asking the filesystem to make a new
-/// file says what is meant, and says it the same way on every platform: relying
-/// on the write to fail would work on Windows, where the mapping locks the
-/// file, and silently overwrite another window's data everywhere else.
-///
-/// The bound is a bound, not a policy: a hundred results kept open at once is
-/// already absurd, and past that the last error is the honest answer.
-#[cfg(not(target_arch = "wasm32"))]
-fn write_result(
-    dir: &std::path::Path,
-    stem: &str,
-    bytes: &[u8],
-) -> std::io::Result<std::path::PathBuf> {
-    use std::io::Write;
-    let mut last = None;
-    for n in 1..=100u32 {
-        let path = dir.join(match n {
-            1 => format!("{stem}.tif"),
-            n => format!("{stem}-{n}.tif"),
-        });
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                file.write_all(bytes)?;
-                return Ok(path);
-            }
-            Err(e) => last = Some(e),
-        }
-    }
-    Err(last.unwrap_or_else(|| std::io::Error::other("no result file could be written")))
-}
-
 /// The status line's two voices: amber for something to be aware of, green for
 /// something that finished. Both are chosen to stay legible against the light
 /// and dark themes rather than to match either one.
@@ -580,64 +533,6 @@ impl WriteOutcome {
     }
 }
 
-/// What a plugin's run came to, after the worker has done everything that can
-/// be done off the interface thread.
-///
-/// The encode and the file write live on the worker precisely because they are
-/// not small: a stabilised timelapse is every plane rewritten, which on a long
-/// recording takes longer than the registration did. Doing them here, after the
-/// result came back, froze the window with the bar sitting at 100%.
-enum PluginProduct {
-    Nothing,
-    Cancelled,
-    Message(String),
-    Plot(Box<fasttiff_plugin_api::Plot>),
-    /// A window is already opening for it; this is what to call it.
-    ///
-    /// A derived image is a second thing, not a correction to the first: the
-    /// point of a projection or a derivative is to be looked at beside what it
-    /// came from. Replacing the open document — which is what this did — threw
-    /// the source away and made the comparison impossible without reopening it.
-    ///
-    /// A window per document is a process per document here: that is already
-    /// how the app opens several files at once, and it needs no window manager
-    /// of its own inside egui. The result reaches that process in memory when
-    /// the machine has room for it and through a temporary file when it does
-    /// not; either way it is named after the image, so the new window's title
-    /// says what it is showing rather than naming a scratch file. A file, when
-    /// one is used, is left behind deliberately — the process that would delete
-    /// it is the one still reading it, and the OS clears the directory.
-    NewWindow(String),
-    /// No way to hand it over, so it comes back whole to be shown in this
-    /// window. The bytes are only carried on this path, which is the failure
-    /// one.
-    Inline {
-        bytes: Vec<u8>,
-        name: String,
-        why: String,
-    },
-    /// Written where the plugin asked.
-    Saved(String),
-    /// Takes the place of the document it was run on, because the plugin asked
-    /// for that rather than for a window.
-    ///
-    /// Carries the bytes like [`PluginProduct::Inline`] does, and for the same
-    /// reason — they have nowhere else to go — but it is not a failure path:
-    /// nothing went wrong and there is nothing to apologise for in the status
-    /// line.
-    Replace {
-        bytes: Vec<u8>,
-        name: String,
-    },
-    /// Move the 3D view as the plugin declared. See [`animation`].
-    Animate(Box<fasttiff_plugin_api::Animation>),
-    /// Stop the plugin's own animation.
-    StopAnimation,
-    /// Have the user draw a rectangle, with this prompt in the status line,
-    /// then run the plugin again with it. See [`region_pick`].
-    SelectRegion(String),
-}
-
 /// What a filter plugin produced, carried back from its worker.
 struct PluginRun {
     /// Which plugin, so a plot it returned can be recomputed for a new
@@ -648,215 +543,170 @@ struct PluginRun {
     name: String,
     /// What the plugin logged, drained from its host when the run ended.
     messages: Vec<String>,
-    outcome: Result<PluginProduct, String>,
+    outcome: Result<fast_tiff_viewer::plugins::Product, String>,
+    /// The file the document the run was on stands for, so a result shown
+    /// in this window is said to be made from it — whatever is on show by
+    /// the time it lands.
+    made_from: Option<PathBuf>,
 }
 
-/// Turn what a plugin returned into something the interface can apply in a
-/// frame — encoding and writing on the way, since this runs on the worker.
+/// The app's half of delivering a plugin's result: the job's bar, and the
+/// platform's way of opening a window or saving a file. Everything before
+/// that last step is `fast_tiff_viewer::plugins::deliver`, shared with the
+/// browser build.
+struct AppDelivery<'a> {
+    label: &'a std::sync::Mutex<String>,
+    progress: &'a std::sync::atomic::AtomicU32,
+    cancel: &'a std::sync::atomic::AtomicBool,
+    same_document: &'a dyn Fn() -> bool,
+}
+
+impl fast_tiff_viewer::plugins::Deliver for AppDelivery<'_> {
+    fn phase(&mut self, label: &str) {
+        Job::begin_phase(self.label, self.progress, label);
+    }
+
+    fn report(&mut self, fraction: f32) -> bool {
+        Job::report(self.progress, fraction);
+        !self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn same_document(&self) -> bool {
+        (self.same_document)()
+    }
+
+    /// A window per document is a process per document here: that is already
+    /// how the app opens several files at once, and it needs no window manager
+    /// of its own inside egui. In a browser it is a tab.
+    fn open_in_new_window(
+        &mut self,
+        result: fast_tiff_viewer::plugins::ResultTiff,
+    ) -> fast_tiff_viewer::plugins::Handover {
+        use fast_tiff_viewer::plugins::Handover;
+        // Named after the image, so the new window's title says what it is
+        // showing rather than naming a scratch file.
+        let name = format!(
+            "{}.tif",
+            fast_tiff_viewer::plugins::file_stem(result.name())
+        );
+
+        // The browser's handover. A tab, not a process — see `crate::web_open`
+        // for why a blob and not a message, and why the plugin had to run
+        // synchronously for this call to be allowed. A refused popup is the
+        // expected failure, not an exceptional one: the result comes back and
+        // is shown in this tab, with the reason in the status line.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let opened = match result.bytes() {
+                Some(bytes) => crate::web_open::open_bytes_in_new_tab(bytes, &name),
+                None => Err("the result is not in memory".to_string()),
+            };
+            match opened {
+                Ok(()) => Handover::Opened(name),
+                Err(why) => Handover::Refused(Box::new(result), why),
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // The file the result was written to as it arrived. The new window
+            // maps it like any file it opens, so the result is never copied
+            // into either process: the pages it needs are read in, and the OS
+            // may let go of the rest. It is left behind deliberately — the
+            // process that would delete it is the one still reading it, and it
+            // cannot say when it is done — and `sweep_old_results` removes it
+            // at a later start, once it is a day old. Its file is named after
+            // the result, so that is what the new window is titled.
+            if let Some(path) = result.path() {
+                let shown = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or(name);
+                return match crate::process::try_open_in_new_process(path) {
+                    Ok(()) => {
+                        let _ = result.into_kept_path();
+                        Handover::Opened(shown)
+                    }
+                    Err(e) => Handover::Refused(Box::new(result), e.to_string()),
+                };
+            }
+            // In memory, because no file could be made for it. Through a pipe
+            // when the machine has the room for the new window to hold it too.
+            let bytes = result.bytes().unwrap_or_default();
+            if !crate::process::fits_in_memory(bytes.len()) {
+                return Handover::Refused(
+                    Box::new(result),
+                    "no file could be written for it, and it is too large to hand over in \
+                     memory"
+                        .into(),
+                );
+            }
+            let cancel = self.cancel;
+            let progress = self.progress;
+            match crate::process::open_bytes_in_new_process(bytes, &name, &mut |f| {
+                Job::report(progress, f);
+                !cancel.load(std::sync::atomic::Ordering::Relaxed)
+            }) {
+                Ok(()) => Handover::Opened(name),
+                Err(_) if cancel.load(std::sync::atomic::Ordering::Relaxed) => Handover::Cancelled,
+                Err(e) => Handover::Refused(Box::new(result), e.to_string()),
+            }
+        }
+    }
+
+    fn save(
+        &mut self,
+        result: fast_tiff_viewer::plugins::ResultTiff,
+        path: &str,
+    ) -> Result<String, String> {
+        // The browser's filesystem is the download manager. The plugin's path
+        // still names the file — the last component of it — because the
+        // desktop honours that name and the two should not disagree about what
+        // the result is called; what a tab cannot honour is the directory, and
+        // it does not pretend to.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let name = crate::web_save::name_from_path(path);
+            let bytes = result.into_bytes().map_err(|e| e.to_string())?;
+            crate::web_save::download(&bytes, &name).map(|()| name)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            result
+                .save_as(std::path::Path::new(path))
+                .map(|()| path.to_string())
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Clear out plugin results more than a day old, on a thread of its own so
+/// the window does not wait for it.
 ///
-/// `same_document` says whether the window still shows the document the run
-/// started on. A replacement for one that has since been closed goes to a new
-/// window, as a new document would: replacing what the user opened meanwhile
-/// would throw that away and show a result of something else in its place.
-fn finish_outcome(
-    outcome: fasttiff_plugin_api::Outcome,
-    label: &std::sync::Mutex<String>,
-    progress: &std::sync::atomic::AtomicU32,
-    cancel: &std::sync::atomic::AtomicBool,
-    luts: &[fasttiff_plugin_api::Lut],
-    same_document: &dyn Fn() -> bool,
-) -> Result<PluginProduct, String> {
-    use fasttiff_plugin_api::Outcome;
-    let stopped = || cancel.load(std::sync::atomic::Ordering::Relaxed);
-
-    match outcome {
-        Outcome::Nothing => Ok(PluginProduct::Nothing),
-        Outcome::Cancelled => Ok(PluginProduct::Cancelled),
-        Outcome::Message(m) => Ok(PluginProduct::Message(m)),
-        Outcome::Plot(p) => Ok(PluginProduct::Plot(p)),
-        // Nothing to encode: the poses are the whole result, and the work of
-        // carrying them out happens frame by frame on the interface thread.
-        Outcome::Animate(a) => Ok(PluginProduct::Animate(a)),
-        Outcome::StopAnimation => Ok(PluginProduct::StopAnimation),
-        Outcome::SelectRegion { prompt } => Ok(PluginProduct::SelectRegion(prompt)),
-        Outcome::NewDocument(image) => {
-            Job::begin_phase(label, progress, "Encoding result");
-            // Taken, not borrowed: each plane is freed as soon as it is
-            // written, so the result is held about once while it is encoded.
-            let image_name = image.name.clone();
-            let bytes = match fast_tiff_viewer::plugins::into_tiff_bytes_reporting(
-                *image,
-                None,
-                luts,
-                &mut |f| {
-                    Job::report(progress, f);
-                    !stopped()
-                },
-            ) {
-                Ok(Some(b)) => b,
-                Ok(None) => return Ok(PluginProduct::Cancelled),
-                Err(e) => return Err(format!("{e:#}")),
-            };
-
-            // A file name from the image's own name, with anything a filesystem
-            // would object to replaced. Needed even for the handover that never
-            // touches a filesystem: it is what the new window is titled.
-            let stem: String = image_name
-                .chars()
-                .map(|c| {
-                    if c.is_alphanumeric() || "-_. ".contains(c) {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            let stem = stem.trim().trim_matches('.').to_string();
-            let stem = if stem.is_empty() {
-                "result".to_string()
-            } else {
-                stem
-            };
-
-            Job::begin_phase(label, progress, "Opening a new window");
-
-            // The browser's handover. A tab, not a process — see
-            // `crate::web_open` for why a blob and not a message, and why the
-            // plugin had to run synchronously for this call to be allowed.
-            #[cfg(target_arch = "wasm32")]
-            {
-                let name = format!("{stem}.tif");
-                match crate::web_open::open_bytes_in_new_tab(&bytes, &name) {
-                    Ok(()) => Ok(PluginProduct::NewWindow(name)),
-                    // A refused popup is the expected failure, not an
-                    // exceptional one, and it is already handled: the result
-                    // comes back whole and is shown in this tab, with the
-                    // reason in the status line. That is exactly what `Inline`
-                    // was built for when a desktop handover could not go
-                    // through.
-                    Err(why) => Ok(PluginProduct::Inline {
-                        bytes,
-                        name: image_name,
-                        why,
-                    }),
+/// What this removes is mostly results handed to new windows: those are
+/// left behind on purpose, the window's process reading them for as long as
+/// it is open, and nothing else ever deletes them. A result still on show in
+/// another window survives it on Windows, where a mapped file cannot be
+/// deleted; see `fast_tiff_viewer::plugins::sweep`. Failures are ignored: the
+/// next start tries again.
+fn sweep_old_results() {
+    // Not from a test that builds an app: that is the user's own folder.
+    #[cfg(not(any(target_arch = "wasm32", test)))]
+    if let fast_tiff_viewer::plugins::ResultDest::Dir(root) =
+        fast_tiff_viewer::plugins::ResultDest::platform_default()
+    {
+        const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+        let _ = std::thread::Builder::new()
+            .name("fasttiff-sweep".to_owned())
+            .spawn(move || {
+                let removed = fast_tiff_viewer::plugins::sweep(&root, DAY);
+                if removed > 0 {
+                    log::info!(
+                        "removed {removed} old plugin result(s) from {}",
+                        root.display()
+                    );
                 }
-            }
-
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                // In memory when the machine has the room for it. A stabilised
-                // recording is as big as the recording, and writing it to a
-                // temporary file only for the new window to read it straight back
-                // is the slowest thing left in the run — twice the size of the
-                // result over the disk, for a file that is deleted when the
-                // machine next clears its temporary directory.
-                if crate::process::fits_in_memory(bytes.len()) {
-                    let name = format!("{stem}.tif");
-                    match crate::process::open_bytes_in_new_process(&bytes, &name, &mut |f| {
-                        Job::report(progress, f);
-                        !stopped()
-                    }) {
-                        Ok(()) => return Ok(PluginProduct::NewWindow(name)),
-                        Err(_) if stopped() => return Ok(PluginProduct::Cancelled),
-                        // Not fatal, and not worth telling the user about: the file
-                        // below does the same job. It is worth a log line, because
-                        // a machine where this always fails is silently doing twice
-                        // the disk traffic it needs to.
-                        Err(e) => log::warn!("in-memory handover failed, using a file: {e}"),
-                    }
-                }
-
-                // Too big to hold, or the handover would not go through. A file it
-                // is — which for a stack that large is the better home anyway, the
-                // new window memory-mapping it rather than holding it resident.
-                Job::begin_phase(label, progress, "Writing result");
-                let dir = std::env::temp_dir().join("fasttiff-plugin-results");
-                let written = std::fs::create_dir_all(&dir)
-                    .and_then(|()| write_result(&dir, &stem, &bytes))
-                    .and_then(|path| crate::process::try_open_in_new_process(&path).map(|()| path));
-                match written {
-                    Ok(path) => Ok(PluginProduct::NewWindow(
-                        path.file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| format!("{stem}.tif")),
-                    )),
-                    // Nowhere to put it is not a reason to lose it: it comes back
-                    // whole and is shown in this window instead.
-                    Err(e) => Ok(PluginProduct::Inline {
-                        bytes,
-                        name: image_name,
-                        why: e.to_string(),
-                    }),
-                }
-            }
-        }
-        Outcome::ReplaceDocument(image) if !same_document() => finish_outcome(
-            Outcome::NewDocument(image),
-            label,
-            progress,
-            cancel,
-            luts,
-            same_document,
-        ),
-        Outcome::ReplaceDocument(image) => {
-            Job::begin_phase(label, progress, "Encoding result");
-            // Taken, not borrowed: each plane is freed as soon as it is
-            // written, so the result is held about once while it is encoded.
-            let image_name = image.name.clone();
-            let bytes = match fast_tiff_viewer::plugins::into_tiff_bytes_reporting(
-                *image,
-                None,
-                luts,
-                &mut |f| {
-                    Job::report(progress, f);
-                    !stopped()
-                },
-            ) {
-                Ok(Some(b)) => b,
-                Ok(None) => return Ok(PluginProduct::Cancelled),
-                Err(e) => return Err(format!("{e:#}")),
-            };
-            // No spawn, no temp file, no fallback: the window it replaces is
-            // this one, so the bytes only have to reach the interface thread.
-            Ok(PluginProduct::Replace {
-                bytes,
-                name: image_name,
-            })
-        }
-        Outcome::SaveToFile { image, path } => {
-            Job::begin_phase(label, progress, "Writing result");
-            // Taken, not borrowed: each plane is freed as soon as it is
-            // written, so the result is held about once while it is encoded.
-            let bytes = match fast_tiff_viewer::plugins::into_tiff_bytes_reporting(
-                *image,
-                None,
-                luts,
-                &mut |f| {
-                    Job::report(progress, f);
-                    !stopped()
-                },
-            ) {
-                Ok(Some(b)) => b,
-                Ok(None) => return Ok(PluginProduct::Cancelled),
-                Err(e) => return Err(format!("{e:#}")),
-            };
-            // The browser's filesystem is the download manager. The plugin's
-            // path still names the file — the last component of it — because
-            // the desktop honours that name and the two should not disagree
-            // about what the result is called; what a tab cannot honour is the
-            // directory, and it does not pretend to.
-            #[cfg(target_arch = "wasm32")]
-            {
-                let name = crate::web_save::name_from_path(&path);
-                crate::web_save::download(&bytes, &name).map(|()| PluginProduct::Saved(name))
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                std::fs::write(&path, bytes)
-                    .map(|()| PluginProduct::Saved(path))
-                    .map_err(|e| e.to_string())
-            }
-        }
+            });
     }
 }
 
@@ -1082,9 +932,13 @@ pub enum Opened {
     /// The file's bytes plus its name, for display.
     ///
     /// The browser build's only route, there being no filesystem there.
-    /// Natively it is how a plugin result reaches a new window when there was
-    /// room to hand it over in memory rather than through a file.
+    /// Natively it is how a plugin result reaches a new window when no file
+    /// could be written for it and it was handed over in memory instead.
     Bytes(Vec<u8>, String),
+    /// A plugin's result, to be opened as it was written: straight to the
+    /// reader, past the importers — it is a TIFF this app wrote, and an
+    /// importer claiming `.tif` has no business reading it back.
+    Source(fast_tiff_viewer::LoadSource),
 }
 
 /// Where the image sits in the viewport: the 2D pan/zoom transform and the
@@ -1598,6 +1452,7 @@ impl ViewerApp {
             .as_ref()
             .map(|r| r.claimed_extensions())
             .unwrap_or_default();
+        sweep_old_results();
         if let Some(opened) = initial {
             app.apply_opened(opened);
         }
@@ -1644,6 +1499,7 @@ impl ViewerApp {
             Opened::Bytes(bytes, name) => {
                 fast_tiff_viewer::LoadSource::Bytes(bytes, PathBuf::from(name))
             }
+            Opened::Source(source) => source,
         });
     }
 
@@ -2095,6 +1951,7 @@ impl ViewerApp {
             return;
         };
 
+        let made_from = loaded.original();
         let view = self.plugin_view(loaded);
         // The regions belong to the plot this plugin is feeding, if it has one.
         // A different plugin gets none — a selection drawn for one measurement
@@ -2113,22 +1970,25 @@ impl ViewerApp {
                 .map(|p| p.rois.clone())
                 .unwrap_or_default()
         });
-        // The source's own tables, so a result that keeps its channels opens
-        // looking like the document it came from. Taken now, with the rest of
-        // the run's inputs, rather than when the result lands — the user may
-        // change a LUT while a long run is going, and the result belongs to
-        // the state the run started in.
-        let luts = loaded.display.luts.clone();
         let job = Job::new(name.clone());
+        // A result is written as it arrives — to a file of its own on the
+        // desktop, to memory in a browser — so a registration's result is
+        // never whole in memory on its way to a window. It is written with the
+        // source's own tables, so a result that keeps its channels opens
+        // looking like the document it came from: those of `view`, taken now
+        // with the rest of the run's inputs rather than when the result lands
+        // — the user may change a LUT while a long run is going, and the
+        // result belongs to the state the run started in.
         let host = fast_tiff_viewer::plugins::StackHost::new(loaded, view)
             .with_selection(selection)
             .with_animating(self.animating_for(index))
-            .with_cancel(job.cancel.clone(), job.progress.clone());
+            .with_cancel(job.cancel.clone(), job.progress.clone())
+            .streaming_to(fast_tiff_viewer::plugins::ResultDest::platform_default());
         let (progress, cancel, label) = self.begin_job(job);
 
         let tx = self.open_tx.clone();
         // Which document this ran on, to tell if it is still the one on show
-        // when the result arrives (see `finish_outcome`).
+        // when the result arrives (see `Deliver::same_document`).
         let document = std::sync::Arc::clone(&self.document);
         let run_on = document.load(std::sync::atomic::Ordering::Relaxed);
         // The run itself, as one closure, so that the only difference between
@@ -2145,15 +2005,27 @@ impl ViewerApp {
                 )),
             })
             .unwrap_or_else(|e| Err(fasttiff_plugin_api::PluginError::failed(e)));
-            // Encoding the result and handing it to a window happen here, on
+            // Finishing the result and handing it to a window happen here, on
             // the worker, under their own label. They used to happen on the
             // interface thread once the result came back — which is why the bar
             // reached 100% and the window then froze until it was done.
             let outcome = match outcome {
-                Ok(o) => finish_outcome(o, &label, &progress, &cancel, &luts, &|| {
-                    document.load(std::sync::atomic::Ordering::Relaxed) == run_on
-                }),
-                Err(e) => Err(e.to_string()),
+                Ok(o) => fast_tiff_viewer::plugins::deliver::finish(
+                    o,
+                    &mut host,
+                    &mut AppDelivery {
+                        label: &label,
+                        progress: &progress,
+                        cancel: &cancel,
+                        same_document: &|| {
+                            document.load(std::sync::atomic::Ordering::Relaxed) == run_on
+                        },
+                    },
+                ),
+                Err(e) => {
+                    host.discard_result();
+                    Err(e.to_string())
+                }
             };
             let run = PluginRun {
                 index,
@@ -2161,6 +2033,7 @@ impl ViewerApp {
                 name,
                 messages: std::mem::take(&mut host.messages),
                 outcome,
+                made_from,
             };
             let _ = tx.send(Incoming::Ran(Box::new(registry), Box::new(run)));
             wake_ui();
@@ -2196,13 +2069,15 @@ impl ViewerApp {
             name,
             messages,
             outcome,
+            made_from,
         } = run;
         for m in &messages {
             log::info!("{name}: {m}");
         }
 
+        use fast_tiff_viewer::plugins::Product;
         match outcome {
-            Ok(PluginProduct::Plot(plot)) => {
+            Ok(Product::Plot(plot)) => {
                 match self.plot.as_mut().filter(|p| p.plugin == index) {
                     // A re-run for a changed selection: keep the window, the
                     // tool and the regions exactly where they are and swap the
@@ -2214,44 +2089,60 @@ impl ViewerApp {
                     None => self.plot = Some(plot::PlotWindow::new(index, params, *plot)),
                 }
             }
-            Ok(PluginProduct::Nothing) => {}
+            Ok(Product::Nothing) => {}
             // A run stopped to make way for a newer selection is not news:
             // the user drew a region, they did not cancel anything. Saying
             // "cancelled" for their own edit would be the tool complaining
             // about being used.
-            Ok(PluginProduct::Cancelled)
+            Ok(Product::Cancelled)
                 if self
                     .plot
                     .as_ref()
                     .is_some_and(|p| p.plugin == index && p.stale) => {}
-            Ok(PluginProduct::Cancelled) => self.core.status = Some(format!("{name}: cancelled")),
-            Ok(PluginProduct::Message(m)) => self.core.status = Some(format!("{name}: {m}")),
+            Ok(Product::Cancelled) => self.core.status = Some(format!("{name}: cancelled")),
+            Ok(Product::Message(m)) => self.core.status = Some(format!("{name}: {m}")),
             // The window is already on its way; there is nothing left to do
             // here but say so.
-            Ok(PluginProduct::NewWindow(what)) => {
+            Ok(Product::NewWindow(what)) => {
                 self.report_done(format!("{name}: opened {what} in a new window"))
             }
-            Ok(PluginProduct::Inline {
-                bytes,
-                name: n,
-                why,
-            }) => {
+            Ok(Product::Inline { result, why }) => {
                 self.core.status = Some(format!(
                     "{name}: could not open a new window ({why}); showing it here"
                 ));
-                self.apply_opened(Opened::Bytes(bytes, n));
+                self.open_result(&name, result, made_from);
             }
-            Ok(PluginProduct::Replace { bytes, name: n }) => {
+            Ok(Product::Replace(result)) => {
                 self.report_done(format!("{name}: replaced this window's image"));
-                self.apply_opened(Opened::Bytes(bytes, n));
+                self.open_result(&name, result, made_from);
             }
-            Ok(PluginProduct::Saved(path)) => self.report_done(format!("{name}: wrote {path}")),
-            Ok(PluginProduct::Animate(a)) => self.start_animation(index, &name, *a),
-            Ok(PluginProduct::StopAnimation) => self.stop_animation_of(index),
-            Ok(PluginProduct::SelectRegion(prompt)) => {
+            Ok(Product::Saved(path)) => self.report_done(format!("{name}: wrote {path}")),
+            Ok(Product::Animate(a)) => self.start_animation(index, &name, *a),
+            Ok(Product::StopAnimation) => self.stop_animation_of(index),
+            Ok(Product::SelectRegion(prompt)) => {
                 self.start_region_pick(index, params, &name, prompt)
             }
             Err(e) => self.core.status = Some(format!("{name}: {e}")),
+        }
+    }
+
+    /// Show a plugin's result in this window: the file it was written to,
+    /// mapped as any opened file is, or its bytes where it was held in memory.
+    ///
+    /// The document it opens as is the result's own: named after it, owning
+    /// its scratch file (deleted when the document is closed), and made from
+    /// `made_from`, the file of the document the run was on — so "Save as…"
+    /// starts in that one's folder, and a plugin run on the result is not
+    /// told the scratch file is its source.
+    fn open_result(
+        &mut self,
+        plugin: &str,
+        result: fast_tiff_viewer::plugins::ResultTiff,
+        made_from: Option<PathBuf>,
+    ) {
+        match result.into_document(made_from) {
+            Ok(source) => self.apply_opened(Opened::Source(source)),
+            Err(e) => self.core.status = Some(format!("{plugin}: could not open its result: {e}")),
         }
     }
 
@@ -2357,7 +2248,7 @@ impl ViewerApp {
             let exts: Vec<&str> = t.extensions.iter().map(|s| s.as_str()).collect();
             dialog = dialog.add_filter(&t.description, &exts);
         }
-        if let Some(dir) = stack.path.parent().filter(|d| d.is_dir()) {
+        if let Some(dir) = stack.save_dir() {
             dialog = dialog.set_directory(dir);
         }
         let Some(path) = dialog.save_file() else {
@@ -4792,11 +4683,6 @@ mod readout_tests;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "app/import_label_tests.rs"]
 mod import_label_tests;
-
-#[cfg(test)]
-#[cfg(not(target_arch = "wasm32"))]
-#[path = "app/result_file_tests.rs"]
-mod result_file_tests;
 
 #[cfg(test)]
 #[path = "app/panel_grow_tests.rs"]

@@ -26,8 +26,9 @@
 //!
 //! # The plane order
 //!
-//! `ImageResult::planes` is `xyczt` — channel fastest, then Z, then T. The one
-//! formula every tool here depends on is therefore
+//! A result's planes are `xyczt` — channel fastest, then Z, then T — whether
+//! returned whole or, as every tool here does, streamed to the host as they
+//! are read. The one formula every tool here depends on is therefore
 //!
 //! ```text
 //!     index = t * (slices * channels) + z * channels + c
@@ -48,8 +49,8 @@
 //! to [`map_planes`] already in order — which is why that is the one place the
 //! ordering has to be right.
 
-use super::shared::Store;
-use fasttiff_plugin_api::{HostContext, ImageInfo, PlaneData, PluginError};
+use super::shared::{Store, Stored};
+use fasttiff_plugin_api::{HostContext, ImageInfo, ImageSpec, ImageStream, PluginError};
 
 mod order;
 mod slices;
@@ -96,38 +97,65 @@ pub(crate) fn axes(info: &ImageInfo) -> Vec<Axis> {
     }
 }
 
-/// Read every plane of the source, in `xyczt` order, applying `f` to each.
+/// Read every plane of the source, in `xyczt` order, applying `f` to each and
+/// pushing it to `out`.
 ///
 /// Shared because three of the four tools are "walk the planes and keep some of
 /// them": what differs is which, and what happens to the samples on the way.
+/// Kept planes go to the host as they are read, so a tool that keeps most of a
+/// recording never holds it — `out` is the result the tool began, and each
+/// plane is the host's before the next is read.
 ///
-/// `Ok(None)` means the user cancelled, which is the house convention
-/// (`to_tiff_bytes_reporting` reports it the same way) and is not the same
-/// thing as an error. Returning `Err` for it — which this did — puts the word
-/// "cancelled" in the status bar styled as a failure, for something the user
-/// asked for.
+/// `Ok(false)` means the user cancelled, which is the house convention and is
+/// not the same thing as an error. Returning `Err` for it — which this once
+/// did — puts the word "cancelled" in the status bar styled as a failure, for
+/// something the user asked for.
 pub(crate) fn map_planes(
     host: &mut dyn HostContext,
     keep: &[(usize, usize)],
     store: Store,
+    out: &mut ImageStream,
     mut f: impl FnMut(&mut Vec<f32>),
-) -> Result<Option<Vec<PlaneData>>, PluginError> {
+) -> Result<bool, PluginError> {
     let info = host.image();
     let channels = info.channels.max(1);
-    let mut planes = Vec::with_capacity(keep.len() * channels);
     let mut buf = Vec::new();
+    let mut stored = Stored::default();
     let total = (keep.len() * channels).max(1);
     let mut done = 0usize;
     for &(z, t) in keep {
         for c in 0..channels {
             if !host.progress(done as f32 / total as f32) {
-                return Ok(None);
+                return Ok(false);
             }
             host.read_plane_f32(fasttiff_plugin_api::Plane::new(c, z, t), &mut buf)?;
             f(&mut buf);
-            planes.push(store.plane(std::mem::take(&mut buf)));
+            out.push(host, store.encode(&buf, &mut stored))?;
             done += 1;
         }
     }
-    Ok(Some(planes))
+    Ok(true)
+}
+
+/// The result of a tool here: the source's frame and calibration, with the
+/// axes the tool left, at the source's own width, named for what was done.
+pub(crate) fn result_spec(
+    host: &dyn HostContext,
+    store: Store,
+    slices: usize,
+    frames: usize,
+    suffix: &str,
+) -> ImageSpec {
+    let info = host.image();
+    ImageSpec {
+        width: info.width,
+        height: info.height,
+        channels: info.channels.max(1),
+        slices,
+        frames,
+        pixel_type: store.pixel_type(),
+        channel_colors: Vec::new(),
+        metadata: Some(host.stack_info().clone()),
+        name: format!("{}-{suffix}", host.stack_info().stem()),
+    }
 }

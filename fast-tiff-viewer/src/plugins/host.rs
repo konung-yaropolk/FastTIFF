@@ -6,10 +6,11 @@
 //! own state — and not in the app.
 
 use fasttiff_plugin_api::{
-    ChannelView, DisplayMode, HostContext, ImageInfo, PixelType, Plane, PluginError, Spacing,
-    StackInfo, ViewParams, VolumeMode, VolumeView,
+    ChannelView, DisplayMode, HostContext, ImageInfo, ImageSpec, PixelType, Plane, PlaneRef,
+    PluginError, Spacing, StackInfo, ViewParams, VolumeMode, VolumeView,
 };
 
+use super::result::{ResultDest, ResultTiff, ResultWriter};
 use crate::dimensions::plane_index;
 use crate::display::Dims;
 use crate::stack::Stack;
@@ -61,6 +62,12 @@ pub struct StackHost {
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Last reported progress, `0.0..=1.0`.
     pub progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Where a result the plugin streams is written, when this host takes
+    /// results plane by plane. `None` takes them only whole.
+    results: Option<ResultDest>,
+    /// The result being streamed, from the plugin's `begin_image` until the
+    /// caller takes it. Dropping it unfinished deletes its file.
+    streamed: Option<ResultWriter>,
 }
 
 impl StackHost {
@@ -78,7 +85,93 @@ impl StackHost {
             messages: Vec::new(),
             cancel: None,
             progress: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            results: None,
+            streamed: None,
         }
+    }
+
+    /// Take a result plane by plane, writing it to `dest` as it arrives.
+    ///
+    /// What the app's runs are built with, so a registration's result is
+    /// never whole in memory: each plane the plugin pushes is written to the
+    /// result's file and let go, and [`take_result`](Self::take_result) has
+    /// the file when the run is over. Without this the host takes results
+    /// only whole, which is what a test that wants an [`ImageResult`] in hand
+    /// wants — and what every host did before.
+    ///
+    /// The result is written with the colour tables of the view the run was
+    /// given (`ViewParams::luts`), the source's tables as the run started.
+    ///
+    /// [`ImageResult`]: fasttiff_plugin_api::ImageResult
+    pub fn streaming_to(mut self, dest: ResultDest) -> Self {
+        self.results = Some(dest);
+        self
+    }
+
+    /// Where a streamed result is written, if this host takes one.
+    pub fn result_dest(&self) -> Option<&ResultDest> {
+        self.results.as_ref()
+    }
+
+    /// The result the plugin streamed in this run, finished: its file closed
+    /// and readable. `None` when nothing was streamed.
+    ///
+    /// Fails, deleting what was written, when fewer planes arrived than were
+    /// declared.
+    pub fn take_result(&mut self) -> Option<anyhow::Result<ResultTiff>> {
+        self.streamed.take().map(ResultWriter::finish)
+    }
+
+    /// Throw away whatever the plugin streamed: the run did not end with it.
+    /// Its file goes with it.
+    pub fn discard_result(&mut self) {
+        self.streamed = None;
+    }
+
+    /// Whether the user has asked this run to stop.
+    pub fn cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// A run's outcome with a streamed result read back into the image outcome
+    /// its target names: the answer [`Plugin::run`] gave before results could
+    /// be streamed.
+    ///
+    /// For tests and tools that want the pixels in hand. The app never does
+    /// this — it opens the file — and anything else is handed back as it was,
+    /// a result streamed for it discarded.
+    ///
+    /// [`Plugin::run`]: fasttiff_plugin_api::Plugin::run
+    pub fn collect(
+        &mut self,
+        outcome: Result<fasttiff_plugin_api::Outcome, PluginError>,
+    ) -> Result<fasttiff_plugin_api::Outcome, PluginError> {
+        use fasttiff_plugin_api::{Outcome, StreamTarget};
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(e) => {
+                self.discard_result();
+                return Err(e);
+            }
+        };
+        let Outcome::Streamed { target } = outcome else {
+            self.discard_result();
+            return Ok(outcome);
+        };
+        let finished = self.take_result().ok_or_else(|| {
+            PluginError::failed("the plugin said it streamed a result, and none arrived")
+        })?;
+        let image = finished
+            .and_then(|r| r.to_image())
+            .map_err(|e| PluginError::failed(format!("{e:#}")))?;
+        let image = Box::new(image);
+        Ok(match target {
+            StreamTarget::NewDocument => Outcome::NewDocument(image),
+            StreamTarget::ReplaceDocument => Outcome::ReplaceDocument(image),
+            StreamTarget::SaveToFile { path } => Outcome::SaveToFile { image, path },
+        })
     }
 
     /// Replace the metadata this host reports.
@@ -247,6 +340,50 @@ impl HostContext for StackHost {
             self.messages.push("… further messages suppressed".into());
         }
     }
+
+    fn streams_results(&self) -> bool {
+        self.results.is_some()
+    }
+
+    fn begin_image(&mut self, spec: &ImageSpec) -> Result<(), PluginError> {
+        let Some(dest) = &self.results else {
+            return Err(PluginError::unsupported(
+                "this host takes a result only whole, not plane by plane",
+            ));
+        };
+        // Declaring again before any plane only restates the result, as it
+        // does across the C boundary; after one, it would be a second result
+        // the first's planes belong to.
+        if self.streamed.as_ref().is_some_and(|w| w.pushed() > 0) {
+            return Err(PluginError::failed(super::result::SECOND_RESULT));
+        }
+        // The restated one replaces the first, whose empty file goes with it.
+        self.streamed = None;
+        let w = ResultWriter::begin(spec.clone(), &self.view.luts, dest)
+            .map_err(|e| PluginError::failed(format!("{e:#}")))?;
+        self.streamed = Some(w);
+        Ok(())
+    }
+
+    fn describe_image(&mut self, spec: &ImageSpec) -> Result<(), PluginError> {
+        let Some(w) = &mut self.streamed else {
+            return Err(PluginError::failed(
+                "the result was described before it was declared",
+            ));
+        };
+        w.redescribe(spec.clone())
+            .map_err(|e| PluginError::failed(format!("{e:#}")))
+    }
+
+    fn push_plane(&mut self, plane: PlaneRef<'_>) -> Result<(), PluginError> {
+        let Some(w) = &mut self.streamed else {
+            return Err(PluginError::failed(
+                "a plane was pushed before the result was declared",
+            ));
+        };
+        w.push(plane)
+            .map_err(|e| PluginError::failed(format!("{e:#}")))
+    }
 }
 
 /// The stack's shape in file terms — see [`ImageInfo`] on why this is not the
@@ -293,11 +430,10 @@ pub fn describe_stack(stack: &Stack) -> StackInfo {
     // `Stack::path` is a real path for a file-opened stack and a bare label for
     // one loaded from bytes (dropped, or picked in the browser build). Only the
     // former is something a plugin can reopen, so say which it is rather than
-    // handing over a path that does not exist.
-    let path = stack
-        .path
-        .exists()
-        .then(|| stack.path.display().to_string());
+    // handing over a path that does not exist. A plugin's result shown here has
+    // a real file, but a scratch one in a temporary folder that goes when the
+    // document does — not a source to tell a plugin about, or to write beside.
+    let path = stack.source_path().map(|p| p.display().to_string());
     StackInfo {
         name: stack
             .path

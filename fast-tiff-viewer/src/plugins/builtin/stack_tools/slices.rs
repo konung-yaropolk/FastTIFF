@@ -19,10 +19,10 @@
 //! 1-based and converted exactly once, on the way in. Everything past that
 //! point is an index.
 
-use super::super::shared::{deliver, in_new_window, Store};
-use super::{axes, map_planes, Axis};
+use super::super::shared::{in_new_window, target, Store};
+use super::{axes, map_planes, result_spec, Axis};
 use fasttiff_plugin_api::{
-    HostContext, ImageInfo, ImageResult, Outcome, ParamDecl, ParamKind, Params, Plugin,
+    HostContext, ImageInfo, ImageStream, Outcome, ParamDecl, ParamKind, Params, Plugin,
     PluginError, PluginInfo,
 };
 
@@ -205,15 +205,17 @@ fn run(host: &mut dyn HostContext, params: &Params, sense: Sense) -> Result<Outc
             });
         }
     }
-    let store = Store::of(info.pixel_type);
-    let Some(planes) = map_planes(host, &pairs, store, |_| {})? else {
-        return Ok(Outcome::Cancelled);
-    };
-
     let verb = match sense {
         Sense::Keep => "kept",
         Sense::Remove => "removed",
     };
+    let store = Store::of(info.pixel_type);
+    let spec = result_spec(host, store, out_slices, out_frames, verb);
+    let mut out = ImageStream::begin(host, spec)?;
+    if !map_planes(host, &pairs, store, &mut out, |_| {})? {
+        return Ok(Outcome::Cancelled);
+    }
+
     host.log(&format!(
         "{verb} {} of {depth} plane(s) along {}",
         match sense {
@@ -222,21 +224,7 @@ fn run(host: &mut dyn HostContext, params: &Params, sense: Sense) -> Result<Outc
         },
         axis.label()
     ));
-
-    let image = ImageResult {
-        width: info.width,
-        height: info.height,
-        channels: info.channels.max(1),
-        slices: out_slices,
-        frames: out_frames,
-        pixel_type: store.pixel_type(),
-        planes,
-        channel_colors: Vec::new(),
-        metadata: Some(host.stack_info().clone()),
-        name: format!("{}-{verb}", host.stack_info().stem()),
-    };
-    image.validate()?;
-    Ok(deliver(image, params))
+    out.finish(target(params))
 }
 
 #[cfg(test)]

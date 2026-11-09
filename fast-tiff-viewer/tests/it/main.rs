@@ -26,5 +26,6 @@ mod roi_plan;
 mod roi_preload;
 mod shift_sync;
 mod stack_model;
+mod streamed_results;
 mod window_assembly;
 mod window_worker;

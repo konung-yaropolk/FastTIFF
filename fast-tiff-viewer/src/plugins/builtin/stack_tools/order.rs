@@ -18,10 +18,10 @@
 //! the difference between light and dark and the difference between first and
 //! last read as the same choice.
 
-use super::super::shared::{deliver, in_new_window, Store};
-use super::{axes, map_planes, Axis};
+use super::super::shared::{in_new_window, target, Store};
+use super::{axes, map_planes, result_spec, Axis};
 use fasttiff_plugin_api::{
-    HostContext, ImageResult, Outcome, ParamDecl, ParamKind, Params, Plugin, PluginError,
+    HostContext, ImageStream, Outcome, ParamDecl, ParamKind, Params, Plugin, PluginError,
     PluginInfo,
 };
 
@@ -86,28 +86,16 @@ impl Plugin for SliceOrderInvert {
         }
 
         let store = Store::of(info.pixel_type);
-        let Some(planes) = map_planes(host, &pairs, store, |_| {})? else {
+        let spec = result_spec(host, store, out_slices, out_frames, "reversed");
+        let mut out = ImageStream::begin(host, spec)?;
+        if !map_planes(host, &pairs, store, &mut out, |_| {})? {
             return Ok(Outcome::Cancelled);
-        };
+        }
 
         host.log(&format!(
             "reversed the order of {depth} plane(s) along {}",
             axis.label()
         ));
-
-        let image = ImageResult {
-            width: info.width,
-            height: info.height,
-            channels: info.channels.max(1),
-            slices: out_slices,
-            frames: out_frames,
-            pixel_type: store.pixel_type(),
-            planes,
-            channel_colors: Vec::new(),
-            metadata: Some(host.stack_info().clone()),
-            name: format!("{}-reversed", host.stack_info().stem()),
-        };
-        image.validate()?;
-        Ok(deliver(image, params))
+        out.finish(target(params))
     }
 }

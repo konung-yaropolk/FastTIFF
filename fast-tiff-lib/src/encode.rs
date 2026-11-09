@@ -390,6 +390,13 @@ struct FrameStrips {
     byte_counts: Vec<u64>,
 }
 
+/// The pixel size the resolution tags are written from: the metadata
+/// builder's, when it is a real size.
+fn pixel_size_of(meta: Option<&StackMetaWrite>) -> Option<(f64, f64)> {
+    meta.and_then(|m| m.pixel_width.zip(m.pixel_height))
+        .filter(|(w, h)| w.is_finite() && *w > 0.0 && h.is_finite() && *h > 0.0)
+}
+
 impl TiffWriter<BufWriter<File>> {
     /// Create `path` (truncating any existing file) and write a stack to it
     /// through a buffered writer.
@@ -461,11 +468,7 @@ impl<W: Write + Seek> TiffWriter<W> {
         if let Some(meta) = &metadata {
             meta.validate_text(metadata_format == MetadataFormat::ImageJ)?;
         }
-        // Pixel size for the resolution tags: taken from the metadata builder.
-        let pixel_size = metadata
-            .as_ref()
-            .and_then(|m| m.pixel_width.zip(m.pixel_height))
-            .filter(|(w, h)| w.is_finite() && *w > 0.0 && h.is_finite() && *h > 0.0);
+        let pixel_size = pixel_size_of(metadata.as_ref());
 
         let spp = samples_per_pixel as usize;
         // PlanarConfiguration is irrelevant for single-sample data (TIFF6), and
@@ -538,6 +541,39 @@ impl<W: Write + Seek> TiffWriter<W> {
     /// Number of frames (planes) written so far.
     pub fn frames_written(&self) -> usize {
         self.frames.len()
+    }
+
+    /// Replace the structured metadata — calibration, channel names and
+    /// LUTs, display mode, the trailing description — that
+    /// [`finish`](Self::finish) writes, at any point before it.
+    ///
+    /// Nothing of it is in the file until `finish`, so metadata need not be
+    /// settled before the first frame: a stream whose colours or calibration
+    /// are only known once some of the data has been seen can say so then.
+    /// Checked as [`WriterOptions::metadata`] is at construction. Replaces a
+    /// verbatim [`WriterOptions::description`] too, the two writing the same
+    /// tag.
+    pub fn set_metadata(&mut self, meta: StackMetaWrite) -> Result<()> {
+        meta.validate_text(self.metadata_format == MetadataFormat::ImageJ)?;
+        self.pixel_size = pixel_size_of(Some(&meta));
+        self.metadata = Some(meta);
+        self.description = None;
+        Ok(())
+    }
+
+    /// Replace what `finish` writes as the `ImageDescription` with this text,
+    /// verbatim — the late form of [`WriterOptions::description`], with the
+    /// same check. Replaces structured metadata set before, the two writing
+    /// the same tag.
+    pub fn set_description(&mut self, text: impl Into<String>) -> Result<()> {
+        let text = text.into();
+        if text.contains('\0') {
+            bail!("description must not contain NUL bytes (TIFF ASCII fields are NUL-terminated)");
+        }
+        self.metadata = None;
+        self.pixel_size = None;
+        self.description = Some(text);
+        Ok(())
     }
 
     /// Append one frame from raw **little-endian** sample bytes — the

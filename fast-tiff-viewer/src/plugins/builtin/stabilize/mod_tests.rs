@@ -6,7 +6,7 @@
 //! no time axis is refused rather than silently "registered".
 
 use super::*;
-use fasttiff_plugin_api::{ImageInfo, ParamKind, ParamValue, Params, PixelType};
+use fasttiff_plugin_api::{ImageInfo, ParamKind, ParamValue, Params, PixelType, PlaneData};
 
 /// The declarations for a stack of this shape, with nothing chosen yet.
 fn decls_for(info: &ImageInfo) -> Vec<fasttiff_plugin_api::ParamDecl> {

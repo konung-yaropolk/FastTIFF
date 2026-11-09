@@ -179,6 +179,16 @@ pub struct Stack {
     /// what it was without one; see [`crate::save`] for what a non-empty one
     /// changes.
     pub overlay: Vec<fast_tiff_lib::PointRoi>,
+    /// Set when this document is a plugin's result shown in this window: the
+    /// document it was made from, and the scratch file it is read from, which
+    /// it deletes when it goes. `path` is then that scratch file — named as
+    /// the result, so the title is right — and is not the user's to be offered
+    /// as the document's source; see [`source_path`](Self::source_path) and
+    /// [`save_dir`](Self::save_dir).
+    ///
+    /// Last on purpose: fields drop in order, so `tiff` — the mapping of that
+    /// file — and the workers holding it are gone before the file is deleted.
+    pub derived: Option<crate::plugins::result::Derived>,
 }
 
 impl Stack {
@@ -280,6 +290,7 @@ impl Stack {
             volume_builder: None,
             volume_builder_tried: false,
             overlay,
+            derived: None,
         };
 
         let (c, z, f) = (
@@ -343,6 +354,31 @@ impl Stack {
     /// The stack's pixel dimensions, from the first frame.
     pub fn dimensions(&self) -> Option<(u32, u32)> {
         self.tiff.frames.first().map(|f| (f.width, f.height))
+    }
+
+    /// The file this document is, when it is a file the user has: `None` for
+    /// one loaded from bytes, whose `path` is only a name, and for a plugin's
+    /// result, whose file is scratch.
+    pub fn source_path(&self) -> Option<&std::path::Path> {
+        (self.derived.is_none() && self.path.exists()).then_some(self.path.as_path())
+    }
+
+    /// The file this document stands for: its own, or for a plugin's result
+    /// the one it was made from — what a result made from *this* document is
+    /// said to be made from in turn.
+    pub fn original(&self) -> Option<PathBuf> {
+        match &self.derived {
+            Some(d) => d.made_from().map(std::path::Path::to_path_buf),
+            None => self.source_path().map(std::path::Path::to_path_buf),
+        }
+    }
+
+    /// Where "Save as…" should start: the folder of the file this document
+    /// stands for (see [`original`](Self::original)), when there is one.
+    pub fn save_dir(&self) -> Option<PathBuf> {
+        self.original()
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+            .filter(|d| d.is_dir())
     }
 
     /// The volume's depth axis: Z for a 4D stack (`slices > 1`), else the whole

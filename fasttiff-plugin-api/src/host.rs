@@ -20,6 +20,23 @@ use crate::PluginError;
 ///   * a plane that was in range stays in range;
 ///   * every `read_*` either fills the buffer to exactly `plane_len()` or
 ///     returns `Err` — never a short read.
+///
+/// # One thread, one call at a time
+///
+/// Every call on a host — reading a plane, reporting progress, logging,
+/// pushing a plane of the result — is made from the thread the run was
+/// called on, and one at a time: never two at once, and never from inside
+/// another. `&mut self` already says so to a Rust plugin, which cannot share
+/// the host between threads without going out of its way to; a plugin that
+/// does its work on a pool of threads hands what they made back to the run's
+/// own thread to read the next plane or push the last one.
+///
+/// It is a rule rather than a courtesy because of what is behind the trait.
+/// A plugin in a shared library reaches the host through the C table in
+/// `fasttiff-plugin-abi`, whose callbacks share one context: reading a plane
+/// on one thread while pushing one on another would be two mutable borrows
+/// of the same host at once. The app's host refuses a call that arrives while
+/// another is still in progress, and the run then fails saying so.
 pub trait HostContext {
     /// The stack's shape, in file coordinates.
     fn image(&self) -> ImageInfo;
@@ -121,6 +138,55 @@ pub trait HostContext {
     /// A line for the host to show the user. Not an error; use the returned
     /// `Err` for that.
     fn log(&mut self, message: &str);
+
+    /// Whether this host takes a result plane by plane, during the run —
+    /// what [`begin_image`](Self::begin_image) and
+    /// [`push_plane`](Self::push_plane) are for.
+    ///
+    /// A plugin does not ask this itself: [`ImageStream`](crate::ImageStream)
+    /// does, and keeps the planes for a host that answers `false`. Provided
+    /// rather than required, and `false`, so a host that has never heard of
+    /// streaming — a test harness, an older embedding — is still a correct
+    /// host, taking every result whole as it always did.
+    fn streams_results(&self) -> bool {
+        false
+    }
+
+    /// Declare the result about to be pushed. Once per run, before the first
+    /// [`push_plane`](Self::push_plane).
+    ///
+    /// Plugins call this through [`ImageStream::begin`](crate::ImageStream::begin),
+    /// which checks the declaration first and asks only a host that
+    /// [streams results](Self::streams_results).
+    fn begin_image(&mut self, _spec: &crate::ImageSpec) -> Result<(), PluginError> {
+        Err(PluginError::unsupported(
+            "this host takes a result only whole, not plane by plane",
+        ))
+    }
+
+    /// One plane of the result [`begin_image`](Self::begin_image) declared,
+    /// in `xyczt` order. The host has finished with `plane` when this returns.
+    fn push_plane(&mut self, _plane: crate::PlaneRef<'_>) -> Result<(), PluginError> {
+        Err(PluginError::unsupported(
+            "this host takes a result only whole, not plane by plane",
+        ))
+    }
+
+    /// Restate the description of the result being streamed — its colours,
+    /// its metadata and the channel names in it — at any point after
+    /// [`begin_image`](Self::begin_image) and before the run returns, planes
+    /// pushed or not. The shape and the name are `begin_image`'s, and a
+    /// `spec` that changes them is refused.
+    ///
+    /// Plugins call this through
+    /// [`ImageStream::describe`](crate::ImageStream::describe). A host writes
+    /// a result's description when it finishes the result, so what is said
+    /// last is what the result says.
+    fn describe_image(&mut self, _spec: &crate::ImageSpec) -> Result<(), PluginError> {
+        Err(PluginError::unsupported(
+            "this host takes a result only whole, not plane by plane",
+        ))
+    }
 }
 
 /// Convenience helpers, available on every `HostContext` and not part of what
@@ -145,6 +211,12 @@ pub trait HostContextExt: HostContext {
             }
         }
         Ok(())
+    }
+
+    /// Start a result that is handed over plane by plane:
+    /// [`ImageStream::begin`](crate::ImageStream::begin) on this host.
+    fn stream_image(&mut self, spec: crate::ImageSpec) -> Result<crate::ImageStream, PluginError> {
+        crate::ImageStream::begin(self, spec)
     }
 }
 

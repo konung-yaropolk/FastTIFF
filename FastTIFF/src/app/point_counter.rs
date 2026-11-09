@@ -569,7 +569,7 @@ impl super::ViewerApp {
             let mut dialog = rfd::FileDialog::new()
                 .add_filter("ImageJ ROI set (*.zip)", &["zip"])
                 .set_file_name(&suggested);
-            if let Some(dir) = stack.path.parent().filter(|d| d.is_dir()) {
+            if let Some(dir) = stack.save_dir() {
                 dialog = dialog.set_directory(dir);
             }
             let Some(path) = dialog.save_file() else {

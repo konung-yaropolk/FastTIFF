@@ -23,10 +23,10 @@
 
 mod params;
 
-use super::shared::{self, Store};
+use super::shared::{self, Store, Stored};
 use fasttiff_plugin_api::{
-    HostContext, ImageResult, Outcome, ParamDecl, Params, Plane, PlaneData, Plugin, PluginError,
-    PluginInfo,
+    HostContext, ImageSpec, ImageStream, Outcome, ParamDecl, Params, Plane, Plugin, PluginError,
+    PluginInfo, StreamTarget,
 };
 use suite2p_registration::{
     area::common_area, compute_reference, fft::Fft2, masks::reference_filters_normed, nonrigid,
@@ -56,19 +56,26 @@ struct Correction<'a> {
     store: Store,
 }
 
-/// Correct a chunk of read planes and move them into the result.
+/// Correct a chunk of read planes and hand them to the host as the result's
+/// next planes.
 ///
 /// Split out only because it is called from two places — once when the chunk
 /// fills and once for whatever is left at the end of a batch — and getting one
 /// of those wrong loses planes off the end of the recording.
+///
+/// The chunk is the most of the result this plugin ever holds: each corrected
+/// plane is stored at the file's width into `stored` and pushed, and the host
+/// has written it before the next one is made.
 fn flush(
     pending: &mut Vec<Vec<f32>>,
     at: &mut Vec<usize>,
-    out: &mut Vec<PlaneData>,
+    host: &mut dyn HostContext,
+    out: &mut ImageStream,
+    stored: &mut Stored,
     how: &Correction<'_>,
-) {
+) -> Result<(), PluginError> {
     if pending.is_empty() {
-        return;
+        return Ok(());
     }
     suite2p_registration::pipeline::apply_batch(
         pending,
@@ -79,8 +86,11 @@ fn flush(
         how.warp,
         how.settings,
     );
-    out.extend(pending.drain(..).map(|v| how.store.plane(v)));
+    for v in pending.drain(..) {
+        out.push(host, how.store.encode(&v, stored))?;
+    }
     at.clear();
+    Ok(())
 }
 
 /// Motion correction for a timelapse, by suite2p's method.
@@ -271,7 +281,34 @@ impl Plugin for Stabilize {
         //
         // A float source stays float, having nothing to round to.
         let store = Store::of(info.pixel_type);
-        let mut planes: Vec<PlaneData> = Vec::with_capacity(channels * slices * info.frames);
+        // The result, declared up front and handed to the host a plane at a
+        // time as each is corrected: it is the recording's size, and holding
+        // it to hand back at the end is what made a long recording need two or
+        // three times its size in memory. The file's metadata goes with it — a
+        // stabilised recording is the recording, so its calibration still
+        // holds. A crop's frame is not known until every frame is measured, so
+        // that result is begun then.
+        let source = host.stack_info().clone();
+        let name = format!("{}-stabilized", source.stem());
+        let spec_of = |width: u32, height: u32| ImageSpec {
+            width,
+            height,
+            channels,
+            slices,
+            frames: info.frames,
+            // The file's own width back again for a rigid run, float for one
+            // that interpolated. See [`Store`].
+            pixel_type: store.pixel_type(),
+            channel_colors: Vec::new(),
+            metadata: Some(source.clone()),
+            name: name.clone(),
+        };
+        let mut out = if cropping {
+            None
+        } else {
+            Some(ImageStream::begin(host, spec_of(info.width, info.height))?)
+        };
+        let mut stored = Stored::default();
         let mut shifts: Vec<Shift> = Vec::with_capacity(info.frames);
         let mut plane = Vec::new();
         // Every frame's block field, for a crop: the area to cut to depends on
@@ -415,7 +452,8 @@ impl Plugin for Stabilize {
                         pending_at.push(t - t0);
                         if pending.len() >= APPLY_CHUNK {
                             done += pending.len() as f64 * plane_work;
-                            flush(&mut pending, &mut pending_at, &mut planes, &correction);
+                            let stream = out.as_mut().expect("begun unless cropping");
+                            flush(&mut pending, &mut pending_at, host, stream, &mut stored, &correction)?;
                             if !host.progress(at(done)) {
                                 return Ok(Outcome::Cancelled);
                             }
@@ -424,14 +462,14 @@ impl Plugin for Stabilize {
                 }
             }
             done += pending.len() as f64 * plane_work;
-            flush(&mut pending, &mut pending_at, &mut planes, &correction);
+            let stream = out.as_mut().expect("begun unless cropping");
+            flush(&mut pending, &mut pending_at, host, stream, &mut stored, &correction)?;
 
             shifts.extend_from_slice(&batch_shifts);
             t0 = t1;
         }
         // A crop: every frame measured, so the area is known — then every
         // plane read again, moved and cut in one resampling.
-        let (mut width, mut height) = (info.width, info.height);
         if cropping {
             let warp = nonrigid
                 .as_ref()
@@ -445,6 +483,9 @@ impl Plugin for Stabilize {
                 )
             })?;
             let cut = Cut::new(ly, lx, area, &shifts, warp);
+            // The cut frame's size is known now, so the result begins here.
+            let mut stream =
+                ImageStream::begin(host, spec_of(area.width as u32, area.height as u32))?;
             for t in 0..info.frames {
                 for z in 0..slices {
                     for c in 0..channels {
@@ -457,7 +498,9 @@ impl Plugin for Stabilize {
                         if pending.len() >= APPLY_CHUNK {
                             done += pending.len() as f64 * plane_work;
                             let moved = cut.apply_batch(&pending, &pending_at, parallel);
-                            planes.extend(moved.into_iter().map(|v| store.plane(v)));
+                            for v in &moved {
+                                stream.push(host, store.encode(v, &mut stored))?;
+                            }
                             pending.clear();
                             pending_at.clear();
                             if !host.progress(at(done)) {
@@ -468,8 +511,10 @@ impl Plugin for Stabilize {
                 }
             }
             let moved = cut.apply_batch(&pending, &pending_at, parallel);
-            planes.extend(moved.into_iter().map(|v| store.plane(v)));
-            (width, height) = (area.width as u32, area.height as u32);
+            for v in &moved {
+                stream.push(host, store.encode(v, &mut stored))?;
+            }
+            out = Some(stream);
             host.log(&if area.is_upright() {
                 format!(
                     "cropped to the common area: {} x {} pixels from ({}, {})",
@@ -512,20 +557,8 @@ impl Plugin for Stabilize {
             }
         ));
 
-        Ok(Outcome::NewDocument(Box::new(ImageResult {
-            width,
-            height,
-            channels,
-            slices,
-            frames: info.frames,
-            // The file's own width back again for a rigid run, float for one
-            // that interpolated. See [`Store`].
-            pixel_type: store.pixel_type(),
-            planes,
-            channel_colors: Vec::new(),
-            metadata: Some(host.stack_info().clone()),
-            name: format!("{}-stabilized", host.stack_info().stem()),
-        })))
+        out.expect("begun before the planes, cropping or not")
+            .finish(StreamTarget::NewDocument)
     }
 }
 

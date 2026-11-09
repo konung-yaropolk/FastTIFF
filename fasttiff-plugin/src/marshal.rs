@@ -15,7 +15,7 @@ use crate::abi::*;
 use crate::api::{
     Animation, AnimationOutput, Confidence, ExportRequest, Exporter, ImportHost, ImportRequest,
     Importer, MovieResolution, Outcome, ParamDecl, ParamKind, ParamValue, Params, PixelType,
-    PlaneData, Plugin, SelectionKind,
+    PlaneRef, Plugin, SelectionKind, StreamTarget,
 };
 use crate::{guard, status_of, CHost};
 
@@ -448,8 +448,12 @@ unsafe extern "C" fn run_shim<T: Plugin + Default>(
             Ok(s) => s,
             Err(e) => return e,
         };
+        // The sink goes into the host the plugin is handed, so a result can be
+        // pushed through it while the run is still reading — which is all a
+        // streamed result is. The copy is valid for this call, and so is the
+        // `CHost`, which drops at the end of it.
         let mut h = match CHost::new(host) {
-            Ok(h) => h,
+            Ok(h) => h.with_sink(sink),
             Err(s) => return s,
         };
         let params = match values_from_c(values, value_count) {
@@ -800,6 +804,13 @@ pub unsafe fn write_outcome(sink: &FtSink, outcome: Outcome) -> FtStatus {
         Outcome::SaveToFile { image, path } => {
             write_result(sink, *image, FtOutcomeKind::SaveToFile, &path)
         }
+        // The planes are already across — pushed during the run, through the
+        // `CHost` this plugin was handed — so all that is left to say is
+        // where they go. The host checks that they all arrived.
+        Outcome::Streamed { target } => {
+            let (kind, text) = stream_kind(&target);
+            (sink.set_outcome)(sink.ctx, kind, FtStr::from_str(text))
+        }
         Outcome::Plot(plot) => write_plot(sink, &plot),
         Outcome::Animate(animation) => write_animation(sink, &animation),
         // A host that predates animations cannot be running one of this
@@ -960,30 +971,47 @@ unsafe fn write_image(
     if let Err(e) = img.validate() {
         return status_of(&e);
     }
-    // Skipped on a host that predates the callback: an image without its
-    // calibration is still worth having, which is the same bargain
-    // `set_channel` makes just below.
-    if let Some(info) = info {
-        if crate::abi::ft_covers!(sink as *const FtSink, FtSink, set_info) {
-            let st = write_stack_info(sink, info);
-            if st != FtStatus::Ok {
-                return st;
-            }
-        }
+    let (spec, planes) = img.into_parts();
+    let st = declare_image(sink, &spec, info);
+    if st != FtStatus::Ok {
+        return st;
     }
-    let crate::api::ImageResult {
-        width,
-        height,
-        channels,
-        slices,
-        frames,
-        pixel_type,
-        planes,
-        channel_colors,
-        metadata: _,
-        name,
-    } = img;
-    let ty = match pixel_type {
+    for p in planes {
+        let st = push_plane(sink, p.as_plane_ref());
+        if st != FtStatus::Ok {
+            return st;
+        }
+        // `p` drops here: the host has its copy.
+    }
+    (sink.set_outcome)(sink.ctx, kind, FtStr::from_str(text))
+}
+
+/// Declare a result to the host: its metadata, its shape, and its channels'
+/// colours and names — everything but the planes, in the order every host has
+/// been sent it in.
+///
+/// Before the planes by habit rather than by rule: the C contract lets a
+/// description arrive at any point up to `set_outcome`, and a host that writes
+/// planes into a file as they arrive writes the description last (see
+/// [`describe_image`]). `info` is the metadata that travels with the result:
+/// the spec's own for a filter, what an importer read for an import;
+/// `spec.metadata` is not read.
+///
+/// What a returned image and a streamed one share, so the two cannot be
+/// declared differently.
+///
+/// # Safety
+/// `sink` must be a valid `FtSink` for the duration of the call.
+pub(crate) unsafe fn declare_image(
+    sink: &FtSink,
+    spec: &crate::api::ImageSpec,
+    info: Option<&crate::api::StackInfo>,
+) -> FtStatus {
+    let st = describe_info(sink, info);
+    if st != FtStatus::Ok {
+        return st;
+    }
+    let ty = match spec.pixel_type {
         PixelType::U8 => FtPixelType::U8,
         PixelType::U16 => FtPixelType::U16,
         PixelType::I16 => FtPixelType::I16,
@@ -991,23 +1019,71 @@ unsafe fn write_image(
     };
     let st = (sink.begin_image)(
         sink.ctx,
-        width,
-        height,
-        channels as u64,
-        slices as u64,
-        frames as u64,
+        spec.width,
+        spec.height,
+        spec.channels as u64,
+        spec.slices as u64,
+        spec.frames as u64,
         ty,
-        FtStr::from_str(&name),
+        FtStr::from_str(&spec.name),
     );
     if st != FtStatus::Ok {
         return st;
     }
-    // Colours before planes, so a host that refuses one has not yet copied a
-    // gigabyte of pixels. Skipped entirely on a host that predates the
-    // callback — the image is still right, it just comes out in the host's
-    // default colours.
+    describe_channels(sink, spec, info)
+}
+
+/// Say again what a result being streamed is: its metadata, its colours and
+/// its channel names, after `begin_image` — what
+/// [`HostContext::describe_image`](crate::api::HostContext::describe_image)
+/// is across the boundary.
+///
+/// The same three callbacks a declaration makes, so they add to what the host
+/// was told rather than replace it: a colour or a name once sent stays, and
+/// metadata is replaced only by metadata.
+///
+/// # Safety
+/// `sink` must be a valid `FtSink` for the duration of the call.
+pub(crate) unsafe fn describe_image(sink: &FtSink, spec: &crate::api::ImageSpec) -> FtStatus {
+    let info = spec.metadata.as_ref();
+    let st = describe_info(sink, info);
+    if st != FtStatus::Ok {
+        return st;
+    }
+    describe_channels(sink, spec, info)
+}
+
+/// The metadata half of a description.
+///
+/// # Safety
+/// `sink` must be a valid `FtSink` for the duration of the call.
+unsafe fn describe_info(sink: &FtSink, info: Option<&crate::api::StackInfo>) -> FtStatus {
+    // Skipped on a host that predates the callback: an image without its
+    // calibration is still worth having, which is the same bargain
+    // `set_channel` makes below.
+    if let Some(info) = info {
+        if crate::abi::ft_covers!(sink as *const FtSink, FtSink, set_info) {
+            return write_stack_info(sink, info);
+        }
+    }
+    FtStatus::Ok
+}
+
+/// The per-channel half of a description: colours and names.
+///
+/// # Safety
+/// `sink` must be a valid `FtSink` for the duration of the call.
+unsafe fn describe_channels(
+    sink: &FtSink,
+    spec: &crate::api::ImageSpec,
+    info: Option<&crate::api::StackInfo>,
+) -> FtStatus {
+    // Colours before planes when declaring, so a host that refuses one has
+    // not yet copied a gigabyte of pixels. Skipped entirely on a host that
+    // predates the callback — the image is still right, it just comes out in
+    // the host's default colours.
     if crate::abi::ft_covers!(sink as *const FtSink, FtSink, set_channel) {
-        for (i, color) in channel_colors.iter().enumerate() {
+        for (i, color) in spec.channel_colors.iter().enumerate() {
             let rgb = (color[0] as u32) << 16 | (color[1] as u32) << 8 | color[2] as u32;
             let st = (sink.set_channel)(sink.ctx, i as u64, FtStr::EMPTY, rgb);
             if st != FtStatus::Ok {
@@ -1028,19 +1104,32 @@ unsafe fn write_image(
             }
         }
     }
-    for p in planes {
-        let (ptr, len) = match &p {
-            PlaneData::U8(v) => (v.as_ptr() as *const core::ffi::c_void, v.len() as u64),
-            PlaneData::U16(v) => (v.as_ptr() as *const core::ffi::c_void, v.len() as u64),
-            PlaneData::F32(v) => (v.as_ptr() as *const core::ffi::c_void, v.len() as u64),
-        };
-        let st = (sink.push_plane)(sink.ctx, ptr, len);
-        if st != FtStatus::Ok {
-            return st;
-        }
-        // `p` drops here: the host has its copy.
+    FtStatus::Ok
+}
+
+/// One plane, borrowed for the length of the call: the host copies or writes
+/// it before returning.
+///
+/// # Safety
+/// `sink` must be a valid `FtSink` for the duration of the call.
+pub(crate) unsafe fn push_plane(sink: &FtSink, plane: PlaneRef<'_>) -> FtStatus {
+    let (ptr, len) = match plane {
+        PlaneRef::U8(v) => (v.as_ptr() as *const core::ffi::c_void, v.len() as u64),
+        PlaneRef::U16(v) => (v.as_ptr() as *const core::ffi::c_void, v.len() as u64),
+        PlaneRef::F32(v) => (v.as_ptr() as *const core::ffi::c_void, v.len() as u64),
+    };
+    (sink.push_plane)(sink.ctx, ptr, len)
+}
+
+/// The outcome kind, and its text, a streamed result is finished with: the
+/// same three a returned image is, because to the host they are the same —
+/// planes were pushed, and this says what to do with them.
+fn stream_kind(target: &StreamTarget) -> (FtOutcomeKind, &str) {
+    match target {
+        StreamTarget::NewDocument => (FtOutcomeKind::NewDocument, ""),
+        StreamTarget::ReplaceDocument => (FtOutcomeKind::ReplaceDocument, ""),
+        StreamTarget::SaveToFile { path } => (FtOutcomeKind::SaveToFile, path),
     }
-    (sink.set_outcome)(sink.ctx, kind, FtStr::from_str(text))
 }
 
 #[cfg(test)]

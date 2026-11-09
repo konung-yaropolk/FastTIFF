@@ -26,11 +26,11 @@
 #[cfg(feature = "_shared-edges")]
 use fasttiff_plugin_api::PluginError;
 #[cfg(feature = "_shared-deliver")]
-use fasttiff_plugin_api::{ImageResult, Outcome};
+use fasttiff_plugin_api::{ImageResult, Outcome, StreamTarget};
 #[cfg(any(feature = "_shared-deliver", feature = "_shared-edges"))]
 use fasttiff_plugin_api::{ParamDecl, ParamKind, Params};
 #[cfg(feature = "_shared-store")]
-use fasttiff_plugin_api::{PixelType, PlaneData};
+use fasttiff_plugin_api::{PixelType, PlaneData, PlaneRef};
 
 /// The key of the "open in a new window" checkbox.
 #[cfg(feature = "_shared-deliver")]
@@ -136,12 +136,28 @@ pub(crate) fn no_common_area(why: impl std::fmt::Display, if_not_real: &str) -> 
 }
 
 /// Hand an image back the way the dialog asked for it.
+///
+/// For a result that comes back whole. One the size of the stack is streamed
+/// instead, to [`target`].
 #[cfg(feature = "_shared-deliver")]
+#[cfg_attr(not(feature = "plugin-deconvolve"), allow(dead_code))]
 pub(crate) fn deliver(image: ImageResult, params: &Params) -> Outcome {
+    match target(params) {
+        StreamTarget::NewDocument => Outcome::NewDocument(Box::new(image)),
+        _ => Outcome::ReplaceDocument(Box::new(image)),
+    }
+}
+
+/// Where the dialog asked a streamed result to go: a new window unless the
+/// box was unchecked. See [`ImageStream::finish`].
+///
+/// [`ImageStream::finish`]: fasttiff_plugin_api::ImageStream::finish
+#[cfg(feature = "_shared-deliver")]
+pub(crate) fn target(params: &Params) -> StreamTarget {
     if params.bool(NEW_WINDOW, true) {
-        Outcome::NewDocument(Box::new(image))
+        StreamTarget::NewDocument
     } else {
-        Outcome::ReplaceDocument(Box::new(image))
+        StreamTarget::ReplaceDocument
     }
 }
 
@@ -204,6 +220,7 @@ impl Store {
     /// the `U16` lane and are declared `PixelType::I16`. Getting that wrong
     /// makes every negative sample read as a very bright one — a picture that
     /// still looks like a picture.
+    #[cfg_attr(not(feature = "plugin-deconvolve"), allow(dead_code))]
     pub(crate) fn plane(self, v: Vec<f32>) -> PlaneData {
         match self {
             Store::U8 => PlaneData::U8(v.iter().map(|&x| whole(x, 0.0, 255.0) as u8).collect()),
@@ -218,6 +235,42 @@ impl Store {
             Store::F32 => PlaneData::F32(v),
         }
     }
+
+    /// [`plane`](Self::plane), into a buffer kept from one plane to the next,
+    /// lent out for the push: what a tool streaming its result uses, so a
+    /// recording of a thousand planes costs one buffer rather than a thousand.
+    /// A float plane is lent as it is.
+    pub(crate) fn encode<'a>(self, v: &'a [f32], into: &'a mut Stored) -> PlaneRef<'a> {
+        match self {
+            Store::U8 => {
+                into.u8.clear();
+                into.u8
+                    .extend(v.iter().map(|&x| whole(x, 0.0, 255.0) as u8));
+                PlaneRef::U8(&into.u8)
+            }
+            Store::U16 => {
+                into.u16.clear();
+                into.u16
+                    .extend(v.iter().map(|&x| whole(x, 0.0, 65535.0) as u16));
+                PlaneRef::U16(&into.u16)
+            }
+            Store::I16 => {
+                into.u16.clear();
+                into.u16
+                    .extend(v.iter().map(|&x| whole(x, -32768.0, 32767.0) as i16 as u16));
+                PlaneRef::U16(&into.u16)
+            }
+            Store::F32 => PlaneRef::F32(v),
+        }
+    }
+}
+
+/// The buffer [`Store::encode`] fills, kept by the tool for its whole run.
+#[cfg(feature = "_shared-store")]
+#[derive(Default)]
+pub(crate) struct Stored {
+    u8: Vec<u8>,
+    u16: Vec<u16>,
 }
 
 /// Round to the nearest whole sample, clamped into range.

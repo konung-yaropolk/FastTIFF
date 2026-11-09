@@ -12,11 +12,13 @@
 //! library cannot, or be held to anything a library is not. Only *where the
 //! vtable came from* differs, and that is what [`Origin`] records.
 //!
-//! The cost of the shared path is a copy of each plane in each direction —
-//! the host decodes into a buffer of its own and copies into the plugin's, and
-//! copies a result plane before the plugin lets it go. Both are memcpy next to
-//! a decode or an encode, and neither holds a second whole stack: the plugin
-//! side frees each result plane the moment it is across.
+//! The cost of the shared path is a copy of each plane on the way in — the
+//! host decodes into a buffer of its own and copies into the plugin's — which
+//! is a memcpy next to a decode. On the way out there is none when the host
+//! streams results, as the app's does: a pushed plane goes straight from the
+//! plugin's buffer into the result's file, inside the push (see
+//! [`ResultSink`]). A host that does not stream copies each plane and keeps
+//! it, and the plugin side frees its own the moment it is across.
 //!
 //! [`Registry`]: super::Registry
 //! [`Origin`]: super::Origin
@@ -55,9 +57,9 @@ use std::path::{Path, PathBuf};
 use fasttiff_plugin_abi as abi;
 use fasttiff_plugin_api::{
     Animation, AnimationOutput, Confidence, ExportRequest, Exporter, FileType, HostContext,
-    ImageResult, ImportHost, ImportRequest, ImportResult, Importer, MovieResolution, Outcome,
-    ParamDecl, ParamKind, ParamValue, Params, PixelType, PlaneData, Plot, Plugin, PluginError,
-    PluginInfo, Pose, SelectionKind, Series, StackInfo,
+    ImageSpec, ImportHost, ImportRequest, ImportResult, Importer, MovieResolution, Outcome,
+    ParamDecl, ParamKind, ParamValue, Params, PixelType, PlaneData, PlaneRef, Plot, Plugin,
+    PluginError, PluginInfo, Pose, SelectionKind, Series, StackInfo, StreamTarget,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -603,6 +605,106 @@ impl<'a> HostCell<'a> {
     }
 }
 
+/// What a C table's `ctx` points at: a value its callbacks reach one call at
+/// a time.
+///
+/// The contract (see `fasttiff_plugin_abi::FtHost`) is that a plugin makes
+/// every host and sink call from the thread that called it, one at a time.
+/// This is what the host does about one that does not. Each callback
+/// [enters](enter) the value before it forms a reference to it and leaves as
+/// it returns; one that finds it already entered — the plugin is calling from
+/// a second thread while the first call is still going — touches nothing and
+/// returns its failure value, and the call that started the plugin reports
+/// the broken rule once the plugin returns (see [`Gated::broken`]). Without
+/// it, a plugin reading a plane on one thread while pushing one on another
+/// had two `&mut` to the same host at once, the sink reaching it too.
+///
+/// The cost is an atomic swap and a store per callback, against the decode
+/// or the write each one does.
+struct Gated<T> {
+    busy: std::sync::atomic::AtomicBool,
+    /// Set when a call found the value in use.
+    broke: std::sync::atomic::AtomicBool,
+    value: std::cell::UnsafeCell<T>,
+}
+
+impl<T> Gated<T> {
+    fn new(value: T) -> Self {
+        Gated {
+            busy: Default::default(),
+            broke: Default::default(),
+            value: std::cell::UnsafeCell::new(value),
+        }
+    }
+
+    /// The `ctx` to hand a plugin. Only ever read through as `&Gated`: the
+    /// value is reached through the cell, never through a `&mut` to this.
+    fn ctx(&self) -> *mut std::ffi::c_void {
+        self as *const Self as *mut std::ffi::c_void
+    }
+
+    /// Whether a call ever arrived while another was in progress.
+    fn broken(&self) -> bool {
+        self.broke.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn into_inner(self) -> T {
+        self.value.into_inner()
+    }
+}
+
+/// The value behind a [`Gated`], for the length of one callback.
+struct Entered<'a, T> {
+    busy: &'a std::sync::atomic::AtomicBool,
+    value: &'a mut T,
+}
+
+impl<T> std::ops::Deref for Entered<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for Entered<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.value
+    }
+}
+
+impl<T> Drop for Entered<'_, T> {
+    fn drop(&mut self) {
+        self.busy.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Enter the [`Gated`] value `ctx` points at, or `None` when it is null or
+/// another call is inside it.
+///
+/// # Safety
+/// `ctx` must be null or point at a live `Gated<T>` of this `T`, and the
+/// result must not outlive the callback it was entered for.
+unsafe fn enter<'a, T>(ctx: *mut std::ffi::c_void) -> Option<Entered<'a, T>> {
+    // A shared reference only, which another thread's `Entered` does not
+    // conflict with: everything it mutates is behind the `UnsafeCell`.
+    let g = (ctx as *const Gated<T>).as_ref()?;
+    if g.busy.swap(true, std::sync::atomic::Ordering::Acquire) {
+        g.broke.store(true, std::sync::atomic::Ordering::Relaxed);
+        return None;
+    }
+    Some(Entered {
+        busy: &g.busy,
+        // SAFETY: `busy` was false and is now ours, so no other `Entered` —
+        // the only thing that dereferences the cell — exists until this one
+        // drops and clears it.
+        value: &mut *g.value.get(),
+    })
+}
+
+/// What a run reports when its plugin broke the one-call-at-a-time rule.
+const CONCURRENT_CALLS: &str = "called the host from two threads at once. Every host and \
+     sink call must come from the thread the run was called on, one at a time";
+
 /// Run `f`, converting a panic in the *host's own* callback into a status.
 ///
 /// The host's callbacks are called from plugin frames, so a panic here would
@@ -616,7 +718,7 @@ unsafe extern "C" fn cb_image_info(
     out: *mut abi::FtImageInfo,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(c) = (ctx as *mut HostCell).as_mut() else {
+        let Some(c) = enter::<HostCell>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         let i = c.inner.image();
@@ -652,7 +754,7 @@ unsafe extern "C" fn cb_view_params(
     out: *mut abi::FtViewParams,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(c) = (ctx as *mut HostCell).as_mut() else {
+        let Some(c) = enter::<HostCell>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         let v = c.inner.view();
@@ -689,7 +791,7 @@ unsafe extern "C" fn cb_channel_view(
     out: *mut abi::FtChannelView,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(c) = (ctx as *mut HostCell).as_mut() else {
+        let Some(c) = enter::<HostCell>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         match c.inner.view().channels.get(index as usize) {
@@ -715,14 +817,14 @@ unsafe extern "C" fn cb_channel_view(
 }
 
 unsafe extern "C" fn cb_stack_name(ctx: *mut std::ffi::c_void) -> abi::FtStr {
-    match (ctx as *mut HostCell).as_ref() {
+    match enter::<HostCell>(ctx) {
         Some(c) => abi::FtStr::from_str(&c.name),
         None => abi::FtStr::EMPTY,
     }
 }
 
 unsafe extern "C" fn cb_stack_path(ctx: *mut std::ffi::c_void) -> abi::FtStr {
-    match (ctx as *mut HostCell).as_ref() {
+    match enter::<HostCell>(ctx) {
         Some(c) => abi::FtStr::from_str(&c.path),
         None => abi::FtStr::EMPTY,
     }
@@ -737,7 +839,7 @@ unsafe extern "C" fn cb_read_plane_f32(
     cap: u64,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(cell) = (ctx as *mut HostCell).as_mut() else {
+        let Some(mut cell) = enter::<HostCell>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         let need = cell.inner.image().plane_len() as u64;
@@ -777,7 +879,7 @@ unsafe extern "C" fn cb_read_plane_u16(
     cap: u64,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(cell) = (ctx as *mut HostCell).as_mut() else {
+        let Some(mut cell) = enter::<HostCell>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         let need = cell.inner.image().plane_len() as u64;
@@ -808,7 +910,7 @@ unsafe extern "C" fn cb_stack_info(
     out: *mut abi::FtStackInfo,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(c) = (ctx as *mut HostCell).as_mut() else {
+        let Some(c) = enter::<HostCell>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         let i = c.inner.stack_info();
@@ -853,7 +955,7 @@ unsafe extern "C" fn cb_stack_string(
     which: u32,
     index: u64,
 ) -> abi::FtStr {
-    let Some(c) = (ctx as *mut HostCell).as_mut() else {
+    let Some(c) = enter::<HostCell>(ctx) else {
         return abi::FtStr::EMPTY;
     };
     // Borrowed from the `StackInfo` the cell holds, which outlives the call —
@@ -875,7 +977,7 @@ unsafe extern "C" fn cb_stack_string(
 }
 
 unsafe extern "C" fn cb_selection_count(ctx: *mut std::ffi::c_void) -> u64 {
-    match (ctx as *mut HostCell).as_mut() {
+    match enter::<HostCell>(ctx) {
         Some(c) => c.inner.selection().len() as u64,
         // Zero is the honest answer for a context that is not there, and it is
         // also the harmless one: the api reads no regions as "the whole frame".
@@ -889,7 +991,7 @@ unsafe extern "C" fn cb_selection_roi(
     out: *mut abi::FtRoi,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(c) = (ctx as *mut HostCell).as_mut() else {
+        let Some(c) = enter::<HostCell>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         // Before the index is looked at: somewhere to put the answer is the
@@ -925,7 +1027,7 @@ unsafe extern "C" fn cb_selection_roi(
 }
 
 unsafe extern "C" fn cb_param_count(ctx: *mut std::ffi::c_void) -> u64 {
-    match (ctx as *mut HostCell).as_mut() {
+    match enter::<HostCell>(ctx) {
         Some(c) => c.inner.pending_params().len() as u64,
         None => 0,
     }
@@ -937,7 +1039,7 @@ unsafe extern "C" fn cb_param_value(
     out: *mut abi::FtValue,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(c) = (ctx as *mut HostCell).as_mut() else {
+        let Some(c) = enter::<HostCell>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         // Somewhere to put the answer before which answer: see `cb_selection_roi`.
@@ -1002,7 +1104,7 @@ unsafe extern "C" fn cb_channel_lut(
     cap: u64,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(c) = (ctx as *mut HostCell).as_mut() else {
+        let Some(c) = enter::<HostCell>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         // Somewhere to put the answer before which answer: see `cb_selection_roi`.
@@ -1021,15 +1123,15 @@ unsafe extern "C" fn cb_channel_lut(
 }
 
 unsafe extern "C" fn cb_animating(ctx: *mut std::ffi::c_void) -> u32 {
-    match (ctx as *mut HostCell).as_ref() {
+    match enter::<HostCell>(ctx) {
         Some(c) => u32::from(c.inner.animating()),
         None => 0,
     }
 }
 
 unsafe extern "C" fn cb_progress(ctx: *mut std::ffi::c_void, fraction: f32) -> u32 {
-    match (ctx as *mut HostCell).as_mut() {
-        Some(c) => {
+    match enter::<HostCell>(ctx) {
+        Some(mut c) => {
             let keep = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 c.inner.progress(fraction)
             }))
@@ -1041,18 +1143,24 @@ unsafe extern "C" fn cb_progress(ctx: *mut std::ffi::c_void, fraction: f32) -> u
 }
 
 unsafe extern "C" fn cb_log(ctx: *mut std::ffi::c_void, message: abi::FtStr) {
-    if let Some(c) = (ctx as *mut HostCell).as_mut() {
+    if let Some(mut c) = enter::<HostCell>(ctx) {
         if let Some(m) = message.as_str() {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.inner.log(m)));
         }
     }
 }
 
-fn host_table(cell: &mut HostCell) -> abi::FtHost {
+/// The C table over `cell`.
+///
+/// Over a shared reference to the [`Gated`] cell, so that a run can hand the
+/// same cell to its result sink too (see [`LoadedPlugin::run`]): every
+/// callback, the sink's included, reaches it one call at a time through
+/// [`enter`], and nothing holds a `&mut` to it in between.
+fn host_table(cell: &Gated<HostCell>) -> abi::FtHost {
     abi::FtHost {
         struct_size: std::mem::size_of::<abi::FtHost>() as u32,
         _pad: 0,
-        ctx: cell as *mut HostCell as *mut std::ffi::c_void,
+        ctx: cell.ctx(),
         image_info: cb_image_info,
         view_params: cb_view_params,
         channel_view: cb_channel_view,
@@ -1075,7 +1183,16 @@ fn host_table(cell: &mut HostCell) -> abi::FtHost {
 
 // ------------------------------------------------------------------- sinks
 
-/// Collects what a plugin pushes. Everything is copied here, inside the call.
+/// Takes what a plugin pushes, inside the call that pushes it.
+///
+/// A result's planes go one of two ways. When the host the run was given
+/// [streams results](HostContext::streams_results) — the app's does — each
+/// plane is handed straight on to it as it arrives, and it writes the plane
+/// into the result's file; nothing is kept here, and a result is never whole
+/// in memory on either side. Otherwise each plane is copied here and the run
+/// ends with the whole [`ImageResult`], which is what every host got before.
+/// The plugin cannot tell the two apart, and does not need to: in both, the
+/// plane is the host's before `push_plane` returns.
 #[derive(Default)]
 struct ResultSink {
     width: u32,
@@ -1085,7 +1202,21 @@ struct ResultSink {
     frames: usize,
     pixel_type: Option<PixelType>,
     name: String,
+    /// The planes, kept when the host does not stream. Empty when it does.
     planes: Vec<PlaneData>,
+    /// The run's [`HostCell`], when its host streams results: pushed planes
+    /// go to `inner` rather than into `planes`. The same pointer the host
+    /// table's `ctx` is, so the two never hold competing borrows of it.
+    stream: Option<std::ptr::NonNull<std::ffi::c_void>>,
+    /// Planes pushed so far, whichever way they went.
+    pushed: usize,
+    /// Whether the streaming host has been told of the result. Not at
+    /// `begin_image`, but at the first plane: a plugin may declare again
+    /// until then, and the colours and names it describes the result with
+    /// usually follow `begin_image`, so the host is told the result once,
+    /// whole. A description that changes after that is passed on as it
+    /// arrives (see [`restate`]).
+    begun: bool,
     kind: Option<abi::FtOutcomeKind>,
     text: String,
     problem: Option<String>,
@@ -1138,7 +1269,7 @@ unsafe extern "C" fn sink_begin(
     name: abi::FtStr,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+        let Some(mut s) = enter::<ResultSink>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         // A declared size that cannot exist must be refused before anything is
@@ -1158,6 +1289,12 @@ unsafe extern "C" fn sink_begin(
         // 16 Gsamples is far past any real image and short of overflowing.
         if px.saturating_mul(planes) > (1u64 << 34) {
             s.problem = Some("the plugin declared a result too large to be real".into());
+            return abi::FtStatus::BadArgument;
+        }
+        // Declaring again before any plane only restates the result. After
+        // one, it would be a second result the first's planes belong to.
+        if s.pushed > 0 {
+            s.problem = Some(super::result::SECOND_RESULT.into());
             return abi::FtStatus::BadArgument;
         }
         s.width = width;
@@ -1194,7 +1331,7 @@ unsafe extern "C" fn sink_push_plane(
     len: u64,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+        let Some(mut s) = enter::<ResultSink>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         let Some(ty) = s.pixel_type else {
@@ -1209,29 +1346,78 @@ unsafe extern "C" fn sink_push_plane(
             return abi::FtStatus::BadArgument;
         }
         let expect = s.channels.max(1) * s.slices.max(1) * s.frames.max(1);
-        if s.planes.len() >= expect {
+        if s.pushed >= expect {
             s.problem = Some(format!(
                 "the plugin pushed more than the {expect} planes it declared"
             ));
             return abi::FtStatus::BadArgument;
         }
         let n = len as usize;
-        // Copied here, inside the call: the plugin's memory is not the host's
-        // to hold on to.
+        // Borrowed for this call only: the plugin's memory is not the host's
+        // to hold on to. U16 and I16 are both sixteen bits in the `U16` lane;
+        // which of them they mean is what the declared `pixel_type` says.
         let plane = match ty {
-            PixelType::U8 => {
-                PlaneData::U8(std::slice::from_raw_parts(data as *const u8, n).to_vec())
-            }
-            PixelType::F32 => {
-                PlaneData::F32(std::slice::from_raw_parts(data as *const f32, n).to_vec())
-            }
-            // U16 and I16 are both sixteen bits in the `U16` lane; which of
-            // them they mean is what the declared `pixel_type` says.
-            _ => PlaneData::U16(std::slice::from_raw_parts(data as *const u16, n).to_vec()),
+            PixelType::U8 => PlaneRef::U8(std::slice::from_raw_parts(data as *const u8, n)),
+            PixelType::F32 => PlaneRef::F32(std::slice::from_raw_parts(data as *const f32, n)),
+            _ => PlaneRef::U16(std::slice::from_raw_parts(data as *const u16, n)),
         };
-        s.planes.push(plane);
+        match s.stream {
+            // Straight on to the host, which writes it and is done with it
+            // before this returns — no copy here, and nothing kept.
+            Some(cell) => {
+                // SAFETY: the run's own gated `HostCell`, alive for the whole
+                // call (see `LoadedPlugin::run`), and entered like any host
+                // callback: a push made while another thread of the plugin is
+                // inside a host call is refused rather than sharing the host.
+                let Some(mut cell) = enter::<HostCell>(cell.as_ptr()) else {
+                    return abi::FtStatus::Error;
+                };
+                let host = &mut *cell.inner;
+                if !s.begun {
+                    if let Err(e) = host.begin_image(&s.spec()) {
+                        s.problem = Some(format!("the result could not be started: {e}"));
+                        return abi::FtStatus::Error;
+                    }
+                    s.begun = true;
+                }
+                if let Err(e) = host.push_plane(plane) {
+                    s.problem = Some(format!("plane {} of the result: {e}", s.pushed));
+                    return abi::FtStatus::Error;
+                }
+            }
+            // Copied, inside the call.
+            None => s.planes.push(plane.to_plane_data()),
+        }
+        s.pushed += 1;
         abi::FtStatus::Ok
     })
+}
+
+/// Pass a change to the result's description on to a streaming host that has
+/// already begun writing it — a colour, a name or metadata set after the
+/// first plane, which the C contract has always allowed. The host writes the
+/// description when it finishes the file, so what is said last is what the
+/// file says. Nothing to do otherwise: a host that has not begun is told the
+/// whole description at the first plane, and one that does not stream gets
+/// it with the planes at the end.
+///
+/// # Safety
+/// `s.stream`, when set, must be the run's gated `HostCell`, alive for the
+/// call.
+unsafe fn restate(s: &mut ResultSink) -> abi::FtStatus {
+    let (Some(cell), true) = (s.stream, s.begun) else {
+        return abi::FtStatus::Ok;
+    };
+    let Some(mut cell) = enter::<HostCell>(cell.as_ptr()) else {
+        return abi::FtStatus::Error;
+    };
+    match cell.inner.describe_image(&s.spec()) {
+        Ok(()) => abi::FtStatus::Ok,
+        Err(e) => {
+            s.problem = Some(format!("the result's description was refused: {e}"));
+            abi::FtStatus::Error
+        }
+    }
 }
 
 unsafe extern "C" fn sink_begin_plot(
@@ -1244,7 +1430,7 @@ unsafe extern "C" fn sink_begin_plot(
     wants: abi::FtSelectionKind,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+        let Some(mut s) = enter::<ResultSink>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         // An axis that is not a number cannot be drawn against, and every
@@ -1282,7 +1468,7 @@ unsafe extern "C" fn sink_push_series(
     color: u32,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+        let Some(mut s) = enter::<ResultSink>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         let Some(p) = s.plot.as_mut() else {
@@ -1332,7 +1518,7 @@ unsafe extern "C" fn sink_set_outcome(
     text: abi::FtStr,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+        let Some(mut s) = enter::<ResultSink>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         s.kind = Some(kind);
@@ -1348,7 +1534,7 @@ unsafe extern "C" fn sink_set_info(
     description: abi::FtStr,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+        let Some(mut s) = enter::<ResultSink>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         // Checked before the reference is formed; see `add_plugin_cb`.
@@ -1381,7 +1567,7 @@ unsafe extern "C" fn sink_set_info(
                 .then_some((i.calibration_offset, i.calibration_scale)),
             description: text(description),
         });
-        abi::FtStatus::Ok
+        restate(&mut s)
     })
 }
 
@@ -1392,7 +1578,7 @@ unsafe extern "C" fn sink_set_channel(
     rgb: u32,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+        let Some(mut s) = enter::<ResultSink>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         // More channels than any real image, so a runaway loop cannot fill
@@ -1402,7 +1588,7 @@ unsafe extern "C" fn sink_set_channel(
         }
         s.colors
             .insert(index, [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]);
-        abi::FtStatus::Ok
+        restate(&mut s)
     })
 }
 
@@ -1412,7 +1598,7 @@ unsafe extern "C" fn sink_set_channel_name(
     name: abi::FtStr,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+        let Some(mut s) = enter::<ResultSink>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         // The same bound as a colour, for the same reason.
@@ -1424,7 +1610,7 @@ unsafe extern "C" fn sink_set_channel_name(
             return abi::FtStatus::BadArgument;
         };
         s.names.insert(index, n.to_string());
-        abi::FtStatus::Ok
+        restate(&mut s)
     })
 }
 
@@ -1438,7 +1624,7 @@ unsafe extern "C" fn sink_set_animation(
     floats_per_pose: u64,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(s) = (ctx as *mut ResultSink).as_mut() else {
+        let Some(mut s) = enter::<ResultSink>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         // A stride shorter than a rotation cannot hold one, and a longer one
@@ -1500,11 +1686,11 @@ unsafe extern "C" fn sink_set_animation(
     })
 }
 
-fn sink_table(sink: &mut ResultSink) -> abi::FtSink {
+fn sink_table(sink: &Gated<ResultSink>) -> abi::FtSink {
     abi::FtSink {
         struct_size: std::mem::size_of::<abi::FtSink>() as u32,
         _pad: 0,
-        ctx: sink as *mut ResultSink as *mut std::ffi::c_void,
+        ctx: sink.ctx(),
         begin_image: sink_begin,
         push_plane: sink_push_plane,
         set_outcome: sink_set_outcome,
@@ -1529,7 +1715,14 @@ impl ResultSink {
     /// Dense up to the highest index named, an unnamed channel in between kept
     /// as an empty string, so the list arrives as the plugin had it.
     fn take_info(&mut self) -> Option<StackInfo> {
-        let mut info = self.info.take()?;
+        let info = self.info_with_names();
+        self.info = None;
+        info
+    }
+
+    /// [`take_info`](Self::take_info), leaving it in place.
+    fn info_with_names(&self) -> Option<StackInfo> {
+        let mut info = self.info.clone()?;
         if let Some(&highest) = self.names.keys().next_back() {
             info.channel_names = (0..=highest)
                 .map(|i| self.names.get(&i).cloned().unwrap_or_default())
@@ -1538,8 +1731,44 @@ impl ResultSink {
         Some(info)
     }
 
+    /// The result as declared so far: `begin_image`'s shape, and the colours,
+    /// metadata and names that came with it.
+    fn spec(&self) -> ImageSpec {
+        // Dense, up to the highest channel the plugin coloured: the result
+        // carries a colour per channel or none at all, and a half-filled list
+        // would silently mean "black" for the rest.
+        let channel_colors = match self.colors.keys().next_back() {
+            Some(&highest) => (0..=highest)
+                .map(|i| {
+                    self.colors
+                        .get(&i)
+                        .copied()
+                        .unwrap_or_else(|| fast_tiff_lib::metadata::composite_color(i as usize))
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        ImageSpec {
+            width: self.width,
+            height: self.height,
+            channels: self.channels,
+            slices: self.slices,
+            frames: self.frames,
+            pixel_type: self.pixel_type.unwrap_or(PixelType::U16),
+            channel_colors,
+            // What the plugin said about its own result, when it said
+            // anything. An importer has already taken this (see
+            // `LoadedImporter::import`, which does so explicitly *before*
+            // calling `finish`), so this is a filter's metadata and nothing
+            // else — the calibration a geometry-preserving filter carried over
+            // from its source.
+            metadata: self.info_with_names(),
+            name: self.name.clone(),
+        }
+    }
+
     /// Turn what was pushed into an outcome, or say what was wrong with it.
-    fn finish(mut self, name: &str) -> Result<Outcome, PluginError> {
+    fn finish(self, name: &str) -> Result<Outcome, PluginError> {
         if let Some(p) = self.problem {
             return Err(PluginError::failed(p));
         }
@@ -1584,38 +1813,24 @@ impl ResultSink {
             abi::FtOutcomeKind::NewDocument
             | abi::FtOutcomeKind::SaveToFile
             | abi::FtOutcomeKind::ReplaceDocument => {
-                // Dense, up to the highest channel the plugin coloured: the
-                // result carries a colour per channel or none at all, and a
-                // half-filled list would silently mean "black" for the rest.
-                let channel_colors = match self.colors.keys().next_back() {
-                    Some(&highest) => (0..=highest)
-                        .map(|i| {
-                            self.colors.get(&i).copied().unwrap_or_else(|| {
-                                fast_tiff_lib::metadata::composite_color(i as usize)
-                            })
-                        })
-                        .collect(),
-                    None => Vec::new(),
-                };
-                let metadata = self.take_info();
-                let image = ImageResult {
-                    width: self.width,
-                    height: self.height,
-                    channels: self.channels,
-                    slices: self.slices,
-                    frames: self.frames,
-                    pixel_type: self.pixel_type.unwrap_or(PixelType::U16),
-                    planes: self.planes,
-                    channel_colors,
-                    // What the plugin said about its own result, when it
-                    // said anything. An importer has already taken this (see
-                    // `LoadedImporter::import`, which does so explicitly
-                    // *before* calling `finish`), so this is a filter's
-                    // metadata and nothing else — the calibration a
-                    // geometry-preserving filter carried over from its source.
-                    metadata,
-                    name: self.name,
-                };
+                let spec = self.spec();
+                // Streamed: the planes are the host's already, so all there is
+                // to check is that they all came — in the words a kept result
+                // that miscounted gets — and say where they go.
+                if self.stream.is_some() {
+                    spec.validate()?;
+                    if Some(self.pushed) != spec.plane_count() {
+                        return Err(spec.count_mismatch(self.pushed));
+                    }
+                    return Ok(Outcome::Streamed {
+                        target: match kind {
+                            abi::FtOutcomeKind::NewDocument => StreamTarget::NewDocument,
+                            abi::FtOutcomeKind::ReplaceDocument => StreamTarget::ReplaceDocument,
+                            _ => StreamTarget::SaveToFile { path: self.text },
+                        },
+                    });
+                }
+                let image = spec.with_planes(self.planes);
                 // The plugin may simply have pushed too few planes; the host
                 // checks rather than trusting the declaration.
                 image.validate()?;
@@ -1662,7 +1877,7 @@ unsafe extern "C" fn decl_push(
     decl: *const abi::FtParamDecl,
 ) -> abi::FtStatus {
     host_guard(|| {
-        let Some(s) = (ctx as *mut DeclSink).as_mut() else {
+        let Some(mut s) = enter::<DeclSink>(ctx) else {
             return abi::FtStatus::BadArgument;
         };
         // Checked before the reference is formed; see `add_plugin_cb`.
@@ -1765,11 +1980,11 @@ unsafe extern "C" fn decl_push(
     })
 }
 
-fn decl_sink_table(sink: &mut DeclSink) -> abi::FtParamSink {
+fn decl_sink_table(sink: &Gated<DeclSink>) -> abi::FtParamSink {
     abi::FtParamSink {
         struct_size: std::mem::size_of::<abi::FtParamSink>() as u32,
         _pad: 0,
-        ctx: sink as *mut DeclSink as *mut std::ffi::c_void,
+        ctx: sink.ctx(),
         push: decl_push,
     }
 }
@@ -1905,12 +2120,16 @@ unsafe fn ask_dialog(
     name: &str,
     source: Option<&Path>,
 ) -> Result<Vec<ParamDecl>, PluginError> {
-    let mut sink = DeclSink::default();
-    let table = decl_sink_table(&mut sink);
+    let sink = Gated::new(DeclSink::default());
+    let table = decl_sink_table(&sink);
     // The plugin's own shim catches its panics; this is the second line, for a
     // plugin that was not built with `fasttiff-plugin`.
     let st = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| params(&table)))
         .unwrap_or(abi::FtStatus::Panic);
+    if sink.broken() {
+        return Err(PluginError::failed(format!("{name} {CONCURRENT_CALLS}")));
+    }
+    let sink = sink.into_inner();
     if st == abi::FtStatus::Ok {
         return Ok(sink.decls);
     }
@@ -1935,15 +2154,23 @@ unsafe fn ask_dialog(
 /// `params` takes `&dyn HostContext`, but the C table is uniform over `&mut`;
 /// [`ReadOnly`] is what makes the one usable as the other, and everything it
 /// lets a plugin reach from here only reads.
-fn with_dialog_host<R>(host: &dyn HostContext, f: impl FnOnce(&abi::FtHost) -> R) -> R {
+fn with_dialog_host(
+    host: &dyn HostContext,
+    name: &str,
+    f: impl FnOnce(&abi::FtHost) -> Result<Vec<ParamDecl>, PluginError>,
+) -> Result<Vec<ParamDecl>, PluginError> {
     let mut shim = ReadOnly(host);
     // Both read `host` immutably, so they are taken before the mutable borrow
     // the cell holds for the rest of the call.
     let cell_name = host.stack_info().name.clone();
     let cell_path = host.stack_info().path.clone().unwrap_or_default();
-    let mut cell = HostCell::new(&mut shim, cell_name, cell_path);
-    let table = host_table(&mut cell);
-    f(&table)
+    let cell = Gated::new(HostCell::new(&mut shim, cell_name, cell_path));
+    let table = host_table(&cell);
+    let declared = f(&table);
+    if cell.broken() {
+        return Err(PluginError::failed(format!("{name} {CONCURRENT_CALLS}")));
+    }
+    declared
 }
 
 impl LoadedPlugin {
@@ -1954,7 +2181,7 @@ impl LoadedPlugin {
     /// run at once, which is the wrong thing to do with one whose dialog has
     /// just failed. The app asks this instead, and stops with the reason.
     pub fn dialog(&self, host: &dyn HostContext) -> Result<Vec<ParamDecl>, PluginError> {
-        with_dialog_host(host, |table| {
+        with_dialog_host(host, &self.info.name, |table| {
             // SAFETY: `table` and the sink `ask_dialog` builds are locals that
             // outlive the call.
             unsafe {
@@ -1990,10 +2217,20 @@ impl Plugin for LoadedPlugin {
         // mutable borrow the cell holds for the rest of the call.
         let cell_name = host.stack_info().name.clone();
         let cell_path = host.stack_info().path.clone().unwrap_or_default();
-        let mut cell = HostCell::new(host, cell_name, cell_path);
-        let table = host_table(&mut cell);
-        let mut sink = ResultSink::default();
-        let sink_table = sink_table(&mut sink);
+        let streams = host.streams_results();
+        let cell = Gated::new(HostCell::new(host, cell_name, cell_path));
+        // One cell, for the host table and — when the host takes results
+        // plane by plane — the result sink, which hands each plane to the same
+        // host the plugin is reading from. Both reach it only through
+        // `enter`, one call at a time.
+        let table = host_table(&cell);
+        let sink = Gated::new(ResultSink {
+            stream: streams
+                .then(|| std::ptr::NonNull::new(cell.ctx()))
+                .flatten(),
+            ..Default::default()
+        });
+        let sink_table = sink_table(&sink);
 
         // SAFETY: every pointer handed over refers to a local that outlives
         // this call, and the plugin copies nothing it is not given.
@@ -2011,9 +2248,21 @@ impl Plugin for LoadedPlugin {
         }))
         .unwrap_or(abi::FtStatus::Panic);
 
+        // Whatever the plugin went on to say, a call refused for arriving
+        // while another was in progress is the reason it did not work.
+        if cell.broken() || sink.broken() {
+            return Err(PluginError::failed(format!("{name} {CONCURRENT_CALLS}")));
+        }
+        let sink = sink.into_inner();
         match st {
             abi::FtStatus::Ok => sink.finish(&name),
             abi::FtStatus::Cancelled => Ok(Outcome::Cancelled),
+            // The host's reason, when it was the host that refused a plane or
+            // could not write it: the plugin only learnt a status, and its own
+            // message can say no more than that.
+            abi::FtStatus::Error | abi::FtStatus::BadArgument if sink.problem.is_some() => {
+                Err(PluginError::failed(sink.problem.unwrap_or_default()))
+            }
             // SAFETY: the plugin's own `last_error`, copied before returning.
             other => Err(unsafe {
                 failure(
@@ -2116,11 +2365,17 @@ impl HostContext for ReadOnly<'_> {
     fn image(&self) -> fasttiff_plugin_api::ImageInfo {
         self.0.image()
     }
-    // Forwarded like everything else here. This shim implements the trait by
-    // hand, so a method that gains a default body is a method this silently
-    // answers *for* the host it wraps — with the default's empty slice rather
-    // than what the host actually has. Anything added to `HostContext` has to
-    // be added here too.
+    // Forwarded like everything a dialog reads. This shim implements the
+    // trait by hand, so a method that gains a default body is a method this
+    // silently answers *for* the host it wraps — with the default's empty
+    // slice rather than what the host actually has. Anything added to
+    // `HostContext` that a dialog can read has to be added here too.
+    //
+    // What is left to the defaults is left on purpose: the four that stream
+    // a result (`streams_results`, `begin_image`, `push_plane`,
+    // `describe_image`). A dialog has no result, so "not plane by plane" is
+    // the true answer here whatever the host behind it would say during a
+    // run.
     fn selection(&self) -> fasttiff_plugin_api::Selection<'_> {
         self.0.selection()
     }
@@ -2221,15 +2476,15 @@ impl Importer for LoadedImporter {
         let p = request.path.to_string_lossy().to_string();
         // Kept alive for the call; see the note in `Plugin::run`.
         let (values, _owned) = values_to_c(&request.params);
-        let mut sink = ResultSink::default();
-        let sink_table = sink_table(&mut sink);
+        let sink = Gated::new(ResultSink::default());
+        let sink_table = sink_table(&sink);
 
         // An import has no stack, but it still needs progress, cancellation and
         // logging, so it gets a host table whose pixel readers refuse rather
         // than no table at all.
         let mut shim = ImportOnly(host);
-        let mut cell = HostCell::new(&mut shim, String::new(), p.clone());
-        let table = host_table(&mut cell);
+        let cell = Gated::new(HostCell::new(&mut shim, String::new(), p.clone()));
+        let table = host_table(&cell);
 
         let st = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             (self.vtable.import)(
@@ -2246,6 +2501,10 @@ impl Importer for LoadedImporter {
         }))
         .unwrap_or(abi::FtStatus::Panic);
 
+        if cell.broken() || sink.broken() {
+            return Err(PluginError::failed(format!("{name} {CONCURRENT_CALLS}")));
+        }
+        let mut sink = sink.into_inner();
         if st != abi::FtStatus::Ok {
             // SAFETY: the plugin's own `last_error`, copied before returning.
             return Err(unsafe {
@@ -2283,7 +2542,7 @@ impl LoadedExporter {
     /// The exporter's dialog, or why it could not declare one. See
     /// [`LoadedPlugin::dialog`].
     pub fn dialog(&self, host: &dyn HostContext) -> Result<Vec<ParamDecl>, PluginError> {
-        with_dialog_host(host, |table| {
+        with_dialog_host(host, &self.info.name, |table| {
             // SAFETY: as in `LoadedPlugin::dialog`.
             unsafe {
                 ask_dialog(
@@ -2324,8 +2583,8 @@ impl Exporter for LoadedExporter {
         // mutable borrow the cell holds for the rest of the call.
         let cell_name = host.stack_info().name.clone();
         let cell_path = host.stack_info().path.clone().unwrap_or_default();
-        let mut cell = HostCell::new(host, cell_name, cell_path);
-        let table = host_table(&mut cell);
+        let cell = Gated::new(HostCell::new(host, cell_name, cell_path));
+        let table = host_table(&cell);
 
         // Nothing comes back but a status: the plugin wrote the file itself.
         let st = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
@@ -2342,6 +2601,9 @@ impl Exporter for LoadedExporter {
         }))
         .unwrap_or(abi::FtStatus::Panic);
 
+        if cell.broken() {
+            return Err(PluginError::failed(format!("{name} {CONCURRENT_CALLS}")));
+        }
         match st {
             abi::FtStatus::Ok => Ok(()),
             // SAFETY: the plugin's own `last_error`, copied before returning.

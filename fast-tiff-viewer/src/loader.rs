@@ -65,6 +65,11 @@ pub enum LoadSource {
     Path(PathBuf),
     /// The file's bytes, plus a name to show for them.
     Bytes(Vec<u8>, PathBuf),
+    /// A plugin's result, opened from one of the other two: the stack it
+    /// becomes is [`Derived`](crate::plugins::result::Derived) — it knows the
+    /// document it was made from, and owns its scratch file. Made by
+    /// [`ResultTiff::into_document`](crate::plugins::ResultTiff::into_document).
+    Derived(Box<LoadSource>, crate::plugins::result::Derived),
 }
 
 impl LoadSource {
@@ -74,6 +79,7 @@ impl LoadSource {
             #[cfg(feature = "mmap")]
             LoadSource::Path(p) => p.clone(),
             LoadSource::Bytes(_, name) => name.clone(),
+            LoadSource::Derived(from, _) => from.name(),
         }
     }
 
@@ -91,6 +97,12 @@ impl LoadSource {
             LoadSource::Path(path) => Stack::open_reporting(path, apply_pseudocolor, on_stage),
             LoadSource::Bytes(bytes, name) => {
                 Stack::from_bytes_reporting(bytes, name, apply_pseudocolor, on_stage)
+            }
+            // A load that fails drops `derived`, and the scratch file with it.
+            LoadSource::Derived(from, derived) => {
+                let mut stack = from.load(apply_pseudocolor, on_stage)?;
+                stack.derived = Some(derived);
+                Ok(stack)
             }
         }
     }
