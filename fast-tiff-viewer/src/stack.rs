@@ -120,6 +120,9 @@ pub struct Stack {
     /// Builds windows off the interface thread, so zooming does not stop the
     /// program while a finer one is prepared. `None` when the thread could not
     /// start, or in a build without threads; windows are then built inline.
+    /// Like the other two workers here it is a `LatestWorker`
+    /// ([`crate::worker`]): a newer request, or dropping it, stops the build
+    /// under way.
     pub window_worker: Option<crate::window::WindowWorker>,
     /// Decoded strip bands, so moving the window re-uses what has already been
     /// decompressed instead of decompressing it again.
@@ -164,10 +167,15 @@ pub struct Stack {
     pub prefetch: Option<Prefetcher>,
     /// Bumped whenever the decode plan changes (dimension-order swap, enabled-set
     /// change) so an in-flight prefetch decoded under the old plan is recognized
-    /// as stale and ignored rather than uploaded.
+    /// as stale and ignored rather than uploaded — and, once the next frame is
+    /// asked for under the new generation, cancelled.
     pub prefetch_gen: u64,
-    /// Background 3D-volume builder, spawned lazily on the first 3D use. `None` after a failed spawn (`volume_builder_tried` set) — volume
-    /// builds then fall back to running synchronously.
+    /// Background 3D-volume builder, spawned lazily on the first 3D use.
+    /// `None` after a failed spawn (`volume_builder_tried` set) — volume
+    /// builds then fall back to running synchronously. Dropping it with the
+    /// stack cancels a build in flight: a closed file's half-built volume, and
+    /// the memory it holds, goes within a plane rather than being finished
+    /// beside the next file's.
     pub volume_builder: Option<VolumeBuilder>,
     pub volume_builder_tried: bool,
     /// The ImageJ overlay a save writes into the TIFF. Opening a file fills it
@@ -187,7 +195,10 @@ pub struct Stack {
     /// [`save_dir`](Self::save_dir).
     ///
     /// Last on purpose: fields drop in order, so `tiff` — the mapping of that
-    /// file — and the workers holding it are gone before the file is deleted.
+    /// file — is let go and the workers holding it are told to stop before the
+    /// file is deleted. Their threads are not joined: each lets go of its share
+    /// of the mapping a step later (see [`crate::worker`]), which the scratch
+    /// file's retried delete allows for.
     pub derived: Option<crate::plugins::result::Derived>,
 }
 
@@ -222,9 +233,10 @@ impl Stack {
     }
 
     /// Same, for a stack already in memory. `name` is only a label — it fills
-    /// the `path` field so a frontend can show a filename and the background
-    /// workers have something to reopen — so a browser can pass the picked
-    /// file's name and nothing will try to touch the filesystem.
+    /// the `path` field so a frontend can show a filename — so a browser can
+    /// pass the picked file's name and nothing will try to touch the
+    /// filesystem. The background workers share the stack itself, so they need
+    /// no file either.
     pub fn from_bytes(
         bytes: Vec<u8>,
         name: PathBuf,

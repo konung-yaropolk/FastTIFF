@@ -31,10 +31,10 @@
 //! * `backend-wgpu` / `backend-glow` — which GPU backend [`sync`] drives.
 //!   Exactly one is needed for [`Viewer::sync`]; with neither, the CPU-side
 //!   model still compiles and is fully usable headless.
-//! * `threads` (default) — background read-ahead and volume assembly. Turn it
-//!   off for a single-threaded host such as `wasm32-unknown-unknown`; the
-//!   synchronous fallbacks are already the paths taken when a worker fails to
-//!   spawn, so nothing else changes.
+//! * `threads` (default) — background read-ahead, window and volume assembly
+//!   (see [`worker`]). Turn it off for a single-threaded host such as
+//!   `wasm32-unknown-unknown`; the synchronous fallbacks are already the paths
+//!   taken when a worker fails to spawn, so nothing else changes.
 
 pub mod bandcache;
 pub mod brightness;
@@ -71,6 +71,7 @@ pub mod units;
 pub mod viewer;
 pub mod volume;
 pub mod window;
+pub mod worker;
 
 #[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
 pub mod sync;

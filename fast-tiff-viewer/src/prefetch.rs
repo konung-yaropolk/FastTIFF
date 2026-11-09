@@ -17,27 +17,24 @@
 //! serial-decode regime). When playback falls behind, the adaptive parallel
 //! decode takes over instead.
 //!
-//! The worker reads the window's own `TiffStack` through a shared `Arc`. Nothing
-//! mutates a stack once it is indexed, so that needs no lock: the only shared
-//! state beyond the stack is a request channel and a result slot. Sharing it
-//! also means the pages the worker touches are the ones the window then reads,
-//! and that a stack held in memory, with no file behind it, gets a worker too. Correctness is defensive: a prefetched
-//! result is used only when its `(generation, frame_index)` and channel layout
-//! exactly match what's wanted; any mismatch falls back to inline decode, so a
-//! stale prefetch can cost a little work but can never show the wrong frame.
+//! The worker is a `LatestWorker` ([`crate::worker`]): asking for a different
+//! frame replaces the request and cancels the read-ahead under way, which is
+//! stale by then. It reads the window's own `TiffStack` through a shared `Arc`.
+//! Nothing mutates a stack once it is indexed, so that needs no lock. Sharing
+//! it also means the pages the worker touches are the ones the window then
+//! reads, and that a stack held in memory, with no file behind it, gets a
+//! worker too. Correctness is defensive: a prefetched result is used only when
+//! its `(generation, frame_index)` and channel layout exactly match what's
+//! wanted; any mismatch falls back to inline decode, so a stale prefetch can
+//! cost a little work but can never show the wrong frame.
 
 use crate::stack::Stack;
+use crate::worker::{CancelToken, LatestWorker, Unclaimed};
 use fast_tiff_lib::TiffStack;
 use fast_tiff_lib::{ByteOrder, FrameInfo};
 use scivis_render::ChannelKind;
 use std::borrow::Cow;
-#[cfg(feature = "threads")]
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-#[cfg(feature = "threads")]
-use std::sync::Mutex;
-#[cfg(feature = "threads")]
-use std::thread::JoinHandle;
 
 /// One channel's decoded pixels, in the format its GPU texture expects.
 pub enum Decoded {
@@ -508,48 +505,24 @@ pub struct PrefetchResult {
     pub channels: Vec<DecodedChannel>,
 }
 
-#[cfg(feature = "threads")]
+/// What the read-ahead worker is asked for, besides the `(generation,
+/// frame_index)` its answer is keyed by.
 struct Request {
-    generation: u64,
-    frame_index: usize,
     jobs: Vec<ChannelJob>,
     /// Whether the requester decodes in parallel: read-ahead decodes the way
     /// the view would have.
     parallel: bool,
 }
 
-/// Read-ahead is a pure optimization, so a host without threads (notably
-/// `wasm32-unknown-unknown`) gets a stub that never produces a result. Callers
-/// already handle `Prefetcher::new` returning `None` — that's the same path a
-/// failed thread spawn takes — so nothing downstream changes.
-#[cfg(not(feature = "threads"))]
-pub struct Prefetcher(std::convert::Infallible);
+/// The read-ahead worker: a `LatestWorker` ([`crate::worker`]) keyed by
+/// `(generation, frame_index)`, so asking for the next frame again on every
+/// repaint is free and asking for a different one cancels the old.
+///
+/// `new` returns `None` when the thread cannot start, and always without the
+/// `threads` feature (notably `wasm32-unknown-unknown`). Read-ahead is a pure
+/// optimization, so callers then decode inline and nothing downstream changes.
+pub struct Prefetcher(LatestWorker<(u64, usize), Request, PrefetchResult>);
 
-#[cfg(not(feature = "threads"))]
-impl Prefetcher {
-    pub fn new(_stack: Arc<TiffStack>, _touch_only: bool) -> Option<Self> {
-        None
-    }
-
-    pub fn request(&self, _generation: u64, _frame_index: usize, _jobs: Vec<ChannelJob>) {
-        match self.0 {}
-    }
-
-    pub fn take_matching(&self, _generation: u64, _frame_index: usize) -> Option<PrefetchResult> {
-        match self.0 {}
-    }
-}
-
-/// Owns the worker thread + the latest result. Dropping it closes the request
-/// channel, which ends the worker (it finishes any in-flight decode first).
-#[cfg(feature = "threads")]
-pub struct Prefetcher {
-    tx: Sender<Request>,
-    result: Arc<Mutex<Option<PrefetchResult>>>,
-    _handle: JoinHandle<()>,
-}
-
-#[cfg(feature = "threads")]
 impl Prefetcher {
     /// Spawn a worker over `stack` — the window's own, shared: no second map,
     /// no second walk of the IFD chain, and the pages it touches are the ones
@@ -558,98 +531,68 @@ impl Prefetcher {
     /// ahead. Returns `None` if the thread fails to spawn — callers then just
     /// decode inline.
     pub fn new(stack: Arc<TiffStack>, touch_only: bool) -> Option<Self> {
-        let (tx, rx) = channel::<Request>();
-        let result = Arc::new(Mutex::new(None));
-        let result_worker = Arc::clone(&result);
-        let handle = std::thread::Builder::new()
-            .name("fasttiff-prefetch".to_owned())
-            .spawn(move || worker_loop(stack, rx, result_worker, touch_only))
-            .ok()?;
-        Some(Self {
-            tx,
-            result,
-            _handle: handle,
-        })
+        let job =
+            move |&(generation, frame_index): &(u64, usize), req: Request, cancel: &CancelToken| {
+                fast_tiff_lib::set_thread_parallel_decode(Some(req.parallel));
+                // Page-touch mode: absorb the next frame's soft page faults here
+                // and publish nothing — the UI thread's inline decode is then
+                // fault-free (and stays zero-copy, which decoding ahead would have
+                // forfeited). A frame's channels are planes of their own, so a
+                // newer request stops it between them.
+                if touch_only {
+                    for job in &req.jobs {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        if let Some(frame) = stack.frames.get(job.ifd_idx) {
+                            stack.prefetch_frame(frame);
+                        }
+                    }
+                    return None;
+                }
+                // The step is the frame: a decode overtaken while it runs finishes,
+                // and the worker then drops it unpublished.
+                let decoded =
+                    decode_jobs(&stack.data, &stack.frames, stack.byte_order, &req.jobs).ok()?;
+                let channels = req
+                    .jobs
+                    .iter()
+                    .zip(decoded)
+                    .map(|(job, data)| DecodedChannel {
+                        channel: job.channel,
+                        width: job.width,
+                        height: job.height,
+                        kind: job.kind,
+                        data,
+                    })
+                    .collect();
+                Some(PrefetchResult {
+                    generation,
+                    frame_index,
+                    channels,
+                })
+            };
+        LatestWorker::spawn("fasttiff-prefetch", Unclaimed::Keep, job).map(Prefetcher)
     }
 
-    /// Ask the worker to decode `frame_index`'s `jobs`. Fire-and-forget; the
-    /// worker drains to the most recent request, so superseded predictions are
-    /// skipped.
+    /// Ask the worker to decode `frame_index`'s `jobs`. Fire-and-forget. A
+    /// different frame (or generation) replaces whatever was asked before and
+    /// cancels it; the same one again is ignored while it is still pending.
     pub fn request(&self, generation: u64, frame_index: usize, jobs: Vec<ChannelJob>) {
-        let _ = self.tx.send(Request {
-            generation,
-            frame_index,
-            jobs,
-            parallel: fast_tiff_lib::parallel_decode_enabled(),
-        });
+        self.0.request(
+            (generation, frame_index),
+            Request {
+                jobs,
+                parallel: fast_tiff_lib::parallel_decode_enabled(),
+            },
+        );
     }
 
     /// Take the prefetched result iff it matches `(generation, frame_index)`;
     /// otherwise leave the slot untouched and return `None`. The caller still
     /// verifies the channel layout before using it.
     pub fn take_matching(&self, generation: u64, frame_index: usize) -> Option<PrefetchResult> {
-        let mut slot = self.result.lock().ok()?;
-        let matches = slot
-            .as_ref()
-            .is_some_and(|r| r.generation == generation && r.frame_index == frame_index);
-        if matches {
-            slot.take()
-        } else {
-            None
-        }
-    }
-}
-
-#[cfg(feature = "threads")]
-fn worker_loop(
-    stack: Arc<TiffStack>,
-    rx: Receiver<Request>,
-    result: Arc<Mutex<Option<PrefetchResult>>>,
-    touch_only: bool,
-) {
-    // Block for a request; channel closed (Prefetcher dropped) -> exit.
-    while let Ok(mut req) = rx.recv() {
-        // Skip superseded predictions: only the most recent request matters.
-        while let Ok(newer) = rx.try_recv() {
-            req = newer;
-        }
-        fast_tiff_lib::set_thread_parallel_decode(Some(req.parallel));
-        // Page-touch mode: absorb the next frame's soft page faults here and
-        // store no result — the UI thread's inline decode is then fault-free
-        // (and stays zero-copy, which decoding ahead would have forfeited).
-        if touch_only {
-            for job in &req.jobs {
-                if let Some(frame) = stack.frames.get(job.ifd_idx) {
-                    stack.prefetch_frame(frame);
-                }
-            }
-            continue;
-        }
-        let mut channels = Vec::with_capacity(req.jobs.len());
-        let ok = match decode_jobs(&stack.data, &stack.frames, stack.byte_order, &req.jobs) {
-            Ok(decoded) => {
-                for (job, data) in req.jobs.iter().zip(decoded) {
-                    channels.push(DecodedChannel {
-                        channel: job.channel,
-                        width: job.width,
-                        height: job.height,
-                        kind: job.kind,
-                        data,
-                    });
-                }
-                true
-            }
-            Err(_) => false,
-        };
-        if ok {
-            if let Ok(mut slot) = result.lock() {
-                *slot = Some(PrefetchResult {
-                    generation: req.generation,
-                    frame_index: req.frame_index,
-                    channels,
-                });
-            }
-        }
+        self.0.take_if(|key| *key == (generation, frame_index))
     }
 }
 

@@ -176,7 +176,8 @@ pub struct VolumeView {
     /// Generation for background builds: bumped whenever the volume has to be
     /// built again — a new file, a dimension-order swap, a smaller rebuild
     /// after the GPU ran out of memory — so an in-flight build for the old one
-    /// is recognized as stale and ignored.
+    /// is recognized as stale and ignored, and cancelled by the next request,
+    /// which carries the new generation.
     pub generation: u64,
     /// Bumped with [`generation`](Self::generation) for a new file or a
     /// dimension-order swap, and only then: a different volume, where

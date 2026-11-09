@@ -13,8 +13,10 @@
 use crate::bandcache::{self, BandCache};
 use crate::prefetch::{decode_jobs_region, decode_jobs_stepped, ChannelJob, Decoded, Samples};
 use crate::roi::{self, Roi};
+use crate::worker::{CancelToken, Cancelled, LatestWorker, Unclaimed};
 use fast_tiff_lib::{FrameInfo, TiffStack};
 use scivis_render::ChannelKind;
+use std::sync::Arc;
 
 /// Whether a window is the entire frame at full resolution, in which case no
 /// view can leave it and nothing needs re-cutting.
@@ -177,6 +179,10 @@ fn blit_band(
 /// Bands come off a grid fixed to the frame rather than to the window (see
 /// [`crate::bandcache`]), which is what lets a moving view re-use what it has
 /// already decompressed. Peak memory is a band, not the frame.
+///
+/// `cancel` is asked before each band, and once it says stop the build ends
+/// with a [`Cancelled`] error (the bands already decoded stay cached). Inline
+/// callers pass [`CancelToken::never`].
 pub fn assemble(
     tiff: &TiffStack,
     bands: &mut BandCache,
@@ -184,6 +190,7 @@ pub fn assemble(
     kinds: &[ChannelKind],
     roi: &Roi,
     frame_index: usize,
+    cancel: &CancelToken,
 ) -> anyhow::Result<Vec<Decoded>> {
     let (frame_w, frame_h) = tiff.frames.first().map_or((0, 0), |f| (f.width, f.height));
     let (tw, th) = roi.texture_size();
@@ -227,6 +234,8 @@ pub fn assemble(
     let probe = tiff.frames.get(jobs.first().map_or(0, |j| j.ifd_idx));
 
     for band in grid {
+        // The step a superseded window still costs: one band's decode.
+        cancel.check()?;
         let rows = bandcache::band_range(band, rows_per_band, frame_h);
         if rows.is_empty() {
             continue;
@@ -504,10 +513,12 @@ impl Overview {
     }
 }
 
-#[cfg(feature = "threads")]
+/// What a window is asked for by: the frame, the window, and which display
+/// channels it holds, in order — the fields of the [`Built`] it becomes.
+type WindowKey = (usize, Roi, Vec<usize>);
+
+/// What the window worker is asked for, besides its [`WindowKey`].
 struct Job {
-    frame_index: usize,
-    roi: Roi,
     jobs: Vec<ChannelJob>,
     kinds: Vec<ChannelKind>,
     /// Whether the requester decodes in parallel: the worker decodes the
@@ -526,71 +537,56 @@ struct Job {
 /// is ready: the picture goes momentarily soft instead of the program going
 /// momentarily dead.
 ///
+/// A `LatestWorker` ([`crate::worker`]): a request for another window cancels
+/// the one being built at its next band, so the window the view has settled on
+/// starts as soon as one band allows rather than after a whole stale build. A
+/// finished window nobody has taken is kept (`Unclaimed::Keep`) — the view may
+/// come back to it.
+///
 /// Only ever used when there *is* something to keep showing. The first view of a
 /// file has nothing to fall back on, so that one is built inline and waited for.
-#[cfg(feature = "threads")]
-pub struct WindowWorker {
-    tx: std::sync::mpsc::Sender<Job>,
-    result: std::sync::Arc<std::sync::Mutex<Option<Built>>>,
-    _handle: std::thread::JoinHandle<()>,
-}
+/// `new` returns `None` without the `threads` feature, and every window is then
+/// built inline.
+pub struct WindowWorker(LatestWorker<WindowKey, Job, Built>);
 
-#[cfg(feature = "threads")]
 impl WindowWorker {
     /// Spawn a worker over `tiff` — the window's own, shared. `None` if the
     /// thread fails to spawn, in which case the caller builds windows inline
     /// as before.
-    pub fn new(tiff: std::sync::Arc<TiffStack>) -> Option<Self> {
-        let (tx, rx) = std::sync::mpsc::channel::<Job>();
-        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let slot = std::sync::Arc::clone(&result);
-        let handle = std::thread::Builder::new()
-            .name("fasttiff-window".to_owned())
-            .spawn(move || {
-                // The window's own stack, shared, and a band cache of its own so
-                // the two threads never contend over one.
-                let mut bands = BandCache::default();
-                while let Ok(job) = rx.recv() {
-                    // Drain to the newest request: while one window was being
-                    // built the view has probably moved again, and the older
-                    // answers are already stale.
-                    let mut job = job;
-                    while let Ok(newer) = rx.try_recv() {
-                        job = newer;
-                    }
-                    fast_tiff_lib::set_thread_parallel_decode(Some(job.parallel));
-                    match assemble(
-                        &tiff,
-                        &mut bands,
-                        &job.jobs,
-                        &job.kinds,
-                        &job.roi,
-                        job.frame_index,
-                    ) {
-                        Ok(planes) => {
-                            let built = Built {
-                                frame_index: job.frame_index,
-                                roi: job.roi,
-                                channels: job.jobs.iter().map(|j| j.channel).collect(),
-                                planes,
-                            };
-                            if let Ok(mut slot) = slot.lock() {
-                                *slot = Some(built);
-                            }
-                        }
-                        Err(e) => log::warn!("window worker: {e:#}"),
+    pub fn new(tiff: Arc<TiffStack>) -> Option<Self> {
+        // A band cache of its own, so the two threads never contend over one.
+        let mut bands = BandCache::default();
+        let build =
+            move |(frame_index, roi, channels): &WindowKey, job: Job, cancel: &CancelToken| {
+                fast_tiff_lib::set_thread_parallel_decode(Some(job.parallel));
+                match assemble(
+                    &tiff,
+                    &mut bands,
+                    &job.jobs,
+                    &job.kinds,
+                    roi,
+                    *frame_index,
+                    cancel,
+                ) {
+                    Ok(planes) => Some(Built {
+                        frame_index: *frame_index,
+                        roi: *roi,
+                        channels: channels.clone(),
+                        planes,
+                    }),
+                    Err(e) if e.is::<Cancelled>() => None,
+                    Err(e) => {
+                        log::warn!("window worker: {e:#}");
+                        None
                     }
                 }
-            })
-            .ok()?;
-        Some(Self {
-            tx,
-            result,
-            _handle: handle,
-        })
+            };
+        LatestWorker::spawn("fasttiff-window", Unclaimed::Keep, build).map(WindowWorker)
     }
 
-    /// Ask for a window. Fire and forget; superseded requests are skipped.
+    /// Ask for a window. Fire and forget: a request for a different window
+    /// cancels the one in progress, and the same one again is ignored while it
+    /// is still pending.
     pub fn request(
         &self,
         frame_index: usize,
@@ -598,13 +594,15 @@ impl WindowWorker {
         jobs: Vec<ChannelJob>,
         kinds: Vec<ChannelKind>,
     ) {
-        let _ = self.tx.send(Job {
-            frame_index,
-            roi,
-            jobs,
-            kinds,
-            parallel: fast_tiff_lib::parallel_decode_enabled(),
-        });
+        let channels = jobs.iter().map(|j| j.channel).collect();
+        self.0.request(
+            (frame_index, roi, channels),
+            Job {
+                jobs,
+                kinds,
+                parallel: fast_tiff_lib::parallel_decode_enabled(),
+            },
+        );
     }
 
     /// Take a finished window if it can serve a view needing `required`,
@@ -628,42 +626,12 @@ impl WindowWorker {
         required: &Roi,
         channels: &[usize],
     ) -> Option<Built> {
-        let mut slot = self.result.lock().ok()?;
-        let usable = slot.as_ref().is_some_and(|b| {
-            b.frame_index == frame_index && b.channels == channels && b.roi.serves(required)
-        });
-        if usable {
-            slot.take()
-        } else {
-            None
-        }
+        self.0.take_if(|(frame, roi, held)| {
+            *frame == frame_index && held == channels && roi.serves(required)
+        })
     }
 }
 
-/// Without threads there is no worker; every window is built inline.
-#[cfg(not(feature = "threads"))]
-pub struct WindowWorker(std::convert::Infallible);
-
-#[cfg(not(feature = "threads"))]
-impl WindowWorker {
-    pub fn new(_tiff: std::sync::Arc<TiffStack>) -> Option<Self> {
-        None
-    }
-    pub fn request(
-        &self,
-        _frame_index: usize,
-        _roi: Roi,
-        _jobs: Vec<ChannelJob>,
-        _kinds: Vec<ChannelKind>,
-    ) {
-        match self.0 {}
-    }
-    pub fn take_matching(
-        &self,
-        _frame_index: usize,
-        _roi: &Roi,
-        _channels: &[usize],
-    ) -> Option<Built> {
-        match self.0 {}
-    }
-}
+#[cfg(test)]
+#[path = "window_tests.rs"]
+mod tests;

@@ -21,6 +21,7 @@ use crate::stack::Stack;
 use crate::viewer::{DecodeMode, ViewMode, Viewer};
 use crate::volume::VolumePlan;
 use crate::window;
+use crate::worker::CancelToken;
 use crate::Renderer;
 use scivis_render::{ChannelKind, ChannelUniform, MAX_CHANNELS};
 
@@ -305,7 +306,8 @@ fn sync_movie(
             // large is not something anyone plays back anyway.
             let assembled = {
                 let Stack { tiff, bands, .. } = &mut *loaded;
-                window::assemble(tiff, bands, &jobs, kinds, &roi, frame_index)
+                let inline = CancelToken::never();
+                window::assemble(tiff, bands, &jobs, kinds, &roi, frame_index, &inline)
             };
             match assembled {
                 Ok(planes) => {
@@ -464,11 +466,20 @@ fn sync_movie(
                     pending = true;
                 }
                 None => {
-                    // No worker — no threads, or the file cannot be reopened.
+                    // No worker — no threads, or the thread could not start.
                     // Take the stall rather than never sharpening.
                     let assembled = {
                         let Stack { tiff, bands, .. } = &mut *loaded;
-                        window::assemble(tiff, bands, &jobs, kinds, &plan.want, frame_index)
+                        let inline = CancelToken::never();
+                        window::assemble(
+                            tiff,
+                            bands,
+                            &jobs,
+                            kinds,
+                            &plan.want,
+                            frame_index,
+                            &inline,
+                        )
                     };
                     if let Ok(planes) = assembled {
                         let (tw, th) = plan.want.texture_size();
@@ -634,23 +645,23 @@ fn sync_volume(
                     view.requested = None;
                 }
                 handled = true;
-            } else {
-                let queued = view.requested == Some((view.generation, time))
-                    || builder.request(view.generation, plan.clone());
-                if queued {
-                    view.requested = Some((view.generation, time));
-                    // In flight: poll again next frame (the previous volume /
-                    // loading screen stays up meanwhile).
-                    needs_repaint = true;
-                    handled = true;
-                }
-                // queued == false: the worker died (its file open failed) — fall
-                // through to the synchronous build.
+            } else if builder.request(view.generation, plan.clone()) {
+                // Asked every frame until it is answered: a repeat of the
+                // request in flight is one lock and changes nothing, and it is
+                // what notices the worker has died.
+                view.requested = Some((view.generation, time));
+                // In flight: poll again next frame (the previous volume /
+                // loading screen stays up meanwhile).
+                needs_repaint = true;
+                handled = true;
             }
+            // Refused: the worker died (a build panicked, this one included),
+            // so fall through to the synchronous build.
         }
         if !handled {
             let generation = view.generation;
-            if let Some(volume) = crate::volume::build_volume(&loaded.tiff, &plan) {
+            let inline = CancelToken::never();
+            if let Ok(Some(volume)) = crate::volume::build_volume(&loaded.tiff, &plan, &inline) {
                 upload_volume(renderer, &volume, view, status);
             }
             if view.generation == generation {

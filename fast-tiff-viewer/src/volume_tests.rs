@@ -11,6 +11,7 @@ use super::*;
 
 /// Wait for `f`, up to five seconds: the worker has to be scheduled and build
 /// the volume first, so there is nothing to assert synchronously.
+#[cfg(feature = "threads")]
 fn within_seconds(what: &str, mut f: impl FnMut() -> bool) {
     let start = std::time::Instant::now();
     while start.elapsed() < std::time::Duration::from_secs(5) {
@@ -24,6 +25,7 @@ fn within_seconds(what: &str, mut f: impl FnMut() -> bool) {
 
 /// A stack held only in memory — the imported case — gets its volume built in
 /// the background and answered under the request's key.
+#[cfg(feature = "threads")]
 #[test]
 fn a_stack_held_in_memory_is_built_in_the_background() {
     let stack = Arc::new(TiffStack::from_bytes(tiny_tiff()).expect("parse"));
@@ -37,6 +39,100 @@ fn a_stack_held_in_memory_is_built_in_the_background() {
     // Another key gets nothing: the reply was taken, and it was not theirs.
     assert!(builder.take_matching(7, 0).is_none());
     assert!(builder.take_matching(8, 0).is_none());
+}
+
+// ------------------------------------------------------------- cancelling
+
+/// A build told to stop after its first plane stops there: it reports
+/// `Cancelled`, not a volume, and reads none of the other 63 planes.
+///
+/// The token says "go on" exactly once and the build asks it before every
+/// plane it reads, so exactly one plane was decoded. A build that never asked,
+/// or asked only once at the start, would come back with a volume.
+#[test]
+fn a_cancelled_build_stops_at_the_next_plane() {
+    const DEPTH: u32 = 64;
+    let tiff = u16_stack(8, 8, DEPTH, |f, i| (f * 64 + i) as u16);
+    let plan = u16_plan(DEPTH as usize, usize::MAX);
+
+    let (token, asked) = crate::worker::CancelToken::after(1);
+    assert_eq!(
+        build_volume(&tiff, &plan, &token).map(|_| ()),
+        Err(Cancelled)
+    );
+    let asked = asked.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(asked >= 2, "asked again after the one plane it was allowed");
+    // One slice at a time, it stops at the very next one.
+    #[cfg(not(feature = "threads"))]
+    assert_eq!(asked, 2);
+
+    // Never cancelled, the same build completes.
+    let built = build_volume(&tiff, &plan, &CancelToken::never()).expect("not cancelled");
+    assert_eq!(built.expect("built").layout.dims, (8, 8, DEPTH));
+}
+
+/// The mip chain is a pass over the whole volume, so a build cancelled after
+/// its last plane does not go on to build one.
+#[test]
+fn a_build_cancelled_after_its_planes_skips_the_mip_chain() {
+    const DEPTH: u32 = 4;
+    let tiff = u16_stack(4, 4, DEPTH, |f, i| (f + i) as u16);
+    let (token, asked) = crate::worker::CancelToken::after(DEPTH as usize);
+    let got = build_volume(&tiff, &u16_plan(DEPTH as usize, usize::MAX), &token);
+    assert_eq!(got.map(|_| ()), Err(Cancelled));
+    assert_eq!(
+        asked.load(std::sync::atomic::Ordering::Relaxed),
+        DEPTH as usize + 1,
+        "once per plane, and once before the mip chain"
+    );
+}
+
+/// Requests for different keys in a row: the newest is answered, and nothing
+/// for the older ones is left to take.
+///
+/// Whether an older one was replaced before it started or stopped part-way is
+/// up to the scheduler here, so this proves only which answer wins. The
+/// stopping is forced where it can be: the worker's tests overtake a job they
+/// hold part-way, and `a_cancelled_build_stops_at_the_next_plane` cancels a
+/// build at a known plane.
+#[cfg(feature = "threads")]
+#[test]
+fn the_newest_of_several_requests_is_the_one_answered() {
+    let stack = Arc::new(u16_stack(64, 64, 64, |f, i| (f * 7 + i) as u16));
+    let builder = VolumeBuilder::new(stack).expect("the thread should spawn");
+    for generation in 1..=3 {
+        assert!(builder.request(generation, u16_plan(64, usize::MAX)));
+    }
+    let mut answer = None;
+    within_seconds("the newest build", || {
+        answer = builder.take_matching(3, 0);
+        answer.is_some()
+    });
+    assert!(answer.flatten().is_some(), "and it built");
+    assert!(builder.take_matching(1, 0).is_none());
+    assert!(builder.take_matching(2, 0).is_none());
+}
+
+/// Dropping the builder — closing the file — with a build asked for lets go
+/// of the stack (the file's mapping, for a mapped file): its thread exits and
+/// keeps nothing.
+///
+/// This build is over long before the bound, cancelled or not, so the test
+/// says nothing about *when* the stack goes. That a dropped worker stops its job at
+/// the next check is forced in the worker's tests
+/// (`dropping_a_worker_mid_job_lets_go_of_what_it_holds`), and that a build
+/// checks at every plane in `a_cancelled_build_stops_at_the_next_plane`.
+#[cfg(feature = "threads")]
+#[test]
+fn a_dropped_builder_lets_go_of_its_stack() {
+    let stack = Arc::new(u16_stack(256, 256, 128, |f, i| (f + i) as u16));
+    let weak = Arc::downgrade(&stack);
+    let builder = VolumeBuilder::new(stack).expect("the thread should spawn");
+    assert!(builder.request(1, u16_plan(128, usize::MAX)));
+    drop(builder);
+    within_seconds("the dropped builder letting go of its stack", || {
+        weak.upgrade().is_none()
+    });
 }
 
 fn plan() -> VolumePlan {
@@ -56,6 +152,7 @@ fn plan() -> VolumePlan {
 }
 
 /// The smallest stack `TiffStack::open` will accept.
+#[cfg(feature = "threads")]
 fn tiny_tiff() -> Vec<u8> {
     use fast_tiff_lib::{SampleType, TiffWriter, WriterOptions};
     let mut w = TiffWriter::new(
@@ -176,7 +273,9 @@ fn no_axis_keeps_more_than_the_detail_cap_or_the_texture_limit() {
 #[test]
 fn a_volume_that_fits_is_packed_sample_for_sample() {
     let tiff = u16_stack(5, 3, 4, |f, i| (f * 1000 + i * 37) as u16);
-    let p = build_volume(&tiff, &u16_plan(4, usize::MAX)).expect("built");
+    let p = build_volume(&tiff, &u16_plan(4, usize::MAX), &CancelToken::never())
+        .expect("not cancelled")
+        .expect("built");
     assert_eq!(p.layout.dims, (5, 3, 4));
     let got: Vec<u16> = p.levels[0][0]
         .as_chunks::<2>()
@@ -212,7 +311,9 @@ fn a_reduced_volume_averages_each_box() {
         plan.detail_cap,
     );
     assert!(sx > 1 || sy > 1 || sz > 1, "the test must reduce something");
-    let p = build_volume(&tiff, &plan).expect("built");
+    let p = build_volume(&tiff, &plan, &CancelToken::never())
+        .expect("not cancelled")
+        .expect("built");
     let (ow, oh, od) = p.layout.dims;
     assert_eq!(
         (ow, oh, od),

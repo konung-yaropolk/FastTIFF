@@ -51,3 +51,38 @@ fn an_uncompressed_plane_is_borrowed_from_the_file() {
         assert!(matches!(&owned[0], Decoded::U16(v) if *v == want));
     }
 }
+
+/// The read-ahead answers the frame asked for last, and nothing for the frames
+/// asked for before it is left to take.
+///
+/// Which of those were replaced before they started and which were decoded
+/// and then dropped is up to the scheduler, so this proves only which answer
+/// wins. A decode never looks at its token; that the worker drops an answer
+/// overtaken while it was computed is forced in the worker's tests
+/// (`an_answer_overtaken_while_computed_is_never_published`).
+#[cfg(feature = "threads")]
+#[test]
+fn the_read_ahead_answers_the_frame_asked_for_last() {
+    use std::time::{Duration, Instant};
+    let tiff = Arc::new(stack(Compression::Deflate));
+    let p = Prefetcher::new(tiff, false).expect("the thread should spawn");
+    for frame in [3, 4, 5] {
+        p.request(1, frame, vec![job()]);
+    }
+    let start = Instant::now();
+    let got = loop {
+        if let Some(r) = p.take_matching(1, 5) {
+            break r;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the read-ahead never answered"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!((got.generation, got.frame_index), (1, 5));
+    let want: Vec<u16> = (0..(W * H) as u16).map(|i| i * 300).collect();
+    assert!(matches!(&got.channels[..], [c] if matches!(&c.data, Decoded::U16(v) if *v == want)));
+    assert!(p.take_matching(1, 3).is_none());
+    assert!(p.take_matching(1, 4).is_none());
+}

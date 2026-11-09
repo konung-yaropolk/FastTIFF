@@ -21,27 +21,24 @@
 //! units, so a stack of thin optical sections — fine in x and y, coarse in z —
 //! gives up in-plane detail it has to spare before depth it has little of.
 //!
-//! The worker mirrors `prefetch::Prefetcher`: it opens its **own** memory map
-//! of the file (sharing the OS page cache), takes the latest queued request
-//! (draining stale ones, so scrubbing a 4D stack skips timepoints instead of
-//! queueing them all), and posts the finished volume into a result slot the UI
-//! thread polls. Results are tagged with `(generation, time)` and used only on
-//! an exact match, so a stale build can cost work but never show wrong data.
+//! The builder is a `LatestWorker` ([`crate::worker`]) over the window's own
+//! stack, shared. A request for another `(generation, time)` replaces the one
+//! waiting and cancels the build under way at its next plane, so scrubbing a 4D
+//! stack skips timepoints instead of building each one, and the wanted
+//! timepoint waits for a plane of the stale build rather than all of it. The
+//! finished volume is posted into a result slot the UI thread polls, and used
+//! only on an exact `(generation, time)` match, so a stale build can cost work
+//! but never show wrong data.
 
 use crate::prefetch::{decode_jobs, ChannelJob, Decoded};
 use crate::units::SampleUnits;
+use crate::worker::{CancelToken, Cancelled, LatestWorker, Unclaimed};
 use fast_tiff_lib::TiffStack;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
 use scivis_render::pack::{self, PackedVolume, TexelFormat, VolumeLayout};
 use scivis_render::{ChannelKind, MAX_CHANNELS};
-#[cfg(feature = "threads")]
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-#[cfg(feature = "threads")]
-use std::sync::Mutex;
-#[cfg(feature = "threads")]
-use std::thread::JoinHandle;
 
 /// The GPU memory a volume may take when the frontend could not find out how
 /// much there is. Every level of every packed texture counts against it.
@@ -149,10 +146,22 @@ pub fn choose_strides(
 /// Build the 3D volume for `plan`, packed for upload. The depth axis is the
 /// whole frame axis in the ordinary case, or (4D, `slices > 1`) the Z axis at
 /// timepoint `plan.time`. All channels share the same reduction, chosen by
-/// [`choose_strides`]. Returns `None` when there's no volume to build (or a
-/// decode failed).
-pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> {
-    let f0 = tiff.frames.first()?;
+/// [`choose_strides`]. `Ok(None)` when there's no volume to build (or a decode
+/// failed).
+///
+/// `cancel` is asked before each source plane is read — once per output slice,
+/// and per plane of the several a reduced slice averages — and before the mip
+/// chain is built. Once it says stop, every task still running finishes the
+/// plane it is on, the half-built volume is dropped, and the result is
+/// [`Cancelled`]. Inline callers pass [`CancelToken::never`].
+pub fn build_volume(
+    tiff: &TiffStack,
+    plan: &VolumePlan,
+    cancel: &CancelToken,
+) -> Result<Option<BuiltVolume>, Cancelled> {
+    let Some(f0) = tiff.frames.first() else {
+        return Ok(None);
+    };
     let (w, h) = (f0.width, f0.height);
     let slices = plan.slices.max(1);
     let channels = plan.channels.max(1);
@@ -166,7 +175,7 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
     let time = if is_4d { plan.time } else { 0 };
     let n = plan.units.len().min(MAX_CHANNELS);
     if w == 0 || h == 0 || depth < 2 || n == 0 {
-        return None;
+        return Ok(None);
     }
     let ckinds: Vec<ChannelKind> = plan.units[..n].iter().map(|u| u.kind()).collect();
     let affines: Vec<(f32, f32)> = plan.units[..n].iter().map(|u| u.volume_affine()).collect();
@@ -221,6 +230,10 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
         let direct = (sx, sy, sz) == (1, 1, 1);
         let mut boxes = SliceBoxes::new(if direct { 0 } else { n }, (w, h), (sx, sy), (ow, oh));
         for k in z_from..z_to {
+            // The step a superseded build still costs: one plane's decode per
+            // task running. `try_for_each` stops handing out slices at the
+            // first `Err`.
+            cancel.check()?;
             // Depth index → (time, z): in 4D the depth is Z at the fixed
             // timepoint; otherwise the depth index *is* the frame (time = k,
             // z = 0). The IFD layout is time-major, then Z, then channel.
@@ -268,11 +281,16 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
         Ok(())
     });
     if let Err(e) = result {
+        if e.is::<Cancelled>() {
+            return Err(Cancelled);
+        }
         log::warn!("volume build failed: {e:#}");
-        return None;
+        return Ok(None);
     }
+    // The mip chain and brick maxima are a pass over the whole volume.
+    cancel.check()?;
     packed.finish();
-    Some(packed)
+    Ok(Some(packed))
 }
 
 /// Store one decoded slice of channel `c`, at full size, into its slab of the
@@ -449,130 +467,54 @@ impl SliceBoxes {
     }
 }
 
-#[cfg(feature = "threads")]
-struct Request {
-    generation: u64,
-    plan: VolumePlan,
-}
+/// The background volume builder: a `LatestWorker` ([`crate::worker`]) keyed
+/// by `(generation, time)`.
+///
+/// A newer request cancels the build in progress at its next plane (see
+/// [`build_volume`]), and dropping the builder — closing the file, opening
+/// another — does the same, so the thread lets go of the stack and its
+/// half-built volume one plane after it is dropped rather than when the build
+/// would have finished. A finished volume nobody took is dropped before the
+/// next build starts (`Unclaimed::Discard`): one builder never holds two.
+///
+/// `new` returns `None` when the thread cannot start, and always without the
+/// `threads` feature; every build then runs synchronously through
+/// [`build_volume`].
+pub struct VolumeBuilder(LatestWorker<(u64, usize), VolumePlan, Option<BuiltVolume>>);
 
-/// A finished background build, tagged so the app can confirm it still matches
-/// what's wanted. `volume: None` means the build failed (the app marks the
-/// timepoint built anyway, so it doesn't retry every frame).
-#[cfg(feature = "threads")]
-struct BuiltReply {
-    generation: u64,
-    time: usize,
-    volume: Option<BuiltVolume>,
-}
-
-/// Owns the volume-builder worker thread + the latest result. Dropping it
-/// closes the request channel, which ends the worker (it finishes any in-flight
-/// build first).
-#[cfg(feature = "threads")]
-pub struct VolumeBuilder {
-    tx: Sender<Request>,
-    result: Arc<Mutex<Option<BuiltReply>>>,
-    _handle: JoinHandle<()>,
-}
-
-#[cfg(feature = "threads")]
 impl VolumeBuilder {
     /// Spawn a worker over `stack` — the window's own, shared, so a stack held
     /// in memory (a plugin's result, an import, every file in a browser) gets
     /// one as well as a mapped file does. Returns `None` if the thread fails
     /// to spawn — callers then build synchronously instead.
     pub fn new(stack: Arc<TiffStack>) -> Option<Self> {
-        let (tx, rx) = channel::<Request>();
-        let result = Arc::new(Mutex::new(None));
-        let result_worker = Arc::clone(&result);
-        let handle = std::thread::Builder::new()
-            .name("fasttiff-volume".to_owned())
-            .spawn(move || worker_loop(stack, rx, result_worker))
-            .ok()?;
-        Some(Self {
-            tx,
-            result,
-            _handle: handle,
-        })
+        // A failed build is published as `None` (the app marks the timepoint
+        // built anyway, so it doesn't retry every frame); a cancelled one is
+        // not published at all.
+        let build = move |_: &(u64, usize), plan: VolumePlan, cancel: &CancelToken| {
+            build_volume(&stack, &plan, cancel).ok()
+        };
+        LatestWorker::spawn("fasttiff-volume", Unclaimed::Discard, build).map(VolumeBuilder)
     }
 
-    /// Queue a build. Returns `false` when the worker is gone — the caller
-    /// should build synchronously instead.
+    /// Queue a build. Asking again for the `(generation, time)` already queued
+    /// or building does nothing; asking for another cancels it. Returns
+    /// `false` when the worker is gone (a build panicked) — the caller should
+    /// build synchronously instead.
     pub fn request(&self, generation: u64, plan: VolumePlan) -> bool {
-        self.tx.send(Request { generation, plan }).is_ok()
+        self.0.request((generation, plan.time), plan)
     }
 
     /// Take the finished volume iff it matches `(generation, time)`; otherwise
-    /// leave the slot untouched (a newer build will overwrite it) and return
+    /// leave the slot untouched (a newer build will replace it) and return
     /// `None`. The outer `Option` is "is there a matching reply"; the inner one
     /// is the build's own success.
     #[allow(clippy::option_option)]
     pub fn take_matching(&self, generation: u64, time: usize) -> Option<Option<BuiltVolume>> {
-        let mut slot = self.result.lock().ok()?;
-        let matches = slot
-            .as_ref()
-            .is_some_and(|r| r.generation == generation && r.time == time);
-        if matches {
-            slot.take().map(|r| r.volume)
-        } else {
-            None
-        }
-    }
-}
-
-#[cfg(feature = "threads")]
-fn worker_loop(
-    stack: Arc<TiffStack>,
-    rx: Receiver<Request>,
-    result: Arc<Mutex<Option<BuiltReply>>>,
-) {
-    // Block for a request; channel closed (VolumeBuilder dropped) -> exit.
-    while let Ok(mut req) = rx.recv() {
-        // Only the most recent request matters: a 4D scrub queues many
-        // timepoints, and building stale ones would just delay the wanted one.
-        while let Ok(newer) = rx.try_recv() {
-            req = newer;
-        }
-        // A reply still in the slot is for an earlier request, which nobody
-        // waits for now (the frontend asks once per build it wants): let it
-        // go before building, so two volumes are never held at once.
-        if let Ok(mut slot) = result.lock() {
-            *slot = None;
-        }
-        let volume = build_volume(&stack, &req.plan);
-        if let Ok(mut slot) = result.lock() {
-            *slot = Some(BuiltReply {
-                generation: req.generation,
-                time: req.plan.time,
-                volume,
-            });
-        }
-    }
-}
-
-/// Without threads there's no background builder; `VolumeBuilder::new` returns
-/// `None` and every build runs synchronously through [`build_volume`] — the
-/// same path a failed thread spawn already takes.
-#[cfg(not(feature = "threads"))]
-pub struct VolumeBuilder(std::convert::Infallible);
-
-#[cfg(not(feature = "threads"))]
-impl VolumeBuilder {
-    pub fn new(_stack: Arc<TiffStack>) -> Option<Self> {
-        None
-    }
-
-    pub fn request(&self, _generation: u64, _plan: VolumePlan) -> bool {
-        match self.0 {}
-    }
-
-    #[allow(clippy::option_option)]
-    pub fn take_matching(&self, _generation: u64, _time: usize) -> Option<Option<BuiltVolume>> {
-        match self.0 {}
+        self.0.take_if(|key| *key == (generation, time))
     }
 }
 
 #[cfg(test)]
-#[cfg(feature = "threads")]
 #[path = "volume_tests.rs"]
 mod tests;

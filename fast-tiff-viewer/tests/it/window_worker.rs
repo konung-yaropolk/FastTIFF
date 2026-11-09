@@ -340,6 +340,7 @@ mod worker {
     use fast_tiff_viewer::bandcache::BandCache;
     use fast_tiff_viewer::prefetch::{ChannelJob, Decoded};
     use fast_tiff_viewer::window::{self, Built, WindowWorker};
+    use fast_tiff_viewer::worker::CancelToken;
     use scivis_render::ChannelKind;
     use std::path::PathBuf;
 
@@ -403,7 +404,16 @@ mod worker {
         let want = roi(20, 20, 60, 40, 2);
 
         let mut bands = BandCache::default();
-        let inline = window::assemble(&tiff, &mut bands, &jobs, &kinds, &want, 0).unwrap();
+        let inline = window::assemble(
+            &tiff,
+            &mut bands,
+            &jobs,
+            &kinds,
+            &want,
+            0,
+            &CancelToken::never(),
+        )
+        .unwrap();
 
         let worker = WindowWorker::new(std::sync::Arc::new(TiffStack::open(&path).unwrap()))
             .expect("worker should start");
