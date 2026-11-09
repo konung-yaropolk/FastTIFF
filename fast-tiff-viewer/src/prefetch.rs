@@ -30,6 +30,7 @@
 //! can never show the wrong frame.
 
 use crate::display::Revision;
+use crate::histogram::{Binning, Histogram};
 use crate::stack::Stack;
 use crate::worker::{CancelToken, LatestWorker, Unclaimed};
 use fast_tiff_lib::TiffStack;
@@ -334,13 +335,17 @@ pub fn build_jobs(loaded: &Stack, frame_index: usize, enabled: &[bool]) -> Vec<C
 /// actually cover, which is snapped outward to strip boundaries because a strip
 /// is the smallest thing that can be decompressed. Callers must index the
 /// planes against *that* range, not the one they asked for.
-pub fn decode_jobs_rows(
-    mmap: &[u8],
+///
+/// Borrowed where the decoder can (see [`DecodedRef`]): the snapshot composes
+/// a band at a time and lets each go, so a band of an uncompressed frame is
+/// read straight out of the mapping.
+pub fn decode_jobs_rows<'a>(
+    mmap: &'a [u8],
     frames: &[FrameInfo],
     order: ByteOrder,
     jobs: &[ChannelJob],
     rows: std::ops::Range<u32>,
-) -> anyhow::Result<(Vec<Decoded>, std::ops::Range<u32>)> {
+) -> anyhow::Result<(Vec<DecodedRef<'a>>, std::ops::Range<u32>)> {
     // Crop each referenced IFD once and renumber the jobs onto the cropped
     // set. Jobs that shared an IFD still share one, which is what keeps RGB
     // planes on a single decompression pass.
@@ -380,7 +385,10 @@ pub fn decode_jobs_rows(
     }
 
     let covered = covered.ok_or_else(|| anyhow::anyhow!("nothing to decode"))?;
-    Ok((decode_jobs(mmap, &band_frames, order, &band_jobs)?, covered))
+    Ok((
+        decode_jobs_borrowed(mmap, &band_frames, order, &band_jobs)?,
+        covered,
+    ))
 }
 
 /// Decode only the pieces covering `cols` x `rows`, for every job.
@@ -507,6 +515,11 @@ pub struct PrefetchResult {
     pub revision: Revision,
     pub frame_index: usize,
     pub channels: Vec<DecodedChannel>,
+    /// The decoded channels' histograms, binned by the worker while it held
+    /// them, when the request asked for them; empty when it did not. Binned
+    /// exactly as the interface thread would have binned the same planes
+    /// (see [`crate::histogram`]).
+    pub histograms: Vec<Histogram>,
 }
 
 /// What a read-ahead is asked for by: the display revision and the frame.
@@ -519,6 +532,8 @@ struct Request {
     /// Whether the requester decodes in parallel: read-ahead decodes the way
     /// the view would have.
     parallel: bool,
+    /// How to bin the frame once decoded, when its histograms are wanted.
+    binning: Option<Binning>,
 }
 
 /// The read-ahead worker: a `LatestWorker` ([`crate::worker`]) keyed by
@@ -566,6 +581,25 @@ impl Prefetcher {
             // and the worker then drops it unpublished.
             let decoded =
                 decode_jobs(&stack.data, &stack.frames, stack.byte_order, &req.jobs).ok()?;
+            // Overtaken while it decoded: the worker would drop it unpublished,
+            // so there is nothing to bin it for.
+            if cancel.is_cancelled() {
+                return None;
+            }
+            // Binned here, while the planes are in hand, rather than by the
+            // interface thread after it takes them. Not free: about 4 ms a
+            // channel of a million samples or more, which this frame is then
+            // published later by, so it is asked for once a throttle interval
+            // rather than every frame (see `histogram::PLAYBACK_INTERVAL`).
+            let histograms = match &req.binning {
+                Some(binning) => req
+                    .jobs
+                    .iter()
+                    .zip(&decoded)
+                    .filter_map(|(job, data)| binning.bin(job.channel, data.view()))
+                    .collect(),
+                None => Vec::new(),
+            };
             let channels = req
                 .jobs
                 .iter()
@@ -582,21 +616,37 @@ impl Prefetcher {
                 revision,
                 frame_index,
                 channels,
+                histograms,
             })
         };
         LatestWorker::spawn("fasttiff-prefetch", Unclaimed::Keep, job).map(Prefetcher)
     }
 
     /// Ask the worker to decode `frame_index`'s `jobs`, built under display
-    /// `revision`. Fire-and-forget. A different frame (or revision) replaces
-    /// whatever was asked before and cancels it; the same one again is ignored
-    /// while it is still pending.
-    pub fn request(&self, revision: Revision, frame_index: usize, jobs: Vec<ChannelJob>) {
+    /// `revision`, and with `binning` to bin them into
+    /// [`PrefetchResult::histograms`]. Fire-and-forget. A different frame (or
+    /// revision) replaces whatever was asked before and cancels it; the same
+    /// one again is ignored while it is still pending, `binning` included.
+    ///
+    /// Page-touch mode decodes nothing ahead, so it bins nothing either: the
+    /// interface thread bins what it decodes inline.
+    #[cfg_attr(
+        not(any(feature = "backend-wgpu", feature = "backend-glow")),
+        allow(dead_code)
+    )]
+    pub(crate) fn request(
+        &self,
+        revision: Revision,
+        frame_index: usize,
+        jobs: Vec<ChannelJob>,
+        binning: Option<Binning>,
+    ) {
         self.0.request(
             (revision, frame_index),
             Request {
                 jobs,
                 parallel: fast_tiff_lib::parallel_decode_enabled(),
+                binning,
             },
         );
     }

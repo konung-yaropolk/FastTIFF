@@ -7,6 +7,7 @@
 //! the pipeline is pinned here by value rather than by eye.
 
 use super::*;
+use crate::prefetch::build_jobs;
 use crate::stack::{SampleUnits, Stack, Window};
 use fast_tiff_lib::{DisplayMap, SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use scivis_render::ChannelKind;
@@ -383,4 +384,228 @@ fn a_signed_window_composes_on_the_offset_texture() {
     );
     assert_eq!(grey(6), 255, "the window's high end is white");
     assert_eq!(grey(11), 255, "above the window is white");
+}
+
+/// The compositor as it was before it worked a band at a time: every enabled
+/// channel decoded whole, blended into one frame-sized accumulator, then
+/// converted. Kept verbatim as the oracle the banded one must equal.
+fn whole_frame_oracle(stack: &Stack) -> Snapshot {
+    use crate::prefetch::{decode_jobs, Decoded};
+    fn sample(data: &Decoded, i: usize) -> Option<f32> {
+        match data {
+            Decoded::U8(v) => v.get(i).map(|&s| s as f32),
+            Decoded::U16(v) => v.get(i).map(|&s| s as f32),
+            Decoded::F32(v) => v.get(i).copied(),
+        }
+    }
+    let (width, height) = stack.dimensions().expect("open");
+    let settings = stack.display.settings();
+    let masks = stack.display.masks();
+    let jobs = build_jobs(stack, stack.frame_index, masks.enabled());
+    let decoded = decode_jobs(
+        &stack.tiff.data,
+        &stack.tiff.frames,
+        stack.tiff.byte_order,
+        &jobs,
+    )
+    .expect("decode");
+    let pixels = width as usize * height as usize;
+    let mut acc = vec![[0.0f32; 3]; pixels];
+    for (job, data) in jobs.iter().zip(&decoded) {
+        let Some(s) = settings.get(job.channel) else {
+            continue;
+        };
+        let Some(lut) = stack.display.luts.get(job.channel) else {
+            continue;
+        };
+        let (min, max) = s.units.to_texture(s.window);
+        for (i, out) in acc.iter_mut().enumerate() {
+            let Some(value) = sample(data, i) else {
+                break;
+            };
+            let rgb = lut_sample(lut, windowed(value, min, max));
+            for (o, v) in out.iter_mut().zip(rgb) {
+                *o += v;
+            }
+        }
+    }
+    let mut rgba = Vec::with_capacity(pixels * 4);
+    for channel in &acc {
+        for v in channel {
+            rgba.push((v.clamp(0.0, 1.0) * 255.0).round() as u8);
+        }
+        rgba.push(255);
+    }
+    Snapshot {
+        width,
+        height,
+        rgba,
+    }
+}
+
+/// Seven rows in strips of two, so bands start and end mid-strip and a strip
+/// is shared by two bands; five columns, so no row is a power of two wide.
+const OW: u32 = 5;
+const OH: u32 = 7;
+
+/// A stack of `channels` channels of `sample` data in strips of two rows,
+/// every sample distinct, each channel with a LUT of its own and a window that
+/// clips both ends: a pixel read from the wrong row, channel or band shows as
+/// a different byte.
+fn oracle_stack(sample: SampleType, channels: usize, spp: u16) -> Stack {
+    let opts = WriterOptions::new(OW, OH, sample)
+        .rows_per_strip(2)
+        .samples_per_pixel(spp)
+        .metadata(StackMetaWrite::new(channels, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).expect("writer");
+    let n = (OW * OH) as usize * spp as usize;
+    for c in 0..channels {
+        let value = |i: usize| (i * 37 + c * 101) % 251;
+        match sample {
+            SampleType::U8 => {
+                let px: Vec<u8> = (0..n).map(|i| value(i) as u8).collect();
+                w.write_frame_u8(&px).expect("frame");
+            }
+            SampleType::U16 => {
+                let px: Vec<u16> = (0..n).map(|i| (value(i) * 211) as u16).collect();
+                w.write_frame_u16(&px).expect("frame");
+            }
+            SampleType::F32 => {
+                let px: Vec<f32> = (0..n).map(|i| value(i) as f32 / 7.0 - 3.0).collect();
+                w.write_frame_f32(&px).expect("frame");
+            }
+            other => panic!("no fixture for {other:?}"),
+        }
+    }
+    let bytes = w.finish().expect("finish").into_inner();
+    let mut stack = Stack::from_bytes(bytes, "oracle.tif".into(), false).expect("open");
+    for c in 0..stack.display.channel_count() {
+        let s = stack.display.settings()[c];
+        let (lo, hi) = (s.bounds.lo, s.bounds.hi);
+        let span = hi - lo;
+        stack
+            .display
+            .set_window(c, Window::new(lo + span * 0.1, hi - span * 0.2));
+        let tint = [(c % 3 == 0) as u8, (c % 3 == 1) as u8, (c % 3 != 1) as u8];
+        stack.display.luts[c] =
+            std::array::from_fn(|i| tint.map(|t| t * i as u8 + (255 - i as u8) / 8));
+    }
+    stack
+}
+
+/// Re-describe each `(ifd, rows_per_strip)`'s strips, which are uncompressed
+/// and contiguous as the writer lays them out, as strips of that many rows:
+/// the same bytes in another valid layout, which no writer here produces.
+fn restrip(stack: &mut Stack, layouts: &[(usize, u32)]) {
+    let mut tiff = fast_tiff_lib::TiffStack::from_bytes(stack.tiff.data.to_vec()).expect("index");
+    for &(ifd, rows_per_strip) in layouts {
+        let frame = &mut tiff.frames[ifd];
+        let offsets = frame.strip_offsets.to_vec();
+        let counts = frame.strip_byte_counts.to_vec();
+        assert!(
+            offsets
+                .windows(2)
+                .zip(&counts)
+                .all(|(o, c)| o[0] + c == o[1]),
+            "the writer's strips should be contiguous"
+        );
+        let total: u64 = counts.iter().sum();
+        let strip = total / frame.height as u64 * rows_per_strip as u64;
+        let starts: Vec<u64> = (0..total).step_by(strip as usize).collect();
+        frame.strip_byte_counts = starts.iter().map(|&at| strip.min(total - at)).collect();
+        frame.strip_offsets = starts.iter().map(|&at| offsets[0] + at).collect();
+        frame.rows_per_strip = rows_per_strip;
+    }
+    stack.tiff = std::sync::Arc::new(tiff);
+}
+
+/// Composed a band at a time, the image is byte for byte the one the whole
+/// frame composed at once gave: for several channels, through the
+/// accumulator, with one switched off; for one, with no accumulator; for RGB
+/// planes decoded together; for floats; for channels whose IFDs are laid out
+/// in strips of different heights, so their bands end on different rows. And
+/// with decoded and composed bands of every height from one row to more than
+/// the frame.
+#[test]
+fn the_banded_image_is_byte_identical_to_the_whole_frame_one() {
+    let cases: Vec<(&str, Stack)> = vec![
+        ("three u16 channels", oracle_stack(SampleType::U16, 3, 1)),
+        ("three u16 channels, one off", {
+            let mut s = oracle_stack(SampleType::U16, 3, 1);
+            s.display.set_enabled(1, false);
+            s
+        }),
+        ("one u8 channel", oracle_stack(SampleType::U8, 1, 1)),
+        ("two f32 channels", oracle_stack(SampleType::F32, 2, 1)),
+        ("chunky RGB", oracle_stack(SampleType::U8, 1, 3)),
+        ("three u16 channels in strips of 2, 3 and 7 rows", {
+            let mut s = oracle_stack(SampleType::U16, 3, 1);
+            restrip(&mut s, &[(1, 3), (2, OH)]);
+            s
+        }),
+    ];
+    for (name, stack) in &cases {
+        let want = whole_frame_oracle(stack);
+        assert!(
+            want.rgba.chunks(4).any(|p| p[..3] != [0, 0, 0]),
+            "{name}: the oracle composed a black image, which tests nothing"
+        );
+        for decode_rows in [1, 2, 3, 4, OH, 100] {
+            for compose_rows in [1, 2, 3, OH, 100] {
+                let got = compose(stack, OW, OH, decode_rows, compose_rows).expect("compose");
+                assert_eq!(
+                    got, want,
+                    "{name}, decoded {decode_rows} and composed {compose_rows} rows at a time"
+                );
+            }
+        }
+        assert_eq!(of_frame(stack).expect("compose"), want, "{name}");
+    }
+    let layouts: Vec<u32> = cases[5].1.tiff.frames[..3]
+        .iter()
+        .map(|f| f.rows_per_strip)
+        .collect();
+    assert_eq!(layouts, [2, 3, OH], "the IFDs should disagree on strips");
+    assert_eq!(
+        cases[4].1.display.channel_count(),
+        3,
+        "RGB has three planes"
+    );
+}
+
+/// A frame whose image is past the limit is refused with that reason, before
+/// any decode or buffer. This one claims 100000 x 100000 pixels, a 40 GB
+/// image no test machine could allocate, over strips that hold nothing that
+/// size: reaching either the allocation or the decode would fail some other
+/// way.
+#[test]
+fn an_oversized_frame_is_refused_before_anything_is_decoded_or_allocated() {
+    let mut stack = stack_u8(2, |_, i| i as u8);
+    let mut tiff = fast_tiff_lib::TiffStack::from_bytes(stack.tiff.data.to_vec()).expect("index");
+    for frame in &mut tiff.frames {
+        frame.width = 100_000;
+        frame.height = 100_000;
+    }
+    stack.tiff = std::sync::Arc::new(tiff);
+    let err = of_frame(&stack).expect_err("a 40 GB copy should be refused");
+    assert_eq!(
+        err.downcast_ref::<TooLarge>(),
+        Some(&TooLarge {
+            width: 100_000,
+            height: 100_000
+        }),
+        "refused for another reason: {err:#}"
+    );
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("100000 x 100000") && message.contains("crop"),
+        "the refusal should say what is too large and what to do: {message}"
+    );
+
+    // The limit is the 8192 x 8192 image, inclusive.
+    assert!(rgba_bytes(8192, 8192) <= MAX_SNAPSHOT_BYTES);
+    assert!(rgba_bytes(8192, 8193) > MAX_SNAPSHOT_BYTES);
+    // And the arithmetic does not wrap, here or where a `usize` is 32 bits.
+    assert_eq!(rgba_bytes(65_536, 65_536), 1 << 34);
+    assert_eq!(rgba_bytes(u32::MAX, u32::MAX), u64::MAX);
 }

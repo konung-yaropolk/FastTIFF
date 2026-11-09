@@ -11,7 +11,9 @@ use super::*;
 use crate::render;
 use egui::RichText;
 use fast_tiff_viewer::camera::{NavMode, OrbitPoint};
-use fast_tiff_viewer::histogram::{fill_alpha, fill_tint, Histogram, BINS};
+use fast_tiff_viewer::histogram::{
+    fill_alpha, fill_tint, FrameHistograms, Histogram, HistogramSource, BINS,
+};
 use std::sync::Arc;
 
 /// The 3D render-settings pop-up: rendering method and the controls belonging
@@ -779,14 +781,40 @@ const RESET_HINT: &str = "Put every contrast window back where it was when the f
 /// [`contrast_controls`]), so a handle sits above the part of the distribution
 /// it clips.
 ///
-/// `hists` is computed by the caller and cached; this only draws.
+/// `held` is the stack's own histograms ([`Stack::histograms`]), handed in
+/// apart from it because the window edits the stack while plotting them. The
+/// viewer bins them from the frames it decodes while the window is open; this
+/// only draws.
 pub(super) fn histogram_window(
     ctx: &egui::Context,
     open: &mut bool,
     loaded: &mut Stack,
-    hists: &[Histogram],
+    held: &FrameHistograms,
     log_scale: &mut bool,
 ) {
+    let hists = held.shown(loaded);
+    // Past the texture limit the frame is never decoded whole, and what is
+    // binned is the overview kept for zooming out: say so, since its counts
+    // are not the frame's.
+    let overview = match held.source() {
+        Some(HistogramSource::Overview { stride }) if !hists.is_empty() => Some(stride),
+        _ => None,
+    };
+    // Such a frame is binned from a view of the whole of it as that view is
+    // built, so with none there are two reasons: zoomed in on it, there is no
+    // such view; zoomed out, the one on screen was built while the histogram
+    // was closed and was too large to keep.
+    let zoomed_out = loaded
+        .roi
+        .zip(loaded.dimensions())
+        .is_some_and(|(roi, (w, h))| fast_tiff_viewer::window::spans_whole_frame(&roi, w, h));
+    let empty_note = if !loaded.over_texture_limit {
+        "No frame to histogram"
+    } else if zoomed_out {
+        "A frame this large is histogrammed from a view of the whole\nof it as that is built: zoom in and back out to build one"
+    } else {
+        "Zoom out to see the whole frame: a frame this large\nis histogrammed from its overview"
+    };
     // Opening size only — the host remembers whatever the user drags it to
     // afterwards. The height is the plot at its default size plus what the
     // controls need: `Stacked` spends two lines per channel, plus two more for
@@ -856,6 +884,18 @@ pub(super) fn histogram_window(
                  and one enormous bin at the dark end flattens everything else \
                  into the axis on a linear plot.",
             );
+            if let Some(stride) = overview {
+                ui.separator();
+                ui.weak(format!("From the 1/{stride} overview"))
+                    .on_hover_text(format!(
+                        "This frame is too large to decode whole, so its \
+                         histogram is binned from the coarse copy kept for \
+                         zooming out: one pixel in {stride} across and down. \
+                         The shape is the frame's; the counts are the \
+                         overview's, and a feature narrower than {stride} \
+                         pixels can be missed."
+                    ));
+            }
             // Auto and Reset drive the very sliders above them, so they
             // are shown only when there are any: a palette stack has a
             // fixed index-to-colour window rather than a contrast one,
@@ -877,17 +917,19 @@ pub(super) fn histogram_window(
         // stack draws no slider, so fall back to the full width.
         let span = track.unwrap_or_else(|| plot.x_range());
         let area = egui::Rect::from_x_y_ranges(span, plot.y_range());
-        draw_plot(ui, area, hists, &loaded.display, *log_scale);
+        draw_plot(ui, area, hists, &loaded.display, *log_scale, empty_note);
     });
 }
 
-/// Paint every channel's histogram over one set of axes.
+/// Paint every channel's histogram over one set of axes. `empty_note` is what
+/// to say when there are none at all.
 fn draw_plot(
     ui: &egui::Ui,
     area: egui::Rect,
     hists: &[Histogram],
     display: &fast_tiff_viewer::Display,
     log_scale: bool,
+    empty_note: &str,
 ) {
     let painter = ui.painter_at(area);
     painter.rect_filled(area, 2.0, ui.visuals().extreme_bg_color);
@@ -906,7 +948,7 @@ fn draw_plot(
             area.center(),
             egui::Align2::CENTER_CENTER,
             if hists.is_empty() {
-                "No frame to histogram"
+                empty_note
             } else {
                 "Every channel is switched off"
             },

@@ -14,6 +14,7 @@
 use crate::bandcache;
 use crate::camera::{build_volume_params, VolumeChannel};
 use crate::display::{ChannelMasks, Revision};
+use crate::histogram::{self, Binning, HistogramSource};
 use crate::prefetch::{
     build_jobs, decode_jobs_borrowed, ChannelJob, Decoded, PrefetchResult, Samples,
 };
@@ -51,9 +52,20 @@ impl Viewer {
         // part of the image is on screen, which is the frontend's business.
         let (uv_offset, uv_scale) = (self.uv_offset, self.uv_scale);
         let viewport = self.viewport_px;
+        // The playback clock, while a movie plays: what the histograms'
+        // throttle on this thread is measured against.
+        let clock = if self.playback.playing {
+            self.playback.last_time
+        } else {
+            None
+        };
+        let histograms_wanted = self.histograms_wanted;
         let Some(loaded) = &mut self.stack else {
             return outcome;
         };
+        // Whatever below changes the histograms, the frontend drew this
+        // repaint's plot before this call and needs another to show them.
+        let histograms_before = loaded.histograms.version();
 
         // The display model as of this call, read once: every cache consulted
         // and every request made below is keyed on this revision, so they all
@@ -68,6 +80,10 @@ impl Viewer {
         let current = Current {
             revision: loaded.display.revision(),
             masks: loaded.display.masks(),
+            histograms: HistogramDemand {
+                wanted: histograms_wanted,
+                inline: histograms_wanted && loaded.histograms.may_bin_inline(clock),
+            },
         };
         let kinds = current.masks.kinds();
         let n_channels = current.masks.len();
@@ -110,6 +126,14 @@ impl Viewer {
             loaded.overview = None;
             outcome.needs_repaint =
                 sync_volume(loaded, &mut self.volume, renderer, &mut self.status);
+            // The volume holds no 2D frame to bin, so the frame's histograms
+            // are decoded for, as the 2D view does for a channel switched off:
+            // during 4D playback once a throttle interval, as nothing else
+            // starts them.
+            if current.histograms.inline {
+                histogram::complete(loaded, true);
+            }
+            outcome.needs_repaint |= note_histograms(loaded, histograms_before, current, clock);
             return outcome;
         }
 
@@ -136,7 +160,18 @@ impl Viewer {
                 Ok(pending) => outcome.needs_repaint |= pending,
                 Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
             }
+            // What showing the frame did not bin: the channels switched off,
+            // a frame already on screen when the histograms were first asked
+            // for, or for a frame past the texture limit, its overview. While
+            // a movie plays, only the channels switched off, of a frame whose
+            // histograms showing it started: a repaint between two frames
+            // decodes nothing, and a frame shown while the throttle was shut
+            // leaves its histograms to a later one.
+            if current.histograms.inline {
+                histogram::complete(loaded, clock.is_none());
+            }
         }
+        outcome.needs_repaint |= note_histograms(loaded, histograms_before, current, clock);
 
         // Window/level goes to the shader in the units its texture actually
         // holds: the file's own for 8-bit (R8Uint holds the raw bytes) and
@@ -184,11 +219,39 @@ impl Viewer {
 
 /// The display model as one [`Viewer::sync`] call sees it, read once at the
 /// top: the revision every cache and request is keyed on, and the per-channel
-/// formats and flags that go with it.
+/// formats and flags that go with it. And what the frontend wants of the
+/// frame's histograms.
 #[derive(Clone, Copy)]
 struct Current {
     revision: Revision,
     masks: ChannelMasks,
+    histograms: HistogramDemand,
+}
+
+/// What a sync does for the histograms of the frame it shows (see
+/// [`crate::histogram`]).
+#[derive(Clone, Copy)]
+struct HistogramDemand {
+    /// The frontend shows them
+    /// ([`Viewer::histograms_wanted`](crate::Viewer::histograms_wanted)): keep
+    /// what the read-ahead binned.
+    wanted: bool,
+    /// And this thread may bin, and decode, for them now: wanted, and not
+    /// within the playback throttle of the last time it did.
+    inline: bool,
+}
+
+/// Close a sync's work on the histograms: when it changed them, start the
+/// playback throttle if this thread did the binning, and say whether the
+/// frontend needs another frame to draw them. Not while a movie plays: the
+/// next frame of it is already scheduled and draws them, a frame later, where
+/// asking for one more would draw every frame of the movie twice.
+fn note_histograms(loaded: &mut Stack, before: u64, current: Current, clock: Option<f64>) -> bool {
+    let changed = loaded.histograms.version() != before;
+    if changed && current.histograms.inline {
+        loaded.histograms.binned_inline(clock);
+    }
+    changed && clock.is_none()
 }
 
 /// Decide which window of the current frame should be on the GPU, recording it
@@ -284,6 +347,12 @@ fn sync_movie(
     let roi = plan.show;
     let revision = current.revision;
     let (kinds, enabled) = (current.masks.kinds(), current.masks.enabled());
+    // Whether showing the frame binned anything, by the time the read-ahead
+    // is asked for the next one.
+    let histograms_before = loaded.histograms.version();
+    // A view of the whole of a frame past the texture limit is binned as it
+    // is built (see `capture_overview`).
+    let bin = current.histograms.inline;
     let mut result = Ok(());
     let frame_index = loaded.frame_index;
     let (fw, fh) = loaded
@@ -347,7 +416,7 @@ fn sync_movie(
                         channels,
                         planes,
                     };
-                    capture_overview(loaded, built, fw, fh, revision, mode);
+                    capture_overview(loaded, built, fw, fh, revision, mode, bin);
                 }
                 Err(e) => result = Err(e),
             }
@@ -358,24 +427,39 @@ fn sync_movie(
             // only costs a little redundant work; it can never upload the
             // wrong frame.
             let mut used_prefetch = false;
-            if let Some(p) = &loaded.prefetch {
-                if let Some(ready) = p.take_matching(revision, frame_index) {
-                    if prefetch_matches(&ready, &jobs) {
-                        for ch in &ready.channels {
-                            upload(
-                                renderer,
-                                ch.channel,
-                                ch.width,
-                                ch.height,
-                                &roi,
-                                ch.data.view(),
-                            );
-                        }
-                        used_prefetch = true;
+            let ready = loaded
+                .prefetch
+                .as_ref()
+                .and_then(|p| p.take_matching(revision, frame_index));
+            if let Some(ready) = ready {
+                if prefetch_matches(&ready, &jobs) {
+                    for ch in &ready.channels {
+                        upload(
+                            renderer,
+                            ch.channel,
+                            ch.width,
+                            ch.height,
+                            &roi,
+                            ch.data.view(),
+                        );
+                    }
+                    used_prefetch = true;
+                    if current.histograms.wanted {
+                        // While it goes on reading ahead, a frame it did not
+                        // bin is left to it: the next is asked for binned.
+                        let bin_here = current.histograms.inline && !read_ahead;
+                        keep_read_ahead_histograms(loaded, ready, bin_here);
                     }
                 }
             }
             if !used_prefetch {
+                // The channels whose histograms this decode is to give, asked
+                // before it, because the planes it returns borrow the stack.
+                let missing = if current.histograms.inline {
+                    histogram::prepare(loaded, HistogramSource::Frame)
+                } else {
+                    [false; MAX_CHANNELS]
+                };
                 // One call decodes every enabled channel; RGB planes share a
                 // single decompression pass. Borrowed: an uncompressed plane
                 // goes from the mapping straight into its texture.
@@ -396,6 +480,16 @@ fn sync_movie(
                                 data.view(),
                             );
                         }
+                        // Binned from the planes just uploaded, which is all
+                        // a histogram of them costs.
+                        let binned = histogram::bin_shown(
+                            loaded,
+                            &missing,
+                            jobs.iter()
+                                .zip(&decoded)
+                                .map(|(job, data)| (job.channel, data.view())),
+                        );
+                        loaded.histograms.put(binned);
                     }
                     Err(e) => result = Err(e),
                 }
@@ -415,7 +509,16 @@ fn sync_movie(
             if n > 1 {
                 let next = (loaded.frame_index + 1) % n;
                 let next_jobs = build_jobs(loaded, next, enabled);
-                p.request(revision, next, next_jobs);
+                // The worker bins the next frame when this thread could have
+                // binned this one and did not: once a throttle interval, and
+                // with the binning off this thread. Not every frame, since a
+                // frame it bins is published that much later (see
+                // `histogram::PLAYBACK_INTERVAL`). A repeat of a request in
+                // flight keeps what it asked, so a throttle that opens between
+                // two frames bins the one after the next.
+                let binned = loaded.histograms.version() != histograms_before;
+                let binning = (current.histograms.inline && !binned).then(|| Binning::of(loaded));
+                p.request(revision, next, next_jobs, binning);
             }
         }
     }
@@ -463,7 +566,7 @@ fn sync_movie(
                 loaded.roi = Some(roi);
                 loaded.last_uploaded = Some((frame_index, revision));
                 loaded.pending_window = None;
-                capture_overview(loaded, built, fw, fh, revision, mode);
+                capture_overview(loaded, built, fw, fh, revision, mode, bin);
             }
             None => match &loaded.window_worker {
                 Some(worker) => {
@@ -521,13 +624,41 @@ fn sync_movie(
                             channels: jobs.iter().map(|j| j.channel).collect(),
                             planes,
                         };
-                        capture_overview(loaded, built, fw, fh, revision, mode);
+                        capture_overview(loaded, built, fw, fh, revision, mode, bin);
                     }
                 }
             },
         }
     }
     result.map(|()| pending)
+}
+
+/// Keep the histograms of a frame taken from the read-ahead: the ones its
+/// worker binned, and when this thread is to bin (`bin_here`), the channels
+/// it did not, from the planes the result holds.
+fn keep_read_ahead_histograms(loaded: &mut Stack, ready: PrefetchResult, bin_here: bool) {
+    let PrefetchResult {
+        channels,
+        mut histograms,
+        ..
+    } = ready;
+    if histograms.is_empty() && !bin_here {
+        return;
+    }
+    let mut missing = histogram::prepare(loaded, HistogramSource::Frame);
+    if bin_here {
+        for h in &histograms {
+            if let Some(m) = missing.get_mut(h.channel) {
+                *m = false;
+            }
+        }
+        histograms.extend(histogram::bin_shown(
+            loaded,
+            &missing,
+            channels.iter().map(|ch| (ch.channel, ch.data.view())),
+        ));
+    }
+    loaded.histograms.put(histograms);
 }
 
 /// Keep a frame-spanning build as the overview, so a view leaving the resident
@@ -545,6 +676,12 @@ fn sync_movie(
 /// `revision` is the one `built` was decoded under, which is this sync's: the
 /// window worker's results are only taken under the revision they were asked
 /// for under.
+///
+/// With `bin`, a build spanning the frame is also binned for the frame's
+/// histograms, kept or not: it is the view of the whole frame they are made
+/// from, and one too large to keep can be binned only now. Without this, a
+/// frame whose overview is never kept (4K, several float channels) would have
+/// no histogram however far it was zoomed out.
 fn capture_overview(
     loaded: &mut Stack,
     built: window::Built,
@@ -552,7 +689,14 @@ fn capture_overview(
     fh: u32,
     revision: Revision,
     mode: roi::LargeImageMode,
+    bin: bool,
 ) {
+    if bin
+        && built.frame_index == loaded.frame_index
+        && window::spans_whole_frame(&built.roi, fw, fh)
+    {
+        histogram::bin_whole_view(loaded, &built);
+    }
     let budget = window::overview_budget(mode);
     if let Some(o) = window::Overview::capture(built, fw, fh, revision, budget) {
         let (tw, th) = o.built.roi.texture_size();

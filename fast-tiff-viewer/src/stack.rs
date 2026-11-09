@@ -163,6 +163,12 @@ pub struct Stack {
     /// must re-upload it because every channel may now read another IFD: the
     /// revision moving is what forces both.
     pub last_uploaded: Option<(usize, Revision)>,
+    /// The histograms of the frame on screen, binned from the decodes that
+    /// showed it while a frontend asks for them
+    /// ([`Viewer::histograms_wanted`](crate::Viewer::histograms_wanted)). A
+    /// frontend plots these rather than decoding the frame again; see
+    /// [`crate::histogram`].
+    pub histograms: crate::histogram::FrameHistograms,
     pub luts_uploaded: bool,
     /// How the viewer is *showing* this stack: the c/z/t interpretation, the
     /// per-channel LUTs and contrast windows, and the layout facts derived at
@@ -300,6 +306,7 @@ impl Stack {
             window_worker: None,
             bands: Default::default(),
             last_uploaded: None,
+            histograms: Default::default(),
             luts_uploaded: false,
             prefetch,
             volume_builder: None,

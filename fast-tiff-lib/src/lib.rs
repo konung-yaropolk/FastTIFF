@@ -61,6 +61,7 @@ pub use decode::{
     read_plane_u16_into, read_plane_u8, read_plane_u8_into, read_planes_f32, read_planes_f32_into,
     read_planes_rgb_u16, read_planes_rgb_u8, read_planes_u16, read_planes_u16_into, read_planes_u8,
     read_planes_u8_into, set_parallel_decode, set_thread_parallel_decode, ParallelDecodeScope,
+    PARALLEL_MIN_PIXELS,
 };
 pub use display::DisplayMap;
 pub use encode::{

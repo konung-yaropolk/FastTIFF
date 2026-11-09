@@ -75,7 +75,7 @@ fn the_read_ahead_answers_the_frame_asked_for_last() {
     let tiff = Arc::new(stack(Compression::Deflate));
     let p = Prefetcher::new(tiff, false).expect("the thread should spawn");
     for frame in [3, 4, 5] {
-        p.request(REV, frame, vec![job()]);
+        p.request(REV, frame, vec![job()], None);
     }
     let start = Instant::now();
     let got = loop {
@@ -134,7 +134,7 @@ fn a_frame_read_ahead_under_an_old_layout_is_refused() {
         .prefetch
         .as_ref()
         .expect("a compressed stack reads ahead");
-    p.request(before, 1, jobs);
+    p.request(before, 1, jobs, None);
 
     crate::dimensions::apply_dimension_override(&mut stack, 3, 1, 2);
     let after = stack.display.revision();
@@ -162,4 +162,49 @@ fn a_frame_read_ahead_under_an_old_layout_is_refused() {
         );
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+/// A frame read ahead with its histograms asked for comes back binned exactly
+/// as a whole-frame decode bins it, and one read ahead without carries none.
+#[cfg(feature = "threads")]
+#[test]
+fn the_read_ahead_bins_the_frame_it_decodes() {
+    use crate::histogram::{frame_histograms, Binning};
+    use std::time::{Duration, Instant};
+    let mut stack = two_channel_movie();
+    let revision = stack.display.revision();
+    let take = |stack: &Stack, frame: usize| {
+        let p = stack
+            .prefetch
+            .as_ref()
+            .expect("a compressed stack reads ahead");
+        let start = Instant::now();
+        loop {
+            if let Some(r) = p.take_matching(revision, frame) {
+                break r;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "the read-ahead never answered"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+
+    let jobs = build_jobs(&stack, 2, &[true, true]);
+    let binning = Binning::of(&stack);
+    let p = stack.prefetch.as_ref().unwrap();
+    p.request(revision, 2, jobs, Some(binning));
+    let got = take(&stack, 2);
+    stack.frame_index = 2;
+    assert_eq!(got.histograms, frame_histograms(&stack));
+    assert_eq!(got.histograms.len(), 2);
+
+    let jobs = build_jobs(&stack, 1, &[true, true]);
+    stack
+        .prefetch
+        .as_ref()
+        .unwrap()
+        .request(revision, 1, jobs, None);
+    assert!(take(&stack, 1).histograms.is_empty());
 }

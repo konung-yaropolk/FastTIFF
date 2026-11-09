@@ -16,7 +16,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Floor on frame size (pixels) below which a decode is never split across
 /// cores: too small for rayon's fork-join to pay off, and such frames decode
 /// fast enough that they're never the playback bottleneck.
-const PARALLEL_MIN_PIXELS: usize = 1024 * 1024;
+///
+/// Public for a caller that decodes a large frame a band at a time: a band is
+/// a cropped [`FrameInfo`] and so a frame of its own here, and one of fewer
+/// pixels than this is decoded on one core however the hint is set.
+pub const PARALLEL_MIN_PIXELS: usize = 1024 * 1024;
 
 /// How far a *compressed* frame's decoded size may exceed the compressed bytes
 /// its strips actually hold, before the file is treated as malformed.

@@ -419,7 +419,14 @@ beside a file. Details are in [`oir-reader/README.md`](oir-reader/README.md).
   Unticking a channel takes its curve off the plot and greys out its slider, in
   both the panel and the window. Resizable — the plot takes whatever height the
   window is given. Log scaling is on by default: a 16-bit frame is mostly
-  background, and linear puts all of it in one bin at the edge.
+  background, and linear puts all of it in one bin at the edge. The curves are
+  binned from the decodes that already show the frame, so an open histogram
+  decodes again only what is not on screen: the channels you have unticked
+  (on an RGB frame, a second pass over the whole frame), and in 3D the 2D
+  frame. While a movie plays they are redrawn a few times a second. A frame
+  too large for one texture is binned from a coarse view of the whole of it,
+  and the window says so; zoomed in on such a frame after moving to another
+  one, there is no histogram until you zoom back out.
 - Z-slice selector when `slices > 1` (the scrubber itself always drives
   the time/frame axis).
 - **Copy the view as an image** — the toolbar's copy button, or **Ctrl+C**
@@ -429,8 +436,10 @@ beside a file. Details are in [`oir-reader/README.md`](oir-reader/README.md).
     every enabled channel through its own contrast window and LUT. Not a grab of
     what is on screen — that is at whatever zoom and pan you left it, and on a
     stack too large to upload whole it is only the window currently resident.
-    The frame is recomposed on the CPU for the copy, which is also why it does
-    not need a working GPU.
+    The frame is recomposed on the CPU for the copy, a band of rows at a time,
+    which is also why it does not need a working GPU. A frame of more pixels
+    than 8192 x 8192 (256 MB as an image) is refused with a message rather
+    than copied: crop it first to copy part of it.
   - In **3D** it is the *view*, because for a ray-march there is nothing else to
     copy: there is no original size, and the camera, projection and brightness
     are the picture. So it takes the 3D panel exactly as framed.

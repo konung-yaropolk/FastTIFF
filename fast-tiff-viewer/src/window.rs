@@ -404,6 +404,10 @@ pub fn overview_budget(mode: roi::LargeImageMode) -> usize {
 /// wider view, so without a fallback there is nothing to draw and the rebuild
 /// has to be waited for.
 ///
+/// It is also the one whole view of such a frame held in memory, so it is what
+/// the frame's histograms are binned from ([`crate::histogram`]): the frame
+/// itself is never decoded whole.
+///
 /// Validated where it is *used*, never invalidated where its inputs are written
 /// — the same contract as [`WindowWorker::take_matching`]. Which frame is
 /// showing is checked against the frame index, and everything else it depends

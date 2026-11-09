@@ -362,6 +362,18 @@ pub struct Viewer {
     /// at each of them for a few frames, and the level it is heading for is the
     /// only one that will still be wanted.
     pub view_moving: bool,
+    /// Whether the frontend is showing the histograms of the frame on screen
+    /// ([`Stack::histograms`]): set while its histogram panel is open.
+    ///
+    /// While it is, [`sync`](Self::sync) bins each frame it decodes for the
+    /// screen (during playback, a few times a second, and by the read-ahead
+    /// when it is reading ahead), and decodes what that did not cover: the
+    /// channels switched off, a frame already on screen when the panel opened,
+    /// and in the 3D view the 2D frame. A frame past the texture limit is
+    /// binned from a view of the whole of it instead. Off, none of that is
+    /// done, and the histograms held are left as they are. See
+    /// [`crate::histogram`].
+    pub histograms_wanted: bool,
     pub playback: Playback,
     pub volume: VolumeView,
 }

@@ -424,32 +424,6 @@ fn initial_fit_zoom(ctx: &egui::Context, img_w: f32, img_h: f32, chrome_h: f32) 
     Some(ZOOM_LEVELS[0]) // even the smallest level overflows — open there and pan
 }
 
-/// Longest the histogram may lag the frame on screen while the movie plays.
-///
-/// Rebuilding decodes the frame a second time — `sync` has already decoded it
-/// for the GPU, but into buffers it does not keep — so an open histogram window
-/// would otherwise double the per-frame decode cost of playback, which is
-/// plainly visible on a large compressed stack. Nobody reads a distribution
-/// redrawn thirty times a second anyway; a few updates per second still looks
-/// live and costs a bounded amount no matter how fast the movie runs.
-const HIST_PLAYBACK_INTERVAL: f64 = 0.25;
-
-/// The channel histograms on display, and the state they were computed from.
-///
-/// Building these decodes every channel of the frame, which is far too much to
-/// redo per repaint, so they are held until something the plot is a *function
-/// of* moves: the frame, the channel layout (a dimension-order change), or a
-/// channel's track — the axis the bins are laid out on. That is
-/// [`HistogramKey`](fast_tiff_viewer::histogram::HistogramKey). Contrast is
-/// deliberately not in the key: the handles slide along the distribution rather
-/// than changing it, which is the whole reason for showing the two together.
-/// Nor is which channels are on: every channel is binned, and the plot leaves
-/// out the ones switched off, so a checkbox is a redraw.
-struct HistCache {
-    key: fast_tiff_viewer::histogram::HistogramKey,
-    hists: Vec<fast_tiff_viewer::Histogram>,
-}
-
 /// The prompt shown while nothing is loaded.
 ///
 /// The browser build adds a line the desktop has no need of. A page that
@@ -1288,11 +1262,6 @@ pub struct ViewerApp {
     /// than as data. Log shows the distribution that is actually there; the
     /// checkbox is right under the plot for anyone who wants true counts.
     hist_log: bool,
-    /// The histograms currently plotted, and what they describe. `None` until
-    /// the window is first opened.
-    hist: Option<HistCache>,
-    /// `input.time` when `hist` was last rebuilt, for the playback throttle.
-    hist_built_at: f64,
 
     // --- 3D input preferences (persist across files) ------------------------
     /// Overlay: draw the volume's bounding box with x/y/z coordinate ticks.
@@ -1432,8 +1401,6 @@ impl ViewerApp {
             show_render_settings: false,
             show_histogram: false,
             hist_log: true,
-            hist: None,
-            hist_built_at: f64::NEG_INFINITY,
             show_coord_box: false,
             move_speed: 1.0,
             scroll_speed: 1.0,
@@ -1620,40 +1587,6 @@ impl ViewerApp {
         if !self.core.can_show_volume() {
             self.show_render_settings = false;
         }
-        // The cached histograms describe the *previous* stack. Its key would
-        // not match the new one (display revisions are never reused), but
-        // there is no reason to keep the old bins until the next repaint finds
-        // that out.
-        self.hist = None;
-    }
-
-    /// Rebuild the cached histograms if what they describe has moved. Called
-    /// only while the window is open, so a closed window costs nothing.
-    ///
-    /// `now` is `input.time`, for the playback throttle (see
-    /// [`HIST_PLAYBACK_INTERVAL`]). Scrubbing by hand is never throttled: those
-    /// are one frame at a time, and a histogram that ignored the frame you just
-    /// moved to would be worse than useless.
-    fn refresh_histograms(&mut self, now: f64) {
-        let playing = self.core.playback.playing;
-        let Some(loaded) = &self.core.stack else {
-            self.hist = None;
-            return;
-        };
-        let fresh = self.hist.as_ref().is_some_and(|c| c.key.describes(loaded));
-        if fresh {
-            return;
-        }
-        // Playback repaints continuously, so a skipped rebuild is picked up on
-        // its own a moment later — no repaint needs scheduling here.
-        if playing && self.hist.is_some() && now - self.hist_built_at < HIST_PLAYBACK_INTERVAL {
-            return;
-        }
-        self.hist = Some(HistCache {
-            key: fast_tiff_viewer::histogram::HistogramKey::of(loaded),
-            hists: fast_tiff_viewer::histogram::frame_histograms(loaded),
-        });
-        self.hist_built_at = now;
     }
 
     /// Drain anything the async picker produced since the last frame. A no-op
@@ -3797,20 +3730,18 @@ impl ViewerApp {
             self.show_histogram = !self.show_histogram;
         }
         if self.show_histogram {
-            self.refresh_histograms(ui.input(|i| i.time));
-            // Split the borrows by field: the window edits the stack's contrast
-            // while reading the cached plots computed from it.
             let mut open = true;
-            if let (Some(loaded), Some(cache)) = (self.core.stack.as_mut(), self.hist.as_ref()) {
-                histogram_window(
-                    ui.ctx(),
-                    &mut open,
-                    loaded,
-                    &cache.hists,
-                    &mut self.hist_log,
-                );
-            } else {
-                open = false;
+            match self.core.stack.as_mut() {
+                Some(loaded) => {
+                    // The window edits the stack's contrast while plotting the
+                    // histograms held on it, so they are lent out of it for
+                    // the call and put back. Nothing the window does touches
+                    // them; the viewer's next sync is what replaces them.
+                    let held = std::mem::take(&mut loaded.histograms);
+                    histogram_window(ui.ctx(), &mut open, loaded, &held, &mut self.hist_log);
+                    loaded.histograms = held;
+                }
+                None => open = false,
             }
             self.show_histogram = open;
         }
@@ -4630,7 +4561,9 @@ impl ViewerApp {
         let _ = (&toolbar_response, &scrub_bar_response);
 
         // Bring the GPU up to date with the core state, then honor a pending
-        // background volume build by scheduling another frame.
+        // background volume build by scheduling another frame. The histograms
+        // are binned from what the sync decodes, while their window is open.
+        self.core.histograms_wanted = self.show_histogram;
         let render = std::sync::Arc::clone(&self.render);
         let outcome = match render.lock() {
             Ok(mut resources) => {
