@@ -224,14 +224,12 @@ reader, and that takes a line of its own:
 cargo test -p oir-reader --no-default-features
 ```
 
-Two things sit outside the default build on purpose and so are missed by the
-line above. Both are worked examples rather than parts of the app, and CI
-builds and tests both so they cannot quietly rot (the second in its
-`viewer-no-threads` step):
+One thing sits outside the workspace on purpose and so is missed by the line
+above: the example plugin, a worked example rather than part of the app. CI
+builds and tests it so it cannot quietly rot:
 
 ```sh
 cargo test --manifest-path plugins/example/Cargo.toml
-cargo test -p fast-tiff-viewer --features plugin-netpbm
 ```
 
 Lint:
@@ -750,16 +748,6 @@ names `builtin-plugins` again, and the application refuses to compile with no
 plugins at all unless `--features plugins-none` says that was deliberate, so a
 forgotten one stops the build rather than shipping a binary that quietly cannot
 do half of what it is for.
-
-A worked example lives among them:
-[`plugins/builtin/netpbm/`](fast-tiff-viewer/src/plugins/builtin/netpbm/mod.rs)
-reads PBM/PGM/PPM as a built-in importer. It is a demonstration rather than a
-format this viewer needs, so it is off by default and deliberately not part of
-`builtin-plugins`:
-
-```sh
-cargo test -p fast-tiff-viewer --features plugin-netpbm
-```
 
 The shared-library lane is native-only — there is no `dlopen` in a browser — so
 the web build gets the built-ins and no way to add to them.

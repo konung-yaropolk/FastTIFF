@@ -76,7 +76,6 @@ plugin-oir = ["fast-tiff-viewer/plugin-oir", "_any-builtin"]
 plugin-nifti = ["fast-tiff-viewer/plugin-nifti", "_any-builtin"]
 plugin-dicom = ["fast-tiff-viewer/plugin-dicom", "_any-builtin"]
 # The worked example for plugin authors; off by default there and here.
-plugin-netpbm = ["fast-tiff-viewer/plugin-netpbm", "_any-builtin"]
 # "Yes, really, no plugins." It enables nothing; it exists so that the guard in
 # `src/lib.rs` can tell a deliberate build from a forgotten feature.
 plugins-none = []

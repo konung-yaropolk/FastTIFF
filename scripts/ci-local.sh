@@ -29,9 +29,9 @@
 # it rewrites it; it is put back afterwards if it was unmodified before.
 
 set -u
-# This script, by a path that still holds after the `cd` below: run as
-# `bash some/dir/scripts/ci-local.sh` from elsewhere, "$0" is relative to where
-# it was started, not to the repository root.
+# This script, by a path that still holds after the `cd` below: run by a
+# relative path from another directory, "$0" is relative to where it was
+# started, not to the repository root.
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 cd "$(dirname "$0")/.." || exit 1
 ROOT=$(pwd)
@@ -210,14 +210,14 @@ example_lint() {
 }
 
 # The three clippy runs. A lint only sees the code its features compile: the
-# default build leaves out the glow renderer, the C APIs, the GPU registration
-# paths and the example importer. Every crate but the app goes in the second
+# default build leaves out the glow renderer, the C APIs and the GPU
+# registration paths. Every crate but the app goes in the second
 # run with all its features; the app's two renderers exclude each other, so it
 # gets the other one in a third.
 clippy_all() {
     cargo clippy --workspace --all-targets -- -D warnings &&
     cargo clippy --workspace --exclude FastTIFF --all-features --all-targets -- -D warnings &&
-    cargo clippy -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins,plugin-netpbm --all-targets -- -D warnings
+    cargo clippy -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins --all-targets -- -D warnings
 }
 
 fuzz() {
@@ -254,7 +254,7 @@ step oir-wasm-no-default -- cargo check -p oir-reader --target wasm32-unknown-un
 step oir-doc             -- env RUSTDOCFLAGS="-D warnings" cargo doc -p oir-reader --no-deps
 step published-package slow -- package -p c-api-support -p image-registration-support -p fast-tiff-lib -p oir-reader -p suite2p-registration -p turboreg-registration
 step web-check           -- cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
-step viewer-no-threads   -- cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu,builtin-plugins,plugin-netpbm
+step viewer-no-threads   -- cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu,builtin-plugins
 step viewer-no-backend   -- cargo check -p fast-tiff-viewer --no-default-features
 step macos-intel explicit -- env MACOSX_DEPLOYMENT_TARGET=11.0 cargo check --release --target x86_64-apple-darwin -p FastTIFF --no-default-features --features renderer-wgpu,builtin-plugins
 step web-bundle slow     -- in_dir FastTIFF-web wasm-pack build --target web --out-dir pkg --release

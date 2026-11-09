@@ -201,9 +201,7 @@ stub_importer!(SameD2, "d.2", &["same"], Confidence::Maybe);
 fn the_builtin_importer_is_installed_and_offers_its_file_types() {
     let reg = Registry::new();
     assert!(reg.problems.is_empty(), "{:?}", reg.problems);
-    // OIR is the importer that ships. Netpbm is a worked example behind an
-    // off-by-default feature, so asserting on it here would fail the ordinary
-    // build; when it is enabled it must register too, and it is checked below.
+    // OIR is the importer that ships, and the one this checks for.
     assert!(
         reg.importers()
             .iter()
@@ -216,26 +214,6 @@ fn the_builtin_importer_is_installed_and_offers_its_file_types() {
             .iter()
             .any(|t| t.extensions.contains(&"oir".to_string())),
         "the Open dialog should learn about .oir: {types:?}"
-    );
-}
-
-/// The example importer still registers when it is asked for, so the feature is
-/// a switch rather than a way for the file to rot unnoticed.
-#[cfg(feature = "plugin-netpbm")]
-#[test]
-fn the_example_importer_registers_when_enabled() {
-    let reg = Registry::new();
-    assert!(
-        reg.importers()
-            .iter()
-            .any(|e| e.info.id == "dev.fasttiff.netpbm"),
-        "the Netpbm example should be installed under its feature"
-    );
-    assert!(
-        reg.open_file_types()
-            .iter()
-            .any(|t| t.extensions.contains(&"pgm".to_string())),
-        "the Open dialog should learn about .pgm"
     );
 }
 

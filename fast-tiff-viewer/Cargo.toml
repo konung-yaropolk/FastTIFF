@@ -121,13 +121,6 @@ _shared-deliver = []
 _shared-store = []
 _shared-edges = []
 
-# A worked example for plugin authors rather than a format this viewer needs;
-# see `plugins/builtin/mod.rs`. Off by default — deliberately not in
-# `builtin-plugins` — and compiled and tested on demand.
-plugin-netpbm = []
-# The name this had before the family was regularised. Kept because it is what
-# the module documentation and anyone's muscle memory say.
-netpbm-example = ["plugin-netpbm"]
 # ---------------------------------------------------------------------------
 # Which GPU backend `sync` drives. Exactly one is required to use `Viewer::sync`
 # and `volume::build_volume`; with neither, the crate still provides the whole

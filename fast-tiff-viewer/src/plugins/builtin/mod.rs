@@ -39,11 +39,6 @@
 //!   of arithmetic that has to stay cancellable, and nine published algorithms
 //!   behind one menu entry.
 //!
-//! [`Netpbm`] is a fifth thing — a worked example of the other shape the job
-//! takes, a documented format implemented straight from its spec. Read it when
-//! writing an importer, enable it (`--features plugin-netpbm`) to run it, but
-//! it is not part of the product and nobody opens a `.pgm` in a TIFF viewer.
-//!
 //! # Which of them are here
 //!
 //! One Cargo feature per directory, named `plugin-<directory>`, and
@@ -185,7 +180,6 @@ builtins! {
     /// Desktop-only on top of its feature, for the reason [`dicom`] is.
     nifti if (all(feature = "plugin-nifti", not(target_arch = "wasm32"))) => importers(Nifti);
     png if (feature = "plugin-png") => importers(PngImport) exporters(Png);
-    netpbm if (feature = "plugin-netpbm") => importers(Netpbm);
 }
 
 /// The one directory here that is not a registry plugin, and so has no

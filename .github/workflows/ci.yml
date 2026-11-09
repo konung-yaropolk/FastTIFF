@@ -156,10 +156,6 @@ jobs:
       # With the plugins, deliberately: deconvolution has single-threaded
       # fallbacks of its own (`deconvolve/par.rs`) and this is the only step
       # that runs them. The no-plugins shape is the step after this one.
-      #
-      # `plugin-netpbm` rides along because it is in no other build: it is the
-      # worked-example importer, off by default and outside `builtin-plugins`,
-      # and it went a month not compiling before anything noticed.
       - name: Check core without threads (wasm-shaped)
         run: bash scripts/ci-local.sh viewer-no-threads
 
