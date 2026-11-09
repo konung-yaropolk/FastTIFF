@@ -380,10 +380,18 @@ pub struct Viewer {
 /// *broken TIFF*, not an unsupported file, and flattening the two would throw
 /// away the part that tells the user whether to go and find a better copy.
 ///
-/// Keyed on [`NotTiff`] rather than on the message text, so rewording the
-/// library cannot silently turn this back into a passthrough.
+/// Keyed on the library's [`ErrorKind::NotTiff`] rather than on the message
+/// text, so rewording the library cannot silently turn this back into a
+/// passthrough. Every link of a library error carries the kind of the
+/// innermost, so the first one in the chain is the one to ask.
+///
+/// [`ErrorKind::NotTiff`]: fast_tiff_lib::ErrorKind::NotTiff
 fn open_failure(e: &anyhow::Error) -> String {
-    if e.chain().any(|c| c.is::<fast_tiff_lib::NotTiff>()) {
+    let kind = e
+        .chain()
+        .find_map(|c| c.downcast_ref::<fast_tiff_lib::Error>())
+        .map(fast_tiff_lib::Error::kind);
+    if kind == Some(fast_tiff_lib::ErrorKind::NotTiff) {
         return "file not supported".to_string();
     }
     format!("{e:#}")

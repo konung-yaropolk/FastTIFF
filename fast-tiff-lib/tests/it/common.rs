@@ -24,8 +24,8 @@ use std::path::Path;
 ///
 /// Takes `impl AsRef<Path>` so it is a drop-in for the `TiffStack::open` calls
 /// it replaced, which accepted both `&Path` and `PathBuf`. The error is
-/// flattened to a `String` — through anyhow's `{:#}`, so the cause chain
-/// survives — to keep the suites free of a dev-dependency on anyhow.
+/// flattened to a `String` through `{:#}`, so the cause chain survives and
+/// the read error of the no-`mmap` path fits the same type.
 pub fn open_tiff(path: impl AsRef<Path>) -> Result<TiffStack, String> {
     let path = path.as_ref();
     #[cfg(feature = "mmap")]

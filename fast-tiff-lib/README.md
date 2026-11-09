@@ -242,10 +242,41 @@ println!(
 let frame = &stack.frames[0];
 let pixels = read_frame_u16(&stack.data, frame, stack.byte_order, None)?;
 assert_eq!(pixels.len(), (frame.width * frame.height) as usize);
-# Ok::<(), anyhow::Error>(())
+# Ok::<(), fast_tiff_lib::Error>(())
 ```
 
-All fallible calls return `anyhow::Result`.
+### Errors
+
+All fallible calls return `fast_tiff_lib::Result`. Its `Error` says what went
+wrong in words, and `Error::kind()` says what kind of failure it was, which is
+what a program should decide on — the words are free to change:
+
+| `ErrorKind` | What happened |
+|---|---|
+| `NotTiff` | The bytes are not a TIFF at all: no `II`/`MM` byte-order mark, or a magic other than 42 and 43. Another reader may know them. |
+| `Malformed` | A damaged TIFF: truncated, pointing outside itself, missing a required tag, contradicting itself, or compressed data that does not decode. |
+| `Unsupported` | A TIFF using what this library has no code for: a compression scheme, bit depth, sample format or predictor, or pages of different sizes. |
+| `Unavailable` | What it needs is behind a cargo feature this build left out (ZSTD without `codec-zstd`). |
+| `TooLarge` | Past the address space, an allocation the system refused, more frames than the index takes. |
+| `InvalidInput` | The call asked for what cannot be done: an option out of range, a reader for a depth the frame does not have, text the format cannot hold, a writer used out of turn. |
+| `Io` | The operating system failed an open, a read or a write. An open or a create says which file, with the `io::Error` as its `source()`; whichever call met it, `Error::io_error()` hands the `io::Error` back, to tell a full disk from a refused permission by its `io::ErrorKind`. |
+| `Internal` | A failure no input should cause — a bug to report. |
+
+```rust
+use fast_tiff_lib::{ErrorKind, TiffStack};
+
+match TiffStack::from_bytes(std::fs::read("scan.dat")?) {
+    Ok(stack) => println!("{} frames", stack.frames.len()),
+    Err(e) if e.kind() == ErrorKind::NotTiff => { /* try another reader */ }
+    Err(e) => eprintln!("{e:#}"), // the whole cause chain
+}
+# Ok::<(), std::io::Error>(())
+```
+
+`Error` is a `std::error::Error + Send + Sync + 'static` one pointer wide, so
+`?` takes it into `anyhow::Error` or `Box<dyn Error>`; to find the kind again
+from there, `downcast_ref::<fast_tiff_lib::Error>()` it out of the chain.
+`{:#}` prints the whole chain, joined by `": "`, as anyhow's `{:#}` does.
 
 ## Core API
 
@@ -459,7 +490,7 @@ for frame in frames {
     writer.write_frame_u16(&frame)?; // one plane per call, streamed to disk
 }
 writer.finish()?; // writes the IFD chain; the file isn't valid without it
-# Ok::<(), anyhow::Error>(())
+# Ok::<(), fast_tiff_lib::Error>(())
 ```
 
 ### What it writes
@@ -596,7 +627,7 @@ let stack = fast_tiff_lib::TiffStack::open("movie.tif")?;
 if let Some(desc) = &stack.description {
     println!("{desc}"); // the whole tag 270 text, unparsed
 }
-# Ok::<(), anyhow::Error>(())
+# Ok::<(), fast_tiff_lib::Error>(())
 
 pub struct ChannelDisplay {
     pub lut: [[u8; 3]; 256],          // 256-entry RGB lookup table
@@ -710,9 +741,10 @@ Turning one off narrows what the crate can do, and says so clearly rather than
 failing obscurely:
 
 - Without `mmap`, `TiffStack::open` doesn't exist; use `TiffStack::from_bytes`.
-- Without `codec-zstd`, a ZSTD-compressed frame returns an error naming the
-  missing feature instead of decoding. Every other codec is pure Rust and
-  unaffected.
+- Without `codec-zstd`, a ZSTD-compressed frame returns an
+  `ErrorKind::Unavailable` error naming the missing feature instead of
+  decoding, and a writer asked for ZSTD refuses the same way when it is made.
+  Every other codec is pure Rust and unaffected.
 
 ### wasm
 
@@ -834,8 +866,11 @@ What a C caller should know:
 
 - **Statuses, not crashes.** Every call that can fail returns `FTL_OK` or the
   reason it did not — `FTL_IO`, `FTL_NOT_TIFF`, `FTL_FORMAT` for a TIFF it
-  cannot read (or not as asked), `FTL_INVALID_ARGUMENT`, `FTL_UNAVAILABLE` —
-  and `ftl_last_error()` says it in words. A panic comes back as `FTL_FAILED`
+  cannot read (damaged, or using what it has no code for), `FTL_TOO_LARGE`
+  for one too large for this target, `FTL_INVALID_ARGUMENT` for a call it
+  cannot take, `FTL_UNAVAILABLE` for what this build left out — and
+  `ftl_last_error()` says it in words. Each is the status of the Rust error's
+  `ErrorKind`, the same in every function. A panic comes back as `FTL_FAILED`
   instead of unwinding into C, as long as the library is built with
   `panic = "unwind"`, the default.
 - **Buffers are the caller's.** `ftl_sample_count()` says how many values a
@@ -844,9 +879,10 @@ What a C caller should know:
   planes, whichever way the file interleaves them — and a writer with
   `planar` set takes the same layout back.
 - **Pick the reader by what you want.** `ftl_read_f32` gives every depth in
-  the file's own units; `ftl_read_u16` gives every depth as display values
-  (8-bit widened, signed offset, 32/64-bit rescaled); `ftl_read_u8` is for
-  8-bit frames as they are and refuses the others with `FTL_FORMAT`.
+  the file's own units; `ftl_read_u16` gives every depth but 4-bit as display
+  values (8-bit widened, signed offset, 32/64-bit rescaled); `ftl_read_u8` is
+  for 8-bit frames, and 4-bit palette indices, as they are. A reader handed a
+  frame it does not take refuses it with `FTL_INVALID_ARGUMENT`.
 - **Strings** go in as NUL-terminated UTF-8, and come out snprintf-style: a
   buffer and its capacity in, the whole length back, so `NULL, 0` asks for
   the size. A number the file does not give is NaN.
@@ -874,7 +910,7 @@ What a C caller should know:
 
 ## Dependencies
 
-`weezl` (LZW), `flate2` (Deflate), `anyhow`, `bytemuck`, `rayon`, plus two
+`weezl` (LZW), `flate2` (Deflate), `bytemuck`, `rayon`, plus two
 optional ones: `memmap2` (feature `mmap`) and `zstd` (feature `codec-zstd`,
 which builds the C library via `zstd-sys`).
 

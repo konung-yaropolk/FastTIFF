@@ -243,7 +243,7 @@ step workspace-tests     -- cargo test --workspace
 step capi-tests          -- cargo test -p fast-tiff-lib -p oir-reader -p suite2p-registration -p turboreg-registration --features fast-tiff-lib/capi,oir-reader/capi,suite2p-registration/capi,suite2p-registration/gpu,turboreg-registration/capi,turboreg-registration/gpu
 step glow-build          -- cargo build -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins
 step glow-tests          -- cargo test --workspace --no-default-features --features FastTIFF/renderer-glow,FastTIFF/builtin-plugins
-step lib-no-default      -- cargo test -p fast-tiff-lib --no-default-features
+step lib-no-default      -- cargo test -p fast-tiff-lib --no-default-features --features capi
 step msrv                -- msrv
 step wasm-target         -- rustup target add wasm32-unknown-unknown
 step lib-wasm            -- cargo check -p fast-tiff-lib --target wasm32-unknown-unknown --no-default-features

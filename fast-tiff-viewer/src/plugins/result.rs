@@ -372,7 +372,8 @@ impl ResultWriter {
             PlaneRef::U8(v) => self.w.write_frame_bytes(v),
             PlaneRef::U16(v) => self.w.write_frame_bytes(&le_bytes_u16(v)),
             PlaneRef::F32(v) => self.w.write_frame_bytes(&le_bytes_f32(v)),
-        }
+        }?;
+        Ok(())
     }
 
     /// Planes written so far.

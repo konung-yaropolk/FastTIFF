@@ -31,5 +31,11 @@ pub fn plane_f32_into(
         .frames
         .get(ifd)
         .with_context(|| format!("IFD {ifd} is past the {} this file has", tiff.frames.len()))?;
-    read_plane_f32_into(&tiff.data, frame, tiff.byte_order, sample, out)
+    Ok(read_plane_f32_into(
+        &tiff.data,
+        frame,
+        tiff.byte_order,
+        sample,
+        out,
+    )?)
 }

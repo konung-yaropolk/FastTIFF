@@ -12,7 +12,7 @@ use super::{
     color_ramp_lut, composite_color, default_lut_for, resolution_to_pixel, ChannelDisplay,
     ChannelWrite, DisplayMode, MetadataFormat, StackMeta, StackMetaWrite, WriteGeometry,
 };
-use anyhow::Result;
+use crate::error::Result;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 use std::collections::HashMap;

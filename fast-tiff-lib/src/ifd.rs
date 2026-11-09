@@ -3,7 +3,7 @@
 //! 32-bit offsets) and BigTIFF (magic 43, 64-bit offsets). This module knows
 //! nothing about ImageJ — it's a minimal, correct TIFF directory reader.
 
-use anyhow::{anyhow, bail, Result};
+use crate::error::{bail, err, ErrorKind, OptionContext, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ByteOrder {
@@ -130,30 +130,44 @@ impl RawIfdEntry {
 
     /// Resolve this entry's raw bytes, whether inline or via offset into `file`.
     pub fn raw_bytes<'a>(&self, file: &'a [u8], order: ByteOrder) -> Result<&'a [u8]> {
-        let len = self
-            .data_len()
-            .ok_or_else(|| anyhow!("unsupported TIFF field type {}", self.field_type))?;
+        let len = self.data_len().with_context(ErrorKind::Unsupported, || {
+            format!("unsupported TIFF field type {}", self.field_type)
+        })?;
         if len <= self.flavor.inline_capacity() {
             // Data lives inline in value_or_offset; slice-returning callers
             // must use `owned_bytes` for that case.
-            bail!("internal: use owned_bytes() for inline fields");
+            bail!(
+                InvalidInput,
+                "internal: use owned_bytes() for inline fields"
+            );
         }
-        let offset = usize::try_from(self.offset(order))
-            .map_err(|_| anyhow!("IFD entry tag {} offset exceeds address space", self.tag))?;
+        // An offset past `usize` is past the end of `file`, whose length is a
+        // `usize`: damaged, not too large, whatever the target.
+        let offset = usize::try_from(self.offset(order)).map_err(|_| {
+            err!(
+                Malformed,
+                "IFD entry tag {} points outside file bounds",
+                self.tag
+            )
+        })?;
         // `checked_add`: both terms come from the file, and the sum overflowing
         // would panic in a debug build before `get` ever ran.
         let end = offset
             .checked_add(len)
-            .ok_or_else(|| anyhow!("IFD entry tag {} offset+length overflows", self.tag))?;
+            .with_context(ErrorKind::Malformed, || {
+                format!("IFD entry tag {} offset+length overflows", self.tag)
+            })?;
         file.get(offset..end)
-            .ok_or_else(|| anyhow!("IFD entry tag {} points outside file bounds", self.tag))
+            .with_context(ErrorKind::Malformed, || {
+                format!("IFD entry tag {} points outside file bounds", self.tag)
+            })
     }
 
     /// Resolve bytes regardless of inline-vs-offset storage, always owned.
     pub fn owned_bytes(&self, file: &[u8], order: ByteOrder) -> Result<Vec<u8>> {
-        let len = self
-            .data_len()
-            .ok_or_else(|| anyhow!("unsupported TIFF field type {}", self.field_type))?;
+        let len = self.data_len().with_context(ErrorKind::Unsupported, || {
+            format!("unsupported TIFF field type {}", self.field_type)
+        })?;
         if len <= self.flavor.inline_capacity() {
             Ok(self.value_or_offset[..len].to_vec())
         } else {
@@ -185,11 +199,12 @@ impl RawIfdEntry {
         // of thing that only becomes a bug once someone adds a caller that
         // recovers.
         out.clear();
-        let sz = type_size(self.field_type)
-            .ok_or_else(|| anyhow!("unsupported TIFF field type {}", self.field_type))?;
-        let len = self
-            .data_len()
-            .ok_or_else(|| anyhow!("unsupported TIFF field type {}", self.field_type))?;
+        let sz = type_size(self.field_type).with_context(ErrorKind::Unsupported, || {
+            format!("unsupported TIFF field type {}", self.field_type)
+        })?;
+        let len = self.data_len().with_context(ErrorKind::Unsupported, || {
+            format!("unsupported TIFF field type {}", self.field_type)
+        })?;
         let bytes: &[u8] = if len <= self.flavor.inline_capacity() {
             &self.value_or_offset[..len]
         } else {
@@ -207,6 +222,7 @@ impl RawIfdEntry {
                 4 => order.u32(chunk) as u64,
                 8 => order.u64(chunk),
                 _ => bail!(
+                    Malformed,
                     "tag {} has non-integer field type {}",
                     self.tag,
                     self.field_type
@@ -222,16 +238,22 @@ impl RawIfdEntry {
         self.as_u64_array(file, order)?
             .into_iter()
             .map(|v| {
-                u32::try_from(v)
-                    .map_err(|_| anyhow!("tag {} value {v} does not fit in 32 bits", self.tag))
+                u32::try_from(v).map_err(|_| {
+                    err!(
+                        Malformed,
+                        "tag {} value {v} does not fit in 32 bits",
+                        self.tag
+                    )
+                })
             })
             .collect()
     }
 
     /// Interpret as a single u32 (first element; common for scalar tags).
     pub fn as_u32(&self, file: &[u8], order: ByteOrder) -> Result<u32> {
-        let sz = type_size(self.field_type)
-            .ok_or_else(|| anyhow!("unsupported TIFF field type {}", self.field_type))?;
+        let sz = type_size(self.field_type).with_context(ErrorKind::Unsupported, || {
+            format!("unsupported TIFF field type {}", self.field_type)
+        })?;
         // Fast path for the overwhelmingly common scalar case (ImageWidth,
         // BitsPerSample, …): the value is stored inline in the value field, so
         // read it directly without the per-call Vec allocation of
@@ -244,18 +266,26 @@ impl RawIfdEntry {
                 4 => order.u32(&self.value_or_offset[0..4]) as u64,
                 8 => order.u64(&self.value_or_offset),
                 _ => bail!(
+                    Malformed,
                     "tag {} has non-integer field type {}",
                     self.tag,
                     self.field_type
                 ),
             };
-            return u32::try_from(v)
-                .map_err(|_| anyhow!("tag {} value {v} does not fit in 32 bits", self.tag));
+            return u32::try_from(v).map_err(|_| {
+                err!(
+                    Malformed,
+                    "tag {} value {v} does not fit in 32 bits",
+                    self.tag
+                )
+            });
         }
         self.as_u32_array(file, order)?
             .first()
             .copied()
-            .ok_or_else(|| anyhow!("tag {} has no data", self.tag))
+            .with_context(ErrorKind::Malformed, || {
+                format!("tag {} has no data", self.tag)
+            })
     }
 
     /// Interpret as a single RATIONAL value (`numerator / denominator`), for
@@ -263,19 +293,24 @@ impl RawIfdEntry {
     pub fn as_rational(&self, file: &[u8], order: ByteOrder) -> Result<f64> {
         if self.field_type != 5 {
             bail!(
+                Malformed,
                 "tag {} is not a RATIONAL (field type {})",
                 self.tag,
                 self.field_type
             );
         }
         let bytes = self.owned_bytes(file, order)?;
-        let pair = bytes
-            .get(..8)
-            .ok_or_else(|| anyhow!("tag {} RATIONAL data too short", self.tag))?;
+        let pair = bytes.get(..8).with_context(ErrorKind::Malformed, || {
+            format!("tag {} RATIONAL data too short", self.tag)
+        })?;
         let num = order.u32(&pair[0..4]);
         let den = order.u32(&pair[4..8]);
         if den == 0 {
-            bail!("tag {} RATIONAL has a zero denominator", self.tag);
+            bail!(
+                Malformed,
+                "tag {} RATIONAL has a zero denominator",
+                self.tag
+            );
         }
         Ok(num as f64 / den as f64)
     }
@@ -335,26 +370,39 @@ pub fn read_ifd_into(
     let at = |base: usize, len: usize| -> Result<std::ops::Range<usize>> {
         let end = base
             .checked_add(len)
-            .ok_or_else(|| anyhow!("IFD at {offset} declares an offset that overflows"))?;
+            .with_context(ErrorKind::Malformed, || {
+                format!("IFD at {offset} declares an offset that overflows")
+            })?;
         Ok(base..end)
     };
     let count_bytes = file
         .get(at(offset, count_len)?)
-        .ok_or_else(|| anyhow!("IFD offset {} out of bounds", offset))?;
+        .with_context(ErrorKind::Malformed, || {
+            format!("IFD offset {} out of bounds", offset)
+        })?;
     let entry_count = match flavor {
         TiffFlavor::Classic => order.u16(count_bytes) as u64,
         TiffFlavor::Big => order.u64(count_bytes),
     };
-    let entry_count = usize::try_from(entry_count)
-        .map_err(|_| anyhow!("IFD at {} declares an absurd entry count", offset))?;
+    let entry_count = usize::try_from(entry_count).map_err(|_| {
+        err!(
+            Malformed,
+            "IFD at {} declares an absurd entry count",
+            offset
+        )
+    })?;
 
     let entries_start = offset + count_len;
     let entries_len = entry_count
         .checked_mul(entry_len)
-        .ok_or_else(|| anyhow!("IFD at {} declares an absurd entry count", offset))?;
+        .with_context(ErrorKind::Malformed, || {
+            format!("IFD at {} declares an absurd entry count", offset)
+        })?;
     let entries_bytes = file
         .get(at(entries_start, entries_len)?)
-        .ok_or_else(|| anyhow!("IFD at {} truncated (entry table out of bounds)", offset))?;
+        .with_context(ErrorKind::Malformed, || {
+            format!("IFD at {} truncated (entry table out of bounds)", offset)
+        })?;
 
     entries.clear();
     entries.reserve(entry_count);
@@ -383,10 +431,14 @@ pub fn read_ifd_into(
 
     let next_offset_pos = entries_start
         .checked_add(entries_len)
-        .ok_or_else(|| anyhow!("IFD at {offset} declares an offset that overflows"))?;
+        .with_context(ErrorKind::Malformed, || {
+            format!("IFD at {offset} declares an offset that overflows")
+        })?;
     let next_bytes = file
         .get(at(next_offset_pos, next_len)?)
-        .ok_or_else(|| anyhow!("IFD at {} truncated (missing next-IFD offset)", offset))?;
+        .with_context(ErrorKind::Malformed, || {
+            format!("IFD at {} truncated (missing next-IFD offset)", offset)
+        })?;
     let next_offset = match flavor {
         TiffFlavor::Classic => order.u32(next_bytes) as u64,
         TiffFlavor::Big => order.u64(next_bytes),
@@ -425,21 +477,22 @@ pub fn next_ifd_offset(
     })
 }
 
-/// The file is not a TIFF at all — its header is some other format's, or none.
+/// Parse the TIFF header: byte order, flavor (classic magic 42 / BigTIFF
+/// magic 43), and the first IFD's absolute offset.
 ///
-/// A type rather than a message because callers act on this one differently
-/// from every other header error. A malformed BigTIFF is a *broken TIFF* and the
-/// user wants the detail; this is *not a TIFF*, and a caller that can read other
-/// formats too — an application with importer plugins, say — wants to say
-/// something about its own range of formats rather than repeat this crate's.
-/// Matching on the message text would work until the message changed, so the
-/// signal is downcastable instead:
+/// Bytes that are not a TIFF at all — some other format's header, or none —
+/// are [`ErrorKind::NotTiff`], apart from every other header error, because
+/// callers act on that one differently. A malformed BigTIFF header is a
+/// *broken TIFF* ([`Malformed`](ErrorKind::Malformed)), and the user wants the
+/// detail; *not a TIFF* is something a caller that reads other formats too —
+/// an application with importer plugins, say — answers with its own range of
+/// formats rather than this crate's words:
 ///
 /// ```no_run
-/// # fn main() -> anyhow::Result<()> {
+/// # fn main() -> fast_tiff_lib::Result<()> {
 /// # let bytes: &[u8] = &[];
 /// match fast_tiff_lib::ifd::read_header(bytes) {
-///     Err(e) if e.downcast_ref::<fast_tiff_lib::ifd::NotTiff>().is_some() => {
+///     Err(e) if e.kind() == fast_tiff_lib::ErrorKind::NotTiff => {
 ///         // Hand it to another reader, or say it is unsupported.
 ///     }
 ///     other => { other?; }
@@ -448,32 +501,13 @@ pub fn next_ifd_offset(
 /// # }
 /// ```
 ///
-/// [`Display`](std::fmt::Display) keeps the wording it always had, so callers
-/// that only print the error see no change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NotTiff {
-    /// The magic number found, when the byte order was readable and only the
-    /// magic was wrong. `None` when the byte-order mark itself was not `II` or
-    /// `MM`, in which case nothing about the file was TIFF-shaped.
-    pub magic: Option<u16>,
-}
-
-impl std::fmt::Display for NotTiff {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.magic {
-            Some(m) => write!(f, "not a TIFF (magic {m}; expected 42 or 43)"),
-            None => write!(f, "not a TIFF"),
-        }
-    }
-}
-
-impl std::error::Error for NotTiff {}
-
-/// Parse the TIFF header: byte order, flavor (classic magic 42 / BigTIFF
-/// magic 43), and the first IFD's absolute offset.
+/// A file shorter than the 8 bytes of a header is
+/// [`Malformed`](crate::ErrorKind::Malformed): too little of it to say what
+/// it was meant to be.
 pub fn read_header(file: &[u8]) -> Result<(ByteOrder, TiffFlavor, u64)> {
     if file.len() < 8 {
         bail!(
+            Malformed,
             "file too small to be a TIFF (need at least 8 bytes, got {})",
             file.len()
         );
@@ -481,7 +515,7 @@ pub fn read_header(file: &[u8]) -> Result<(ByteOrder, TiffFlavor, u64)> {
     let order = match &file[0..2] {
         b"II" => ByteOrder::Little,
         b"MM" => ByteOrder::Big,
-        _other => return Err(NotTiff { magic: None }.into()),
+        _other => bail!(NotTiff, "not a TIFF"),
     };
     let magic = order.u16(&file[2..4]);
     match magic {
@@ -491,6 +525,7 @@ pub fn read_header(file: &[u8]) -> Result<(ByteOrder, TiffFlavor, u64)> {
             // then the u64 first-IFD offset.
             if file.len() < 16 {
                 bail!(
+                    Malformed,
                     "file too small to be a BigTIFF (need at least 16 bytes, got {})",
                     file.len()
                 );
@@ -498,10 +533,16 @@ pub fn read_header(file: &[u8]) -> Result<(ByteOrder, TiffFlavor, u64)> {
             let offset_size = order.u16(&file[4..6]);
             let reserved = order.u16(&file[6..8]);
             if offset_size != 8 || reserved != 0 {
-                bail!("malformed BigTIFF header (offset size {offset_size}, reserved {reserved})");
+                bail!(
+                    Malformed,
+                    "malformed BigTIFF header (offset size {offset_size}, reserved {reserved})"
+                );
             }
             Ok((order, TiffFlavor::Big, order.u64(&file[8..16])))
         }
-        other => Err(NotTiff { magic: Some(other) }.into()),
+        other => Err(err!(
+            NotTiff,
+            "not a TIFF (magic {other}; expected 42 or 43)"
+        )),
     }
 }

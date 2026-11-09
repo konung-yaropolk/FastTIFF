@@ -14,12 +14,41 @@
 //! builds it as a shared and a static library. The README's "From C and C++"
 //! has the rest: what lands where, how to link it, and what a C caller should
 //! know.
+//!
+//! # Errors
+//!
+//! Every fallible call returns this crate's [`Result`], whose [`Error`] says
+//! what went wrong in words and, through [`Error::kind`], what kind of failure
+//! it was: the bytes are [not a TIFF](ErrorKind::NotTiff) at all, the file is
+//! [damaged](ErrorKind::Malformed), it uses something this library
+//! [does not read](ErrorKind::Unsupported) or this build
+//! [left out](ErrorKind::Unavailable), it is [too large](ErrorKind::TooLarge)
+//! for this target, the operating system [failed](ErrorKind::Io) an open, a
+//! read or a write, or the call itself [asked for what cannot be
+//! done](ErrorKind::InvalidInput). Decide on the kind, never on the words:
+//!
+//! ```no_run
+//! use fast_tiff_lib::{ErrorKind, TiffStack};
+//!
+//! match TiffStack::from_bytes(std::fs::read("scan.dat")?) {
+//!     Ok(stack) => println!("{} frames", stack.frames.len()),
+//!     // Some other format: hand it to another reader.
+//!     Err(e) if e.kind() == ErrorKind::NotTiff => {}
+//!     Err(e) => eprintln!("{e:#}"),
+//! }
+//! # Ok::<(), std::io::Error>(())
+//! ```
+//!
+//! An [`Error`] is a [`std::error::Error`], `Send`, `Sync` and `'static`, so
+//! `?` takes it into `anyhow`, `Box<dyn Error>` and the like, and `{:#}`
+//! prints its whole cause chain.
 
 #[cfg(feature = "capi")]
 pub mod capi;
 pub mod decode;
 pub mod display;
 pub mod encode;
+mod error;
 pub mod ifd;
 pub mod index;
 pub mod metadata;
@@ -37,11 +66,12 @@ pub use display::DisplayMap;
 pub use encode::{
     SampleType, TiffWriter, WriterOptions, DEFAULT_DEFLATE_LEVEL, DEFAULT_ZSTD_LEVEL,
 };
-pub use ifd::{ByteOrder, NotTiff, TiffFlavor};
+pub use error::{Error, ErrorKind, Result};
+pub use ifd::{ByteOrder, TiffFlavor};
 pub use index::{
     Compression, FrameInfo, Region, RowBand, SampleFormat, SampledBand, Strips, TiffStack,
 };
-pub use metadata::roi::{point_rois_from_imagej, roi_set_zip, PointRoi, RoiPoint, RoiSetTooLarge};
+pub use metadata::roi::{point_rois_from_imagej, roi_set_zip, PointRoi, RoiPoint};
 pub use metadata::{
     color_ramp_lut, colormap_to_lut, composite_color, default_composite_lut, default_lut_for,
     grayscale_lut, resolve_dimensions, ChannelDisplay, DisplayMode, MetadataFormat,

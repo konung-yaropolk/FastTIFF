@@ -117,6 +117,8 @@ jobs:
       # `open`-based integration tests used to be gated off here, which
       # silently cost this step every one of them (a test binary with zero
       # tests still prints `ok`); they now go through `open_tiff` in `tests/it/common.rs`.
+      # With `capi` on, so the C API's statuses for ZSTD in a build without the
+      # codec are tested in the one build that lacks it.
       - name: Test lib with no default features (wasm-shaped)
         run: bash scripts/ci-local.sh lib-no-default
 

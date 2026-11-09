@@ -429,7 +429,7 @@ fn write_batch(
     frames: &[Vec<u8>],
 ) -> Result<()> {
     let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
-    writer.write_frames_bytes(&refs)
+    Ok(writer.write_frames_bytes(&refs)?)
 }
 
 /// Whether `frames` frames of `bytes_per_frame` each fit a classic TIFF

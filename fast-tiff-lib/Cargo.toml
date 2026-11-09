@@ -29,8 +29,8 @@ default = ["mmap", "codec-zstd"]
 # no filesystem (wasm), where `TiffStack::from_bytes` is the way in instead.
 mmap = ["dep:memmap2"]
 # ZSTD codec (compression = 50000). A C dependency via zstd-sys, so it cannot
-# build for wasm32-unknown-unknown; a stack using ZSTD strips then reports an
-# unsupported-compression error instead of decoding.
+# build for wasm32-unknown-unknown; reading a ZSTD frame, or making a ZSTD
+# writer, then fails with `ErrorKind::Unavailable` naming the missing feature.
 codec-zstd = ["dep:zstd"]
 # A C interface — `src/capi.rs`, declared in `include/fast_tiff_lib.h` — for linking
 # into C and C++ programs as a shared or static library. Adds no dependency.
@@ -49,7 +49,6 @@ memmap2 = { workspace = true, optional = true }
 weezl = "0.2"      # LZW codec (compression = 5)
 flate2 = { workspace = true }     # Deflate/Zip codec (compression = 8 / 32946)
 zstd = { version = "0.14", optional = true } # ZSTD codec (50000, libtiff/GDAL ext)
-anyhow = { workspace = true }
 bytemuck = { workspace = true, features = ["extern_crate_alloc"] }
 rayon = { workspace = true }     # data-parallel strip decompression + 32-bit conversion
 quick-xml = { workspace = true } # OME-TIFF metadata (OME-XML in ImageDescription)

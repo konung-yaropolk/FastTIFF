@@ -6,9 +6,9 @@
 //! 32-bit float) falls back to an owned `Vec<u16>`.
 
 use crate::display::DisplayMap;
+use crate::error::{bail, err, Error, ErrorKind, OptionContext, Result};
 use crate::ifd::ByteOrder;
 use crate::index::{Compression, FrameInfo, SampleFormat, TiffStack};
-use anyhow::{anyhow, bail, Result};
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -159,7 +159,7 @@ pub fn read_frame_u16<'a>(
         let len_bytes = n_samples * 2;
         let slice = mmap
             .get(offset..offset + len_bytes)
-            .ok_or_else(|| anyhow!("strip data out of file bounds"))?;
+            .context(ErrorKind::Malformed, "strip data out of file bounds")?;
         // bytemuck guarantees this cast is sound: u8 -> u16 reinterpret of
         // an aligned, correctly-sized byte slice. mmap pages are at least
         // 2-byte aligned (page-aligned, in fact), so alignment holds.
@@ -340,7 +340,7 @@ fn bytes_for_bits(bits: u16) -> Result<usize> {
         16 => Ok(2),
         32 => Ok(4),
         64 => Ok(8),
-        other => bail!("unsupported bits_per_sample: {other}"),
+        other => bail!(Unsupported, "unsupported bits_per_sample: {other}"),
     }
 }
 
@@ -370,6 +370,7 @@ fn guard_frame_size(frame: &FrameInfo) -> Result<usize> {
     let coverable = frame.strip_coverable_bytes()?;
     if total_len as u64 > coverable {
         bail!(
+            Malformed,
             "frame declares {total_len} decoded bytes but its {} strip(s) of {} row(s) can cover \
              only {coverable} — refusing to allocate for a malformed or hostile file",
             frame.strip_offsets.len(),
@@ -389,6 +390,7 @@ fn guard_frame_size(frame: &FrameInfo) -> Result<usize> {
     if frame.compression == Compression::None {
         if total_len as u64 > available {
             bail!(
+                Malformed,
                 "uncompressed frame declares {total_len} decoded bytes but its strips supply \
                  only {available}"
             );
@@ -397,6 +399,7 @@ fn guard_frame_size(frame: &FrameInfo) -> Result<usize> {
         let ceiling = available.saturating_mul(MAX_DECODED_EXPANSION);
         if total_len as u64 > ceiling {
             bail!(
+                Malformed,
                 "frame declares {total_len} decoded bytes from only {available} compressed \
                  byte(s) ({:?}) — beyond any real codec's expansion, refusing to allocate",
                 frame.compression
@@ -417,7 +420,7 @@ fn guard_frame_size(frame: &FrameInfo) -> Result<usize> {
 /// thing we support.
 fn decode_4bit_indices(mmap: &[u8], frame: &FrameInfo) -> Result<Vec<u8>> {
     if frame.samples_per_pixel > 1 {
-        bail!("4-bit multi-sample images are not supported");
+        bail!(Unsupported, "4-bit multi-sample images are not supported");
     }
     let width = frame.width as usize;
     let height = frame.height as usize;
@@ -428,9 +431,13 @@ fn decode_4bit_indices(mmap: &[u8], frame: &FrameInfo) -> Result<Vec<u8>> {
     // `decode_native_bytes_opt`: these sizes come from the file. 4-bit geometry
     // is *not* covered by `FrameInfo::decoded_len` (a 4-bit sample has no whole
     // byte size), so this path does its own arithmetic and must guard it too.
-    let overflow = || anyhow!("4-bit frame geometry overflows address space ({width}x{height})");
-    let packed_len = packed_row.checked_mul(height).ok_or_else(overflow)?;
-    let out_len = width.checked_mul(height).ok_or_else(overflow)?;
+    let overflow = || format!("4-bit frame geometry overflows address space ({width}x{height})");
+    let packed_len = packed_row
+        .checked_mul(height)
+        .with_context(ErrorKind::TooLarge, overflow)?;
+    let out_len = width
+        .checked_mul(height)
+        .with_context(ErrorKind::TooLarge, overflow)?;
     // Both bounds from `guard_frame_size`, in 4-bit's packed units: what the
     // strips can structurally cover, and what they actually supply.
     let coverable = (frame.strip_offsets.len() as u64)
@@ -444,6 +451,7 @@ fn decode_4bit_indices(mmap: &[u8], frame: &FrameInfo) -> Result<Vec<u8>> {
     };
     if packed_len as u64 > coverable.min(supply) {
         bail!(
+            Malformed,
             "4-bit frame declares {packed_len} packed bytes but its {} strip(s) supply only \
              {available} and cover only {coverable} — refusing to allocate",
             frame.strip_offsets.len()
@@ -453,7 +461,10 @@ fn decode_4bit_indices(mmap: &[u8], frame: &FrameInfo) -> Result<Vec<u8>> {
     // Assemble the packed bytes, decompressing each strip into its row range.
     let mut packed: Vec<u8> = Vec::new();
     packed.try_reserve_exact(packed_len).map_err(|_| {
-        anyhow!("cannot allocate {packed_len} bytes for a {width}x{height} 4-bit frame")
+        err!(
+            TooLarge,
+            "cannot allocate {packed_len} bytes for a {width}x{height} 4-bit frame"
+        )
     })?;
     packed.resize(packed_len, 0);
     let mut rows_done = 0usize;
@@ -468,19 +479,27 @@ fn decode_4bit_indices(mmap: &[u8], frame: &FrameInfo) -> Result<Vec<u8>> {
         let rows = rows_per_strip.min(height - rows_done);
         let src = mmap
             .get(off as usize..(off as usize).saturating_add(len as usize).min(mmap.len()))
-            .ok_or_else(|| anyhow!("strip at offset {off} out of file bounds"))?;
+            .with_context(ErrorKind::Malformed, || {
+                format!("strip at offset {off} out of file bounds")
+            })?;
         let dst = &mut packed[rows_done * packed_row..(rows_done + rows) * packed_row];
         decompress_into(src, frame.compression, dst)?;
         rows_done += rows;
     }
     if rows_done < height {
-        bail!("4-bit strips cover only {rows_done} of {height} rows");
+        bail!(
+            Malformed,
+            "4-bit strips cover only {rows_done} of {height} rows"
+        );
     }
 
     // Unpack nibbles → one index byte per pixel.
     let mut out: Vec<u8> = Vec::new();
     out.try_reserve_exact(out_len).map_err(|_| {
-        anyhow!("cannot allocate {out_len} bytes for a {width}x{height} 4-bit frame")
+        err!(
+            TooLarge,
+            "cannot allocate {out_len} bytes for a {width}x{height} 4-bit frame"
+        )
     })?;
     out.resize(out_len, 0);
     for (prow, orow) in packed
@@ -553,9 +572,12 @@ fn for_each_raw_strip(
         let avail = (len as usize).min(expected);
         let src = mmap
             .get(offset as usize..offset as usize + avail)
-            .ok_or_else(|| anyhow!("strip at offset {offset} out of file bounds"))?;
+            .with_context(ErrorKind::Malformed, || {
+                format!("strip at offset {offset} out of file bounds")
+            })?;
         if src.len() < expected {
             bail!(
+                Malformed,
                 "strip data is shorter than the declared image size ({} of {} bytes)",
                 src.len(),
                 expected
@@ -566,7 +588,10 @@ fn for_each_raw_strip(
         sample_pos += n_samples;
     }
     if sample_pos < total_samples {
-        bail!("strips cover only {sample_pos} of {total_samples} samples");
+        bail!(
+            Malformed,
+            "strips cover only {sample_pos} of {total_samples} samples"
+        );
     }
     Ok(())
 }
@@ -608,9 +633,26 @@ pub fn read_plane_u16_into(
     plane: usize,
     out: &mut Vec<u16>,
 ) -> Result<DisplayMap> {
+    refuse_4bit_for_display(frame, "read_plane_u16")?;
     let native = decode_native_bytes(mmap, frame, file_order)?;
     ensure_len(out, frame.pixel_count()?);
     plane_u16_from_native(&native, frame, file_order, float_range, plane, out)
+}
+
+/// The display readers have no widening for 4-bit samples, which are palette
+/// indices (or sixteen levels of gray) that [`read_plane_u8`] and
+/// [`read_plane_f32`] give as they are. So a single-sample 4-bit frame here
+/// is a call to the wrong reader, [`ErrorKind::InvalidInput`]; a multi-sample
+/// one, which no reader takes, the decode refuses as unsupported.
+fn refuse_4bit_for_display(frame: &FrameInfo, method: &str) -> Result<()> {
+    if frame.bits_per_sample == 4 && frame.samples_per_pixel <= 1 {
+        bail!(
+            InvalidInput,
+            "{method} does not read 4-bit samples; read_plane_u8 and read_plane_f32 give them \
+             as they are"
+        );
+    }
+    Ok(())
 }
 
 /// Size `out` to exactly `n` reusing its allocation; only newly-grown
@@ -647,6 +689,7 @@ pub fn read_planes_u16_into(
     float_range: Option<(f32, f32)>,
     out: &mut Vec<Vec<u16>>,
 ) -> Result<()> {
+    refuse_4bit_for_display(frame, "read_planes_u16")?;
     let spp = (frame.samples_per_pixel as usize).max(1);
     let n_pixels = frame.pixel_count()?;
     // Chunky multi-sample with Predictor 2: fuse the predictor undo into the
@@ -854,7 +897,7 @@ fn plane_u16_from_native(
             }
             return Ok(map);
         }
-        other => bail!("unsupported bits_per_sample: {other}"),
+        other => bail!(Unsupported, "unsupported bits_per_sample: {other}"),
     }
     Ok(DisplayMap::of(frame, None).expect("8- and 16-bit frames have a fixed map"))
 }
@@ -979,10 +1022,10 @@ fn deinterleave_u8(native: &[u8], spp: usize, out: &mut [Vec<u8>]) -> Result<()>
     }
     let need = n
         .checked_mul(spp)
-        .ok_or_else(|| anyhow!("frame size overflows"))?;
+        .context(ErrorKind::TooLarge, "frame size overflows")?;
     let src = native
         .get(..need)
-        .ok_or_else(|| anyhow!("plane data out of file bounds"))?;
+        .context(ErrorKind::Malformed, "plane data out of file bounds")?;
 
     #[cfg(target_arch = "x86_64")]
     if spp == 3 && out.len() >= 3 && std::arch::is_x86_feature_detected!("ssse3") {
@@ -1083,6 +1126,7 @@ fn plane_u8_from_native(
 ) -> Result<()> {
     if frame.bits_per_sample != 8 {
         bail!(
+            InvalidInput,
             "read_plane_u8 requires 8-bit samples, got {}",
             frame.bits_per_sample
         );
@@ -1108,10 +1152,10 @@ fn gather_u8(native: &[u8], base: usize, stride: usize, out: &mut [u8]) -> Resul
     if stride == 1 {
         let end = base
             .checked_add(out.len())
-            .ok_or_else(|| anyhow!("plane offset overflows"))?;
+            .context(ErrorKind::TooLarge, "plane offset overflows")?;
         let src = native
             .get(base..end)
-            .ok_or_else(|| anyhow!("plane data out of bounds"))?;
+            .context(ErrorKind::Malformed, "plane data out of bounds")?;
         out.copy_from_slice(src);
         return Ok(());
     }
@@ -1120,10 +1164,10 @@ fn gather_u8(native: &[u8], base: usize, stride: usize, out: &mut [u8]) -> Resul
     let end = (out.len() - 1)
         .checked_mul(stride)
         .and_then(|n| n.checked_add(base + 1))
-        .ok_or_else(|| anyhow!("plane offset overflows"))?;
+        .context(ErrorKind::TooLarge, "plane offset overflows")?;
     let src = native
         .get(base..end)
-        .ok_or_else(|| anyhow!("plane data out of bounds"))?;
+        .context(ErrorKind::Malformed, "plane data out of bounds")?;
     for (o, &b) in out.iter_mut().zip(src.iter().step_by(stride)) {
         *o = b;
     }
@@ -1163,7 +1207,7 @@ pub fn read_frame_f32<'a>(
         let len_bytes = n_pixels * 4;
         let slice = mmap
             .get(offset..offset + len_bytes)
-            .ok_or_else(|| anyhow!("strip data out of file bounds"))?;
+            .context(ErrorKind::Malformed, "strip data out of file bounds")?;
         if let Ok(samples) = bytemuck::try_cast_slice::<u8, f32>(slice) {
             return Ok(Cow::Borrowed(samples));
         }
@@ -1294,11 +1338,12 @@ pub fn read_planes_f32_into(
 fn require_f32_samples(frame: &FrameInfo, method: &str) -> Result<()> {
     match (frame.bits_per_sample, frame.sample_format) {
         (8 | 16, SampleFormat::Float) => bail!(
+            Unsupported,
             "{method} does not read {}-bit floating-point samples",
             frame.bits_per_sample
         ),
         (8 | 16 | 32 | 64, _) => Ok(()),
-        (other, _) => bail!("{method} cannot read {other}-bit samples"),
+        (other, _) => bail!(Unsupported, "{method} cannot read {other}-bit samples"),
     }
 }
 
@@ -1598,7 +1643,7 @@ fn decode_native_bytes_opt<'a>(
         let offset = frame.strip_offsets[0] as usize;
         let slice = mmap
             .get(offset..offset + total_len)
-            .ok_or_else(|| anyhow!("strip data out of file bounds"))?;
+            .context(ErrorKind::Malformed, "strip data out of file bounds")?;
         return if undo_pred && frame.predictor != 1 {
             // Predictor undo mutates in place, so it needs an owned copy.
             Ok(Cow::Owned(undo_predictor(
@@ -1623,7 +1668,8 @@ fn decode_native_bytes_opt<'a>(
     guard_frame_size(frame)?;
     let mut native: Vec<u8> = Vec::new();
     native.try_reserve_exact(total_len).map_err(|_| {
-        anyhow!(
+        err!(
+            TooLarge,
             "cannot allocate {total_len} bytes for a {}x{} frame",
             frame.width,
             frame.height
@@ -1655,7 +1701,9 @@ fn decode_native_bytes_opt<'a>(
         && should_parallelize(n_pixels);
     let strip_src = |offset: u64, len: u64| -> Result<&[u8]> {
         mmap.get(offset as usize..(offset + len) as usize)
-            .ok_or_else(|| anyhow!("strip at offset {offset} (len {len}) out of file bounds"))
+            .with_context(ErrorKind::Malformed, || {
+                format!("strip at offset {offset} (len {len}) out of file bounds")
+            })
     };
     // Undo the predictor per strip, right here, rather than in a second pass
     // over the assembled frame: the strip's rows are still in cache from the
@@ -1695,6 +1743,7 @@ fn decode_native_bytes_opt<'a>(
 
     if written < total_len {
         bail!(
+            Malformed,
             "decoded {} bytes but expected {} for a {}x{} frame ({} bytes/sample) — \
              strip data is shorter than the declared image size",
             written,
@@ -1736,9 +1785,10 @@ fn assemble_tiles(
 ) -> Result<Vec<u8>> {
     let sample_bytes = bytes_for_bits(frame.bits_per_sample)?;
     let total_len = frame.decoded_len()?;
-    let (across, down, tile_w, tile_h) = frame
-        .tile_grid()
-        .ok_or_else(|| anyhow!("assemble_tiles called on a stripped frame"))?;
+    let (across, down, tile_w, tile_h) = frame.tile_grid().context(
+        ErrorKind::Internal,
+        "assemble_tiles called on a stripped frame",
+    )?;
 
     let spp = (frame.samples_per_pixel as usize).max(1);
     let planar = frame.is_planar();
@@ -1756,6 +1806,7 @@ fn assemble_tiles(
     let plane_bytes = dst_row_bytes.saturating_mul(frame.height as usize);
     if tile_bytes == 0 || plane_bytes == 0 {
         bail!(
+            Malformed,
             "degenerate tile geometry: {tile_w}x{tile_h} tiles in a {}x{} frame",
             frame.width,
             frame.height
@@ -1766,6 +1817,7 @@ fn assemble_tiles(
     let want = frame.piece_count();
     if frame.strip_offsets.len() < want || frame.strip_byte_counts.len() < want {
         bail!(
+            Malformed,
             "tile table has {} offsets / {} byte counts, need {want} for {across}x{down} tiles              across {n_planes} plane(s)",
             frame.strip_offsets.len(),
             frame.strip_byte_counts.len()
@@ -1786,16 +1838,19 @@ fn assemble_tiles(
     padded.tile_size = None;
     padded.rows_per_strip = tile_h;
     guard_frame_size(&padded).map_err(|e| {
-        anyhow!(
-            "{tile_w}x{tile_h} tiles over a {}x{} frame: {e}",
-            frame.width,
-            frame.height
+        Error::new(
+            e.kind(),
+            format!(
+                "{tile_w}x{tile_h} tiles over a {}x{} frame: {e}",
+                frame.width, frame.height
+            ),
         )
     })?;
 
     let mut native: Vec<u8> = Vec::new();
     native.try_reserve_exact(total_len).map_err(|_| {
-        anyhow!(
+        err!(
+            TooLarge,
             "cannot allocate {total_len} bytes for a {}x{} frame",
             frame.width,
             frame.height
@@ -1827,7 +1882,10 @@ fn assemble_tiles(
             // no, and an abort cannot be caught by an embedder.
             let mut scratch: Vec<u8> = Vec::new();
             scratch.try_reserve_exact(tile_bytes).map_err(|_| {
-                anyhow!("cannot allocate {tile_bytes} bytes for a {tile_w}x{tile_h} tile")
+                err!(
+                    TooLarge,
+                    "cannot allocate {tile_bytes} bytes for a {tile_w}x{tile_h} tile"
+                )
             })?;
             scratch.resize(tile_bytes, 0);
             for tx in 0..across as usize {
@@ -1835,14 +1893,17 @@ fn assemble_tiles(
                 let (offset, len) = (frame.strip_offsets[index], frame.strip_byte_counts[index]);
                 let src = mmap
                     .get(offset as usize..(offset as usize).saturating_add(len as usize))
-                    .ok_or_else(|| {
-                        anyhow!("tile {index} at offset {offset} (len {len}) out of file bounds")
+                    .with_context(ErrorKind::Malformed, || {
+                        format!("tile {index} at offset {offset} (len {len}) out of file bounds")
                     })?;
                 // Zero first: a tile whose data runs short leaves the rest of
                 // its rectangle blank rather than showing the previous tile.
                 scratch.fill(0);
                 if decompress_into(src, compression, &mut scratch)? == 0 {
-                    bail!("tile {index} decoded to nothing ({len} bytes at offset {offset})");
+                    bail!(
+                        Malformed,
+                        "tile {index} decoded to nothing ({len} bytes at offset {offset})"
+                    );
                 }
                 let tile = if undo_pred && frame.predictor != 1 {
                     Cow::Owned(undo_predictor(
@@ -1921,7 +1982,7 @@ fn inflate_into(raw: &[u8], dest: &mut [u8]) -> Result<usize> {
                     &mut dest[written..],
                     flate2::FlushDecompress::Finish,
                 )
-                .map_err(|e| anyhow!("Deflate decode failed: {e}"))?;
+                .map_err(|e| err!(Malformed, "Deflate decode failed: {e}"))?;
             written = d.total_out() as usize;
             if status == flate2::Status::StreamEnd {
                 break;
@@ -1956,8 +2017,8 @@ fn zstd_into(raw: &[u8], dest: &mut [u8]) -> Result<usize> {
             // than never taking the fast path.
             Err(_) => {
                 let dec = zstd::stream::read::Decoder::new(raw)
-                    .map_err(|e| anyhow!("ZSTD decode failed: {e}"))?;
-                read_all_into(dec, dest).map_err(|e| anyhow!("ZSTD decode failed: {e}"))
+                    .map_err(|e| err!(Malformed, "ZSTD decode failed: {e}"))?;
+                read_all_into(dec, dest).map_err(|e| err!(Malformed, "ZSTD decode failed: {e}"))
             }
         }
     })
@@ -1999,7 +2060,7 @@ fn decompress_into(raw: &[u8], compression: Compression, dest: &mut [u8]) -> Res
                         }
                     }
                     Ok(weezl::LzwStatus::NoProgress) => break, // input exhausted early
-                    Err(e) => return Err(anyhow!("LZW decode failed: {e:?}")),
+                    Err(e) => bail!(Malformed, "LZW decode failed: {e:?}"),
                 }
             }
             Ok(out_pos)
@@ -2014,10 +2075,13 @@ fn decompress_into(raw: &[u8], compression: Compression, dest: &mut [u8]) -> Res
         // fails in the browser.
         #[cfg(not(feature = "codec-zstd"))]
         Compression::Zstd => bail!(
+            Unavailable,
             "this frame uses ZSTD compression, but the `codec-zstd` feature is off \
              (it needs a C toolchain, so it is unavailable on wasm)"
         ),
-        Compression::Other(code) => bail!("unsupported TIFF compression scheme: {code}"),
+        Compression::Other(code) => {
+            bail!(Unsupported, "unsupported TIFF compression scheme: {code}")
+        }
     }
 }
 
@@ -2249,11 +2313,15 @@ fn undo_predictor_in_place(
             }
         }
         (3, 4) | (3, 8) => undo_float_predictor(data, row_bytes, stride, sample_bytes, file_order),
-        (2, other) => bail!("predictor 2 undo not implemented for {other}-byte samples"),
-        (3, other) => {
-            bail!("floating-point predictor requires 32- or 64-bit samples, got {other}-byte")
-        }
-        (other, _) => bail!("unsupported TIFF predictor: {other}"),
+        (2, other) => bail!(
+            Unsupported,
+            "predictor 2 undo not implemented for {other}-byte samples"
+        ),
+        (3, other) => bail!(
+            Unsupported,
+            "floating-point predictor requires 32- or 64-bit samples, got {other}-byte"
+        ),
+        (other, _) => bail!(Unsupported, "unsupported TIFF predictor: {other}"),
     }
     Ok(())
 }
@@ -2432,6 +2500,7 @@ fn require_cmyk(frame: &FrameInfo, method: &str) -> Result<()> {
         return Ok(());
     }
     bail!(
+        InvalidInput,
         "{method} requires a CMYK frame (PhotometricInterpretation=5, InkSet=1, 4+ unsigned \
          8- or 16-bit samples); this frame is photometric={}, ink_set={}, {} sample(s)/px, \
          {}-bit {:?}",
@@ -2457,11 +2526,16 @@ type InkPlanes<'a, T> = (&'a [T], &'a [T], &'a [T], &'a [T]);
 /// a denial of service for anyone embedding this.
 fn four_inks<'a, T>(planes: &'a [Vec<T>], method: &str) -> Result<InkPlanes<'a, T>> {
     if planes.len() < 4 {
-        bail!("{method}: expected 4 ink planes, decoded {}", planes.len());
+        bail!(
+            Internal,
+            "{method}: expected 4 ink planes, decoded {}",
+            planes.len()
+        );
     }
     let n = planes[0].len();
     if let Some(bad) = planes[..4].iter().position(|p| p.len() != n) {
         bail!(
+            Internal,
             "{method}: ink planes disagree on length (plane 0 has {n}, plane {bad} has {})",
             planes[bad].len()
         );

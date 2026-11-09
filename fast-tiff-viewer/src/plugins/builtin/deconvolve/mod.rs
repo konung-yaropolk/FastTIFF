@@ -148,7 +148,7 @@ pub(crate) fn load_psf(path: &str) -> Result<Psf, PluginError> {
     let mut slice = Vec::new();
     for (i, frame) in tiff.frames.iter().enumerate() {
         fast_tiff_lib::read_plane_f32_into(&tiff.data, frame, tiff.byte_order, 0, &mut slice)
-            .map_err(|e: anyhow::Error| {
+            .map_err(|e| {
                 PluginError::failed(format!("decoding slice {} of the PSF: {e:#}", i + 1))
             })?;
         data.extend_from_slice(&slice);

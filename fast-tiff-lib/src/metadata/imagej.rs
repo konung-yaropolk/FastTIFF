@@ -32,8 +32,8 @@ use super::{
     default_lut_for, resolution_to_pixel, ChannelDisplay, DisplayMode, MetadataFormat, StackMeta,
     StackMetaWrite,
 };
+use crate::error::Result;
 use crate::ifd::ByteOrder;
-use anyhow::Result;
 use std::collections::HashMap;
 
 /// Decode Java-style `\uXXXX` escapes that ImageJ writes into text fields for
