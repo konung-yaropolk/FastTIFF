@@ -119,7 +119,7 @@ impl super::ViewerApp {
         // A rectangle is drawn on the picture. An animation running in 3D
         // stops on its own when the view leaves it.
         self.core.view_mode = fast_tiff_viewer::ViewMode::Movie;
-        self.region_pick = Some(RegionPick {
+        self.tools.region_pick = Some(RegionPick {
             plugin,
             params,
             name: name.to_string(),
@@ -132,13 +132,13 @@ impl super::ViewerApp {
     /// Enter and Escape while a rectangle is being drawn, and giving up when
     /// the picture it is drawn on goes away. Called once a frame.
     pub(super) fn tick_region_pick(&mut self, ctx: &egui::Context) {
-        let Some(pick) = self.region_pick.as_ref() else {
+        let Some(pick) = self.tools.region_pick.as_ref() else {
             return;
         };
         let name = pick.name.clone();
         if self.core.document.is_none() || self.core.view_mode != fast_tiff_viewer::ViewMode::Movie
         {
-            self.region_pick = None;
+            self.tools.region_pick = None;
             self.core.status = Some(format!("{name}: cancelled"));
             return;
         }
@@ -153,7 +153,7 @@ impl super::ViewerApp {
             )
         });
         if escape {
-            self.region_pick = None;
+            self.tools.region_pick = None;
             self.core.status = Some(format!("{name}: cancelled"));
         } else if enter {
             let Some(roi) = pick.roi else {
@@ -168,7 +168,7 @@ impl super::ViewerApp {
                 self.core.status = Some(self.busy_message());
                 return;
             }
-            let pick = self.region_pick.take().expect("checked above");
+            let pick = self.tools.region_pick.take().expect("checked above");
             self.picked = Some((pick.plugin, vec![roi]));
             self.run_plugin(pick.plugin, pick.params);
         }

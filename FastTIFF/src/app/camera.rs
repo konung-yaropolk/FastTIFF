@@ -30,14 +30,15 @@ impl ViewerApp {
         // opened in 2D, or set up while the view was elsewhere, moved nothing
         // the user was watching.
         if self
-            .volume_last_camera
+            .volume_ui
+            .last_camera
             .is_some_and(|(last, at)| frame <= at + 1 && !last.same_pose(&mark))
         {
-            self.volume_moved_at = Some(now);
+            self.volume_ui.moved_at = Some(now);
         }
-        self.volume_last_camera = Some((mark, frame));
-        let since = self.volume_moved_at.map(|t| now - t);
-        self.core.volume.downscale = downscale_after(since, self.moving_downscale);
+        self.volume_ui.last_camera = Some((mark, frame));
+        let since = self.volume_ui.moved_at.map(|t| now - t);
+        self.core.volume.downscale = downscale_after(since, self.volume_ui.prefs.moving_downscale);
         if let Some(s) = since.filter(|_| self.core.volume.downscale > 1) {
             // The sharp frame is due when the settle time runs out, input or
             // not.
@@ -63,7 +64,10 @@ impl ViewerApp {
         let pan_speed = self.core.volume.cam.pan_speed(panel_rect.height());
         let (_, right, up) = self.core.volume.cam.basis();
         // Snapshot the speed preferences before borrowing the camera mutably.
-        let (move_speed, scroll_speed) = (self.move_speed, self.scroll_speed);
+        let (move_speed, scroll_speed) = (
+            self.volume_ui.prefs.move_speed,
+            self.volume_ui.prefs.scroll_speed,
+        );
 
         // Keyboard + wheel (wheel only while the pointer is over the canvas).
         let (alt, shift, wheel, wasd, space, arrows) = ui.input(|i| {

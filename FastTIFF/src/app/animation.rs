@@ -738,7 +738,10 @@ impl super::ViewerApp {
     /// Whether the plugin at `index` has an animation running — what its
     /// dialog's Play/Stop button reads.
     pub(super) fn animating_for(&self, index: usize) -> bool {
-        self.animation.as_ref().is_some_and(|a| a.plugin == index)
+        self.animation
+            .running
+            .as_ref()
+            .is_some_and(|a| a.plugin == index)
     }
 
     /// Carry out an animation the plugin at `plugin` (called `name`) returned.
@@ -758,7 +761,7 @@ impl super::ViewerApp {
         }
         // Playing needs nothing the writer has; a second recording would
         // need the slot the first one's file is still being finished in.
-        if self.animation_saving.is_some() && !matches!(animation.output, AnimationOutput::Play) {
+        if self.animation.saving.is_some() && !matches!(animation.output, AnimationOutput::Play) {
             self.core.status = Some(format!("{name}: the last animation is still being written"));
             return;
         }
@@ -790,7 +793,7 @@ impl super::ViewerApp {
         };
         // One view, one motion: whatever was running gives way, and puts the
         // view back first so the new one starts from what the user set up.
-        if let Some(previous) = self.animation.take() {
+        if let Some(previous) = self.animation.running.take() {
             self.end_animation(previous, Ended::Replaced);
         }
         let saving = recording.is_some();
@@ -811,7 +814,7 @@ impl super::ViewerApp {
             };
             (dest, sink)
         });
-        self.animation = Some(Running::new(
+        self.animation.running = Some(Running::new(
             plugin,
             animation,
             &self.core.volume.cam,
@@ -828,7 +831,7 @@ impl super::ViewerApp {
     /// plugin's is not its to stop.
     pub(super) fn stop_animation_of(&mut self, plugin: usize) {
         if self.animating_for(plugin) {
-            let run = self.animation.take().expect("checked above");
+            let run = self.animation.running.take().expect("checked above");
             self.end_animation(run, Ended::Asked);
         }
     }
@@ -849,11 +852,11 @@ impl super::ViewerApp {
     /// view is drawn, so the pose it sets is the one this frame shows.
     pub(super) fn tick_animation(&mut self, ctx: &egui::Context) {
         // A save whose frames are all in, finishing.
-        if let Some(saving) = self.animation_saving.as_mut() {
+        if let Some(saving) = self.animation.saving.as_mut() {
             match saving.poll() {
                 Some(result) => {
                     let dest = saving.dest.name();
-                    self.animation_saving = None;
+                    self.animation.saving = None;
                     match result {
                         Ok(n) => self.report_done(format!("Saved a {n}-frame animation: {dest}")),
                         Err(why) => {
@@ -868,28 +871,29 @@ impl super::ViewerApp {
         // whether or not a recording still wants it, so one that ended while
         // its last frame was on the way does not hold up the next.
         let (shot, max_side) = {
-            let mut shot = self.volume_capture.failed.take().map(Err);
+            let mut shot = self.animation.capture.failed.take().map(Err);
             let mut max_side = MOVIE_MAX_SIDE;
             if let Ok(mut resources) = self.render.lock() {
-                if self.volume_capture.in_flight && shot.is_none() {
+                if self.animation.capture.in_flight && shot.is_none() {
                     shot = resources.take_volume_capture();
                 }
                 max_side = max_side.min(resources.max_2d_texture_size());
             }
             if shot.is_some() {
-                self.volume_capture.in_flight = false;
+                self.animation.capture.in_flight = false;
             }
             (shot, max_side)
         };
 
-        let pressed = std::mem::take(&mut self.volume_pressed);
-        let Some(run) = self.animation.as_mut() else {
+        let pressed = std::mem::take(&mut self.volume_ui.pressed);
+        let Some(run) = self.animation.running.as_mut() else {
             return;
         };
-        let ready =
-            self.core.volume_built() && !self.core.volume_building() && self.volume_rect.is_some();
+        let ready = self.core.volume_built()
+            && !self.core.volume_building()
+            && self.volume_ui.rect.is_some();
         let ppp = ctx.pixels_per_point();
-        let movie = match (self.volume_rect, self.core.document.as_ref()) {
+        let movie = match (self.volume_ui.rect, self.core.document.as_ref()) {
             (Some(rect), Some(stack)) => {
                 let (w, h) = stack.dimensions().unwrap_or((1, 1));
                 // At window resolution the movie is the view's own size,
@@ -915,7 +919,7 @@ impl super::ViewerApp {
             pressed,
             ready,
             movie_size: movie,
-            capture_busy: self.volume_capture.in_flight,
+            capture_busy: self.animation.capture.in_flight,
             shot,
         };
         match run.step(frame) {
@@ -927,7 +931,7 @@ impl super::ViewerApp {
                 self.core.volume.pose = Some(pose);
                 // Rendered once this frame's pose has reached the GPU: see
                 // `capture_animation_frame`.
-                self.volume_capture.request = capture;
+                self.animation.capture.request = capture;
                 if let Some(rec) = &run.recording {
                     let size = rec
                         .size
@@ -946,21 +950,36 @@ impl super::ViewerApp {
                 }
             }
             Step::End(why) => {
-                let run = self.animation.take().expect("running");
+                let run = self.animation.running.take().expect("running");
                 self.end_animation(run, why);
             }
             Step::Recorded => {
-                let run = self.animation.take().expect("running");
+                let run = self.animation.running.take().expect("running");
                 self.core.volume.pose = None;
                 let rec = run.recording.expect("a recording");
                 let dest = rec.dest.clone();
                 self.core.status = Some(format!("Writing animation: {}", dest.name()));
-                self.animation_saving = Some(rec.frames.finish(dest));
+                self.animation.saving = Some(rec.frames.finish(dest));
                 self.requery_dialog_of(run.plugin);
                 ctx.request_repaint();
             }
         }
     }
+}
+
+/// The app's animation state: what is running, what is being written, and the
+/// off-screen render between the two.
+///
+/// Not reset when a document lands: an animation is of the 3D view rather than
+/// of a file, and ends by its own rules (see [`Ended`]).
+#[derive(Default)]
+pub(super) struct Animations {
+    /// A plugin's animation of the 3D view, playing or being recorded.
+    pub(super) running: Option<Running>,
+    /// A recorded animation whose frames are all in, being written.
+    pub(super) saving: Option<Saving>,
+    /// The off-screen render of a pose a recording asked for.
+    pub(super) capture: VolumeCapture,
 }
 
 /// The off-screen render a recording has asked for, and the one it is
@@ -981,12 +1000,12 @@ impl super::ViewerApp {
     /// renderer just brought up to date with this frame, so the pose rendered
     /// is the one the view shows.
     pub(super) fn capture_animation_frame(&mut self, resources: &mut fast_tiff_viewer::Renderer) {
-        let Some((w, h)) = self.volume_capture.request.take() else {
+        let Some((w, h)) = self.animation.capture.request.take() else {
             return;
         };
         match resources.capture_volume(w, h) {
-            Ok(()) => self.volume_capture.in_flight = true,
-            Err(why) => self.volume_capture.failed = Some(why),
+            Ok(()) => self.animation.capture.in_flight = true,
+            Err(why) => self.animation.capture.failed = Some(why),
         }
     }
 }

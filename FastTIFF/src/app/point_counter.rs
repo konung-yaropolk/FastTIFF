@@ -501,9 +501,9 @@ impl super::ViewerApp {
         // Points are placed on the picture. An animation running in 3D stops
         // on its own when the view leaves it.
         self.core.view_mode = fast_tiff_viewer::ViewMode::Movie;
-        if self.point_counter.is_none() {
+        if self.tools.point_counter.is_none() {
             let loaded = loaded_message(stack);
-            self.point_counter = Some(Session::for_stack(stack));
+            self.tools.point_counter = Some(Session::for_stack(stack));
             if let Some(message) = loaded {
                 self.report_done(message);
             }
@@ -515,18 +515,18 @@ impl super::ViewerApp {
     /// Draw the counter's window while it is open, and act on its buttons.
     /// Called once a frame.
     pub(super) fn poll_point_counter(&mut self, ctx: &egui::Context) {
-        let Some(tool) = self.point_counter.as_mut() else {
+        let Some(tool) = self.tools.point_counter.as_mut() else {
             return;
         };
         // The points were placed on a picture that is no longer there.
         let Some(stack) = self.core.document.as_ref() else {
-            self.point_counter = None;
+            self.tools.point_counter = None;
             return;
         };
         let imagej_reads_overlay = fast_tiff_viewer::save::overlay_readable_by_imagej(stack);
         match counter_window(ctx, tool, stack.display.dims().frames, imagej_reads_overlay) {
             CounterAction::None => {}
-            CounterAction::Close => self.point_counter = None,
+            CounterAction::Close => self.tools.point_counter = None,
             CounterAction::SaveRois => self.save_point_rois(),
             CounterAction::AddToTiff => self.add_points_to_overlay(),
         }
@@ -537,7 +537,7 @@ impl super::ViewerApp {
     /// a hyperstack too — see [`PointCounter::rois_for`].
     fn point_rois(&self) -> Option<Vec<PointRoi>> {
         let stack = self.core.document.as_ref()?;
-        let tool = self.point_counter.as_ref()?;
+        let tool = self.tools.point_counter.as_ref()?;
         Some(tool.counter.rois_for(stack))
     }
 

@@ -10,14 +10,23 @@
 //! The GPU is reached only through `crate::render`, the eframe adapter over
 //! `scivis-render`, so nothing here mentions glow or wgpu.
 //!
+//! A frame is `ViewerApp::draw`: the toolbar, the bottom bar, the windows and
+//! the canvas, each laid out by a method of its own. What their widgets ask for
+//! is queued as a `command::UiCommand` rather than done from inside egui's
+//! closures, and applied at the points of the frame `command` documents.
+//!
 //! Supporting clusters live in child modules (which share this module's
 //! privacy, so the split adds no `pub` surface beyond `pub(super)`):
 //!   * `animation` — a plugin's animation of the 3D view, played or recorded
 //!   * `camera`  — egui input → the core camera
+//!   * `canvas`  — the central panel: the picture, in 2D or 3D
+//!   * `command` — the interface's requests, and the order they take effect in
 //!   * `minimap` — the 2D navigator: where the view sits in the whole frame
 //!   * `overlay` — the 3D coordinate-box overlay, drawn with the egui painter
 //!   * `point_counter` — clicking points onto the picture, counted in groups
 //!   * `scale`   — how large the chrome is drawn (the web build runs bigger)
+//!   * `scrub_bar` — the bottom bar: playback, channels, contrast, status
+//!   * `toolbar` — the top bar: open, save, copy, plugins, 2D/3D
 //!   * `widgets` — the contrast range slider + value formatting
 //!   * `windows` — the render-settings, metadata and histogram pop-ups
 
@@ -42,7 +51,9 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 mod animation;
 mod autoscroll;
 mod camera;
+mod canvas;
 mod clipboard;
+mod command;
 mod copy_view;
 mod dialog;
 mod kinetic;
@@ -57,12 +68,19 @@ mod point_counter;
 mod region_pick;
 mod scale;
 mod scroll;
+mod scrub_bar;
+mod toolbar;
 mod widgets;
 mod windows;
 
+use command::{Applying, Commands, Step, UiCommand, Via, FRAME};
+// Named in the docs of this module and of its children, which link to the
+// phases; the code goes by `FRAME` and never names one.
+#[cfg(doc)]
+use command::Phase;
 use scale::UI_SCALE;
 use widgets::{contrast_controls, histogram_button, ContrastLayout};
-use windows::{histogram_window, metadata_window, render_settings_window, Resident};
+use windows::{WindowId, Windows};
 
 /// Install the chrome defaults both hosts share, before the first frame.
 ///
@@ -86,6 +104,11 @@ pub fn install_chrome(ctx: &egui::Context) {
 fn tint_color(tint: Option<[u8; 3]>) -> Option<Color32> {
     tint.map(|[r, g, b]| Color32::from_rgb(r, g, b))
 }
+
+/// Whether this is the browser build. Where an answer differs there, the
+/// platform is handed to whatever gives it as this value rather than tested
+/// with `cfg!` in place, so that both answers are tested on either build.
+const WEB: bool = cfg!(target_arch = "wasm32");
 
 /// Discrete zoom levels the viewer snaps to (3.1% … 3200%). Zooming in/out
 /// steps between adjacent levels. Above 100% the levels are mostly whole-number
@@ -990,6 +1013,44 @@ struct View2d {
 }
 
 impl View2d {
+    /// Forget the picture that was open, now that another has landed.
+    ///
+    /// Everything goes back to [`Default`] but the fields named here, so a
+    /// field added to the view is reset unless someone decides it should not
+    /// be. What that drops, and why it has to:
+    ///
+    /// * the zoom and pan: the new picture starts at 1:1, and on native the
+    ///   next frame computes a fit-to-screen zoom and sizes the window once (on
+    ///   the web `pending_initial_fit` is consumed by the canvas layout
+    ///   instead); the fit factor belongs to the last picture;
+    /// * `was_pannable`: a new file starts with no history of overflowing, or
+    ///   the navigator would draw on its first frame from the previous file's
+    ///   answer;
+    /// * `pan_glide`: momentum from the last picture means nothing in this one;
+    /// * `autoscroll` and `minimap_drag`: positions on screen tied to a
+    ///   transform that has just been reset. An autoscroll anchor would park
+    ///   the new picture's neutral point wherever the last click happened to
+    ///   land, and a navigator drag would carry on moving a view of an image
+    ///   that is no longer open;
+    /// * `zoom_glide`: a glide belongs to the picture that was on screen, and
+    ///   carrying one into a new file would slide the fresh image away from the
+    ///   zoom it just opened at; `resize_to_zoom` with it.
+    fn reset(&mut self) {
+        *self = View2d {
+            // The opening fit, still to come.
+            pending_initial_fit: true,
+            // Kept: the last layout's geometry, which the next frame lays out
+            // afresh; a zoom reposition, which a zoom step sets and the same
+            // frame's window sizing takes (natively — the browser never reads
+            // it); and wheel travel short of one frame.
+            image_origin: self.image_origin,
+            panel_rect: self.panel_rect,
+            zoom_reposition: self.zoom_reposition,
+            scroll_accum: self.scroll_accum,
+            ..View2d::default()
+        };
+    }
+
     /// The zoom the picture is heading for: the glide's target while one is in
     /// flight, otherwise what is on screen.
     ///
@@ -1101,6 +1162,15 @@ struct PanelLayout {
 }
 
 impl PanelLayout {
+    /// Start over for a new document. The panel is sized and populated for the
+    /// previous file's channel count, so it is rebuilt wholesale. That also
+    /// disarms a toggle caught in flight, whose remembered height belongs to a
+    /// layout that no longer exists and would resize the window by a stale
+    /// delta.
+    fn reset(&mut self) {
+        *self = PanelLayout::default();
+    }
+
     /// Note what the bottom bar's info row just drew, and arm a window grow if
     /// it changed the bar's height.
     ///
@@ -1211,22 +1281,16 @@ pub struct ViewerApp {
     /// [`plugins`](Self::plugins) `None` — the worker has the registry and
     /// gives it back with the result.
     job: Option<Job>,
-    /// The plot a plugin returned, while one is on screen.
-    ///
-    /// It owns the canvas selection too: the regions belong to the plot they
-    /// feed, so closing the window takes the tool away with it rather than
-    /// leaving a selection behind that nothing is measuring.
-    plot: Option<plot::PlotWindow>,
-    /// A rectangle being drawn because a plugin asked for one. See
-    /// [`region_pick`].
-    region_pick: Option<region_pick::RegionPick>,
+    /// The canvas tools: a plot's regions, a rectangle a plugin asked for, the
+    /// point counter.
+    tools: Tools,
     /// The rectangle a plugin asked for, drawn and confirmed, waiting for the
     /// run it is the selection of: which plugin, and the regions.
+    ///
+    /// A run's input rather than one of the [`Tools`], and not reset with
+    /// them: it is set only as it is handed to [`run_plugin`](Self::run_plugin),
+    /// which takes it.
     picked: Option<(usize, Vec<fasttiff_plugin_api::Roi>)>,
-    /// The point counter, while its window is open. Like the plot's regions,
-    /// the points belong to the window: closing it takes them, and their
-    /// marks, away. See [`point_counter`].
-    point_counter: Option<point_counter::Session>,
 
     // --- window chrome ------------------------------------------------------
     /// The window title last sent via `ViewportCommand::Title`. Native only —
@@ -1247,65 +1311,113 @@ pub struct ViewerApp {
     /// Comparing the text means the colour can only ever apply to the message it
     /// was set for.
     good_status: Option<String>,
-    /// Whether the file-metadata pop-up window is open.
-    show_metadata: bool,
-    /// Whether the 3D render-settings pop-up is open.
-    show_render_settings: bool,
-    /// Whether the channel-histogram pop-up is open.
-    show_histogram: bool,
-    /// Plot log(1 + count) in the histogram. A preference, so it outlives both
-    /// the window being closed and the file being changed.
-    ///
-    /// On by default. A 16-bit microscopy frame is mostly background sitting in
-    /// the bottom percent of a 0..65535 track, so a linear plot is one spike at
-    /// the left edge and a flat line — which reads as a broken widget rather
-    /// than as data. Log shows the distribution that is actually there; the
-    /// checkbox is right under the plot for anyone who wants true counts.
-    hist_log: bool,
+    /// The pop-up windows — metadata, histogram, render settings — and which
+    /// are open.
+    windows: Windows,
+    /// The 3D view's preferences, and what the frames between need to
+    /// remember about it.
+    volume_ui: VolumeUi,
+    /// A plugin's animation of the 3D view, playing or being recorded. See
+    /// [`animation`].
+    animation: animation::Animations,
+}
 
-    // --- 3D input preferences (persist across files) ------------------------
+/// The canvas tools, each while it is in use.
+///
+/// Each one's marks are positions in the picture it was used on, so a new
+/// document takes them away (see [`reset`](Self::reset)).
+#[derive(Default)]
+struct Tools {
+    /// The plot a plugin returned, while one is on screen.
+    ///
+    /// It owns the canvas selection too: the regions belong to the plot they
+    /// feed, so closing the window takes the tool away with it rather than
+    /// leaving a selection behind that nothing is measuring.
+    plot: Option<plot::PlotWindow>,
+    /// A rectangle being drawn because a plugin asked for one. See
+    /// [`region_pick`].
+    region_pick: Option<region_pick::RegionPick>,
+    /// The point counter, while its window is open. Like the plot's regions,
+    /// the points belong to the window: closing it takes them, and their
+    /// marks, away. See [`point_counter`].
+    point_counter: Option<point_counter::Session>,
+}
+
+impl Tools {
+    /// Put the tools away, now that another document has landed.
+    fn reset(&mut self) {
+        // A plot of the last picture. The regions are in pixels of the picture
+        // they were drawn on; carrying them to a different image would put them
+        // somewhere arbitrary and go on measuring, which is worse than losing
+        // them.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.plot = None;
+        }
+        // A rectangle being drawn for a plugin was drawn on the last picture.
+        self.region_pick = None;
+        // And so were the counted points: they are positions in that picture,
+        // and counting on into this one would mix two images in one table.
+        self.point_counter = None;
+    }
+}
+
+/// The user's 3D input preferences. Edited in the render-settings window, and
+/// kept across files.
+struct VolumePrefs {
     /// Overlay: draw the volume's bounding box with x/y/z coordinate ticks.
     show_coord_box: bool,
     /// User-adjustable 3D navigation speeds (multipliers on the built-in base
-    /// rates), edited in the render-settings window. `move_speed` scales WASD /
-    /// Space / Shift translation; `scroll_speed` scales the mouse-wheel fly.
+    /// rates). `move_speed` scales WASD / Space / Shift translation;
+    /// `scroll_speed` scales the mouse-wheel fly.
     move_speed: f32,
     scroll_speed: f32,
     /// How many times smaller, per axis, the 3D view renders while the user
-    /// moves it: 1 (full), 2 or 4. Set in the render-settings window.
+    /// moves it: 1 (full), 2 or 4.
     moving_downscale: u32,
+}
 
-    // --- copying the view ---------------------------------------------------
+impl Default for VolumePrefs {
+    fn default() -> Self {
+        VolumePrefs {
+            show_coord_box: false,
+            move_speed: 1.0,
+            scroll_speed: 1.0,
+            moving_downscale: render::MOVING_DOWNSCALE,
+        }
+    }
+}
+
+/// The 3D view's side of the frontend: the user's preferences for it, and
+/// what one frame leaves for the next about it.
+///
+/// Nothing here is reset when a document lands: the preferences are the
+/// user's, and the rest describes the panel and the camera, which are still
+/// there.
+#[derive(Default)]
+struct VolumeUi {
+    prefs: VolumePrefs,
     /// The 3-D panel's rect, recorded as it is painted.
     ///
     /// Copying the 3-D view is a screenshot of the window cropped to this, and
     /// the crop happens a frame or more after the request — so the rect has to
     /// be remembered rather than asked for at crop time, when the panel may not
     /// be being laid out at all.
-    volume_rect: Option<egui::Rect>,
+    rect: Option<egui::Rect>,
     /// Set when a screenshot has been asked for in order to copy the 3-D view,
     /// holding the rect to cut out of it. `None` when no copy is outstanding,
     /// which is also what keeps an unrelated screenshot from being copied.
     pending_copy: Option<egui::Rect>,
-
-    // --- animating the 3D view ----------------------------------------------
-    /// A plugin's animation of the 3D view, playing or being recorded. See
-    /// [`animation`].
-    animation: Option<animation::Running>,
-    /// A recorded animation whose frames are all in, being written.
-    animation_saving: Option<animation::Saving>,
-    /// The off-screen render of a pose a recording asked for.
-    volume_capture: animation::VolumeCapture,
     /// Set when the pointer is pressed on the 3D view, and taken by the next
     /// frame's animation step: grabbing a turning volume is how people stop
     /// it, whether or not the grab goes on to move anything.
-    volume_pressed: bool,
+    pressed: bool,
     /// The 3D camera as it was in the last 3D frame, and that frame's number
     /// (`cumulative_frame_nr`), to tell a frame that moved it.
-    volume_last_camera: Option<(animation::CameraMark, u64)>,
+    last_camera: Option<(animation::CameraMark, u64)>,
     /// When the user last moved the 3D view (the frontend clock, seconds).
     /// Until [`VOLUME_SETTLE_S`] after it, the view renders at reduced size.
-    volume_moved_at: Option<f64>,
+    moved_at: Option<f64>,
 }
 
 /// How long the 3D view stays at reduced resolution after the user last moved
@@ -1391,28 +1503,13 @@ impl ViewerApp {
             open_tx,
             open_rx,
             job: None,
-            plot: None,
-            region_pick: None,
+            tools: Tools::default(),
             picked: None,
-            point_counter: None,
             last_title: None,
             good_status: None,
-            show_metadata: false,
-            show_render_settings: false,
-            show_histogram: false,
-            hist_log: true,
-            show_coord_box: false,
-            move_speed: 1.0,
-            scroll_speed: 1.0,
-            moving_downscale: render::MOVING_DOWNSCALE,
-            volume_rect: None,
-            pending_copy: None,
-            animation: None,
-            animation_saving: None,
-            volume_capture: Default::default(),
-            volume_pressed: false,
-            volume_last_camera: None,
-            volume_moved_at: None,
+            windows: Windows::new(),
+            volume_ui: VolumeUi::default(),
+            animation: Default::default(),
         };
         app.claimed_extensions = app
             .plugins
@@ -1518,75 +1615,18 @@ impl ViewerApp {
 
     /// Reset everything that described the previous file, once a load has
     /// landed. The other half of [`apply_opened`](Self::apply_opened).
+    ///
+    /// Each part of the chrome resets itself: what it keeps and what it drops
+    /// is its own business, written down where its fields are.
     fn finish_open(&mut self) {
         self.document
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // Start at 1:1; on native the next frame computes a fit-to-screen zoom
-        // and sizes the window once. On the web `pending_initial_fit` is
-        // consumed by the canvas layout instead.
-        self.view.zoom = 1.0;
-        self.view.pan = egui::Vec2::ZERO;
-        self.view.pending_initial_fit = true;
-        self.view.fit_zoom = None;
-        // A new file starts with no history of overflowing, or the navigator
-        // would draw on its first frame from the previous file's answer.
-        self.view.was_pannable = false;
-        // Momentum from the last picture means nothing in this one.
-        self.view.pan_glide.stop();
-        // And neither does a gesture over it. Both of these are positions on
-        // screen tied to a transform that has just been reset: an autoscroll
-        // anchor would park the new picture's neutral point wherever the last
-        // click happened to land, and a navigator drag would carry on moving a
-        // view of an image that is no longer open.
-        self.view.autoscroll = None;
-        self.view.minimap_drag = false;
-        // And neither does a plot of it. The regions are in pixels of the
-        // picture they were drawn on; carrying them to a different image would
-        // put them somewhere arbitrary and go on measuring, which is worse than
-        // losing them.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.plot = None;
-        }
-        // A rectangle being drawn for a plugin was drawn on the last picture.
-        self.region_pick = None;
-        // And so were the counted points: they are positions in that picture,
-        // and counting on into this one would mix two images in one table.
-        self.point_counter = None;
-        self.view.resize_to_zoom = false;
-        // A glide belongs to the picture that was on screen; carrying one into
-        // a new file would slide the fresh image away from the zoom it just
-        // opened at.
-        self.view.zoom_glide = None;
-        // The channels panel is sized and populated for the previous file's
-        // channel count, so it is rebuilt wholesale. That also disarms a toggle
-        // caught in flight, whose remembered height belongs to a layout that no
-        // longer exists and would resize the window by a stale delta.
-        self.panel = PanelLayout::default();
-        // The pop-ups, though, stay up on the desktop. Each is its own window
-        // there, and what it shows is "the open file" rather than one
-        // particular file — every one of them is rebuilt from the live stack
-        // each frame, so leaving them open simply repoints them at the new one.
-        // That is the behaviour worth having when comparing files: park the
-        // histogram on a second monitor and step through a folder, rather than
-        // reopening it after every load.
-        //
-        // In the browser they are windows *inside* the canvas, laid over the
-        // image and sized for the channel count that is going away, so there
-        // they still close.
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.show_metadata = false;
-            self.show_render_settings = false;
-            self.show_histogram = false;
-        }
-        // Except the 3D settings, which are reachable only through a button the
-        // toolbar hides for a stack with no volume. Leaving that window up over
-        // a single-frame file would strand it: closed, it cannot be reopened.
-        #[cfg(not(target_arch = "wasm32"))]
-        if !self.core.can_show_volume() {
-            self.show_render_settings = false;
-        }
+        self.view.reset();
+        self.tools.reset();
+        self.panel.reset();
+        // The pop-ups mostly stay up on the desktop, repointed at the new
+        // document; each says for itself (`AppWindow::outlives_document`).
+        self.windows.reset(&self.core, WEB);
     }
 
     /// Drain anything the async picker produced since the last frame. A no-op
@@ -1708,18 +1748,18 @@ impl ViewerApp {
     /// timelapse behaves like any other slow plugin rather than freezing the
     /// window every time a region is drawn.
     fn poll_plot(&mut self, ctx: &egui::Context) {
-        let Some(win) = self.plot.as_mut() else {
+        let Some(win) = self.tools.plot.as_mut() else {
             return;
         };
         let busy = self.job.is_some();
         match plot::plot_window(ctx, win, busy) {
-            plot::PlotAction::Close => self.plot = None,
+            plot::PlotAction::Close => self.tools.plot = None,
             plot::PlotAction::Rerun => win.stale = true,
             plot::PlotAction::None => {}
         }
         // Deferred to here rather than done inside the window: a run needs the
-        // registry, which the window's borrow of `self.plot` would still hold.
-        let Some(win) = self.plot.as_ref() else {
+        // registry, which the window's borrow of `self.tools.plot` would still hold.
+        let Some(win) = self.tools.plot.as_ref() else {
             return;
         };
         if !win.stale {
@@ -1739,7 +1779,7 @@ impl ViewerApp {
             Some(job) => job.cancel.store(true, std::sync::atomic::Ordering::Relaxed),
             None if self.plugins.is_some() => {
                 let (index, params) = (win.plugin, win.params.clone());
-                self.plot.as_mut().expect("still open").stale = false;
+                self.tools.plot.as_mut().expect("still open").stale = false;
                 self.run_plugin(index, params);
             }
             None => {}
@@ -1890,7 +1930,8 @@ impl ViewerApp {
             .filter(|(plugin, _)| *plugin == index)
             .map(|(_, rois)| rois);
         let selection = picked.unwrap_or_else(|| {
-            self.plot
+            self.tools
+                .plot
                 .as_ref()
                 .filter(|p| p.plugin == index)
                 .map(|p| p.rois.clone())
@@ -2004,7 +2045,7 @@ impl ViewerApp {
         use fast_tiff_viewer::plugins::Product;
         match outcome {
             Ok(Product::Plot(plot)) => {
-                match self.plot.as_mut().filter(|p| p.plugin == index) {
+                match self.tools.plot.as_mut().filter(|p| p.plugin == index) {
                     // A re-run for a changed selection: keep the window, the
                     // tool and the regions exactly where they are and swap the
                     // chart. Rebuilding it would move a window the user placed.
@@ -2012,7 +2053,7 @@ impl ViewerApp {
                         open.plot = *plot;
                         open.stale = false;
                     }
-                    None => self.plot = Some(plot::PlotWindow::new(index, params, *plot)),
+                    None => self.tools.plot = Some(plot::PlotWindow::new(index, params, *plot)),
                 }
             }
             Ok(Product::Nothing) => {}
@@ -2022,6 +2063,7 @@ impl ViewerApp {
             // about being used.
             Ok(Product::Cancelled)
                 if self
+                    .tools
                     .plot
                     .as_ref()
                     .is_some_and(|p| p.plugin == index && p.stale) => {}
@@ -2306,12 +2348,12 @@ impl ViewerApp {
         if self.core.view_mode == ViewMode::Volume {
             // Nothing has been painted yet on the frame a file opens in, so
             // there is no view to grab. Saying so beats copying a blank.
-            let Some(rect) = self.volume_rect else {
+            let Some(rect) = self.volume_ui.rect else {
                 self.core.status = Some("The 3D view has not been drawn yet".into());
                 return;
             };
             copy_view::request_volume(ctx);
-            self.pending_copy = Some(rect);
+            self.volume_ui.pending_copy = Some(rect);
             return;
         }
         match fast_tiff_viewer::snapshot::of_frame(stack) {
@@ -2330,7 +2372,7 @@ impl ViewerApp {
     /// reason is none of this function's business, and copying it would put a
     /// picture on the clipboard that nobody asked for.
     fn poll_copy(&mut self, ctx: &egui::Context) {
-        let Some(rect) = self.pending_copy else {
+        let Some(rect) = self.volume_ui.pending_copy else {
             return;
         };
         let Some(shot) = copy_view::take_screenshot(ctx) else {
@@ -2339,7 +2381,7 @@ impl ViewerApp {
         // Taken, whatever happens next: a screenshot that cannot be cropped is
         // not going to become croppable on the following frame, and leaving the
         // request standing would copy the next unrelated screenshot instead.
-        self.pending_copy = None;
+        self.volume_ui.pending_copy = None;
         match copy_view::crop(&shot, rect, ctx.pixels_per_point()) {
             Some(image) => {
                 let (w, h) = (image.width(), image.height());
@@ -2715,15 +2757,81 @@ impl ViewerApp {
 
 impl ViewerApp {
     /// The whole of one frame. Kept apart from [`eframe::App::ui`] so that
-    /// what must happen after every frame happens however this one ends — it
-    /// returns early from several places.
+    /// what must happen after every frame happens however this one ends.
+    ///
+    /// The frame is [`FRAME`], taken a step at a time. The panels and windows
+    /// do not act on what is clicked: they queue it as a [`UiCommand`], and
+    /// each [`Step::Apply`] carries out what is due at that point. [`Phase`]
+    /// says why each of those points is where it is, and [`UiCommand::slot`]
+    /// which command lands at which.
     fn draw(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let cmds = Commands::default();
+        // What a step leaves for the steps after it.
+        let mut pinching = false;
+        let mut toolbar = None;
+        let mut bar: Option<scrub_bar::Bar> = None;
+        for step in FRAME {
+            match step {
+                Step::Intake => self.intake(&ctx),
+                Step::ZoomInput => pinching = self.zoom_input(ui),
+                Step::Toolbar => toolbar = Some(self.toolbar(ui, &cmds)),
+                Step::ToolWindows => self.tool_windows(&ctx),
+                Step::Hotkeys => self.hotkeys(&ctx, &cmds),
+                Step::PollCopy => self.poll_copy(&ctx),
+                Step::ScrubBar => bar = Some(self.scrub_bar(ui, &cmds)),
+                Step::Popups => self.popups(&ctx),
+                Step::NoteInfoRow => {
+                    // A status message lands in the same bar as the panel, and
+                    // pushes the image up in exactly the same way — so it gets
+                    // the same answer: the window grows by the message's height
+                    // instead of the canvas shrinking under it. Losing thirty
+                    // pixels of canvas is enough to put an image that was
+                    // fitted to the window into pan mode, which is a strange
+                    // thing for "saved it" to do.
+                    //
+                    // Armed here rather than where the status is set, because a
+                    // status can be set from anywhere — including a worker
+                    // thread — and what matters is not that it changed but that
+                    // the bar in front of the user is now a different height.
+                    let bar = bar.as_mut().expect("FRAME lays the bar out first");
+                    let height = bar.height();
+                    self.panel.note_info_row(bar.drawn_info.take(), height);
+                }
+                Step::RunPlayback => {
+                    let bar = bar.as_ref().expect("FRAME lays the bar out first");
+                    self.run_playback(&ctx, bar.scrubber_held);
+                }
+                Step::SettleView => self.settle_view(&ctx),
+                Step::Canvas => self.canvas(ui, pinching, &cmds),
+                Step::EndFrame => {
+                    let toolbar = toolbar.as_ref().expect("FRAME lays the toolbar out first");
+                    let bar = bar.as_ref().expect("FRAME lays the bar out first");
+                    self.end_frame(ui, toolbar, &bar.response);
+                }
+                Step::Apply(phase) => {
+                    // The bar's height, from the phase after it on.
+                    let at = Applying {
+                        ctx: &ctx,
+                        bar_height: bar.as_ref().map(scrub_bar::Bar::height),
+                    };
+                    self.apply_due(phase, &cmds, &at);
+                }
+            }
+        }
+        cmds.finish();
+    }
+
+    /// Take in what arrived since the last frame: files dropped on the window,
+    /// what the asynchronous picker and the workers sent, and a load that
+    /// finished — and keep frames coming while one is still on its way.
+    fn intake(&mut self, ctx: &egui::Context) {
         // Files dropped onto the window. Natively these carry a path, and
         // dropping several opens the first here and launches the rest in their
         // own processes; in a browser the drop event carries the bytes instead.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
+            let dropped: Vec<PathBuf> = ctx.input(|i| {
                 i.raw
                     .dropped_files
                     .iter()
@@ -2747,7 +2855,7 @@ impl ViewerApp {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let dropped: Vec<Opened> = ui.ctx().input(|i| {
+            let dropped: Vec<Opened> = ctx.input(|i| {
                 i.raw
                     .dropped_files
                     .iter()
@@ -2781,13 +2889,16 @@ impl ViewerApp {
         #[cfg(target_arch = "wasm32")]
         let working = false;
         if self.core.load_stage().is_some() {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(50));
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         } else if working {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(250));
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
+    }
 
+    /// This frame's zoom input — the wheel and keys, and a pinch — applied to
+    /// the 2D view before any panel is laid out. Returns whether a pinch is in
+    /// progress, which the canvas needs to know too.
+    fn zoom_input(&mut self, ui: &egui::Ui) -> bool {
         // Collect zoom input before panels consume events.
         // `zoom_delta()` is the correct API: egui routes Ctrl+scroll into
         // `zoom_factor_delta` rather than `smooth_scroll_delta`, so checking
@@ -2907,936 +3018,45 @@ impl ViewerApp {
         // Read *after* the advance, so the frame a glide lands on plans at once
         // rather than waiting one more.
         self.core.view_moving = self.view.zoom_glide.is_some() || pinching;
+        pinching
+    }
 
-        // 2D/3D view toggle + the 3D-settings button are set inside the toolbar
-        // closure via these locals (applied after) so the closure never needs a
-        // second borrow of `self`.
-        let current_view_mode = self.core.view_mode;
-        // Read before the toolbar closure, which would otherwise need a second
-        // borrow of `self` to ask.
-        let can_show_volume = self.core.can_show_volume();
-        let mut mode_request: Option<ViewMode> = None;
-        let mut open_requested = false;
-        let mut save_requested = false;
-        let mut copy_requested = false;
-        let mut render_settings_toggle = false;
-        let mut plugin_to_start: Option<usize> = None;
-        let mut open_point_counter = false;
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut open_plugin_folder = false;
+    /// The tool windows: a plugin's dialog, its plot, the point counter. Each
+    /// acts on its own buttons as it is drawn.
+    fn tool_windows(&mut self, ctx: &egui::Context) {
+        self.poll_plugin_dialog(ctx);
+        self.poll_plot(ctx);
+        self.poll_point_counter(ctx);
+    }
 
-        let toolbar_response = egui::Panel::top("toolbar").show_inside(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .button(RichText::new(ICON_OPEN).size(ICON_SIZE))
-                    .on_hover_text("Open a file…")
-                    .clicked()
-                {
-                    open_requested = true;
-                }
-                // Save and Copy both act on the open image, so with nothing
-                // open they are *hidden* rather than greyed out. A disabled
-                // control is a promise that some reachable state will enable
-                // it; "open a file first" is not that state, it is the whole
-                // program not having started yet, and two dead buttons beside
-                // Open say nothing Open does not already say.
-                //
-                // Busy is the opposite case and stays greyed: there *is* an
-                // image, the button *will* work, and the only thing missing is
-                // the few seconds a write or an import is taking. That is a
-                // promise worth making, so the disabled hover text names it.
-                if self.core.document.is_some() {
-                    // Named for what each platform actually does. The desktop
-                    // asks where to put the file, so its label ends in an
-                    // ellipsis; the browser cannot ask and hands the file to the
-                    // download manager instead, so promising a dialog there
-                    // would be a lie.
-                    let save_label = if cfg!(target_arch = "wasm32") {
-                        "Download as TIFF"
-                    } else {
-                        "Save as TIFF…"
-                    };
-                    if ui
-                        .add_enabled(
-                            self.job.is_none(),
-                            egui::Button::new(RichText::new(ICON_SAVE).size(ICON_SIZE)),
-                        )
-                        .on_hover_text(save_label)
-                        .on_disabled_hover_text(format!("{save_label} — busy"))
-                        .clicked()
-                    {
-                        save_requested = true;
-                    }
-                    // What a copy *is* differs by view mode, so the tooltip
-                    // says which one the user will get rather than a generic
-                    // "copy": in 2-D the frame at its own size, in 3-D the view
-                    // as it is framed on screen. See `copy_view`.
-                    let copy_label = if self.core.view_mode == ViewMode::Volume {
-                        "Copy the 3D view as an image"
-                    } else {
-                        "Copy this frame as an image"
-                    };
-                    if ui
-                        .add_enabled(
-                            self.job.is_none(),
-                            egui::Button::new(RichText::new(ICON_COPY).size(ICON_SIZE)),
-                        )
-                        .on_hover_text(format!("{copy_label}  (Ctrl/Cmd+C)"))
-                        .on_disabled_hover_text(format!("{copy_label} — busy"))
-                        .clicked()
-                    {
-                        copy_requested = true;
-                    }
-                }
-                {
-                    let available = self.plugins.as_ref().filter(|_| self.job.is_none());
-                    let has_stack = self.core.document.is_some();
-                    match plugins_ui::plugins_menu(ui, available, has_stack) {
-                        plugins_ui::MenuAction::Run(i) => plugin_to_start = Some(i),
-                        plugins_ui::MenuAction::PointCounter => open_point_counter = true,
-                        // The entry that produces this is itself desktop-only,
-                        // so on the web the variant is simply never sent.
-                        #[cfg(not(target_arch = "wasm32"))]
-                        plugins_ui::MenuAction::OpenPluginFolder => open_plugin_folder = true,
-                        plugins_ui::MenuAction::None => {}
-                    }
-                }
-                // 2D/3D switch, right next to Open, and the render-settings
-                // button beside it. Both need a volume to act on, which needs at
-                // least two frames to stack into one.
-                //
-                // Hidden rather than greyed out when there is none. A disabled
-                // control is a promise that it will work under some condition
-                // the user can reach, and offers a tooltip to say which; these
-                // cannot become available for the open file no matter what is
-                // clicked, so a permanently dead 2D/3D pair next to Open reads
-                // as breakage. The toolbar is also short enough that the gap is
-                // no loss. The file-info group below supplies the trailing
-                // separator, so this block owns only its own leading ones.
-                if can_show_volume {
-                    ui.separator();
-                    if ui
-                        .selectable_label(current_view_mode == ViewMode::Movie, "2D")
-                        .on_hover_text("Movie (2D) view")
-                        .clicked()
-                    {
-                        mode_request = Some(ViewMode::Movie);
-                    }
-                    if ui
-                        .selectable_label(current_view_mode == ViewMode::Volume, "3D")
-                        .on_hover_text("Volume (3D) view — drag to rotate, scroll to zoom")
-                        .clicked()
-                    {
-                        mode_request = Some(ViewMode::Volume);
-                    }
-                    ui.separator();
-                    if ui
-                        .button(RichText::new(ICON_SETTINGS).size(ICON_SIZE))
-                        .on_hover_text("3D render settings")
-                        .clicked()
-                    {
-                        render_settings_toggle = true;
-                    }
-                }
-                if self.core.document.is_none() {
-                    // Nothing open yet: show the version + active render backend
-                    // in the space the file info will later occupy.
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format!(
-                            "FastTIFF v{}, Renderer: {}",
-                            env!("CARGO_PKG_VERSION"),
-                            render::BACKEND
-                    )));
-
-                }
-                if let Some(loaded) = &self.core.document {
-                    let meta = &loaded.tiff.meta;
-                    // What the viewer is actually showing, which is not the
-                    // file's raw claim whenever an axis was reclassified.
-                    let dims = loaded.display.dims();
-                    // Reflect a toggle click made earlier in this same toolbar
-                    // (the 2D/3D buttons run before this), so the layout updates
-                    // on the click frame rather than one frame later.
-                    let in_3d = mode_request.unwrap_or(current_view_mode) == ViewMode::Volume;
-                    // In 3D the frame axis becomes the volume's depth, so the
-                    // frame counter/time are only meaningful when the stack also
-                    // has a separate time axis (the channels+Z+time case, where
-                    // `slices > 1`); otherwise hide them.
-                    let hide_frame_info = in_3d && dims.slices <= 1;
-
-                    // Zoom is a 2D-only concept — hidden entirely in 3D.
-                    if !in_3d {
-                        ui.separator();
-                        // Up to 2 decimals, trailing zeros trimmed: 3.1%, 33.3%,
-                        // 100%, 3200% — so the fractional small zooms read correctly.
-                        //
-                        // The level being glided *to*, not the value part-way
-                        // there: the number is what the wheel selected, and
-                        // running it through the intermediate frames turns a
-                        // readout into a blur nobody can read.
-                        let pct = format!("{:.2}", self.view.zoom_settled() * 100.0);
-                        let pct = pct.trim_end_matches('0').trim_end_matches('.');
-                        ui.label(RichText::new(format!("{pct}%")).monospace())
-                            .on_hover_text("Zoom (Ctrl+scroll to change)");
-                    }
-                    ui.separator();
-                    let channels_desc = if loaded.display.cmyk() {
-                        // Say what was read *and* what is shown: the file holds
-                        // four ink plates, the viewer shows three converted
-                        // components, and a printing user will want to know the
-                        // K plate is folded in rather than dropped.
-                        //
-                        // ASCII arrow on purpose: the bundled font has
-                        // no U+2192, so a real arrow renders as a tofu
-                        // box. The multiplication sign already on this
-                        // status line IS in the font, which makes that
-                        // gap easy to assume away.
-                        "CMYK->RGB".to_string()
-                    } else if loaded.display.rgb() {
-                        "RGB".to_string()
-                    } else {
-                        format!("{} channel(s)", dims.channels)
-                    };
-                    let bits = loaded.tiff.frames.first().map(|f| f.bits_per_sample).unwrap_or(0);
-                    let (px_w, px_h) = loaded
-                        .tiff
-                        .frames
-                        .first()
-                        .map_or((0, 0), |f| (f.width, f.height));
-                    ui.label(format!("{px_w}×{px_h} px, {bits}-bit, {channels_desc}"));
-                    // The same frame in real units, when the file says how big a
-                    // pixel is. Next to the pixel count rather than replacing it:
-                    // the two answer different questions — how much data there is
-                    // against how much specimen it covers — and a micrograph is
-                    // routinely discussed in both.
-                    if let Some(physical) = physical_size(
-                        meta.pixel_width,
-                        meta.pixel_height,
-                        meta.unit.as_deref(),
-                        px_w,
-                        px_h,
-                    ) {
-                        ui.separator();
-                        ui.label(physical).on_hover_text(
-                            "Physical size, from the pixel calibration in the file's metadata \
-                             (OME PhysicalSize, or the TIFF resolution tags).",
-                        );
-                    }
-
-                    // Say so when the picture on screen is not the picture in
-                    // the file. This only appears for frames past the GPU
-                    // texture limit, which is rare and enormous — but silently
-                    // showing a reduced image as if it were the data would be
-                    // the kind of wrong a viewer must never be.
-                    let gpu_stride = self.core.gpu_stride();
-                    if gpu_stride > 1 {
-                        ui.separator();
-                        ui.label(
-                            RichText::new(format!("1/{gpu_stride} scale"))
-                                .color(Color32::from_rgb(230, 170, 60)),
-                        )
-                        .on_hover_text(format!(
-                            "This frame is larger than one GPU texture can hold, so it is                              shown subsampled {}x on each axis. Pixel values and measurements                              read from it are sampled, not exact.",
-                            gpu_stride
-                        ));
-                    }
-
-                    if !hide_frame_info {
-                        ui.separator();
-                        let frame_digits = dims.frames.to_string().len();
-                        ui.label(
-                            RichText::new(format!("Frame {:>frame_digits$} / {}", loaded.frame() + 1, dims.frames))
-                                .monospace(),
-                        );
-                        if let Some(interval) = meta.frame_interval_s {
-                            ui.separator();
-                            let max_time = dims.frames.saturating_sub(1) as f64 * interval;
-                            let time_width = format!("{max_time:.3}").len();
-                            let current_time = loaded.frame() as f64 * interval;
-                            ui.label(RichText::new(format!("t = {current_time:>time_width$.3}s")).monospace());
-                        }
-                    }
-                }
-            });
-        });
-        if open_requested {
-            self.show_open_dialog(ui.ctx());
-        }
-        if save_requested {
-            self.save_as();
-        }
-        if copy_requested {
-            self.copy_view(ui.ctx());
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if open_plugin_folder {
-            match fast_tiff_viewer::plugins::install_dir() {
-                Some(dir) => {
-                    self.report_done(format!("Plugin folder: {}", dir.display()));
-                    // Best effort: showing the path in the status bar is the
-                    // part that must not fail, so a file manager that will
-                    // not launch is not an error.
-                    let _ = open_in_file_manager(&dir);
-                }
-                None => {
-                    self.core.status = Some("Could not determine a writable plugin folder".into())
-                }
-            }
-        }
-        if let Some(index) = plugin_to_start {
-            self.start_plugin(index);
-        }
-        if open_point_counter {
-            self.open_point_counter(ui.ctx());
-        }
-        self.poll_plugin_dialog(ui.ctx());
-        self.poll_plot(ui.ctx());
-        self.poll_point_counter(ui.ctx());
-        // Ctrl/Cmd+C, after the buttons so an explicit click this frame is not
-        // also counted as a chord, and before the poll so a copy asked for by
-        // key is picked up on the same schedule as one asked for by button.
-        if copy_view::hotkey(ui.ctx()) {
-            self.copy_view(ui.ctx());
+    /// The main window's chords, read once the tool windows have been drawn
+    /// (see [`Phase::ToolWindows`]).
+    fn hotkeys(&self, ctx: &egui::Context, cmds: &Commands) {
+        // Ctrl/Cmd+C.
+        if copy_view::hotkey(ctx) {
+            cmds.push(UiCommand::Copy(Via::Hotkey));
         }
         // Ctrl/Cmd+Z, the point counter's undo, while the main window has the
-        // keyboard. Before the picture handles this frame's pointer, so an
-        // undo that ends a drag in flight is not followed by one more step of
-        // it. The counter's own window takes the chord when it has the
-        // keyboard instead — see `point_counter::counter_window`.
-        if let Some(tool) = self.point_counter.as_mut() {
-            if point_counter::undo_hotkey(ui.ctx()) {
-                tool.undo();
-            }
+        // keyboard — and only while the counter is open, which is when the
+        // chord is taken. Applied before the picture handles this frame's
+        // pointer, so an undo that ends a drag in flight is not followed by
+        // one more step of it.
+        if self.tools.point_counter.is_some() && point_counter::undo_hotkey(ctx) {
+            cmds.push(UiCommand::UndoPoint);
         }
-        self.poll_copy(ui.ctx());
-        if let Some(mode) = mode_request {
-            self.core.view_mode = mode;
-            // Entering 3D stops movie playback — unless the stack is 4D (a
-            // separate time axis, `slices > 1`), where playing animates the
-            // volume through time.
-            if mode == ViewMode::Volume {
-                let is_4d = self
-                    .core
-                    .document
-                    .as_ref()
-                    .is_some_and(|l| l.display.dims().slices > 1);
-                if !is_4d {
-                    self.core.playback.playing = false;
-                    self.core.playback.last_time = None;
-                }
-            }
-        }
-        // In 3D the arrow keys rotate the volume (handled in the central panel),
-        // so the movie's arrow-scrub and wheel-scrub paths must stand down.
-        let view_is_volume = self.core.view_mode == ViewMode::Volume;
+    }
 
-        let panel_expanded = self.panel.expanded;
-        let is_playing = self.core.playback.playing;
-        let pseudocolor_on = self.core.apply_pseudocolor;
-        let mut toggle_requested = false;
-        let mut play_toggle_requested = false;
-        // Whether the scrubber is being held this frame; applied after the panel
-        // closure, which cannot reach `self.core` while it holds the stack.
-        let mut scrubber_held = false;
-        // A requested dimension-role reassignment: (channels, slices, frames).
-        let mut dimension_override: Option<(usize, usize, usize)> = None;
-        let mut pseudocolor_toggle: Option<bool> = None;
-        // New selection for the single-channel grayscale color/colormap selector.
-        let mut gray_lut_change: Option<usize> = None;
-        let mut scroll_step: i32 = 0;
-        let mut playback_fps = self.core.playback.fps;
-        let mut decode_mode = self.core.decode_mode;
-        let mut large_image_mode = self.core.large_image_mode;
-        // Read here, before the stack is borrowed for the controls: what the
-        // last sync found the frame to be on this device.
-        let over_texture_limit = self.core.over_texture_limit();
-        let mut metadata_toggle = false;
-        let mut histogram_toggle = false;
-        let current_status = self.core.status.clone();
-        // Green only for the message it was recorded for; see `good_status`.
-        let status_is_good = current_status.is_some() && current_status == self.good_status;
-
-        // The readout is the same whichever slow thing is running: a worker —
-        // import, plugin, save, export — or the core opening a file on its own.
-        // What differs is only the words and whether there is a fraction to
-        // draw, so that is all that is worked out here.
-        //
-        // The worker comes first because it *is* first: a file is imported and
-        // then opened, so while both could be set the worker is the one still
-        // happening.
-        //
-        // The file's name is deliberately not part of this. It was shown beside
-        // the label, but it is already in the window title, so it bought a
-        // second copy of the same string at the cost of the width the bar now
-        // spreads into.
-        let working = self.job.as_ref().map(|job| (job.label(), job.fraction()));
-        let progress = working.or_else(|| {
-            let stage = self.core.load_stage()?;
-            Some((stage.label().to_string(), stage.fraction()))
-        });
-        let load_stage = progress.is_some();
-        // Filled in below by the bar itself, if it draws a status line.
-        let mut drawn_info: Option<String> = None;
-        // Set by the info row's stop button. A `Cell` because the row is a
-        // closure called from two places and captures everything by reference;
-        // it cannot reach `self` to set the flag directly.
-        //
-        // Only offered for work this app is running. The core's own load has no
-        // cancel to press.
-        #[cfg(not(target_arch = "wasm32"))]
-        let can_stop = self.job.is_some();
-        #[cfg(target_arch = "wasm32")]
-        let can_stop = false;
-        let stop_clicked = std::cell::Cell::new(false);
-        // The bottom line of the panel: what is running, and the last thing
-        // that happened. One row for both.
-        //
-        // The progress readout used to be a row of its own above everything
-        // else, which pushed the picture up for the length of every load — and
-        // a load is exactly when the picture is being looked at. Sharing the
-        // status line costs nothing: they are both one line of chrome saying
-        // what the program is up to, and they are rarely both interesting at
-        // once.
-        //
-        // Returns what it drew, which is what the window's height bookkeeping
-        // compares against — a row that appears has to come out of the window
-        // rather than out of the canvas.
-        let info_row = |ui: &mut egui::Ui, status: Option<(&str, bool)>| -> Option<String> {
-            if progress.is_none() && status.is_none() {
-                return None;
-            }
-            let key = info_key(
-                status.map(|(s, _)| s),
-                progress.as_ref().map(|(label, _)| label.as_str()),
-            );
-            ui.separator();
-            ui.horizontal(|ui| {
-                // The status goes first so the bar can have the rest of the
-                // row. An `egui::ProgressBar` with no `desired_width` takes
-                // `available_size_before_wrap().x`, so whatever is placed
-                // before it decides how wide it ends up — and anything placed
-                // after it would be squeezed out of the row entirely.
-                if let Some((status, good)) = status {
-                    let color = if good { STATUS_DONE } else { STATUS_NOTE };
-                    ui.label(RichText::new(status).color(color).small());
-                }
-                if let Some((label, fraction)) = &progress {
-                    // Also before the bar, and for the same reason.
-                    if can_stop && ui.small_button("✖").on_hover_text("Stop").clicked() {
-                        stop_clicked.set(true);
-                    }
-                    ui.add(progress_bar(label, *fraction));
-                }
-            });
-            Some(key)
+    /// The pop-up windows that are open, in the order they were registered.
+    fn popups(&mut self, ctx: &egui::Context) {
+        let mut host = windows::Host {
+            core: &mut self.core,
+            prefs: &mut self.volume_ui.prefs,
         };
-        let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
-            let Some(loaded) = &mut self.core.document else {
-                if !load_stage {
-                    ui.label(RichText::new("© 2026 SciWare LLC").weak());
-                }
-                // Still worth a row with nothing open: this is where the first
-                // file's progress is reported, and where a plugin's "open an
-                // image first" lands.
-                drawn_info = info_row(ui, current_status.as_deref().map(|s| (s, status_is_good)));
-                return;
-            };
-            ui.add_space(4.0);
+        self.windows.show(ctx, &mut host);
+    }
 
-            ui.horizontal(|ui| {
-                let max_frame = loaded.display.dims().frames.saturating_sub(1);
-                let has_multiple_frames = loaded.display.dims().frames > 1;
-                // In 3D the frame axis is the volume's depth, so play/step/scrub
-                // are meaningless unless the stack has a separate time axis
-                // (`slices > 1`). Grey them out otherwise.
-                let frame_nav_enabled =
-                    has_multiple_frames && !(view_is_volume && loaded.display.dims().slices <= 1);
-
-                let toggle_size = egui::vec2(20.0, 20.0);
-                let toggle_response = ui
-                    .add_sized(toggle_size, egui::Button::new(""))
-                    .on_hover_text("Show/hide channel & contrast settings");
-                if toggle_response.clicked() {
-                    toggle_requested = true;
-                }
-                let icon_color = ui.style().interact(&toggle_response).fg_stroke.color;
-                let r = toggle_response.rect.shrink(6.0);
-                let triangle = if panel_expanded {
-                    vec![r.left_bottom(), r.right_bottom(), r.center_top()]
-                } else {
-                    vec![r.left_top(), r.right_top(), r.center_bottom()]
-                };
-                ui.painter().add(egui::Shape::convex_polygon(triangle, icon_color, egui::Stroke::NONE));
-
-                // Play/pause looped movie. Painted (triangle / two bars) rather
-                // than using glyphs, since the default font may not carry the
-                // ▶/⏸ characters.
-                ui.add_enabled_ui(frame_nav_enabled, |ui| {
-                    let play_resp = ui
-                        .add_sized(egui::vec2(22.0, 20.0), egui::Button::new(""))
-                        .on_hover_text("Play/pause looped movie");
-                    if play_resp.clicked() {
-                        play_toggle_requested = true;
-                    }
-                    let color = ui.style().interact(&play_resp).fg_stroke.color;
-                    let r = play_resp.rect.shrink(5.0);
-                    if is_playing {
-                        let bar = r.width() * 0.32;
-                        let left = egui::Rect::from_min_max(r.left_top(), egui::pos2(r.left() + bar, r.bottom()));
-                        let right = egui::Rect::from_min_max(egui::pos2(r.right() - bar, r.top()), r.right_bottom());
-                        ui.painter().rect_filled(left, 0.0, color);
-                        ui.painter().rect_filled(right, 0.0, color);
-                    } else {
-                        let tri = vec![r.left_top(), r.left_bottom(), egui::pos2(r.right(), r.center().y)];
-                        ui.painter().add(egui::Shape::convex_polygon(tri, color, egui::Stroke::NONE));
-                    }
-                });
-
-                ui.add_enabled_ui(frame_nav_enabled, |ui| {
-                    if ui.button("|<").on_hover_text("First frame").clicked() {
-                        loaded.set_frame(0);
-                    }
-                    if ui.button("<").on_hover_text("Previous frame (←)").clicked() {
-                        loaded.set_frame(loaded.frame().saturating_sub(1));
-                    }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(">|").on_hover_text("Last frame").clicked() {
-                            loaded.set_frame(max_frame);
-                        }
-                        if ui.button(">").on_hover_text("Next frame (→)").clicked() {
-                            loaded.set_frame(loaded.frame() + 1);
-                        }
-
-                        let remaining = ui.available_width();
-                        if has_multiple_frames {
-                            ui.spacing_mut().slider_width = remaining.max(40.0);
-                            let mut frame = loaded.frame();
-                            let scrub = ui.add(
-                                egui::Slider::new(&mut frame, 0..=max_frame)
-                                    .show_value(false)
-                                    .trailing_fill(true),
-                            );
-                            loaded.set_frame(frame);
-                            // Held, not merely dragged: the frame under the
-                            // pointer should hold still from the moment it is
-                            // grabbed, before any movement, since that is
-                            // already the frame being looked at.
-                            scrubber_held =
-                                scrub.is_pointer_button_down_on() || scrub.dragged();
-                        } else {
-                            // Single-frame stack: there's nothing to scrub, so draw
-                            // a flat, handleless track instead of a slider parked at
-                            // zero (the whole row is already disabled above).
-                            let (rect, _) = ui.allocate_exact_size(
-                                egui::vec2(remaining.max(40.0), 18.0),
-                                egui::Sense::hover(),
-                            );
-                            let y = rect.center().y;
-                            let track = egui::Rect::from_min_max(
-                                egui::pos2(rect.left(), y - 2.0),
-                                egui::pos2(rect.right(), y + 2.0),
-                            );
-                            ui.painter().rect_filled(track, 2.0, ui.visuals().widgets.inactive.bg_fill);
-                        }
-                    });
-                });
-            });
-
-            // Not while a text field has the caret, where the arrows move it: a
-            // group's name being edited in the point counter's window, which in
-            // a browser shares this viewport's keyboard.
-            if !view_is_volume && !ui.ctx().text_edit_focused() {
-                ui.input(|i| {
-                    // Shift jumps ~5% of the stack at a time (min 1 frame) instead
-                    // of 1, matching the Shift+wheel fast-scroll step.
-                    let step = if i.modifiers.shift {
-                        ((loaded.display.dims().frames as f64 * FAST_SCROLL_RATE).round() as usize).max(1)
-                    } else {
-                        1
-                    };
-                    if i.key_pressed(egui::Key::ArrowRight) {
-                        loaded.set_frame(loaded.frame() + step);
-                    }
-                    if i.key_pressed(egui::Key::ArrowLeft) {
-                        loaded.set_frame(loaded.frame().saturating_sub(step));
-                    }
-                });
-            }
-
-            if panel_expanded {
-                ui.separator();
-                // Wrapping, not clipping: this row holds up to six independent
-                // control groups, and which of them are present depends on the
-                // file. Narrow the window — or open the web build, whose chrome
-                // is drawn half again as large — and the tail of the row used to
-                // simply vanish past the edge with nothing to indicate it was
-                // there. Wrapping spends panel height, which the layout has, to
-                // buy back reachability, which it did not.
-                ui.horizontal_wrapped(|ui| {
-                    // Whether a control group already sits in the row — each
-                    // optional group below draws its leading separator only if
-                    // so, so hiding a group never leaves an orphaned separator.
-                    let mut row_has_items = false;
-
-                    // The channels-vs-time guess (and its override) is
-                    // meaningless for RGB, where the "channels" are fixed color
-                    // planes — so the dropdown and pseudocolor toggle are hidden
-                    // there.
-                    if !loaded.display.rgb() {
-                        ui.label("Dimension order:");
-                        let c = loaded.display.dims().channels;
-                        let z = loaded.display.dims().slices;
-                        let f = loaded.display.dims().frames;
-                        // When the file has a real Z axis (as loaded — see
-                        // `has_z_axis`), offer every assignment of the three
-                        // counts to the three roles; otherwise just the
-                        // channels/time swap (Z passes through untouched).
-                        // sort+dedup collapses duplicates when counts are equal
-                        // and keeps the list order stable across
-                        // reinterpretations.
-                        let show_z = loaded.display.has_z_axis;
-                        let mut options: Vec<(usize, usize, usize)> = if show_z {
-                            vec![(c, z, f), (c, f, z), (z, c, f), (z, f, c), (f, c, z), (f, z, c)]
-                        } else {
-                            vec![(c, z, f), (f, z, c)]
-                        };
-                        options.sort_unstable();
-                        options.dedup();
-                        let dim_label = |oc: usize, oz: usize, of: usize| {
-                            if show_z {
-                                format!("c: {oc}  z: {oz}  t: {of}")
-                            } else if view_is_volume {
-                                // Without a separate Z axis, 3D uses the frame
-                                // axis as the volume's depth — so what reads as
-                                // time in 2D is genuinely Z here.
-                                format!("c: {oc}  z: {of}")
-                            } else {
-                                format!("c: {oc}  t: {of}")
-                            }
-                        };
-                        egui::ComboBox::from_id_salt("dim_override")
-                            .selected_text(dim_label(c, z, f))
-                            .show_ui(ui, |ui| {
-                                for (oc, oz, of) in options {
-                                    if ui
-                                        .selectable_label((oc, oz, of) == (c, z, f), dim_label(oc, oz, of))
-                                        .clicked()
-                                    {
-                                        dimension_override = Some((oc, oz, of));
-                                    }
-                                }
-                            });
-
-                        // Optional channel palette — only for multi-channel
-                        // grayscale stacks that carry no colors of their own.
-                        if pseudocolor_applicable(loaded) {
-                            ui.separator();
-                            let mut on = pseudocolor_on;
-                            if ui
-                                .checkbox(&mut on, "Apply pseudocolor")
-                                .on_hover_text("Tint channels ch1 = red, ch2 = green, ch3 = blue, …")
-                                .changed()
-                            {
-                                pseudocolor_toggle = Some(on);
-                            }
-                        }
-                        row_has_items = true;
-                    }
-
-                    // Editable playback rate (seeded from metadata `fps=`, else
-                    // 30). Only shown when there's a playable time axis: several
-                    // frames in 2D; in 3D the frame axis is the volume's depth,
-                    // so time only exists for 4D stacks (`slices > 1`) — matches
-                    // the play/scrub controls' enable logic above.
-                    let fps_playable = loaded.display.dims().frames > 1
-                        && !(view_is_volume && loaded.display.dims().slices <= 1);
-                    if fps_playable {
-                        if row_has_items {
-                            ui.separator();
-                        }
-                        ui.add(
-                            egui::DragValue::new(&mut playback_fps)
-                                .speed(0.5)
-                                .range(0.1..=1000.0)
-                                .max_decimals(2)
-                                .suffix(" fps"),
-                        )
-                        .on_hover_text("Playback speed (frames per second)");
-                        row_has_items = true;
-                    }
-
-                    // LUT selector for a single channel: show it through a
-                    // channel color or a perceptual colormap
-                    // (magma/plasma/inferno/viridis/turbo). When the file carries
-                    // its own LUT the list leads with "Built-in LUT" (the
-                    // default). Hidden for RGB, composite, and multi-channel
-                    // stacks — there the per-channel colors / pseudocolor toggle
-                    // already handle coloring.
-                    if gray_lut_applicable(loaded) {
-                        if row_has_items {
-                            ui.separator();
-                        }
-                        ui.label("LUT:");
-                        let sel = loaded.display.gray_lut_sel;
-                        egui::ComboBox::from_id_salt("gray_lut")
-                            .selected_text(gray_lut_sel_name(&loaded.display, sel))
-                            .show_ui(ui, |ui| {
-                                for opt in 0..gray_lut_count(&loaded.display) {
-                                    // Tint each entry with its LUT's low (dark) end
-                                    // — the color the darkest samples map to. A
-                                    // grayscale/black low end (grayscale + the pure
-                                    // channel-color ramps) keeps the default text color.
-                                    let name = gray_lut_sel_name(&loaded.display, opt);
-                                    let text = match tint_color(gray_lut_sel_tint(&loaded.display, opt)) {
-                                        Some(c) => RichText::new(name).color(c),
-                                        None => RichText::new(name),
-                                    };
-                                    if ui.selectable_label(opt == sel, text).clicked() {
-                                        gray_lut_change = Some(opt);
-                                    }
-                                }
-                            })
-                            .response
-                            .on_hover_text("Display this channel through a color LUT or colormap");
-                        row_has_items = true;
-                    }
-
-                    // CPU decode parallelism: Auto threads only when playback
-                    // can't keep up; Serial/Threaded force it off/on. Threaded
-                    // decode only ever kicks in for compressed frames (parallel
-                    // strip decompression) or wide 32-/64-bit frames (parallel
-                    // per-pixel rescale/cast). 8- and 16-bit uncompressed frames
-                    // decode zero-copy or with an unthreaded copy, so the control
-                    // has no effect and is hidden for them.
-                    let threadable = loaded.tiff.frames.first().is_some_and(|f| {
-                        f.compression != fast_tiff_lib::Compression::None || f.bits_per_sample >= 32
-                    });
-                    if threadable {
-                        if row_has_items {
-                            ui.separator();
-                        }
-                        ui.label("Decode:");
-                        egui::ComboBox::from_id_salt("decode_mode")
-                            .selected_text(decode_mode.label())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut decode_mode, DecodeMode::Auto, "Auto")
-                                    .on_hover_text("Single-threaded until playback drops frames, then multi-threaded");
-                                ui.selectable_value(&mut decode_mode, DecodeMode::Serial, "Serial")
-                                    .on_hover_text("Always single-threaded (lowest total CPU)");
-                                ui.selectable_value(&mut decode_mode, DecodeMode::Threaded, "Threaded")
-                                    .on_hover_text("Always multi-threaded for large frames (spreads across cores)");
-                            });
-                        row_has_items = true;
-                    }
-
-                    // How a frame too large to become a texture is kept on
-                    // screen. Only for such frames — for every ordinary image
-                    // both settings do exactly the same thing, and an option
-                    // that changes nothing is worse than no option. The flag is
-                    // set during the GPU sync, since only there is the device's
-                    // texture limit known.
-                    if over_texture_limit {
-                        if row_has_items {
-                            ui.separator();
-                        }
-                        ui.label("Large image:");
-                        egui::ComboBox::from_id_salt("large_image_mode")
-                            .selected_text(match large_image_mode {
-                                LargeImageMode::Preload => "Preload",
-                                LargeImageMode::Tiled => "Tiled",
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut large_image_mode, LargeImageMode::Tiled, "Tiled")
-                                    .on_hover_text(
-                                        "Load only the region on screen, at whatever resolution the zoom \
-                                         calls for. Uses far less memory, but every zoom step decodes afresh, \
-                                         so zooming costs CPU and can stutter.",
-                                    );
-                                ui.selectable_value(&mut large_image_mode, LargeImageMode::Preload, "Preload")
-                                    .on_hover_text(
-                                        "Keep one reduced copy of the whole image in memory, plus full \
-                                         resolution for whatever is on screen. Smooth to pan and zoom, and \
-                                         less moiré when zoomed out, at the cost of the memory that copy \
-                                         occupies.",
-                                    );
-                            })
-                            .response
-                            .on_hover_text(
-                                "This image is larger than the graphics card can hold as one texture, \
-                                 so only part of it is resident at a time.",
-                            );
-                        row_has_items = true;
-                    }
-
-                    // The two pop-up toggles. They flow with the rest of the
-                    // row rather than being pinned to its right edge: once the
-                    // row can wrap there is no single right edge to pin to, and
-                    // a button that jumps to the end of whichever line happens
-                    // to be last is harder to find than one that simply follows
-                    // the controls.
-                    if row_has_items {
-                        ui.separator();
-                    }
-                    if histogram_button(ui).clicked() {
-                        histogram_toggle = true;
-                    }
-                    if ui
-                        .button(RichText::new("( i )").size(12.0))
-                        .on_hover_text("See metadata")
-                        .clicked()
-                    {
-                        metadata_toggle = true;
-                    }
-                });
-                if !loaded.display.rgb() {
-                    ui.label(
-                        RichText::new(
-                            "Channels are guessed automatically (6 or fewer = channels, more = time); \
-                             use Dimension order if that guess is wrong for this file.",
-                        )
-                        .small()
-                        .weak(),
-                    );
-                }
-
-                contrast_controls(ui, loaded, ContrastLayout::Inline, None);
-            }
-            // The triple-axis note explains that 2D freezes Z at its first
-            // slice — but the 3D view *does* use Z (as the volume depth), so
-            // showing it there would be wrong. When `triple_axis_warning` is
-            // set, the status IS that note (`compute_status` short-circuits on
-            // it), so this suppresses exactly the right message.
-            let suppressed = view_is_volume && loaded.display.triple_axis_warning;
-            drawn_info = info_row(
-                ui,
-                current_status
-                    .as_deref()
-                    .filter(|_| !suppressed)
-                    .map(|s| (s, status_is_good)),
-            );
-            ui.add_space(4.0);
-        });
-
-        self.core.playback.fps = playback_fps;
-        self.core.decode_mode = decode_mode;
-        self.core.large_image_mode = large_image_mode;
-        if metadata_toggle {
-            self.show_metadata = !self.show_metadata;
-        }
-        if self.show_metadata {
-            match &self.core.document {
-                Some(loaded) => metadata_window(ui.ctx(), &mut self.show_metadata, loaded),
-                None => self.show_metadata = false,
-            }
-        }
-        if histogram_toggle {
-            self.show_histogram = !self.show_histogram;
-        }
-        if self.show_histogram {
-            let mut open = true;
-            let resident = Resident {
-                over_texture_limit: self.core.over_texture_limit(),
-                window: self.core.resident_window(),
-            };
-            match self.core.document.as_mut() {
-                Some(loaded) => {
-                    histogram_window(ui.ctx(), &mut open, loaded, resident, &mut self.hist_log)
-                }
-                None => open = false,
-            }
-            self.show_histogram = open;
-        }
-        if render_settings_toggle {
-            self.show_render_settings = !self.show_render_settings;
-        }
-        if self.show_render_settings {
-            let prev_nav = self.core.volume.cam.nav;
-            let mut reset_position = false;
-            render_settings_window(
-                ui.ctx(),
-                &mut self.show_render_settings,
-                &mut self.core.volume.scale,
-                &mut self.core.volume.interp,
-                &mut self.moving_downscale,
-                &mut self.core.volume.cam.nav,
-                &mut self.core.volume.cam.orbit_point,
-                &mut self.move_speed,
-                &mut self.scroll_speed,
-                &mut self.core.volume.render,
-                &mut self.core.volume.density,
-                &mut self.core.volume.iso,
-                &mut self.core.volume.mip_brightness,
-                &mut self.core.volume.volume_brightness,
-                &mut self.core.volume.volume_autolevel,
-                &mut self.show_coord_box,
-                &mut reset_position,
-                self.core.document.as_ref(),
-            );
-            // Keep the view continuous across a fly⇄orbit switch (the two use
-            // different eye representations) instead of snapping to a default.
-            if self.core.volume.cam.nav != prev_nav {
-                self.core.volume.cam.sync_for_nav(prev_nav.is_fly());
-            }
-            if reset_position {
-                self.core.volume.cam.reset();
-            }
-        }
-
-        // A status message lands in the same bar as the panel, and pushes the
-        // image up in exactly the same way — so it gets the same answer: the
-        // window grows by the message's height instead of the canvas shrinking
-        // under it. Losing thirty pixels of canvas is enough to put an image
-        // that was fitted to the window into pan mode, which is a strange thing
-        // for "saved it" to do.
-        //
-        // Armed here rather than where the status is set, because a status can
-        // be set from anywhere — including a worker thread — and what matters
-        // is not that it changed but that the bar in front of the user is now a
-        // different height.
-        self.panel
-            .note_info_row(drawn_info, scrub_bar_response.response.rect.height());
-
-        // The stop button only raises the flag the worker polls: it does not
-        // take the job away. The worker still owns the registry and still has
-        // to hand it back, and until it does the app must keep showing that
-        // something is running — a readout that vanished on the click would
-        // claim the work had stopped before it had.
-        #[cfg(not(target_arch = "wasm32"))]
-        if stop_clicked.get() {
-            if let Some(job) = &self.job {
-                job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-
-        if toggle_requested {
-            self.panel.expanded = !self.panel.expanded;
-            // Remember the panel's height *before* it expands/collapses; the
-            // next frame (once it's redrawn in the new state) grows or shrinks
-            // the window by the difference. This frame still shows the old
-            // height, so the actual delta only becomes known next frame.
-            self.panel
-                .arm_grow(scrub_bar_response.response.rect.height());
-        }
-
-        if play_toggle_requested {
-            self.core.playback.playing = !self.core.playback.playing;
-            // Start each play/pause from a clean clock, so the first tick after
-            // resuming doesn't jump by however long we were paused and the
-            // keeping-up estimate starts neutral. (`decode_parallel` stays
-            // latched across a pause — if this stack needed it, it still does.)
-            self.core.playback.restart();
-        }
-
-        if let Some(on) = pseudocolor_toggle {
-            self.core.set_pseudocolor(on);
-        }
-
-        if let Some(sel) = gray_lut_change {
-            self.core.set_gray_lut(sel);
-        }
-
+    /// Run the playback clock for this frame.
+    fn run_playback(&mut self, ctx: &egui::Context, scrubber_held: bool) {
         // Looped playback: the core advances by real elapsed time so the movie
         // runs at the file's `fps` (or the default) regardless of render
         // cadence. All we add is the repaint scheduling.
@@ -3846,7 +3066,7 @@ impl ViewerApp {
         // picks up again on release. Without it the clock and the scrubber
         // write the frame index in turn and the picture flickers between them.
         self.core.playback.scrubbing = scrubber_held;
-        self.core.tick_playback(ui.input(|i| i.time));
+        self.core.tick_playback(ctx.input(|i| i.time));
         if self.core.playback.playing {
             // Ask for the next repaint at the playback rate rather than
             // immediately: no point re-running egui faster than frames actually
@@ -3854,30 +3074,14 @@ impl ViewerApp {
             // repaints as soon as it's ready, so we still render as fast as we
             // can when behind (and the core's demand estimate still detects it).
             let fps = self.core.playback.fps.max(0.1);
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs_f64(1.0 / fps));
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(1.0 / fps));
         }
+    }
 
-        // Reassigning the axes also refreshes LUTs + status; the volume is
-        // rebuilt at the next sync, which finds the channel layout moved (the
-        // frame axis, i.e. the volume depth, just changed).
-        if let Some((c, z, f)) = dimension_override {
-            // The counter's points are on frames of the axes as they were.
-            let before = self
-                .point_counter
-                .as_ref()
-                .and(self.core.document.as_ref())
-                .map(fast_tiff_viewer::plugins::builtin::point_counter::frame_starts);
-            self.core.set_dimension_order(c, z, f);
-            if let (Some(before), Some(tool), Some(stack)) = (
-                before,
-                self.point_counter.as_mut(),
-                self.core.document.as_ref(),
-            ) {
-                tool.follow_axes(&before, stack);
-            }
-        }
-
+    /// Settle the view before the canvas is drawn: back to 2D when there is no
+    /// volume left to show, then the animation's step and the region pick's
+    /// keys, both of which read the settled mode.
+    fn settle_view(&mut self, ctx: &egui::Context) {
         // A dimension swap can collapse the stack to a single frame (e.g.
         // 1 ch × N frames -> N ch × 1 frame), which can't build a volume — the
         // stale volume (first channel only) would keep showing, and with the
@@ -3900,672 +3104,27 @@ impl ViewerApp {
         // The animation's step for this frame, now that every way of leaving
         // 3D or moving the camera this frame has been applied, and before the
         // 3D view is drawn with the pose it decides.
-        self.tick_animation(ui.ctx());
-        self.tick_region_pick(ui.ctx());
+        self.tick_animation(ctx);
+        self.tick_region_pick(ctx);
+    }
 
-        // Central panel: the image is drawn at exactly `image_size × zoom`. When
-        // that fits the panel it's centered (letterboxed); when it's larger
-        // (zoomed past what the monitor-capped window can show) it overflows and
-        // is pannable by dragging. Aspect ratio is always preserved.
-        // Zero inner margin: the window is sized to exactly the image, so any
-        // panel padding would make the available area smaller than the image
-        // and produce a small spurious pan/overflow even when it should fit.
-        egui::CentralPanel::default()
-            .frame(egui::Frame::default().inner_margin(egui::Margin::ZERO))
-            .show_inside(ui, |ui| {
-                if self.core.document.is_none() {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(welcome_text());
-                    });
-                    return;
-                }
-
-                let available = ui.available_size();
-                let (panel_rect, response) =
-                    ui.allocate_exact_size(available, egui::Sense::click_and_drag());
-                self.view.panel_rect = panel_rect;
-
-                // Fit the image to the canvas on open. The browser has no window to
-                // resize around the picture the way the desktop build does, so
-                // without this a gigapixel mosaic opens at 1:1 and shows one corner
-                // of itself.
-                //
-                // Fitted to the canvas *exactly*, not to the nearest fixed level: a
-                // 4:3 image in a 16:9 canvas has no fixed level that fills it, so
-                // snapping would either crop a sliver or leave a visible margin.
-                // The exact factor then joins this image's zoom ladder, so scrolling
-                // back out returns to the fitted view instead of stepping past it —
-                // which is the whole reason it has to be a rung and not a one-off.
-                //
-                // Held back until the 2D view is the one on screen: in 3D the zoom
-                // is unused, and consuming the flag there would leave the image
-                // unfitted when the user came back to 2D.
-                #[cfg(target_arch = "wasm32")]
-                if self.view.pending_initial_fit && self.core.view_mode == ViewMode::Movie {
-                    let dims = self
-                        .core
-                        .document
-                        .as_ref()
-                        .and_then(|l| l.tiff.frames.first())
-                        .map(|f| (f.width as f32, f.height as f32));
-                    match dims.and_then(|(iw, ih)| fit_to_panel(iw, ih, available)) {
-                        Some(z) => {
-                            self.view.zoom = z;
-                            self.view.fit_zoom = Some(z);
-                            self.view.pan = egui::Vec2::ZERO;
-                            self.view.pending_initial_fit = false;
-                        }
-                        // No canvas size yet — it has not been laid out. Come back
-                        // next frame rather than fitting to nothing.
-                        None => ui.ctx().request_repaint(),
-                    }
-                }
-
-                // 3D volume view: drive the camera per the active nav mode and paint
-                // the GPU ray-march. The 2D pan/UV/scrub path below is bypassed. This
-                // runs before the `loaded` borrow so it can call `&mut self` methods.
-                if self.core.view_mode == ViewMode::Volume {
-                    self.core.volume.aspect =
-                        (panel_rect.width() / panel_rect.height().max(1.0)).clamp(0.1, 10.0);
-                    let ppp = ui.ctx().pixels_per_point();
-                    self.core.volume.viewport_px = [
-                        (panel_rect.width() * ppp).round().max(1.0) as u32,
-                        (panel_rect.height() * ppp).round().max(1.0) as u32,
-                    ];
-                    // The screen, for how much detail a volume is worth keeping.
-                    if let Some(monitor) = ui.ctx().input(|i| i.viewport().monitor_size) {
-                        self.core.volume.screen_px =
-                            (monitor.x.max(monitor.y) * ppp).round().max(0.0) as u32;
-                    }
-
-                    // Until the first volume is built, show a black loading screen so
-                    // the heavy decode doesn't freeze on the previous view (`sync_gpu`
-                    // defers the initial build until after this frame paints).
-                    if !self.core.volume_built() {
-                        ui.painter()
-                            .rect_filled(panel_rect, 0.0, egui::Color32::BLACK);
-                        ui.painter().text(
-                            panel_rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "Loading 3D…",
-                            egui::FontId::proportional(16.0),
-                            egui::Color32::from_gray(150),
-                        );
-                        ui.ctx().request_repaint();
-                        return;
-                    }
-
-                    let animating = self.drive_volume_camera(ui, &response, panel_rect);
-                    // A press, moving or not, is the user reaching for the
-                    // view: an animation stops for it on the next frame.
-                    if response.is_pointer_button_down_on() {
-                        self.volume_pressed = true;
-                    }
-                    self.volume_motion(ui.ctx());
-                    // Where the view is, for a copy of it. Recorded at the one
-                    // place that knows — a copy happens a frame later, by which
-                    // time this panel may not be being laid out at all.
-                    self.volume_rect = Some(panel_rect);
-                    response.on_hover_cursor(egui::CursorIcon::Crosshair);
-                    ui.painter()
-                        .with_clip_rect(panel_rect)
-                        .add(render::paint_volume_callback(&self.render, panel_rect));
-                    // Coordinate-box overlay, drawn on top of the ray-march with the
-                    // 2D painter (aligned via the same camera; see `overlay`).
-                    if self.show_coord_box {
-                        let painter = ui.painter().with_clip_rect(panel_rect);
-                        self.draw_coord_box(&painter, panel_rect);
-                    }
-                    // Keep repainting while a drag or held key keeps the camera moving.
-                    if animating {
-                        ui.ctx().request_repaint();
-                    }
-                    return;
-                }
-
-                let Some(loaded) = &self.core.document else {
-                    return;
-                };
-                let (Some(w), Some(h)) = (
-                    loaded.tiff.frames.first().map(|f| f.width),
-                    loaded.tiff.frames.first().map(|f| f.height),
-                ) else {
-                    return;
-                };
-
-                let img_px = egui::vec2(w as f32 * self.view.zoom, h as f32 * self.view.zoom);
-                // A 1px tolerance so sub-pixel rounding between the window size and
-                // the panel's available area doesn't register as a pannable overflow.
-                let overflow = egui::vec2(
-                    (img_px.x - available.x - 1.0).max(0.0),
-                    (img_px.y - available.y - 1.0).max(0.0),
-                );
-                let pannable = overflow.x > 0.0 || overflow.y > 0.0;
-
-                // A plot asking for regions takes the *primary* drag: while its
-                // tool is armed, dragging on the picture with the left button
-                // draws rather than pans. Every other button still pans — see the
-                // rule below — and the tool is only armed while its window is
-                // open, so this cannot strand someone with an unpannable view.
-                //
-                // A rectangle a plugin asked for takes it the same way, and
-                // ahead of a plot: it is what the user was just asked to do.
-                // The point counter takes it too while its window is open,
-                // after a rectangle and ahead of a plot: clicking points on is
-                // a tool the user opened by hand, and a plot's regions can be
-                // drawn again once the counter is closed.
-                let selecting = (self.region_pick.is_some()
-                    || self.point_counter.is_some()
-                    || self.plot.as_ref().is_some_and(|p| p.wants_regions()))
-                    && !pinching;
-                let frame = loaded.frame();
-
-                // The navigator's frame box, worked out before anything acts on a
-                // drag: a press that lands on the map has to claim the gesture
-                // early enough that the picture underneath does not pan as well.
-                //
-                // Gated on the same `steady_pannable` that decides whether the map
-                // is *drawn*, so it is never clickable while invisible — an
-                // invisible hit target in the corner of the image would be a
-                // mystery rather than a feature. The `was_pannable` bookkeeping
-                // moves up here with it, which is where it belongs anyway: it is
-                // part of this frame's decision, not of the painting.
-                let settled = !self.view.pending_initial_fit;
-                let steady_pannable = pannable && self.view.was_pannable && settled;
-                self.view.was_pannable = pannable && settled;
-                let map = steady_pannable
-                    .then(|| minimap::frame_box(panel_rect, img_px.x, img_px.y))
-                    .flatten();
-
-                // Who owns the drag in flight. Decided once, when it starts, and
-                // the primary button only: the middle button belongs to panning
-                // and to autoscroll everywhere on the picture, including over the
-                // map. Without that split a middle-click on the map would both
-                // jump the view and arm autoscroll, from one press.
-                if response.drag_started() {
-                    self.view.minimap_drag = response.drag_started_by(egui::PointerButton::Primary)
-                        && map
-                            .zip(response.interact_pointer_pos())
-                            .is_some_and(|(outer, at)| outer.contains(at));
-                }
-                if response.drag_stopped() {
-                    self.view.minimap_drag = false;
-                }
-                let on_map = self.view.minimap_drag;
-
-                // Where on the map the pointer is acting, if it is.
-                //
-                // Two ways in, and the second is easy to miss: egui only calls a
-                // gesture a drag once the pointer has moved past its click
-                // threshold, so a careful single click never sets `dragged()` at
-                // all. Without the `clicked()` arm, clicking the map — the first
-                // thing anyone tries — would do nothing.
-                //
-                // Mid-drag the position is used wherever it is, including outside
-                // the map: dragging the view box to an edge and carrying on is how
-                // you reach the corner of a large image, and clamping that to the
-                // map's bounds would make the gesture stop short of the edge.
-                let map_action = map.and_then(|outer| {
-                    let at = response.interact_pointer_pos()?;
-                    let taken = on_map
-                        || (response.clicked_by(egui::PointerButton::Primary)
-                            && outer.contains(at));
-                    taken.then_some((outer, at))
-                });
-
-                // Dragging or clicking the navigator moves the view to the pointer.
-                //
-                // Anywhere in the frame box counts, not only on the view box. At
-                // `MIN_VIEW_BOX` that box is a four-point target, which is not
-                // something to ask anyone to hit; and "click the map to go there"
-                // is what a navigator is for. Grabbing the box and dragging it is
-                // then the same code path rather than a second handler, which is
-                // what keeps the two gestures from disagreeing about where the
-                // view ends up.
-                if let Some((outer, at)) = map_action {
-                    // As with the picture: a hand on it ends any glide.
-                    self.view.pan_glide.stop();
-                    // How much of the image is on screen, which is what `pan_for`
-                    // centres on the clicked point: the panel on an axis that
-                    // overflows, the whole image on one that fits.
-                    let view = egui::vec2(img_px.x.min(available.x), img_px.y.min(available.y));
-                    self.view.pan = minimap::pan_for(outer, img_px, view, at);
-                }
-
-                // Autoscroll: the sticky mode a middle-click turns on, where the
-                // view drifts towards wherever the pointer sits. See
-                // [`autoscroll`] for the curve and why the mode is worth having
-                // beside the drag.
-                //
-                // A *click* toggles it, never a drag, and that is what lets the
-                // two gestures share the middle button without a mode switch: a
-                // middle press that moves is a pan (the rule below), a middle
-                // press that does not is this. egui will not report `clicked` for
-                // a pointer that travelled past its click threshold, so the two
-                // are mutually exclusive by construction rather than by a guard
-                // that could be got wrong.
-                //
-                // Whether it was on as this frame began is kept for the point
-                // counter: a left-click or a drag that ends the mode below is
-                // spent on that, and must not also add or move a point.
-                let autoscroll_was_on = self.view.autoscroll.is_some();
-                if response.clicked_by(egui::PointerButton::Middle) {
-                    // Toggling off from anywhere, so a second middle-click always
-                    // means stop — including the one that would otherwise re-anchor
-                    // the mode somewhere new and leave no way out but the keyboard.
-                    self.view.autoscroll = match self.view.autoscroll {
-                        Some(_) => None,
-                        // Only where there is something to scroll. A mode that
-                        // swallowed the click and then did nothing would be
-                        // indistinguishable from a dead button.
-                        None if pannable => response.interact_pointer_pos(),
-                        None => None,
-                    };
-                }
-                // Every other way out. A left- or right-click is how anyone leaves
-                // this mode by reflex; taking hold of the picture or the map means
-                // steering by hand from now on, and leaving the drift running
-                // under a drag would have two things moving the view at once;
-                // Escape is the way out when the first reflex was wrong; and an
-                // image that no longer overflows has nothing left to scroll.
-                //
-                // A drag start cannot collide with the toggle above — egui reports
-                // a gesture as a click or as a drag, never both — so the order of
-                // these two blocks does not decide anything.
-                if self.view.autoscroll.is_some()
-                    && (!pannable
-                        || response.drag_started()
-                        || response.clicked_by(egui::PointerButton::Primary)
-                        || response.clicked_by(egui::PointerButton::Secondary)
-                        || ui.input(|i| i.key_pressed(egui::Key::Escape)))
-                {
-                    self.view.autoscroll = None;
-                }
-                if let Some(anchor) = self.view.autoscroll {
-                    // `latest_pos` rather than `hover_pos`: the pointer may be over
-                    // a panel or off the window entirely while the mode runs, and
-                    // "keep scrolling the way I left it pointing" is the behaviour
-                    // every platform's version has.
-                    if let Some(at) = ui.input(|i| i.pointer.latest_pos()) {
-                        let dt = ui.input(|i| i.stable_dt);
-                        // `stable_dt` rather than the raw frame time: this is
-                        // multiplied by a velocity every frame, so a single long
-                        // frame — a decode, a window resize — would otherwise land
-                        // as a jump of hundreds of points.
-                        let v = autoscroll::velocity(anchor, at);
-                        // Opposite sign to the drag below, and deliberately: a drag
-                        // moves the *picture* under the pointer, while this moves
-                        // the *view* towards it. Pointing below the anchor scrolls
-                        // down, which means showing a lower part of the image,
-                        // which means a larger pan.
-                        self.view.pan += v * dt;
-                        // The mode animates, so it has to ask for the frames. Only
-                        // while actually moving: parked in the dead zone it should
-                        // cost no more than any other idle window.
-                        if v != egui::Vec2::ZERO {
-                            ui.ctx().request_repaint();
-                        }
-                    }
-                }
-
-                // Drag to pan when the image overflows the panel. Not during a
-                // gesture: egui synthesises a pointer from the first touch, so a
-                // two-finger pan arrives here as well and would be applied twice.
-                //
-                // **Any button pans**, with one exception: the primary one belongs
-                // to the region tool while that tool is armed. Spelling the rule
-                // out this way rather than leaving it to `dragged()` is what gives
-                // the middle button a pan that survives the region tool — and the
-                // middle button is the one this matters for, being what CAD and
-                // image editors use to pan and what the 3D view's own CAD mode
-                // already maps to pan (`camera.rs`). It is also why the region
-                // handler below asks for the primary button specifically: without
-                // that, a middle-drag would pan and draw a region at once.
-                let dragging_picture = response.dragged()
-                    && !(selecting && response.dragged_by(egui::PointerButton::Primary));
-                if pannable && dragging_picture && !pinching && !on_map {
-                    // Taking hold of the picture ends any glide: the hand on it now
-                    // decides where it goes.
-                    self.view.pan_glide.stop();
-                    self.view.pan -= response.drag_delta();
-                }
-                self.view.pan.x = self.view.pan.x.clamp(0.0, overflow.x);
-                self.view.pan.y = self.view.pan.y.clamp(0.0, overflow.y);
-
-                // Where the image's top-left *would* be if drawn full-size: scrolled
-                // by `pan` on an overflowing axis, centered on an axis that fits.
-                // (Cached for cursor-centered zoom; may lie outside the panel.)
-                let origin = egui::pos2(
-                    if overflow.x > 0.0 {
-                        panel_rect.min.x - self.view.pan.x
-                    } else {
-                        panel_rect.min.x + (available.x - img_px.x) * 0.5
-                    },
-                    if overflow.y > 0.0 {
-                        panel_rect.min.y - self.view.pan.y
-                    } else {
-                        panel_rect.min.y + (available.y - img_px.y) * 0.5
-                    },
-                );
-                self.view.image_origin = origin;
-
-                // The selection tool, now that the transform for this frame is
-                // settled. Committed on release rather than continuously, so a
-                // drag across a long timelapse starts one measurement instead
-                // of one per frame of the gesture.
-                // The primary button only, and not a gesture the navigator took:
-                // the other buttons pan (see the rule above), and a drag that
-                // began on the map is moving the view rather than measuring
-                // anything. Without either guard one gesture would do two things.
-                if let (true, Some(pick)) = (selecting && !on_map, self.region_pick.as_mut()) {
-                    let primary = egui::PointerButton::Primary;
-                    let px = response
-                        .interact_pointer_pos()
-                        .map(|pos| plot::pixel_at(pos, origin, self.view.zoom));
-                    let pressed = ui
-                        .input(|i| i.pointer.press_origin())
-                        .map(|pos| plot::pixel_at(pos, origin, self.view.zoom));
-                    let buttons = (
-                        response.drag_started_by(primary),
-                        response.dragged_by(primary),
-                        response.drag_stopped(),
-                    );
-                    if let Some(roi) = pick.track(px, pressed, buttons, (w, h)) {
-                        self.core.status = Some(pick.drawn_message(&roi));
-                    }
-                } else if let (true, Some(tool)) =
-                    (selecting && !on_map, self.point_counter.as_mut())
-                {
-                    // In image pixels, continuous: a click mid-pixel is x.5,
-                    // which is where the mark is drawn and what ImageJ gets.
-                    let zoom = self.view.zoom;
-                    let to_image = |pos| point_counter::image_at(pos, origin, zoom);
-                    let primary = egui::PointerButton::Primary;
-                    let at = response.interact_pointer_pos();
-                    let gesture = point_counter::Gesture {
-                        at: at.map(to_image),
-                        pressed_at: ui.input(|i| i.pointer.press_origin()).map(to_image),
-                        clicked: response.clicked_by(primary),
-                        alt: ui.input(|i| i.modifiers.alt),
-                        drag_started: response.drag_started_by(primary),
-                        dragging: response.dragged_by(primary),
-                        drag_stopped: response.drag_stopped(),
-                        // A click on the navigator moves the view (a drag
-                        // that began there never reaches here: `on_map`), and
-                        // one that ends autoscroll only ends it.
-                        taken: autoscroll_was_on
-                            || map.zip(at).is_some_and(|(outer, at)| outer.contains(at)),
-                    };
-                    tool.track(gesture, frame, point_counter::HIT_RADIUS / zoom, (w, h));
-                } else if selecting && !on_map {
-                    let zoom = self.view.zoom;
-                    let add = ui.input(|i| i.modifiers.shift);
-                    if let Some(win) = self.plot.as_mut() {
-                        if let Some(pos) = response.interact_pointer_pos() {
-                            let px = plot::pixel_at(pos, origin, zoom);
-                            let primary = egui::PointerButton::Primary;
-                            match win.drag {
-                                None if response.drag_started_by(primary) => {
-                                    win.drag = Some((px, px))
-                                }
-                                Some((from, _)) if response.dragged_by(primary) => {
-                                    win.drag = Some((from, px))
-                                }
-                                _ => {}
-                            }
-                        }
-                        if response.drag_stopped() {
-                            if let Some((from, to)) = win.drag.take() {
-                                if let Some(roi) = plot::drag_region(from, to, win.shape, w, h) {
-                                    // Shift adds; a plain drag replaces, which
-                                    // is what makes "start again" one gesture.
-                                    if !add {
-                                        win.rois.clear();
-                                    }
-                                    win.rois.push(roi);
-                                    win.stale = true;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Render into the on-screen *visible* rectangle only, and pan/zoom
-                // via UVs. Drawing into an oversized rect doesn't work: the callback
-                // viewport is clamped to the framebuffer, which would just squash the
-                // whole image back to fit instead of zooming.
-                let full_rect = egui::Rect::from_min_size(origin, img_px);
-                let visible = full_rect.intersect(panel_rect);
-                if visible.is_positive() {
-                    let inv = egui::vec2(1.0 / img_px.x.max(1.0), 1.0 / img_px.y.max(1.0));
-                    self.core.uv_offset = ((visible.min - origin) * inv).into();
-                    self.core.uv_scale = (visible.size() * inv).into();
-                    // How much room there is to draw it, which is what decides how
-                    // finely an over-large image needs to be sampled.
-                    let ppp = ui.ctx().pixels_per_point();
-                    self.core.viewport_px = (visible.size() * ppp).into();
-                    ui.painter()
-                        .with_clip_rect(panel_rect)
-                        .add(render::paint_callback(&self.render, visible));
-                }
-
-                // The regions, over the picture and clipped to the panel like
-                // everything else here.
-                if let Some(pick) = self.region_pick.as_ref() {
-                    region_pick::draw(
-                        &ui.painter().with_clip_rect(panel_rect),
-                        pick,
-                        origin,
-                        self.view.zoom,
-                        (w, h),
-                    );
-                } else if let Some(win) = self.plot.as_ref().filter(|p| p.wants_regions()) {
-                    plot::draw_rois(
-                        &ui.painter().with_clip_rect(panel_rect),
-                        win,
-                        origin,
-                        self.view.zoom,
-                        (w, h),
-                    );
-                }
-                // The counted points, over any regions: they are what the
-                // pointer is acting on while the counter is open.
-                if let Some(tool) = self.point_counter.as_ref() {
-                    point_counter::draw(
-                        &ui.painter().with_clip_rect(panel_rect),
-                        &tool.counter,
-                        frame,
-                        origin,
-                        self.view.zoom,
-                    );
-                }
-
-                // Where the view sits in the frame, once that stops being obvious.
-                // Drawn after the image so it is over it, and clipped to the panel
-                // like everything else here.
-                //
-                // `map` is `Some` exactly when this should be drawn, and it was
-                // decided above, before the drag handlers — see the comment there
-                // for why it has to be, and why `steady_pannable` is the condition.
-                if let Some(outer) = map {
-                    minimap::draw(
-                        &ui.painter().with_clip_rect(panel_rect),
-                        ui.visuals(),
-                        outer,
-                        full_rect,
-                        visible,
-                    );
-                }
-
-                // The autoscroll anchor, so the mode is visible and so its neutral
-                // point is findable. Without a marker the only way to stop
-                // scrolling is to hunt for the dead zone by trial and error, and
-                // the only way to know the mode is on at all is that the picture
-                // is moving — which is also what it looks like when something else
-                // has gone wrong.
-                if let Some(anchor) = self.view.autoscroll {
-                    let painter = ui.painter().with_clip_rect(panel_rect);
-                    let (ink, opposite) = minimap::contrasting_ink(ui.visuals());
-                    // A ring the size of the dead zone, so the thing on screen is
-                    // the thing the arithmetic uses: inside the ring is parked,
-                    // outside it moves. Haloed in the opposite ink for the same
-                    // reason the map has a backdrop — this sits over the picture,
-                    // which can be any brightness.
-                    for (r, w, c) in [
-                        (
-                            autoscroll::DEAD_ZONE + 1.0,
-                            3.0,
-                            opposite.gamma_multiply(0.6),
-                        ),
-                        (autoscroll::DEAD_ZONE, 1.5_f32, ink),
-                    ] {
-                        painter.circle_stroke(anchor, r, egui::Stroke::new(w, c));
-                    }
-                    painter.circle_filled(anchor, 1.5_f32, ink);
-                }
-
-                // What the pointer is over decides the cursor. Three answers, in
-                // the order of what has the gesture: the autoscroll mode owns the
-                // pointer wherever it is, the navigator owns it over the map, and
-                // otherwise it is the picture's.
-                let hover = response.hover_pos();
-                let over_map = map.zip(hover).is_some_and(|(outer, at)| outer.contains(at));
-                response.on_hover_cursor(if self.view.autoscroll.is_some() {
-                    egui::CursorIcon::AllScroll
-                } else if over_map || on_map {
-                    // The hand means "drag what is under the pointer", and over the
-                    // map what moves is the view somewhere else. The four-way arrow
-                    // is what every navigator uses for that.
-                    egui::CursorIcon::Move
-                } else if let Some(tool) = self
-                    .point_counter
-                    .as_ref()
-                    .filter(|_| selecting && self.region_pick.is_none())
-                {
-                    // The left button places and moves points here, not the
-                    // picture, so the hand is for a point under the pointer.
-                    let zoom = self.view.zoom;
-                    point_counter::cursor(
-                        tool,
-                        hover.map(|pos| point_counter::image_at(pos, origin, zoom)),
-                        frame,
-                        point_counter::HIT_RADIUS / zoom,
-                    )
-                } else if pannable {
-                    egui::CursorIcon::Grab
-                } else {
-                    egui::CursorIcon::Crosshair
-                });
-
-                // Scrub frames by scrolling over the image (Ctrl+scroll is zoom, so
-                // it's excluded). Two modes:
-                //   • normal — discrete wheel *events*, so one mouse notch is exactly
-                //     one frame (touchpad pixels accumulate to ~one notch);
-                //   • Shift (fast-scroll) — ride the smoothed glide, advancing a
-                //     ~10%-of-stack step at `FAST_SCROLL_GLIDE_RATE` per second (time-
-                //     scaled, so single- and multi-channel stacks scroll the same),
-                //     so one notch sums to ~10% while keeping the smooth glide feel.
-                // egui remaps Shift+wheel to horizontal scrolling, so the smoothed
-                // delta lands on `.x` with the same sign — `x + y` recovers it.
-                let mut pan_swipe = egui::Vec2::ZERO;
-                if ui.rect_contains_pointer(panel_rect) {
-                    let shift = ui.input(|i| i.modifiers.shift);
-                    if shift {
-                        let (glide, dt) = ui.input(|i| {
-                            let s = i.smooth_scroll_delta;
-                            (s.x + s.y, i.stable_dt)
-                        });
-                        if glide != 0.0 {
-                            // ~10% of the stack per notch, spread across the glide.
-                            let n_frames = self
-                                .core
-                                .document
-                                .as_ref()
-                                .map(|l| l.display.dims().frames)
-                                .unwrap_or(1);
-                            let fast_step = (n_frames as f64 * FAST_SCROLL_RATE).max(1.0);
-                            // glide < 0 is scroll-down → advance frames. Advance at a
-                            // fixed rate *per second* (scaled by the frame time), so
-                            // the jump depends only on the glide's real-time duration
-                            // — identical for single- and multi-channel stacks despite
-                            // their different render speeds. Fractions accumulate so
-                            // short stacks still move.
-                            let dir = if glide < 0.0 { 1.0 } else { -1.0 };
-                            self.view.scroll_accum +=
-                                (dir * fast_step * FAST_SCROLL_GLIDE_RATE * dt as f64) as f32;
-                            let steps = self.view.scroll_accum.trunc();
-                            self.view.scroll_accum -= steps;
-                            scroll_step = steps as i32;
-                        }
-                    } else {
-                        // Which device sent this, and therefore what it means —
-                        // see `scroll`.
-                        let scroll::Wheel { swipe, notches } =
-                            ui.input(|i| scroll::classify(&i.events, pannable));
-                        pan_swipe = swipe;
-                        // egui scroll is +y up; we scrub the next frame on scroll-down.
-                        self.view.scroll_accum -= notches;
-                        let steps = self.view.scroll_accum.trunc();
-                        self.view.scroll_accum -= steps;
-                        scroll_step = steps as i32;
-                    }
-                } else {
-                    self.view.scroll_accum = 0.0;
-                }
-
-                // Move the field of view by swipe, and keep moving for a moment
-                // after the swipe stops. Deliberately outside the hover test above:
-                // a flick that carries the pointer off the image should still
-                // coast, and stopping dead at the edge of the panel would feel like
-                // the picture had hit something.
-                //
-                // The sign matches dragging — the picture follows the fingers —
-                // because they are the same gesture done two ways, and having them
-                // disagree would be worse than either choice.
-                let dt = ui.input(|i| i.stable_dt);
-                if !pannable {
-                    self.view.pan_glide.stop();
-                }
-                let motion = if pan_swipe == egui::Vec2::ZERO {
-                    self.view.pan_glide.coast(dt)
-                } else {
-                    self.view.pan_glide.push(pan_swipe, dt)
-                };
-                if motion != egui::Vec2::ZERO {
-                    let want = self.view.pan - motion;
-                    self.view.pan.x = want.x.clamp(0.0, overflow.x);
-                    self.view.pan.y = want.y.clamp(0.0, overflow.y);
-                    // Clamped means that axis ran into the edge of the image. Stop
-                    // it there: a glide left wound up against a bound would spring
-                    // forward again the moment the bound moved.
-                    self.view.pan_glide.stop_axes(
-                        (self.view.pan.x - want.x).abs() > 0.01,
-                        (self.view.pan.y - want.y).abs() > 0.01,
-                    );
-                }
-                // A coast is motion with no input behind it, so nothing else will
-                // ask for the next frame.
-                if self.view.pan_glide.is_moving() {
-                    ui.ctx().request_repaint();
-                }
-            });
-
-        if scroll_step != 0 {
-            if let Some(loaded) = &mut self.core.document {
-                loaded.set_frame(loaded.frame().saturating_add_signed(scroll_step as isize));
-            }
-        }
-
+    /// Size the window, then bring the GPU up to date with this frame.
+    fn end_frame(
+        &mut self,
+        ui: &egui::Ui,
+        toolbar_response: &egui::InnerResponse<()>,
+        scrub_bar_response: &egui::InnerResponse<()>,
+    ) {
         // Window chrome (sizing, position, title) is a desktop-only concern.
         #[cfg(not(target_arch = "wasm32"))]
-        self.manage_window(ui, &toolbar_response, &scrub_bar_response);
+        self.manage_window(ui, toolbar_response, scrub_bar_response);
         #[cfg(target_arch = "wasm32")]
-        let _ = (&toolbar_response, &scrub_bar_response);
+        let _ = (toolbar_response, scrub_bar_response);
 
         // Bring the GPU up to date with the core state, then honor a pending
         // background volume build by scheduling another frame. The histograms
         // are binned from what the sync decodes, while their window is open.
-        self.core.histograms_wanted = self.show_histogram;
+        self.core.histograms_wanted = self.windows.is_open(WindowId::HISTOGRAM);
         let render = std::sync::Arc::clone(&self.render);
         let outcome = match render.lock() {
             Ok(mut resources) => {
@@ -4615,6 +3174,10 @@ mod import_label_tests;
 #[cfg(test)]
 #[path = "app/panel_grow_tests.rs"]
 mod panel_grow_tests;
+
+#[cfg(test)]
+#[path = "app/reset_tests.rs"]
+mod reset_tests;
 
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
