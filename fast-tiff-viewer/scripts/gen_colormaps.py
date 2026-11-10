@@ -12,16 +12,18 @@ Requires matplotlib (>= 3.3 for `turbo`).
     python fast-tiff-viewer/scripts/gen_colormaps.py
 """
 from pathlib import Path
-
-import matplotlib
-import matplotlib.pyplot as plt
+import seaborn as sns
 
 # (Rust name, matplotlib colormap name), in the order shown in the UI.
 COLORMAPS = [
     ("MAGMA", "magma"),
     ("PLASMA", "plasma"),
     ("INFERNO", "inferno"),
+    ("ROCKET", "rocket"),
+    ("FLARE", "flare_r"),
     ("VIRIDIS", "viridis"),
+    ("MAKO", "mako"),
+    ("CREST", "crest_r"),
     ("TURBO", "turbo"),
     ("BONE", "bone"),
     ("SUMMER", "summer"),
@@ -29,7 +31,7 @@ COLORMAPS = [
 
 
 def table(mpl_name: str) -> list[tuple[int, int, int]]:
-    cmap = plt.get_cmap(mpl_name)
+    cmap = sns.color_palette(mpl_name, as_cmap=True)
     rows = []
     for i in range(256):
         r, g, b, _ = cmap(i / 255.0)
@@ -56,13 +58,13 @@ def main() -> None:
 
     header = f'''//! Perceptual colormaps for displaying a single grayscale channel through a
 //! color LUT: the matplotlib "viridis family" (magma, plasma, inferno,
-//! viridis) plus Google's turbo. Each is a full 256-entry RGB table indexed by
+//! viridis), seaborn cmaps plus Google's turbo. Each is a full 256-entry RGB table indexed by
 //! display intensity (0 = `lut[0]`, 255 = `lut[255]`) — the same layout as the
 //! app's other channel LUTs (see `fast_tiff_lib::grayscale_lut`).
 //!
 //! The tables are baked in, so the app has no runtime or build-time dependency
-//! on matplotlib. Regenerate with `scripts/gen_colormaps.py` (matplotlib
-//! {matplotlib.__version__} was used here).
+//! on seaborn. Regenerate with `scripts/gen_colormaps.py` (seaborn
+//! {sns.__version__} was used here).
 
 /// Colormap display names, in UI order (parallel to [`LUTS`]).
 pub const NAMES: [&str; {len(COLORMAPS)}] = [{names}];
