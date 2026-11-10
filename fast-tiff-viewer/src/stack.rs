@@ -8,7 +8,7 @@
 
 use crate::channels::refresh_pseudocolor;
 use crate::dimensions::{apply_resolved_dimensions_reporting, setup_cmyk, setup_rgb};
-use crate::display::{Display, Revision};
+use crate::display::Display;
 use crate::loader::LoadStage;
 use crate::prefetch::Prefetcher;
 pub use crate::units::{SampleUnits, Window};
@@ -31,7 +31,7 @@ use std::sync::Arc;
 /// ([`Display::settings`]), and its setters
 /// ([`set_enabled`](Display::set_enabled), [`set_window`](Display::set_window))
 /// are how a shown channel changes, so a toggle is always recorded in the
-/// display's [`Revision`].
+/// display's [`Revision`](crate::display::Revision).
 #[derive(Clone, Copy, Debug)]
 pub struct ChannelSettings {
     /// The contrast window: `lo` shows black, `hi` full intensity.
@@ -87,7 +87,15 @@ impl ChannelSettings {
     }
 }
 
-/// An open TIFF stack plus everything the viewer derives from it.
+/// An open TIFF stack plus everything the viewer derives from it: the
+/// document a view shows.
+///
+/// What is here holds for every view of it — the file, how it is shown, the
+/// frame on screen, the overlay a save writes, and the document's services
+/// (its background workers and the caches valid for any view). What one
+/// renderer has uploaded of it is not: that is the viewer's own residency,
+/// which is why a channel toggle or a dimension override only ever edits the
+/// [`display`](Self::display).
 pub struct Stack {
     /// The file's bytes and frame index, shared rather than owned.
     ///
@@ -104,91 +112,12 @@ pub struct Stack {
     pub tiff: Arc<TiffStack>,
     pub path: PathBuf,
     pub frame_index: usize,
-    /// Subsampling applied on the way to the GPU: `1` when what is on screen is
-    /// the file's own resolution, higher when the view had to be coarsened to
-    /// fit a texture.
-    ///
-    /// Recorded here rather than kept inside the upload because it changes what
-    /// the user is looking at, and a viewer that quietly showed a reduced image
-    /// as if it were the data would be lying. The frontend reads this to say
-    /// so. On a frame bigger than one texture it falls to 1 as you zoom in,
-    /// which is the signal that you are now seeing real pixels.
-    pub gpu_stride: u32,
-    /// The window of the frame currently on the GPU, when only a window of it
-    /// is. `None` means the whole frame is resident — the ordinary case.
-    pub roi: Option<crate::roi::Roi>,
-    /// Whether this frame is past the device's per-axis texture limit, and so
-    /// can only be shown through a window at all.
-    ///
-    /// Set during [`crate::sync`], because it depends on the device. A frontend
-    /// reads it to decide whether the large-image controls are worth showing —
-    /// for every ordinary image they are not, and an option that does nothing
-    /// is worse than no option.
-    pub over_texture_limit: bool,
-    /// Builds windows off the interface thread, so zooming does not stop the
-    /// program while a finer one is prepared. `None` when the thread could not
-    /// start, or in a build without threads; windows are then built inline.
-    /// Like the other two workers here it is a `LatestWorker`
-    /// ([`crate::worker`]): a newer request, or dropping it, stops the build
-    /// under way.
-    pub window_worker: Option<crate::window::WindowWorker>,
-    /// Decoded strip bands, so moving the window re-uses what has already been
-    /// decompressed instead of decompressing it again.
-    ///
-    /// Only ever filled for frames too large to upload whole; an ordinary image
-    /// never puts anything in it. See [`crate::bandcache`].
-    pub bands: crate::bandcache::BandCache,
-    /// The whole frame at a coarse sampling, decoded and held in RAM — what a
-    /// view leaving the resident window falls back to, so it can show correct
-    /// pixels at once instead of stopping while a new window is cut.
-    ///
-    /// `None` until a frame-spanning window has been built for this file, which
-    /// the opening fit-to-window view does anyway. Never invalidated where its
-    /// inputs change; validated at every use. See [`crate::window::Overview`].
-    pub overview: Option<crate::window::Overview>,
-    /// The window the background worker is currently building, if any, with the
-    /// frame and the display [`Revision`] it was asked for under.
-    ///
-    /// Only so the same window is not asked for again on the next frame. A pan
-    /// or zoom re-plans every frame, so the rectangle wanted drifts continuously
-    /// even while the worker is part-way through one that would serve every one
-    /// of those frames. The revision is what makes a window asked for before a
-    /// dimension override, or a channel toggle, no longer count as in flight.
-    pub pending_window: Option<(usize, crate::roi::Roi, Revision)>,
-
-    /// The frame on the GPU, and the display [`Revision`] it was decoded
-    /// under. A disabled channel is skipped during upload (the shader
-    /// multiplies it out anyway), so re-enabling one must re-upload the frame
-    /// even when its index is unchanged, and a reinterpretation of the axes
-    /// must re-upload it because every channel may now read another IFD: the
-    /// revision moving is what forces both.
-    pub last_uploaded: Option<(usize, Revision)>,
-    /// The histograms of the frame on screen, binned from the decodes that
-    /// showed it while a frontend asks for them
-    /// ([`Viewer::histograms_wanted`](crate::Viewer::histograms_wanted)). A
-    /// frontend plots these rather than decoding the frame again; see
-    /// [`crate::histogram`].
-    pub histograms: crate::histogram::FrameHistograms,
-    pub luts_uploaded: bool,
     /// How the viewer is *showing* this stack: the c/z/t interpretation, the
     /// per-channel LUTs and contrast windows, and the layout facts derived at
     /// load. Everything mutable about the presentation lives here, so
     /// [`tiff`](Self::tiff)`.meta` stays exactly as the file was parsed — see
     /// [`crate::display`].
     pub display: Display,
-    /// Background read-ahead worker over [`tiff`](Self::tiff): decode-ahead for compressed
-    /// stacks, page-touch for uncompressed ones. `None` when the worker failed
-    /// to start, or always under `--no-default-features` (no `threads`); the
-    /// inline decode path covers both. See [`crate::prefetch`].
-    pub prefetch: Option<Prefetcher>,
-    /// Background 3D-volume builder, spawned lazily on the first 3D use.
-    /// `None` after a failed spawn (`volume_builder_tried` set) — volume
-    /// builds then fall back to running synchronously. Dropping it with the
-    /// stack cancels a build in flight: a closed file's half-built volume, and
-    /// the memory it holds, goes within a plane rather than being finished
-    /// beside the next file's.
-    pub volume_builder: Option<VolumeBuilder>,
-    pub volume_builder_tried: bool,
     /// The ImageJ overlay a save writes into the TIFF. Opening a file fills it
     /// with the point ROIs of the file's own overlay
     /// ([`StackMeta::overlay`](fast_tiff_lib::StackMeta::overlay)), so that a
@@ -198,6 +127,8 @@ pub struct Stack {
     /// what it was without one; see [`crate::save`] for what a non-empty one
     /// changes.
     pub overlay: Vec<fast_tiff_lib::PointRoi>,
+    /// The workers and caches every view of this document shares.
+    pub(crate) services: Services,
     /// Set when this document is a plugin's result shown in this window: the
     /// document it was made from, and the scratch file it is read from, which
     /// it deletes when it goes. `path` is then that scratch file — named as
@@ -213,10 +144,90 @@ pub struct Stack {
     pub derived: Option<crate::plugins::result::Derived>,
 }
 
+/// What a document runs and keeps for whoever shows it: the background
+/// workers over its pixels, and the caches that hold for any view of it.
+///
+/// Every worker starts on first need, so a document nobody shows — a test's,
+/// a plugin's input, one opened and closed again — runs no thread at all.
+/// Each is a `LatestWorker` ([`crate::worker`]): a newer request, or dropping
+/// it with the document, stops the job under way. Each is `None` while it has
+/// not been needed, when its thread could not start, and always in a build
+/// without threads; the work is then done inline, the same path either way.
+#[derive(Default)]
+pub(crate) struct Services {
+    /// Background read-ahead: decode-ahead for compressed stacks, page-touch
+    /// for uncompressed ones. See [`crate::prefetch`].
+    pub(crate) prefetch: Option<Prefetcher>,
+    /// Builds windows of a frame too large for one texture, off the
+    /// interface thread, so zooming does not stop the program while a finer
+    /// one is prepared.
+    pub(crate) window_worker: Option<crate::window::WindowWorker>,
+    /// Builds 3D volumes. Dropping it with the document cancels a build in
+    /// flight: a closed file's half-built volume, and the memory it holds,
+    /// goes within a plane rather than being finished beside the next file's.
+    pub(crate) volume_builder: Option<VolumeBuilder>,
+    /// Decoded strip bands, so moving the window re-uses what has already been
+    /// decompressed instead of decompressing it again.
+    ///
+    /// Only ever filled for frames too large to upload whole; an ordinary
+    /// image never puts anything in it. Keyed by display channel, and so
+    /// emptied by the next build under another channel layout
+    /// ([`BandCache::hold_layout`](crate::bandcache::BandCache::hold_layout)).
+    /// See [`crate::bandcache`].
+    pub(crate) bands: crate::bandcache::BandCache,
+    /// The histograms of the frame on screen; see [`Stack::histograms`].
+    pub(crate) histograms: crate::histogram::FrameHistograms,
+}
+
+// Started by the per-frame GPU path (`crate::sync`), which needs a backend.
+#[cfg_attr(
+    not(any(feature = "backend-wgpu", feature = "backend-glow")),
+    allow(dead_code)
+)]
+impl Services {
+    /// The read-ahead worker over `tiff`, started if it is not running.
+    pub(crate) fn start_prefetch(&mut self, tiff: &Arc<TiffStack>) -> Option<&Prefetcher> {
+        if self.prefetch.is_none() {
+            let compressed = tiff
+                .frames
+                .first()
+                .is_some_and(|f| f.compression != fast_tiff_lib::Compression::None);
+            self.prefetch = Prefetcher::new(Arc::clone(tiff), !compressed);
+        }
+        self.prefetch.as_ref()
+    }
+
+    /// The window worker over `tiff`, started if it is not running.
+    pub(crate) fn start_window_worker(
+        &mut self,
+        tiff: &Arc<TiffStack>,
+    ) -> Option<&crate::window::WindowWorker> {
+        if self.window_worker.is_none() {
+            self.window_worker = crate::window::WindowWorker::new(Arc::clone(tiff));
+            if self.window_worker.is_some() {
+                // The worker keeps its own bands, and from here on it is the
+                // one decoding windows. Holding a second full cache here would
+                // be memory for a thread that has stopped asking.
+                self.bands.set_budget(crate::bandcache::IDLE_CACHE_BYTES);
+            }
+        }
+        self.window_worker.as_ref()
+    }
+
+    /// The volume builder over `tiff`, started if it is not running.
+    pub(crate) fn start_volume_builder(&mut self, tiff: &Arc<TiffStack>) -> Option<&VolumeBuilder> {
+        if self.volume_builder.is_none() {
+            self.volume_builder = VolumeBuilder::new(Arc::clone(tiff));
+        }
+        self.volume_builder.as_ref()
+    }
+}
+
 impl Stack {
     /// Open `path` and derive the full display model: resolved c/z/t roles, RGB
-    /// or palette setup, per-channel contrast windows, the file's own LUT, and
-    /// the read-ahead worker.
+    /// or palette setup, per-channel contrast windows and the file's own LUT.
+    /// No worker starts here: the document's background workers each start
+    /// when a view first needs one.
     ///
     /// `apply_pseudocolor` carries the frontend's persistent preference onto the
     /// new stack (it only affects multi-channel grayscale stacks — see
@@ -280,38 +291,15 @@ impl Stack {
         // A copy: `tiff.meta` stays as the file was parsed, and this is the
         // document's, which the point counter may replace.
         let overlay = tiff.meta.overlay.clone();
-        let tiff = Arc::new(tiff);
-        // Spin up the read-ahead worker over the same stack: decode-ahead for
-        // compressed stacks, page-touch for uncompressed (see the `prefetch`
-        // field). Without threads there is none, and every frame decodes
-        // inline — the same path taken whenever a spawn fails.
-        let compressed = tiff
-            .frames
-            .first()
-            .is_some_and(|f| f.compression != fast_tiff_lib::Compression::None);
-        let prefetch = Prefetcher::new(Arc::clone(&tiff), !compressed);
-
+        // No worker is started here: each starts when a view first needs it
+        // (see `Services`).
         let mut stack = Stack {
-            tiff,
+            tiff: Arc::new(tiff),
             path,
-            display: Display::default(),
             frame_index: 0,
-            // Corrected on the first sync, once a renderer is on hand to say
-            // what this device can hold.
-            gpu_stride: 1,
-            roi: None,
-            over_texture_limit: false,
-            overview: None,
-            pending_window: None,
-            window_worker: None,
-            bands: Default::default(),
-            last_uploaded: None,
-            histograms: Default::default(),
-            luts_uploaded: false,
-            prefetch,
-            volume_builder: None,
-            volume_builder_tried: false,
+            display: Display::default(),
             overlay,
+            services: Services::default(),
             derived: None,
         };
 
@@ -360,6 +348,15 @@ impl Stack {
         refresh_pseudocolor(&mut stack, apply_pseudocolor);
 
         Ok(stack)
+    }
+
+    /// The histograms of the frame on screen, binned from the decodes that
+    /// showed it while a frontend asks for them
+    /// ([`Viewer::histograms_wanted`](crate::Viewer::histograms_wanted)). A
+    /// frontend plots these rather than decoding the frame again; see
+    /// [`crate::histogram`].
+    pub fn histograms(&self) -> &crate::histogram::FrameHistograms {
+        &self.services.histograms
     }
 
     /// Frame count on the scrub/time axis (at least 1).

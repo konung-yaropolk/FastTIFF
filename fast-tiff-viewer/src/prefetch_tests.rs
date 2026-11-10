@@ -130,9 +130,12 @@ fn a_frame_read_ahead_under_an_old_layout_is_refused() {
     let jobs = build_jobs(&stack, 1, &[true, true]);
     let ifds: Vec<usize> = jobs.iter().map(|j| j.ifd_idx).collect();
     assert_eq!(ifds, [2, 3]);
+    // Started as a sync starts it, on the first frame read ahead: a stack
+    // runs no worker of its own accord.
+    assert!(stack.services.prefetch.is_none());
     let p = stack
-        .prefetch
-        .as_ref()
+        .services
+        .start_prefetch(&stack.tiff)
         .expect("a compressed stack reads ahead");
     p.request(before, 1, jobs, None);
 
@@ -145,7 +148,7 @@ fn a_frame_read_ahead_under_an_old_layout_is_refused() {
         "channel 0 of frame 1 reads another IFD"
     );
 
-    let p = stack.prefetch.as_ref().unwrap();
+    let p = stack.services.prefetch.as_ref().unwrap();
     let start = Instant::now();
     loop {
         assert!(
@@ -172,9 +175,11 @@ fn the_read_ahead_bins_the_frame_it_decodes() {
     use crate::histogram::{frame_histograms, Binning};
     use std::time::{Duration, Instant};
     let mut stack = two_channel_movie();
+    stack.services.start_prefetch(&stack.tiff);
     let revision = stack.display.revision();
     let take = |stack: &Stack, frame: usize| {
         let p = stack
+            .services
             .prefetch
             .as_ref()
             .expect("a compressed stack reads ahead");
@@ -193,7 +198,7 @@ fn the_read_ahead_bins_the_frame_it_decodes() {
 
     let jobs = build_jobs(&stack, 2, &[true, true]);
     let binning = Binning::of(&stack);
-    let p = stack.prefetch.as_ref().unwrap();
+    let p = stack.services.prefetch.as_ref().unwrap();
     p.request(revision, 2, jobs, Some(binning));
     let got = take(&stack, 2);
     stack.frame_index = 2;
@@ -202,6 +207,7 @@ fn the_read_ahead_bins_the_frame_it_decodes() {
 
     let jobs = build_jobs(&stack, 1, &[true, true]);
     stack
+        .services
         .prefetch
         .as_ref()
         .unwrap()

@@ -201,10 +201,11 @@ pub(super) struct Running {
     poses: Vec<[[f32; 3]; 3]>,
     fps: f32,
     mark: CameraMark,
-    /// The volume's stack generation when it started: a different number is a
-    /// different stack, or the same one with its axes reassigned. (Not the
-    /// builder's generation, which also moves when the same volume is rebuilt
-    /// smaller for want of GPU memory: that is waited out, like a first build.)
+    /// Which volume the view showed when it started
+    /// ([`Viewer::volume_identity`](fast_tiff_viewer::Viewer::volume_identity)):
+    /// a different number is a different stack, or the same one with its axes
+    /// reassigned. (Not a rebuild of the same volume, smaller for want of GPU
+    /// memory: that is waited out, like a first build.)
     generation: u64,
     /// The frontend clock when pose 0 was first shown. `None` until the volume
     /// is ready to be drawn, so a long first build does not eat into the cycle.
@@ -234,7 +235,8 @@ pub(super) struct Frame<'a> {
     /// The frontend clock, in seconds.
     pub(super) now: f64,
     pub(super) in_volume: bool,
-    /// The volume's stack generation (`VolumeView::stack_generation`).
+    /// Which volume the view shows
+    /// ([`Viewer::volume_identity`](fast_tiff_viewer::Viewer::volume_identity)).
     pub(super) generation: u64,
     pub(super) camera: &'a CameraState,
     /// Whether the pointer was pressed on the 3D view since the last frame.
@@ -813,7 +815,7 @@ impl super::ViewerApp {
             plugin,
             animation,
             &self.core.volume.cam,
-            self.core.volume.stack_generation,
+            self.core.volume_identity(),
             sink,
         ));
         if saving {
@@ -884,9 +886,8 @@ impl super::ViewerApp {
         let Some(run) = self.animation.as_mut() else {
             return;
         };
-        let ready = self.core.volume.built_frame.is_some()
-            && self.core.volume.requested.is_none()
-            && self.volume_rect.is_some();
+        let ready =
+            self.core.volume_built() && !self.core.volume_building() && self.volume_rect.is_some();
         let ppp = ctx.pixels_per_point();
         let movie = match (self.volume_rect, self.core.stack.as_ref()) {
             (Some(rect), Some(stack)) => {
@@ -909,7 +910,7 @@ impl super::ViewerApp {
         let frame = Frame {
             now: ctx.input(|i| i.time),
             in_volume: self.core.view_mode == fast_tiff_viewer::ViewMode::Volume,
-            generation: self.core.volume.stack_generation,
+            generation: self.core.volume_identity(),
             camera: &self.core.volume.cam,
             pressed,
             ready,

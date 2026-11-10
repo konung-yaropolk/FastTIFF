@@ -56,6 +56,12 @@ fn rgb(frames: usize) -> Stack {
     stack
 }
 
+/// What a sync completes the histograms with for a frame that fits a texture,
+/// whose residency holds no overview.
+fn complete(stack: &mut Stack, start: bool) -> usize {
+    super::complete(stack, &Residency::default(), start)
+}
+
 /// What a sync does for the histograms when it decodes the frame for the
 /// screen inline: bin the enabled channels it decoded, then complete the
 /// rest. Returns how many channels `complete` decoded.
@@ -76,7 +82,7 @@ fn show(stack: &mut Stack) -> usize {
             .zip(&decoded)
             .map(|(job, data)| (job.channel, data.view())),
     );
-    stack.histograms.put(binned);
+    stack.services.histograms.put(binned);
     complete(stack, true)
 }
 
@@ -94,10 +100,10 @@ fn the_held_histograms_equal_a_whole_frame_decode() {
             assert_eq!(decoded, 1, "only the channel switched off is decoded");
             let reference = frame_histograms(&stack);
             assert_eq!(reference.len(), 3);
-            assert!(stack.histograms.describes(&stack));
-            assert_eq!(stack.histograms.source(), Some(HistogramSource::Frame));
+            assert!(stack.histograms().describes(&stack));
+            assert_eq!(stack.histograms().source(), Some(HistogramSource::Frame));
             assert_eq!(
-                stack.histograms.shown(&stack),
+                stack.histograms().shown(&stack),
                 &reference[..],
                 "frame {frame}: the held histograms differ from a whole-frame decode"
             );
@@ -135,14 +141,14 @@ fn histograms_kept_from_the_read_ahead_equal_a_whole_frame_decode() {
             .zip(&planes)
             .map(|(job, data)| (job.channel, data.view())),
     ));
-    stack.histograms.put(binned);
+    stack.services.histograms.put(binned);
     assert_eq!(
         complete(&mut stack, true),
         0,
         "the read-ahead's planes covered it"
     );
     assert_eq!(
-        stack.histograms.shown(&stack),
+        stack.histograms().shown(&stack),
         &frame_histograms(&stack)[..]
     );
 }
@@ -155,8 +161,8 @@ fn a_channel_toggle_decodes_nothing_for_the_histograms() {
     let mut stack = movie(3, 2);
     stack.display.set_enabled(2, false);
     assert_eq!(show(&mut stack), 1);
-    let held = stack.histograms.shown(&stack).to_vec();
-    let version = stack.histograms.version();
+    let held = stack.histograms().shown(&stack).to_vec();
+    let version = stack.histograms().version();
 
     for (c, on) in [(2, true), (0, false), (0, true), (2, false)] {
         assert!(stack.display.set_enabled(c, on));
@@ -171,28 +177,28 @@ fn a_channel_toggle_decodes_nothing_for_the_histograms() {
     }
     assert!(stack.display.set_window(1, Window::new(100.0, 9000.0)));
     assert_eq!(complete(&mut stack, true), 0, "a contrast drag decoded");
-    assert_eq!(stack.histograms.shown(&stack), &held[..]);
+    assert_eq!(stack.histograms().shown(&stack), &held[..]);
     assert_eq!(
-        stack.histograms.version(),
+        stack.histograms().version(),
         version,
         "nothing changed, so nothing should ask for a redraw"
     );
 
     // Another frame is another distribution, with nothing decoded for it yet.
     stack.frame_index = 1;
-    assert!(!stack.histograms.describes(&stack));
+    assert!(!stack.histograms().describes(&stack));
     assert_eq!(complete(&mut stack, true), 3);
     assert_eq!(
-        stack.histograms.shown(&stack),
+        stack.histograms().shown(&stack),
         &frame_histograms(&stack)[..]
     );
 
     // And an override reads other planes: the old bins are not even shown.
     crate::dimensions::apply_dimension_override(&mut stack, 2, 1, 3);
-    assert!(stack.histograms.shown(&stack).is_empty());
+    assert!(stack.histograms().shown(&stack).is_empty());
     assert_eq!(complete(&mut stack, true), 2);
     assert_eq!(
-        stack.histograms.shown(&stack),
+        stack.histograms().shown(&stack),
         &frame_histograms(&stack)[..]
     );
 }
@@ -254,7 +260,7 @@ fn what_is_missing_is_decoded_once() {
     // A frame index past the end does not decode; it is tried once.
     stack.frame_index = 5;
     assert_eq!(complete(&mut stack, true), 2);
-    assert!(stack.histograms.shown(&stack).is_empty());
+    assert!(stack.histograms().shown(&stack).is_empty());
     assert_eq!(
         complete(&mut stack, true),
         0,
@@ -271,7 +277,7 @@ fn during_playback_complete_only_adds_to_what_showing_the_frame_started() {
     let mut stack = movie(3, 3);
     stack.display.set_enabled(2, false);
     assert_eq!(show(&mut stack), 1);
-    let held = stack.histograms.shown(&stack).to_vec();
+    let held = stack.histograms().shown(&stack).to_vec();
 
     // Frame 1 was shown while the throttle was shut, so nothing binned it;
     // the repaints after it, with the throttle open, decode nothing.
@@ -284,7 +290,7 @@ fn during_playback_complete_only_adds_to_what_showing_the_frame_started() {
         );
     }
     assert_eq!(
-        stack.histograms.shown(&stack),
+        stack.histograms().shown(&stack),
         &held[..],
         "the last histograms stay up until the next are made"
     );
@@ -308,11 +314,11 @@ fn during_playback_complete_only_adds_to_what_showing_the_frame_started() {
             .zip(&decoded)
             .map(|(job, data)| (job.channel, data.view())),
     );
-    stack.histograms.put(binned);
+    stack.services.histograms.put(binned);
     assert_eq!(complete(&mut stack, false), 1);
     assert_eq!(complete(&mut stack, false), 0);
     assert_eq!(
-        stack.histograms.shown(&stack),
+        stack.histograms().shown(&stack),
         &frame_histograms(&stack)[..]
     );
 }
@@ -323,11 +329,13 @@ fn during_playback_complete_only_adds_to_what_showing_the_frame_started() {
 #[test]
 fn a_frame_past_the_texture_limit_is_binned_from_its_overview() {
     let mut stack = movie(2, 2);
-    stack.over_texture_limit = true;
+    // What a sync of a frame past the texture limit records for it.
+    let mut residency = Residency::default();
+    residency.over_texture_limit = true;
 
     // Nothing held for frame 0: no histogram, and nothing decoded for one.
-    assert_eq!(complete(&mut stack, true), 0);
-    assert!(stack.histograms.shown(&stack).is_empty());
+    assert_eq!(super::complete(&mut stack, &residency, true), 0);
+    assert!(stack.histograms().shown(&stack).is_empty());
 
     // The overview a fit-to-window view keeps: the whole frame at stride 2.
     let revision = stack.display.revision();
@@ -339,38 +347,35 @@ fn a_frame_past_the_texture_limit_is_binned_from_its_overview() {
         h: H,
         stride: 2,
     };
-    let planes = {
-        let Stack { tiff, bands, .. } = &mut stack;
-        window::assemble(
-            tiff,
-            bands,
-            revision.layout,
-            &jobs,
-            &roi,
-            0,
-            &CancelToken::never(),
-        )
-        .expect("assemble")
-    };
+    let planes = window::assemble(
+        &stack.tiff,
+        &mut stack.services.bands,
+        revision.layout,
+        &jobs,
+        &roi,
+        0,
+        &CancelToken::never(),
+    )
+    .expect("assemble");
     let built = window::Built {
         frame_index: 0,
         roi,
         channels: jobs.iter().map(|j| j.channel).collect(),
         planes,
     };
-    stack.overview = Some(Overview::capture(built, W, H, revision, usize::MAX).expect("spans"));
+    residency.overview = Some(Overview::capture(built, W, H, revision, usize::MAX).expect("spans"));
 
     assert_eq!(
-        complete(&mut stack, true),
+        super::complete(&mut stack, &residency, true),
         0,
         "a frame this large was decoded"
     );
     assert_eq!(
-        stack.histograms.source(),
+        stack.histograms().source(),
         Some(HistogramSource::Overview { stride: 2 })
     );
     let binning = Binning::of(&stack);
-    let o = stack.overview.as_ref().expect("held");
+    let o = residency.overview.as_ref().expect("held");
     let want: Vec<Histogram> = o
         .built
         .channels
@@ -379,14 +384,14 @@ fn a_frame_past_the_texture_limit_is_binned_from_its_overview() {
         .filter_map(|(&c, plane)| binning.bin(c, plane.view()))
         .collect();
     assert_eq!(want.len(), 2);
-    assert_eq!(stack.histograms.shown(&stack), &want[..]);
+    assert_eq!(stack.histograms().shown(&stack), &want[..]);
     let (tw, th) = roi.texture_size();
     assert!(want.iter().all(|h| h.counted == tw as u64 * th as u64));
 
     // Another frame, and the overview is of frame 0: no histograms.
     stack.frame_index = 1;
-    assert_eq!(complete(&mut stack, true), 0);
-    assert!(stack.histograms.shown(&stack).is_empty());
+    assert_eq!(super::complete(&mut stack, &residency, true), 0);
+    assert!(stack.histograms().shown(&stack).is_empty());
 }
 
 /// A view of the whole of a frame past the texture limit that is too large to
@@ -395,7 +400,9 @@ fn a_frame_past_the_texture_limit_is_binned_from_its_overview() {
 #[test]
 fn a_whole_frame_view_too_large_to_keep_is_binned_as_it_is_built() {
     let mut stack = movie(2, 2);
-    stack.over_texture_limit = true;
+    // What a sync of a frame past the texture limit records for it.
+    let mut residency = Residency::default();
+    residency.over_texture_limit = true;
     let revision = stack.display.revision();
     let jobs = build_jobs(&stack, 0, stack.display.masks().enabled());
     let roi = Roi {
@@ -405,19 +412,16 @@ fn a_whole_frame_view_too_large_to_keep_is_binned_as_it_is_built() {
         h: H,
         stride: 2,
     };
-    let planes = {
-        let Stack { tiff, bands, .. } = &mut stack;
-        window::assemble(
-            tiff,
-            bands,
-            revision.layout,
-            &jobs,
-            &roi,
-            0,
-            &CancelToken::never(),
-        )
-        .expect("assemble")
-    };
+    let planes = window::assemble(
+        &stack.tiff,
+        &mut stack.services.bands,
+        revision.layout,
+        &jobs,
+        &roi,
+        0,
+        &CancelToken::never(),
+    )
+    .expect("assemble");
     let built = window::Built {
         frame_index: 0,
         roi,
@@ -436,20 +440,20 @@ fn a_whole_frame_view_too_large_to_keep_is_binned_as_it_is_built() {
     bin_whole_view(&mut stack, &built);
     // Too large to keep: no overview, and the view goes.
     assert!(Overview::capture(built, W, H, revision, 0).is_none());
-    assert!(stack.overview.is_none());
+    assert!(residency.overview.is_none());
     for _ in 0..2 {
-        assert_eq!(complete(&mut stack, true), 0);
+        assert_eq!(super::complete(&mut stack, &residency, true), 0);
         assert_eq!(
-            stack.histograms.source(),
+            stack.histograms().source(),
             Some(HistogramSource::Overview { stride: 2 })
         );
-        assert_eq!(stack.histograms.shown(&stack), &want[..]);
+        assert_eq!(stack.histograms().shown(&stack), &want[..]);
     }
 
     // Another frame, with no view of it: nothing, not frame 0's.
     stack.frame_index = 1;
-    assert_eq!(complete(&mut stack, true), 0);
-    assert!(stack.histograms.shown(&stack).is_empty());
+    assert_eq!(super::complete(&mut stack, &residency, true), 0);
+    assert!(stack.histograms().shown(&stack).is_empty());
 }
 
 /// During playback this thread bins at most every interval of the playback

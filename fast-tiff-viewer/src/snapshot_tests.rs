@@ -67,7 +67,8 @@ fn with(stack: &mut Stack, lut: Lut, min: f32, max: f32) {
             "the window helper should reach the texture as {min}..{max}, got {lo}..{hi}"
         );
     }
-    stack.display.luts.fill(lut);
+    let n = stack.display.luts().len();
+    stack.display.set_luts(vec![lut; n]);
 }
 
 /// The copy is the image's own size, not the window's. This is the property
@@ -253,8 +254,12 @@ fn each_channel_is_coloured_by_its_own_lut() {
     with(&mut stack, ramp(), 0.0, 255.0);
     assert!(stack.display.settings().len() >= 2, "need two channels");
     // Channel 0 red, channel 1 green: the sum must be yellow with no blue.
-    stack.display.luts[0] = std::array::from_fn(|i| [i as u8, 0, 0]);
-    stack.display.luts[1] = std::array::from_fn(|i| [0, i as u8, 0]);
+    stack
+        .display
+        .set_lut(0, std::array::from_fn(|i| [i as u8, 0, 0]));
+    stack
+        .display
+        .set_lut(1, std::array::from_fn(|i| [0, i as u8, 0]));
     let snap = of_frame(&stack).expect("compose");
     assert_eq!(
         snap.pixel(0, 0).expect("in range"),
@@ -370,7 +375,8 @@ fn a_signed_window_composes_on_the_offset_texture() {
     let mut stack = Stack::from_bytes(bytes, "signed.tif".into(), false).expect("open");
     assert_eq!(stack.display.settings()[0].kind(), ChannelKind::Int16);
     stack.display.set_window(0, Window::new(-4.0, 0.0));
-    stack.display.luts.fill(ramp());
+    let n = stack.display.luts().len();
+    stack.display.set_luts(vec![ramp(); n]);
 
     let snap = of_frame(&stack).expect("compose");
     let grey = |i: u32| snap.pixel(i % W, i / W).expect("in range")[0];
@@ -415,7 +421,7 @@ fn whole_frame_oracle(stack: &Stack) -> Snapshot {
         let Some(s) = settings.get(job.channel) else {
             continue;
         };
-        let Some(lut) = stack.display.luts.get(job.channel) else {
+        let Some(lut) = stack.display.lut(job.channel) else {
             continue;
         };
         let (min, max) = s.units.to_texture(s.window);
@@ -487,8 +493,10 @@ fn oracle_stack(sample: SampleType, channels: usize, spp: u16) -> Stack {
             .display
             .set_window(c, Window::new(lo + span * 0.1, hi - span * 0.2));
         let tint = [(c % 3 == 0) as u8, (c % 3 == 1) as u8, (c % 3 != 1) as u8];
-        stack.display.luts[c] =
-            std::array::from_fn(|i| tint.map(|t| t * i as u8 + (255 - i as u8) / 8));
+        stack.display.set_lut(
+            c,
+            std::array::from_fn(|i| tint.map(|t| t * i as u8 + (255 - i as u8) / 8)),
+        );
     }
     stack
 }

@@ -10,6 +10,8 @@
 use crate::camera::CameraState;
 use crate::channels::refresh_pseudocolor;
 use crate::dimensions::{apply_dimension_override, compute_status};
+use crate::residency::Residency;
+use crate::roi::Roi;
 use crate::stack::Stack;
 use scivis_render::{VolumeInterp, VolumeRender};
 use std::path::PathBuf;
@@ -114,7 +116,12 @@ impl Playback {
     }
 }
 
-/// The 3D volume view's camera, appearance, and build tracking.
+/// The 3D volume view's camera and appearance: how the user has set the view
+/// up.
+///
+/// What the renderer holds of the volume, and the builds asked for, are the
+/// viewer's residency instead (see [`Viewer::volume_built`]): they follow the
+/// document, not the user's choices.
 #[derive(Clone, Copy, Debug)]
 pub struct VolumeView {
     pub cam: CameraState,
@@ -160,37 +167,6 @@ pub struct VolumeView {
     /// voxels along any axis — more than that cannot be seen even zoomed in
     /// twofold — however much GPU memory there is.
     pub screen_px: u32,
-    /// The most bytes the volume may take after an upload ran out of GPU
-    /// memory: half the volume that failed, so the next one is smaller
-    /// whatever limited the last one's size. `None` for each new stack.
-    pub budget_cap: Option<usize>,
-    /// The GPU memory budget worked out for the current generation, so every
-    /// timepoint of a 4D stack is built at the same size.
-    pub planned_budget: Option<usize>,
-    /// Which timepoint the currently-uploaded volume holds (`Some(frame_index)`
-    /// in the 4D case, else `Some(0)`); `None` means no volume is uploaded yet,
-    /// so a frontend should show a loading state until the first build lands. A
-    /// mismatch with the current timepoint queues a rebuild — this is what makes
-    /// 4D playback advance the volume through time.
-    pub built_frame: Option<usize>,
-    /// Generation for background builds: bumped whenever the volume has to be
-    /// built again — a new file, a dimension-order swap, a smaller rebuild
-    /// after the GPU ran out of memory — so an in-flight build for the old one
-    /// is recognized as stale and ignored, and cancelled by the next request,
-    /// which carries the new generation.
-    pub generation: u64,
-    /// Bumped with [`generation`](Self::generation) for a new file or a
-    /// dimension-order swap, and only then: a different volume, where
-    /// `generation` also moves for the same one rebuilt smaller. What a
-    /// frontend compares to tell that what it was showing has gone.
-    pub stack_generation: u64,
-    /// The [`generation`](Self::generation) of the volume last uploaded, to
-    /// tell whether an error the renderer reports late is about the volume
-    /// the view still wants.
-    pub uploaded_generation: Option<u64>,
-    /// The `(generation, time)` currently queued on the background builder, so
-    /// the request isn't re-sent on every polling frame.
-    pub requested: Option<(u64, usize)>,
     /// A turn of the volume about the middle of the volume under the centre
     /// of the view (see `VolumeCamera::pivot_distance`), on top
     /// of the camera — row-major, in volume coordinates. Set by a frontend playing an animation, frame by
@@ -221,13 +197,6 @@ impl Default for VolumeView {
             viewport_px: [1920, 1080],
             downscale: 1,
             screen_px: 0,
-            budget_cap: None,
-            planned_budget: None,
-            built_frame: None,
-            generation: 0,
-            stack_generation: 0,
-            uploaded_generation: None,
-            requested: None,
             pose: None,
         }
     }
@@ -258,24 +227,6 @@ impl VolumeView {
     pub fn detail_height(&self, dims: (u32, u32, u32)) -> f32 {
         let cam = self.camera(dims);
         cam.detail_height(cam.pivot_distance(), (dims.0, dims.1))
-    }
-
-    /// Invalidate the uploaded volume and any in-flight background build, so the
-    /// next 3D draw rebuilds. Call after anything that changes the volume's
-    /// shape (new file, dimension-order swap).
-    pub fn invalidate(&mut self) {
-        self.rebuild();
-        self.stack_generation = self.stack_generation.wrapping_add(1);
-    }
-
-    /// Build the same volume again, from a fresh plan (a smaller budget, say),
-    /// dropping any build in flight. Not a different volume: see
-    /// [`stack_generation`](Self::stack_generation).
-    pub fn rebuild(&mut self) {
-        self.built_frame = None;
-        self.generation = self.generation.wrapping_add(1);
-        self.requested = None;
-        self.planned_budget = None;
     }
 
     /// The most samples a ray of this view may take
@@ -327,10 +278,6 @@ pub struct Viewer {
     pub large_image_mode: crate::roi::LargeImageMode,
     /// Latched once playback falls behind in `Auto` mode. Reset per stack.
     pub decode_parallel: bool,
-    /// A stack was replaced, and the GPU volume built from the old one is to
-    /// be given back on the next [`sync`](Self::sync) — the first call that
-    /// has the renderer.
-    pub(crate) release_volume_gpu: bool,
     /// The visible UV sub-rect of the 2D image (`offset`, `scale`), computed by
     /// the frontend from its zoom + pan and uploaded to the shader. The image is
     /// always drawn into the on-screen visible rect with pan/zoom done via these
@@ -376,6 +323,11 @@ pub struct Viewer {
     pub histograms_wanted: bool,
     pub playback: Playback,
     pub volume: VolumeView,
+    /// What the renderer holds of [`stack`](Self::stack), in 2D and 3D: one
+    /// view's side of the document, reconciled with its display model at the
+    /// top of every [`sync`](Self::sync) and replaced whenever the document
+    /// is. See `crate::residency`.
+    pub(crate) residency: Residency,
 }
 
 /// What to put after "Failed to open file:" — the error's own words, unless the
@@ -527,15 +479,16 @@ impl Viewer {
                     ..Default::default()
                 };
                 // 3D defaults for the new stack: per-axis voxel scale from the
-                // pixel calibration (X/YResolution) + Z spacing (else 1:1:1), a
-                // fresh orbit, and an invalidated volume so entering 3D uploads
-                // this stack's data.
+                // pixel calibration (X/YResolution) + Z spacing (else 1:1:1),
+                // and a fresh orbit.
                 self.volume.scale = stack.tiff.meta.voxel_scale();
                 self.volume.cam.reset();
-                // A fresh budget: what did not fit before may have been
-                // another stack's problem.
-                self.volume.budget_cap = None;
-                self.volume.invalidate();
+                // Nothing the renderer holds is of this stack. A fresh
+                // residency says so: its first sync uploads this stack's
+                // frame and LUTs, gives the last stack's volume back, and
+                // starts from a fresh volume budget, since what did not fit
+                // before may have been the last stack's problem.
+                self.residency = Residency::default();
                 // Always start a newly-opened file in the 2D movie view.
                 self.view_mode = ViewMode::Movie;
                 self.status = compute_status(
@@ -546,9 +499,6 @@ impl Viewer {
                 // New stack: re-evaluate decode parallelism from scratch (its
                 // per-frame decode cost is different).
                 self.decode_parallel = false;
-                // The last stack's volume is no use to this one; its GPU memory
-                // goes back on the next sync, which has the renderer.
-                self.release_volume_gpu = true;
                 self.stack = Some(stack);
                 Ok(())
             }
@@ -559,8 +509,10 @@ impl Viewer {
         }
     }
 
-    /// Reassign which axis counts mean channels / Z / time, then refresh
-    /// everything derived from that: LUTs, the status note, and the volume.
+    /// Reassign which axis counts mean channels / Z / time, then refresh what
+    /// is derived from that here: the LUTs and the status note. What the
+    /// renderer holds — the frame, the volume — follows at the next sync,
+    /// which finds the display's channel layout moved.
     pub fn set_dimension_order(&mut self, channels: usize, slices: usize, frames: usize) {
         if let Some(stack) = &mut self.stack {
             apply_dimension_override(stack, channels, slices, frames);
@@ -573,8 +525,6 @@ impl Viewer {
                 stack.display.plane_mismatch,
             );
         }
-        // The frame axis (volume depth) just changed.
-        self.volume.invalidate();
     }
 
     /// Apply the pseudocolor preference to the current stack (and remember it
@@ -586,7 +536,6 @@ impl Viewer {
         }
     }
 
-    /// Whether the stack has enough depth to build a volume from.
     /// Pick the single-channel LUT by selector index — index 0 is the file's
     /// own "Built-in" map when it has one, then grayscale, the named channel
     /// colours, and the perceptual colormaps (see
@@ -602,11 +551,68 @@ impl Viewer {
         }
         stack.display.gray_lut_sel = sel;
         let lut = crate::channels::gray_lut_sel_lut(&stack.display, sel);
-        if stack.display.set_lut(0, lut) {
-            stack.luts_uploaded = false; // force a LUT re-upload on the next sync
-        }
+        stack.display.set_lut(0, lut);
     }
 
+    /// Subsampling applied to the 2D frame on its way to the GPU, as of the
+    /// last [`sync`](Self::sync): `1` when what is on screen is the file's own
+    /// resolution, higher when the view had to be coarsened to fit a texture.
+    ///
+    /// It changes what the user is looking at, and a viewer that quietly
+    /// showed a reduced image as if it were the data would be lying: a
+    /// frontend reads this to say so. On a frame bigger than one texture it
+    /// falls to 1 as you zoom in, which is the signal that you are now seeing
+    /// real pixels.
+    pub fn gpu_stride(&self) -> u32 {
+        self.residency.gpu_stride
+    }
+
+    /// Whether the frame on screen is past the device's per-axis texture
+    /// limit, and so can only be shown through a window at all, as of the
+    /// last [`sync`](Self::sync) (it depends on the device).
+    ///
+    /// A frontend reads it to decide whether the large-image controls are
+    /// worth showing — for every ordinary image they are not, and an option
+    /// that does nothing is worse than no option.
+    pub fn over_texture_limit(&self) -> bool {
+        self.residency.over_texture_limit
+    }
+
+    /// The window of the frame the 2D textures hold, in the frame's own
+    /// pixels and at its sampling stride; `None` before anything is uploaded.
+    /// The whole frame at stride 1 for anything that fits a texture.
+    pub fn resident_window(&self) -> Option<Roi> {
+        self.residency.roi
+    }
+
+    /// Whether a volume of the stack as it stands is on the GPU, for the 3D
+    /// view to draw: of some timepoint, the previous one's while 4D playback
+    /// builds the next. False until the first build lands — a frontend shows
+    /// a loading state meanwhile — and from the moment the axes are
+    /// reassigned, which makes it another volume.
+    pub fn volume_built(&self) -> bool {
+        self.stack
+            .as_ref()
+            .is_some_and(|s| self.residency.volume.built_for(s.display.revision().layout))
+    }
+
+    /// Whether a volume build has been asked for and not yet landed.
+    pub fn volume_building(&self) -> bool {
+        self.residency.volume.requested.is_some()
+    }
+
+    /// Which volume the 3D view is of: moves when a new stack is opened or its
+    /// axes are reassigned — when what is shown is a different volume — and
+    /// not when the same one is rebuilt smaller after the GPU ran out of
+    /// memory. What a frontend compares to tell that what it was showing has
+    /// gone. `0` with no stack open.
+    pub fn volume_identity(&self) -> u64 {
+        self.stack
+            .as_ref()
+            .map_or(0, |s| s.display.revision().layout)
+    }
+
+    /// Whether the stack has enough depth to build a volume from.
     pub fn can_show_volume(&self) -> bool {
         self.stack
             .as_ref()

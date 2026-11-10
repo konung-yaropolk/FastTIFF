@@ -30,6 +30,11 @@
 //! made under and compares; nothing has to diff copies of the settings, and
 //! nothing has to remember to reset a cache when the model moves, because the
 //! fields that would move it are private to the methods that move the counter.
+//!
+//! The LUTs have a counter of their own, apart from the [`Revision`]: a LUT is
+//! applied as a frame is drawn, so nothing decoded depends on it, and only
+//! what holds a copy of the LUTs themselves (a renderer's LUT texture) is
+//! keyed on it.
 
 use crate::stack::{ChannelSettings, Window};
 use fast_tiff_lib::{DisplayMode, StackMeta};
@@ -154,8 +159,9 @@ impl Default for ChannelMasks {
 ///
 /// What a decode depends on — the interpretation, the RGB layout, the channels
 /// and which of them are on — is private, and changed only through methods
-/// that move the matching counter of [`revision`](Self::revision). The rest is
-/// appearance nothing is keyed on, and stays an open field.
+/// that move the matching counter of [`revision`](Self::revision). So are the
+/// LUTs, which a renderer's copy of them is keyed on, with a counter of their
+/// own. The rest is appearance nothing is keyed on, and stays an open field.
 #[derive(Clone, Debug)]
 pub struct Display {
     /// The c/z/t interpretation in effect (see [`Dims`]).
@@ -170,8 +176,9 @@ pub struct Display {
     settings: Vec<ChannelSettings>,
     /// The LUT actually rendered for each channel, same length and order as
     /// [`settings`](Self::settings). Starts as the file's own and then reflects
-    /// whatever the user picked.
-    pub luts: Vec<Lut>,
+    /// whatever the user picked. Changed only through the methods that move
+    /// [`lut_revision`](Self::lut_revision).
+    luts: Vec<Lut>,
     /// The file's own LUT for a single-channel stack (a TIFF ColorMap or an
     /// ImageJ LUT), kept verbatim so the selector's "Built-in" option can put it
     /// back after the user has tried another. `None` when the file supplied no
@@ -219,6 +226,9 @@ pub struct Display {
     masks: ChannelMasks,
     /// See [`Revision`].
     revision: Revision,
+    /// Which version of [`luts`](Self::luts) this is; see
+    /// [`lut_revision`](Self::lut_revision).
+    lut_revision: u64,
 }
 
 impl Default for Display {
@@ -240,6 +250,7 @@ impl Default for Display {
             gray_lut_sel: 0,
             masks: ChannelMasks::default(),
             revision: Revision::default(),
+            lut_revision: 0,
         }
     }
 }
@@ -277,6 +288,20 @@ impl Display {
     /// Which version of the model this is; see [`Revision`].
     pub fn revision(&self) -> Revision {
         self.revision
+    }
+
+    /// Which version of the LUTs this is: moved by every method that changes
+    /// one, at the moment it does, and drawn from the same process-wide
+    /// sequence as the [`Revision`], so no two stacks' LUTs share a number.
+    /// What holds a copy of them (a renderer's LUT texture) records the number
+    /// it copied and compares.
+    // Read by the per-frame GPU path (`crate::sync`), which needs a backend.
+    #[cfg_attr(
+        not(any(feature = "backend-wgpu", feature = "backend-glow")),
+        allow(dead_code)
+    )]
+    pub(crate) fn lut_revision(&self) -> u64 {
+        self.lut_revision
     }
 
     /// Each channel's texture format and on/off flag, without collecting them.
@@ -348,16 +373,29 @@ impl Display {
         self.luts.get(c)
     }
 
-    /// Replace channel `c`'s rendered LUT. Returns whether anything changed, so
-    /// a caller can skip re-uploading when it didn't.
+    /// Every channel's rendered LUT, in channel order.
+    pub fn luts(&self) -> &[Lut] {
+        &self.luts
+    }
+
+    /// Replace channel `c`'s rendered LUT. Returns whether anything changed;
+    /// when it did, the LUT revision has moved, and nothing else has.
     pub fn set_lut(&mut self, c: usize, lut: Lut) -> bool {
         match self.luts.get_mut(c) {
             Some(slot) if *slot != lut => {
                 *slot = lut;
+                self.lut_revision = next_revision();
                 true
             }
             _ => false,
         }
+    }
+
+    /// Replace every channel's LUT, as a reinterpretation of the channels does
+    /// (RGB or CMYK setup). Moves the LUT revision.
+    pub(crate) fn set_luts(&mut self, luts: Vec<Lut>) {
+        self.luts = luts;
+        self.lut_revision = next_revision();
     }
 
     /// Reset the per-channel LUTs to what `meta` supplies for `channels`
@@ -370,8 +408,12 @@ impl Display {
     /// ImageJ block survive; when it changes they're regenerated from `mode`,
     /// which also stops a collapsed single-channel stack from wearing a stale
     /// composite (e.g. red) LUT.
+    ///
+    /// Moves the LUT revision either way: it comes with a new channel layout,
+    /// whose channels the old LUTs were not uploaded for.
     pub fn reseed_luts(&mut self, meta: &StackMeta, channels: usize) {
         let keep = channels == self.luts.len();
+        self.lut_revision = next_revision();
         self.luts = (0..channels)
             .map(|c| {
                 if keep {

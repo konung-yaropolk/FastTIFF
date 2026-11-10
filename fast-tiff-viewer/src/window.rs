@@ -409,13 +409,15 @@ pub fn overview_budget(mode: roi::LargeImageMode) -> usize {
 /// itself is never decoded whole.
 ///
 /// Validated where it is *used*, never invalidated where its inputs are written
-/// — the same contract as [`WindowWorker::take_matching`]. Which frame is
-/// showing is checked against the frame index, and everything else it depends
-/// on against the display [`Revision`] it was captured under: the
-/// channel-to-IFD mapping and each channel's texture format (its `layout`),
-/// and which channels are on (its `enabled`), since the planes are those of the
-/// channels that were on. Those revisions are moved by the only methods that
-/// can change what they cover, so nothing has to remember to drop this.
+/// — the same contract as [`WindowWorker::take_matching`]. It is one view's,
+/// held in that view's residency, which at the top of every sync drops one
+/// that no longer [`matches`](Self::matches): which frame is showing is checked
+/// against the frame index, and everything else it depends on against the
+/// display [`Revision`] it was captured under: the channel-to-IFD mapping and
+/// each channel's texture format (its `layout`), and which channels are on
+/// (its `enabled`), since the planes are those of the channels that were on.
+/// Those revisions are moved by the only methods that can change what they
+/// cover, so nothing has to remember to drop this.
 /// Getting it wrong would show pixels from another frame or another channel
 /// mapping — or, for a channel whose format changed, upload a buffer of the
 /// wrong length, a failed validation that takes the process with it.

@@ -611,7 +611,7 @@ fn metadata_of(stack: &SaveSource) -> StackMetaWrite {
     // 768 bytes each, and writing them is what makes a saved file open in the
     // colours it was saved in rather than in whichever ones a reader defaults
     // to for that channel count.
-    for lut in &stack.display.luts {
+    for lut in stack.display.luts() {
         out = out.channel_lut(*lut);
     }
     if let Some(text) = carried_description(stack) {

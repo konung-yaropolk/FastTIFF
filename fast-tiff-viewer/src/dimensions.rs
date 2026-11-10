@@ -189,7 +189,9 @@ pub fn apply_resolved_dimensions_reporting(
     // Both move the display's layout revision, which is what everything
     // decoded under the old interpretation — the frame on the GPU, a frame
     // read ahead, a window being built, the retained overview, the decoded
-    // bands — is checked against before it is used again.
+    // bands, the volume — is checked against before it is used again: the
+    // viewer's residency at the top of its next sync, each worker and cache
+    // as it is asked. Nothing here has to know about any of them.
     loaded.display.set_dims(dims);
     loaded.display.triple_axis_warning = resolved.triple_axis_warning;
     loaded.display.mode = loaded.tiff.meta.mode;
@@ -203,15 +205,6 @@ pub fn apply_resolved_dimensions_reporting(
             on_channel,
         ));
     loaded.frame_index = 0;
-    loaded.luts_uploaded = false;
-    // Which IFD each display channel reads just changed, so every band held
-    // and the retained overview now describe the wrong planes. Both are
-    // checked against the layout revision before use and would never be
-    // used again; dropping them here only returns the memory now rather than
-    // at the next windowed decode. Only ever non-empty for a frame too large
-    // to upload whole, so this costs nothing for an ordinary image.
-    loaded.bands.clear();
-    loaded.overview = None;
 }
 
 /// Which sample planes of an `spp`-sample RGB frame get a display channel, and
@@ -253,9 +246,11 @@ pub fn setup_rgb(loaded: &mut Stack) {
     loaded.display.set_sample_planes(false);
     loaded.display.mode = fast_tiff_lib::DisplayMode::Color;
     // 0 = red, 1 = green, 2 = blue, then the composite palette for any extras.
-    loaded.display.luts = (0..planes)
-        .map(fast_tiff_lib::default_composite_lut)
-        .collect();
+    loaded.display.set_luts(
+        (0..planes)
+            .map(fast_tiff_lib::default_composite_lut)
+            .collect(),
+    );
     // Unsigned 8-bit RGB deinterleaves into raw u8 planes (`read_plane_u8`) and
     // rides the R8Uint path — half the texture memory + upload of widening each
     // plane to u16. Deeper or signed RGB still widens to u16 via `read_plane_u16`.
@@ -278,7 +273,6 @@ pub fn setup_rgb(loaded: &mut Stack) {
             .collect(),
     );
     loaded.frame_index = 0;
-    loaded.luts_uploaded = false;
 }
 
 /// Reconfigures a freshly-loaded CMYK (Separated) stack: its four ink planes
@@ -297,13 +291,20 @@ pub fn setup_rgb(loaded: &mut Stack) {
 /// remain available from the library (`read_planes_u8`/`read_planes_u16` still
 /// return one plane per sample), so a future "show separations" mode has
 /// everything it needs.
+///
+/// Like [`setup_rgb`] and [`apply_resolved_dimensions`], this edits only the
+/// display model (and the frame index), so it is as safe to call on a stack
+/// already on screen as on one just opened: the display's revisions moving is
+/// what has a viewer drop everything it holds of the old mapping.
 pub fn setup_cmyk(loaded: &mut Stack) {
     // Both flags: `rgb` drives the plane-of-one-IFD decode addressing shared
     // with real RGB, `cmyk` records that these channels are derived.
     loaded.display.set_sample_planes(true);
     loaded.display.mode = fast_tiff_lib::DisplayMode::Color;
     // R, G, B.
-    loaded.display.luts = (0..3).map(fast_tiff_lib::default_composite_lut).collect();
+    loaded
+        .display
+        .set_luts((0..3).map(fast_tiff_lib::default_composite_lut).collect());
     // The conversion outputs in the source's own width: 8-bit inks give 8-bit
     // components (the zero-widening R8Uint upload), 16-bit gives 16. The
     // components are the conversion's output rather than the file's inks, so
@@ -325,7 +326,6 @@ pub fn setup_cmyk(loaded: &mut Stack) {
             .collect(),
     );
     loaded.frame_index = 0;
-    loaded.luts_uploaded = false;
 }
 
 /// Applies a manual dimension-order change from the dropdown: reassigns the

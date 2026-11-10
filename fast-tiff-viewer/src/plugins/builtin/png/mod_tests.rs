@@ -152,7 +152,7 @@ fn each_channel_goes_through_the_lut_it_is_displayed_with() {
     for (i, e) in green.iter_mut().enumerate() {
         *e = [0, i as u8, 0];
     }
-    stack.display.luts = vec![green];
+    stack.display.set_luts(vec![green]);
 
     let path = temp("lut");
     export(&stack, &path);
@@ -205,7 +205,7 @@ fn export_ramp_of(sample: SampleType, window: Window) -> Vec<u8> {
     let bytes = w.finish().expect("finish").into_inner();
     let mut stack = Stack::from_bytes(bytes, "ramp.tif".into(), false).expect("open");
     stack.display.set_window(0, window);
-    stack.display.luts = vec![grayscale_ramp()];
+    stack.display.set_luts(vec![grayscale_ramp()]);
     let path = temp(&format!("{sample:?}"));
     export(&stack, &path);
     let (_, _, rgb) = read_png(&path);

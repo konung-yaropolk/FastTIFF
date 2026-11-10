@@ -8,7 +8,7 @@
 //! what is on screen.
 
 use fast_tiff_viewer::roi::LargeImageMode::{Preload, Tiled};
-use fast_tiff_viewer::roi::{overview_stride, plan, Budget, Residency, MAX_PRELOAD_BYTES};
+use fast_tiff_viewer::roi::{overview_stride, plan, Budget, Plan, MAX_PRELOAD_BYTES};
 
 /// The file this feature exists for, and a common device limit.
 const ANDROMEDA: (u32, u32) = (40_000, 12_788);
@@ -19,7 +19,7 @@ const RGB8: usize = 3;
 const PANEL: [f32; 2] = [1920.0, 1080.0];
 const WHOLE: ([f32; 2], [f32; 2]) = ([0.0, 0.0], [1.0, 1.0]);
 
-fn preload(w: u32, h: u32, off: [f32; 2], scale: [f32; 2], panel: [f32; 2]) -> Residency {
+fn preload(w: u32, h: u32, off: [f32; 2], scale: [f32; 2], panel: [f32; 2]) -> Plan {
     plan(
         w,
         h,

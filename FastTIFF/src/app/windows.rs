@@ -11,9 +11,7 @@ use super::*;
 use crate::render;
 use egui::RichText;
 use fast_tiff_viewer::camera::{NavMode, OrbitPoint};
-use fast_tiff_viewer::histogram::{
-    fill_alpha, fill_tint, FrameHistograms, Histogram, HistogramSource, BINS,
-};
+use fast_tiff_viewer::histogram::{fill_alpha, fill_tint, Histogram, HistogramSource, BINS};
 use std::sync::Arc;
 
 /// The 3D render-settings pop-up: rendering method and the controls belonging
@@ -772,6 +770,18 @@ const AUTO_HINT: &str = "Clip the outermost 0.35% of samples at each end.\
 /// Hover text for the histogram Reset button.
 const RESET_HINT: &str = "Put every contrast window back where it was when the file was opened.";
 
+/// What the viewer's last sync put on the GPU of the frame on screen, as far as
+/// the histogram window says anything about it.
+#[derive(Clone, Copy)]
+pub(super) struct Resident {
+    /// Whether the frame is past the device's texture limit
+    /// ([`Viewer::over_texture_limit`](fast_tiff_viewer::Viewer::over_texture_limit)).
+    pub(super) over_texture_limit: bool,
+    /// The window of it the textures hold
+    /// ([`Viewer::resident_window`](fast_tiff_viewer::Viewer::resident_window)).
+    pub(super) window: Option<fast_tiff_viewer::roi::Roi>,
+}
+
 /// The channel-histogram pop-up: the intensity distribution of the frame on
 /// screen, with the contrast sliders directly beneath it.
 ///
@@ -781,34 +791,39 @@ const RESET_HINT: &str = "Put every contrast window back where it was when the f
 /// [`contrast_controls`]), so a handle sits above the part of the distribution
 /// it clips.
 ///
-/// `held` is the stack's own histograms ([`Stack::histograms`]), handed in
-/// apart from it because the window edits the stack while plotting them. The
-/// viewer bins them from the frames it decodes while the window is open; this
-/// only draws.
+/// What it plots is the stack's own histograms ([`Stack::histograms`]),
+/// which the viewer bins from the frames it decodes while the window is open;
+/// this only draws. They are borrowed from the stack only where nothing
+/// edits it (the note on where they came from, and the plot), so the contrast
+/// controls drawn between the two edit it with nothing copied out. `resident`
+/// is what the viewer's last sync put on the GPU, which says why a frame too
+/// large for one texture may have none.
 pub(super) fn histogram_window(
     ctx: &egui::Context,
     open: &mut bool,
     loaded: &mut Stack,
-    held: &FrameHistograms,
+    resident: Resident,
     log_scale: &mut bool,
 ) {
-    let hists = held.shown(loaded);
     // Past the texture limit the frame is never decoded whole, and what is
     // binned is the overview kept for zooming out: say so, since its counts
     // are not the frame's.
+    let held = loaded.histograms();
     let overview = match held.source() {
-        Some(HistogramSource::Overview { stride }) if !hists.is_empty() => Some(stride),
+        Some(HistogramSource::Overview { stride }) if !held.shown(loaded).is_empty() => {
+            Some(stride)
+        }
         _ => None,
     };
     // Such a frame is binned from a view of the whole of it as that view is
     // built, so with none there are two reasons: zoomed in on it, there is no
     // such view; zoomed out, the one on screen was built while the histogram
     // was closed and was too large to keep.
-    let zoomed_out = loaded
-        .roi
+    let zoomed_out = resident
+        .window
         .zip(loaded.dimensions())
         .is_some_and(|(roi, (w, h))| fast_tiff_viewer::window::spans_whole_frame(&roi, w, h));
-    let empty_note = if !loaded.over_texture_limit {
+    let empty_note = if !resident.over_texture_limit {
         "No frame to histogram"
     } else if zoomed_out {
         "A frame this large is histogrammed from a view of the whole\nof it as that is built: zoom in and back out to build one"
@@ -903,7 +918,10 @@ pub(super) fn histogram_window(
             if track.is_some() {
                 ui.separator();
                 if ui.button("Auto").on_hover_text(AUTO_HINT).clicked() {
-                    fast_tiff_viewer::channels::auto_contrast(loaded, hists);
+                    // Fitted to them while it edits the document that holds
+                    // them, so it is handed a copy: on a click, not a repaint.
+                    let hists = loaded.histograms().shown(loaded).to_vec();
+                    fast_tiff_viewer::channels::auto_contrast(loaded, &hists);
                 }
                 if ui.button("Reset").on_hover_text(RESET_HINT).clicked() {
                     fast_tiff_viewer::channels::reset_contrast(loaded);
@@ -917,6 +935,7 @@ pub(super) fn histogram_window(
         // stack draws no slider, so fall back to the full width.
         let span = track.unwrap_or_else(|| plot.x_range());
         let area = egui::Rect::from_x_y_ranges(span, plot.y_range());
+        let hists = loaded.histograms().shown(loaded);
         draw_plot(ui, area, hists, &loaded.display, *log_scale, empty_note);
     });
 }

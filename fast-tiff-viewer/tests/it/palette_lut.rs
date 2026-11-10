@@ -124,7 +124,7 @@ fn switching_colormap_and_back_restores_the_file_ramp() {
     viewer
         .load_bytes(palette_tiff(16, 8, 87), "palette.tif".into())
         .unwrap();
-    let original = viewer.stack.as_ref().unwrap().display.luts[0];
+    let original = viewer.stack.as_ref().unwrap().display.luts()[0];
     assert_ne!(
         original,
         fast_tiff_lib::grayscale_lut(),
@@ -136,13 +136,13 @@ fn switching_colormap_and_back_restores_the_file_ramp() {
     for sel in 1..n {
         viewer.set_gray_lut(sel);
         assert_ne!(
-            viewer.stack.as_ref().unwrap().display.luts[0],
+            viewer.stack.as_ref().unwrap().display.luts()[0],
             original,
             "option {sel} should change the display"
         );
         viewer.set_gray_lut(0);
         assert_eq!(
-            viewer.stack.as_ref().unwrap().display.luts[0],
+            viewer.stack.as_ref().unwrap().display.luts()[0],
             original,
             "returning from option {sel} must restore the file's ramp"
         );
@@ -178,7 +178,7 @@ fn a_plain_grayscale_file_gains_no_spurious_builtin_option() {
 #[test]
 fn isosurface_albedo_lands_on_a_visible_part_of_the_lut() {
     let stack = open(palette_tiff(16, 8, 87));
-    let lut = stack.display.luts[0];
+    let lut = stack.display.luts()[0];
     assert_eq!(lut[255], [0, 0, 0], "this palette really does end black");
 
     let t = scivis_render::brightest_lut_t(&lut);
@@ -214,7 +214,7 @@ fn volume_params_carry_the_albedo_per_channel() {
     // End-to-end: the value actually reaches the uniform the shader reads.
     use fast_tiff_viewer::camera::{build_volume_params, volume_camera, VolumeChannel};
     let stack = open(palette_tiff(16, 8, 87));
-    let albedo = scivis_render::brightest_lut_t(&stack.display.luts[0]);
+    let albedo = scivis_render::brightest_lut_t(&stack.display.luts()[0]);
     assert!(
         albedo < 1.0,
         "the stretched palette peaks before its top entry"

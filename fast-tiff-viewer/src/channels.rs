@@ -570,6 +570,9 @@ pub fn gray_lut_applicable(loaded: &Stack) -> bool {
 /// Sets the per-channel LUTs of an applicable (multi-channel grayscale) stack:
 /// the standard channel palette (ch1 red, ch2 green, …) when `apply` is true,
 /// plain grayscale otherwise. No-op for stacks that carry their own colors.
+///
+/// A LUT that changes moves the display's LUT revision, which is what has the
+/// renderer's copy uploaded again.
 pub fn refresh_pseudocolor(loaded: &mut Stack, apply: bool) {
     if !pseudocolor_applicable(loaded) {
         return;
@@ -582,5 +585,4 @@ pub fn refresh_pseudocolor(loaded: &mut Stack, apply: bool) {
         };
         loaded.display.set_lut(c, lut);
     }
-    loaded.luts_uploaded = false; // force re-upload on the next sync
 }

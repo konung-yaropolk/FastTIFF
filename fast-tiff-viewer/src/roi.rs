@@ -194,7 +194,7 @@ pub struct Roi {
 /// uploading only the required rect leaves no margin at all. They are returned
 /// together, from one stride, so the two can never disagree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Residency {
+pub struct Plan {
     /// The window to upload: the visible region plus margin.
     pub resident: Roi,
     /// The least that would serve this view. A window already on the GPU that
@@ -215,7 +215,7 @@ pub struct Serving {
     /// The window the view really wants. Equal to `show` when there is nothing
     /// better to prepare.
     pub want: Roi,
-    /// The least that would serve this view — [`Residency::required`], carried
+    /// The least that would serve this view — [`Plan::required`], carried
     /// through so the caller can ask "is this good enough?" rather than "is
     /// this identical?".
     ///
@@ -263,7 +263,7 @@ pub struct Serving {
 /// Pure, and separate from the GPU for that reason: which case applies decides
 /// whether zooming a gigapixel image stalls, and that should be checkable
 /// without a display.
-pub fn serve(current: Option<Roi>, overview: Option<Roi>, plan: &Residency) -> Serving {
+pub fn serve(current: Option<Roi>, overview: Option<Roi>, plan: &Plan) -> Serving {
     if let Some(show) = current {
         if show.serves(&plan.required) {
             return Serving {
@@ -395,7 +395,7 @@ pub fn plan(
     uv_scale: [f32; 2],
     viewport: [f32; 2],
     budget: Budget,
-) -> Residency {
+) -> Plan {
     let Budget {
         max_axis,
         bytes_per_texel,
@@ -449,7 +449,7 @@ pub fn plan(
             // The escape is for a frame so large that even one texel per axis is
             // over budget; there is nothing coarser to fall back to.
             if bytes <= MAX_ROI_BYTES || (rx.1 <= 1 && ry.1 <= 1) {
-                return Residency {
+                return Plan {
                     resident: roi(rx, ry, stride, width, height),
                     required: roi(
                         axis_window(vx, vw, width, stride, max_axis, 1),
@@ -485,7 +485,7 @@ fn plan_preloaded(
     viewport: [f32; 2],
     max_axis: u32,
     bytes_per_texel: usize,
-) -> Residency {
+) -> Plan {
     let (vx, vy, vw, vh) = visible;
     let coarse = {
         let stride = overview_stride(width, height, max_axis, bytes_per_texel);
@@ -499,7 +499,7 @@ fn plan_preloaded(
             h: height,
             stride,
         };
-        Residency {
+        Plan {
             resident: r,
             required: r,
         }
@@ -524,7 +524,7 @@ fn plan_preloaded(
             let rx = axis_window(vx, vw, width, 1, max_axis, margin);
             let ry = axis_window(vy, vh, height, 1, max_axis, margin);
             if (rx.1 as usize) * (ry.1 as usize) * bytes_per_texel <= MAX_ROI_BYTES {
-                return Residency {
+                return Plan {
                     resident: roi(rx, ry, 1, width, height),
                     required,
                 };

@@ -61,6 +61,10 @@ pub mod planes;
 /// that never opens the Plugins menu pays for it only in binary size.
 pub mod plugins;
 pub mod prefetch;
+/// What one renderer holds of the document it shows, reconciled with the
+/// display model once per sync. Crate-private: a frontend asks the
+/// [`Viewer`] what it needs of it.
+mod residency;
 pub mod roi;
 /// Writing the open stack back out as a TIFF. Native only: it writes to a
 /// path, and a browser has none.

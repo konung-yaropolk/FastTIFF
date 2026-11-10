@@ -448,31 +448,6 @@ fn a_float_volume_past_the_half_float_range_stays_finite() {
     );
 }
 
-/// A smaller rebuild after the GPU ran out of memory is the same volume: a
-/// build in flight is dropped, but what a frontend compares to tell that a
-/// different stack is on show (an animation stops for that) does not move.
-#[test]
-fn a_rebuild_is_not_a_different_stack() {
-    let mut v = crate::viewer::VolumeView {
-        built_frame: Some(0),
-        requested: Some((0, 0)),
-        planned_budget: Some(1 << 20),
-        ..Default::default()
-    };
-    v.rebuild();
-    assert_eq!((v.generation, v.stack_generation), (1, 0));
-    assert_eq!(
-        (v.built_frame, v.requested, v.planned_budget),
-        (None, None, None)
-    );
-    v.invalidate();
-    assert_eq!(
-        (v.generation, v.stack_generation),
-        (2, 1),
-        "a new stack moves both"
-    );
-}
-
 #[test]
 fn the_detail_cap_follows_the_screen_with_a_floor() {
     assert_eq!(detail_cap(0), u32::MAX, "unknown screen: no cap");

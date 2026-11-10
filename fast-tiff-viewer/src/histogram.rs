@@ -21,7 +21,9 @@
 //! decoded once, to draw it. So the histograms are binned from those planes:
 //! the ones `crate::sync` decodes inline, or takes from the read-ahead — whose
 //! worker can bin the frame it decodes ahead while it holds it, off the
-//! interface thread. They are held on the stack as its [`FrameHistograms`].
+//! interface thread. They are held on the stack as its [`FrameHistograms`],
+//! one of the document's services: whichever view decoded the frame, they are
+//! the frame's.
 //!
 //! What no decode for the screen covers is decoded for them, and that is not
 //! nothing:
@@ -55,8 +57,10 @@
 //! against, and what a caller without a renderer, and so without a sync, uses.
 
 use crate::prefetch::{build_jobs, decode_jobs_borrowed, Decoded, Samples};
+use crate::residency::Residency;
 use crate::stack::Stack;
 use crate::units::{SampleUnits, Window};
+use crate::window::Overview;
 use scivis_render::{Lut, MAX_CHANNELS};
 
 /// Bins per histogram. Matches the 256 entries of a [`Lut`], so one bin is
@@ -184,7 +188,7 @@ impl Binning {
     }
 }
 
-/// The histograms of the frame on screen, kept on the stack
+/// The histograms of the frame on screen, kept with the stack
 /// ([`Stack::histograms`]) and made from the decodes that show it (see the
 /// [module docs](self)).
 ///
@@ -329,18 +333,19 @@ impl FrameHistograms {
     allow(dead_code)
 )]
 pub(crate) fn prepare(stack: &mut Stack, source: HistogramSource) -> [bool; MAX_CHANNELS] {
-    if !stack.histograms.holds(stack, source) {
+    if !stack.services.histograms.holds(stack, source) {
         let key = HistogramKey::of(stack);
-        stack.histograms.held = Some(Held {
+        let histograms = &mut stack.services.histograms;
+        histograms.held = Some(Held {
             key,
             source,
             hists: Vec::new(),
             done: [false; MAX_CHANNELS],
         });
-        stack.histograms.version += 1;
+        histograms.version += 1;
     }
     let mut missing = [false; MAX_CHANNELS];
-    if let Some(held) = &stack.histograms.held {
+    if let Some(held) = &stack.services.histograms.held {
         let n = stack.display.channel_count().min(MAX_CHANNELS);
         for (m, done) in missing.iter_mut().zip(&held.done).take(n) {
             *m = !done;
@@ -379,8 +384,9 @@ pub(crate) fn bin_shown<'a>(
 /// it, with what nothing else binned: decode the channels still missing — the
 /// ones switched off, or every one when histograms are first asked for on a
 /// frame already on screen — and only those. A frame past the texture limit
-/// is never decoded whole: its histograms are binned from the overview, when
-/// one of this frame is held, and otherwise there are none.
+/// (as `residency`, the view's, found it) is never decoded whole: its
+/// histograms are binned from the overview that view holds, when it is of
+/// this frame, and otherwise there are none.
 ///
 /// `start` is whether this may start the histograms of a frame that has
 /// none, decoding every channel for them. Not while a movie plays in the 2D
@@ -396,12 +402,17 @@ pub(crate) fn bin_shown<'a>(
     not(any(feature = "backend-wgpu", feature = "backend-glow")),
     allow(dead_code)
 )]
-pub(crate) fn complete(stack: &mut Stack, start: bool) -> usize {
-    if stack.over_texture_limit {
-        from_overview(stack);
+pub(crate) fn complete(stack: &mut Stack, residency: &Residency, start: bool) -> usize {
+    if residency.over_texture_limit {
+        from_overview(stack, residency.overview.as_ref());
         return 0;
     }
-    if !start && !stack.histograms.holds(stack, HistogramSource::Frame) {
+    if !start
+        && !stack
+            .services
+            .histograms
+            .holds(stack, HistogramSource::Frame)
+    {
         return 0;
     }
     let missing = prepare(stack, HistogramSource::Frame);
@@ -428,12 +439,12 @@ pub(crate) fn complete(stack: &mut Stack, start: bool) -> usize {
         // reporting it already.
         Err(_) => Vec::new(),
     };
-    stack.histograms.put(binned);
-    stack.histograms.tried(&missing);
+    stack.services.histograms.put(binned);
+    stack.services.histograms.tried(&missing);
     jobs.len()
 }
 
-/// [`complete`] for a frame past the texture limit: bin the overview, which is
+/// [`complete`] for a frame past the texture limit: bin `overview`, which is
 /// the whole frame at the overview's stride, when it is of this frame and
 /// channel layout. Its channels are the ones that were on when it was built,
 /// so a channel switched off then has no histogram until the next overview.
@@ -441,24 +452,20 @@ pub(crate) fn complete(stack: &mut Stack, start: bool) -> usize {
 /// Held, or binned as it was built ([`bin_whole_view`]), what is binned from
 /// a view of the whole frame stays while it describes the frame: zoomed in on
 /// it, there is no such view, and the histograms are still the frame's.
-fn from_overview(stack: &mut Stack) {
+fn from_overview(stack: &mut Stack, overview: Option<&Overview>) {
     let layout = stack.display.revision().layout;
-    let held = stack
-        .overview
-        .as_ref()
-        .is_some_and(|o| o.built.frame_index == stack.frame_index && o.revision.layout == layout);
-    if !held {
+    let of_this_frame = overview
+        .filter(|o| o.built.frame_index == stack.frame_index && o.revision.layout == layout);
+    let Some(overview) = of_this_frame else {
         // Nothing of this frame to bin. What is held is kept only while it
         // is still this frame's: another frame's would be the wrong picture,
         // with nothing to say so.
-        if !stack.histograms.describes(stack) {
-            stack.histograms.clear();
+        if !stack.services.histograms.describes(stack) {
+            stack.services.histograms.clear();
         }
         return;
-    }
-    let overview = stack.overview.take().expect("checked");
+    };
     bin_whole_view(stack, &overview.built);
-    stack.overview = Some(overview);
 }
 
 /// Bin `view`, a window spanning the whole of the frame on screen at its
@@ -483,7 +490,7 @@ pub(crate) fn bin_whole_view(stack: &mut Stack, view: &crate::window::Built) {
             .copied()
             .zip(view.planes.iter().map(Decoded::view)),
     );
-    stack.histograms.put(binned);
+    stack.services.histograms.put(binned);
 }
 
 /// Histogram every display channel of the stack's current frame, decoding

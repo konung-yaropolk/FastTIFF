@@ -62,7 +62,7 @@ mod windows;
 
 use scale::UI_SCALE;
 use widgets::{contrast_controls, histogram_button, ContrastLayout};
-use windows::{histogram_window, metadata_window, render_settings_window};
+use windows::{histogram_window, metadata_window, render_settings_window, Resident};
 
 /// Install the chrome defaults both hosts share, before the first frame.
 ///
@@ -3129,15 +3129,16 @@ impl ViewerApp {
                     // texture limit, which is rare and enormous — but silently
                     // showing a reduced image as if it were the data would be
                     // the kind of wrong a viewer must never be.
-                    if loaded.gpu_stride > 1 {
+                    let gpu_stride = self.core.gpu_stride();
+                    if gpu_stride > 1 {
                         ui.separator();
                         ui.label(
-                            RichText::new(format!("1/{} scale", loaded.gpu_stride))
+                            RichText::new(format!("1/{gpu_stride} scale"))
                                 .color(Color32::from_rgb(230, 170, 60)),
                         )
                         .on_hover_text(format!(
                             "This frame is larger than one GPU texture can hold, so it is                              shown subsampled {}x on each axis. Pixel values and measurements                              read from it are sampled, not exact.",
-                            loaded.gpu_stride
+                            gpu_stride
                         ));
                     }
 
@@ -3247,6 +3248,9 @@ impl ViewerApp {
         let mut playback_fps = self.core.playback.fps;
         let mut decode_mode = self.core.decode_mode;
         let mut large_image_mode = self.core.large_image_mode;
+        // Read here, before the stack is borrowed for the controls: what the
+        // last sync found the frame to be on this device.
+        let over_texture_limit = self.core.over_texture_limit();
         let mut metadata_toggle = false;
         let mut histogram_toggle = false;
         let current_status = self.core.status.clone();
@@ -3632,7 +3636,7 @@ impl ViewerApp {
                     // that changes nothing is worse than no option. The flag is
                     // set during the GPU sync, since only there is the device's
                     // texture limit known.
-                    if loaded.over_texture_limit {
+                    if over_texture_limit {
                         if row_has_items {
                             ui.separator();
                         }
@@ -3731,15 +3735,13 @@ impl ViewerApp {
         }
         if self.show_histogram {
             let mut open = true;
+            let resident = Resident {
+                over_texture_limit: self.core.over_texture_limit(),
+                window: self.core.resident_window(),
+            };
             match self.core.stack.as_mut() {
                 Some(loaded) => {
-                    // The window edits the stack's contrast while plotting the
-                    // histograms held on it, so they are lent out of it for
-                    // the call and put back. Nothing the window does touches
-                    // them; the viewer's next sync is what replaces them.
-                    let held = std::mem::take(&mut loaded.histograms);
-                    histogram_window(ui.ctx(), &mut open, loaded, &held, &mut self.hist_log);
-                    loaded.histograms = held;
+                    histogram_window(ui.ctx(), &mut open, loaded, resident, &mut self.hist_log)
                 }
                 None => open = false,
             }
@@ -3855,8 +3857,9 @@ impl ViewerApp {
                 .request_repaint_after(std::time::Duration::from_secs_f64(1.0 / fps));
         }
 
-        // Reassigning the axes also refreshes LUTs + status and invalidates the
-        // volume (the frame axis, i.e. the volume depth, just changed).
+        // Reassigning the axes also refreshes LUTs + status; the volume is
+        // rebuilt at the next sync, which finds the channel layout moved (the
+        // frame axis, i.e. the volume depth, just changed).
         if let Some((c, z, f)) = dimension_override {
             // The counter's points are on frames of the axes as they were.
             let before = self
@@ -3977,7 +3980,7 @@ impl ViewerApp {
                     // Until the first volume is built, show a black loading screen so
                     // the heavy decode doesn't freeze on the previous view (`sync_gpu`
                     // defers the initial build until after this frame paints).
-                    if self.core.volume.built_frame.is_none() {
+                    if !self.core.volume_built() {
                         ui.painter()
                             .rect_filled(panel_rect, 0.0, egui::Color32::BLACK);
                         ui.painter().text(

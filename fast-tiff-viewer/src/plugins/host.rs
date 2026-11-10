@@ -487,7 +487,7 @@ pub fn describe_view(
         frame_index,
         volume_view,
         channels,
-        luts: stack.display.luts.clone(),
+        luts: stack.display.luts().to_vec(),
         volume,
     }
 }

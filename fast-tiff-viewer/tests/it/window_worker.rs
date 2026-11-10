@@ -17,7 +17,7 @@
 //!   background worker that quietly returned something different would be far
 //!   worse than the stall it replaces.
 
-use fast_tiff_viewer::roi::{self, Residency, Roi};
+use fast_tiff_viewer::roi::{self, Plan, Roi};
 
 // A view of the NASA Andromeda mosaic — the frame this machinery exists for.
 const W: u32 = 40_000;
@@ -29,8 +29,8 @@ fn roi(x: u32, y: u32, w: u32, h: u32, stride: u32) -> Roi {
 
 /// `resident` is what would be uploaded, `required` the least that serves the
 /// view — the pair `roi::plan` returns.
-fn plan(resident: Roi, required: Roi) -> Residency {
-    Residency { resident, required }
+fn plan(resident: Roi, required: Roi) -> Plan {
+    Plan { resident, required }
 }
 
 // ---------------------------------------------------------------------------

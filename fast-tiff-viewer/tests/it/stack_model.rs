@@ -142,83 +142,6 @@ fn float_stack_windows_in_its_own_units() {
     assert!(s.window.lo <= s.window.hi);
 }
 
-/// Reassigning the axes changes which IFD each display channel reads. The
-/// decoded-band cache is keyed by *display channel* — it has to be, because
-/// that is what keeps a sideways pan hitting — so after a reassignment every
-/// band it holds describes the wrong plane, and reusing one splices pixels from
-/// the old interpretation into the new picture.
-///
-/// Only reachable on a frame too large to upload whole, which is the only case
-/// that fills the cache at all; but there it is a wrong image rather than a slow
-/// one, so the cache is dropped whenever the mapping moves.
-#[test]
-fn reassigning_the_axes_drops_everything_decoded_under_the_old_mapping() {
-    use fast_tiff_viewer::prefetch::Decoded;
-    use fast_tiff_viewer::roi::Roi;
-    use fast_tiff_viewer::window::{Built, Overview, OVERVIEW_MAX_BYTES};
-
-    let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
-        return;
-    };
-    let mut viewer = Viewer::new();
-    load(&mut viewer, path).expect("hyperstack should open");
-
-    // Stand in for what a windowed decode leaves behind: a band and a retained
-    // overview, both held under display channel 0 of frame 0.
-    let stack = viewer.stack.as_mut().unwrap();
-    let (w, h) = (stack.tiff.frames[0].width, stack.tiff.frames[0].height);
-
-    stack
-        .bands
-        .put(0, vec![0], 0, (0, 4096), vec![Decoded::U16(vec![7; 1024])]);
-    assert!(
-        stack.bands.get(0, &[0], 0, (0, 4096)).is_some(),
-        "the setup has to be cached"
-    );
-
-    let whole = Roi {
-        x: 0,
-        y: 0,
-        w,
-        h,
-        stride: 4,
-    };
-    let built = Built {
-        frame_index: 0,
-        roi: whole,
-        channels: vec![0],
-        planes: vec![Decoded::U16(vec![7; 64])],
-    };
-    let before = stack.display.revision();
-    stack.overview = Overview::capture(built, w, h, before, OVERVIEW_MAX_BYTES);
-    assert!(
-        stack.overview.is_some(),
-        "the setup has to retain an overview"
-    );
-
-    let shown = viewer.stack.as_ref().unwrap().display.dims();
-    viewer.set_dimension_order(shown.frames, shown.slices, shown.channels);
-
-    let stack = viewer.stack.as_mut().unwrap();
-    assert_ne!(
-        stack.display.revision().layout,
-        before.layout,
-        "the override is recorded as a new channel layout"
-    );
-    assert!(
-        stack.bands.get(0, &[0], 0, (0, 4096)).is_none(),
-        "channel 0 now reads a different IFD, so the band held for it is the wrong plane"
-    );
-    assert!(
-        stack.bands.is_empty(),
-        "nothing decoded under the old mapping may survive"
-    );
-    assert!(
-        stack.overview.is_none(),
-        "the overview was decoded through the old channel-to-IFD mapping too"
-    );
-}
-
 #[test]
 fn dimension_override_conserves_the_plane_count() {
     let Some(path) = fixture("ij_u16_spp1_p6_hyperstack.tif") else {
@@ -235,7 +158,7 @@ fn dimension_override_conserves_the_plane_count() {
     };
     let shown = viewer.stack.as_ref().unwrap().display.dims();
     let planes = shown.channels * shown.slices * shown.frames;
-    let gen_before = viewer.volume.generation;
+    let volume_before = viewer.volume_identity();
 
     // Swap the channel and time roles, as the dimension-order dropdown does.
     viewer.set_dimension_order(shown.frames, shown.slices, shown.channels);
@@ -264,16 +187,17 @@ fn dimension_override_conserves_the_plane_count() {
     let shown_now = fast_tiff_viewer::Display::shown_channels(after.channels);
     assert_eq!(stack.display.settings().len(), shown_now);
     assert_eq!(
-        stack.display.luts.len(),
+        stack.display.luts().len(),
         shown_now,
         "one LUT per shown channel"
     );
-    // ...and the volume was invalidated, since the depth axis just changed.
+    // ...and the volume is another one, since the depth axis just changed.
     assert_ne!(
-        viewer.volume.generation, gen_before,
-        "volume should be invalidated"
+        viewer.volume_identity(),
+        volume_before,
+        "the volume should be another one"
     );
-    assert_eq!(viewer.volume.built_frame, None);
+    assert!(!viewer.volume_built());
 }
 
 #[test]
@@ -315,8 +239,6 @@ fn pseudocolor_tints_channels_and_reverts() {
             .all(|cd| channel_tint(&cd.lut).is_none()),
         "turning pseudocolor off should restore plain grayscale LUTs"
     );
-    // Either way the LUTs must be re-uploaded on the next sync.
-    assert!(!stack.luts_uploaded);
 }
 
 #[test]
