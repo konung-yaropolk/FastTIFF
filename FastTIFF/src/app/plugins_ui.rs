@@ -5,6 +5,7 @@
 //! toolchain have a dialog at all — see `fasttiff_plugin_api::params` for why
 //! passing an `&mut egui::Ui` across that boundary is not an option.
 
+use super::platform::{Current, Platform as _, Purpose, TARGET};
 use egui::RichText;
 use fast_tiff_viewer::plugins::Registry;
 use fasttiff_plugin_api::{ParamDecl, ParamKind, ParamValue, Params, PluginInfo};
@@ -15,9 +16,8 @@ pub(super) enum MenuAction {
     Run(usize),
     /// Open the point counter, the app's own tool (see `point_counter`).
     PointCounter,
-    /// Open the folder plugins are installed into. Desktop-only, like the
-    /// menu entry that produces it.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Open the folder plugins are installed into, where there is one to
+    /// open — see [`plugins_menu`].
     OpenPluginFolder,
     None,
 }
@@ -73,11 +73,14 @@ fn with_app_tools<'a>(
 }
 
 /// The Plugins menu button and its contents. `has_stack`: whether an image is
-/// open, which the app's own tools need.
+/// open, which the app's own tools need. `plugin_folder`: whether there is a
+/// folder to install plugins into, to offer to open
+/// ([`Target::has_plugin_folder`](super::platform::Target::has_plugin_folder)).
 pub(super) fn plugins_menu(
     ui: &mut egui::Ui,
     registry: Option<&Registry>,
     has_stack: bool,
+    plugin_folder: bool,
 ) -> MenuAction {
     // `None` means an import has the registry — see `ViewerApp::plugins`. The
     // button stays, greyed, rather than vanishing: a toolbar that loses an item
@@ -174,8 +177,7 @@ pub(super) fn plugins_menu(
         // Desktop-only: there is no folder to open in a browser, and nothing
         // to put in one — the web build runs the built-in plugins and cannot
         // load a shared library. The rest of this menu is identical on both.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
+        if plugin_folder {
             ui.separator();
             if ui
                 .button("Open plugin folder…")
@@ -573,40 +575,35 @@ fn control(ui: &mut egui::Ui, d: &ParamDecl, values: &mut Params) {
         // point there. A browser has no filesystem path to produce: its picker
         // hands over *bytes*, and a plugin that asked for a path means to open
         // it itself — which it cannot do in a browser either. So the web build
-        // shows the field and no button. A plugin that needs a file is then
-        // visibly unusable rather than invisibly broken, and the ones that
-        // offer an alternative (deconvolution's built-in Gaussian PSF) still
-        // work. `rfd` is in the shared dependencies, but only its *async*
-        // dialog exists on wasm, and an async picker cannot answer inside the
-        // synchronous `changed()` of a widget.
-        #[cfg(not(target_arch = "wasm32"))]
+        // shows the field and no button (`Target::asks_for_paths`). A plugin
+        // that needs a file is then visibly unusable rather than invisibly
+        // broken, and the ones that offer an alternative (deconvolution's
+        // built-in Gaussian PSF) still work. An async picker could not answer
+        // inside the synchronous `changed()` of a widget anyway.
         ParamKind::Path { default, save } => {
             label(ui, d);
-            ui.horizontal(|ui| {
-                let mut v = values.text(&d.key, default).to_string();
-                if ui.text_edit_singleline(&mut v).changed() {
-                    values.set(d.key.clone(), ParamValue::Path(v.clone()));
-                }
-                if ui.button("…").clicked() {
-                    let picked = if *save {
-                        rfd::FileDialog::new().save_file()
-                    } else {
-                        rfd::FileDialog::new().pick_file()
-                    };
-                    if let Some(p) = picked {
-                        values.set(d.key.clone(), ParamValue::Path(p.display().to_string()));
+            if TARGET.asks_for_paths() {
+                ui.horizontal(|ui| {
+                    path_field(ui, d, values, default);
+                    if ui.button("…").clicked() {
+                        let purpose = if *save { Purpose::Save } else { Purpose::Open };
+                        if let Some(p) = Current::ask_path(purpose, None, None, &[]) {
+                            values.set(d.key.clone(), ParamValue::Path(p.display().to_string()));
+                        }
                     }
-                }
-            });
-        }
-        #[cfg(target_arch = "wasm32")]
-        ParamKind::Path { default, .. } => {
-            label(ui, d);
-            let mut v = values.text(&d.key, default).to_string();
-            if ui.text_edit_singleline(&mut v).changed() {
-                values.set(d.key.clone(), ParamValue::Path(v.clone()));
+                });
+            } else {
+                path_field(ui, d, values, default);
             }
         }
+    }
+}
+
+/// A path parameter's text field.
+fn path_field(ui: &mut egui::Ui, d: &ParamDecl, values: &mut Params, default: &str) {
+    let mut v = values.text(&d.key, default).to_string();
+    if ui.text_edit_singleline(&mut v).changed() {
+        values.set(d.key.clone(), ParamValue::Path(v));
     }
 }
 

@@ -5,8 +5,9 @@
 //! Everything here writes a stack in memory and reads it straight back, with no
 //! temp file anywhere.
 
-use fast_tiff_lib::{read_frame_u16, Compression, SampleType, TiffStack, WriterOptions};
+use fast_tiff_lib::{read_frame_u16, Bytes, Compression, SampleType, TiffStack, WriterOptions};
 use std::io::Cursor;
+use std::sync::Arc;
 
 /// Write `frames` of 16-bit pixels into an in-memory TIFF.
 fn write(width: u32, height: u32, frames: &[Vec<u16>], compression: Compression) -> Vec<u8> {
@@ -55,6 +56,56 @@ fn pure_rust_codecs_decode_from_bytes() {
         let got = read_frame_u16(&stack.data, &stack.frames[0], stack.byte_order, None).unwrap();
         assert_eq!(got.as_ref(), &pixels[..], "{compression:?}");
     }
+}
+
+/// A buffer handed over behind an `Arc` is held, not copied — the browser's
+/// dropped file arrives that way, and opening it is then no whole-file memcpy
+/// — and the stack it becomes reads exactly as one made from an owned `Vec` of
+/// the same bytes.
+#[test]
+fn a_shared_buffer_is_held_rather_than_copied() {
+    let (w, h) = (6u32, 4u32);
+    let frames: Vec<Vec<u16>> = (0..3)
+        .map(|f| {
+            (0..w * h)
+                .map(|i| (i as u16 * 37 + f * 11) % 2048)
+                .collect()
+        })
+        .collect();
+    let bytes = write(w, h, &frames, Compression::Lzw);
+
+    let owned = TiffStack::from_bytes(bytes.clone()).unwrap();
+    let shared: Arc<[u8]> = Arc::from(bytes);
+    let stack = TiffStack::from_bytes(Arc::clone(&shared)).unwrap();
+
+    match &stack.data {
+        Bytes::Shared(held) => assert!(Arc::ptr_eq(held, &shared), "a different buffer"),
+        other => panic!("expected the shared buffer itself, got {other:?}"),
+    }
+    assert_eq!(
+        Arc::strong_count(&shared),
+        2,
+        "the stack holds one reference"
+    );
+    assert_eq!(
+        stack.data.as_ptr(),
+        shared.as_ptr(),
+        "the bytes were copied"
+    );
+
+    assert_eq!(stack.frames.len(), owned.frames.len());
+    for (i, want) in frames.iter().enumerate() {
+        let from_shared =
+            read_frame_u16(&stack.data, &stack.frames[i], stack.byte_order, None).unwrap();
+        let from_owned =
+            read_frame_u16(&owned.data, &owned.frames[i], owned.byte_order, None).unwrap();
+        assert_eq!(from_shared.as_ref(), &want[..], "frame {i}");
+        assert_eq!(from_shared.as_ref(), from_owned.as_ref(), "frame {i}");
+    }
+
+    // And the reference goes when the stack does.
+    drop(stack);
+    assert_eq!(Arc::strong_count(&shared), 1);
 }
 
 #[test]

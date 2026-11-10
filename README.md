@@ -286,9 +286,9 @@ on to build a plugin, and which therefore depend on nothing of ours:
 
 `FastTIFF` is a lib + bin: the library half holds the egui interface, and both
 the desktop binary and the web build construct the same `ViewerApp`. The UI is
-written once; what differs per host — window management, how a file is opened,
-the GPU option hook — is confined to a handful of `#[cfg(target_arch = "wasm32")]`
-sites.
+written once; what differs per host — window management, how a file is opened
+and saved, workers, new windows — is behind one seam, `FastTIFF/src/app/platform/`,
+which a single `cfg` points at the desktop or the browser implementation.
 
 - **`fast-tiff-lib/`** - pure parsing/decoding library, no GUI or GPU
   dependencies. IFD-chain walking, ImageJ metadata parsing, strip decoding

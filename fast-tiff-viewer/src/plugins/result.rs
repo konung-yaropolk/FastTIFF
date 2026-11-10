@@ -548,11 +548,11 @@ impl ResultTiff {
                         made_from,
                         scratch: None,
                     };
-                    (crate::LoadSource::Bytes(bytes, name), derived)
+                    (crate::LoadSource::Bytes(bytes.into(), name), derived)
                 }
             }
             ResultData::Memory(bytes) => (
-                crate::LoadSource::Bytes(bytes, name),
+                crate::LoadSource::Bytes(bytes.into(), name),
                 Derived {
                     made_from,
                     #[cfg(not(target_arch = "wasm32"))]

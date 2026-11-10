@@ -13,9 +13,14 @@
 //! the app is a single canvas element, and a popup would be a separate
 //! document the page cannot lay out or style. So the two hosts genuinely differ
 //! and this module is the seam — every pop-up is written once, against a
-//! [`egui::Ui`], and drawn wherever the host can put it.
+//! [`egui::Ui`], and drawn wherever the host can put it
+//! ([`Target::popups`](super::platform::Target::popups)).
+//!
+//! Both ways are compiled on both targets: they are egui's, which has
+//! viewports and in-canvas windows everywhere, and only which one is used
+//! differs.
 
-#[cfg(target_arch = "wasm32")]
+use super::platform::{Popups, TARGET};
 use super::scale::unscaled;
 
 /// How one pop-up wants to be presented.
@@ -47,10 +52,10 @@ pub(super) struct Dialog<'a> {
     /// content but never shrinks back: open the settings in Volume mode, switch
     /// to Max intensity, and the rows that went leave a blank space behind.
     pub fit_height: bool,
-    /// Whether the user can resize it. Honoured only in the browser: a native
-    /// window is always resizable, and refusing to be would leave a user whose
-    /// screen is shorter than the content with no way to reach the rest of it.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    /// Whether the user can resize it. Honoured only in the canvas: a window
+    /// of its own is always resizable, and refusing to be would leave a user
+    /// whose screen is shorter than the content with no way to reach the rest
+    /// of it.
     pub resizable: bool,
     /// Whether it floats above the main window.
     ///
@@ -73,8 +78,34 @@ pub(super) struct Dialog<'a> {
 /// close button, or the `x` on the egui window). The caller still owns the flag
 /// otherwise — a toolbar button toggling it off simply stops calling this, and
 /// the window goes away with it.
-#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn show(
+    ctx: &egui::Context,
+    dialog: Dialog<'_>,
+    open: &mut bool,
+    body: impl FnMut(&mut egui::Ui),
+) {
+    match TARGET.popups() {
+        Popups::OwnWindow => show_own_window(ctx, dialog, open, body),
+        Popups::InCanvas => show_in_canvas(ctx, dialog, open, body),
+    }
+}
+
+/// Bring the pop-up `id` to the front: a window of its own gets the window
+/// manager's focus, one in the canvas the top of egui's own order.
+pub(super) fn raise(ctx: &egui::Context, id: &str) {
+    match TARGET.popups() {
+        Popups::OwnWindow => ctx.send_viewport_cmd_to(
+            egui::ViewportId::from_hash_of(id),
+            egui::ViewportCommand::Focus,
+        ),
+        Popups::InCanvas => {
+            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, egui::Id::new(id)))
+        }
+    }
+}
+
+/// A top-level window of its own, one per [viewport](egui::ViewportId).
+fn show_own_window(
     ctx: &egui::Context,
     dialog: Dialog<'_>,
     open: &mut bool,
@@ -155,8 +186,7 @@ pub(super) fn show(
     }
 }
 
-/// What a native [`Dialog::fit_height`] window keeps between frames.
-#[cfg(not(target_arch = "wasm32"))]
+/// What a [`Dialog::fit_height`] window of its own keeps between frames.
 #[derive(Clone, Copy)]
 struct FitHeight {
     /// The height its content last asked for, in points.
@@ -171,7 +201,6 @@ struct FitHeight {
     asked: f32,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl FitHeight {
     fn load(ctx: &egui::Context, key: egui::Id, first: f32) -> Self {
         let frame = ctx.cumulative_frame_nr();
@@ -222,8 +251,7 @@ impl FitHeight {
 /// The browser has no second window to open, so the pop-up stays an egui window
 /// floating over the canvas — drawn at native size even though the chrome
 /// around it is enlarged (see [`unscaled`]).
-#[cfg(target_arch = "wasm32")]
-pub(super) fn show(
+fn show_in_canvas(
     ctx: &egui::Context,
     dialog: Dialog<'_>,
     open: &mut bool,

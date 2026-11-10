@@ -68,11 +68,10 @@ impl ViewerApp {
         // Filled in below by the bar itself, if it draws a status line.
         let mut drawn_info: Option<String> = None;
         // Whether the info row offers a stop button: only for work this app is
-        // running. The core's own load has no cancel to press.
-        #[cfg(not(target_arch = "wasm32"))]
-        let can_stop = self.job.is_some();
-        #[cfg(target_arch = "wasm32")]
-        let can_stop = false;
+        // running, and only while the interface can draw beside it — a job on
+        // the frame that started it, the browser's, cannot be stopped. The
+        // core's own load has no cancel to press.
+        let can_stop = TARGET.jobs_run_behind() && self.job.is_some();
         // The bottom line of the panel: what is running, and the last thing
         // that happened. One row for both.
         //

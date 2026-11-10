@@ -369,7 +369,6 @@ fn a_movie_with_no_frames_is_refused() {
 
 /// On the desktop the frames go to a file as they come, the file is a movie
 /// when the recording finishes, and nothing is left behind when it does not.
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_recording_to_a_file_finishes_or_leaves_nothing() {
     let dir = std::env::temp_dir().join(format!("fasttiff-anim-{}", std::process::id()));

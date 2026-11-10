@@ -42,9 +42,10 @@ pub(super) enum UiCommand {
     Save,
     /// Put the view on the clipboard.
     Copy(Via),
-    /// Reveal the folder plugins are installed into. Desktop-only, like the
-    /// menu entry that asks for it.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Reveal the folder plugins are installed into. Asked for only where the
+    /// menu offers it ([`Target::has_plugin_folder`]).
+    ///
+    /// [`Target::has_plugin_folder`]: super::platform::Target::has_plugin_folder
     OpenPluginFolder,
     /// Begin the plugin at this registry index: its dialog, or the run.
     StartPlugin(usize),
@@ -226,7 +227,6 @@ impl UiCommand {
             UiCommand::Open => (Toolbar, 0),
             UiCommand::Save => (Toolbar, 1),
             UiCommand::Copy(Via::Button) => (Toolbar, 2),
-            #[cfg(not(target_arch = "wasm32"))]
             UiCommand::OpenPluginFolder => (Toolbar, 3),
             UiCommand::StartPlugin(_) => (Toolbar, 4),
             UiCommand::OpenPointCounter => (Toolbar, 5),
@@ -344,7 +344,6 @@ impl super::ViewerApp {
             UiCommand::Open => self.show_open_dialog(at.ctx),
             UiCommand::Save => self.save_as(),
             UiCommand::Copy(_) => self.copy_view(at.ctx),
-            #[cfg(not(target_arch = "wasm32"))]
             UiCommand::OpenPluginFolder => self.open_plugin_folder(),
             UiCommand::StartPlugin(index) => self.start_plugin(index),
             UiCommand::OpenPointCounter => self.open_point_counter(at.ctx),
@@ -437,15 +436,15 @@ impl super::ViewerApp {
     }
 
     /// The Plugins menu's "Open plugin folder": say where it is, and show it.
-    #[cfg(not(target_arch = "wasm32"))]
     fn open_plugin_folder(&mut self) {
-        match fast_tiff_viewer::plugins::install_dir() {
+        use super::platform::{Current, Platform as _};
+        match Current::plugin_folder() {
             Some(dir) => {
                 self.report_done(format!("Plugin folder: {}", dir.display()));
                 // Best effort: showing the path in the status bar is the part
                 // that must not fail, so a file manager that will not launch is
                 // not an error.
-                let _ = super::open_in_file_manager(&dir);
+                let _ = Current::reveal_folder(&dir);
             }
             None => self.core.status = Some("Could not determine a writable plugin folder".into()),
         }

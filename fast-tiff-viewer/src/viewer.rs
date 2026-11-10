@@ -464,7 +464,11 @@ impl Viewer {
     /// point, where `name` is just the picked file's name for display.
     /// Otherwise identical to [`Viewer::open`], including every per-document
     /// default it re-seeds.
-    pub fn load_bytes(&mut self, bytes: Vec<u8>, name: PathBuf) -> anyhow::Result<()> {
+    pub fn load_bytes(
+        &mut self,
+        bytes: impl Into<fast_tiff_lib::Bytes>,
+        name: PathBuf,
+    ) -> anyhow::Result<()> {
         let opened = Document::from_bytes(bytes, name, self.apply_pseudocolor);
         self.adopt(opened)
     }

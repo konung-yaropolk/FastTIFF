@@ -55,7 +55,7 @@ fn an_open_signals_exactly_once() {
     let mut viewer = Viewer::new();
     let signals = open_and_count_signals(
         &mut viewer,
-        LoadSource::Bytes(tiff_bytes(3, 16, 16), "t.tif".into()),
+        LoadSource::Bytes(tiff_bytes(3, 16, 16).into(), "t.tif".into()),
     );
     assert_eq!(
         signals, 1,
@@ -74,7 +74,7 @@ fn a_failed_open_still_signals() {
     let mut viewer = Viewer::new();
     let signals = open_and_count_signals(
         &mut viewer,
-        LoadSource::Bytes(b"not a tiff".to_vec(), "bad.tif".into()),
+        LoadSource::Bytes(b"not a tiff".to_vec().into(), "bad.tif".into()),
     );
     assert_eq!(signals, 1);
     assert!(viewer.document.is_none());
@@ -100,11 +100,11 @@ fn opening_a_second_file_signals_again() {
     let mut viewer = Viewer::new();
     open_and_count_signals(
         &mut viewer,
-        LoadSource::Bytes(tiff_bytes(2, 8, 8), "a.tif".into()),
+        LoadSource::Bytes(tiff_bytes(2, 8, 8).into(), "a.tif".into()),
     );
     let signals = open_and_count_signals(
         &mut viewer,
-        LoadSource::Bytes(tiff_bytes(5, 8, 8), "b.tif".into()),
+        LoadSource::Bytes(tiff_bytes(5, 8, 8).into(), "b.tif".into()),
     );
     assert_eq!(signals, 1, "the second open must report its landing too");
     assert_eq!(viewer.document.as_ref().map(|s| s.frame_count()), Some(5));

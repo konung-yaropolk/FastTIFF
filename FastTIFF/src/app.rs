@@ -25,6 +25,8 @@
 //!   * `command` — the interface's requests, and the order they take effect in
 //!   * `minimap` — the 2D navigator: where the view sits in the whole frame
 //!   * `overlay` — the 3D coordinate-box overlay, drawn with the egui painter
+//!   * `platform` — what the desktop and the browser do differently: the
+//!     one place that knows which of the two this is
 //!   * `point_counter` — clicking points onto the picture, counted in groups
 //!   * `scale`   — how large the chrome is drawn (the web build runs bigger)
 //!   * `scrub_bar` — the bottom bar: playback, channels, contrast, status
@@ -41,12 +43,8 @@ use fast_tiff_viewer::channels::{
 use fast_tiff_viewer::roi::LargeImageMode;
 use fast_tiff_viewer::{DecodeMode, Document, ViewMode, Viewer};
 // The registry's entries are the C-boundary types themselves rather than
-// trait objects, so the traits whose methods the app calls are named here —
-// the importer's and exporter's only where the app imports and exports with
-// plugins, which a browser does not.
-use fasttiff_plugin_api::Plugin as _;
-#[cfg(not(target_arch = "wasm32"))]
-use fasttiff_plugin_api::{Exporter as _, Importer as _};
+// trait objects, so the traits whose methods the app calls are named here.
+use fasttiff_plugin_api::{Exporter as _, Importer as _, Plugin as _};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -62,6 +60,7 @@ mod dialog;
 mod kinetic;
 mod minimap;
 mod overlay;
+mod platform;
 // Drawing a plot a plugin declared, and the canvas selection tool that feeds
 // it. On both platforms: the browser build has the Plugins menu too, and a
 // plot-producing plugin among its built-ins.
@@ -82,6 +81,7 @@ use command::{Applying, Commands, Step, UiCommand, Via, FRAME};
 // phases; the code goes by `FRAME` and never names one.
 #[cfg(doc)]
 use command::Phase;
+use platform::{Current, Destination, Placement, Platform as _, Purpose, TARGET, WEB};
 use scale::UI_SCALE;
 use widgets::{contrast_controls, histogram_button, ContrastLayout};
 use windows::{WindowId, Windows};
@@ -109,11 +109,6 @@ fn tint_color(tint: Option<[u8; 3]>) -> Option<Color32> {
     tint.map(|[r, g, b]| Color32::from_rgb(r, g, b))
 }
 
-/// Whether this is the browser build. Where an answer differs there, the
-/// platform is handed to whatever gives it as this value rather than tested
-/// with `cfg!` in place, so that both answers are tested on either build.
-const WEB: bool = cfg!(target_arch = "wasm32");
-
 /// Discrete zoom levels the viewer snaps to (3.1% … 3200%). Zooming in/out
 /// steps between adjacent levels. Above 100% the levels are mostly whole-number
 /// magnifications (200%, 300%, 400%, …), where one source pixel maps to an exact
@@ -124,12 +119,6 @@ const ZOOM_LEVELS: [f32; 21] = [
     0.031, 0.042, 0.063, 0.083, 0.125, 0.167, 0.25, 0.333, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
     8.0, 12.0, 16.0, 24.0, 32.0,
 ];
-
-/// Smallest the window is ever sized to (inner size, points). Zooming out past
-/// this keeps the window here and just letterboxes the shrinking image.
-/// Native only — the canvas is sized by the page.
-#[cfg(not(target_arch = "wasm32"))]
-const MIN_WINDOW: f32 = 256.0;
 
 /// Fast-scroll rate is a fraction of movie total frames number to be skipped
 /// per mouse wheel notch or arrow press when Shift is held. (0.1 means 10% of the stack)
@@ -205,38 +194,6 @@ fn trim_num(v: f64) -> String {
 /// rounding in the table.
 const FIT_SNAP: f32 = 0.02;
 
-/// Whether the window's size is the window manager's to decide, not ours.
-///
-/// True when maximized *or* full screen. Both were meant to be covered by the
-/// "leave the window alone" rule, but only `maximized` was ever asked about —
-/// and on macOS the green button goes full screen rather than maximizing, so
-/// every zoom step out shrank a full-screen window out from under the picture.
-///
-/// `unwrap_or(false)` on each: a backend that does not report one of them
-/// leaves the window resizable, which is the behaviour it had before either
-/// flag existed.
-///
-/// **Known gap, and it is egui's, not ours.** On macOS `maximized` is read only
-/// when the window is created and never refreshed — `egui-winit` skips the
-/// runtime query on that platform to avoid a deadlock (its `lib.rs`, guarded by
-/// `is_init || !cfg!(target_os = "macos")`; egui issue #3494). So a macOS window
-/// *zoomed* rather than made full screen — Option-green, a double-clicked title
-/// bar, Window > Zoom, or macOS 15 edge tiling — reports neither flag, and a
-/// zoom step out will still resize it. `fullscreen` has no such gate and is
-/// refreshed every frame on every platform, which is why the green button (full
-/// screen, the usual case) is covered. Detecting the zoomed case would mean
-/// guessing from the window's size against the monitor's, and the app's own
-/// sizing cap (`monitor_work_area`, 95% x 90%) sits too close to what a zoomed
-/// window actually measures to tell the two apart reliably.
-///
-/// Native only, like [`monitor_work_area`]: the browser build has no window of
-/// its own to resize.
-#[cfg(not(target_arch = "wasm32"))]
-fn window_size_is_not_ours(ctx: &egui::Context) -> bool {
-    let (maximized, fullscreen) = ctx.input(|i| (i.viewport().maximized, i.viewport().fullscreen));
-    maximized.unwrap_or(false) || fullscreen.unwrap_or(false)
-}
-
 /// Time constant of the glide a zoom step takes to its new level.
 ///
 /// The approach is exponential, so a step is about 63% done after this long.
@@ -271,7 +228,9 @@ const ZOOM_GLIDE_MAX_DT: f32 = 1.0 / 20.0;
 ///
 /// The `Err` is a message for the status line. Saying which plugin declined and
 /// why beats falling through to the TIFF reader and reporting "not a TIFF".
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// An importer reads a path, so only a host with files ever gets here — see
+/// [`ViewerApp::start_import`].
 fn import_with_plugin(
     registry: &mut fast_tiff_viewer::plugins::Registry,
     path: &std::path::Path,
@@ -322,7 +281,7 @@ fn import_with_plugin(
     // import is then held about once, not twice.
     let bytes = fast_tiff_viewer::plugins::into_tiff_bytes(imported.image, imported.info.as_ref())
         .map_err(|e| format!("{name}: {e:#}"))?;
-    Ok(Opened::Bytes(bytes, imported_label(path, &fallback)))
+    Ok(Opened::Bytes(bytes.into(), imported_label(path, &fallback)))
 }
 
 /// The status line's two voices: amber for something to be aware of, green for
@@ -405,86 +364,12 @@ fn zoom_bounds(fit: Option<f32>) -> (f32, f32) {
     (ladder[0], ladder[ladder.len() - 1])
 }
 
-/// The zoom at which an `img_w` x `img_h` image exactly fits `avail`, capped at
-/// 1:1 so a small image is not magnified into a blur.
-///
-/// `None` while the area is not yet known — a canvas has no size on the frame
-/// before it is first laid out — so the caller waits rather than fitting to
-/// nothing.
-///
-/// Web-only, as the desktop build sizes its window to the image instead
-/// ([`initial_fit_zoom`] is that path's opposite number), but compiled under
-/// `test` on every target so the guards above stay covered.
-#[cfg(any(target_arch = "wasm32", test))]
-fn fit_to_panel(img_w: f32, img_h: f32, avail: egui::Vec2) -> Option<f32> {
-    if !(img_w >= 1.0 && img_h >= 1.0 && avail.x >= 1.0 && avail.y >= 1.0) {
-        return None;
-    }
-    let z = (avail.x / img_w).min(avail.y / img_h).min(1.0);
-    z.is_finite().then_some(z).filter(|z| *z > 0.0)
-}
-
-/// The usable desktop area for the window, i.e. the monitor size minus headroom
-/// for the title bar, taskbar, and window borders. `None` until the monitor
-/// size is reported. This is the cap on how large the window may grow — beyond
-/// it the image overflows the window and becomes pannable.
-#[cfg(not(target_arch = "wasm32"))]
-fn monitor_work_area(ctx: &egui::Context) -> Option<egui::Vec2> {
-    ctx.input(|i| i.viewport().monitor_size)
-        .map(|m| egui::vec2((m.x * 0.95).max(1.0), (m.y * 0.90).max(1.0)))
-}
-
-/// The opening zoom for a freshly loaded image: the largest zoom level ≤ 100%
-/// at which the image plus chrome still fits the monitor's work area (so a
-/// normal image opens at 100%, a big one at 50% or 25%). Returns `None` when the
-/// monitor size isn't reported yet (caller should keep waiting rather than
-/// guess) so a huge image never briefly opens oversized.
-#[cfg(not(target_arch = "wasm32"))]
-fn initial_fit_zoom(ctx: &egui::Context, img_w: f32, img_h: f32, chrome_h: f32) -> Option<f32> {
-    let avail = monitor_work_area(ctx)?;
-    // Largest zoom level at most 100% that still fits the work area.
-    for &z in ZOOM_LEVELS.iter().rev().filter(|&&z| z <= 1.0) {
-        if img_w * z <= avail.x && img_h * z + chrome_h <= avail.y {
-            return Some(z);
-        }
-    }
-    Some(ZOOM_LEVELS[0]) // even the smallest level overflows — open there and pan
-}
-
-/// The prompt shown while nothing is loaded.
-///
-/// The browser build adds a line the desktop has no need of. A page that
-/// accepts a dropped file is indistinguishable, from the outside, from one
-/// that uploads it — and for microscopy data, which is routinely unpublished
-/// and sometimes clinical, that ambiguity is a real reason not to try the
-/// tool at all. The drop target is the one place the reassurance arrives
-/// before the question does; the README says as much, but nobody reads it
-/// first.
-///
-/// `cfg!` rather than `#[cfg]` so both wordings compile and are checked on
-/// every target: the shared lines are written once and cannot drift apart.
-fn welcome_text() -> String {
-    let mut text = String::from("Drag and drop a file here, \nor click \"Open File\" above.\n");
-    if cfg!(target_arch = "wasm32") {
-        text.push_str(
-            "\n\nEverything is processed locally in your browser — \nno file is ever uploaded to a server.\n",
-        );
-    }
-    text.push_str(
-        "\n\n\nScroll — navigate frames\nShift + Scroll — fast navigate\nCtrl + Scroll — zoom",
-    );
-    text
-}
-
-/// Something that arrived from somewhere other than this frame's user input.
+/// What a job sends back once it is done: everything that arrives from
+/// somewhere other than this frame's user input, but for files, which come in
+/// through the platform ([`platform::Platform::take_incoming_files`]).
 enum Incoming {
-    /// A file chosen by the asynchronous picker. Only the web build has one:
-    /// the native dialog blocks and applies its result directly.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    Opened(Opened),
     /// An import finished. The registry travels back with the result, because
     /// the worker was holding it — see [`ViewerApp::plugins`].
-    #[cfg(not(target_arch = "wasm32"))]
     Imported(
         Box<fast_tiff_viewer::plugins::Registry>,
         Result<Opened, String>,
@@ -496,7 +381,6 @@ enum Incoming {
     ///
     /// The registry is `Some` only for an export, which had to borrow it; a
     /// plain TIFF save is the app's own code and never takes it.
-    #[cfg(not(target_arch = "wasm32"))]
     Wrote(
         Option<Box<fast_tiff_viewer::plugins::Registry>>,
         String,
@@ -511,14 +395,12 @@ enum Incoming {
 /// write. The distinction is drawn from the cancel flag rather than from the
 /// error text: an exporter reports being stopped through whatever error its
 /// author picked, and matching on strings to find out would be guesswork.
-#[cfg(not(target_arch = "wasm32"))]
 enum WriteOutcome {
     Done,
     Cancelled,
     Failed(String),
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl WriteOutcome {
     fn of(result: Result<(), String>, cancel: &std::sync::atomic::AtomicBool) -> Self {
         match result {
@@ -599,138 +481,40 @@ impl fast_tiff_viewer::plugins::Deliver for AppDelivery<'_> {
         (self.same_document)()
     }
 
-    /// A window per document is a process per document here: that is already
-    /// how the app opens several files at once, and it needs no window manager
-    /// of its own inside egui. In a browser it is a tab.
+    /// A process on the desktop, a tab in a browser: see
+    /// [`Platform::deliver_new_document`](platform::Platform::deliver_new_document).
     fn open_in_new_window(
         &mut self,
         result: fast_tiff_viewer::plugins::ResultTiff,
     ) -> fast_tiff_viewer::plugins::Handover {
-        use fast_tiff_viewer::plugins::Handover;
         // Named after the image, so the new window's title says what it is
         // showing rather than naming a scratch file.
         let name = format!(
             "{}.tif",
             fast_tiff_viewer::plugins::file_stem(result.name())
         );
-
-        // The browser's handover. A tab, not a process — see `crate::web_open`
-        // for why a blob and not a message, and why the plugin had to run
-        // synchronously for this call to be allowed. A refused popup is the
-        // expected failure, not an exceptional one: the result comes back and
-        // is shown in this tab, with the reason in the status line.
-        #[cfg(target_arch = "wasm32")]
-        {
-            let opened = match result.bytes() {
-                Some(bytes) => crate::web_open::open_bytes_in_new_tab(bytes, &name),
-                None => Err("the result is not in memory".to_string()),
-            };
-            match opened {
-                Ok(()) => Handover::Opened(name),
-                Err(why) => Handover::Refused(Box::new(result), why),
-            }
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            // The file the result was written to as it arrived. The new window
-            // maps it like any file it opens, so the result is never copied
-            // into either process: the pages it needs are read in, and the OS
-            // may let go of the rest. It is left behind deliberately — the
-            // process that would delete it is the one still reading it, and it
-            // cannot say when it is done — and `sweep_old_results` removes it
-            // at a later start, once it is a day old. Its file is named after
-            // the result, so that is what the new window is titled.
-            if let Some(path) = result.path() {
-                let shown = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or(name);
-                return match crate::process::try_open_in_new_process(path) {
-                    Ok(()) => {
-                        let _ = result.into_kept_path();
-                        Handover::Opened(shown)
-                    }
-                    Err(e) => Handover::Refused(Box::new(result), e.to_string()),
-                };
-            }
-            // In memory, because no file could be made for it. Through a pipe
-            // when the machine has the room for the new window to hold it too.
-            let bytes = result.bytes().unwrap_or_default();
-            if !crate::process::fits_in_memory(bytes.len()) {
-                return Handover::Refused(
-                    Box::new(result),
-                    "no file could be written for it, and it is too large to hand over in \
-                     memory"
-                        .into(),
-                );
-            }
-            let cancel = self.cancel;
-            let progress = self.progress;
-            match crate::process::open_bytes_in_new_process(bytes, &name, &mut |f| {
-                Job::report(progress, f);
-                !cancel.load(std::sync::atomic::Ordering::Relaxed)
-            }) {
-                Ok(()) => Handover::Opened(name),
-                Err(_) if cancel.load(std::sync::atomic::Ordering::Relaxed) => Handover::Cancelled,
-                Err(e) => Handover::Refused(Box::new(result), e.to_string()),
-            }
-        }
+        Current::deliver_new_document(result, name, self.progress, self.cancel)
     }
 
+    /// Where the plugin said, on the desktop. In a browser the download
+    /// manager is the filesystem, and the plugin's path still names the file —
+    /// the last component of it — because the desktop honours that name and
+    /// the two should not disagree about what the result is called; what a tab
+    /// cannot honour is the directory, and it does not pretend to.
     fn save(
         &mut self,
         result: fast_tiff_viewer::plugins::ResultTiff,
         path: &str,
     ) -> Result<String, String> {
-        // The browser's filesystem is the download manager. The plugin's path
-        // still names the file — the last component of it — because the
-        // desktop honours that name and the two should not disagree about what
-        // the result is called; what a tab cannot honour is the directory, and
-        // it does not pretend to.
-        #[cfg(target_arch = "wasm32")]
-        {
-            let name = crate::web_save::name_from_path(path);
-            let bytes = result.into_bytes().map_err(|e| e.to_string())?;
-            crate::web_save::download(&bytes, &name).map(|()| name)
+        match TARGET.plugin_file(path) {
+            Destination::File(file) => {
+                Current::write_result(result, &file).map(|()| path.to_string())
+            }
+            Destination::Download(name) => {
+                let bytes = result.into_bytes().map_err(|e| e.to_string())?;
+                Current::download(&bytes, &name, "image/tiff").map(|()| name)
+            }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            result
-                .save_as(std::path::Path::new(path))
-                .map(|()| path.to_string())
-                .map_err(|e| e.to_string())
-        }
-    }
-}
-
-/// Clear out plugin results more than a day old, on a thread of its own so
-/// the window does not wait for it.
-///
-/// What this removes is mostly results handed to new windows: those are
-/// left behind on purpose, the window's process reading them for as long as
-/// it is open, and nothing else ever deletes them. A result still on show in
-/// another window survives it on Windows, where a mapped file cannot be
-/// deleted; see `fast_tiff_viewer::plugins::sweep`. Failures are ignored: the
-/// next start tries again.
-fn sweep_old_results() {
-    // Not from a test that builds an app: that is the user's own folder.
-    #[cfg(not(any(target_arch = "wasm32", test)))]
-    if let fast_tiff_viewer::plugins::ResultDest::Dir(root) =
-        fast_tiff_viewer::plugins::ResultDest::platform_default()
-    {
-        const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-        let _ = std::thread::Builder::new()
-            .name("fasttiff-sweep".to_owned())
-            .spawn(move || {
-                let removed = fast_tiff_viewer::plugins::sweep(&root, DAY);
-                if removed > 0 {
-                    log::info!(
-                        "removed {removed} old plugin result(s) from {}",
-                        root.display()
-                    );
-                }
-            });
     }
 }
 
@@ -890,7 +674,7 @@ impl Job {
     /// that only has the `Arc` can call it.
     fn report(progress: &std::sync::atomic::AtomicU32, fraction: f32) {
         fast_tiff_viewer::plugins::progress::store(progress, fraction);
-        wake_ui_for_progress();
+        Current::wake_for_progress();
     }
 }
 
@@ -902,7 +686,8 @@ impl Job {
 /// the whole of `draw`, to move a bar a percent at a time — a core taken from
 /// the registration, and a GPU kept out of idle. Now a frame comes when there
 /// is something to show: a result arriving ([`wake_ui`]) or the bar moving
-/// ([`wake_ui_for_progress`]), with a slow poll as a safety net.
+/// ([`Platform::wake_for_progress`](platform::Platform::wake_for_progress)),
+/// with a slow poll as a safety net.
 ///
 /// Recorded on the first frame, before any worker can exist.
 static UI: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
@@ -914,56 +699,25 @@ fn wake_ui() {
     }
 }
 
-/// [`wake_ui`] for a progress report, at most every 100 ms: a bar shows no
-/// finer steps than that, and a plugin that reports once a row would otherwise
-/// redraw the window thousands of times a second.
-///
-/// Not in the browser, where a job runs on the interface thread itself and
-/// there is no clock to throttle by (`Instant` has none on wasm32).
-fn wake_ui_for_progress() {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        static LAST_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let now = START
-            .get_or_init(std::time::Instant::now)
-            .elapsed()
-            .as_millis() as u64;
-        if due(&LAST_MS, now, 100) {
-            wake_ui();
-        }
-    }
-}
-
-/// Whether at least `every` ms have passed since the time in `last`, claiming
-/// `now` as the new last time when they have — once, however many threads ask
-/// at the same moment. `last` starts at 0, so the first ask after `every` ms
-/// of running is due.
-#[cfg(not(target_arch = "wasm32"))]
-fn due(last: &std::sync::atomic::AtomicU64, now: u64, every: u64) -> bool {
-    use std::sync::atomic::Ordering;
-    let then = last.load(Ordering::Relaxed);
-    now.saturating_sub(then) >= every
-        && last
-            .compare_exchange(then, now, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-}
-
 /// A file the user asked to open, however it arrived.
 ///
 /// Native and web get files by different routes — a path from a dialog, argv or
 /// an Apple Event, versus bytes from an async browser picker or a drop event —
 /// so they meet here and everything downstream is shared.
 pub enum Opened {
-    /// A path on disk. Native only; the browser has no filesystem to name.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// A path on disk. Only the desktop has any to give, and only the
+    /// desktop's platform makes a source of one (`Platform::path_source`).
     Path(PathBuf),
     /// The file's bytes plus its name, for display.
     ///
     /// The browser build's only route, there being no filesystem there.
     /// Natively it is how a plugin result reaches a new window when no file
     /// could be written for it and it was handed over in memory instead.
-    Bytes(Vec<u8>, String),
+    ///
+    /// Owned or shared, and never copied on the way to the reader: a browser
+    /// drop arrives as egui's `Arc<[u8]>`, and the document keeps that buffer
+    /// (see [`fast_tiff_lib::Bytes`]).
+    Bytes(fast_tiff_lib::Bytes, String),
     /// A plugin's result, to be opened as it was written: straight to the
     /// reader, past the importers — it is a TIFF this app wrote, and an
     /// importer claiming `.tif` has no business reading it back.
@@ -1227,38 +981,13 @@ impl PanelLayout {
 
     /// Arm a grow against the height in front of us, for a change that has not
     /// happened yet — the panel toggle, whose new size only appears next frame.
+    ///
+    /// What is armed is read by the half of this bookkeeping that only a host
+    /// sizing its own window has (`grow_delta` and `waiting`, in
+    /// `app/platform/native.rs`): in a browser the window is the page's.
     fn arm_grow(&mut self, height: f32) {
         self.grow_armed = GROW_WAIT;
         self.old_h = height;
-    }
-
-    /// How much taller the window should get, if that is settled this frame.
-    ///
-    /// `Some` disarms. `None` means either nothing was armed or the change has
-    /// not shown up yet — [`waiting`](Self::waiting) tells those apart, and the
-    /// wait is bounded so a change that never comes stops asking for frames.
-    ///
-    /// Native only, like its caller: in a browser the window is the page's,
-    /// and nothing here resizes it.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn grow_delta(&mut self, height: f32) -> Option<f32> {
-        if self.grow_armed == 0 {
-            return None;
-        }
-        let delta = height - self.old_h;
-        if delta.abs() > 0.5 {
-            self.grow_armed = 0;
-            return Some(delta);
-        }
-        self.grow_armed -= 1;
-        None
-    }
-
-    /// Whether a grow is still expecting the bar's height to change, and the
-    /// caller should keep frames coming so it can see it.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn waiting(&self) -> bool {
-        self.grow_armed > 0
     }
 }
 
@@ -1296,11 +1025,10 @@ pub struct ViewerApp {
     document: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The plugin whose dialog is open, and the values entered so far.
     plugin_dialog: Option<PluginDialog>,
-    /// Where what arrives from outside this frame's input is sent
-    /// ([`Incoming`]): a file from the browser's asynchronous picker, and each
-    /// job's result once it is done. Drained once a frame by
-    /// [`drain_pending_open`](Self::drain_pending_open). The desktop's file
-    /// dialog blocks and applies its result directly, so it never sends.
+    /// Where each job's result is sent once it is done ([`Incoming`]).
+    /// Drained once a frame by [`drain_pending_open`](Self::drain_pending_open).
+    /// Files come in through the platform instead, the browser's asynchronous
+    /// picker included.
     open_tx: Sender<Incoming>,
     open_rx: Receiver<Incoming>,
     /// The slow thing running on a worker thread, while one is: an import, a
@@ -1325,10 +1053,9 @@ pub struct ViewerApp {
     picked: Option<(usize, Vec<fasttiff_plugin_api::Roi>)>,
 
     // --- window chrome ------------------------------------------------------
-    /// The window title last sent via `ViewportCommand::Title`. Native only —
-    /// a canvas has no title bar; the page's `<title>` is the host's business.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    last_title: Option<String>,
+    /// The desktop or the browser: what this app does that the two hosts do
+    /// their own way. See [`platform`].
+    platform: Current,
     /// The status message that should read as *done*, not as *careful*.
     ///
     /// The status line is amber, which is right for what it usually carries: a
@@ -1418,34 +1145,6 @@ struct VolumeUi {
 /// the sharp frame arrives as soon as the hand stops.
 const VOLUME_SETTLE_S: f64 = 0.15;
 
-/// Reveal a directory in the platform's file manager.
-///
-/// Best effort by design: the plugin folder's path is shown in the status bar
-/// regardless, and a desktop with no file manager — a bare window manager, a
-/// remote session — should not turn "where do plugins go?" into an error.
-#[cfg(not(target_arch = "wasm32"))]
-fn open_in_file_manager(dir: &std::path::Path) -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("explorer");
-        c.arg(dir);
-        c
-    };
-    #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("open");
-        c.arg(dir);
-        c
-    };
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let mut cmd = {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(dir);
-        c
-    };
-    cmd.spawn().map(|_| ())
-}
-
 /// A plugin's dialog, while it is open.
 struct PluginDialog {
     /// Index into the registry's plugin list.
@@ -1463,7 +1162,6 @@ struct PluginDialog {
 /// which vendor format this came from is the first thing anyone asks.
 /// `fallback` — the plugin's own name for the image — covers an importer that
 /// synthesises rather than reads, where the path names no file.
-#[cfg(not(target_arch = "wasm32"))]
 fn imported_label(path: &std::path::Path, fallback: &str) -> String {
     match path.file_name() {
         Some(n) => format!("{} - imported", n.to_string_lossy()),
@@ -1474,21 +1172,12 @@ fn imported_label(path: &std::path::Path, fallback: &str) -> String {
 impl ViewerApp {
     pub fn new(initial: Option<Opened>, render: Render) -> Self {
         let (open_tx, open_rx) = channel();
-        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut app = Self {
             core: Viewer::new(),
             render,
             view: View2d::default(),
             panel: PanelLayout::default(),
-            // `with_installed` scans the plugin folders and loads every
-            // shared library it finds; `new` is the built-ins alone. The
-            // browser gets the latter because there is nothing to scan and no
-            // `dlopen` to do it with — which is the only difference between
-            // the two platforms' plugin menus.
-            #[cfg(not(target_arch = "wasm32"))]
-            plugins: Some(fast_tiff_viewer::plugins::Registry::with_installed()),
-            #[cfg(target_arch = "wasm32")]
-            plugins: Some(fast_tiff_viewer::plugins::Registry::new()),
+            plugins: Some(Current::registry()),
             plugin_dialog: None,
             claimed_extensions: Vec::new(),
             document: Default::default(),
@@ -1497,7 +1186,7 @@ impl ViewerApp {
             job: None,
             tools: Tools::default(),
             picked: None,
-            last_title: None,
+            platform: Current::new(),
             good_status: None,
             windows: Windows::new(),
             volume_ui: VolumeUi::default(),
@@ -1508,7 +1197,7 @@ impl ViewerApp {
             .as_ref()
             .map(|r| r.claimed_extensions())
             .unwrap_or_default();
-        sweep_old_results();
+        Current::sweep_old_results();
         if let Some(opened) = initial {
             app.apply_opened(opened);
         }
@@ -1537,7 +1226,6 @@ impl ViewerApp {
         // of a window that does not repaint, does not respond, and that the
         // desktop offers to kill. The core already opens files this way and
         // draws a progress readout for it; an import is the same promise.
-        #[cfg(not(target_arch = "wasm32"))]
         let opened = match opened {
             Opened::Path(path) => match self.start_import(path) {
                 Ok(()) => return,
@@ -1546,17 +1234,23 @@ impl ViewerApp {
             other => other,
         };
 
-        // Same rule as a worker job: the readout is about to appear, and what
-        // the last action said is not about this one. See `begin_job`.
-        self.clear_status();
-        self.core.begin_open(match opened {
-            #[cfg(not(target_arch = "wasm32"))]
-            Opened::Path(path) => fast_tiff_viewer::LoadSource::Path(path),
+        let source = match opened {
+            Opened::Path(path) => match Current::path_source(path) {
+                Ok(source) => source,
+                Err(why) => {
+                    self.core.status = Some(why);
+                    return;
+                }
+            },
             Opened::Bytes(bytes, name) => {
                 fast_tiff_viewer::LoadSource::Bytes(bytes, PathBuf::from(name))
             }
             Opened::Source(source) => source,
-        });
+        };
+        // Same rule as a worker job: the readout is about to appear, and what
+        // the last action said is not about this one. See `begin_job`.
+        self.clear_status();
+        self.core.begin_open(source);
     }
 
     /// Start showing a job, clearing what the last one left behind.
@@ -1621,13 +1315,11 @@ impl ViewerApp {
         self.windows.reset(&self.core, WEB);
     }
 
-    /// Apply whatever arrived since the last frame ([`Incoming`]): a file the
-    /// browser's picker produced, and the result of a job that finished.
+    /// Apply whatever arrived since the last frame ([`Incoming`]): the result
+    /// of a job that finished.
     fn drain_pending_open(&mut self) {
         while let Ok(message) = self.open_rx.try_recv() {
             match message {
-                Incoming::Opened(opened) => self.apply_opened(opened),
-                #[cfg(not(target_arch = "wasm32"))]
                 Incoming::Imported(registry, result) => {
                     // The registry comes home first, so the app is usable again
                     // whether the import worked or not.
@@ -1643,7 +1335,6 @@ impl ViewerApp {
                     self.job = None;
                     self.apply_plugin_run(*run);
                 }
-                #[cfg(not(target_arch = "wasm32"))]
                 Incoming::Wrote(registry, name, result) => {
                     if let Some(r) = registry {
                         self.plugins = Some(*r);
@@ -1998,27 +1689,10 @@ impl ViewerApp {
             let _ = tx.send(Incoming::Ran(Box::new(registry), Box::new(run)));
             wake_ui();
         };
-
-        #[cfg(not(target_arch = "wasm32"))]
-        std::thread::spawn(work);
-
-        // No thread to spawn: `std::thread::spawn` compiles on
-        // wasm32-unknown-unknown and panics when called, and a browser without
-        // shared memory has no worker that could hold this anyway. So it runs
-        // here, on the frame that asked for it. Two things follow, and both
-        // are deliberate.
-        //
-        // The interface does not repaint while a plugin runs, so the progress
-        // bar it reports to is never seen and Cancel cannot be clicked. That
-        // is a real limitation of the web build, not an oversight — the
-        // alternative is a worker, shared memory, and a second wasm instance.
-        //
-        // It is also what makes `web_open` work: the result is handed to a new
-        // tab from inside the same task as the click that started the run, so
-        // the browser still counts the user as having asked for it and does
-        // not refuse the popup.
-        #[cfg(target_arch = "wasm32")]
-        work();
+        // A thread on the desktop; in a browser, here and now, on the frame
+        // that asked — which is also what lets a result open in a new tab. See
+        // `Platform::spawn_job` for why, and what it costs.
+        Current::spawn_job(work);
     }
 
     /// Apply what a plugin returned, once its worker has handed it back.
@@ -2133,7 +1807,9 @@ impl ViewerApp {
     /// `Ok(())` means an import is running and the caller is done; the result
     /// arrives through [`drain_pending_open`](Self::drain_pending_open). `Err`
     /// hands the path back, unclaimed, for the ordinary TIFF reader.
-    #[cfg(not(target_arch = "wasm32"))]
+    ///
+    /// Reached only with a path, which only the desktop has: a browser's
+    /// files arrive as bytes and go straight to the reader.
     fn start_import(&mut self, path: std::path::PathBuf) -> Result<(), std::path::PathBuf> {
         // One import at a time. The registry is with the worker, and a second
         // import would have nothing to read the file with — better to say so
@@ -2163,7 +1839,7 @@ impl ViewerApp {
 
         let (progress, cancel, _label) = self.begin_job(Job::new("Importing"));
         let tx = self.open_tx.clone();
-        std::thread::spawn(move || {
+        Current::spawn_job(move || {
             let mut registry = registry;
             let result = contained("the importer", || {
                 import_with_plugin(&mut registry, &path, &progress, &cancel)
@@ -2177,14 +1853,16 @@ impl ViewerApp {
         Ok(())
     }
 
-    /// Ask where to put the open stack, and write it there.
+    /// Write the open stack where the user wants it: asked where on the
+    /// desktop, handed to the downloads in a browser ([`Target::place`]).
     ///
-    /// The dialog blocks the interface, which is right — it is a modal, and
-    /// nothing else should be happening while it is up. The *write* does not:
-    /// it is a decode-and-encode of every plane, seconds on a large stack, and
-    /// it runs on a worker against its own handle on the same memory-mapped
-    /// file. See `fast_tiff_viewer::save::SaveSource`.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// The desktop's dialog blocks the interface, which is right — it is a
+    /// modal, and nothing else should be happening while it is up. The *write*
+    /// does not: it is a decode-and-encode of every plane, seconds on a large
+    /// stack, and it runs on a worker against its own handle on the same
+    /// memory-mapped file. See `fast_tiff_viewer::save::SaveSource`.
+    ///
+    /// [`Target::place`]: platform::Target::place
     fn save_as(&mut self) {
         let Some(stack) = self.core.document.as_ref() else {
             self.core.status = Some("Open an image first".into());
@@ -2194,52 +1872,55 @@ impl ViewerApp {
             self.core.status = Some(self.busy_message());
             return;
         }
-        // Suggest the file's own name with a `.tif` on it. An imported stack
-        // has no file, and its `path` is the name it is shown under — which is
-        // exactly what to suggest saving it as.
-        let stem = stack
-            .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "stack".to_string());
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter("TIFF", &["tif", "tiff"])
-            .set_file_name(format!("{stem}.tif"));
-        // Every installed exporter's formats, beside the host's own TIFF. TIFF
-        // is first because it is the only one that keeps the stack whole; the
-        // rest are for handing a picture to something else.
-        let offered = self
-            .plugins
-            .as_ref()
-            .map(|p| p.save_file_types())
-            .unwrap_or_default();
-        for t in &offered {
-            let exts: Vec<&str> = t.extensions.iter().map(|s| s.as_str()).collect();
-            dialog = dialog.add_filter(&t.description, &exts);
-        }
-        if let Some(dir) = stack.save_dir() {
-            dialog = dialog.set_directory(dir);
-        }
-        let Some(path) = dialog.save_file() else {
-            // Cancelled: not a failure, and not worth a status line either.
-            return;
+        // What the window is titled with: the file's own name, the name an
+        // imported stack is shown under, the name a browser document arrived
+        // under — with a `.tif` on it.
+        let suggested = TARGET.save_name(&stack.path);
+        let destination = match TARGET.place("", suggested) {
+            Placement::At(destination) => destination,
+            Placement::Ask(name) => {
+                // Every installed exporter's formats, beside the host's own
+                // TIFF. TIFF is first because it is the only one that keeps the
+                // stack whole; the rest are for handing a picture to something
+                // else.
+                let mut filters =
+                    vec![fasttiff_plugin_api::FileType::new("TIFF", &["tif", "tiff"])];
+                filters.extend(
+                    self.plugins
+                        .as_ref()
+                        .map(|p| p.save_file_types())
+                        .unwrap_or_default(),
+                );
+                let dir = stack.save_dir();
+                match Current::ask_path(Purpose::Save, Some(&name), dir.as_deref(), &filters) {
+                    Some(path) => Destination::File(path),
+                    // Cancelled: not a failure, and not worth a status line
+                    // either.
+                    None => return,
+                }
+            }
         };
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.display().to_string());
-        // The extension decides, not the filter row that was selected: the
-        // dialogs disagree about whether choosing a filter rewrites the name,
-        // and the name is the thing the user can see. An extension no exporter
-        // claims is a TIFF, which is also what an extension-less name gets.
-        match self.exporter_for(&path) {
-            Some(index) => self.start_export(index, path, name),
-            None => self.start_save(path, name),
+        match destination {
+            Destination::File(path) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                // The extension decides, not the filter row that was selected:
+                // the dialogs disagree about whether choosing a filter rewrites
+                // the name, and the name is the thing the user can see. An
+                // extension no exporter claims is a TIFF, which is also what an
+                // extension-less name gets.
+                match self.exporter_for(&path) {
+                    Some(index) => self.start_export(index, path, name),
+                    None => self.start_save(path, name),
+                }
+            }
+            Destination::Download(name) => self.download_tiff(name),
         }
     }
 
     /// Write the open stack as a TIFF, on a worker.
-    #[cfg(not(target_arch = "wasm32"))]
     fn start_save(&mut self, path: std::path::PathBuf, name: String) {
         let Some(stack) = self.core.document.as_ref() else {
             return;
@@ -2248,13 +1929,12 @@ impl ViewerApp {
         let (progress, cancel, _label) = self.begin_job(Job::new("Saving"));
 
         let tx = self.open_tx.clone();
-        std::thread::spawn(move || {
+        Current::spawn_job(move || {
             let result = contained("the writer", || {
-                fast_tiff_viewer::save::save_source(&source, &path, &mut |f| {
+                Current::write_tiff(&source, &path, &mut |f| {
                     Job::report(&progress, f);
                     !cancel.load(std::sync::atomic::Ordering::Relaxed)
                 })
-                .map_err(|e| format!("{e:#}"))
             })
             .unwrap_or_else(Err);
             let outcome = WriteOutcome::of(result, &cancel);
@@ -2264,22 +1944,21 @@ impl ViewerApp {
         });
     }
 
-    /// Encode the open stack and hand it to the browser as a download.
+    /// Encode the open stack and hand it to the browser's downloads as `name`.
     ///
-    /// The browser's `save_as`, and shorter than the desktop's because both of
-    /// the things that make that one long are gone. There is no dialog to put
-    /// up — a tab cannot ask where a file should go, and the download manager
-    /// asks instead, if the user has told it to — and there is no worker to put
-    /// the write on.
+    /// Shorter than the desktop's save because both of the things that make
+    /// that one long are gone. There is no dialog to put up — a tab cannot ask
+    /// where a file should go, and the download manager asks instead, if the
+    /// user has told it to — and there is no worker to put the write on.
     ///
     /// # It runs on the frame that asked for it
     ///
-    /// Same as a plugin on this target, for the same reason: `std::thread::spawn`
-    /// compiles on `wasm32-unknown-unknown` and panics when called. So the
-    /// interface does not repaint while the encode runs, which means the
-    /// progress bar would never be seen and Cancel could never be clicked —
-    /// hence no [`Job`] at all here, rather than one that reports to nothing.
-    /// The status line afterwards is the whole of what this says.
+    /// Same as a job on this target, for the same reason (see
+    /// `Platform::spawn_job`). So the interface does not repaint while the
+    /// encode runs, which means a progress bar would never be seen and Cancel
+    /// could never be clicked — hence no [`Job`] at all here, rather than one
+    /// that reports to nothing. The status line afterwards is the whole of what
+    /// this says.
     ///
     /// A large stack will therefore hold the tab for as long as the encode
     /// takes. That is a real limit of this target and not a small one; it is
@@ -2294,25 +1973,16 @@ impl ViewerApp {
     /// an importer and this button writes TIFF.
     ///
     /// [`Exporter`]: fasttiff_plugin_api::Exporter
-    #[cfg(target_arch = "wasm32")]
-    fn save_as(&mut self) {
+    fn download_tiff(&mut self, name: String) {
         let Some(stack) = self.core.document.as_ref() else {
-            self.core.status = Some("Open an image first".into());
             return;
         };
-        if self.job.is_some() {
-            self.core.status = Some(self.busy_message());
-            return;
-        }
-        // What the window is titled with, which for a document that arrived as
-        // bytes is the name it arrived under.
-        let name = crate::web_save::suggested_name(&stack.path.to_string_lossy());
         let source = fast_tiff_viewer::save::SaveSource::of(stack);
         // Nothing to report progress to and nothing that could set the cancel
         // flag, so the callback is a constant rather than a pretence.
         let wrote = fast_tiff_viewer::save::save_to_bytes(&source, &mut |_| true)
             .map_err(|e| format!("{e:#}"))
-            .and_then(|bytes| crate::web_save::download(&bytes, &name));
+            .and_then(|bytes| Current::download(&bytes, &name, "image/tiff"));
         match wrote {
             // "Saved" rather than "Downloaded": where it went is the browser's
             // business, and the user asked to save their image.
@@ -2397,7 +2067,9 @@ impl ViewerApp {
     ///
     /// The registry goes with it, as an import's and a filter's do, which is
     /// what keeps a second job from starting while this one holds the data.
-    #[cfg(not(target_arch = "wasm32"))]
+    ///
+    /// An exporter writes to a path, so this is reached only with a file to
+    /// write: the desktop's.
     fn start_export(&mut self, index: usize, path: std::path::PathBuf, name: String) {
         let Some(loaded) = self.core.document.as_ref() else {
             return;
@@ -2418,7 +2090,7 @@ impl ViewerApp {
         let (_, cancel, _label) = self.begin_job(job);
 
         let tx = self.open_tx.clone();
-        std::thread::spawn(move || {
+        Current::spawn_job(move || {
             let mut registry = registry;
             let mut host = host;
             let result = contained(&plugin_name, || match registry.exporter_mut(index) {
@@ -2457,301 +2129,22 @@ impl ViewerApp {
     }
 
     /// Which exporter, if any, claims this name.
-    #[cfg(not(target_arch = "wasm32"))]
     fn exporter_for(&self, path: &std::path::Path) -> Option<usize> {
         self.plugins.as_ref()?.exporter_for(path)
     }
 
-    /// Show the platform's file picker.
-    ///
-    /// Native: a blocking dialog that can select several files — the first
-    /// opens here and the rest are launched in their own processes, matching
-    /// the command line and drag-drop. Web: an async picker that posts its
-    /// result back through `open_rx`.
+    /// Show the platform's file picker, offering what the importers read
+    /// beside TIFF, and open what it gives back now. A picker that answers
+    /// later — the browser's — hands its file in through the platform's
+    /// incoming files instead (see [`intake`](Self::intake)).
     fn show_open_dialog(&mut self, ctx: &egui::Context) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = ctx;
-            // Importers add their formats to the picker, so a file an installed
-            // plugin can read is selectable without the user changing the
-            // filter to "all files" and hoping.
-            let mut dialog = rfd::FileDialog::new().add_filter("TIFF", &["tif", "tiff"]);
-            let types = self
-                .plugins
-                .as_ref()
-                .map(|p| p.open_file_types())
-                .unwrap_or_default();
-            if !types.is_empty() {
-                let mut every: Vec<&str> = vec!["tif", "tiff"];
-                for t in &types {
-                    let exts: Vec<&str> = t.extensions.iter().map(|s| s.as_str()).collect();
-                    dialog = dialog.add_filter(&t.description, &exts);
-                    every.extend(exts);
-                }
-                // A combined entry first, so "open whatever this app can read"
-                // is one click rather than a hunt through the format list.
-                dialog = rfd::FileDialog::new()
-                    .add_filter("Images FastTIFF can read", &every)
-                    .add_filter("TIFF", &["tif", "tiff"]);
-                for t in &types {
-                    let exts: Vec<&str> = t.extensions.iter().map(|s| s.as_str()).collect();
-                    dialog = dialog.add_filter(&t.description, &exts);
-                }
-            }
-            if let Some(paths) = dialog.pick_files() {
-                if let Some(first) = crate::process::open_all(&paths) {
-                    self.apply_opened(Opened::Path(first.clone()));
-                }
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let tx = self.open_tx.clone();
-            let ctx = ctx.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Some(handle) = rfd::AsyncFileDialog::new()
-                    .add_filter("TIFF", &["tif", "tiff"])
-                    .pick_file()
-                    .await
-                {
-                    let name = handle.file_name();
-                    let _ = tx.send(Incoming::Opened(Opened::Bytes(handle.read().await, name)));
-                }
-                // Wake the UI whether or not a file was chosen.
-                ctx.request_repaint();
-            });
-        }
-    }
-}
-
-impl ViewerApp {
-    /// Size, position and title the OS window in response to this frame's
-    /// events. Native only — a browser canvas is sized by CSS, and none of
-    /// `ViewportCommand` means anything there.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn manage_window(
-        &mut self,
-        ui: &egui::Ui,
-        toolbar_response: &egui::InnerResponse<()>,
-        scrub_bar_response: &egui::InnerResponse<()>,
-    ) {
-        // Window sizing happens ONLY in response to explicit events — a freshly
-        // opened file, or a zoom change (handled below) — never every frame.
-        // That's what lets the window be freely resized and maximized without
-        // shaking or being snapped back.
-        let toolbar_height = toolbar_response.response.rect.height();
-        let bottom_bar_height = scrub_bar_response.response.rect.height();
-        let chrome_height = toolbar_height + bottom_bar_height;
-
-        // Panel expand/collapse: grow (or shrink) the window height by the
-        // panel's own height change, so the image and toolbar above stay put
-        // and the panel "drops down" from its position. One-shot, triggered
-        // only by the toggle. Skipped when the window manager owns the size
-        // (maximized or full screen) — there the
-        // image just letterboxes into the space the panel takes. We stay armed
-        // until the height actually changes (the toggle frame still reports the
-        // old height), repainting meanwhile so the next frame lands.
-        if let Some(delta) = self.panel.grow_delta(bottom_bar_height) {
-            if !window_size_is_not_ours(ui.ctx()) {
-                let cur = ui.ctx().content_rect().size();
-                let h = (cur.y + delta).round().max(200.0);
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                        cur.x.round(),
-                        h,
-                    )));
-            }
-        } else if self.panel.waiting() {
-            // The change has not shown up yet. Keep the frames coming so the
-            // next one can see it.
-            ui.ctx().request_repaint();
-        }
-
-        let img_dims = self
-            .core
-            .document
+        let readable = self
+            .plugins
             .as_ref()
-            .and_then(|l| l.tiff.frames.first())
-            .map(|f| (f.width as f32, f.height as f32));
-
-        if let Some((img_w, img_h)) = img_dims {
-            // On open: pick the largest zoom level ≤ 100% at which the image +
-            // chrome still fits the monitor (a huge image opens scaled down, a
-            // normal one at 100%). Deferred to here because the chrome height
-            // and monitor size aren't known at open time.
-            if self.view.pending_initial_fit {
-                if let Some(z) = initial_fit_zoom(ui.ctx(), img_w, img_h, chrome_height) {
-                    self.view.zoom = z;
-                    self.view.pan = egui::Vec2::ZERO;
-                    self.view.pending_initial_fit = false;
-                    self.view.resize_to_zoom = true;
-                } else {
-                    // Monitor size not reported yet (can stay unknown until the
-                    // window first gets focus/input). Poll a few times a second
-                    // rather than spinning `request_repaint` every frame, which
-                    // would peg a CPU core while the app sits idle on load.
-                    ui.ctx()
-                        .request_repaint_after(std::time::Duration::from_millis(100));
-                }
-            }
-
-            // When the window manager owns the size — maximized or full screen —
-            // the window is left completely alone on zoom, and the image just
-            // zooms/pans/letterboxes inside it (handled by the central panel's
-            // UV transform).
-            let size_is_fixed = window_size_is_not_ours(ui.ctx());
-
-            // The target window inner size for the current zoom: the image scaled
-            // uniformly, clamped to fit the monitor and to the minimum size. Once
-            // it hits the minimum the window stops shrinking and the image just
-            // letterboxes. Computed once so the reposition decision and the
-            // actual resize agree. `None` when the window manager owns the size
-            // (window left alone).
-            let target_window = if size_is_fixed {
-                None
-            } else {
-                // The zoom being glided to, so the window is the right size for
-                // the destination while the picture is still on its way there.
-                // Sizing to the animated value instead would resize the window
-                // on every frame of every step.
-                let settled = self.view.zoom_settled();
-                let window_scale = match monitor_work_area(ui.ctx()) {
-                    Some(m) => {
-                        let fit = (m.x / img_w).min((m.y - chrome_height).max(1.0) / img_h);
-                        settled.min(fit)
-                    }
-                    None => settled,
-                };
-                let w = (img_w * window_scale).round().max(MIN_WINDOW);
-                let h = (img_h * window_scale + chrome_height)
-                    .round()
-                    .max(MIN_WINDOW);
-                Some(egui::vec2(w, h))
-            };
-
-            // The zoom value + pan were already applied early (above), so the
-            // image is redrawing at the new zoom this frame. Here we only decide
-            // whether to move the window so the cursor's point stays on the same
-            // desktop spot.
-            let mut reposition: Option<egui::Pos2> = None;
-            if let Some((old_zoom, cursor)) = self.view.zoom_reposition.take() {
-                let new_zoom = self.view.zoom_settled();
-                let fits = monitor_work_area(ui.ctx())
-                    .map(|m| img_w * new_zoom <= m.x && img_h * new_zoom + chrome_height <= m.y)
-                    .unwrap_or(true);
-                // Whether the window grew vs. the previous frame (zoom-in case),
-                // and whether the image is now letterboxed inside the window
-                // (smaller than the content on either axis).
-                let cur_inner = ui
-                    .ctx()
-                    .input(|i| i.viewport().inner_rect.map(|r| r.size()));
-                let grew = match (target_window, cur_inner) {
-                    (Some(t), Some(c)) => t.x > c.x + 0.5 || t.y > c.y + 0.5,
-                    _ => true,
-                };
-                let letterboxing = match target_window {
-                    Some(t) => {
-                        img_w * new_zoom < t.x - 0.5
-                            || img_h * new_zoom < (t.y - chrome_height) - 0.5
-                    }
-                    None => false,
-                };
-                // Whether the image was letterboxed *before* this zoom step. In
-                // that state the cursor can sit in the empty margin, off the
-                // image, so the cursor-anchor math would jump the window — skip
-                // the one reposition on the letterboxed → first-fitted step.
-                let was_letterboxing = match cur_inner {
-                    Some(c) => {
-                        img_w * old_zoom < c.x - 0.5
-                            || img_h * old_zoom < (c.y - chrome_height) - 0.5
-                    }
-                    None => false,
-                };
-                // Follow the cursor when zooming *in* and the window grows (but
-                // not on the first step out of a letterboxed state), or when
-                // zooming *out* while the image still fills the window. Once it's
-                // letterboxing at the minimum size, or the window manager owns
-                // the size, it stays put.
-                let follow = !size_is_fixed
-                    && fits
-                    && ((new_zoom > old_zoom && grew && !was_letterboxing)
-                        || (new_zoom < old_zoom && !letterboxing));
-                if follow {
-                    if let Some(outer) = ui.ctx().input(|i| i.viewport().outer_rect.map(|r| r.min))
-                    {
-                        let ratio = new_zoom / old_zoom;
-                        reposition =
-                            Some(outer + (cursor - self.view.panel_rect.min) * (1.0 - ratio));
-                    }
-                }
-            }
-
-            // Apply a pending resize (one-shot), unless the window manager owns
-            // the size.
-            if self.view.resize_to_zoom {
-                if let Some(size) = target_window {
-                    let (w, h) = (size.x, size.y);
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-
-                    // Keep the window fully on the desktop. The target position is
-                    // the cursor-zoom move (or the current position when none).
-                    // Horizontally it's clamped to the monitor width. Vertically,
-                    // if the (grown) window's bottom would drop below the usable
-                    // area, it's *centered* between the top and bottom of the
-                    // monitor — symmetric margins, so it's least likely to be
-                    // covered by a taskbar whether that's docked at the top or
-                    // the bottom (egui doesn't report which).
-                    let info = ui.ctx().input(|i| {
-                        (
-                            i.viewport().outer_rect,
-                            i.viewport().inner_rect,
-                            i.viewport().monitor_size,
-                        )
-                    });
-                    if let (Some(outer), Some(inner), Some(monitor)) = info {
-                        let decoration = outer.size() - inner.size();
-                        let new_outer = egui::vec2(w, h) + decoration;
-                        let target = reposition.unwrap_or(outer.min);
-                        let max_x = (monitor.x - new_outer.x).max(0.0);
-                        let usable_bottom = monitor_work_area(ui.ctx())
-                            .map(|wa| wa.y)
-                            .unwrap_or(monitor.y);
-                        let y = if target.y + new_outer.y > usable_bottom {
-                            ((monitor.y - new_outer.y) * 0.5).max(0.0)
-                        } else {
-                            target.y.max(0.0)
-                        };
-                        let clamped = egui::pos2(target.x.clamp(0.0, max_x), y);
-                        if (clamped - outer.min).length() > 0.5 {
-                            ui.ctx()
-                                .send_viewport_cmd(egui::ViewportCommand::OuterPosition(clamped));
-                        }
-                    } else if let Some(pos) = reposition {
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
-                    }
-                }
-                self.view.resize_to_zoom = false;
-            }
-        }
-
-        // Window title: loaded filename, or the app name when nothing is open.
-        let desired_title = match &self.core.document {
-            Some(loaded) => {
-                let name = loaded
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                format!("{name} • FastTIFF")
-            }
-            None => "FastTIFF".to_string(),
-        };
-        if self.last_title.as_deref() != Some(desired_title.as_str()) {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Title(desired_title.clone()));
-            self.last_title = Some(desired_title);
+            .map(|p| p.open_file_types())
+            .unwrap_or_default();
+        if let Some(opened) = self.platform.pick_file(ctx, &readable) {
+            self.apply_opened(opened);
         }
     }
 }
@@ -2823,53 +2216,16 @@ impl ViewerApp {
         cmds.finish();
     }
 
-    /// Take in what arrived since the last frame: files dropped on the window,
-    /// what the asynchronous picker and the workers sent, and a load that
-    /// finished — and keep frames coming while one is still on its way.
+    /// Take in what arrived since the last frame: files dropped on the window
+    /// or handed over by the system or a picker, what the workers sent, and a
+    /// load that finished — and keep frames coming while one is still on its
+    /// way.
     fn intake(&mut self, ctx: &egui::Context) {
-        // Files dropped onto the window. Natively these carry a path, and
-        // dropping several opens the first here and launches the rest in their
-        // own processes; in a browser the drop event carries the bytes instead.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let dropped: Vec<PathBuf> = ctx.input(|i| {
-                i.raw
-                    .dropped_files
-                    .iter()
-                    .filter_map(|f| f.path.clone())
-                    .collect()
-            });
-            if let Some(first) = crate::process::open_all(&dropped) {
-                self.apply_opened(Opened::Path(first.clone()));
-            }
-
-            // macOS "Open With" / double-click delivers files via an Apple Event
-            // (not argv); drain whatever `macos_open`'s handler has queued and
-            // open them the same way as drag-drop.
-            #[cfg(target_os = "macos")]
-            {
-                let opened = crate::macos_open::take_opened_files();
-                if let Some(first) = crate::process::open_all(&opened) {
-                    self.apply_opened(Opened::Path(first.clone()));
-                }
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let dropped: Vec<Opened> = ctx.input(|i| {
-                i.raw
-                    .dropped_files
-                    .iter()
-                    .filter_map(|f| {
-                        f.bytes
-                            .as_ref()
-                            .map(|b| Opened::Bytes(b.to_vec(), f.name.clone()))
-                    })
-                    .collect()
-            });
-            for d in dropped {
-                self.apply_opened(d);
-            }
+        // Paths on the desktop, several of which open the first here and the
+        // rest in processes of their own; bytes in a browser. See
+        // `Platform::take_incoming_files`.
+        for opened in self.platform.take_incoming_files(ctx) {
+            self.apply_opened(opened);
         }
         self.drain_pending_open();
         // Take delivery of a load that finished since the last frame, and keep
@@ -2884,11 +2240,9 @@ impl ViewerApp {
         // (`wake_ui`). The slow poll here is only a safety net, for a wake
         // that raced the frame. A load cannot wake anything (the core knows no
         // toolkit), so it is polled, at a rate a readout needs rather than at
-        // the display's.
-        #[cfg(not(target_arch = "wasm32"))]
-        let working = self.job.is_some();
-        #[cfg(target_arch = "wasm32")]
-        let working = false;
+        // the display's. A job that runs on the frame that started it — the
+        // browser's — has nothing to poll for.
+        let working = TARGET.jobs_run_behind() && self.job.is_some();
         if self.core.load_stage().is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         } else if working {
@@ -3117,11 +2471,16 @@ impl ViewerApp {
         toolbar_response: &egui::InnerResponse<()>,
         scrub_bar_response: &egui::InnerResponse<()>,
     ) {
-        // Window chrome (sizing, position, title) is a desktop-only concern.
-        #[cfg(not(target_arch = "wasm32"))]
-        self.manage_window(ui, toolbar_response, scrub_bar_response);
-        #[cfg(target_arch = "wasm32")]
-        let _ = (toolbar_response, scrub_bar_response);
+        // Window chrome (sizing, position, title): the desktop's alone, and
+        // nothing in a browser, whose canvas the page sizes.
+        self.platform.manage_window(
+            ui.ctx(),
+            &mut self.view,
+            &mut self.panel,
+            self.core.document.as_ref(),
+            toolbar_response.response.rect.height(),
+            scrub_bar_response.response.rect.height(),
+        );
 
         // Bring the GPU up to date with the core state, then honor a pending
         // background volume build by scheduling another frame. The histograms
@@ -3149,8 +2508,7 @@ impl eframe::App for ViewerApp {
         // The graphics device is gone, and egui would panic drawing this frame
         // without it. Ending here instead puts the reason in words; the panic
         // hook shows it (see `render::explain_gpu_failure`).
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(why) = crate::render::gpu_lost() {
+        if let Some(why) = Current::gpu_lost() {
             panic!("{why}");
         }
         self.draw(ui, frame);
@@ -3169,7 +2527,6 @@ mod zoom_tests;
 mod readout_tests;
 
 #[cfg(test)]
-#[cfg(not(target_arch = "wasm32"))]
 #[path = "app/import_label_tests.rs"]
 mod import_label_tests;
 
@@ -3182,6 +2539,5 @@ mod panel_grow_tests;
 mod reset_tests;
 
 #[cfg(test)]
-#[cfg(not(target_arch = "wasm32"))]
 #[path = "app/job_tests.rs"]
 mod job_tests;

@@ -19,7 +19,7 @@ impl ViewerApp {
             .show_inside(ui, |ui| {
                 if self.core.document.is_none() {
                     ui.centered_and_justified(|ui| {
-                        ui.label(welcome_text());
+                        ui.label(TARGET.welcome_text());
                     });
                     return;
                 }
@@ -29,10 +29,9 @@ impl ViewerApp {
                     ui.allocate_exact_size(available, egui::Sense::click_and_drag());
                 self.view.panel_rect = panel_rect;
 
-                // Fit the image to the canvas on open. The browser has no window to
-                // resize around the picture the way the desktop build does, so
-                // without this a gigapixel mosaic opens at 1:1 and shows one corner
-                // of itself.
+                // Fit the image to the canvas on open, where the platform fits
+                // a fresh picture to its canvas rather than sizing a window
+                // around it (the browser: see `Opening::FitCanvas`).
                 //
                 // Fitted to the canvas *exactly*, not to the nearest fixed level: a
                 // 4:3 image in a 16:9 canvas has no fixed level that fills it, so
@@ -44,15 +43,18 @@ impl ViewerApp {
                 // Held back until the 2D view is the one on screen: in 3D the zoom
                 // is unused, and consuming the flag there would leave the image
                 // unfitted when the user came back to 2D.
-                #[cfg(target_arch = "wasm32")]
-                if self.view.pending_initial_fit && self.core.view_mode == ViewMode::Movie {
+                let opening = TARGET.opening();
+                if opening == platform::Opening::FitCanvas
+                    && self.view.pending_initial_fit
+                    && self.core.view_mode == ViewMode::Movie
+                {
                     let dims = self
                         .core
                         .document
                         .as_ref()
                         .and_then(|l| l.tiff.frames.first())
-                        .map(|f| (f.width as f32, f.height as f32));
-                    match dims.and_then(|(iw, ih)| fit_to_panel(iw, ih, available)) {
+                        .map(|f| egui::vec2(f.width as f32, f.height as f32));
+                    match dims.and_then(|image| opening.zoom(image, Some(available), 0.0)) {
                         Some(z) => {
                             self.view.zoom = z;
                             self.view.fit_zoom = Some(z);

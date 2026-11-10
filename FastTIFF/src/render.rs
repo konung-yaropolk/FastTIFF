@@ -57,15 +57,11 @@ pub use backend::{ImageRenderResources, BACKEND};
 pub type Render = Arc<Mutex<ImageRenderResources>>;
 
 /// The `eframe::Renderer` the compiled-in backend needs requested in
-/// `NativeOptions`. Native only — `WebOptions` has no equivalent field; the
-/// browser build is always wgpu.
-#[cfg(all(feature = "renderer-glow", not(target_arch = "wasm32")))]
+/// `NativeOptions`. Only the desktop's options ask: `WebOptions` has no
+/// equivalent field, the browser build being always wgpu.
+#[cfg(feature = "renderer-glow")]
 pub const RENDERER: eframe::Renderer = eframe::Renderer::Glow;
-#[cfg(all(
-    feature = "renderer-wgpu",
-    not(feature = "renderer-glow"),
-    not(target_arch = "wasm32")
-))]
+#[cfg(all(feature = "renderer-wgpu", not(feature = "renderer-glow")))]
 pub const RENDERER: eframe::Renderer = eframe::Renderer::Wgpu;
 
 // --- glow ------------------------------------------------------------------
@@ -146,13 +142,15 @@ mod glue {
         resources.set_adapter(rs.adapter.clone());
         // And the GPU registrations run on this device rather than opening
         // their own: a second device can deadlock against this one on a card
-        // short of memory (see `share_gpu_device`).
+        // short of memory (see `share_gpu_device`). The registrations' GPU
+        // paths are the desktop's alone, so the viewer has this nowhere else.
         #[cfg(not(target_arch = "wasm32"))]
         fast_tiff_viewer::share_gpu_device(&rs.device, &rs.queue, &rs.adapter.get_info());
         // A lost device is noted, so the app can close saying why rather than
-        // let egui panic on its next draw (see `gpu_lost`). Dropping the device
-        // at exit reports `Destroyed`, which is not news.
-        #[cfg(not(target_arch = "wasm32"))]
+        // let egui panic on its next draw (see `gpu_lost`) — where the
+        // platform closes over it at all, which the browser does not
+        // (`Platform::gpu_lost`). Dropping the device at exit reports
+        // `Destroyed`, which is not news.
         rs.device.set_device_lost_callback(|reason, message| {
             if !matches!(reason, wgpu::DeviceLostReason::Destroyed) {
                 super::note_gpu_lost(message);
@@ -287,6 +285,14 @@ mod glue {
     }
 }
 
+// Each option hook takes its own target's eframe options, a type that exists
+// on that target alone.
+#[cfg(not(target_arch = "wasm32"))]
+pub use glue::tune_native_options;
+#[cfg(target_arch = "wasm32")]
+pub use glue::tune_web_options;
+pub use glue::{init, paint_callback, paint_volume_callback};
+
 // --- a lost graphics device -------------------------------------------------
 
 /// What wgpu said when the graphics device was lost, once it has been.
@@ -295,21 +301,18 @@ mod glue {
 /// nothing in the window can be drawn without it — egui panics on its next
 /// draw ("Failed to create staging buffer"). What can be done is to close
 /// saying why, in words, rather than with a renderer's internals.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// Recorded on every target; whether the app closes over it is the
+/// platform's to say, and only the desktop does (`Platform::gpu_lost`).
 static GPU_LOST: Mutex<Option<String>> = Mutex::new(None);
 
-#[cfg(all(
-    feature = "renderer-wgpu",
-    not(feature = "renderer-glow"),
-    not(target_arch = "wasm32")
-))]
+#[cfg(all(feature = "renderer-wgpu", not(feature = "renderer-glow")))]
 fn note_gpu_lost(message: String) {
     *GPU_LOST.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
 }
 
 /// What to close with, once the graphics device is gone: for the frame loop,
 /// which ends there rather than let egui draw.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn gpu_lost() -> Option<String> {
     let lost = GPU_LOST.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
     Some(gpu_failure_text(&lost))
@@ -321,13 +324,11 @@ pub fn gpu_lost() -> Option<String> {
 /// Three ways it shows: the frame loop ending on a loss it was told about
 /// ([`gpu_lost`]); egui panicking first, on a device lost before anyone
 /// heard; and wgpu's own panic for running out of video memory.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn explain_gpu_failure(panic: &str) -> Option<String> {
     let recorded = GPU_LOST.lock().unwrap_or_else(|e| e.into_inner()).clone();
     explain(recorded.as_deref(), panic)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn explain(recorded: Option<&str>, panic: &str) -> Option<String> {
     // egui-wgpu's words when the device it writes to is gone, and wgpu's
     // default handler's when an allocation found no video memory.
@@ -340,7 +341,6 @@ fn explain(recorded: Option<&str>, panic: &str) -> Option<String> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn gpu_failure_text(detail: &str) -> String {
     let detail = detail.trim();
     format!(
@@ -360,7 +360,7 @@ fn gpu_failure_text(detail: &str) -> String {
     )
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod gpu_lost_tests {
     use super::explain;
 
@@ -391,9 +391,3 @@ mod gpu_lost_tests {
         assert_eq!(explain(None, "wgpu error: Validation Error"), None);
     }
 }
-
-#[cfg(not(target_arch = "wasm32"))]
-pub use glue::tune_native_options;
-#[cfg(target_arch = "wasm32")]
-pub use glue::tune_web_options;
-pub use glue::{init, paint_callback, paint_volume_callback};

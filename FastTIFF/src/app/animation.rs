@@ -42,13 +42,16 @@
 //! On the desktop the frames go to a writer thread as they arrive, so a long
 //! recording is never held in memory whole; in the browser, which has no
 //! threads and no files, they are kept and the movie is downloaded at the end.
+//! Which is which follows from where the movie goes ([`Destination`]): a file
+//! is written by a thread, a download is built in memory — and only the
+//! desktop is ever given a file to write (see `Target::place`).
 
+use super::platform::{Current, Destination, Placement, Platform as _, Purpose, TARGET};
 use fast_tiff_lib::{Compression, SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::camera::{CameraState, NavMode, OrbitPoint};
 use fasttiff_plugin_api::{Animation, AnimationOutput, MovieResolution};
 use scivis_render::VolumeImage;
 use std::io::{Seek, Write};
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -66,7 +69,6 @@ pub(super) const MOVIE_MAX_SIDE: u32 = 8192;
 /// Frames the writer thread may have waiting before the next pose is held
 /// back. A large movie compresses more slowly than it renders, and frames
 /// queued without a limit would pile up in memory.
-#[cfg(not(target_arch = "wasm32"))]
 const WRITER_QUEUE: usize = 3;
 
 /// How long to wait for the writer to catch up before looking again, in
@@ -153,27 +155,6 @@ impl Ended {
             Ended::Failed(why) => why.as_str(),
         };
         format!("Recording stopped: {why}. Nothing was saved.")
-    }
-}
-
-/// Where a recorded movie goes.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum Destination {
-    /// A file, written as the frames arrive. Desktop only.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    File(std::path::PathBuf),
-    /// A download, under this name. The browser's only filesystem.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    Download(String),
-}
-
-impl Destination {
-    /// The name to report the movie under.
-    pub(super) fn name(&self) -> String {
-        match self {
-            Destination::File(p) => p.display().to_string(),
-            Destination::Download(n) => n.clone(),
-        }
     }
 }
 
@@ -492,12 +473,12 @@ impl<W: Write + Seek> MovieWriter<W> {
 
 // ------------------------------------------------------------ where frames go
 
-/// The far end of a recording: a writer thread on the desktop, memory in the
-/// browser.
+/// The far end of a recording: a writer thread for a file, memory for a
+/// download — so in practice a thread on the desktop and memory in the
+/// browser, the only target that downloads and the one with no threads.
 pub(super) struct FrameSink(Sink);
 
 enum Sink {
-    #[cfg(not(target_arch = "wasm32"))]
     Thread {
         tx: Option<std::sync::mpsc::Sender<Msg>>,
         done: std::sync::mpsc::Receiver<Result<usize, String>>,
@@ -509,14 +490,12 @@ enum Sink {
         writer: Option<std::thread::JoinHandle<()>>,
     },
     // Boxed: the writer is large, and the other two are a few pointers.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Memory(Option<Box<MovieWriter<std::io::Cursor<Vec<u8>>>>>),
     /// The frames, handed straight to a test.
     #[cfg(test)]
     Test(std::sync::mpsc::Sender<Vec<u8>>, usize),
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 enum Msg {
     Frame(Vec<u8>, (usize, usize)),
     Finish,
@@ -529,9 +508,7 @@ pub(super) struct Saving {
 }
 
 enum Done {
-    #[cfg(not(target_arch = "wasm32"))]
     Thread(std::sync::mpsc::Receiver<Result<usize, String>>),
-    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
     Ready(Option<Result<usize, String>>),
 }
 
@@ -539,7 +516,6 @@ impl Saving {
     /// How the save went, once it is over: the frame count, or why not.
     pub(super) fn poll(&mut self) -> Option<Result<usize, String>> {
         match &mut self.done {
-            #[cfg(not(target_arch = "wasm32"))]
             Done::Thread(rx) => match rx.try_recv() {
                 Ok(r) => Some(r),
                 Err(std::sync::mpsc::TryRecvError::Empty) => None,
@@ -558,7 +534,10 @@ impl FrameSink {
     /// The file is created when the first frame arrives and removed again if
     /// the recording stops before the last: a half movie is not a movie, and
     /// one left behind under the name the user chose would be mistaken for one.
-    #[cfg(not(target_arch = "wasm32"))]
+    ///
+    /// A thread of its own rather than a job (`Platform::spawn_job`): it lives
+    /// for the whole recording, waiting on frames. Only ever asked for with a
+    /// file to write, which only the desktop has.
     pub(super) fn to_file(path: std::path::PathBuf, fps: f32) -> FrameSink {
         let (tx, rx) = std::sync::mpsc::channel::<Msg>();
         let (done_tx, done) = std::sync::mpsc::channel();
@@ -628,12 +607,20 @@ impl FrameSink {
     }
 
     /// Frames kept in memory, for a download at the end.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub(super) fn in_memory(fps: f32) -> FrameSink {
         FrameSink(Sink::Memory(Some(Box::new(MovieWriter::new(
             std::io::Cursor::new(Vec::new()),
             fps,
         )))))
+    }
+
+    /// Where the frames for `dest` go: a thread writing the file, or memory
+    /// for the download.
+    pub(super) fn for_destination(dest: &Destination, fps: f32) -> FrameSink {
+        match dest {
+            Destination::File(path) => FrameSink::to_file(path.clone(), fps),
+            Destination::Download(_) => FrameSink::in_memory(fps),
+        }
     }
 
     /// A sink whose frames arrive on the returned channel.
@@ -644,7 +631,7 @@ impl FrameSink {
     }
 
     /// Give up on the recording, and wait until whatever it wrote is gone.
-    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[cfg(test)]
     pub(super) fn abandon(self) {
         if let Sink::Thread { tx, writer, .. } = self.0 {
             drop(tx);
@@ -659,7 +646,6 @@ impl FrameSink {
     /// other sinks are done with a frame by the time `push` returns.
     pub(super) fn busy(&self) -> bool {
         match &self.0 {
-            #[cfg(not(target_arch = "wasm32"))]
             Sink::Thread { queued, .. } => queued.load(Ordering::Relaxed) >= WRITER_QUEUE,
             _ => false,
         }
@@ -667,7 +653,6 @@ impl FrameSink {
 
     pub(super) fn push(&mut self, rgb: Vec<u8>, size: (usize, usize)) -> Result<(), String> {
         match &mut self.0 {
-            #[cfg(not(target_arch = "wasm32"))]
             Sink::Thread { tx, queued, .. } => match tx {
                 Some(tx) => {
                     queued.fetch_add(1, Ordering::Relaxed);
@@ -692,7 +677,6 @@ impl FrameSink {
     /// Every frame is in: finish the movie, wherever it is going.
     pub(super) fn finish(self, dest: Destination) -> Saving {
         let done = match self.0 {
-            #[cfg(not(target_arch = "wasm32"))]
             Sink::Thread { tx, done, .. } => {
                 if let Some(tx) = tx {
                     let _ = tx.send(Msg::Finish);
@@ -714,21 +698,12 @@ impl FrameSink {
     }
 }
 
-/// Hand a movie built in memory to where it is going: the browser's downloads.
+/// Hand a movie built in memory to where it is going: the browser's downloads,
+/// in practice, since a file is written by its thread as the frames come.
 fn deliver(bytes: &[u8], dest: &Destination) -> Result<(), String> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        crate::web_save::download(bytes, &dest.name())
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        match dest {
-            Destination::File(p) => std::fs::write(p, bytes).map_err(|e| e.to_string()),
-            Destination::Download(_) => {
-                let _ = bytes;
-                Err("there is nowhere to download to outside a browser".into())
-            }
-        }
+    match dest {
+        Destination::File(p) => std::fs::write(p, bytes).map_err(|e| e.to_string()),
+        Destination::Download(name) => Current::download(bytes, name, "image/tiff"),
     }
 }
 
@@ -807,11 +782,7 @@ impl super::ViewerApp {
         }
         let fps = animation.fps;
         let sink = recording.map(|dest| {
-            let sink = match &dest {
-                #[cfg(not(target_arch = "wasm32"))]
-                Destination::File(p) => FrameSink::to_file(p.clone(), fps),
-                _ => FrameSink::in_memory(fps),
-            };
+            let sink = FrameSink::for_destination(&dest, fps);
             (dest, sink)
         });
         self.animation.running = Some(Running::new(
@@ -1011,28 +982,16 @@ impl super::ViewerApp {
 }
 
 /// Where a recorded animation goes: where the plugin said, or where the user
-/// says when asked. `None` when the user would not say.
+/// says when asked — or, in a browser, which cannot be asked for a place, a
+/// download under a name (see `Target::place`). `None` when the user would not
+/// say.
 fn destination(path: &str, stem: &str) -> Option<Destination> {
-    let suggested = format!("{stem}-animation.tif");
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        if !path.is_empty() {
-            return Some(Destination::File(path.into()));
+    match TARGET.place(path, format!("{stem}-animation.tif")) {
+        Placement::At(dest) => Some(dest),
+        Placement::Ask(name) => {
+            let tiff = [fasttiff_plugin_api::FileType::new("TIFF", &["tif", "tiff"])];
+            Current::ask_path(Purpose::Save, Some(&name), None, &tiff).map(Destination::File)
         }
-        rfd::FileDialog::new()
-            .add_filter("TIFF", &["tif", "tiff"])
-            .set_file_name(&suggested)
-            .save_file()
-            .map(Destination::File)
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        // A browser cannot be asked for a place, only given a name.
-        Some(Destination::Download(if path.is_empty() {
-            suggested
-        } else {
-            crate::web_save::name_from_path(path)
-        }))
     }
 }
 

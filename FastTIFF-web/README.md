@@ -33,17 +33,24 @@ Needs a current browser with WebGPU or WebGL2 (Chrome/Edge 113+, Firefox 141+).
 both hosts construct the same app. All this crate does is hand eframe a canvas
 instead of a window.
 
-What actually differs between the two hosts is 31 `#[cfg(target_arch = "wasm32")]`
-sites across ~3,100 lines of shared UI, and every one of them is about the
-*host* rather than the viewer:
+What actually differs between the two hosts is all about the *host* rather
+than the viewer, and it is behind one seam, `FastTIFF/src/app/platform/`: what
+each host *decides* is a `Target` value whose answers are tested for both on
+any machine, and what each host *does* is the `Platform` trait, implemented in
+`native.rs` and `web.rs` and picked by the one `cfg` in `mod.rs`. The rest of
+the UI never asks which target it is on.
 
 | | Desktop | Web |
 |---|---|---|
-| Window sizing, position, title | `ViewerApp::manage_window` | nothing — CSS sizes the canvas |
-| Opening a file | blocking dialog, argv, Apple Events → a path | async picker / drop → bytes |
+| Window sizing, position, title | `Platform::manage_window` | nothing — CSS sizes the canvas |
+| Opening a file | blocking dialog, argv, Apple Events → a path | async picker / drop → bytes, kept as egui's `Arc<[u8]>` rather than copied |
+| Saving, exporting | asks where, writes on a worker | downloads under a name, on the frame that asked |
+| Running a job | a worker thread | inline, on the frame that asked (`Platform::spawn_job`) |
+| A result's own window | a new process | a new tab |
+| Pop-ups | windows of their own | egui windows in the canvas |
 | GPU option hook | `render::tune_native_options` | `render::tune_web_options` |
 | Extra files at once | launched as sibling processes | n/a |
-| Interface scale | native (`app::scale::UI_SCALE` = 1.0) | **150%**, pop-ups excepted |
+| Interface scale | native (`Target::ui_scale` = 1.0) | **125%**, pop-ups excepted |
 | Empty-viewport prompt | drop/open + scroll hints | the same, plus the local-processing line |
 | Opening zoom | window resized to the image, at a fixed level | image fitted to the canvas, at whatever factor that takes |
 
@@ -66,7 +73,7 @@ open, since it describes one picture in one canvas.
 
 ## Why the web build is drawn larger
 
-`install_chrome` sets egui's zoom factor to 1.5 here and 1.0 natively. The
+`install_chrome` sets egui's zoom factor to 1.25 here and 1.0 natively. The
 desktop window is sized to the image and read at arm's length; a canvas is one
 element on a page, competing with the browser's own furniture, and the same
 widgets come out noticeably small. Zoom factor scales `pixels_per_point`, so

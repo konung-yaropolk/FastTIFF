@@ -33,22 +33,15 @@ impl ViewerApp {
                 // the few seconds a write or an import is taking. That is a
                 // promise worth making, so the disabled hover text names it.
                 if self.core.document.is_some() {
-                    // Named for what each platform actually does. The desktop
-                    // asks where to put the file, so its label ends in an
-                    // ellipsis; the browser cannot ask and hands the file to the
-                    // download manager instead, so promising a dialog there
-                    // would be a lie.
-                    let save_label = if cfg!(target_arch = "wasm32") {
-                        "Download as TIFF"
-                    } else {
-                        "Save as TIFF…"
-                    };
+                    // Named for what each platform actually does: see
+                    // `Target::save_label`.
+                    let save_label = TARGET.save_label("as TIFF");
                     if ui
                         .add_enabled(
                             self.job.is_none(),
                             egui::Button::new(RichText::new(ICON_SAVE).size(ICON_SIZE)),
                         )
-                        .on_hover_text(save_label)
+                        .on_hover_text(save_label.as_str())
                         .on_disabled_hover_text(format!("{save_label} — busy"))
                         .clicked()
                     {
@@ -78,14 +71,14 @@ impl ViewerApp {
                 {
                     let available = self.plugins.as_ref().filter(|_| self.job.is_none());
                     let has_stack = self.core.document.is_some();
-                    match plugins_ui::plugins_menu(ui, available, has_stack) {
+                    let folder = TARGET.has_plugin_folder();
+                    match plugins_ui::plugins_menu(ui, available, has_stack, folder) {
                         plugins_ui::MenuAction::Run(i) => cmds.push(UiCommand::StartPlugin(i)),
                         plugins_ui::MenuAction::PointCounter => {
                             cmds.push(UiCommand::OpenPointCounter)
                         }
-                        // The entry that produces this is itself desktop-only,
-                        // so on the web the variant is simply never sent.
-                        #[cfg(not(target_arch = "wasm32"))]
+                        // Offered only where there is a folder, so on the web
+                        // the variant is simply never sent.
                         plugins_ui::MenuAction::OpenPluginFolder => {
                             cmds.push(UiCommand::OpenPluginFolder)
                         }

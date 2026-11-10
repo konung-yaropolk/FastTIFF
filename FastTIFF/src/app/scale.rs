@@ -14,10 +14,10 @@
 /// Applied as egui's zoom factor, which multiplies `pixels_per_point` — so it
 /// scales fonts, padding, hit targets and line widths together, rather than
 /// just enlarging text into a layout built for smaller text.
-#[cfg(target_arch = "wasm32")]
-pub const UI_SCALE: f32 = 1.25;
-#[cfg(not(target_arch = "wasm32"))]
-pub const UI_SCALE: f32 = 1.0;
+///
+/// Which size this build draws at is the platform's to say
+/// ([`Target::ui_scale`](super::platform::Target::ui_scale)).
+pub const UI_SCALE: f32 = super::platform::TARGET.ui_scale();
 
 /// Draw a pop-up window at native size even when the chrome around it is
 /// scaled.
@@ -40,7 +40,6 @@ pub const UI_SCALE: f32 = 1.0;
 /// A no-op on the desktop, where the scale is already 1 — and unreachable
 /// there too, since a desktop pop-up is its own window rather than something
 /// drawn inside the scaled canvas (see [`super::dialog`]).
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(super) fn unscaled<R>(ctx: &egui::Context, show: impl FnOnce(&egui::Context) -> R) -> R {
     if UI_SCALE == 1.0 {
         return show(ctx);

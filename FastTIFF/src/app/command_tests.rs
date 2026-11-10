@@ -16,7 +16,6 @@ fn one_of_each() -> Vec<UiCommand> {
         UiCommand::Open,
         UiCommand::Save,
         UiCommand::Copy(Via::Button),
-        #[cfg(not(target_arch = "wasm32"))]
         UiCommand::OpenPluginFolder,
         UiCommand::StartPlugin(3),
         UiCommand::OpenPointCounter,
@@ -73,7 +72,6 @@ fn a_frame_applies_its_commands_in_the_documented_order() {
                 UiCommand::Open,
                 UiCommand::Save,
                 UiCommand::Copy(Via::Button),
-                #[cfg(not(target_arch = "wasm32"))]
                 UiCommand::OpenPluginFolder,
                 UiCommand::StartPlugin(3),
                 UiCommand::OpenPointCounter,

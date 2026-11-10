@@ -64,7 +64,11 @@ pub enum LoadSource {
     #[cfg(feature = "mmap")]
     Path(PathBuf),
     /// The file's bytes, plus a name to show for them.
-    Bytes(Vec<u8>, PathBuf),
+    ///
+    /// Owned or shared ([`fast_tiff_lib::Bytes`]): a buffer that arrives behind
+    /// an `Arc` — a file dropped on a browser tab — is opened without being
+    /// copied, and a `Vec` is kept as it came.
+    Bytes(fast_tiff_lib::Bytes, PathBuf),
     /// A plugin's result, opened from one of the other two: the stack it
     /// becomes is [`Derived`](crate::plugins::result::Derived) — it knows the
     /// document it was made from, and owns its scratch file. Made by

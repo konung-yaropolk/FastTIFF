@@ -292,14 +292,26 @@ let stack = TiffStack::open("movie.tif")?;
 // on wasm, or for a stack that arrived over the network.
 let bytes: Vec<u8> = std::fs::read("movie.tif")?;
 let stack = TiffStack::from_bytes(bytes)?;
+
+// Or from a buffer shared behind an `Arc`, which the stack holds rather than
+// copies.
+let shared: std::sync::Arc<[u8]> = std::fs::read("movie.tif")?.into();
+let stack = TiffStack::from_bytes(std::sync::Arc::clone(&shared))?;
 ```
 
 They share one parser, so a mapped and an in-memory stack can never disagree.
 See [Feature flags](#feature-flags) for the trade-off between them.
 
+`from_bytes` takes anything that converts into a [`Bytes`](#bytes): a
+`Vec<u8>`, which the stack then owns, or an `Arc<[u8]>`, which it shares with
+whoever else holds one. Neither is copied. A buffer that already lives behind an
+`Arc` — egui hands a file dropped on a browser tab over that way — opens with
+no whole-file memcpy; a `Vec` is taken as it is, since turning it into an
+`Arc<[u8]>` would itself be a copy.
+
 ```rust
 pub struct TiffStack {
-    pub data: Bytes,                // the file's bytes (mapped or owned)
+    pub data: Bytes,                // the file's bytes (mapped, owned or shared)
     pub byte_order: ByteOrder,      // Little or Big (the file's endianness)
     pub frames: Vec<FrameInfo>,     // one entry per IFD/plane, in file order
     pub meta: StackMeta,            // normalized display metadata (ImageJ / OME / inferred)
@@ -313,16 +325,22 @@ every decoder and you rarely name the type:
 
 ```rust
 pub enum Bytes {
-    Mapped(memmap2::Mmap),   // only with the `mmap` feature
+    Mapped(memmap2::Mmap),       // only with the `mmap` feature
     Owned(Vec<u8>),
+    Shared(std::sync::Arc<[u8]>),
 }
 ```
 
+It is re-exported at the crate root as `fast_tiff_lib::Bytes`, with
+`From<Vec<u8>>` (to `Owned`) and `From<Arc<[u8]>>` (to `Shared`).
+
 The choice does **not** affect decoding — the zero-copy fast path borrows out of
-either one. What differs is when you pay for the bytes: `Mapped` reads pages
+any of them. What differs is when you pay for the bytes: `Mapped` reads pages
 lazily on first touch and lets the OS evict them again, so opening a multi-GB
 stack is instant and resident memory tracks what you actually looked at.
-`Owned` reads everything up front and keeps it.
+`Owned` and `Shared` hold the whole file in memory for the stack's lifetime;
+`Shared` holds one reference to a buffer the caller may go on using, and the
+buffer is freed when the last holder lets go of it.
 
 ### `FrameInfo`
 

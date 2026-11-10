@@ -860,17 +860,26 @@ impl FrameInfo {
     }
 }
 
-/// Where a stack's bytes live. Both variants deref to `&[u8]`, so every decode
+/// Where a stack's bytes live. Every variant derefs to `&[u8]`, so every decode
 /// entry point takes one shape regardless of how the file was opened.
 ///
 /// `Mapped` is the native path — the OS pages data in on demand, so opening a
-/// multi-GB stack costs nothing until pixels are touched. `Owned` is for hosts
-/// with no filesystem to map (a browser, where the bytes arrive from a file
-/// input or `fetch`), and for callers that already hold the whole file.
+/// multi-GB stack costs nothing until pixels are touched. `Owned` and `Shared`
+/// are for bytes already in memory: a host with no filesystem to map (a
+/// browser, where the bytes arrive from a file input or `fetch`), and callers
+/// that already hold the whole file.
+///
+/// `Shared` is held, never copied. A buffer that someone else already keeps
+/// behind an `Arc` — egui hands a file dropped on a browser tab over that way
+/// — becomes a stack with no whole-file memcpy, and without a second copy of
+/// the file alive beside it while the stack is indexed and read. `Owned` is
+/// for a `Vec` the caller gives up: turning one into an `Arc<[u8]>` would
+/// itself be a copy, so it is kept as it came.
 pub enum Bytes {
     #[cfg(feature = "mmap")]
     Mapped(Mmap),
     Owned(Vec<u8>),
+    Shared(std::sync::Arc<[u8]>),
 }
 
 impl std::ops::Deref for Bytes {
@@ -880,7 +889,20 @@ impl std::ops::Deref for Bytes {
             #[cfg(feature = "mmap")]
             Bytes::Mapped(m) => m,
             Bytes::Owned(v) => v,
+            Bytes::Shared(s) => s,
         }
+    }
+}
+
+impl From<Vec<u8>> for Bytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Bytes::Owned(bytes)
+    }
+}
+
+impl From<std::sync::Arc<[u8]>> for Bytes {
+    fn from(bytes: std::sync::Arc<[u8]>) -> Self {
+        Bytes::Shared(bytes)
     }
 }
 
@@ -890,6 +912,7 @@ impl std::fmt::Debug for Bytes {
             #[cfg(feature = "mmap")]
             Bytes::Mapped(_) => "Mapped",
             Bytes::Owned(_) => "Owned",
+            Bytes::Shared(_) => "Shared",
         };
         write!(f, "Bytes::{kind}({} bytes)", self.len())
     }
@@ -900,8 +923,9 @@ impl std::fmt::Debug for Bytes {
 // produced by `open` / `from_bytes`).
 #[non_exhaustive]
 pub struct TiffStack {
-    /// The file's bytes — memory-mapped, or owned. Derefs to `&[u8]`, which is
-    /// what every `read_*` function takes.
+    /// The file's bytes — memory-mapped, owned, or shared with the caller (see
+    /// [`Bytes`]). Derefs to `&[u8]`, which is what every `read_*` function
+    /// takes.
     pub data: Bytes,
     pub byte_order: ByteOrder,
     pub frames: Vec<FrameInfo>,
@@ -938,8 +962,12 @@ impl TiffStack {
     /// Identical to [`TiffStack::open`] in every other respect: same parser,
     /// same errors, same frame index. The bytes are kept for the stack's
     /// lifetime, so unlike the mapped path the whole file sits in memory.
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
-        Self::from_backing(Bytes::Owned(bytes))
+    ///
+    /// `bytes` is anything that is a [`Bytes`]: a `Vec<u8>`, which the stack
+    /// then owns, or an `Arc<[u8]>`, which it shares with whoever else holds
+    /// it — the stack keeps a reference, not a copy. Neither is copied here.
+    pub fn from_bytes(bytes: impl Into<Bytes>) -> Result<Self> {
+        Self::from_backing(bytes.into())
     }
 
     /// Walk the IFD chain and build the frame index + metadata. Shared by both

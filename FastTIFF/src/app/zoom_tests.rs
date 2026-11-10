@@ -11,6 +11,7 @@
 //! for ever is worse than the jump it replaced, and one that depends on frame
 //! rate looks different on every machine.
 
+use super::platform::fit_to_panel;
 use super::*;
 
 #[test]

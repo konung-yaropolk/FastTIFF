@@ -70,7 +70,7 @@ pub use encode::{
 pub use error::{Error, ErrorKind, Result};
 pub use ifd::{ByteOrder, TiffFlavor};
 pub use index::{
-    Compression, FrameInfo, Region, RowBand, SampleFormat, SampledBand, Strips, TiffStack,
+    Bytes, Compression, FrameInfo, Region, RowBand, SampleFormat, SampledBand, Strips, TiffStack,
 };
 pub use metadata::roi::{point_rois_from_imagej, roi_set_zip, PointRoi, RoiPoint};
 pub use metadata::{

@@ -265,8 +265,11 @@ impl Document {
     /// pass the picked file's name and nothing will try to touch the
     /// filesystem. The background workers share the stack itself, so they need
     /// no file either.
+    ///
+    /// `bytes` is owned (a `Vec<u8>`) or shared (an `Arc<[u8]>`), and is kept
+    /// rather than copied either way — see [`fast_tiff_lib::Bytes`].
     pub fn from_bytes(
-        bytes: Vec<u8>,
+        bytes: impl Into<fast_tiff_lib::Bytes>,
         name: PathBuf,
         apply_pseudocolor: bool,
     ) -> anyhow::Result<Self> {
@@ -276,7 +279,7 @@ impl Document {
     /// [`from_bytes`](Self::from_bytes), reporting progress — see
     /// [`open_reporting`](Self::open_reporting).
     pub fn from_bytes_reporting(
-        bytes: Vec<u8>,
+        bytes: impl Into<fast_tiff_lib::Bytes>,
         name: PathBuf,
         apply_pseudocolor: bool,
         on_stage: &mut dyn FnMut(LoadStage),

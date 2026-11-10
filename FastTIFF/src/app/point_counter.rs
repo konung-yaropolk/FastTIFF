@@ -55,6 +55,7 @@ use super::canvas_tool::{
     undo_hotkey, CanvasGesture, CanvasTool, FrameStarts, ImageXform, Layer, Priority, ToolEvent,
 };
 use super::dialog;
+use super::platform::{Current, Destination, Placement, Platform as _, Purpose, TARGET};
 
 /// The tool's name: its menu entry and its window's title.
 pub(super) const NAME: &str = "Point counter";
@@ -365,11 +366,7 @@ pub(super) fn counter_window(
         ui.horizontal_wrapped(|ui| {
             // Named for what each platform does, as the toolbar's save is: a
             // browser cannot ask where, only hand the file to its downloads.
-            let save = if cfg!(target_arch = "wasm32") {
-                "Download ImageJ overlay"
-            } else {
-                "Save ImageJ overlay…"
-            };
+            let save = TARGET.save_label("ImageJ overlay");
             if ui
                 .button(save)
                 .on_hover_text(
@@ -491,18 +488,7 @@ fn group_table(ui: &mut egui::Ui, counter: &mut PointCounter) {
 /// Bring the counter's window to the front: a menu entry for a window that is
 /// already open, and has gone behind the main one or another, should show it.
 fn raise_window(ctx: &egui::Context) {
-    // A window of its own on the desktop, so the window manager's focus; in
-    // the browser an egui window, so the top of egui's own order.
-    #[cfg(not(target_arch = "wasm32"))]
-    ctx.send_viewport_cmd_to(
-        egui::ViewportId::from_hash_of(WINDOW_ID),
-        egui::ViewportCommand::Focus,
-    );
-    #[cfg(target_arch = "wasm32")]
-    ctx.move_to_top(egui::LayerId::new(
-        egui::Order::Middle,
-        egui::Id::new(WINDOW_ID),
-    ));
+    super::dialog::raise(ctx, WINDOW_ID);
 }
 
 /// A group's colour, as a small square before its name.
@@ -596,38 +582,44 @@ impl super::ViewerApp {
             }
         };
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let (name, wrote) = {
-            let mut dialog = rfd::FileDialog::new()
-                .add_filter("ImageJ ROI set (*.zip)", &["zip"])
-                .set_file_name(&suggested);
-            if let Some(dir) = stack.save_dir() {
-                dialog = dialog.set_directory(dir);
+        let destination = match TARGET.place("", suggested) {
+            Placement::At(destination) => destination,
+            Placement::Ask(name) => {
+                let filters = [fasttiff_plugin_api::FileType::new(
+                    "ImageJ ROI set (*.zip)",
+                    &["zip"],
+                )];
+                let dir = stack.save_dir();
+                match Current::ask_path(Purpose::Save, Some(&name), dir.as_deref(), &filters) {
+                    Some(path) => Destination::File(path),
+                    // Cancelled: not a failure, and not worth a status line.
+                    None => return,
+                }
             }
-            let Some(path) = dialog.save_file() else {
-                // Cancelled: not a failure, and not worth a status line.
-                return;
-            };
-            // ImageJ tells a ROI set by its extension, so a name typed
-            // without one gets it rather than becoming a file nothing opens.
-            let path = if path.extension().is_none() {
-                path.with_extension("zip")
-            } else {
-                path
-            };
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.display().to_string());
-            (
-                name,
-                std::fs::write(&path, &bytes).map_err(|e| e.to_string()),
-            )
         };
-        #[cfg(target_arch = "wasm32")]
-        let (name, wrote) = {
-            let wrote = crate::web_save::download_as(&bytes, &suggested, "application/zip");
-            (suggested, wrote)
+        let (name, wrote) = match destination {
+            Destination::File(path) => {
+                // ImageJ tells a ROI set by its extension, so a name typed
+                // without one gets it rather than becoming a file nothing
+                // opens.
+                let path = if path.extension().is_none() {
+                    path.with_extension("zip")
+                } else {
+                    path
+                };
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                (
+                    name,
+                    std::fs::write(&path, &bytes).map_err(|e| e.to_string()),
+                )
+            }
+            Destination::Download(name) => {
+                let wrote = Current::download(&bytes, &name, "application/zip");
+                (name, wrote)
+            }
         };
 
         match wrote {
