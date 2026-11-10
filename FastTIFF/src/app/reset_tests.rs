@@ -101,3 +101,41 @@ fn the_volume_ui_starts_with_the_default_preferences() {
     assert!(!ui.pressed);
     assert!(ui.last_camera.is_none() && ui.moved_at.is_none());
 }
+
+fn run_on(document: u64, outcome: fast_tiff_viewer::plugins::Product) -> PluginRun {
+    PluginRun {
+        index: 0,
+        run_on: document,
+        params: fasttiff_plugin_api::Params::new(),
+        name: "trace".into(),
+        messages: Vec::new(),
+        outcome: Ok(outcome),
+        made_from: None,
+    }
+}
+
+/// A plot measured on the last document, or a rectangle asked for on it,
+/// does not come back over the next one when the run ends after that one
+/// landed: the reset put the canvas tools away, and a late result would
+/// reopen one on a picture it never read. What is not drawn on the picture
+/// still lands, and so does a plot of the document still on show.
+#[test]
+fn a_canvas_result_from_the_last_document_is_not_shown_on_the_next() {
+    use fast_tiff_viewer::plugins::Product;
+    let plot = || Product::Plot(Box::new(fasttiff_plugin_api::Plot::new("trace")));
+    let pick = || Product::SelectRegion("Draw a rectangle".into());
+    let news = || Product::Message("done".into());
+
+    // `finish_open` counts the document that landed after the run began.
+    let (before, after) = (0, 1);
+    assert!(run_on(before, plot()).outlived(after), "a plot");
+    assert!(run_on(before, pick()).outlived(after), "a region pick");
+    assert!(!run_on(before, news()).outlived(after), "a message");
+    assert!(!run_on(after, plot()).outlived(after), "its own plot");
+    assert!(!run_on(after, pick()).outlived(after), "its own pick");
+
+    // A failed run says so whatever is on show.
+    let mut failed = run_on(before, plot());
+    failed.outcome = Err("it broke".into());
+    assert!(!failed.outlived(after));
+}

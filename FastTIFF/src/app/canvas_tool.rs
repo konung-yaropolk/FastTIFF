@@ -6,7 +6,7 @@
 //! and a plot's regions ([`plot`]). Each is a [`CanvasTool`]: how strongly it
 //! claims the button ([`Priority`]), what it draws ([`Layer`]), and what it
 //! does with a frame of the pointer, the cursor, Ctrl/Cmd+Z, a change of axes,
-//! a frame's tick and a new document.
+//! and a frame's tick.
 //!
 //! The canvas asks [`Tools::arbitrate`] once a frame which tool has the button
 //! and which are drawn, and routes the pointer, draws the overlay and sets the
@@ -34,7 +34,9 @@
 //! | [`axes_changed`](CanvasTool::axes_changed) | [`UiCommand::SetDimensionOrder`], at [`Phase::Playback`] | [`Tools::axes_changed`] |
 //! | [`tick`](CanvasTool::tick) | after [`Phase::Playback`], once the view is settled | [`ViewerApp::tick_tools`] |
 //! | [`track`](CanvasTool::track), [`draw`](CanvasTool::draw), [`cursor`](CanvasTool::cursor) | the canvas, before [`Phase::Canvas`] | [`Tools::arbitrate`] |
-//! | [`outlives_document`](CanvasTool::outlives_document) | a new document | [`Tools::reset`] |
+//!
+//! No tool outlives the document it was used on, on the desktop or in a
+//! browser: a new one puts them all away ([`Tools::reset`]).
 //!
 //! A tool's window is not one of its hooks. The plot's and the counter's are
 //! drawn with the other tool windows, after [`Phase::Toolbar`], and each acts
@@ -269,6 +271,11 @@ pub(super) struct CanvasGesture {
     /// Something else had this click or press: the navigator, or leaving
     /// autoscroll. Set by the canvas, which knows about both, with
     /// [`is_taken`](Self::is_taken).
+    ///
+    /// Every tool honours it alike: a press that is taken starts nothing —
+    /// no point, no region — since one gesture doing two things is what it
+    /// is there to stop. A drag already in flight goes on wherever the
+    /// pointer goes, over the navigator too.
     pub(super) taken: bool,
 }
 
@@ -380,7 +387,8 @@ pub(super) trait CanvasTool {
     ///
     /// The primary button only: the others pan the picture whichever tool has
     /// it, which is what `drag_started` and `dragging` say. Without that, a
-    /// middle-drag would pan and draw at once.
+    /// middle-drag would pan and draw at once. And not a press something else
+    /// had ([`CanvasGesture::taken`]), for the same reason.
     fn track(
         &mut self,
         gesture: &CanvasGesture,
@@ -415,13 +423,6 @@ pub(super) trait CanvasTool {
     /// the canvas will draw, and `busy` whether something is running.
     fn tick(&mut self, _ctx: &egui::Context, _core: &Viewer, _busy: bool) -> Option<ToolEvent> {
         None
-    }
-
-    /// Whether it stays when another document lands in place of the one it
-    /// was used on, on the desktop or (`web`) in a browser. Its marks are
-    /// positions in that picture, so as a rule it does not.
-    fn outlives_document(&self, _web: bool) -> bool {
-        false
     }
 }
 
@@ -496,7 +497,7 @@ impl Tools {
     /// does not compile until it is named here, and once named, its binding
     /// is unused (a warning, which CI fails on) until it is listed with its
     /// slot. A tool left out would never be arbitrated, drawn, ticked or
-    /// undone, nor put away for a new document.
+    /// undone.
     pub(super) fn table(&self) -> [(ToolSlot, Option<&dyn CanvasTool>); 3] {
         let Tools {
             plot,
@@ -579,18 +580,17 @@ impl Tools {
         }
     }
 
-    /// Put the tools away, now that another document has landed: each that
-    /// does not outlive the picture it was used on, on the desktop or (`web`)
-    /// in a browser.
-    pub(super) fn reset(&mut self, web: bool) {
-        for slot in self.slots() {
-            if self
-                .get(slot)
-                .is_some_and(|tool| !tool.outlives_document(web))
-            {
-                self.close(slot);
-            }
-        }
+    /// Put every tool away, now that another document has landed, on the
+    /// desktop and in a browser alike.
+    ///
+    /// What each holds is in pixels of the picture it was used on: a plot's
+    /// regions, the rectangle being drawn for a plugin, the counted points.
+    /// Carried to a different image they would sit somewhere arbitrary — a
+    /// plot would go on measuring there, and a counter would mix two images
+    /// in one table — which is worse than losing them. Every field, so a tool
+    /// added to `Tools` is put away too without being named here.
+    pub(super) fn reset(&mut self) {
+        *self = Tools::default();
     }
 }
 

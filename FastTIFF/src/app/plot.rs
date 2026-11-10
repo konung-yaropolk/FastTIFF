@@ -61,8 +61,8 @@ pub(super) struct PlotWindow {
     pub rois: Vec<Roi>,
     /// The shape the next drag makes.
     pub shape: Shape,
-    /// A drag in flight: the pixel it started on and the pixel it is over.
-    pub drag: Option<((i64, i64), (i64, i64))>,
+    /// A drag in flight. See [`track_drag`].
+    pub drag: Option<DragCorners>,
     /// Set when the selection changed and the plot no longer describes it.
     pub stale: bool,
 }
@@ -84,42 +84,6 @@ impl PlotWindow {
     pub fn wants_regions(&self) -> bool {
         self.plot.wants == SelectionKind::Regions
     }
-
-    /// Take one frame of a drag on the picture: `px` is the pixel the pointer
-    /// is acting at, `started`/`dragging` what the primary button did and
-    /// `stopped` whether a drag ended, and `add` whether Shift is held.
-    ///
-    /// The region starts at the pixel the drag was first seen at, and is
-    /// committed on release rather than continuously, so a drag across a
-    /// long timelapse starts one measurement instead of one per frame of the
-    /// gesture. Shift adds it; a plain drag replaces them all, which is what
-    /// makes "start again" one gesture.
-    pub fn track(
-        &mut self,
-        px: Option<(i64, i64)>,
-        (started, dragging, stopped): (bool, bool, bool),
-        add: bool,
-        size: (u32, u32),
-    ) {
-        if let Some(px) = px {
-            match self.drag {
-                None if started => self.drag = Some((px, px)),
-                Some((from, _)) if dragging => self.drag = Some((from, px)),
-                _ => {}
-            }
-        }
-        if stopped {
-            if let Some((from, to)) = self.drag.take() {
-                if let Some(roi) = drag_region(from, to, self.shape, size.0, size.1) {
-                    if !add {
-                        self.rois.clear();
-                    }
-                    self.rois.push(roi);
-                    self.stale = true;
-                }
-            }
-        }
-    }
 }
 
 // ------------------------------------------------------------ the canvas tool
@@ -139,24 +103,70 @@ impl CanvasTool for PlotWindow {
         self.wants_regions()
     }
 
-    /// In whole pixels. A changed selection leaves the plot stale, for its
-    /// window to run the plugin again (see `ViewerApp::poll_plot`).
+    /// In whole pixels, by [`track_drag`], in the shape the window has
+    /// chosen. A finished drag replaces the regions, or with Shift adds to
+    /// them, and leaves the plot stale for its window to run the plugin again
+    /// (see `ViewerApp::poll_plot`).
+    ///
+    /// Committed on release rather than continuously, so a drag across a long
+    /// timelapse starts one measurement instead of one per frame of the
+    /// gesture. A plain drag replacing them all is what makes "start again"
+    /// one gesture.
     fn track(&mut self, g: &CanvasGesture, xf: &ImageXform, _frame: usize) -> Option<ToolEvent> {
-        let px = g.at.map(|pos| xf.pixel_at(pos));
-        let buttons = (g.drag_started, g.dragging, g.drag_stopped);
-        PlotWindow::track(self, px, buttons, g.shift, xf.size);
+        let (from, to) = track_drag(&mut self.drag, g, xf)?;
+        let roi = drag_region(from, to, self.shape, xf.size.0, xf.size.1)?;
+        if !g.shift {
+            self.rois.clear();
+        }
+        self.rois.push(roi);
+        self.stale = true;
         None
     }
 
     fn draw(&self, painter: &egui::Painter, xf: &ImageXform, _frame: usize) {
         draw_rois(painter, self, xf);
     }
+}
 
-    /// On the desktop a new document closes the plot. In the browser it has
-    /// always stayed up, regions and all: the reset was written while plots
-    /// were desktop-only, and still clears them only there.
-    fn outlives_document(&self, web: bool) -> bool {
-        web
+/// A region being dragged out on the picture: the pixel the button went down
+/// on, and the pixel the pointer is over.
+pub(super) type DragCorners = ((i64, i64), (i64, i64));
+
+/// One frame of a region being dragged out with the primary button, in whole
+/// pixels: `drag` is the one in flight, if any. Returns its corners on the
+/// frame it ends, for [`drag_region`] to make a region of.
+///
+/// The rule for every tool that draws a region — a plot's, and the rectangle
+/// a plugin asks for — so that the two draw alike:
+///
+/// * It starts on the pixel the button went down on
+///   ([`CanvasGesture::pressed_at`]), not where the drag was first seen: egui
+///   reports a drag only once the pointer has moved past its click
+///   threshold, and a corner that far from the press is not the one aimed at.
+/// * Its far corner follows the pointer up to the frame the button comes up
+///   on, which can be past the last frame of the drag: a quick flick moves
+///   and lets go in one frame.
+/// * A press something else had ([`CanvasGesture::taken`]) starts none, as
+///   it adds no point to a count.
+pub(super) fn track_drag(
+    drag: &mut Option<DragCorners>,
+    g: &CanvasGesture,
+    xf: &ImageXform,
+) -> Option<DragCorners> {
+    if let Some(px) = g.at.map(|pos| xf.pixel_at(pos)) {
+        match *drag {
+            None if g.drag_started && !g.taken => {
+                let from = g.pressed_at.map_or(px, |pos| xf.pixel_at(pos));
+                *drag = Some((from, px));
+            }
+            Some((from, _)) if g.dragging || g.drag_stopped => *drag = Some((from, px)),
+            _ => {}
+        }
+    }
+    if g.drag_stopped {
+        drag.take()
+    } else {
+        None
     }
 }
 

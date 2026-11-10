@@ -80,7 +80,9 @@ impl ViewerApp {
                     let has_stack = self.core.document.is_some();
                     match plugins_ui::plugins_menu(ui, available, has_stack) {
                         plugins_ui::MenuAction::Run(i) => cmds.push(UiCommand::StartPlugin(i)),
-                        plugins_ui::MenuAction::PointCounter => cmds.push(UiCommand::OpenPointCounter),
+                        plugins_ui::MenuAction::PointCounter => {
+                            cmds.push(UiCommand::OpenPointCounter)
+                        }
                         // The entry that produces this is itself desktop-only,
                         // so on the web the variant is simply never sent.
                         #[cfg(not(target_arch = "wasm32"))]
@@ -131,13 +133,11 @@ impl ViewerApp {
                     // Nothing open yet: show the version + active render backend
                     // in the space the file info will later occupy.
                     ui.separator();
-                    ui.label(
-                        RichText::new(format!(
-                            "FastTIFF v{}, Renderer: {}",
-                            env!("CARGO_PKG_VERSION"),
-                            render::BACKEND
+                    ui.label(RichText::new(format!(
+                        "FastTIFF v{}, Renderer: {}",
+                        env!("CARGO_PKG_VERSION"),
+                        render::BACKEND
                     )));
-
                 }
                 if let Some(loaded) = &self.core.document {
                     let meta = &loaded.tiff.meta;
@@ -187,7 +187,12 @@ impl ViewerApp {
                     } else {
                         format!("{} channel(s)", dims.channels)
                     };
-                    let bits = loaded.tiff.frames.first().map(|f| f.bits_per_sample).unwrap_or(0);
+                    let bits = loaded
+                        .tiff
+                        .frames
+                        .first()
+                        .map(|f| f.bits_per_sample)
+                        .unwrap_or(0);
                     let (px_w, px_h) = loaded
                         .tiff
                         .frames
@@ -225,25 +230,29 @@ impl ViewerApp {
                             RichText::new(format!("1/{gpu_stride} scale"))
                                 .color(Color32::from_rgb(230, 170, 60)),
                         )
-                        .on_hover_text(format!(
-                            "This frame is larger than one GPU texture can hold, so it is                              shown subsampled {}x on each axis. Pixel values and measurements                              read from it are sampled, not exact.",
-                            gpu_stride
-                        ));
+                        .on_hover_text(subsampled_note(gpu_stride));
                     }
 
                     if !hide_frame_info {
                         ui.separator();
                         let frame_digits = dims.frames.to_string().len();
                         ui.label(
-                            RichText::new(format!("Frame {:>frame_digits$} / {}", loaded.frame() + 1, dims.frames))
-                                .monospace(),
+                            RichText::new(format!(
+                                "Frame {:>frame_digits$} / {}",
+                                loaded.frame() + 1,
+                                dims.frames
+                            ))
+                            .monospace(),
                         );
                         if let Some(interval) = meta.frame_interval_s {
                             ui.separator();
                             let max_time = dims.frames.saturating_sub(1) as f64 * interval;
                             let time_width = format!("{max_time:.3}").len();
                             let current_time = loaded.frame() as f64 * interval;
-                            ui.label(RichText::new(format!("t = {current_time:>time_width$.3}s")).monospace());
+                            ui.label(
+                                RichText::new(format!("t = {current_time:>time_width$.3}s"))
+                                    .monospace(),
+                            );
                         }
                     }
                 }
@@ -251,3 +260,17 @@ impl ViewerApp {
         })
     }
 }
+
+/// What the "1/N scale" badge says on hover, for a frame shown at one pixel
+/// in `stride` on each axis.
+fn subsampled_note(stride: u32) -> String {
+    format!(
+        "This frame is larger than one GPU texture can hold, so it is shown \
+         subsampled {stride}x on each axis. Pixel values and measurements read \
+         from it are sampled, not exact."
+    )
+}
+
+#[cfg(test)]
+#[path = "toolbar_tests.rs"]
+mod tests;

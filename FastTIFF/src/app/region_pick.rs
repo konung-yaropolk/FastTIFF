@@ -31,42 +31,11 @@ pub(super) struct RegionPick {
     pub name: String,
     /// The rectangle drawn so far.
     pub roi: Option<Roi>,
-    /// A drag in flight: the pixel it started on and the pixel it is over.
-    pub drag: Option<((i64, i64), (i64, i64))>,
+    /// A drag in flight. See [`plot::track_drag`].
+    pub drag: Option<plot::DragCorners>,
 }
 
 impl RegionPick {
-    /// Take one frame of a drag on the picture: `px` is the pixel under the
-    /// pointer, `pressed` the pixel the button went down on, and
-    /// `started`/`dragging`/`stopped` what the primary button did. Returns the
-    /// rectangle when a drag ends on one.
-    ///
-    /// The rectangle starts where the button went down, not where the drag was
-    /// noticed: a drag is only reported once the pointer has moved a few
-    /// pixels, and a corner that far from the press is not the one aimed at.
-    pub fn track(
-        &mut self,
-        px: Option<(i64, i64)>,
-        pressed: Option<(i64, i64)>,
-        (started, dragging, stopped): (bool, bool, bool),
-        size: (u32, u32),
-    ) -> Option<Roi> {
-        if let Some(px) = px {
-            match self.drag {
-                None if started => self.drag = Some((pressed.unwrap_or(px), px)),
-                Some((from, _)) if dragging || stopped => self.drag = Some((from, px)),
-                _ => {}
-            }
-        }
-        if !stopped {
-            return None;
-        }
-        let (from, to) = self.drag.take()?;
-        let roi = plot::drag_region(from, to, Shape::Rect, size.0, size.1)?;
-        self.roi = Some(roi);
-        Some(roi)
-    }
-
     /// What the status line says once a rectangle is drawn.
     pub fn drawn_message(&self, roi: &Roi) -> String {
         format!(
@@ -106,13 +75,14 @@ impl CanvasTool for RegionPick {
         Layer::Regions
     }
 
-    /// In whole pixels, from where the button went down; committed on
-    /// release. The status line says what was drawn.
+    /// In whole pixels, by [`plot::track_drag`] as a plot's regions are: from
+    /// the pixel the button went down on to the one it came up on, committed
+    /// on release. A new drag replaces the last rectangle; one wholly off the
+    /// picture keeps it. The status line says what was drawn.
     fn track(&mut self, g: &CanvasGesture, xf: &ImageXform, _frame: usize) -> Option<ToolEvent> {
-        let px = g.at.map(|pos| xf.pixel_at(pos));
-        let pressed = g.pressed_at.map(|pos| xf.pixel_at(pos));
-        let buttons = (g.drag_started, g.dragging, g.drag_stopped);
-        let roi = RegionPick::track(self, px, pressed, buttons, xf.size)?;
+        let (from, to) = plot::track_drag(&mut self.drag, g, xf)?;
+        let roi = plot::drag_region(from, to, Shape::Rect, xf.size.0, xf.size.1)?;
+        self.roi = Some(roi);
         Some(ToolEvent::Status(self.drawn_message(&roi)))
     }
 

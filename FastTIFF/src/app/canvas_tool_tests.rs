@@ -7,10 +7,17 @@
 //! for where its inputs come from, as the oracle the new code is held to.
 //!
 //! The oracles are scaffolding for that move, which changed nothing a tool
-//! does, including what may be wrong: where a plot's region starts, and when
-//! a press counts as taken, are the old branches' answers. Fixing one breaks
-//! a comparison here; replace that comparison with an assertion of the
-//! behaviour wanted rather than editing the "old" code to match.
+//! does, including what may be wrong. Fixing one breaks a comparison here;
+//! replace that comparison with an assertion of the behaviour wanted rather
+//! than editing the "old" code to match.
+//!
+//! Three such things have been fixed since, and what pinned them replaced
+//! so: a plot's region starts where the button went down and ends where it
+//! came up, as the region pick's always did; neither starts on a press that
+//! was taken, as no point is added on one; and a new document puts a plot
+//! away in a browser as on the desktop. The region pick's branch and the
+//! plot's are no longer compared with, then: the gestures below assert the
+//! regions they draw.
 
 use super::*;
 use egui::PointerButton::{Middle, Primary};
@@ -329,31 +336,22 @@ fn the_table_lists_every_tool_once_under_its_own_slot() {
 }
 
 /// The undo chord is the tools' exactly while the counter is open, as it was;
-/// and a reset puts away what `finish_open` did: every tool on the desktop,
-/// and in a browser every tool but a plot, which has always stayed up there.
+/// and a new document puts every tool away, in a browser as on the desktop.
+/// A plot used to stay up there, regions and all, and go on measuring them on
+/// the new picture.
 #[test]
-fn the_undo_chord_and_the_reset_follow_the_tools_in_use() {
-    for web in [false, true] {
-        for mut tools in every_combination() {
-            let counting = tools.point_counter.is_some();
-            assert_eq!(tools.takes_undo(), counting);
-            let plot_kept = tools.plot.is_some() && web;
-            tools.reset(web);
-            assert!(tools.region_pick.is_none() && tools.point_counter.is_none());
-            assert_eq!(tools.plot.is_some(), plot_kept, "web {web}");
-        }
+fn the_undo_chord_follows_the_counter_and_a_reset_puts_every_tool_away() {
+    for mut tools in every_combination() {
+        let counting = tools.point_counter.is_some();
+        assert_eq!(tools.takes_undo(), counting);
+        tools.reset();
+        assert!(tools.plot.is_none(), "the plot and its regions");
+        assert!(tools.region_pick.is_none() && tools.point_counter.is_none());
+        assert!(tools.is_empty());
     }
 }
 
 // --------------------------------------------------------------- the transform
-
-/// `plot::pixel_at`, as it was.
-fn old_pixel_at(pos: Pos2, origin: Pos2, zoom: f32) -> (i64, i64) {
-    (
-        ((pos.x - origin.x) / zoom).floor() as i64,
-        ((pos.y - origin.y) / zoom).floor() as i64,
-    )
-}
 
 /// `point_counter::image_at`, as it was.
 fn old_image_at(pos: Pos2, origin: Pos2, zoom: f32) -> (f32, f32) {
@@ -576,29 +574,6 @@ const XF: ImageXform = ImageXform {
     size: (40, 20),
 };
 
-/// What the region pick's branch did with a frame, before 18c.
-fn old_region_pick(
-    pick: &mut region_pick::RegionPick,
-    response: &egui::Response,
-    ui: &egui::Ui,
-) -> Option<String> {
-    let (origin, zoom, (w, h)) = (XF.origin, XF.zoom, XF.size);
-    let primary = egui::PointerButton::Primary;
-    let px = response
-        .interact_pointer_pos()
-        .map(|pos| old_pixel_at(pos, origin, zoom));
-    let pressed = ui
-        .input(|i| i.pointer.press_origin())
-        .map(|pos| old_pixel_at(pos, origin, zoom));
-    let buttons = (
-        response.drag_started_by(primary),
-        response.dragged_by(primary),
-        response.drag_stopped(),
-    );
-    let roi = pick.track(px, pressed, buttons, (w, h))?;
-    Some(pick.drawn_message(&roi))
-}
-
 /// What the counter's branch did with a frame, before 18c.
 fn old_point_counter(
     tool: &mut point_counter::Session,
@@ -641,48 +616,30 @@ fn old_counter_cursor(
     )
 }
 
-/// What the plot's branch did with a frame, before 18c.
-fn old_plot(win: &mut plot::PlotWindow, response: &egui::Response, ui: &egui::Ui) {
-    let (origin, zoom, (w, h)) = (XF.origin, XF.zoom, XF.size);
-    let add = ui.input(|i| i.modifiers.shift);
-    if let Some(pos) = response.interact_pointer_pos() {
-        let px = old_pixel_at(pos, origin, zoom);
-        let primary = egui::PointerButton::Primary;
-        match win.drag {
-            None if response.drag_started_by(primary) => win.drag = Some((px, px)),
-            Some((from, _)) if response.dragged_by(primary) => win.drag = Some((from, px)),
-            _ => {}
-        }
-    }
-    if response.drag_stopped() {
-        if let Some((from, to)) = win.drag.take() {
-            if let Some(roi) = plot::drag_region(from, to, win.shape, w, h) {
-                if !add {
-                    win.rois.clear();
-                }
-                win.rois.push(roi);
-                win.stale = true;
-            }
-        }
-    }
-}
-
-/// Each tool twice, one fed the old way and one the new, after `frames`.
+/// The counter twice, one fed the old way and one the new, after `frames`.
 struct Pair<T> {
     old: T,
     new: T,
 }
 
+/// Every tool, after `frames`.
 struct Outcome {
-    pick: Pair<region_pick::RegionPick>,
+    /// The rectangle a plugin asked for.
+    pick: region_pick::RegionPick,
     counter: Pair<point_counter::Session>,
-    plot: Pair<plot::PlotWindow>,
+    /// A plot asking for regions, drawing rectangles.
+    plot: plot::PlotWindow,
 }
 
-/// Feed `frames` to every tool the old way and the new, asserting after each
-/// frame that the two agree: on what the tool holds, on what it asked the app
-/// to say, and on the cursor.
-fn compare(
+/// Feed `frames` to every tool, asserting after each frame what holds of any
+/// gesture: the counter does what its branch did before 18c, the old way and
+/// the new agreeing on what it holds and on the cursor; the region pick says
+/// on the status line what it drew, and says nothing when it drew nothing;
+/// and the plot's drag in flight is the pick's, the two going by one rule
+/// (`plot::track_drag`).
+///
+/// `autoscroll_was_on` holds for every frame, so every press is taken.
+fn feed(
     frames: &[Frame],
     counter_at_start: point_counter::Session,
     map: Option<Rect>,
@@ -690,18 +647,12 @@ fn compare(
 ) -> Outcome {
     let seeded = || point_counter::Session::new(counter_at_start.counter.clone());
     let mut out = Outcome {
-        pick: Pair {
-            old: region_pick(),
-            new: region_pick(),
-        },
+        pick: region_pick(),
         counter: Pair {
             old: seeded(),
             new: seeded(),
         },
-        plot: Pair {
-            old: plot_window(SelectionKind::Regions),
-            new: plot_window(SelectionKind::Regions),
-        },
+        plot: plot_window(SelectionKind::Regions),
     };
     let mut n = 0;
     run(frames, |response, ui| {
@@ -712,11 +663,15 @@ fn compare(
         };
         assert_eq!(gesture.hover, response.hover_pos());
 
-        let said = old_region_pick(&mut out.pick.old, response, ui);
-        let asked = CanvasTool::track(&mut out.pick.new, &gesture, &XF, 0);
-        assert_eq!(asked, said.map(ToolEvent::Status), "frame {n}");
-        assert_eq!(out.pick.new.drag, out.pick.old.drag, "frame {n}");
-        assert_eq!(out.pick.new.roi, out.pick.old.roi, "frame {n}");
+        let drawn = out.pick.roi;
+        match CanvasTool::track(&mut out.pick, &gesture, &XF, 0) {
+            Some(said) => {
+                let roi = out.pick.roi.expect("it said it drew one");
+                let status = ToolEvent::Status(out.pick.drawn_message(&roi));
+                assert_eq!(said, status, "frame {n}");
+            }
+            None => assert_eq!(out.pick.roi, drawn, "frame {n}"),
+        }
 
         old_point_counter(&mut out.counter.old, response, ui, map, autoscroll_was_on);
         let asked = CanvasTool::track(&mut out.counter.new, &gesture, &XF, 0);
@@ -732,12 +687,9 @@ fn compare(
             "frame {n}"
         );
 
-        old_plot(&mut out.plot.old, response, ui);
-        let asked = CanvasTool::track(&mut out.plot.new, &gesture, &XF, 0);
+        let asked = CanvasTool::track(&mut out.plot, &gesture, &XF, 0);
         assert_eq!(asked, None, "frame {n}");
-        assert_eq!(out.plot.new.drag, out.plot.old.drag, "frame {n}");
-        assert_eq!(out.plot.new.rois, out.plot.old.rois, "frame {n}");
-        assert_eq!(out.plot.new.stale, out.plot.old.stale, "frame {n}");
+        assert_eq!(out.plot.drag, out.pick.drag, "one rule for both, frame {n}");
         n += 1;
     });
     out
@@ -752,24 +704,59 @@ fn counter_with_a_point() -> point_counter::Session {
 
 const NONE: egui::Modifiers = egui::Modifiers::NONE;
 
-/// A left drag across the picture draws the rectangle and the plot's region,
-/// and moves the point it started on, exactly as before.
+/// Where a region is, and how big: `(x, y, w, h)` in pixels.
+type Xywh = (u32, u32, u32, u32);
+
+fn xywh(roi: &Roi) -> Xywh {
+    (roi.x, roi.y, roi.w, roi.h)
+}
+
+/// The rectangle and the plot's regions, as `(x, y, w, h)`.
+fn regions(out: &Outcome) -> (Option<Xywh>, Vec<Xywh>) {
+    (
+        out.pick.roi.as_ref().map(xywh),
+        out.plot.rois.iter().map(xywh).collect(),
+    )
+}
+
+/// The pixel under each point below, on `XF`: `((x - 100) / 2.5, (y - 50) /
+/// 2.5)`, floored.
+const PRESS: Pos2 = Pos2::new(110.0, 60.0); // pixel (4, 4), on the point
+const VIA: Pos2 = Pos2::new(140.0, 70.0); // pixel (16, 8)
+const LET_GO: Pos2 = Pos2::new(170.0, 85.0); // pixel (28, 14)
+
+/// From the press on pixel (4, 4) to pixel (28, 14), both inside.
+const PRESS_TO_LET_GO: Xywh = (4, 4, 25, 11);
+
+/// A left drag across the picture moves the point it started on, and draws
+/// the rectangle and the plot's region from the pixel the button went down
+/// on — not from the one egui first called it a drag over, past its click
+/// threshold, where a plot's region used to start.
 #[test]
-fn a_left_drag_does_what_it_did() {
-    let frames = drag(
-        Primary,
-        Pos2::new(110.0, 60.0),
-        Pos2::new(140.0, 70.0),
-        Pos2::new(170.0, 85.0),
-        NONE,
-    );
-    let out = compare(&frames, counter_with_a_point(), None, false);
-    // It was a drag, so each tool did something with it.
-    assert!(out.pick.new.roi.is_some(), "a rectangle was drawn");
-    assert_eq!(out.plot.new.rois.len(), 1, "a region was drawn");
-    assert!(out.plot.new.stale);
+fn a_left_drag_draws_from_where_the_button_went_down() {
+    let frames = drag(Primary, PRESS, VIA, LET_GO, NONE);
+    let out = feed(&frames, counter_with_a_point(), None, false);
+    let (pick, plot) = regions(&out);
+    assert_eq!(pick, Some(PRESS_TO_LET_GO), "the rectangle");
+    assert_eq!(plot, vec![PRESS_TO_LET_GO], "the plot's region");
+    assert!(out.plot.stale);
     let p = out.counter.new.counter.points[0];
     assert!((p.x, p.y) != (4.2, 4.2), "the point was moved");
+}
+
+/// A drag let go on the frame it reaches its end — a quick flick, the move
+/// and the release arriving together — ends where the button came up. A
+/// plot's region used to end where the frame before left it.
+#[test]
+fn a_flick_ends_where_the_button_came_up() {
+    let mut frames = drag(Primary, PRESS, VIA, LET_GO, NONE);
+    // The frame moving to `LET_GO` on its own: without it, the release is
+    // the first frame there.
+    frames.remove(3);
+    let out = feed(&frames, counter_with_a_point(), None, false);
+    let (pick, plot) = regions(&out);
+    assert_eq!(pick, Some(PRESS_TO_LET_GO), "the rectangle");
+    assert_eq!(plot, vec![PRESS_TO_LET_GO], "the plot's region");
 }
 
 /// A click adds a point, and draws nothing; Alt+click on it takes it away.
@@ -777,14 +764,15 @@ fn a_left_drag_does_what_it_did() {
 fn a_click_and_an_alt_click_do_what_they_did() {
     let mut frames = click(Pos2::new(150.0, 75.0), NONE);
     frames.extend(click(Pos2::new(110.5, 60.5), egui::Modifiers::ALT));
-    let out = compare(&frames, counter_with_a_point(), None, false);
-    assert!(out.pick.new.roi.is_none() && out.plot.new.rois.is_empty());
+    let out = feed(&frames, counter_with_a_point(), None, false);
+    assert_eq!(regions(&out), (None, vec![]), "a click draws nothing");
     let points = &out.counter.new.counter.points;
     assert_eq!(points.len(), 1, "one added, one deleted: {points:?}");
     assert_eq!((points[0].x, points[0].y), (20.0, 10.0));
 }
 
-/// Shift adds a plot region to the last; a middle drag pans and draws none.
+/// Shift adds a plot region to the last, where the rectangle is replaced; a
+/// middle drag pans and draws none.
 #[test]
 fn shift_adds_a_region_and_the_middle_button_draws_nothing() {
     let mut frames = drag(
@@ -808,23 +796,33 @@ fn shift_adds_a_region_and_the_middle_button_draws_nothing() {
         Pos2::new(180.0, 90.0),
         NONE,
     ));
-    let out = compare(&frames, counter_with_a_point(), None, false);
-    assert_eq!(out.plot.new.rois.len(), 2, "the second added to the first");
+    let out = feed(&frames, counter_with_a_point(), None, false);
+    // Pixels (2, 2) to (12, 8), and (20, 4) to (36, 18).
+    let (first, second) = ((2, 2, 11, 7), (20, 4, 17, 15));
+    let (pick, plot) = regions(&out);
+    assert_eq!(plot, vec![first, second], "the second added to the first");
+    assert_eq!(pick, Some(second), "one rectangle at a time");
     let p = out.counter.new.counter.points[0];
     assert_eq!((p.x, p.y), (4.2, 4.2), "a middle drag moves no point");
 }
 
 /// A drag that leaves the picture keeps what is on it, and one that starts
-/// off it starts where it began.
+/// off it starts where it began rather than at the picture's corner.
 #[test]
-fn a_drag_off_the_picture_does_what_it_did() {
-    let mut frames = drag(
+fn a_drag_off_the_picture_keeps_what_is_on_it() {
+    let leaving = drag(
         Primary,
         Pos2::new(150.0, 75.0),
         Pos2::new(300.0, 200.0),
         Pos2::new(400.0, 300.0),
         NONE,
     );
+    let out = feed(&leaving, counter_with_a_point(), None, false);
+    // Pixels (20, 10) to (120, 100), on a 40 x 20 picture.
+    let on_it = (20, 10, 20, 10);
+    assert_eq!(regions(&out), (Some(on_it), vec![on_it]));
+
+    let mut frames = leaving;
     frames.extend(drag(
         Primary,
         Pos2::new(20.0, 20.0),
@@ -832,39 +830,36 @@ fn a_drag_off_the_picture_does_what_it_did() {
         Pos2::new(120.0, 70.0),
         NONE,
     ));
-    let out = compare(&frames, counter_with_a_point(), None, false);
-    assert!(out.pick.new.roi.is_some());
+    let out = feed(&frames, counter_with_a_point(), None, false);
+    // Pixels (-32, -12) to (8, 8).
+    let on_it = (0, 0, 9, 9);
+    assert_eq!(regions(&out), (Some(on_it), vec![on_it]));
 }
 
-/// A click the navigator took, or one that ended autoscroll, adds no point —
-/// and a rectangle and a plot, which only drag, go on as they did.
+/// A press the navigator took, or one that ended autoscroll, is spent on
+/// that: it adds no point, moves none, and starts no rectangle and no plot
+/// region, which used to be drawn regardless. A drag that began off the map
+/// is the tools' all the way, though it ends over the map.
 #[test]
-fn a_taken_click_does_what_it_did() {
+fn a_taken_press_starts_nothing() {
     let map = Rect::from_min_size(Pos2::new(160.0, 80.0), Vec2::new(40.0, 20.0));
+    assert!(map.contains(LET_GO) && !map.contains(VIA));
     let mut frames = click(Pos2::new(170.0, 90.0), NONE);
-    frames.extend(drag(
-        Primary,
-        Pos2::new(110.0, 60.0),
-        Pos2::new(140.0, 70.0),
-        Pos2::new(170.0, 85.0),
-        NONE,
-    ));
-    let out = compare(&frames, counter_with_a_point(), Some(map), false);
-    assert_eq!(
-        out.counter.new.counter.points.len(),
-        1,
-        "the click was the map's"
-    );
-    let out = compare(&frames, counter_with_a_point(), None, true);
-    assert_eq!(
-        out.counter.new.counter.points.len(),
-        1,
-        "it ended autoscroll"
-    );
-    let p = out.counter.new.counter.points[0];
+    frames.extend(drag(Primary, PRESS, VIA, LET_GO, NONE));
+
+    let out = feed(&frames, counter_with_a_point(), Some(map), false);
+    let points = &out.counter.new.counter.points;
+    assert_eq!(points.len(), 1, "the click was the map's");
+    assert!((points[0].x, points[0].y) != (4.2, 4.2), "the drag was not");
+    let (pick, plot) = regions(&out);
+    assert_eq!(pick, Some(PRESS_TO_LET_GO), "the rectangle");
+    assert_eq!(plot, vec![PRESS_TO_LET_GO], "the plot's region");
+
+    let out = feed(&frames, counter_with_a_point(), None, true);
+    let points = &out.counter.new.counter.points;
+    assert_eq!(points.len(), 1, "the click ended autoscroll");
+    let p = points[0];
     assert_eq!((p.x, p.y), (4.2, 4.2), "and so did the drag");
-    assert!(
-        out.pick.new.roi.is_some(),
-        "a rectangle is drawn regardless"
-    );
+    assert_eq!(regions(&out), (None, vec![]), "which drew nothing");
+    assert!(!out.plot.stale);
 }

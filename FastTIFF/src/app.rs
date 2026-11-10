@@ -63,8 +63,8 @@ mod kinetic;
 mod minimap;
 mod overlay;
 // Drawing a plot a plugin declared, and the canvas selection tool that feeds
-// it. Native only, like `plugins_ui`: both are reached from the Plugins menu,
-// which the browser build does not have.
+// it. On both platforms: the browser build has the Plugins menu too, and a
+// plot-producing plugin among its built-ins.
 mod plot;
 mod plugins_ui;
 mod point_counter;
@@ -476,11 +476,6 @@ fn welcome_text() -> String {
     text
 }
 
-/// A file the user asked to open, however it arrived.
-///
-/// Native and web get files by different routes — a path from a dialog, argv or
-/// an Apple Event, versus bytes from an async browser picker or a drop event —
-/// so they meet here and everything downstream is shared.
 /// Something that arrived from somewhere other than this frame's user input.
 enum Incoming {
     /// A file chosen by the asynchronous picker. Only the web build has one:
@@ -539,6 +534,9 @@ struct PluginRun {
     /// Which plugin, so a plot it returned can be recomputed for a new
     /// selection without asking the user again.
     index: usize,
+    /// Which document the run was on, as [`ViewerApp::document`] counted it
+    /// when the run started; see [`outlived`](Self::outlived).
+    run_on: u64,
     /// What its dialog was answered with, reused verbatim on a re-run.
     params: fasttiff_plugin_api::Params,
     name: String,
@@ -549,6 +547,31 @@ struct PluginRun {
     /// in this window is said to be made from it — whatever is on show by
     /// the time it lands.
     made_from: Option<PathBuf>,
+}
+
+impl PluginRun {
+    /// Whether the run returned something drawn on the picture it read — a
+    /// plot of its regions, or a rectangle for the user to draw — and another
+    /// document has landed since it started, `now` being the window's count.
+    ///
+    /// A new document puts every canvas tool away ([`Tools::reset`]), and a
+    /// result that lands later must not bring one back: it would put one
+    /// picture's chart, or its prompt, over another. On the desktop a run can
+    /// still be going when the next file opens — a file no importer claims
+    /// does not wait for the registry the run holds. (In a browser the run
+    /// ends inside the frame that started it.)
+    ///
+    /// Anything else was either decided on the worker already (a replacement
+    /// goes to a new window once the document has changed:
+    /// `Deliver::same_document`) or is news whatever is on show.
+    fn outlived(&self, now: u64) -> bool {
+        use fast_tiff_viewer::plugins::Product;
+        self.run_on != now
+            && matches!(
+                self.outcome,
+                Ok(Product::Plot(_) | Product::SelectRegion(_))
+            )
+    }
 }
 
 /// The app's half of delivering a plugin's result: the job's bar, and the
@@ -926,6 +949,11 @@ fn due(last: &std::sync::atomic::AtomicU64, now: u64, every: u64) -> bool {
             .is_ok()
 }
 
+/// A file the user asked to open, however it arrived.
+///
+/// Native and web get files by different routes — a path from a dialog, argv or
+/// an Apple Event, versus bytes from an async browser picker or a drop event —
+/// so they meet here and everything downstream is shared.
 pub enum Opened {
     /// A path on disk. Native only; the browser has no filesystem to name.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1246,9 +1274,10 @@ pub struct ViewerApp {
     view: View2d,
     /// The collapsible channels panel's layout bookkeeping.
     panel: PanelLayout,
-    /// Installed plugins and importers. Native only — see
-    /// `fast_tiff_viewer::plugins`.
-    /// The plugins, unless an import worker currently has them.
+    /// The plugins, importers and exporters, unless a job currently has them.
+    /// On the desktop, the built-ins and the libraries installed on disk; in a
+    /// browser, the built-ins alone, there being no disk to search and no way
+    /// to load a library. See `fast_tiff_viewer::plugins`.
     ///
     /// Moved to the worker rather than shared behind a lock. A lock would have
     /// to be taken by the menu on every frame, and taken *while the import
@@ -1267,12 +1296,11 @@ pub struct ViewerApp {
     document: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The plugin whose dialog is open, and the values entered so far.
     plugin_dialog: Option<PluginDialog>,
-    /// Files opened asynchronously arrive here. Only the web picker uses it —
-    /// the native dialog blocks and applies its result directly — but the
-    /// channel exists on both so the drain path is shared.
-    /// Only the async web picker sends; natively the dialog blocks and applies
-    /// its result directly, so the sender is unused there.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    /// Where what arrives from outside this frame's input is sent
+    /// ([`Incoming`]): a file from the browser's asynchronous picker, and each
+    /// job's result once it is done. Drained once a frame by
+    /// [`drain_pending_open`](Self::drain_pending_open). The desktop's file
+    /// dialog blocks and applies its result directly, so it never sends.
     open_tx: Sender<Incoming>,
     open_rx: Receiver<Incoming>,
     /// The slow thing running on a worker thread, while one is: an import, a
@@ -1586,15 +1614,15 @@ impl ViewerApp {
         self.document
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.view.reset();
-        self.tools.reset(WEB);
+        self.tools.reset();
         self.panel.reset();
         // The pop-ups mostly stay up on the desktop, repointed at the new
         // document; each says for itself (`AppWindow::outlives_document`).
         self.windows.reset(&self.core, WEB);
     }
 
-    /// Drain anything the async picker produced since the last frame. A no-op
-    /// natively, where the dialog is synchronous.
+    /// Apply whatever arrived since the last frame ([`Incoming`]): a file the
+    /// browser's picker produced, and the result of a job that finished.
     fn drain_pending_open(&mut self) {
         while let Ok(message) = self.open_rx.try_recv() {
             match message {
@@ -1960,6 +1988,7 @@ impl ViewerApp {
             };
             let run = PluginRun {
                 index,
+                run_on,
                 params: values,
                 name,
                 messages: std::mem::take(&mut host.messages),
@@ -1994,17 +2023,25 @@ impl ViewerApp {
 
     /// Apply what a plugin returned, once its worker has handed it back.
     fn apply_plugin_run(&mut self, run: PluginRun) {
+        for m in &run.messages {
+            log::info!("{}: {m}", run.name);
+        }
+        if run.outlived(self.document.load(std::sync::atomic::Ordering::Relaxed)) {
+            self.core.status = Some(format!(
+                "{}: not shown, as another image was opened while it ran",
+                run.name
+            ));
+            return;
+        }
         let PluginRun {
             index,
+            run_on: _,
             params,
             name,
-            messages,
+            messages: _,
             outcome,
             made_from,
         } = run;
-        for m in &messages {
-            log::info!("{name}: {m}");
-        }
 
         use fast_tiff_viewer::plugins::Product;
         match outcome {

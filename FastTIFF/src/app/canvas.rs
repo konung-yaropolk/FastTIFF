@@ -266,9 +266,10 @@ impl ViewerApp {
         // are mutually exclusive by construction rather than by a guard
         // that could be got wrong.
         //
-        // Whether it was on as this frame began is kept for the point
-        // counter: a left-click or a drag that ends the mode below is
-        // spent on that, and must not also add or move a point.
+        // Whether it was on as this frame began is kept for the tools: a
+        // left-click or a drag that ends the mode below is spent on that,
+        // and must not also add or move a point or start a region
+        // (`CanvasGesture::taken`).
         let autoscroll_was_on = self.view.autoscroll.is_some();
         if response.clicked_by(egui::PointerButton::Middle) {
             // Toggling off from anywhere, so a second middle-click always
