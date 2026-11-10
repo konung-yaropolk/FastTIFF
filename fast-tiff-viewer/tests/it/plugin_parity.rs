@@ -23,7 +23,7 @@
 
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::plugins::{builtin, describe_view, Origin, Registry, StackHost};
-use fast_tiff_viewer::Stack;
+use fast_tiff_viewer::Document;
 use fasttiff_plugin_api::{
     ExportRequest, Exporter, ImageResult, ImportRequest, Importer, Outcome, ParamDecl, ParamKind,
     ParamValue, Params, Plugin, PluginError, StackInfo, VolumeMode, VolumeView,
@@ -45,7 +45,7 @@ const T: usize = 4;
 /// the host never reports an open stack's channel names to a plugin, so there
 /// is nothing for a filter to keep — but the colours do, as the tables the
 /// PNG exporter draws through.
-fn stack() -> Stack {
+fn stack() -> Document {
     let meta = StackMetaWrite::new(C, Z)
         .unit("micron")
         .pixel_size(0.25, 0.25)
@@ -80,10 +80,10 @@ fn stack() -> Stack {
         }
     }
     let bytes = w.finish().unwrap().into_inner();
-    Stack::from_bytes(bytes, "parity.tif".into(), false).expect("open")
+    Document::from_bytes(bytes, "parity.tif".into(), false).expect("open")
 }
 
-fn host(s: &Stack) -> StackHost {
+fn host(s: &Document) -> StackHost {
     StackHost::new(
         s,
         describe_view(
@@ -141,13 +141,13 @@ fn shown(r: Result<Outcome, PluginError>) -> String {
 /// Run `T` directly and through the registry, and require the same answer.
 ///
 /// Returns its id, so the caller can check that every built-in was covered.
-fn same_both_ways<P: Plugin + Default + 'static>(s: &Stack) -> String {
+fn same_both_ways<P: Plugin + Default + 'static>(s: &Document) -> String {
     same_both_ways_with::<P>(s, |_| {})
 }
 
 /// [`same_both_ways`], with the dialog's defaults adjusted by `set` first.
 fn same_both_ways_with<P: Plugin + Default + 'static>(
-    s: &Stack,
+    s: &Document,
     set: impl FnOnce(&mut Params),
 ) -> String {
     let direct = P::default();
@@ -274,7 +274,7 @@ fn every_built_in_filter_answers_the_same_through_the_boundary() {
 /// Crop with a rectangle drawn, both ways, and what it made: every channel,
 /// slice and frame kept, cut to the rectangle.
 #[cfg(feature = "plugin-crop")]
-fn crop_same_both_ways(s: &Stack) {
+fn crop_same_both_ways(s: &Document) {
     use fasttiff_plugin_api::{Roi, Shape};
     let roi = Roi {
         shape: Shape::Rect,

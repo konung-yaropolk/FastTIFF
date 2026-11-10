@@ -371,7 +371,7 @@ fn a_plugins_progress_reaches_the_bar_at_the_same_scale() {
         w.write_frame_bytes(&[0u8; 32]).unwrap();
     }
     let bytes = w.finish().unwrap().into_inner();
-    let stack = fast_tiff_viewer::Stack::from_bytes(bytes, "seam.tif".into(), false).unwrap();
+    let stack = fast_tiff_viewer::Document::from_bytes(bytes, "seam.tif".into(), false).unwrap();
     let view = fast_tiff_viewer::plugins::describe_view(
         &stack,
         0,

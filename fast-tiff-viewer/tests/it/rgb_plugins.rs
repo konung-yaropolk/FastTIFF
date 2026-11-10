@@ -8,7 +8,7 @@
 
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::plugins::{builtin, describe_view, StackHost};
-use fast_tiff_viewer::Stack;
+use fast_tiff_viewer::Document;
 use fasttiff_plugin_api::{
     DisplayMode, HostContext, Outcome, Params, Plane, PlaneData, Plugin, VolumeMode, VolumeView,
 };
@@ -26,7 +26,7 @@ fn sample(frame: u8, i: usize, s: usize) -> u8 {
         .wrapping_add(7 * frame)
 }
 
-fn rgb_stack() -> Stack {
+fn rgb_stack() -> Document {
     let opts = WriterOptions::new(W, H, SampleType::U8).samples_per_pixel(3);
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
     for f in 0..FRAMES {
@@ -35,10 +35,10 @@ fn rgb_stack() -> Stack {
             .collect();
         w.write_frame_bytes(&px).unwrap();
     }
-    Stack::from_bytes(w.finish().unwrap().into_inner(), "rgb.tif".into(), false).unwrap()
+    Document::from_bytes(w.finish().unwrap().into_inner(), "rgb.tif".into(), false).unwrap()
 }
 
-fn host(s: &Stack) -> StackHost {
+fn host(s: &Document) -> StackHost {
     let v = VolumeView {
         mode: VolumeMode::Mip,
         density: 1.0,
@@ -90,7 +90,7 @@ fn slice_order_invert_keeps_the_colours_and_their_tables() {
         fast_tiff_viewer::plugins::to_tiff_bytes_reporting(&img, None, &luts, &mut |_| true)
             .unwrap()
             .unwrap();
-    let out = Stack::from_bytes(bytes, "out.tif".into(), false).unwrap();
+    let out = Document::from_bytes(bytes, "out.tif".into(), false).unwrap();
     assert_eq!(out.display.dims().channels, 3);
     assert_eq!(out.display.mode, fast_tiff_lib::DisplayMode::Composite);
     assert_eq!(out.display.luts(), &luts[..]);
@@ -111,7 +111,7 @@ fn a_multichannel_stack_still_crosses_whole() {
             .collect();
         w.write_frame_bytes(&px).unwrap();
     }
-    let s = Stack::from_bytes(w.finish().unwrap().into_inner(), "c2.tif".into(), false).unwrap();
+    let s = Document::from_bytes(w.finish().unwrap().into_inner(), "c2.tif".into(), false).unwrap();
     let luts = s.display.luts().to_vec();
     let Outcome::NewDocument(img) = builtin::SliceOrderInvert
         .run(&mut host(&s), &Params::new())
@@ -124,7 +124,7 @@ fn a_multichannel_stack_still_crosses_whole() {
         fast_tiff_viewer::plugins::to_tiff_bytes_reporting(&img, None, &luts, &mut |_| true)
             .unwrap()
             .unwrap();
-    let out = Stack::from_bytes(bytes, "out.tif".into(), false).unwrap();
+    let out = Document::from_bytes(bytes, "out.tif".into(), false).unwrap();
     assert_eq!(out.display.dims().channels, 2);
     assert_eq!(out.display.luts(), &luts[..]);
 }

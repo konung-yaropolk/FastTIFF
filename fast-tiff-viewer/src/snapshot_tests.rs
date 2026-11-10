@@ -7,8 +7,8 @@
 //! the pipeline is pinned here by value rather than by eye.
 
 use super::*;
+use crate::document::{Document, SampleUnits, Window};
 use crate::prefetch::build_jobs;
-use crate::stack::{SampleUnits, Stack, Window};
 use fast_tiff_lib::{DisplayMap, SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use scivis_render::ChannelKind;
 use std::io::Cursor;
@@ -32,7 +32,7 @@ fn only_top() -> Lut {
 }
 
 /// An 8-bit stack of `channels` channels whose sample values are given by `f`.
-fn stack_u8(channels: usize, f: impl Fn(usize, u32) -> u8) -> Stack {
+fn stack_u8(channels: usize, f: impl Fn(usize, u32) -> u8) -> Document {
     let opts = WriterOptions::new(W, H, SampleType::U8).metadata(StackMetaWrite::new(channels, 1));
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).expect("writer");
     for c in 0..channels {
@@ -40,7 +40,7 @@ fn stack_u8(channels: usize, f: impl Fn(usize, u32) -> u8) -> Stack {
         w.write_frame_u8(&px).expect("frame");
     }
     let bytes = w.finish().expect("finish").into_inner();
-    Stack::from_bytes(bytes, "snapshot.tif".into(), false).expect("the stack should open")
+    Document::from_bytes(bytes, "snapshot.tif".into(), false).expect("the stack should open")
 }
 
 /// Give every channel the same window and LUT, so a test that is not about the
@@ -53,7 +53,7 @@ fn stack_u8(channels: usize, f: impl Fn(usize, u32) -> u8) -> Stack {
 /// every test agree with a compositor that was off by a factor of the
 /// widening. So the helper still checks that the window reaches the texture's
 /// units as the test meant it.
-fn with(stack: &mut Stack, lut: Lut, min: f32, max: f32) {
+fn with(stack: &mut Document, lut: Lut, min: f32, max: f32) {
     for c in 0..stack.display.channel_count() {
         stack.display.set_window(c, Window::new(min, max));
         stack.display.set_enabled(c, true);
@@ -280,11 +280,11 @@ fn the_snapshot_follows_the_current_frame() {
         w.write_frame_u8(&vec![v; (W * H) as usize]).expect("frame");
     }
     let bytes = w.finish().expect("finish").into_inner();
-    let mut stack = Stack::from_bytes(bytes, "frames.tif".into(), false).expect("open");
+    let mut stack = Document::from_bytes(bytes, "frames.tif".into(), false).expect("open");
     with(&mut stack, ramp(), 0.0, 255.0);
 
     for (i, want) in [10u8, 120, 240].iter().enumerate() {
-        stack.frame_index = i;
+        stack.set_frame(i);
         let snap = of_frame(&stack).expect("compose");
         assert_eq!(
             snap.pixel(0, 0).expect("in range")[0],
@@ -372,7 +372,7 @@ fn a_signed_window_composes_on_the_offset_texture() {
         .collect();
     w.write_frame_bytes(&px).expect("frame");
     let bytes = w.finish().expect("finish").into_inner();
-    let mut stack = Stack::from_bytes(bytes, "signed.tif".into(), false).expect("open");
+    let mut stack = Document::from_bytes(bytes, "signed.tif".into(), false).expect("open");
     assert_eq!(stack.display.settings()[0].kind(), ChannelKind::Int16);
     stack.display.set_window(0, Window::new(-4.0, 0.0));
     let n = stack.display.luts().len();
@@ -395,7 +395,7 @@ fn a_signed_window_composes_on_the_offset_texture() {
 /// The compositor as it was before it worked a band at a time: every enabled
 /// channel decoded whole, blended into one frame-sized accumulator, then
 /// converted. Kept verbatim as the oracle the banded one must equal.
-fn whole_frame_oracle(stack: &Stack) -> Snapshot {
+fn whole_frame_oracle(stack: &Document) -> Snapshot {
     use crate::prefetch::{decode_jobs, Decoded};
     fn sample(data: &Decoded, i: usize) -> Option<f32> {
         match data {
@@ -407,7 +407,7 @@ fn whole_frame_oracle(stack: &Stack) -> Snapshot {
     let (width, height) = stack.dimensions().expect("open");
     let settings = stack.display.settings();
     let masks = stack.display.masks();
-    let jobs = build_jobs(stack, stack.frame_index, masks.enabled());
+    let jobs = build_jobs(stack, stack.frame(), masks.enabled());
     let decoded = decode_jobs(
         &stack.tiff.data,
         &stack.tiff.frames,
@@ -458,7 +458,7 @@ const OH: u32 = 7;
 /// every sample distinct, each channel with a LUT of its own and a window that
 /// clips both ends: a pixel read from the wrong row, channel or band shows as
 /// a different byte.
-fn oracle_stack(sample: SampleType, channels: usize, spp: u16) -> Stack {
+fn oracle_stack(sample: SampleType, channels: usize, spp: u16) -> Document {
     let opts = WriterOptions::new(OW, OH, sample)
         .rows_per_strip(2)
         .samples_per_pixel(spp)
@@ -484,7 +484,7 @@ fn oracle_stack(sample: SampleType, channels: usize, spp: u16) -> Stack {
         }
     }
     let bytes = w.finish().expect("finish").into_inner();
-    let mut stack = Stack::from_bytes(bytes, "oracle.tif".into(), false).expect("open");
+    let mut stack = Document::from_bytes(bytes, "oracle.tif".into(), false).expect("open");
     for c in 0..stack.display.channel_count() {
         let s = stack.display.settings()[c];
         let (lo, hi) = (s.bounds.lo, s.bounds.hi);
@@ -504,7 +504,7 @@ fn oracle_stack(sample: SampleType, channels: usize, spp: u16) -> Stack {
 /// Re-describe each `(ifd, rows_per_strip)`'s strips, which are uncompressed
 /// and contiguous as the writer lays them out, as strips of that many rows:
 /// the same bytes in another valid layout, which no writer here produces.
-fn restrip(stack: &mut Stack, layouts: &[(usize, u32)]) {
+fn restrip(stack: &mut Document, layouts: &[(usize, u32)]) {
     let mut tiff = fast_tiff_lib::TiffStack::from_bytes(stack.tiff.data.to_vec()).expect("index");
     for &(ifd, rows_per_strip) in layouts {
         let frame = &mut tiff.frames[ifd];
@@ -536,7 +536,7 @@ fn restrip(stack: &mut Stack, layouts: &[(usize, u32)]) {
 /// the frame.
 #[test]
 fn the_banded_image_is_byte_identical_to_the_whole_frame_one() {
-    let cases: Vec<(&str, Stack)> = vec![
+    let cases: Vec<(&str, Document)> = vec![
         ("three u16 channels", oracle_stack(SampleType::U16, 3, 1)),
         ("three u16 channels, one off", {
             let mut s = oracle_stack(SampleType::U16, 3, 1);

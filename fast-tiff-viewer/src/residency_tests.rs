@@ -7,8 +7,8 @@
 //! as the next sync's first step would.
 
 use super::*;
+use crate::document::Document;
 use crate::prefetch::Decoded;
-use crate::stack::Stack;
 use crate::window::Built;
 use crate::{Viewer, Window};
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
@@ -28,8 +28,8 @@ fn movie_bytes() -> Vec<u8> {
     w.finish().unwrap().into_inner()
 }
 
-fn movie() -> Stack {
-    let stack = Stack::from_bytes(movie_bytes(), "movie.tif".into(), false).unwrap();
+fn movie() -> Document {
+    let stack = Document::from_bytes(movie_bytes(), "movie.tif".into(), false).unwrap();
     let dims = stack.display.dims();
     assert_eq!((dims.channels, dims.slices, dims.frames), (2, 1, 3));
     stack
@@ -46,7 +46,7 @@ const WINDOW: Roi = Roi {
 };
 
 /// The whole frame at stride 2: the overview such a view falls back on.
-fn overview_of(stack: &Stack) -> Overview {
+fn overview_of(stack: &Document) -> Overview {
     let roi = Roi {
         x: 0,
         y: 0,
@@ -56,7 +56,7 @@ fn overview_of(stack: &Stack) -> Overview {
     };
     let (tw, th) = roi.texture_size();
     let built = Built {
-        frame_index: stack.frame_index,
+        frame_index: stack.frame(),
         roi,
         channels: vec![0, 1],
         planes: (0..2)
@@ -69,22 +69,22 @@ fn overview_of(stack: &Stack) -> Overview {
 /// Everything a sync of `stack`'s frame leaves resident: the frame's pixels
 /// cut to a window, the LUTs, an overview, a finer window asked for, and a
 /// volume built and uploaded.
-fn filled(stack: &Stack) -> Residency {
+fn filled(stack: &Document) -> Residency {
     let mut r = Residency::default();
-    r.reconcile(&stack.display, stack.frame_index);
+    r.reconcile(&stack.display, stack.frame());
     assert!(
         r.volume.take_release(),
         "a fresh residency gives back what the renderer held"
     );
     let revision = stack.display.revision();
-    r.uploaded(WINDOW, stack.frame_index, revision);
+    r.uploaded(WINDOW, stack.frame(), revision);
     r.luts = Some(stack.display.lut_revision());
     r.overview = Some(overview_of(stack));
     let finer = Roi {
         stride: 1,
         ..WINDOW
     };
-    r.pending_window = Some((stack.frame_index, finer, revision));
+    r.pending_window = Some((stack.frame(), finer, revision));
     r.volume.built_frame = Some(0);
     r.volume.uploaded_generation = Some(r.volume.generation);
     r.volume.budget_cap = Some(1 << 30);
@@ -102,7 +102,7 @@ struct Held {
     volume: bool,
 }
 
-fn held(r: &Residency, stack: &Stack) -> Held {
+fn held(r: &Residency, stack: &Document) -> Held {
     Held {
         roi: r.roi.is_some(),
         frame: r.frame.is_some(),
@@ -129,7 +129,7 @@ fn an_unchanged_model_keeps_everything() {
     let stack = movie();
     let mut r = filled(&stack);
     for _ in 0..3 {
-        r.reconcile(&stack.display, stack.frame_index);
+        r.reconcile(&stack.display, stack.frame());
         assert_eq!(held(&r, &stack), EVERYTHING);
     }
     assert!(!r.volume.take_release(), "nothing is given back twice");
@@ -145,7 +145,7 @@ fn a_channel_toggle_drops_what_depends_on_the_enabled_channels_only() {
     let mut r = filled(&stack);
     let generation = r.volume.generation;
     assert!(stack.display.set_enabled(1, false));
-    r.reconcile(&stack.display, stack.frame_index);
+    r.reconcile(&stack.display, stack.frame());
     assert_eq!(
         held(&r, &stack),
         Held {
@@ -181,7 +181,7 @@ fn a_dimension_override_drops_everything_uploaded() {
     crate::dimensions::apply_dimension_override(&mut stack, 3, 1, 2);
     let after = stack.display.revision();
     assert_ne!(after.layout, before.layout);
-    r.reconcile(&stack.display, stack.frame_index);
+    r.reconcile(&stack.display, stack.frame());
 
     assert_eq!(
         held(&r, &stack),
@@ -217,7 +217,7 @@ fn a_lut_change_marks_only_the_luts() {
     let mut r = filled(&stack);
     let same = *stack.display.lut(0).unwrap();
     assert!(!stack.display.set_lut(0, same));
-    r.reconcile(&stack.display, stack.frame_index);
+    r.reconcile(&stack.display, stack.frame());
     assert_eq!(held(&r, &stack), EVERYTHING);
 
     let revision = stack.display.revision();
@@ -229,7 +229,7 @@ fn a_lut_change_marks_only_the_luts() {
         revision,
         "no decode revision moves"
     );
-    r.reconcile(&stack.display, stack.frame_index);
+    r.reconcile(&stack.display, stack.frame());
     assert_eq!(
         held(&r, &stack),
         Held {
@@ -260,11 +260,11 @@ fn every_lut_control_moves_the_lut_revision() {
         .load_bytes(movie_bytes(), "movie.tif".into())
         .unwrap();
     viewer.set_dimension_order(1, 1, 6);
-    let stack = viewer.stack.as_ref().unwrap();
+    let stack = viewer.document.as_ref().unwrap();
     assert!(crate::channels::gray_lut_applicable(stack));
     let before = stack.display.lut_revision();
     viewer.set_gray_lut(2);
-    let after = viewer.stack.as_ref().unwrap().display.lut_revision();
+    let after = viewer.document.as_ref().unwrap().display.lut_revision();
     assert_ne!(after, before, "a colormap picked");
 }
 
@@ -275,7 +275,7 @@ fn a_contrast_window_drops_nothing() {
     let mut stack = movie();
     let mut r = filled(&stack);
     assert!(stack.display.set_window(0, Window::new(10.0, 20.0)));
-    r.reconcile(&stack.display, stack.frame_index);
+    r.reconcile(&stack.display, stack.frame());
     assert_eq!(held(&r, &stack), EVERYTHING);
 }
 
@@ -288,8 +288,8 @@ fn a_contrast_window_drops_nothing() {
 fn a_frame_change_drops_the_frame_on_the_gpu() {
     let mut stack = movie();
     let mut r = filled(&stack);
-    stack.frame_index = 1;
-    r.reconcile(&stack.display, stack.frame_index);
+    stack.set_frame(1);
+    r.reconcile(&stack.display, stack.frame());
     assert_eq!(
         held(&r, &stack),
         Held {
@@ -303,14 +303,14 @@ fn a_frame_change_drops_the_frame_on_the_gpu() {
 
     // Back to the frame that was uploaded: what went does not come back, since
     // the textures have been written since.
-    stack.frame_index = 0;
-    r.reconcile(&stack.display, stack.frame_index);
+    stack.set_frame(0);
+    r.reconcile(&stack.display, stack.frame());
     assert!(r.frame.is_none());
 }
 
 /// A smaller rebuild after the GPU ran out of memory is the same volume: a
 /// build in flight is dropped, but what a frontend compares to tell that a
-/// different stack is on show (an animation stops for that) does not move. A
+/// different document is on show (an animation stops for that) does not move. A
 /// dimension override does move it, and the volume stops counting as built
 /// the moment the axes are reassigned, before any sync.
 #[test]
@@ -319,7 +319,7 @@ fn a_rebuild_is_the_same_volume_and_an_override_another() {
     viewer
         .load_bytes(movie_bytes(), "movie.tif".into())
         .unwrap();
-    viewer.residency = filled(viewer.stack.as_ref().unwrap());
+    viewer.residency = filled(viewer.document.as_ref().unwrap());
     viewer.residency.volume.requested = Some((viewer.residency.volume.generation, 0));
     assert!(viewer.volume_built());
     assert!(viewer.volume_building());
@@ -331,7 +331,7 @@ fn a_rebuild_is_the_same_volume_and_an_override_another() {
     assert!(!viewer.volume_built() && !viewer.volume_building());
     assert_eq!(viewer.volume_identity(), identity, "the same volume");
 
-    viewer.residency = filled(viewer.stack.as_ref().unwrap());
+    viewer.residency = filled(viewer.document.as_ref().unwrap());
     assert!(viewer.volume_built());
     viewer.set_dimension_order(3, 1, 2);
     assert_ne!(viewer.volume_identity(), identity, "another volume");
@@ -348,13 +348,13 @@ fn a_new_document_starts_a_fresh_residency() {
     viewer
         .load_bytes(movie_bytes(), "movie.tif".into())
         .unwrap();
-    let first = viewer.stack.as_ref().unwrap().display.revision();
-    viewer.residency = filled(viewer.stack.as_ref().unwrap());
+    let first = viewer.document.as_ref().unwrap().display.revision();
+    viewer.residency = filled(viewer.document.as_ref().unwrap());
 
     viewer
         .load_bytes(movie_bytes(), "movie.tif".into())
         .unwrap();
-    let stack = viewer.stack.as_ref().unwrap();
+    let stack = viewer.document.as_ref().unwrap();
     assert_ne!(stack.display.revision(), first);
     let r = &mut viewer.residency;
     assert_eq!(
@@ -376,9 +376,9 @@ fn a_new_document_starts_a_fresh_residency() {
     );
 
     // And one kept by mistake would drop everything at its first reconcile.
-    let mut kept = filled(viewer.stack.as_ref().unwrap());
+    let mut kept = filled(viewer.document.as_ref().unwrap());
     let old = movie();
-    kept.reconcile(&old.display, old.frame_index);
+    kept.reconcile(&old.display, old.frame());
     assert_eq!(
         held(&kept, &old),
         Held {
@@ -407,7 +407,7 @@ fn a_sync_is_asked_for_what_each_change_left_stale() {
         upload_luts: true,
     };
     let mut stack = movie();
-    let sync = |r: &mut Residency, s: &Stack| r.begin_sync(&s.display, s.frame_index);
+    let sync = |r: &mut Residency, s: &Document| r.begin_sync(&s.display, s.frame());
 
     // A fresh residency: all of it, and the volume it knows nothing of given
     // back, once. The LUTs are asked for until they are recorded as sent.
@@ -445,7 +445,7 @@ fn a_sync_is_asked_for_what_each_change_left_stale() {
 
     // Another frame: the frame.
     let mut r = filled(&stack);
-    stack.frame_index = 1;
+    stack.set_frame(1);
     assert_eq!(sync(&mut r, &stack), nothing);
     assert!(r.needs_upload(&WINDOW));
 
@@ -477,7 +477,7 @@ fn a_sync_is_asked_for_what_each_change_left_stale() {
 #[test]
 fn a_document_runs_no_worker_until_a_view_needs_one() {
     let mut stack = movie();
-    let idle = |s: &Stack| {
+    let idle = |s: &Document| {
         s.services.prefetch.is_none()
             && s.services.window_worker.is_none()
             && s.services.volume_builder.is_none()

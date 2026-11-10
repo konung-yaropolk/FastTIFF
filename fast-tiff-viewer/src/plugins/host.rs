@@ -1,4 +1,4 @@
-//! A [`HostContext`] backed by a loaded [`Stack`].
+//! A [`HostContext`] backed by a loaded [`Document`].
 //!
 //! This is what a plugin actually talks to for the in-process lane. The
 //! `.dll`/`.so` lane will wrap the same object behind a C vtable rather than
@@ -13,13 +13,13 @@ use fasttiff_plugin_api::{
 use super::result::{ResultDest, ResultTiff, ResultWriter};
 use crate::dimensions::plane_index;
 use crate::display::Dims;
-use crate::stack::Stack;
+use crate::document::Document;
 use fast_tiff_lib::{read_plane_u16_into, SampleFormat, TiffStack};
 use std::sync::Arc;
 
 /// Everything a plugin can reach for one run.
 ///
-/// Owns what it needs rather than borrowing the [`Stack`], which is what lets a
+/// Owns what it needs rather than borrowing the [`Document`], which is what lets a
 /// run happen on a worker thread while the window keeps drawing. The pixels are
 /// not copied to get there: `tiff` is a second handle on the *same* indexed
 /// file — one memory map, shared — and the two fields beside it are the plane
@@ -71,7 +71,7 @@ pub struct StackHost {
 }
 
 impl StackHost {
-    pub fn new(stack: &Stack, view: ViewParams) -> Self {
+    pub fn new(stack: &Document, view: ViewParams) -> Self {
         StackHost {
             image: describe_image(stack),
             info: describe_stack(stack),
@@ -388,7 +388,7 @@ impl HostContext for StackHost {
 
 /// The stack's shape in file terms — see [`ImageInfo`] on why this is not the
 /// display's channel count.
-pub fn describe_image(stack: &Stack) -> ImageInfo {
+pub fn describe_image(stack: &Document) -> ImageInfo {
     let (width, height) = stack.dimensions().unwrap_or((0, 0));
     let f0 = stack.tiff.frames.first();
     let pixel_type = match f0.map(|f| (f.bits_per_sample, f.sample_format)) {
@@ -414,7 +414,7 @@ pub fn describe_image(stack: &Stack) -> ImageInfo {
 /// `plane_index`). Reporting that one channel left every plugin reading red
 /// alone and writing it back as a grayscale stack. CMYK is left as it was:
 /// its samples are inks, which are not what is shown.
-fn file_channels(stack: &Stack) -> usize {
+fn file_channels(stack: &Document) -> usize {
     let display = &stack.display;
     if display.rgb() && !display.cmyk() {
         display.channel_count().max(1)
@@ -425,9 +425,9 @@ fn file_channels(stack: &Stack) -> usize {
 
 /// The file's metadata, flattened into the dependency-free shape the contract
 /// uses.
-pub fn describe_stack(stack: &Stack) -> StackInfo {
+pub fn describe_stack(stack: &Document) -> StackInfo {
     let meta = &stack.tiff.meta;
-    // `Stack::path` is a real path for a file-opened stack and a bare label for
+    // `Document::path` is a real path for a file-opened stack and a bare label for
     // one loaded from bytes (dropped, or picked in the browser build). Only the
     // former is something a plugin can reopen, so say which it is rather than
     // handing over a path that does not exist. A plugin's result shown here has
@@ -468,7 +468,7 @@ pub fn describe_stack(stack: &Stack) -> StackInfo {
 /// contract promises ([`ChannelView::min`]) and what the viewer holds them in,
 /// so they are copied rather than converted.
 pub fn describe_view(
-    stack: &Stack,
+    stack: &Document,
     frame_index: usize,
     volume_view: bool,
     volume: VolumeView,

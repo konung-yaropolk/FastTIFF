@@ -6,7 +6,7 @@
 //!         │
 //!   scivis-render     GPU pipelines, textures, ray-marching
 //!         │
-//!   fast-tiff-viewer  ← you are here: stack model, channel settings,
+//!   fast-tiff-viewer  ← you are here: document model, channel settings,
 //!         │             c/z/t interpretation, camera, decode→GPU sync
 //!   frontend          egui app, or a wasm/JS web UI
 //! ```
@@ -43,6 +43,7 @@ pub mod channels;
 pub mod colormap;
 pub mod dimensions;
 pub mod display;
+pub mod document;
 pub mod histogram;
 pub mod loader;
 /// Decoding one plane as `f32` in the file's own units. One definition, so the
@@ -70,7 +71,6 @@ pub mod roi;
 /// path, and a browser has none.
 pub mod save;
 pub mod snapshot;
-pub mod stack;
 pub mod units;
 pub mod viewer;
 pub mod volume;
@@ -121,9 +121,9 @@ pub fn share_gpu_device(device: &wgpu::Device, queue: &wgpu::Queue, adapter: &wg
 
 pub use dimensions::{plane_index, planes_addressed};
 pub use display::{Dims, Display, Revision};
+pub use document::{ChannelSettings, Document, SampleUnits, Window};
 pub use histogram::Histogram;
 pub use loader::{LoadSource, LoadStage};
-pub use stack::{ChannelSettings, SampleUnits, Stack, Window};
 pub use viewer::{DecodeMode, Playback, ViewMode, Viewer, VolumeView, DEFAULT_FPS};
 
 // Re-exported so a frontend needs only this crate in its imports for the common

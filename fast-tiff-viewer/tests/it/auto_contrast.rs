@@ -11,7 +11,7 @@
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::channels::{auto_contrast, reset_contrast};
 use fast_tiff_viewer::histogram::{auto_window, frame_histograms, Histogram, BINS};
-use fast_tiff_viewer::{Stack, Window};
+use fast_tiff_viewer::{Document, Window};
 use std::io::Cursor;
 
 /// A one-frame u16 stack of `w * h` pixels: `outliers` of them pinned to 0,
@@ -139,8 +139,8 @@ fn windowed_f32_stack(
     writer.finish().unwrap().into_inner()
 }
 
-fn load(bytes: Vec<u8>) -> Stack {
-    Stack::from_bytes(bytes, "auto.tif".into(), false).expect("should open")
+fn load(bytes: Vec<u8>) -> Document {
+    Document::from_bytes(bytes, "auto.tif".into(), false).expect("should open")
 }
 
 /// 10_000 pixels, 20 at each extreme. The saturation budget is
@@ -367,7 +367,7 @@ fn auto_fits_the_frame_on_screen_not_frame_zero() {
         "need both frames addressable"
     );
 
-    stack.frame_index = 1;
+    stack.set_frame(1);
     let hists = frame_histograms(&stack);
     auto_contrast(&mut stack, &hists);
 
@@ -441,7 +441,7 @@ fn a_window_fitted_past_the_track_is_pulled_back_onto_it() {
         "channel 0 track should be too narrow for 60000, got {bounds:?}"
     );
 
-    stack.frame_index = 1;
+    stack.set_frame(1);
     let hists = frame_histograms(&stack);
     auto_contrast(&mut stack, &hists);
 
@@ -482,7 +482,7 @@ fn the_low_handle_is_clamped_without_the_window_collapsing() {
         "channel 0 track should start well above zero, got {bounds:?}"
     );
 
-    stack.frame_index = 1;
+    stack.set_frame(1);
     let hists = frame_histograms(&stack);
     auto_contrast(&mut stack, &hists);
 
@@ -557,7 +557,7 @@ fn capped_u16_stack(planes: usize, blank: usize, w: u32, h: u32) -> Vec<u8> {
 }
 
 fn opening_window(bytes: Vec<u8>) -> (f32, f32) {
-    let s = Stack::from_bytes(bytes, "probe.tif".into(), false).expect("should open");
+    let s = Document::from_bytes(bytes, "probe.tif".into(), false).expect("should open");
     let c = s.display.settings().first().expect("one channel");
     (c.window.lo, c.window.hi)
 }

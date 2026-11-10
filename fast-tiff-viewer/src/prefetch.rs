@@ -30,8 +30,8 @@
 //! can never show the wrong frame.
 
 use crate::display::Revision;
+use crate::document::Document;
 use crate::histogram::{Binning, Histogram};
-use crate::stack::Stack;
 use crate::worker::{CancelToken, LatestWorker, Unclaimed};
 use fast_tiff_lib::TiffStack;
 use fast_tiff_lib::{ByteOrder, FrameInfo};
@@ -287,7 +287,7 @@ pub struct ChannelJob {
 /// touch a GPU. This function decides only *which* channels to fetch for the 2D
 /// view and at which timepoint; it asks for slice 0, because the 2D scrub axis
 /// is time and Z is a stride there.
-pub fn build_jobs(loaded: &Stack, frame_index: usize, enabled: &[bool]) -> Vec<ChannelJob> {
+pub fn build_jobs(loaded: &Document, frame_index: usize, enabled: &[bool]) -> Vec<ChannelJob> {
     let Some((width, height)) = loaded.dimensions() else {
         return Vec::new();
     };

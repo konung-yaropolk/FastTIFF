@@ -1,10 +1,13 @@
-//! The loaded stack and its per-channel display settings — the model every
+//! The loaded document and its per-channel display settings — the model every
 //! other core module operates on, and the thing a frontend binds its widgets to.
 //!
-//! This was the viewer app's private `LoadedStack`. Nothing in it was ever
-//! GUI-specific; it moved here so a second frontend gets the c/z/t
-//! interpretation, contrast defaults, LUT selection and read-ahead wiring for
-//! free instead of reimplementing them.
+//! This was the viewer app's private `LoadedStack`, then the core's `Stack`;
+//! "document" is the plugin API's word for it too (a result opens as a
+//! `StreamTarget::NewDocument` or a `StreamTarget::ReplaceDocument`). What a
+//! renderer has uploaded of one is not here: the [`Viewer`](crate::Viewer)
+//! keeps that beside it. Nothing in it was ever GUI-specific; it moved here
+//! so a second frontend gets the c/z/t interpretation, contrast defaults, LUT
+//! selection and read-ahead wiring for free instead of reimplementing them.
 
 use crate::channels::refresh_pseudocolor;
 use crate::dimensions::{apply_resolved_dimensions_reporting, setup_cmyk, setup_rgb};
@@ -96,7 +99,7 @@ impl ChannelSettings {
 /// renderer has uploaded of it is not: that is the viewer's own residency,
 /// which is why a channel toggle or a dimension override only ever edits the
 /// [`display`](Self::display).
-pub struct Stack {
+pub struct Document {
     /// The file's bytes and frame index, shared rather than owned.
     ///
     /// `Arc` because a plugin, an export or a save runs on a worker thread and
@@ -111,8 +114,11 @@ pub struct Stack {
     /// the fields below and stays with the window.
     pub tiff: Arc<TiffStack>,
     pub path: PathBuf,
-    pub frame_index: usize,
-    /// How the viewer is *showing* this stack: the c/z/t interpretation, the
+    /// The frame on screen, on the scrub/time axis; see [`frame`](Self::frame).
+    /// Below [`frame_count`](Self::frame_count): [`set_frame`](Self::set_frame)
+    /// clamps, and reinterpreting the axes puts it back to 0.
+    frame_index: usize,
+    /// How the viewer is *showing* this document: the c/z/t interpretation, the
     /// per-channel LUTs and contrast windows, and the layout facts derived at
     /// load. Everything mutable about the presentation lives here, so
     /// [`tiff`](Self::tiff)`.meta` stays exactly as the file was parsed — see
@@ -175,7 +181,7 @@ pub(crate) struct Services {
     /// ([`BandCache::hold_layout`](crate::bandcache::BandCache::hold_layout)).
     /// See [`crate::bandcache`].
     pub(crate) bands: crate::bandcache::BandCache,
-    /// The histograms of the frame on screen; see [`Stack::histograms`].
+    /// The histograms of the frame on screen; see [`Document::histograms`].
     pub(crate) histograms: crate::histogram::FrameHistograms,
 }
 
@@ -223,7 +229,7 @@ impl Services {
     }
 }
 
-impl Stack {
+impl Document {
     /// Open `path` and derive the full display model: resolved c/z/t roles, RGB
     /// or palette setup, per-channel contrast windows and the file's own LUT.
     /// No worker starts here: the document's background workers each start
@@ -293,7 +299,7 @@ impl Stack {
         let overlay = tiff.meta.overlay.clone();
         // No worker is started here: each starts when a view first needs it
         // (see `Services`).
-        let mut stack = Stack {
+        let mut stack = Document {
             tiff: Arc::new(tiff),
             path,
             frame_index: 0,
@@ -362,6 +368,18 @@ impl Stack {
     /// Frame count on the scrub/time axis (at least 1).
     pub fn frame_count(&self) -> usize {
         self.display.dims().frames.max(1)
+    }
+
+    /// The frame on screen: its index on the scrub/time axis, from 0.
+    pub fn frame(&self) -> usize {
+        self.frame_index
+    }
+
+    /// Show frame `i`, or the last frame when `i` is past it, so that a step
+    /// or a scrub off the end lands on the end rather than on a frame that is
+    /// not there.
+    pub fn set_frame(&mut self, i: usize) {
+        self.frame_index = i.min(self.frame_count() - 1);
     }
 
     /// The stack's pixel dimensions, from the first frame.

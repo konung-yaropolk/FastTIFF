@@ -51,7 +51,7 @@ pub(super) fn render_settings_window(
     volume_autolevel: &mut bool,
     show_coord_box: &mut bool,
     reset_position: &mut bool,
-    loaded: Option<&Stack>,
+    loaded: Option<&Document>,
 ) {
     let spec = dialog::Dialog {
         id: "render_settings",
@@ -280,7 +280,7 @@ pub(super) fn render_settings_window(
     });
 }
 
-pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Stack) {
+pub(super) fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Document) {
     let tiff = &loaded.tiff;
     let spec = dialog::Dialog {
         id: "file_metadata",
@@ -791,9 +791,9 @@ pub(super) struct Resident {
 /// [`contrast_controls`]), so a handle sits above the part of the distribution
 /// it clips.
 ///
-/// What it plots is the stack's own histograms ([`Stack::histograms`]),
+/// What it plots is the document's own histograms ([`Document::histograms`]),
 /// which the viewer bins from the frames it decodes while the window is open;
-/// this only draws. They are borrowed from the stack only where nothing
+/// this only draws. They are borrowed from the document only where nothing
 /// edits it (the note on where they came from, and the plot), so the contrast
 /// controls drawn between the two edit it with nothing copied out. `resident`
 /// is what the viewer's last sync put on the GPU, which says why a frame too
@@ -801,7 +801,7 @@ pub(super) struct Resident {
 pub(super) fn histogram_window(
     ctx: &egui::Context,
     open: &mut bool,
-    loaded: &mut Stack,
+    loaded: &mut Document,
     resident: Resident,
     log_scale: &mut bool,
 ) {

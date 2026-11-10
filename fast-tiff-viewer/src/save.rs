@@ -44,7 +44,7 @@
 //!
 //! # Except with an overlay: uncompressed
 //!
-//! A stack carrying an ImageJ overlay ([`Stack::overlay`]: the points the file
+//! A stack carrying an ImageJ overlay ([`Document::overlay`]: the points the file
 //! came with, or the point counter's) is written uncompressed instead, and the
 //! overlay with it. ImageJ reads the overlay of a multi-image TIFF only when it
 //! opens the file as one contiguous stack, and it does that only for an
@@ -76,7 +76,7 @@
 //! here where the desktop would have streamed it.
 
 use crate::display::Dims;
-use crate::stack::Stack;
+use crate::document::Document;
 use anyhow::{bail, Context, Result};
 use fast_tiff_lib::metadata::{self, MetadataFormat};
 use fast_tiff_lib::{
@@ -156,11 +156,11 @@ impl Samples {
 /// vectors of settings. Taking it costs a refcount bump and one small clone.
 ///
 /// Owned rather than borrowed because the window carries on being used while
-/// the write runs, and a `&Stack` held across that would stop it.
+/// the write runs, and a `&Document` held across that would stop it.
 pub struct SaveSource {
     tiff: std::sync::Arc<fast_tiff_lib::TiffStack>,
     display: crate::display::Display,
-    /// [`Stack::overlay`], as it was when the snapshot was taken.
+    /// [`Document::overlay`], as it was when the snapshot was taken.
     overlay: Vec<fast_tiff_lib::PointRoi>,
 }
 
@@ -170,7 +170,7 @@ impl SaveSource {
     /// The metadata written comes from the display model, so changing the
     /// contrast or the axes after pressing Save must not change the file that
     /// is already being written — hence a snapshot rather than a live borrow.
-    pub fn of(stack: &Stack) -> Self {
+    pub fn of(stack: &Document) -> Self {
         SaveSource {
             tiff: std::sync::Arc::clone(&stack.tiff),
             display: stack.display.clone(),
@@ -189,7 +189,7 @@ impl SaveSource {
 /// The blocking form, for callers with nothing to report progress to — tests,
 /// and any future headless use. [`save_source`] is what the app calls.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn save_stack(stack: &Stack, path: &Path) -> Result<()> {
+pub fn save_stack(stack: &Document, path: &Path) -> Result<()> {
     save_source(&SaveSource::of(stack), path, &mut |_| true)
 }
 
@@ -547,7 +547,7 @@ fn placed_for_imagej(
 /// the save is uncompressed, which it is only while that fits a classic TIFF
 /// (see the module docs). Past that the overlay is still in the file, for this
 /// viewer, but ImageJ shows the image without it.
-pub fn overlay_readable_by_imagej(stack: &Stack) -> bool {
+pub fn overlay_readable_by_imagej(stack: &Document) -> bool {
     let Some(first) = stack.tiff.frames.first() else {
         return true;
     };

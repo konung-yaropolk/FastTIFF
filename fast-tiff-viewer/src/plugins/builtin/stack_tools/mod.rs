@@ -8,7 +8,7 @@
 //!
 //! # Every tool offers a window
 //!
-//! FastTIFF is one stack per window, so a result either opens in a window of
+//! FastTIFF is one document per window, so a result either opens in a window of
 //! its own or takes the place of the one it came from. Only the user knows
 //! which they meant, so every tool here asks — see [`in_new_window`] — and
 //! defaults to a new window, because that is the answer that cannot lose

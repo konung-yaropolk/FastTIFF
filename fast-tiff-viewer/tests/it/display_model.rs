@@ -62,7 +62,7 @@ fn two_channel_movie() -> Viewer {
 }
 
 fn display(viewer: &mut Viewer) -> &mut Display {
-    &mut viewer.stack.as_mut().expect("a stack is open").display
+    &mut viewer.document.as_mut().expect("a stack is open").display
 }
 
 /// Switching a channel on or off changes which planes a frame decodes, not

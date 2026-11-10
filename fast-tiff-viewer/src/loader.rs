@@ -10,7 +10,7 @@
 //! What the frontend gets back is a handle it polls once a frame: a stage to
 //! show while the load runs, and the finished stack when it lands.
 
-use crate::stack::Stack;
+use crate::document::Document;
 use std::path::PathBuf;
 
 /// How far an open has got.
@@ -91,12 +91,12 @@ impl LoadSource {
         self,
         apply_pseudocolor: bool,
         on_stage: &mut dyn FnMut(LoadStage),
-    ) -> anyhow::Result<Stack> {
+    ) -> anyhow::Result<Document> {
         match self {
             #[cfg(feature = "mmap")]
-            LoadSource::Path(path) => Stack::open_reporting(path, apply_pseudocolor, on_stage),
+            LoadSource::Path(path) => Document::open_reporting(path, apply_pseudocolor, on_stage),
             LoadSource::Bytes(bytes, name) => {
-                Stack::from_bytes_reporting(bytes, name, apply_pseudocolor, on_stage)
+                Document::from_bytes_reporting(bytes, name, apply_pseudocolor, on_stage)
             }
             // A load that fails drops `derived`, and the scratch file with it.
             LoadSource::Derived(from, derived) => {
@@ -111,14 +111,14 @@ impl LoadSource {
 #[cfg(feature = "threads")]
 mod threaded {
     use super::{LoadSource, LoadStage};
-    use crate::stack::Stack;
+    use crate::document::Document;
     use std::path::PathBuf;
     use std::sync::mpsc::{channel, Receiver};
     use std::sync::{Arc, Mutex};
 
     /// A load in flight on a worker thread.
     pub struct Loading {
-        rx: Receiver<anyhow::Result<Stack>>,
+        rx: Receiver<anyhow::Result<Document>>,
         stage: Arc<Mutex<LoadStage>>,
         name: PathBuf,
     }
@@ -180,7 +180,7 @@ mod threaded {
 
         /// The finished stack, once there is one. `None` while it is still
         /// running — never blocks.
-        pub fn take(&mut self) -> Option<anyhow::Result<Stack>> {
+        pub fn take(&mut self) -> Option<anyhow::Result<Document>> {
             match self.rx.try_recv() {
                 Ok(result) => Some(result),
                 // Disconnected without a result means the worker died, which

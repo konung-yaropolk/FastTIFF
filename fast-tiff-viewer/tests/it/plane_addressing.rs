@@ -1,7 +1,7 @@
 //! Regression tests for mapping a display frame to an IFD in the file.
 //!
 //! The failure these guard against: the stack's *resolved* interpretation
-//! (`Stack::display.dims()`) and the file's *raw* metadata (`tiff.meta`) are
+//! (`Document::display.dims()`) and the file's *raw* metadata (`tiff.meta`) are
 //! deliberately allowed to disagree — resolving is exactly the act of
 //! reclassifying a mislabeled axis, e.g. a file claiming `channels=10` that is
 //! really a 10-frame movie. Anything that addresses planes must use the
@@ -9,7 +9,7 @@
 //! walks past the end of the IFD chain.
 
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
-use fast_tiff_viewer::{Stack, Viewer};
+use fast_tiff_viewer::{Document, Viewer};
 use std::io::Cursor;
 
 /// A stack of `n` single-channel planes whose ImageJ metadata *claims*
@@ -28,8 +28,8 @@ fn mislabeled_stack(n: usize, w: u32, h: u32) -> Vec<u8> {
     writer.finish().unwrap().into_inner()
 }
 
-fn load(bytes: Vec<u8>) -> Stack {
-    Stack::from_bytes(bytes, "mislabeled.tif".into(), false).expect("should open")
+fn load(bytes: Vec<u8>) -> Document {
+    Document::from_bytes(bytes, "mislabeled.tif".into(), false).expect("should open")
 }
 
 #[test]

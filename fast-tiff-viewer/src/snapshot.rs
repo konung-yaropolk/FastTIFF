@@ -67,8 +67,8 @@
 //! be a different picture from the one a copy promises. Refusing says what
 //! happened, and cropping the frame first gives a copy that is the image.
 
+use crate::document::Document;
 use crate::prefetch::{build_jobs, decode_jobs_rows, ChannelJob, DecodedRef, Samples};
-use crate::stack::Stack;
 use anyhow::{Context, Result};
 use fast_tiff_lib::PARALLEL_MIN_PIXELS;
 use scivis_render::Lut;
@@ -260,7 +260,7 @@ struct Source<'a> {
 /// reporting: the caller asked for a copy and there is nothing to give it. And
 /// refuses, before decoding or allocating anything for it, a frame whose image
 /// would be past 256 MiB (8192 x 8192 pixels); see the [module docs](self).
-pub fn of_frame(stack: &Stack) -> Result<Snapshot> {
+pub fn of_frame(stack: &Document) -> Result<Snapshot> {
     let (width, height) = stack
         .dimensions()
         .context("nothing is open, so there is no view to copy")?;
@@ -278,7 +278,7 @@ pub fn of_frame(stack: &Stack) -> Result<Snapshot> {
 /// [`of_frame`] past its size check: decoded `decode_rows` rows at a time (or
 /// the whole strips around them), composed `compose_rows` at a time.
 fn compose(
-    stack: &Stack,
+    stack: &Document,
     width: u32,
     height: u32,
     decode_rows: u32,
@@ -291,7 +291,7 @@ fn compose(
     // source, in the order its first channel comes.
     let mut sources: Vec<Source<'_>> = Vec::new();
     let mut layers: Vec<Layer<'_>> = Vec::new();
-    for job in build_jobs(stack, stack.frame_index, masks.enabled()) {
+    for job in build_jobs(stack, stack.frame(), masks.enabled()) {
         let (Some(s), Some(lut)) = (settings.get(job.channel), stack.display.lut(job.channel))
         else {
             continue;

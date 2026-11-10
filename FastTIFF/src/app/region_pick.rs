@@ -112,7 +112,7 @@ impl super::ViewerApp {
         name: &str,
         prompt: String,
     ) {
-        if self.core.stack.is_none() {
+        if self.core.document.is_none() {
             self.core.status = Some("Open an image first".into());
             return;
         }
@@ -136,7 +136,8 @@ impl super::ViewerApp {
             return;
         };
         let name = pick.name.clone();
-        if self.core.stack.is_none() || self.core.view_mode != fast_tiff_viewer::ViewMode::Movie {
+        if self.core.document.is_none() || self.core.view_mode != fast_tiff_viewer::ViewMode::Movie
+        {
             self.region_pick = None;
             self.core.status = Some(format!("{name}: cancelled"));
             return;

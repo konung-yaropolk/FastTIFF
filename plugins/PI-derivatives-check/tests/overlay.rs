@@ -78,7 +78,7 @@ fn movie() -> Vec<PlaneData> {
         .collect()
 }
 
-fn stack() -> fast_tiff_viewer::stack::Stack {
+fn stack() -> fast_tiff_viewer::Document {
     let img = ImageResult {
         width: W,
         height: H,

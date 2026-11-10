@@ -21,7 +21,7 @@ const H: u32 = 10;
 /// `channels` x `frames` planes of 16-bit samples, plane `p` a ramp starting
 /// at `p * 7000` so every channel and frame has a distribution of its own,
 /// and the channels' slider tracks differ.
-fn movie(channels: usize, frames: usize) -> Stack {
+fn movie(channels: usize, frames: usize) -> Document {
     let opts = WriterOptions::new(W, H, SampleType::U16)
         .rows_per_strip(3)
         .metadata(StackMetaWrite::new(channels, 1));
@@ -33,7 +33,7 @@ fn movie(channels: usize, frames: usize) -> Stack {
         w.write_frame_u16(&px).expect("frame");
     }
     let bytes = w.finish().expect("finish").into_inner();
-    let stack = Stack::from_bytes(bytes, "movie.tif".into(), false).expect("open");
+    let stack = Document::from_bytes(bytes, "movie.tif".into(), false).expect("open");
     let dims = stack.display.dims();
     assert_eq!((dims.channels, dims.frames), (channels, frames));
     stack
@@ -41,7 +41,7 @@ fn movie(channels: usize, frames: usize) -> Stack {
 
 /// A chunky 8-bit RGB stack of `frames` frames: its channels are planes of
 /// one IFD, decoded together.
-fn rgb(frames: usize) -> Stack {
+fn rgb(frames: usize) -> Document {
     let opts = WriterOptions::new(W, H, SampleType::U8)
         .samples_per_pixel(3)
         .metadata(StackMetaWrite::new(1, 1));
@@ -51,23 +51,23 @@ fn rgb(frames: usize) -> Stack {
         w.write_frame_u8(&px).expect("frame");
     }
     let bytes = w.finish().expect("finish").into_inner();
-    let stack = Stack::from_bytes(bytes, "rgb.tif".into(), false).expect("open");
+    let stack = Document::from_bytes(bytes, "rgb.tif".into(), false).expect("open");
     assert!(stack.display.rgb(), "the fixture should open as RGB");
     stack
 }
 
 /// What a sync completes the histograms with for a frame that fits a texture,
 /// whose residency holds no overview.
-fn complete(stack: &mut Stack, start: bool) -> usize {
+fn complete(stack: &mut Document, start: bool) -> usize {
     super::complete(stack, &Residency::default(), start)
 }
 
 /// What a sync does for the histograms when it decodes the frame for the
 /// screen inline: bin the enabled channels it decoded, then complete the
 /// rest. Returns how many channels `complete` decoded.
-fn show(stack: &mut Stack) -> usize {
+fn show(stack: &mut Document) -> usize {
     let missing = prepare(stack, HistogramSource::Frame);
-    let jobs = build_jobs(stack, stack.frame_index, stack.display.masks().enabled());
+    let jobs = build_jobs(stack, stack.frame(), stack.display.masks().enabled());
     let decoded = decode_jobs_borrowed(
         &stack.tiff.data,
         &stack.tiff.frames,
@@ -95,7 +95,7 @@ fn the_held_histograms_equal_a_whole_frame_decode() {
     for mut stack in [movie(3, 2), rgb(2)] {
         stack.display.set_enabled(1, false);
         for frame in 0..2 {
-            stack.frame_index = frame;
+            stack.set_frame(frame);
             let decoded = show(&mut stack);
             assert_eq!(decoded, 1, "only the channel switched off is decoded");
             let reference = frame_histograms(&stack);
@@ -116,7 +116,7 @@ fn the_held_histograms_equal_a_whole_frame_decode() {
 #[test]
 fn histograms_kept_from_the_read_ahead_equal_a_whole_frame_decode() {
     let mut stack = movie(2, 3);
-    stack.frame_index = 2;
+    stack.set_frame(2);
     // What the worker returns for the frame: its planes, and the histograms
     // of the first channel, as a request made before the second was binned.
     let jobs = build_jobs(&stack, 2, &[true, true]);
@@ -185,7 +185,7 @@ fn a_channel_toggle_decodes_nothing_for_the_histograms() {
     );
 
     // Another frame is another distribution, with nothing decoded for it yet.
-    stack.frame_index = 1;
+    stack.set_frame(1);
     assert!(!stack.histograms().describes(&stack));
     assert_eq!(complete(&mut stack, true), 3);
     assert_eq!(
@@ -210,9 +210,9 @@ fn a_channel_toggle_decodes_nothing_for_the_histograms() {
 /// another plane, and the old bins describe the wrong one.
 #[test]
 fn a_channel_toggle_keeps_the_key_and_a_dimension_override_does_not() {
-    // Three channels of one frame, which an override can lay out as three
+    // Three channels of two frames, which an override can lay out as six
     // frames of one channel.
-    let mut stack = movie(3, 1);
+    let mut stack = movie(3, 2);
     let key = HistogramKey::of(&stack);
     assert!(key.describes(&stack));
 
@@ -233,16 +233,14 @@ fn a_channel_toggle_keeps_the_key_and_a_dimension_override_does_not() {
         "a contrast drag re-decoded the histograms"
     );
 
-    // The key is only numbers, so a frame index past this one-frame stack's
-    // end will do to show that the frame is part of it.
-    stack.frame_index = 1;
+    stack.set_frame(1);
     assert!(
         !key.describes(&stack),
         "another frame is another distribution"
     );
-    stack.frame_index = 0;
+    stack.set_frame(0);
 
-    crate::dimensions::apply_dimension_override(&mut stack, 1, 1, 3);
+    crate::dimensions::apply_dimension_override(&mut stack, 1, 1, 6);
     assert!(
         !key.describes(&stack),
         "the axes were reassigned and the old bins were kept"
@@ -257,8 +255,15 @@ fn what_is_missing_is_decoded_once() {
     assert_eq!(complete(&mut stack, true), 2, "nothing was binned yet");
     assert_eq!(complete(&mut stack, true), 0, "and nothing is missing now");
 
-    // A frame index past the end does not decode; it is tried once.
-    stack.frame_index = 5;
+    // A frame whose planes the file does not have does not decode; it is
+    // tried once. Opening clamps the axes to the planes there are and
+    // `set_frame` to the frames, so only a display told otherwise gets here.
+    let dims = stack.display.dims();
+    stack
+        .display
+        .set_dims(crate::display::Dims { frames: 6, ..dims });
+    stack.set_frame(5);
+    assert_eq!(stack.frame(), 5);
     assert_eq!(complete(&mut stack, true), 2);
     assert!(stack.histograms().shown(&stack).is_empty());
     assert_eq!(
@@ -281,7 +286,7 @@ fn during_playback_complete_only_adds_to_what_showing_the_frame_started() {
 
     // Frame 1 was shown while the throttle was shut, so nothing binned it;
     // the repaints after it, with the throttle open, decode nothing.
-    stack.frame_index = 1;
+    stack.set_frame(1);
     for _ in 0..3 {
         assert_eq!(
             complete(&mut stack, false),
@@ -297,7 +302,7 @@ fn during_playback_complete_only_adds_to_what_showing_the_frame_started() {
 
     // Frame 2 is shown with the throttle open: showing it bins the enabled
     // channels, and only the one switched off is decoded.
-    stack.frame_index = 2;
+    stack.set_frame(2);
     let missing = prepare(&mut stack, HistogramSource::Frame);
     let jobs = build_jobs(&stack, 2, stack.display.masks().enabled());
     let decoded = decode_jobs_borrowed(
@@ -389,7 +394,7 @@ fn a_frame_past_the_texture_limit_is_binned_from_its_overview() {
     assert!(want.iter().all(|h| h.counted == tw as u64 * th as u64));
 
     // Another frame, and the overview is of frame 0: no histograms.
-    stack.frame_index = 1;
+    stack.set_frame(1);
     assert_eq!(super::complete(&mut stack, &residency, true), 0);
     assert!(stack.histograms().shown(&stack).is_empty());
 }
@@ -451,7 +456,7 @@ fn a_whole_frame_view_too_large_to_keep_is_binned_as_it_is_built() {
     }
 
     // Another frame, with no view of it: nothing, not frame 0's.
-    stack.frame_index = 1;
+    stack.set_frame(1);
     assert_eq!(super::complete(&mut stack, &residency, true), 0);
     assert!(stack.histograms().shown(&stack).is_empty());
 }

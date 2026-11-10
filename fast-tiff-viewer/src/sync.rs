@@ -13,13 +13,13 @@
 
 use crate::camera::{build_volume_params, VolumeChannel};
 use crate::display::{ChannelMasks, Revision};
+use crate::document::Document;
 use crate::histogram::{self, Binning, HistogramSource};
 use crate::prefetch::{
     build_jobs, decode_jobs_borrowed, ChannelJob, Decoded, PrefetchResult, Samples,
 };
 use crate::residency::{Residency, VolumeResidency};
 use crate::roi::{self, Roi, Serving};
-use crate::stack::Stack;
 use crate::viewer::{DecodeMode, ViewMode, Viewer, VolumeView};
 use crate::volume::VolumePlan;
 use crate::window;
@@ -45,7 +45,7 @@ impl Viewer {
     /// slice.
     pub fn sync(&mut self, renderer: &mut Renderer) -> SyncOutcome {
         let mut outcome = SyncOutcome::default();
-        // Read before the stack is borrowed mutably: residency depends on which
+        // Read before the document is borrowed mutably: residency depends on which
         // part of the image is on screen, which is the frontend's business.
         let (uv_offset, uv_scale) = (self.uv_offset, self.uv_scale);
         let viewport = self.viewport_px;
@@ -57,10 +57,10 @@ impl Viewer {
             None
         };
         let histograms_wanted = self.histograms_wanted;
-        let Some(loaded) = &mut self.stack else {
+        let Some(loaded) = &mut self.document else {
             return outcome;
         };
-        // What the renderer holds that no longer describes the stack as it
+        // What the renderer holds that no longer describes the document as it
         // stands goes first, all of it in one place: the frame after a scrub,
         // a toggle or an override, the LUTs after a pick, the volume after an
         // override or a new file. Nothing that changes the display model
@@ -68,8 +68,8 @@ impl Viewer {
         // Everything below may take what is still recorded as current, and
         // what is to be sent first is what it returns.
         let residency = &mut self.residency;
-        let pending = residency.begin_sync(&loaded.display, loaded.frame_index);
-        // A volume of another stack, or of the axes before an override, is no
+        let pending = residency.begin_sync(&loaded.display, loaded.frame());
+        // A volume of another document, or of the axes before an override, is no
         // use to this one: its GPU memory goes back now, this being the first
         // call that has the renderer.
         if pending.release_volume {
@@ -266,7 +266,12 @@ struct HistogramDemand {
 /// frontend needs another frame to draw them. Not while a movie plays: the
 /// next frame of it is already scheduled and draws them, a frame later, where
 /// asking for one more would draw every frame of the movie twice.
-fn note_histograms(loaded: &mut Stack, before: u64, current: Current, clock: Option<f64>) -> bool {
+fn note_histograms(
+    loaded: &mut Document,
+    before: u64,
+    current: Current,
+    clock: Option<f64>,
+) -> bool {
     let histograms = &mut loaded.services.histograms;
     let changed = histograms.version() != before;
     if changed && current.histograms.inline {
@@ -291,7 +296,7 @@ fn note_histograms(loaded: &mut Stack, before: u64, current: Current, clock: Opt
 ///   view, so nothing is ever re-cut and nothing has to be decoded twice.
 #[allow(clippy::too_many_arguments)]
 fn plan_residency(
-    loaded: &Stack,
+    loaded: &Document,
     residency: &mut Residency,
     renderer: &Renderer,
     current: Current,
@@ -352,7 +357,7 @@ fn plan_residency(
 /// the next frame when `read_ahead` is set.
 #[allow(clippy::too_many_arguments)]
 fn sync_movie(
-    loaded: &mut Stack,
+    loaded: &mut Document,
     residency: &mut Residency,
     renderer: &mut Renderer,
     current: Current,
@@ -371,7 +376,7 @@ fn sync_movie(
     // is built (see `capture_overview`).
     let bin = current.histograms.inline;
     let mut result = Ok(());
-    let frame_index = loaded.frame_index;
+    let frame_index = loaded.frame();
     let (fw, fh) = loaded
         .tiff
         .frames
@@ -476,7 +481,7 @@ fn sync_movie(
             }
             if !used_prefetch {
                 // The channels whose histograms this decode is to give, asked
-                // before it, because the planes it returns borrow the stack.
+                // before it, because the planes it returns borrow the document.
                 let missing = if current.histograms.inline {
                     histogram::prepare(loaded, HistogramSource::Frame)
                 } else {
@@ -530,7 +535,7 @@ fn sync_movie(
         // needs no thread for it.
         loaded.services.start_prefetch(&loaded.tiff);
         if let Some(p) = &loaded.services.prefetch {
-            let next = (loaded.frame_index + 1) % n;
+            let next = (loaded.frame() + 1) % n;
             let next_jobs = build_jobs(loaded, next, enabled);
             // The worker bins the next frame when this thread could have
             // binned this one and did not: once a throttle interval, and
@@ -552,7 +557,7 @@ fn sync_movie(
     // neither taken nor counted as in flight.
     let mut pending = false;
     if !plan.ready && plan.want != plan.show {
-        let frame_index = loaded.frame_index;
+        let frame_index = loaded.frame();
         let jobs = build_jobs(loaded, frame_index, enabled);
 
         // Started on first need: a thread is only worth it for a frame too
@@ -649,7 +654,7 @@ fn sync_movie(
 /// Keep the histograms of a frame taken from the read-ahead: the ones its
 /// worker binned, and when this thread is to bin (`bin_here`), the channels
 /// it did not, from the planes the result holds.
-fn keep_read_ahead_histograms(loaded: &mut Stack, ready: PrefetchResult, bin_here: bool) {
+fn keep_read_ahead_histograms(loaded: &mut Document, ready: PrefetchResult, bin_here: bool) {
     let PrefetchResult {
         channels,
         mut histograms,
@@ -697,7 +702,7 @@ fn keep_read_ahead_histograms(loaded: &mut Stack, ready: PrefetchResult, bin_her
 /// no histogram however far it was zoomed out.
 #[allow(clippy::too_many_arguments)]
 fn capture_overview(
-    loaded: &mut Stack,
+    loaded: &mut Document,
     residency: &mut Residency,
     built: window::Built,
     fw: u32,
@@ -706,10 +711,7 @@ fn capture_overview(
     mode: roi::LargeImageMode,
     bin: bool,
 ) {
-    if bin
-        && built.frame_index == loaded.frame_index
-        && window::spans_whole_frame(&built.roi, fw, fh)
-    {
+    if bin && built.frame_index == loaded.frame() && window::spans_whole_frame(&built.roi, fw, fh) {
         histogram::bin_whole_view(loaded, &built);
     }
     let budget = window::overview_budget(mode);
@@ -778,7 +780,7 @@ fn upload_texture(renderer: &mut Renderer, channel: usize, w: u32, h: u32, data:
 /// so playback animates the volume through time; otherwise the frame axis *is*
 /// the depth and `time` stays 0.
 fn sync_volume(
-    loaded: &mut Stack,
+    loaded: &mut Document,
     view: &mut VolumeView,
     res: &mut VolumeResidency,
     renderer: &mut Renderer,
@@ -786,12 +788,12 @@ fn sync_volume(
 ) -> bool {
     let mut needs_repaint = false;
     let is_4d = loaded.display.dims().slices > 1;
-    let time = if is_4d { loaded.frame_index } else { 0 };
+    let time = if is_4d { loaded.frame() } else { 0 };
 
     let generation = res.generation;
     // In a browser the GPU can refuse a volume after its upload returned (see
     // `take_late_upload_error`): handled as if the upload had failed — when it
-    // is the volume still wanted. One of a stack since closed is already being
+    // is the volume still wanted. One of a document since closed is already being
     // replaced, and the new one owes it nothing.
     if let Some((error, bytes)) = renderer.take_late_upload_error() {
         if res.uploaded_generation == Some(res.generation) {
@@ -932,7 +934,7 @@ fn sync_volume(
 /// channels/frames swap is honored, `time` is the 4D timepoint to build, and
 /// `budget` the bytes it may take on the GPU.
 pub fn plan_volume(
-    loaded: &Stack,
+    loaded: &Document,
     renderer: &Renderer,
     time: usize,
     budget: usize,

@@ -17,7 +17,7 @@
 //! * the pointer turned into a [`Gesture`], by the canvas, and the cursor;
 //! * the marks drawn over the picture ([`draw`]);
 //! * where the two exports go: a RoiSet `.zip` the ROI Manager opens, or the
-//!   open document's overlay ([`Stack::overlay`]), which the next save writes
+//!   open document's overlay ([`Document::overlay`]), which the next save writes
 //!   into the TIFF.
 //!
 //! # Gestures
@@ -43,13 +43,13 @@
 //! them. What was added to the TIFF's overlay is the document's by then, and
 //! stays until the file is saved or another one is opened.
 //!
-//! [`Stack::overlay`]: fast_tiff_viewer::Stack::overlay
+//! [`Document::overlay`]: fast_tiff_viewer::Document::overlay
 
 use egui::{Color32, Pos2, RichText, Stroke, Vec2};
 use fast_tiff_lib::PointRoi;
 use fast_tiff_viewer::plugins::builtin::point_counter::{CountedPoint, PointCounter};
 pub(super) use fast_tiff_viewer::plugins::builtin::point_counter::{Gesture, Session};
-use fast_tiff_viewer::Stack;
+use fast_tiff_viewer::Document;
 
 use super::dialog;
 
@@ -222,7 +222,7 @@ pub(super) fn draw(
 /// "Add into TIFF's overlay" has replaced it, it is what was added, which a
 /// user who closed the window and opened it again should not take for the
 /// file's.
-pub(super) fn loaded_message(stack: &Stack) -> Option<String> {
+pub(super) fn loaded_message(stack: &Document) -> Option<String> {
     if stack.overlay.is_empty() {
         return None;
     }
@@ -494,7 +494,7 @@ impl super::ViewerApp {
     /// A new session starts from the document's overlay when it has one, and
     /// says so on the status line.
     pub(super) fn open_point_counter(&mut self, ctx: &egui::Context) {
-        let Some(stack) = self.core.stack.as_ref() else {
+        let Some(stack) = self.core.document.as_ref() else {
             self.core.status = Some("Open an image first".into());
             return;
         };
@@ -519,7 +519,7 @@ impl super::ViewerApp {
             return;
         };
         // The points were placed on a picture that is no longer there.
-        let Some(stack) = self.core.stack.as_ref() else {
+        let Some(stack) = self.core.document.as_ref() else {
             self.point_counter = None;
             return;
         };
@@ -536,7 +536,7 @@ impl super::ViewerApp {
     /// the stack position of its frame, and placed so that ImageJ draws it on
     /// a hyperstack too — see [`PointCounter::rois_for`].
     fn point_rois(&self) -> Option<Vec<PointRoi>> {
-        let stack = self.core.stack.as_ref()?;
+        let stack = self.core.document.as_ref()?;
         let tool = self.point_counter.as_ref()?;
         Some(tool.counter.rois_for(stack))
     }
@@ -552,7 +552,7 @@ impl super::ViewerApp {
             self.core.status = Some(format!("{NAME}: no points to save yet"));
             return;
         }
-        let Some(stack) = self.core.stack.as_ref() else {
+        let Some(stack) = self.core.document.as_ref() else {
             return;
         };
         let suggested = file_name(&stack.path);
@@ -614,7 +614,7 @@ impl super::ViewerApp {
         let Some(rois) = self.point_rois() else {
             return;
         };
-        let Some(stack) = self.core.stack.as_mut() else {
+        let Some(stack) = self.core.document.as_mut() else {
             return;
         };
         if rois.is_empty() {

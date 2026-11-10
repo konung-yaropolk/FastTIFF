@@ -11,7 +11,7 @@
 //! without them still builds green.
 
 use fast_tiff_viewer::channels::{channel_tint, gray_lut_applicable, pseudocolor_applicable};
-use fast_tiff_viewer::{ChannelKind, Stack, Viewer};
+use fast_tiff_viewer::{ChannelKind, Document, Viewer};
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> Option<PathBuf> {
@@ -26,18 +26,18 @@ fn fixture(name: &str) -> Option<PathBuf> {
 
 /// Open a stack through whichever entry point this build has.
 ///
-/// With `mmap` (the default) that's the memory-mapped `Stack::open`; without
-/// it, the bytes are read here and handed to `Stack::from_bytes` — the path a
+/// With `mmap` (the default) that's the memory-mapped `Document::open`; without
+/// it, the bytes are read here and handed to `Document::from_bytes` — the path a
 /// browser takes. So the two CI configurations between them cover both.
-fn open_stack(path: PathBuf, pseudocolor: bool) -> anyhow::Result<Stack> {
+fn open_stack(path: PathBuf, pseudocolor: bool) -> anyhow::Result<Document> {
     #[cfg(feature = "mmap")]
     {
-        Stack::open(path, pseudocolor)
+        Document::open(path, pseudocolor)
     }
     #[cfg(not(feature = "mmap"))]
     {
         let bytes = std::fs::read(&path)?;
-        Stack::from_bytes(bytes, path, pseudocolor)
+        Document::from_bytes(bytes, path, pseudocolor)
     }
 }
 
@@ -153,17 +153,17 @@ fn dimension_override_conserves_the_plane_count() {
     // The file's own labels, and the interpretation currently in effect. These
     // are deliberately two different things.
     let file_dims = {
-        let m = &viewer.stack.as_ref().unwrap().tiff.meta;
+        let m = &viewer.document.as_ref().unwrap().tiff.meta;
         (m.channels, m.slices, m.frames)
     };
-    let shown = viewer.stack.as_ref().unwrap().display.dims();
+    let shown = viewer.document.as_ref().unwrap().display.dims();
     let planes = shown.channels * shown.slices * shown.frames;
     let volume_before = viewer.volume_identity();
 
     // Swap the channel and time roles, as the dimension-order dropdown does.
     viewer.set_dimension_order(shown.frames, shown.slices, shown.channels);
 
-    let stack = viewer.stack.as_ref().unwrap();
+    let stack = viewer.document.as_ref().unwrap();
     let after = stack.display.dims();
     assert_eq!(after.channels, shown.frames);
     assert_eq!(after.frames, shown.channels);
@@ -208,13 +208,13 @@ fn pseudocolor_tints_channels_and_reverts() {
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
 
-    if !pseudocolor_applicable(viewer.stack.as_ref().unwrap()) {
+    if !pseudocolor_applicable(viewer.document.as_ref().unwrap()) {
         return; // this fixture carries its own colors; nothing to assert
     }
 
     viewer.set_pseudocolor(true);
     let tinted = viewer
-        .stack
+        .document
         .as_ref()
         .unwrap()
         .tiff
@@ -229,7 +229,7 @@ fn pseudocolor_tints_channels_and_reverts() {
     );
 
     viewer.set_pseudocolor(false);
-    let stack = viewer.stack.as_ref().unwrap();
+    let stack = viewer.document.as_ref().unwrap();
     assert!(
         stack
             .tiff
@@ -248,13 +248,13 @@ fn a_failed_open_keeps_the_current_stack() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, good).expect("open");
-    assert!(viewer.stack.is_some());
+    assert!(viewer.document.is_some());
 
     // Dropping a corrupt/nonexistent file must not close the good image.
     let err = load(&mut viewer, PathBuf::from("definitely-not-a-file.tif"));
     assert!(err.is_err());
     assert!(
-        viewer.stack.is_some(),
+        viewer.document.is_some(),
         "a failed open must not drop the loaded stack"
     );
     assert!(viewer
@@ -271,7 +271,7 @@ fn playback_advances_by_real_elapsed_time() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    let n = viewer.stack.as_ref().unwrap().frame_count();
+    let n = viewer.document.as_ref().unwrap().frame_count();
     if n < 2 {
         return;
     }
@@ -281,13 +281,13 @@ fn playback_advances_by_real_elapsed_time() {
 
     // The first tick only seeds the clock — it can't know how much time passed.
     assert_eq!(viewer.tick_playback(0.0), 0);
-    assert_eq!(viewer.stack.as_ref().unwrap().frame_index, 0);
+    assert_eq!(viewer.document.as_ref().unwrap().frame(), 0);
 
     // A quarter-frame of real time is not yet a whole frame...
     assert_eq!(viewer.tick_playback(0.025), 0);
     // ...but it accumulates rather than being discarded: 0.025 + 0.075 = one frame.
     assert_eq!(viewer.tick_playback(0.1), 1);
-    assert_eq!(viewer.stack.as_ref().unwrap().frame_index, 1 % n);
+    assert_eq!(viewer.document.as_ref().unwrap().frame(), 1 % n);
 
     // A long stall steps by however many frames the elapsed time demanded.
     let stepped = viewer.tick_playback(0.6);
@@ -296,7 +296,7 @@ fn playback_advances_by_real_elapsed_time() {
     // Playback wraps rather than running off the end.
     for i in 0..(2 * n) {
         viewer.tick_playback(1.0 + i as f64 * 0.1);
-        assert!(viewer.stack.as_ref().unwrap().frame_index < n);
+        assert!(viewer.document.as_ref().unwrap().frame() < n);
     }
 }
 
@@ -307,7 +307,7 @@ fn falling_behind_latches_parallel_decode_only_in_auto() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    if viewer.stack.as_ref().unwrap().frame_count() < 2 {
+    if viewer.document.as_ref().unwrap().frame_count() < 2 {
         return;
     }
 
@@ -359,15 +359,15 @@ fn cycling_luts_never_disturbs_the_parsed_metadata() {
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
     // Collapse to a single channel so the LUT selector applies.
-    let dims = viewer.stack.as_ref().unwrap().display.dims();
+    let dims = viewer.document.as_ref().unwrap().display.dims();
     viewer.set_dimension_order(1, dims.slices, dims.channels * dims.frames);
-    if !fast_tiff_viewer::channels::gray_lut_applicable(viewer.stack.as_ref().unwrap()) {
+    if !fast_tiff_viewer::channels::gray_lut_applicable(viewer.document.as_ref().unwrap()) {
         return;
     }
 
     // Snapshot what the file said, before touching a single control.
     let before: Vec<_> = viewer
-        .stack
+        .document
         .as_ref()
         .unwrap()
         .tiff
@@ -379,13 +379,13 @@ fn cycling_luts_never_disturbs_the_parsed_metadata() {
 
     // Walk every selector entry, then come back to index 0.
     let options =
-        fast_tiff_viewer::channels::gray_lut_count(&viewer.stack.as_ref().unwrap().display);
+        fast_tiff_viewer::channels::gray_lut_count(&viewer.document.as_ref().unwrap().display);
     for sel in 0..options {
         viewer.set_gray_lut(sel);
     }
     viewer.set_gray_lut(0);
 
-    let stack = viewer.stack.as_ref().unwrap();
+    let stack = viewer.document.as_ref().unwrap();
     let after: Vec<_> = stack
         .tiff
         .meta
@@ -427,7 +427,7 @@ fn holding_the_scrubber_stops_playback_advancing() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    let n = viewer.stack.as_ref().unwrap().frame_count();
+    let n = viewer.document.as_ref().unwrap().frame_count();
     if n < 2 {
         return;
     }
@@ -439,7 +439,7 @@ fn holding_the_scrubber_stops_playback_advancing() {
     // Grab the scrubber and put the view on a particular frame, as the slider
     // widget does by writing straight into the stack.
     viewer.playback.scrubbing = true;
-    viewer.stack.as_mut().unwrap().frame_index = 3 % n;
+    viewer.document.as_mut().unwrap().set_frame(3 % n);
 
     // Time passes — plenty of it, several frames' worth at this rate — and the
     // frame the user is holding does not move.
@@ -447,7 +447,7 @@ fn holding_the_scrubber_stops_playback_advancing() {
         let stepped = viewer.tick_playback(i as f64 * 0.05);
         assert_eq!(stepped, 0, "playback advanced while the scrubber was held");
         assert_eq!(
-            viewer.stack.as_ref().unwrap().frame_index,
+            viewer.document.as_ref().unwrap().frame(),
             3 % n,
             "the held frame changed under the pointer at tick {i}"
         );
@@ -463,7 +463,7 @@ fn releasing_the_scrubber_resumes_playback() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    let n = viewer.stack.as_ref().unwrap().frame_count();
+    let n = viewer.document.as_ref().unwrap().frame_count();
     if n < 2 {
         return;
     }
@@ -473,7 +473,7 @@ fn releasing_the_scrubber_resumes_playback() {
     viewer.tick_playback(0.0);
 
     viewer.playback.scrubbing = true;
-    viewer.stack.as_mut().unwrap().frame_index = 2 % n;
+    viewer.document.as_mut().unwrap().set_frame(2 % n);
     viewer.tick_playback(1.0);
     assert!(
         viewer.playback.playing,
@@ -485,7 +485,7 @@ fn releasing_the_scrubber_resumes_playback() {
     viewer.tick_playback(1.0); // re-seeds the clock
     let stepped = viewer.tick_playback(1.3);
     assert_eq!(stepped, 3, "0.3 s at 10 fps is three frames");
-    assert_eq!(viewer.stack.as_ref().unwrap().frame_index, (2 + 3) % n);
+    assert_eq!(viewer.document.as_ref().unwrap().frame(), (2 + 3) % n);
 }
 
 /// Letting go must not pay back the frames that would have played during the
@@ -502,7 +502,7 @@ fn releasing_the_scrubber_does_not_replay_the_time_it_was_held() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    let n = viewer.stack.as_ref().unwrap().frame_count();
+    let n = viewer.document.as_ref().unwrap().frame_count();
     if n < 2 {
         return;
     }
@@ -512,7 +512,7 @@ fn releasing_the_scrubber_does_not_replay_the_time_it_was_held() {
     viewer.tick_playback(0.0);
 
     viewer.playback.scrubbing = true;
-    viewer.stack.as_mut().unwrap().frame_index = 1 % n;
+    viewer.document.as_mut().unwrap().set_frame(1 % n);
     // Held for ten seconds — three hundred frames at this rate.
     for i in 1..=100 {
         viewer.tick_playback(i as f64 * 0.1);
@@ -525,7 +525,7 @@ fn releasing_the_scrubber_does_not_replay_the_time_it_was_held() {
         stepped, 0,
         "released and immediately leapt {stepped} frames"
     );
-    assert_eq!(viewer.stack.as_ref().unwrap().frame_index, 1 % n);
+    assert_eq!(viewer.document.as_ref().unwrap().frame(), 1 % n);
 }
 
 /// The flag is about the *clock*, not about being open. With nothing playing,
@@ -537,7 +537,7 @@ fn holding_the_scrubber_while_paused_changes_nothing() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    if viewer.stack.as_ref().unwrap().frame_count() < 2 {
+    if viewer.document.as_ref().unwrap().frame_count() < 2 {
         return;
     }
 
@@ -560,7 +560,7 @@ fn playback_is_unchanged_when_the_scrubber_is_not_held() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    let n = viewer.stack.as_ref().unwrap().frame_count();
+    let n = viewer.document.as_ref().unwrap().frame_count();
     if n < 2 {
         return;
     }
@@ -589,7 +589,7 @@ fn releasing_the_scrubber_does_not_carry_a_stale_fraction() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    if viewer.stack.as_ref().unwrap().frame_count() < 2 {
+    if viewer.document.as_ref().unwrap().frame_count() < 2 {
         return;
     }
 

@@ -5,7 +5,7 @@
 use super::tint_color;
 use egui::{Color32, RichText};
 use fast_tiff_viewer::channels::{channel_tint, shift_sync, ui_tint};
-use fast_tiff_viewer::{Stack, Window};
+use fast_tiff_viewer::{Document, Window};
 
 /// Formats a sample value — in the file's own units, which is what every
 /// window and bound the viewer holds is in — for display, applying the stack's
@@ -382,7 +382,7 @@ fn contrast_row(
 /// a palette (indexed) stack has no contrast window at all.
 pub(super) fn contrast_controls(
     ui: &mut egui::Ui,
-    loaded: &mut Stack,
+    loaded: &mut Document,
     layout: ContrastLayout,
     track: Option<Window>,
 ) -> Option<egui::Rangef> {

@@ -9,7 +9,7 @@
 
 use super::*;
 use crate::plugins::{describe_view, StackHost};
-use crate::stack::{Stack, Window};
+use crate::document::{Document, Window};
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fasttiff_plugin_api::{Params, VolumeMode, VolumeView};
 use std::io::Cursor;
@@ -37,12 +37,12 @@ fn temp(name: &str) -> std::path::PathBuf {
 
 /// A one-channel 16-bit stack whose pixels run 0, 8192, 16384, … so the
 /// contrast window has something to bite on.
-fn ramp_stack() -> Stack {
+fn ramp_stack() -> Document {
     let opts = WriterOptions::new(W, H, SampleType::U16).metadata(StackMetaWrite::new(1, 1));
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).expect("writer");
     let px: Vec<u16> = (0..W * H).map(|i| (i * 8192).min(65535) as u16).collect();
     w.write_frame_u16(&px).expect("frame");
-    Stack::from_bytes(
+    Document::from_bytes(
         w.finish().expect("finish").into_inner(),
         "ramp.tif".into(),
         false,
@@ -61,7 +61,7 @@ fn read_png(path: &std::path::Path) -> (u32, u32, Vec<u8>) {
     (info.width, info.height, buf)
 }
 
-fn export(stack: &Stack, path: &std::path::Path) {
+fn export(stack: &Document, path: &std::path::Path) {
     let v = describe_view(stack, 0, false, view());
     let mut host = StackHost::new(stack, v);
     Png.export(
@@ -203,7 +203,7 @@ fn export_ramp_of(sample: SampleType, window: Window) -> Vec<u8> {
     }
     .expect("frame");
     let bytes = w.finish().expect("finish").into_inner();
-    let mut stack = Stack::from_bytes(bytes, "ramp.tif".into(), false).expect("open");
+    let mut stack = Document::from_bytes(bytes, "ramp.tif".into(), false).expect("open");
     stack.display.set_window(0, window);
     stack.display.set_luts(vec![grayscale_ramp()]);
     let path = temp(&format!("{sample:?}"));

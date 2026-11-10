@@ -56,9 +56,9 @@
 //! held histograms used to be made. It is the reference they are tested
 //! against, and what a caller without a renderer, and so without a sync, uses.
 
+use crate::document::Document;
 use crate::prefetch::{build_jobs, decode_jobs_borrowed, Decoded, Samples};
 use crate::residency::Residency;
-use crate::stack::Stack;
 use crate::units::{SampleUnits, Window};
 use crate::window::Overview;
 use scivis_render::{Lut, MAX_CHANNELS};
@@ -127,9 +127,9 @@ pub(crate) struct HistogramKey {
 
 impl HistogramKey {
     /// The key of `stack`'s histograms as it stands.
-    pub(crate) fn of(stack: &Stack) -> Self {
+    pub(crate) fn of(stack: &Document) -> Self {
         HistogramKey {
-            frame: stack.frame_index,
+            frame: stack.frame(),
             layout: stack.display.revision().layout,
             bounds: stack.display.settings().iter().map(|s| s.bounds).collect(),
         }
@@ -138,8 +138,8 @@ impl HistogramKey {
     /// Whether histograms built under this key still describe `stack`: the
     /// same as `*self == HistogramKey::of(stack)`, without building one, as a
     /// sync asks on every repaint.
-    pub(crate) fn describes(&self, stack: &Stack) -> bool {
-        self.frame == stack.frame_index
+    pub(crate) fn describes(&self, stack: &Document) -> bool {
+        self.frame == stack.frame()
             && self.layout == stack.display.revision().layout
             && self
                 .bounds
@@ -174,7 +174,7 @@ pub(crate) struct Binning {
 
 impl Binning {
     /// The binning of `stack`'s frames as it stands.
-    pub(crate) fn of(stack: &Stack) -> Self {
+    pub(crate) fn of(stack: &Document) -> Self {
         Binning {
             track: shared_track(stack),
             units: stack.display.settings().iter().map(|s| s.units).collect(),
@@ -189,7 +189,7 @@ impl Binning {
 }
 
 /// The histograms of the frame on screen, kept with the stack
-/// ([`Stack::histograms`]) and made from the decodes that show it (see the
+/// ([`Document::histograms`]) and made from the decodes that show it (see the
 /// [module docs](self)).
 ///
 /// Held until something replaces them, which is what a plot wants: after a
@@ -226,7 +226,7 @@ impl FrameHistograms {
     /// layout. They may still be of a frame the stack has just left; a
     /// channel layout they were not binned under gives none, since their
     /// channel numbers would name other channels.
-    pub fn shown(&self, stack: &Stack) -> &[Histogram] {
+    pub fn shown(&self, stack: &Document) -> &[Histogram] {
         match &self.held {
             Some(held) if held.key.layout == stack.display.revision().layout => &held.hists,
             _ => &[],
@@ -240,7 +240,7 @@ impl FrameHistograms {
 
     /// Whether the held histograms are of `stack` as it stands: the frame on
     /// screen, under its channel layout and slider tracks.
-    pub(crate) fn describes(&self, stack: &Stack) -> bool {
+    pub(crate) fn describes(&self, stack: &Document) -> bool {
         self.held
             .as_ref()
             .is_some_and(|held| held.key.describes(stack))
@@ -316,7 +316,7 @@ impl FrameHistograms {
 
     /// Whether what is held was binned from `source` for `stack` as it
     /// stands, so binning more of it adds to it rather than starting over.
-    fn holds(&self, stack: &Stack, source: HistogramSource) -> bool {
+    fn holds(&self, stack: &Document, source: HistogramSource) -> bool {
         self.held
             .as_ref()
             .is_some_and(|held| held.source == source && held.key.describes(stack))
@@ -332,7 +332,7 @@ impl FrameHistograms {
     not(any(feature = "backend-wgpu", feature = "backend-glow")),
     allow(dead_code)
 )]
-pub(crate) fn prepare(stack: &mut Stack, source: HistogramSource) -> [bool; MAX_CHANNELS] {
+pub(crate) fn prepare(stack: &mut Document, source: HistogramSource) -> [bool; MAX_CHANNELS] {
     if !stack.services.histograms.holds(stack, source) {
         let key = HistogramKey::of(stack);
         let histograms = &mut stack.services.histograms;
@@ -362,7 +362,7 @@ pub(crate) fn prepare(stack: &mut Stack, source: HistogramSource) -> [bool; MAX_
     allow(dead_code)
 )]
 pub(crate) fn bin_shown<'a>(
-    stack: &Stack,
+    stack: &Document,
     missing: &[bool; MAX_CHANNELS],
     planes: impl IntoIterator<Item = (usize, Samples<'a>)>,
 ) -> Vec<Histogram> {
@@ -402,7 +402,7 @@ pub(crate) fn bin_shown<'a>(
     not(any(feature = "backend-wgpu", feature = "backend-glow")),
     allow(dead_code)
 )]
-pub(crate) fn complete(stack: &mut Stack, residency: &Residency, start: bool) -> usize {
+pub(crate) fn complete(stack: &mut Document, residency: &Residency, start: bool) -> usize {
     if residency.over_texture_limit {
         from_overview(stack, residency.overview.as_ref());
         return 0;
@@ -419,7 +419,7 @@ pub(crate) fn complete(stack: &mut Stack, residency: &Residency, start: bool) ->
     if !missing.contains(&true) {
         return 0;
     }
-    let jobs = build_jobs(stack, stack.frame_index, &missing);
+    let jobs = build_jobs(stack, stack.frame(), &missing);
     // Borrowed, as for the screen: an uncompressed plane is binned straight
     // out of the mapping, with no copy.
     let binned = match decode_jobs_borrowed(
@@ -452,10 +452,10 @@ pub(crate) fn complete(stack: &mut Stack, residency: &Residency, start: bool) ->
 /// Held, or binned as it was built ([`bin_whole_view`]), what is binned from
 /// a view of the whole frame stays while it describes the frame: zoomed in on
 /// it, there is no such view, and the histograms are still the frame's.
-fn from_overview(stack: &mut Stack, overview: Option<&Overview>) {
+fn from_overview(stack: &mut Document, overview: Option<&Overview>) {
     let layout = stack.display.revision().layout;
-    let of_this_frame = overview
-        .filter(|o| o.built.frame_index == stack.frame_index && o.revision.layout == layout);
+    let of_this_frame =
+        overview.filter(|o| o.built.frame_index == stack.frame() && o.revision.layout == layout);
     let Some(overview) = of_this_frame else {
         // Nothing of this frame to bin. What is held is kept only while it
         // is still this frame's: another frame's would be the wrong picture,
@@ -477,7 +477,7 @@ fn from_overview(stack: &mut Stack, overview: Option<&Overview>) {
     not(any(feature = "backend-wgpu", feature = "backend-glow")),
     allow(dead_code)
 )]
-pub(crate) fn bin_whole_view(stack: &mut Stack, view: &crate::window::Built) {
+pub(crate) fn bin_whole_view(stack: &mut Document, view: &crate::window::Built) {
     let source = HistogramSource::Overview {
         stride: view.roi.stride.max(1),
     };
@@ -496,7 +496,7 @@ pub(crate) fn bin_whole_view(stack: &mut Stack, view: &crate::window::Built) {
 /// Histogram every display channel of the stack's current frame, decoding
 /// every one of them: the whole-frame reference the held histograms
 /// ([`FrameHistograms`]) are made to equal, and what a caller with no renderer
-/// uses. A frontend showing the frame should read [`Stack::histograms`]
+/// uses. A frontend showing the frame should read [`Document::histograms`]
 /// instead, which are binned from the decodes that show it.
 ///
 /// Returns an empty vec when nothing is loaded or the frame fails to decode —
@@ -505,7 +505,7 @@ pub(crate) fn bin_whole_view(stack: &mut Stack, view: &crate::window::Built) {
 /// What the result depends on, and so when to call this again, is the frame,
 /// the channel layout and each channel's slider track: not which channels are
 /// on, nor their contrast windows.
-pub fn frame_histograms(stack: &Stack) -> Vec<Histogram> {
+pub fn frame_histograms(stack: &Document) -> Vec<Histogram> {
     if stack.display.settings().is_empty() {
         return Vec::new();
     }
@@ -514,7 +514,7 @@ pub fn frame_histograms(stack: &Stack) -> Vec<Histogram> {
     // instead of decoding the frame again, which is what makes toggling one
     // feel instant — and is why `HistogramKey` leaves the enabled set out.
     let every = [true; MAX_CHANNELS];
-    let jobs = build_jobs(stack, stack.frame_index, &every);
+    let jobs = build_jobs(stack, stack.frame(), &every);
     let Ok(decoded) = decode_jobs_borrowed(
         &stack.tiff.data,
         &stack.tiff.frames,
@@ -536,7 +536,7 @@ pub fn frame_histograms(stack: &Stack) -> Vec<Histogram> {
 /// Public because a frontend drawing the plot needs the same number to label an
 /// axis or place a marker, and recomputing it there would be one more place for
 /// the two to disagree.
-pub fn shared_track(stack: &Stack) -> Window {
+pub fn shared_track(stack: &Document) -> Window {
     let settings = stack.display.settings();
     let track = settings
         .iter()

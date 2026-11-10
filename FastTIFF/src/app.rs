@@ -28,7 +28,7 @@ use fast_tiff_viewer::channels::{
     pseudocolor_applicable,
 };
 use fast_tiff_viewer::roi::LargeImageMode;
-use fast_tiff_viewer::{DecodeMode, Stack, ViewMode, Viewer};
+use fast_tiff_viewer::{DecodeMode, Document, ViewMode, Viewer};
 // The registry's entries are the C-boundary types themselves rather than
 // trait objects, so the traits whose methods the app calls are named here —
 // the importer's and exporter's only where the app imports and exports with
@@ -1161,7 +1161,7 @@ impl PanelLayout {
 }
 
 pub struct ViewerApp {
-    /// Everything that isn't GUI: the loaded stack, channel settings, playback
+    /// Everything that isn't GUI: the loaded document, channel settings, playback
     /// clock, 3D camera, and the decode→GPU sync. See `fast_tiff_viewer`.
     core: Viewer,
     /// GPU textures/shader for compositing the image, shared with the paint
@@ -1633,7 +1633,7 @@ impl ViewerApp {
 
     /// Begin a plugin: show its dialog, or run it at once if it declared none.
     fn start_plugin(&mut self, index: usize) {
-        let Some(loaded) = self.core.stack.as_ref() else {
+        let Some(loaded) = self.core.document.as_ref() else {
             self.core.status = Some("Open an image first".into());
             return;
         };
@@ -1678,12 +1678,12 @@ impl ViewerApp {
     }
 
     /// The viewer state a plugin sees, snapshotted for one run.
-    fn plugin_view(&self, loaded: &fast_tiff_viewer::Stack) -> fasttiff_plugin_api::ViewParams {
+    fn plugin_view(&self, loaded: &fast_tiff_viewer::Document) -> fasttiff_plugin_api::ViewParams {
         let v = &self.core.volume;
         let (forward, right, up) = v.cam.basis();
         fast_tiff_viewer::plugins::describe_view(
             loaded,
-            loaded.frame_index,
+            loaded.frame(),
             self.core.view_mode == ViewMode::Volume,
             fast_tiff_viewer::plugins::describe_volume(
                 match v.render {
@@ -1800,7 +1800,7 @@ impl ViewerApp {
     /// `values` untouched, so going back to a method restores what was set
     /// for it rather than resetting it.
     fn requery_dialog(&mut self, dialog: &mut PluginDialog) {
-        let Some(loaded) = self.core.stack.as_ref() else {
+        let Some(loaded) = self.core.document.as_ref() else {
             return;
         };
         let host = fast_tiff_viewer::plugins::StackHost::new(loaded, self.plugin_view(loaded))
@@ -1857,7 +1857,7 @@ impl ViewerApp {
     /// The registry goes with it, exactly as an import's does, which is what
     /// stops a second plugin starting while this one has the data.
     fn run_plugin(&mut self, index: usize, values: fasttiff_plugin_api::Params) {
-        let Some(loaded) = self.core.stack.as_ref() else {
+        let Some(loaded) = self.core.document.as_ref() else {
             self.core.status = Some("Open an image first".into());
             return;
         };
@@ -2143,7 +2143,7 @@ impl ViewerApp {
     /// file. See `fast_tiff_viewer::save::SaveSource`.
     #[cfg(not(target_arch = "wasm32"))]
     fn save_as(&mut self) {
-        let Some(stack) = self.core.stack.as_ref() else {
+        let Some(stack) = self.core.document.as_ref() else {
             self.core.status = Some("Open an image first".into());
             return;
         };
@@ -2198,7 +2198,7 @@ impl ViewerApp {
     /// Write the open stack as a TIFF, on a worker.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_save(&mut self, path: std::path::PathBuf, name: String) {
-        let Some(stack) = self.core.stack.as_ref() else {
+        let Some(stack) = self.core.document.as_ref() else {
             return;
         };
         let source = fast_tiff_viewer::save::SaveSource::of(stack);
@@ -2253,7 +2253,7 @@ impl ViewerApp {
     /// [`Exporter`]: fasttiff_plugin_api::Exporter
     #[cfg(target_arch = "wasm32")]
     fn save_as(&mut self) {
-        let Some(stack) = self.core.stack.as_ref() else {
+        let Some(stack) = self.core.document.as_ref() else {
             self.core.status = Some("Open an image first".into());
             return;
         };
@@ -2295,7 +2295,7 @@ impl ViewerApp {
     ///
     /// Shared by the toolbar button and the hotkey, so the two cannot drift.
     fn copy_view(&mut self, ctx: &egui::Context) {
-        let Some(stack) = self.core.stack.as_ref() else {
+        let Some(stack) = self.core.document.as_ref() else {
             self.core.status = Some("Open an image first".into());
             return;
         };
@@ -2356,7 +2356,7 @@ impl ViewerApp {
     /// what keeps a second job from starting while this one holds the data.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_export(&mut self, index: usize, path: std::path::PathBuf, name: String) {
-        let Some(loaded) = self.core.stack.as_ref() else {
+        let Some(loaded) = self.core.document.as_ref() else {
             return;
         };
         let Some(registry) = self.plugins.take() else {
@@ -2526,7 +2526,7 @@ impl ViewerApp {
 
         let img_dims = self
             .core
-            .stack
+            .document
             .as_ref()
             .and_then(|l| l.tiff.frames.first())
             .map(|f| (f.width as f32, f.height as f32));
@@ -2694,7 +2694,7 @@ impl ViewerApp {
         }
 
         // Window title: loaded filename, or the app name when nothing is open.
-        let desired_title = match &self.core.stack {
+        let desired_title = match &self.core.document {
             Some(loaded) => {
                 let name = loaded
                     .path
@@ -2828,7 +2828,7 @@ impl ViewerApp {
         let touch = ui.input(|i| i.multi_touch());
         let pinching = touch.is_some();
         if let Some(t) = touch {
-            if self.core.stack.is_some() && self.core.view_mode == ViewMode::Movie {
+            if self.core.document.is_some() && self.core.view_mode == ViewMode::Movie {
                 let old_zoom = self.view.zoom;
                 let (lo, hi) = zoom_bounds(self.view.fit_zoom);
                 let new_zoom = (old_zoom * t.zoom_delta).clamp(lo, hi);
@@ -2858,7 +2858,7 @@ impl ViewerApp {
         // height is known. Cursor-centering uses last frame's cached geometry.
         if zoom_step != 0
             && !pinching
-            && self.core.stack.is_some()
+            && self.core.document.is_some()
             && self.core.view_mode == ViewMode::Movie
         {
             // Stepped off wherever the picture is *heading*, not where it has
@@ -2888,7 +2888,7 @@ impl ViewerApp {
         // Advance the glide, in this same frame as the step that started it, so
         // the picture is already moving on the frame the wheel turned.
         if self.view.zoom_glide.is_some() {
-            if pinching || self.core.stack.is_none() || self.core.view_mode != ViewMode::Movie {
+            if pinching || self.core.document.is_none() || self.core.view_mode != ViewMode::Movie {
                 // A pinch drives the zoom directly and a 3D view has none;
                 // either way the glide has nothing left to say.
                 self.view.zoom_glide = None;
@@ -2945,7 +2945,7 @@ impl ViewerApp {
                 // image, the button *will* work, and the only thing missing is
                 // the few seconds a write or an import is taking. That is a
                 // promise worth making, so the disabled hover text names it.
-                if self.core.stack.is_some() {
+                if self.core.document.is_some() {
                     // Named for what each platform actually does. The desktop
                     // asks where to put the file, so its label ends in an
                     // ellipsis; the browser cannot ask and hands the file to the
@@ -2990,7 +2990,7 @@ impl ViewerApp {
                 }
                 {
                     let available = self.plugins.as_ref().filter(|_| self.job.is_none());
-                    let has_stack = self.core.stack.is_some();
+                    let has_stack = self.core.document.is_some();
                     match plugins_ui::plugins_menu(ui, available, has_stack) {
                         plugins_ui::MenuAction::Run(i) => plugin_to_start = Some(i),
                         plugins_ui::MenuAction::PointCounter => open_point_counter = true,
@@ -3038,7 +3038,7 @@ impl ViewerApp {
                         render_settings_toggle = true;
                     }
                 }
-                if self.core.stack.is_none() {
+                if self.core.document.is_none() {
                     // Nothing open yet: show the version + active render backend
                     // in the space the file info will later occupy.
                     ui.separator();
@@ -3050,7 +3050,7 @@ impl ViewerApp {
                     )));
 
                 }
-                if let Some(loaded) = &self.core.stack {
+                if let Some(loaded) = &self.core.document {
                     let meta = &loaded.tiff.meta;
                     // What the viewer is actually showing, which is not the
                     // file's raw claim whenever an axis was reclassified.
@@ -3146,14 +3146,14 @@ impl ViewerApp {
                         ui.separator();
                         let frame_digits = dims.frames.to_string().len();
                         ui.label(
-                            RichText::new(format!("Frame {:>frame_digits$} / {}", loaded.frame_index + 1, dims.frames))
+                            RichText::new(format!("Frame {:>frame_digits$} / {}", loaded.frame() + 1, dims.frames))
                                 .monospace(),
                         );
                         if let Some(interval) = meta.frame_interval_s {
                             ui.separator();
                             let max_time = dims.frames.saturating_sub(1) as f64 * interval;
                             let time_width = format!("{max_time:.3}").len();
-                            let current_time = loaded.frame_index as f64 * interval;
+                            let current_time = loaded.frame() as f64 * interval;
                             ui.label(RichText::new(format!("t = {current_time:>time_width$.3}s")).monospace());
                         }
                     }
@@ -3218,7 +3218,7 @@ impl ViewerApp {
             if mode == ViewMode::Volume {
                 let is_4d = self
                     .core
-                    .stack
+                    .document
                     .as_ref()
                     .is_some_and(|l| l.display.dims().slices > 1);
                 if !is_4d {
@@ -3332,7 +3332,7 @@ impl ViewerApp {
             Some(key)
         };
         let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
-            let Some(loaded) = &mut self.core.stack else {
+            let Some(loaded) = &mut self.core.document else {
                 if !load_stage {
                     ui.label(RichText::new("© 2026 SciWare LLC").weak());
                 }
@@ -3395,28 +3395,30 @@ impl ViewerApp {
 
                 ui.add_enabled_ui(frame_nav_enabled, |ui| {
                     if ui.button("|<").on_hover_text("First frame").clicked() {
-                        loaded.frame_index = 0;
+                        loaded.set_frame(0);
                     }
                     if ui.button("<").on_hover_text("Previous frame (←)").clicked() {
-                        loaded.frame_index = loaded.frame_index.saturating_sub(1);
+                        loaded.set_frame(loaded.frame().saturating_sub(1));
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button(">|").on_hover_text("Last frame").clicked() {
-                            loaded.frame_index = max_frame;
+                            loaded.set_frame(max_frame);
                         }
                         if ui.button(">").on_hover_text("Next frame (→)").clicked() {
-                            loaded.frame_index = (loaded.frame_index + 1).min(max_frame);
+                            loaded.set_frame(loaded.frame() + 1);
                         }
 
                         let remaining = ui.available_width();
                         if has_multiple_frames {
                             ui.spacing_mut().slider_width = remaining.max(40.0);
+                            let mut frame = loaded.frame();
                             let scrub = ui.add(
-                                egui::Slider::new(&mut loaded.frame_index, 0..=max_frame)
+                                egui::Slider::new(&mut frame, 0..=max_frame)
                                     .show_value(false)
                                     .trailing_fill(true),
                             );
+                            loaded.set_frame(frame);
                             // Held, not merely dragged: the frame under the
                             // pointer should hold still from the moment it is
                             // grabbed, before any movement, since that is
@@ -3454,12 +3456,11 @@ impl ViewerApp {
                     } else {
                         1
                     };
-                    let max_frame = loaded.display.dims().frames.saturating_sub(1);
                     if i.key_pressed(egui::Key::ArrowRight) {
-                        loaded.frame_index = (loaded.frame_index + step).min(max_frame);
+                        loaded.set_frame(loaded.frame() + step);
                     }
                     if i.key_pressed(egui::Key::ArrowLeft) {
-                        loaded.frame_index = loaded.frame_index.saturating_sub(step);
+                        loaded.set_frame(loaded.frame().saturating_sub(step));
                     }
                 });
             }
@@ -3725,7 +3726,7 @@ impl ViewerApp {
             self.show_metadata = !self.show_metadata;
         }
         if self.show_metadata {
-            match &self.core.stack {
+            match &self.core.document {
                 Some(loaded) => metadata_window(ui.ctx(), &mut self.show_metadata, loaded),
                 None => self.show_metadata = false,
             }
@@ -3739,7 +3740,7 @@ impl ViewerApp {
                 over_texture_limit: self.core.over_texture_limit(),
                 window: self.core.resident_window(),
             };
-            match self.core.stack.as_mut() {
+            match self.core.document.as_mut() {
                 Some(loaded) => {
                     histogram_window(ui.ctx(), &mut open, loaded, resident, &mut self.hist_log)
                 }
@@ -3771,7 +3772,7 @@ impl ViewerApp {
                 &mut self.core.volume.volume_autolevel,
                 &mut self.show_coord_box,
                 &mut reset_position,
-                self.core.stack.as_ref(),
+                self.core.document.as_ref(),
             );
             // Keep the view continuous across a fly⇄orbit switch (the two use
             // different eye representations) instead of snapping to a default.
@@ -3865,13 +3866,13 @@ impl ViewerApp {
             let before = self
                 .point_counter
                 .as_ref()
-                .and(self.core.stack.as_ref())
+                .and(self.core.document.as_ref())
                 .map(fast_tiff_viewer::plugins::builtin::point_counter::frame_starts);
             self.core.set_dimension_order(c, z, f);
             if let (Some(before), Some(tool), Some(stack)) = (
                 before,
                 self.point_counter.as_mut(),
-                self.core.stack.as_ref(),
+                self.core.document.as_ref(),
             ) {
                 tool.follow_axes(&before, stack);
             }
@@ -3887,7 +3888,7 @@ impl ViewerApp {
         if self.core.view_mode == ViewMode::Volume
             && self
                 .core
-                .stack
+                .document
                 .as_ref()
                 .is_some_and(|l| l.display.dims().frames < 2)
         {
@@ -3912,7 +3913,7 @@ impl ViewerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().inner_margin(egui::Margin::ZERO))
             .show_inside(ui, |ui| {
-                if self.core.stack.is_none() {
+                if self.core.document.is_none() {
                     ui.centered_and_justified(|ui| {
                         ui.label(welcome_text());
                     });
@@ -3943,7 +3944,7 @@ impl ViewerApp {
                 if self.view.pending_initial_fit && self.core.view_mode == ViewMode::Movie {
                     let dims = self
                         .core
-                        .stack
+                        .document
                         .as_ref()
                         .and_then(|l| l.tiff.frames.first())
                         .map(|f| (f.width as f32, f.height as f32));
@@ -4022,7 +4023,7 @@ impl ViewerApp {
                     return;
                 }
 
-                let Some(loaded) = &self.core.stack else {
+                let Some(loaded) = &self.core.document else {
                     return;
                 };
                 let (Some(w), Some(h)) = (
@@ -4057,7 +4058,7 @@ impl ViewerApp {
                     || self.point_counter.is_some()
                     || self.plot.as_ref().is_some_and(|p| p.wants_regions()))
                     && !pinching;
-                let frame = loaded.frame_index;
+                let frame = loaded.frame();
 
                 // The navigator's frame box, worked out before anything acts on a
                 // drag: a press that lands on the map has to claim the gesture
@@ -4478,7 +4479,7 @@ impl ViewerApp {
                             // ~10% of the stack per notch, spread across the glide.
                             let n_frames = self
                                 .core
-                                .stack
+                                .document
                                 .as_ref()
                                 .map(|l| l.display.dims().frames)
                                 .unwrap_or(1);
@@ -4550,10 +4551,8 @@ impl ViewerApp {
             });
 
         if scroll_step != 0 {
-            if let Some(loaded) = &mut self.core.stack {
-                let max_frame = loaded.display.dims().frames.saturating_sub(1) as i64;
-                let target = (loaded.frame_index as i64 + scroll_step as i64).clamp(0, max_frame);
-                loaded.frame_index = target as usize;
+            if let Some(loaded) = &mut self.core.document {
+                loaded.set_frame(loaded.frame().saturating_add_signed(scroll_step as isize));
             }
         }
 

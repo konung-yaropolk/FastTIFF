@@ -7,7 +7,7 @@
 //! offset below — looks perfectly plausible until someone measures something.
 
 use super::*;
-use crate::stack::{Stack, Window};
+use crate::document::{Document, Window};
 use fast_tiff_lib::{
     read_frame_f32, read_frame_u16, read_planes_f32, SampleType, StackMetaWrite, TiffStack,
     TiffWriter, WriterOptions,
@@ -65,15 +65,15 @@ fn source(sample: SampleType, channels: usize, slices: usize, frames: usize) -> 
     w.finish().expect("finish").into_inner()
 }
 
-fn open(bytes: Vec<u8>) -> Stack {
-    Stack::from_bytes(bytes, "probe.tif".into(), false).expect("the source should open")
+fn open(bytes: Vec<u8>) -> Document {
+    Document::from_bytes(bytes, "probe.tif".into(), false).expect("the source should open")
 }
 
 /// `bytes` opened, with one more frame of a different shape on the end — what
 /// a scanner's thumbnail IFD looks like to the reader. The writer will not
 /// make such a file, so the frame's geometry is faked, on a `TiffStack` of its
 /// own: the stack's is shared with its workers and is not this test's to edit.
-fn with_odd_frame(bytes: Vec<u8>) -> Stack {
+fn with_odd_frame(bytes: Vec<u8>) -> Document {
     let mut stack = open(bytes.clone());
     let mut tiff = TiffStack::from_bytes(bytes).expect("parse");
     let mut odd = tiff.frames[0].clone();
@@ -216,8 +216,8 @@ fn the_shape_on_screen_is_the_shape_that_is_written() {
 
     let path = temp("shape");
     save_stack(&stack, &path).expect("save");
-    let back =
-        Stack::from_bytes(std::fs::read(&path).unwrap(), "back.tif".into(), false).expect("reopen");
+    let back = Document::from_bytes(std::fs::read(&path).unwrap(), "back.tif".into(), false)
+        .expect("reopen");
     assert_eq!(
         (
             back.display.dims().channels,
@@ -930,13 +930,13 @@ fn the_overlay_is_readable_by_imagej_below_4_gib() {
     let opts = WriterOptions::new(4, 4, SampleType::U8);
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
     w.write_frame_u8(&[0; 16]).unwrap();
-    let s = Stack::from_bytes(w.finish().unwrap().into_inner(), "x.tif".into(), false).unwrap();
+    let s = Document::from_bytes(w.finish().unwrap().into_inner(), "x.tif".into(), false).unwrap();
     assert!(overlay_readable_by_imagej(&s));
 }
 
 /// A stack of `T` samples with display range `range` in its description, and
 /// the samples `0, 1, 2, ...` (wrapping).
-fn ranged(sample: SampleType, range: (f64, f64)) -> Stack {
+fn ranged(sample: SampleType, range: (f64, f64)) -> Document {
     let opts = WriterOptions::new(16, 16, sample)
         .metadata(StackMetaWrite::new(1, 1).range(range.0, range.1));
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
@@ -961,12 +961,12 @@ fn ranged(sample: SampleType, range: (f64, f64)) -> Stack {
             _ => unreachable!(),
         }
     }
-    Stack::from_bytes(w.finish().unwrap().into_inner(), "ranged.tif".into(), false).unwrap()
+    Document::from_bytes(w.finish().unwrap().into_inner(), "ranged.tif".into(), false).unwrap()
 }
 
 /// The `min=`/`max=` a saved file's description declares.
 fn declared_range(bytes: Vec<u8>) -> (String, String) {
-    let back = Stack::from_bytes(bytes, "again.tif".into(), false).unwrap();
+    let back = Document::from_bytes(bytes, "again.tif".into(), false).unwrap();
     let desc = back.tiff.description.clone().unwrap_or_default();
     let get = |key: &str| {
         desc.lines()
@@ -999,7 +999,7 @@ fn an_8_bit_window_is_in_sample_units_both_ways() {
     s.display.set_window(0, Window::new(20.0, 147.0));
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
     assert_eq!(declared_range(bytes.clone()), ("20".into(), "147".into()));
-    let back = Stack::from_bytes(bytes, "again.tif".into(), false).unwrap();
+    let back = Document::from_bytes(bytes, "again.tif".into(), false).unwrap();
     assert_eq!(
         back.display.settings()[0].window,
         Window::new(20.0, 147.0),
@@ -1043,7 +1043,7 @@ fn a_signed_16_bit_window_is_in_imagejs_offset_units_in_the_file() {
         declared_range(bytes.clone()),
         ("19968".into(), "32768".into())
     );
-    let back = Stack::from_bytes(bytes, "again.tif".into(), false).unwrap();
+    let back = Document::from_bytes(bytes, "again.tif".into(), false).unwrap();
     assert_eq!(
         back.display.settings()[0].window,
         Window::new(-12_800.0, 0.0)

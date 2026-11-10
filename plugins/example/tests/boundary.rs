@@ -89,7 +89,7 @@ fn volume() -> VolumeView {
 
 /// A small float stack whose planes are all different, so a mixed-up plane
 /// index cannot pass unnoticed.
-fn stack(channels: usize, frames: usize) -> fast_tiff_viewer::stack::Stack {
+fn stack(channels: usize, frames: usize) -> fast_tiff_viewer::Document {
     let (w, h) = (5u32, 4u32);
     let n = (w * h) as usize;
     let mut planes = Vec::new();
@@ -1094,7 +1094,7 @@ fn expected_mean(t: usize, indices: &[usize]) -> f32 {
     (sum / indices.len() as f64) as f32
 }
 
-fn run_plot(s: &fast_tiff_viewer::stack::Stack, rois: Vec<Roi>) -> fasttiff_plugin_api::Plot {
+fn run_plot(s: &fast_tiff_viewer::Document, rois: Vec<Roi>) -> fasttiff_plugin_api::Plot {
     let mut from_library = plugin("dev.fasttiff.example.plotmean");
     let view = plugins::describe_view(s, 0, false, volume());
     let mut host = plugins::StackHost::new(s, view).with_selection(rois);

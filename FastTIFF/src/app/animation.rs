@@ -743,7 +743,7 @@ impl super::ViewerApp {
 
     /// Carry out an animation the plugin at `plugin` (called `name`) returned.
     pub(super) fn start_animation(&mut self, plugin: usize, name: &str, animation: Animation) {
-        let Some(stack) = self.core.stack.as_ref() else {
+        let Some(stack) = self.core.document.as_ref() else {
             self.core.status = Some("Open an image first".into());
             return;
         };
@@ -889,7 +889,7 @@ impl super::ViewerApp {
         let ready =
             self.core.volume_built() && !self.core.volume_building() && self.volume_rect.is_some();
         let ppp = ctx.pixels_per_point();
-        let movie = match (self.volume_rect, self.core.stack.as_ref()) {
+        let movie = match (self.volume_rect, self.core.document.as_ref()) {
             (Some(rect), Some(stack)) => {
                 let (w, h) = stack.dimensions().unwrap_or((1, 1));
                 // At window resolution the movie is the view's own size,

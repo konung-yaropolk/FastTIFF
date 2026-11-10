@@ -440,10 +440,10 @@ pub enum Outcome {
     /// Replace the document the plugin was run on with this image.
     ///
     /// The other half of [`Outcome::NewDocument`], and the reason a tool can
-    /// offer an "open in a new window" checkbox at all: FastTIFF is one stack
-    /// per window, so a result either arrives in a window of its own or takes
-    /// the place of the one it came from, and only the user knows which they
-    /// wanted.
+    /// offer an "open in a new window" checkbox at all: FastTIFF is one
+    /// document per window, so a result either arrives in a window of its own
+    /// or takes the place of the one it came from, and only the user knows
+    /// which they wanted.
     ///
     /// Unlike the other outcomes this one is **destructive** — what was open is
     /// gone from that window unless it was saved — so a plugin should default

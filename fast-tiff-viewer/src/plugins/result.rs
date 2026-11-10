@@ -1,7 +1,7 @@
 //! Turning what a plugin produced into a document the app can show.
 //!
 //! A plugin's result is written as a TIFF and opened through the ordinary
-//! reader, rather than built into a [`Stack`](crate::Stack) field by field.
+//! reader, rather than built into a [`Document`](crate::Document) field by field.
 //! That costs an encode and a decode of the result, and it is still the right
 //! answer: a plugin result is a *real* document from the moment it exists.
 //! Channel setup, auto-contrast, LUTs, the c/z/t interpretation, the
@@ -171,7 +171,7 @@ fn remove_scratch(path: &Path) -> bool {
 /// pixels: the document it was made from, and — on the desktop — the scratch
 /// file it is read from, which it owns.
 ///
-/// Held by the [`Stack`](crate::Stack) the result was opened as, so the file
+/// Held by the [`Document`](crate::Document) the result was opened as, so the file
 /// is deleted when the document is closed or replaced, the stack's own mapping
 /// of it having gone first.
 #[derive(Debug, Default)]
@@ -1037,13 +1037,13 @@ pub fn to_stack(
     image: &ImageResult,
     info: Option<&StackInfo>,
     apply_pseudocolor: bool,
-) -> anyhow::Result<crate::stack::Stack> {
+) -> anyhow::Result<crate::document::Document> {
     let bytes = to_tiff_bytes(image, info)?;
     let name = info
         .map(|i| i.name.clone())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| image.name.clone());
-    crate::stack::Stack::from_bytes(bytes, name.into(), apply_pseudocolor)
+    crate::document::Document::from_bytes(bytes, name.into(), apply_pseudocolor)
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@
 //!     `render::tune_web_options`),
 //!   * how large the chrome is drawn — the web build runs at 150% (`app::scale`).
 //!
-//! Everything below the UI — the stack model, channel settings, contrast,
+//! Everything below the UI — the document model, channel settings, contrast,
 //! dimension order, playback and the 3D camera — comes from `fast_tiff_viewer`
 //! and is identical on every target.
 

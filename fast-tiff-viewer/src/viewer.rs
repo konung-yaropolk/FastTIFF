@@ -1,4 +1,4 @@
-//! [`Viewer`] — the frontend-agnostic viewer state: which stack is open, what
+//! [`Viewer`] — the frontend-agnostic viewer state: which document is open, what
 //! it's showing, and everything the per-frame GPU sync needs.
 //!
 //! This is the state a *second* frontend would otherwise have to reinvent. It
@@ -10,9 +10,9 @@
 use crate::camera::CameraState;
 use crate::channels::refresh_pseudocolor;
 use crate::dimensions::{apply_dimension_override, compute_status};
+use crate::document::Document;
 use crate::residency::Residency;
 use crate::roi::Roi;
-use crate::stack::Stack;
 use scivis_render::{VolumeInterp, VolumeRender};
 use std::path::PathBuf;
 
@@ -247,7 +247,8 @@ impl VolumeView {
 /// The viewer's frontend-agnostic state.
 #[derive(Default)]
 pub struct Viewer {
-    pub stack: Option<Stack>,
+    /// The open document, if any: the file and how it is shown.
+    pub document: Option<Document>,
     /// A note about the stack's shape worth surfacing to the user (mislabeled
     /// channel counts, the frozen-Z warning). `None` when there's nothing to say.
     pub status: Option<String>,
@@ -258,7 +259,7 @@ pub struct Viewer {
     pub apply_pseudocolor: bool,
     /// User's decode-parallelism preference (persists across files).
     pub decode_mode: DecodeMode,
-    /// A file being opened on a worker thread, if one is. The previous stack
+    /// A file being opened on a worker thread, if one is. The previous document
     /// stays on screen and usable until it lands — an open replaces a picture
     /// rather than removing one and then providing another.
     #[cfg(feature = "threads")]
@@ -276,7 +277,7 @@ pub struct Viewer {
     /// across files). Only consulted for such frames; see
     /// [`crate::roi::LargeImageMode`].
     pub large_image_mode: crate::roi::LargeImageMode,
-    /// Latched once playback falls behind in `Auto` mode. Reset per stack.
+    /// Latched once playback falls behind in `Auto` mode. Reset per document.
     pub decode_parallel: bool,
     /// The visible UV sub-rect of the 2D image (`offset`, `scale`), computed by
     /// the frontend from its zoom + pan and uploaded to the shader. The image is
@@ -310,7 +311,7 @@ pub struct Viewer {
     /// only one that will still be wanted.
     pub view_moving: bool,
     /// Whether the frontend is showing the histograms of the frame on screen
-    /// ([`Stack::histograms`]): set while its histogram panel is open.
+    /// ([`Document::histograms`]): set while its histogram panel is open.
     ///
     /// While it is, [`sync`](Self::sync) bins each frame it decodes for the
     /// screen (during playback, a few times a second, and by the read-ahead
@@ -323,7 +324,7 @@ pub struct Viewer {
     pub histograms_wanted: bool,
     pub playback: Playback,
     pub volume: VolumeView,
-    /// What the renderer holds of [`stack`](Self::stack), in 2D and 3D: one
+    /// What the renderer holds of [`document`](Self::document), in 2D and 3D: one
     /// view's side of the document, reconciled with its display model at the
     /// top of every [`sync`](Self::sync) and replaced whenever the document
     /// is. See `crate::residency`.
@@ -371,20 +372,19 @@ impl Viewer {
     }
 
     /// Open `path`, replacing whatever was loaded. On success every derived
-    /// per-stack default is re-seeded: playback rate from the file's `fps=`,
+    /// per-document default is re-seeded: playback rate from the file's `fps=`,
     /// voxel scale from its calibration, a fresh 3D camera, and the 2D movie
-    /// view. On failure the previous stack is dropped and `status` carries the
-    /// error, matching what the user sees.
+    /// view.
     ///
-    /// On failure the **previously loaded stack stays open** and only `status`
-    /// changes — dropping a corrupt file onto a window must not close the good
+    /// On failure the **previously loaded document stays open** and only
+    /// `status` changes, carrying the error — dropping a corrupt file onto a window must not close the good
     /// image the user was looking at.
     ///
     /// Frontend-side chrome (window title, zoom, open pop-ups) is *not* touched
     /// — that's the frontend's to reset.
     #[cfg(feature = "mmap")]
     pub fn open(&mut self, path: PathBuf) -> anyhow::Result<()> {
-        let opened = Stack::open(path, self.apply_pseudocolor);
+        let opened = Document::open(path, self.apply_pseudocolor);
         self.adopt(opened)
     }
 
@@ -392,7 +392,7 @@ impl Viewer {
     ///
     /// Returns immediately. [`poll_open`](Self::poll_open) reports when it
     /// lands; until then [`load_stage`](Self::load_stage) says how far it has
-    /// got, and the previously open stack is still there to look at.
+    /// got, and the previously open document is still there to look at.
     ///
     /// Without threads to spawn — a browser, or a failed spawn — this falls
     /// back to loading here and now, which blocks exactly as it always did.
@@ -420,7 +420,7 @@ impl Viewer {
 
     /// Take delivery of a finished load, if one has finished this frame.
     ///
-    /// Returns `true` when a stack was installed or an error recorded — the
+    /// Returns `true` when a document was installed or an error recorded — the
     /// signal for a frontend to reset whatever it had arranged around the
     /// previous file.
     pub fn poll_open(&mut self) -> bool {
@@ -460,46 +460,46 @@ impl Viewer {
         None
     }
 
-    /// Load a stack from bytes already in memory — the browser's entry point,
-    /// where `name` is just the picked file's name for display. Otherwise
-    /// identical to [`Viewer::open`], including every per-stack default it
-    /// re-seeds.
+    /// Load a document from bytes already in memory — the browser's entry
+    /// point, where `name` is just the picked file's name for display.
+    /// Otherwise identical to [`Viewer::open`], including every per-document
+    /// default it re-seeds.
     pub fn load_bytes(&mut self, bytes: Vec<u8>, name: PathBuf) -> anyhow::Result<()> {
-        let opened = Stack::from_bytes(bytes, name, self.apply_pseudocolor);
+        let opened = Document::from_bytes(bytes, name, self.apply_pseudocolor);
         self.adopt(opened)
     }
 
-    /// Install a freshly opened stack (or record why it failed), re-seeding
-    /// every per-stack default. Shared so the two entry points can't drift.
-    fn adopt(&mut self, opened: anyhow::Result<Stack>) -> anyhow::Result<()> {
+    /// Install a freshly opened document (or record why it failed), re-seeding
+    /// every per-document default. Shared so the two entry points can't drift.
+    fn adopt(&mut self, opened: anyhow::Result<Document>) -> anyhow::Result<()> {
         match opened {
-            Ok(stack) => {
+            Ok(doc) => {
                 self.playback = Playback {
-                    fps: stack.tiff.meta.fps.unwrap_or(DEFAULT_FPS),
+                    fps: doc.tiff.meta.fps.unwrap_or(DEFAULT_FPS),
                     ..Default::default()
                 };
-                // 3D defaults for the new stack: per-axis voxel scale from the
+                // 3D defaults for the new document: per-axis voxel scale from the
                 // pixel calibration (X/YResolution) + Z spacing (else 1:1:1),
                 // and a fresh orbit.
-                self.volume.scale = stack.tiff.meta.voxel_scale();
+                self.volume.scale = doc.tiff.meta.voxel_scale();
                 self.volume.cam.reset();
-                // Nothing the renderer holds is of this stack. A fresh
-                // residency says so: its first sync uploads this stack's
-                // frame and LUTs, gives the last stack's volume back, and
+                // Nothing the renderer holds is of this document. A fresh
+                // residency says so: its first sync uploads this document's
+                // frame and LUTs, gives the last document's volume back, and
                 // starts from a fresh volume budget, since what did not fit
-                // before may have been the last stack's problem.
+                // before may have been the last document's problem.
                 self.residency = Residency::default();
                 // Always start a newly-opened file in the 2D movie view.
                 self.view_mode = ViewMode::Movie;
                 self.status = compute_status(
-                    stack.display.dims(),
-                    stack.display.triple_axis_warning,
-                    stack.display.plane_mismatch,
+                    doc.display.dims(),
+                    doc.display.triple_axis_warning,
+                    doc.display.plane_mismatch,
                 );
-                // New stack: re-evaluate decode parallelism from scratch (its
+                // New document: re-evaluate decode parallelism from scratch (its
                 // per-frame decode cost is different).
                 self.decode_parallel = false;
-                self.stack = Some(stack);
+                self.document = Some(doc);
                 Ok(())
             }
             Err(e) => {
@@ -514,25 +514,25 @@ impl Viewer {
     /// renderer holds — the frame, the volume — follows at the next sync,
     /// which finds the display's channel layout moved.
     pub fn set_dimension_order(&mut self, channels: usize, slices: usize, frames: usize) {
-        if let Some(stack) = &mut self.stack {
-            apply_dimension_override(stack, channels, slices, frames);
+        if let Some(doc) = &mut self.document {
+            apply_dimension_override(doc, channels, slices, frames);
             // The swap rebuilds channel_display from `mode`, so re-apply the
             // pseudocolor preference on top of the fresh LUTs.
-            refresh_pseudocolor(stack, self.apply_pseudocolor);
+            refresh_pseudocolor(doc, self.apply_pseudocolor);
             self.status = compute_status(
-                stack.display.dims(),
-                stack.display.triple_axis_warning,
-                stack.display.plane_mismatch,
+                doc.display.dims(),
+                doc.display.triple_axis_warning,
+                doc.display.plane_mismatch,
             );
         }
     }
 
-    /// Apply the pseudocolor preference to the current stack (and remember it
-    /// for stacks opened later).
+    /// Apply the pseudocolor preference to the current document (and remember
+    /// it for documents opened later).
     pub fn set_pseudocolor(&mut self, on: bool) {
         self.apply_pseudocolor = on;
-        if let Some(stack) = &mut self.stack {
-            refresh_pseudocolor(stack, on);
+        if let Some(doc) = &mut self.document {
+            refresh_pseudocolor(doc, on);
         }
     }
 
@@ -543,15 +543,17 @@ impl Viewer {
     ///
     /// Restoring "Built-in" works because opening a file never overwrites
     /// `tiff.meta`: the file's colours are still there to go back to. No-op
-    /// when no stack is open or the selector doesn't apply to it.
+    /// when no document is open or the selector doesn't apply to it.
     pub fn set_gray_lut(&mut self, sel: usize) {
-        let Some(stack) = &mut self.stack else { return };
-        if !crate::channels::gray_lut_applicable(stack) {
+        let Some(doc) = &mut self.document else {
+            return;
+        };
+        if !crate::channels::gray_lut_applicable(doc) {
             return;
         }
-        stack.display.gray_lut_sel = sel;
-        let lut = crate::channels::gray_lut_sel_lut(&stack.display, sel);
-        stack.display.set_lut(0, lut);
+        doc.display.gray_lut_sel = sel;
+        let lut = crate::channels::gray_lut_sel_lut(&doc.display, sel);
+        doc.display.set_lut(0, lut);
     }
 
     /// Subsampling applied to the 2D frame on its way to the GPU, as of the
@@ -591,7 +593,7 @@ impl Viewer {
     /// a loading state meanwhile — and from the moment the axes are
     /// reassigned, which makes it another volume.
     pub fn volume_built(&self) -> bool {
-        self.stack
+        self.document
             .as_ref()
             .is_some_and(|s| self.residency.volume.built_for(s.display.revision().layout))
     }
@@ -601,20 +603,20 @@ impl Viewer {
         self.residency.volume.requested.is_some()
     }
 
-    /// Which volume the 3D view is of: moves when a new stack is opened or its
+    /// Which volume the 3D view is of: moves when a new document is opened or its
     /// axes are reassigned — when what is shown is a different volume — and
     /// not when the same one is rebuilt smaller after the GPU ran out of
     /// memory. What a frontend compares to tell that what it was showing has
-    /// gone. `0` with no stack open.
+    /// gone. `0` with no document open.
     pub fn volume_identity(&self) -> u64 {
-        self.stack
+        self.document
             .as_ref()
             .map_or(0, |s| s.display.revision().layout)
     }
 
     /// Whether the stack has enough depth to build a volume from.
     pub fn can_show_volume(&self) -> bool {
-        self.stack
+        self.document
             .as_ref()
             .is_some_and(|s| s.display.dims().frames >= 2)
     }
@@ -623,7 +625,7 @@ impl Viewer {
     /// i.e. playback still means something in the 3D view. False for an ordinary
     /// 3D stack, where the frame axis *is* the depth.
     pub fn is_4d(&self) -> bool {
-        self.stack
+        self.document
             .as_ref()
             .is_some_and(|s| s.display.dims().slices > 1)
     }
@@ -646,12 +648,12 @@ impl Viewer {
             self.playback.accumulator = 0.0;
             return 0;
         }
-        let Some(stack) = &mut self.stack else {
+        let Some(doc) = &mut self.document else {
             self.playback.last_time = None;
             self.playback.accumulator = 0.0;
             return 0;
         };
-        let n = stack.frame_count();
+        let n = doc.frame_count();
         if !self.playback.playing || n <= 1 {
             self.playback.playing = self.playback.playing && n > 1;
             self.playback.last_time = None;
@@ -674,7 +676,7 @@ impl Viewer {
             if self.playback.accumulator >= 1.0 {
                 stepped = self.playback.accumulator.floor() as usize;
                 self.playback.accumulator -= stepped as f64;
-                stack.frame_index = (stack.frame_index + stepped) % n;
+                doc.set_frame((doc.frame() + stepped) % n);
             }
         }
         self.playback.last_time = Some(now);

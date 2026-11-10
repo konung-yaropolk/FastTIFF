@@ -9,7 +9,7 @@
 
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::histogram::{fill_alpha, frame_histograms, BINS};
-use fast_tiff_viewer::Stack;
+use fast_tiff_viewer::Document;
 use std::io::Cursor;
 
 /// A `frames`-plane u16 stack where plane `f` is filled with the single value
@@ -49,8 +49,8 @@ fn ramp_u8_stack() -> Vec<u8> {
     writer.finish().unwrap().into_inner()
 }
 
-fn load(bytes: Vec<u8>) -> Stack {
-    Stack::from_bytes(bytes, "hist.tif".into(), false).expect("should open")
+fn load(bytes: Vec<u8>) -> Document {
+    Document::from_bytes(bytes, "hist.tif".into(), false).expect("should open")
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn the_histogram_follows_the_current_frame() {
     // Frame 2 is a different constant from frame 0, so the spike must move.
     let mut stack = load(flat_u16_stack(3, 16, 16, 100, 5000));
     let first = frame_histograms(&stack)[0].clone();
-    stack.frame_index = 2;
+    stack.set_frame(2);
     let third = frame_histograms(&stack)[0].clone();
     let spike =
         |h: &fast_tiff_viewer::Histogram| h.bins.iter().position(|&b| b > 0).expect("a spike");
@@ -162,10 +162,11 @@ fn an_empty_stack_histograms_to_nothing_rather_than_panicking() {
     // A display with no channels at all.
     stack.display = fast_tiff_viewer::Display::default();
     assert!(frame_histograms(&stack).is_empty());
-    // A frame index past the end is a decode error, not a panic.
-    let mut stack = load(flat_u16_stack(1, 8, 8, 1, 0));
-    stack.frame_index = 999;
-    assert!(frame_histograms(&stack).is_empty());
+    // A frame past the end cannot be asked for: it is the last frame.
+    let mut stack = load(flat_u16_stack(3, 8, 8, 1, 0));
+    stack.set_frame(999);
+    assert_eq!(stack.frame(), 2);
+    assert_eq!(frame_histograms(&stack).len(), 1);
 }
 
 #[test]

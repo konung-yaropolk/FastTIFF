@@ -10,7 +10,7 @@
 //! image rather than an obvious failure, so it is worth pinning.
 
 use fast_tiff_viewer::prefetch::Decoded;
-use fast_tiff_viewer::{ChannelKind, Stack};
+use fast_tiff_viewer::{ChannelKind, Document};
 use std::path::PathBuf;
 
 const W: usize = 23;
@@ -29,20 +29,20 @@ fn fixture(name: &str) -> Option<PathBuf> {
 /// Open through whichever entry point this build has — memory-mapped by
 /// default, byte-slice when `mmap` is off (the browser path). Both
 /// configurations run in CI, so between them each entry point is covered.
-fn open_stack(path: PathBuf) -> anyhow::Result<Stack> {
+fn open_stack(path: PathBuf) -> anyhow::Result<Document> {
     #[cfg(feature = "mmap")]
     {
-        Stack::open(path, false)
+        Document::open(path, false)
     }
     #[cfg(not(feature = "mmap"))]
     {
         let bytes = std::fs::read(&path)?;
-        Stack::from_bytes(bytes, path, false)
+        Document::from_bytes(bytes, path, false)
     }
 }
 
 /// Decode `frame` with exactly the channels in `enabled` switched on.
-fn decode(stack: &Stack, frame: usize, enabled: &[bool]) -> Vec<Decoded> {
+fn decode(stack: &Document, frame: usize, enabled: &[bool]) -> Vec<Decoded> {
     let jobs = fast_tiff_viewer::prefetch::build_jobs(stack, frame, enabled);
     fast_tiff_viewer::prefetch::decode_jobs(
         &stack.tiff.data,
@@ -63,7 +63,7 @@ fn as_u8(d: &Decoded) -> &Vec<u8> {
 /// What the four ink plates say each component should be, read straight from
 /// the library's raw per-sample readers — the ones this feature was required
 /// not to disturb.
-fn reference_rgb(stack: &Stack, frame: usize) -> Vec<[u8; 3]> {
+fn reference_rgb(stack: &Document, frame: usize) -> Vec<[u8; 3]> {
     let f = &stack.tiff.frames[frame];
     let raw = fast_tiff_lib::read_planes_u8(&stack.tiff.data, f, stack.tiff.byte_order).unwrap();
     assert_eq!(

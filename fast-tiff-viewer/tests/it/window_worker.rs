@@ -592,7 +592,7 @@ mod worker {
     /// Two channels by three timepoints of 64 x 64 u16, plane `i` filled with
     /// `i * 1000 + 7`, so which IFD a window came from can be read off any of
     /// its samples.
-    fn two_channel_movie() -> fast_tiff_viewer::Stack {
+    fn two_channel_movie() -> fast_tiff_viewer::Document {
         use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
         let opts = WriterOptions::new(64, 64, SampleType::U16).metadata(StackMetaWrite::new(2, 1));
         let mut w = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
@@ -600,7 +600,7 @@ mod worker {
             w.write_frame_u16(&vec![plane * 1000 + 7; 64 * 64]).unwrap();
         }
         let bytes = w.finish().unwrap().into_inner();
-        fast_tiff_viewer::Stack::from_bytes(bytes, "movie.tif".into(), false).unwrap()
+        fast_tiff_viewer::Document::from_bytes(bytes, "movie.tif".into(), false).unwrap()
     }
 
     fn first_sample(plane: &Decoded) -> u16 {

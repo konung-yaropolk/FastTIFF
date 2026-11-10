@@ -4,7 +4,7 @@ resolver = "2"
 #   fast-tiff-lib     file I/O, IFD index, decode, metadata
 #   oir-reader        the Olympus OIR container reader, standalone beside it
 #   scivis-render     GPU pipelines, textures, ray-marching
-#   fast-tiff-viewer  stack model, channel settings, decode -> GPU sync
+#   fast-tiff-viewer  document model, channel settings, decode -> GPU sync
 #   FastTIFF          the egui UI (its library) and the desktop host (its binary)
 #   FastTIFF-web      the browser host around that same library
 #

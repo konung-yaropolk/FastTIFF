@@ -8,7 +8,7 @@
 //! gives for the same pixel.
 
 use super::*;
-use crate::stack::Stack;
+use crate::document::Document;
 use fast_tiff_lib::{
     read_frame_f32, read_frame_u16, read_frame_u8, SampleType, StackMetaWrite, TiffStack,
     TiffWriter, WriterOptions,
@@ -226,7 +226,7 @@ fn check_against_the_decoder(sample: SampleType, values: &[f64]) {
     let bytes = one_plane_bytes(sample, values);
     let tiff = TiffStack::from_bytes(bytes.clone()).unwrap();
     let file = read_frame_f32(&tiff.data, &tiff.frames[0], tiff.byte_order).unwrap();
-    let stack = Stack::from_bytes(bytes, "units.tif".into(), false).unwrap();
+    let stack = Document::from_bytes(bytes, "units.tif".into(), false).unwrap();
     let s = stack.display.settings()[0];
     let (data, order, frame) = (&tiff.data, tiff.byte_order, &tiff.frames[0]);
     let texture: Vec<f32> = match s.kind() {
@@ -292,7 +292,7 @@ fn every_depth_reads_its_texture_back_as_the_files_values() {
 #[test]
 fn a_wide_integer_window_is_the_rescaled_range() {
     let bytes = one_plane_bytes(SampleType::I32, &[-70_000.0, 0.0, 1_000_000.0]);
-    let stack = Stack::from_bytes(bytes, "wide.tif".into(), false).unwrap();
+    let stack = Document::from_bytes(bytes, "wide.tif".into(), false).unwrap();
     let s = stack.display.settings()[0];
     assert_eq!(s.kind(), ChannelKind::Int16);
     assert_eq!(
@@ -317,7 +317,8 @@ fn an_8_bit_files_declared_range_opens_and_saves_unchanged() {
         .metadata(StackMetaWrite::new(1, 1).range(12.0, 99.0));
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
     w.write_frame_u8(&[0, 50, 100, 255]).unwrap();
-    let stack = Stack::from_bytes(w.finish().unwrap().into_inner(), "8.tif".into(), false).unwrap();
+    let stack =
+        Document::from_bytes(w.finish().unwrap().into_inner(), "8.tif".into(), false).unwrap();
     let s = stack.display.settings()[0];
     assert_eq!(s.units, SampleUnits::RAW8);
     assert_eq!(s.window, Window::new(12.0, 99.0));

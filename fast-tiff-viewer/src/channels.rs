@@ -3,8 +3,8 @@
 //! tables, and the pseudocolor toggle. Split from `app.rs`.
 
 use crate::display::Display;
+use crate::document::{ChannelSettings, Document};
 use crate::histogram::{auto_window, Histogram};
-use crate::stack::{ChannelSettings, Stack};
 use crate::units::{SampleUnits, Window};
 use fast_tiff_lib::{DisplayMap, TiffStack};
 use scivis_render::{ChannelKind, Lut};
@@ -495,7 +495,7 @@ fn build_one(tiff: &TiffStack, c: usize, channels: usize) -> ChannelSettings {
 /// the window it had. Palette stacks are skipped entirely: their window is a
 /// pinned index-to-LUT identity, not a contrast choice, and moving it would
 /// remap every colour.
-pub fn auto_contrast(loaded: &mut Stack, hists: &[Histogram]) {
+pub fn auto_contrast(loaded: &mut Document, hists: &[Histogram]) {
     if loaded.display.palette {
         return;
     }
@@ -535,7 +535,7 @@ pub fn auto_contrast(loaded: &mut Stack, hists: &[Histogram]) {
 /// change, for instance — rebuilds the settings and with them the window this
 /// returns to, which is right: the starting point is whatever the current
 /// reading of the file starts from.
-pub fn reset_contrast(loaded: &mut Stack) {
+pub fn reset_contrast(loaded: &mut Document) {
     if loaded.display.palette {
         return;
     }
@@ -548,7 +548,7 @@ pub fn reset_contrast(loaded: &mut Stack) {
 /// Whether the "apply pseudocolor" option is meaningful for this stack: only
 /// multi-channel grayscale stacks (composite files already carry colors; RGB is
 /// handled separately) can be optionally tinted with the channel palette.
-pub fn pseudocolor_applicable(loaded: &Stack) -> bool {
+pub fn pseudocolor_applicable(loaded: &Document) -> bool {
     !loaded.display.rgb()
         && loaded.display.channel_count() > 1
         && loaded.display.mode == fast_tiff_lib::DisplayMode::Grayscale
@@ -563,7 +563,7 @@ pub fn pseudocolor_applicable(loaded: &Stack) -> bool {
 /// leads with a "Built-in LUT" option (the default) so the file's colors show,
 /// with grayscale / channel colors / colormaps available to override. The
 /// multi-channel case is covered by the pseudocolor toggle instead.
-pub fn gray_lut_applicable(loaded: &Stack) -> bool {
+pub fn gray_lut_applicable(loaded: &Document) -> bool {
     !loaded.display.rgb() && loaded.display.channel_count() == 1
 }
 
@@ -573,7 +573,7 @@ pub fn gray_lut_applicable(loaded: &Stack) -> bool {
 ///
 /// A LUT that changes moves the display's LUT revision, which is what has the
 /// renderer's copy uploaded again.
-pub fn refresh_pseudocolor(loaded: &mut Stack, apply: bool) {
+pub fn refresh_pseudocolor(loaded: &mut Document, apply: bool) {
     if !pseudocolor_applicable(loaded) {
         return;
     }

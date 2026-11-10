@@ -25,7 +25,7 @@
 
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::plugins::{builtin, describe_view, StackHost};
-use fast_tiff_viewer::Stack;
+use fast_tiff_viewer::Document;
 use fasttiff_plugin_api::{
     DisplayMode, HostContext, ImageResult, Outcome, ParamKind, ParamValue, Params, PixelType,
     Plane, PlaneData, Plugin, PluginError, Spacing, StackInfo, VolumeMode, VolumeView,
@@ -43,7 +43,7 @@ const H: u32 = 4;
 /// `resolve_dimensions` folds Z into time unconditionally otherwise, because a
 /// single-timepoint z-stack is indistinguishable from a movie and the movie
 /// reading is right far more often. The assertion below holds callers to that.
-fn stack(channels: usize, slices: usize, frames: usize) -> Stack {
+fn stack(channels: usize, slices: usize, frames: usize) -> Document {
     let opts = WriterOptions::new(W, H, SampleType::F32)
         // Frames are derived from the plane count when writing, so the
         // metadata states only channels and slices.
@@ -61,7 +61,7 @@ fn stack(channels: usize, slices: usize, frames: usize) -> Stack {
         }
     }
     let bytes = w.finish().unwrap().into_inner();
-    let s = Stack::from_bytes(bytes, "probe.tif".into(), false).expect("stack should open");
+    let s = Document::from_bytes(bytes, "probe.tif".into(), false).expect("stack should open");
     // `resolve_dimensions` reclassifies a mislabelled axis on purpose, and a
     // single-timepoint z-stack reads as a movie. Assert the shape here so a
     // test never silently exercises a different one than its name claims.
@@ -87,7 +87,7 @@ fn plane_tag(c: usize, z: usize, t: usize) -> f32 {
 ///
 /// Pixel 0 of each plane is [`plane_tag`] again, so the same addressing
 /// assertions work; the rest ramps so that an inversion is visible.
-fn stack_u16(channels: usize, slices: usize, frames: usize) -> Stack {
+fn stack_u16(channels: usize, slices: usize, frames: usize) -> Document {
     let opts =
         WriterOptions::new(W, H, SampleType::U16).metadata(StackMetaWrite::new(channels, slices));
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
@@ -102,7 +102,7 @@ fn stack_u16(channels: usize, slices: usize, frames: usize) -> Stack {
         }
     }
     let bytes = w.finish().unwrap().into_inner();
-    let s = Stack::from_bytes(bytes, "probe16.tif".into(), false).expect("stack should open");
+    let s = Document::from_bytes(bytes, "probe16.tif".into(), false).expect("stack should open");
     assert_eq!(
         (
             s.display.dims().channels,
@@ -155,14 +155,14 @@ fn view() -> VolumeView {
     }
 }
 
-fn host(s: &Stack, frame_index: usize) -> StackHost {
+fn host(s: &Document, frame_index: usize) -> StackHost {
     StackHost::new(s, describe_view(s, frame_index, false, view()))
 }
 
 /// The "Uncovered edges" option a plugin's dialog labels `label`, as the
 /// dialog would set it: looked up by label, so a test asks for what a user
 /// picks rather than for a position in the list.
-fn edges(plugin: &dyn Plugin, s: &Stack, label: &str) -> ParamValue {
+fn edges(plugin: &dyn Plugin, s: &Document, label: &str) -> ParamValue {
     let h = host(s, 0);
     let decls = plugin.params(&h);
     let decl = decls
@@ -281,7 +281,7 @@ fn invert_reflects_a_single_float_plane_about_its_own_range() {
 /// still says which axis it is about to work on.
 #[test]
 fn z_project_offers_the_axes_the_stack_has() {
-    let axis_options = |s: &Stack| -> Vec<String> {
+    let axis_options = |s: &Document| -> Vec<String> {
         let h = host(s, 0);
         let decls = builtin::ZProject.params(&h);
         let d = decls
@@ -551,7 +551,7 @@ fn every_bit_depth_reaches_a_plugin_as_f32() {
         let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
         w.write_frame_bytes(&raw).unwrap();
         let bytes = w.finish().unwrap().into_inner();
-        let s = Stack::from_bytes(bytes, "depth.tif".into(), false).unwrap();
+        let s = Document::from_bytes(bytes, "depth.tif".into(), false).unwrap();
 
         let mut h = host(&s, 0);
         let mut got = Vec::new();
@@ -569,7 +569,7 @@ fn invert_runs_on_an_8_bit_stack() {
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
     w.write_frame_bytes(&[0u8, 85, 170, 255]).unwrap();
     let bytes = w.finish().unwrap().into_inner();
-    let s = Stack::from_bytes(bytes, "eight.tif".into(), false).unwrap();
+    let s = Document::from_bytes(bytes, "eight.tif".into(), false).unwrap();
 
     let mut h = host(&s, 0);
     let mut p = builtin::Invert;
@@ -613,7 +613,7 @@ fn the_borrowed_and_decoded_plane_paths_agree() {
         let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
         w.write_frame_bytes(&raw).unwrap();
         let bytes = w.finish().unwrap().into_inner();
-        let s = Stack::from_bytes(bytes, "cmp.tif".into(), false).unwrap();
+        let s = Document::from_bytes(bytes, "cmp.tif".into(), false).unwrap();
 
         // Not vacuous: the two files must genuinely differ in how they are
         // stored, or both would be taking the same path.
@@ -648,7 +648,7 @@ fn repeated_plane_reads_reuse_one_buffer() {
         w.write_frame_bytes(&[7u8; 16]).unwrap();
     }
     let bytes = w.finish().unwrap().into_inner();
-    let s = Stack::from_bytes(bytes, "many.tif".into(), false).unwrap();
+    let s = Document::from_bytes(bytes, "many.tif".into(), false).unwrap();
 
     let mut h = host(&s, 0);
     let mut out = Vec::new();
@@ -843,7 +843,7 @@ fn plot_third_axis_can_walk_z_on_a_4d_stack() {
 /// A movie of one field wandering along a known path, written as a real TIFF
 /// and opened as a real stack — so this exercises the plugin exactly as the
 /// menu does.
-fn wandering_stack(ly: u32, lx: u32, path: &[(i32, i32)], channels: usize) -> Stack {
+fn wandering_stack(ly: u32, lx: u32, path: &[(i32, i32)], channels: usize) -> Document {
     // Blobs, so there is something to lock onto. Flat noise registers nowhere.
     let base: Vec<f32> = {
         let mut f = vec![10.0f32; (ly * lx) as usize];
@@ -881,7 +881,7 @@ fn wandering_stack(ly: u32, lx: u32, path: &[(i32, i32)], channels: usize) -> St
         }
     }
     let bytes = w.finish().unwrap().into_inner();
-    Stack::from_bytes(bytes, "moving.tif".into(), false).expect("open")
+    Document::from_bytes(bytes, "moving.tif".into(), false).expect("open")
 }
 
 #[test]
@@ -1200,7 +1200,7 @@ fn stabilize_runs_the_same_stack_on_the_cpu() {
 ///
 /// `wandering_stack` writes float samples; a two-photon recording is 16-bit,
 /// and that is the case the result's width has to match.
-fn wandering_u16_stack(ly: u32, lx: u32, path: &[(i32, i32)]) -> Stack {
+fn wandering_u16_stack(ly: u32, lx: u32, path: &[(i32, i32)]) -> Document {
     let base: Vec<u16> = (0..ly * lx)
         .map(|i| {
             let (y, x) = ((i / lx) as f32, (i % lx) as f32);
@@ -1226,7 +1226,7 @@ fn wandering_u16_stack(ly: u32, lx: u32, path: &[(i32, i32)]) -> Stack {
         w.write_frame_bytes(&bytes).unwrap();
     }
     let bytes = w.finish().unwrap().into_inner();
-    Stack::from_bytes(bytes, "moving16.tif".into(), false).expect("open")
+    Document::from_bytes(bytes, "moving16.tif".into(), false).expect("open")
 }
 
 /// A stabilised 16-bit recording comes back 16-bit — rigid or non-rigid.
@@ -1297,7 +1297,7 @@ fn stabilize_keeps_signed_samples_signed() {
         w.write_frame_bytes(&bytes).unwrap();
     }
     let bytes = w.finish().unwrap().into_inner();
-    let s = Stack::from_bytes(bytes, "signed.tif".into(), false).expect("open");
+    let s = Document::from_bytes(bytes, "signed.tif".into(), false).expect("open");
 
     let mut h = host(&s, 0);
     let mut params = Params::new();
@@ -1388,14 +1388,14 @@ fn drift_frames(side: u32, path: &[(f32, f32)]) -> Vec<Vec<f32>> {
 }
 
 /// Those frames written as a real TIFF and opened as a real stack.
-fn drifting_stack(side: u32, frames: &[Vec<f32>]) -> Stack {
+fn drifting_stack(side: u32, frames: &[Vec<f32>]) -> Document {
     let opts = WriterOptions::new(side, side, SampleType::F32).metadata(StackMetaWrite::new(1, 1));
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
     for f in frames {
         w.write_frame_f32(f).unwrap();
     }
     let bytes = w.finish().unwrap().into_inner();
-    Stack::from_bytes(bytes, "drifting.tif".into(), false).expect("open")
+    Document::from_bytes(bytes, "drifting.tif".into(), false).expect("open")
 }
 
 /// The dialog's index for a compute backend.
@@ -1531,7 +1531,7 @@ fn turboreg_crops_a_turned_stack_at_an_angle() {
     for f in &frames {
         writer.write_frame_f32(f).unwrap();
     }
-    let s = Stack::from_bytes(
+    let s = Document::from_bytes(
         writer.finish().unwrap().into_inner(),
         "turning.tif".into(),
         false,
@@ -2106,7 +2106,7 @@ fn a_plugin_result_reopens_without_a_plane_mismatch() {
             .unwrap();
     }
     let bytes = wr.finish().unwrap().into_inner();
-    let s = Stack::from_bytes(bytes, "zstack.tif".into(), false).expect("opens");
+    let s = Document::from_bytes(bytes, "zstack.tif".into(), false).expect("opens");
     assert_eq!(s.display.plane_mismatch, None, "the source should be clean");
     // Z folds into time, which is what makes the result's shape differ from
     // the description it carries.
@@ -2130,8 +2130,8 @@ fn a_plugin_result_reopens_without_a_plane_mismatch() {
 
     // Exactly what the app does on the way to a new window.
     let encoded = fast_tiff_viewer::plugins::to_tiff_bytes(&img, None).expect("encode");
-    let reopened =
-        Stack::from_bytes(encoded, "result.tif".into(), false).expect("the result should reopen");
+    let reopened = Document::from_bytes(encoded, "result.tif".into(), false)
+        .expect("the result should reopen");
     assert_eq!(
         reopened.display.plane_mismatch, None,
         "the new window reported a damaged file"
@@ -2227,7 +2227,7 @@ fn a_deconvolved_stack_reopens_calibrated_and_undamaged() {
         wr.write_frame_bytes(&px.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>())
             .unwrap();
     }
-    let s = Stack::from_bytes(
+    let s = Document::from_bytes(
         wr.finish().unwrap().into_inner(),
         "zstack.tif".into(),
         false,
@@ -2250,8 +2250,8 @@ fn a_deconvolved_stack_reopens_calibrated_and_undamaged() {
         panic!("expected a document")
     };
     let encoded = fast_tiff_viewer::plugins::to_tiff_bytes(&img, None).expect("encode");
-    let reopened =
-        Stack::from_bytes(encoded, "result.tif".into(), false).expect("the result should reopen");
+    let reopened = Document::from_bytes(encoded, "result.tif".into(), false)
+        .expect("the result should reopen");
 
     assert_eq!(
         reopened.display.plane_mismatch, None,
@@ -2298,7 +2298,7 @@ fn a_generated_psf_reopens_as_the_volume_it_describes() {
 
     let encoded = fast_tiff_viewer::plugins::to_tiff_bytes(&img, None).expect("encode");
     let reopened =
-        Stack::from_bytes(encoded, "psf.tif".into(), false).expect("the PSF should reopen");
+        Document::from_bytes(encoded, "psf.tif".into(), false).expect("the PSF should reopen");
     assert_eq!(reopened.display.plane_mismatch, None);
     assert_eq!(reopened.dimensions(), Some((11, 11)));
     assert_eq!(reopened.tiff.frames.len(), 7);

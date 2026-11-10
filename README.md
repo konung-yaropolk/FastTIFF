@@ -268,7 +268,7 @@ one):
         │
   scivis-render     GPU pipelines, textures, ray-marching
         │
-  fast-tiff-viewer  stack model, channel settings, decode → GPU sync,
+  fast-tiff-viewer  document model, channel settings, decode → GPU sync,
         │           and the plugin host
   FastTIFF          the egui UI (lib) + the native binary
         │
@@ -308,7 +308,7 @@ sites.
   offline with naga, so a broken shader fails `cargo test` instead of showing a
   blank canvas.
 - **`fast-tiff-viewer/`** — everything between "a TIFF on disk" and "pixels on the
-  GPU": the loaded-stack model, per-channel contrast/LUT derivation, c/z/t
+  GPU": the document model, per-channel contrast/LUT derivation, c/z/t
   interpretation, the display-channel → IFD mapping, 3D volume assembly,
   read-ahead, the camera, the playback clock, and the per-frame sync that drives
   the renderer. A `threads` feature (on by default) can be turned off for a

@@ -11,7 +11,7 @@
 //! nothing meaningful to drag).
 
 use fast_tiff_viewer::channels::{gray_lut_count, gray_lut_sel_lut, gray_lut_sel_name};
-use fast_tiff_viewer::{Stack, Viewer};
+use fast_tiff_viewer::{Document, Viewer};
 
 /// A minimal uncompressed 8-bit palette TIFF whose ColorMap is a grayscale ramp
 /// stretched over indices `0..=top` (everything above is black) — i.e. what a
@@ -73,8 +73,8 @@ fn palette_tiff(w: u32, h: u32, top: u32) -> Vec<u8> {
     out
 }
 
-fn open(bytes: Vec<u8>) -> Stack {
-    Stack::from_bytes(bytes, "palette.tif".into(), false).expect("palette stack should open")
+fn open(bytes: Vec<u8>) -> Document {
+    Document::from_bytes(bytes, "palette.tif".into(), false).expect("palette stack should open")
 }
 
 #[test]
@@ -124,25 +124,25 @@ fn switching_colormap_and_back_restores_the_file_ramp() {
     viewer
         .load_bytes(palette_tiff(16, 8, 87), "palette.tif".into())
         .unwrap();
-    let original = viewer.stack.as_ref().unwrap().display.luts()[0];
+    let original = viewer.document.as_ref().unwrap().display.luts()[0];
     assert_ne!(
         original,
         fast_tiff_lib::grayscale_lut(),
         "loads through the file's ramp"
     );
 
-    let n = gray_lut_count(&viewer.stack.as_ref().unwrap().display);
+    let n = gray_lut_count(&viewer.document.as_ref().unwrap().display);
     // Walk every option, then come back to "Built-in" each time.
     for sel in 1..n {
         viewer.set_gray_lut(sel);
         assert_ne!(
-            viewer.stack.as_ref().unwrap().display.luts()[0],
+            viewer.document.as_ref().unwrap().display.luts()[0],
             original,
             "option {sel} should change the display"
         );
         viewer.set_gray_lut(0);
         assert_eq!(
-            viewer.stack.as_ref().unwrap().display.luts()[0],
+            viewer.document.as_ref().unwrap().display.luts()[0],
             original,
             "returning from option {sel} must restore the file's ramp"
         );
@@ -160,7 +160,7 @@ fn a_plain_grayscale_file_gains_no_spurious_builtin_option() {
     let mut wr = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
     wr.write_frame_bytes(&vec![7u8; (w * h) as usize]).unwrap();
     let stack =
-        Stack::from_bytes(wr.finish().unwrap().into_inner(), "plain.tif".into(), false).unwrap();
+        Document::from_bytes(wr.finish().unwrap().into_inner(), "plain.tif".into(), false).unwrap();
 
     assert!(!stack.display.palette);
     assert!(

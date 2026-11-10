@@ -4,7 +4,7 @@
 
 use crate::channels::build_channel_settings_reporting;
 use crate::display::Dims;
-use crate::stack::{ChannelSettings, Stack};
+use crate::document::{ChannelSettings, Document};
 use crate::units::SampleUnits;
 use scivis_render::{ChannelKind, MAX_CHANNELS};
 
@@ -148,7 +148,10 @@ pub fn compute_status(
 /// position. The one place that does this, so the manual channels/frames
 /// swap can't drift out of sync with `open_file` the way `self.status`
 /// previously did.
-pub fn apply_resolved_dimensions(loaded: &mut Stack, resolved: fast_tiff_lib::ResolvedDimensions) {
+pub fn apply_resolved_dimensions(
+    loaded: &mut Document,
+    resolved: fast_tiff_lib::ResolvedDimensions,
+) {
     apply_resolved_dimensions_reporting(loaded, resolved, &mut |_, _| {});
 }
 
@@ -156,7 +159,7 @@ pub fn apply_resolved_dimensions(loaded: &mut Stack, resolved: fast_tiff_lib::Re
 /// they finish — the slow part of opening a file, and the only part whose
 /// length is known ahead of time.
 pub fn apply_resolved_dimensions_reporting(
-    loaded: &mut Stack,
+    loaded: &mut Document,
     resolved: fast_tiff_lib::ResolvedDimensions,
     on_channel: &mut dyn FnMut(usize, usize),
 ) {
@@ -204,13 +207,13 @@ pub fn apply_resolved_dimensions_reporting(
             resolved.channels,
             on_channel,
         ));
-    loaded.frame_index = 0;
+    loaded.set_frame(0);
 }
 
 /// Which sample planes of an `spp`-sample RGB frame get a display channel, and
 /// which of those start enabled — one entry per channel, `true` = on. The whole
 /// policy `setup_rgb` applies, split out so it's testable without a
-/// file-and-GPU-backed `Stack`. See `setup_rgb` for the reasoning.
+/// file-and-GPU-backed `Document`. See `setup_rgb` for the reasoning.
 ///
 /// Beyond `MAX_CHANNELS` the shader has no slot to composite into, so further
 /// samples are dropped — no real file has 7+ samples/pixel.
@@ -223,7 +226,7 @@ pub fn rgb_channel_plan(spp: usize) -> Vec<bool> {
 /// colors show without any contrast tweaking). Additively blending the red,
 /// green and blue ramps in the composite shader reconstructs the original RGB
 /// pixel. Frame navigation still walks IFDs (one full-color image per IFD) —
-/// see `Stack::rgb`.
+/// see `Display::rgb`.
 ///
 /// Samples past the third (TIFF ExtraSamples — alpha, or anything else a writer
 /// packed in) get channels too, but **start disabled**. They're real data the
@@ -234,7 +237,7 @@ pub fn rgb_channel_plan(spp: usize) -> Vec<bool> {
 /// the additive shader would blend in as a solid color wash over the picture.
 /// Off-by-default is the only setting that's harmless for both: the channel row
 /// is visible, and one click shows it.
-pub fn setup_rgb(loaded: &mut Stack) {
+pub fn setup_rgb(loaded: &mut Document) {
     let spp = loaded
         .tiff
         .frames
@@ -272,7 +275,7 @@ pub fn setup_rgb(loaded: &mut Stack) {
             })
             .collect(),
     );
-    loaded.frame_index = 0;
+    loaded.set_frame(0);
 }
 
 /// Reconfigures a freshly-loaded CMYK (Separated) stack: its four ink planes
@@ -296,7 +299,7 @@ pub fn setup_rgb(loaded: &mut Stack) {
 /// display model (and the frame index), so it is as safe to call on a stack
 /// already on screen as on one just opened: the display's revisions moving is
 /// what has a viewer drop everything it holds of the old mapping.
-pub fn setup_cmyk(loaded: &mut Stack) {
+pub fn setup_cmyk(loaded: &mut Document) {
     // Both flags: `rgb` drives the plane-of-one-IFD decode addressing shared
     // with real RGB, `cmyk` records that these channels are derived.
     loaded.display.set_sample_planes(true);
@@ -325,7 +328,7 @@ pub fn setup_cmyk(loaded: &mut Stack) {
             .map(|_| ChannelSettings::new(units.full_range(), units))
             .collect(),
     );
-    loaded.frame_index = 0;
+    loaded.set_frame(0);
 }
 
 /// Applies a manual dimension-order change from the dropdown: reassigns the
@@ -335,7 +338,12 @@ pub fn setup_cmyk(loaded: &mut Stack) {
 /// unchanged, so it stays a plain channels/time swap. The triple-axis
 /// warning flag is carried over — it describes the file, not the current
 /// role assignment.
-pub fn apply_dimension_override(loaded: &mut Stack, channels: usize, slices: usize, frames: usize) {
+pub fn apply_dimension_override(
+    loaded: &mut Document,
+    channels: usize,
+    slices: usize,
+    frames: usize,
+) {
     let resolved = fast_tiff_lib::ResolvedDimensions {
         channels,
         slices,

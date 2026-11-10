@@ -240,7 +240,7 @@ fn marks_are_drawn_for_the_frame_in_view_numbered_over_all_frames() {
 
 /// A 100 x 50 time series of `frames` frames, written with `rois` as its
 /// ImageJ overlay and opened as the app opens a file.
-fn stack_with_overlay(frames: usize, rois: Vec<PointRoi>) -> Stack {
+fn stack_with_overlay(frames: usize, rois: Vec<PointRoi>) -> Document {
     use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
     let opts = WriterOptions::new(100, 50, SampleType::U8)
         .metadata(StackMetaWrite::new(1, 1).overlay(rois));
@@ -249,7 +249,7 @@ fn stack_with_overlay(frames: usize, rois: Vec<PointRoi>) -> Stack {
         w.write_frame_u8(&vec![f as u8; 100 * 50]).unwrap();
     }
     let bytes = w.finish().unwrap().into_inner();
-    Stack::from_bytes(bytes, "counted.tif".into(), false).unwrap()
+    Document::from_bytes(bytes, "counted.tif".into(), false).unwrap()
 }
 
 fn named(name: &str, color: [u8; 3], points: &[(f32, f32, u32)]) -> PointRoi {

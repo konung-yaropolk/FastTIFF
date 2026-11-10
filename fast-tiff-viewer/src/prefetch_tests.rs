@@ -98,7 +98,7 @@ fn the_read_ahead_answers_the_frame_asked_for_last() {
 /// Two channels by three timepoints, deflated (so the stack reads ahead by
 /// decoding), plane `i` filled with `i * 1000`.
 #[cfg(feature = "threads")]
-fn two_channel_movie() -> Stack {
+fn two_channel_movie() -> Document {
     use fast_tiff_lib::StackMetaWrite;
     let opts = WriterOptions::new(W, H, SampleType::U16)
         .compression(Compression::Deflate)
@@ -109,7 +109,7 @@ fn two_channel_movie() -> Stack {
             .unwrap();
     }
     let bytes = w.finish().unwrap().into_inner();
-    Stack::from_bytes(bytes, "movie.tif".into(), false).unwrap()
+    Document::from_bytes(bytes, "movie.tif".into(), false).unwrap()
 }
 
 /// A frame read ahead under one channel layout is not taken under the next.
@@ -177,7 +177,7 @@ fn the_read_ahead_bins_the_frame_it_decodes() {
     let mut stack = two_channel_movie();
     stack.services.start_prefetch(&stack.tiff);
     let revision = stack.display.revision();
-    let take = |stack: &Stack, frame: usize| {
+    let take = |stack: &Document, frame: usize| {
         let p = stack
             .services
             .prefetch
@@ -201,7 +201,7 @@ fn the_read_ahead_bins_the_frame_it_decodes() {
     let p = stack.services.prefetch.as_ref().unwrap();
     p.request(revision, 2, jobs, Some(binning));
     let got = take(&stack, 2);
-    stack.frame_index = 2;
+    stack.set_frame(2);
     assert_eq!(got.histograms, frame_histograms(&stack));
     assert_eq!(got.histograms.len(), 2);
 

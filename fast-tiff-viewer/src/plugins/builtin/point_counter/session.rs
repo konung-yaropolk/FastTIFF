@@ -10,7 +10,7 @@
 //! with the other buttons, the wheel — stays the frontend's.
 
 use super::{frame_of_position, PointCounter};
-use crate::stack::Stack;
+use crate::document::Document;
 
 /// A point being dragged.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,7 +69,7 @@ impl Session {
     /// A session on `stack`: its overlay's points, each on the frame its
     /// plane is on ([`PointCounter::from_overlay`]), or a fresh counter when
     /// it has none.
-    pub fn for_stack(stack: &Stack) -> Self {
+    pub fn for_stack(stack: &Document) -> Self {
         Self::new(PointCounter::from_overlay(stack))
     }
 
@@ -154,7 +154,7 @@ impl Session {
     /// every frame when it is on none. Pinned, it stays pinned, so changing
     /// the axes and changing them back puts every point where it was
     /// ([`PointCounter::reanchor`]).
-    pub fn follow_axes(&mut self, before: &[u32], stack: &Stack) {
+    pub fn follow_axes(&mut self, before: &[u32], stack: &Document) {
         self.counter.reanchor(
             |frame| before.get(frame).copied().filter(|&p| p != 0),
             |plane| frame_of_position(stack, plane),

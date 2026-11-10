@@ -10,7 +10,7 @@
 
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::plugins::{describe_view, Registry, ResultDest, StackHost};
-use fast_tiff_viewer::Stack;
+use fast_tiff_viewer::Document;
 use fasttiff_plugin_api::{
     HostContext, ImageResult, ImageSpec, Outcome, ParamKind, ParamValue, Params, Plane, PlaneRef,
     Plugin, PluginError, StackInfo, StreamTarget, ViewParams, VolumeMode, VolumeView,
@@ -30,7 +30,7 @@ fn view() -> VolumeView {
     }
 }
 
-fn host(s: &Stack) -> StackHost {
+fn host(s: &Document) -> StackHost {
     StackHost::new(s, describe_view(s, 0, false, view()))
 }
 
@@ -49,7 +49,7 @@ fn entries(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// A field of blobs wandering along `path`, one channel, as a real stack.
-fn wandering(side: u32, path: &[(i32, i32)]) -> Stack {
+fn wandering(side: u32, path: &[(i32, i32)]) -> Document {
     let base: Vec<f32> = {
         let mut f = vec![10.0f32; (side * side) as usize];
         for (cy, cx, amp) in [
@@ -78,7 +78,7 @@ fn wandering(side: u32, path: &[(i32, i32)]) -> Stack {
             .collect();
         w.write_frame_f32(&px).unwrap();
     }
-    Stack::from_bytes(w.finish().unwrap().into_inner(), "moving.tif".into(), false).unwrap()
+    Document::from_bytes(w.finish().unwrap().into_inner(), "moving.tif".into(), false).unwrap()
 }
 
 const PATH: [(i32, i32); 6] = [(0, 0), (3, -2), (-4, 1), (2, 3), (-1, -3), (4, 2)];
@@ -90,7 +90,7 @@ fn installed(reg: &mut Registry, id: &str) -> usize {
 }
 
 /// The edge choice labelled `label`, as the dialog would set it.
-fn edges(reg: &Registry, index: usize, s: &Stack, label: &str) -> ParamValue {
+fn edges(reg: &Registry, index: usize, s: &Document, label: &str) -> ParamValue {
     let decls = reg.entries()[index].plugin.params(&host(s));
     let decl = decls
         .iter()
@@ -108,7 +108,7 @@ fn edges(reg: &Registry, index: usize, s: &Stack, label: &str) -> ParamValue {
 fn whole_and_streamed(
     reg: &mut Registry,
     index: usize,
-    s: &Stack,
+    s: &Document,
     params: &Params,
     dir: &Path,
 ) -> (ImageResult, ImageResult, PathBuf) {

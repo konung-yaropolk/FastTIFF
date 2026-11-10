@@ -1,6 +1,6 @@
 //! [`Residency`]: what one renderer holds of the document it shows.
 //!
-//! The document ([`Stack`](crate::Stack)) is what is shown: the file, the
+//! The document, a [`Document`](crate::Document), is what is shown: the file, the
 //! display model, the frame on screen, and the services every view of it
 //! shares — the background workers and the caches that hold for any view. This
 //! is one view's side of it: which frame its textures hold, the window of the
@@ -266,7 +266,7 @@ pub(crate) struct VolumeResidency {
     /// whatever limited the last one's size. Kept across a layout change —
     /// it is this renderer's memory that ran short — and gone with the
     /// residency when the document changes: what did not fit may have been
-    /// the last stack's problem.
+    /// the last document's problem.
     pub(crate) budget_cap: Option<usize>,
     /// The renderer may hold a volume nothing here describes, whose memory
     /// should go back on the next sync, the first call that has the renderer.

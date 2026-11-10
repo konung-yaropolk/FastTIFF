@@ -96,7 +96,7 @@ name = "FastTIFF"
 path = "src/main.rs"
 
 [dependencies]
-# The stack model, channel/contrast settings, camera, and the decode->GPU sync
+# The document model, channel/contrast settings, camera, and the decode->GPU sync
 # — everything this app does that isn't a window or a widget.
 fast-tiff-viewer = { path = "../fast-tiff-viewer", default-features = false }
 fast-tiff-lib = { path = "../fast-tiff-lib", default-features = false }

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
 
 /// A two-frame 4x3 stack to run against.
-fn stack() -> crate::Stack {
+fn stack() -> crate::Document {
     let image = ImageResult {
         width: 4,
         height: 3,
@@ -38,7 +38,7 @@ fn files_in(dir: &std::path::Path) -> Vec<PathBuf> {
 }
 
 /// A streaming host over `s`, writing to `dir`, with a stop button.
-fn host(s: &crate::Stack, dir: &std::path::Path) -> (StackHost, Arc<AtomicBool>) {
+fn host(s: &crate::Document, dir: &std::path::Path) -> (StackHost, Arc<AtomicBool>) {
     let view = describe_view(
         s,
         0,

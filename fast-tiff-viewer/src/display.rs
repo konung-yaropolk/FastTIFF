@@ -1,7 +1,7 @@
 //! [`Display`] — how the viewer is *showing* a stack, as opposed to what the
 //! file said.
 //!
-//! `Stack::tiff.meta` is the parsed file: whatever `fast-tiff-lib` read out of
+//! `Document::tiff.meta` is the parsed file: whatever `fast-tiff-lib` read out of
 //! the TIFF, and nothing else. It is never written to after `open`. Everything
 //! the viewer or the user decides on top of it lives here instead:
 //!
@@ -36,7 +36,7 @@
 //! what holds a copy of the LUTs themselves (a renderer's LUT texture) is
 //! keyed on it.
 
-use crate::stack::{ChannelSettings, Window};
+use crate::document::{ChannelSettings, Window};
 use fast_tiff_lib::{DisplayMode, StackMeta};
 use scivis_render::{ChannelKind, Lut, MAX_CHANNELS};
 use std::sync::atomic::{AtomicU64, Ordering};
