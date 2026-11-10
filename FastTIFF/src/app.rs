@@ -20,6 +20,8 @@
 //!   * `animation` — a plugin's animation of the 3D view, played or recorded
 //!   * `camera`  — egui input → the core camera
 //!   * `canvas`  — the central panel: the picture, in 2D or 3D
+//!   * `canvas_tool` — the tools that take the left button on the picture,
+//!     and which of them has it
 //!   * `command` — the interface's requests, and the order they take effect in
 //!   * `minimap` — the 2D navigator: where the view sits in the whole frame
 //!   * `overlay` — the 3D coordinate-box overlay, drawn with the egui painter
@@ -52,6 +54,7 @@ mod animation;
 mod autoscroll;
 mod camera;
 mod canvas;
+mod canvas_tool;
 mod clipboard;
 mod command;
 mod copy_view;
@@ -73,6 +76,7 @@ mod toolbar;
 mod widgets;
 mod windows;
 
+use canvas_tool::{CanvasGesture, ImageXform, Tools};
 use command::{Applying, Commands, Step, UiCommand, Via, FRAME};
 // Named in the docs of this module and of its children, which link to the
 // phases; the code goes by `FRAME` and never names one.
@@ -1322,46 +1326,6 @@ pub struct ViewerApp {
     animation: animation::Animations,
 }
 
-/// The canvas tools, each while it is in use.
-///
-/// Each one's marks are positions in the picture it was used on, so a new
-/// document takes them away (see [`reset`](Self::reset)).
-#[derive(Default)]
-struct Tools {
-    /// The plot a plugin returned, while one is on screen.
-    ///
-    /// It owns the canvas selection too: the regions belong to the plot they
-    /// feed, so closing the window takes the tool away with it rather than
-    /// leaving a selection behind that nothing is measuring.
-    plot: Option<plot::PlotWindow>,
-    /// A rectangle being drawn because a plugin asked for one. See
-    /// [`region_pick`].
-    region_pick: Option<region_pick::RegionPick>,
-    /// The point counter, while its window is open. Like the plot's regions,
-    /// the points belong to the window: closing it takes them, and their
-    /// marks, away. See [`point_counter`].
-    point_counter: Option<point_counter::Session>,
-}
-
-impl Tools {
-    /// Put the tools away, now that another document has landed.
-    fn reset(&mut self) {
-        // A plot of the last picture. The regions are in pixels of the picture
-        // they were drawn on; carrying them to a different image would put them
-        // somewhere arbitrary and go on measuring, which is worse than losing
-        // them.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.plot = None;
-        }
-        // A rectangle being drawn for a plugin was drawn on the last picture.
-        self.region_pick = None;
-        // And so were the counted points: they are positions in that picture,
-        // and counting on into this one would mix two images in one table.
-        self.point_counter = None;
-    }
-}
-
 /// The user's 3D input preferences. Edited in the render-settings window, and
 /// kept across files.
 struct VolumePrefs {
@@ -1622,7 +1586,7 @@ impl ViewerApp {
         self.document
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.view.reset();
-        self.tools.reset();
+        self.tools.reset(WEB);
         self.panel.reset();
         // The pop-ups mostly stay up on the desktop, repointed at the new
         // document; each says for itself (`AppWindow::outlives_document`).
@@ -3036,13 +3000,13 @@ impl ViewerApp {
         if copy_view::hotkey(ctx) {
             cmds.push(UiCommand::Copy(Via::Hotkey));
         }
-        // Ctrl/Cmd+Z, the point counter's undo, while the main window has the
-        // keyboard — and only while the counter is open, which is when the
-        // chord is taken. Applied before the picture handles this frame's
-        // pointer, so an undo that ends a drag in flight is not followed by
-        // one more step of it.
-        if self.tools.point_counter.is_some() && point_counter::undo_hotkey(ctx) {
-            cmds.push(UiCommand::UndoPoint);
+        // Ctrl/Cmd+Z, the canvas tools' undo (the point counter's), while the
+        // main window has the keyboard — and only while a tool that keeps an
+        // undo history is open, which is when the chord is taken. Applied
+        // before the picture handles this frame's pointer, so an undo that
+        // ends a drag in flight is not followed by one more step of it.
+        if self.tools.takes_undo() && canvas_tool::undo_hotkey(ctx) {
+            cmds.push(UiCommand::UndoTool);
         }
     }
 
@@ -3079,8 +3043,9 @@ impl ViewerApp {
     }
 
     /// Settle the view before the canvas is drawn: back to 2D when there is no
-    /// volume left to show, then the animation's step and the region pick's
-    /// keys, both of which read the settled mode.
+    /// volume left to show, then the animation's step and the canvas tools'
+    /// tick (a rectangle's Enter and Escape), both of which read the settled
+    /// mode.
     fn settle_view(&mut self, ctx: &egui::Context) {
         // A dimension swap can collapse the stack to a single frame (e.g.
         // 1 ch × N frames -> N ch × 1 frame), which can't build a volume — the
@@ -3105,7 +3070,7 @@ impl ViewerApp {
         // 3D or moving the camera this frame has been applied, and before the
         // 3D view is drawn with the pose it decides.
         self.tick_animation(ctx);
-        self.tick_region_pick(ctx);
+        self.tick_tools(ctx);
     }
 
     /// Size the window, then bring the GPU up to date with this frame.

@@ -14,8 +14,8 @@
 //! the egui side of it, which that crate has no toolkit for:
 //!
 //! * the window: the table of groups and counts, and the buttons;
-//! * the pointer turned into a [`Gesture`], by the canvas, and the cursor;
-//! * the marks drawn over the picture ([`draw`]);
+//! * the canvas tool ([`CanvasTool`]): the pointer turned into a [`Gesture`],
+//!   the cursor, and the marks drawn over the picture ([`draw`]);
 //! * where the two exports go: a RoiSet `.zip` the ROI Manager opens, or the
 //!   open document's overlay ([`Document::overlay`]), which the next save writes
 //!   into the TIFF.
@@ -51,6 +51,9 @@ use fast_tiff_viewer::plugins::builtin::point_counter::{CountedPoint, PointCount
 pub(super) use fast_tiff_viewer::plugins::builtin::point_counter::{Gesture, Session};
 use fast_tiff_viewer::Document;
 
+use super::canvas_tool::{
+    undo_hotkey, CanvasGesture, CanvasTool, FrameStarts, ImageXform, Layer, Priority, ToolEvent,
+};
 use super::dialog;
 
 /// The tool's name: its menu entry and its window's title.
@@ -63,7 +66,7 @@ const WINDOW_ID: &str = "point_counter";
 /// How near a press has to land to a point to take hold of it, in screen
 /// points. On screen rather than in the image so that a point is as easy to
 /// grab at 3% as at 3200%: divided by the zoom before it reaches
-/// [`PointCounter::hit`].
+/// [`PointCounter::hit`] (see [`reach`]).
 pub(super) const HIT_RADIUS: f32 = 6.0;
 
 /// The mark: a cross with arms this long either side of the point, in screen
@@ -114,50 +117,79 @@ pub(super) fn cursor(
     }
 }
 
-/// The image position under a point on screen, continuous: pixel `(i, j)`
-/// covers `[i, i+1) x [j, j+1)`, so the middle of it is `(i + 0.5, j + 0.5)`.
-/// Not floored the way [`plot::pixel_at`](super::plot::pixel_at) is — a point
-/// is where it was clicked, and the ImageJ export puts it on the same pixel.
-pub(super) fn image_at(pos: Pos2, origin: Pos2, zoom: f32) -> (f32, f32) {
-    ((pos.x - origin.x) / zoom, (pos.y - origin.y) / zoom)
+/// [`HIT_RADIUS`] in image pixels, at the zoom `xf` is drawn at.
+fn reach(xf: &ImageXform) -> f32 {
+    HIT_RADIUS / xf.zoom
 }
 
-/// The screen position of an image position: [`image_at`] the other way.
-pub(super) fn screen_at((x, y): (f32, f32), origin: Pos2, zoom: f32) -> Pos2 {
-    origin + Vec2::new(x * zoom, y * zoom)
-}
-
-/// Whether Ctrl/Cmd+Z was pressed this frame, in the viewport `ctx` is
-/// drawing.
+/// The canvas tool: after a rectangle a plugin asked for, and ahead of a
+/// plot's regions. It draws marks, over any regions.
 ///
-/// Skipped while text has the keyboard, for the reason
-/// [`copy_view::hotkey`](super::copy_view::hotkey) is: in a group's name the
-/// chord is the text field's own undo, and taking back a point instead would
-/// read as the field being broken. Any other widget with the focus — a button
-/// just reached with Tab — has no undo of its own, and leaves it to the points.
-pub(super) fn undo_hotkey(ctx: &egui::Context) -> bool {
-    if super::copy_view::text_has_the_keyboard(ctx) {
-        return false;
+/// Positions are continuous ([`ImageXform::image_at`]): a click mid-pixel is
+/// x.5, which is where the mark is drawn and what ImageJ gets.
+impl CanvasTool for Session {
+    fn priority(&self) -> Priority {
+        Priority::Opened
     }
-    ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z))
+
+    fn layer(&self) -> Layer {
+        Layer::Marks
+    }
+
+    fn track(&mut self, g: &CanvasGesture, xf: &ImageXform, frame: usize) -> Option<ToolEvent> {
+        let gesture = Gesture {
+            at: g.at.map(|pos| xf.image_at(pos)),
+            pressed_at: g.pressed_at.map(|pos| xf.image_at(pos)),
+            clicked: g.clicked,
+            alt: g.alt,
+            drag_started: g.drag_started,
+            dragging: g.dragging,
+            drag_stopped: g.drag_stopped,
+            taken: g.taken,
+        };
+        Session::track(self, gesture, frame, reach(xf), xf.size);
+        None
+    }
+
+    fn draw(&self, painter: &egui::Painter, xf: &ImageXform, frame: usize) {
+        draw(painter, &self.counter, frame, xf);
+    }
+
+    /// The left button places and moves points here, not the picture, so the
+    /// hand is for a point under the pointer.
+    fn cursor(
+        &self,
+        hover: Option<Pos2>,
+        xf: &ImageXform,
+        frame: usize,
+    ) -> Option<egui::CursorIcon> {
+        let hover = hover.map(|pos| xf.image_at(pos));
+        Some(cursor(self, hover, frame, reach(xf)))
+    }
+
+    fn axes_changed(&mut self, before: &FrameStarts, stack: &Document) {
+        self.follow_axes(before.positions(), stack);
+    }
+
+    fn has_undo(&self) -> bool {
+        true
+    }
+
+    fn undo(&mut self) {
+        Session::undo(self);
+    }
 }
 
 /// Draw the points shown on `frame` over the picture: a cross in the group's
 /// colour, and the point's number in its group beside it, both outlined so
 /// they read on any part of the image.
-pub(super) fn draw(
-    painter: &egui::Painter,
-    counter: &PointCounter,
-    frame: usize,
-    origin: Pos2,
-    zoom: f32,
-) {
+pub(super) fn draw(painter: &egui::Painter, counter: &PointCounter, frame: usize, xf: &ImageXform) {
     // Room for a mark and its number whose point is just off the panel.
     let room = painter.clip_rect().expand(ARM + 4.0 * LABEL_SIZE);
     let font = egui::FontId::proportional(LABEL_SIZE);
     let halo = Stroke::new(HALO_STROKE, HALO);
     let on_screen = |i: usize, p: &CountedPoint| {
-        counter.shown_on(i, frame) && room.contains(screen_at((p.x, p.y), origin, zoom))
+        counter.shown_on(i, frame) && room.contains(xf.screen_at((p.x, p.y)))
     };
     let numbered = counter
         .points
@@ -180,7 +212,7 @@ pub(super) fn draw(
         if !on_screen(i, p) {
             continue;
         }
-        let c = screen_at((p.x, p.y), origin, zoom);
+        let c = xf.screen_at((p.x, p.y));
         let [r, g, b] = counter.groups[p.group].color;
         let color = Color32::from_rgb(r, g, b);
         // Both halos first, a point longer at each end, so neither arm's

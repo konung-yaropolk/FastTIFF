@@ -1,29 +1,11 @@
 //! The canvas tool's geometry, and the chart's number formatting.
 //!
 //! The drawing itself is not tested here — what is worth pinning is the
-//! screen-to-pixel mapping, because a plot of the wrong pixels looks exactly
-//! like a plot of the right ones.
+//! drag-to-region mapping, because a plot of the wrong pixels looks exactly
+//! like a plot of the right ones. The screen-to-pixel mapping before it is
+//! `ImageXform`'s, and is tested with it, in `canvas_tool_tests.rs`.
 
 use super::*;
-
-const ORIGIN: Pos2 = Pos2::new(100.0, 50.0);
-
-#[test]
-fn a_point_maps_to_the_pixel_it_is_within() {
-    // At 4x zoom, image pixel (0,0) covers screen x 100..104.
-    assert_eq!(pixel_at(Pos2::new(100.0, 50.0), ORIGIN, 4.0), (0, 0));
-    assert_eq!(pixel_at(Pos2::new(103.9, 53.9), ORIGIN, 4.0), (0, 0));
-    assert_eq!(pixel_at(Pos2::new(104.0, 54.0), ORIGIN, 4.0), (1, 1));
-    // Not rounded: three-quarters into a pixel is still that pixel.
-    assert_eq!(pixel_at(Pos2::new(107.0, 50.0), ORIGIN, 4.0), (1, 0));
-}
-
-#[test]
-fn a_point_left_of_the_image_maps_outside_it() {
-    // Negative rather than clamped to 0 — clamping here would make a drag that
-    // began off the image start at its corner instead of where it began.
-    assert_eq!(pixel_at(Pos2::new(96.0, 46.0), ORIGIN, 4.0), (-1, -1));
-}
 
 /// The smallest possible selection is one pixel. A drag that starts and ends
 /// inside the same pixel must select it, not nothing.

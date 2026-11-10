@@ -4,10 +4,10 @@
 //! without a line there carried the last file's state into the next. Each part
 //! of the chrome now resets itself; these pin what each one drops and what it
 //! deliberately keeps, so a change to either is a change someone made on
-//! purpose.
+//! purpose. The canvas tools' reset is pinned with the tools, in
+//! `canvas_tool_tests`, and the pop-ups' in `windows_tests`.
 
 use super::*;
-use fast_tiff_viewer::plugins::builtin::point_counter::PointCounter;
 
 /// A view with every field moved off its fresh value.
 fn used_view() -> View2d {
@@ -70,33 +70,6 @@ fn a_new_document_keeps_the_views_layout_bookkeeping() {
     assert_eq!(view.panel_rect, used.panel_rect);
     assert_eq!(view.zoom_reposition, used.zoom_reposition);
     assert_eq!(view.scroll_accum, used.scroll_accum);
-}
-
-/// Every canvas tool is put away: their marks are positions in the picture
-/// that has gone.
-#[test]
-#[cfg(not(target_arch = "wasm32"))]
-fn a_new_document_puts_the_canvas_tools_away() {
-    let mut tools = Tools {
-        plot: Some(plot::PlotWindow::new(
-            0,
-            fasttiff_plugin_api::Params::new(),
-            fasttiff_plugin_api::Plot::new("trace"),
-        )),
-        region_pick: Some(region_pick::RegionPick {
-            plugin: 1,
-            params: fasttiff_plugin_api::Params::new(),
-            name: "Crop".into(),
-            roi: None,
-            drag: None,
-        }),
-        point_counter: Some(point_counter::Session::new(PointCounter::new())),
-    };
-    tools.reset();
-    // As `Tools::default()` has them.
-    assert!(tools.plot.is_none());
-    assert!(tools.region_pick.is_none());
-    assert!(tools.point_counter.is_none());
 }
 
 /// The channels panel is rebuilt wholesale, a grow caught in flight included.

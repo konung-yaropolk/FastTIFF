@@ -15,6 +15,7 @@
 //! [`egui::Painter`], so the idiom is established, and a few polylines are not
 //! worth a dependency.
 
+use super::canvas_tool::{CanvasGesture, CanvasTool, Layer, Priority, ToolEvent};
 use super::*;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use fasttiff_plugin_api::{Plot, Roi, SelectionKind, Shape};
@@ -83,19 +84,80 @@ impl PlotWindow {
     pub fn wants_regions(&self) -> bool {
         self.plot.wants == SelectionKind::Regions
     }
+
+    /// Take one frame of a drag on the picture: `px` is the pixel the pointer
+    /// is acting at, `started`/`dragging` what the primary button did and
+    /// `stopped` whether a drag ended, and `add` whether Shift is held.
+    ///
+    /// The region starts at the pixel the drag was first seen at, and is
+    /// committed on release rather than continuously, so a drag across a
+    /// long timelapse starts one measurement instead of one per frame of the
+    /// gesture. Shift adds it; a plain drag replaces them all, which is what
+    /// makes "start again" one gesture.
+    pub fn track(
+        &mut self,
+        px: Option<(i64, i64)>,
+        (started, dragging, stopped): (bool, bool, bool),
+        add: bool,
+        size: (u32, u32),
+    ) {
+        if let Some(px) = px {
+            match self.drag {
+                None if started => self.drag = Some((px, px)),
+                Some((from, _)) if dragging => self.drag = Some((from, px)),
+                _ => {}
+            }
+        }
+        if stopped {
+            if let Some((from, to)) = self.drag.take() {
+                if let Some(roi) = drag_region(from, to, self.shape, size.0, size.1) {
+                    if !add {
+                        self.rois.clear();
+                    }
+                    self.rois.push(roi);
+                    self.stale = true;
+                }
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------ the canvas tool
 
-/// The image pixel under a point on screen.
-///
-/// Floored, not rounded: the pixel under the cursor is the one it is *within*,
-/// and rounding would give the top-left quarter of a pixel to its neighbour.
-pub(super) fn pixel_at(pos: Pos2, origin: Pos2, zoom: f32) -> (i64, i64) {
-    (
-        ((pos.x - origin.x) / zoom).floor() as i64,
-        ((pos.y - origin.y) / zoom).floor() as i64,
-    )
+/// The canvas tool, while the plugin asked for regions: after every other,
+/// being a selection offered with a result rather than one asked for.
+impl CanvasTool for PlotWindow {
+    fn priority(&self) -> Priority {
+        Priority::Offered
+    }
+
+    fn layer(&self) -> Layer {
+        Layer::Regions
+    }
+
+    fn wants_primary(&self) -> bool {
+        self.wants_regions()
+    }
+
+    /// In whole pixels. A changed selection leaves the plot stale, for its
+    /// window to run the plugin again (see `ViewerApp::poll_plot`).
+    fn track(&mut self, g: &CanvasGesture, xf: &ImageXform, _frame: usize) -> Option<ToolEvent> {
+        let px = g.at.map(|pos| xf.pixel_at(pos));
+        let buttons = (g.drag_started, g.dragging, g.drag_stopped);
+        PlotWindow::track(self, px, buttons, g.shift, xf.size);
+        None
+    }
+
+    fn draw(&self, painter: &egui::Painter, xf: &ImageXform, _frame: usize) {
+        draw_rois(painter, self, xf);
+    }
+
+    /// On the desktop a new document closes the plot. In the browser it has
+    /// always stayed up, regions and all: the reset was written while plots
+    /// were desktop-only, and still clears them only there.
+    fn outlives_document(&self, web: bool) -> bool {
+        web
+    }
 }
 
 /// The region a drag between two pixels covers.
@@ -114,13 +176,6 @@ pub(super) fn drag_region(
     let lo = (from.0.min(to.0), from.1.min(to.1));
     let hi = (from.0.max(to.0) + 1, from.1.max(to.1) + 1);
     Roi::from_corners(lo, hi, width, height).map(|r| r.with_shape(shape))
-}
-
-pub(super) fn roi_rect(roi: &Roi, origin: Pos2, zoom: f32) -> Rect {
-    Rect::from_min_size(
-        origin + Vec2::new(roi.x as f32 * zoom, roi.y as f32 * zoom),
-        Vec2::new(roi.w as f32 * zoom, roi.h as f32 * zoom),
-    )
 }
 
 /// Outline one region.
@@ -149,15 +204,9 @@ pub(super) fn stroke_roi(painter: &egui::Painter, rect: Rect, shape: Shape, stro
 }
 
 /// Draw the committed regions and the one being dragged, over the picture.
-pub(super) fn draw_rois(
-    painter: &egui::Painter,
-    win: &PlotWindow,
-    origin: Pos2,
-    zoom: f32,
-    size: (u32, u32),
-) {
+pub(super) fn draw_rois(painter: &egui::Painter, win: &PlotWindow, xf: &ImageXform) {
     for (i, roi) in win.rois.iter().enumerate() {
-        let rect = roi_rect(roi, origin, zoom);
+        let rect = xf.roi_rect(roi);
         let color = palette(i);
         stroke_roi(painter, rect, roi.shape, Stroke::new(1.5_f32, color));
         // The number, so a line in the legend can be found on the picture.
@@ -171,10 +220,10 @@ pub(super) fn draw_rois(
     }
     // The drag in flight, thinner so it reads as provisional.
     if let Some((from, to)) = win.drag {
-        if let Some(preview) = drag_region(from, to, win.shape, size.0, size.1) {
+        if let Some(preview) = drag_region(from, to, win.shape, xf.size.0, xf.size.1) {
             stroke_roi(
                 painter,
-                roi_rect(&preview, origin, zoom),
+                xf.roi_rect(&preview),
                 preview.shape,
                 Stroke::new(1.0_f32, palette(win.rois.len())),
             );

@@ -46,24 +46,12 @@ fn the_cursor_says_what_the_left_button_would_do() {
     );
 }
 
-/// The middle of a pixel is `.5`, at any zoom, and the conversion goes both
-/// ways.
-#[test]
-fn screen_and_image_positions_are_continuous_and_invert() {
-    let origin = egui::pos2(100.0, 50.0);
-    // At 4x, pixel (10, 20) spans screen x 140..144, y 130..134.
-    assert_eq!(
-        image_at(egui::pos2(142.0, 132.0), origin, 4.0),
-        (10.5, 20.5)
-    );
-    assert_eq!(image_at(origin, origin, 4.0), (0.0, 0.0));
-    let p = (37.25, 3.75);
-    for zoom in [0.25, 1.0, 1.5, 32.0] {
-        let back = image_at(screen_at(p, origin, zoom), origin, zoom);
-        assert!(
-            (back.0 - p.0).abs() < 1e-4 && (back.1 - p.1).abs() < 1e-4,
-            "{zoom}"
-        );
+/// The picture at `zoom`, its top-left corner at the panel's.
+fn at_zoom(zoom: f32) -> ImageXform {
+    ImageXform {
+        origin: egui::pos2(0.0, 0.0),
+        zoom,
+        size: SIZE,
     }
 }
 
@@ -218,7 +206,7 @@ fn marks_are_drawn_for_the_frame_in_view_numbered_over_all_frames() {
     let mut texts = Vec::new();
     let output = ctx.run_ui(egui::RawInput::default(), |ui| {
         let painter = ui.painter().clone();
-        draw(&painter, &t.counter, 1, egui::pos2(0.0, 0.0), 2.0);
+        draw(&painter, &t.counter, 1, &at_zoom(2.0));
     });
     for clipped in &output.shapes {
         if let egui::Shape::Text(text) = &clipped.shape {
@@ -368,7 +356,7 @@ fn a_crowded_frame_is_drawn_without_numbers() {
     let shapes = |t: &Session| {
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let painter = ui.painter().clone();
-            draw(&painter, &t.counter, 0, egui::pos2(0.0, 0.0), 1.0);
+            draw(&painter, &t.counter, 0, &at_zoom(1.0));
         });
         let texts = output
             .shapes

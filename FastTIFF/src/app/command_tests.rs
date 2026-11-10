@@ -21,7 +21,7 @@ fn one_of_each() -> Vec<UiCommand> {
         UiCommand::StartPlugin(3),
         UiCommand::OpenPointCounter,
         UiCommand::Copy(Via::Hotkey),
-        UiCommand::UndoPoint,
+        UiCommand::UndoTool,
         UiCommand::SetViewMode(ViewMode::Volume),
         UiCommand::SetFps(12.5),
         UiCommand::SetDecodeMode(DecodeMode::Threaded),
@@ -81,7 +81,7 @@ fn a_frame_applies_its_commands_in_the_documented_order() {
         ),
         (
             ToolWindows,
-            vec![UiCommand::Copy(Via::Hotkey), UiCommand::UndoPoint],
+            vec![UiCommand::Copy(Via::Hotkey), UiCommand::UndoTool],
         ),
         (CopyPoll, vec![UiCommand::SetViewMode(ViewMode::Volume)]),
         (
@@ -147,10 +147,10 @@ fn a_click_and_a_chord_in_one_frame_are_two_copies() {
 /// drag in flight is not followed by one more step of it."
 #[test]
 fn the_undo_lands_before_the_canvas_takes_the_pointer() {
-    assert!(phase_of(UiCommand::UndoPoint) < Phase::Canvas);
+    assert!(phase_of(UiCommand::UndoTool) < Phase::Canvas);
     // And after the tool windows, where the counter's own window takes the
     // chord first when it has the keyboard.
-    assert!(phase_of(UiCommand::UndoPoint) > Phase::Toolbar);
+    assert!(phase_of(UiCommand::UndoTool) > Phase::Toolbar);
 }
 
 /// A dialog the toolbar opens is drawn on the same frame: everything the

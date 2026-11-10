@@ -50,8 +50,9 @@ pub(super) enum UiCommand {
     StartPlugin(usize),
     /// Open the point counter, or raise it.
     OpenPointCounter,
-    /// Take back the point counter's last edit.
-    UndoPoint,
+    /// Take back the last edit of the canvas tools that keep an undo history:
+    /// the point counter's.
+    UndoTool,
     /// Switch between the movie and the volume.
     SetViewMode(ViewMode),
     /// The playback rate, in frames per second.
@@ -231,7 +232,7 @@ impl UiCommand {
             UiCommand::OpenPointCounter => (Toolbar, 5),
             // The chords, copy first, as the keys are read.
             UiCommand::Copy(Via::Hotkey) => (ToolWindows, 0),
-            UiCommand::UndoPoint => (ToolWindows, 1),
+            UiCommand::UndoTool => (ToolWindows, 1),
             UiCommand::SetViewMode(_) => (CopyPoll, 0),
             // The bar's settings, then the window toggles — among which the
             // order means nothing, each window having a flag of its own.
@@ -350,11 +351,7 @@ impl super::ViewerApp {
             // Ctrl/Cmd+Z while the main window has the keyboard. The counter's
             // own window takes the chord when it has the keyboard instead — see
             // `point_counter::counter_window`.
-            UiCommand::UndoPoint => {
-                if let Some(tool) = self.tools.point_counter.as_mut() {
-                    tool.undo();
-                }
-            }
+            UiCommand::UndoTool => self.tools.undo(),
             UiCommand::SetViewMode(mode) => self.set_view_mode(mode),
             UiCommand::SetFps(fps) => self.core.playback.fps = fps,
             UiCommand::SetDecodeMode(mode) => self.core.decode_mode = mode,
@@ -424,20 +421,18 @@ impl super::ViewerApp {
     /// rebuilt at the next sync, which finds the channel layout moved (the
     /// frame axis, i.e. the volume depth, just changed).
     fn set_dimension_order(&mut self, c: usize, z: usize, f: usize) {
-        // The counter's points are on frames of the axes as they were.
+        // The tools' marks are on frames of the axes as they were (the
+        // counter's points are), so where the frames began is taken first —
+        // while a tool is in use, since without one nothing asks.
         let before = self
-            .tools
-            .point_counter
+            .core
+            .document
             .as_ref()
-            .and(self.core.document.as_ref())
-            .map(fast_tiff_viewer::plugins::builtin::point_counter::frame_starts);
+            .filter(|_| !self.tools.is_empty())
+            .map(super::canvas_tool::FrameStarts::of);
         self.core.set_dimension_order(c, z, f);
-        if let (Some(before), Some(tool), Some(stack)) = (
-            before,
-            self.tools.point_counter.as_mut(),
-            self.core.document.as_ref(),
-        ) {
-            tool.follow_axes(&before, stack);
+        if let (Some(before), Some(stack)) = (before, self.core.document.as_ref()) {
+            self.tools.axes_changed(&before, stack);
         }
     }
 

@@ -169,22 +169,17 @@ impl ViewerApp {
         );
         let pannable = overflow.x > 0.0 || overflow.y > 0.0;
 
-        // A plot asking for regions takes the *primary* drag: while its
-        // tool is armed, dragging on the picture with the left button
-        // draws rather than pans. Every other button still pans — see the
-        // rule below — and the tool is only armed while its window is
-        // open, so this cannot strand someone with an unpannable view.
+        // A canvas tool takes the *primary* drag: while one has it,
+        // dragging on the picture with the left button draws rather than
+        // pans. Every other button still pans — see the rule below — and a
+        // tool claims it only while it is in use (its window open, or a
+        // plugin waiting for a rectangle, which Escape gives up), so this
+        // cannot strand someone with an unpannable view.
         //
-        // A rectangle a plugin asked for takes it the same way, and
-        // ahead of a plot: it is what the user was just asked to do.
-        // The point counter takes it too while its window is open,
-        // after a rectangle and ahead of a plot: clicking points on is
-        // a tool the user opened by hand, and a plot's regions can be
-        // drawn again once the counter is closed.
-        let selecting = (self.tools.region_pick.is_some()
-            || self.tools.point_counter.is_some()
-            || self.tools.plot.as_ref().is_some_and(|p| p.wants_regions()))
-            && !pinching;
+        // Which tool has it, and which are drawn, is decided here, once,
+        // from what each tool claims (see `canvas_tool`), and the drag rule,
+        // the tool's gesture, the overlay and the cursor below all go by it.
+        let tools = self.tools.arbitrate(pinching);
         let frame = loaded.frame();
 
         // The navigator's frame box, worked out before anything acts on a
@@ -334,22 +329,16 @@ impl ViewerApp {
             }
         }
 
-        // Drag to pan when the image overflows the panel. Not during a
-        // gesture: egui synthesises a pointer from the first touch, so a
-        // two-finger pan arrives here as well and would be applied twice.
-        //
-        // **Any button pans**, with one exception: the primary one belongs
-        // to the region tool while that tool is armed. Spelling the rule
-        // out this way rather than leaving it to `dragged()` is what gives
-        // the middle button a pan that survives the region tool — and the
-        // middle button is the one this matters for, being what CAD and
-        // image editors use to pan and what the 3D view's own CAD mode
-        // already maps to pan (`camera.rs`). It is also why the region
-        // handler below asks for the primary button specifically: without
-        // that, a middle-drag would pan and draw a region at once.
-        let dragging_picture =
-            response.dragged() && !(selecting && response.dragged_by(egui::PointerButton::Primary));
-        if pannable && dragging_picture && !pinching && !on_map {
+        // Drag to pan when the image overflows the panel: any button but the
+        // primary one while a tool has it, and not a pinch or a drag the
+        // navigator has (see `Arbitration::pans`).
+        let pans = tools.pans(
+            response.dragged(),
+            response.dragged_by(egui::PointerButton::Primary),
+            pinching,
+            on_map,
+        );
+        if pannable && pans {
             // Taking hold of the picture ends any glide: the hand on it now
             // decides where it goes.
             self.view.pan_glide.stop();
@@ -375,81 +364,31 @@ impl ViewerApp {
         );
         self.view.image_origin = origin;
 
-        // The selection tool, now that the transform for this frame is
-        // settled. Committed on release rather than continuously, so a
-        // drag across a long timelapse starts one measurement instead
-        // of one per frame of the gesture.
-        // The primary button only, and not a gesture the navigator took:
-        // the other buttons pan (see the rule above), and a drag that
-        // began on the map is moving the view rather than measuring
-        // anything. Without either guard one gesture would do two things.
-        if let (true, Some(pick)) = (selecting && !on_map, self.tools.region_pick.as_mut()) {
-            let primary = egui::PointerButton::Primary;
-            let px = response
-                .interact_pointer_pos()
-                .map(|pos| plot::pixel_at(pos, origin, self.view.zoom));
-            let pressed = ui
-                .input(|i| i.pointer.press_origin())
-                .map(|pos| plot::pixel_at(pos, origin, self.view.zoom));
-            let buttons = (
-                response.drag_started_by(primary),
-                response.dragged_by(primary),
-                response.drag_stopped(),
-            );
-            if let Some(roi) = pick.track(px, pressed, buttons, (w, h)) {
-                self.core.status = Some(pick.drawn_message(&roi));
-            }
-        } else if let (true, Some(tool)) = (selecting && !on_map, self.tools.point_counter.as_mut())
-        {
-            // In image pixels, continuous: a click mid-pixel is x.5,
-            // which is where the mark is drawn and what ImageJ gets.
-            let zoom = self.view.zoom;
-            let to_image = |pos| point_counter::image_at(pos, origin, zoom);
-            let primary = egui::PointerButton::Primary;
-            let at = response.interact_pointer_pos();
-            let gesture = point_counter::Gesture {
-                at: at.map(to_image),
-                pressed_at: ui.input(|i| i.pointer.press_origin()).map(to_image),
-                clicked: response.clicked_by(primary),
-                alt: ui.input(|i| i.modifiers.alt),
-                drag_started: response.drag_started_by(primary),
-                dragging: response.dragged_by(primary),
-                drag_stopped: response.drag_stopped(),
-                // A click on the navigator moves the view (a drag
-                // that began there never reaches here: `on_map`), and
-                // one that ends autoscroll only ends it.
-                taken: autoscroll_was_on
-                    || map.zip(at).is_some_and(|(outer, at)| outer.contains(at)),
-            };
-            tool.track(gesture, frame, point_counter::HIT_RADIUS / zoom, (w, h));
-        } else if selecting && !on_map {
-            let zoom = self.view.zoom;
-            let add = ui.input(|i| i.modifiers.shift);
-            if let Some(win) = self.tools.plot.as_mut() {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    let px = plot::pixel_at(pos, origin, zoom);
-                    let primary = egui::PointerButton::Primary;
-                    match win.drag {
-                        None if response.drag_started_by(primary) => win.drag = Some((px, px)),
-                        Some((from, _)) if response.dragged_by(primary) => {
-                            win.drag = Some((from, px))
-                        }
-                        _ => {}
-                    }
-                }
-                if response.drag_stopped() {
-                    if let Some((from, to)) = win.drag.take() {
-                        if let Some(roi) = plot::drag_region(from, to, win.shape, w, h) {
-                            // Shift adds; a plain drag replaces, which
-                            // is what makes "start again" one gesture.
-                            if !add {
-                                win.rois.clear();
-                            }
-                            win.rois.push(roi);
-                            win.stale = true;
-                        }
-                    }
-                }
+        // The tool that has the primary button, now that the transform for
+        // this frame is settled: this frame of the pointer, in the picture's
+        // pixels. Not a gesture the navigator took: a drag that began on the
+        // map is moving the view rather than measuring anything, and the
+        // other buttons pan (see the rule above). Without either guard one
+        // gesture would do two things.
+        let xf = ImageXform {
+            origin,
+            zoom: self.view.zoom,
+            size: (w, h),
+        };
+        let gesture = CanvasGesture {
+            // A click on the navigator moves the view (a drag that began
+            // there never reaches a tool: `on_map`), and one that ends
+            // autoscroll only ends it.
+            taken: CanvasGesture::is_taken(autoscroll_was_on, map, response.interact_pointer_pos()),
+            ..CanvasGesture::read(&response, ui)
+        };
+        if let Some(slot) = tools.routed(on_map) {
+            let event = self
+                .tools
+                .get_mut(slot)
+                .and_then(|tool| tool.track(&gesture, &xf, frame));
+            if let Some(event) = event {
+                self.on_tool_event(slot, event);
             }
         }
 
@@ -472,35 +411,11 @@ impl ViewerApp {
                 .add(render::paint_callback(&self.render, visible));
         }
 
-        // The regions, over the picture and clipped to the panel like
-        // everything else here.
-        if let Some(pick) = self.tools.region_pick.as_ref() {
-            region_pick::draw(
-                &ui.painter().with_clip_rect(panel_rect),
-                pick,
-                origin,
-                self.view.zoom,
-                (w, h),
-            );
-        } else if let Some(win) = self.tools.plot.as_ref().filter(|p| p.wants_regions()) {
-            plot::draw_rois(
-                &ui.painter().with_clip_rect(panel_rect),
-                win,
-                origin,
-                self.view.zoom,
-                (w, h),
-            );
-        }
-        // The counted points, over any regions: they are what the
-        // pointer is acting on while the counter is open.
-        if let Some(tool) = self.tools.point_counter.as_ref() {
-            point_counter::draw(
-                &ui.painter().with_clip_rect(panel_rect),
-                &tool.counter,
-                frame,
-                origin,
-                self.view.zoom,
-            );
+        // The tools' regions and marks, over the picture and clipped to the
+        // panel like everything else here: one tool's regions, then the
+        // counted points over them (see `canvas_tool::Layer`).
+        for tool in tools.drawn.iter().filter_map(|&slot| self.tools.get(slot)) {
+            tool.draw(&ui.painter().with_clip_rect(panel_rect), &xf, frame);
         }
 
         // Where the view sits in the frame, once that stops being obvious.
@@ -547,39 +462,17 @@ impl ViewerApp {
             painter.circle_filled(anchor, 1.5_f32, ink);
         }
 
-        // What the pointer is over decides the cursor. Three answers, in
-        // the order of what has the gesture: the autoscroll mode owns the
-        // pointer wherever it is, the navigator owns it over the map, and
-        // otherwise it is the picture's.
-        let hover = response.hover_pos();
+        // What the pointer is over decides the cursor: autoscroll's, the
+        // navigator's, the tool's that has the primary button, or the
+        // picture's (see `Arbitration::cursor`).
+        let hover = gesture.hover;
         let over_map = map.zip(hover).is_some_and(|(outer, at)| outer.contains(at));
-        response.on_hover_cursor(if self.view.autoscroll.is_some() {
-            egui::CursorIcon::AllScroll
-        } else if over_map || on_map {
-            // The hand means "drag what is under the pointer", and over the
-            // map what moves is the view somewhere else. The four-way arrow
-            // is what every navigator uses for that.
-            egui::CursorIcon::Move
-        } else if let Some(tool) = self
-            .tools
-            .point_counter
-            .as_ref()
-            .filter(|_| selecting && self.tools.region_pick.is_none())
-        {
-            // The left button places and moves points here, not the
-            // picture, so the hand is for a point under the pointer.
-            let zoom = self.view.zoom;
-            point_counter::cursor(
-                tool,
-                hover.map(|pos| point_counter::image_at(pos, origin, zoom)),
-                frame,
-                point_counter::HIT_RADIUS / zoom,
-            )
-        } else if pannable {
-            egui::CursorIcon::Grab
-        } else {
-            egui::CursorIcon::Crosshair
-        });
+        response.on_hover_cursor(tools.cursor(
+            self.view.autoscroll.is_some(),
+            over_map || on_map,
+            |slot| self.tools.get(slot)?.cursor(hover, &xf, frame),
+            pannable,
+        ));
 
         // Scrub frames by scrolling over the image (Ctrl+scroll is zoom, so
         // it's excluded). Two modes:
