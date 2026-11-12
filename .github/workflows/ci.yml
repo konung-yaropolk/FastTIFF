@@ -174,7 +174,7 @@ jobs:
   # the runner the release .dmg is built on and the slice of it these tests
   # actually exercise.
   test-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         shell: bash
