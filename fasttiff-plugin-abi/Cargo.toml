@@ -12,6 +12,7 @@
 name = "fasttiff-plugin-abi"
 version = "0.26.1"
 edition = "2021"
+rust-version.workspace = true
 description = "The FastTIFF plugin binary interface: the extern \"C\" contract a .dll/.so plugin implements."
 license = "MPL-2.0"
 repository = "https://github.com/konung-yaropolk/FastTIFF"

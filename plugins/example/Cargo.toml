@@ -1,7 +1,7 @@
 # A real plugin, built the way a third party would build one.
 #
-# It exists to be loaded, not to be read: `fast-tiff-viewer`'s
-# `plugin_library.rs` opens the `.dll`/`.so` this produces and checks that the
+# It exists to be loaded, not to be read: its own `tests/boundary.rs` opens
+# the `.dll`/`.so` this produces, through the host's loader, and checks that the
 # `Invert` inside it gives byte-identical output to the built-in `Invert` it was
 # copied from. A plugin API that is only ever exercised by plugins compiled into
 # the host is one that has never actually crossed the boundary it exists for.

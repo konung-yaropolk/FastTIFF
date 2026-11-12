@@ -15,7 +15,7 @@
 //! # The algorithm is EPFL's
 //!
 //! [`turboreg_registration`] is the implementation; this file is only the
-//! plugin around it — the dialog, reading planes, and assembling the result.
+//! plugin around it — the dialog, reading planes, and streaming the result.
 //! See that crate's manifest for the licensing, which is not the obvious one.
 //!
 //! # Measured on one channel, applied to all
@@ -29,9 +29,9 @@
 
 mod params;
 
-use super::shared::{self, Store};
+use super::shared::{self, Store, Stored};
 use fasttiff_plugin_api::{
-    HostContext, ImageResult, Outcome, ParamDecl, Params, Plane, PlaneData, Plugin, PluginError,
+    HostContext, ImageSpec, ImageStream, Outcome, ParamDecl, Params, Plane, Plugin, PluginError,
     PluginInfo,
 };
 use turboreg_registration::{register_stack, Backend, Frames, Reference, Transformation};
@@ -238,9 +238,24 @@ impl Plugin for TurboReg {
         }
 
         // Now one pass over the recording, applying each timepoint's
-        // transformation to every plane of that timepoint.
+        // transformation to every plane of that timepoint — and handing each
+        // moved plane to the host as soon as it exists. The result is the
+        // recording's size, and it is never held: the host writes each plane
+        // into the result's file and the next one reuses the buffer.
         let store = Store::of(info.pixel_type);
-        let mut out: Vec<PlaneData> = Vec::with_capacity(channels * slices * info.frames);
+        let spec = ImageSpec {
+            width: width as u32,
+            height: height as u32,
+            channels,
+            slices,
+            frames: info.frames,
+            pixel_type: store.pixel_type(),
+            channel_colors: Vec::new(),
+            metadata: Some(host.stack_info().clone()),
+            name: format!("{}-registered", host.stack_info().stem()),
+        };
+        let mut out = ImageStream::begin(host, spec)?;
+        let mut stored = Stored::default();
         let mut done = reading + registering;
         // xyczt: channel fastest, then z, then t — the order the host expects.
         for t in 0..info.frames {
@@ -252,7 +267,7 @@ impl Plugin for TurboReg {
                         .apply(&scratch, ly, lx, t)
                         .map_err(|none| shared::no_common_area(none, IF_NOT_REAL))?;
                     done += work::WARP;
-                    out.push(store.plane(moved));
+                    out.push(host, store.encode(&moved, &mut stored))?;
                 }
             }
             if !host.progress(at(done)) {
@@ -287,21 +302,7 @@ impl Plugin for TurboReg {
             }
         ));
 
-        Ok(shared::deliver(
-            ImageResult {
-                width: width as u32,
-                height: height as u32,
-                channels,
-                slices,
-                frames: info.frames,
-                pixel_type: store.pixel_type(),
-                planes: out,
-                channel_colors: Vec::new(),
-                metadata: Some(host.stack_info().clone()),
-                name: format!("{}-registered", host.stack_info().stem()),
-            },
-            params,
-        ))
+        out.finish(shared::target(params))
     }
 }
 

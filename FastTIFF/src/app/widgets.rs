@@ -5,11 +5,13 @@
 use super::tint_color;
 use egui::{Color32, RichText};
 use fast_tiff_viewer::channels::{channel_tint, shift_sync, ui_tint};
-use fast_tiff_viewer::Stack;
+use fast_tiff_viewer::{Document, Window};
 
-/// Formats a raw sample value for display, applying the stack's linear
-/// calibration (`c0 + c1 * raw`) when present so the user sees real values;
-/// otherwise shows the raw value. Picks a coarse/fine precision by magnitude.
+/// Formats a sample value — in the file's own units, which is what every
+/// window and bound the viewer holds is in — for display, applying the stack's
+/// linear calibration (`c0 + c1 * raw`) when present so the user sees real
+/// values; otherwise shows the value itself. Picks a coarse/fine precision by
+/// magnitude.
 pub(super) fn format_calibrated(calibration: Option<(f64, f64)>, raw: f32) -> String {
     let v = match calibration {
         Some((c0, c1)) => c0 + c1 * raw as f64,
@@ -52,7 +54,8 @@ const DISABLED_HANDLE_OPACITY: f32 = 1.0;
 const HANDLE_RADIUS: f32 = 6.0;
 
 /// A two-handle horizontal range slider editing `(min, max)` within the
-/// inclusive track `[lo, hi]` (all in raw sample units). The handles can't
+/// inclusive track `[lo, hi]` (all in the file's own sample units, as the
+/// viewer holds every window — see `fast_tiff_viewer::units`). The handles can't
 /// cross. `salt` disambiguates the interaction ids when several sliders share
 /// a parent (e.g. one per channel). `tint`, when set, colors the selected span
 /// with the channel's display color (composite/RGB or pseudocolor); otherwise
@@ -69,6 +72,9 @@ const HANDLE_RADIUS: f32 = 6.0;
 /// Returns the rect the track was drawn in, so a caller can align something
 /// above it — the histogram window plots each channel across exactly the span
 /// its own slider covers.
+// Nine plain values, all of them the slider's own: bundling them into a struct
+// for one caller would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn range_slider(
     ui: &mut egui::Ui,
     salt: u64,
@@ -277,19 +283,21 @@ fn draw_head(ui: &mut egui::Ui, head: RowHead<'_>) -> bool {
 
 /// One channel's contrast controls. Returns the slider's horizontal span.
 ///
-/// `window` is the channel's `(min, max, bounds)` — passed as separate borrows
-/// rather than the whole `ChannelSettings` so `head` can hold `&mut enabled`
-/// from the same struct at the same time.
+/// `window` is the channel's window and the track its slider spans, both in
+/// file units — passed as separate borrows rather than the whole
+/// `ChannelSettings` so `head` can hold `&mut enabled` from the same struct at
+/// the same time.
 fn contrast_row(
     ui: &mut egui::Ui,
     layout: ContrastLayout,
     salt: u64,
     head: RowHead<'_>,
-    window: (&mut f32, &mut f32, (f32, f32)),
+    (window, track): (&mut Window, Window),
     calibration: Option<(f64, f64)>,
     tint: Option<Color32>,
 ) -> egui::Rangef {
-    let (min, max, (lo, hi)) = window;
+    let Window { lo, hi } = track;
+    let Window { lo: min, hi: max } = window;
     let value = format!(
         "{} – {}",
         format_calibrated(calibration, *min),
@@ -351,8 +359,12 @@ fn contrast_row(
 ///
 /// Shared by the bottom panel and the histogram window. They are the same
 /// control in two places — a value dragged in one is visibly live in the other,
-/// because both are editing `loaded.display.settings` directly — and writing it
-/// once is what keeps them that way.
+/// because both edit the same `loaded.display` — and writing it once is what
+/// keeps them that way.
+///
+/// The widgets edit copies of the settings, which are written back through
+/// `Display::set_enabled` and `Display::set_window`: a checkbox is a change of
+/// which channels are on, and only the display's own setter records it as one.
 ///
 /// `layout` picks how each channel's three pieces are arranged — see
 /// [`ContrastLayout`].
@@ -363,41 +375,38 @@ fn contrast_row(
 /// range instead: the histogram window does, so that a handle's position means
 /// the same thing as a position on the plot above it. Widening a track can only
 /// relax the clamp `range_slider` applies, so an override never alters a value.
+/// Like every window here, it is in the file's own sample units.
 ///
 /// Returns the horizontal span the sliders were drawn across, so a caller can
 /// align a plot with the track underneath it. `None` when no slider was drawn:
 /// a palette (indexed) stack has no contrast window at all.
 pub(super) fn contrast_controls(
     ui: &mut egui::Ui,
-    loaded: &mut Stack,
+    loaded: &mut Document,
     layout: ContrastLayout,
-    track: Option<(f32, f32)>,
+    track: Option<Window>,
 ) -> Option<egui::Rangef> {
     let mut span: Option<egui::Rangef> = None;
     let calibration = loaded.tiff.meta.calibration;
-    let rgb = loaded.display.rgb;
+    let rgb = loaded.display.rgb();
     // A palette channel's window is a fixed index→LUT identity, so
     // there's nothing to adjust — its contrast slider is suppressed.
     let palette = loaded.display.palette;
     // Tint for the single-channel contrast slider: the low (dark) end
     // of its chosen color LUT (grayscale/black → None → the default
-    // selection color). Snapshot here, before the mutable borrow of
-    // `channel_settings` below.
-    let single_tint = (loaded.display.settings.len() == 1)
+    // selection color).
+    let single_tint = (loaded.display.channel_count() == 1)
         .then(|| tint_color(loaded.display.lut(0).and_then(ui_tint)))
         .flatten();
-    if loaded.display.settings.len() > 1 {
+    if loaded.display.channel_count() > 1 {
         ui.separator();
         // Hold Shift while dragging one channel's slider to move every
         // channel's window by the same amount. Snapshot the values
         // first so we can detect which one moved and by how much.
         let shift = ui.input(|i| i.modifiers.shift);
-        let before: Vec<(f32, f32)> = loaded
-            .display
-            .settings
-            .iter()
-            .map(|s| (s.min, s.max))
-            .collect();
+        let before: Vec<Window> = loaded.display.settings().iter().map(|s| s.window).collect();
+        // What the rows below edit, written back once they have all drawn.
+        let mut rows = loaded.display.settings().to_vec();
         // Per-channel slider tints from each channel's display LUT —
         // colored only for composite/RGB or pseudocolor stacks, `None`
         // (default color) for plain grayscale.
@@ -409,7 +418,7 @@ pub(super) fn contrast_controls(
             .map(|cd| tint_color(channel_tint(&cd.lut)))
             .collect();
         // One entry per channel, stacked vertically.
-        for (c, settings) in loaded.display.settings.iter_mut().enumerate() {
+        for (c, settings) in rows.iter_mut().enumerate() {
             let label = if rgb {
                 // Sample planes past RGBA have no conventional letter — number
                 // them instead.
@@ -438,11 +447,7 @@ pub(super) fn contrast_controls(
                     enabled: &mut settings.enabled,
                     hover,
                 },
-                (
-                    &mut settings.min,
-                    &mut settings.max,
-                    track.unwrap_or(settings.bounds),
-                ),
+                (&mut settings.window, track.unwrap_or(settings.bounds)),
                 calibration,
                 tints.get(c).copied().flatten(),
             ));
@@ -450,7 +455,11 @@ pub(super) fn contrast_controls(
         // Shift-sync: if a slider moved this frame, carry the same delta to
         // every other enabled channel.
         if shift {
-            shift_sync(&mut loaded.display.settings, &before);
+            shift_sync(&mut rows, &before);
+        }
+        for (c, row) in rows.iter().enumerate() {
+            loaded.display.set_enabled(c, row.enabled);
+            loaded.display.set_window(c, row.window);
         }
         ui.label(
             RichText::new("Hold Shift while dragging to adjust all channels together.")
@@ -458,23 +467,21 @@ pub(super) fn contrast_controls(
                 .weak(),
         );
     } else if !palette {
-        if let Some(settings) = loaded.display.settings.first_mut() {
+        if let Some(&settings) = loaded.display.settings().first() {
             ui.separator();
             // A caption rather than a checkbox: switching off the only channel
             // would just blank the image.
+            let mut window = settings.window;
             span = Some(contrast_row(
                 ui,
                 layout,
                 0,
                 RowHead::Caption("Contrast:"),
-                (
-                    &mut settings.min,
-                    &mut settings.max,
-                    track.unwrap_or(settings.bounds),
-                ),
+                (&mut window, track.unwrap_or(settings.bounds)),
                 calibration,
                 single_tint,
             ));
+            loaded.display.set_window(0, window);
         }
     }
     // No `else`: a palette (indexed) image shows no contrast row at

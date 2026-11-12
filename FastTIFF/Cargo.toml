@@ -62,24 +62,26 @@ builtin-plugins = [
     "plugin-nifti",
     "plugin-dicom",
 ]
-plugin-invert = ["fast-tiff-viewer/plugin-invert"]
-plugin-zproject = ["fast-tiff-viewer/plugin-zproject"]
-plugin-plot-axis = ["fast-tiff-viewer/plugin-plot-axis"]
-plugin-stack-tools = ["fast-tiff-viewer/plugin-stack-tools"]
-plugin-animation-3d = ["fast-tiff-viewer/plugin-animation-3d"]
-plugin-crop = ["fast-tiff-viewer/plugin-crop"]
-plugin-suite2p-stabilize = ["fast-tiff-viewer/plugin-suite2p-stabilize"]
-plugin-turboreg-stabilize = ["fast-tiff-viewer/plugin-turboreg-stabilize"]
-plugin-deconvolve = ["fast-tiff-viewer/plugin-deconvolve"]
-plugin-png = ["fast-tiff-viewer/plugin-png"]
-plugin-oir = ["fast-tiff-viewer/plugin-oir"]
-plugin-nifti = ["fast-tiff-viewer/plugin-nifti"]
-plugin-dicom = ["fast-tiff-viewer/plugin-dicom"]
+plugin-invert = ["fast-tiff-viewer/plugin-invert", "_any-builtin"]
+plugin-zproject = ["fast-tiff-viewer/plugin-zproject", "_any-builtin"]
+plugin-plot-axis = ["fast-tiff-viewer/plugin-plot-axis", "_any-builtin"]
+plugin-stack-tools = ["fast-tiff-viewer/plugin-stack-tools", "_any-builtin"]
+plugin-animation-3d = ["fast-tiff-viewer/plugin-animation-3d", "_any-builtin"]
+plugin-crop = ["fast-tiff-viewer/plugin-crop", "_any-builtin"]
+plugin-suite2p-stabilize = ["fast-tiff-viewer/plugin-suite2p-stabilize", "_any-builtin"]
+plugin-turboreg-stabilize = ["fast-tiff-viewer/plugin-turboreg-stabilize", "_any-builtin"]
+plugin-deconvolve = ["fast-tiff-viewer/plugin-deconvolve", "_any-builtin"]
+plugin-png = ["fast-tiff-viewer/plugin-png", "_any-builtin"]
+plugin-oir = ["fast-tiff-viewer/plugin-oir", "_any-builtin"]
+plugin-nifti = ["fast-tiff-viewer/plugin-nifti", "_any-builtin"]
+plugin-dicom = ["fast-tiff-viewer/plugin-dicom", "_any-builtin"]
 # The worked example for plugin authors; off by default there and here.
-plugin-netpbm = ["fast-tiff-viewer/plugin-netpbm"]
 # "Yes, really, no plugins." It enables nothing; it exists so that the guard in
 # `src/lib.rs` can tell a deliberate build from a forgotten feature.
 plugins-none = []
+# Set by every plugin feature above, for the no-plugins guard in `src/lib.rs`,
+# which then needs no list of its own to keep in step. Not for choosing directly.
+_any-builtin = []
 # ---------------------------------------------------------------------------
 
 
@@ -94,7 +96,7 @@ name = "FastTIFF"
 path = "src/main.rs"
 
 [dependencies]
-# The stack model, channel/contrast settings, camera, and the decode->GPU sync
+# The document model, channel/contrast settings, camera, and the decode->GPU sync
 # — everything this app does that isn't a window or a widget.
 fast-tiff-viewer = { path = "../fast-tiff-viewer", default-features = false }
 fast-tiff-lib = { path = "../fast-tiff-lib", default-features = false }
@@ -107,18 +109,18 @@ scivis-render = { path = "../scivis-render" }
 # `renderer-*` features above pick exactly one. `default_fonts` keeps the
 # bundled text fonts. (egui still pulls the passive `accesskit` data-types crate
 # as an unavoidable core dependency.)
-eframe = { version = "0.34", default-features = false, features = ["default_fonts"] }
-egui = "0.34"
+eframe = { workspace = true, features = ["default_fonts"] }
+egui = { workspace = true }
 # egui's own table, for the metadata window's OME tables: a header that stays
 # put and only the rows in view laid out, which a recording's thousands of
 # OME `Plane` records need. Default features off: no image loaders.
-egui_extras = { version = "0.34", default-features = false }
-anyhow = "1.0"
+egui_extras = { workspace = true }
+anyhow = { workspace = true }
 rfd = "0.17"
 # The plugin contract. Shared, like the plugin system itself now is: the
 # browser build runs the built-in plugins and so needs the dialog types.
 fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
-log = "0.4"
+log = { workspace = true }
 env_logger = "0.11"
 # Decodes the bundled PNG into RGBA for the application icon (see `window_icon`
 # in main.rs). Needed on every native platform including macOS: eframe installs
@@ -143,10 +145,10 @@ fast-tiff-lib = { path = "../fast-tiff-lib", features = ["mmap", "codec-zstd"] }
 # the desktop hands one to a second process. That is `src/web_open.rs`, and
 # these are what it is written against.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-js-sys = "0.3"
-web-sys = { version = "0.3", features = [
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = [
     # The blob a result travels in, and the URL that names it.
     "Blob",
     "Url",
@@ -184,7 +186,7 @@ winres = "0.1.12"
 # Only needed on Linux. Linux windowing backends for winit. Cargo unions these with the eframe
 # features above; target-gating keeps X11/Wayland out of Windows/macOS builds.
 [target.'cfg(target_os = "linux")'.dependencies]
-eframe = { version = "0.34", default-features = false, features = ["x11", "wayland"] }
+eframe = { workspace = true, features = ["x11", "wayland"] }
 
 
 [package.metadata.winres]

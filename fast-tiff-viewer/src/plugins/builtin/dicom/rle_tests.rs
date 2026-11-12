@@ -118,7 +118,9 @@ fn a_sixteen_bit_frame_recomposes_its_samples_from_two_byte_planes() {
     let out = decode(&f, fmt(4, 1, 16, 1)).expect("decode");
     // Native little-endian: low byte first within each sample.
     let got: Vec<u16> = out
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     assert_eq!(got, want.to_vec());
@@ -155,7 +157,9 @@ fn a_sixteen_bit_colour_frame_takes_six_segments() {
     }
     let out = decode(&fragment(&segs), fmt(2, 1, 16, 3)).expect("decode");
     let got: Vec<u16> = out
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     // Interleaved: pixel 0's three components, then pixel 1's.

@@ -1152,7 +1152,12 @@ fn the_hyperstack_position_is_in_the_second_header() {
 fn too_many_rois_for_a_roi_set_is_an_error() {
     let one = roi("A", [0; 3], vec![pt(1.0, 1.0, 0)]);
     let rois = vec![one; 65_536];
-    assert_eq!(roi_set_zip(&rois), Err(RoiSetTooLarge));
+    let err = roi_set_zip(&rois).unwrap_err();
+    assert_eq!(err.kind(), crate::ErrorKind::TooLarge);
+    assert_eq!(
+        err.to_string(),
+        "too many ROIs for an ImageJ ROI set: it holds at most 65,535, and 4 GiB in all"
+    );
     assert!(roi_set_zip(&rois[..65_535]).is_ok());
 }
 

@@ -6,10 +6,14 @@ on:
 
 jobs:
   publish-fast-tiff-lib:
+    needs: publish-c-api-support
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
 
       - name: Read lib version
         id: ver
@@ -38,14 +42,106 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-  # suite2p-registration: the registration algorithm on its own, with no
-  # dependency on anything else in this workspace, so it publishes beside
-  # fast-tiff-lib rather than after it.
-  publish-suite2p-registration:
+  # c-api-support: the scaffolding of every C API here. fast-tiff-lib,
+  # oir-reader and both registration crates depend on it (behind `capi`), so it
+  # goes first and they wait for it; when this version is already on crates.io
+  # the job skips and they go straight on.
+  publish-c-api-support:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - name: Read crate version
+        id: ver
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name=="c-api-support") | .version')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "c-api-support version: $v"
+
+      - name: Already on crates.io?
+        id: pub
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+                 -H "User-Agent: ${{ github.repository }} publish CI" \
+                 "https://crates.io/api/v1/crates/c-api-support/${{ steps.ver.outputs.version }}")
+          if [ "$code" = "200" ]; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v${{ steps.ver.outputs.version }} already published — skipping."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: steps.pub.outputs.already == 'false'
+        run: cargo publish -p c-api-support
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # image-registration-support: what the two registration crates share that is not an
+  # algorithm. They depend on it, so it goes first and they wait for it; when
+  # this version is already on crates.io the job skips and they go straight on.
+  publish-image-registration-support:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - name: Read crate version
+        id: ver
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name=="image-registration-support") | .version')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "image-registration-support version: $v"
+
+      - name: Already on crates.io?
+        id: pub
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+                 -H "User-Agent: ${{ github.repository }} publish CI" \
+                 "https://crates.io/api/v1/crates/image-registration-support/${{ steps.ver.outputs.version }}")
+          if [ "$code" = "200" ]; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v${{ steps.ver.outputs.version }} already published — skipping."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # `threads` is in the default set, so `cargo publish` verifies only the
+      # build that has it; the threadless one is the sequential stand-ins.
+      - name: Check the crate builds without threads
+        if: steps.pub.outputs.already == 'false'
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p image-registration-support --no-default-features
+          cargo check -p image-registration-support --no-default-features \
+            --target wasm32-unknown-unknown
+
+      - name: Publish
+        if: steps.pub.outputs.already == 'false'
+        run: cargo publish -p image-registration-support
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # suite2p-registration: the registration algorithm, after the common crate
+  # it depends on and beside fast-tiff-lib.
+  publish-suite2p-registration:
+    needs: [publish-c-api-support, publish-image-registration-support]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
 
       - name: Read crate version
         id: ver
@@ -79,7 +175,8 @@ jobs:
       # And the other direction, for the same reason: `threads` is *in* the
       # default set, so `cargo publish` verifies only the build that has it. The
       # threadless one is what a wasm consumer gets, and it is the one with
-      # hand-written stand-ins for rayon's iterators (`src/par.rs`) — the half
+      # hand-written stand-ins for rayon's iterators (image-registration-support's
+      # `par`) — the half
       # most able to stop compiling without anyone here noticing.
       - name: Check the crate builds without threads
         if: steps.pub.outputs.already == 'false'
@@ -96,14 +193,17 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
 
-  # turboreg-registration: the registration algorithm on its own, with no
-  # dependency on anything else in this workspace, so it publishes beside
-  # fast-tiff-lib rather than after it.
+  # turboreg-registration: the registration algorithm, after the common crate
+  # it depends on and beside fast-tiff-lib.
   publish-turboreg-registration:
+    needs: [publish-c-api-support, publish-image-registration-support]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
 
       - name: Read crate version
         id: ver
@@ -137,7 +237,8 @@ jobs:
       # And the other direction, for the same reason: `threads` is *in* the
       # default set, so `cargo publish` verifies only the build that has it. The
       # threadless one is what a wasm consumer gets, and it is the one with
-      # hand-written stand-ins for rayon's iterators (`src/par.rs`) — the half
+      # hand-written stand-ins for rayon's iterators (image-registration-support's
+      # `par`) — the half
       # most able to stop compiling without anyone here noticing.
       - name: Check the crate builds without threads
         if: steps.pub.outputs.already == 'false'
@@ -157,10 +258,14 @@ jobs:
   # anything else in this workspace, so it publishes beside fast-tiff-lib
   # rather than after it.
   publish-oir-reader:
+    needs: publish-c-api-support
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      # The toolchain rust-toolchain.toml names, with the components and
+      # targets it lists.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
 
       - name: Read crate version
         id: ver

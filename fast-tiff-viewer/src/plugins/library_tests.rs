@@ -1,7 +1,7 @@
 //! Plugins that lie.
 //!
-//! `plugin_library.rs` proves the boundary is correct for a plugin that
-//! behaves. This proves it is *safe* for one that does not — which is the case
+//! `plugins/example/tests/boundary.rs` proves the boundary is correct for a
+//! plugin that behaves. This proves it is *safe* for one that does not — which is the case
 //! that actually matters, because a plugin is third-party code the host has no
 //! control over, and "it crashed the microscope software" is not an acceptable
 //! outcome for any of it.
@@ -17,7 +17,9 @@
 //! declared, less data than was declared, and a panic.
 
 use super::*;
-use fasttiff_plugin_api::{ImageInfo, Plane, StackInfo, ViewParams, VolumeMode, VolumeView};
+use fasttiff_plugin_api::{
+    ImageInfo, ImageResult, Plane, StackInfo, ViewParams, VolumeMode, VolumeView,
+};
 
 // ------------------------------------------------------------ a host to run in
 
@@ -338,7 +340,7 @@ fn a_name_that_is_not_utf8_is_reported_rather_than_shown() {
 #[test]
 fn an_absurd_string_length_is_refused_rather_than_read() {
     unsafe extern "C" fn query(reg: *mut abi::FtRegistrar) -> abi::FtStatus {
-        static ONE: [u8; 1] = [b'x'];
+        static ONE: [u8; 1] = *b"x";
         static VT: abi::FtPluginVtable = abi::FtPluginVtable {
             struct_size: 0,
             _pad: 0,
@@ -396,8 +398,8 @@ fn a_query_that_fails_is_reported_with_its_status() {
 /// terminates the process inside the **plugin**, before any host frame runs.
 /// No `catch_unwind` on this side can change that, which is precisely why
 /// `fasttiff_plugin::export_plugin!` wraps every entry point in its own guard
-/// and converts the panic to this status. `plugin_library.rs` tests that guard
-/// against the real example plugin; this tests what the host does with the
+/// and converts the panic to this status. `plugins/example/tests/boundary.rs`
+/// tests that guard against the real example plugin; this tests what the host does with the
 /// answer.
 #[test]
 fn a_query_that_reports_a_panic_is_not_loaded() {
@@ -1455,10 +1457,10 @@ fn an_exporter_with_a_malformed_file_type_is_refused() {
 
 /// Run `f` against a real result sink and hand back what it collected.
 fn against_the_sink(f: impl FnOnce(&abi::FtSink)) -> ResultSink {
-    let mut sink = ResultSink::default();
-    let table = sink_table(&mut sink);
+    let sink = Gated::new(ResultSink::default());
+    let table = sink_table(&sink);
     f(&table);
-    sink
+    sink.into_inner()
 }
 
 /// Declare a chart with the axis and tool given, and nothing else.
@@ -1650,8 +1652,8 @@ fn a_plot_finished_without_being_declared_is_refused() {
 #[test]
 fn a_region_that_was_never_drawn_is_out_of_range() {
     let mut inner = FakeHost::default();
-    let mut cell = HostCell::new(&mut inner, "n".into(), String::new());
-    let table = host_table(&mut cell);
+    let cell = Gated::new(HostCell::new(&mut inner, "n".into(), String::new()));
+    let table = host_table(&cell);
     unsafe {
         assert_eq!((table.selection_count)(table.ctx), 0);
         let mut roi = abi::FtRoi {
@@ -1724,8 +1726,8 @@ fn a_plugin_sees_the_tables_its_channels_are_drawn_with() {
 fn a_colour_table_needs_room_for_a_whole_one() {
     let mut inner = FakeHost::default();
     inner.view.luts = vec![ramp([255, 255, 255])];
-    let mut cell = HostCell::new(&mut inner, "n".into(), String::new());
-    let table = host_table(&mut cell);
+    let cell = Gated::new(HostCell::new(&mut inner, "n".into(), String::new()));
+    let table = host_table(&cell);
     let mut buf = [0u8; 768];
     unsafe {
         assert_eq!(
@@ -2011,4 +2013,535 @@ fn a_dialog_behind_the_boundary_follows_its_own_choices() {
         vec!["more", "extra"],
         "the switch was on, and the dialog never heard"
     );
+}
+
+// ------------------------------------------------- a host that streams results
+//
+// `FakeHost` takes results only whole, so none of the above reaches the branch
+// of `sink_push_plane` that hands a plane straight on to the run's host — the
+// one that reaches the host cell from the sink. These do, and with no file
+// behind the host, so they run under Miri too.
+
+/// A host that takes results plane by plane and keeps what it was told: the
+/// declarations, a copy of every plane, every restated description.
+#[derive(Default)]
+struct StreamingHost {
+    base: FakeHost,
+    begun: Vec<fasttiff_plugin_api::ImageSpec>,
+    planes: Vec<PlaneData>,
+    described: Vec<fasttiff_plugin_api::ImageSpec>,
+    /// Refuse the plane of this index, as a host whose disk filled would.
+    fail_at: Option<usize>,
+    /// Hold every plane read until [`RELEASE`] — what lets a test have a
+    /// second thread call in while the first is inside the host.
+    hold_reads: bool,
+}
+
+/// Set by a held read once it is inside the host.
+static HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Lets a held read go on.
+static RELEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Wait for `flag`, without hanging a test whose logic is wrong.
+fn wait_for(flag: &std::sync::atomic::AtomicBool) -> bool {
+    for _ in 0..1_000_000 {
+        if flag.load(std::sync::atomic::Ordering::Acquire) {
+            return true;
+        }
+        std::thread::yield_now();
+    }
+    false
+}
+
+impl HostContext for StreamingHost {
+    fn image(&self) -> ImageInfo {
+        self.base.image()
+    }
+    fn view(&self) -> &ViewParams {
+        self.base.view()
+    }
+    fn stack_info(&self) -> &StackInfo {
+        self.base.stack_info()
+    }
+    fn read_plane_u16(&mut self, p: Plane, out: &mut Vec<u16>) -> Result<(), PluginError> {
+        self.base.read_plane_u16(p, out)
+    }
+    fn read_plane_f32(&mut self, p: Plane, out: &mut Vec<f32>) -> Result<(), PluginError> {
+        if self.hold_reads {
+            HELD.store(true, std::sync::atomic::Ordering::Release);
+            wait_for(&RELEASE);
+        }
+        self.base.read_plane_f32(p, out)
+    }
+    fn progress(&mut self, f: f32) -> bool {
+        self.base.progress(f)
+    }
+    fn log(&mut self, m: &str) {
+        self.base.log(m)
+    }
+    fn streams_results(&self) -> bool {
+        true
+    }
+    fn begin_image(&mut self, spec: &fasttiff_plugin_api::ImageSpec) -> Result<(), PluginError> {
+        self.begun.push(spec.clone());
+        Ok(())
+    }
+    fn push_plane(&mut self, plane: PlaneRef<'_>) -> Result<(), PluginError> {
+        if self.fail_at == Some(self.planes.len()) {
+            return Err(PluginError::failed("the disk is full"));
+        }
+        self.planes.push(plane.to_plane_data());
+        Ok(())
+    }
+    fn describe_image(&mut self, spec: &fasttiff_plugin_api::ImageSpec) -> Result<(), PluginError> {
+        self.described.push(spec.clone());
+        Ok(())
+    }
+}
+
+/// Declare a 2x2 float result of `frames` planes called `name`.
+unsafe fn declare(s: &abi::FtSink, frames: u64, name: &'static str) -> abi::FtStatus {
+    (s.begin_image)(
+        s.ctx,
+        2,
+        2,
+        1,
+        1,
+        frames,
+        abi::FtPixelType::F32,
+        abi::FtStr::from_str(name),
+    )
+}
+
+/// Push a 2x2 float plane of `v`.
+unsafe fn push(s: &abi::FtSink, v: f32) -> abi::FtStatus {
+    let plane = [v; 4];
+    (s.push_plane)(s.ctx, plane.as_ptr() as *const std::ffi::c_void, 4)
+}
+
+/// The whole of a streamed result reaches the host as it is pushed, declared
+/// once — with the colour that came after `begin_image` but before the first
+/// plane — and the run ends saying it streamed.
+#[test]
+fn a_streamed_result_goes_straight_to_the_host() {
+    unsafe extern "C" fn run(
+        _h: *const abi::FtHost,
+        _v: *const abi::FtValue,
+        _n: u64,
+        sink: *const abi::FtSink,
+    ) -> abi::FtStatus {
+        let s = &*sink;
+        declare(s, 3, "streamed");
+        (s.set_channel)(s.ctx, 0, abi::FtStr::EMPTY, 0x00FF00FF);
+        for v in [1.0, 2.0, 3.0] {
+            if push(s, v) != abi::FtStatus::Ok {
+                return abi::FtStatus::Error;
+            }
+        }
+        (s.set_outcome)(s.ctx, abi::FtOutcomeKind::NewDocument, abi::FtStr::EMPTY)
+    }
+    let mut p = plugin_with_run!(run);
+    let mut host = StreamingHost::default();
+    let out = p.run(&mut host, &Params::new()).expect("runs");
+    assert_eq!(
+        out,
+        Outcome::Streamed {
+            target: StreamTarget::NewDocument
+        }
+    );
+    assert_eq!(host.begun.len(), 1, "declared once");
+    let spec = &host.begun[0];
+    assert_eq!((spec.frames, spec.name.as_str()), (3, "streamed"));
+    assert_eq!(spec.channel_colors, vec![[255, 0, 255]]);
+    assert_eq!(
+        host.planes,
+        vec![
+            PlaneData::F32(vec![1.0; 4]),
+            PlaneData::F32(vec![2.0; 4]),
+            PlaneData::F32(vec![3.0; 4])
+        ]
+    );
+    assert!(
+        host.described.is_empty(),
+        "nothing changed after the first plane"
+    );
+}
+
+/// Too few planes is the error a returned image that miscounted gets.
+#[test]
+fn a_short_stream_is_refused_in_the_words_a_short_image_gets() {
+    unsafe extern "C" fn run(
+        _h: *const abi::FtHost,
+        _v: *const abi::FtValue,
+        _n: u64,
+        sink: *const abi::FtSink,
+    ) -> abi::FtStatus {
+        let s = &*sink;
+        declare(s, 3, "short");
+        push(s, 1.0);
+        (s.set_outcome)(s.ctx, abi::FtOutcomeKind::NewDocument, abi::FtStr::EMPTY)
+    }
+    let mut p = plugin_with_run!(run);
+    let mut host = StreamingHost::default();
+    let err = p
+        .run(&mut host, &Params::new())
+        .expect_err("a short stream is refused");
+    assert!(err.to_string().contains("3 planes but carries 1"), "{err}");
+    assert_eq!(host.planes.len(), 1);
+}
+
+/// One plane too many is stopped at the push, before the host sees it.
+#[test]
+fn a_stream_with_too_many_planes_is_stopped_at_the_push() {
+    unsafe extern "C" fn run(
+        _h: *const abi::FtHost,
+        _v: *const abi::FtValue,
+        _n: u64,
+        sink: *const abi::FtSink,
+    ) -> abi::FtStatus {
+        let s = &*sink;
+        declare(s, 1, "long");
+        push(s, 1.0);
+        if push(s, 2.0) == abi::FtStatus::Ok {
+            return abi::FtStatus::Panic;
+        }
+        (s.set_outcome)(s.ctx, abi::FtOutcomeKind::NewDocument, abi::FtStr::EMPTY)
+    }
+    let mut p = plugin_with_run!(run);
+    let mut host = StreamingHost::default();
+    let err = p
+        .run(&mut host, &Params::new())
+        .expect_err("an over-long stream is refused");
+    assert!(err.to_string().contains("more than the 1 planes"), "{err}");
+    assert_eq!(host.planes.len(), 1, "the extra plane reached the host");
+}
+
+/// Declaring again before the first plane restates the result — the host is
+/// told only the last — and declaring again after one is a second result,
+/// refused in the words the in-process host uses.
+#[test]
+fn a_result_can_be_restated_until_its_first_plane() {
+    unsafe extern "C" fn restated(
+        _h: *const abi::FtHost,
+        _v: *const abi::FtValue,
+        _n: u64,
+        sink: *const abi::FtSink,
+    ) -> abi::FtStatus {
+        let s = &*sink;
+        declare(s, 1, "first");
+        declare(s, 2, "second");
+        push(s, 1.0);
+        push(s, 2.0);
+        (s.set_outcome)(
+            s.ctx,
+            abi::FtOutcomeKind::ReplaceDocument,
+            abi::FtStr::EMPTY,
+        )
+    }
+    let mut p = plugin_with_run!(restated);
+    let mut host = StreamingHost::default();
+    let out = p.run(&mut host, &Params::new()).expect("runs");
+    assert_eq!(
+        out,
+        Outcome::Streamed {
+            target: StreamTarget::ReplaceDocument
+        }
+    );
+    assert_eq!(host.begun.len(), 1);
+    assert_eq!(
+        (host.begun[0].frames, host.begun[0].name.as_str()),
+        (2, "second")
+    );
+}
+
+/// The second half: once a plane is out, declaring again is a second result.
+#[test]
+fn a_second_result_after_a_plane_is_refused_as_in_process() {
+    unsafe extern "C" fn run(
+        _h: *const abi::FtHost,
+        _v: *const abi::FtValue,
+        _n: u64,
+        sink: *const abi::FtSink,
+    ) -> abi::FtStatus {
+        let s = &*sink;
+        declare(s, 2, "first");
+        push(s, 1.0);
+        if declare(s, 2, "second") == abi::FtStatus::Ok {
+            return abi::FtStatus::Panic;
+        }
+        abi::FtStatus::BadArgument
+    }
+    let mut p = plugin_with_run!(run);
+    let err = p
+        .run(&mut StreamingHost::default(), &Params::new())
+        .expect_err("a second result is refused");
+    assert_eq!(
+        err,
+        PluginError::failed(super::super::result::SECOND_RESULT),
+        "the words differ from the in-process host's"
+    );
+}
+
+/// A colour, metadata and a channel name set after the planes reach the host
+/// as they are set — which the C contract has always allowed and the host
+/// once refused.
+#[test]
+fn a_description_set_after_the_planes_reaches_the_host() {
+    unsafe extern "C" fn run(
+        _h: *const abi::FtHost,
+        _v: *const abi::FtValue,
+        _n: u64,
+        sink: *const abi::FtSink,
+    ) -> abi::FtStatus {
+        let s = &*sink;
+        declare(s, 2, "late");
+        push(s, 1.0);
+        push(s, 2.0);
+        let info = abi::FtStackInfo {
+            struct_size: std::mem::size_of::<abi::FtStackInfo>() as u32,
+            mode: 0,
+            present: abi::FT_HAS_SPACING_X | abi::FT_HAS_SPACING_Y,
+            _pad: 0,
+            spacing_x: 0.5,
+            spacing_y: 0.5,
+            spacing_z: 0.0,
+            frame_interval_s: 0.0,
+            calibration_offset: 0.0,
+            calibration_scale: 0.0,
+        };
+        let steps = [
+            (s.set_channel)(s.ctx, 0, abi::FtStr::EMPTY, 0x00FF00FF),
+            (s.set_info)(
+                s.ctx,
+                &info,
+                abi::FtStr::from_str("micron"),
+                abi::FtStr::EMPTY,
+            ),
+            (s.set_channel_name)(s.ctx, 0, abi::FtStr::from_str("GCaMP")),
+        ];
+        if steps.iter().any(|&st| st != abi::FtStatus::Ok) {
+            return abi::FtStatus::Error;
+        }
+        (s.set_outcome)(s.ctx, abi::FtOutcomeKind::NewDocument, abi::FtStr::EMPTY)
+    }
+    let mut p = plugin_with_run!(run);
+    let mut host = StreamingHost::default();
+    p.run(&mut host, &Params::new()).expect("runs");
+    assert_eq!(host.planes.len(), 2);
+    assert_eq!(host.begun[0].channel_colors, Vec::<[u8; 3]>::new());
+    assert_eq!(host.described.len(), 3, "told of each change");
+    let last = host.described.last().unwrap();
+    assert_eq!(last.channel_colors, vec![[255, 0, 255]]);
+    let meta = last.metadata.as_ref().expect("the metadata arrived");
+    assert_eq!(meta.unit.as_deref(), Some("micron"));
+    assert_eq!(meta.spacing.x, Some(0.5));
+    assert_eq!(meta.channel_names, vec!["GCaMP"]);
+}
+
+/// A host that cannot take a plane fails the run with its own reason, not
+/// with the bare status the plugin was handed.
+#[test]
+fn a_host_that_cannot_take_a_plane_says_why() {
+    unsafe extern "C" fn run(
+        _h: *const abi::FtHost,
+        _v: *const abi::FtValue,
+        _n: u64,
+        sink: *const abi::FtSink,
+    ) -> abi::FtStatus {
+        let s = &*sink;
+        declare(s, 3, "full");
+        for v in [1.0, 2.0, 3.0] {
+            let st = push(s, v);
+            if st != abi::FtStatus::Ok {
+                return st;
+            }
+        }
+        (s.set_outcome)(s.ctx, abi::FtOutcomeKind::NewDocument, abi::FtStr::EMPTY)
+    }
+    let mut p = plugin_with_run!(run);
+    let mut host = StreamingHost {
+        fail_at: Some(1),
+        ..Default::default()
+    };
+    let err = p
+        .run(&mut host, &Params::new())
+        .expect_err("the refused plane fails the run");
+    let text = err.to_string();
+    assert!(text.contains("plane 1 of the result"), "{text}");
+    assert!(text.contains("the disk is full"), "{text}");
+    assert_eq!(host.planes.len(), 1);
+}
+
+/// Streams through `ImageStream`, compiled in, and colours its result once the
+/// planes are out.
+#[derive(Default)]
+struct Streams;
+
+impl Plugin for Streams {
+    fn info(&self) -> PluginInfo {
+        PluginInfo::new("dev.test.streams", "Streams")
+    }
+    fn run(&mut self, h: &mut dyn HostContext, _p: &Params) -> Result<Outcome, PluginError> {
+        let spec = fasttiff_plugin_api::ImageSpec {
+            width: 2,
+            height: 2,
+            channels: 1,
+            slices: 1,
+            frames: 2,
+            pixel_type: PixelType::F32,
+            channel_colors: Vec::new(),
+            metadata: Some(StackInfo::default()),
+            name: "made".into(),
+        };
+        let mut out = fasttiff_plugin_api::ImageStream::begin(h, spec)?;
+        let mut buf = Vec::new();
+        for t in 0..2 {
+            h.read_plane_f32(Plane::new(0, 0, 0), &mut buf)?;
+            buf.iter_mut().for_each(|v| *v += t as f32);
+            out.push(h, PlaneRef::F32(&buf))?;
+        }
+        out.describe(h, |s| s.channel_colors = vec![[1, 2, 3]])?;
+        out.finish(StreamTarget::NewDocument)
+    }
+}
+
+/// The in-process lane streams through the same boundary: the plugin's
+/// `ImageStream` pushes through `fasttiff-plugin`'s host into this sink and on
+/// to the run's host, and its late colour follows.
+#[test]
+fn a_built_in_streams_through_the_boundary() {
+    let mut p = plugin_of::<Streams>().expect("registers");
+    let mut host = StreamingHost::default();
+    let out = p.run(&mut host, &Params::new()).expect("runs");
+    assert_eq!(
+        out,
+        Outcome::Streamed {
+            target: StreamTarget::NewDocument
+        }
+    );
+    assert_eq!(
+        host.planes,
+        vec![
+            PlaneData::F32(vec![1.0, 2.0, 3.0, 4.0]),
+            PlaneData::F32(vec![2.0, 3.0, 4.0, 5.0])
+        ]
+    );
+    assert_eq!(host.begun.len(), 1);
+    assert_eq!(
+        host.described.last().map(|s| s.channel_colors.clone()),
+        Some(vec![[1, 2, 3]])
+    );
+}
+
+/// The host's half of "one call at a time": a plane pushed from a second
+/// thread while the first is inside a read is refused, not run beside it —
+/// that would be two `&mut` to one host — and the run fails saying why.
+#[test]
+fn a_plugin_calling_from_two_threads_at_once_is_refused() {
+    struct Sink(abi::FtSink);
+    // SAFETY: the sink is the run's own, which outlives the thread: it is
+    // joined before `run` returns. Sending it is the misbehaviour under test.
+    unsafe impl Send for Sink {}
+
+    unsafe extern "C" fn run(
+        h: *const abi::FtHost,
+        _v: *const abi::FtValue,
+        _n: u64,
+        sink: *const abi::FtSink,
+    ) -> abi::FtStatus {
+        let s = &*sink;
+        declare(s, 2, "racy");
+        push(s, 0.0);
+        let other = Sink(*s);
+        let pusher = std::thread::spawn(move || {
+            let other = other;
+            // Once the run's own thread is inside a read...
+            wait_for(&HELD);
+            let st = push(&other.0, 1.0);
+            RELEASE.store(true, std::sync::atomic::Ordering::Release);
+            st
+        });
+        let mut buf = [0.0f32; 4];
+        let read = ((*h).read_plane_f32)((*h).ctx, 0, 0, 0, buf.as_mut_ptr(), 4);
+        let pushed = pusher.join().unwrap_or(abi::FtStatus::Panic);
+        if read != abi::FtStatus::Ok || pushed == abi::FtStatus::Ok {
+            // The push ran beside the read: the thing that must not happen.
+            return abi::FtStatus::Panic;
+        }
+        (s.set_outcome)(s.ctx, abi::FtOutcomeKind::NewDocument, abi::FtStr::EMPTY)
+    }
+    let mut p = plugin_with_run!(run);
+    let mut host = StreamingHost {
+        hold_reads: true,
+        ..Default::default()
+    };
+    let err = p
+        .run(&mut host, &Params::new())
+        .expect_err("a call from a second thread is refused");
+    assert!(err.to_string().contains("two threads at once"), "{err}");
+    assert_eq!(host.planes.len(), 1, "the second thread's plane got in");
+}
+
+/// End to end, into a file: a plugin behind the boundary colours its result
+/// after pushing every plane of it, and the colour is in the file the app's
+/// host wrote — it was refused once, the file's header being taken to be
+/// written by the first plane.
+#[test]
+#[cfg_attr(miri, ignore = "writes a file")]
+fn a_colour_set_after_the_planes_is_in_the_file() {
+    unsafe extern "C" fn run(
+        _h: *const abi::FtHost,
+        _v: *const abi::FtValue,
+        _n: u64,
+        sink: *const abi::FtSink,
+    ) -> abi::FtStatus {
+        let s = &*sink;
+        declare(s, 2, "coloured late");
+        push(s, 1.0);
+        push(s, 2.0);
+        if (s.set_channel)(s.ctx, 0, abi::FtStr::EMPTY, 0x00FF00FF) != abi::FtStatus::Ok {
+            return abi::FtStatus::Error;
+        }
+        (s.set_outcome)(s.ctx, abi::FtOutcomeKind::NewDocument, abi::FtStr::EMPTY)
+    }
+    let source = super::super::to_stack(
+        &ImageResult {
+            width: 2,
+            height: 2,
+            channels: 1,
+            slices: 1,
+            frames: 1,
+            pixel_type: PixelType::F32,
+            planes: vec![PlaneData::F32(vec![0.0; 4])],
+            channel_colors: Vec::new(),
+            metadata: None,
+            name: "source".into(),
+        },
+        None,
+        false,
+    )
+    .unwrap();
+    let dir = std::env::temp_dir().join(format!("ft-library-late-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut host = super::super::StackHost::new(&source, FakeHost::default().view)
+        .streaming_to(super::super::ResultDest::Dir(dir.clone()));
+    let mut p = plugin_with_run!(run);
+    let out = p.run(&mut host, &Params::new()).expect("runs");
+    assert!(matches!(out, Outcome::Streamed { .. }), "{out:?}");
+    let file = host.take_result().expect("streamed").expect("finished");
+    assert_eq!(
+        file.spec().channel_colors,
+        vec![[255, 0, 255]],
+        "the spec kept up"
+    );
+    let back =
+        fast_tiff_lib::TiffStack::from_bytes(std::fs::read(file.path().unwrap()).unwrap()).unwrap();
+    assert_eq!(back.frames.len(), 2);
+    assert!(
+        back.meta.has_explicit_luts,
+        "the late colour is not in the file"
+    );
+    assert_eq!(back.meta.channel_display[0].lut[255], [255, 0, 255]);
+    drop(file);
+    let _ = std::fs::remove_dir_all(&dir);
 }

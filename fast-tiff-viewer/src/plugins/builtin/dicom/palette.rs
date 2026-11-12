@@ -138,7 +138,9 @@ impl Palette {
             // has would read half a table and stretch it over the image.
             let entries: Vec<u16> = if bytes.len() >= count * 2 {
                 bytes
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .take(count)
                     .map(|c| {
                         let c = [c[0], c[1]];

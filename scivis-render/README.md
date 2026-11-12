@@ -340,8 +340,9 @@ instead of rounding through f16's ~11 bits. Everything degrades cleanly without
 it, so this is a quality knob, not a requirement.
 
 Also `BACKEND: &str` on both (`"wgpu"` / `"glow"`), for a UI that wants to show
-which one is live, and `volume_gpu_bps(kind)` (bytes per channel sample before
-packing and mips) for a rough figure.
+which one is live. A volume's bytes per sample are those of the format
+`volume_texel_format(kind)` returns (`TexelFormat::bytes`); a 2D channel's are
+`ChannelKind::bytes_per_sample`.
 
 Features: `backend-wgpu` and `backend-glow` (additive), and `rayon` to build a
 packed volume's mip chain and brick maxima across threads.
@@ -379,7 +380,7 @@ r.paint(&mut render_pass);
 ## Threading
 
 On native platforms `ImageRenderResources` is both `Send` and `Sync` — asserted
-at compile time in `tests/markers.rs`, so a dependency bump that drops either
+at compile time in `tests/it/markers.rs`, so a dependency bump that drops either
 fails this crate's build rather than yours. On wasm the glow backend is neither,
 because a WebGL context is bound to one thread.
 

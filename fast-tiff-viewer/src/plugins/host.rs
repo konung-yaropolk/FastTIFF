@@ -1,4 +1,4 @@
-//! A [`HostContext`] backed by a loaded [`Stack`].
+//! A [`HostContext`] backed by a loaded [`Document`].
 //!
 //! This is what a plugin actually talks to for the in-process lane. The
 //! `.dll`/`.so` lane will wrap the same object behind a C vtable rather than
@@ -6,19 +6,20 @@
 //! own state — and not in the app.
 
 use fasttiff_plugin_api::{
-    ChannelView, DisplayMode, HostContext, ImageInfo, PixelType, Plane, PluginError, Spacing,
-    StackInfo, ViewParams, VolumeMode, VolumeView,
+    ChannelView, DisplayMode, HostContext, ImageInfo, ImageSpec, PixelType, Plane, PlaneRef,
+    PluginError, Spacing, StackInfo, ViewParams, VolumeMode, VolumeView,
 };
 
+use super::result::{ResultDest, ResultTiff, ResultWriter};
 use crate::dimensions::plane_index;
 use crate::display::Dims;
-use crate::stack::Stack;
+use crate::document::Document;
 use fast_tiff_lib::{read_plane_u16_into, SampleFormat, TiffStack};
 use std::sync::Arc;
 
 /// Everything a plugin can reach for one run.
 ///
-/// Owns what it needs rather than borrowing the [`Stack`], which is what lets a
+/// Owns what it needs rather than borrowing the [`Document`], which is what lets a
 /// run happen on a worker thread while the window keeps drawing. The pixels are
 /// not copied to get there: `tiff` is a second handle on the *same* indexed
 /// file — one memory map, shared — and the two fields beside it are the plane
@@ -46,7 +47,6 @@ pub struct StackHost {
     /// case — an uncompressed, native-order, unsigned 16-bit frame, which is
     /// what this library's own writer and ImageJ both produce — converts
     /// straight from the memory map and leaves this empty.
-    scratch: crate::planes::Scratch,
     /// The regions the user has drawn, if any. See
     /// [`HostContext::selection`](fasttiff_plugin_api::HostContext::selection).
     selection: Vec<fasttiff_plugin_api::Roi>,
@@ -62,25 +62,116 @@ pub struct StackHost {
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Last reported progress, `0.0..=1.0`.
     pub progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Where a result the plugin streams is written, when this host takes
+    /// results plane by plane. `None` takes them only whole.
+    results: Option<ResultDest>,
+    /// The result being streamed, from the plugin's `begin_image` until the
+    /// caller takes it. Dropping it unfinished deletes its file.
+    streamed: Option<ResultWriter>,
 }
 
 impl StackHost {
-    pub fn new(stack: &Stack, view: ViewParams) -> Self {
+    pub fn new(stack: &Document, view: ViewParams) -> Self {
         StackHost {
             image: describe_image(stack),
             info: describe_stack(stack),
             view,
             tiff: Arc::clone(&stack.tiff),
-            dims: stack.display.dims,
-            rgb: stack.display.rgb,
-            scratch: Default::default(),
+            dims: stack.display.dims(),
+            rgb: stack.display.rgb(),
             selection: Vec::new(),
             pending: Default::default(),
             animating: false,
             messages: Vec::new(),
             cancel: None,
             progress: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            results: None,
+            streamed: None,
         }
+    }
+
+    /// Take a result plane by plane, writing it to `dest` as it arrives.
+    ///
+    /// What the app's runs are built with, so a registration's result is
+    /// never whole in memory: each plane the plugin pushes is written to the
+    /// result's file and let go, and [`take_result`](Self::take_result) has
+    /// the file when the run is over. Without this the host takes results
+    /// only whole, which is what a test that wants an [`ImageResult`] in hand
+    /// wants — and what every host did before.
+    ///
+    /// The result is written with the colour tables of the view the run was
+    /// given (`ViewParams::luts`), the source's tables as the run started.
+    ///
+    /// [`ImageResult`]: fasttiff_plugin_api::ImageResult
+    pub fn streaming_to(mut self, dest: ResultDest) -> Self {
+        self.results = Some(dest);
+        self
+    }
+
+    /// Where a streamed result is written, if this host takes one.
+    pub fn result_dest(&self) -> Option<&ResultDest> {
+        self.results.as_ref()
+    }
+
+    /// The result the plugin streamed in this run, finished: its file closed
+    /// and readable. `None` when nothing was streamed.
+    ///
+    /// Fails, deleting what was written, when fewer planes arrived than were
+    /// declared.
+    pub fn take_result(&mut self) -> Option<anyhow::Result<ResultTiff>> {
+        self.streamed.take().map(ResultWriter::finish)
+    }
+
+    /// Throw away whatever the plugin streamed: the run did not end with it.
+    /// Its file goes with it.
+    pub fn discard_result(&mut self) {
+        self.streamed = None;
+    }
+
+    /// Whether the user has asked this run to stop.
+    pub fn cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// A run's outcome with a streamed result read back into the image outcome
+    /// its target names: the answer [`Plugin::run`] gave before results could
+    /// be streamed.
+    ///
+    /// For tests and tools that want the pixels in hand. The app never does
+    /// this — it opens the file — and anything else is handed back as it was,
+    /// a result streamed for it discarded.
+    ///
+    /// [`Plugin::run`]: fasttiff_plugin_api::Plugin::run
+    pub fn collect(
+        &mut self,
+        outcome: Result<fasttiff_plugin_api::Outcome, PluginError>,
+    ) -> Result<fasttiff_plugin_api::Outcome, PluginError> {
+        use fasttiff_plugin_api::{Outcome, StreamTarget};
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(e) => {
+                self.discard_result();
+                return Err(e);
+            }
+        };
+        let Outcome::Streamed { target } = outcome else {
+            self.discard_result();
+            return Ok(outcome);
+        };
+        let finished = self.take_result().ok_or_else(|| {
+            PluginError::failed("the plugin said it streamed a result, and none arrived")
+        })?;
+        let image = finished
+            .and_then(|r| r.to_image())
+            .map_err(|e| PluginError::failed(format!("{e:#}")))?;
+        let image = Box::new(image);
+        Ok(match target {
+            StreamTarget::NewDocument => Outcome::NewDocument(image),
+            StreamTarget::ReplaceDocument => Outcome::ReplaceDocument(image),
+            StreamTarget::SaveToFile { path } => Outcome::SaveToFile { image, path },
+        })
     }
 
     /// Replace the metadata this host reports.
@@ -195,8 +286,10 @@ impl HostContext for StackHost {
     fn read_plane_u16(&mut self, plane: Plane, out: &mut Vec<u16>) -> Result<(), PluginError> {
         let (ifd, sample) = self.locate(plane)?;
         let frame = &self.tiff.frames[ifd];
-        // The contrast window is what a float plane is rescaled through; a
-        // plugin wanting the raw values asks for f32 instead.
+        // The contrast window is what a 32- or 64-bit plane is rescaled
+        // through. It is in the channel's own units, which for such a plane are
+        // the values being rescaled, so it can be handed to the decoder as it
+        // is. A plugin wanting the raw values asks for f32 instead.
         let range = self.view.channels.get(plane.c).map(|c| (c.min, c.max));
         read_plane_u16_into(
             &self.tiff.data,
@@ -206,6 +299,7 @@ impl HostContext for StackHost {
             sample,
             out,
         )
+        .map(|_map| ())
         .map_err(|e| {
             PluginError::failed(format!(
                 "decoding (c{}, z{}, t{}): {e:#}",
@@ -218,14 +312,12 @@ impl HostContext for StackHost {
         let (ifd, sample) = self.locate(plane)?;
         // Shared with `crate::measure`, so a plugin's mean and the app's own
         // plot of the same pixels cannot disagree. See `crate::planes`.
-        crate::planes::plane_f32_into(&self.tiff, ifd, sample, &mut self.scratch, out).map_err(
-            |e| {
-                PluginError::failed(format!(
-                    "decoding (c{}, z{}, t{}): {e:#}",
-                    plane.c, plane.z, plane.t
-                ))
-            },
-        )
+        crate::planes::plane_f32_into(&self.tiff, ifd, sample, out).map_err(|e| {
+            PluginError::failed(format!(
+                "decoding (c{}, z{}, t{}): {e:#}",
+                plane.c, plane.z, plane.t
+            ))
+        })
     }
 
     fn progress(&mut self, fraction: f32) -> bool {
@@ -248,11 +340,55 @@ impl HostContext for StackHost {
             self.messages.push("… further messages suppressed".into());
         }
     }
+
+    fn streams_results(&self) -> bool {
+        self.results.is_some()
+    }
+
+    fn begin_image(&mut self, spec: &ImageSpec) -> Result<(), PluginError> {
+        let Some(dest) = &self.results else {
+            return Err(PluginError::unsupported(
+                "this host takes a result only whole, not plane by plane",
+            ));
+        };
+        // Declaring again before any plane only restates the result, as it
+        // does across the C boundary; after one, it would be a second result
+        // the first's planes belong to.
+        if self.streamed.as_ref().is_some_and(|w| w.pushed() > 0) {
+            return Err(PluginError::failed(super::result::SECOND_RESULT));
+        }
+        // The restated one replaces the first, whose empty file goes with it.
+        self.streamed = None;
+        let w = ResultWriter::begin(spec.clone(), &self.view.luts, dest)
+            .map_err(|e| PluginError::failed(format!("{e:#}")))?;
+        self.streamed = Some(w);
+        Ok(())
+    }
+
+    fn describe_image(&mut self, spec: &ImageSpec) -> Result<(), PluginError> {
+        let Some(w) = &mut self.streamed else {
+            return Err(PluginError::failed(
+                "the result was described before it was declared",
+            ));
+        };
+        w.redescribe(spec.clone())
+            .map_err(|e| PluginError::failed(format!("{e:#}")))
+    }
+
+    fn push_plane(&mut self, plane: PlaneRef<'_>) -> Result<(), PluginError> {
+        let Some(w) = &mut self.streamed else {
+            return Err(PluginError::failed(
+                "a plane was pushed before the result was declared",
+            ));
+        };
+        w.push(plane)
+            .map_err(|e| PluginError::failed(format!("{e:#}")))
+    }
 }
 
 /// The stack's shape in file terms — see [`ImageInfo`] on why this is not the
 /// display's channel count.
-pub fn describe_image(stack: &Stack) -> ImageInfo {
+pub fn describe_image(stack: &Document) -> ImageInfo {
     let (width, height) = stack.dimensions().unwrap_or((0, 0));
     let f0 = stack.tiff.frames.first();
     let pixel_type = match f0.map(|f| (f.bits_per_sample, f.sample_format)) {
@@ -265,8 +401,8 @@ pub fn describe_image(stack: &Stack) -> ImageInfo {
         width,
         height,
         channels: file_channels(stack),
-        slices: stack.display.dims.slices.max(1),
-        frames: stack.display.dims.frames.max(1),
+        slices: stack.display.dims().slices.max(1),
+        frames: stack.display.dims().frames.max(1),
         samples_per_pixel: f0.map(|f| f.samples_per_pixel).unwrap_or(1),
         pixel_type,
     }
@@ -278,27 +414,26 @@ pub fn describe_image(stack: &Stack) -> ImageInfo {
 /// `plane_index`). Reporting that one channel left every plugin reading red
 /// alone and writing it back as a grayscale stack. CMYK is left as it was:
 /// its samples are inks, which are not what is shown.
-fn file_channels(stack: &Stack) -> usize {
+fn file_channels(stack: &Document) -> usize {
     let display = &stack.display;
-    if display.rgb && !display.cmyk {
+    if display.rgb() && !display.cmyk() {
         display.channel_count().max(1)
     } else {
-        display.dims.channels.max(1)
+        display.dims().channels.max(1)
     }
 }
 
 /// The file's metadata, flattened into the dependency-free shape the contract
 /// uses.
-pub fn describe_stack(stack: &Stack) -> StackInfo {
+pub fn describe_stack(stack: &Document) -> StackInfo {
     let meta = &stack.tiff.meta;
-    // `Stack::path` is a real path for a file-opened stack and a bare label for
+    // `Document::path` is a real path for a file-opened stack and a bare label for
     // one loaded from bytes (dropped, or picked in the browser build). Only the
     // former is something a plugin can reopen, so say which it is rather than
-    // handing over a path that does not exist.
-    let path = stack
-        .path
-        .exists()
-        .then(|| stack.path.display().to_string());
+    // handing over a path that does not exist. A plugin's result shown here has
+    // a real file, but a scratch one in a temporary folder that goes when the
+    // document does — not a source to tell a plugin about, or to write beside.
+    let path = stack.source_path().map(|p| p.display().to_string());
     StackInfo {
         name: stack
             .path
@@ -309,7 +444,7 @@ pub fn describe_stack(stack: &Stack) -> StackInfo {
         // RGB is shown composited, its channels red, green and blue, whatever
         // the file says; a result made from it should open looking the same.
         mode: match meta.mode {
-            _ if stack.display.rgb && !stack.display.cmyk => DisplayMode::Composite,
+            _ if stack.display.rgb() && !stack.display.cmyk() => DisplayMode::Composite,
             fast_tiff_lib::DisplayMode::Composite => DisplayMode::Composite,
             fast_tiff_lib::DisplayMode::Color => DisplayMode::Color,
             _ => DisplayMode::Grayscale,
@@ -328,19 +463,23 @@ pub fn describe_stack(stack: &Stack) -> StackInfo {
 }
 
 /// The viewer's display state, snapshotted for the run.
+///
+/// The windows go out in the file's own sample units, which is what the
+/// contract promises ([`ChannelView::min`]) and what the viewer holds them in,
+/// so they are copied rather than converted.
 pub fn describe_view(
-    stack: &Stack,
+    stack: &Document,
     frame_index: usize,
     volume_view: bool,
     volume: VolumeView,
 ) -> ViewParams {
     let channels = stack
         .display
-        .settings
+        .settings()
         .iter()
         .map(|s| ChannelView {
-            min: s.min,
-            max: s.max,
+            min: s.window.lo,
+            max: s.window.hi,
             enabled: s.enabled,
         })
         .collect();
@@ -348,7 +487,7 @@ pub fn describe_view(
         frame_index,
         volume_view,
         channels,
-        luts: stack.display.luts.clone(),
+        luts: stack.display.luts().to_vec(),
         volume,
     }
 }

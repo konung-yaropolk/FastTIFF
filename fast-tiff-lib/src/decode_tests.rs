@@ -60,7 +60,7 @@ fn predictor_undo_le_roundtrip() {
 
     let restored = undo_predictor(bytes, &frame, 2, ByteOrder::Little).unwrap();
     let mut out = [0u16; 8];
-    for (i, chunk) in restored.chunks_exact(2).enumerate() {
+    for (i, chunk) in restored.as_chunks::<2>().0.iter().enumerate() {
         out[i] = ByteOrder::Little.u16(chunk);
     }
     assert_eq!(out, original);
@@ -86,7 +86,7 @@ fn predictor_undo_be_roundtrip() {
 
     let restored = undo_predictor(bytes, &frame, 2, ByteOrder::Big).unwrap();
     let mut out = [0u16; 4];
-    for (i, chunk) in restored.chunks_exact(2).enumerate() {
+    for (i, chunk) in restored.as_chunks::<2>().0.iter().enumerate() {
         out[i] = ByteOrder::Big.u16(chunk);
     }
     assert_eq!(out, original);
@@ -377,7 +377,7 @@ fn planar_predictor2_differences_per_plane_row() {
 
     // Horizontal-difference each 3-sample row independently.
     let mut differenced = original;
-    for row in differenced.chunks_exact_mut(3) {
+    for row in differenced.as_chunks_mut::<3>().0.iter_mut() {
         for i in (1..3).rev() {
             row[i] = row[i].wrapping_sub(row[i - 1]);
         }
@@ -699,4 +699,38 @@ fn planar_u8_planes_are_read_contiguously() {
             );
         }
     }
+}
+
+/// A thread's own parallelism choice wins over the process-wide hint, a scope
+/// restores what the thread had, and one thread's choice is not another's.
+#[test]
+fn parallel_decoding_is_chosen_per_thread() {
+    set_thread_parallel_decode(Some(true));
+    assert!(parallel_decode_enabled());
+    {
+        let _serial = parallel_decode_scope(false);
+        assert!(!parallel_decode_enabled());
+        {
+            let _again = parallel_decode_scope(true);
+            assert!(parallel_decode_enabled());
+        }
+        assert!(
+            !parallel_decode_enabled(),
+            "the inner scope restored the outer"
+        );
+    }
+    assert!(
+        parallel_decode_enabled(),
+        "and the outer restored the thread's own"
+    );
+
+    let other = std::thread::spawn(|| {
+        set_thread_parallel_decode(Some(false));
+        parallel_decode_enabled()
+    })
+    .join()
+    .unwrap();
+    assert!(!other, "the other thread decided for itself");
+    assert!(parallel_decode_enabled(), "and did not decide for this one");
+    set_thread_parallel_decode(None);
 }

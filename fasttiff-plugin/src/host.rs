@@ -3,8 +3,9 @@
 
 use crate::abi::*;
 use crate::api::{
-    ChannelView, DisplayMode, HostContext, ImageInfo, Params, PixelType, Plane, PluginError, Roi,
-    Selection, Shape, Spacing, StackInfo, ViewParams, VolumeMode, VolumeView,
+    ChannelView, DisplayMode, HostContext, ImageInfo, ImageSpec, Params, PixelType, Plane,
+    PlaneRef, PluginError, Roi, Selection, Shape, Spacing, StackInfo, ViewParams, VolumeMode,
+    VolumeView,
 };
 
 /// Stands in for `stack_info` on a host too old to have it.
@@ -176,9 +177,28 @@ pub struct CHost {
     pending: Params,
     /// Whether one of this plugin's animations is running, as of the call.
     animating: bool,
+    /// Where a result goes while the run is still going: the sink the run
+    /// was handed, which takes a plane at a time whenever it is pushed. `None`
+    /// outside a run — a dialog has no result to stream.
+    sink: Option<FtSink>,
 }
 
 impl CHost {
+    /// Let the plugin hand its result over through `sink` as it makes it,
+    /// rather than all at once when the run returns.
+    ///
+    /// The C contract has always allowed this — the only rule is that the
+    /// result is declared before its first plane — and a plugin's memory is
+    /// what it saves: a registration that rewrites a recording no longer has
+    /// to hold the recording's worth of result to give it back.
+    ///
+    /// # Safety
+    /// `sink` must be the run's own sink (a copy made by `sink_of`), whose
+    /// callbacks and context stay valid for the lifetime of this value.
+    pub unsafe fn with_sink(mut self, sink: FtSink) -> CHost {
+        self.sink = Some(sink);
+        self
+    }
     /// Build from the host's table, reading everything that is snapshot-shaped
     /// once so a plugin's repeated `image()` calls do not cross the boundary.
     ///
@@ -359,6 +379,7 @@ impl CHost {
         Ok(CHost {
             pending,
             animating,
+            sink: None,
             selection,
             image: ImageInfo {
                 width: ii.width,
@@ -488,6 +509,63 @@ impl HostContext for CHost {
     fn log(&mut self, message: &str) {
         // SAFETY: the borrow outlives the call, which is all the contract asks.
         unsafe { (self.host.log)(self.host.ctx, FtStr::from_str(message)) }
+    }
+
+    /// During a run, always: every host has `begin_image` and `push_plane`
+    /// in the core of its sink. Whether *it* writes the planes as they come or
+    /// keeps them until the end is the host's business, not this plugin's —
+    /// the plugin's memory is the same either way.
+    fn streams_results(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    fn begin_image(&mut self, spec: &ImageSpec) -> Result<(), PluginError> {
+        let Some(sink) = &self.sink else {
+            return Err(PluginError::unsupported(
+                "a result can only be streamed during a run",
+            ));
+        };
+        // SAFETY: the run's sink, valid for as long as this host is (see
+        // `with_sink`).
+        let st = unsafe { crate::marshal::declare_image(sink, spec, spec.metadata.as_ref()) };
+        sink_status(st, "declare the result")
+    }
+
+    fn push_plane(&mut self, plane: PlaneRef<'_>) -> Result<(), PluginError> {
+        let Some(sink) = &self.sink else {
+            return Err(PluginError::unsupported(
+                "a result can only be streamed during a run",
+            ));
+        };
+        // SAFETY: as above; `plane` is borrowed for the call, and the host
+        // is done with it when the call returns.
+        let st = unsafe { crate::marshal::push_plane(sink, plane) };
+        sink_status(st, "take a plane of the result")
+    }
+
+    fn describe_image(&mut self, spec: &ImageSpec) -> Result<(), PluginError> {
+        let Some(sink) = &self.sink else {
+            return Err(PluginError::unsupported(
+                "a result can only be streamed during a run",
+            ));
+        };
+        // SAFETY: as above.
+        let st = unsafe { crate::marshal::describe_image(sink, spec) };
+        sink_status(st, "take the result's description")
+    }
+}
+
+/// A refusal from the host's sink, as an error. The host keeps its own reason
+/// and reports it in place of this one; this is what a plugin sees.
+fn sink_status(st: FtStatus, what: &str) -> Result<(), PluginError> {
+    match st {
+        FtStatus::Ok => Ok(()),
+        FtStatus::Unsupported => Err(PluginError::unsupported(format!(
+            "the host could not {what}"
+        ))),
+        other => Err(PluginError::failed(format!(
+            "the host could not {what} ({other:?})"
+        ))),
     }
 }
 

@@ -34,41 +34,62 @@
 //! decoders' `Vec`-based `*_into` forms cannot write to either. The fast path
 //! therefore costs a `memcpy` from the mapping and nothing more.
 
+use c_api_support::{status, Errors};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::fs::File;
 use std::io::BufWriter;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
+use crate::error::{bail, Context, OptionContext};
 use crate::{
     frame_float_minmax, read_frame_f32, read_frame_u16, read_frame_u8, read_planes_f32,
     read_planes_rgb_u16, read_planes_rgb_u8, read_planes_u16, read_planes_u8, resolve_dimensions,
-    ByteOrder, Compression, DisplayMode, FrameInfo, MetadataFormat, NotTiff, ResolvedDimensions,
-    SampleFormat, SampleType, StackMeta, StackMetaWrite, TiffFlavor, TiffStack, TiffWriter,
-    WriterOptions,
+    ByteOrder, Compression, DisplayMode, Error, ErrorKind, FrameInfo, MetadataFormat,
+    ResolvedDimensions, Result, SampleFormat, SampleType, StackMeta, StackMetaWrite, TiffFlavor,
+    TiffStack, TiffWriter, WriterOptions,
 };
 
+// Statuses 0 to 4 mean the same in all four of this repository's C APIs
+// (`FTL_`, `OIR_`, `S2P_`, `TR_`), so a host that opens a file with one and
+// registers it with another handles the common cases once. Each library's own
+// statuses follow from 5. A failure in the Rust API becomes the status of its
+// [`ErrorKind`] (see `status_of`), the same for every function.
+
 /// The call did what it was asked.
-pub const FTL_OK: c_int = 0;
-/// A pointer, size, index, buffer or option the call cannot take.
-pub const FTL_INVALID_ARGUMENT: c_int = 1;
+pub const FTL_OK: c_int = status::OK;
+/// Reserved: never returned by this library, which has no call to stop. The
+/// number is kept so that statuses 0 to 4 match the other C APIs.
+pub const FTL_CANCELLED: c_int = status::CANCELLED;
+/// A pointer, size, index, buffer or option the call cannot take — a frame
+/// among them, when the reader called does not read its depth or layout (a
+/// 16-bit frame through [`ftl_read_u8`], an RGB one through
+/// [`ftl_read_rgb_u8`]) — or a writer used out of turn
+/// ([`ErrorKind::InvalidInput`]).
+pub const FTL_INVALID_ARGUMENT: c_int = status::INVALID_ARGUMENT;
 /// Not in this build or on this target: `ftl_open` without the `mmap`
 /// feature, a file written on a target with no filesystem, ZSTD without
-/// `codec-zstd`.
-pub const FTL_UNAVAILABLE: c_int = 2;
-/// Something inside the library went wrong: a panic, or a decoder that
-/// produced a size it should not have.
-pub const FTL_FAILED: c_int = 3;
-/// A file could not be opened, created, mapped, read or written.
-pub const FTL_IO: c_int = 4;
+/// `codec-zstd` ([`ErrorKind::Unavailable`]).
+pub const FTL_UNAVAILABLE: c_int = status::UNAVAILABLE;
+/// Something inside the library went wrong: a panic, a codec failing where
+/// no input should make it, or a decoder that produced a size it should not
+/// have ([`ErrorKind::Internal`]).
+pub const FTL_FAILED: c_int = status::FAILED;
+/// A file could not be opened, created, mapped, read or written
+/// ([`ErrorKind::Io`]).
+pub const FTL_IO: c_int = 5;
 /// The bytes are not a TIFF at all (no `II`/`MM` byte-order mark, or a magic
-/// number other than 42 and 43).
-pub const FTL_NOT_TIFF: c_int = 5;
-/// A TIFF this library cannot read, or not the way asked: malformed, an
-/// unsupported codec or bit depth, or a frame of the wrong depth for the
-/// reader called (a 16-bit frame through [`ftl_read_u8`]).
-pub const FTL_FORMAT: c_int = 6;
+/// number other than 42 and 43; [`ErrorKind::NotTiff`]).
+pub const FTL_NOT_TIFF: c_int = 6;
+/// A TIFF this library cannot read: damaged or truncated
+/// ([`ErrorKind::Malformed`]), or using a codec, bit depth, sample format or
+/// predictor it has no code for ([`ErrorKind::Unsupported`]).
+pub const FTL_FORMAT: c_int = 7;
+/// Larger than this library or this target can hold: a frame whose size
+/// overflows the address space, an allocation the system refused, more
+/// frames than the index takes ([`ErrorKind::TooLarge`]). Reading or writing
+/// it on a 64-bit target, or with more memory, may work.
+pub const FTL_TOO_LARGE: c_int = 8;
 
 /// TIFF `SampleFormat` 1, [`SampleFormat::UnsignedInt`].
 pub const FTL_SAMPLE_UNSIGNED: u16 = 1;
@@ -566,7 +587,7 @@ impl FtlWriterOptions {
             }
             let names = std::slice::from_raw_parts(self.channel_names, self.named_channels);
             let colors = std::slice::from_raw_parts(self.channel_colors, 3 * self.named_channels);
-            for (i, (&name, rgb)) in names.iter().zip(colors.chunks_exact(3)).enumerate() {
+            for (i, (&name, rgb)) in names.iter().zip(colors.as_chunks::<3>().0).enumerate() {
                 let name = c_str("a channel name", name)?
                     .ok_or_else(|| format!("channel_names[{i}] is NULL"))?;
                 m = m.channel(name, [rgb[0], rgb[1], rgb[2]]);
@@ -590,50 +611,33 @@ thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
 }
 
-/// Record why a call failed, for [`ftl_last_error`], and return its status.
-///
-/// `try_with`, not `with`: a call made while the thread is being torn down —
-/// from a C++ `thread_local` destructor, say — finds the slot already gone,
-/// and `with` would panic there, which past `extern "C"` is an abort. The
-/// status still comes back; only the message is lost.
-fn fail(status: c_int, why: impl Into<String>) -> c_int {
-    let why = CString::new(why.into().replace('\0', " ")).unwrap_or_default();
-    let _ = LAST_ERROR.try_with(|e| *e.borrow_mut() = why);
-    status
-}
+/// This library's failure reporting: its own last-error slot above, the
+/// shared scaffolding in [`c_api_support::Errors`].
+static ERRORS: Errors = Errors::new(
+    &LAST_ERROR,
+    FTL_INVALID_ARGUMENT,
+    FTL_FAILED,
+    "fast-tiff-lib",
+);
 
-/// The status for an error from the Rust API: what its type says when it has
-/// one ([`NotTiff`], an I/O error anywhere in the chain), `otherwise` when it
-/// is only words.
-fn status_of(e: &anyhow::Error, otherwise: c_int) -> c_int {
-    if e.downcast_ref::<NotTiff>().is_some() {
-        FTL_NOT_TIFF
-    } else if e.chain().any(|c| c.is::<std::io::Error>()) {
-        FTL_IO
-    } else {
-        otherwise
+/// The status for an error from the Rust API: its kind's, whichever function
+/// it came from. Exhaustive, so a kind added to the crate has to be given one
+/// here before it builds.
+fn status_of(e: &Error) -> c_int {
+    match e.kind() {
+        ErrorKind::Io => FTL_IO,
+        ErrorKind::NotTiff => FTL_NOT_TIFF,
+        ErrorKind::Malformed | ErrorKind::Unsupported => FTL_FORMAT,
+        ErrorKind::Unavailable => FTL_UNAVAILABLE,
+        ErrorKind::TooLarge => FTL_TOO_LARGE,
+        ErrorKind::InvalidInput => FTL_INVALID_ARGUMENT,
+        ErrorKind::Internal => FTL_FAILED,
     }
 }
 
-/// [`fail`] with an error from the Rust API, its whole chain in the message.
-fn fail_with(e: &anyhow::Error, otherwise: c_int) -> c_int {
-    fail(status_of(e, otherwise), format!("{e:#}"))
-}
-
-/// Run `work`, turning a panic into [`FTL_FAILED`] rather than letting it
-/// unwind into a caller that has no idea what one is.
-fn guarded(work: impl FnOnce() -> c_int) -> c_int {
-    match catch_unwind(AssertUnwindSafe(work)) {
-        Ok(status) => status,
-        Err(panic) => {
-            let why = panic
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "no message".to_string());
-            fail(FTL_FAILED, format!("fast-tiff-lib panicked: {why}"))
-        }
-    }
+/// `ERRORS.fail` with an error from the Rust API, its whole chain in the message.
+fn fail_with(e: &Error) -> c_int {
+    ERRORS.fail(status_of(e), format!("{e:#}"))
 }
 
 /// The stack behind `s`, or the status to return for a null one.
@@ -645,7 +649,7 @@ fn guarded(work: impl FnOnce() -> c_int) -> c_int {
 unsafe fn stack<'a>(s: *const FtlStack) -> Result<&'a TiffStack, c_int> {
     s.as_ref()
         .map(|s| &s.inner)
-        .ok_or_else(|| fail(FTL_INVALID_ARGUMENT, "the stack handle is NULL"))
+        .ok_or_else(|| ERRORS.fail(FTL_INVALID_ARGUMENT, "the stack handle is NULL"))
 }
 
 /// The stack behind `s` and its frame `index`, or the status to return.
@@ -660,7 +664,7 @@ unsafe fn frame_at<'a>(
     let st = stack(s)?;
     match st.frames.get(index) {
         Some(f) => Ok((st, f)),
-        None => Err(fail(
+        None => Err(ERRORS.fail(
             FTL_INVALID_ARGUMENT,
             format!(
                 "frame {index} is past the end of {} frame(s)",
@@ -670,21 +674,6 @@ unsafe fn frame_at<'a>(
     }
 }
 
-/// The snprintf convention: as much of `s` as fits in `cap` bytes,
-/// NUL-terminated, and the whole length back.
-///
-/// # Safety
-///
-/// `buf` is null or points to `cap` writable bytes.
-unsafe fn copy_str(s: &str, buf: *mut c_char, cap: usize) -> usize {
-    if !buf.is_null() && cap > 0 {
-        let n = s.len().min(cap - 1);
-        std::ptr::copy_nonoverlapping(s.as_ptr(), buf.cast::<u8>(), n);
-        buf.add(n).write(0);
-    }
-    s.len()
-}
-
 /// Why the last call on this thread that did not return `FTL_OK` failed, as a
 /// NUL-terminated UTF-8 string. Empty before any has.
 ///
@@ -692,9 +681,7 @@ unsafe fn copy_str(s: &str, buf: *mut c_char, cap: usize) -> usize {
 /// the text to keep it. Empty, too, on a thread being torn down.
 #[no_mangle]
 pub extern "C" fn ftl_last_error() -> *const c_char {
-    LAST_ERROR
-        .try_with(|e| e.borrow().as_ptr())
-        .unwrap_or(c"".as_ptr())
+    ERRORS.last_error()
 }
 
 /// The library's version, `"major.minor.patch"`, NUL-terminated and static.
@@ -725,37 +712,32 @@ pub extern "C" fn ftl_set_parallel_decode(enabled: bool) {
 /// memory for one pointer.
 #[no_mangle]
 pub unsafe extern "C" fn ftl_open(path: *const c_char, out: *mut *mut FtlStack) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         if out.is_null() {
-            return fail(FTL_INVALID_ARGUMENT, "out is NULL");
+            return ERRORS.fail(FTL_INVALID_ARGUMENT, "out is NULL");
         }
         out.write(std::ptr::null_mut());
         let path = match c_str("path", path) {
             Ok(Some(p)) => p,
-            Ok(None) => return fail(FTL_INVALID_ARGUMENT, "path is NULL"),
-            Err(why) => return fail(FTL_INVALID_ARGUMENT, why),
+            Ok(None) => return ERRORS.fail(FTL_INVALID_ARGUMENT, "path is NULL"),
+            Err(why) => return ERRORS.fail(FTL_INVALID_ARGUMENT, why),
         };
         #[cfg(not(feature = "mmap"))]
         {
             let _ = path;
-            fail(
+            ERRORS.fail(
                 FTL_UNAVAILABLE,
                 "this build has no `mmap` feature, so no ftl_open; read the file and use ftl_open_bytes",
             )
         }
         #[cfg(feature = "mmap")]
         {
-            // `TiffStack::open` words a failed open without keeping the
-            // `io::Error`, so open it here first for a status that says I/O.
-            if let Err(e) = File::open(path) {
-                return fail(FTL_IO, format!("could not open {path}: {e}"));
-            }
             match TiffStack::open(path) {
                 Ok(inner) => {
                     out.write(Box::into_raw(Box::new(FtlStack { inner })));
                     FTL_OK
                 }
-                Err(e) => fail_with(&e, FTL_FORMAT),
+                Err(e) => fail_with(&e),
             }
         }
     })
@@ -776,16 +758,16 @@ pub unsafe extern "C" fn ftl_open_bytes(
     len: usize,
     out: *mut *mut FtlStack,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         if out.is_null() {
-            return fail(FTL_INVALID_ARGUMENT, "out is NULL");
+            return ERRORS.fail(FTL_INVALID_ARGUMENT, "out is NULL");
         }
         out.write(std::ptr::null_mut());
         if data.is_null() {
-            return fail(FTL_INVALID_ARGUMENT, "data is NULL");
+            return ERRORS.fail(FTL_INVALID_ARGUMENT, "data is NULL");
         }
         if len > isize::MAX as usize {
-            return fail(
+            return ERRORS.fail(
                 FTL_INVALID_ARGUMENT,
                 "len is larger than memory can address",
             );
@@ -796,7 +778,7 @@ pub unsafe extern "C" fn ftl_open_bytes(
                 out.write(Box::into_raw(Box::new(FtlStack { inner })));
                 FTL_OK
             }
-            Err(e) => fail_with(&e, FTL_FORMAT),
+            Err(e) => fail_with(&e),
         }
     })
 }
@@ -864,7 +846,7 @@ pub unsafe extern "C" fn ftl_frame_info(
         Err(status) => return status,
     };
     if out.is_null() {
-        return fail(FTL_INVALID_ARGUMENT, "out is NULL");
+        return ERRORS.fail(FTL_INVALID_ARGUMENT, "out is NULL");
     }
     out.write(FtlFrameInfo::from(f));
     FTL_OK
@@ -883,16 +865,17 @@ pub unsafe extern "C" fn ftl_metadata(s: *const FtlStack, out: *mut FtlMetadata)
         Err(status) => return status,
     };
     if out.is_null() {
-        return fail(FTL_INVALID_ARGUMENT, "out is NULL");
+        return ERRORS.fail(FTL_INVALID_ARGUMENT, "out is NULL");
     }
     out.write(FtlMetadata::from(&st.meta));
     FTL_OK
 }
 
 /// The calibration unit ([`StackMeta::unit`], such as `"µm"`), UTF-8, by the
-/// snprintf convention: as much as fits in `cap` bytes, NUL-terminated, and
-/// the whole length back, not counting the NUL. 0 when the file names none,
-/// and for NULL.
+/// snprintf convention: as much as fits in `cap` bytes, NUL-terminated and cut
+/// between characters, and the whole length back, not counting the NUL. 0
+/// when the file names none. A NULL stack, or a NULL `buf` with a nonzero
+/// `cap`, is `-FTL_INVALID_ARGUMENT`.
 ///
 /// # Safety
 ///
@@ -903,14 +886,15 @@ pub unsafe extern "C" fn ftl_metadata_unit(
     s: *const FtlStack,
     buf: *mut c_char,
     cap: usize,
-) -> usize {
-    let unit = s.as_ref().and_then(|s| s.inner.meta.unit.as_deref());
-    copy_str(unit.unwrap_or(""), buf, cap)
+) -> isize {
+    c_api_support::len_of(
+        stack(s).map(|st| ERRORS.put_text(st.meta.unit.as_deref().unwrap_or(""), buf, cap)),
+    )
 }
 
 /// The first IFD's `ImageDescription` ([`TiffStack::description`]), verbatim,
 /// by the snprintf convention (see [`ftl_metadata_unit`]). 0 when the file
-/// has none, and for NULL.
+/// has none.
 ///
 /// # Safety
 ///
@@ -921,9 +905,10 @@ pub unsafe extern "C" fn ftl_description(
     s: *const FtlStack,
     buf: *mut c_char,
     cap: usize,
-) -> usize {
-    let text = s.as_ref().and_then(|s| s.inner.description.as_deref());
-    copy_str(text.unwrap_or(""), buf, cap)
+) -> isize {
+    c_api_support::len_of(
+        stack(s).map(|st| ERRORS.put_text(st.description.as_deref().unwrap_or(""), buf, cap)),
+    )
 }
 
 /// [`resolve_dimensions`]: how a viewer reads `channels` x `slices` x
@@ -940,20 +925,24 @@ pub unsafe extern "C" fn ftl_resolve_dimensions(
     frames: usize,
     out: *mut FtlDims,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         if out.is_null() {
-            return fail(FTL_INVALID_ARGUMENT, "out is NULL");
+            return ERRORS.fail(FTL_INVALID_ARGUMENT, "out is NULL");
         }
         // The promise is that the product never changes, which needs one:
         // a count of zero, or a product past `size_t`, has nothing to keep.
         if channels == 0 || slices == 0 || frames == 0 {
-            return fail(
+            return ERRORS.fail(
                 FTL_INVALID_ARGUMENT,
                 format!("{channels} x {slices} x {frames}: every count has to be at least 1"),
             );
         }
-        if channels.checked_mul(slices).and_then(|v| v.checked_mul(frames)).is_none() {
-            return fail(
+        if channels
+            .checked_mul(slices)
+            .and_then(|v| v.checked_mul(frames))
+            .is_none()
+        {
+            return ERRORS.fail(
                 FTL_INVALID_ARGUMENT,
                 format!("{channels} x {slices} x {frames} is more frames than size_t counts"),
             );
@@ -987,14 +976,14 @@ pub unsafe extern "C" fn ftl_plane_index(
         Err(status) => return status,
     };
     if index.is_null() {
-        return fail(FTL_INVALID_ARGUMENT, "index is NULL");
+        return ERRORS.fail(FTL_INVALID_ARGUMENT, "index is NULL");
     }
     let (channels, slices, frames) = match dims.as_ref() {
         Some(d) => (d.channels, d.slices, d.frames),
         None => (st.meta.channels, st.meta.slices, st.meta.frames),
     };
     if c >= channels || z >= slices || t >= frames {
-        return fail(
+        return ERRORS.fail(
             FTL_INVALID_ARGUMENT,
             format!("(c {c}, z {z}, t {t}) is outside {channels} x {slices} x {frames}"),
         );
@@ -1009,7 +998,7 @@ pub unsafe extern "C" fn ftl_plane_index(
             index.write(i);
             FTL_OK
         }
-        _ => fail(
+        _ => ERRORS.fail(
             FTL_INVALID_ARGUMENT,
             format!(
                 "(c {c}, z {z}, t {t}) is past the end of the file's {} frame(s)",
@@ -1038,36 +1027,34 @@ pub unsafe extern "C" fn ftl_sample_count(
         Err(status) => return status,
     };
     if count.is_null() {
-        return fail(FTL_INVALID_ARGUMENT, "count is NULL");
+        return ERRORS.fail(FTL_INVALID_ARGUMENT, "count is NULL");
     }
     match f.sample_count() {
         Ok(n) => {
             count.write(n);
             FTL_OK
         }
-        Err(e) => fail_with(&e, FTL_FORMAT),
+        Err(e) => fail_with(&e),
     }
 }
 
 /// A decoder as the readers below drive it: the frame's planes, in sample
 /// order, borrowed from the mapping where the Rust API can.
-type Decode<T> = for<'a> fn(
-    &'a TiffStack,
-    &'a FrameInfo,
-    Option<(f32, f32)>,
-) -> anyhow::Result<Vec<Cow<'a, [T]>>>;
+type Decode<T> =
+    for<'a> fn(&'a TiffStack, &'a FrameInfo, Option<(f32, f32)>) -> Result<Vec<Cow<'a, [T]>>>;
 
 /// Values a reader writes: one plane per sample, or three for the RGB ones.
-type Count = fn(&FrameInfo) -> anyhow::Result<usize>;
+type Count = fn(&FrameInfo) -> Result<usize>;
 
-fn all_samples(f: &FrameInfo) -> anyhow::Result<usize> {
+fn all_samples(f: &FrameInfo) -> Result<usize> {
     f.sample_count()
 }
 
-fn three_planes(f: &FrameInfo) -> anyhow::Result<usize> {
-    f.pixel_count()?
-        .checked_mul(3)
-        .ok_or_else(|| anyhow::anyhow!("frame geometry overflows address space"))
+fn three_planes(f: &FrameInfo) -> Result<usize> {
+    f.pixel_count()?.checked_mul(3).context(
+        ErrorKind::TooLarge,
+        "frame geometry overflows address space",
+    )
 }
 
 fn owned<T: Clone>(planes: Vec<Vec<T>>) -> Vec<Cow<'static, [T]>> {
@@ -1078,9 +1065,10 @@ fn decode_u8<'a>(
     st: &'a TiffStack,
     f: &'a FrameInfo,
     _: Option<(f32, f32)>,
-) -> anyhow::Result<Vec<Cow<'a, [u8]>>> {
+) -> Result<Vec<Cow<'a, [u8]>>> {
     if !matches!(f.bits_per_sample, 4 | 8) {
-        anyhow::bail!(
+        bail!(
+            InvalidInput,
             "the frame is {}-bit; ftl_read_u8 takes 8-bit frames (and 4-bit palette indices), \
              ftl_read_u16 or ftl_read_f32 the rest",
             f.bits_per_sample
@@ -1097,7 +1085,14 @@ fn decode_u16<'a>(
     st: &'a TiffStack,
     f: &'a FrameInfo,
     range: Option<(f32, f32)>,
-) -> anyhow::Result<Vec<Cow<'a, [u16]>>> {
+) -> Result<Vec<Cow<'a, [u16]>>> {
+    if f.bits_per_sample == 4 && f.samples_per_pixel <= 1 {
+        bail!(
+            InvalidInput,
+            "the frame is 4-bit; ftl_read_u8 and ftl_read_f32 read its values as they are, \
+             ftl_read_u16 has no widening for them"
+        );
+    }
     if f.samples_per_pixel <= 1 {
         Ok(vec![read_frame_u16(&st.data, f, st.byte_order, range)?])
     } else {
@@ -1109,7 +1104,7 @@ fn decode_f32<'a>(
     st: &'a TiffStack,
     f: &'a FrameInfo,
     _: Option<(f32, f32)>,
-) -> anyhow::Result<Vec<Cow<'a, [f32]>>> {
+) -> Result<Vec<Cow<'a, [f32]>>> {
     if f.samples_per_pixel <= 1 {
         Ok(vec![read_frame_f32(&st.data, f, st.byte_order)?])
     } else {
@@ -1121,7 +1116,7 @@ fn decode_rgb_u8<'a>(
     st: &'a TiffStack,
     f: &'a FrameInfo,
     _: Option<(f32, f32)>,
-) -> anyhow::Result<Vec<Cow<'a, [u8]>>> {
+) -> Result<Vec<Cow<'a, [u8]>>> {
     Ok(owned(read_planes_rgb_u8(&st.data, f, st.byte_order)?))
 }
 
@@ -1129,7 +1124,7 @@ fn decode_rgb_u16<'a>(
     st: &'a TiffStack,
     f: &'a FrameInfo,
     _: Option<(f32, f32)>,
-) -> anyhow::Result<Vec<Cow<'a, [u16]>>> {
+) -> Result<Vec<Cow<'a, [u16]>>> {
     Ok(owned(read_planes_rgb_u16(&st.data, f, st.byte_order)?))
 }
 
@@ -1149,42 +1144,34 @@ unsafe fn read_into<T: Copy>(
     count: Count,
     decode: Decode<T>,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         let (st, f) = match frame_at(s, index) {
             Ok(v) => v,
             Err(status) => return status,
         };
         if out.is_null() {
-            return fail(FTL_INVALID_ARGUMENT, "out is NULL");
-        }
-        // Reading ZSTD without the codec is the build, not the file: the same
-        // status writing it gets.
-        if f.compression == Compression::Zstd && !cfg!(feature = "codec-zstd") {
-            return fail(
-                FTL_UNAVAILABLE,
-                format!("frame {index} is ZSTD-compressed, and this build has no `codec-zstd`"),
-            );
+            return ERRORS.fail(FTL_INVALID_ARGUMENT, "out is NULL");
         }
         let needed = match count(f) {
             Ok(n) => n,
-            Err(e) => return fail_with(&e, FTL_FORMAT),
+            Err(e) => return fail_with(&e),
         };
         if len < needed {
-            return fail(
+            return ERRORS.fail(
                 FTL_INVALID_ARGUMENT,
                 format!("out holds {len} values; frame {index} decodes to {needed}"),
             );
         }
-        let planes = match decode(st, f, range) {
+        // Reading ZSTD without the codec comes back as the build's limit, not
+        // the file's fault: the decoder says `Unavailable`, the status writing
+        // it gets.
+        let planes = match decode(st, f, range).with_context(|| format!("frame {index}")) {
             Ok(p) => p,
-            Err(e) => {
-                let status = status_of(&e, FTL_FORMAT);
-                return fail(status, format!("frame {index}: {e:#}"));
-            }
+            Err(e) => return fail_with(&e),
         };
         let total: usize = planes.iter().map(|p| p.len()).sum();
         if total != needed {
-            return fail(
+            return ERRORS.fail(
                 FTL_FAILED,
                 format!("frame {index} decoded to {total} values, not the {needed} expected"),
             );
@@ -1200,8 +1187,9 @@ unsafe fn read_into<T: Copy>(
 
 /// Frame `index` as raw 8-bit samples, every sample plane one after another
 /// ([`read_frame_u8`], [`read_planes_u8`]): 8-bit frames, and 4-bit palette
-/// indices as one byte each; anything wider is `FTL_FORMAT`. `out` holds
-/// `len` bytes, at least [`ftl_sample_count`].
+/// indices as one byte each; anything wider is `FTL_INVALID_ARGUMENT`, the
+/// frame being one this reader does not take. `out` holds `len` bytes, at
+/// least [`ftl_sample_count`].
 ///
 /// # Safety
 ///
@@ -1221,8 +1209,9 @@ pub unsafe extern "C" fn ftl_read_u8(
 /// another ([`read_frame_u16`], [`read_planes_u16`]): 16-bit as it is, 8-bit
 /// widened onto 0..=65535, signed offset into unsigned, 32- and 64-bit
 /// rescaled from `range[0]..range[1]` — or from each plane's own minimum and
-/// maximum when `range` is NULL. `out` holds `len` values, at least
-/// [`ftl_sample_count`].
+/// maximum when `range` is NULL. A 4-bit frame is `FTL_INVALID_ARGUMENT`:
+/// [`ftl_read_u8`] and [`ftl_read_f32`] read it. `out` holds `len` values, at
+/// least [`ftl_sample_count`].
 ///
 /// # Safety
 ///
@@ -1241,7 +1230,7 @@ pub unsafe extern "C" fn ftl_read_u16(
     } else {
         let (lo, hi) = (range.read(), range.add(1).read());
         if !lo.is_finite() || !hi.is_finite() {
-            return fail(
+            return ERRORS.fail(
                 FTL_INVALID_ARGUMENT,
                 format!("range {lo}..{hi} is not finite"),
             );
@@ -1251,10 +1240,11 @@ pub unsafe extern "C" fn ftl_read_u16(
     read_into(s, index, range, out, len, all_samples, decode_u16)
 }
 
-/// Frame `index` as raw floats, every sample plane one after another
-/// ([`read_frame_f32`], [`read_planes_f32`]): 32- and 64-bit frames, integer
-/// or float, cast to `float`; 8- and 16-bit are `FTL_FORMAT`. `out` holds
-/// `len` values, at least [`ftl_sample_count`].
+/// Frame `index` as floats in the file's own units, every sample plane one
+/// after another ([`read_frame_f32`], [`read_planes_f32`]): any depth, integer
+/// or float, with no widening, offset or rescale (an 8-bit 200 is 200.0, a
+/// signed 16-bit -1 is -1.0); 16-bit floating point is `FTL_FORMAT`. `out`
+/// holds `len` values, at least [`ftl_sample_count`].
 ///
 /// # Safety
 ///
@@ -1272,8 +1262,8 @@ pub unsafe extern "C" fn ftl_read_f32(
 
 /// An 8-bit CMYK frame (`FtlFrameInfo.cmyk`) converted to red, green and
 /// blue planes, one after another ([`read_planes_rgb_u8`]); anything else is
-/// `FTL_FORMAT`. An RGB frame needs no conversion: [`ftl_read_u8`] gives its
-/// planes. `out` holds `len` bytes, at least `3 * width * height`.
+/// `FTL_INVALID_ARGUMENT`. An RGB frame needs no conversion: [`ftl_read_u8`]
+/// gives its planes. `out` holds `len` bytes, at least `3 * width * height`.
 ///
 /// # Safety
 ///
@@ -1324,12 +1314,14 @@ pub unsafe extern "C" fn ftl_float_minmax(
     min: *mut f32,
     max: *mut f32,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         let (st, f) = match frame_at(s, index) {
             Ok(v) => v,
             Err(status) => return status,
         };
-        match frame_float_minmax(&st.data, f, st.byte_order) {
+        match frame_float_minmax(&st.data, f, st.byte_order)
+            .with_context(|| format!("frame {index}"))
+        {
             Ok(r) => {
                 let (lo, hi) = r.unwrap_or((f32::NAN, f32::NAN));
                 if !min.is_null() {
@@ -1340,7 +1332,7 @@ pub unsafe extern "C" fn ftl_float_minmax(
                 }
                 FTL_OK
             }
-            Err(e) => fail(status_of(&e, FTL_FORMAT), format!("frame {index}: {e:#}")),
+            Err(e) => fail_with(&e),
         }
     })
 }
@@ -1355,7 +1347,7 @@ pub unsafe extern "C" fn ftl_float_minmax(
 #[no_mangle]
 pub unsafe extern "C" fn ftl_writer_options_default(out: *mut FtlWriterOptions) -> c_int {
     if out.is_null() {
-        return fail(FTL_INVALID_ARGUMENT, "out is NULL");
+        return ERRORS.fail(FTL_INVALID_ARGUMENT, "out is NULL");
     }
     out.write(FtlWriterOptions {
         width: 0,
@@ -1408,46 +1400,41 @@ pub unsafe extern "C" fn ftl_writer_create(
     options: *const FtlWriterOptions,
     out: *mut *mut FtlWriter,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         if out.is_null() {
-            return fail(FTL_INVALID_ARGUMENT, "out is NULL");
+            return ERRORS.fail(FTL_INVALID_ARGUMENT, "out is NULL");
         }
         out.write(std::ptr::null_mut());
         let path = match c_str("path", path) {
             Ok(Some(p)) => p,
-            Ok(None) => return fail(FTL_INVALID_ARGUMENT, "path is NULL"),
-            Err(why) => return fail(FTL_INVALID_ARGUMENT, why),
+            Ok(None) => return ERRORS.fail(FTL_INVALID_ARGUMENT, "path is NULL"),
+            Err(why) => return ERRORS.fail(FTL_INVALID_ARGUMENT, why),
         };
         let Some(options) = options.as_ref() else {
-            return fail(FTL_INVALID_ARGUMENT, "options is NULL");
+            return ERRORS.fail(FTL_INVALID_ARGUMENT, "options is NULL");
         };
         let opts = match options.to_options() {
             Ok(o) => o,
-            Err(why) => return fail(FTL_INVALID_ARGUMENT, why),
+            Err(why) => return ERRORS.fail(FTL_INVALID_ARGUMENT, why),
         };
-        if cfg!(not(feature = "codec-zstd")) && options.compression == FTL_COMPRESSION_ZSTD {
-            return fail(
-                FTL_UNAVAILABLE,
-                "this build has no `codec-zstd` feature, so it cannot write ZSTD",
-            );
-        }
         if cfg!(all(target_arch = "wasm32", target_os = "unknown")) {
-            return fail(FTL_UNAVAILABLE, "this target has no filesystem to write to");
+            return ERRORS.fail(FTL_UNAVAILABLE, "this target has no filesystem to write to");
         }
-        // Validated against memory first, so a refusal leaves no file behind.
+        // Validated against memory first, so a refusal — ZSTD without
+        // `codec-zstd` among them — leaves no file behind.
         if let Err(e) = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts.clone()) {
-            return fail_with(&e, FTL_INVALID_ARGUMENT);
+            return fail_with(&e);
         }
         let file = match File::create(path) {
             Ok(f) => f,
-            Err(e) => return fail(FTL_IO, format!("could not create {path}: {e}")),
+            Err(e) => return ERRORS.fail(FTL_IO, format!("could not create {path}: {e}")),
         };
         match TiffWriter::new(BufWriter::new(file), opts) {
             Ok(inner) => {
                 out.write(Box::into_raw(Box::new(FtlWriter { inner })));
                 FTL_OK
             }
-            Err(e) => fail_with(&e, FTL_INVALID_ARGUMENT),
+            Err(e) => fail_with(&e),
         }
     })
 }
@@ -1463,24 +1450,24 @@ unsafe fn write_with<T>(
     w: *mut FtlWriter,
     samples: *const T,
     count: usize,
-    write: impl FnOnce(&mut TiffWriter<BufWriter<File>>, &[T]) -> anyhow::Result<()>,
+    write: impl FnOnce(&mut TiffWriter<BufWriter<File>>, &[T]) -> Result<()>,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         let Some(w) = w.as_mut() else {
-            return fail(FTL_INVALID_ARGUMENT, "the writer handle is NULL");
+            return ERRORS.fail(FTL_INVALID_ARGUMENT, "the writer handle is NULL");
         };
         if samples.is_null() {
-            return fail(FTL_INVALID_ARGUMENT, "samples is NULL");
+            return ERRORS.fail(FTL_INVALID_ARGUMENT, "samples is NULL");
         }
         if count > isize::MAX as usize / std::mem::size_of::<T>().max(1) {
-            return fail(
+            return ERRORS.fail(
                 FTL_INVALID_ARGUMENT,
                 "count is larger than memory can address",
             );
         }
         match write(&mut w.inner, std::slice::from_raw_parts(samples, count)) {
             Ok(()) => FTL_OK,
-            Err(e) => fail_with(&e, FTL_INVALID_ARGUMENT),
+            Err(e) => fail_with(&e),
         }
     })
 }
@@ -1583,15 +1570,19 @@ pub unsafe extern "C" fn ftl_writer_frames_written(w: *const FtlWriter) -> usize
 #[no_mangle]
 pub unsafe extern "C" fn ftl_writer_finish(w: *mut FtlWriter) -> c_int {
     if w.is_null() {
-        return fail(FTL_INVALID_ARGUMENT, "the writer handle is NULL");
+        return ERRORS.fail(FTL_INVALID_ARGUMENT, "the writer handle is NULL");
     }
     let w = Box::from_raw(w);
-    guarded(move || match w.inner.finish() {
-        Ok(file) => match file.into_inner() {
+    ERRORS.guarded(move || {
+        let closed = w.inner.finish().and_then(|file| {
+            file.into_inner()
+                .map_err(|e| e.into_error())
+                .context("could not write the file")
+        });
+        match closed {
             Ok(_) => FTL_OK,
-            Err(e) => fail(FTL_IO, format!("could not write the file: {}", e.error())),
-        },
-        Err(e) => fail_with(&e, FTL_INVALID_ARGUMENT),
+            Err(e) => fail_with(&e),
+        }
     })
 }
 

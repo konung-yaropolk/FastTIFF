@@ -2,6 +2,7 @@
 name = "scivis-render"
 version = "0.26.2"
 edition = "2021"
+rust-version.workspace = true
 description = "Scientific visualization on the GPU: per-channel window/level + LUT compositing of multi-channel image stacks in 2D, and volume ray-marching in 3D, on wgpu or OpenGL. No GUI toolkit, no file format — you bring the pixels."
 license = "MPL-2.0"
 readme = "README.md"
@@ -44,12 +45,12 @@ rayon = ["dep:rayon"]
 # windowing layer uses — egui-wgpu 0.34 → wgpu 29, egui_glow 0.34 → glow 0.17.
 # Cargo unifies them automatically while the majors match; a host on a different
 # major would get a type mismatch at the `new()` call, not a subtle bug.
-wgpu = { version = "29", optional = true }
+wgpu = { workspace = true, optional = true }
 glow = { version = "0.17", optional = true }
 # f32 <-> f16 for half-float volume texels (`pack`); already in wgpu's tree.
 half = "2"
-rayon = { version = "1.10", optional = true }
-bytemuck = { version = "1.25", optional = true }
+rayon = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }
 
 # Asking the driver how much GPU memory there is (`vram`), on the backends
 # wgpu uses there. Both are already in wgpu's tree at these versions, so they
@@ -67,10 +68,10 @@ ash = { version = "0.38", optional = true }
 # promise, which the upload waits for (`wgpu_backend`). Already in wgpu's
 # tree there, for its WebGPU backend.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen-futures = { version = "0.4", optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
 
 # WGSL is only validated by wgpu at runtime (shader-module creation), so this
 # lets `cargo test` catch shader errors offline, with no GPU and regardless of
 # which backend feature is on. naga is already in the tree via wgpu.
 [dev-dependencies]
-naga = { version = "30", features = ["wgsl-in"] }
+naga = { workspace = true, features = ["wgsl-in"] }

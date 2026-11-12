@@ -22,41 +22,6 @@ impl Lcg {
     }
 }
 
-fn brute_largest(mask: &[bool], rows: usize, cols: usize) -> usize {
-    let mut best = 0;
-    for y0 in 0..rows {
-        for x0 in 0..cols {
-            for y1 in y0..rows {
-                for x1 in x0..cols {
-                    if (y0..=y1).all(|y| (x0..=x1).all(|x| mask[y * cols + x])) {
-                        best = best.max((y1 - y0 + 1) * (x1 - x0 + 1));
-                    }
-                }
-            }
-        }
-    }
-    best
-}
-
-#[test]
-fn the_largest_rectangle_is_the_largest() {
-    let mut rng = Lcg(5);
-    for case in 0..300 {
-        let (rows, cols) = (1 + rng.next() as usize % 8, 1 + rng.next() as usize % 9);
-        let mask: Vec<bool> = (0..rows * cols).map(|_| rng.next() % 5 != 0).collect();
-        let want = brute_largest(&mask, rows, cols);
-        match largest_rectangle(&mask, rows, cols) {
-            None => assert_eq!(want, 0, "case {case}"),
-            Some(r) => {
-                assert_eq!(r.height * r.width, want, "case {case}: {r:?}");
-                let all = (r.row..r.row + r.height)
-                    .all(|y| (r.col..r.col + r.width).all(|x| mask[y * cols + x]));
-                assert!(all, "case {case}: {r:?} is not all covered");
-            }
-        }
-    }
-}
-
 /// A rotation by `degrees` about the frame's middle, then a shift.
 fn turn(degrees: f64, ty: f64, tx: f64, ly: usize, lx: usize) -> Matrix {
     let (sin, cos) = degrees.to_radians().sin_cos();
@@ -83,7 +48,7 @@ fn wobble(rng: &mut Lcg, ly: usize, lx: usize) -> Matrix {
     m.c[1] *= s;
     m.c[6] *= s;
     m.c[2] += rng.within(0.02);
-    if rng.next() % 3 == 0 {
+    if rng.next().is_multiple_of(3) {
         m.c[3] = rng.within(0.0005);
         m.c[7] = -m.c[3];
     }
@@ -129,7 +94,10 @@ fn the_common_area_is_covered_and_largest() {
                 if a.is_upright() {
                     assert_eq!(a.height * a.width, upright, "case {case}: {a:?}");
                 } else {
-                    assert!(a.height * a.width > upright, "case {case}: {a:?} vs {upright}");
+                    assert!(
+                        a.height * a.width > upright,
+                        "case {case}: {a:?} vs {upright}"
+                    );
                 }
                 assert_eq!(common_area(&matrices, ly, lx, false), Ok(a), "case {case}");
             }
@@ -154,7 +122,10 @@ fn a_turned_stack_is_cut_at_an_angle() {
         largest_rectangle(&mask, ly, lx).map_or(0, |r| r.height * r.width)
     };
     assert!(!area.is_upright(), "{area:?} against an upright {up}");
-    assert!(area.height * area.width > up + up / 10, "{area:?} against {up}");
+    assert!(
+        area.height * area.width > up + up / 10,
+        "{area:?} against {up}"
+    );
 }
 
 /// Translation and scale only: upright, without searching.

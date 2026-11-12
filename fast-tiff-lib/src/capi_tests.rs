@@ -89,10 +89,12 @@ fn flat<T: Clone>(planes: Vec<Vec<T>>) -> Vec<T> {
 
 fn description(s: *const FtlStack) -> String {
     let n = unsafe { ftl_description(s, null_mut(), 0) };
+    assert!(n >= 0, "{n}: {}", last_error());
+    let n = n as usize;
     let mut buf = vec![0u8; n + 1];
     assert_eq!(
         unsafe { ftl_description(s, buf.as_mut_ptr().cast(), buf.len()) },
-        n
+        n as isize
     );
     assert_eq!(buf[n], 0);
     String::from_utf8(buf[..n].to_vec()).unwrap()
@@ -101,7 +103,8 @@ fn description(s: *const FtlStack) -> String {
 fn unit(s: *const FtlStack) -> String {
     let mut buf = [0u8; 64];
     let n = unsafe { ftl_metadata_unit(s, buf.as_mut_ptr().cast(), buf.len()) };
-    String::from_utf8(buf[..n].to_vec()).unwrap()
+    assert!(n >= 0, "{n}: {}", last_error());
+    String::from_utf8(buf[..n as usize].to_vec()).unwrap()
 }
 
 fn metadata(s: *const FtlStack) -> FtlMetadata {
@@ -160,7 +163,8 @@ fn read_c<T: Copy + Default>(
 }
 
 /// Every reader on every frame of every fixture: what C hands back is what
-/// the Rust readers do, and where Rust refuses, so does C, with a reason.
+/// the Rust readers do, and where Rust refuses, so does C, with a reason and
+/// the status of the Rust error's kind.
 #[test]
 fn every_fixture_reads_through_c_as_through_rust() {
     for path in fixtures() {
@@ -209,7 +213,7 @@ fn every_fixture_reads_through_c_as_through_rust() {
                 let got = read_c(|o, l| unsafe { ftl_read_u16(s, i, null(), o, l) }, n);
                 match read_planes_u16(data, f, order, None) {
                     Ok(want) => assert_eq!(got.as_deref(), Ok(&flat(want)[..]), "{what}"),
-                    Err(_) => refused(got.clone().unwrap_err(), FTL_FORMAT),
+                    Err(e) => refused(got.clone().unwrap_err(), status_of(&e)),
                 }
                 if f.samples_per_pixel == 1 {
                     if let Ok(want) = read_frame_u16(data, f, order, None) {
@@ -230,7 +234,9 @@ fn every_fixture_reads_through_c_as_through_rust() {
                         Ok(&read_frame_u8(data, f, order).unwrap()[..]),
                         "{what}"
                     ),
-                    _ => refused(got.unwrap_err(), FTL_FORMAT),
+                    // A depth this reader does not take: the call's mistake,
+                    // not the file's.
+                    _ => refused(got.unwrap_err(), FTL_INVALID_ARGUMENT),
                 }
 
                 // f32: 32- and 64-bit only. Compared bit for bit, NaN and all.
@@ -240,7 +246,7 @@ fn every_fixture_reads_through_c_as_through_rust() {
                         let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
                         assert_eq!(bits(&got.unwrap()), bits(&flat(want)), "{what}");
                     }
-                    Err(_) => refused(got.unwrap_err(), FTL_FORMAT),
+                    Err(e) => refused(got.unwrap_err(), status_of(&e)),
                 }
 
                 // CMYK to RGB: CMYK only.
@@ -249,18 +255,19 @@ fn every_fixture_reads_through_c_as_through_rust() {
                 let got16 = read_c(|o, l| unsafe { ftl_read_rgb_u16(s, i, o, l) }, three);
                 match read_planes_rgb_u8(data, f, order) {
                     Ok(want) => assert_eq!(got8.as_deref(), Ok(&flat(want)[..]), "{what}"),
-                    Err(_) => refused(got8.clone().unwrap_err(), FTL_FORMAT),
+                    Err(e) => refused(got8.clone().unwrap_err(), status_of(&e)),
                 }
                 match read_planes_rgb_u16(data, f, order) {
                     Ok(want) => assert_eq!(got16.as_deref(), Ok(&flat(want)[..]), "{what}"),
-                    Err(_) => refused(got16.clone().unwrap_err(), FTL_FORMAT),
+                    Err(e) => refused(got16.clone().unwrap_err(), status_of(&e)),
                 }
                 if f.is_cmyk() {
                     assert!(got16.is_ok(), "{what}: CMYK converts");
                 } else {
                     assert!(
-                        got8.is_err() && got16.is_err(),
-                        "{what}: only CMYK converts"
+                        got8 == Err(FTL_INVALID_ARGUMENT) && got16 == Err(FTL_INVALID_ARGUMENT),
+                        "{what}: only CMYK converts, and asking of another frame is the call's \
+                         mistake"
                     );
                 }
 
@@ -750,22 +757,52 @@ fn every_layout_and_type_matches_rust() {
     }
 }
 
+/// A string cut short is cut between characters, so C always gets valid
+/// UTF-8: a `µ` (two bytes) that does not fit is left out whole.
+#[test]
+fn a_string_cut_short_is_still_utf8() {
+    let opts = WriterOptions::new(2, 2, crate::SampleType::U8).description("ab\u{b5}m and more");
+    let mut w = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+    w.write_frame_u8(&[0; 4]).unwrap();
+    let bytes = w.finish().unwrap().into_inner();
+    let s = open_c_bytes(&bytes);
+    let full = description(s);
+    assert!(full.starts_with("ab\u{b5}m"), "{full:?}");
+    // cap 4 leaves room for 3 bytes: "ab" and the first byte of the µ.
+    for (cap, want) in [(3, "ab"), (4, "ab"), (5, "ab\u{b5}")] {
+        let mut buf = vec![0x55u8; cap];
+        assert_eq!(
+            unsafe { ftl_description(s, buf.as_mut_ptr().cast(), cap) },
+            full.len() as isize
+        );
+        let got = CStr::from_bytes_until_nul(&buf).unwrap();
+        assert_eq!(got.to_str(), Ok(want), "cap {cap}");
+    }
+    unsafe { ftl_stack_free(s) };
+}
+
 /// The snprintf convention, at every edge.
 #[test]
 fn strings_follow_the_snprintf_convention() {
     let s = open_c(&fixture("ij_u16_spp1_p6_hyperstack.tif"));
     let full = description(s);
     assert!(full.len() > 8);
-    assert_eq!(unsafe { ftl_description(s, null_mut(), 0) }, full.len());
+    let len = full.len() as isize;
+    assert_eq!(unsafe { ftl_description(s, null_mut(), 0) }, len);
     let mut buf = [0x55u8; 6];
     assert_eq!(
         unsafe { ftl_description(s, buf.as_mut_ptr().cast(), 0) },
-        full.len()
+        len
     );
     assert_eq!(buf, [0x55; 6], "cap 0 writes nothing");
     assert_eq!(
         unsafe { ftl_description(s, buf.as_mut_ptr().cast(), 5) },
-        full.len()
+        len
+    );
+    // A NULL buffer with room claimed is refused rather than ignored.
+    assert_eq!(
+        unsafe { ftl_description(s, null_mut(), 5) },
+        -(FTL_INVALID_ARGUMENT as isize)
     );
     assert_eq!(&buf[..4], &full.as_bytes()[..4]);
     assert_eq!(buf[4], 0, "cut short, still terminated");
@@ -781,11 +818,16 @@ fn strings_follow_the_snprintf_convention() {
     );
     assert_eq!(buf[0], 0);
     unsafe { ftl_stack_free(s) };
+    // A NULL stack is an invalid argument, with a reason.
     assert_eq!(
         unsafe { ftl_description(null(), buf.as_mut_ptr().cast(), buf.len()) },
-        0
+        -(FTL_INVALID_ARGUMENT as isize)
     );
-    assert_eq!(unsafe { ftl_metadata_unit(null(), null_mut(), 0) }, 0);
+    assert!(last_error().contains("NULL"), "{}", last_error());
+    assert_eq!(
+        unsafe { ftl_metadata_unit(null(), null_mut(), 0) },
+        -(FTL_INVALID_ARGUMENT as isize)
+    );
 }
 
 /// What C can say and Rust cannot, and what neither accepts, comes back as a
@@ -930,20 +972,170 @@ fn bad_reads_are_refused_with_a_reason() {
     );
     assert_eq!(&roomy[n..], &[7, 7, 7]);
 
-    // A 16-bit frame through the 8-bit and float readers.
+    // A 16-bit frame through the 8-bit reader, which refuses it as a frame it
+    // does not take, and the float one, which gives the file's own values.
     let mut bytes8 = vec![0u8; 3 * n];
     let mut floats = vec![0f32; n];
     refused(
         unsafe { ftl_read_u8(s, 0, bytes8.as_mut_ptr(), n) },
-        FTL_FORMAT,
+        FTL_INVALID_ARGUMENT,
     );
-    refused(
+    assert_eq!(
         unsafe { ftl_read_f32(s, 0, floats.as_mut_ptr(), n) },
-        FTL_FORMAT,
+        FTL_OK
     );
+    let mut words = vec![0u16; n];
+    assert_eq!(
+        unsafe { ftl_read_u16(s, 0, null(), words.as_mut_ptr(), n) },
+        FTL_OK
+    );
+    assert!(floats.iter().zip(&words).all(|(&f, &w)| f == w as f32));
     refused(
         unsafe { ftl_read_rgb_u8(s, 0, bytes8.as_mut_ptr(), 3 * n) },
-        FTL_FORMAT,
+        FTL_INVALID_ARGUMENT,
+    );
+    unsafe { ftl_stack_free(s) };
+}
+
+/// Each kind of Rust error has one status, whichever function it reaches C
+/// through.
+#[test]
+fn every_kind_has_its_status() {
+    let of = |kind| status_of(&Error::new(kind, "x"));
+    for (kind, want) in [
+        (ErrorKind::Io, FTL_IO),
+        (ErrorKind::NotTiff, FTL_NOT_TIFF),
+        (ErrorKind::Malformed, FTL_FORMAT),
+        (ErrorKind::Unsupported, FTL_FORMAT),
+        (ErrorKind::Unavailable, FTL_UNAVAILABLE),
+        (ErrorKind::TooLarge, FTL_TOO_LARGE),
+        (ErrorKind::InvalidInput, FTL_INVALID_ARGUMENT),
+        (ErrorKind::Internal, FTL_FAILED),
+    ] {
+        assert_eq!(of(kind), want, "{kind:?}");
+    }
+    // The statuses of its own are distinct from each other and from the
+    // shared base.
+    let own = [FTL_IO, FTL_NOT_TIFF, FTL_FORMAT, FTL_TOO_LARGE];
+    assert!(own.iter().all(|&s| s >= status::FIRST_OWN));
+    for (i, a) in own.iter().enumerate() {
+        assert!(own[i + 1..].iter().all(|b| b != a));
+    }
+}
+
+/// The header is written by hand: its statuses are read here and held
+/// against this module's, so that a status added to one is added to both.
+#[test]
+fn the_header_has_these_statuses() {
+    let header = include_str!("../include/fast_tiff_lib.h");
+    let mut defined: Vec<(&str, c_int)> = header
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("#define FTL_"))
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            Some((it.next()?, it.next()?.parse().ok()?))
+        })
+        .collect();
+    let first_non_status = defined
+        .iter()
+        .position(|(name, _)| name.starts_with("SAMPLE_"))
+        .expect("the SampleFormat codes follow the statuses");
+    defined.truncate(first_non_status);
+    assert_eq!(
+        defined,
+        [
+            ("OK", FTL_OK),
+            ("CANCELLED", FTL_CANCELLED),
+            ("INVALID_ARGUMENT", FTL_INVALID_ARGUMENT),
+            ("UNAVAILABLE", FTL_UNAVAILABLE),
+            ("FAILED", FTL_FAILED),
+            ("IO", FTL_IO),
+            ("NOT_TIFF", FTL_NOT_TIFF),
+            ("FORMAT", FTL_FORMAT),
+            ("TOO_LARGE", FTL_TOO_LARGE),
+        ]
+    );
+}
+
+/// The four failures a C caller meets first, each by its status, through the
+/// path and the in-memory entry points both, with the Rust words in
+/// `ftl_last_error`.
+#[test]
+fn opening_says_what_kind_of_failure_it_was() {
+    let mut s = null_mut();
+    let good = std::fs::read(fixture("tff_u16_spp1_p2_none-le.tif")).unwrap();
+    let pdf = b"%PDF-1.7 this is not a TIFF".to_vec();
+    let truncated = good[..good.len() / 2].to_vec();
+    let cases = [
+        (pdf, FTL_NOT_TIFF, "not a TIFF"),
+        (truncated, FTL_FORMAT, "out of bounds"),
+        (b"II*\0".to_vec(), FTL_FORMAT, "file too small to be a TIFF"),
+    ];
+    for (bytes, want, says) in &cases {
+        refused(
+            unsafe { ftl_open_bytes(bytes.as_ptr().cast(), bytes.len(), &mut s) },
+            *want,
+        );
+        assert!(last_error().contains(says), "{}", last_error());
+        assert!(s.is_null());
+        #[cfg(feature = "mmap")]
+        {
+            let path = temp("kind_of_failure.tif");
+            std::fs::write(&path, bytes).unwrap();
+            refused(unsafe { ftl_open(c_path(&path).as_ptr(), &mut s) }, *want);
+            assert!(last_error().contains(says), "{}", last_error());
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    // A missing file is the operating system's answer, said the way the
+    // Rust API says it: what was being done, then why it failed.
+    #[cfg(feature = "mmap")]
+    {
+        let missing = temp("no_such_file.tif");
+        let _ = std::fs::remove_file(&missing);
+        refused(
+            unsafe { ftl_open(c_path(&missing).as_ptr(), &mut s) },
+            FTL_IO,
+        );
+        let why = std::fs::File::open(&missing).unwrap_err();
+        assert_eq!(
+            last_error(),
+            format!("could not open {}: {why}", missing.display())
+        );
+    }
+
+    // A bad argument never reaches the file.
+    refused(
+        unsafe { ftl_open_bytes(good.as_ptr().cast(), good.len(), null_mut()) },
+        FTL_INVALID_ARGUMENT,
+    );
+    let st = open_c_bytes(&good);
+    let mut n = 0;
+    refused(
+        unsafe { ftl_sample_count(st, usize::MAX, &mut n) },
+        FTL_INVALID_ARGUMENT,
+    );
+    unsafe { ftl_stack_free(st) };
+}
+
+/// A frame too large for the address space is its own status, apart from a
+/// damaged file: the fuzz case that declares 2^31 x 2^31 x 4 samples, whose
+/// sample count does not fit in a `size_t`.
+#[test]
+fn a_frame_too_large_to_address_is_too_large() {
+    let bytes = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fuzz-regressions/overflow-w2g-h2g-spp4.tif"),
+    )
+    .unwrap();
+    let s = open_c_bytes(&bytes);
+    let mut n = 0;
+    refused(unsafe { ftl_sample_count(s, 0, &mut n) }, FTL_TOO_LARGE);
+    assert!(
+        last_error().contains("overflows address space"),
+        "{}",
+        last_error()
     );
     unsafe { ftl_stack_free(s) };
 }
@@ -1183,8 +1375,8 @@ fn the_reviewed_edges_are_refused() {
     };
     let mut w = null_mut();
     let status = unsafe { ftl_writer_create(p.as_ptr(), &o, &mut w) };
-    assert_ne!(status, FTL_OK, "an overflowing frame was accepted");
-    assert!(!last_error().is_empty());
+    refused(status, FTL_TOO_LARGE);
+    assert!(last_error().contains("overflows"), "{}", last_error());
     assert!(w.is_null());
     assert!(!path.exists(), "a refused writer left a file behind");
 
@@ -1196,42 +1388,168 @@ fn the_reviewed_edges_are_refused() {
             FTL_INVALID_ARGUMENT,
         );
     }
-    assert_eq!(unsafe { ftl_resolve_dimensions(2, 3, 4, d.as_mut_ptr()) }, FTL_OK);
+    assert_eq!(
+        unsafe { ftl_resolve_dimensions(2, 3, 4, d.as_mut_ptr()) },
+        FTL_OK
+    );
 }
 
-/// Reading ZSTD in a build without the codec is the build's limit, not the
-/// file's fault: the same FTL_UNAVAILABLE that writing it gets.
-#[cfg(not(feature = "codec-zstd"))]
-#[test]
-fn zstd_without_the_codec_is_unavailable_to_read() {
-    use crate::encode::SampleType;
+/// One 4 x 2 frame, written in memory by the Rust writer.
+fn one_frame(
+    sample_type: crate::encode::SampleType,
+    write: impl FnOnce(&mut TiffWriter<std::io::Cursor<Vec<u8>>>) -> crate::Result<()>,
+) -> Vec<u8> {
     let mut w = TiffWriter::new(
         std::io::Cursor::new(Vec::new()),
-        WriterOptions::new(4, 2, SampleType::U8),
+        WriterOptions::new(4, 2, sample_type),
     )
     .unwrap();
-    w.write_frame_u8(&[7u8; 8]).unwrap();
-    let mut bytes = w.finish().unwrap().into_inner();
-    // The Compression entry, little-endian classic TIFF: tag 259, SHORT, one
-    // value, 1 (none). Rewritten to 50000, ZSTD.
-    let none = [0x03u8, 0x01, 0x03, 0x00, 0x01, 0, 0, 0, 0x01, 0x00];
-    let at = bytes
-        .windows(none.len())
-        .position(|w| w == none)
-        .expect("the Compression entry");
-    bytes[at + 8..at + 10].copy_from_slice(&50000u16.to_le_bytes());
-    let mut s = null_mut();
-    assert_eq!(
-        unsafe { ftl_open_bytes(bytes.as_ptr().cast(), bytes.len(), &mut s) },
-        FTL_OK,
+    write(&mut w).unwrap();
+    w.finish().unwrap().into_inner()
+}
+
+/// `bytes`, a little-endian classic TIFF, with each entry for `tag` that
+/// holds the one SHORT `from` changed to hold `to`: a file the writer would
+/// not make.
+fn with_short(mut bytes: Vec<u8>, tag: u16, from: u16, to: u16) -> Vec<u8> {
+    let mut entry = tag.to_le_bytes().to_vec();
+    entry.extend_from_slice(&[0x03, 0x00, 0x01, 0, 0, 0]);
+    entry.extend_from_slice(&from.to_le_bytes());
+    let mut at = 0;
+    while let Some(i) = bytes[at..].windows(entry.len()).position(|w| w == entry) {
+        let i = at + i;
+        bytes[i + 8..i + 10].copy_from_slice(&to.to_le_bytes());
+        at = i + entry.len();
+    }
+    assert!(at > 0, "no entry for tag {tag} holding {from}");
+    bytes
+}
+
+/// 4-bit samples are read by the 8-bit and the float readers, so the 16-bit
+/// display reader refusing one is the call's mistake, as an 8-bit reader
+/// handed a 16-bit frame is — not a depth the library has no code for.
+#[test]
+fn a_4_bit_frame_through_the_16_bit_reader_is_the_wrong_reader() {
+    use crate::encode::SampleType;
+    // Rewritten from 8 bits a sample to 4: the first four bytes of the strip
+    // are then the eight indices 0 to 7, two to a byte.
+    let packed = [0x01, 0x23, 0x45, 0x67, 0, 0, 0, 0];
+    let bytes = with_short(
+        one_frame(SampleType::U8, |w| w.write_frame_u8(&packed)),
+        258,
+        8,
+        4,
+    );
+    let s = open_c_bytes(&bytes);
+    let st = unsafe { &(*s).inner };
+    let f = &st.frames[0];
+    assert_eq!(f.bits_per_sample, 4);
+    let want: Vec<u8> = (0..8).collect();
+
+    let got = read_c(|o, l| unsafe { ftl_read_u8(s, 0, o, l) }, 8);
+    assert_eq!(got.as_deref(), Ok(&want[..]));
+    let got = read_c(|o, l| unsafe { ftl_read_f32(s, 0, o, l) }, 8);
+    let floats: Vec<f32> = want.iter().map(|&i| i as f32).collect();
+    assert_eq!(got.as_deref(), Ok(&floats[..]));
+
+    let mut words = [0u16; 8];
+    refused(
+        unsafe { ftl_read_u16(s, 0, null(), words.as_mut_ptr(), words.len()) },
+        FTL_INVALID_ARGUMENT,
+    );
+    assert!(
+        last_error().contains("ftl_read_u8") && last_error().contains("ftl_read_f32"),
         "{}",
         last_error()
     );
+    // The Rust readers say the same, by kind.
+    for e in [
+        read_frame_u16(&st.data, f, st.byte_order, None).unwrap_err(),
+        read_planes_u16(&st.data, f, st.byte_order, None).unwrap_err(),
+    ] {
+        assert_eq!(e.kind(), ErrorKind::InvalidInput, "{e:#}");
+    }
+    unsafe { ftl_stack_free(s) };
+}
+
+/// ZSTD in a build without the codec is the build's limit, not the file's
+/// fault: FTL_UNAVAILABLE from every reader and from the writer. What a call
+/// would refuse even with the codec, it refuses for that, with that status.
+#[cfg(not(feature = "codec-zstd"))]
+#[test]
+fn zstd_without_the_codec_is_unavailable() {
+    use crate::encode::SampleType;
+    // Compression rewritten from 1 (none) to 50000, ZSTD.
+    let zstd = |bytes| with_short(bytes, 259, 1, 50000);
+
+    let bytes = zstd(one_frame(SampleType::U8, |w| w.write_frame_u8(&[7; 8])));
+    let s = open_c_bytes(&bytes);
     let mut out = [0u8; 8];
     refused(
         unsafe { ftl_read_u8(s, 0, out.as_mut_ptr(), out.len()) },
         FTL_UNAVAILABLE,
     );
     assert!(last_error().contains("codec-zstd"), "{}", last_error());
+    // A buffer too small is the caller's mistake whatever the codec: it is
+    // checked before anything is decoded.
+    refused(
+        unsafe { ftl_read_u8(s, 0, out.as_mut_ptr(), 2) },
+        FTL_INVALID_ARGUMENT,
+    );
     unsafe { ftl_stack_free(s) };
+
+    // So is a frame the reader called does not take.
+    let bytes = zstd(one_frame(SampleType::U16, |w| w.write_frame_u16(&[7; 8])));
+    let s = open_c_bytes(&bytes);
+    refused(
+        unsafe { ftl_read_u8(s, 0, out.as_mut_ptr(), out.len()) },
+        FTL_INVALID_ARGUMENT,
+    );
+    let mut words = [0u16; 8];
+    refused(
+        unsafe { ftl_read_u16(s, 0, null(), words.as_mut_ptr(), words.len()) },
+        FTL_UNAVAILABLE,
+    );
+    unsafe { ftl_stack_free(s) };
+
+    // A float frame's range needs the frame decoded, so it is unavailable too.
+    let bytes = zstd(one_frame(SampleType::F32, |w| w.write_frame_f32(&[0.5; 8])));
+    let s = open_c_bytes(&bytes);
+    let (mut lo, mut hi) = (0f32, 0f32);
+    refused(
+        unsafe { ftl_float_minmax(s, 0, &mut lo, &mut hi) },
+        FTL_UNAVAILABLE,
+    );
+    assert!(last_error().contains("codec-zstd"), "{}", last_error());
+    let mut floats = [0f32; 8];
+    refused(
+        unsafe { ftl_read_f32(s, 0, floats.as_mut_ptr(), floats.len()) },
+        FTL_UNAVAILABLE,
+    );
+    unsafe { ftl_stack_free(s) };
+
+    // Nor can it be written, which the writer says before making the file.
+    let path = temp("zstd_without_the_codec.tif");
+    let o = FtlWriterOptions {
+        width: 4,
+        height: 2,
+        sample_type: FTL_TYPE_U8,
+        compression: FTL_COMPRESSION_ZSTD,
+        ..options()
+    };
+    let mut w = null_mut();
+    refused(
+        unsafe { ftl_writer_create(c_path(&path).as_ptr(), &o, &mut w) },
+        FTL_UNAVAILABLE,
+    );
+    assert!(last_error().contains("codec-zstd"), "{}", last_error());
+    assert!(w.is_null());
+    assert!(!path.exists(), "a refused writer left a file behind");
+    // Options the writer refuses whatever the codec are refused first.
+    let o = FtlWriterOptions { width: 0, ..o };
+    refused(
+        unsafe { ftl_writer_create(c_path(&path).as_ptr(), &o, &mut w) },
+        FTL_INVALID_ARGUMENT,
+    );
+    assert!(!path.exists(), "a refused writer left a file behind");
 }

@@ -21,28 +21,24 @@
 //! units, so a stack of thin optical sections — fine in x and y, coarse in z —
 //! gives up in-plane detail it has to spare before depth it has little of.
 //!
-//! The worker mirrors `prefetch::Prefetcher`: it opens its **own** memory map
-//! of the file (sharing the OS page cache), takes the latest queued request
-//! (draining stale ones, so scrubbing a 4D stack skips timepoints instead of
-//! queueing them all), and posts the finished volume into a result slot the UI
-//! thread polls. Results are tagged with `(generation, time)` and used only on
-//! an exact match, so a stale build can cost work but never show wrong data.
+//! The builder is a `LatestWorker` ([`crate::worker`]) over the window's own
+//! stack, shared. A request for another `(generation, time)` replaces the one
+//! waiting and cancels the build under way at its next plane, so scrubbing a 4D
+//! stack skips timepoints instead of building each one, and the wanted
+//! timepoint waits for a plane of the stale build rather than all of it. The
+//! finished volume is posted into a result slot the UI thread polls, and used
+//! only on an exact `(generation, time)` match, so a stale build can cost work
+//! but never show wrong data.
 
 use crate::prefetch::{decode_jobs, ChannelJob, Decoded};
+use crate::units::SampleUnits;
+use crate::worker::{CancelToken, Cancelled, LatestWorker, Unclaimed};
 use fast_tiff_lib::TiffStack;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
 use scivis_render::pack::{self, PackedVolume, TexelFormat, VolumeLayout};
 use scivis_render::{ChannelKind, MAX_CHANNELS};
-use std::path::PathBuf;
-#[cfg(feature = "threads")]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "threads")]
-use std::sync::mpsc::{channel, Receiver, Sender};
-#[cfg(feature = "threads")]
-use std::sync::{Arc, Mutex};
-#[cfg(feature = "threads")]
-use std::thread::JoinHandle;
+use std::sync::Arc;
 
 /// The GPU memory a volume may take when the frontend could not find out how
 /// much there is. Every level of every packed texture counts against it.
@@ -82,7 +78,10 @@ pub fn detail_cap(screen_px: u32) -> u32 {
 /// parse, so a channels/frames swap in the UI is honored by background builds.
 #[derive(Clone)]
 pub struct VolumePlan {
-    pub kinds: Vec<ChannelKind>,
+    /// Each channel's units, which say both how it decodes (its kind) and how
+    /// its samples are normalized into the volume
+    /// ([`SampleUnits::volume_affine`]).
+    pub units: Vec<SampleUnits>,
     pub rgb: bool,
     pub channels: usize,
     pub slices: usize,
@@ -147,10 +146,22 @@ pub fn choose_strides(
 /// Build the 3D volume for `plan`, packed for upload. The depth axis is the
 /// whole frame axis in the ordinary case, or (4D, `slices > 1`) the Z axis at
 /// timepoint `plan.time`. All channels share the same reduction, chosen by
-/// [`choose_strides`]. Returns `None` when there's no volume to build (or a
-/// decode failed).
-pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> {
-    let f0 = tiff.frames.first()?;
+/// [`choose_strides`]. `Ok(None)` when there's no volume to build (or a decode
+/// failed).
+///
+/// `cancel` is asked before each source plane is read — once per output slice,
+/// and per plane of the several a reduced slice averages — and before the mip
+/// chain is built. Once it says stop, every task still running finishes the
+/// plane it is on, the half-built volume is dropped, and the result is
+/// [`Cancelled`]. Inline callers pass [`CancelToken::never`].
+pub fn build_volume(
+    tiff: &TiffStack,
+    plan: &VolumePlan,
+    cancel: &CancelToken,
+) -> Result<Option<BuiltVolume>, Cancelled> {
+    let Some(f0) = tiff.frames.first() else {
+        return Ok(None);
+    };
     let (w, h) = (f0.width, f0.height);
     let slices = plan.slices.max(1);
     let channels = plan.channels.max(1);
@@ -162,11 +173,12 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
         plan.frames.max(1) as u32
     };
     let time = if is_4d { plan.time } else { 0 };
-    let n = plan.kinds.len().min(MAX_CHANNELS);
+    let n = plan.units.len().min(MAX_CHANNELS);
     if w == 0 || h == 0 || depth < 2 || n == 0 {
-        return None;
+        return Ok(None);
     }
-    let ckinds = &plan.kinds[..n];
+    let ckinds: Vec<ChannelKind> = plan.units[..n].iter().map(|u| u.kind()).collect();
+    let affines: Vec<(f32, f32)> = plan.units[..n].iter().map(|u| u.volume_affine()).collect();
 
     let (sx, sy, sz) = choose_strides(
         (w, h, depth),
@@ -218,6 +230,10 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
         let direct = (sx, sy, sz) == (1, 1, 1);
         let mut boxes = SliceBoxes::new(if direct { 0 } else { n }, (w, h), (sx, sy), (ow, oh));
         for k in z_from..z_to {
+            // The step a superseded build still costs: one plane's decode per
+            // task running. `try_for_each` stops handing out slices at the
+            // first `Err`.
+            cancel.check()?;
             // Depth index → (time, z): in 4D the depth is Z at the fixed
             // timepoint; otherwise the depth index *is* the frame (time = k,
             // z = 0). The IFD layout is time-major, then Z, then channel.
@@ -253,28 +269,44 @@ pub fn build_volume(tiff: &TiffStack, plan: &VolumePlan) -> Option<BuiltVolume> 
             let decoded = decode_jobs(&tiff.data, &tiff.frames, tiff.byte_order, &jobs)?;
             for (c, dec) in decoded.iter().enumerate() {
                 if direct {
-                    encode_slice(&layout, &mut slabs, c, dec);
+                    encode_slice(&layout, &mut slabs, c, dec, affines[c]);
                 } else {
                     boxes.add(c, dec);
                 }
             }
         }
         if !direct {
-            boxes.write(&layout, &mut slabs, z_to - z_from);
+            boxes.write(&layout, &mut slabs, z_to - z_from, &affines);
         }
         Ok(())
     });
     if let Err(e) = result {
+        if e.is::<Cancelled>() {
+            return Err(Cancelled);
+        }
         log::warn!("volume build failed: {e:#}");
-        return None;
+        return Ok(None);
     }
+    // The mip chain and brick maxima are a pass over the whole volume.
+    cancel.check()?;
     packed.finish();
-    Some(packed)
+    Ok(Some(packed))
 }
 
 /// Store one decoded slice of channel `c`, at full size, into its slab of the
 /// packed texture that holds it. A short decode leaves the rest zero.
-fn encode_slice(layout: &VolumeLayout, slabs: &mut [&mut [u8]], c: usize, dec: &Decoded) {
+///
+/// Samples go through the channel's `(scale, offset)`
+/// ([`SampleUnits::volume_affine`]), the map
+/// [`SampleUnits::to_unorm`](crate::units::SampleUnits::to_unorm) puts the
+/// channel's window on the same scale with.
+fn encode_slice(
+    layout: &VolumeLayout,
+    slabs: &mut [&mut [u8]],
+    c: usize,
+    dec: &Decoded,
+    (scale, offset): (f32, f32),
+) {
     let (t, k) = layout.place(c);
     let texel = layout.texel_bytes(t);
     let fb = layout.format.bytes();
@@ -289,17 +321,17 @@ fn encode_slice(layout: &VolumeLayout, slabs: &mut [&mut [u8]], c: usize, dec: &
             .iter()
             .take(voxels)
             .enumerate()
-            .for_each(|(i, &x)| put(i, x as f32 / 255.0)),
+            .for_each(|(i, &x)| put(i, x as f32 * scale + offset)),
         Decoded::U16(v) => v
             .iter()
             .take(voxels)
             .enumerate()
-            .for_each(|(i, &x)| put(i, x as f32 / 65535.0)),
+            .for_each(|(i, &x)| put(i, x as f32 * scale + offset)),
         Decoded::F32(v) => v
             .iter()
             .take(voxels)
             .enumerate()
-            .for_each(|(i, &x)| put(i, x)),
+            .for_each(|(i, &x)| put(i, x * scale + offset)),
     }
 }
 
@@ -331,11 +363,13 @@ impl SliceBoxes {
         }
     }
 
-    /// Add one decoded source slice of channel `c`, in texture units.
+    /// Add one decoded source slice of channel `c`, in texture units. The
+    /// volume's normalization is applied to the average, in
+    /// [`write`](Self::write): it is affine, so it commutes with averaging.
     fn add(&mut self, c: usize, dec: &Decoded) {
         match dec {
-            Decoded::U8(v) => self.add_samples(c, v, |x| x as f32 / 255.0),
-            Decoded::U16(v) => self.add_samples(c, v, |x| x as f32 / 65535.0),
+            Decoded::U8(v) => self.add_samples(c, v, |x| x as f32),
+            Decoded::U16(v) => self.add_samples(c, v, |x| x as f32),
             Decoded::F32(v) => self.add_floats(c, v),
         }
     }
@@ -390,15 +424,23 @@ impl SliceBoxes {
     }
 
     /// Divide every sum by the number of source voxels behind it (`slices`
-    /// source slices deep, the box clipped at the far edges) and store it into
-    /// this output slice's slab of every packed texture.
-    fn write(&self, layout: &VolumeLayout, slabs: &mut [&mut [u8]], slices: u32) {
+    /// source slices deep, the box clipped at the far edges), normalize it by
+    /// its channel's `affines` entry, and store it into this output slice's
+    /// slab of every packed texture.
+    fn write(
+        &self,
+        layout: &VolumeLayout,
+        slabs: &mut [&mut [u8]],
+        slices: u32,
+        affines: &[(f32, f32)],
+    ) {
         let (w, h) = self.src;
         let (sx, sy) = self.stride;
         let (ow, oh) = self.out;
         let fb = layout.format.bytes();
         let count = |o: u32, s: u32, n: u32| (n - o * s).min(s);
         for (c, sums) in self.sums.iter().enumerate() {
+            let (scale, offset) = affines[c];
             let (t, k) = layout.place(c);
             let texel = layout.texel_bytes(t);
             let slab = &mut slabs[t];
@@ -416,164 +458,63 @@ impl SliceBoxes {
                         None => sums[i] / (nx * ny * slices.max(1)) as f32,
                     };
                     let at = i * texel + k * fb;
-                    layout.format.encode(v, &mut slab[at..at + fb]);
+                    layout
+                        .format
+                        .encode(v * scale + offset, &mut slab[at..at + fb]);
                 }
             }
         }
     }
 }
 
-#[cfg(feature = "threads")]
-struct Request {
-    generation: u64,
-    plan: VolumePlan,
-}
+/// The background volume builder: a `LatestWorker` ([`crate::worker`]) keyed
+/// by `(generation, time)`.
+///
+/// A newer request cancels the build in progress at its next plane (see
+/// [`build_volume`]), and dropping the builder — closing the file, opening
+/// another — does the same, so the thread lets go of the stack and its
+/// half-built volume one plane after it is dropped rather than when the build
+/// would have finished. A finished volume nobody took is dropped before the
+/// next build starts (`Unclaimed::Discard`): one builder never holds two.
+///
+/// `new` returns `None` when the thread cannot start, and always without the
+/// `threads` feature; every build then runs synchronously through
+/// [`build_volume`].
+pub struct VolumeBuilder(LatestWorker<(u64, usize), VolumePlan, Option<BuiltVolume>>);
 
-/// A finished background build, tagged so the app can confirm it still matches
-/// what's wanted. `volume: None` means the build failed (the app marks the
-/// timepoint built anyway, so it doesn't retry every frame).
-#[cfg(feature = "threads")]
-struct BuiltReply {
-    generation: u64,
-    time: usize,
-    volume: Option<BuiltVolume>,
-}
-
-/// Owns the volume-builder worker thread + the latest result. Dropping it
-/// closes the request channel, which ends the worker (it finishes any in-flight
-/// build first).
-#[cfg(feature = "threads")]
-pub struct VolumeBuilder {
-    tx: Sender<Request>,
-    result: Arc<Mutex<Option<BuiltReply>>>,
-    /// Set by the worker when it could not open the file and gave up.
-    ///
-    /// A dead worker cannot be detected by *asking* it: `request` only fails
-    /// once the receiver has been dropped, which is a frame or two after the
-    /// open failed, and by then a request has already been queued and is being
-    /// polled for a reply that will never come. This is the flag that says so
-    /// on every frame after, rather than only on the one that happened to send.
-    failed: Arc<AtomicBool>,
-    _handle: JoinHandle<()>,
-}
-
-#[cfg(feature = "threads")]
 impl VolumeBuilder {
-    /// Spawn a worker that opens its own map of `path` (shares the OS page
-    /// cache — no duplicate pixel RAM). Returns `None` if the thread fails to
-    /// spawn; if the worker's file open fails the thread exits and `request`
-    /// starts returning `false` — callers then build synchronously instead.
-    pub fn new(path: PathBuf) -> Option<Self> {
-        let (tx, rx) = channel::<Request>();
-        let result = Arc::new(Mutex::new(None));
-        let result_worker = Arc::clone(&result);
-        let failed = Arc::new(AtomicBool::new(false));
-        let failed_worker = Arc::clone(&failed);
-        let handle = std::thread::Builder::new()
-            .name("fasttiff-volume".to_owned())
-            .spawn(move || match TiffStack::open(&path) {
-                Ok(stack) => worker_loop(stack, rx, result_worker),
-                Err(e) => {
-                    // Not always a problem worth reporting: a stack a plugin
-                    // imported has no file on disk at all, and its `path` is
-                    // the name it is shown under. The caller builds volumes
-                    // here on the main thread instead.
-                    log::debug!("volume builder: can't open {}: {e:#}", path.display());
-                    failed_worker.store(true, Ordering::Release);
-                }
-            })
-            .ok()?;
-        Some(Self {
-            tx,
-            result,
-            failed,
-            _handle: handle,
-        })
+    /// Spawn a worker over `stack` — the window's own, shared, so a stack held
+    /// in memory (a plugin's result, an import, every file in a browser) gets
+    /// one as well as a mapped file does. Returns `None` if the thread fails
+    /// to spawn — callers then build synchronously instead.
+    pub fn new(stack: Arc<TiffStack>) -> Option<Self> {
+        // A failed build is published as `None` (the app marks the timepoint
+        // built anyway, so it doesn't retry every frame); a cancelled one is
+        // not published at all.
+        let build = move |_: &(u64, usize), plan: VolumePlan, cancel: &CancelToken| {
+            build_volume(&stack, &plan, cancel).ok()
+        };
+        LatestWorker::spawn("fasttiff-volume", Unclaimed::Discard, build).map(VolumeBuilder)
     }
 
-    /// Whether the worker gave up before it started: its file could not be
-    /// opened, and it will never answer anything.
-    pub fn failed(&self) -> bool {
-        self.failed.load(Ordering::Acquire)
-    }
-
-    /// Queue a build. Returns `false` when the worker is gone (its file open
-    /// failed) — the caller should build synchronously instead.
+    /// Queue a build. Asking again for the `(generation, time)` already queued
+    /// or building does nothing; asking for another cancels it. Returns
+    /// `false` when the worker is gone (a build panicked) — the caller should
+    /// build synchronously instead.
     pub fn request(&self, generation: u64, plan: VolumePlan) -> bool {
-        self.tx.send(Request { generation, plan }).is_ok()
+        self.0.request((generation, plan.time), plan)
     }
 
     /// Take the finished volume iff it matches `(generation, time)`; otherwise
-    /// leave the slot untouched (a newer build will overwrite it) and return
+    /// leave the slot untouched (a newer build will replace it) and return
     /// `None`. The outer `Option` is "is there a matching reply"; the inner one
     /// is the build's own success.
     #[allow(clippy::option_option)]
     pub fn take_matching(&self, generation: u64, time: usize) -> Option<Option<BuiltVolume>> {
-        let mut slot = self.result.lock().ok()?;
-        let matches = slot
-            .as_ref()
-            .is_some_and(|r| r.generation == generation && r.time == time);
-        if matches {
-            slot.take().map(|r| r.volume)
-        } else {
-            None
-        }
-    }
-}
-
-#[cfg(feature = "threads")]
-fn worker_loop(stack: TiffStack, rx: Receiver<Request>, result: Arc<Mutex<Option<BuiltReply>>>) {
-    // Block for a request; channel closed (VolumeBuilder dropped) -> exit.
-    while let Ok(mut req) = rx.recv() {
-        // Only the most recent request matters: a 4D scrub queues many
-        // timepoints, and building stale ones would just delay the wanted one.
-        while let Ok(newer) = rx.try_recv() {
-            req = newer;
-        }
-        // A reply still in the slot is for an earlier request, which nobody
-        // waits for now (the frontend asks once per build it wants): let it
-        // go before building, so two volumes are never held at once.
-        if let Ok(mut slot) = result.lock() {
-            *slot = None;
-        }
-        let volume = build_volume(&stack, &req.plan);
-        if let Ok(mut slot) = result.lock() {
-            *slot = Some(BuiltReply {
-                generation: req.generation,
-                time: req.plan.time,
-                volume,
-            });
-        }
-    }
-}
-
-/// Without threads there's no background builder; `VolumeBuilder::new` returns
-/// `None` and every build runs synchronously through [`build_volume`] — the
-/// same path a failed thread spawn already takes.
-#[cfg(not(feature = "threads"))]
-pub struct VolumeBuilder(std::convert::Infallible);
-
-#[cfg(not(feature = "threads"))]
-impl VolumeBuilder {
-    pub fn new(_path: PathBuf) -> Option<Self> {
-        None
-    }
-
-    pub fn request(&self, _generation: u64, _plan: VolumePlan) -> bool {
-        match self.0 {}
-    }
-
-    pub fn failed(&self) -> bool {
-        match self.0 {}
-    }
-
-    #[allow(clippy::option_option)]
-    pub fn take_matching(&self, _generation: u64, _time: usize) -> Option<Option<BuiltVolume>> {
-        match self.0 {}
+        self.0.take_if(|key| *key == (generation, time))
     }
 }
 
 #[cfg(test)]
-#[cfg(feature = "threads")]
 #[path = "volume_tests.rs"]
 mod tests;

@@ -87,12 +87,19 @@ impl std::fmt::Display for PluginError {
 
 impl std::error::Error for PluginError {}
 
-/// An image a plugin produced.
+/// An image a plugin produced, whole.
 ///
 /// Planes are channel-major within a slice, slice-major within a timepoint —
 /// the same `xyczt` order the reader uses — and every plane must be
 /// `width * height` samples. The host validates that before doing anything with
 /// it, so a plugin that miscounts gets a clear error rather than a corrupt file.
+///
+/// Every plane is held at once, which is right for a result the size of a
+/// plane or a projection and wrong for one the size of the recording: a
+/// stabilised timelapse returned this way exists in the plugin's memory in
+/// full before the host has seen any of it. Such a result is streamed instead,
+/// plane by plane, through an [`ImageStream`](crate::ImageStream) — which
+/// takes an [`ImageSpec`], this struct without its planes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageResult {
     pub width: u32,
@@ -154,49 +161,271 @@ impl PlaneData {
             PlaneData::F32(_) => PixelType::F32,
         }
     }
+
+    /// The same samples, borrowed: what a plane is pushed to the host as.
+    pub fn as_plane_ref(&self) -> PlaneRef<'_> {
+        match self {
+            PlaneData::U8(v) => PlaneRef::U8(v),
+            PlaneData::U16(v) => PlaneRef::U16(v),
+            PlaneData::F32(v) => PlaneRef::F32(v),
+        }
+    }
 }
 
-impl ImageResult {
-    /// Whether the plane count and every plane's length match the declared
-    /// shape. The host checks this; a plugin can too.
-    pub fn validate(&self) -> Result<(), PluginError> {
-        let expect_planes = self.channels.max(1) * self.slices.max(1) * self.frames.max(1);
-        if self.planes.len() != expect_planes {
-            return Err(PluginError::failed(format!(
-                "result declares {}x{}x{} = {expect_planes} planes but carries {}",
-                self.channels,
-                self.slices,
-                self.frames,
-                self.planes.len()
-            )));
+/// One plane's samples, borrowed: the [`PlaneData`] a plugin pushes without
+/// giving it up, so the buffer it filled can be filled again for the next one.
+///
+/// The same three lanes, and the same rule for signed samples: they travel in
+/// [`PlaneRef::U16`] as their raw bits, the result declaring [`PixelType::I16`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlaneRef<'a> {
+    U8(&'a [u8]),
+    U16(&'a [u16]),
+    F32(&'a [f32]),
+}
+
+impl PlaneRef<'_> {
+    pub fn len(&self) -> usize {
+        match self {
+            PlaneRef::U8(v) => v.len(),
+            PlaneRef::U16(v) => v.len(),
+            PlaneRef::F32(v) => v.len(),
         }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn pixel_type(&self) -> PixelType {
+        match self {
+            PlaneRef::U8(_) => PixelType::U8,
+            PlaneRef::U16(_) => PixelType::U16,
+            PlaneRef::F32(_) => PixelType::F32,
+        }
+    }
+    /// A copy of the samples, owned.
+    pub fn to_plane_data(&self) -> PlaneData {
+        match *self {
+            PlaneRef::U8(v) => PlaneData::U8(v.to_vec()),
+            PlaneRef::U16(v) => PlaneData::U16(v.to_vec()),
+            PlaneRef::F32(v) => PlaneData::F32(v.to_vec()),
+        }
+    }
+}
+
+impl<'a> From<&'a PlaneData> for PlaneRef<'a> {
+    fn from(p: &'a PlaneData) -> Self {
+        p.as_plane_ref()
+    }
+}
+
+/// Everything about a result image but its pixels: an [`ImageResult`] without
+/// its planes.
+///
+/// What a result is declared with before its first plane exists, so a plugin
+/// can hand its planes over as it makes them — see
+/// [`ImageStream`](crate::ImageStream). The fields mean what they mean on
+/// `ImageResult`, and are checked the same way.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageSpec {
+    pub width: u32,
+    pub height: u32,
+    pub channels: usize,
+    pub slices: usize,
+    pub frames: usize,
+    pub pixel_type: PixelType,
+    /// What colour each channel should be shown in. See
+    /// [`ImageResult::channel_colors`].
+    pub channel_colors: Vec<[u8; 3]>,
+    /// Metadata to carry into the result. See [`ImageResult::metadata`].
+    pub metadata: Option<StackInfo>,
+    /// What to call it. See [`ImageResult::name`].
+    pub name: String,
+}
+
+impl ImageSpec {
+    /// How many planes the declared shape has: `channels * slices * frames`,
+    /// each counted as at least one. `None` when that is more than a `usize`
+    /// can count — a shape [`validate`](Self::validate) refuses, and one a
+    /// plugin across the C boundary can declare in a single call.
+    pub fn plane_count(&self) -> Option<usize> {
+        self.channels
+            .max(1)
+            .checked_mul(self.slices.max(1))?
+            .checked_mul(self.frames.max(1))
+    }
+
+    /// Samples in one plane. Saturates rather than wrapping on a target whose
+    /// `usize` cannot hold `width * height`, so a plane that big matches no
+    /// real plane; [`validate`](Self::validate) refuses the shape anyway.
+    pub fn plane_len(&self) -> usize {
+        (self.width as usize).saturating_mul(self.height as usize)
+    }
+
+    /// Whether the shape can hold a picture at all: no zero dimension, and
+    /// as many planes, of as many samples, as can be counted.
+    pub fn validate(&self) -> Result<(), PluginError> {
         if self.width == 0 || self.height == 0 {
             return Err(PluginError::failed("result has a zero dimension"));
         }
-        let expect_len = self.width as usize * self.height as usize;
-        for (i, p) in self.planes.iter().enumerate() {
-            if p.len() != expect_len {
-                return Err(PluginError::failed(format!(
-                    "result plane {i} has {} samples, expected {}x{} = {expect_len}",
-                    p.len(),
-                    self.width,
-                    self.height
-                )));
-            }
-            // `I16` is carried in the `U16` lane as raw bits — see `PlaneData`
-            // — so that pairing is the one mismatch that is not one.
-            let declared_ok = p.pixel_type() == self.pixel_type
-                || (self.pixel_type == PixelType::I16 && p.pixel_type() == PixelType::U16);
-            if !declared_ok {
-                return Err(PluginError::failed(format!(
-                    "result plane {i} is {:?} but the result declares {:?}",
-                    p.pixel_type(),
-                    self.pixel_type
-                )));
-            }
+        if (self.width as usize)
+            .checked_mul(self.height as usize)
+            .is_none()
+        {
+            return Err(PluginError::failed(format!(
+                "result planes of {}x{} are more samples than can be addressed",
+                self.width, self.height
+            )));
+        }
+        if self.plane_count().is_none() {
+            return Err(PluginError::failed(format!(
+                "result declares {}x{}x{} planes, more than can be counted",
+                self.channels, self.slices, self.frames
+            )));
         }
         Ok(())
     }
+
+    /// Whether `plane` can be plane `index` of this result: the right number
+    /// of samples, in the declared lane.
+    pub fn check_plane(&self, index: usize, plane: PlaneRef<'_>) -> Result<(), PluginError> {
+        let expect_len = self.plane_len();
+        if plane.len() != expect_len {
+            return Err(PluginError::failed(format!(
+                "result plane {index} has {} samples, expected {}x{} = {expect_len}",
+                plane.len(),
+                self.width,
+                self.height
+            )));
+        }
+        // `I16` is carried in the `U16` lane as raw bits — see `PlaneData` —
+        // so that pairing is the one mismatch that is not one.
+        let declared_ok = plane.pixel_type() == self.pixel_type
+            || (self.pixel_type == PixelType::I16 && plane.pixel_type() == PixelType::U16);
+        if !declared_ok {
+            return Err(PluginError::failed(format!(
+                "result plane {index} is {:?} but the result declares {:?}",
+                plane.pixel_type(),
+                self.pixel_type
+            )));
+        }
+        Ok(())
+    }
+
+    /// The error for a result that ended with `carried` planes where this
+    /// shape has [`plane_count`](Self::plane_count). One wording, whether the
+    /// planes were returned or streamed.
+    pub fn count_mismatch(&self, carried: usize) -> PluginError {
+        let declared = self
+            .plane_count()
+            .map_or_else(|| "uncountably many".to_string(), |n| n.to_string());
+        PluginError::failed(format!(
+            "result declares {}x{}x{} = {declared} planes but carries {carried}",
+            self.channels, self.slices, self.frames,
+        ))
+    }
+
+    /// The whole result, these planes being its pixels. Not checked: see
+    /// [`ImageResult::validate`].
+    pub fn with_planes(self, planes: Vec<PlaneData>) -> ImageResult {
+        let ImageSpec {
+            width,
+            height,
+            channels,
+            slices,
+            frames,
+            pixel_type,
+            channel_colors,
+            metadata,
+            name,
+        } = self;
+        ImageResult {
+            width,
+            height,
+            channels,
+            slices,
+            frames,
+            pixel_type,
+            planes,
+            channel_colors,
+            metadata,
+            name,
+        }
+    }
+}
+
+impl ImageResult {
+    /// Everything but the planes, copied.
+    pub fn spec(&self) -> ImageSpec {
+        ImageSpec {
+            width: self.width,
+            height: self.height,
+            channels: self.channels,
+            slices: self.slices,
+            frames: self.frames,
+            pixel_type: self.pixel_type,
+            channel_colors: self.channel_colors.clone(),
+            metadata: self.metadata.clone(),
+            name: self.name.clone(),
+        }
+    }
+
+    /// The declaration and the planes, apart — what a host that writes a
+    /// result plane by plane takes it as.
+    pub fn into_parts(self) -> (ImageSpec, Vec<PlaneData>) {
+        let ImageResult {
+            width,
+            height,
+            channels,
+            slices,
+            frames,
+            pixel_type,
+            planes,
+            channel_colors,
+            metadata,
+            name,
+        } = self;
+        (
+            ImageSpec {
+                width,
+                height,
+                channels,
+                slices,
+                frames,
+                pixel_type,
+                channel_colors,
+                metadata,
+                name,
+            },
+            planes,
+        )
+    }
+
+    /// Whether the plane count and every plane's length match the declared
+    /// shape. The host checks this; a plugin can too.
+    pub fn validate(&self) -> Result<(), PluginError> {
+        let spec = self.spec();
+        spec.validate()?;
+        if Some(self.planes.len()) != spec.plane_count() {
+            return Err(spec.count_mismatch(self.planes.len()));
+        }
+        for (i, p) in self.planes.iter().enumerate() {
+            spec.check_plane(i, p.as_plane_ref())?;
+        }
+        Ok(())
+    }
+}
+
+/// Where a streamed result goes: the three things a returned image can be
+/// asked to do, for an image the host already has.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamTarget {
+    /// Open it in a new document. See [`Outcome::NewDocument`].
+    NewDocument,
+    /// Put it in place of the document the plugin ran on. Destructive; see
+    /// [`Outcome::ReplaceDocument`].
+    ReplaceDocument,
+    /// Write it to this path. See [`Outcome::SaveToFile`].
+    SaveToFile { path: String },
 }
 
 /// What a run produced.
@@ -211,10 +440,10 @@ pub enum Outcome {
     /// Replace the document the plugin was run on with this image.
     ///
     /// The other half of [`Outcome::NewDocument`], and the reason a tool can
-    /// offer an "open in a new window" checkbox at all: FastTIFF is one stack
-    /// per window, so a result either arrives in a window of its own or takes
-    /// the place of the one it came from, and only the user knows which they
-    /// wanted.
+    /// offer an "open in a new window" checkbox at all: FastTIFF is one
+    /// document per window, so a result either arrives in a window of its own
+    /// or takes the place of the one it came from, and only the user knows
+    /// which they wanted.
     ///
     /// Unlike the other outcomes this one is **destructive** — what was open is
     /// gone from that window unless it was saved — so a plugin should default
@@ -232,6 +461,15 @@ pub enum Outcome {
         image: Box<ImageResult>,
         path: String,
     },
+    /// The image was handed to the host plane by plane during the run, through
+    /// an [`ImageStream`](crate::ImageStream); this says what to do with it.
+    ///
+    /// What [`ImageStream::finish`](crate::ImageStream::finish) returns, and
+    /// the way to hand back a result the size of the recording: the host
+    /// writes each plane into the result file as it arrives, so neither side
+    /// ever holds the whole of it. Returned without a stream having been
+    /// begun and filled, it is an error naming the plugin.
+    Streamed { target: StreamTarget },
     /// Show this chart. The host draws it; see [`crate::plot`].
     ///
     /// If the plot asks for a canvas tool, the host arms it and runs this

@@ -43,6 +43,7 @@
 //! that does use several counters is split into one [`PointRoi`] per counter,
 //! which is the same shape.
 
+use crate::error::{err, Error, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// `"Iout"`: the first four bytes of every ImageJ `.roi`.
@@ -271,12 +272,13 @@ impl PointRoi {
 /// same bytes.
 ///
 /// Not Zip64: more than 65,535 ROIs, or more than 4 GiB of them, does not fit,
-/// and is [`RoiSetTooLarge`] rather than a broken archive. A file's overlay can
-/// hold that many, one ROI per point.
-pub fn roi_set_zip(rois: &[PointRoi]) -> Result<Vec<u8>, RoiSetTooLarge> {
+/// and is an [`ErrorKind::TooLarge`](crate::ErrorKind::TooLarge) error rather
+/// than a broken archive. A file's overlay can hold that many, one ROI per
+/// point.
+pub fn roi_set_zip(rois: &[PointRoi]) -> Result<Vec<u8>> {
     let kept: Vec<&PointRoi> = rois.iter().filter(|r| !r.points.is_empty()).collect();
     if kept.len() > usize::from(u16::MAX) {
-        return Err(RoiSetTooLarge);
+        return Err(too_many_rois());
     }
     let names = unique_entry_names(kept.iter().map(|r| entry_stem(&r.name)).collect());
     let entries: Vec<(String, Vec<u8>)> = kept
@@ -295,7 +297,7 @@ pub fn roi_set_zip(rois: &[PointRoi]) -> Result<Vec<u8>, RoiSetTooLarge> {
         .sum::<u64>()
         + 22;
     if size > u64::from(u32::MAX) {
-        return Err(RoiSetTooLarge);
+        return Err(too_many_rois());
     }
 
     let mut zip = ZipWriter::default();
@@ -307,18 +309,12 @@ pub fn roi_set_zip(rois: &[PointRoi]) -> Result<Vec<u8>, RoiSetTooLarge> {
 
 /// What [`roi_set_zip`] says when the ROIs do not fit a zip without Zip64:
 /// more than 65,535 of them, or more than 4 GiB.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RoiSetTooLarge;
-
-impl std::fmt::Display for RoiSetTooLarge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            "too many ROIs for an ImageJ ROI set: it holds at most 65,535, and 4 GiB in all",
-        )
-    }
+fn too_many_rois() -> Error {
+    err!(
+        TooLarge,
+        "too many ROIs for an ImageJ ROI set: it holds at most 65,535, and 4 GiB in all"
+    )
 }
-
-impl std::error::Error for RoiSetTooLarge {}
 
 /// The part of an entry name a ROI's name supplies: path separators replaced,
 /// so the archive cannot describe a directory, a `.roi` it ends in left off —
@@ -672,7 +668,9 @@ fn read_name(d: &[u8], h: usize) -> Option<String> {
     let len = usize::try_from(len).ok()?;
     let bytes = d.get(at..at.checked_add(len.checked_mul(2)?)?)?;
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
     Some(String::from_utf16_lossy(&units))
@@ -688,7 +686,9 @@ fn read_counters(d: &[u8], h: usize, n: usize) -> Option<Option<Vec<i32>>> {
     let at = usize::try_from(at).ok()?;
     let bytes = d.get(at..at.checked_add(n.checked_mul(4)?)?)?;
     let words = bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|w| i32::from_be_bytes([w[0], w[1], w[2], w[3]]))
         .collect();
     Some(Some(words))

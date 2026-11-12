@@ -13,6 +13,9 @@
 /// The plugins compiled into this build. Everything else in this module is the
 /// *interface* they are written against; nothing here reaches into it.
 pub mod builtin;
+/// What happens to a run's result once it is over, up to the platform's last
+/// step.
+pub mod deliver;
 /// Finding installed plugin libraries on disk. Desktop-only: there is no disk
 /// to search in a browser.
 #[cfg(not(target_arch = "wasm32"))]
@@ -25,10 +28,16 @@ pub mod library;
 pub mod progress;
 pub mod result;
 
+pub use deliver::{Deliver, Handover, Product};
 #[cfg(not(target_arch = "wasm32"))]
 pub use discover::{install_dir, is_library, search_paths, user_plugin_dir, LIBRARY_EXT};
 pub use host::{describe_image, describe_stack, describe_view, describe_volume, StackHost};
-pub use result::{to_stack, to_tiff_bytes, to_tiff_bytes_reporting};
+pub use result::{
+    file_stem, into_tiff_bytes, into_tiff_bytes_reporting, to_stack, to_tiff_bytes,
+    to_tiff_bytes_reporting, write_result, Derived, ResultDest, ResultTiff, ResultWriter,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use result::{sweep, ScratchFile};
 
 pub use library::{LoadedExporter, LoadedImporter, LoadedPlugin};
 
@@ -275,6 +284,25 @@ impl Registry {
             }
         }
         out
+    }
+
+    /// The extensions some importer claims, lowercase and without the dot,
+    /// sorted: what [`claims_extension`](Self::claims_extension) checks a path
+    /// against, for a host to keep while the registry itself is away — with a
+    /// job, say — so that a file no importer wants can still be opened.
+    pub fn claimed_extensions(&self) -> Vec<String> {
+        let mut all: Vec<String> = self
+            .importers
+            .iter()
+            .flat_map(|e| {
+                e.file_types
+                    .iter()
+                    .flat_map(|t| t.extensions.iter().cloned())
+            })
+            .collect();
+        all.sort();
+        all.dedup();
+        all
     }
 
     /// Whether any importer claims this path by extension. Opens no file, so it

@@ -1,11 +1,12 @@
 //! Handing an image to a second tab — the browser's answer to
 //! [`crate::process`].
 //!
-//! FastTIFF is one stack per window, and on the desktop that means one stack
-//! per *process*: a plugin result opens by re-launching the binary and handing
-//! the encoded TIFF over on its stdin (see [`crate::process`]). A browser has
-//! no processes to launch, but it has tabs, and a tab is the same thing for
-//! this purpose — a second instance of the app with its own document.
+//! FastTIFF is one document per window, and on the desktop that means one
+//! document per *process*: a plugin result opens by re-launching the binary
+//! and handing the encoded TIFF over on its stdin (see [`crate::process`]). A
+//! browser has no processes to launch, but it has tabs, and a tab is the same
+//! thing for this purpose — a second instance of the app with its own
+//! document.
 //!
 //! # How the bytes get across
 //!

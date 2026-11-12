@@ -1,11 +1,14 @@
 # The egui build of the FastTIFF viewer, running on a browser canvas.
 #
-# Standalone for the same reason as FastTIFF-web/crate: Cargo unifies features
-# across a workspace, so one build covering this crate and the desktop app
-# would union `threads`/`mmap`/`codec-zstd` back into the viewer and break the
-# wasm build.
-[workspace]
-
+# A workspace member. It used to be a workspace of its own, on the grounds that
+# Cargo would otherwise union the desktop's `threads`/`mmap`/`codec-zstd` into
+# the wasm build; resolver 2 does not, since the desktop crate asks for those
+# only under `cfg(not(target_arch = "wasm32"))`. Being separate cost a second
+# lockfile that no test ran against and Dependabot never saw.
+#
+# Built with the workspace's release profile. On wasm32-unknown-unknown
+# `panic = "unwind"` has no effect (abort is the only strategy the target has),
+# so the `panic = "abort"` this crate once set for itself changed nothing.
 [package]
 name = "fasttiff-web-egui"
 version = "1.27.1"
@@ -24,9 +27,9 @@ crate-type = ["cdylib", "rlib"]
 #
 #     wasm-pack build --target web --release -- #         --no-default-features --features plugin-invert,plugin-zproject
 #
-# Worth doing only for the two that carry weight. `plugin-deconvolve` brings an
-# FFT and `plugin-suite2p-stabilize` a registration crate; the other seven are their own
-# code and little else.
+# Worth doing only for the three that carry weight. `plugin-deconvolve` brings
+# an FFT, and `plugin-suite2p-stabilize` and `plugin-turboreg-stabilize` a
+# registration crate each; the others are their own code and little else.
 [features]
 default = ["builtin-plugins"]
 builtin-plugins = ["fasttiff/builtin-plugins"]
@@ -37,6 +40,7 @@ plugin-stack-tools = ["fasttiff/plugin-stack-tools"]
 plugin-animation-3d = ["fasttiff/plugin-animation-3d"]
 plugin-crop = ["fasttiff/plugin-crop"]
 plugin-suite2p-stabilize = ["fasttiff/plugin-suite2p-stabilize"]
+plugin-turboreg-stabilize = ["fasttiff/plugin-turboreg-stabilize"]
 plugin-deconvolve = ["fasttiff/plugin-deconvolve"]
 plugin-png = ["fasttiff/plugin-png"]
 # `plugin-oir`, `plugin-nifti` and `plugin-dicom` are deliberately absent. All
@@ -45,7 +49,10 @@ plugin-png = ["fasttiff/plugin-png"]
 # could not turn anything on would only mislead.
 plugins-none = ["fasttiff/plugins-none"]
 
-[dependencies]
+# Every dependency is wasm-only, and so is the source (`src/lib.rs` is
+# `#![cfg(target_arch = "wasm32")]`): on any other target this crate is empty,
+# which is what lets `cargo test --workspace` include it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
 # The shared egui UI. `default-features = false` keeps the desktop-only feature
 # set (threads / mmap / the C zstd codec) out of the wasm build; the renderer
 # backend is selected explicitly.
@@ -53,19 +60,16 @@ plugins-none = ["fasttiff/plugins-none"]
 # `use fasttiff::…` resolves to.
 fasttiff = { path = "../FastTIFF", package = "FastTIFF", default-features = false, features = ["renderer-wgpu"] }
 
-eframe = { version = "0.34", default-features = false, features = ["default_fonts", "wgpu"] }
-egui = "0.34"
+eframe = { workspace = true, features = ["default_fonts", "wgpu"] }
+egui = { workspace = true }
 
-wasm-bindgen = "0.2"
+wasm-bindgen = { workspace = true }
 # `#[wasm_bindgen]` on an async fn expands to code referencing this crate.
-wasm-bindgen-futures = "0.4"
-log = "0.4"
+wasm-bindgen-futures = { workspace = true }
+log = { workspace = true }
 console_log = "1"
 console_error_panic_hook = "0.1"
-
-[dependencies.web-sys]
-version = "0.3"
-features = ["HtmlCanvasElement", "Window", "Document", "Element"]
+web-sys = { workspace = true, features = ["HtmlCanvasElement", "Window", "Document", "Element"] }
 
 # There is deliberately no `[package.metadata.wasm-pack.profile.release]`
 # `wasm-opt` block here, and it is worth saying why so that the next person
@@ -90,8 +94,3 @@ features = ["HtmlCanvasElement", "Window", "Document", "Element"]
 # read as feature switches, and dropping it silently ships an unoptimised
 # bundle.
 
-[profile.release]
-opt-level = 3
-lto = "fat"        # Enable Link-Time Optimization
-codegen-units = 1  # Helps LTO optimize more effectively
-panic = 'abort'    # 'abort' to kill process or 'unwind' for safe memory cleanup

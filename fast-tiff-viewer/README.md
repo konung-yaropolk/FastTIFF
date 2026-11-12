@@ -11,7 +11,7 @@ in sight.
         │
   scivis-render     GPU pipelines, textures, ray-marching
         │
-  fast-tiff-viewer  ← this crate: stack model, channel settings,
+  fast-tiff-viewer  ← this crate: document model, channel settings,
         │             c/z/t interpretation, camera, decode→GPU sync
   frontend          egui desktop app, or a wasm/JS web UI
 ```

@@ -5,7 +5,7 @@ use super::*;
 use fasttiff_plugin_api::ParamValue;
 
 // The plane order these tools rely on — channel fastest, then Z, then T — is
-// pinned where it can actually be got wrong: in `tests/plugins.rs`, against a
+// pinned where it can actually be got wrong: in `tests/it/plugins.rs`, against a
 // real stack whose every plane carries its own `(c, z, t)`. There is no
 // formula here to unit-test, because none of the tools computes an index.
 // Each chooses which `(z, t)` pairs to walk and hands them to `map_planes`
@@ -154,4 +154,43 @@ fn the_default_opens_a_window_rather_than_replacing_one() {
 #[test]
 fn the_checkbox_key_matches_what_is_read() {
     assert_eq!(in_new_window().key, NEW_WINDOW);
+}
+
+/// A streamed result goes where a returned one would.
+#[test]
+fn a_streamed_result_goes_where_the_box_says() {
+    assert_eq!(target(&Params::new()), StreamTarget::NewDocument);
+    let mut off = Params::new();
+    off.set(NEW_WINDOW, ParamValue::Bool(false));
+    assert_eq!(target(&off), StreamTarget::ReplaceDocument);
+}
+
+/// The reused buffer stores a plane exactly as a fresh one does — rounding,
+/// clamping, NaN and the signed lane included — however many planes it has
+/// held before.
+#[test]
+fn encoding_into_a_kept_buffer_matches_storing_a_fresh_plane() {
+    let v = vec![
+        -40000.0,
+        -1.6,
+        -0.4,
+        0.5,
+        1.5,
+        254.6,
+        300.0,
+        70000.0,
+        f32::NAN,
+    ];
+    let mut kept = Stored::default();
+    for store in [Store::U8, Store::U16, Store::I16, Store::F32] {
+        for _ in 0..2 {
+            let fresh = store.plane(v.clone());
+            let encoded = store.encode(&v, &mut kept);
+            assert_eq!(
+                format!("{:?}", encoded),
+                format!("{:?}", fresh.as_plane_ref()),
+                "{store:?}"
+            );
+        }
+    }
 }

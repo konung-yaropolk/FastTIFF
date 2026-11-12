@@ -2,7 +2,7 @@
 
 use super::super::tests::{keys, settle, write_f32_tiff, TestHost};
 use super::*;
-use fasttiff_plugin_api::{ParamValue, PixelType};
+use fasttiff_plugin_api::{ImageResult, ParamValue, PixelType};
 
 fn params(host: &mut TestHost, overrides: &[(&str, ParamValue)]) -> Params {
     settle(&Deconvolve, host, overrides).1
@@ -743,4 +743,105 @@ fn the_window_is_named_after_the_method() {
     );
     let image = image_of(Deconvolve.run(&mut host, &p).expect("run"));
     assert!(image.name.ends_with("-wiener"), "{}", image.name);
+}
+
+/// A host that takes the result plane by plane, over a [`TestHost`], noting
+/// whether a timepoint was read before every plane of the ones before it had
+/// been handed back.
+struct Streaming<'a> {
+    inner: &'a mut TestHost,
+    spec: Option<ImageSpec>,
+    pushed: Vec<PlaneData>,
+    /// Planes in one timepoint of the result.
+    per_timepoint: usize,
+    /// Set when a plane of timepoint `t` was read while fewer than
+    /// `t * per_timepoint` planes had been pushed.
+    ahead: bool,
+}
+
+impl HostContext for Streaming<'_> {
+    fn image(&self) -> fasttiff_plugin_api::ImageInfo {
+        self.inner.image()
+    }
+    fn view(&self) -> &fasttiff_plugin_api::ViewParams {
+        self.inner.view()
+    }
+    fn stack_info(&self) -> &fasttiff_plugin_api::StackInfo {
+        self.inner.stack_info()
+    }
+    fn read_plane_u16(&mut self, p: Plane, out: &mut Vec<u16>) -> Result<(), PluginError> {
+        self.inner.read_plane_u16(p, out)
+    }
+    fn read_plane_f32(&mut self, p: Plane, out: &mut Vec<f32>) -> Result<(), PluginError> {
+        if self.pushed.len() < p.t * self.per_timepoint {
+            self.ahead = true;
+        }
+        self.inner.read_plane_f32(p, out)
+    }
+    fn progress(&mut self, f: f32) -> bool {
+        self.inner.progress(f)
+    }
+    fn log(&mut self, m: &str) {
+        self.inner.log(m)
+    }
+    fn streams_results(&self) -> bool {
+        true
+    }
+    fn begin_image(&mut self, spec: &ImageSpec) -> Result<(), PluginError> {
+        self.spec = Some(spec.clone());
+        Ok(())
+    }
+    fn push_plane(&mut self, plane: fasttiff_plugin_api::PlaneRef<'_>) -> Result<(), PluginError> {
+        self.pushed.push(plane.to_plane_data());
+        Ok(())
+    }
+}
+
+/// Streamed, the result is the one a whole run returns, plane for plane and
+/// in order, whichever way the volumes run. Along Z and plane by plane, a
+/// timepoint is handed back in full before the next is read — the most the
+/// plugin holds is one timepoint; along time that cannot be, every volume
+/// holding a slice of every timepoint.
+#[test]
+fn a_streamed_run_is_the_whole_result_handed_back_in_order() {
+    let (c, z, t) = (2usize, 3usize, 3usize);
+    let mut host = TestHost::new(4, 4, c, z, t);
+    for ti in 0..t {
+        for zi in 0..z {
+            for ci in 0..c {
+                let tag = (ti * 100 + zi * 10 + ci) as f32;
+                host.set_plane(Plane::new(ci, zi, ti), &[tag; 16]);
+            }
+        }
+    }
+    for shape in 0..3 {
+        let p = params(
+            &mut host,
+            &[
+                ("psf_path", ParamValue::Path(delta_psf_file("streamed.tif"))),
+                ("dimensionality", ParamValue::Choice(shape)),
+            ],
+        );
+        let whole = image_of(Deconvolve.run(&mut host, &p).expect("run"));
+        let mut streaming = Streaming {
+            inner: &mut host,
+            spec: None,
+            pushed: Vec::new(),
+            per_timepoint: c * z,
+            ahead: false,
+        };
+        let out = Deconvolve.run(&mut streaming, &p).expect("streamed run");
+        assert!(
+            matches!(out, Outcome::Streamed { .. }),
+            "shape {shape}: {out:?}"
+        );
+        assert_eq!(streaming.spec, Some(whole.spec()), "shape {shape}");
+        assert_eq!(streaming.pushed, whole.planes, "shape {shape}: the planes differ");
+        // 0 is the default (along Z here), 1 plane by plane, 2 along time.
+        assert_eq!(
+            streaming.ahead,
+            shape == 2,
+            "shape {shape}: a timepoint was read before the last one was handed back"
+        );
+    }
 }

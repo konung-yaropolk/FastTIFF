@@ -278,7 +278,7 @@ fn points_follow_the_axes_they_were_placed_on() {
         w.write_frame_u8(&[p; 4]).unwrap();
     }
     let bytes = w.finish().unwrap().into_inner();
-    let mut stack = Stack::from_bytes(bytes, "axes.tif".into(), false).unwrap();
+    let mut stack = Document::from_bytes(bytes, "axes.tif".into(), false).unwrap();
     assert_eq!(stack.frame_count(), 3);
 
     let mut t = Session::new(PointCounter::new());

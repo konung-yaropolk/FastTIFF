@@ -5,11 +5,11 @@
 //! TIFF walker, not an ImageJ-specific format — it doesn't assume anything
 //! about how many IFDs there are or what writer produced them.
 
+use crate::error::{bail, err, Error, ErrorKind, OptionContext, Result};
 use crate::ifd::{self, ByteOrder, RawIfdEntry, TiffFlavor};
 use crate::metadata::{self, StackMeta};
-use anyhow::{anyhow, bail, Result};
 #[cfg(feature = "mmap")]
-use {memmap2::Mmap, std::fs::File, std::path::Path};
+use {crate::error::Context, memmap2::Mmap, std::fs::File, std::path::Path};
 
 // `pub(crate)`: shared with the write side (`encode`), so reader and writer
 // can never disagree on tag numbers.
@@ -116,7 +116,7 @@ pub enum Strips {
 /// which is a trap for a type whose whole point is that it has two spellings
 /// for the same one-element list. Everything the crate builds goes through
 /// `From`, which normalises — but `Many` is a public variant, so a caller can
-/// spell it the other way, and `tests/row_bands.rs` really does `assert_eq!`
+/// spell it the other way, and `tests/it/row_bands.rs` really does `assert_eq!`
 /// two of these against each other.
 impl PartialEq for Strips {
     #[inline]
@@ -474,7 +474,10 @@ impl FrameInfo {
         // tile row is `across` consecutive entries. Not wrong to want, but not
         // what this expresses — a tiled frame narrows by cropping instead.
         if self.is_tiled() {
-            bail!("crop_rows_step is for stripped frames; a tiled frame narrows with crop()");
+            bail!(
+                InvalidInput,
+                "crop_rows_step is for stripped frames; a tiled frame narrows with crop()"
+            );
         }
 
         let per_plane = self.height.div_ceil(per_piece) as usize;
@@ -482,6 +485,7 @@ impl FrameInfo {
         let want = self.piece_count();
         if self.strip_offsets.len() < want || self.strip_byte_counts.len() < want {
             bail!(
+                Malformed,
                 "strip table has {} offsets / {} byte counts, need {want}",
                 self.strip_offsets.len(),
                 self.strip_byte_counts.len()
@@ -580,6 +584,7 @@ impl FrameInfo {
         let want = self.piece_count();
         if self.strip_offsets.len() < want || self.strip_byte_counts.len() < want {
             bail!(
+                Malformed,
                 "tile table has {} offsets / {} byte counts, need {want} for {across}x{down} tiles                  across {planes} plane(s)",
                 self.strip_offsets.len(),
                 self.strip_byte_counts.len()
@@ -691,6 +696,7 @@ impl FrameInfo {
         let (first, last) = (first as usize, (last as usize).min(per_plane));
         if first >= last {
             bail!(
+                InvalidInput,
                 "row band {start}..{end} selects no strips of a {}-row frame",
                 self.height
             );
@@ -700,6 +706,7 @@ impl FrameInfo {
         let want = planes * per_plane;
         if self.strip_offsets.len() < want || self.strip_byte_counts.len() < want {
             bail!(
+                Malformed,
                 "strip table describes {} offsets / {} byte counts, need {want} for {planes} plane(s)                  of {per_plane} strip(s)",
                 self.strip_offsets.len(),
                 self.strip_byte_counts.len()
@@ -743,7 +750,7 @@ impl FrameInfo {
             16 => Ok(2),
             32 => Ok(4),
             64 => Ok(8),
-            other => bail!("unsupported bits_per_sample: {other}"),
+            other => bail!(Unsupported, "unsupported bits_per_sample: {other}"),
         }
     }
 
@@ -756,11 +763,10 @@ impl FrameInfo {
     pub fn pixel_count(&self) -> Result<usize> {
         (self.width as usize)
             .checked_mul(self.height as usize)
-            .ok_or_else(|| {
-                anyhow!(
+            .with_context(ErrorKind::TooLarge, || {
+                format!(
                     "frame geometry overflows address space: {}x{}",
-                    self.width,
-                    self.height
+                    self.width, self.height
                 )
             })
     }
@@ -776,8 +782,8 @@ impl FrameInfo {
     pub fn sample_count(&self) -> Result<usize> {
         self.pixel_count()?
             .checked_mul(self.samples_per_pixel.max(1) as usize)
-            .ok_or_else(|| {
-                anyhow!(
+            .with_context(ErrorKind::TooLarge, || {
+                format!(
                     "frame geometry overflows address space: {}x{} x {} sample(s)/px",
                     self.width,
                     self.height,
@@ -798,7 +804,7 @@ impl FrameInfo {
     pub fn decoded_len(&self) -> Result<usize> {
         let sample_bytes = self.sample_bytes()?;
         let too_big = || {
-            anyhow!(
+            format!(
                 "frame geometry overflows address space: {}x{} x {} sample(s)/px x {} byte(s)/sample",
                 self.width,
                 self.height,
@@ -810,7 +816,7 @@ impl FrameInfo {
             .checked_mul(self.height as usize)
             .and_then(|v| v.checked_mul(self.samples_per_pixel.max(1) as usize))
             .and_then(|v| v.checked_mul(sample_bytes))
-            .ok_or_else(too_big)
+            .with_context(ErrorKind::TooLarge, too_big)
     }
 
     /// Total bytes the frame's usable strips supply.
@@ -854,17 +860,26 @@ impl FrameInfo {
     }
 }
 
-/// Where a stack's bytes live. Both variants deref to `&[u8]`, so every decode
+/// Where a stack's bytes live. Every variant derefs to `&[u8]`, so every decode
 /// entry point takes one shape regardless of how the file was opened.
 ///
 /// `Mapped` is the native path — the OS pages data in on demand, so opening a
-/// multi-GB stack costs nothing until pixels are touched. `Owned` is for hosts
-/// with no filesystem to map (a browser, where the bytes arrive from a file
-/// input or `fetch`), and for callers that already hold the whole file.
+/// multi-GB stack costs nothing until pixels are touched. `Owned` and `Shared`
+/// are for bytes already in memory: a host with no filesystem to map (a
+/// browser, where the bytes arrive from a file input or `fetch`), and callers
+/// that already hold the whole file.
+///
+/// `Shared` is held, never copied. A buffer that someone else already keeps
+/// behind an `Arc` — egui hands a file dropped on a browser tab over that way
+/// — becomes a stack with no whole-file memcpy, and without a second copy of
+/// the file alive beside it while the stack is indexed and read. `Owned` is
+/// for a `Vec` the caller gives up: turning one into an `Arc<[u8]>` would
+/// itself be a copy, so it is kept as it came.
 pub enum Bytes {
     #[cfg(feature = "mmap")]
     Mapped(Mmap),
     Owned(Vec<u8>),
+    Shared(std::sync::Arc<[u8]>),
 }
 
 impl std::ops::Deref for Bytes {
@@ -874,7 +889,20 @@ impl std::ops::Deref for Bytes {
             #[cfg(feature = "mmap")]
             Bytes::Mapped(m) => m,
             Bytes::Owned(v) => v,
+            Bytes::Shared(s) => s,
         }
+    }
+}
+
+impl From<Vec<u8>> for Bytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Bytes::Owned(bytes)
+    }
+}
+
+impl From<std::sync::Arc<[u8]>> for Bytes {
+    fn from(bytes: std::sync::Arc<[u8]>) -> Self {
+        Bytes::Shared(bytes)
     }
 }
 
@@ -884,6 +912,7 @@ impl std::fmt::Debug for Bytes {
             #[cfg(feature = "mmap")]
             Bytes::Mapped(_) => "Mapped",
             Bytes::Owned(_) => "Owned",
+            Bytes::Shared(_) => "Shared",
         };
         write!(f, "Bytes::{kind}({} bytes)", self.len())
     }
@@ -894,8 +923,9 @@ impl std::fmt::Debug for Bytes {
 // produced by `open` / `from_bytes`).
 #[non_exhaustive]
 pub struct TiffStack {
-    /// The file's bytes — memory-mapped, or owned. Derefs to `&[u8]`, which is
-    /// what every `read_*` function takes.
+    /// The file's bytes — memory-mapped, owned, or shared with the caller (see
+    /// [`Bytes`]). Derefs to `&[u8]`, which is what every `read_*` function
+    /// takes.
     pub data: Bytes,
     pub byte_order: ByteOrder,
     pub frames: Vec<FrameInfo>,
@@ -918,7 +948,7 @@ impl TiffStack {
     #[cfg(feature = "mmap")]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let file = File::open(path.as_ref())
-            .map_err(|e| anyhow!("could not open {}: {e}", path.as_ref().display()))?;
+            .with_context(|| format!("could not open {}", path.as_ref().display()))?;
         // SAFETY: standard caveat of memmap2 — the file must not be mutated
         // out from under us while mapped. We open read-only and treat the
         // mapping as immutable for the lifetime of the TiffStack.
@@ -932,8 +962,12 @@ impl TiffStack {
     /// Identical to [`TiffStack::open`] in every other respect: same parser,
     /// same errors, same frame index. The bytes are kept for the stack's
     /// lifetime, so unlike the mapped path the whole file sits in memory.
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
-        Self::from_backing(Bytes::Owned(bytes))
+    ///
+    /// `bytes` is anything that is a [`Bytes`]: a `Vec<u8>`, which the stack
+    /// then owns, or an `Arc<[u8]>`, which it shares with whoever else holds
+    /// it — the stack keeps a reference, not a copy. Neither is copied here.
+    pub fn from_bytes(bytes: impl Into<Bytes>) -> Result<Self> {
+        Self::from_backing(bytes.into())
     }
 
     /// Walk the IFD chain and build the frame index + metadata. Shared by both
@@ -953,8 +987,11 @@ impl TiffStack {
         // ColorMap (tag 320) for a palette image → the channel's display LUT.
         let mut color_map: Option<Vec<u32>> = None;
 
+        // An offset past `usize` is past the end of `mmap`, whose length is a
+        // `usize`: the file is damaged, on whatever target it is read, and
+        // says so in the words a 64-bit target's bounds check uses.
         let mut offset = usize::try_from(first_ifd)
-            .map_err(|_| anyhow!("first IFD offset exceeds address space"))?;
+            .map_err(|_| err!(Malformed, "IFD offset {first_ifd} out of bounds"))?;
         let mut first = true;
         // Cycle detection, Brent's algorithm: one comparison per IFD and no
         // memory, in place of a `HashSet` of every offset seen. That set cost a
@@ -1009,16 +1046,20 @@ impl TiffStack {
             frames.push(frame);
             if frames.len() > MAX_FRAMES {
                 bail!(
+                    TooLarge,
                     "TIFF declares more than {MAX_FRAMES} planes — refusing to index further \
                      (a malformed chain of minimal IFDs can otherwise amplify a small file \
                      into gigabytes of frame index)"
                 );
             }
             offset = usize::try_from(next_offset)
-                .map_err(|_| anyhow!("next-IFD offset exceeds address space"))?;
+                .map_err(|_| err!(Malformed, "IFD offset {next_offset} out of bounds"))?;
             if offset != 0 {
                 if offset == tortoise {
-                    bail!("malformed TIFF: IFD chain loops back to offset {offset}");
+                    bail!(
+                        Malformed,
+                        "malformed TIFF: IFD chain loops back to offset {offset}"
+                    );
                 }
                 lam += 1;
                 if lam == power {
@@ -1030,7 +1071,7 @@ impl TiffStack {
         }
 
         if frames.is_empty() {
-            bail!("TIFF has no image directories");
+            bail!(Malformed, "TIFF has no image directories");
         }
 
         // Every frame in the stack must share the first frame's geometry and
@@ -1052,6 +1093,7 @@ impl TiffStack {
             .find(|(_, f)| (f.width, f.height, f.bits_per_sample, f.samples_per_pixel) != f0_shape)
         {
             bail!(
+                Unsupported,
                 "TIFF frames are not uniform: frame 0 is {}x{} ({}-bit, {} sample(s)/px) but \
                  frame {} is {}x{} ({}-bit, {} sample(s)/px). This looks like a pyramidal or \
                  mixed-size TIFF, which this stack viewer doesn't support.",
@@ -1155,6 +1197,7 @@ fn validate_frames(frames: &[FrameInfo], file_len: usize) -> Result<()> {
     for (i, f) in frames.iter().enumerate() {
         if f.width == 0 || f.height == 0 {
             bail!(
+                Malformed,
                 "frame {i} declares an empty image ({}x{})",
                 f.width,
                 f.height
@@ -1163,7 +1206,8 @@ fn validate_frames(frames: &[FrameInfo], file_len: usize) -> Result<()> {
         // Overflow guard. `decoded_len` is what every downstream allocation is
         // sized from, so proving it here means it cannot wrap there.
         if f.sample_bytes().is_ok() {
-            f.decoded_len().map_err(|e| anyhow!("frame {i}: {e}"))?;
+            f.decoded_len()
+                .map_err(|e| Error::new(e.kind(), format!("frame {i}: {e}")))?;
         }
         // A strip that starts or ends outside the file is unambiguously broken,
         // and refusing it up front bounds `strip_bytes_total` by the file size —
@@ -1171,9 +1215,12 @@ fn validate_frames(frames: &[FrameInfo], file_len: usize) -> Result<()> {
         for (&off, &len) in f.strip_offsets.iter().zip(f.strip_byte_counts.iter()) {
             let end = off
                 .checked_add(len)
-                .ok_or_else(|| anyhow!("frame {i}: strip offset {off} + length {len} overflows"))?;
+                .with_context(ErrorKind::Malformed, || {
+                    format!("frame {i}: strip offset {off} + length {len} overflows")
+                })?;
             if end > file_len as u64 {
                 bail!(
+                    Malformed,
                     "frame {i}: strip at offset {off} (+{len} bytes) extends past the end of \
                      the {file_len}-byte file",
                 );
@@ -1335,8 +1382,8 @@ fn frame_info_from_entries(
         }
     }
 
-    let width = width.ok_or_else(|| anyhow!("IFD missing ImageWidth"))?;
-    let height = height.ok_or_else(|| anyhow!("IFD missing ImageLength"))?;
+    let width = width.context(ErrorKind::Malformed, "IFD missing ImageWidth")?;
+    let height = height.context(ErrorKind::Malformed, "IFD missing ImageLength")?;
     // A tiled image carries the same information under different tags. Folding
     // it into the strip fields here is what lets everything downstream — the
     // bounds checks, the size guards, the parallel decompression — apply to
@@ -1349,18 +1396,19 @@ fn frame_info_from_entries(
     };
     let (strip_offsets, strip_byte_counts) = match tile_size {
         Some(_) => (
-            tile_offsets.ok_or_else(|| anyhow!("IFD missing TileOffsets"))?,
-            tile_byte_counts.ok_or_else(|| anyhow!("IFD missing TileByteCounts"))?,
+            tile_offsets.context(ErrorKind::Malformed, "IFD missing TileOffsets")?,
+            tile_byte_counts.context(ErrorKind::Malformed, "IFD missing TileByteCounts")?,
         ),
         None => (
-            strip_offsets.ok_or_else(|| {
+            strip_offsets.context(
+                ErrorKind::Malformed,
                 if tile_offsets.is_some() {
-                    anyhow!("IFD has TileOffsets but no usable TileWidth/TileLength")
+                    "IFD has TileOffsets but no usable TileWidth/TileLength"
                 } else {
-                    anyhow!("IFD missing StripOffsets")
-                }
-            })?,
-            strip_byte_counts.ok_or_else(|| anyhow!("IFD missing StripByteCounts"))?,
+                    "IFD missing StripOffsets"
+                },
+            )?,
+            strip_byte_counts.context(ErrorKind::Malformed, "IFD missing StripByteCounts")?,
         ),
     };
 

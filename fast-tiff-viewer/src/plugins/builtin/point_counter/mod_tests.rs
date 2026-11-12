@@ -383,7 +383,7 @@ fn no_points_no_rois() {
 
 /// A U8 stack of `planes` 2x2 planes described as `channels` x `slices` x the
 /// rest.
-fn stack(channels: usize, slices: usize, planes: usize) -> Stack {
+fn stack(channels: usize, slices: usize, planes: usize) -> Document {
     let opts =
         WriterOptions::new(2, 2, SampleType::U8).metadata(StackMetaWrite::new(channels, slices));
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
@@ -391,7 +391,7 @@ fn stack(channels: usize, slices: usize, planes: usize) -> Stack {
         w.write_frame_u8(&[p as u8; 4]).unwrap();
     }
     let bytes = w.finish().unwrap().into_inner();
-    Stack::from_bytes(bytes, "probe.tif".into(), false).unwrap()
+    Document::from_bytes(bytes, "probe.tif".into(), false).unwrap()
 }
 
 #[test]
@@ -411,7 +411,7 @@ fn a_time_series_frame_is_its_own_slice() {
 fn a_hyperstack_frame_is_its_first_channels_slice() {
     let s = stack(2, 1, 6);
     assert_eq!(
-        (s.display.dims.channels, s.display.dims.frames),
+        (s.display.dims().channels, s.display.dims().frames),
         (2, 3),
         "the probe is the shape it is meant to be"
     );
@@ -428,7 +428,7 @@ fn a_new_stack_has_no_overlay() {
 
 /// An RGB stack of `frames` 2x2 frames: one IFD a frame, its channels the
 /// samples inside it.
-fn rgb_stack(frames: usize) -> Stack {
+fn rgb_stack(frames: usize) -> Document {
     let opts = WriterOptions::new(2, 2, SampleType::U8)
         .samples_per_pixel(3)
         .metadata(StackMetaWrite::new(1, 1));
@@ -437,7 +437,7 @@ fn rgb_stack(frames: usize) -> Stack {
         w.write_frame_u8(&[f as u8; 12]).unwrap();
     }
     let bytes = w.finish().unwrap().into_inner();
-    Stack::from_bytes(bytes, "rgb.tif".into(), false).unwrap()
+    Document::from_bytes(bytes, "rgb.tif".into(), false).unwrap()
 }
 
 /// Every frame's position comes back to that frame, on every shape of stack
@@ -458,7 +458,7 @@ fn frame_of_position_inverts_imagej_position() {
                 frame_of_position(&s, imagej_position(&s, f)),
                 Some(f),
                 "frame {f} of {:?}",
-                s.display.dims
+                s.display.dims()
             );
         }
     }
@@ -478,9 +478,9 @@ fn every_plane_of_a_frame_is_that_frame() {
     let s = stack(2, 3, 12);
     assert_eq!(
         (
-            s.display.dims.channels,
-            s.display.dims.slices,
-            s.display.dims.frames
+            s.display.dims().channels,
+            s.display.dims().slices,
+            s.display.dims().frames
         ),
         (2, 3, 2),
         "the probe is the shape it is meant to be"
@@ -489,7 +489,7 @@ fn every_plane_of_a_frame_is_that_frame() {
     assert_eq!(frames, [[Some(0); 6], [Some(1); 6]].concat());
     // RGB: the channels are inside the IFD, so each IFD is a frame.
     let s = rgb_stack(3);
-    assert!(s.display.rgb);
+    assert!(s.display.rgb());
     let frames: Vec<Option<usize>> = (1..=3).map(|p| frame_of_position(&s, p)).collect();
     assert_eq!(frames, [Some(0), Some(1), Some(2)]);
 }
@@ -711,15 +711,16 @@ fn assert_same_counter(back: &PointCounter, want: &PointCounter) {
 /// overlay, saved as a TIFF (its `IJMetadata` block), opened again — the
 /// stack has the overlay — and loaded into a counter, which has the same
 /// groups, points and frames.
-fn round_trip(s: &mut Stack, counter: &PointCounter) -> PointCounter {
+fn round_trip(s: &mut Document, counter: &PointCounter) -> PointCounter {
     let rois = counter.to_rois(|f| imagej_position(s, f));
     s.overlay = rois;
     let bytes = crate::save::save_to_bytes(&crate::save::SaveSource::of(s), &mut |_| true)
         .expect("the save");
-    let back = Stack::from_bytes(bytes, "again.tif".into(), false).expect("the saved file opens");
-    assert_eq!(back.display.dims, s.display.dims, "the same axes");
+    let back =
+        Document::from_bytes(bytes, "again.tif".into(), false).expect("the saved file opens");
+    assert_eq!(back.display.dims(), s.display.dims(), "the same axes");
     assert_eq!(back.overlay.len(), s.overlay.len(), "the overlay came back");
-    PointCounter::from_rois(&back.overlay, back.display.dims.frames, |p| {
+    PointCounter::from_rois(&back.overlay, back.display.dims().frames, |p| {
         frame_of_position(&back, p)
     })
 }
@@ -837,14 +838,14 @@ fn a_group_on_one_frame_of_a_hyperstack_gets_its_plane() {
 }
 
 /// A stack of `channels` x `slices` x the rest, with `rois` as its overlay.
-fn with_overlay(channels: usize, slices: usize, planes: usize, rois: Vec<PointRoi>) -> Stack {
+fn with_overlay(channels: usize, slices: usize, planes: usize, rois: Vec<PointRoi>) -> Document {
     let opts = WriterOptions::new(2, 2, SampleType::U8)
         .metadata(StackMetaWrite::new(channels, slices).overlay(rois));
     let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
     for p in 0..planes {
         w.write_frame_u8(&[p as u8; 4]).unwrap();
     }
-    Stack::from_bytes(
+    Document::from_bytes(
         w.finish().unwrap().into_inner(),
         "overlay.tif".into(),
         false,

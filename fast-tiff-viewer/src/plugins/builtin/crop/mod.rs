@@ -20,11 +20,11 @@
 //! counts: a crop has one answer.
 
 use fasttiff_plugin_api::{
-    HostContext, ImageResult, Outcome, ParamDecl, Params, Plane, PlaneData, Plugin, PluginError,
-    PluginInfo, Roi,
+    HostContext, ImageSpec, ImageStream, Outcome, ParamDecl, Params, Plane, Plugin, PluginError,
+    PluginInfo, Roi, StreamTarget,
 };
 
-use crate::plugins::builtin::shared::Store;
+use crate::plugins::builtin::shared::{Store, Stored};
 
 /// What the status line says while the rectangle is being drawn.
 pub(crate) const PROMPT: &str =
@@ -79,7 +79,21 @@ impl Plugin for Crop {
         let n_planes = channels * slices * frames;
         let width = info.width as usize;
 
-        let mut planes: Vec<PlaneData> = Vec::with_capacity(n_planes);
+        // Every plane is kept, so the result is the stack's length: it is
+        // handed over a plane at a time as it is cut, never held whole.
+        let spec = ImageSpec {
+            width: w as u32,
+            height: h as u32,
+            channels,
+            slices,
+            frames,
+            pixel_type: store.pixel_type(),
+            channel_colors: Vec::new(),
+            metadata: Some(host.stack_info().clone()),
+            name: format!("{}-crop", host.stack_info().stem()),
+        };
+        let mut out = ImageStream::begin(host, spec)?;
+        let mut stored = Stored::default();
         let mut buf = Vec::new();
         let mut done = 0usize;
         for t in 0..frames {
@@ -89,27 +103,15 @@ impl Plugin for Crop {
                         return Ok(Outcome::Cancelled);
                     }
                     host.read_plane_f32(Plane::new(c, z, t), &mut buf)?;
-                    planes.push(store.plane(cut(&buf, width, (x0, y0, w, h))));
+                    let piece = cut(&buf, width, (x0, y0, w, h));
+                    out.push(host, store.encode(&piece, &mut stored))?;
                     done += 1;
                 }
             }
         }
 
         host.log(&format!("kept {w} x {h} pixels from ({x0}, {y0})"));
-        let image = ImageResult {
-            width: w as u32,
-            height: h as u32,
-            channels,
-            slices,
-            frames,
-            pixel_type: store.pixel_type(),
-            planes,
-            channel_colors: Vec::new(),
-            metadata: Some(host.stack_info().clone()),
-            name: format!("{}-crop", host.stack_info().stem()),
-        };
-        image.validate()?;
-        Ok(Outcome::NewDocument(Box::new(image)))
+        out.finish(StreamTarget::NewDocument)
     }
 }
 

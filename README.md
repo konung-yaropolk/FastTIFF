@@ -224,13 +224,12 @@ reader, and that takes a line of its own:
 cargo test -p oir-reader --no-default-features
 ```
 
-Two things sit outside the workspace on purpose and so are missed by the line
-above — both are worked examples rather than parts of the app, and both are
-kept building so they cannot quietly rot:
+One thing sits outside the workspace on purpose and so is missed by the line
+above: the example plugin, a worked example rather than part of the app. CI
+builds and tests it so it cannot quietly rot:
 
 ```sh
 cargo test --manifest-path plugins/example/Cargo.toml
-cargo test -p fast-tiff-viewer --features plugin-netpbm
 ```
 
 Lint:
@@ -241,7 +240,7 @@ cargo clippy --workspace --all-targets
 The web build is a different target and has its own `#[cfg]` paths, so lint it
 separately:
 ```sh
-cargo clippy --manifest-path FastTIFF-web/Cargo.toml --target wasm32-unknown-unknown --all-targets
+cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
 ```
 
 
@@ -269,7 +268,7 @@ one):
         │
   scivis-render     GPU pipelines, textures, ray-marching
         │
-  fast-tiff-viewer  stack model, channel settings, decode → GPU sync,
+  fast-tiff-viewer  document model, channel settings, decode → GPU sync,
         │           and the plugin host
   FastTIFF          the egui UI (lib) + the native binary
         │
@@ -287,9 +286,9 @@ on to build a plugin, and which therefore depend on nothing of ours:
 
 `FastTIFF` is a lib + bin: the library half holds the egui interface, and both
 the desktop binary and the web build construct the same `ViewerApp`. The UI is
-written once; what differs per host — window management, how a file is opened,
-the GPU option hook — is confined to a handful of `#[cfg(target_arch = "wasm32")]`
-sites.
+written once; what differs per host — window management, how a file is opened
+and saved, workers, new windows — is behind one seam, `FastTIFF/src/app/platform/`,
+which a single `cfg` points at the desktop or the browser implementation.
 
 - **`fast-tiff-lib/`** - pure parsing/decoding library, no GUI or GPU
   dependencies. IFD-chain walking, ImageJ metadata parsing, strip decoding
@@ -309,7 +308,7 @@ sites.
   offline with naga, so a broken shader fails `cargo test` instead of showing a
   blank canvas.
 - **`fast-tiff-viewer/`** — everything between "a TIFF on disk" and "pixels on the
-  GPU": the loaded-stack model, per-channel contrast/LUT derivation, c/z/t
+  GPU": the document model, per-channel contrast/LUT derivation, c/z/t
   interpretation, the display-channel → IFD mapping, 3D volume assembly,
   read-ahead, the camera, the playback clock, and the per-frame sync that drives
   the renderer. A `threads` feature (on by default) can be turned off for a
@@ -420,7 +419,14 @@ beside a file. Details are in [`oir-reader/README.md`](oir-reader/README.md).
   Unticking a channel takes its curve off the plot and greys out its slider, in
   both the panel and the window. Resizable — the plot takes whatever height the
   window is given. Log scaling is on by default: a 16-bit frame is mostly
-  background, and linear puts all of it in one bin at the edge.
+  background, and linear puts all of it in one bin at the edge. The curves are
+  binned from the decodes that already show the frame, so an open histogram
+  decodes again only what is not on screen: the channels you have unticked
+  (on an RGB frame, a second pass over the whole frame), and in 3D the 2D
+  frame. While a movie plays they are redrawn a few times a second. A frame
+  too large for one texture is binned from a coarse view of the whole of it,
+  and the window says so; zoomed in on such a frame after moving to another
+  one, there is no histogram until you zoom back out.
 - Z-slice selector when `slices > 1` (the scrubber itself always drives
   the time/frame axis).
 - **Copy the view as an image** — the toolbar's copy button, or **Ctrl+C**
@@ -430,8 +436,10 @@ beside a file. Details are in [`oir-reader/README.md`](oir-reader/README.md).
     every enabled channel through its own contrast window and LUT. Not a grab of
     what is on screen — that is at whatever zoom and pan you left it, and on a
     stack too large to upload whole it is only the window currently resident.
-    The frame is recomposed on the CPU for the copy, which is also why it does
-    not need a working GPU.
+    The frame is recomposed on the CPU for the copy, a band of rows at a time,
+    which is also why it does not need a working GPU. A frame of more pixels
+    than 8192 x 8192 (256 MB as an image) is refused with a message rather
+    than copied: crop it first to copy part of it.
   - In **3D** it is the *view*, because for a ray-march there is nothing else to
     copy: there is no original size, and the camera, projection and brightness
     are the picture. So it takes the 3D panel exactly as framed.
@@ -749,16 +757,6 @@ names `builtin-plugins` again, and the application refuses to compile with no
 plugins at all unless `--features plugins-none` says that was deliberate, so a
 forgotten one stops the build rather than shipping a binary that quietly cannot
 do half of what it is for.
-
-A worked example lives among them:
-[`plugins/builtin/netpbm/`](fast-tiff-viewer/src/plugins/builtin/netpbm/mod.rs)
-reads PBM/PGM/PPM as a built-in importer. It is a demonstration rather than a
-format this viewer needs, so it is off by default and deliberately not part of
-`builtin-plugins`:
-
-```sh
-cargo test -p fast-tiff-viewer --features plugin-netpbm
-```
 
 The shared-library lane is native-only — there is no `dlopen` in a browser — so
 the web build gets the built-ins and no way to add to them.

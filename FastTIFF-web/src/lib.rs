@@ -7,6 +7,11 @@
 //!
 //! The desktop entry point is `FastTIFF/src/main.rs`; compare the two and the
 //! whole difference between the platforms is visible at a glance.
+//!
+//! Empty on every other target. `eframe::WebRunner` exists only on wasm32, and
+//! this crate is a workspace member, so a host `cargo test --workspace` has to
+//! be able to build it — as nothing.
+#![cfg(target_arch = "wasm32")]
 
 use wasm_bindgen::prelude::*;
 
@@ -31,7 +36,7 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<WebHandle, JsVa
     // a path from its argv — instead of appearing empty and filling in.
     let opened = fasttiff::web_open::take_pending()
         .await
-        .map(|(bytes, name)| fasttiff::app::Opened::Bytes(bytes, name));
+        .map(|(bytes, name)| fasttiff::app::Opened::Bytes(bytes.into(), name));
 
     let mut web_options = eframe::WebOptions::default();
     fasttiff::render::tune_web_options(&mut web_options);
@@ -44,7 +49,7 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<WebHandle, JsVa
             Box::new(|cc| {
                 // Theme + interface scale. The same call the desktop binary
                 // makes — it is what decides that the web build draws its
-                // chrome at 150%, so the difference lives in the shared crate
+                // chrome at 125%, so the difference lives in the shared crate
                 // rather than here.
                 fasttiff::install_chrome(&cc.egui_ctx);
                 let render = fasttiff::render::init(cc);

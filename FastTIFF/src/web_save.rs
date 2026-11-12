@@ -8,10 +8,14 @@
 //!
 //! So the two halves swap places. The encode is the same
 //! ([`fast_tiff_viewer::save`] produces identical bytes either way); what
-//! changes is that the name is decided here rather than by the user, and the
-//! destination is decided by the browser rather than by us. Someone who wants
-//! to choose both turns on "ask where to save each file" and gets the dialog
-//! back — from the browser, which is the only thing that can show it.
+//! changes is that the name is decided by the app rather than by the user (in
+//! `app/platform/naming.rs`, which is compiled and tested on every target),
+//! and the destination is decided by the browser rather than by us. Someone
+//! who wants to choose both turns on "ask where to save each file" and gets
+//! the dialog back — from the browser, which is the only thing that can show
+//! it.
+//!
+//! Browser-only, as a module: everything here is `web-sys`.
 //!
 //! # How a `Vec<u8>` becomes a download
 //!
@@ -41,14 +45,6 @@
 //! Not *never*, either: these are whole microscopy stacks, and a blob that is
 //! never released is a copy of one retained until the tab is closed.
 
-//! # What is compiled where
-//!
-//! Everything that touches a browser is `wasm32`-only. [`suggested_name`] is
-//! not: it is string handling, it is the part most likely to be wrong on a file
-//! called `scan.ome.tif`, and it follows `app::fit_to_panel` in being compiled
-//! under `test` on every target so that it stays covered.
-
-#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
 /// How long the blob is kept alive after the click, in milliseconds.
@@ -56,23 +52,15 @@ use wasm_bindgen::JsCast;
 /// The download only needs the URL to resolve, which happens as the click is
 /// dispatched; this is slack for a browser that defers that to a later task.
 /// Ten seconds is far more than any of them take and still bounded.
-#[cfg(target_arch = "wasm32")]
 const REVOKE_AFTER_MS: i32 = 10_000;
 
-/// Offer `bytes` to the user as a download named `name`.
+/// Offer `bytes` to the user as a download named `name`, of media type
+/// `mime` — which a download manager may go by in naming or opening it.
 ///
 /// `Err` is "the browser would not take it", which is a thing to report rather
 /// than retry — the status line is where it belongs, because by this point the
 /// encode has already succeeded and the work is not lost, merely undelivered.
-#[cfg(target_arch = "wasm32")]
-pub fn download(bytes: &[u8], name: &str) -> Result<(), String> {
-    download_as(bytes, name, "image/tiff")
-}
-
-/// [`download`] for a file that is not a TIFF: `mime` is its media type, which
-/// a download manager may go by in naming or opening it.
-#[cfg(target_arch = "wasm32")]
-pub fn download_as(bytes: &[u8], name: &str, mime: &str) -> Result<(), String> {
+pub fn download(bytes: &[u8], name: &str, mime: &str) -> Result<(), String> {
     let window = web_sys::window().ok_or("there is no window to save from")?;
     let document = window.document().ok_or("there is no page to save from")?;
 
@@ -127,7 +115,6 @@ pub fn download_as(bytes: &[u8], name: &str, mime: &str) -> Result<(), String> {
 /// already been handed over, and the only consequence is that one blob is held
 /// until the tab closes. Telling the user their file did not save, when it did,
 /// would be the worse of the two outcomes.
-#[cfg(target_arch = "wasm32")]
 fn revoke_later(window: &web_sys::Window, url: String) {
     let revoke = wasm_bindgen::closure::Closure::once_into_js(move || {
         let _ = web_sys::Url::revoke_object_url(&url);
@@ -137,60 +124,3 @@ fn revoke_later(window: &web_sys::Window, url: String) {
         REVOKE_AFTER_MS,
     );
 }
-
-/// The name to suggest for a download of `shown_as`.
-///
-/// `shown_as` is what the window is titled with, which for a browser document
-/// is the name it arrived under and for a plugin's result is the name the
-/// plugin gave it. Either way it is the name the user is looking at, so it is
-/// the one to offer back — with a `.tif` on it, because what is being written
-/// is a TIFF whatever the source was called.
-///
-/// Separated from [`download`] so that the naming can be tested on every
-/// target: it is ordinary string handling, and the part most likely to be
-/// wrong on a file called `scan.ome.tif` or on one called nothing at all.
-pub fn suggested_name(shown_as: &str) -> String {
-    let trimmed = shown_as.trim();
-    // Everything before the first dot, not the last: `scan.ome.tif` is an
-    // OME-TIFF and its stem is `scan`, where taking the last would leave
-    // `scan.ome` and produce `scan.ome.tif` again — which is right by accident
-    // here and wrong for `scan.ome.tiff`.
-    let stem = trimmed.split('/').next_back().unwrap_or(trimmed);
-    let stem = stem.split('\\').next_back().unwrap_or(stem);
-    let stem = stem.split('.').next().unwrap_or(stem).trim();
-    if stem.is_empty() {
-        "stack.tif".to_string()
-    } else {
-        format!("{stem}.tif")
-    }
-}
-
-/// The download name for a path a *plugin* chose.
-///
-/// Unlike [`suggested_name`], this keeps whatever the plugin called the file,
-/// extension and all. A plugin that asks the host to write `derivative.tif`
-/// gets `derivative.tif` on both platforms, which is the point: the name is the
-/// plugin's output, not the host's suggestion, and a web build that quietly
-/// renamed it would make the same plugin produce two different results.
-///
-/// Only the last component survives. A browser download cannot choose a
-/// directory, and a `/` left in the `download` attribute is ignored by some
-/// browsers and rewritten by others — so the directory is dropped deliberately
-/// rather than passed along to be mangled.
-pub fn name_from_path(path: &str) -> String {
-    let last = path
-        .split(['/', '\\'])
-        .next_back()
-        .unwrap_or(path)
-        .trim()
-        .trim_end_matches('.');
-    if last.is_empty() {
-        "result.tif".to_string()
-    } else {
-        last.to_string()
-    }
-}
-
-#[cfg(test)]
-#[path = "web_save_tests.rs"]
-mod tests;

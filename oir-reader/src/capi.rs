@@ -34,10 +34,9 @@
 
 #![allow(unsafe_code)]
 
-use std::any::Any;
+use c_api_support::{status, Errors};
 use std::cell::RefCell;
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::ffi::{c_char, c_int, c_void, CString};
 
 use crate::{
     Access, Acquisition, BlockSource, Channel, Error, ErrorKind, Options, Planes, ReadPath, Record,
@@ -45,17 +44,17 @@ use crate::{
 };
 
 /// The call did what it was asked.
-pub const OIR_OK: c_int = 0;
+pub const OIR_OK: c_int = status::OK;
 /// The progress callback asked to stop; nothing was produced.
-pub const OIR_CANCELLED: c_int = 1;
+pub const OIR_CANCELLED: c_int = status::CANCELLED;
 /// A pointer, size, index or enumeration value the call cannot take.
-pub const OIR_INVALID_ARGUMENT: c_int = 2;
+pub const OIR_INVALID_ARGUMENT: c_int = status::INVALID_ARGUMENT;
 /// The call cannot work in this build: reading by path where there is no
 /// filesystem (`wasm32-unknown-unknown`). Read the bytes with
 /// [`oir_read_bytes`] there.
-pub const OIR_UNAVAILABLE: c_int = 3;
+pub const OIR_UNAVAILABLE: c_int = status::UNAVAILABLE;
 /// The reader failed in a way that is not the file's fault: a panic inside it.
-pub const OIR_FAILED: c_int = 4;
+pub const OIR_FAILED: c_int = status::FAILED;
 /// A part could not be opened or read ([`ErrorKind::Io`]).
 pub const OIR_IO_ERROR: c_int = 5;
 /// Not an OIR file: the signature is missing ([`ErrorKind::NotOir`]).
@@ -265,20 +264,9 @@ thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
 }
 
-/// Record why a call failed, for [`oir_last_error`], and return its status.
-fn fail(status: c_int, why: impl Into<String>) -> c_int {
-    let why = CString::new(why.into().replace('\0', " ")).unwrap_or_default();
-    // `try_with`: a call from a thread being torn down (a C++ `thread_local`
-    // destructor) finds the slot gone, and `with` would panic there, which
-    // past `extern "C"` is an abort. The status still comes back.
-    let _ = LAST_ERROR.try_with(|e| *e.borrow_mut() = why);
-    status
-}
-
-/// [`fail`], for a call that returns a length: the status, negated.
-fn fail_len(status: c_int, why: impl Into<String>) -> isize {
-    -(fail(status, why) as isize)
-}
+/// This library's failure reporting: its own last-error slot above, the
+/// shared scaffolding in [`c_api_support::Errors`].
+static ERRORS: Errors = Errors::new(&LAST_ERROR, OIR_INVALID_ARGUMENT, OIR_FAILED, "the reader");
 
 /// The status for a reader error, and the reason with the part it was reading
 /// and the operating system's own words.
@@ -297,27 +285,7 @@ fn fail_read(e: &Error) -> c_int {
     if let Some(cause) = std::error::Error::source(e) {
         why = format!("{why} ({cause})");
     }
-    fail(status, why)
-}
-
-fn panicked(panic: Box<dyn Any + Send>) -> String {
-    let why = panic
-        .downcast_ref::<&str>()
-        .map(|s| s.to_string())
-        .or_else(|| panic.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "no message".to_string());
-    format!("the reader panicked: {why}")
-}
-
-/// Run `work`, turning a panic into [`OIR_FAILED`] rather than letting it
-/// unwind into a caller that has no idea what one is.
-fn guarded(work: impl FnOnce() -> c_int) -> c_int {
-    catch_unwind(AssertUnwindSafe(work)).unwrap_or_else(|p| fail(OIR_FAILED, panicked(p)))
-}
-
-/// [`guarded`], for a call that returns a length.
-fn guarded_len(work: impl FnOnce() -> isize) -> isize {
-    catch_unwind(AssertUnwindSafe(work)).unwrap_or_else(|p| fail_len(OIR_FAILED, panicked(p)))
+    ERRORS.fail(status, why)
 }
 
 /// The acquisition behind `a`, or the status to return for a null one.
@@ -329,63 +297,7 @@ fn guarded_len(work: impl FnOnce() -> isize) -> isize {
 unsafe fn handle<'a>(a: *const OirAcquisition) -> Result<&'a Acquisition, c_int> {
     a.as_ref()
         .map(|a| &a.inner)
-        .ok_or_else(|| fail(OIR_INVALID_ARGUMENT, "the acquisition handle is NULL"))
-}
-
-/// A NUL-terminated UTF-8 argument, or the status to return for it.
-///
-/// # Safety
-///
-/// `s` is null or points to a NUL-terminated string.
-unsafe fn text_arg<'a>(s: *const c_char, name: &str) -> Result<&'a str, c_int> {
-    if s.is_null() {
-        return Err(fail(OIR_INVALID_ARGUMENT, format!("{name} is NULL")));
-    }
-    CStr::from_ptr(s)
-        .to_str()
-        .map_err(|_| fail(OIR_INVALID_ARGUMENT, format!("{name} is not UTF-8")))
-}
-
-/// Hand `s` to C the way `snprintf` would: as much as fits in `cap` bytes with
-/// a NUL after it — cut at a character boundary, never inside one — and the
-/// length of the whole, without the NUL, as the answer.
-///
-/// # Safety
-///
-/// `buf` is null or points to `cap` writable bytes.
-unsafe fn put_text(s: &str, buf: *mut c_char, cap: usize) -> isize {
-    if buf.is_null() {
-        if cap != 0 {
-            return fail_len(
-                OIR_INVALID_ARGUMENT,
-                format!("buf is NULL but cap is {cap}; pass 0 to ask for the length"),
-            );
-        }
-    } else if cap != 0 {
-        let mut n = s.len().min(cap - 1);
-        while !s.is_char_boundary(n) {
-            n -= 1;
-        }
-        std::ptr::copy_nonoverlapping(s.as_ptr(), buf.cast::<u8>(), n);
-        buf.add(n).write(0);
-    }
-    // No string is longer than isize::MAX bytes.
-    s.len() as isize
-}
-
-/// Element `i` of `list`, or the status to return for one past the end.
-fn index_in<'a, T>(list: &'a [T], i: usize, what: &str) -> Result<&'a T, c_int> {
-    list.get(i).ok_or_else(|| {
-        fail(
-            OIR_INVALID_ARGUMENT,
-            format!("{what} {i} is past the end; there are {}", list.len()),
-        )
-    })
-}
-
-/// The status of a `Result<_, c_int>` as a length.
-fn len_of(r: Result<isize, c_int>) -> isize {
-    r.unwrap_or_else(|status| -(status as isize))
+        .ok_or_else(|| ERRORS.fail(OIR_INVALID_ARGUMENT, "the acquisition handle is NULL"))
 }
 
 /// Why the last call on this thread that did not return `OIR_OK` failed, as a
@@ -395,9 +307,7 @@ fn len_of(r: Result<isize, c_int>) -> isize {
 /// text to keep it.
 #[no_mangle]
 pub extern "C" fn oir_last_error() -> *const c_char {
-    LAST_ERROR
-        .try_with(|e| e.borrow().as_ptr())
-        .unwrap_or(c"".as_ptr())
+    ERRORS.last_error()
 }
 
 /// The library's version, `"major.minor.patch"`, NUL-terminated and static.
@@ -437,7 +347,7 @@ pub unsafe extern "C" fn oir_is_oir(head: *const u8, len: usize) -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn oir_options_default(out: *mut OirOptions) -> c_int {
     if out.is_null() {
-        return fail(OIR_INVALID_ARGUMENT, "out is NULL");
+        return ERRORS.fail(OIR_INVALID_ARGUMENT, "out is NULL");
     }
     out.write(OirOptions {
         access: OIR_ACCESS_AUTO,
@@ -467,12 +377,12 @@ pub unsafe extern "C" fn oir_read(
     user: *mut c_void,
     out: *mut *mut OirAcquisition,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         if out.is_null() {
-            return fail(OIR_INVALID_ARGUMENT, "out is NULL");
+            return ERRORS.fail(OIR_INVALID_ARGUMENT, "out is NULL");
         }
         out.write(std::ptr::null_mut());
-        let path = match text_arg(path, "path") {
+        let path = match ERRORS.text_arg(path, "path") {
             Ok(p) => p,
             Err(status) => return status,
         };
@@ -480,11 +390,11 @@ pub unsafe extern "C" fn oir_read(
             None => Options::new(),
             Some(o) => match o.to_options() {
                 Ok(o) => o,
-                Err(why) => return fail(OIR_INVALID_ARGUMENT, why),
+                Err(why) => return ERRORS.fail(OIR_INVALID_ARGUMENT, why),
             },
         };
         if NO_FILESYSTEM {
-            return fail(
+            return ERRORS.fail(
                 OIR_UNAVAILABLE,
                 "this build has no filesystem to read a path from; use oir_read_bytes",
             );
@@ -529,18 +439,18 @@ pub unsafe extern "C" fn oir_read_bytes(
     user: *mut c_void,
     out: *mut *mut OirAcquisition,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         if out.is_null() {
-            return fail(OIR_INVALID_ARGUMENT, "out is NULL");
+            return ERRORS.fail(OIR_INVALID_ARGUMENT, "out is NULL");
         }
         out.write(std::ptr::null_mut());
         let mut slices: Vec<&[u8]> = Vec::new();
         if n_parts > 0 {
             if parts.is_null() || lens.is_null() {
-                return fail(OIR_INVALID_ARGUMENT, "parts or lens is NULL");
+                return ERRORS.fail(OIR_INVALID_ARGUMENT, "parts or lens is NULL");
             }
             if n_parts > isize::MAX as usize / std::mem::size_of::<usize>() {
-                return fail(
+                return ERRORS.fail(
                     OIR_INVALID_ARGUMENT,
                     "n_parts is larger than memory can hold",
                 );
@@ -549,14 +459,14 @@ pub unsafe extern "C" fn oir_read_bytes(
             let lens = std::slice::from_raw_parts(lens, n_parts);
             for (i, (&p, &len)) in parts.iter().zip(lens).enumerate() {
                 if len > isize::MAX as usize {
-                    return fail(
+                    return ERRORS.fail(
                         OIR_INVALID_ARGUMENT,
                         format!("part {i} is larger than memory can hold"),
                     );
                 }
                 if p.is_null() {
                     if len != 0 {
-                        return fail(
+                        return ERRORS.fail(
                             OIR_INVALID_ARGUMENT,
                             format!("part {i} is NULL but {len} bytes long"),
                         );
@@ -610,7 +520,7 @@ pub unsafe extern "C" fn oir_shape(a: *const OirAcquisition, out: *mut OirShape)
         Err(status) => return status,
     };
     if out.is_null() {
-        return fail(OIR_INVALID_ARGUMENT, "out is NULL");
+        return ERRORS.fail(OIR_INVALID_ARGUMENT, "out is NULL");
     }
     let s = a.shape();
     out.write(OirShape {
@@ -652,7 +562,7 @@ pub unsafe extern "C" fn oir_plane_index(
         Err(status) => return status,
     };
     if index.is_null() {
-        return fail(OIR_INVALID_ARGUMENT, "index is NULL");
+        return ERRORS.fail(OIR_INVALID_ARGUMENT, "index is NULL");
     }
     let s = a.shape();
     match s.plane_index(c, z, t) {
@@ -660,7 +570,7 @@ pub unsafe extern "C" fn oir_plane_index(
             index.write(i);
             OIR_OK
         }
-        None => fail(
+        None => ERRORS.fail(
             OIR_INVALID_ARGUMENT,
             format!(
                 "channel {c}, slice {z}, frame {t} is outside a stack of {} channel(s), {} slice(s), {} frame(s)",
@@ -697,7 +607,7 @@ fn plane_bytes(planes: &Planes, i: usize) -> Option<&[u8]> {
 unsafe fn plane_of<'a>(a: *const OirAcquisition, i: usize) -> Result<&'a [u8], c_int> {
     let a = handle(a)?;
     plane_bytes(a.planes(), i).ok_or_else(|| {
-        fail(
+        ERRORS.fail(
             OIR_INVALID_ARGUMENT,
             format!("plane {i} is past the end; there are {}", a.planes().len()),
         )
@@ -724,10 +634,10 @@ pub unsafe extern "C" fn oir_plane_copy(
         Err(status) => return status,
     };
     if out.is_null() {
-        return fail(OIR_INVALID_ARGUMENT, "out is NULL");
+        return ERRORS.fail(OIR_INVALID_ARGUMENT, "out is NULL");
     }
     if out_bytes < plane.len() {
-        return fail(
+        return ERRORS.fail(
             OIR_INVALID_ARGUMENT,
             format!("a plane needs {} bytes, not {out_bytes}", plane.len()),
         );
@@ -752,7 +662,7 @@ pub unsafe extern "C" fn oir_plane_data(
     data: *mut *const c_void,
 ) -> c_int {
     if data.is_null() {
-        return fail(OIR_INVALID_ARGUMENT, "data is NULL");
+        return ERRORS.fail(OIR_INVALID_ARGUMENT, "data is NULL");
     }
     data.write(std::ptr::null());
     match plane_of(a, i) {
@@ -780,7 +690,7 @@ pub unsafe extern "C" fn oir_record_info(
         Err(status) => return status,
     };
     if out.is_null() {
-        return fail(OIR_INVALID_ARGUMENT, "out is NULL");
+        return ERRORS.fail(OIR_INVALID_ARGUMENT, "out is NULL");
     }
     let r = a.record();
     out.write(OirRecordInfo {
@@ -824,10 +734,10 @@ pub unsafe extern "C" fn oir_frame_times(
         return OIR_OK;
     }
     if out.is_null() {
-        return fail(OIR_INVALID_ARGUMENT, "out is NULL");
+        return ERRORS.fail(OIR_INVALID_ARGUMENT, "out is NULL");
     }
     if len < times.len() {
-        return fail(
+        return ERRORS.fail(
             OIR_INVALID_ARGUMENT,
             format!("there are {} frame times, and room for {len}", times.len()),
         );
@@ -891,11 +801,11 @@ pub unsafe extern "C" fn oir_record_string(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    len_of((|| {
+    c_api_support::len_of((|| {
         let a = handle(a)?;
-        let value =
-            record_field(a.record(), field).map_err(|why| fail(OIR_INVALID_ARGUMENT, why))?;
-        Ok(put_text(value.unwrap_or(""), buf, cap))
+        let value = record_field(a.record(), field)
+            .map_err(|why| ERRORS.fail(OIR_INVALID_ARGUMENT, why))?;
+        Ok(ERRORS.put_text(value.unwrap_or(""), buf, cap))
     })())
 }
 
@@ -916,11 +826,12 @@ pub unsafe extern "C" fn oir_channel_string(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    len_of((|| {
+    c_api_support::len_of((|| {
         let a = handle(a)?;
-        let channel = index_in(a.record().channels(), index, "channel")?;
-        let value = channel_field(channel, field).map_err(|why| fail(OIR_INVALID_ARGUMENT, why))?;
-        Ok(put_text(value.unwrap_or(""), buf, cap))
+        let channel = ERRORS.index_in(a.record().channels(), index, "channel")?;
+        let value =
+            channel_field(channel, field).map_err(|why| ERRORS.fail(OIR_INVALID_ARGUMENT, why))?;
+        Ok(ERRORS.put_text(value.unwrap_or(""), buf, cap))
     })())
 }
 
@@ -938,10 +849,10 @@ pub unsafe extern "C" fn oir_event_name(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    len_of((|| {
+    c_api_support::len_of((|| {
         let a = handle(a)?;
-        let event = index_in(a.record().events(), index, "event")?;
-        Ok(put_text(event.name(), buf, cap))
+        let event = ERRORS.index_in(a.record().events(), index, "event")?;
+        Ok(ERRORS.put_text(event.name(), buf, cap))
     })())
 }
 
@@ -963,9 +874,9 @@ pub unsafe extern "C" fn oir_event_time_ms(
         Err(status) => return status,
     };
     if time_ms.is_null() {
-        return fail(OIR_INVALID_ARGUMENT, "time_ms is NULL");
+        return ERRORS.fail(OIR_INVALID_ARGUMENT, "time_ms is NULL");
     }
-    match index_in(a.record().events(), index, "event") {
+    match ERRORS.index_in(a.record().events(), index, "event") {
         Ok(e) => {
             time_ms.write(e.time_ms());
             OIR_OK
@@ -992,12 +903,12 @@ pub unsafe extern "C" fn oir_fluoview_text(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    guarded_len(|| {
-        len_of((|| {
+    ERRORS.guarded_len(|| {
+        c_api_support::len_of((|| {
             let a = handle(a)?;
-            let name = text_arg(file_name, "file_name")?;
+            let name = ERRORS.text_arg(file_name, "file_name")?;
             let text = a.fluoview_text(name).unwrap_or_default();
-            Ok(put_text(&text, buf, cap))
+            Ok(ERRORS.put_text(&text, buf, cap))
         })())
     })
 }
@@ -1029,9 +940,9 @@ pub unsafe extern "C" fn oir_part_info(
         Err(status) => return status,
     };
     if out.is_null() {
-        return fail(OIR_INVALID_ARGUMENT, "out is NULL");
+        return ERRORS.fail(OIR_INVALID_ARGUMENT, "out is NULL");
     }
-    let p = match index_in(a.parts(), index, "part") {
+    let p = match ERRORS.index_in(a.parts(), index, "part") {
         Ok(p) => p,
         Err(status) => return status,
     };
@@ -1066,11 +977,11 @@ pub unsafe extern "C" fn oir_part_path(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    len_of((|| {
+    c_api_support::len_of((|| {
         let a = handle(a)?;
-        let part = index_in(a.parts(), index, "part")?;
+        let part = ERRORS.index_in(a.parts(), index, "part")?;
         let path = part.path().map(|p| p.to_string_lossy()).unwrap_or_default();
-        Ok(put_text(&path, buf, cap))
+        Ok(ERRORS.put_text(&path, buf, cap))
     })())
 }
 
@@ -1090,19 +1001,19 @@ pub unsafe extern "C" fn oir_part_map_error(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    len_of((|| {
+    c_api_support::len_of((|| {
         let a = handle(a)?;
-        let part = index_in(a.parts(), index, "part")?;
-        Ok(put_text(part.map_error().unwrap_or(""), buf, cap))
+        let part = ERRORS.index_in(a.parts(), index, "part")?;
+        Ok(ERRORS.put_text(part.map_error().unwrap_or(""), buf, cap))
     })())
 }
 
 /// The files of the acquisition `path` begins, without reading them
 /// ([`acquisition_parts`](crate::acquisition_parts)), or the status to return.
 unsafe fn parts_of(path: *const c_char) -> Result<Vec<std::path::PathBuf>, c_int> {
-    let path = text_arg(path, "path")?;
+    let path = ERRORS.text_arg(path, "path")?;
     if NO_FILESYSTEM {
-        return Err(fail(
+        return Err(ERRORS.fail(
             OIR_UNAVAILABLE,
             "this build has no filesystem to look for parts in",
         ));
@@ -1123,9 +1034,9 @@ pub unsafe extern "C" fn oir_acquisition_part_count(
     path: *const c_char,
     count: *mut usize,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         if count.is_null() {
-            return fail(OIR_INVALID_ARGUMENT, "count is NULL");
+            return ERRORS.fail(OIR_INVALID_ARGUMENT, "count is NULL");
         }
         match parts_of(path) {
             Ok(parts) => {
@@ -1152,11 +1063,11 @@ pub unsafe extern "C" fn oir_acquisition_part(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    guarded_len(|| {
-        len_of((|| {
+    ERRORS.guarded_len(|| {
+        c_api_support::len_of((|| {
             let parts = parts_of(path)?;
-            let part = index_in(&parts, index, "part")?;
-            Ok(put_text(&part.to_string_lossy(), buf, cap))
+            let part = ERRORS.index_in(&parts, index, "part")?;
+            Ok(ERRORS.put_text(&part.to_string_lossy(), buf, cap))
         })())
     })
 }

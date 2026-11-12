@@ -23,10 +23,10 @@
 
 mod params;
 
-use super::shared;
+use super::shared::{self, Store, Stored};
 use fasttiff_plugin_api::{
-    HostContext, ImageResult, Outcome, ParamDecl, Params, PixelType, Plane, PlaneData, Plugin,
-    PluginError, PluginInfo,
+    HostContext, ImageSpec, ImageStream, Outcome, ParamDecl, Params, Plane, Plugin, PluginError,
+    PluginInfo, StreamTarget,
 };
 use suite2p_registration::{
     area::common_area, compute_reference, fft::Fft2, masks::reference_filters_normed, nonrigid,
@@ -45,95 +45,6 @@ fn workers_available() -> usize {
         .unwrap_or(1)
 }
 
-/// How a corrected plane is stored in the result.
-///
-/// **The file's own width, always.** A stabilised recording is the recording
-/// with its frames moved: a 16-bit acquisition should come back 16-bit, the
-/// same size, and open in whatever opened the original. Widening it to float
-/// doubles every byte of it — on disk, through the handover to the new window,
-/// and in that window's memory for as long as it is open.
-///
-/// What that costs depends on the correction:
-///
-/// * A **rigid** run is `np.roll`. Every sample is the file's own, moved; no
-///   arithmetic touches a value, and `f32` carries every `u8`, `u16` and `i16`
-///   exactly. Nothing is lost at all.
-/// * A **non-rigid** run interpolates between pixels, so it makes values that
-///   were never in the file, and storing them at the source's width rounds
-///   them — by at most half a sample step. suite2p does the same: its own
-///   `reg_tif` output is `int16`, not float.
-///
-/// A float source stays float, having nothing to round to.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Store {
-    U8,
-    U16,
-    /// Signed 16-bit. It has no `PlaneData` arm of its own: the samples travel
-    /// as their raw bit pattern in [`PlaneData::U16`] with the result declaring
-    /// [`PixelType::I16`], which is what the contract asks for.
-    I16,
-    F32,
-}
-
-impl Store {
-    /// What to store a result in: whatever the file holds.
-    fn of(source: PixelType) -> Self {
-        match source {
-            PixelType::U8 => Store::U8,
-            PixelType::U16 => Store::U16,
-            PixelType::I16 => Store::I16,
-            PixelType::F32 => Store::F32,
-        }
-    }
-
-    fn pixel_type(self) -> PixelType {
-        match self {
-            Store::U8 => PixelType::U8,
-            Store::U16 => PixelType::U16,
-            Store::I16 => PixelType::I16,
-            Store::F32 => PixelType::F32,
-        }
-    }
-
-    /// Move a corrected plane into the result at this width.
-    ///
-    /// Rounded to nearest rather than truncated: an interpolated 41.6 is nearer
-    /// 42 than 41, and truncating would darken every warped frame by half a
-    /// sample on average. A rigid run's samples are already whole, so rounding
-    /// leaves them alone.
-    ///
-    /// The clamp cannot bite on a plane that came from a file of this type — it
-    /// is there so that a plane which somehow did not still produces a picture
-    /// rather than a wrapped-around one.
-    fn plane(self, v: Vec<f32>) -> PlaneData {
-        match self {
-            Store::U8 => PlaneData::U8(v.iter().map(|&x| whole(x, 0.0, 255.0) as u8).collect()),
-            Store::U16 => {
-                PlaneData::U16(v.iter().map(|&x| whole(x, 0.0, 65535.0) as u16).collect())
-            }
-            // The bit pattern, as `PlaneData` documents it: `i16` first, then
-            // those same sixteen bits read as `u16`.
-            Store::I16 => PlaneData::U16(
-                v.iter()
-                    .map(|&x| whole(x, -32768.0, 32767.0) as i16 as u16)
-                    .collect(),
-            ),
-            Store::F32 => PlaneData::F32(v),
-        }
-    }
-}
-
-/// A sample rounded to the nearest whole number and held inside `lo..=hi`.
-///
-/// `NaN` comes out as `lo` rather than as a cast's zero, which for signed data
-/// would be mid-grey — a hole in a frame that looks like data.
-fn whole(x: f32, lo: f32, hi: f32) -> f32 {
-    if x.is_nan() {
-        return lo;
-    }
-    x.clamp(lo, hi).round()
-}
-
 /// How one batch's planes are corrected and stored — the same for every chunk
 /// of it.
 struct Correction<'a> {
@@ -145,19 +56,26 @@ struct Correction<'a> {
     store: Store,
 }
 
-/// Correct a chunk of read planes and move them into the result.
+/// Correct a chunk of read planes and hand them to the host as the result's
+/// next planes.
 ///
 /// Split out only because it is called from two places — once when the chunk
 /// fills and once for whatever is left at the end of a batch — and getting one
 /// of those wrong loses planes off the end of the recording.
+///
+/// The chunk is the most of the result this plugin ever holds: each corrected
+/// plane is stored at the file's width into `stored` and pushed, and the host
+/// has written it before the next one is made.
 fn flush(
     pending: &mut Vec<Vec<f32>>,
     at: &mut Vec<usize>,
-    out: &mut Vec<PlaneData>,
+    host: &mut dyn HostContext,
+    out: &mut ImageStream,
+    stored: &mut Stored,
     how: &Correction<'_>,
-) {
+) -> Result<(), PluginError> {
     if pending.is_empty() {
-        return;
+        return Ok(());
     }
     suite2p_registration::pipeline::apply_batch(
         pending,
@@ -168,8 +86,11 @@ fn flush(
         how.warp,
         how.settings,
     );
-    out.extend(pending.drain(..).map(|v| how.store.plane(v)));
+    for v in pending.drain(..) {
+        out.push(host, how.store.encode(&v, stored))?;
+    }
     at.clear();
+    Ok(())
 }
 
 /// Motion correction for a timelapse, by suite2p's method.
@@ -194,6 +115,10 @@ impl Plugin for Stabilize {
     }
 
     fn run(&mut self, host: &mut dyn HostContext, params: &Params) -> Result<Outcome, PluginError> {
+        // The GPU context suite2p keeps between batches goes when the run
+        // does, however it ends.
+        #[cfg(feature = "gpu-registration")]
+        let _release = ReleaseGpuOnDrop;
         let info = host.image();
         // The time axis is what moves. A single frame has no motion to correct,
         // and a Z stack's slices are different depths rather than the same
@@ -336,8 +261,54 @@ impl Plugin for Stabilize {
 
         let slices = info.slices.max(1);
         let channels = info.channels.max(1);
+        // How a corrected plane is stored in the result (`shared::Store`).
+        //
+        // **The file's own width, always.** A stabilised recording is the recording
+        // with its frames moved: a 16-bit acquisition should come back 16-bit, the
+        // same size, and open in whatever opened the original. Widening it to float
+        // doubles every byte of it — on disk, through the handover to the new window,
+        // and in that window's memory for as long as it is open.
+        //
+        // What that costs depends on the correction:
+        //
+        // * A **rigid** run is `np.roll`. Every sample is the file's own, moved; no
+        //   arithmetic touches a value, and `f32` carries every `u8`, `u16` and `i16`
+        //   exactly. Nothing is lost at all.
+        // * A **non-rigid** run interpolates between pixels, so it makes values that
+        //   were never in the file, and storing them at the source's width rounds
+        //   them — by at most half a sample step. suite2p does the same: its own
+        //   `reg_tif` output is `int16`, not float.
+        //
+        // A float source stays float, having nothing to round to.
         let store = Store::of(info.pixel_type);
-        let mut planes: Vec<PlaneData> = Vec::with_capacity(channels * slices * info.frames);
+        // The result, declared up front and handed to the host a plane at a
+        // time as each is corrected: it is the recording's size, and holding
+        // it to hand back at the end is what made a long recording need two or
+        // three times its size in memory. The file's metadata goes with it — a
+        // stabilised recording is the recording, so its calibration still
+        // holds. A crop's frame is not known until every frame is measured, so
+        // that result is begun then.
+        let source = host.stack_info().clone();
+        let name = format!("{}-stabilized", source.stem());
+        let spec_of = |width: u32, height: u32| ImageSpec {
+            width,
+            height,
+            channels,
+            slices,
+            frames: info.frames,
+            // The file's own width back again for a rigid run, float for one
+            // that interpolated. See [`Store`].
+            pixel_type: store.pixel_type(),
+            channel_colors: Vec::new(),
+            metadata: Some(source.clone()),
+            name: name.clone(),
+        };
+        let mut out = if cropping {
+            None
+        } else {
+            Some(ImageStream::begin(host, spec_of(info.width, info.height))?)
+        };
+        let mut stored = Stored::default();
         let mut shifts: Vec<Shift> = Vec::with_capacity(info.frames);
         let mut plane = Vec::new();
         // Every frame's block field, for a crop: the area to cut to depends on
@@ -481,7 +452,8 @@ impl Plugin for Stabilize {
                         pending_at.push(t - t0);
                         if pending.len() >= APPLY_CHUNK {
                             done += pending.len() as f64 * plane_work;
-                            flush(&mut pending, &mut pending_at, &mut planes, &correction);
+                            let stream = out.as_mut().expect("begun unless cropping");
+                            flush(&mut pending, &mut pending_at, host, stream, &mut stored, &correction)?;
                             if !host.progress(at(done)) {
                                 return Ok(Outcome::Cancelled);
                             }
@@ -490,14 +462,14 @@ impl Plugin for Stabilize {
                 }
             }
             done += pending.len() as f64 * plane_work;
-            flush(&mut pending, &mut pending_at, &mut planes, &correction);
+            let stream = out.as_mut().expect("begun unless cropping");
+            flush(&mut pending, &mut pending_at, host, stream, &mut stored, &correction)?;
 
             shifts.extend_from_slice(&batch_shifts);
             t0 = t1;
         }
         // A crop: every frame measured, so the area is known — then every
         // plane read again, moved and cut in one resampling.
-        let (mut width, mut height) = (info.width, info.height);
         if cropping {
             let warp = nonrigid
                 .as_ref()
@@ -511,6 +483,9 @@ impl Plugin for Stabilize {
                 )
             })?;
             let cut = Cut::new(ly, lx, area, &shifts, warp);
+            // The cut frame's size is known now, so the result begins here.
+            let mut stream =
+                ImageStream::begin(host, spec_of(area.width as u32, area.height as u32))?;
             for t in 0..info.frames {
                 for z in 0..slices {
                     for c in 0..channels {
@@ -523,7 +498,9 @@ impl Plugin for Stabilize {
                         if pending.len() >= APPLY_CHUNK {
                             done += pending.len() as f64 * plane_work;
                             let moved = cut.apply_batch(&pending, &pending_at, parallel);
-                            planes.extend(moved.into_iter().map(|v| store.plane(v)));
+                            for v in &moved {
+                                stream.push(host, store.encode(v, &mut stored))?;
+                            }
                             pending.clear();
                             pending_at.clear();
                             if !host.progress(at(done)) {
@@ -534,8 +511,10 @@ impl Plugin for Stabilize {
                 }
             }
             let moved = cut.apply_batch(&pending, &pending_at, parallel);
-            planes.extend(moved.into_iter().map(|v| store.plane(v)));
-            (width, height) = (area.width as u32, area.height as u32);
+            for v in &moved {
+                stream.push(host, store.encode(v, &mut stored))?;
+            }
+            out = Some(stream);
             host.log(&if area.is_upright() {
                 format!(
                     "cropped to the common area: {} x {} pixels from ({}, {})",
@@ -578,20 +557,8 @@ impl Plugin for Stabilize {
             }
         ));
 
-        Ok(Outcome::NewDocument(Box::new(ImageResult {
-            width,
-            height,
-            channels,
-            slices,
-            frames: info.frames,
-            // The file's own width back again for a rigid run, float for one
-            // that interpolated. See [`Store`].
-            pixel_type: store.pixel_type(),
-            planes,
-            channel_colors: Vec::new(),
-            metadata: Some(host.stack_info().clone()),
-            name: format!("{}-stabilized", host.stack_info().stem()),
-        })))
+        out.expect("begun before the planes, cropping or not")
+            .finish(StreamTarget::NewDocument)
     }
 }
 
@@ -614,6 +581,19 @@ fn gpu_trouble(settings: &suite2p_registration::Settings) -> Result<(), PluginEr
     }
     let _ = settings;
     Ok(())
+}
+
+/// Lets go of suite2p's resident GPU context when dropped: the batch buffers
+/// a run kept between batches are of no use once it has ended, and on a small
+/// card they are memory the renderer and the next run need.
+#[cfg(feature = "gpu-registration")]
+struct ReleaseGpuOnDrop;
+
+#[cfg(feature = "gpu-registration")]
+impl Drop for ReleaseGpuOnDrop {
+    fn drop(&mut self) {
+        suite2p_registration::gpu::release_resident();
+    }
 }
 
 #[cfg(test)]

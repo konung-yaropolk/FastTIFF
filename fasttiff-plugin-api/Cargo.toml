@@ -13,6 +13,7 @@
 name = "fasttiff-plugin-api"
 version = "0.26.1"
 edition = "2021"
+rust-version.workspace = true
 description = "The FastTIFF plugin contract: what a plugin declares, what the host hands it, and what it may return."
 license = "MPL-2.0"
 repository = "https://github.com/konung-yaropolk/FastTIFF"

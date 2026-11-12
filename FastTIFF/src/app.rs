@@ -10,14 +10,27 @@
 //! The GPU is reached only through `crate::render`, the eframe adapter over
 //! `scivis-render`, so nothing here mentions glow or wgpu.
 //!
+//! A frame is `ViewerApp::draw`: the toolbar, the bottom bar, the windows and
+//! the canvas, each laid out by a method of its own. What their widgets ask for
+//! is queued as a `command::UiCommand` rather than done from inside egui's
+//! closures, and applied at the points of the frame `command` documents.
+//!
 //! Supporting clusters live in child modules (which share this module's
 //! privacy, so the split adds no `pub` surface beyond `pub(super)`):
 //!   * `animation` — a plugin's animation of the 3D view, played or recorded
 //!   * `camera`  — egui input → the core camera
+//!   * `canvas`  — the central panel: the picture, in 2D or 3D
+//!   * `canvas_tool` — the tools that take the left button on the picture,
+//!     and which of them has it
+//!   * `command` — the interface's requests, and the order they take effect in
 //!   * `minimap` — the 2D navigator: where the view sits in the whole frame
 //!   * `overlay` — the 3D coordinate-box overlay, drawn with the egui painter
+//!   * `platform` — what the desktop and the browser do differently: the
+//!     one place that knows which of the two this is
 //!   * `point_counter` — clicking points onto the picture, counted in groups
 //!   * `scale`   — how large the chrome is drawn (the web build runs bigger)
+//!   * `scrub_bar` — the bottom bar: playback, channels, contrast, status
+//!   * `toolbar` — the top bar: open, save, copy, plugins, 2D/3D
 //!   * `widgets` — the contrast range slider + value formatting
 //!   * `windows` — the render-settings, metadata and histogram pop-ups
 
@@ -28,41 +41,50 @@ use fast_tiff_viewer::channels::{
     pseudocolor_applicable,
 };
 use fast_tiff_viewer::roi::LargeImageMode;
-use fast_tiff_viewer::{DecodeMode, Stack, ViewMode, Viewer};
+use fast_tiff_viewer::{DecodeMode, Document, ViewMode, Viewer};
 // The registry's entries are the C-boundary types themselves rather than
-// trait objects, so the traits whose methods the app calls are named here —
-// the importer's and exporter's only where the app imports and exports with
-// plugins, which a browser does not.
-use fasttiff_plugin_api::Plugin as _;
-#[cfg(not(target_arch = "wasm32"))]
-use fasttiff_plugin_api::{Exporter as _, Importer as _};
+// trait objects, so the traits whose methods the app calls are named here.
+use fasttiff_plugin_api::{Exporter as _, Importer as _, Plugin as _};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 mod animation;
 mod autoscroll;
 mod camera;
+mod canvas;
+mod canvas_tool;
 mod clipboard;
+mod command;
 mod copy_view;
 mod dialog;
 mod kinetic;
 mod minimap;
 mod overlay;
+mod platform;
 // Drawing a plot a plugin declared, and the canvas selection tool that feeds
-// it. Native only, like `plugins_ui`: both are reached from the Plugins menu,
-// which the browser build does not have.
+// it. On both platforms: the browser build has the Plugins menu too, and a
+// plot-producing plugin among its built-ins.
 mod plot;
 mod plugins_ui;
 mod point_counter;
 mod region_pick;
 mod scale;
 mod scroll;
+mod scrub_bar;
+mod toolbar;
 mod widgets;
 mod windows;
 
+use canvas_tool::{CanvasGesture, ImageXform, Tools};
+use command::{Applying, Commands, Step, UiCommand, Via, FRAME};
+// Named in the docs of this module and of its children, which link to the
+// phases; the code goes by `FRAME` and never names one.
+#[cfg(doc)]
+use command::Phase;
+use platform::{Current, Destination, Placement, Platform as _, Purpose, TARGET, WEB};
 use scale::UI_SCALE;
 use widgets::{contrast_controls, histogram_button, ContrastLayout};
-use windows::{histogram_window, metadata_window, render_settings_window};
+use windows::{WindowId, Windows};
 
 /// Install the chrome defaults both hosts share, before the first frame.
 ///
@@ -97,12 +119,6 @@ const ZOOM_LEVELS: [f32; 21] = [
     0.031, 0.042, 0.063, 0.083, 0.125, 0.167, 0.25, 0.333, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
     8.0, 12.0, 16.0, 24.0, 32.0,
 ];
-
-/// Smallest the window is ever sized to (inner size, points). Zooming out past
-/// this keeps the window here and just letterboxes the shrinking image.
-/// Native only — the canvas is sized by the page.
-#[cfg(not(target_arch = "wasm32"))]
-const MIN_WINDOW: f32 = 256.0;
 
 /// Fast-scroll rate is a fraction of movie total frames number to be skipped
 /// per mouse wheel notch or arrow press when Shift is held. (0.1 means 10% of the stack)
@@ -178,38 +194,6 @@ fn trim_num(v: f64) -> String {
 /// rounding in the table.
 const FIT_SNAP: f32 = 0.02;
 
-/// Whether the window's size is the window manager's to decide, not ours.
-///
-/// True when maximized *or* full screen. Both were meant to be covered by the
-/// "leave the window alone" rule, but only `maximized` was ever asked about —
-/// and on macOS the green button goes full screen rather than maximizing, so
-/// every zoom step out shrank a full-screen window out from under the picture.
-///
-/// `unwrap_or(false)` on each: a backend that does not report one of them
-/// leaves the window resizable, which is the behaviour it had before either
-/// flag existed.
-///
-/// **Known gap, and it is egui's, not ours.** On macOS `maximized` is read only
-/// when the window is created and never refreshed — `egui-winit` skips the
-/// runtime query on that platform to avoid a deadlock (its `lib.rs`, guarded by
-/// `is_init || !cfg!(target_os = "macos")`; egui issue #3494). So a macOS window
-/// *zoomed* rather than made full screen — Option-green, a double-clicked title
-/// bar, Window > Zoom, or macOS 15 edge tiling — reports neither flag, and a
-/// zoom step out will still resize it. `fullscreen` has no such gate and is
-/// refreshed every frame on every platform, which is why the green button (full
-/// screen, the usual case) is covered. Detecting the zoomed case would mean
-/// guessing from the window's size against the monitor's, and the app's own
-/// sizing cap (`monitor_work_area`, 95% x 90%) sits too close to what a zoomed
-/// window actually measures to tell the two apart reliably.
-///
-/// Native only, like [`monitor_work_area`]: the browser build has no window of
-/// its own to resize.
-#[cfg(not(target_arch = "wasm32"))]
-fn window_size_is_not_ours(ctx: &egui::Context) -> bool {
-    let (maximized, fullscreen) = ctx.input(|i| (i.viewport().maximized, i.viewport().fullscreen));
-    maximized.unwrap_or(false) || fullscreen.unwrap_or(false)
-}
-
 /// Time constant of the glide a zoom step takes to its new level.
 ///
 /// The approach is exponential, so a step is about 63% done after this long.
@@ -244,7 +228,9 @@ const ZOOM_GLIDE_MAX_DT: f32 = 1.0 / 20.0;
 ///
 /// The `Err` is a message for the status line. Saying which plugin declined and
 /// why beats falling through to the TIFF reader and reporting "not a TIFF".
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// An importer reads a path, so only a host with files ever gets here — see
+/// [`ViewerApp::start_import`].
 fn import_with_plugin(
     registry: &mut fast_tiff_viewer::plugins::Registry,
     path: &std::path::Path,
@@ -285,62 +271,17 @@ fn import_with_plugin(
         .import(&request, &mut Host(progress, cancel))
         .map_err(|e| format!("{name}: {e}"))?;
 
-    let bytes = fast_tiff_viewer::plugins::to_tiff_bytes(&imported.image, imported.info.as_ref())
-        .map_err(|e| format!("{name}: {e:#}"))?;
     let fallback = imported
         .info
         .as_ref()
         .map(|i| i.name.clone())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| imported.image.name.clone());
-    Ok(Opened::Bytes(bytes, imported_label(path, &fallback)))
-}
-
-/// Write a plugin's result where a new window can open it, and say where.
-///
-/// Tries `<stem>.tif` first and falls back to `<stem>-2.tif`, `-3.tif` and so
-/// on. The fallback is not tidiness about overwriting: a window already showing
-/// an earlier result **memory-maps that file for as long as it is open**, and
-/// Windows refuses to write to a file with a mapped section. So running a
-/// plugin twice without closing the first result failed at the write, and the
-/// caller's last-resort path — show it in this window instead — then replaced
-/// the document the user was working from. A second result is a second thing to
-/// look at, exactly as the first was; it needs a name of its own.
-///
-/// Each name is *created*, never overwritten — `create_new` fails if the file
-/// is there, which is the whole mechanism. Asking the filesystem to make a new
-/// file says what is meant, and says it the same way on every platform: relying
-/// on the write to fail would work on Windows, where the mapping locks the
-/// file, and silently overwrite another window's data everywhere else.
-///
-/// The bound is a bound, not a policy: a hundred results kept open at once is
-/// already absurd, and past that the last error is the honest answer.
-#[cfg(not(target_arch = "wasm32"))]
-fn write_result(
-    dir: &std::path::Path,
-    stem: &str,
-    bytes: &[u8],
-) -> std::io::Result<std::path::PathBuf> {
-    use std::io::Write;
-    let mut last = None;
-    for n in 1..=100u32 {
-        let path = dir.join(match n {
-            1 => format!("{stem}.tif"),
-            n => format!("{stem}-{n}.tif"),
-        });
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                file.write_all(bytes)?;
-                return Ok(path);
-            }
-            Err(e) => last = Some(e),
-        }
-    }
-    Err(last.unwrap_or_else(|| std::io::Error::other("no result file could be written")))
+    // The planes go into the encode, and each is freed once written: the
+    // import is then held about once, not twice.
+    let bytes = fast_tiff_viewer::plugins::into_tiff_bytes(imported.image, imported.info.as_ref())
+        .map_err(|e| format!("{name}: {e:#}"))?;
+    Ok(Opened::Bytes(bytes.into(), imported_label(path, &fallback)))
 }
 
 /// The status line's two voices: amber for something to be aware of, green for
@@ -423,117 +364,12 @@ fn zoom_bounds(fit: Option<f32>) -> (f32, f32) {
     (ladder[0], ladder[ladder.len() - 1])
 }
 
-/// The zoom at which an `img_w` x `img_h` image exactly fits `avail`, capped at
-/// 1:1 so a small image is not magnified into a blur.
-///
-/// `None` while the area is not yet known — a canvas has no size on the frame
-/// before it is first laid out — so the caller waits rather than fitting to
-/// nothing.
-///
-/// Web-only, as the desktop build sizes its window to the image instead
-/// ([`initial_fit_zoom`] is that path's opposite number), but compiled under
-/// `test` on every target so the guards above stay covered.
-#[cfg(any(target_arch = "wasm32", test))]
-fn fit_to_panel(img_w: f32, img_h: f32, avail: egui::Vec2) -> Option<f32> {
-    if !(img_w >= 1.0 && img_h >= 1.0 && avail.x >= 1.0 && avail.y >= 1.0) {
-        return None;
-    }
-    let z = (avail.x / img_w).min(avail.y / img_h).min(1.0);
-    z.is_finite().then_some(z).filter(|z| *z > 0.0)
-}
-
-/// The usable desktop area for the window, i.e. the monitor size minus headroom
-/// for the title bar, taskbar, and window borders. `None` until the monitor
-/// size is reported. This is the cap on how large the window may grow — beyond
-/// it the image overflows the window and becomes pannable.
-#[cfg(not(target_arch = "wasm32"))]
-fn monitor_work_area(ctx: &egui::Context) -> Option<egui::Vec2> {
-    ctx.input(|i| i.viewport().monitor_size)
-        .map(|m| egui::vec2((m.x * 0.95).max(1.0), (m.y * 0.90).max(1.0)))
-}
-
-/// The opening zoom for a freshly loaded image: the largest zoom level ≤ 100%
-/// at which the image plus chrome still fits the monitor's work area (so a
-/// normal image opens at 100%, a big one at 50% or 25%). Returns `None` when the
-/// monitor size isn't reported yet (caller should keep waiting rather than
-/// guess) so a huge image never briefly opens oversized.
-#[cfg(not(target_arch = "wasm32"))]
-fn initial_fit_zoom(ctx: &egui::Context, img_w: f32, img_h: f32, chrome_h: f32) -> Option<f32> {
-    let avail = monitor_work_area(ctx)?;
-    // Largest zoom level at most 100% that still fits the work area.
-    for &z in ZOOM_LEVELS.iter().rev().filter(|&&z| z <= 1.0) {
-        if img_w * z <= avail.x && img_h * z + chrome_h <= avail.y {
-            return Some(z);
-        }
-    }
-    Some(ZOOM_LEVELS[0]) // even the smallest level overflows — open there and pan
-}
-
-/// Longest the histogram may lag the frame on screen while the movie plays.
-///
-/// Rebuilding decodes the frame a second time — `sync` has already decoded it
-/// for the GPU, but into buffers it does not keep — so an open histogram window
-/// would otherwise double the per-frame decode cost of playback, which is
-/// plainly visible on a large compressed stack. Nobody reads a distribution
-/// redrawn thirty times a second anyway; a few updates per second still looks
-/// live and costs a bounded amount no matter how fast the movie runs.
-const HIST_PLAYBACK_INTERVAL: f64 = 0.25;
-
-/// The channel histograms on display, and the state they were computed from.
-///
-/// Building these decodes every channel of the frame, which is far too much to
-/// redo per repaint, so they are held until something the plot is a *function
-/// of* moves: the frame, the plane interpretation (`prefetch_gen` bumps on a
-/// dimension-order change), or a channel's track — the axis the bins are laid
-/// out on. Contrast is deliberately not in the key: the handles slide along the
-/// distribution rather than changing it, which is the whole reason for showing
-/// the two together.
-struct HistCache {
-    frame: usize,
-    generation: u64,
-    bounds: Vec<(f32, f32)>,
-    hists: Vec<fast_tiff_viewer::Histogram>,
-}
-
-/// The prompt shown while nothing is loaded.
-///
-/// The browser build adds a line the desktop has no need of. A page that
-/// accepts a dropped file is indistinguishable, from the outside, from one
-/// that uploads it — and for microscopy data, which is routinely unpublished
-/// and sometimes clinical, that ambiguity is a real reason not to try the
-/// tool at all. The drop target is the one place the reassurance arrives
-/// before the question does; the README says as much, but nobody reads it
-/// first.
-///
-/// `cfg!` rather than `#[cfg]` so both wordings compile and are checked on
-/// every target: the shared lines are written once and cannot drift apart.
-fn welcome_text() -> String {
-    let mut text = String::from("Drag and drop a file here, \nor click \"Open File\" above.\n");
-    if cfg!(target_arch = "wasm32") {
-        text.push_str(
-            "\n\nEverything is processed locally in your browser — \nno file is ever uploaded to a server.\n",
-        );
-    }
-    text.push_str(
-        "\n\n\nScroll — navigate frames\nShift + Scroll — fast navigate\nCtrl + Scroll — zoom",
-    );
-    text
-}
-
-/// A file the user asked to open, however it arrived.
-///
-/// Native and web get files by different routes — a path from a dialog, argv or
-/// an Apple Event, versus bytes from an async browser picker or a drop event —
-/// so they meet here and everything downstream is shared.
-/// Something that arrived from somewhere other than this frame's user input.
+/// What a job sends back once it is done: everything that arrives from
+/// somewhere other than this frame's user input, but for files, which come in
+/// through the platform ([`platform::Platform::take_incoming_files`]).
 enum Incoming {
-    /// A file chosen by the asynchronous picker. Only the web build has one:
-    /// the native dialog blocks and applies its result directly.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    Opened(Opened),
     /// An import finished. The registry travels back with the result, because
     /// the worker was holding it — see [`ViewerApp::plugins`].
-    #[cfg(not(target_arch = "wasm32"))]
     Imported(
         Box<fast_tiff_viewer::plugins::Registry>,
         Result<Opened, String>,
@@ -545,7 +381,6 @@ enum Incoming {
     ///
     /// The registry is `Some` only for an export, which had to borrow it; a
     /// plain TIFF save is the app's own code and never takes it.
-    #[cfg(not(target_arch = "wasm32"))]
     Wrote(
         Option<Box<fast_tiff_viewer::plugins::Registry>>,
         String,
@@ -560,14 +395,12 @@ enum Incoming {
 /// write. The distinction is drawn from the cancel flag rather than from the
 /// error text: an exporter reports being stopped through whatever error its
 /// author picked, and matching on strings to find out would be guesswork.
-#[cfg(not(target_arch = "wasm32"))]
 enum WriteOutcome {
     Done,
     Cancelled,
     Failed(String),
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl WriteOutcome {
     fn of(result: Result<(), String>, cancel: &std::sync::atomic::AtomicBool) -> Self {
         match result {
@@ -578,260 +411,109 @@ impl WriteOutcome {
     }
 }
 
-/// What a plugin's run came to, after the worker has done everything that can
-/// be done off the interface thread.
-///
-/// The encode and the file write live on the worker precisely because they are
-/// not small: a stabilised timelapse is every plane rewritten, which on a long
-/// recording takes longer than the registration did. Doing them here, after the
-/// result came back, froze the window with the bar sitting at 100%.
-enum PluginProduct {
-    Nothing,
-    Cancelled,
-    Message(String),
-    Plot(Box<fasttiff_plugin_api::Plot>),
-    /// A window is already opening for it; this is what to call it.
-    ///
-    /// A derived image is a second thing, not a correction to the first: the
-    /// point of a projection or a derivative is to be looked at beside what it
-    /// came from. Replacing the open document — which is what this did — threw
-    /// the source away and made the comparison impossible without reopening it.
-    ///
-    /// A window per document is a process per document here: that is already
-    /// how the app opens several files at once, and it needs no window manager
-    /// of its own inside egui. The result reaches that process in memory when
-    /// the machine has room for it and through a temporary file when it does
-    /// not; either way it is named after the image, so the new window's title
-    /// says what it is showing rather than naming a scratch file. A file, when
-    /// one is used, is left behind deliberately — the process that would delete
-    /// it is the one still reading it, and the OS clears the directory.
-    NewWindow(String),
-    /// No way to hand it over, so it comes back whole to be shown in this
-    /// window. The bytes are only carried on this path, which is the failure
-    /// one.
-    Inline {
-        bytes: Vec<u8>,
-        name: String,
-        why: String,
-    },
-    /// Written where the plugin asked.
-    Saved(String),
-    /// Takes the place of the document it was run on, because the plugin asked
-    /// for that rather than for a window.
-    ///
-    /// Carries the bytes like [`PluginProduct::Inline`] does, and for the same
-    /// reason — they have nowhere else to go — but it is not a failure path:
-    /// nothing went wrong and there is nothing to apologise for in the status
-    /// line.
-    Replace {
-        bytes: Vec<u8>,
-        name: String,
-    },
-    /// Move the 3D view as the plugin declared. See [`animation`].
-    Animate(Box<fasttiff_plugin_api::Animation>),
-    /// Stop the plugin's own animation.
-    StopAnimation,
-    /// Have the user draw a rectangle, with this prompt in the status line,
-    /// then run the plugin again with it. See [`region_pick`].
-    SelectRegion(String),
-}
-
 /// What a filter plugin produced, carried back from its worker.
 struct PluginRun {
     /// Which plugin, so a plot it returned can be recomputed for a new
     /// selection without asking the user again.
     index: usize,
+    /// Which document the run was on, as [`ViewerApp::document`] counted it
+    /// when the run started; see [`outlived`](Self::outlived).
+    run_on: u64,
     /// What its dialog was answered with, reused verbatim on a re-run.
     params: fasttiff_plugin_api::Params,
     name: String,
     /// What the plugin logged, drained from its host when the run ended.
     messages: Vec<String>,
-    outcome: Result<PluginProduct, String>,
+    outcome: Result<fast_tiff_viewer::plugins::Product, String>,
+    /// The file the document the run was on stands for, so a result shown
+    /// in this window is said to be made from it — whatever is on show by
+    /// the time it lands.
+    made_from: Option<PathBuf>,
 }
 
-/// Turn what a plugin returned into something the interface can apply in a
-/// frame — encoding and writing on the way, since this runs on the worker.
-fn finish_outcome(
-    outcome: fasttiff_plugin_api::Outcome,
-    label: &std::sync::Mutex<String>,
-    progress: &std::sync::atomic::AtomicU32,
-    cancel: &std::sync::atomic::AtomicBool,
-    luts: &[fasttiff_plugin_api::Lut],
-) -> Result<PluginProduct, String> {
-    use fasttiff_plugin_api::Outcome;
-    let stopped = || cancel.load(std::sync::atomic::Ordering::Relaxed);
+impl PluginRun {
+    /// Whether the run returned something drawn on the picture it read — a
+    /// plot of its regions, or a rectangle for the user to draw — and another
+    /// document has landed since it started, `now` being the window's count.
+    ///
+    /// A new document puts every canvas tool away ([`Tools::reset`]), and a
+    /// result that lands later must not bring one back: it would put one
+    /// picture's chart, or its prompt, over another. On the desktop a run can
+    /// still be going when the next file opens — a file no importer claims
+    /// does not wait for the registry the run holds. (In a browser the run
+    /// ends inside the frame that started it.)
+    ///
+    /// Anything else was either decided on the worker already (a replacement
+    /// goes to a new window once the document has changed:
+    /// `Deliver::same_document`) or is news whatever is on show.
+    fn outlived(&self, now: u64) -> bool {
+        use fast_tiff_viewer::plugins::Product;
+        self.run_on != now
+            && matches!(
+                self.outcome,
+                Ok(Product::Plot(_) | Product::SelectRegion(_))
+            )
+    }
+}
 
-    match outcome {
-        Outcome::Nothing => Ok(PluginProduct::Nothing),
-        Outcome::Cancelled => Ok(PluginProduct::Cancelled),
-        Outcome::Message(m) => Ok(PluginProduct::Message(m)),
-        Outcome::Plot(p) => Ok(PluginProduct::Plot(p)),
-        // Nothing to encode: the poses are the whole result, and the work of
-        // carrying them out happens frame by frame on the interface thread.
-        Outcome::Animate(a) => Ok(PluginProduct::Animate(a)),
-        Outcome::StopAnimation => Ok(PluginProduct::StopAnimation),
-        Outcome::SelectRegion { prompt } => Ok(PluginProduct::SelectRegion(prompt)),
-        Outcome::NewDocument(image) => {
-            Job::begin_phase(label, progress, "Encoding result");
-            let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
-                &image,
-                None,
-                luts,
-                &mut |f| {
-                    Job::report(progress, f);
-                    !stopped()
-                },
-            ) {
-                Ok(Some(b)) => b,
-                Ok(None) => return Ok(PluginProduct::Cancelled),
-                Err(e) => return Err(format!("{e:#}")),
-            };
+/// The app's half of delivering a plugin's result: the job's bar, and the
+/// platform's way of opening a window or saving a file. Everything before
+/// that last step is `fast_tiff_viewer::plugins::deliver`, shared with the
+/// browser build.
+struct AppDelivery<'a> {
+    label: &'a std::sync::Mutex<String>,
+    progress: &'a std::sync::atomic::AtomicU32,
+    cancel: &'a std::sync::atomic::AtomicBool,
+    same_document: &'a dyn Fn() -> bool,
+}
 
-            // A file name from the image's own name, with anything a filesystem
-            // would object to replaced. Needed even for the handover that never
-            // touches a filesystem: it is what the new window is titled.
-            let stem: String = image
-                .name
-                .chars()
-                .map(|c| {
-                    if c.is_alphanumeric() || "-_. ".contains(c) {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            let stem = stem.trim().trim_matches('.').to_string();
-            let stem = if stem.is_empty() {
-                "result".to_string()
-            } else {
-                stem
-            };
+impl fast_tiff_viewer::plugins::Deliver for AppDelivery<'_> {
+    fn phase(&mut self, label: &str) {
+        Job::begin_phase(self.label, self.progress, label);
+    }
 
-            Job::begin_phase(label, progress, "Opening a new window");
+    fn report(&mut self, fraction: f32) -> bool {
+        Job::report(self.progress, fraction);
+        !self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
 
-            // The browser's handover. A tab, not a process — see
-            // `crate::web_open` for why a blob and not a message, and why the
-            // plugin had to run synchronously for this call to be allowed.
-            #[cfg(target_arch = "wasm32")]
-            {
-                let name = format!("{stem}.tif");
-                return match crate::web_open::open_bytes_in_new_tab(&bytes, &name) {
-                    Ok(()) => Ok(PluginProduct::NewWindow(name)),
-                    // A refused popup is the expected failure, not an
-                    // exceptional one, and it is already handled: the result
-                    // comes back whole and is shown in this tab, with the
-                    // reason in the status line. That is exactly what `Inline`
-                    // was built for when a desktop handover could not go
-                    // through.
-                    Err(why) => Ok(PluginProduct::Inline {
-                        bytes,
-                        name: image.name.clone(),
-                        why,
-                    }),
-                };
+    fn same_document(&self) -> bool {
+        (self.same_document)()
+    }
+
+    /// A process on the desktop, a tab in a browser: see
+    /// [`Platform::deliver_new_document`](platform::Platform::deliver_new_document).
+    fn open_in_new_window(
+        &mut self,
+        result: fast_tiff_viewer::plugins::ResultTiff,
+    ) -> fast_tiff_viewer::plugins::Handover {
+        // Named after the image, so the new window's title says what it is
+        // showing rather than naming a scratch file.
+        let name = format!(
+            "{}.tif",
+            fast_tiff_viewer::plugins::file_stem(result.name())
+        );
+        Current::deliver_new_document(result, name, self.progress, self.cancel)
+    }
+
+    /// Where the plugin said, on the desktop. In a browser the download
+    /// manager is the filesystem, and the plugin's path still names the file —
+    /// the last component of it — because the desktop honours that name and
+    /// the two should not disagree about what the result is called; what a tab
+    /// cannot honour is the directory, and it does not pretend to.
+    fn save(
+        &mut self,
+        result: fast_tiff_viewer::plugins::ResultTiff,
+        path: &str,
+    ) -> Result<String, String> {
+        match TARGET.plugin_file(path) {
+            Destination::File(file) => {
+                Current::write_result(result, &file).map(|()| path.to_string())
             }
-
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                // In memory when the machine has the room for it. A stabilised
-                // recording is as big as the recording, and writing it to a
-                // temporary file only for the new window to read it straight back
-                // is the slowest thing left in the run — twice the size of the
-                // result over the disk, for a file that is deleted when the
-                // machine next clears its temporary directory.
-                if crate::process::fits_in_memory(bytes.len()) {
-                    let name = format!("{stem}.tif");
-                    match crate::process::open_bytes_in_new_process(&bytes, &name, &mut |f| {
-                        Job::report(progress, f);
-                        !stopped()
-                    }) {
-                        Ok(()) => return Ok(PluginProduct::NewWindow(name)),
-                        Err(_) if stopped() => return Ok(PluginProduct::Cancelled),
-                        // Not fatal, and not worth telling the user about: the file
-                        // below does the same job. It is worth a log line, because
-                        // a machine where this always fails is silently doing twice
-                        // the disk traffic it needs to.
-                        Err(e) => log::warn!("in-memory handover failed, using a file: {e}"),
-                    }
-                }
-
-                // Too big to hold, or the handover would not go through. A file it
-                // is — which for a stack that large is the better home anyway, the
-                // new window memory-mapping it rather than holding it resident.
-                Job::begin_phase(label, progress, "Writing result");
-                let dir = std::env::temp_dir().join("fasttiff-plugin-results");
-                let written = std::fs::create_dir_all(&dir)
-                    .and_then(|()| write_result(&dir, &stem, &bytes))
-                    .and_then(|path| crate::process::try_open_in_new_process(&path).map(|()| path));
-                match written {
-                    Ok(path) => Ok(PluginProduct::NewWindow(
-                        path.file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| format!("{stem}.tif")),
-                    )),
-                    // Nowhere to put it is not a reason to lose it: it comes back
-                    // whole and is shown in this window instead.
-                    Err(e) => Ok(PluginProduct::Inline {
-                        bytes,
-                        name: image.name.clone(),
-                        why: e.to_string(),
-                    }),
-                }
+            Destination::Download(name) => {
+                let bytes = result.into_bytes().map_err(|e| e.to_string())?;
+                Current::download(&bytes, &name, "image/tiff").map(|()| name)
             }
-        }
-        Outcome::ReplaceDocument(image) => {
-            Job::begin_phase(label, progress, "Encoding result");
-            let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
-                &image,
-                None,
-                luts,
-                &mut |f| {
-                    Job::report(progress, f);
-                    !stopped()
-                },
-            ) {
-                Ok(Some(b)) => b,
-                Ok(None) => return Ok(PluginProduct::Cancelled),
-                Err(e) => return Err(format!("{e:#}")),
-            };
-            // No spawn, no temp file, no fallback: the window it replaces is
-            // this one, so the bytes only have to reach the interface thread.
-            Ok(PluginProduct::Replace {
-                bytes,
-                name: image.name.clone(),
-            })
-        }
-        Outcome::SaveToFile { image, path } => {
-            Job::begin_phase(label, progress, "Writing result");
-            let bytes = match fast_tiff_viewer::plugins::to_tiff_bytes_reporting(
-                &image,
-                None,
-                luts,
-                &mut |f| {
-                    Job::report(progress, f);
-                    !stopped()
-                },
-            ) {
-                Ok(Some(b)) => b,
-                Ok(None) => return Ok(PluginProduct::Cancelled),
-                Err(e) => return Err(format!("{e:#}")),
-            };
-            // The browser's filesystem is the download manager. The plugin's
-            // path still names the file — the last component of it — because
-            // the desktop honours that name and the two should not disagree
-            // about what the result is called; what a tab cannot honour is the
-            // directory, and it does not pretend to.
-            #[cfg(target_arch = "wasm32")]
-            {
-                let name = crate::web_save::name_from_path(&path);
-                return crate::web_save::download(&bytes, &name)
-                    .map(|()| PluginProduct::Saved(name));
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            std::fs::write(&path, bytes)
-                .map(|()| PluginProduct::Saved(path))
-                .map_err(|e| e.to_string())
         }
     }
 }
@@ -992,19 +674,54 @@ impl Job {
     /// that only has the `Arc` can call it.
     fn report(progress: &std::sync::atomic::AtomicU32, fraction: f32) {
         fast_tiff_viewer::plugins::progress::store(progress, fraction);
+        Current::wake_for_progress();
     }
 }
 
+/// The interface's egui context, for a worker to wake it with.
+///
+/// A worker cannot draw, and nothing makes the interface look at a job but a
+/// frame. Before this, a frame was asked for on every vsync for as long as any
+/// job was alive: a ten-minute registration was some 36,000 full redraws, each
+/// the whole of `draw`, to move a bar a percent at a time — a core taken from
+/// the registration, and a GPU kept out of idle. Now a frame comes when there
+/// is something to show: a result arriving ([`wake_ui`]) or the bar moving
+/// ([`Platform::wake_for_progress`](platform::Platform::wake_for_progress)),
+/// with a slow poll as a safety net.
+///
+/// Recorded on the first frame, before any worker can exist.
+static UI: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
+
+/// Ask the interface for a frame, from any thread: a result has arrived.
+fn wake_ui() {
+    if let Some(ctx) = UI.get() {
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+}
+
+/// A file the user asked to open, however it arrived.
+///
+/// Native and web get files by different routes — a path from a dialog, argv or
+/// an Apple Event, versus bytes from an async browser picker or a drop event —
+/// so they meet here and everything downstream is shared.
 pub enum Opened {
-    /// A path on disk. Native only; the browser has no filesystem to name.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// A path on disk. Only the desktop has any to give, and only the
+    /// desktop's platform makes a source of one (`Platform::path_source`).
     Path(PathBuf),
     /// The file's bytes plus its name, for display.
     ///
     /// The browser build's only route, there being no filesystem there.
-    /// Natively it is how a plugin result reaches a new window when there was
-    /// room to hand it over in memory rather than through a file.
-    Bytes(Vec<u8>, String),
+    /// Natively it is how a plugin result reaches a new window when no file
+    /// could be written for it and it was handed over in memory instead.
+    ///
+    /// Owned or shared, and never copied on the way to the reader: a browser
+    /// drop arrives as egui's `Arc<[u8]>`, and the document keeps that buffer
+    /// (see [`fast_tiff_lib::Bytes`]).
+    Bytes(fast_tiff_lib::Bytes, String),
+    /// A plugin's result, to be opened as it was written: straight to the
+    /// reader, past the importers — it is a TIFF this app wrote, and an
+    /// importer claiming `.tif` has no business reading it back.
+    Source(fast_tiff_viewer::LoadSource),
 }
 
 /// Where the image sits in the viewport: the 2D pan/zoom transform and the
@@ -1082,6 +799,44 @@ struct View2d {
 }
 
 impl View2d {
+    /// Forget the picture that was open, now that another has landed.
+    ///
+    /// Everything goes back to [`Default`] but the fields named here, so a
+    /// field added to the view is reset unless someone decides it should not
+    /// be. What that drops, and why it has to:
+    ///
+    /// * the zoom and pan: the new picture starts at 1:1, and on native the
+    ///   next frame computes a fit-to-screen zoom and sizes the window once (on
+    ///   the web `pending_initial_fit` is consumed by the canvas layout
+    ///   instead); the fit factor belongs to the last picture;
+    /// * `was_pannable`: a new file starts with no history of overflowing, or
+    ///   the navigator would draw on its first frame from the previous file's
+    ///   answer;
+    /// * `pan_glide`: momentum from the last picture means nothing in this one;
+    /// * `autoscroll` and `minimap_drag`: positions on screen tied to a
+    ///   transform that has just been reset. An autoscroll anchor would park
+    ///   the new picture's neutral point wherever the last click happened to
+    ///   land, and a navigator drag would carry on moving a view of an image
+    ///   that is no longer open;
+    /// * `zoom_glide`: a glide belongs to the picture that was on screen, and
+    ///   carrying one into a new file would slide the fresh image away from the
+    ///   zoom it just opened at; `resize_to_zoom` with it.
+    fn reset(&mut self) {
+        *self = View2d {
+            // The opening fit, still to come.
+            pending_initial_fit: true,
+            // Kept: the last layout's geometry, which the next frame lays out
+            // afresh; a zoom reposition, which a zoom step sets and the same
+            // frame's window sizing takes (natively — the browser never reads
+            // it); and wheel travel short of one frame.
+            image_origin: self.image_origin,
+            panel_rect: self.panel_rect,
+            zoom_reposition: self.zoom_reposition,
+            scroll_accum: self.scroll_accum,
+            ..View2d::default()
+        };
+    }
+
     /// The zoom the picture is heading for: the glide's target while one is in
     /// flight, otherwise what is on screen.
     ///
@@ -1193,6 +948,15 @@ struct PanelLayout {
 }
 
 impl PanelLayout {
+    /// Start over for a new document. The panel is sized and populated for the
+    /// previous file's channel count, so it is rebuilt wholesale. That also
+    /// disarms a toggle caught in flight, whose remembered height belongs to a
+    /// layout that no longer exists and would resize the window by a stale
+    /// delta.
+    fn reset(&mut self) {
+        *self = PanelLayout::default();
+    }
+
     /// Note what the bottom bar's info row just drew, and arm a window grow if
     /// it changed the bar's height.
     ///
@@ -1217,38 +981,18 @@ impl PanelLayout {
 
     /// Arm a grow against the height in front of us, for a change that has not
     /// happened yet — the panel toggle, whose new size only appears next frame.
+    ///
+    /// What is armed is read by the half of this bookkeeping that only a host
+    /// sizing its own window has (`grow_delta` and `waiting`, in
+    /// `app/platform/native.rs`): in a browser the window is the page's.
     fn arm_grow(&mut self, height: f32) {
         self.grow_armed = GROW_WAIT;
         self.old_h = height;
     }
-
-    /// How much taller the window should get, if that is settled this frame.
-    ///
-    /// `Some` disarms. `None` means either nothing was armed or the change has
-    /// not shown up yet — [`waiting`](Self::waiting) tells those apart, and the
-    /// wait is bounded so a change that never comes stops asking for frames.
-    fn grow_delta(&mut self, height: f32) -> Option<f32> {
-        if self.grow_armed == 0 {
-            return None;
-        }
-        let delta = height - self.old_h;
-        if delta.abs() > 0.5 {
-            self.grow_armed = 0;
-            return Some(delta);
-        }
-        self.grow_armed -= 1;
-        None
-    }
-
-    /// Whether a grow is still expecting the bar's height to change, and the
-    /// caller should keep frames coming so it can see it.
-    fn waiting(&self) -> bool {
-        self.grow_armed > 0
-    }
 }
 
 pub struct ViewerApp {
-    /// Everything that isn't GUI: the loaded stack, channel settings, playback
+    /// Everything that isn't GUI: the loaded document, channel settings, playback
     /// clock, 3D camera, and the decode→GPU sync. See `fast_tiff_viewer`.
     core: Viewer,
     /// GPU textures/shader for compositing the image, shared with the paint
@@ -1259,9 +1003,10 @@ pub struct ViewerApp {
     view: View2d,
     /// The collapsible channels panel's layout bookkeeping.
     panel: PanelLayout,
-    /// Installed plugins and importers. Native only — see
-    /// `fast_tiff_viewer::plugins`.
-    /// The plugins, unless an import worker currently has them.
+    /// The plugins, importers and exporters, unless a job currently has them.
+    /// On the desktop, the built-ins and the libraries installed on disk; in a
+    /// browser, the built-ins alone, there being no disk to search and no way
+    /// to load a library. See `fast_tiff_viewer::plugins`.
     ///
     /// Moved to the worker rather than shared behind a lock. A lock would have
     /// to be taken by the menu on every frame, and taken *while the import
@@ -1269,14 +1014,21 @@ pub struct ViewerApp {
     /// get off the interface thread. Handing the registry over and taking it
     /// back makes "busy" a state the code can see rather than a wait it cannot.
     plugins: Option<fast_tiff_viewer::plugins::Registry>,
+    /// What [`plugins`](Self::plugins) claims to import, by extension, kept for
+    /// when the registry is with a job: a file none of them wants is the TIFF
+    /// reader's either way, and opening it need not wait for the job to end.
+    claimed_extensions: Vec<String>,
+    /// Bumped each time a document lands in this window. A plugin run notes it
+    /// when it starts, so a result meant to replace the document it ran on can
+    /// tell that the user has opened another one since — and go to a window of
+    /// its own instead of over the one the user is now looking at.
+    document: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The plugin whose dialog is open, and the values entered so far.
     plugin_dialog: Option<PluginDialog>,
-    /// Files opened asynchronously arrive here. Only the web picker uses it —
-    /// the native dialog blocks and applies its result directly — but the
-    /// channel exists on both so the drain path is shared.
-    /// Only the async web picker sends; natively the dialog blocks and applies
-    /// its result directly, so the sender is unused there.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    /// Where each job's result is sent once it is done ([`Incoming`]).
+    /// Drained once a frame by [`drain_pending_open`](Self::drain_pending_open).
+    /// Files come in through the platform instead, the browser's asynchronous
+    /// picker included.
     open_tx: Sender<Incoming>,
     open_rx: Receiver<Incoming>,
     /// The slow thing running on a worker thread, while one is: an import, a
@@ -1289,28 +1041,21 @@ pub struct ViewerApp {
     /// [`plugins`](Self::plugins) `None` — the worker has the registry and
     /// gives it back with the result.
     job: Option<Job>,
-    /// The plot a plugin returned, while one is on screen.
-    ///
-    /// It owns the canvas selection too: the regions belong to the plot they
-    /// feed, so closing the window takes the tool away with it rather than
-    /// leaving a selection behind that nothing is measuring.
-    plot: Option<plot::PlotWindow>,
-    /// A rectangle being drawn because a plugin asked for one. See
-    /// [`region_pick`].
-    region_pick: Option<region_pick::RegionPick>,
+    /// The canvas tools: a plot's regions, a rectangle a plugin asked for, the
+    /// point counter.
+    tools: Tools,
     /// The rectangle a plugin asked for, drawn and confirmed, waiting for the
     /// run it is the selection of: which plugin, and the regions.
+    ///
+    /// A run's input rather than one of the [`Tools`], and not reset with
+    /// them: it is set only as it is handed to [`run_plugin`](Self::run_plugin),
+    /// which takes it.
     picked: Option<(usize, Vec<fasttiff_plugin_api::Roi>)>,
-    /// The point counter, while its window is open. Like the plot's regions,
-    /// the points belong to the window: closing it takes them, and their
-    /// marks, away. See [`point_counter`].
-    point_counter: Option<point_counter::Session>,
 
     // --- window chrome ------------------------------------------------------
-    /// The window title last sent via `ViewportCommand::Title`. Native only —
-    /// a canvas has no title bar; the page's `<title>` is the host's business.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    last_title: Option<String>,
+    /// The desktop or the browser: what this app does that the two hosts do
+    /// their own way. See [`platform`].
+    platform: Current,
     /// The status message that should read as *done*, not as *careful*.
     ///
     /// The status line is amber, which is right for what it usually carries: a
@@ -1325,70 +1070,73 @@ pub struct ViewerApp {
     /// Comparing the text means the colour can only ever apply to the message it
     /// was set for.
     good_status: Option<String>,
-    /// Whether the file-metadata pop-up window is open.
-    show_metadata: bool,
-    /// Whether the 3D render-settings pop-up is open.
-    show_render_settings: bool,
-    /// Whether the channel-histogram pop-up is open.
-    show_histogram: bool,
-    /// Plot log(1 + count) in the histogram. A preference, so it outlives both
-    /// the window being closed and the file being changed.
-    ///
-    /// On by default. A 16-bit microscopy frame is mostly background sitting in
-    /// the bottom percent of a 0..65535 track, so a linear plot is one spike at
-    /// the left edge and a flat line — which reads as a broken widget rather
-    /// than as data. Log shows the distribution that is actually there; the
-    /// checkbox is right under the plot for anyone who wants true counts.
-    hist_log: bool,
-    /// The histograms currently plotted, and what they describe. `None` until
-    /// the window is first opened.
-    hist: Option<HistCache>,
-    /// `input.time` when `hist` was last rebuilt, for the playback throttle.
-    hist_built_at: f64,
+    /// The pop-up windows — metadata, histogram, render settings — and which
+    /// are open.
+    windows: Windows,
+    /// The 3D view's preferences, and what the frames between need to
+    /// remember about it.
+    volume_ui: VolumeUi,
+    /// A plugin's animation of the 3D view, playing or being recorded. See
+    /// [`animation`].
+    animation: animation::Animations,
+}
 
-    // --- 3D input preferences (persist across files) ------------------------
+/// The user's 3D input preferences. Edited in the render-settings window, and
+/// kept across files.
+struct VolumePrefs {
     /// Overlay: draw the volume's bounding box with x/y/z coordinate ticks.
     show_coord_box: bool,
     /// User-adjustable 3D navigation speeds (multipliers on the built-in base
-    /// rates), edited in the render-settings window. `move_speed` scales WASD /
-    /// Space / Shift translation; `scroll_speed` scales the mouse-wheel fly.
+    /// rates). `move_speed` scales WASD / Space / Shift translation;
+    /// `scroll_speed` scales the mouse-wheel fly.
     move_speed: f32,
     scroll_speed: f32,
     /// How many times smaller, per axis, the 3D view renders while the user
-    /// moves it: 1 (full), 2 or 4. Set in the render-settings window.
+    /// moves it: 1 (full), 2 or 4.
     moving_downscale: u32,
+}
 
-    // --- copying the view ---------------------------------------------------
+impl Default for VolumePrefs {
+    fn default() -> Self {
+        VolumePrefs {
+            show_coord_box: false,
+            move_speed: 1.0,
+            scroll_speed: 1.0,
+            moving_downscale: render::MOVING_DOWNSCALE,
+        }
+    }
+}
+
+/// The 3D view's side of the frontend: the user's preferences for it, and
+/// what one frame leaves for the next about it.
+///
+/// Nothing here is reset when a document lands: the preferences are the
+/// user's, and the rest describes the panel and the camera, which are still
+/// there.
+#[derive(Default)]
+struct VolumeUi {
+    prefs: VolumePrefs,
     /// The 3-D panel's rect, recorded as it is painted.
     ///
     /// Copying the 3-D view is a screenshot of the window cropped to this, and
     /// the crop happens a frame or more after the request — so the rect has to
     /// be remembered rather than asked for at crop time, when the panel may not
     /// be being laid out at all.
-    volume_rect: Option<egui::Rect>,
+    rect: Option<egui::Rect>,
     /// Set when a screenshot has been asked for in order to copy the 3-D view,
     /// holding the rect to cut out of it. `None` when no copy is outstanding,
     /// which is also what keeps an unrelated screenshot from being copied.
     pending_copy: Option<egui::Rect>,
-
-    // --- animating the 3D view ----------------------------------------------
-    /// A plugin's animation of the 3D view, playing or being recorded. See
-    /// [`animation`].
-    animation: Option<animation::Running>,
-    /// A recorded animation whose frames are all in, being written.
-    animation_saving: Option<animation::Saving>,
-    /// The off-screen render of a pose a recording asked for.
-    volume_capture: animation::VolumeCapture,
     /// Set when the pointer is pressed on the 3D view, and taken by the next
     /// frame's animation step: grabbing a turning volume is how people stop
     /// it, whether or not the grab goes on to move anything.
-    volume_pressed: bool,
+    pressed: bool,
     /// The 3D camera as it was in the last 3D frame, and that frame's number
     /// (`cumulative_frame_nr`), to tell a frame that moved it.
-    volume_last_camera: Option<(animation::CameraMark, u64)>,
+    last_camera: Option<(animation::CameraMark, u64)>,
     /// When the user last moved the 3D view (the frontend clock, seconds).
     /// Until [`VOLUME_SETTLE_S`] after it, the view renders at reduced size.
-    volume_moved_at: Option<f64>,
+    moved_at: Option<f64>,
 }
 
 /// How long the 3D view stays at reduced resolution after the user last moved
@@ -1396,34 +1144,6 @@ pub struct ViewerApp {
 /// clicks, does not flick between sharp and coarse frames; short enough that
 /// the sharp frame arrives as soon as the hand stops.
 const VOLUME_SETTLE_S: f64 = 0.15;
-
-/// Reveal a directory in the platform's file manager.
-///
-/// Best effort by design: the plugin folder's path is shown in the status bar
-/// regardless, and a desktop with no file manager — a bare window manager, a
-/// remote session — should not turn "where do plugins go?" into an error.
-#[cfg(not(target_arch = "wasm32"))]
-fn open_in_file_manager(dir: &std::path::Path) -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("explorer");
-        c.arg(dir);
-        c
-    };
-    #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("open");
-        c.arg(dir);
-        c
-    };
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let mut cmd = {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(dir);
-        c
-    };
-    cmd.spawn().map(|_| ())
-}
 
 /// A plugin's dialog, while it is open.
 struct PluginDialog {
@@ -1442,7 +1162,6 @@ struct PluginDialog {
 /// which vendor format this came from is the first thing anyone asks.
 /// `fallback` — the plugin's own name for the image — covers an importer that
 /// synthesises rather than reads, where the path names no file.
-#[cfg(not(target_arch = "wasm32"))]
 fn imported_label(path: &std::path::Path, fallback: &str) -> String {
     match path.file_name() {
         Some(n) => format!("{} - imported", n.to_string_lossy()),
@@ -1453,50 +1172,32 @@ fn imported_label(path: &std::path::Path, fallback: &str) -> String {
 impl ViewerApp {
     pub fn new(initial: Option<Opened>, render: Render) -> Self {
         let (open_tx, open_rx) = channel();
-        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut app = Self {
             core: Viewer::new(),
             render,
             view: View2d::default(),
             panel: PanelLayout::default(),
-            // `with_installed` scans the plugin folders and loads every
-            // shared library it finds; `new` is the built-ins alone. The
-            // browser gets the latter because there is nothing to scan and no
-            // `dlopen` to do it with — which is the only difference between
-            // the two platforms' plugin menus.
-            #[cfg(not(target_arch = "wasm32"))]
-            plugins: Some(fast_tiff_viewer::plugins::Registry::with_installed()),
-            #[cfg(target_arch = "wasm32")]
-            plugins: Some(fast_tiff_viewer::plugins::Registry::new()),
+            plugins: Some(Current::registry()),
             plugin_dialog: None,
+            claimed_extensions: Vec::new(),
+            document: Default::default(),
             open_tx,
             open_rx,
             job: None,
-            plot: None,
-            region_pick: None,
+            tools: Tools::default(),
             picked: None,
-            point_counter: None,
-            last_title: None,
+            platform: Current::new(),
             good_status: None,
-            show_metadata: false,
-            show_render_settings: false,
-            show_histogram: false,
-            hist_log: true,
-            hist: None,
-            hist_built_at: f64::NEG_INFINITY,
-            show_coord_box: false,
-            move_speed: 1.0,
-            scroll_speed: 1.0,
-            moving_downscale: render::MOVING_DOWNSCALE,
-            volume_rect: None,
-            pending_copy: None,
-            animation: None,
-            animation_saving: None,
-            volume_capture: Default::default(),
-            volume_pressed: false,
-            volume_last_camera: None,
-            volume_moved_at: None,
+            windows: Windows::new(),
+            volume_ui: VolumeUi::default(),
+            animation: Default::default(),
         };
+        app.claimed_extensions = app
+            .plugins
+            .as_ref()
+            .map(|r| r.claimed_extensions())
+            .unwrap_or_default();
+        Current::sweep_old_results();
         if let Some(opened) = initial {
             app.apply_opened(opened);
         }
@@ -1525,7 +1226,6 @@ impl ViewerApp {
         // of a window that does not repaint, does not respond, and that the
         // desktop offers to kill. The core already opens files this way and
         // draws a progress readout for it; an import is the same promise.
-        #[cfg(not(target_arch = "wasm32"))]
         let opened = match opened {
             Opened::Path(path) => match self.start_import(path) {
                 Ok(()) => return,
@@ -1534,16 +1234,23 @@ impl ViewerApp {
             other => other,
         };
 
-        // Same rule as a worker job: the readout is about to appear, and what
-        // the last action said is not about this one. See `begin_job`.
-        self.clear_status();
-        self.core.begin_open(match opened {
-            #[cfg(not(target_arch = "wasm32"))]
-            Opened::Path(path) => fast_tiff_viewer::LoadSource::Path(path),
+        let source = match opened {
+            Opened::Path(path) => match Current::path_source(path) {
+                Ok(source) => source,
+                Err(why) => {
+                    self.core.status = Some(why);
+                    return;
+                }
+            },
             Opened::Bytes(bytes, name) => {
                 fast_tiff_viewer::LoadSource::Bytes(bytes, PathBuf::from(name))
             }
-        });
+            Opened::Source(source) => source,
+        };
+        // Same rule as a worker job: the readout is about to appear, and what
+        // the last action said is not about this one. See `begin_job`.
+        self.clear_status();
+        self.core.begin_open(source);
     }
 
     /// Start showing a job, clearing what the last one left behind.
@@ -1594,122 +1301,25 @@ impl ViewerApp {
 
     /// Reset everything that described the previous file, once a load has
     /// landed. The other half of [`apply_opened`](Self::apply_opened).
-    fn finish_open(&mut self) {
-        // Start at 1:1; on native the next frame computes a fit-to-screen zoom
-        // and sizes the window once. On the web `pending_initial_fit` is
-        // consumed by the canvas layout instead.
-        self.view.zoom = 1.0;
-        self.view.pan = egui::Vec2::ZERO;
-        self.view.pending_initial_fit = true;
-        self.view.fit_zoom = None;
-        // A new file starts with no history of overflowing, or the navigator
-        // would draw on its first frame from the previous file's answer.
-        self.view.was_pannable = false;
-        // Momentum from the last picture means nothing in this one.
-        self.view.pan_glide.stop();
-        // And neither does a gesture over it. Both of these are positions on
-        // screen tied to a transform that has just been reset: an autoscroll
-        // anchor would park the new picture's neutral point wherever the last
-        // click happened to land, and a navigator drag would carry on moving a
-        // view of an image that is no longer open.
-        self.view.autoscroll = None;
-        self.view.minimap_drag = false;
-        // And neither does a plot of it. The regions are in pixels of the
-        // picture they were drawn on; carrying them to a different image would
-        // put them somewhere arbitrary and go on measuring, which is worse than
-        // losing them.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.plot = None;
-        }
-        // A rectangle being drawn for a plugin was drawn on the last picture.
-        self.region_pick = None;
-        // And so were the counted points: they are positions in that picture,
-        // and counting on into this one would mix two images in one table.
-        self.point_counter = None;
-        self.view.resize_to_zoom = false;
-        // A glide belongs to the picture that was on screen; carrying one into
-        // a new file would slide the fresh image away from the zoom it just
-        // opened at.
-        self.view.zoom_glide = None;
-        // The channels panel is sized and populated for the previous file's
-        // channel count, so it is rebuilt wholesale. That also disarms a toggle
-        // caught in flight, whose remembered height belongs to a layout that no
-        // longer exists and would resize the window by a stale delta.
-        self.panel = PanelLayout::default();
-        // The pop-ups, though, stay up on the desktop. Each is its own window
-        // there, and what it shows is "the open file" rather than one
-        // particular file — every one of them is rebuilt from the live stack
-        // each frame, so leaving them open simply repoints them at the new one.
-        // That is the behaviour worth having when comparing files: park the
-        // histogram on a second monitor and step through a folder, rather than
-        // reopening it after every load.
-        //
-        // In the browser they are windows *inside* the canvas, laid over the
-        // image and sized for the channel count that is going away, so there
-        // they still close.
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.show_metadata = false;
-            self.show_render_settings = false;
-            self.show_histogram = false;
-        }
-        // Except the 3D settings, which are reachable only through a button the
-        // toolbar hides for a stack with no volume. Leaving that window up over
-        // a single-frame file would strand it: closed, it cannot be reopened.
-        #[cfg(not(target_arch = "wasm32"))]
-        if !self.core.can_show_volume() {
-            self.show_render_settings = false;
-        }
-        // The cached histograms describe the *previous* stack, and a new one
-        // starts at frame 0 generation 0 — exactly the key the old cache holds,
-        // so staleness alone would not catch it.
-        self.hist = None;
-    }
-
-    /// Rebuild the cached histograms if what they describe has moved. Called
-    /// only while the window is open, so a closed window costs nothing.
     ///
-    /// `now` is `input.time`, for the playback throttle (see
-    /// [`HIST_PLAYBACK_INTERVAL`]). Scrubbing by hand is never throttled: those
-    /// are one frame at a time, and a histogram that ignored the frame you just
-    /// moved to would be worse than useless.
-    fn refresh_histograms(&mut self, now: f64) {
-        let playing = self.core.playback.playing;
-        let Some(loaded) = &self.core.stack else {
-            self.hist = None;
-            return;
-        };
-        let bounds: Vec<(f32, f32)> = loaded.display.settings.iter().map(|s| s.bounds).collect();
-        let fresh = self.hist.as_ref().is_some_and(|c| {
-            c.frame == loaded.frame_index
-                && c.generation == loaded.prefetch_gen
-                && c.bounds == bounds
-        });
-        if fresh {
-            return;
-        }
-        // Playback repaints continuously, so a skipped rebuild is picked up on
-        // its own a moment later — no repaint needs scheduling here.
-        if playing && self.hist.is_some() && now - self.hist_built_at < HIST_PLAYBACK_INTERVAL {
-            return;
-        }
-        self.hist = Some(HistCache {
-            frame: loaded.frame_index,
-            generation: loaded.prefetch_gen,
-            bounds,
-            hists: fast_tiff_viewer::histogram::frame_histograms(loaded),
-        });
-        self.hist_built_at = now;
+    /// Each part of the chrome resets itself: what it keeps and what it drops
+    /// is its own business, written down where its fields are.
+    fn finish_open(&mut self) {
+        self.document
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.view.reset();
+        self.tools.reset();
+        self.panel.reset();
+        // The pop-ups mostly stay up on the desktop, repointed at the new
+        // document; each says for itself (`AppWindow::outlives_document`).
+        self.windows.reset(&self.core, WEB);
     }
 
-    /// Drain anything the async picker produced since the last frame. A no-op
-    /// natively, where the dialog is synchronous.
+    /// Apply whatever arrived since the last frame ([`Incoming`]): the result
+    /// of a job that finished.
     fn drain_pending_open(&mut self) {
         while let Ok(message) = self.open_rx.try_recv() {
             match message {
-                Incoming::Opened(opened) => self.apply_opened(opened),
-                #[cfg(not(target_arch = "wasm32"))]
                 Incoming::Imported(registry, result) => {
                     // The registry comes home first, so the app is usable again
                     // whether the import worked or not.
@@ -1725,7 +1335,6 @@ impl ViewerApp {
                     self.job = None;
                     self.apply_plugin_run(*run);
                 }
-                #[cfg(not(target_arch = "wasm32"))]
                 Incoming::Wrote(registry, name, result) => {
                     if let Some(r) = registry {
                         self.plugins = Some(*r);
@@ -1747,7 +1356,7 @@ impl ViewerApp {
 
     /// Begin a plugin: show its dialog, or run it at once if it declared none.
     fn start_plugin(&mut self, index: usize) {
-        let Some(loaded) = self.core.stack.as_ref() else {
+        let Some(loaded) = self.core.document.as_ref() else {
             self.core.status = Some("Open an image first".into());
             return;
         };
@@ -1792,12 +1401,12 @@ impl ViewerApp {
     }
 
     /// The viewer state a plugin sees, snapshotted for one run.
-    fn plugin_view(&self, loaded: &fast_tiff_viewer::Stack) -> fasttiff_plugin_api::ViewParams {
+    fn plugin_view(&self, loaded: &fast_tiff_viewer::Document) -> fasttiff_plugin_api::ViewParams {
         let v = &self.core.volume;
         let (forward, right, up) = v.cam.basis();
         fast_tiff_viewer::plugins::describe_view(
             loaded,
-            loaded.frame_index,
+            loaded.frame(),
             self.core.view_mode == ViewMode::Volume,
             fast_tiff_viewer::plugins::describe_volume(
                 match v.render {
@@ -1822,18 +1431,18 @@ impl ViewerApp {
     /// timelapse behaves like any other slow plugin rather than freezing the
     /// window every time a region is drawn.
     fn poll_plot(&mut self, ctx: &egui::Context) {
-        let Some(win) = self.plot.as_mut() else {
+        let Some(win) = self.tools.plot.as_mut() else {
             return;
         };
         let busy = self.job.is_some();
         match plot::plot_window(ctx, win, busy) {
-            plot::PlotAction::Close => self.plot = None,
+            plot::PlotAction::Close => self.tools.plot = None,
             plot::PlotAction::Rerun => win.stale = true,
             plot::PlotAction::None => {}
         }
         // Deferred to here rather than done inside the window: a run needs the
-        // registry, which the window's borrow of `self.plot` would still hold.
-        let Some(win) = self.plot.as_ref() else {
+        // registry, which the window's borrow of `self.tools.plot` would still hold.
+        let Some(win) = self.tools.plot.as_ref() else {
             return;
         };
         if !win.stale {
@@ -1853,7 +1462,7 @@ impl ViewerApp {
             Some(job) => job.cancel.store(true, std::sync::atomic::Ordering::Relaxed),
             None if self.plugins.is_some() => {
                 let (index, params) = (win.plugin, win.params.clone());
-                self.plot.as_mut().expect("still open").stale = false;
+                self.tools.plot.as_mut().expect("still open").stale = false;
                 self.run_plugin(index, params);
             }
             None => {}
@@ -1914,7 +1523,7 @@ impl ViewerApp {
     /// `values` untouched, so going back to a method restores what was set
     /// for it rather than resetting it.
     fn requery_dialog(&mut self, dialog: &mut PluginDialog) {
-        let Some(loaded) = self.core.stack.as_ref() else {
+        let Some(loaded) = self.core.document.as_ref() else {
             return;
         };
         let host = fast_tiff_viewer::plugins::StackHost::new(loaded, self.plugin_view(loaded))
@@ -1971,7 +1580,7 @@ impl ViewerApp {
     /// The registry goes with it, exactly as an import's does, which is what
     /// stops a second plugin starting while this one has the data.
     fn run_plugin(&mut self, index: usize, values: fasttiff_plugin_api::Params) {
-        let Some(loaded) = self.core.stack.as_ref() else {
+        let Some(loaded) = self.core.document.as_ref() else {
             self.core.status = Some("Open an image first".into());
             return;
         };
@@ -1991,6 +1600,7 @@ impl ViewerApp {
             return;
         };
 
+        let made_from = loaded.original();
         let view = self.plugin_view(loaded);
         // The regions belong to the plot this plugin is feeding, if it has one.
         // A different plugin gets none — a selection drawn for one measurement
@@ -2003,26 +1613,34 @@ impl ViewerApp {
             .filter(|(plugin, _)| *plugin == index)
             .map(|(_, rois)| rois);
         let selection = picked.unwrap_or_else(|| {
-            self.plot
+            self.tools
+                .plot
                 .as_ref()
                 .filter(|p| p.plugin == index)
                 .map(|p| p.rois.clone())
                 .unwrap_or_default()
         });
-        // The source's own tables, so a result that keeps its channels opens
-        // looking like the document it came from. Taken now, with the rest of
-        // the run's inputs, rather than when the result lands — the user may
-        // change a LUT while a long run is going, and the result belongs to
-        // the state the run started in.
-        let luts = loaded.display.luts.clone();
         let job = Job::new(name.clone());
+        // A result is written as it arrives — to a file of its own on the
+        // desktop, to memory in a browser — so a registration's result is
+        // never whole in memory on its way to a window. It is written with the
+        // source's own tables, so a result that keeps its channels opens
+        // looking like the document it came from: those of `view`, taken now
+        // with the rest of the run's inputs rather than when the result lands
+        // — the user may change a LUT while a long run is going, and the
+        // result belongs to the state the run started in.
         let host = fast_tiff_viewer::plugins::StackHost::new(loaded, view)
             .with_selection(selection)
             .with_animating(self.animating_for(index))
-            .with_cancel(job.cancel.clone(), job.progress.clone());
+            .with_cancel(job.cancel.clone(), job.progress.clone())
+            .streaming_to(fast_tiff_viewer::plugins::ResultDest::platform_default());
         let (progress, cancel, label) = self.begin_job(job);
 
         let tx = self.open_tx.clone();
+        // Which document this ran on, to tell if it is still the one on show
+        // when the result arrives (see `Deliver::same_document`).
+        let document = std::sync::Arc::clone(&self.document);
+        let run_on = document.load(std::sync::atomic::Ordering::Relaxed);
         // The run itself, as one closure, so that the only difference between
         // the platforms is whether a thread carries it.
         let work = move || {
@@ -2037,62 +1655,72 @@ impl ViewerApp {
                 )),
             })
             .unwrap_or_else(|e| Err(fasttiff_plugin_api::PluginError::failed(e)));
-            // Encoding the result and handing it to a window happen here, on
+            // Finishing the result and handing it to a window happen here, on
             // the worker, under their own label. They used to happen on the
             // interface thread once the result came back — which is why the bar
             // reached 100% and the window then froze until it was done.
             let outcome = match outcome {
-                Ok(o) => finish_outcome(o, &label, &progress, &cancel, &luts),
-                Err(e) => Err(e.to_string()),
+                Ok(o) => fast_tiff_viewer::plugins::deliver::finish(
+                    o,
+                    &mut host,
+                    &mut AppDelivery {
+                        label: &label,
+                        progress: &progress,
+                        cancel: &cancel,
+                        same_document: &|| {
+                            document.load(std::sync::atomic::Ordering::Relaxed) == run_on
+                        },
+                    },
+                ),
+                Err(e) => {
+                    host.discard_result();
+                    Err(e.to_string())
+                }
             };
             let run = PluginRun {
                 index,
+                run_on,
                 params: values,
                 name,
                 messages: std::mem::take(&mut host.messages),
                 outcome,
+                made_from,
             };
             let _ = tx.send(Incoming::Ran(Box::new(registry), Box::new(run)));
+            wake_ui();
         };
-
-        #[cfg(not(target_arch = "wasm32"))]
-        std::thread::spawn(work);
-
-        // No thread to spawn: `std::thread::spawn` compiles on
-        // wasm32-unknown-unknown and panics when called, and a browser without
-        // shared memory has no worker that could hold this anyway. So it runs
-        // here, on the frame that asked for it. Two things follow, and both
-        // are deliberate.
-        //
-        // The interface does not repaint while a plugin runs, so the progress
-        // bar it reports to is never seen and Cancel cannot be clicked. That
-        // is a real limitation of the web build, not an oversight — the
-        // alternative is a worker, shared memory, and a second wasm instance.
-        //
-        // It is also what makes `web_open` work: the result is handed to a new
-        // tab from inside the same task as the click that started the run, so
-        // the browser still counts the user as having asked for it and does
-        // not refuse the popup.
-        #[cfg(target_arch = "wasm32")]
-        work();
+        // A thread on the desktop; in a browser, here and now, on the frame
+        // that asked — which is also what lets a result open in a new tab. See
+        // `Platform::spawn_job` for why, and what it costs.
+        Current::spawn_job(work);
     }
 
     /// Apply what a plugin returned, once its worker has handed it back.
     fn apply_plugin_run(&mut self, run: PluginRun) {
+        for m in &run.messages {
+            log::info!("{}: {m}", run.name);
+        }
+        if run.outlived(self.document.load(std::sync::atomic::Ordering::Relaxed)) {
+            self.core.status = Some(format!(
+                "{}: not shown, as another image was opened while it ran",
+                run.name
+            ));
+            return;
+        }
         let PluginRun {
             index,
+            run_on: _,
             params,
             name,
-            messages,
+            messages: _,
             outcome,
+            made_from,
         } = run;
-        for m in &messages {
-            log::info!("{name}: {m}");
-        }
 
+        use fast_tiff_viewer::plugins::Product;
         match outcome {
-            Ok(PluginProduct::Plot(plot)) => {
-                match self.plot.as_mut().filter(|p| p.plugin == index) {
+            Ok(Product::Plot(plot)) => {
+                match self.tools.plot.as_mut().filter(|p| p.plugin == index) {
                     // A re-run for a changed selection: keep the window, the
                     // tool and the regions exactly where they are and swap the
                     // chart. Rebuilding it would move a window the user placed.
@@ -2100,47 +1728,64 @@ impl ViewerApp {
                         open.plot = *plot;
                         open.stale = false;
                     }
-                    None => self.plot = Some(plot::PlotWindow::new(index, params, *plot)),
+                    None => self.tools.plot = Some(plot::PlotWindow::new(index, params, *plot)),
                 }
             }
-            Ok(PluginProduct::Nothing) => {}
+            Ok(Product::Nothing) => {}
             // A run stopped to make way for a newer selection is not news:
             // the user drew a region, they did not cancel anything. Saying
             // "cancelled" for their own edit would be the tool complaining
             // about being used.
-            Ok(PluginProduct::Cancelled)
+            Ok(Product::Cancelled)
                 if self
+                    .tools
                     .plot
                     .as_ref()
                     .is_some_and(|p| p.plugin == index && p.stale) => {}
-            Ok(PluginProduct::Cancelled) => self.core.status = Some(format!("{name}: cancelled")),
-            Ok(PluginProduct::Message(m)) => self.core.status = Some(format!("{name}: {m}")),
+            Ok(Product::Cancelled) => self.core.status = Some(format!("{name}: cancelled")),
+            Ok(Product::Message(m)) => self.core.status = Some(format!("{name}: {m}")),
             // The window is already on its way; there is nothing left to do
             // here but say so.
-            Ok(PluginProduct::NewWindow(what)) => {
+            Ok(Product::NewWindow(what)) => {
                 self.report_done(format!("{name}: opened {what} in a new window"))
             }
-            Ok(PluginProduct::Inline {
-                bytes,
-                name: n,
-                why,
-            }) => {
+            Ok(Product::Inline { result, why }) => {
                 self.core.status = Some(format!(
                     "{name}: could not open a new window ({why}); showing it here"
                 ));
-                self.apply_opened(Opened::Bytes(bytes, n));
+                self.open_result(&name, result, made_from);
             }
-            Ok(PluginProduct::Replace { bytes, name: n }) => {
+            Ok(Product::Replace(result)) => {
                 self.report_done(format!("{name}: replaced this window's image"));
-                self.apply_opened(Opened::Bytes(bytes, n));
+                self.open_result(&name, result, made_from);
             }
-            Ok(PluginProduct::Saved(path)) => self.report_done(format!("{name}: wrote {path}")),
-            Ok(PluginProduct::Animate(a)) => self.start_animation(index, &name, *a),
-            Ok(PluginProduct::StopAnimation) => self.stop_animation_of(index),
-            Ok(PluginProduct::SelectRegion(prompt)) => {
+            Ok(Product::Saved(path)) => self.report_done(format!("{name}: wrote {path}")),
+            Ok(Product::Animate(a)) => self.start_animation(index, &name, *a),
+            Ok(Product::StopAnimation) => self.stop_animation_of(index),
+            Ok(Product::SelectRegion(prompt)) => {
                 self.start_region_pick(index, params, &name, prompt)
             }
             Err(e) => self.core.status = Some(format!("{name}: {e}")),
+        }
+    }
+
+    /// Show a plugin's result in this window: the file it was written to,
+    /// mapped as any opened file is, or its bytes where it was held in memory.
+    ///
+    /// The document it opens as is the result's own: named after it, owning
+    /// its scratch file (deleted when the document is closed), and made from
+    /// `made_from`, the file of the document the run was on — so "Save as…"
+    /// starts in that one's folder, and a plugin run on the result is not
+    /// told the scratch file is its source.
+    fn open_result(
+        &mut self,
+        plugin: &str,
+        result: fast_tiff_viewer::plugins::ResultTiff,
+        made_from: Option<PathBuf>,
+    ) {
+        match result.into_document(made_from) {
+            Ok(source) => self.apply_opened(Opened::Source(source)),
+            Err(e) => self.core.status = Some(format!("{plugin}: could not open its result: {e}")),
         }
     }
 
@@ -2162,15 +1807,28 @@ impl ViewerApp {
     /// `Ok(())` means an import is running and the caller is done; the result
     /// arrives through [`drain_pending_open`](Self::drain_pending_open). `Err`
     /// hands the path back, unclaimed, for the ordinary TIFF reader.
-    #[cfg(not(target_arch = "wasm32"))]
+    ///
+    /// Reached only with a path, which only the desktop has: a browser's
+    /// files arrive as bytes and go straight to the reader.
     fn start_import(&mut self, path: std::path::PathBuf) -> Result<(), std::path::PathBuf> {
-        // One at a time. The registry is with the worker, and a second import
-        // would have nothing to read the file with — better to say so than to
-        // hand an OIR to the TIFF reader and report that it is not a TIFF.
+        // One import at a time. The registry is with the worker, and a second
+        // import would have nothing to read the file with — better to say so
+        // than to hand an OIR to the TIFF reader and report that it is not a
+        // TIFF. A file no importer claims needs no importer, though: it is the
+        // TIFF reader's whether a job is running or not, and refusing it made
+        // every file unopenable for the length of an hour-long filter.
         let Some(registry) = self.plugins.take() else {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_lowercase);
+            if ext.is_none_or(|e| !self.claimed_extensions.contains(&e)) {
+                return Err(path);
+            }
             self.core.status = Some(self.busy_message());
             return Ok(());
         };
+        self.claimed_extensions = registry.claimed_extensions();
         // Cheap rejection first: no file is opened unless an extension matches,
         // so the common case of a TIFF costs one string compare — and costs no
         // thread.
@@ -2181,7 +1839,7 @@ impl ViewerApp {
 
         let (progress, cancel, _label) = self.begin_job(Job::new("Importing"));
         let tx = self.open_tx.clone();
-        std::thread::spawn(move || {
+        Current::spawn_job(move || {
             let mut registry = registry;
             let result = contained("the importer", || {
                 import_with_plugin(&mut registry, &path, &progress, &cancel)
@@ -2190,20 +1848,23 @@ impl ViewerApp {
             // If the send fails the window is gone, and so is anyone who wanted
             // the result.
             let _ = tx.send(Incoming::Imported(Box::new(registry), result));
+            wake_ui();
         });
         Ok(())
     }
 
-    /// Ask where to put the open stack, and write it there.
+    /// Write the open stack where the user wants it: asked where on the
+    /// desktop, handed to the downloads in a browser ([`Target::place`]).
     ///
-    /// The dialog blocks the interface, which is right — it is a modal, and
-    /// nothing else should be happening while it is up. The *write* does not:
-    /// it is a decode-and-encode of every plane, seconds on a large stack, and
-    /// it runs on a worker against its own handle on the same memory-mapped
-    /// file. See `fast_tiff_viewer::save::SaveSource`.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// The desktop's dialog blocks the interface, which is right — it is a
+    /// modal, and nothing else should be happening while it is up. The *write*
+    /// does not: it is a decode-and-encode of every plane, seconds on a large
+    /// stack, and it runs on a worker against its own handle on the same
+    /// memory-mapped file. See `fast_tiff_viewer::save::SaveSource`.
+    ///
+    /// [`Target::place`]: platform::Target::place
     fn save_as(&mut self) {
-        let Some(stack) = self.core.stack.as_ref() else {
+        let Some(stack) = self.core.document.as_ref() else {
             self.core.status = Some("Open an image first".into());
             return;
         };
@@ -2211,91 +1872,93 @@ impl ViewerApp {
             self.core.status = Some(self.busy_message());
             return;
         }
-        // Suggest the file's own name with a `.tif` on it. An imported stack
-        // has no file, and its `path` is the name it is shown under — which is
-        // exactly what to suggest saving it as.
-        let stem = stack
-            .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "stack".to_string());
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter("TIFF", &["tif", "tiff"])
-            .set_file_name(format!("{stem}.tif"));
-        // Every installed exporter's formats, beside the host's own TIFF. TIFF
-        // is first because it is the only one that keeps the stack whole; the
-        // rest are for handing a picture to something else.
-        let offered = self
-            .plugins
-            .as_ref()
-            .map(|p| p.save_file_types())
-            .unwrap_or_default();
-        for t in &offered {
-            let exts: Vec<&str> = t.extensions.iter().map(|s| s.as_str()).collect();
-            dialog = dialog.add_filter(&t.description, &exts);
-        }
-        if let Some(dir) = stack.path.parent().filter(|d| d.is_dir()) {
-            dialog = dialog.set_directory(dir);
-        }
-        let Some(path) = dialog.save_file() else {
-            // Cancelled: not a failure, and not worth a status line either.
-            return;
+        // What the window is titled with: the file's own name, the name an
+        // imported stack is shown under, the name a browser document arrived
+        // under — with a `.tif` on it.
+        let suggested = TARGET.save_name(&stack.path);
+        let destination = match TARGET.place("", suggested) {
+            Placement::At(destination) => destination,
+            Placement::Ask(name) => {
+                // Every installed exporter's formats, beside the host's own
+                // TIFF. TIFF is first because it is the only one that keeps the
+                // stack whole; the rest are for handing a picture to something
+                // else.
+                let mut filters =
+                    vec![fasttiff_plugin_api::FileType::new("TIFF", &["tif", "tiff"])];
+                filters.extend(
+                    self.plugins
+                        .as_ref()
+                        .map(|p| p.save_file_types())
+                        .unwrap_or_default(),
+                );
+                let dir = stack.save_dir();
+                match Current::ask_path(Purpose::Save, Some(&name), dir.as_deref(), &filters) {
+                    Some(path) => Destination::File(path),
+                    // Cancelled: not a failure, and not worth a status line
+                    // either.
+                    None => return,
+                }
+            }
         };
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.display().to_string());
-        // The extension decides, not the filter row that was selected: the
-        // dialogs disagree about whether choosing a filter rewrites the name,
-        // and the name is the thing the user can see. An extension no exporter
-        // claims is a TIFF, which is also what an extension-less name gets.
-        match self.exporter_for(&path) {
-            Some(index) => self.start_export(index, path, name),
-            None => self.start_save(path, name),
+        match destination {
+            Destination::File(path) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                // The extension decides, not the filter row that was selected:
+                // the dialogs disagree about whether choosing a filter rewrites
+                // the name, and the name is the thing the user can see. An
+                // extension no exporter claims is a TIFF, which is also what an
+                // extension-less name gets.
+                match self.exporter_for(&path) {
+                    Some(index) => self.start_export(index, path, name),
+                    None => self.start_save(path, name),
+                }
+            }
+            Destination::Download(name) => self.download_tiff(name),
         }
     }
 
     /// Write the open stack as a TIFF, on a worker.
-    #[cfg(not(target_arch = "wasm32"))]
     fn start_save(&mut self, path: std::path::PathBuf, name: String) {
-        let Some(stack) = self.core.stack.as_ref() else {
+        let Some(stack) = self.core.document.as_ref() else {
             return;
         };
         let source = fast_tiff_viewer::save::SaveSource::of(stack);
         let (progress, cancel, _label) = self.begin_job(Job::new("Saving"));
 
         let tx = self.open_tx.clone();
-        std::thread::spawn(move || {
+        Current::spawn_job(move || {
             let result = contained("the writer", || {
-                fast_tiff_viewer::save::save_source(&source, &path, &mut |f| {
+                Current::write_tiff(&source, &path, &mut |f| {
                     Job::report(&progress, f);
                     !cancel.load(std::sync::atomic::Ordering::Relaxed)
                 })
-                .map_err(|e| format!("{e:#}"))
             })
             .unwrap_or_else(Err);
             let outcome = WriteOutcome::of(result, &cancel);
             // The registry was never taken: a plain save is the app's own code.
             let _ = tx.send(Incoming::Wrote(None, name, outcome));
+            wake_ui();
         });
     }
 
-    /// Encode the open stack and hand it to the browser as a download.
+    /// Encode the open stack and hand it to the browser's downloads as `name`.
     ///
-    /// The browser's `save_as`, and shorter than the desktop's because both of
-    /// the things that make that one long are gone. There is no dialog to put
-    /// up — a tab cannot ask where a file should go, and the download manager
-    /// asks instead, if the user has told it to — and there is no worker to put
-    /// the write on.
+    /// Shorter than the desktop's save because both of the things that make
+    /// that one long are gone. There is no dialog to put up — a tab cannot ask
+    /// where a file should go, and the download manager asks instead, if the
+    /// user has told it to — and there is no worker to put the write on.
     ///
     /// # It runs on the frame that asked for it
     ///
-    /// Same as a plugin on this target, for the same reason: `std::thread::spawn`
-    /// compiles on `wasm32-unknown-unknown` and panics when called. So the
-    /// interface does not repaint while the encode runs, which means the
-    /// progress bar would never be seen and Cancel could never be clicked —
-    /// hence no [`Job`] at all here, rather than one that reports to nothing.
-    /// The status line afterwards is the whole of what this says.
+    /// Same as a job on this target, for the same reason (see
+    /// `Platform::spawn_job`). So the interface does not repaint while the
+    /// encode runs, which means a progress bar would never be seen and Cancel
+    /// could never be clicked — hence no [`Job`] at all here, rather than one
+    /// that reports to nothing. The status line afterwards is the whole of what
+    /// this says.
     ///
     /// A large stack will therefore hold the tab for as long as the encode
     /// takes. That is a real limit of this target and not a small one; it is
@@ -2310,25 +1973,16 @@ impl ViewerApp {
     /// an importer and this button writes TIFF.
     ///
     /// [`Exporter`]: fasttiff_plugin_api::Exporter
-    #[cfg(target_arch = "wasm32")]
-    fn save_as(&mut self) {
-        let Some(stack) = self.core.stack.as_ref() else {
-            self.core.status = Some("Open an image first".into());
+    fn download_tiff(&mut self, name: String) {
+        let Some(stack) = self.core.document.as_ref() else {
             return;
         };
-        if self.job.is_some() {
-            self.core.status = Some(self.busy_message());
-            return;
-        }
-        // What the window is titled with, which for a document that arrived as
-        // bytes is the name it arrived under.
-        let name = crate::web_save::suggested_name(&stack.path.to_string_lossy());
         let source = fast_tiff_viewer::save::SaveSource::of(stack);
         // Nothing to report progress to and nothing that could set the cancel
         // flag, so the callback is a constant rather than a pretence.
         let wrote = fast_tiff_viewer::save::save_to_bytes(&source, &mut |_| true)
             .map_err(|e| format!("{e:#}"))
-            .and_then(|bytes| crate::web_save::download(&bytes, &name));
+            .and_then(|bytes| Current::download(&bytes, &name, "image/tiff"));
         match wrote {
             // "Saved" rather than "Downloaded": where it went is the browser's
             // business, and the user asked to save their image.
@@ -2354,7 +2008,7 @@ impl ViewerApp {
     ///
     /// Shared by the toolbar button and the hotkey, so the two cannot drift.
     fn copy_view(&mut self, ctx: &egui::Context) {
-        let Some(stack) = self.core.stack.as_ref() else {
+        let Some(stack) = self.core.document.as_ref() else {
             self.core.status = Some("Open an image first".into());
             return;
         };
@@ -2365,12 +2019,12 @@ impl ViewerApp {
         if self.core.view_mode == ViewMode::Volume {
             // Nothing has been painted yet on the frame a file opens in, so
             // there is no view to grab. Saying so beats copying a blank.
-            let Some(rect) = self.volume_rect else {
+            let Some(rect) = self.volume_ui.rect else {
                 self.core.status = Some("The 3D view has not been drawn yet".into());
                 return;
             };
             copy_view::request_volume(ctx);
-            self.pending_copy = Some(rect);
+            self.volume_ui.pending_copy = Some(rect);
             return;
         }
         match fast_tiff_viewer::snapshot::of_frame(stack) {
@@ -2389,7 +2043,7 @@ impl ViewerApp {
     /// reason is none of this function's business, and copying it would put a
     /// picture on the clipboard that nobody asked for.
     fn poll_copy(&mut self, ctx: &egui::Context) {
-        let Some(rect) = self.pending_copy else {
+        let Some(rect) = self.volume_ui.pending_copy else {
             return;
         };
         let Some(shot) = copy_view::take_screenshot(ctx) else {
@@ -2398,7 +2052,7 @@ impl ViewerApp {
         // Taken, whatever happens next: a screenshot that cannot be cropped is
         // not going to become croppable on the following frame, and leaving the
         // request standing would copy the next unrelated screenshot instead.
-        self.pending_copy = None;
+        self.volume_ui.pending_copy = None;
         match copy_view::crop(&shot, rect, ctx.pixels_per_point()) {
             Some(image) => {
                 let (w, h) = (image.width(), image.height());
@@ -2413,9 +2067,11 @@ impl ViewerApp {
     ///
     /// The registry goes with it, as an import's and a filter's do, which is
     /// what keeps a second job from starting while this one holds the data.
-    #[cfg(not(target_arch = "wasm32"))]
+    ///
+    /// An exporter writes to a path, so this is reached only with a file to
+    /// write: the desktop's.
     fn start_export(&mut self, index: usize, path: std::path::PathBuf, name: String) {
-        let Some(loaded) = self.core.stack.as_ref() else {
+        let Some(loaded) = self.core.document.as_ref() else {
             return;
         };
         let Some(registry) = self.plugins.take() else {
@@ -2434,7 +2090,7 @@ impl ViewerApp {
         let (_, cancel, _label) = self.begin_job(job);
 
         let tx = self.open_tx.clone();
-        std::thread::spawn(move || {
+        Current::spawn_job(move || {
             let mut registry = registry;
             let mut host = host;
             let result = contained(&plugin_name, || match registry.exporter_mut(index) {
@@ -2468,357 +2124,108 @@ impl ViewerApp {
             }
             let outcome = WriteOutcome::of(result, &cancel);
             let _ = tx.send(Incoming::Wrote(Some(Box::new(registry)), name, outcome));
+            wake_ui();
         });
     }
 
     /// Which exporter, if any, claims this name.
-    #[cfg(not(target_arch = "wasm32"))]
     fn exporter_for(&self, path: &std::path::Path) -> Option<usize> {
         self.plugins.as_ref()?.exporter_for(path)
     }
 
-    /// Show the platform's file picker.
-    ///
-    /// Native: a blocking dialog that can select several files — the first
-    /// opens here and the rest are launched in their own processes, matching
-    /// the command line and drag-drop. Web: an async picker that posts its
-    /// result back through `open_rx`.
+    /// Show the platform's file picker, offering what the importers read
+    /// beside TIFF, and open what it gives back now. A picker that answers
+    /// later — the browser's — hands its file in through the platform's
+    /// incoming files instead (see [`intake`](Self::intake)).
     fn show_open_dialog(&mut self, ctx: &egui::Context) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = ctx;
-            // Importers add their formats to the picker, so a file an installed
-            // plugin can read is selectable without the user changing the
-            // filter to "all files" and hoping.
-            let mut dialog = rfd::FileDialog::new().add_filter("TIFF", &["tif", "tiff"]);
-            let types = self
-                .plugins
-                .as_ref()
-                .map(|p| p.open_file_types())
-                .unwrap_or_default();
-            if !types.is_empty() {
-                let mut every: Vec<&str> = vec!["tif", "tiff"];
-                for t in &types {
-                    let exts: Vec<&str> = t.extensions.iter().map(|s| s.as_str()).collect();
-                    dialog = dialog.add_filter(&t.description, &exts);
-                    every.extend(exts);
-                }
-                // A combined entry first, so "open whatever this app can read"
-                // is one click rather than a hunt through the format list.
-                dialog = rfd::FileDialog::new()
-                    .add_filter("Images FastTIFF can read", &every)
-                    .add_filter("TIFF", &["tif", "tiff"]);
-                for t in &types {
-                    let exts: Vec<&str> = t.extensions.iter().map(|s| s.as_str()).collect();
-                    dialog = dialog.add_filter(&t.description, &exts);
-                }
-            }
-            if let Some(paths) = dialog.pick_files() {
-                if let Some(first) = crate::process::open_all(&paths) {
-                    self.apply_opened(Opened::Path(first.clone()));
-                }
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let tx = self.open_tx.clone();
-            let ctx = ctx.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Some(handle) = rfd::AsyncFileDialog::new()
-                    .add_filter("TIFF", &["tif", "tiff"])
-                    .pick_file()
-                    .await
-                {
-                    let name = handle.file_name();
-                    let _ = tx.send(Incoming::Opened(Opened::Bytes(handle.read().await, name)));
-                }
-                // Wake the UI whether or not a file was chosen.
-                ctx.request_repaint();
-            });
-        }
-    }
-}
-
-impl ViewerApp {
-    /// Size, position and title the OS window in response to this frame's
-    /// events. Native only — a browser canvas is sized by CSS, and none of
-    /// `ViewportCommand` means anything there.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn manage_window(
-        &mut self,
-        ui: &egui::Ui,
-        toolbar_response: &egui::InnerResponse<()>,
-        scrub_bar_response: &egui::InnerResponse<()>,
-    ) {
-        // Window sizing happens ONLY in response to explicit events — a freshly
-        // opened file, or a zoom change (handled below) — never every frame.
-        // That's what lets the window be freely resized and maximized without
-        // shaking or being snapped back.
-        let toolbar_height = toolbar_response.response.rect.height();
-        let bottom_bar_height = scrub_bar_response.response.rect.height();
-        let chrome_height = toolbar_height + bottom_bar_height;
-
-        // Panel expand/collapse: grow (or shrink) the window height by the
-        // panel's own height change, so the image and toolbar above stay put
-        // and the panel "drops down" from its position. One-shot, triggered
-        // only by the toggle. Skipped when the window manager owns the size
-        // (maximized or full screen) — there the
-        // image just letterboxes into the space the panel takes. We stay armed
-        // until the height actually changes (the toggle frame still reports the
-        // old height), repainting meanwhile so the next frame lands.
-        if let Some(delta) = self.panel.grow_delta(bottom_bar_height) {
-            if !window_size_is_not_ours(ui.ctx()) {
-                let cur = ui.ctx().content_rect().size();
-                let h = (cur.y + delta).round().max(200.0);
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                        cur.x.round(),
-                        h,
-                    )));
-            }
-        } else if self.panel.waiting() {
-            // The change has not shown up yet. Keep the frames coming so the
-            // next one can see it.
-            ui.ctx().request_repaint();
-        }
-
-        let img_dims = self
-            .core
-            .stack
+        let readable = self
+            .plugins
             .as_ref()
-            .and_then(|l| l.tiff.frames.first())
-            .map(|f| (f.width as f32, f.height as f32));
-
-        if let Some((img_w, img_h)) = img_dims {
-            // On open: pick the largest zoom level ≤ 100% at which the image +
-            // chrome still fits the monitor (a huge image opens scaled down, a
-            // normal one at 100%). Deferred to here because the chrome height
-            // and monitor size aren't known at open time.
-            if self.view.pending_initial_fit {
-                if let Some(z) = initial_fit_zoom(ui.ctx(), img_w, img_h, chrome_height) {
-                    self.view.zoom = z;
-                    self.view.pan = egui::Vec2::ZERO;
-                    self.view.pending_initial_fit = false;
-                    self.view.resize_to_zoom = true;
-                } else {
-                    // Monitor size not reported yet (can stay unknown until the
-                    // window first gets focus/input). Poll a few times a second
-                    // rather than spinning `request_repaint` every frame, which
-                    // would peg a CPU core while the app sits idle on load.
-                    ui.ctx()
-                        .request_repaint_after(std::time::Duration::from_millis(100));
-                }
-            }
-
-            // When the window manager owns the size — maximized or full screen —
-            // the window is left completely alone on zoom, and the image just
-            // zooms/pans/letterboxes inside it (handled by the central panel's
-            // UV transform).
-            let size_is_fixed = window_size_is_not_ours(ui.ctx());
-
-            // The target window inner size for the current zoom: the image scaled
-            // uniformly, clamped to fit the monitor and to the minimum size. Once
-            // it hits the minimum the window stops shrinking and the image just
-            // letterboxes. Computed once so the reposition decision and the
-            // actual resize agree. `None` when the window manager owns the size
-            // (window left alone).
-            let target_window = if size_is_fixed {
-                None
-            } else {
-                // The zoom being glided to, so the window is the right size for
-                // the destination while the picture is still on its way there.
-                // Sizing to the animated value instead would resize the window
-                // on every frame of every step.
-                let settled = self.view.zoom_settled();
-                let window_scale = match monitor_work_area(ui.ctx()) {
-                    Some(m) => {
-                        let fit = (m.x / img_w).min((m.y - chrome_height).max(1.0) / img_h);
-                        settled.min(fit)
-                    }
-                    None => settled,
-                };
-                let w = (img_w * window_scale).round().max(MIN_WINDOW);
-                let h = (img_h * window_scale + chrome_height)
-                    .round()
-                    .max(MIN_WINDOW);
-                Some(egui::vec2(w, h))
-            };
-
-            // The zoom value + pan were already applied early (above), so the
-            // image is redrawing at the new zoom this frame. Here we only decide
-            // whether to move the window so the cursor's point stays on the same
-            // desktop spot.
-            let mut reposition: Option<egui::Pos2> = None;
-            if let Some((old_zoom, cursor)) = self.view.zoom_reposition.take() {
-                let new_zoom = self.view.zoom_settled();
-                let fits = monitor_work_area(ui.ctx())
-                    .map(|m| img_w * new_zoom <= m.x && img_h * new_zoom + chrome_height <= m.y)
-                    .unwrap_or(true);
-                // Whether the window grew vs. the previous frame (zoom-in case),
-                // and whether the image is now letterboxed inside the window
-                // (smaller than the content on either axis).
-                let cur_inner = ui
-                    .ctx()
-                    .input(|i| i.viewport().inner_rect.map(|r| r.size()));
-                let grew = match (target_window, cur_inner) {
-                    (Some(t), Some(c)) => t.x > c.x + 0.5 || t.y > c.y + 0.5,
-                    _ => true,
-                };
-                let letterboxing = match target_window {
-                    Some(t) => {
-                        img_w * new_zoom < t.x - 0.5
-                            || img_h * new_zoom < (t.y - chrome_height) - 0.5
-                    }
-                    None => false,
-                };
-                // Whether the image was letterboxed *before* this zoom step. In
-                // that state the cursor can sit in the empty margin, off the
-                // image, so the cursor-anchor math would jump the window — skip
-                // the one reposition on the letterboxed → first-fitted step.
-                let was_letterboxing = match cur_inner {
-                    Some(c) => {
-                        img_w * old_zoom < c.x - 0.5
-                            || img_h * old_zoom < (c.y - chrome_height) - 0.5
-                    }
-                    None => false,
-                };
-                // Follow the cursor when zooming *in* and the window grows (but
-                // not on the first step out of a letterboxed state), or when
-                // zooming *out* while the image still fills the window. Once it's
-                // letterboxing at the minimum size, or the window manager owns
-                // the size, it stays put.
-                let follow = !size_is_fixed
-                    && fits
-                    && ((new_zoom > old_zoom && grew && !was_letterboxing)
-                        || (new_zoom < old_zoom && !letterboxing));
-                if follow {
-                    if let Some(outer) = ui.ctx().input(|i| i.viewport().outer_rect.map(|r| r.min))
-                    {
-                        let ratio = new_zoom / old_zoom;
-                        reposition =
-                            Some(outer + (cursor - self.view.panel_rect.min) * (1.0 - ratio));
-                    }
-                }
-            }
-
-            // Apply a pending resize (one-shot), unless the window manager owns
-            // the size.
-            if self.view.resize_to_zoom {
-                if let Some(size) = target_window {
-                    let (w, h) = (size.x, size.y);
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-
-                    // Keep the window fully on the desktop. The target position is
-                    // the cursor-zoom move (or the current position when none).
-                    // Horizontally it's clamped to the monitor width. Vertically,
-                    // if the (grown) window's bottom would drop below the usable
-                    // area, it's *centered* between the top and bottom of the
-                    // monitor — symmetric margins, so it's least likely to be
-                    // covered by a taskbar whether that's docked at the top or
-                    // the bottom (egui doesn't report which).
-                    let info = ui.ctx().input(|i| {
-                        (
-                            i.viewport().outer_rect,
-                            i.viewport().inner_rect,
-                            i.viewport().monitor_size,
-                        )
-                    });
-                    if let (Some(outer), Some(inner), Some(monitor)) = info {
-                        let decoration = outer.size() - inner.size();
-                        let new_outer = egui::vec2(w, h) + decoration;
-                        let target = reposition.unwrap_or(outer.min);
-                        let max_x = (monitor.x - new_outer.x).max(0.0);
-                        let usable_bottom = monitor_work_area(ui.ctx())
-                            .map(|wa| wa.y)
-                            .unwrap_or(monitor.y);
-                        let y = if target.y + new_outer.y > usable_bottom {
-                            ((monitor.y - new_outer.y) * 0.5).max(0.0)
-                        } else {
-                            target.y.max(0.0)
-                        };
-                        let clamped = egui::pos2(target.x.clamp(0.0, max_x), y);
-                        if (clamped - outer.min).length() > 0.5 {
-                            ui.ctx()
-                                .send_viewport_cmd(egui::ViewportCommand::OuterPosition(clamped));
-                        }
-                    } else if let Some(pos) = reposition {
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
-                    }
-                }
-                self.view.resize_to_zoom = false;
-            }
-        }
-
-        // Window title: loaded filename, or the app name when nothing is open.
-        let desired_title = match &self.core.stack {
-            Some(loaded) => {
-                let name = loaded
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                format!("{name} • FastTIFF")
-            }
-            None => "FastTIFF".to_string(),
-        };
-        if self.last_title.as_deref() != Some(desired_title.as_str()) {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Title(desired_title.clone()));
-            self.last_title = Some(desired_title);
+            .map(|p| p.open_file_types())
+            .unwrap_or_default();
+        if let Some(opened) = self.platform.pick_file(ctx, &readable) {
+            self.apply_opened(opened);
         }
     }
 }
 
 impl ViewerApp {
     /// The whole of one frame. Kept apart from [`eframe::App::ui`] so that
-    /// what must happen after every frame happens however this one ends — it
-    /// returns early from several places.
+    /// what must happen after every frame happens however this one ends.
+    ///
+    /// The frame is [`FRAME`], taken a step at a time. The panels and windows
+    /// do not act on what is clicked: they queue it as a [`UiCommand`], and
+    /// each [`Step::Apply`] carries out what is due at that point. [`Phase`]
+    /// says why each of those points is where it is, and [`UiCommand::slot`]
+    /// which command lands at which.
     fn draw(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Files dropped onto the window. Natively these carry a path, and
-        // dropping several opens the first here and launches the rest in their
-        // own processes; in a browser the drop event carries the bytes instead.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
-                i.raw
-                    .dropped_files
-                    .iter()
-                    .filter_map(|f| f.path.clone())
-                    .collect()
-            });
-            if let Some(first) = crate::process::open_all(&dropped) {
-                self.apply_opened(Opened::Path(first.clone()));
-            }
-
-            // macOS "Open With" / double-click delivers files via an Apple Event
-            // (not argv); drain whatever `macos_open`'s handler has queued and
-            // open them the same way as drag-drop.
-            #[cfg(target_os = "macos")]
-            {
-                let opened = crate::macos_open::take_opened_files();
-                if let Some(first) = crate::process::open_all(&opened) {
-                    self.apply_opened(Opened::Path(first.clone()));
+        let ctx = ui.ctx().clone();
+        let cmds = Commands::default();
+        // What a step leaves for the steps after it.
+        let mut pinching = false;
+        let mut toolbar = None;
+        let mut bar: Option<scrub_bar::Bar> = None;
+        for step in FRAME {
+            match step {
+                Step::Intake => self.intake(&ctx),
+                Step::ZoomInput => pinching = self.zoom_input(ui),
+                Step::Toolbar => toolbar = Some(self.toolbar(ui, &cmds)),
+                Step::ToolWindows => self.tool_windows(&ctx),
+                Step::Hotkeys => self.hotkeys(&ctx, &cmds),
+                Step::PollCopy => self.poll_copy(&ctx),
+                Step::ScrubBar => bar = Some(self.scrub_bar(ui, &cmds)),
+                Step::Popups => self.popups(&ctx),
+                Step::NoteInfoRow => {
+                    // A status message lands in the same bar as the panel, and
+                    // pushes the image up in exactly the same way — so it gets
+                    // the same answer: the window grows by the message's height
+                    // instead of the canvas shrinking under it. Losing thirty
+                    // pixels of canvas is enough to put an image that was
+                    // fitted to the window into pan mode, which is a strange
+                    // thing for "saved it" to do.
+                    //
+                    // Armed here rather than where the status is set, because a
+                    // status can be set from anywhere — including a worker
+                    // thread — and what matters is not that it changed but that
+                    // the bar in front of the user is now a different height.
+                    let bar = bar.as_mut().expect("FRAME lays the bar out first");
+                    let height = bar.height();
+                    self.panel.note_info_row(bar.drawn_info.take(), height);
+                }
+                Step::RunPlayback => {
+                    let bar = bar.as_ref().expect("FRAME lays the bar out first");
+                    self.run_playback(&ctx, bar.scrubber_held);
+                }
+                Step::SettleView => self.settle_view(&ctx),
+                Step::Canvas => self.canvas(ui, pinching, &cmds),
+                Step::EndFrame => {
+                    let toolbar = toolbar.as_ref().expect("FRAME lays the toolbar out first");
+                    let bar = bar.as_ref().expect("FRAME lays the bar out first");
+                    self.end_frame(ui, toolbar, &bar.response);
+                }
+                Step::Apply(phase) => {
+                    // The bar's height, from the phase after it on.
+                    let at = Applying {
+                        ctx: &ctx,
+                        bar_height: bar.as_ref().map(scrub_bar::Bar::height),
+                    };
+                    self.apply_due(phase, &cmds, &at);
                 }
             }
         }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let dropped: Vec<Opened> = ui.ctx().input(|i| {
-                i.raw
-                    .dropped_files
-                    .iter()
-                    .filter_map(|f| {
-                        f.bytes
-                            .as_ref()
-                            .map(|b| Opened::Bytes(b.to_vec(), f.name.clone()))
-                    })
-                    .collect()
-            });
-            for d in dropped {
-                self.apply_opened(d);
-            }
+        cmds.finish();
+    }
+
+    /// Take in what arrived since the last frame: files dropped on the window
+    /// or handed over by the system or a picker, what the workers sent, and a
+    /// load that finished — and keep frames coming while one is still on its
+    /// way.
+    fn intake(&mut self, ctx: &egui::Context) {
+        // Paths on the desktop, several of which open the first here and the
+        // rest in processes of their own; bytes in a browser. See
+        // `Platform::take_incoming_files`.
+        for opened in self.platform.take_incoming_files(ctx) {
+            self.apply_opened(opened);
         }
         self.drain_pending_open();
         // Take delivery of a load that finished since the last frame, and keep
@@ -2828,19 +2235,25 @@ impl ViewerApp {
         if self.core.poll_open() {
             self.finish_open();
         }
-        // A worker counts as much as a load here — an import, a plugin, a save
-        // or an export. None of them can wake the interface, and the frame that
-        // notices one has finished is this same one. Without this the readout
-        // would only move when the mouse did, and the result would land
-        // whenever the user next happened to touch something.
-        #[cfg(not(target_arch = "wasm32"))]
-        let importing = self.job.is_some();
-        #[cfg(target_arch = "wasm32")]
-        let importing = false;
-        if importing || self.core.load_stage().is_some() {
-            ui.ctx().request_repaint();
+        // A worker — an import, a plugin, a save or an export — wakes the
+        // interface itself when its result is sent and as its progress moves
+        // (`wake_ui`). The slow poll here is only a safety net, for a wake
+        // that raced the frame. A load cannot wake anything (the core knows no
+        // toolkit), so it is polled, at a rate a readout needs rather than at
+        // the display's. A job that runs on the frame that started it — the
+        // browser's — has nothing to poll for.
+        let working = TARGET.jobs_run_behind() && self.job.is_some();
+        if self.core.load_stage().is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        } else if working {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
+    }
 
+    /// This frame's zoom input — the wheel and keys, and a pinch — applied to
+    /// the 2D view before any panel is laid out. Returns whether a pinch is in
+    /// progress, which the canvas needs to know too.
+    fn zoom_input(&mut self, ui: &egui::Ui) -> bool {
         // Collect zoom input before panels consume events.
         // `zoom_delta()` is the correct API: egui routes Ctrl+scroll into
         // `zoom_factor_delta` rather than `smooth_scroll_delta`, so checking
@@ -2881,7 +2294,7 @@ impl ViewerApp {
         let touch = ui.input(|i| i.multi_touch());
         let pinching = touch.is_some();
         if let Some(t) = touch {
-            if self.core.stack.is_some() && self.core.view_mode == ViewMode::Movie {
+            if self.core.document.is_some() && self.core.view_mode == ViewMode::Movie {
                 let old_zoom = self.view.zoom;
                 let (lo, hi) = zoom_bounds(self.view.fit_zoom);
                 let new_zoom = (old_zoom * t.zoom_delta).clamp(lo, hi);
@@ -2911,7 +2324,7 @@ impl ViewerApp {
         // height is known. Cursor-centering uses last frame's cached geometry.
         if zoom_step != 0
             && !pinching
-            && self.core.stack.is_some()
+            && self.core.document.is_some()
             && self.core.view_mode == ViewMode::Movie
         {
             // Stepped off wherever the picture is *heading*, not where it has
@@ -2941,7 +2354,7 @@ impl ViewerApp {
         // Advance the glide, in this same frame as the step that started it, so
         // the picture is already moving on the frame the wheel turned.
         if self.view.zoom_glide.is_some() {
-            if pinching || self.core.stack.is_none() || self.core.view_mode != ViewMode::Movie {
+            if pinching || self.core.document.is_none() || self.core.view_mode != ViewMode::Movie {
                 // A pinch drives the zoom directly and a 3D view has none;
                 // either way the glide has nothing left to say.
                 self.view.zoom_glide = None;
@@ -2960,935 +2373,45 @@ impl ViewerApp {
         // Read *after* the advance, so the frame a glide lands on plans at once
         // rather than waiting one more.
         self.core.view_moving = self.view.zoom_glide.is_some() || pinching;
+        pinching
+    }
 
-        // 2D/3D view toggle + the 3D-settings button are set inside the toolbar
-        // closure via these locals (applied after) so the closure never needs a
-        // second borrow of `self`.
-        let current_view_mode = self.core.view_mode;
-        // Read before the toolbar closure, which would otherwise need a second
-        // borrow of `self` to ask.
-        let can_show_volume = self.core.can_show_volume();
-        let mut mode_request: Option<ViewMode> = None;
-        let mut open_requested = false;
-        let mut save_requested = false;
-        let mut copy_requested = false;
-        let mut render_settings_toggle = false;
-        let mut plugin_to_start: Option<usize> = None;
-        let mut open_point_counter = false;
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut open_plugin_folder = false;
+    /// The tool windows: a plugin's dialog, its plot, the point counter. Each
+    /// acts on its own buttons as it is drawn.
+    fn tool_windows(&mut self, ctx: &egui::Context) {
+        self.poll_plugin_dialog(ctx);
+        self.poll_plot(ctx);
+        self.poll_point_counter(ctx);
+    }
 
-        let toolbar_response = egui::Panel::top("toolbar").show_inside(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .button(RichText::new(ICON_OPEN).size(ICON_SIZE))
-                    .on_hover_text("Open a file…")
-                    .clicked()
-                {
-                    open_requested = true;
-                }
-                // Save and Copy both act on the open image, so with nothing
-                // open they are *hidden* rather than greyed out. A disabled
-                // control is a promise that some reachable state will enable
-                // it; "open a file first" is not that state, it is the whole
-                // program not having started yet, and two dead buttons beside
-                // Open say nothing Open does not already say.
-                //
-                // Busy is the opposite case and stays greyed: there *is* an
-                // image, the button *will* work, and the only thing missing is
-                // the few seconds a write or an import is taking. That is a
-                // promise worth making, so the disabled hover text names it.
-                if self.core.stack.is_some() {
-                    // Named for what each platform actually does. The desktop
-                    // asks where to put the file, so its label ends in an
-                    // ellipsis; the browser cannot ask and hands the file to the
-                    // download manager instead, so promising a dialog there
-                    // would be a lie.
-                    let save_label = if cfg!(target_arch = "wasm32") {
-                        "Download as TIFF"
-                    } else {
-                        "Save as TIFF…"
-                    };
-                    if ui
-                        .add_enabled(
-                            self.job.is_none(),
-                            egui::Button::new(RichText::new(ICON_SAVE).size(ICON_SIZE)),
-                        )
-                        .on_hover_text(save_label)
-                        .on_disabled_hover_text(format!("{save_label} — busy"))
-                        .clicked()
-                    {
-                        save_requested = true;
-                    }
-                    // What a copy *is* differs by view mode, so the tooltip
-                    // says which one the user will get rather than a generic
-                    // "copy": in 2-D the frame at its own size, in 3-D the view
-                    // as it is framed on screen. See `copy_view`.
-                    let copy_label = if self.core.view_mode == ViewMode::Volume {
-                        "Copy the 3D view as an image"
-                    } else {
-                        "Copy this frame as an image"
-                    };
-                    if ui
-                        .add_enabled(
-                            self.job.is_none(),
-                            egui::Button::new(RichText::new(ICON_COPY).size(ICON_SIZE)),
-                        )
-                        .on_hover_text(format!("{copy_label}  (Ctrl/Cmd+C)"))
-                        .on_disabled_hover_text(format!("{copy_label} — busy"))
-                        .clicked()
-                    {
-                        copy_requested = true;
-                    }
-                }
-                {
-                    let available = self.plugins.as_ref().filter(|_| self.job.is_none());
-                    let has_stack = self.core.stack.is_some();
-                    match plugins_ui::plugins_menu(ui, available, has_stack) {
-                        plugins_ui::MenuAction::Run(i) => plugin_to_start = Some(i),
-                        plugins_ui::MenuAction::PointCounter => open_point_counter = true,
-                        // The entry that produces this is itself desktop-only,
-                        // so on the web the variant is simply never sent.
-                        #[cfg(not(target_arch = "wasm32"))]
-                        plugins_ui::MenuAction::OpenPluginFolder => open_plugin_folder = true,
-                        plugins_ui::MenuAction::None => {}
-                    }
-                }
-                // 2D/3D switch, right next to Open, and the render-settings
-                // button beside it. Both need a volume to act on, which needs at
-                // least two frames to stack into one.
-                //
-                // Hidden rather than greyed out when there is none. A disabled
-                // control is a promise that it will work under some condition
-                // the user can reach, and offers a tooltip to say which; these
-                // cannot become available for the open file no matter what is
-                // clicked, so a permanently dead 2D/3D pair next to Open reads
-                // as breakage. The toolbar is also short enough that the gap is
-                // no loss. The file-info group below supplies the trailing
-                // separator, so this block owns only its own leading ones.
-                if can_show_volume {
-                    ui.separator();
-                    if ui
-                        .selectable_label(current_view_mode == ViewMode::Movie, "2D")
-                        .on_hover_text("Movie (2D) view")
-                        .clicked()
-                    {
-                        mode_request = Some(ViewMode::Movie);
-                    }
-                    if ui
-                        .selectable_label(current_view_mode == ViewMode::Volume, "3D")
-                        .on_hover_text("Volume (3D) view — drag to rotate, scroll to zoom")
-                        .clicked()
-                    {
-                        mode_request = Some(ViewMode::Volume);
-                    }
-                    ui.separator();
-                    if ui
-                        .button(RichText::new(ICON_SETTINGS).size(ICON_SIZE))
-                        .on_hover_text("3D render settings")
-                        .clicked()
-                    {
-                        render_settings_toggle = true;
-                    }
-                }
-                if self.core.stack.is_none() {
-                    // Nothing open yet: show the version + active render backend
-                    // in the space the file info will later occupy.
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format!(
-                            "FastTIFF v{}, Renderer: {}",
-                            env!("CARGO_PKG_VERSION"),
-                            render::BACKEND
-                    )));
+    /// The main window's chords, read once the tool windows have been drawn
+    /// (see [`Phase::ToolWindows`]).
+    fn hotkeys(&self, ctx: &egui::Context, cmds: &Commands) {
+        // Ctrl/Cmd+C.
+        if copy_view::hotkey(ctx) {
+            cmds.push(UiCommand::Copy(Via::Hotkey));
+        }
+        // Ctrl/Cmd+Z, the canvas tools' undo (the point counter's), while the
+        // main window has the keyboard — and only while a tool that keeps an
+        // undo history is open, which is when the chord is taken. Applied
+        // before the picture handles this frame's pointer, so an undo that
+        // ends a drag in flight is not followed by one more step of it.
+        if self.tools.takes_undo() && canvas_tool::undo_hotkey(ctx) {
+            cmds.push(UiCommand::UndoTool);
+        }
+    }
 
-                }
-                if let Some(loaded) = &self.core.stack {
-                    let meta = &loaded.tiff.meta;
-                    // What the viewer is actually showing, which is not the
-                    // file's raw claim whenever an axis was reclassified.
-                    let dims = loaded.display.dims;
-                    // Reflect a toggle click made earlier in this same toolbar
-                    // (the 2D/3D buttons run before this), so the layout updates
-                    // on the click frame rather than one frame later.
-                    let in_3d = mode_request.unwrap_or(current_view_mode) == ViewMode::Volume;
-                    // In 3D the frame axis becomes the volume's depth, so the
-                    // frame counter/time are only meaningful when the stack also
-                    // has a separate time axis (the channels+Z+time case, where
-                    // `slices > 1`); otherwise hide them.
-                    let hide_frame_info = in_3d && dims.slices <= 1;
-
-                    // Zoom is a 2D-only concept — hidden entirely in 3D.
-                    if !in_3d {
-                        ui.separator();
-                        // Up to 2 decimals, trailing zeros trimmed: 3.1%, 33.3%,
-                        // 100%, 3200% — so the fractional small zooms read correctly.
-                        //
-                        // The level being glided *to*, not the value part-way
-                        // there: the number is what the wheel selected, and
-                        // running it through the intermediate frames turns a
-                        // readout into a blur nobody can read.
-                        let pct = format!("{:.2}", self.view.zoom_settled() * 100.0);
-                        let pct = pct.trim_end_matches('0').trim_end_matches('.');
-                        ui.label(RichText::new(format!("{pct}%")).monospace())
-                            .on_hover_text("Zoom (Ctrl+scroll to change)");
-                    }
-                    ui.separator();
-                    let channels_desc = if loaded.display.cmyk {
-                        // Say what was read *and* what is shown: the file holds
-                        // four ink plates, the viewer shows three converted
-                        // components, and a printing user will want to know the
-                        // K plate is folded in rather than dropped.
-                        //
-                        // ASCII arrow on purpose: the bundled font has
-                        // no U+2192, so a real arrow renders as a tofu
-                        // box. The multiplication sign already on this
-                        // status line IS in the font, which makes that
-                        // gap easy to assume away.
-                        "CMYK->RGB".to_string()
-                    } else if loaded.display.rgb {
-                        "RGB".to_string()
-                    } else {
-                        format!("{} channel(s)", dims.channels)
-                    };
-                    let bits = loaded.tiff.frames.first().map(|f| f.bits_per_sample).unwrap_or(0);
-                    let (px_w, px_h) = loaded
-                        .tiff
-                        .frames
-                        .first()
-                        .map_or((0, 0), |f| (f.width, f.height));
-                    ui.label(format!("{px_w}×{px_h} px, {bits}-bit, {channels_desc}"));
-                    // The same frame in real units, when the file says how big a
-                    // pixel is. Next to the pixel count rather than replacing it:
-                    // the two answer different questions — how much data there is
-                    // against how much specimen it covers — and a micrograph is
-                    // routinely discussed in both.
-                    if let Some(physical) = physical_size(
-                        meta.pixel_width,
-                        meta.pixel_height,
-                        meta.unit.as_deref(),
-                        px_w,
-                        px_h,
-                    ) {
-                        ui.separator();
-                        ui.label(physical).on_hover_text(
-                            "Physical size, from the pixel calibration in the file's metadata \
-                             (OME PhysicalSize, or the TIFF resolution tags).",
-                        );
-                    }
-
-                    // Say so when the picture on screen is not the picture in
-                    // the file. This only appears for frames past the GPU
-                    // texture limit, which is rare and enormous — but silently
-                    // showing a reduced image as if it were the data would be
-                    // the kind of wrong a viewer must never be.
-                    if loaded.gpu_stride > 1 {
-                        ui.separator();
-                        ui.label(
-                            RichText::new(format!("1/{} scale", loaded.gpu_stride))
-                                .color(Color32::from_rgb(230, 170, 60)),
-                        )
-                        .on_hover_text(format!(
-                            "This frame is larger than one GPU texture can hold, so it is                              shown subsampled {}x on each axis. Pixel values and measurements                              read from it are sampled, not exact.",
-                            loaded.gpu_stride
-                        ));
-                    }
-
-                    if !hide_frame_info {
-                        ui.separator();
-                        let frame_digits = dims.frames.to_string().len();
-                        ui.label(
-                            RichText::new(format!("Frame {:>frame_digits$} / {}", loaded.frame_index + 1, dims.frames))
-                                .monospace(),
-                        );
-                        if let Some(interval) = meta.frame_interval_s {
-                            ui.separator();
-                            let max_time = dims.frames.saturating_sub(1) as f64 * interval;
-                            let time_width = format!("{max_time:.3}").len();
-                            let current_time = loaded.frame_index as f64 * interval;
-                            ui.label(RichText::new(format!("t = {current_time:>time_width$.3}s")).monospace());
-                        }
-                    }
-                }
-            });
-        });
-        if open_requested {
-            self.show_open_dialog(ui.ctx());
-        }
-        if save_requested {
-            self.save_as();
-        }
-        if copy_requested {
-            self.copy_view(ui.ctx());
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if open_plugin_folder {
-            match fast_tiff_viewer::plugins::install_dir() {
-                Some(dir) => {
-                    self.report_done(format!("Plugin folder: {}", dir.display()));
-                    // Best effort: showing the path in the status bar is the
-                    // part that must not fail, so a file manager that will
-                    // not launch is not an error.
-                    let _ = open_in_file_manager(&dir);
-                }
-                None => {
-                    self.core.status = Some("Could not determine a writable plugin folder".into())
-                }
-            }
-        }
-        if let Some(index) = plugin_to_start {
-            self.start_plugin(index);
-        }
-        if open_point_counter {
-            self.open_point_counter(ui.ctx());
-        }
-        self.poll_plugin_dialog(ui.ctx());
-        self.poll_plot(ui.ctx());
-        self.poll_point_counter(ui.ctx());
-        // Ctrl/Cmd+C, after the buttons so an explicit click this frame is not
-        // also counted as a chord, and before the poll so a copy asked for by
-        // key is picked up on the same schedule as one asked for by button.
-        if copy_view::hotkey(ui.ctx()) {
-            self.copy_view(ui.ctx());
-        }
-        // Ctrl/Cmd+Z, the point counter's undo, while the main window has the
-        // keyboard. Before the picture handles this frame's pointer, so an
-        // undo that ends a drag in flight is not followed by one more step of
-        // it. The counter's own window takes the chord when it has the
-        // keyboard instead — see `point_counter::counter_window`.
-        if let Some(tool) = self.point_counter.as_mut() {
-            if point_counter::undo_hotkey(ui.ctx()) {
-                tool.undo();
-            }
-        }
-        self.poll_copy(ui.ctx());
-        if let Some(mode) = mode_request {
-            self.core.view_mode = mode;
-            // Entering 3D stops movie playback — unless the stack is 4D (a
-            // separate time axis, `slices > 1`), where playing animates the
-            // volume through time.
-            if mode == ViewMode::Volume {
-                let is_4d = self
-                    .core
-                    .stack
-                    .as_ref()
-                    .is_some_and(|l| l.display.dims.slices > 1);
-                if !is_4d {
-                    self.core.playback.playing = false;
-                    self.core.playback.last_time = None;
-                }
-            }
-        }
-        // In 3D the arrow keys rotate the volume (handled in the central panel),
-        // so the movie's arrow-scrub and wheel-scrub paths must stand down.
-        let view_is_volume = self.core.view_mode == ViewMode::Volume;
-
-        let panel_expanded = self.panel.expanded;
-        let is_playing = self.core.playback.playing;
-        let pseudocolor_on = self.core.apply_pseudocolor;
-        let mut toggle_requested = false;
-        let mut play_toggle_requested = false;
-        // Whether the scrubber is being held this frame; applied after the panel
-        // closure, which cannot reach `self.core` while it holds the stack.
-        let mut scrubber_held = false;
-        // A requested dimension-role reassignment: (channels, slices, frames).
-        let mut dimension_override: Option<(usize, usize, usize)> = None;
-        let mut pseudocolor_toggle: Option<bool> = None;
-        // New selection for the single-channel grayscale color/colormap selector.
-        let mut gray_lut_change: Option<usize> = None;
-        let mut scroll_step: i32 = 0;
-        let mut playback_fps = self.core.playback.fps;
-        let mut decode_mode = self.core.decode_mode;
-        let mut large_image_mode = self.core.large_image_mode;
-        let mut metadata_toggle = false;
-        let mut histogram_toggle = false;
-        let current_status = self.core.status.clone();
-        // Green only for the message it was recorded for; see `good_status`.
-        let status_is_good = current_status.is_some() && current_status == self.good_status;
-
-        // The readout is the same whichever slow thing is running: a worker —
-        // import, plugin, save, export — or the core opening a file on its own.
-        // What differs is only the words and whether there is a fraction to
-        // draw, so that is all that is worked out here.
-        //
-        // The worker comes first because it *is* first: a file is imported and
-        // then opened, so while both could be set the worker is the one still
-        // happening.
-        //
-        // The file's name is deliberately not part of this. It was shown beside
-        // the label, but it is already in the window title, so it bought a
-        // second copy of the same string at the cost of the width the bar now
-        // spreads into.
-        let working = self.job.as_ref().map(|job| (job.label(), job.fraction()));
-        let progress = working.or_else(|| {
-            let stage = self.core.load_stage()?;
-            Some((stage.label().to_string(), stage.fraction()))
-        });
-        let load_stage = progress.is_some();
-        // Filled in below by the bar itself, if it draws a status line.
-        let mut drawn_info: Option<String> = None;
-        // Set by the info row's stop button. A `Cell` because the row is a
-        // closure called from two places and captures everything by reference;
-        // it cannot reach `self` to set the flag directly.
-        //
-        // Only offered for work this app is running. The core's own load has no
-        // cancel to press.
-        #[cfg(not(target_arch = "wasm32"))]
-        let can_stop = self.job.is_some();
-        #[cfg(target_arch = "wasm32")]
-        let can_stop = false;
-        let stop_clicked = std::cell::Cell::new(false);
-        // The bottom line of the panel: what is running, and the last thing
-        // that happened. One row for both.
-        //
-        // The progress readout used to be a row of its own above everything
-        // else, which pushed the picture up for the length of every load — and
-        // a load is exactly when the picture is being looked at. Sharing the
-        // status line costs nothing: they are both one line of chrome saying
-        // what the program is up to, and they are rarely both interesting at
-        // once.
-        //
-        // Returns what it drew, which is what the window's height bookkeeping
-        // compares against — a row that appears has to come out of the window
-        // rather than out of the canvas.
-        let info_row = |ui: &mut egui::Ui, status: Option<(&str, bool)>| -> Option<String> {
-            if progress.is_none() && status.is_none() {
-                return None;
-            }
-            let key = info_key(
-                status.map(|(s, _)| s),
-                progress.as_ref().map(|(label, _)| label.as_str()),
-            );
-            ui.separator();
-            ui.horizontal(|ui| {
-                // The status goes first so the bar can have the rest of the
-                // row. An `egui::ProgressBar` with no `desired_width` takes
-                // `available_size_before_wrap().x`, so whatever is placed
-                // before it decides how wide it ends up — and anything placed
-                // after it would be squeezed out of the row entirely.
-                if let Some((status, good)) = status {
-                    let color = if good { STATUS_DONE } else { STATUS_NOTE };
-                    ui.label(RichText::new(status).color(color).small());
-                }
-                if let Some((label, fraction)) = &progress {
-                    // Also before the bar, and for the same reason.
-                    if can_stop && ui.small_button("✖").on_hover_text("Stop").clicked() {
-                        stop_clicked.set(true);
-                    }
-                    ui.add(progress_bar(label, *fraction));
-                }
-            });
-            Some(key)
+    /// The pop-up windows that are open, in the order they were registered.
+    fn popups(&mut self, ctx: &egui::Context) {
+        let mut host = windows::Host {
+            core: &mut self.core,
+            prefs: &mut self.volume_ui.prefs,
         };
-        let scrub_bar_response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
-            let Some(loaded) = &mut self.core.stack else {
-                if !load_stage {
-                    ui.label(RichText::new("© 2026 SciWare LLC").weak());
-                }
-                // Still worth a row with nothing open: this is where the first
-                // file's progress is reported, and where a plugin's "open an
-                // image first" lands.
-                drawn_info = info_row(ui, current_status.as_deref().map(|s| (s, status_is_good)));
-                return;
-            };
-            ui.add_space(4.0);
+        self.windows.show(ctx, &mut host);
+    }
 
-            ui.horizontal(|ui| {
-                let max_frame = loaded.display.dims.frames.saturating_sub(1);
-                let has_multiple_frames = loaded.display.dims.frames > 1;
-                // In 3D the frame axis is the volume's depth, so play/step/scrub
-                // are meaningless unless the stack has a separate time axis
-                // (`slices > 1`). Grey them out otherwise.
-                let frame_nav_enabled =
-                    has_multiple_frames && !(view_is_volume && loaded.display.dims.slices <= 1);
-
-                let toggle_size = egui::vec2(20.0, 20.0);
-                let toggle_response = ui
-                    .add_sized(toggle_size, egui::Button::new(""))
-                    .on_hover_text("Show/hide channel & contrast settings");
-                if toggle_response.clicked() {
-                    toggle_requested = true;
-                }
-                let icon_color = ui.style().interact(&toggle_response).fg_stroke.color;
-                let r = toggle_response.rect.shrink(6.0);
-                let triangle = if panel_expanded {
-                    vec![r.left_bottom(), r.right_bottom(), r.center_top()]
-                } else {
-                    vec![r.left_top(), r.right_top(), r.center_bottom()]
-                };
-                ui.painter().add(egui::Shape::convex_polygon(triangle, icon_color, egui::Stroke::NONE));
-
-                // Play/pause looped movie. Painted (triangle / two bars) rather
-                // than using glyphs, since the default font may not carry the
-                // ▶/⏸ characters.
-                ui.add_enabled_ui(frame_nav_enabled, |ui| {
-                    let play_resp = ui
-                        .add_sized(egui::vec2(22.0, 20.0), egui::Button::new(""))
-                        .on_hover_text("Play/pause looped movie");
-                    if play_resp.clicked() {
-                        play_toggle_requested = true;
-                    }
-                    let color = ui.style().interact(&play_resp).fg_stroke.color;
-                    let r = play_resp.rect.shrink(5.0);
-                    if is_playing {
-                        let bar = r.width() * 0.32;
-                        let left = egui::Rect::from_min_max(r.left_top(), egui::pos2(r.left() + bar, r.bottom()));
-                        let right = egui::Rect::from_min_max(egui::pos2(r.right() - bar, r.top()), r.right_bottom());
-                        ui.painter().rect_filled(left, 0.0, color);
-                        ui.painter().rect_filled(right, 0.0, color);
-                    } else {
-                        let tri = vec![r.left_top(), r.left_bottom(), egui::pos2(r.right(), r.center().y)];
-                        ui.painter().add(egui::Shape::convex_polygon(tri, color, egui::Stroke::NONE));
-                    }
-                });
-
-                ui.add_enabled_ui(frame_nav_enabled, |ui| {
-                    if ui.button("|<").on_hover_text("First frame").clicked() {
-                        loaded.frame_index = 0;
-                    }
-                    if ui.button("<").on_hover_text("Previous frame (←)").clicked() {
-                        loaded.frame_index = loaded.frame_index.saturating_sub(1);
-                    }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(">|").on_hover_text("Last frame").clicked() {
-                            loaded.frame_index = max_frame;
-                        }
-                        if ui.button(">").on_hover_text("Next frame (→)").clicked() {
-                            loaded.frame_index = (loaded.frame_index + 1).min(max_frame);
-                        }
-
-                        let remaining = ui.available_width();
-                        if has_multiple_frames {
-                            ui.spacing_mut().slider_width = remaining.max(40.0);
-                            let scrub = ui.add(
-                                egui::Slider::new(&mut loaded.frame_index, 0..=max_frame)
-                                    .show_value(false)
-                                    .trailing_fill(true),
-                            );
-                            // Held, not merely dragged: the frame under the
-                            // pointer should hold still from the moment it is
-                            // grabbed, before any movement, since that is
-                            // already the frame being looked at.
-                            scrubber_held =
-                                scrub.is_pointer_button_down_on() || scrub.dragged();
-                        } else {
-                            // Single-frame stack: there's nothing to scrub, so draw
-                            // a flat, handleless track instead of a slider parked at
-                            // zero (the whole row is already disabled above).
-                            let (rect, _) = ui.allocate_exact_size(
-                                egui::vec2(remaining.max(40.0), 18.0),
-                                egui::Sense::hover(),
-                            );
-                            let y = rect.center().y;
-                            let track = egui::Rect::from_min_max(
-                                egui::pos2(rect.left(), y - 2.0),
-                                egui::pos2(rect.right(), y + 2.0),
-                            );
-                            ui.painter().rect_filled(track, 2.0, ui.visuals().widgets.inactive.bg_fill);
-                        }
-                    });
-                });
-            });
-
-            // Not while a text field has the caret, where the arrows move it: a
-            // group's name being edited in the point counter's window, which in
-            // a browser shares this viewport's keyboard.
-            if !view_is_volume && !ui.ctx().text_edit_focused() {
-                ui.input(|i| {
-                    // Shift jumps ~5% of the stack at a time (min 1 frame) instead
-                    // of 1, matching the Shift+wheel fast-scroll step.
-                    let step = if i.modifiers.shift {
-                        ((loaded.display.dims.frames as f64 * FAST_SCROLL_RATE).round() as usize).max(1)
-                    } else {
-                        1
-                    };
-                    let max_frame = loaded.display.dims.frames.saturating_sub(1);
-                    if i.key_pressed(egui::Key::ArrowRight) {
-                        loaded.frame_index = (loaded.frame_index + step).min(max_frame);
-                    }
-                    if i.key_pressed(egui::Key::ArrowLeft) {
-                        loaded.frame_index = loaded.frame_index.saturating_sub(step);
-                    }
-                });
-            }
-
-            if panel_expanded {
-                ui.separator();
-                // Wrapping, not clipping: this row holds up to six independent
-                // control groups, and which of them are present depends on the
-                // file. Narrow the window — or open the web build, whose chrome
-                // is drawn half again as large — and the tail of the row used to
-                // simply vanish past the edge with nothing to indicate it was
-                // there. Wrapping spends panel height, which the layout has, to
-                // buy back reachability, which it did not.
-                ui.horizontal_wrapped(|ui| {
-                    // Whether a control group already sits in the row — each
-                    // optional group below draws its leading separator only if
-                    // so, so hiding a group never leaves an orphaned separator.
-                    let mut row_has_items = false;
-
-                    // The channels-vs-time guess (and its override) is
-                    // meaningless for RGB, where the "channels" are fixed color
-                    // planes — so the dropdown and pseudocolor toggle are hidden
-                    // there.
-                    if !loaded.display.rgb {
-                        ui.label("Dimension order:");
-                        let c = loaded.display.dims.channels;
-                        let z = loaded.display.dims.slices;
-                        let f = loaded.display.dims.frames;
-                        // When the file has a real Z axis (as loaded — see
-                        // `has_z_axis`), offer every assignment of the three
-                        // counts to the three roles; otherwise just the
-                        // channels/time swap (Z passes through untouched).
-                        // sort+dedup collapses duplicates when counts are equal
-                        // and keeps the list order stable across
-                        // reinterpretations.
-                        let show_z = loaded.display.has_z_axis;
-                        let mut options: Vec<(usize, usize, usize)> = if show_z {
-                            vec![(c, z, f), (c, f, z), (z, c, f), (z, f, c), (f, c, z), (f, z, c)]
-                        } else {
-                            vec![(c, z, f), (f, z, c)]
-                        };
-                        options.sort_unstable();
-                        options.dedup();
-                        let dim_label = |oc: usize, oz: usize, of: usize| {
-                            if show_z {
-                                format!("c: {oc}  z: {oz}  t: {of}")
-                            } else if view_is_volume {
-                                // Without a separate Z axis, 3D uses the frame
-                                // axis as the volume's depth — so what reads as
-                                // time in 2D is genuinely Z here.
-                                format!("c: {oc}  z: {of}")
-                            } else {
-                                format!("c: {oc}  t: {of}")
-                            }
-                        };
-                        egui::ComboBox::from_id_salt("dim_override")
-                            .selected_text(dim_label(c, z, f))
-                            .show_ui(ui, |ui| {
-                                for (oc, oz, of) in options {
-                                    if ui
-                                        .selectable_label((oc, oz, of) == (c, z, f), dim_label(oc, oz, of))
-                                        .clicked()
-                                    {
-                                        dimension_override = Some((oc, oz, of));
-                                    }
-                                }
-                            });
-
-                        // Optional channel palette — only for multi-channel
-                        // grayscale stacks that carry no colors of their own.
-                        if pseudocolor_applicable(loaded) {
-                            ui.separator();
-                            let mut on = pseudocolor_on;
-                            if ui
-                                .checkbox(&mut on, "Apply pseudocolor")
-                                .on_hover_text("Tint channels ch1 = red, ch2 = green, ch3 = blue, …")
-                                .changed()
-                            {
-                                pseudocolor_toggle = Some(on);
-                            }
-                        }
-                        row_has_items = true;
-                    }
-
-                    // Editable playback rate (seeded from metadata `fps=`, else
-                    // 30). Only shown when there's a playable time axis: several
-                    // frames in 2D; in 3D the frame axis is the volume's depth,
-                    // so time only exists for 4D stacks (`slices > 1`) — matches
-                    // the play/scrub controls' enable logic above.
-                    let fps_playable = loaded.display.dims.frames > 1
-                        && !(view_is_volume && loaded.display.dims.slices <= 1);
-                    if fps_playable {
-                        if row_has_items {
-                            ui.separator();
-                        }
-                        ui.add(
-                            egui::DragValue::new(&mut playback_fps)
-                                .speed(0.5)
-                                .range(0.1..=1000.0)
-                                .max_decimals(2)
-                                .suffix(" fps"),
-                        )
-                        .on_hover_text("Playback speed (frames per second)");
-                        row_has_items = true;
-                    }
-
-                    // LUT selector for a single channel: show it through a
-                    // channel color or a perceptual colormap
-                    // (magma/plasma/inferno/viridis/turbo). When the file carries
-                    // its own LUT the list leads with "Built-in LUT" (the
-                    // default). Hidden for RGB, composite, and multi-channel
-                    // stacks — there the per-channel colors / pseudocolor toggle
-                    // already handle coloring.
-                    if gray_lut_applicable(loaded) {
-                        if row_has_items {
-                            ui.separator();
-                        }
-                        ui.label("LUT:");
-                        let sel = loaded.display.gray_lut_sel;
-                        egui::ComboBox::from_id_salt("gray_lut")
-                            .selected_text(gray_lut_sel_name(&loaded.display, sel))
-                            .show_ui(ui, |ui| {
-                                for opt in 0..gray_lut_count(&loaded.display) {
-                                    // Tint each entry with its LUT's low (dark) end
-                                    // — the color the darkest samples map to. A
-                                    // grayscale/black low end (grayscale + the pure
-                                    // channel-color ramps) keeps the default text color.
-                                    let name = gray_lut_sel_name(&loaded.display, opt);
-                                    let text = match tint_color(gray_lut_sel_tint(&loaded.display, opt)) {
-                                        Some(c) => RichText::new(name).color(c),
-                                        None => RichText::new(name),
-                                    };
-                                    if ui.selectable_label(opt == sel, text).clicked() {
-                                        gray_lut_change = Some(opt);
-                                    }
-                                }
-                            })
-                            .response
-                            .on_hover_text("Display this channel through a color LUT or colormap");
-                        row_has_items = true;
-                    }
-
-                    // CPU decode parallelism: Auto threads only when playback
-                    // can't keep up; Serial/Threaded force it off/on. Threaded
-                    // decode only ever kicks in for compressed frames (parallel
-                    // strip decompression) or wide 32-/64-bit frames (parallel
-                    // per-pixel rescale/cast). 8- and 16-bit uncompressed frames
-                    // decode zero-copy or with an unthreaded copy, so the control
-                    // has no effect and is hidden for them.
-                    let threadable = loaded.tiff.frames.first().is_some_and(|f| {
-                        f.compression != fast_tiff_lib::Compression::None || f.bits_per_sample >= 32
-                    });
-                    if threadable {
-                        if row_has_items {
-                            ui.separator();
-                        }
-                        ui.label("Decode:");
-                        egui::ComboBox::from_id_salt("decode_mode")
-                            .selected_text(decode_mode.label())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut decode_mode, DecodeMode::Auto, "Auto")
-                                    .on_hover_text("Single-threaded until playback drops frames, then multi-threaded");
-                                ui.selectable_value(&mut decode_mode, DecodeMode::Serial, "Serial")
-                                    .on_hover_text("Always single-threaded (lowest total CPU)");
-                                ui.selectable_value(&mut decode_mode, DecodeMode::Threaded, "Threaded")
-                                    .on_hover_text("Always multi-threaded for large frames (spreads across cores)");
-                            });
-                        row_has_items = true;
-                    }
-
-                    // How a frame too large to become a texture is kept on
-                    // screen. Only for such frames — for every ordinary image
-                    // both settings do exactly the same thing, and an option
-                    // that changes nothing is worse than no option. The flag is
-                    // set during the GPU sync, since only there is the device's
-                    // texture limit known.
-                    if loaded.over_texture_limit {
-                        if row_has_items {
-                            ui.separator();
-                        }
-                        ui.label("Large image:");
-                        egui::ComboBox::from_id_salt("large_image_mode")
-                            .selected_text(match large_image_mode {
-                                LargeImageMode::Preload => "Preload",
-                                LargeImageMode::Tiled => "Tiled",
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut large_image_mode, LargeImageMode::Tiled, "Tiled")
-                                    .on_hover_text(
-                                        "Load only the region on screen, at whatever resolution the zoom \
-                                         calls for. Uses far less memory, but every zoom step decodes afresh, \
-                                         so zooming costs CPU and can stutter.",
-                                    );
-                                ui.selectable_value(&mut large_image_mode, LargeImageMode::Preload, "Preload")
-                                    .on_hover_text(
-                                        "Keep one reduced copy of the whole image in memory, plus full \
-                                         resolution for whatever is on screen. Smooth to pan and zoom, and \
-                                         less moiré when zoomed out, at the cost of the memory that copy \
-                                         occupies.",
-                                    );
-                            })
-                            .response
-                            .on_hover_text(
-                                "This image is larger than the graphics card can hold as one texture, \
-                                 so only part of it is resident at a time.",
-                            );
-                        row_has_items = true;
-                    }
-
-                    // The two pop-up toggles. They flow with the rest of the
-                    // row rather than being pinned to its right edge: once the
-                    // row can wrap there is no single right edge to pin to, and
-                    // a button that jumps to the end of whichever line happens
-                    // to be last is harder to find than one that simply follows
-                    // the controls.
-                    if row_has_items {
-                        ui.separator();
-                    }
-                    if histogram_button(ui).clicked() {
-                        histogram_toggle = true;
-                    }
-                    if ui
-                        .button(RichText::new("( i )").size(12.0))
-                        .on_hover_text("See metadata")
-                        .clicked()
-                    {
-                        metadata_toggle = true;
-                    }
-                });
-                if !loaded.display.rgb {
-                    ui.label(
-                        RichText::new(
-                            "Channels are guessed automatically (6 or fewer = channels, more = time); \
-                             use Dimension order if that guess is wrong for this file.",
-                        )
-                        .small()
-                        .weak(),
-                    );
-                }
-
-                contrast_controls(ui, loaded, ContrastLayout::Inline, None);
-            }
-            // The triple-axis note explains that 2D freezes Z at its first
-            // slice — but the 3D view *does* use Z (as the volume depth), so
-            // showing it there would be wrong. When `triple_axis_warning` is
-            // set, the status IS that note (`compute_status` short-circuits on
-            // it), so this suppresses exactly the right message.
-            let suppressed = view_is_volume && loaded.display.triple_axis_warning;
-            drawn_info = info_row(
-                ui,
-                current_status
-                    .as_deref()
-                    .filter(|_| !suppressed)
-                    .map(|s| (s, status_is_good)),
-            );
-            ui.add_space(4.0);
-        });
-
-        self.core.playback.fps = playback_fps;
-        self.core.decode_mode = decode_mode;
-        self.core.large_image_mode = large_image_mode;
-        if metadata_toggle {
-            self.show_metadata = !self.show_metadata;
-        }
-        if self.show_metadata {
-            match &self.core.stack {
-                Some(loaded) => metadata_window(ui.ctx(), &mut self.show_metadata, loaded),
-                None => self.show_metadata = false,
-            }
-        }
-        if histogram_toggle {
-            self.show_histogram = !self.show_histogram;
-        }
-        if self.show_histogram {
-            self.refresh_histograms(ui.input(|i| i.time));
-            // Split the borrows by field: the window edits the stack's contrast
-            // while reading the cached plots computed from it.
-            let mut open = true;
-            if let (Some(loaded), Some(cache)) = (self.core.stack.as_mut(), self.hist.as_ref()) {
-                histogram_window(
-                    ui.ctx(),
-                    &mut open,
-                    loaded,
-                    &cache.hists,
-                    &mut self.hist_log,
-                );
-            } else {
-                open = false;
-            }
-            self.show_histogram = open;
-        }
-        if render_settings_toggle {
-            self.show_render_settings = !self.show_render_settings;
-        }
-        if self.show_render_settings {
-            let prev_nav = self.core.volume.cam.nav;
-            let mut reset_position = false;
-            render_settings_window(
-                ui.ctx(),
-                &mut self.show_render_settings,
-                &mut self.core.volume.scale,
-                &mut self.core.volume.interp,
-                &mut self.moving_downscale,
-                &mut self.core.volume.cam.nav,
-                &mut self.core.volume.cam.orbit_point,
-                &mut self.move_speed,
-                &mut self.scroll_speed,
-                &mut self.core.volume.render,
-                &mut self.core.volume.density,
-                &mut self.core.volume.iso,
-                &mut self.core.volume.mip_brightness,
-                &mut self.core.volume.volume_brightness,
-                &mut self.core.volume.volume_autolevel,
-                &mut self.show_coord_box,
-                &mut reset_position,
-                self.core.stack.as_ref(),
-            );
-            // Keep the view continuous across a fly⇄orbit switch (the two use
-            // different eye representations) instead of snapping to a default.
-            if self.core.volume.cam.nav != prev_nav {
-                self.core.volume.cam.sync_for_nav(prev_nav.is_fly());
-            }
-            if reset_position {
-                self.core.volume.cam.reset();
-            }
-        }
-
-        // A status message lands in the same bar as the panel, and pushes the
-        // image up in exactly the same way — so it gets the same answer: the
-        // window grows by the message's height instead of the canvas shrinking
-        // under it. Losing thirty pixels of canvas is enough to put an image
-        // that was fitted to the window into pan mode, which is a strange thing
-        // for "saved it" to do.
-        //
-        // Armed here rather than where the status is set, because a status can
-        // be set from anywhere — including a worker thread — and what matters
-        // is not that it changed but that the bar in front of the user is now a
-        // different height.
-        self.panel
-            .note_info_row(drawn_info, scrub_bar_response.response.rect.height());
-
-        // The stop button only raises the flag the worker polls: it does not
-        // take the job away. The worker still owns the registry and still has
-        // to hand it back, and until it does the app must keep showing that
-        // something is running — a readout that vanished on the click would
-        // claim the work had stopped before it had.
-        #[cfg(not(target_arch = "wasm32"))]
-        if stop_clicked.get() {
-            if let Some(job) = &self.job {
-                job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-
-        if toggle_requested {
-            self.panel.expanded = !self.panel.expanded;
-            // Remember the panel's height *before* it expands/collapses; the
-            // next frame (once it's redrawn in the new state) grows or shrinks
-            // the window by the difference. This frame still shows the old
-            // height, so the actual delta only becomes known next frame.
-            self.panel
-                .arm_grow(scrub_bar_response.response.rect.height());
-        }
-
-        if play_toggle_requested {
-            self.core.playback.playing = !self.core.playback.playing;
-            // Start each play/pause from a clean clock, so the first tick after
-            // resuming doesn't jump by however long we were paused and the
-            // keeping-up estimate starts neutral. (`decode_parallel` stays
-            // latched across a pause — if this stack needed it, it still does.)
-            self.core.playback.restart();
-        }
-
-        if let Some(on) = pseudocolor_toggle {
-            self.core.set_pseudocolor(on);
-        }
-
-        if let Some(sel) = gray_lut_change {
-            self.core.set_gray_lut(sel);
-        }
-
+    /// Run the playback clock for this frame.
+    fn run_playback(&mut self, ctx: &egui::Context, scrubber_held: bool) {
         // Looped playback: the core advances by real elapsed time so the movie
         // runs at the file's `fps` (or the default) regardless of render
         // cadence. All we add is the repaint scheduling.
@@ -3898,7 +2421,7 @@ impl ViewerApp {
         // picks up again on release. Without it the clock and the scrubber
         // write the frame index in turn and the picture flickers between them.
         self.core.playback.scrubbing = scrubber_held;
-        self.core.tick_playback(ui.input(|i| i.time));
+        self.core.tick_playback(ctx.input(|i| i.time));
         if self.core.playback.playing {
             // Ask for the next repaint at the playback rate rather than
             // immediately: no point re-running egui faster than frames actually
@@ -3906,29 +2429,15 @@ impl ViewerApp {
             // repaints as soon as it's ready, so we still render as fast as we
             // can when behind (and the core's demand estimate still detects it).
             let fps = self.core.playback.fps.max(0.1);
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs_f64(1.0 / fps));
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(1.0 / fps));
         }
+    }
 
-        // Reassigning the axes also refreshes LUTs + status and invalidates the
-        // volume (the frame axis, i.e. the volume depth, just changed).
-        if let Some((c, z, f)) = dimension_override {
-            // The counter's points are on frames of the axes as they were.
-            let before = self
-                .point_counter
-                .as_ref()
-                .and(self.core.stack.as_ref())
-                .map(fast_tiff_viewer::plugins::builtin::point_counter::frame_starts);
-            self.core.set_dimension_order(c, z, f);
-            if let (Some(before), Some(tool), Some(stack)) = (
-                before,
-                self.point_counter.as_mut(),
-                self.core.stack.as_ref(),
-            ) {
-                tool.follow_axes(&before, stack);
-            }
-        }
-
+    /// Settle the view before the canvas is drawn: back to 2D when there is no
+    /// volume left to show, then the animation's step and the canvas tools'
+    /// tick (a rectangle's Enter and Escape), both of which read the settled
+    /// mode.
+    fn settle_view(&mut self, ctx: &egui::Context) {
         // A dimension swap can collapse the stack to a single frame (e.g.
         // 1 ch × N frames -> N ch × 1 frame), which can't build a volume — the
         // stale volume (first channel only) would keep showing, and with the
@@ -3939,9 +2448,9 @@ impl ViewerApp {
         if self.core.view_mode == ViewMode::Volume
             && self
                 .core
-                .stack
+                .document
                 .as_ref()
-                .is_some_and(|l| l.display.dims.frames < 2)
+                .is_some_and(|l| l.display.dims().frames < 2)
         {
             self.core.view_mode = ViewMode::Movie;
             self.core.playback.playing = false;
@@ -3951,672 +2460,32 @@ impl ViewerApp {
         // The animation's step for this frame, now that every way of leaving
         // 3D or moving the camera this frame has been applied, and before the
         // 3D view is drawn with the pose it decides.
-        self.tick_animation(ui.ctx());
-        self.tick_region_pick(ui.ctx());
+        self.tick_animation(ctx);
+        self.tick_tools(ctx);
+    }
 
-        // Central panel: the image is drawn at exactly `image_size × zoom`. When
-        // that fits the panel it's centered (letterboxed); when it's larger
-        // (zoomed past what the monitor-capped window can show) it overflows and
-        // is pannable by dragging. Aspect ratio is always preserved.
-        // Zero inner margin: the window is sized to exactly the image, so any
-        // panel padding would make the available area smaller than the image
-        // and produce a small spurious pan/overflow even when it should fit.
-        egui::CentralPanel::default()
-            .frame(egui::Frame::default().inner_margin(egui::Margin::ZERO))
-            .show_inside(ui, |ui| {
-                if self.core.stack.is_none() {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(welcome_text());
-                    });
-                    return;
-                }
-
-                let available = ui.available_size();
-                let (panel_rect, response) =
-                    ui.allocate_exact_size(available, egui::Sense::click_and_drag());
-                self.view.panel_rect = panel_rect;
-
-                // Fit the image to the canvas on open. The browser has no window to
-                // resize around the picture the way the desktop build does, so
-                // without this a gigapixel mosaic opens at 1:1 and shows one corner
-                // of itself.
-                //
-                // Fitted to the canvas *exactly*, not to the nearest fixed level: a
-                // 4:3 image in a 16:9 canvas has no fixed level that fills it, so
-                // snapping would either crop a sliver or leave a visible margin.
-                // The exact factor then joins this image's zoom ladder, so scrolling
-                // back out returns to the fitted view instead of stepping past it —
-                // which is the whole reason it has to be a rung and not a one-off.
-                //
-                // Held back until the 2D view is the one on screen: in 3D the zoom
-                // is unused, and consuming the flag there would leave the image
-                // unfitted when the user came back to 2D.
-                #[cfg(target_arch = "wasm32")]
-                if self.view.pending_initial_fit && self.core.view_mode == ViewMode::Movie {
-                    let dims = self
-                        .core
-                        .stack
-                        .as_ref()
-                        .and_then(|l| l.tiff.frames.first())
-                        .map(|f| (f.width as f32, f.height as f32));
-                    match dims.and_then(|(iw, ih)| fit_to_panel(iw, ih, available)) {
-                        Some(z) => {
-                            self.view.zoom = z;
-                            self.view.fit_zoom = Some(z);
-                            self.view.pan = egui::Vec2::ZERO;
-                            self.view.pending_initial_fit = false;
-                        }
-                        // No canvas size yet — it has not been laid out. Come back
-                        // next frame rather than fitting to nothing.
-                        None => ui.ctx().request_repaint(),
-                    }
-                }
-
-                // 3D volume view: drive the camera per the active nav mode and paint
-                // the GPU ray-march. The 2D pan/UV/scrub path below is bypassed. This
-                // runs before the `loaded` borrow so it can call `&mut self` methods.
-                if self.core.view_mode == ViewMode::Volume {
-                    self.core.volume.aspect =
-                        (panel_rect.width() / panel_rect.height().max(1.0)).clamp(0.1, 10.0);
-                    let ppp = ui.ctx().pixels_per_point();
-                    self.core.volume.viewport_px = [
-                        (panel_rect.width() * ppp).round().max(1.0) as u32,
-                        (panel_rect.height() * ppp).round().max(1.0) as u32,
-                    ];
-                    // The screen, for how much detail a volume is worth keeping.
-                    if let Some(monitor) = ui.ctx().input(|i| i.viewport().monitor_size) {
-                        self.core.volume.screen_px =
-                            (monitor.x.max(monitor.y) * ppp).round().max(0.0) as u32;
-                    }
-
-                    // Until the first volume is built, show a black loading screen so
-                    // the heavy decode doesn't freeze on the previous view (`sync_gpu`
-                    // defers the initial build until after this frame paints).
-                    if self.core.volume.built_frame.is_none() {
-                        ui.painter()
-                            .rect_filled(panel_rect, 0.0, egui::Color32::BLACK);
-                        ui.painter().text(
-                            panel_rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "Loading 3D…",
-                            egui::FontId::proportional(16.0),
-                            egui::Color32::from_gray(150),
-                        );
-                        ui.ctx().request_repaint();
-                        return;
-                    }
-
-                    let animating = self.drive_volume_camera(ui, &response, panel_rect);
-                    // A press, moving or not, is the user reaching for the
-                    // view: an animation stops for it on the next frame.
-                    if response.is_pointer_button_down_on() {
-                        self.volume_pressed = true;
-                    }
-                    self.volume_motion(ui.ctx());
-                    // Where the view is, for a copy of it. Recorded at the one
-                    // place that knows — a copy happens a frame later, by which
-                    // time this panel may not be being laid out at all.
-                    self.volume_rect = Some(panel_rect);
-                    response.on_hover_cursor(egui::CursorIcon::Crosshair);
-                    ui.painter()
-                        .with_clip_rect(panel_rect)
-                        .add(render::paint_volume_callback(&self.render, panel_rect));
-                    // Coordinate-box overlay, drawn on top of the ray-march with the
-                    // 2D painter (aligned via the same camera; see `overlay`).
-                    if self.show_coord_box {
-                        let painter = ui.painter().with_clip_rect(panel_rect);
-                        self.draw_coord_box(&painter, panel_rect);
-                    }
-                    // Keep repainting while a drag or held key keeps the camera moving.
-                    if animating {
-                        ui.ctx().request_repaint();
-                    }
-                    return;
-                }
-
-                let Some(loaded) = &self.core.stack else {
-                    return;
-                };
-                let (Some(w), Some(h)) = (
-                    loaded.tiff.frames.first().map(|f| f.width),
-                    loaded.tiff.frames.first().map(|f| f.height),
-                ) else {
-                    return;
-                };
-
-                let img_px = egui::vec2(w as f32 * self.view.zoom, h as f32 * self.view.zoom);
-                // A 1px tolerance so sub-pixel rounding between the window size and
-                // the panel's available area doesn't register as a pannable overflow.
-                let overflow = egui::vec2(
-                    (img_px.x - available.x - 1.0).max(0.0),
-                    (img_px.y - available.y - 1.0).max(0.0),
-                );
-                let pannable = overflow.x > 0.0 || overflow.y > 0.0;
-
-                // A plot asking for regions takes the *primary* drag: while its
-                // tool is armed, dragging on the picture with the left button
-                // draws rather than pans. Every other button still pans — see the
-                // rule below — and the tool is only armed while its window is
-                // open, so this cannot strand someone with an unpannable view.
-                //
-                // A rectangle a plugin asked for takes it the same way, and
-                // ahead of a plot: it is what the user was just asked to do.
-                // The point counter takes it too while its window is open,
-                // after a rectangle and ahead of a plot: clicking points on is
-                // a tool the user opened by hand, and a plot's regions can be
-                // drawn again once the counter is closed.
-                let selecting = (self.region_pick.is_some()
-                    || self.point_counter.is_some()
-                    || self.plot.as_ref().is_some_and(|p| p.wants_regions()))
-                    && !pinching;
-                let frame = loaded.frame_index;
-
-                // The navigator's frame box, worked out before anything acts on a
-                // drag: a press that lands on the map has to claim the gesture
-                // early enough that the picture underneath does not pan as well.
-                //
-                // Gated on the same `steady_pannable` that decides whether the map
-                // is *drawn*, so it is never clickable while invisible — an
-                // invisible hit target in the corner of the image would be a
-                // mystery rather than a feature. The `was_pannable` bookkeeping
-                // moves up here with it, which is where it belongs anyway: it is
-                // part of this frame's decision, not of the painting.
-                let settled = !self.view.pending_initial_fit;
-                let steady_pannable = pannable && self.view.was_pannable && settled;
-                self.view.was_pannable = pannable && settled;
-                let map = steady_pannable
-                    .then(|| minimap::frame_box(panel_rect, img_px.x, img_px.y))
-                    .flatten();
-
-                // Who owns the drag in flight. Decided once, when it starts, and
-                // the primary button only: the middle button belongs to panning
-                // and to autoscroll everywhere on the picture, including over the
-                // map. Without that split a middle-click on the map would both
-                // jump the view and arm autoscroll, from one press.
-                if response.drag_started() {
-                    self.view.minimap_drag = response.drag_started_by(egui::PointerButton::Primary)
-                        && map
-                            .zip(response.interact_pointer_pos())
-                            .is_some_and(|(outer, at)| outer.contains(at));
-                }
-                if response.drag_stopped() {
-                    self.view.minimap_drag = false;
-                }
-                let on_map = self.view.minimap_drag;
-
-                // Where on the map the pointer is acting, if it is.
-                //
-                // Two ways in, and the second is easy to miss: egui only calls a
-                // gesture a drag once the pointer has moved past its click
-                // threshold, so a careful single click never sets `dragged()` at
-                // all. Without the `clicked()` arm, clicking the map — the first
-                // thing anyone tries — would do nothing.
-                //
-                // Mid-drag the position is used wherever it is, including outside
-                // the map: dragging the view box to an edge and carrying on is how
-                // you reach the corner of a large image, and clamping that to the
-                // map's bounds would make the gesture stop short of the edge.
-                let map_action = map.and_then(|outer| {
-                    let at = response.interact_pointer_pos()?;
-                    let taken = on_map
-                        || (response.clicked_by(egui::PointerButton::Primary)
-                            && outer.contains(at));
-                    taken.then_some((outer, at))
-                });
-
-                // Dragging or clicking the navigator moves the view to the pointer.
-                //
-                // Anywhere in the frame box counts, not only on the view box. At
-                // `MIN_VIEW_BOX` that box is a four-point target, which is not
-                // something to ask anyone to hit; and "click the map to go there"
-                // is what a navigator is for. Grabbing the box and dragging it is
-                // then the same code path rather than a second handler, which is
-                // what keeps the two gestures from disagreeing about where the
-                // view ends up.
-                if let Some((outer, at)) = map_action {
-                    // As with the picture: a hand on it ends any glide.
-                    self.view.pan_glide.stop();
-                    // How much of the image is on screen, which is what `pan_for`
-                    // centres on the clicked point: the panel on an axis that
-                    // overflows, the whole image on one that fits.
-                    let view = egui::vec2(img_px.x.min(available.x), img_px.y.min(available.y));
-                    self.view.pan = minimap::pan_for(outer, img_px, view, at);
-                }
-
-                // Autoscroll: the sticky mode a middle-click turns on, where the
-                // view drifts towards wherever the pointer sits. See
-                // [`autoscroll`] for the curve and why the mode is worth having
-                // beside the drag.
-                //
-                // A *click* toggles it, never a drag, and that is what lets the
-                // two gestures share the middle button without a mode switch: a
-                // middle press that moves is a pan (the rule below), a middle
-                // press that does not is this. egui will not report `clicked` for
-                // a pointer that travelled past its click threshold, so the two
-                // are mutually exclusive by construction rather than by a guard
-                // that could be got wrong.
-                //
-                // Whether it was on as this frame began is kept for the point
-                // counter: a left-click or a drag that ends the mode below is
-                // spent on that, and must not also add or move a point.
-                let autoscroll_was_on = self.view.autoscroll.is_some();
-                if response.clicked_by(egui::PointerButton::Middle) {
-                    // Toggling off from anywhere, so a second middle-click always
-                    // means stop — including the one that would otherwise re-anchor
-                    // the mode somewhere new and leave no way out but the keyboard.
-                    self.view.autoscroll = match self.view.autoscroll {
-                        Some(_) => None,
-                        // Only where there is something to scroll. A mode that
-                        // swallowed the click and then did nothing would be
-                        // indistinguishable from a dead button.
-                        None if pannable => response.interact_pointer_pos(),
-                        None => None,
-                    };
-                }
-                // Every other way out. A left- or right-click is how anyone leaves
-                // this mode by reflex; taking hold of the picture or the map means
-                // steering by hand from now on, and leaving the drift running
-                // under a drag would have two things moving the view at once;
-                // Escape is the way out when the first reflex was wrong; and an
-                // image that no longer overflows has nothing left to scroll.
-                //
-                // A drag start cannot collide with the toggle above — egui reports
-                // a gesture as a click or as a drag, never both — so the order of
-                // these two blocks does not decide anything.
-                if self.view.autoscroll.is_some()
-                    && (!pannable
-                        || response.drag_started()
-                        || response.clicked_by(egui::PointerButton::Primary)
-                        || response.clicked_by(egui::PointerButton::Secondary)
-                        || ui.input(|i| i.key_pressed(egui::Key::Escape)))
-                {
-                    self.view.autoscroll = None;
-                }
-                if let Some(anchor) = self.view.autoscroll {
-                    // `latest_pos` rather than `hover_pos`: the pointer may be over
-                    // a panel or off the window entirely while the mode runs, and
-                    // "keep scrolling the way I left it pointing" is the behaviour
-                    // every platform's version has.
-                    if let Some(at) = ui.input(|i| i.pointer.latest_pos()) {
-                        let dt = ui.input(|i| i.stable_dt);
-                        // `stable_dt` rather than the raw frame time: this is
-                        // multiplied by a velocity every frame, so a single long
-                        // frame — a decode, a window resize — would otherwise land
-                        // as a jump of hundreds of points.
-                        let v = autoscroll::velocity(anchor, at);
-                        // Opposite sign to the drag below, and deliberately: a drag
-                        // moves the *picture* under the pointer, while this moves
-                        // the *view* towards it. Pointing below the anchor scrolls
-                        // down, which means showing a lower part of the image,
-                        // which means a larger pan.
-                        self.view.pan += v * dt;
-                        // The mode animates, so it has to ask for the frames. Only
-                        // while actually moving: parked in the dead zone it should
-                        // cost no more than any other idle window.
-                        if v != egui::Vec2::ZERO {
-                            ui.ctx().request_repaint();
-                        }
-                    }
-                }
-
-                // Drag to pan when the image overflows the panel. Not during a
-                // gesture: egui synthesises a pointer from the first touch, so a
-                // two-finger pan arrives here as well and would be applied twice.
-                //
-                // **Any button pans**, with one exception: the primary one belongs
-                // to the region tool while that tool is armed. Spelling the rule
-                // out this way rather than leaving it to `dragged()` is what gives
-                // the middle button a pan that survives the region tool — and the
-                // middle button is the one this matters for, being what CAD and
-                // image editors use to pan and what the 3D view's own CAD mode
-                // already maps to pan (`camera.rs`). It is also why the region
-                // handler below asks for the primary button specifically: without
-                // that, a middle-drag would pan and draw a region at once.
-                let dragging_picture = response.dragged()
-                    && !(selecting && response.dragged_by(egui::PointerButton::Primary));
-                if pannable && dragging_picture && !pinching && !on_map {
-                    // Taking hold of the picture ends any glide: the hand on it now
-                    // decides where it goes.
-                    self.view.pan_glide.stop();
-                    self.view.pan -= response.drag_delta();
-                }
-                self.view.pan.x = self.view.pan.x.clamp(0.0, overflow.x);
-                self.view.pan.y = self.view.pan.y.clamp(0.0, overflow.y);
-
-                // Where the image's top-left *would* be if drawn full-size: scrolled
-                // by `pan` on an overflowing axis, centered on an axis that fits.
-                // (Cached for cursor-centered zoom; may lie outside the panel.)
-                let origin = egui::pos2(
-                    if overflow.x > 0.0 {
-                        panel_rect.min.x - self.view.pan.x
-                    } else {
-                        panel_rect.min.x + (available.x - img_px.x) * 0.5
-                    },
-                    if overflow.y > 0.0 {
-                        panel_rect.min.y - self.view.pan.y
-                    } else {
-                        panel_rect.min.y + (available.y - img_px.y) * 0.5
-                    },
-                );
-                self.view.image_origin = origin;
-
-                // The selection tool, now that the transform for this frame is
-                // settled. Committed on release rather than continuously, so a
-                // drag across a long timelapse starts one measurement instead
-                // of one per frame of the gesture.
-                // The primary button only, and not a gesture the navigator took:
-                // the other buttons pan (see the rule above), and a drag that
-                // began on the map is moving the view rather than measuring
-                // anything. Without either guard one gesture would do two things.
-                if let (true, Some(pick)) = (selecting && !on_map, self.region_pick.as_mut()) {
-                    let primary = egui::PointerButton::Primary;
-                    let px = response
-                        .interact_pointer_pos()
-                        .map(|pos| plot::pixel_at(pos, origin, self.view.zoom));
-                    let pressed = ui
-                        .input(|i| i.pointer.press_origin())
-                        .map(|pos| plot::pixel_at(pos, origin, self.view.zoom));
-                    let buttons = (
-                        response.drag_started_by(primary),
-                        response.dragged_by(primary),
-                        response.drag_stopped(),
-                    );
-                    if let Some(roi) = pick.track(px, pressed, buttons, (w, h)) {
-                        self.core.status = Some(pick.drawn_message(&roi));
-                    }
-                } else if let (true, Some(tool)) =
-                    (selecting && !on_map, self.point_counter.as_mut())
-                {
-                    // In image pixels, continuous: a click mid-pixel is x.5,
-                    // which is where the mark is drawn and what ImageJ gets.
-                    let zoom = self.view.zoom;
-                    let to_image = |pos| point_counter::image_at(pos, origin, zoom);
-                    let primary = egui::PointerButton::Primary;
-                    let at = response.interact_pointer_pos();
-                    let gesture = point_counter::Gesture {
-                        at: at.map(to_image),
-                        pressed_at: ui.input(|i| i.pointer.press_origin()).map(to_image),
-                        clicked: response.clicked_by(primary),
-                        alt: ui.input(|i| i.modifiers.alt),
-                        drag_started: response.drag_started_by(primary),
-                        dragging: response.dragged_by(primary),
-                        drag_stopped: response.drag_stopped(),
-                        // A click on the navigator moves the view (a drag
-                        // that began there never reaches here: `on_map`), and
-                        // one that ends autoscroll only ends it.
-                        taken: autoscroll_was_on
-                            || map.zip(at).is_some_and(|(outer, at)| outer.contains(at)),
-                    };
-                    tool.track(gesture, frame, point_counter::HIT_RADIUS / zoom, (w, h));
-                } else if selecting && !on_map {
-                    let zoom = self.view.zoom;
-                    let add = ui.input(|i| i.modifiers.shift);
-                    if let Some(win) = self.plot.as_mut() {
-                        if let Some(pos) = response.interact_pointer_pos() {
-                            let px = plot::pixel_at(pos, origin, zoom);
-                            let primary = egui::PointerButton::Primary;
-                            match win.drag {
-                                None if response.drag_started_by(primary) => {
-                                    win.drag = Some((px, px))
-                                }
-                                Some((from, _)) if response.dragged_by(primary) => {
-                                    win.drag = Some((from, px))
-                                }
-                                _ => {}
-                            }
-                        }
-                        if response.drag_stopped() {
-                            if let Some((from, to)) = win.drag.take() {
-                                if let Some(roi) = plot::drag_region(from, to, win.shape, w, h) {
-                                    // Shift adds; a plain drag replaces, which
-                                    // is what makes "start again" one gesture.
-                                    if !add {
-                                        win.rois.clear();
-                                    }
-                                    win.rois.push(roi);
-                                    win.stale = true;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Render into the on-screen *visible* rectangle only, and pan/zoom
-                // via UVs. Drawing into an oversized rect doesn't work: the callback
-                // viewport is clamped to the framebuffer, which would just squash the
-                // whole image back to fit instead of zooming.
-                let full_rect = egui::Rect::from_min_size(origin, img_px);
-                let visible = full_rect.intersect(panel_rect);
-                if visible.is_positive() {
-                    let inv = egui::vec2(1.0 / img_px.x.max(1.0), 1.0 / img_px.y.max(1.0));
-                    self.core.uv_offset = ((visible.min - origin) * inv).into();
-                    self.core.uv_scale = (visible.size() * inv).into();
-                    // How much room there is to draw it, which is what decides how
-                    // finely an over-large image needs to be sampled.
-                    let ppp = ui.ctx().pixels_per_point();
-                    self.core.viewport_px = (visible.size() * ppp).into();
-                    ui.painter()
-                        .with_clip_rect(panel_rect)
-                        .add(render::paint_callback(&self.render, visible));
-                }
-
-                // The regions, over the picture and clipped to the panel like
-                // everything else here.
-                if let Some(pick) = self.region_pick.as_ref() {
-                    region_pick::draw(
-                        &ui.painter().with_clip_rect(panel_rect),
-                        pick,
-                        origin,
-                        self.view.zoom,
-                        (w, h),
-                    );
-                } else if let Some(win) = self.plot.as_ref().filter(|p| p.wants_regions()) {
-                    plot::draw_rois(
-                        &ui.painter().with_clip_rect(panel_rect),
-                        win,
-                        origin,
-                        self.view.zoom,
-                        (w, h),
-                    );
-                }
-                // The counted points, over any regions: they are what the
-                // pointer is acting on while the counter is open.
-                if let Some(tool) = self.point_counter.as_ref() {
-                    point_counter::draw(
-                        &ui.painter().with_clip_rect(panel_rect),
-                        &tool.counter,
-                        frame,
-                        origin,
-                        self.view.zoom,
-                    );
-                }
-
-                // Where the view sits in the frame, once that stops being obvious.
-                // Drawn after the image so it is over it, and clipped to the panel
-                // like everything else here.
-                //
-                // `map` is `Some` exactly when this should be drawn, and it was
-                // decided above, before the drag handlers — see the comment there
-                // for why it has to be, and why `steady_pannable` is the condition.
-                if let Some(outer) = map {
-                    minimap::draw(
-                        &ui.painter().with_clip_rect(panel_rect),
-                        ui.visuals(),
-                        outer,
-                        full_rect,
-                        visible,
-                    );
-                }
-
-                // The autoscroll anchor, so the mode is visible and so its neutral
-                // point is findable. Without a marker the only way to stop
-                // scrolling is to hunt for the dead zone by trial and error, and
-                // the only way to know the mode is on at all is that the picture
-                // is moving — which is also what it looks like when something else
-                // has gone wrong.
-                if let Some(anchor) = self.view.autoscroll {
-                    let painter = ui.painter().with_clip_rect(panel_rect);
-                    let (ink, opposite) = minimap::contrasting_ink(ui.visuals());
-                    // A ring the size of the dead zone, so the thing on screen is
-                    // the thing the arithmetic uses: inside the ring is parked,
-                    // outside it moves. Haloed in the opposite ink for the same
-                    // reason the map has a backdrop — this sits over the picture,
-                    // which can be any brightness.
-                    for (r, w, c) in [
-                        (
-                            autoscroll::DEAD_ZONE + 1.0,
-                            3.0,
-                            opposite.gamma_multiply(0.6),
-                        ),
-                        (autoscroll::DEAD_ZONE, 1.5_f32, ink),
-                    ] {
-                        painter.circle_stroke(anchor, r, egui::Stroke::new(w, c));
-                    }
-                    painter.circle_filled(anchor, 1.5_f32, ink);
-                }
-
-                // What the pointer is over decides the cursor. Three answers, in
-                // the order of what has the gesture: the autoscroll mode owns the
-                // pointer wherever it is, the navigator owns it over the map, and
-                // otherwise it is the picture's.
-                let hover = response.hover_pos();
-                let over_map = map.zip(hover).is_some_and(|(outer, at)| outer.contains(at));
-                response.on_hover_cursor(if self.view.autoscroll.is_some() {
-                    egui::CursorIcon::AllScroll
-                } else if over_map || on_map {
-                    // The hand means "drag what is under the pointer", and over the
-                    // map what moves is the view somewhere else. The four-way arrow
-                    // is what every navigator uses for that.
-                    egui::CursorIcon::Move
-                } else if let Some(tool) = self
-                    .point_counter
-                    .as_ref()
-                    .filter(|_| selecting && self.region_pick.is_none())
-                {
-                    // The left button places and moves points here, not the
-                    // picture, so the hand is for a point under the pointer.
-                    let zoom = self.view.zoom;
-                    point_counter::cursor(
-                        tool,
-                        hover.map(|pos| point_counter::image_at(pos, origin, zoom)),
-                        frame,
-                        point_counter::HIT_RADIUS / zoom,
-                    )
-                } else if pannable {
-                    egui::CursorIcon::Grab
-                } else {
-                    egui::CursorIcon::Crosshair
-                });
-
-                // Scrub frames by scrolling over the image (Ctrl+scroll is zoom, so
-                // it's excluded). Two modes:
-                //   • normal — discrete wheel *events*, so one mouse notch is exactly
-                //     one frame (touchpad pixels accumulate to ~one notch);
-                //   • Shift (fast-scroll) — ride the smoothed glide, advancing a
-                //     ~10%-of-stack step at `FAST_SCROLL_GLIDE_RATE` per second (time-
-                //     scaled, so single- and multi-channel stacks scroll the same),
-                //     so one notch sums to ~10% while keeping the smooth glide feel.
-                // egui remaps Shift+wheel to horizontal scrolling, so the smoothed
-                // delta lands on `.x` with the same sign — `x + y` recovers it.
-                let mut pan_swipe = egui::Vec2::ZERO;
-                if ui.rect_contains_pointer(panel_rect) {
-                    let shift = ui.input(|i| i.modifiers.shift);
-                    if shift {
-                        let (glide, dt) = ui.input(|i| {
-                            let s = i.smooth_scroll_delta;
-                            (s.x + s.y, i.stable_dt)
-                        });
-                        if glide != 0.0 {
-                            // ~10% of the stack per notch, spread across the glide.
-                            let n_frames = self
-                                .core
-                                .stack
-                                .as_ref()
-                                .map(|l| l.display.dims.frames)
-                                .unwrap_or(1);
-                            let fast_step = (n_frames as f64 * FAST_SCROLL_RATE).max(1.0);
-                            // glide < 0 is scroll-down → advance frames. Advance at a
-                            // fixed rate *per second* (scaled by the frame time), so
-                            // the jump depends only on the glide's real-time duration
-                            // — identical for single- and multi-channel stacks despite
-                            // their different render speeds. Fractions accumulate so
-                            // short stacks still move.
-                            let dir = if glide < 0.0 { 1.0 } else { -1.0 };
-                            self.view.scroll_accum +=
-                                (dir * fast_step * FAST_SCROLL_GLIDE_RATE * dt as f64) as f32;
-                            let steps = self.view.scroll_accum.trunc();
-                            self.view.scroll_accum -= steps;
-                            scroll_step = steps as i32;
-                        }
-                    } else {
-                        // Which device sent this, and therefore what it means —
-                        // see `scroll`.
-                        let scroll::Wheel { swipe, notches } =
-                            ui.input(|i| scroll::classify(&i.events, pannable));
-                        pan_swipe = swipe;
-                        // egui scroll is +y up; we scrub the next frame on scroll-down.
-                        self.view.scroll_accum -= notches;
-                        let steps = self.view.scroll_accum.trunc();
-                        self.view.scroll_accum -= steps;
-                        scroll_step = steps as i32;
-                    }
-                } else {
-                    self.view.scroll_accum = 0.0;
-                }
-
-                // Move the field of view by swipe, and keep moving for a moment
-                // after the swipe stops. Deliberately outside the hover test above:
-                // a flick that carries the pointer off the image should still
-                // coast, and stopping dead at the edge of the panel would feel like
-                // the picture had hit something.
-                //
-                // The sign matches dragging — the picture follows the fingers —
-                // because they are the same gesture done two ways, and having them
-                // disagree would be worse than either choice.
-                let dt = ui.input(|i| i.stable_dt);
-                if !pannable {
-                    self.view.pan_glide.stop();
-                }
-                let motion = if pan_swipe == egui::Vec2::ZERO {
-                    self.view.pan_glide.coast(dt)
-                } else {
-                    self.view.pan_glide.push(pan_swipe, dt)
-                };
-                if motion != egui::Vec2::ZERO {
-                    let want = self.view.pan - motion;
-                    self.view.pan.x = want.x.clamp(0.0, overflow.x);
-                    self.view.pan.y = want.y.clamp(0.0, overflow.y);
-                    // Clamped means that axis ran into the edge of the image. Stop
-                    // it there: a glide left wound up against a bound would spring
-                    // forward again the moment the bound moved.
-                    self.view.pan_glide.stop_axes(
-                        (self.view.pan.x - want.x).abs() > 0.01,
-                        (self.view.pan.y - want.y).abs() > 0.01,
-                    );
-                }
-                // A coast is motion with no input behind it, so nothing else will
-                // ask for the next frame.
-                if self.view.pan_glide.is_moving() {
-                    ui.ctx().request_repaint();
-                }
-            });
-
-        if scroll_step != 0 {
-            if let Some(loaded) = &mut self.core.stack {
-                let max_frame = loaded.display.dims.frames.saturating_sub(1) as i64;
-                let target = (loaded.frame_index as i64 + scroll_step as i64).clamp(0, max_frame);
-                loaded.frame_index = target as usize;
-            }
-        }
-
-        // Window chrome (sizing, position, title) is a desktop-only concern.
-        #[cfg(not(target_arch = "wasm32"))]
-        self.manage_window(ui, &toolbar_response, &scrub_bar_response);
-        #[cfg(target_arch = "wasm32")]
-        let _ = (&toolbar_response, &scrub_bar_response);
+    /// Size the window, then bring the GPU up to date with this frame.
+    fn end_frame(
+        &mut self,
+        ui: &egui::Ui,
+        toolbar_response: &egui::InnerResponse<()>,
+        scrub_bar_response: &egui::InnerResponse<()>,
+    ) {
+        // Window chrome (sizing, position, title): the desktop's alone, and
+        // nothing in a browser, whose canvas the page sizes.
+        self.platform.manage_window(
+            ui.ctx(),
+            &mut self.view,
+            &mut self.panel,
+            self.core.document.as_ref(),
+            toolbar_response.response.rect.height(),
+            scrub_bar_response.response.rect.height(),
+        );
 
         // Bring the GPU up to date with the core state, then honor a pending
-        // background volume build by scheduling another frame.
+        // background volume build by scheduling another frame. The histograms
+        // are binned from what the sync decodes, while their window is open.
+        self.core.histograms_wanted = self.windows.is_open(WindowId::HISTOGRAM);
         let render = std::sync::Arc::clone(&self.render);
         let outcome = match render.lock() {
             Ok(mut resources) => {
@@ -4635,11 +2504,11 @@ impl ViewerApp {
 
 impl eframe::App for ViewerApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        UI.get_or_init(|| ui.ctx().clone());
         // The graphics device is gone, and egui would panic drawing this frame
         // without it. Ending here instead puts the reason in words; the panic
         // hook shows it (see `render::explain_gpu_failure`).
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(why) = crate::render::gpu_lost() {
+        if let Some(why) = Current::gpu_lost() {
             panic!("{why}");
         }
         self.draw(ui, frame);
@@ -4658,20 +2527,17 @@ mod zoom_tests;
 mod readout_tests;
 
 #[cfg(test)]
-#[cfg(not(target_arch = "wasm32"))]
 #[path = "app/import_label_tests.rs"]
 mod import_label_tests;
-
-#[cfg(test)]
-#[cfg(not(target_arch = "wasm32"))]
-#[path = "app/result_file_tests.rs"]
-mod result_file_tests;
 
 #[cfg(test)]
 #[path = "app/panel_grow_tests.rs"]
 mod panel_grow_tests;
 
 #[cfg(test)]
-#[cfg(not(target_arch = "wasm32"))]
+#[path = "app/reset_tests.rs"]
+mod reset_tests;
+
+#[cfg(test)]
 #[path = "app/job_tests.rs"]
 mod job_tests;

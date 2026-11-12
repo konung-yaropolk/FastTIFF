@@ -10,7 +10,7 @@
 //! What the frontend gets back is a handle it polls once a frame: a stage to
 //! show while the load runs, and the finished stack when it lands.
 
-use crate::stack::Stack;
+use crate::document::Document;
 use std::path::PathBuf;
 
 /// How far an open has got.
@@ -64,7 +64,16 @@ pub enum LoadSource {
     #[cfg(feature = "mmap")]
     Path(PathBuf),
     /// The file's bytes, plus a name to show for them.
-    Bytes(Vec<u8>, PathBuf),
+    ///
+    /// Owned or shared ([`fast_tiff_lib::Bytes`]): a buffer that arrives behind
+    /// an `Arc` — a file dropped on a browser tab — is opened without being
+    /// copied, and a `Vec` is kept as it came.
+    Bytes(fast_tiff_lib::Bytes, PathBuf),
+    /// A plugin's result, opened from one of the other two: the stack it
+    /// becomes is [`Derived`](crate::plugins::result::Derived) — it knows the
+    /// document it was made from, and owns its scratch file. Made by
+    /// [`ResultTiff::into_document`](crate::plugins::ResultTiff::into_document).
+    Derived(Box<LoadSource>, crate::plugins::result::Derived),
 }
 
 impl LoadSource {
@@ -74,6 +83,7 @@ impl LoadSource {
             #[cfg(feature = "mmap")]
             LoadSource::Path(p) => p.clone(),
             LoadSource::Bytes(_, name) => name.clone(),
+            LoadSource::Derived(from, _) => from.name(),
         }
     }
 
@@ -85,12 +95,18 @@ impl LoadSource {
         self,
         apply_pseudocolor: bool,
         on_stage: &mut dyn FnMut(LoadStage),
-    ) -> anyhow::Result<Stack> {
+    ) -> anyhow::Result<Document> {
         match self {
             #[cfg(feature = "mmap")]
-            LoadSource::Path(path) => Stack::open_reporting(path, apply_pseudocolor, on_stage),
+            LoadSource::Path(path) => Document::open_reporting(path, apply_pseudocolor, on_stage),
             LoadSource::Bytes(bytes, name) => {
-                Stack::from_bytes_reporting(bytes, name, apply_pseudocolor, on_stage)
+                Document::from_bytes_reporting(bytes, name, apply_pseudocolor, on_stage)
+            }
+            // A load that fails drops `derived`, and the scratch file with it.
+            LoadSource::Derived(from, derived) => {
+                let mut stack = from.load(apply_pseudocolor, on_stage)?;
+                stack.derived = Some(derived);
+                Ok(stack)
             }
         }
     }
@@ -99,14 +115,14 @@ impl LoadSource {
 #[cfg(feature = "threads")]
 mod threaded {
     use super::{LoadSource, LoadStage};
-    use crate::stack::Stack;
+    use crate::document::Document;
     use std::path::PathBuf;
     use std::sync::mpsc::{channel, Receiver};
     use std::sync::{Arc, Mutex};
 
     /// A load in flight on a worker thread.
     pub struct Loading {
-        rx: Receiver<anyhow::Result<Stack>>,
+        rx: Receiver<anyhow::Result<Document>>,
         stage: Arc<Mutex<LoadStage>>,
         name: PathBuf,
     }
@@ -168,7 +184,7 @@ mod threaded {
 
         /// The finished stack, once there is one. `None` while it is still
         /// running — never blocks.
-        pub fn take(&mut self) -> Option<anyhow::Result<Stack>> {
+        pub fn take(&mut self) -> Option<anyhow::Result<Document>> {
             match self.rx.try_recv() {
                 Ok(result) => Some(result),
                 // Disconnected without a result means the worker died, which

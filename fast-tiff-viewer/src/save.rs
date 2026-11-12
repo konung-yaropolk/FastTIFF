@@ -15,8 +15,8 @@
 //! window it came from.
 //!
 //! What it does *not* do is re-interpret the samples. A frame goes out in the
-//! type it came in as, which is why the signed case below undoes the decoder's
-//! offset instead of writing the offset values.
+//! type it came in as, its samples copied as the file's own bytes rather than
+//! through any of the decoders' display transforms.
 //!
 //! # Compressed: Deflate, level 1, no predictor
 //!
@@ -44,7 +44,7 @@
 //!
 //! # Except with an overlay: uncompressed
 //!
-//! A stack carrying an ImageJ overlay ([`Stack::overlay`]: the points the file
+//! A stack carrying an ImageJ overlay ([`Document::overlay`]: the points the file
 //! came with, or the point counter's) is written uncompressed instead, and the
 //! overlay with it. ImageJ reads the overlay of a multi-image TIFF only when it
 //! opens the file as one contiguous stack, and it does that only for an
@@ -76,12 +76,12 @@
 //! here where the desktop would have streamed it.
 
 use crate::display::Dims;
-use crate::stack::Stack;
+use crate::document::Document;
 use anyhow::{bail, Context, Result};
 use fast_tiff_lib::metadata::{self, MetadataFormat};
 use fast_tiff_lib::{
-    read_frame_f32_into, read_frame_u16_into, read_frame_u8_into, Compression, FrameInfo,
-    SampleFormat, SampleType, StackMetaWrite, TiffWriter, WriterOptions,
+    read_frame_bytes_into, ByteOrder, Compression, FrameInfo, SampleFormat, SampleType,
+    StackMetaWrite, TiffWriter, WriterOptions,
 };
 
 /// How files are compressed. See the module docs for why these.
@@ -98,18 +98,14 @@ use std::path::Path;
 
 /// How a frame's samples travel from the file to the file.
 ///
-/// The decoders normalise on the way in — 8-bit is widened, floats are rescaled
-/// into the display window, signed integers are offset — so a save has to pick
-/// the reader whose normalisation it can undo, rather than the most convenient
-/// one. Reading an 8-bit frame as `u16` and writing it as `u16` would double
-/// the file and change every value.
+/// The frames are copied as the file's own bytes, so this only names the type
+/// they are written as — and refuses the ones the writer cannot reproduce
+/// without changing the samples.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Samples {
     U8,
+    I8,
     U16,
-    /// 16-bit signed. The decoder hands these back offset by +32768 so they sort
-    /// as unsigned; writing them without undoing that would shift every pixel by
-    /// half the range.
     I16,
     F32,
 }
@@ -117,12 +113,13 @@ enum Samples {
 impl Samples {
     fn of(frame: &FrameInfo) -> Result<Samples> {
         Ok(match (frame.bits_per_sample, frame.sample_format) {
-            (8, SampleFormat::UnsignedInt) | (8, SampleFormat::SignedInt) => Samples::U8,
+            (8, SampleFormat::UnsignedInt) => Samples::U8,
+            (8, SampleFormat::SignedInt) => Samples::I8,
+            // 4-bit palette indices are read one per byte, so that is how they
+            // are written: the values survive, the packing does not.
+            (4, SampleFormat::UnsignedInt) => Samples::U8,
+            (16, SampleFormat::UnsignedInt) => Samples::U16,
             (16, SampleFormat::SignedInt) => Samples::I16,
-            // Sub-byte and other narrow depths come out of the decoder as
-            // `u16` values, so that is what they are written as: the values
-            // survive, the original bit depth does not.
-            (b, SampleFormat::UnsignedInt) if b <= 16 => Samples::U16,
             (32, SampleFormat::Float) => Samples::F32,
             (bits, format) => bail!(
                 "this stack is {bits}-bit {format:?}, which this writer cannot reproduce \
@@ -134,9 +131,18 @@ impl Samples {
     fn sample_type(self) -> SampleType {
         match self {
             Samples::U8 => SampleType::U8,
+            Samples::I8 => SampleType::I8,
             Samples::U16 => SampleType::U16,
             Samples::I16 => SampleType::I16,
             Samples::F32 => SampleType::F32,
+        }
+    }
+
+    fn bytes(self) -> usize {
+        match self {
+            Samples::U8 | Samples::I8 => 1,
+            Samples::U16 | Samples::I16 => 2,
+            Samples::F32 => 4,
         }
     }
 }
@@ -150,11 +156,11 @@ impl Samples {
 /// vectors of settings. Taking it costs a refcount bump and one small clone.
 ///
 /// Owned rather than borrowed because the window carries on being used while
-/// the write runs, and a `&Stack` held across that would stop it.
+/// the write runs, and a `&Document` held across that would stop it.
 pub struct SaveSource {
     tiff: std::sync::Arc<fast_tiff_lib::TiffStack>,
     display: crate::display::Display,
-    /// [`Stack::overlay`], as it was when the snapshot was taken.
+    /// [`Document::overlay`], as it was when the snapshot was taken.
     overlay: Vec<fast_tiff_lib::PointRoi>,
 }
 
@@ -164,7 +170,7 @@ impl SaveSource {
     /// The metadata written comes from the display model, so changing the
     /// contrast or the axes after pressing Save must not change the file that
     /// is already being written — hence a snapshot rather than a live borrow.
-    pub fn of(stack: &Stack) -> Self {
+    pub fn of(stack: &Document) -> Self {
         SaveSource {
             tiff: std::sync::Arc::clone(&stack.tiff),
             display: stack.display.clone(),
@@ -183,7 +189,7 @@ impl SaveSource {
 /// The blocking form, for callers with nothing to report progress to — tests,
 /// and any future headless use. [`save_source`] is what the app calls.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn save_stack(stack: &Stack, path: &Path) -> Result<()> {
+pub fn save_stack(stack: &Document, path: &Path) -> Result<()> {
     save_source(&SaveSource::of(stack), path, &mut |_| true)
 }
 
@@ -319,6 +325,9 @@ fn write_all<W: std::io::Write + std::io::Seek>(
     on_progress: &mut dyn FnMut(f32) -> bool,
     batch_bytes: usize,
 ) -> Result<W> {
+    // A save is something the user waits for, on a thread of its own: its
+    // decodes and its compression use every core, whatever the view is doing.
+    let _parallel = fast_tiff_lib::parallel_decode_scope(true);
     let stack = source;
     let first = stack
         .tiff
@@ -351,8 +360,11 @@ fn write_all<W: std::io::Write + std::io::Seek>(
 
     let bytes_per_frame = frame_bytes(first, samples);
 
+    // The frames are copied as the file lays them out, so a planar source is
+    // written planar.
     let options = WriterOptions::new(first.width, first.height, samples.sample_type())
         .samples_per_pixel(spp)
+        .planar(spp > 1 && first.is_planar())
         .metadata(metadata_of(stack));
     // An overlay is only seen by ImageJ in an uncompressed stack (module docs).
     // Uncompressed, the writer puts each frame in one strip (no
@@ -375,9 +387,6 @@ fn write_all<W: std::io::Write + std::io::Seek>(
 
     let data = &stack.tiff.data;
     let order = stack.tiff.byte_order;
-    let mut u8s: Vec<u8> = Vec::new();
-    let mut u16s: Vec<u16> = Vec::new();
-    let mut f32s: Vec<f32> = Vec::new();
     let per_batch = (batch_bytes / bytes_per_frame).max(1);
     // Buffers reused from batch to batch; `filled` of them hold this batch.
     let mut batch: Vec<Vec<u8>> = Vec::with_capacity(per_batch);
@@ -395,33 +404,10 @@ fn write_all<W: std::io::Write + std::io::Seek>(
         if filled == batch.len() {
             batch.push(Vec::with_capacity(bytes_per_frame));
         }
-        let out = &mut batch[filled];
-        out.clear();
-        let wrote = || format!("writing frame {i}");
-        match samples {
-            Samples::U8 => {
-                read_frame_u8_into(data, frame, order, &mut u8s).with_context(wrote)?;
-                out.extend_from_slice(&u8s);
-            }
-            Samples::U16 => {
-                read_frame_u16_into(data, frame, order, None, &mut u16s).with_context(wrote)?;
-                extend_le(out, &u16s);
-            }
-            Samples::I16 => {
-                read_frame_u16_into(data, frame, order, None, &mut u16s).with_context(wrote)?;
-                // Back to the bit pattern the file had: the decoder XORs the
-                // sign bit so signed data sorts as unsigned, and this is that
-                // operation run the other way.
-                for v in &mut u16s {
-                    *v ^= 0x8000;
-                }
-                extend_le(out, &u16s);
-            }
-            Samples::F32 => {
-                read_frame_f32_into(data, frame, order, &mut f32s).with_context(wrote)?;
-                extend_le(out, &f32s);
-            }
-        }
+        // The file's own samples, in the writer's byte order, decoded straight
+        // into the batch: no display transform to undo, and no copy between.
+        read_frame_bytes_into(data, frame, order, ByteOrder::Little, &mut batch[filled])
+            .with_context(|| format!("writing frame {i}"))?;
         filled += 1;
         if filled == per_batch {
             write_batch(&mut writer, &batch[..filled])
@@ -443,19 +429,7 @@ fn write_batch(
     frames: &[Vec<u8>],
 ) -> Result<()> {
     let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
-    writer.write_frames_bytes(&refs)
-}
-
-/// Append samples as the little-endian bytes a TIFF written by this crate
-/// holds. A straight copy on every little-endian host.
-fn extend_le<T: bytemuck::Pod>(out: &mut Vec<u8>, samples: &[T]) {
-    if cfg!(target_endian = "little") {
-        out.extend_from_slice(bytemuck::cast_slice(samples));
-    } else {
-        for s in samples {
-            out.extend(bytemuck::bytes_of(s).iter().rev());
-        }
-    }
+    Ok(writer.write_frames_bytes(&refs)?)
 }
 
 /// Whether `frames` frames of `bytes_per_frame` each fit a classic TIFF
@@ -573,7 +547,7 @@ fn placed_for_imagej(
 /// the save is uncompressed, which it is only while that fits a classic TIFF
 /// (see the module docs). Past that the overlay is still in the file, for this
 /// viewer, but ImageJ shows the image without it.
-pub fn overlay_readable_by_imagej(stack: &Stack) -> bool {
+pub fn overlay_readable_by_imagej(stack: &Document) -> bool {
     let Some(first) = stack.tiff.frames.first() else {
         return true;
     };
@@ -587,11 +561,7 @@ pub fn overlay_readable_by_imagej(stack: &Stack) -> bool {
 /// One frame's uncompressed size as the writer writes it.
 fn frame_bytes(first: &FrameInfo, samples: Samples) -> usize {
     (first.width as usize * first.height as usize * first.samples_per_pixel.max(1) as usize)
-        .saturating_mul(match samples {
-            Samples::U8 => 1,
-            Samples::U16 | Samples::I16 => 2,
-            Samples::F32 => 4,
-        })
+        .saturating_mul(samples.bytes())
         .max(1)
 }
 
@@ -602,7 +572,7 @@ fn frame_bytes(first: &FrameInfo, samples: Samples) -> usize {
 /// recoloured, is saved as it is being looked at — which is the only reading of
 /// "save" that does not surprise someone who just changed something.
 fn metadata_of(stack: &SaveSource) -> StackMetaWrite {
-    let dims = stack.display.dims;
+    let dims = stack.display.dims();
     let meta = &stack.tiff.meta;
     let mut out = StackMetaWrite::new(dims.channels, dims.slices).mode(stack.display.mode);
 
@@ -630,22 +600,18 @@ fn metadata_of(stack: &SaveSource) -> StackMetaWrite {
     // The window on screen. The format carries one for the stack, so the first
     // channel's speaks for it — the alternative is to write none and have the
     // file open on auto-contrast, which is a visible change to something the
-    // user did not touch. In the samples' units, as the file is written: the
-    // interface keeps an 8-bit window widened onto 0..65535
-    // (`channels::window_scale`), which ImageJ would read as 257 times the
-    // range and show the image saturated.
-    if let Some(first) = stack.display.settings.first() {
-        let scale = match stack.tiff.frames.first().map(Samples::of) {
-            Some(Ok(Samples::U8)) => f64::from(crate::channels::WIDEN_8BIT),
-            _ => 1.0,
-        };
-        out = out.range(first.min as f64 / scale, first.max as f64 / scale);
+    // user did not touch. In ImageJ's units for the samples, which are the
+    // file's own except for signed 16-bit (see `SampleUnits::to_imagej`), and
+    // the same definition opening a file reads the range back with.
+    if let Some(first) = stack.display.settings().first() {
+        let (lo, hi) = first.units.to_imagej(first.window);
+        out = out.range(lo, hi);
     }
     // Every channel's LUT, always — including plain grayscale ones. They are
     // 768 bytes each, and writing them is what makes a saved file open in the
     // colours it was saved in rather than in whichever ones a reader defaults
     // to for that channel count.
-    for lut in &stack.display.luts {
+    for lut in stack.display.luts() {
         out = out.channel_lut(*lut);
     }
     if let Some(text) = carried_description(stack) {
@@ -654,7 +620,7 @@ fn metadata_of(stack: &SaveSource) -> StackMetaWrite {
     // The overlay — the file's own points, or the point counter's — as ImageJ
     // overlay ROIs, each where ImageJ will draw it on these axes.
     if !stack.overlay.is_empty() {
-        let rgb = stack.display.rgb;
+        let rgb = stack.display.rgb();
         // The axes the file was written with, which a hyperstack position read
         // from it is in.
         let read_in = Dims {

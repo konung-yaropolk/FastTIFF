@@ -6,7 +6,7 @@
 //!         │
 //!   scivis-render     GPU pipelines, textures, ray-marching
 //!         │
-//!   fast-tiff-viewer  ← you are here: stack model, channel settings,
+//!   fast-tiff-viewer  ← you are here: document model, channel settings,
 //!         │             c/z/t interpretation, camera, decode→GPU sync
 //!   frontend          egui app, or a wasm/JS web UI
 //! ```
@@ -31,10 +31,10 @@
 //! * `backend-wgpu` / `backend-glow` — which GPU backend [`sync`] drives.
 //!   Exactly one is needed for [`Viewer::sync`]; with neither, the CPU-side
 //!   model still compiles and is fully usable headless.
-//! * `threads` (default) — background read-ahead and volume assembly. Turn it
-//!   off for a single-threaded host such as `wasm32-unknown-unknown`; the
-//!   synchronous fallbacks are already the paths taken when a worker fails to
-//!   spawn, so nothing else changes.
+//! * `threads` (default) — background read-ahead, window and volume assembly
+//!   (see [`worker`]). Turn it off for a single-threaded host such as
+//!   `wasm32-unknown-unknown`; the synchronous fallbacks are already the paths
+//!   taken when a worker fails to spawn, so nothing else changes.
 
 pub mod bandcache;
 pub mod brightness;
@@ -43,6 +43,7 @@ pub mod channels;
 pub mod colormap;
 pub mod dimensions;
 pub mod display;
+pub mod document;
 pub mod histogram;
 pub mod loader;
 /// Decoding one plane as `f32` in the file's own units. One definition, so the
@@ -61,15 +62,20 @@ pub mod planes;
 /// that never opens the Plugins menu pays for it only in binary size.
 pub mod plugins;
 pub mod prefetch;
+/// What one renderer holds of the document it shows, reconciled with the
+/// display model once per sync. Crate-private: a frontend asks the
+/// [`Viewer`] what it needs of it.
+mod residency;
 pub mod roi;
 /// Writing the open stack back out as a TIFF. Native only: it writes to a
 /// path, and a browser has none.
 pub mod save;
 pub mod snapshot;
-pub mod stack;
+pub mod units;
 pub mod viewer;
 pub mod volume;
 pub mod window;
+pub mod worker;
 
 #[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
 pub mod sync;
@@ -95,26 +101,29 @@ pub type Renderer = backend::ImageRenderResources;
 /// and every device in the process is lost — which is how a TurboReg run on a
 /// 4096 x 4096 stack, with a 3D volume resident, took the application down.
 /// On the one device a registration short of memory fails its batch and says
-/// so instead (see each crate's `use_device`).
+/// so instead (see `image_registration_support::gpu::use_device`).
+///
+/// One call for every registration: the registration crates share one device
+/// slot, so a GPU path added to either is on the renderer's device without
+/// being added here.
 #[cfg(all(feature = "gpu-registration", not(target_arch = "wasm32")))]
 pub fn share_gpu_device(device: &wgpu::Device, queue: &wgpu::Queue, adapter: &wgpu::AdapterInfo) {
-    #[cfg(feature = "plugin-turboreg-stabilize")]
-    if !turboreg_registration::gpu::use_device(device.clone(), queue.clone(), adapter) {
-        log::warn!("TurboReg had opened a GPU device of its own already");
-    }
-    #[cfg(feature = "plugin-suite2p-stabilize")]
-    if !suite2p_registration::gpu::use_device(device.clone(), queue.clone(), adapter) {
-        log::warn!("suite2p had opened a GPU device of its own already");
+    #[cfg(any(
+        feature = "plugin-suite2p-stabilize",
+        feature = "plugin-turboreg-stabilize"
+    ))]
+    if !image_registration_support::gpu::use_device(device.clone(), queue.clone(), adapter) {
+        log::warn!("a registration had opened a GPU device of its own already");
     }
     // Both plugins may be compiled out.
     let _ = (device, queue, adapter);
 }
 
 pub use dimensions::{plane_index, planes_addressed};
-pub use display::{Dims, Display};
+pub use display::{Dims, Display, Revision};
+pub use document::{ChannelSettings, Document, SampleUnits, Window};
 pub use histogram::Histogram;
 pub use loader::{LoadSource, LoadStage};
-pub use stack::{ChannelSettings, Stack};
 pub use viewer::{DecodeMode, Playback, ViewMode, Viewer, VolumeView, DEFAULT_FPS};
 
 // Re-exported so a frontend needs only this crate in its imports for the common

@@ -5,18 +5,17 @@
 //! `FastTIFF-web` is the wasm one (a canvas). Both construct the same
 //! [`ViewerApp`], so the UI is written once.
 //!
-//! What differs between them is confined to `#[cfg(target_arch = "wasm32")]`
-//! at a handful of places, all of them about the *host* rather than the viewer:
+//! What differs between them is all about the *host* rather than the viewer —
+//! window management, how files come in and go out, workers, a new process or
+//! a new tab, how large the chrome is drawn — and it is behind one seam,
+//! `app::platform`: what each host decides is a value tested on every target,
+//! and what each host does is one implementation per target, picked there by
+//! the one `cfg` that picks it. Beyond it, only what cannot compile on the
+//! other target is gated: the host modules below, and the GPU adapter's
+//! per-target option hooks (`render::tune_native_options` /
+//! `render::tune_web_options`).
 //!
-//!   * window management — sizing, positioning and titling the OS window has no
-//!     canvas equivalent (`ViewerApp::manage_window`),
-//!   * opening files — a blocking dialog and argv versus an async picker and
-//!     drop events carrying bytes (`Opened`),
-//!   * the GPU adapter's option hook (`render::tune_native_options` /
-//!     `render::tune_web_options`),
-//!   * how large the chrome is drawn — the web build runs at 150% (`app::scale`).
-//!
-//! Everything below the UI — the stack model, channel settings, contrast,
+//! Everything below the UI — the document model, channel settings, contrast,
 //! dimension order, playback and the 3D camera — comes from `fast_tiff_viewer`
 //! and is identical on every target.
 
@@ -27,23 +26,7 @@
 // original objection to putting plugins behind a feature at all was exactly
 // that CI would not notice, because a release step only compiles — so this is
 // the thing that notices, at the only moment where noticing is free.
-#[cfg(not(any(
-    feature = "plugin-invert",
-    feature = "plugin-zproject",
-    feature = "plugin-plot-axis",
-    feature = "plugin-stack-tools",
-    feature = "plugin-animation-3d",
-    feature = "plugin-crop",
-    feature = "plugin-suite2p-stabilize",
-    feature = "plugin-turboreg-stabilize",
-    feature = "plugin-deconvolve",
-    feature = "plugin-png",
-    feature = "plugin-oir",
-    feature = "plugin-nifti",
-    feature = "plugin-dicom",
-    feature = "plugin-netpbm",
-    feature = "plugins-none",
-)))]
+#[cfg(not(any(feature = "_any-builtin", feature = "plugins-none")))]
 compile_error!(
     "FastTIFF is being built with no built-in plugins, which is almost always a \
      `--no-default-features` that forgot to name them again: add `builtin-plugins` \
@@ -59,20 +42,23 @@ compile_error!(
 pub mod app;
 pub mod render;
 
-// Native-only host integrations: launching sibling processes for extra files,
-// and the macOS Apple Event that delivers "Open With" documents.
+// The hosts' own integrations, each on the one target it can compile for;
+// `app::platform` is what uses them. The desktop's: launching sibling
+// processes for extra files and plugin results, and the macOS Apple Event
+// that delivers "Open With" documents (AppKit's, so macOS's alone).
 #[cfg(all(target_os = "macos", not(target_arch = "wasm32")))]
 pub mod macos_open;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod process;
 /// The browser's counterpart to [`process`]: handing a document to a second
-/// tab instead of to a second process.
+/// tab instead of to a second process. Written against `web-sys`, which only
+/// wasm32 has.
 #[cfg(target_arch = "wasm32")]
 pub mod web_open;
 /// The browser's counterpart to a save dialog: handing a file to the user as a
-/// download. Compiled under `test` on every target for the one part of it that
-/// is not about a browser; see the module.
-#[cfg(any(target_arch = "wasm32", test))]
+/// download. `web-sys` too; what a download is called is decided, and tested,
+/// in `app/platform/naming.rs` on every target.
+#[cfg(target_arch = "wasm32")]
 pub mod web_save;
 
 pub use app::{install_chrome, ViewerApp};

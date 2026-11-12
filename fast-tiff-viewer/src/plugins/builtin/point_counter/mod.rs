@@ -9,7 +9,7 @@
 //! and keeps nothing between them, and what crosses the plugin boundary has no
 //! point shape, while this is a session: a list of points that grows click by
 //! click, an undo history, and marks drawn over the picture for as long as its
-//! window is open. So it uses the viewer's own types ([`Stack`]), has no entry
+//! window is open. So it uses the viewer's own types ([`Document`]), has no entry
 //! in [`register`](super::register), and has no `plugin-…` feature: the
 //! applications refer to it directly, and it brings no dependency for a feature
 //! to leave out.
@@ -22,7 +22,7 @@
 //! * `fast_tiff_lib::metadata::roi` — the ImageJ `.roi` format and the RoiSet
 //!   `.zip`. The TIFF reader and writer need it for the overlay in a file's
 //!   `IJMetadata`, and that crate cannot reach up into this one;
-//! * [`Stack::overlay`] and [`save`](crate::save) — the overlay a document
+//! * [`Document::overlay`] and [`save`](crate::save) — the overlay a document
 //!   carries, and how a save writes it;
 //! * `FastTIFF/src/app/point_counter.rs` — the window, the marks drawn over the
 //!   picture, and filling a [`Gesture`] from the pointer. They are egui, and
@@ -63,13 +63,13 @@
 //!
 //! An export can come back: [`PointCounter::from_rois`] starts a counter from
 //! point ROIs — a file's ImageJ overlay as it was read
-//! ([`Stack::overlay`](crate::Stack::overlay)) — with [`frame_of_position`]
+//! ([`Document::overlay`](crate::Document::overlay)) — with [`frame_of_position`]
 //! turning each point's stack position back into its frame. What
 //! [`to_rois`](PointCounter::to_rois) writes, `from_rois` reads back as the
 //! same groups — those that had points — with the same points, numbered the
 //! same, on the same frames.
 
-use crate::stack::Stack;
+use crate::document::Document;
 use fast_tiff_lib::{PointRoi, RoiPoint};
 
 pub mod session;
@@ -436,9 +436,9 @@ impl PointCounter {
     /// shows. ImageJ draws such a group on no plane at all without it (see
     /// [`PointRoi::hyperstack_position`]); a group spread over frames is drawn
     /// point by point, and needs none.
-    pub fn rois_for(&self, stack: &Stack) -> Vec<PointRoi> {
+    pub fn rois_for(&self, stack: &Document) -> Vec<PointRoi> {
         let hyperstack =
-            crate::save::opens_as_imagej_hyperstack(stack.display.dims, stack.display.rgb);
+            crate::save::opens_as_imagej_hyperstack(stack.display.dims(), stack.display.rgb());
         self.rois(
             |frame| imagej_position(stack, frame),
             |frame| {
@@ -524,7 +524,7 @@ impl PointCounter {
         }
     }
 
-    /// A counter that starts from `stack`'s overlay ([`Stack::overlay`]):
+    /// A counter that starts from `stack`'s overlay ([`Document::overlay`]):
     /// [`from_rois`](Self::from_rois), each point's stack position mapped to
     /// its frame by [`frame_of_position`].
     ///
@@ -535,14 +535,14 @@ impl PointCounter {
     /// frame that plane is on, when every plane the position covers (an axis
     /// at 0 covers all of it) is on the one frame. When they are not, the
     /// points are on every frame.
-    pub fn from_overlay(stack: &Stack) -> Self {
+    pub fn from_overlay(stack: &Document) -> Self {
         let meta = &stack.tiff.meta;
         let written = crate::display::Dims {
             channels: meta.channels,
             slices: meta.slices,
             frames: meta.frames,
         };
-        let rgb = stack.display.rgb;
+        let rgb = stack.display.rgb();
         let rois: Vec<PointRoi> = stack
             .overlay
             .iter()
@@ -566,7 +566,7 @@ impl PointCounter {
                 roi
             })
             .collect();
-        Self::from_rois(&rois, stack.display.dims.frames, |position| {
+        Self::from_rois(&rois, stack.display.dims().frames, |position| {
             frame_of_position(stack, position)
         })
     }
@@ -575,7 +575,7 @@ impl PointCounter {
 /// Where each frame of `stack` starts, as ImageJ stack positions
 /// ([`imagej_position`]) — what stays put about a point's frame when the axes
 /// are reassigned, and so how [`Session::follow_axes`] finds it again.
-pub fn frame_starts(stack: &Stack) -> Vec<u32> {
+pub fn frame_starts(stack: &Document) -> Vec<u32> {
     (0..stack.frame_count())
         .map(|frame| imagej_position(stack, frame))
         .collect()
@@ -591,12 +591,12 @@ pub fn frame_starts(stack: &Stack) -> Vec<u32> {
 /// on. The position follows the axes as they are being looked at
 /// ([`Display::dims`](crate::display::Display::dims)), which are also the ones
 /// a save writes into the file's description.
-pub fn imagej_position(stack: &Stack, frame: usize) -> u32 {
+pub fn imagej_position(stack: &Document, frame: usize) -> u32 {
     if stack.tiff.frames.len() <= 1 {
         return 0;
     }
     let (ifd, _) =
-        crate::dimensions::plane_index(stack.display.dims, stack.display.rgb, 0, 0, frame);
+        crate::dimensions::plane_index(stack.display.dims(), stack.display.rgb(), 0, 0, frame);
     u32::try_from(ifd + 1).unwrap_or(u32::MAX)
 }
 
@@ -610,14 +610,14 @@ pub fn imagej_position(stack: &Stack, frame: usize) -> u32 {
 /// slice 3 of a 4D stack, is on that frame here. `None` for 0, which is
 /// "every slice" rather than one, and for a position past the file's IFDs or
 /// past the frames the axes describe.
-pub fn frame_of_position(stack: &Stack, position: u32) -> Option<usize> {
+pub fn frame_of_position(stack: &Document, position: u32) -> Option<usize> {
     let ifd = usize::try_from(position.checked_sub(1)?).ok()?;
     if ifd >= stack.tiff.frames.len() {
         return None;
     }
     // The IFDs between one frame's first plane and the next's.
     let (stride, _) =
-        crate::dimensions::plane_index(stack.display.dims, stack.display.rgb, 0, 0, 1);
+        crate::dimensions::plane_index(stack.display.dims(), stack.display.rgb(), 0, 0, 1);
     let frame = ifd / stride.max(1);
     (frame < stack.frame_count()).then_some(frame)
 }

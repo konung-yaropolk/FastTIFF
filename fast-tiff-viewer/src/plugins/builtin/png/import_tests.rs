@@ -159,7 +159,7 @@ fn with_many_ztxt(n: usize) -> Vec<u8> {
 }
 
 fn write(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("fasttiff_png_import_tests");
+    let dir = std::env::temp_dir().join(format!("fasttiff_png_import_tests_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let p = dir.join(name);
     std::fs::write(&p, bytes).unwrap();
@@ -692,7 +692,10 @@ fn a_file_that_is_not_a_png_is_refused() {
 /// And a file that is not there at all.
 #[test]
 fn a_missing_file_is_reported_rather_than_panicking() {
-    let path = std::env::temp_dir().join("fasttiff_png_import_tests/no_such_file.png");
+    let path = std::env::temp_dir().join(format!(
+        "fasttiff_png_import_tests_{}/no_such_file.png",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&path);
     assert!(PngImport
         .import(

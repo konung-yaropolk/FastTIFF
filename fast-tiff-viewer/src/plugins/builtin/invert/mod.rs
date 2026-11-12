@@ -29,11 +29,11 @@
 //! the mapping depends on the file.
 
 use fasttiff_plugin_api::{
-    HostContext, ImageResult, Outcome, ParamDecl, Params, Plane, PlaneData, Plugin, PluginError,
+    HostContext, ImageSpec, ImageStream, Outcome, ParamDecl, Params, Plane, Plugin, PluginError,
     PluginInfo,
 };
 
-use crate::plugins::builtin::shared::{deliver, in_new_window, Store};
+use crate::plugins::builtin::shared::{in_new_window, target, Store, Stored};
 
 /// Invert every plane of whatever is loaded, about the sample type's range.
 #[derive(Default)]
@@ -110,7 +110,20 @@ impl Plugin for Invert {
         };
         let pivot = lo + hi;
 
-        let mut planes: Vec<PlaneData> = Vec::with_capacity(n_planes);
+        // The whole stack comes back, so it is handed over a plane at a time.
+        let spec = ImageSpec {
+            width: info.width,
+            height: info.height,
+            channels,
+            slices,
+            frames,
+            pixel_type: store.pixel_type(),
+            channel_colors: Vec::new(),
+            metadata: Some(host.stack_info().clone()),
+            name: format!("{}-inverted", host.stack_info().stem()),
+        };
+        let mut out = ImageStream::begin(host, spec)?;
+        let mut stored = Stored::default();
         let mut buf = Vec::new();
         let mut done = 0usize;
         let (base, span) = if measured { (0.5, 0.5) } else { (0.0, 1.0) };
@@ -129,25 +142,11 @@ impl Plugin for Invert {
                             *v = pivot - *v;
                         }
                     }
-                    planes.push(store.plane(std::mem::take(&mut buf)));
+                    out.push(host, store.encode(&buf, &mut stored))?;
                     done += 1;
                 }
             }
         }
-
-        let image = ImageResult {
-            width: info.width,
-            height: info.height,
-            channels,
-            slices,
-            frames,
-            pixel_type: store.pixel_type(),
-            planes,
-            channel_colors: Vec::new(),
-            metadata: Some(host.stack_info().clone()),
-            name: format!("{}-inverted", host.stack_info().stem()),
-        };
-        image.validate()?;
-        Ok(deliver(image, params))
+        out.finish(target(params))
     }
 }

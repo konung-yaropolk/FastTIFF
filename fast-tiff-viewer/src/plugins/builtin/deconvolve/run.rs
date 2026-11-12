@@ -2,7 +2,9 @@
 //!
 //! The dialog is the union of what ImageJ's deconvolution plugins ask for, and
 //! the work is done one `(channel, timepoint)` volume at a time: read it,
-//! embed it in a padded grid, run the chosen algorithm, crop it back.
+//! embed it in a padded grid, run the chosen algorithm, crop it back, and
+//! hand its planes to the host as soon as their turn in the result comes —
+//! the result is never whole in memory, except along time (see the run).
 //!
 //! # Why a volume at a time
 //!
@@ -35,10 +37,10 @@ use super::algorithms::{self, Method, Settings, Stopped};
 use super::fft::{Dims, Transform};
 use super::grid::{self, Edge, Grid, Operator};
 use super::{heading, load_psf, Psf, MAX_WORKING_BYTES, MENU};
-use crate::plugins::builtin::shared::{deliver, in_new_window, Store};
+use crate::plugins::builtin::shared::{in_new_window, target, Store, Stored};
 use fasttiff_plugin_api::{
-    HostContext, ImageResult, Outcome, ParamDecl, ParamKind, Params, Plane, PlaneData, Plugin,
-    PluginError, PluginInfo,
+    HostContext, ImageSpec, ImageStream, Outcome, ParamDecl, ParamKind, Params, Plane, PlaneData,
+    Plugin, PluginError, PluginInfo,
 };
 
 /// Deconvolve the open stack.
@@ -562,7 +564,30 @@ impl Plugin for Deconvolve {
         ));
 
         // ---- the work ----------------------------------------------------
-        let mut planes: Vec<Option<PlaneData>> = vec![None; channels * slices * out_frames];
+        // The result is handed to the host as it is made, in the `xyczt`
+        // order it is written in: channel fastest, then Z, then time. The
+        // jobs run in that order with the channel innermost, so a plane whose
+        // turn has come is pushed at once, and the planes made before their
+        // turn — the other slices of a volume along Z, waiting for the
+        // channels before them — are at most one timepoint's. A volume along
+        // time is the exception, and an inherent one: each holds one slice at
+        // every timepoint, so the first timepoint is complete only once the
+        // last volume is, and that shape holds the result until the end, as
+        // every shape did before.
+        let spec = ImageSpec {
+            width: info.width,
+            height: info.height,
+            channels,
+            slices,
+            frames: out_frames,
+            pixel_type: store.pixel_type(),
+            channel_colors: Vec::new(),
+            metadata: Some(host.stack_info().clone()),
+            name: format!("{}-{}", host.stack_info().stem(), method.tag()),
+        };
+        let mut out = ImageStream::begin(host, spec)?;
+        let mut stored = Stored::default();
+        let mut waiting = Waiting::default();
         let mut volume = Vec::new();
         let mut padded = Vec::new();
         let mut cropped = Vec::new();
@@ -570,8 +595,8 @@ impl Plugin for Deconvolve {
         let mut done = 0usize;
         let mut reported: Option<Stopped> = None;
 
-        for c in 0..channels {
-            for job in &jobs {
+        for job in &jobs {
+            for c in 0..channels {
                 volume.clear();
                 for &(z, ti) in job {
                     if !host.progress(done as f32 / total_chunks as f32) {
@@ -590,6 +615,15 @@ impl Plugin for Deconvolve {
                 let Some(result) = result else {
                     return Ok(Outcome::Cancelled);
                 };
+                // A volume that diverged is noise shaped like an image, and
+                // would be handed back as part of the result: fail the run at
+                // the first one, rather than after the whole stack.
+                if let Stopped::Diverged(it) = result.stopped {
+                    return Err(PluginError::failed(format!(
+                        "the estimate diverged on iteration {it}. Lower the step size, or \
+                         raise the regularization."
+                    )));
+                }
                 reported.get_or_insert(result.stopped.clone());
                 plan.crop(&result.image, &mut cropped);
 
@@ -597,7 +631,12 @@ impl Plugin for Deconvolve {
                 let plane = src.x * src.y;
                 for (&(z, ti), slice) in job.iter().zip(cropped.chunks_exact(plane)) {
                     let at = ti * (slices * channels) + z * channels + c;
-                    planes[at] = Some(store.plane(slice.to_vec()));
+                    if at == out.pushed() {
+                        out.push(host, store.encode(slice, &mut stored))?;
+                    } else {
+                        waiting.keep(at, store.plane(slice.to_vec()));
+                    }
+                    waiting.push_ready(host, &mut out)?;
                 }
                 done += 1;
             }
@@ -608,35 +647,39 @@ impl Plugin for Deconvolve {
                 "stopped after {iterations} iteration(s): the estimate moved {delta:.4}%, \
                  under the threshold"
             )),
-            Some(Stopped::Diverged(it)) => {
-                return Err(PluginError::failed(format!(
-                    "the estimate diverged on iteration {it}. Lower the step size, or \
-                     raise the regularization."
-                )))
-            }
             Some(Stopped::Completed(n)) if n > 0 => host.log(&format!("ran {n} iteration(s)")),
             _ => {}
         }
+        if !waiting.is_empty() {
+            return Err(PluginError::failed("a plane was not computed"));
+        }
+        out.finish(target(params))
+    }
+}
 
-        let planes: Vec<PlaneData> = planes
-            .into_iter()
-            .map(|p| p.ok_or_else(|| PluginError::failed("a plane was not computed")))
-            .collect::<Result<_, _>>()?;
+/// Planes made before their turn in the result, by their place in it.
+#[derive(Default)]
+struct Waiting(std::collections::BTreeMap<usize, PlaneData>);
 
-        let image = ImageResult {
-            width: info.width,
-            height: info.height,
-            channels,
-            slices,
-            frames: out_frames,
-            pixel_type: store.pixel_type(),
-            planes,
-            channel_colors: Vec::new(),
-            metadata: Some(host.stack_info().clone()),
-            name: format!("{}-{}", host.stack_info().stem(), method.tag()),
-        };
-        image.validate()?;
-        Ok(deliver(image, params))
+impl Waiting {
+    fn keep(&mut self, at: usize, plane: PlaneData) {
+        self.0.insert(at, plane);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Push every plane whose turn has come, freeing each as it goes.
+    fn push_ready(
+        &mut self,
+        host: &mut dyn HostContext,
+        out: &mut ImageStream,
+    ) -> Result<(), PluginError> {
+        while let Some(plane) = self.0.remove(&out.pushed()) {
+            out.push_owned(host, plane)?;
+        }
+        Ok(())
     }
 }
 

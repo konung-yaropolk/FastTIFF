@@ -10,6 +10,7 @@
 //! host at least as new as me". These pin both directions of that.
 
 use super::*;
+use crate::api::PlaneData;
 
 unsafe extern "C" fn begin(
     _c: *mut core::ffi::c_void,
@@ -1447,4 +1448,199 @@ fn a_host_that_is_animating_says_so() {
     // SAFETY: a complete, well-formed table of this build's own size.
     let h = unsafe { crate::host::CHost::new(full.as_ptr()) }.expect("a current host");
     assert!(fasttiff_plugin_api::HostContext::animating(&h));
+}
+
+// ------------------------------------------------------- a streamed result
+
+/// What the streaming fixtures saw, in the order they saw it.
+static CALLS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn called(what: impl Into<String>) {
+    CALLS.lock().unwrap().push(what.into());
+}
+
+unsafe extern "C" fn calls_begin(
+    _c: *mut core::ffi::c_void,
+    w: u32,
+    h: u32,
+    ch: u64,
+    sl: u64,
+    f: u64,
+    _t: FtPixelType,
+    n: FtStr,
+) -> FtStatus {
+    called(format!(
+        "begin {w}x{h} {ch}x{sl}x{f} {}",
+        n.as_str().unwrap_or("?")
+    ));
+    FtStatus::Ok
+}
+unsafe extern "C" fn calls_push(
+    _c: *mut core::ffi::c_void,
+    d: *const core::ffi::c_void,
+    l: u64,
+) -> FtStatus {
+    let first = *(d as *const u16);
+    called(format!("push {first} x{l}"));
+    FtStatus::Ok
+}
+unsafe extern "C" fn calls_info(
+    _c: *mut core::ffi::c_void,
+    _i: *const FtStackInfo,
+    u: FtStr,
+    _d: FtStr,
+) -> FtStatus {
+    called(format!("info {}", u.as_str().unwrap_or("?")));
+    FtStatus::Ok
+}
+unsafe extern "C" fn calls_channel_name(_c: *mut core::ffi::c_void, i: u64, n: FtStr) -> FtStatus {
+    called(format!("name {i} {}", n.as_str().unwrap_or("?")));
+    FtStatus::Ok
+}
+unsafe extern "C" fn calls_outcome(
+    _c: *mut core::ffi::c_void,
+    k: FtOutcomeKind,
+    t: FtStr,
+) -> FtStatus {
+    called(format!("outcome {k:?} {}", t.as_str().unwrap_or("?")));
+    FtStatus::Ok
+}
+unsafe extern "C" fn calls_progress(_c: *mut core::ffi::c_void, f: f32) -> u32 {
+    called(format!("progress {f}"));
+    1
+}
+
+/// Streams three frames, reporting progress between them, so the order of
+/// what reaches the host shows whether a plane went over while the run was
+/// still going or only once it had returned.
+#[derive(Default)]
+struct Streamer;
+
+impl crate::api::Plugin for Streamer {
+    fn info(&self) -> crate::api::PluginInfo {
+        crate::api::PluginInfo::new("dev.test.streamer", "Streamer")
+    }
+    fn run(
+        &mut self,
+        host: &mut dyn crate::api::HostContext,
+        _p: &Params,
+    ) -> Result<Outcome, crate::api::PluginError> {
+        let spec = crate::api::ImageSpec {
+            width: 2,
+            height: 2,
+            channels: 1,
+            slices: 1,
+            frames: 3,
+            pixel_type: PixelType::U16,
+            channel_colors: Vec::new(),
+            metadata: Some(crate::api::StackInfo {
+                unit: Some("micron".into()),
+                channel_names: vec!["only".into()],
+                ..Default::default()
+            }),
+            name: "streamed".into(),
+        };
+        let mut out = crate::api::ImageStream::begin(host, spec)?;
+        for t in 0..3u16 {
+            host.progress(t as f32);
+            out.push(host, PlaneRef::U16(&[t * 10; 4]))?;
+        }
+        // A description changed once the planes are out crosses too.
+        out.describe(host, |s| {
+            if let Some(m) = s.metadata.as_mut() {
+                m.unit = Some("nm".into());
+            }
+        })?;
+        out.finish(StreamTarget::SaveToFile {
+            path: "out.tif".into(),
+        })
+    }
+}
+
+/// A streamed result reaches the host's sink one plane at a time *during* the
+/// run — each push between two progress reports — declared first, metadata,
+/// names and all, and finished as the kind its target names.
+#[test]
+fn a_streamed_result_crosses_plane_by_plane_while_the_run_goes() {
+    let _alone = alone();
+    CALLS.lock().unwrap().clear();
+    let mut table = answering_host(core::mem::size_of::<FtHost>());
+    table.progress = calls_progress;
+    table.stack_string = no_stack_string_fixture;
+    let host = Exactly::holding(&table, core::mem::size_of::<FtHost>());
+    let s = FtSink {
+        begin_image: calls_begin,
+        push_plane: calls_push,
+        set_info: calls_info,
+        set_channel_name: calls_channel_name,
+        set_outcome: calls_outcome,
+        ..sink(core::mem::size_of::<FtSink>())
+    };
+    // SAFETY: a complete host table and sink, every callback real.
+    let st = unsafe { run_shim::<Streamer>(host.as_ptr(), core::ptr::null(), 0, &s) };
+    assert_eq!(st, FtStatus::Ok);
+    assert_eq!(
+        *CALLS.lock().unwrap(),
+        vec![
+            "info micron",
+            "begin 2x2 1x1x3 streamed",
+            "name 0 only",
+            "progress 0",
+            "push 0 x4",
+            "progress 1",
+            "push 10 x4",
+            "progress 2",
+            "push 20 x4",
+            "info nm",
+            "name 0 only",
+            "outcome SaveToFile out.tif",
+        ]
+    );
+}
+
+/// A host that refuses a plane stops the run there, with an error rather than
+/// a result the host never got all of.
+#[test]
+fn a_refused_plane_ends_the_stream() {
+    unsafe extern "C" fn refuse(
+        _c: *mut core::ffi::c_void,
+        _d: *const core::ffi::c_void,
+        _l: u64,
+    ) -> FtStatus {
+        FtStatus::Error
+    }
+    let _alone = alone();
+    CALLS.lock().unwrap().clear();
+    let table = answering_host(core::mem::size_of::<FtHost>());
+    let host = Exactly::holding(&table, core::mem::size_of::<FtHost>());
+    let s = FtSink {
+        push_plane: refuse,
+        set_outcome: calls_outcome,
+        ..sink(core::mem::size_of::<FtSink>())
+    };
+    // SAFETY: as above.
+    let st = unsafe { run_shim::<Streamer>(host.as_ptr(), core::ptr::null(), 0, &s) };
+    assert_eq!(st, FtStatus::Error);
+    assert!(
+        CALLS
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| !c.starts_with("outcome")),
+        "a broken stream was finished anyway: {:?}",
+        CALLS.lock().unwrap()
+    );
+}
+
+/// Outside a run there is no sink, so nothing to stream to — and a plugin that
+/// tries is told so rather than handed a dangling table.
+#[test]
+fn a_dialog_host_cannot_be_streamed_to() {
+    let table = answering_host(core::mem::size_of::<FtHost>());
+    let full = Exactly::holding(&table, core::mem::size_of::<FtHost>());
+    // SAFETY: a complete, well-formed table of this build's own size.
+    let mut h = unsafe { crate::host::CHost::new(full.as_ptr()) }.expect("a current host");
+    use crate::api::HostContext;
+    assert!(!h.streams_results());
+    assert!(h.push_plane(PlaneRef::U8(&[0; 4])).is_err());
 }

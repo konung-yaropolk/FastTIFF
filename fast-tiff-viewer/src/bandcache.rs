@@ -91,10 +91,20 @@ struct Entry {
 /// Deliberately a plain vector: it holds a handful of entries, a linear scan of
 /// which is nothing next to decompressing one of them, and the ordering *is* the
 /// recency information.
+///
+/// An entry is keyed by *display channel*, so it is only right for the channel
+/// layout it was decoded under: after a dimension override channel 0 reads
+/// another IFD. The cache records that layout ([`hold_layout`](Self::hold_layout))
+/// and empties itself when asked for another, which is what keeps the window
+/// worker's own cache — which nothing else can reach to clear — from splicing
+/// the old mapping's pixels into a new window.
 pub struct BandCache {
     entries: Vec<Entry>,
     bytes: usize,
     budget: usize,
+    /// The [`Revision::layout`](crate::display::Revision::layout) the entries
+    /// were decoded under, once anything has said.
+    layout: Option<u64>,
 }
 
 impl Default for BandCache {
@@ -103,11 +113,25 @@ impl Default for BandCache {
             entries: Vec::new(),
             bytes: 0,
             budget: MAX_CACHE_BYTES,
+            layout: None,
         }
     }
 }
 
 impl BandCache {
+    /// Make this the cache of channel layout `layout` (a
+    /// [`Revision::layout`](crate::display::Revision::layout)): drop everything
+    /// held if it was decoded under another one.
+    ///
+    /// [`crate::window::assemble`] calls it before every build, so no holder
+    /// of a cache has to remember to.
+    pub fn hold_layout(&mut self, layout: u64) {
+        if self.layout != Some(layout) {
+            self.clear();
+            self.layout = Some(layout);
+        }
+    }
+
     /// The decoded planes of `band`, if they are still held.
     ///
     /// Takes `&mut self` because a hit is what makes an entry recent; a cache

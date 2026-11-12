@@ -101,7 +101,7 @@ pub(crate) struct Psf {
 /// or as frames. A file with several samples per pixel contributes its first,
 /// with a note, because an RGB PSF is a mistake rather than a format.
 pub(crate) fn load_psf(path: &str) -> Result<Psf, PluginError> {
-    use fast_tiff_lib::{SampleFormat, TiffStack};
+    use fast_tiff_lib::TiffStack;
 
     if path.trim().is_empty() {
         return Err(PluginError::unsupported(
@@ -143,54 +143,15 @@ pub(crate) fn load_psf(path: &str) -> Result<Psf, PluginError> {
     }
 
     let mut data = Vec::with_capacity(dims.len());
-    let (mut u8buf, mut u16buf, mut f32buf) = (Vec::new(), Vec::new(), Vec::new());
+    // In the file's own units: a PSF is arithmetic, not a display, so it must
+    // not see the display readers' widening or signed offset.
+    let mut slice = Vec::new();
     for (i, frame) in tiff.frames.iter().enumerate() {
-        let fail = |e: anyhow::Error| {
-            PluginError::failed(format!("decoding slice {} of the PSF: {e:#}", i + 1))
-        };
-        match frame.bits_per_sample {
-            32 | 64 => {
-                fast_tiff_lib::read_plane_f32_into(
-                    &tiff.data,
-                    frame,
-                    tiff.byte_order,
-                    0,
-                    &mut f32buf,
-                )
-                .map_err(fail)?;
-                data.extend_from_slice(&f32buf);
-            }
-            8 | 4 => {
-                fast_tiff_lib::read_plane_u8_into(
-                    &tiff.data,
-                    frame,
-                    tiff.byte_order,
-                    0,
-                    &mut u8buf,
-                )
-                .map_err(fail)?;
-                data.extend(u8buf.iter().map(|&v| v as f32));
-            }
-            _ => {
-                fast_tiff_lib::read_plane_u16_into(
-                    &tiff.data,
-                    frame,
-                    tiff.byte_order,
-                    None,
-                    0,
-                    &mut u16buf,
-                )
-                .map_err(fail)?;
-                // That reader offsets signed samples into unsigned display
-                // space so that signed and unsigned files look alike. A PSF is
-                // arithmetic, not a display, so the offset comes back off.
-                if frame.sample_format == SampleFormat::SignedInt {
-                    data.extend(u16buf.iter().map(|&v| v as f32 - 32768.0));
-                } else {
-                    data.extend(u16buf.iter().map(|&v| v as f32));
-                }
-            }
-        }
+        fast_tiff_lib::read_plane_f32_into(&tiff.data, frame, tiff.byte_order, 0, &mut slice)
+            .map_err(|e| {
+                PluginError::failed(format!("decoding slice {} of the PSF: {e:#}", i + 1))
+            })?;
+        data.extend_from_slice(&slice);
     }
     if data.len() != dims.len() {
         return Err(PluginError::failed(format!(
