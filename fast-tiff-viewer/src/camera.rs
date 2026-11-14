@@ -67,19 +67,19 @@ pub enum OrbitPoint {
 /// pivot right at the eye (rotate in place) when the eye is inside the volume;
 /// wheel/dolly keep a small floor (`UNSTICK`) so they never sit exactly on the
 /// pivot and can back out of a radius-0 orbit.
-pub const VOL_DIST_MIN: f32 = 0.0;
-pub const VOL_DIST_MAX: f32 = 300.0;
-pub const VOL_DIST_UNSTICK: f32 = 0.02;
+pub(crate) const VOL_DIST_MIN: f32 = 0.0;
+pub(crate) const VOL_DIST_MAX: f32 = 300.0;
+pub(crate) const VOL_DIST_UNSTICK: f32 = 0.02;
 
 /// Fly speed: cross the volume's longest axis (length 1.0 in box space) in ~5 s.
 /// Callers scale it by the real frame time, so it's frame-rate independent.
 pub const FLY_UNITS_PER_SEC: f32 = 0.2;
 /// Base distance one wheel notch flies along the focal axis.
-pub const FLY_WHEEL: f32 = 0.15;
+pub(crate) const FLY_WHEEL: f32 = 0.15;
 /// Radians one arrow-key press rotates by.
 pub const KEY_ROT: f32 = 0.04;
 
-pub fn vol_dist_clamped(dist: f32) -> f32 {
+pub(crate) fn vol_dist_clamped(dist: f32) -> f32 {
     dist.clamp(VOL_DIST_MIN, VOL_DIST_MAX)
 }
 
@@ -286,7 +286,7 @@ impl CameraState {
     /// preserved: the volume center stays fixed on screen, and the camera never
     /// re-aims at it. Exact (the two orthonormal bases give the rotation
     /// directly), so no drift accumulates.
-    pub fn orbit_center(&mut self, dx: f32, dy: f32) {
+    pub(crate) fn orbit_center(&mut self, dx: f32, dy: f32) {
         let (f0, r0, u0) = self.basis();
         self.orbit(dx, dy); // update yaw/pitch (same as the screen-center orbit)
         let (f1, r1, u1) = self.basis();
@@ -444,7 +444,7 @@ impl VolumeCamera {
     /// This is how an animation moves the view without touching
     /// [`CameraState`]: a yaw-and-pitch camera cannot roll and cannot pass
     /// over the pole, and a tumble about the volume's own x axis does both.
-    pub fn posed(&self, rotation: &[[f32; 3]; 3], pivot: [f32; 3]) -> VolumeCamera {
+    pub(crate) fn posed(&self, rotation: &[[f32; 3]; 3], pivot: [f32; 3]) -> VolumeCamera {
         let t = |v: [f32; 3]| {
             [
                 rotation[0][0] * v[0] + rotation[1][0] * v[1] + rotation[2][0] * v[2],
@@ -492,7 +492,7 @@ impl VolumeCamera {
     /// in place. With the eye inside the volume it is the middle of what lies
     /// ahead. When the axis misses the volume, it is the point on the axis
     /// nearest the volume's centre.
-    pub fn pivot_distance(&self) -> f32 {
+    pub(crate) fn pivot_distance(&self) -> f32 {
         match focal_box_span(self.eye, self.forward, self.box_he) {
             Some((near, far)) => 0.5 * (near + far),
             None => (-(self.eye[0] * self.forward[0]
@@ -508,7 +508,7 @@ impl VolumeCamera {
     /// none of the detail in view.
     ///
     /// Measured at the centre because that is where an animation's pivot is
-    /// (`dist` is [`pivot_distance`](Self::pivot_distance) there),
+    /// (`dist` is the distance to the volume under the centre there),
     /// and with the smaller of the two pixel sizes so an anisotropic plane
     /// keeps its finer axis. It scales with what is in view: zoomed out until
     /// the whole stack is in the picture, it is taller than the stack is; zoomed
@@ -524,7 +524,7 @@ impl VolumeCamera {
 /// Vertical field of view is fixed at 45°; the shader takes its tangent.
 const TAN_HALF_FOV: f32 = 0.414_213_57; // tan(22.5°)
 
-pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub(crate) fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
@@ -534,7 +534,7 @@ pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 
 /// Translate `base` by motion `mv` = (strafe, up, forward) relative to the look
 /// basis (`forward`/`right`, with world-Y as up).
-pub fn translate3(
+pub(crate) fn translate3(
     base: [f32; 3],
     forward: [f32; 3],
     right: [f32; 3],
@@ -548,7 +548,7 @@ pub fn translate3(
     ]
 }
 
-pub fn norm3(v: [f32; 3]) -> [f32; 3] {
+pub(crate) fn norm3(v: [f32; 3]) -> [f32; 3] {
     let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     if len > 1e-6 {
         [v[0] / len, v[1] / len, v[2] / len]
@@ -560,14 +560,14 @@ pub fn norm3(v: [f32; 3]) -> [f32; 3] {
 /// Near intersection distance of the ray `ro + t*rd` with the axis-aligned box
 /// `[-he, he]` (a slab test). `None` if the ray misses the box ahead of the eye;
 /// clamped to ≥ 0, so it's 0 when the eye is already inside the box.
-pub fn focal_box_entry(ro: [f32; 3], rd: [f32; 3], he: [f32; 3]) -> Option<f32> {
+pub(crate) fn focal_box_entry(ro: [f32; 3], rd: [f32; 3], he: [f32; 3]) -> Option<f32> {
     focal_box_span(ro, rd, he).map(|(near, _)| near)
 }
 
 /// Where the ray `ro + t*rd` enters and leaves the box `[-he, he]`, as the
 /// distances `(near, far)` along it; `near` is clamped to ≥ 0 as in
 /// [`focal_box_entry`]. `None` if the ray misses the box ahead of the eye.
-pub fn focal_box_span(ro: [f32; 3], rd: [f32; 3], he: [f32; 3]) -> Option<(f32, f32)> {
+pub(crate) fn focal_box_span(ro: [f32; 3], rd: [f32; 3], he: [f32; 3]) -> Option<(f32, f32)> {
     let mut t0 = f32::NEG_INFINITY;
     let mut t1 = f32::INFINITY;
     for i in 0..3 {
@@ -597,7 +597,7 @@ pub fn focal_box_span(ro: [f32; 3], rd: [f32; 3], he: [f32; 3]) -> Option<(f32, 
 /// `yaw = pitch = 0` the camera looks along -Z with +Y up; yaw spins around the
 /// world vertical, pitch tilts. Shared by `volume_camera` and the pan/fly input
 /// math so both agree on which way "right"/"up"/"forward" point.
-pub fn volume_basis(yaw: f32, pitch: f32) -> ([f32; 3], [f32; 3], [f32; 3]) {
+pub(crate) fn volume_basis(yaw: f32, pitch: f32) -> ([f32; 3], [f32; 3], [f32; 3]) {
     let pitch = pitch.clamp(-1.54, 1.54); // ~±88°, avoid the pole singularity
     let (cy, sy) = (yaw.cos(), yaw.sin());
     let (cp, sp) = (pitch.cos(), pitch.sin());
@@ -613,7 +613,11 @@ pub fn volume_basis(yaw: f32, pitch: f32) -> ([f32; 3], [f32; 3], [f32; 3]) {
 /// mode uses `fly_pos` directly. The box's largest scaled axis is 0.5, and
 /// `scale` (per-axis voxel size) folds in so anisotropic voxels render with
 /// correct proportions regardless of the (subsampled) texture size.
-pub fn volume_camera(cam: &CameraState, scale: [f32; 3], dims: (u32, u32, u32)) -> VolumeCamera {
+pub(crate) fn volume_camera(
+    cam: &CameraState,
+    scale: [f32; 3],
+    dims: (u32, u32, u32),
+) -> VolumeCamera {
     let (forward, right, up) = volume_basis(cam.yaw, cam.pitch);
     let eye = cam.eye(forward);
     VolumeCamera {
@@ -646,7 +650,7 @@ pub(crate) fn box_half_extents(scale: [f32; 3], dims: (u32, u32, u32)) -> [f32; 
 
 /// One channel's contribution to the ray-march uniforms.
 #[derive(Clone, Copy, Debug)]
-pub struct VolumeChannel {
+pub(crate) struct VolumeChannel {
     /// Window low/high, in the sampled texture's units: normalized as the
     /// voxels are, integers as unorm and floats over the channel's span — see
     /// [`SampleUnits::to_unorm`](crate::units::SampleUnits::to_unorm).
@@ -665,7 +669,7 @@ pub struct VolumeChannel {
 /// `windows` is one `(min, max, is_float, enabled)` tuple per channel, already
 /// in the sampled texture's units: normalized as the voxels are, integers as
 /// unorm and floats over the channel's span (see [`VolumeChannel::min`]).
-pub fn build_volume_params(
+pub(crate) fn build_volume_params(
     cam: &VolumeCamera,
     channels: &[VolumeChannel],
     aspect: f32,

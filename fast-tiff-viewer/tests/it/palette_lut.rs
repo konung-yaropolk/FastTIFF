@@ -10,8 +10,7 @@
 //! suppressed (its window is a fixed index -> entry identity, so there is
 //! nothing meaningful to drag).
 
-use fast_tiff_viewer::channels::{gray_lut_count, gray_lut_sel_lut, gray_lut_sel_name};
-use fast_tiff_viewer::{Document, Viewer};
+use fast_tiff_viewer::{ChannelLayout, Document, Viewer};
 
 /// A minimal uncompressed 8-bit palette TIFF whose ColorMap is a grayscale ramp
 /// stretched over indices `0..=top` (everything above is black) — i.e. what a
@@ -82,11 +81,12 @@ fn the_fixture_really_is_a_stretched_grayscale_palette() {
     // Guards the premise: if this stopped being a non-identity grey ramp, the
     // tests below would pass without proving anything.
     let stack = open(palette_tiff(16, 8, 87));
-    assert!(
-        stack.display.palette,
+    assert_eq!(
+        stack.display().layout(),
+        ChannelLayout::Palette,
         "photometric=3 should be recognised as palette"
     );
-    let lut = stack.tiff.meta.channel_display[0].lut;
+    let lut = stack.tiff().meta.channel_display[0].lut;
     assert!(
         lut.iter().all(|p| p[0] == p[1] && p[1] == p[2]),
         "ramp is grayscale"
@@ -102,17 +102,54 @@ fn the_fixture_really_is_a_stretched_grayscale_palette() {
 
 #[test]
 fn a_palette_file_offers_its_own_map_in_the_selector() {
-    let stack = open(palette_tiff(16, 8, 87));
-    assert!(
-        stack.display.builtin_lut.is_some(),
+    let mut viewer = Viewer::new();
+    viewer
+        .load_bytes(palette_tiff(16, 8, 87), "palette.tif".into())
+        .unwrap();
+    let luts = viewer.document().unwrap().display().gray_luts().unwrap();
+    assert_eq!(
+        luts.name(0),
+        "Built-in",
         "the ColorMap is this file's display transfer — it must be offered, \
          grayscale ramp or not, since the contrast slider is suppressed here"
     );
-    assert_eq!(gray_lut_sel_name(&stack.display, 0), "Built-in");
+    assert_eq!(luts.selected(), 0, "and shown to begin with");
+    viewer.set_gray_lut(1);
+    viewer.set_gray_lut(0);
+    let stack = viewer.document().unwrap();
     assert_eq!(
-        gray_lut_sel_lut(&stack.display, 0),
-        stack.tiff.meta.channel_display[0].lut,
+        stack.display().luts()[0],
+        stack.tiff().meta.channel_display[0].lut,
         "option 0 restores the file's own map exactly"
+    );
+}
+
+/// A palette stack has no contrast window to fit. Its window is a pinned
+/// index-to-LUT identity, and nudging it would remap every colour in the
+/// image — so neither a drag, nor Auto, nor Reset may move it. (That Reset
+/// leaves even a moved one alone is tested beside the display, which can
+/// move it: through the API nothing can.)
+#[test]
+fn palette_windows_are_left_alone_by_a_drag_auto_and_reset() {
+    let mut stack = open(palette_tiff(16, 8, 87));
+    assert!(!stack.display().layout().has_contrast());
+    let before = stack.display().window(0);
+    let hists = fast_tiff_viewer::histogram::frame_histograms(&stack);
+
+    assert!(
+        !stack
+            .display_mut()
+            .set_window(0, fast_tiff_viewer::Window::new(-0.5, 254.5)),
+        "a palette window is refused"
+    );
+    assert_eq!(stack.display().window(0), before);
+    stack.display_mut().auto_contrast(&hists);
+    stack.display_mut().reset_contrast();
+
+    assert_eq!(
+        stack.display().window(0),
+        before,
+        "a palette window is an identity mapping, not a contrast choice"
     );
 }
 
@@ -124,25 +161,31 @@ fn switching_colormap_and_back_restores_the_file_ramp() {
     viewer
         .load_bytes(palette_tiff(16, 8, 87), "palette.tif".into())
         .unwrap();
-    let original = viewer.document.as_ref().unwrap().display.luts()[0];
+    let original = viewer.document().unwrap().display().luts()[0];
     assert_ne!(
         original,
         fast_tiff_lib::grayscale_lut(),
         "loads through the file's ramp"
     );
 
-    let n = gray_lut_count(&viewer.document.as_ref().unwrap().display);
+    let n = viewer
+        .document()
+        .unwrap()
+        .display()
+        .gray_luts()
+        .unwrap()
+        .count();
     // Walk every option, then come back to "Built-in" each time.
     for sel in 1..n {
         viewer.set_gray_lut(sel);
         assert_ne!(
-            viewer.document.as_ref().unwrap().display.luts()[0],
+            viewer.document().unwrap().display().luts()[0],
             original,
             "option {sel} should change the display"
         );
         viewer.set_gray_lut(0);
         assert_eq!(
-            viewer.document.as_ref().unwrap().display.luts()[0],
+            viewer.document().unwrap().display().luts()[0],
             original,
             "returning from option {sel} must restore the file's ramp"
         );
@@ -162,12 +205,12 @@ fn a_plain_grayscale_file_gains_no_spurious_builtin_option() {
     let stack =
         Document::from_bytes(wr.finish().unwrap().into_inner(), "plain.tif".into(), false).unwrap();
 
-    assert!(!stack.display.palette);
-    assert!(
-        stack.display.builtin_lut.is_none(),
+    assert_eq!(stack.display().layout(), ChannelLayout::Intensity);
+    assert_eq!(
+        stack.display().gray_luts().unwrap().name(0),
+        "Grayscale",
         "no ColorMap, so no Built-in option"
     );
-    assert_eq!(gray_lut_sel_name(&stack.display, 0), "Grayscale");
 }
 
 /// The isosurface paints one fixed colour for the whole surface, so raising the
@@ -178,7 +221,7 @@ fn a_plain_grayscale_file_gains_no_spurious_builtin_option() {
 #[test]
 fn isosurface_albedo_lands_on_a_visible_part_of_the_lut() {
     let stack = open(palette_tiff(16, 8, 87));
-    let lut = stack.display.luts()[0];
+    let lut = stack.display().luts()[0];
     assert_eq!(lut[255], [0, 0, 0], "this palette really does end black");
 
     let t = scivis_render::brightest_lut_t(&lut);
@@ -207,38 +250,4 @@ fn an_ordinary_ramp_still_uses_its_top_entry() {
             "a rising ramp peaks at the top"
         );
     }
-}
-
-#[test]
-fn volume_params_carry_the_albedo_per_channel() {
-    // End-to-end: the value actually reaches the uniform the shader reads.
-    use fast_tiff_viewer::camera::{build_volume_params, volume_camera, VolumeChannel};
-    let stack = open(palette_tiff(16, 8, 87));
-    let albedo = scivis_render::brightest_lut_t(&stack.display.luts()[0]);
-    assert!(
-        albedo < 1.0,
-        "the stretched palette peaks before its top entry"
-    );
-
-    let cam = volume_camera(&Default::default(), [1.0, 1.0, 1.0], (16, 8, 4));
-    let ch = [VolumeChannel {
-        min: 0.0,
-        max: 1.0,
-        is_float: false,
-        enabled: true,
-        albedo_t: albedo,
-    }];
-    let params = build_volume_params(
-        &cam,
-        &ch,
-        1.0,
-        scivis_render::VolumeRender::Surface,
-        100.0,
-        0.1,
-        // Surface mode ignores the gain; 1.0 is "as composited".
-        1.0,
-    );
-    assert_eq!(params.albedo_t[0], albedo);
-    // Absent channels keep the top entry, which is what an unused slot wants.
-    assert_eq!(params.albedo_t[1], 1.0);
 }

@@ -31,7 +31,7 @@ const MINMAX_SAMPLE_BUDGET: usize = 1 << 18; // 262144
 /// Scans at most [`MINMAX_SAMPLE_BUDGET`] samples, striding across the frame
 /// when it is larger. Decoding still costs a frame, but the scan itself stops
 /// being O(pixels) on a 4K image.
-pub fn channel_minmax(
+pub(crate) fn channel_minmax(
     tiff: &TiffStack,
     channel: usize,
     step: usize,
@@ -80,7 +80,11 @@ pub fn channel_minmax(
 /// Actual float min/max of channel `c`'s first frame with contrast in it, for
 /// 32-bit float data — matches ImageJ auto-ranging a float image to its own
 /// values rather than assuming a fixed integer-shaped scale.
-pub fn channel_float_minmax(tiff: &TiffStack, channel: usize, step: usize) -> Option<Window> {
+pub(crate) fn channel_float_minmax(
+    tiff: &TiffStack,
+    channel: usize,
+    step: usize,
+) -> Option<Window> {
     let measure = |idx: usize| {
         let frame = tiff.frames.get(idx)?;
         let range =
@@ -220,7 +224,7 @@ pub fn shift_sync(settings: &mut [ChannelSettings], before: &[Window]) {
 /// window past the metadata defaults. Falls back to the window alone when the
 /// data range is unknown, and pads a degenerate (zero-width) range so the
 /// slider stays usable. File units in, file units out.
-pub fn slider_bounds(window: Window, data: Option<Window>) -> Window {
+pub(crate) fn slider_bounds(window: Window, data: Option<Window>) -> Window {
     let Window { mut lo, mut hi } = data.map_or(window, |d| window.union(d));
     // Not `hi <= lo`: a NaN bound compares false both ways, and has to be
     // padded like an empty range rather than let through.
@@ -262,17 +266,18 @@ pub fn ui_tint(lut: &Lut) -> Option<[u8; 3]> {
 /// palette `fast_tiff_lib::default_composite_lut` cycles through, so color option
 /// *i* maps to `default_composite_lut(i)`. White is omitted — its ramp is
 /// identical to grayscale.
-pub const GRAY_LUT_COLOR_NAMES: [&str; 6] = ["Red", "Green", "Blue", "Yellow", "Magenta", "Cyan"];
+pub(crate) const GRAY_LUT_COLOR_NAMES: [&str; 6] =
+    ["Red", "Green", "Blue", "Yellow", "Magenta", "Cyan"];
 
 /// Number of options in the grayscale color selector: plain grayscale, then the
 /// named channel colors, then the perceptual colormaps (`crate::colormap`).
-pub fn gray_lut_option_count() -> usize {
+pub(crate) fn gray_lut_option_count() -> usize {
     1 + GRAY_LUT_COLOR_NAMES.len() + crate::colormap::NAMES.len()
 }
 
 /// Display name for grayscale-color option `sel` (see `gray_lut_for` for the
 /// index layout).
-pub fn gray_lut_name(sel: usize) -> &'static str {
+pub(crate) fn gray_lut_name(sel: usize) -> &'static str {
     let colors = GRAY_LUT_COLOR_NAMES.len();
     if sel == 0 {
         "Grayscale"
@@ -286,7 +291,7 @@ pub fn gray_lut_name(sel: usize) -> &'static str {
 /// The 256-entry LUT for grayscale-color option `sel`: `0` = plain grayscale,
 /// `1..=6` = the named channel colors, the rest = the perceptual colormaps —
 /// the same order the selector lists them in.
-pub fn gray_lut_for(sel: usize) -> Lut {
+pub(crate) fn gray_lut_for(sel: usize) -> Lut {
     let colors = GRAY_LUT_COLOR_NAMES.len();
     if sel == 0 {
         fast_tiff_lib::grayscale_lut()
@@ -297,57 +302,11 @@ pub fn gray_lut_for(sel: usize) -> Lut {
     }
 }
 
-// When the file carries its own LUT (`builtin_lut`), the selector prepends a
-// leading "Built-in" entry (the default) ahead of the computed options — so the
-// built-in colormap is one option among grayscale/colors/colormaps. The helpers
-// below fold that offset in, so the selector index (`Display::gray_lut_sel`) is
-// `0 = Built-in` when present, else `0 = Grayscale`.
-
-/// 1 when a leading "Built-in" option is present, else 0.
-fn gray_lut_offset(display: &Display) -> usize {
-    display.builtin_lut.is_some() as usize
-}
-
-/// Total selector options, including the leading "Built-in" when present.
-pub fn gray_lut_count(display: &Display) -> usize {
-    gray_lut_option_count() + gray_lut_offset(display)
-}
-
-/// Display name for selector index `sel` ("Built-in" at 0 when present).
-pub fn gray_lut_sel_name(display: &Display, sel: usize) -> &'static str {
-    let off = gray_lut_offset(display);
-    if off == 1 && sel == 0 {
-        "Built-in"
-    } else {
-        gray_lut_name(sel - off)
-    }
-}
-
-/// The 256-entry LUT for selector index `sel` (the file's own map at 0 when
-/// present, otherwise the computed option).
-///
-/// Returns by value because the caller is *installing* it. To merely tint a
-/// widget, use [`gray_lut_sel_tint`] instead — it avoids building the LUT at all.
-pub fn gray_lut_sel_lut(display: &Display, sel: usize) -> Lut {
-    let off = gray_lut_offset(display);
-    match display.builtin_lut {
-        Some(lut) if sel == 0 => lut,
-        _ => gray_lut_for(sel - off),
-    }
-}
-
-/// The tint colour for selector index `sel`, without materialising its LUT.
-///
-/// A `Lut` is 768 bytes and the selector asks about *every* option on every
-/// frame the combo is open, so building one per option per frame just to read a
-/// single entry is pure waste. Only entry 127 matters (see [`ui_tint`]), and for
-/// the generated ramps that entry is computable directly from the base colour.
-pub fn gray_lut_sel_tint(display: &Display, sel: usize) -> Option<[u8; 3]> {
-    let off = gray_lut_offset(display);
-    if off == 1 && sel == 0 {
-        return display.builtin_lut.as_ref().and_then(ui_tint);
-    }
-    let sel = sel - off;
+/// The tint colour for grayscale-colour option `sel` (see [`gray_lut_for`] for
+/// the index layout), without materialising its LUT: entry 127, as
+/// [`ui_tint`] reads it, worked out from the option's base colour for the
+/// generated ramps.
+pub(crate) fn gray_lut_tint(sel: usize) -> Option<[u8; 3]> {
     let colors = GRAY_LUT_COLOR_NAMES.len();
     if sel == 0 {
         None // plain grayscale: entry 127 is grey, so no tint
@@ -367,22 +326,17 @@ pub fn gray_lut_sel_tint(display: &Display, sel: usize) -> Option<[u8; 3]> {
 }
 
 /// Builds the per-channel settings (window/level, enabled, float-encoding
-/// range) for `channels` display channels.
+/// range) for `channels` display channels, reporting `(done, total)` as each
+/// channel's scan finishes.
 ///
 /// Reads `tiff.meta` purely as a source of *defaults* — the file's suggested
 /// display window — and never writes to it; the result is owned by
 /// [`Display::settings`](crate::display::Display::settings).
-pub fn build_channel_settings(tiff: &TiffStack, channels: usize) -> Vec<ChannelSettings> {
-    build_channel_settings_reporting(tiff, channels, &mut |_, _| {})
-}
-
-/// [`build_channel_settings`], reporting `(done, total)` as each channel's scan
-/// finishes.
 ///
 /// This is the slow half of opening a file — every channel decodes a frame to
 /// find its display range — and the only part of an open whose length is known
 /// in advance, so it is the part a progress bar can be honest about.
-pub fn build_channel_settings_reporting(
+pub(crate) fn build_channel_settings_reporting(
     tiff: &TiffStack,
     channels: usize,
     on_channel: &mut dyn FnMut(usize, usize),
@@ -470,7 +424,7 @@ fn build_one(tiff: &TiffStack, c: usize, channels: usize) -> ChannelSettings {
         // in ImageJ's units for the type), else the data's range, else the
         // whole of what the texture can show. All in file units.
         let window = meta_range
-            .map(|range| units.from_imagej(range))
+            .map(|range| units.window_from_imagej(range))
             .or(data)
             .unwrap_or_else(|| units.full_range());
         ChannelSettings {
@@ -480,91 +434,60 @@ fn build_one(tiff: &TiffStack, c: usize, channels: usize) -> ChannelSettings {
     }
 }
 
-/// Fit every contrast window to where its data actually is, using histograms
-/// already computed for the frame on screen.
-///
-/// Reads the histograms rather than rescanning the pixels: they describe the
-/// frame the user is looking at and are already in hand, so Auto costs nothing
-/// and — more importantly — agrees with the plot it is clicked underneath.
-/// [`build_channel_settings`] instead scans frame 0 at load, which is the right
-/// choice there and the wrong one here: on a stack whose brightness drifts,
-/// seeding from frame 0 is a reasonable default, but auto-ing to it while
-/// looking at frame 900 would be visibly wrong.
-///
-/// A channel with no histogram, or one whose histogram counted nothing, keeps
-/// the window it had. Palette stacks are skipped entirely: their window is a
-/// pinned index-to-LUT identity, not a contrast choice, and moving it would
-/// remap every colour.
-pub fn auto_contrast(loaded: &mut Document, hists: &[Histogram]) {
-    if loaded.display.palette {
-        return;
-    }
-    for h in hists {
-        let Some(bounds) = loaded.display.settings().get(h.channel).map(|s| s.bounds) else {
-            continue;
-        };
-        let Some(fitted) = auto_window(h) else {
-            continue;
-        };
-        // The histogram spans the union of every channel track, so a window
-        // fitted on it can reach past this one. Clamping keeps both handles
-        // somewhere the slider can actually draw them.
-        let mut window = fitted.clamp_to(bounds);
-        // Both ends landing on the same side of the track would leave an empty
-        // window, which divides by zero on the way to the shader. Fall back to
-        // showing everything, which is at least a picture.
-        if window.hi <= window.lo {
-            window = bounds;
+impl Display {
+    /// What [`DisplayMut::auto_contrast`](crate::DisplayMut::auto_contrast)
+    /// does.
+    pub(crate) fn auto_contrast(&mut self, hists: &[Histogram]) {
+        if !self.layout().has_contrast() {
+            return;
         }
-        loaded.display.set_window(h.channel, window);
+        for h in hists {
+            let Some(bounds) = self.settings().get(h.channel).map(|s| s.bounds) else {
+                continue;
+            };
+            let Some(fitted) = auto_window(h) else {
+                continue;
+            };
+            // The histogram spans the union of every channel track, so a
+            // window fitted on it can reach past this one. Clamping keeps both
+            // handles somewhere the slider can actually draw them.
+            let mut window = fitted.clamp_to(bounds);
+            // Both ends landing on the same side of the track would leave an
+            // empty window, which divides by zero on the way to the shader.
+            // Fall back to showing everything, which is at least a picture.
+            if window.hi <= window.lo {
+                window = bounds;
+            }
+            self.set_window(h.channel, window);
+        }
+    }
+
+    /// What [`DisplayMut::reset_contrast`](crate::DisplayMut::reset_contrast)
+    /// does.
+    pub(crate) fn reset_contrast(&mut self) {
+        if !self.layout().has_contrast() {
+            return;
+        }
+        for c in 0..self.channel_count() {
+            let initial = self.settings()[c].initial;
+            self.set_window(c, initial);
+        }
     }
 }
 
-/// Put every contrast window back where it was when the file was opened — the
-/// undo for any amount of dragging, and for [`auto_contrast`].
-///
-/// The window the file asked for, not the full slider track. Those differ
-/// whenever a file declares a display range narrower than its data, which is
-/// the normal case for anything saved out of ImageJ: opening the window to the
-/// full track would "reset" such a file to something it has never been shown
-/// as. Restoring what it opened with is the state the user is actually trying
-/// to get back to, and it costs nothing to remember — see
-/// [`ChannelSettings::initial`].
-///
-/// Reopening a *different* interpretation of the same file — a dimension-order
-/// change, for instance — rebuilds the settings and with them the window this
-/// returns to, which is right: the starting point is whatever the current
-/// reading of the file starts from.
-pub fn reset_contrast(loaded: &mut Document) {
-    if loaded.display.palette {
-        return;
+impl Document {
+    /// Whether the "apply pseudocolor" option is meaningful for this stack:
+    /// only multi-channel grayscale stacks (composite files already carry
+    /// colors; RGB is handled separately) can be optionally tinted with the
+    /// channel palette ([`Viewer::set_pseudocolor`](crate::Viewer::set_pseudocolor)).
+    pub fn pseudocolor_applicable(&self) -> bool {
+        !self.display.layout().shown_as_rgb()
+            && self.display.channel_count() > 1
+            && self.display.mode == fast_tiff_lib::DisplayMode::Grayscale
+            // The file's own per-channel LUTs win: don't override them with
+            // the grayscale/pseudocolor default.
+            && !self.tiff.meta.has_explicit_luts
     }
-    for c in 0..loaded.display.channel_count() {
-        let initial = loaded.display.settings()[c].initial;
-        loaded.display.set_window(c, initial);
-    }
-}
-
-/// Whether the "apply pseudocolor" option is meaningful for this stack: only
-/// multi-channel grayscale stacks (composite files already carry colors; RGB is
-/// handled separately) can be optionally tinted with the channel palette.
-pub fn pseudocolor_applicable(loaded: &Document) -> bool {
-    !loaded.display.rgb()
-        && loaded.display.channel_count() > 1
-        && loaded.display.mode == fast_tiff_lib::DisplayMode::Grayscale
-        // The file's own per-channel LUTs win: don't override them with the
-        // grayscale/pseudocolor default.
-        && !loaded.tiff.meta.has_explicit_luts
-}
-
-/// Whether the single-channel LUT/colormap selector applies: exactly one
-/// channel that isn't RGB. It applies whether the channel is plain grayscale
-/// *or* already carries a file-supplied LUT — in the latter case the selector
-/// leads with a "Built-in LUT" option (the default) so the file's colors show,
-/// with grayscale / channel colors / colormaps available to override. The
-/// multi-channel case is covered by the pseudocolor toggle instead.
-pub fn gray_lut_applicable(loaded: &Document) -> bool {
-    !loaded.display.rgb() && loaded.display.channel_count() == 1
 }
 
 /// Sets the per-channel LUTs of an applicable (multi-channel grayscale) stack:
@@ -573,8 +496,8 @@ pub fn gray_lut_applicable(loaded: &Document) -> bool {
 ///
 /// A LUT that changes moves the display's LUT revision, which is what has the
 /// renderer's copy uploaded again.
-pub fn refresh_pseudocolor(loaded: &mut Document, apply: bool) {
-    if !pseudocolor_applicable(loaded) {
+pub(crate) fn refresh_pseudocolor(loaded: &mut Document, apply: bool) {
+    if !loaded.pseudocolor_applicable() {
         return;
     }
     for c in 0..loaded.display.channel_count() {

@@ -261,7 +261,7 @@ fn every_lut_control_moves_the_lut_revision() {
         .unwrap();
     viewer.set_dimension_order(1, 1, 6);
     let stack = viewer.document.as_ref().unwrap();
-    assert!(crate::channels::gray_lut_applicable(stack));
+    assert!(stack.display.gray_luts().is_some());
     let before = stack.display.lut_revision();
     viewer.set_gray_lut(2);
     let after = viewer.document.as_ref().unwrap().display.lut_revision();

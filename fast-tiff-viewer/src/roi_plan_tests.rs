@@ -19,9 +19,9 @@
 //! tracks the zoom continuously. The two-level `Preload` scheme has its own
 //! file; the three properties above are required of both.
 
-use fast_tiff_viewer::roi::LargeImageMode::Tiled;
-use fast_tiff_viewer::roi::{extract, plan, Budget, Roi, MAX_ROI_BYTES};
-use fast_tiff_viewer::PhysicalPx;
+use crate::roi::LargeImageMode::Tiled;
+use crate::roi::{extract, plan, Budget, Roi, MAX_ROI_BYTES};
+use crate::PhysicalPx;
 
 /// A viewport large enough that it never drives the stride — so the tests below
 /// exercise the texture-budget path unless they say otherwise.
@@ -599,7 +599,7 @@ fn every_planned_window_cuts_to_exactly_its_texture() {
 /// feature almost nobody needs.
 #[test]
 fn only_frames_past_the_texture_limit_need_a_window() {
-    use fast_tiff_viewer::roi::needs_window;
+    use crate::roi::needs_window;
     for (w, h) in [(1u32, 1u32), (512, 512), (4096, 4096), (16_384, 16_384)] {
         assert!(
             !needs_window(w, h, 16_384),

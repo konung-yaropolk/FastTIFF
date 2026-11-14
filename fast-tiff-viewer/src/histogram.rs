@@ -155,7 +155,7 @@ pub enum HistogramSource {
     /// with at most a million samples of each binned.
     Frame,
     /// The overview of a frame too large for one texture
-    /// ([`crate::window::Overview`]): every `stride`-th pixel along each axis
+    /// (the retained overview): every `stride`-th pixel along each axis
     /// of the whole frame, which is never decoded whole. The same
     /// distribution sampled differently, so the shape is the frame's but the
     /// counts are not the counts [`Frame`](Self::Frame) would give, and a
@@ -628,11 +628,10 @@ fn stride(len: usize) -> usize {
 /// dark-current floor, and letting those set the ends leaves everything of
 /// interest squeezed into the middle. Throwing away a third of a percent at
 /// each end costs a handful of outliers and buys the rest of the histogram.
-pub const AUTO_SATURATION: f64 = 0.0035;
+pub(crate) const AUTO_SATURATION: f64 = 0.0035;
 
 /// A contrast window fitted to where this channel of data actually is: the
-/// narrowest span that keeps all but [`AUTO_SATURATION`] of the samples at each
-/// end, in the same units as [`Histogram::lo`]/[`Histogram::hi`] and therefore
+/// narrowest span that keeps all but 0.35% of the samples at each end, in the same units as [`Histogram::lo`]/[`Histogram::hi`] and therefore
 /// as [`crate::ChannelSettings::window`] — the file's own.
 ///
 /// `None` when nothing was counted, which is the one case with no defensible

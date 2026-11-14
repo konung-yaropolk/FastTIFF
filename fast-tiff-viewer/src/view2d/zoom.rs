@@ -21,7 +21,7 @@ pub const ZOOM_LEVELS: [f32; 21] = [
 /// concerned, and the pair would cost a wheel notch to cross for no visible
 /// change. 2% is below what anyone can see in a zoom and well above the
 /// rounding in the table.
-pub const FIT_SNAP: f32 = 0.02;
+pub(crate) const FIT_SNAP: f32 = 0.02;
 
 /// The zoom levels in effect: the fixed ladder, plus this image's exact
 /// fit-to-window factor when it has one and it is not already on the ladder.

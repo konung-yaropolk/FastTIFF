@@ -1,7 +1,7 @@
 //! egui's geometry and the viewer's: the one place this app converts between
 //! them.
 //!
-//! The 2D view is the core's ([`fast_tiff_viewer::View2d`]), kept in logical
+//! The 2D view is the core's ([`fast_tiff_viewer::view2d::View2d`]), kept in logical
 //! points — which is what egui calls a point, so a conversion is a copy of
 //! the two components and changes no number. Everything that reads input or
 //! paints stays in egui's types and crosses here: `.logical()` on the way in,

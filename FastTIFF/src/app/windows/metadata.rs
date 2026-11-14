@@ -18,7 +18,7 @@ impl AppWindow for MetadataWindow {
     }
 
     fn show(&mut self, ctx: &egui::Context, open: &mut bool, host: &mut Host<'_>) {
-        match &host.core.document {
+        match host.core.document() {
             Some(loaded) => metadata_window(ctx, open, loaded),
             None => *open = false,
         }
@@ -40,7 +40,7 @@ impl AppWindow for MetadataWindow {
 }
 
 fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Document) {
-    let tiff = &loaded.tiff;
+    let tiff = loaded.tiff();
     let spec = dialog::Dialog {
         id: WindowId::METADATA.0,
         title: "File metadata",
@@ -205,11 +205,11 @@ fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Document) {
                 );
                 // Everything in this panel is the *file's* own metadata, left
                 // exactly as parsed. The viewer's interpretation is separate
-                // (see `fast_tiff_viewer::display`) and routinely differs — a
+                // (see `fast_tiff_viewer::Display`) and routinely differs — a
                 // mislabeled `channels=100` is really a frame count, and the
                 // user can reassign the axes by hand. Show that only when the
                 // two disagree, so the panel stays quiet for ordinary files.
-                let shown = loaded.display.dims();
+                let shown = loaded.display().dims();
                 if (shown.channels, shown.slices, shown.frames)
                     != (meta.channels, meta.slices, meta.frames)
                 {
@@ -267,7 +267,7 @@ type OmeElement = fast_tiff_lib::metadata::ome::XmlElement;
 /// Parsed when the section is first opened, and once per file: the XML of a
 /// long recording carries a `Plane` per plane and runs to megabytes, and this
 /// window is drawn every frame.
-fn ome_metadata(ui: &mut egui::Ui, tiff: &Arc<fast_tiff_lib::TiffStack>) {
+fn ome_metadata(ui: &mut egui::Ui, tiff: &fast_tiff_lib::TiffStack) {
     let Some(desc) = tiff
         .description
         .as_deref()
@@ -298,12 +298,12 @@ fn ome_metadata(ui: &mut egui::Ui, tiff: &Arc<fast_tiff_lib::TiffStack>) {
 /// opened in its place is parsed afresh.
 fn ome_tree(
     ctx: &egui::Context,
-    tiff: &Arc<fast_tiff_lib::TiffStack>,
+    tiff: &fast_tiff_lib::TiffStack,
     desc: &str,
 ) -> Arc<Option<OmeElement>> {
     type Cached = ((usize, usize, usize), Arc<Option<OmeElement>>);
     let key = (
-        Arc::as_ptr(tiff) as usize,
+        std::ptr::from_ref(tiff) as usize,
         desc.as_ptr() as usize,
         desc.len(),
     );

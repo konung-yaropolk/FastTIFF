@@ -17,31 +17,34 @@ pub mod builtin;
 /// step.
 pub mod deliver;
 /// Finding installed plugin libraries on disk. Desktop-only: there is no disk
-/// to search in a browser.
+/// to search in a browser. What a frontend uses of it is re-exported here.
 #[cfg(not(target_arch = "wasm32"))]
-pub mod discover;
-pub mod host;
+pub(crate) mod discover;
+// What a plugin sees of the document it runs on. Re-exported here. (A
+// comment, not docs: outer docs would have rustdoc resolve the module's own
+// links from here.)
+pub(crate) mod host;
 /// The host half of the C ABI, for every plugin. Opening a shared library is
 /// the one desktop-only part of it — there is no `dlopen` in a browser, which
 /// is why the web build gets the built-ins and nothing else.
 pub mod library;
 pub mod progress;
-pub mod result;
+// What a run makes, and where it is written. Re-exported here. (A comment,
+// as for `host`.)
+pub(crate) mod result;
 
-pub use deliver::{Deliver, Handover, Product};
 #[cfg(not(target_arch = "wasm32"))]
-pub use discover::{install_dir, is_library, search_paths, user_plugin_dir, LIBRARY_EXT};
+pub use discover::{install_dir, search_paths, LIBRARY_EXT, PLUGIN_PATH_VAR};
 pub use host::{describe_image, describe_stack, describe_view, describe_volume, StackHost};
 pub use result::{
-    file_stem, into_tiff_bytes, into_tiff_bytes_reporting, to_stack, to_tiff_bytes,
-    to_tiff_bytes_reporting, write_result, Derived, ResultDest, ResultTiff, ResultWriter,
+    file_stem, into_tiff_bytes, to_stack, to_tiff_bytes, to_tiff_bytes_reporting, write_result,
+    Derived, ResultDest, ResultTiff,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use result::{sweep, ScratchFile};
 
-pub use library::{LoadedExporter, LoadedImporter, LoadedPlugin};
-
 use fasttiff_plugin_api::{Confidence, Exporter, FileType, Importer, Plugin, PluginInfo};
+use library::{LoadedExporter, LoadedImporter, LoadedPlugin};
 use std::path::Path;
 
 /// Where a plugin came from. Shown in the menu so a user can tell a built-in

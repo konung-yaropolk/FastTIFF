@@ -78,7 +78,7 @@ impl StackHost {
             view,
             tiff: Arc::clone(&stack.tiff),
             dims: stack.display.dims(),
-            rgb: stack.display.rgb(),
+            rgb: stack.display.layout().shown_as_rgb(),
             selection: Vec::new(),
             pending: Default::default(),
             animating: false,
@@ -416,7 +416,7 @@ pub fn describe_image(stack: &Document) -> ImageInfo {
 /// its samples are inks, which are not what is shown.
 fn file_channels(stack: &Document) -> usize {
     let display = &stack.display;
-    if display.rgb() && !display.cmyk() {
+    if display.layout() == crate::display::ChannelLayout::Rgb {
         display.channel_count().max(1)
     } else {
         display.dims().channels.max(1)
@@ -444,7 +444,9 @@ pub fn describe_stack(stack: &Document) -> StackInfo {
         // RGB is shown composited, its channels red, green and blue, whatever
         // the file says; a result made from it should open looking the same.
         mode: match meta.mode {
-            _ if stack.display.rgb() && !stack.display.cmyk() => DisplayMode::Composite,
+            _ if stack.display.layout() == crate::display::ChannelLayout::Rgb => {
+                DisplayMode::Composite
+            }
             fast_tiff_lib::DisplayMode::Composite => DisplayMode::Composite,
             fast_tiff_lib::DisplayMode::Color => DisplayMode::Color,
             _ => DisplayMode::Grayscale,

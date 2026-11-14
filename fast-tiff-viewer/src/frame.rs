@@ -1,23 +1,25 @@
 //! [`FrameInputs`]: what a frontend decides each frame and hands to
 //! [`Viewer::sync`](crate::Viewer::sync).
-//!
-//! Everything the core needs to know about the frontend's view, and nothing it
-//! keeps: which part of the 2D image is on screen and in how many pixels, how
-//! large the 3D view is and how finely to render it, whether the view is still
-//! moving, and whether the histograms are being shown. The frontend works these
-//! out from its own pan, zoom, panel and animation state, and passes them as one
-//! value, so the frame contract is the signature of `sync` rather than a set of
-//! fields to remember to write, in the right order, before calling it.
-//!
-//! Sizes on screen are [`PhysicalPx`] everywhere: the device's own pixels,
-//! which is what a GPU renders into and what decides how much detail is worth
-//! decoding. A frontend thinking in logical points converts once, with
-//! [`LogicalVec::to_physical`]; the 2D view's part is worked out for it, by
-//! [`Placement::inputs`](crate::view2d::Placement::inputs).
 
 use crate::screen::{LogicalPt, LogicalRect, LogicalVec, PhysicalPx};
 
-/// What a frontend decides for one frame. See the [module docs](self).
+/// What a frontend decides for one frame, and hands to
+/// [`Viewer::sync`](crate::Viewer::sync).
+///
+/// Everything the core needs to know about the frontend's view, and nothing it
+/// keeps: which part of the 2D image is on screen and in how many pixels, how
+/// large the 3D view is and how finely to render it, whether the view is still
+/// moving, and whether the histograms are being shown. The frontend works these
+/// out from its own pan, zoom, panel and animation state, and passes them as one
+/// value, so the frame contract is the signature of `sync` rather than a set of
+/// fields to remember to write, in the right order, before calling it.
+///
+/// Sizes on screen are [`PhysicalPx`] everywhere: the device's own pixels,
+/// which is what a GPU renders into and what decides how much detail is worth
+/// decoding. A frontend thinking in logical points converts once, with
+/// [`LogicalVec::to_physical`](crate::view2d::LogicalVec::to_physical); the
+/// 2D view's part is worked out for it, by
+/// [`ImagePlacement::inputs`](crate::view2d::ImagePlacement::inputs).
 ///
 /// Kept by the frontend from one frame to the next where that matters: a
 /// frame that does not lay the 2D view out (the 3D view is on screen, or the
@@ -35,7 +37,7 @@ pub struct FrameInputs {
     /// already changed by the time it is decoded.
     ///
     /// Set while a zoom step is gliding out or a pinch is live: a 2D view's
-    /// [`View2d::is_moving`](crate::View2d::is_moving). Windows already
+    /// [`View2d::is_moving`](crate::view2d::View2d::is_moving). Windows already
     /// finished are still taken — a better picture is always worth having —
     /// but no new one is started until the view settles. Without this an
     /// animated zoom decodes at every sampling level it passes through on the
@@ -147,15 +149,13 @@ pub struct VolumeInputs {
     /// A turn of the volume about the middle of the volume under the centre
     /// of the view (see `VolumeCamera::pivot_distance`), on top of the user's
     /// camera. Set by a frontend playing an animation, frame by frame; `None`
-    /// the rest of the time. See [`VolumeCamera::posed`].
+    /// the rest of the time.
     ///
     /// Separate from the camera on purpose: the camera
     /// ([`VolumeSettings::cam`](crate::VolumeSettings::cam)) is what the user
     /// set up and the animation is seen from, and leaving it untouched is what
     /// lets a frontend tell that the user has taken the view back (it changed)
     /// and put the view back exactly as it was when the animation ends.
-    ///
-    /// [`VolumeCamera::posed`]: crate::camera::VolumeCamera::posed
     pub pose: Option<Pose>,
 }
 
@@ -191,7 +191,7 @@ impl VolumeInputs {
     /// which is what reducing it is for. Worked out from the reduced size, its
     /// rays could take up to sixteen times the steps, and a large volume would
     /// move barely faster than it stands.
-    pub fn max_steps(&self, channels: usize, interp: scivis_render::VolumeInterp) -> i32 {
+    pub(crate) fn max_steps(&self, channels: usize, interp: scivis_render::VolumeInterp) -> i32 {
         let [w, h] = self.viewport.whole();
         scivis_render::max_steps(w as f64 * h as f64, channels, interp)
     }

@@ -489,7 +489,7 @@ fn every_plane_of_a_frame_is_that_frame() {
     assert_eq!(frames, [[Some(0); 6], [Some(1); 6]].concat());
     // RGB: the channels are inside the IFD, so each IFD is a frame.
     let s = rgb_stack(3);
-    assert!(s.display.rgb());
+    assert!(s.display.layout().shown_as_rgb());
     let frames: Vec<Option<usize>> = (1..=3).map(|p| frame_of_position(&s, p)).collect();
     assert_eq!(frames, [Some(0), Some(1), Some(2)]);
 }

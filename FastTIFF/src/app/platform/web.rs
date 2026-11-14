@@ -6,7 +6,8 @@
 
 use super::{Delivery, Platform, Purpose, Target, NOT_IN_MEMORY};
 use crate::app::{CanvasView, Document, Opened, PanelLayout};
-use fast_tiff_viewer::plugins::{Handover, Registry, ResultTiff};
+use fast_tiff_viewer::plugins::deliver::Handover;
+use fast_tiff_viewer::plugins::{Registry, ResultTiff};
 use fast_tiff_viewer::save::SaveSource;
 use fast_tiff_viewer::LoadSource;
 use fasttiff_plugin_api::FileType;

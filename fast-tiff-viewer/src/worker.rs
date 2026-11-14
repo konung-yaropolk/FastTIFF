@@ -77,7 +77,7 @@
 /// Cheap to clone and to ask: one atomic load. Ask once per step of the job
 /// (see the module docs), never per sample.
 #[derive(Clone, Debug)]
-pub struct CancelToken(Source);
+pub(crate) struct CancelToken(Source);
 
 #[derive(Clone, Debug)]
 enum Source {
@@ -102,7 +102,7 @@ enum Source {
 
 impl CancelToken {
     /// A token that is never cancelled, for running a job inline.
-    pub fn never() -> Self {
+    pub(crate) fn never() -> Self {
         CancelToken(Source::Never)
     }
 
@@ -116,7 +116,7 @@ impl CancelToken {
 
     /// Whether the job has been overtaken by a newer request or its worker
     /// dropped, so its answer will not be used.
-    pub fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         match &self.0 {
             Source::Never => false,
             #[cfg(feature = "threads")]
@@ -131,7 +131,7 @@ impl CancelToken {
     }
 
     /// [`is_cancelled`](Self::is_cancelled) as a `Result`, for a job's `?`.
-    pub fn check(&self) -> Result<(), Cancelled> {
+    pub(crate) fn check(&self) -> Result<(), Cancelled> {
         if self.is_cancelled() {
             Err(Cancelled)
         } else {
@@ -158,7 +158,7 @@ impl CancelToken {
 /// cancelled. Not a failure: nobody wanted the answer any more, so there is
 /// nothing to report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Cancelled;
+pub(crate) struct Cancelled;
 
 impl std::fmt::Display for Cancelled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -250,7 +250,7 @@ mod threaded {
         ///
         /// `None` when the thread could not be started; the caller then does
         /// the work inline.
-        pub fn spawn<F>(name: &str, unclaimed: Unclaimed, job: F) -> Option<Self>
+        pub(crate) fn spawn<F>(name: &str, unclaimed: Unclaimed, job: F) -> Option<Self>
         where
             F: FnMut(&K, Req, &CancelToken) -> Option<Out> + Send + 'static,
         {
@@ -284,7 +284,7 @@ mod threaded {
         ///
         /// `false` when the thread is gone (a job panicked); the caller should
         /// do the work inline.
-        pub fn request(&self, key: K, req: Req) -> bool {
+        pub(crate) fn request(&self, key: K, req: Req) -> bool {
             let mut s = self.shared.lock();
             if !s.alive {
                 return false;
@@ -306,7 +306,7 @@ mod threaded {
         /// Take the finished result if `wanted` says its key is the answer to
         /// what is wanted now; otherwise leave it in place and return `None`.
         /// `wanted` runs under the worker's lock, so keep it a comparison.
-        pub fn take_if(&self, wanted: impl FnOnce(&K) -> bool) -> Option<Out> {
+        pub(crate) fn take_if(&self, wanted: impl FnOnce(&K) -> bool) -> Option<Out> {
             let mut s = self.shared.lock();
             if !s.done.as_ref().is_some_and(|(key, _)| wanted(key)) {
                 return None;
@@ -416,18 +416,18 @@ where
     Out: Send + 'static,
 {
     /// Always `None`: there is no thread to start.
-    pub fn spawn<F>(_name: &str, _unclaimed: Unclaimed, _job: F) -> Option<Self>
+    pub(crate) fn spawn<F>(_name: &str, _unclaimed: Unclaimed, _job: F) -> Option<Self>
     where
         F: FnMut(&K, Req, &CancelToken) -> Option<Out> + Send + 'static,
     {
         None
     }
 
-    pub fn request(&self, _key: K, _req: Req) -> bool {
+    pub(crate) fn request(&self, _key: K, _req: Req) -> bool {
         match self.never {}
     }
 
-    pub fn take_if(&self, _wanted: impl FnOnce(&K) -> bool) -> Option<Out> {
+    pub(crate) fn take_if(&self, _wanted: impl FnOnce(&K) -> bool) -> Option<Out> {
         match self.never {}
     }
 }

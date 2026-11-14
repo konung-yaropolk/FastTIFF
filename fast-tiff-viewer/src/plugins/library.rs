@@ -191,7 +191,7 @@ pub fn load_all(registry: &mut Registry) {
         };
         let mut files: Vec<PathBuf> = entries
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| super::is_library(p))
+            .filter(|p| super::discover::is_library(p))
             .collect();
         // Deterministic order, so which of two clashing plugins wins does not
         // depend on the filesystem.

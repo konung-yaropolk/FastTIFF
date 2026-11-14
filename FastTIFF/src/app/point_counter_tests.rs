@@ -262,7 +262,7 @@ fn a_session_starts_from_the_files_overlay() {
         named("Glia", [4, 5, 6], &[(50.5, 40.5, 2)]),
     ];
     let mut stack = stack_with_overlay(5, rois.clone());
-    assert_eq!(stack.overlay, rois, "the stack opened with its overlay");
+    assert_eq!(stack.overlay(), rois, "the stack opened with its overlay");
 
     let t = Session::for_stack(&stack);
     let names: Vec<&str> = t.counter.groups.iter().map(|g| g.name.as_str()).collect();
@@ -289,7 +289,7 @@ fn a_session_starts_from_the_files_overlay() {
     );
 
     // What "Add into TIFF's overlay" put there is not the file's.
-    stack.overlay = vec![named("Mine", [0; 3], &[(1.5, 1.5, 0)])];
+    stack.set_overlay(vec![named("Mine", [0; 3], &[(1.5, 1.5, 0)])]);
     assert_eq!(
         loaded_message(&stack).as_deref(),
         Some("Loaded 1 point in 1 group from the overlay added to this image.")
@@ -300,7 +300,7 @@ fn a_session_starts_from_the_files_overlay() {
 #[test]
 fn without_an_overlay_a_session_starts_empty() {
     let stack = stack_with_overlay(5, Vec::new());
-    assert!(stack.overlay.is_empty());
+    assert!(stack.overlay().is_empty());
     let t = Session::for_stack(&stack);
     assert_eq!(t.counter.groups.len(), 1);
     assert_eq!(t.counter.groups[0].name, "Group 1");
@@ -327,7 +327,7 @@ fn loaded_points_start_shown_on_every_frame() {
     let ctx = egui::Context::default();
     for _ in 0..3 {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            counter_window(ui.ctx(), &mut t, stack.display.dims().frames, true);
+            counter_window(ui.ctx(), &mut t, stack.display().dims().frames, true);
         });
     }
     assert!(!t.counter.per_frame, "the window leaves it as it is");

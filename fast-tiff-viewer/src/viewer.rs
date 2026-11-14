@@ -13,7 +13,7 @@
 use crate::camera::{CameraState, VolumeNavPrefs};
 use crate::channels::refresh_pseudocolor;
 use crate::dimensions::{apply_dimension_override, shape_note};
-use crate::document::Document;
+use crate::document::{Document, DocumentMut};
 use crate::frame::Pose;
 use crate::notice::{Notice, NoticeKind, Notices};
 use crate::residency::Residency;
@@ -34,7 +34,7 @@ pub enum ViewMode {
 }
 
 /// How per-frame decoding is split across CPU cores. The choice maps onto
-/// `fast-tiff-lib`'s parallel-decode hint each frame (see [`crate::sync`]).
+/// `fast-tiff-lib`'s parallel-decode hint each frame, in [`Viewer::sync`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum DecodeMode {
     /// Serial by default; switch to threaded automatically when real-time
@@ -70,32 +70,29 @@ impl DecodeMode {
 
 /// Looped-playback clock. Advances by real elapsed time so the movie runs at the
 /// file's fps regardless of render cadence.
+///
+/// A frontend starts and stops it, sets its rate and says when the scrubber is
+/// held; [`Viewer::tick_playback`] runs it.
 #[derive(Clone, Copy, Debug)]
 pub struct Playback {
-    pub playing: bool,
+    /// See [`playing`](Self::playing).
+    pub(crate) playing: bool,
     /// Playback rate (frames/second). Seeded from the file's `fps=` metadata (or
     /// [`DEFAULT_FPS`]) on every load.
-    pub fps: f64,
+    pub(crate) fps: f64,
     /// Frontend clock time (seconds) at the previous frame while playing.
     /// `None` when not playing.
-    pub last_time: Option<f64>,
+    pub(crate) last_time: Option<f64>,
     /// Fractional-frame carry so a non-integer frames-per-tick advance doesn't
     /// lose or gain time over a long playback.
-    pub accumulator: f64,
+    pub(crate) accumulator: f64,
     /// Smoothed "frames demanded per render" while playing: how many frames the
     /// elapsed real time wanted us to advance each tick. ~1 when keeping up; >1
     /// means renders are slower than the target fps (frames dropping — one core
     /// is saturated). Drives the `Auto` decode latch.
-    pub demand_ema: f32,
-    /// Set by the frontend while the scrubber is held.
-    ///
-    /// Playback is *suspended*, not stopped: [`playing`](Self::playing) stays
-    /// set so releasing resumes without the user pressing play again. Both the
-    /// clock and the scrubber write the frame index, so with the clock still
-    /// running a held scrubber and playback take turns — which is seen as the
-    /// picture flickering between the frame being scrubbed to and the next one
-    /// along.
-    pub scrubbing: bool,
+    pub(crate) demand_ema: f32,
+    /// See [`set_scrubbing`](Self::set_scrubbing).
+    pub(crate) scrubbing: bool,
 }
 
 impl Default for Playback {
@@ -112,9 +109,60 @@ impl Default for Playback {
 }
 
 impl Playback {
+    /// Whether the movie is playing. Still `true` while the scrubber is held:
+    /// a hold suspends playback rather than stopping it.
+    pub fn playing(&self) -> bool {
+        self.playing
+    }
+
+    /// Playback rate, in frames a second: the file's `fps=` (or
+    /// [`DEFAULT_FPS`]) when it was opened, until [`set_fps`](Self::set_fps).
+    pub fn fps(&self) -> f64 {
+        self.fps
+    }
+
+    /// Play at `fps` frames a second from now on.
+    pub fn set_fps(&mut self, fps: f64) {
+        self.fps = fps;
+    }
+
+    /// Start playing, or pause, from a clean clock: the first tick after
+    /// resuming does not jump by however long it was paused. A latched
+    /// parallel decode stays latched across a pause — if the stack needed it,
+    /// it still does.
+    pub fn toggle(&mut self) {
+        self.playing = !self.playing;
+        self.restart();
+    }
+
+    /// Start playing from a clean clock (see [`toggle`](Self::toggle)).
+    pub fn play(&mut self) {
+        self.playing = true;
+        self.restart();
+    }
+
+    /// Stop playing, for a view in which playback has no meaning.
+    pub fn stop(&mut self) {
+        self.playing = false;
+        self.last_time = None;
+    }
+
+    /// Say whether the scrubber is held, every frame before
+    /// [`Viewer::tick_playback`].
+    ///
+    /// While it is, playback is *suspended*, not stopped:
+    /// [`playing`](Self::playing) stays set so releasing resumes without the
+    /// user pressing play again. Both the clock and the scrubber write the
+    /// frame index, so with the clock still running a held scrubber and
+    /// playback take turns — which is seen as the picture flickering between
+    /// the frame being scrubbed to and the next one along.
+    pub fn set_scrubbing(&mut self, held: bool) {
+        self.scrubbing = held;
+    }
+
     /// Restart the clock, so the first tick after resuming doesn't jump by
     /// however long we were paused.
-    pub fn restart(&mut self) {
+    fn restart(&mut self) {
         self.last_time = None;
         self.accumulator = 0.0;
         self.demand_ema = 1.0;
@@ -158,9 +206,8 @@ pub struct VolumeSettings {
     pub volume_brightness: f32,
     /// Whether the volume render's gain follows the density automatically.
     ///
-    /// On by default. See [`crate::brightness::autolevel`] for what it
-    /// compensates and why the density slider otherwise changes the brightness
-    /// as much as the solidity.
+    /// On by default: without it the density slider changes the brightness as
+    /// much as the solidity, since a denser volume composites brighter.
     pub volume_autolevel: bool,
 }
 
@@ -226,8 +273,10 @@ impl VolumeSettings {
 /// The viewer's frontend-agnostic state.
 #[derive(Default)]
 pub struct Viewer {
-    /// The open document, if any: the file and how it is shown.
-    pub document: Option<Document>,
+    /// The open document, if any: the file and how it is shown. Replaced only
+    /// by an open, which re-seeds everything per-document with it; see
+    /// [`document`](Self::document).
+    pub(crate) document: Option<Document>,
     /// What there is to tell the user, one notice per kind: see
     /// [`notices`](Self::notices). Set here (an open, an axis override) and by
     /// the sync (a decode, a volume upload).
@@ -235,15 +284,16 @@ pub struct Viewer {
     pub view_mode: ViewMode,
     /// User preference (persists across files): tint a multi-channel *grayscale*
     /// stack with the standard channel palette (ch1 red, ch2 green, ch3 blue, …).
-    /// Has no effect on stacks that already carry colors.
-    pub apply_pseudocolor: bool,
+    /// Has no effect on stacks that already carry colors. See
+    /// [`pseudocolor`](Self::pseudocolor).
+    pub(crate) apply_pseudocolor: bool,
     /// User's decode-parallelism preference (persists across files).
     pub decode_mode: DecodeMode,
     /// A file being opened on a worker thread, if one is. The previous document
     /// stays on screen and usable until it lands — an open replaces a picture
     /// rather than removing one and then providing another.
     #[cfg(feature = "threads")]
-    pub loading: Option<crate::loader::Loading>,
+    pub(crate) loading: Option<crate::loader::Loading>,
     /// Set when a load lands, cleared by [`poll_open`](Self::poll_open).
     ///
     /// The signal is the same whether the load ran on a worker or here on this
@@ -258,7 +308,8 @@ pub struct Viewer {
     /// [`crate::roi::LargeImageMode`].
     pub large_image_mode: crate::roi::LargeImageMode,
     /// Latched once playback falls behind in `Auto` mode. Reset per document.
-    pub decode_parallel: bool,
+    /// See [`decodes_in_parallel`](Self::decodes_in_parallel).
+    pub(crate) decode_parallel: bool,
     pub playback: Playback,
     pub volume: VolumeSettings,
     /// What the renderer holds of [`document`](Self::document), in 2D and 3D: one
@@ -303,6 +354,36 @@ fn open_failure(e: &anyhow::Error) -> String {
 impl Viewer {
     pub fn new() -> Self {
         Viewer::default()
+    }
+
+    /// The open document, if any. One arrives only through an open
+    /// ([`open`](Self::open), [`begin_open`](Self::begin_open),
+    /// [`load_bytes`](Self::load_bytes)), which re-seeds playback, the 3D
+    /// view and what the renderer holds along with it.
+    pub fn document(&self) -> Option<&Document> {
+        self.document.as_ref()
+    }
+
+    /// The open document, to change what can be changed of it in place: the
+    /// frame on screen, a channel's window, whether a channel is on, its
+    /// overlay. A [`DocumentMut`] rather than `&mut Document`, so it cannot
+    /// be replaced in place.
+    pub fn document_mut(&mut self) -> Option<DocumentMut<'_>> {
+        self.document.as_mut().map(DocumentMut::new)
+    }
+
+    /// Whether multi-channel grayscale stacks are tinted with the standard
+    /// channel palette: the user's preference, kept across files and set with
+    /// [`set_pseudocolor`](Self::set_pseudocolor).
+    pub fn pseudocolor(&self) -> bool {
+        self.apply_pseudocolor
+    }
+
+    /// Whether frames are being decoded across cores: always under
+    /// [`DecodeMode::Threaded`], never under [`DecodeMode::Serial`], and under
+    /// [`DecodeMode::Auto`] once playback of this document has fallen behind.
+    pub fn decodes_in_parallel(&self) -> bool {
+        self.decode_mode.parallel(self.decode_parallel)
     }
 
     /// What there is to tell the user about the view on screen, in
@@ -486,8 +567,17 @@ impl Viewer {
     /// is derived from that here: the LUTs and the note about the shape. What
     /// the renderer holds — the frame, the volume — follows at the next sync,
     /// which finds the display's channel layout moved.
+    ///
+    /// The counts are a reassignment of the axes in effect, so their product
+    /// is theirs: a triple that would address more or fewer planes (or none)
+    /// is ignored, as no reading of the file it describes.
     pub fn set_dimension_order(&mut self, channels: usize, slices: usize, frames: usize) {
         if let Some(doc) = &mut self.document {
+            let now = doc.display.dims();
+            let planes = |c: usize, z: usize, t: usize| c.checked_mul(z)?.checked_mul(t);
+            if planes(channels, slices, frames) != planes(now.channels, now.slices, now.frames) {
+                return;
+            }
             apply_dimension_override(doc, channels, slices, frames);
             // The swap rebuilds channel_display from `mode`, so re-apply the
             // pseudocolor preference on top of the fresh LUTs.
@@ -509,24 +599,20 @@ impl Viewer {
         }
     }
 
-    /// Pick the single-channel LUT by selector index — index 0 is the file's
-    /// own "Built-in" map when it has one, then grayscale, the named channel
-    /// colours, and the perceptual colormaps (see
-    /// [`crate::channels::gray_lut_sel_lut`]).
+    /// Show the single-channel LUT selector's option `sel`
+    /// ([`GrayLuts`](crate::GrayLuts)): the file's own "Built-in" map first
+    /// when it has one, then grayscale, the named channel colours, and the
+    /// perceptual colormaps.
     ///
     /// Restoring "Built-in" works because opening a file never overwrites
     /// `tiff.meta`: the file's colours are still there to go back to. No-op
-    /// when no document is open or the selector doesn't apply to it.
+    /// when no document is open, the selector doesn't apply to it
+    /// ([`Display::gray_luts`](crate::Display::gray_luts) is `None`), or `sel`
+    /// is not one of its options.
     pub fn set_gray_lut(&mut self, sel: usize) {
-        let Some(doc) = &mut self.document else {
-            return;
-        };
-        if !crate::channels::gray_lut_applicable(doc) {
-            return;
+        if let Some(doc) = &mut self.document {
+            doc.display.select_gray_lut(sel);
         }
-        doc.display.gray_lut_sel = sel;
-        let lut = crate::channels::gray_lut_sel_lut(&doc.display, sel);
-        doc.display.set_lut(0, lut);
     }
 
     /// Subsampling applied to the 2D frame on its way to the GPU, as of the

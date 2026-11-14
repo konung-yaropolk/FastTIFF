@@ -12,10 +12,10 @@ impl ViewerApp {
     /// Draw the coordinate box for the current volume view into `painter` (which
     /// the caller has clipped to the volume rect). No-op without a loaded stack.
     pub(super) fn draw_coord_box(&self, painter: &egui::Painter, rect: egui::Rect) {
-        let Some(loaded) = &self.core.document else {
+        let Some(loaded) = self.core.document() else {
             return;
         };
-        let f0 = loaded.tiff.frames.first();
+        let f0 = loaded.tiff().frames.first();
         let (Some(w), Some(h)) = (f0.map(|f| f.width), f0.map(|f| f.height)) else {
             return;
         };
@@ -27,7 +27,7 @@ impl ViewerApp {
         let volume = &self.sync_inputs.volume;
         let cam = self.core.volume.camera(dims, volume.pose.as_ref());
 
-        let unit = loaded.tiff.meta.unit.as_deref().filter(|u| !u.is_empty());
+        let unit = loaded.tiff().meta.unit.as_deref().filter(|u| !u.is_empty());
         draw_box(
             painter,
             rect,

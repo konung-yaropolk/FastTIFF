@@ -6,26 +6,23 @@
 //! fat-LTO link. As modules of one binary they link once. A module that
 //! only applies to some builds says so with its own `#![cfg(...)]`.
 //!
+//! They test what a frontend can do, through the public API alone: that is
+//! what being outside the crate is for. A suite about the crate's own
+//! machinery (the band cache, residency planning, window assembly, plane
+//! addressing) is a unit test beside the code it tests, in `src/`.
+//!
 //! Run one suite with `cargo test -p fast-tiff-viewer --test it <module>::`.
 
 mod auto_contrast;
-mod band_cache;
-mod cmyk_display;
 mod display_model;
 mod document_model;
+mod facade;
 mod histogram;
 mod open_failure;
 mod open_signal;
-mod overview;
 mod palette_lut;
-mod plane_addressing;
-mod plane_clamp;
 mod plugin_parity;
 mod plugins;
 mod rgb_plugins;
-mod roi_plan;
-mod roi_preload;
 mod shift_sync;
 mod streamed_results;
-mod window_assembly;
-mod window_worker;

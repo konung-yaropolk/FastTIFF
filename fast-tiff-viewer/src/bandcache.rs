@@ -30,12 +30,12 @@ use std::ops::Range;
 /// longer journeys across the image at a memory cost that is hard to justify
 /// for a viewer; smaller and a single window would not fit, which is the one
 /// case that has to hit.
-pub const MAX_CACHE_BYTES: usize = 384 << 20;
+pub(crate) const MAX_CACHE_BYTES: usize = 384 << 20;
 
 /// Bytes the interface thread's cache keeps once a background worker has taken
 /// over window decoding — enough for one band, so a cold build is not made
 /// worse, but not a second full cache standing idle.
-pub const IDLE_CACHE_BYTES: usize = TARGET_BAND_BYTES;
+pub(crate) const IDLE_CACHE_BYTES: usize = TARGET_BAND_BYTES;
 
 /// Bytes a single band should come to, before rounding to a power-of-two row
 /// count. Small enough that the grid is fine-grained for vertical panning,
@@ -48,7 +48,7 @@ const TARGET_BAND_BYTES: usize = 32 << 20;
 /// A power of two, and derived only from things that are fixed for the open
 /// file, so the grid never shifts underfoot — which is the whole basis of the
 /// cache returning anything.
-pub fn band_rows(width: u32, bytes_per_row_sample: usize) -> u32 {
+pub(crate) fn band_rows(width: u32, bytes_per_row_sample: usize) -> u32 {
     let per_row = (width as usize).saturating_mul(bytes_per_row_sample).max(1);
     let rows = (TARGET_BAND_BYTES / per_row).clamp(1, 4096);
     // Round down to a power of two: any two frames of the same file then agree
@@ -57,14 +57,14 @@ pub fn band_rows(width: u32, bytes_per_row_sample: usize) -> u32 {
 }
 
 /// The rows band `index` covers, clamped to the frame.
-pub fn band_range(index: u32, rows_per_band: u32, height: u32) -> Range<u32> {
+pub(crate) fn band_range(index: u32, rows_per_band: u32, height: u32) -> Range<u32> {
     let start = index.saturating_mul(rows_per_band).min(height);
     let end = start.saturating_add(rows_per_band).min(height);
     start..end
 }
 
 /// The bands a row range touches.
-pub fn bands_covering(rows: Range<u32>, rows_per_band: u32) -> Range<u32> {
+pub(crate) fn bands_covering(rows: Range<u32>, rows_per_band: u32) -> Range<u32> {
     let rpb = rows_per_band.max(1);
     let first = rows.start / rpb;
     let last = rows.end.max(rows.start + 1).div_ceil(rpb);
@@ -98,7 +98,7 @@ struct Entry {
 /// and empties itself when asked for another, which is what keeps the window
 /// worker's own cache — which nothing else can reach to clear — from splicing
 /// the old mapping's pixels into a new window.
-pub struct BandCache {
+pub(crate) struct BandCache {
     entries: Vec<Entry>,
     bytes: usize,
     budget: usize,
@@ -125,7 +125,7 @@ impl BandCache {
     ///
     /// [`crate::window::assemble`] calls it before every build, so no holder
     /// of a cache has to remember to.
-    pub fn hold_layout(&mut self, layout: u64) {
+    pub(crate) fn hold_layout(&mut self, layout: u64) {
         if self.layout != Some(layout) {
             self.clear();
             self.layout = Some(layout);
@@ -136,7 +136,7 @@ impl BandCache {
     ///
     /// Takes `&mut self` because a hit is what makes an entry recent; a cache
     /// that did not record that would evict whatever is being looked at.
-    pub fn get(
+    pub(crate) fn get(
         &mut self,
         frame: usize,
         channels: &[usize],
@@ -156,7 +156,7 @@ impl BandCache {
     ///
     /// A band too large to fit on its own is simply not held rather than
     /// emptying the cache for something that cannot stay.
-    pub fn put(
+    pub(crate) fn put(
         &mut self,
         frame: usize,
         channels: Vec<usize>,
@@ -192,7 +192,7 @@ impl BandCache {
     /// set — which are misses whatever it is holding. Rather than pay for two
     /// full caches so one of them can go unread, its budget is cut when the
     /// worker starts.
-    pub fn set_budget(&mut self, bytes: usize) {
+    pub(crate) fn set_budget(&mut self, bytes: usize) {
         self.budget = bytes;
         self.evict();
     }
@@ -207,23 +207,30 @@ impl BandCache {
 
     /// Drop everything. Called when what the cache describes stops being true —
     /// a new file, or a re-interpretation of the current one.
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.bytes = 0;
     }
 
     /// Bytes currently held.
-    pub fn bytes(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn bytes(&self) -> usize {
         self.bytes
     }
 
     /// How many bands are held.
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Whether nothing is held.
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 }
+
+#[cfg(test)]
+#[path = "bandcache_tests.rs"]
+mod tests;

@@ -42,30 +42,30 @@ use std::sync::Arc;
 
 /// The GPU memory a volume may take when the frontend could not find out how
 /// much there is. Every level of every packed texture counts against it.
-pub const DEFAULT_VOLUME_BUDGET: usize = 768 << 20;
+pub(crate) const DEFAULT_VOLUME_BUDGET: usize = 768 << 20;
 
 /// The least a budget is cut to by retries after the GPU ran out of memory:
 /// below this there is no volume worth showing.
-pub const MIN_VOLUME_BUDGET: usize = 32 << 20;
+pub(crate) const MIN_VOLUME_BUDGET: usize = 32 << 20;
 
 /// The most a budget may be, whatever the GPU has: the volume is built in RAM
 /// before it is uploaded, and a frontend with a large card should not find its
 /// host out of memory instead. 4 GB on a 64-bit host; 1 GB where addresses are
 /// 32 bits (a browser's wasm32), whose whole address space is 4 GB — and where
 /// `4 << 30` would not even fit in a `usize`.
-pub const MAX_VOLUME_BUDGET: usize = if usize::BITS >= 64 {
+pub(crate) const MAX_VOLUME_BUDGET: usize = if usize::BITS >= 64 {
     (4u64 << 30) as usize
 } else {
     1 << 30
 };
 
 /// A built volume, packed for upload.
-pub type BuiltVolume = PackedVolume;
+pub(crate) type BuiltVolume = PackedVolume;
 
 /// The most voxels a volume keeps along any axis for `screen` (no cap when
 /// the frontend cannot tell its size): twice the screen's longest side, so a
 /// view zoomed in twofold is still sharp, and never under 2048.
-pub fn detail_cap(screen: crate::screen::PhysicalPx) -> u32 {
+pub(crate) fn detail_cap(screen: crate::screen::PhysicalPx) -> u32 {
     match screen.longest_side() {
         0 => u32::MAX,
         side => side.saturating_mul(2).max(2048),
@@ -76,7 +76,7 @@ pub fn detail_cap(screen: crate::screen::PhysicalPx) -> u32 {
 /// the app's (possibly manually overridden) metadata, not the worker's own
 /// parse, so a channels/frames swap in the UI is honored by background builds.
 #[derive(Clone)]
-pub struct VolumePlan {
+pub(crate) struct VolumePlan {
     /// Each channel's units, which say both how it decodes (its kind) and how
     /// its samples are normalized into the volume
     /// ([`SampleUnits::volume_affine`]).
@@ -109,7 +109,7 @@ pub struct VolumePlan {
 /// chain included, fits `budget`: always the stride of the axis whose output
 /// voxels are physically finest (`stride × scale`), the larger output winning a
 /// tie, and never one already down to a single voxel.
-pub fn choose_strides(
+pub(crate) fn choose_strides(
     dims: (u32, u32, u32),
     channels: usize,
     format: TexelFormat,
@@ -153,7 +153,7 @@ pub fn choose_strides(
 /// chain is built. Once it says stop, every task still running finishes the
 /// plane it is on, the half-built volume is dropped, and the result is
 /// [`Cancelled`]. Inline callers pass [`CancelToken::never`].
-pub fn build_volume(
+pub(crate) fn build_volume(
     tiff: &TiffStack,
     plan: &VolumePlan,
     cancel: &CancelToken,
@@ -479,14 +479,14 @@ impl SliceBoxes {
 /// `new` returns `None` when the thread cannot start, and always without the
 /// `threads` feature; every build then runs synchronously through
 /// [`build_volume`].
-pub struct VolumeBuilder(LatestWorker<(u64, usize), VolumePlan, Option<BuiltVolume>>);
+pub(crate) struct VolumeBuilder(LatestWorker<(u64, usize), VolumePlan, Option<BuiltVolume>>);
 
 impl VolumeBuilder {
     /// Spawn a worker over `stack` — the window's own, shared, so a stack held
     /// in memory (a plugin's result, an import, every file in a browser) gets
     /// one as well as a mapped file does. Returns `None` if the thread fails
     /// to spawn — callers then build synchronously instead.
-    pub fn new(stack: Arc<TiffStack>) -> Option<Self> {
+    pub(crate) fn new(stack: Arc<TiffStack>) -> Option<Self> {
         // A failed build is published as `None` (the app marks the timepoint
         // built anyway, so it doesn't retry every frame); a cancelled one is
         // not published at all.
@@ -500,7 +500,7 @@ impl VolumeBuilder {
     /// or building does nothing; asking for another cancels it. Returns
     /// `false` when the worker is gone (a build panicked) — the caller should
     /// build synchronously instead.
-    pub fn request(&self, generation: u64, plan: VolumePlan) -> bool {
+    pub(crate) fn request(&self, generation: u64, plan: VolumePlan) -> bool {
         self.0.request((generation, plan.time), plan)
     }
 
@@ -509,7 +509,11 @@ impl VolumeBuilder {
     /// `None`. The outer `Option` is "is there a matching reply"; the inner one
     /// is the build's own success.
     #[allow(clippy::option_option)]
-    pub fn take_matching(&self, generation: u64, time: usize) -> Option<Option<BuiltVolume>> {
+    pub(crate) fn take_matching(
+        &self,
+        generation: u64,
+        time: usize,
+    ) -> Option<Option<BuiltVolume>> {
         self.0.take_if(|key| *key == (generation, time))
     }
 }

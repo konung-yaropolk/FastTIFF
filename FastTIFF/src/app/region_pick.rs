@@ -94,7 +94,7 @@ impl CanvasTool for RegionPick {
     /// when the picture it is drawn on goes away.
     fn tick(&mut self, ctx: &egui::Context, core: &Viewer, busy: bool) -> Option<ToolEvent> {
         let cancelled = || ToolEvent::Close(format!("{}: cancelled", self.name));
-        if core.document.is_none() || core.view_mode != ViewMode::Movie {
+        if core.document().is_none() || core.view_mode != ViewMode::Movie {
             return Some(cancelled());
         }
         // Keys typed into a text field are that field's.
@@ -141,7 +141,7 @@ impl super::ViewerApp {
         name: &str,
         prompt: String,
     ) {
-        if self.core.document.is_none() {
+        if self.core.document().is_none() {
             self.say("Open an image first".into());
             return;
         }

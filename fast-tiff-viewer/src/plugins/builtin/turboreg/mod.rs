@@ -59,9 +59,9 @@ fn ran_on(backend: Backend) -> String {
 /// resampling one is in between. Split evenly instead, the bar raced through
 /// the reading and then sat still for the registration, which reads as a hang.
 mod work {
-    pub const READ: f64 = 1.0;
-    pub const REGISTER: f64 = 40.0;
-    pub const WARP: f64 = 6.0;
+    pub(super) const READ: f64 = 1.0;
+    pub(super) const REGISTER: f64 = 40.0;
+    pub(super) const WARP: f64 = 6.0;
 }
 
 /// The measurement image for one timepoint: one channel's plane, or the mean of

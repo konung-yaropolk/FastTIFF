@@ -256,15 +256,15 @@ pub(super) fn draw(painter: &egui::Painter, counter: &PointCounter, frame: usize
 /// user who closed the window and opened it again should not take for the
 /// file's.
 pub(super) fn loaded_message(stack: &Document) -> Option<String> {
-    if stack.overlay.is_empty() {
+    if stack.overlay().is_empty() {
         return None;
     }
-    let from = if stack.overlay == stack.tiff.meta.overlay {
+    let from = if stack.overlay() == stack.tiff().meta.overlay {
         "the file's overlay"
     } else {
         "the overlay added to this image"
     };
-    Some(format!("Loaded {} from {from}.", summary(&stack.overlay)))
+    Some(format!("Loaded {} from {from}.", summary(stack.overlay())))
 }
 
 /// `"12 points in 3 groups"`: what a set of ROIs holds, for the status line.
@@ -512,21 +512,26 @@ impl super::ViewerApp {
     /// A new session starts from the document's overlay when it has one, and
     /// says so on the status line.
     pub(super) fn open_point_counter(&mut self, ctx: &egui::Context) {
-        let Some(stack) = self.core.document.as_ref() else {
+        let Some(stack) = self.core.document() else {
             self.say("Open an image first".into());
             return;
         };
+        let start = self
+            .tools
+            .point_counter
+            .is_none()
+            .then(|| (Session::for_stack(stack), loaded_message(stack)));
         // Points are placed on the picture. An animation running in 3D stops
         // on its own when the view leaves it.
         self.core.view_mode = fast_tiff_viewer::ViewMode::Movie;
-        if self.tools.point_counter.is_none() {
-            let loaded = loaded_message(stack);
-            self.tools.point_counter = Some(Session::for_stack(stack));
-            if let Some(message) = loaded {
-                self.report_done(message);
+        match start {
+            Some((session, loaded)) => {
+                self.tools.point_counter = Some(session);
+                if let Some(message) = loaded {
+                    self.report_done(message);
+                }
             }
-        } else {
-            raise_window(ctx);
+            None => raise_window(ctx),
         }
     }
 
@@ -537,12 +542,17 @@ impl super::ViewerApp {
             return;
         };
         // The points were placed on a picture that is no longer there.
-        let Some(stack) = self.core.document.as_ref() else {
+        let Some(stack) = self.core.document() else {
             self.tools.point_counter = None;
             return;
         };
         let imagej_reads_overlay = fast_tiff_viewer::save::overlay_readable_by_imagej(stack);
-        match counter_window(ctx, tool, stack.display.dims().frames, imagej_reads_overlay) {
+        match counter_window(
+            ctx,
+            tool,
+            stack.display().dims().frames,
+            imagej_reads_overlay,
+        ) {
             CounterAction::None => {}
             CounterAction::Close => self.tools.point_counter = None,
             CounterAction::SaveRois => self.save_point_rois(),
@@ -554,7 +564,7 @@ impl super::ViewerApp {
     /// the stack position of its frame, and placed so that ImageJ draws it on
     /// a hyperstack too — see [`PointCounter::rois_for`].
     fn point_rois(&self) -> Option<Vec<PointRoi>> {
-        let stack = self.core.document.as_ref()?;
+        let stack = self.core.document()?;
         let tool = self.tools.point_counter.as_ref()?;
         Some(tool.counter.rois_for(stack))
     }
@@ -570,10 +580,10 @@ impl super::ViewerApp {
             self.say(format!("{NAME}: no points to save yet"));
             return;
         }
-        let Some(stack) = self.core.document.as_ref() else {
+        let Some(stack) = self.core.document() else {
             return;
         };
-        let suggested = file_name(&stack.path);
+        let suggested = file_name(stack.path());
         let bytes = match fast_tiff_lib::roi_set_zip(&rois) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -638,16 +648,16 @@ impl super::ViewerApp {
         let Some(rois) = self.point_rois() else {
             return;
         };
-        let Some(stack) = self.core.document.as_mut() else {
+        let Some(mut stack) = self.core.document_mut() else {
             return;
         };
         if rois.is_empty() {
             // Deleting every point and adding again is how an overlay added
             // by mistake comes off.
-            if stack.overlay.is_empty() {
+            if stack.overlay().is_empty() {
                 self.say(format!("{NAME}: no points to add yet"));
             } else {
-                stack.overlay.clear();
+                stack.set_overlay(Vec::new());
                 self.report_done(
                     "Removed the overlay: there are no points. Save the file to write it \
                      without one."
@@ -656,7 +666,7 @@ impl super::ViewerApp {
             }
             return;
         }
-        let message = if fast_tiff_viewer::save::overlay_readable_by_imagej(stack) {
+        let message = if fast_tiff_viewer::save::overlay_readable_by_imagej(&stack) {
             format!(
                 "Added {} to the overlay. Save the file to write it (saved uncompressed, so \
                  ImageJ can read it).",
@@ -670,7 +680,7 @@ impl super::ViewerApp {
                 summary(&rois)
             )
         };
-        stack.overlay = rois;
+        stack.set_overlay(rois);
         self.report_done(message);
     }
 }

@@ -19,12 +19,12 @@
 
 #![cfg(feature = "mmap")]
 
+use crate::bandcache::BandCache;
+use crate::prefetch::{ChannelJob, Decoded};
+use crate::roi::Roi;
+use crate::window;
+use crate::worker::CancelToken;
 use fast_tiff_lib::{SampleType, TiffStack, TiffWriter, WriterOptions};
-use fast_tiff_viewer::bandcache::BandCache;
-use fast_tiff_viewer::prefetch::{ChannelJob, Decoded};
-use fast_tiff_viewer::roi::Roi;
-use fast_tiff_viewer::window;
-use fast_tiff_viewer::worker::CancelToken;
 use scivis_render::ChannelKind;
 use std::io::Cursor;
 

@@ -810,12 +810,12 @@ fn an_importers_metadata_reaches_the_document() {
     // boundary is what the exact assertion on `info` above already checked.
     let close = |got: Option<f64>, want: f64| got.is_some_and(|v| (v - want).abs() < 1e-9);
     assert!(
-        close(s.tiff.meta.pixel_width, 0.65) && close(s.tiff.meta.pixel_height, 0.65),
+        close(s.tiff().meta.pixel_width, 0.65) && close(s.tiff().meta.pixel_height, 0.65),
         "the spacing did not reach the written file: {:?} x {:?}",
-        s.tiff.meta.pixel_width,
-        s.tiff.meta.pixel_height
+        s.tiff().meta.pixel_width,
+        s.tiff().meta.pixel_height
     );
-    assert_eq!(s.tiff.meta.unit.as_deref(), Some("micron"));
+    assert_eq!(s.tiff().meta.unit.as_deref(), Some("micron"));
 
     let _ = std::fs::remove_file(file);
 }
@@ -991,14 +991,14 @@ fn a_library_in_the_plugin_folder_reaches_the_menu() {
     .unwrap();
     std::fs::write(dir.join("notes.txt"), b"not a plugin").unwrap();
 
-    std::env::set_var(plugins::discover::PLUGIN_PATH_VAR, &dir);
+    std::env::set_var(plugins::PLUGIN_PATH_VAR, &dir);
     assert!(
         plugins::search_paths().contains(&dir),
         "the override should come first on the search path"
     );
 
     let reg = Registry::with_installed();
-    std::env::remove_var(plugins::discover::PLUGIN_PATH_VAR);
+    std::env::remove_var(plugins::PLUGIN_PATH_VAR);
 
     assert!(
         reg.find("dev.fasttiff.example.invert").is_some(),

@@ -11,10 +11,10 @@
 //! all of this would be memory spent to no effect. The first tests here are
 //! about that, not about the LRU.
 
-use fast_tiff_viewer::bandcache::{
+use crate::bandcache::{
     band_range, band_rows, bands_covering, BandCache, IDLE_CACHE_BYTES, MAX_CACHE_BYTES,
 };
-use fast_tiff_viewer::prefetch::Decoded;
+use crate::prefetch::Decoded;
 
 /// The mosaic this exists for: 40000 wide, three 8-bit channels.
 const WIDE: u32 = 40_000;

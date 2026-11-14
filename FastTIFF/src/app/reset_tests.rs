@@ -98,7 +98,7 @@ fn the_volume_ui_starts_with_the_default_preferences() {
     assert!(ui.last_camera.is_none() && ui.moved_at.is_none());
 }
 
-fn run_on(document: u64, outcome: fast_tiff_viewer::plugins::Product) -> PluginRun {
+fn run_on(document: u64, outcome: fast_tiff_viewer::plugins::deliver::Product) -> PluginRun {
     PluginRun {
         index: 0,
         run_on: document,
@@ -117,7 +117,7 @@ fn run_on(document: u64, outcome: fast_tiff_viewer::plugins::Product) -> PluginR
 /// still lands, and so does a plot of the document still on show.
 #[test]
 fn a_canvas_result_from_the_last_document_is_not_shown_on_the_next() {
-    use fast_tiff_viewer::plugins::Product;
+    use fast_tiff_viewer::plugins::deliver::Product;
     let plot = || Product::Plot(Box::new(fasttiff_plugin_api::Plot::new("trace")));
     let pick = || Product::SelectRegion("Draw a rectangle".into());
     let news = || Product::Message("done".into());

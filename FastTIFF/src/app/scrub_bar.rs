@@ -31,12 +31,12 @@ impl ViewerApp {
         let view_is_volume = self.core.view_mode == ViewMode::Volume;
 
         let panel_expanded = self.panel.expanded;
-        let is_playing = self.core.playback.playing;
-        let pseudocolor_on = self.core.apply_pseudocolor;
+        let is_playing = self.core.playback.playing();
+        let pseudocolor_on = self.core.pseudocolor();
         // Whether the scrubber is being held this frame; handed back with the
         // bar, for the playback clock, which runs once the bar is done.
         let mut scrubber_held = false;
-        let mut playback_fps = self.core.playback.fps;
+        let mut playback_fps = self.core.playback.fps();
         let mut decode_mode = self.core.decode_mode;
         let mut large_image_mode = self.core.large_image_mode;
         // Read here, before the stack is borrowed for the controls: what the
@@ -130,7 +130,7 @@ impl ViewerApp {
             Some(key.inner)
         };
         let response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
-            let Some(loaded) = &mut self.core.document else {
+            let Some(mut loaded) = self.core.document_mut() else {
                 if !load_stage {
                     ui.label(RichText::new("© 2026 SciWare LLC").weak());
                 }
@@ -143,13 +143,13 @@ impl ViewerApp {
             ui.add_space(4.0);
 
             ui.horizontal(|ui| {
-                let max_frame = loaded.display.dims().frames.saturating_sub(1);
-                let has_multiple_frames = loaded.display.dims().frames > 1;
+                let max_frame = loaded.display().dims().frames.saturating_sub(1);
+                let has_multiple_frames = loaded.display().dims().frames > 1;
                 // In 3D the frame axis is the volume's depth, so play/step/scrub
                 // are meaningless unless the stack has a separate time axis
                 // (`slices > 1`). Grey them out otherwise.
                 let frame_nav_enabled =
-                    has_multiple_frames && !(view_is_volume && loaded.display.dims().slices <= 1);
+                    has_multiple_frames && !(view_is_volume && loaded.display().dims().slices <= 1);
 
                 let toggle_size = egui::vec2(20.0, 20.0);
                 let toggle_response = ui
@@ -196,7 +196,7 @@ impl ViewerApp {
                         loaded.set_frame(0);
                     }
                     if ui.button("<").on_hover_text("Previous frame (←)").clicked() {
-                        loaded.set_frame(loaded.frame().saturating_sub(1));
+                        loaded.step_frame(-1);
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -204,7 +204,7 @@ impl ViewerApp {
                             loaded.set_frame(max_frame);
                         }
                         if ui.button(">").on_hover_text("Next frame (→)").clicked() {
-                            loaded.set_frame(loaded.frame() + 1);
+                            loaded.step_frame(1);
                         }
 
                         let remaining = ui.available_width();
@@ -250,15 +250,15 @@ impl ViewerApp {
                     // Shift jumps ~5% of the stack at a time (min 1 frame) instead
                     // of 1, matching the Shift+wheel fast-scroll step.
                     let step = if i.modifiers.shift {
-                        ((loaded.display.dims().frames as f64 * FAST_SCROLL_RATE).round() as usize).max(1)
+                        ((loaded.display().dims().frames as f64 * FAST_SCROLL_RATE).round() as usize).max(1)
                     } else {
                         1
                     };
                     if i.key_pressed(egui::Key::ArrowRight) {
-                        loaded.set_frame(loaded.frame() + step);
+                        loaded.step_frame(step as isize);
                     }
                     if i.key_pressed(egui::Key::ArrowLeft) {
-                        loaded.set_frame(loaded.frame().saturating_sub(step));
+                        loaded.step_frame(-(step as isize));
                     }
                 });
             }
@@ -282,11 +282,11 @@ impl ViewerApp {
                     // meaningless for RGB, where the "channels" are fixed color
                     // planes — so the dropdown and pseudocolor toggle are hidden
                     // there.
-                    if !loaded.display.rgb() {
+                    if !loaded.display().layout().shown_as_rgb() {
                         ui.label("Dimension order:");
-                        let c = loaded.display.dims().channels;
-                        let z = loaded.display.dims().slices;
-                        let f = loaded.display.dims().frames;
+                        let c = loaded.display().dims().channels;
+                        let z = loaded.display().dims().slices;
+                        let f = loaded.display().dims().frames;
                         // When the file has a real Z axis (as loaded — see
                         // `has_z_axis`), offer every assignment of the three
                         // counts to the three roles; otherwise just the
@@ -294,7 +294,7 @@ impl ViewerApp {
                         // sort+dedup collapses duplicates when counts are equal
                         // and keeps the list order stable across
                         // reinterpretations.
-                        let show_z = loaded.display.has_z_axis;
+                        let show_z = loaded.display().has_z_axis();
                         let mut options: Vec<(usize, usize, usize)> = if show_z {
                             vec![(c, z, f), (c, f, z), (z, c, f), (z, f, c), (f, c, z), (f, z, c)]
                         } else {
@@ -329,7 +329,7 @@ impl ViewerApp {
 
                         // Optional channel palette — only for multi-channel
                         // grayscale stacks that carry no colors of their own.
-                        if pseudocolor_applicable(loaded) {
+                        if loaded.pseudocolor_applicable() {
                             ui.separator();
                             let mut on = pseudocolor_on;
                             if ui
@@ -348,8 +348,8 @@ impl ViewerApp {
                     // frames in 2D; in 3D the frame axis is the volume's depth,
                     // so time only exists for 4D stacks (`slices > 1`) — matches
                     // the play/scrub controls' enable logic above.
-                    let fps_playable = loaded.display.dims().frames > 1
-                        && !(view_is_volume && loaded.display.dims().slices <= 1);
+                    let fps_playable = loaded.display().dims().frames > 1
+                        && !(view_is_volume && loaded.display().dims().slices <= 1);
                     if fps_playable {
                         if row_has_items {
                             ui.separator();
@@ -372,22 +372,22 @@ impl ViewerApp {
                     // default). Hidden for RGB, composite, and multi-channel
                     // stacks — there the per-channel colors / pseudocolor toggle
                     // already handle coloring.
-                    if gray_lut_applicable(loaded) {
+                    if let Some(luts) = loaded.display().gray_luts() {
                         if row_has_items {
                             ui.separator();
                         }
                         ui.label("LUT:");
-                        let sel = loaded.display.gray_lut_sel;
+                        let sel = luts.selected();
                         egui::ComboBox::from_id_salt("gray_lut")
-                            .selected_text(gray_lut_sel_name(&loaded.display, sel))
+                            .selected_text(luts.name(sel))
                             .show_ui(ui, |ui| {
-                                for opt in 0..gray_lut_count(&loaded.display) {
+                                for opt in 0..luts.count() {
                                     // Tint each entry with its LUT's low (dark) end
                                     // — the color the darkest samples map to. A
                                     // grayscale/black low end (grayscale + the pure
                                     // channel-color ramps) keeps the default text color.
-                                    let name = gray_lut_sel_name(&loaded.display, opt);
-                                    let text = match tint_color(gray_lut_sel_tint(&loaded.display, opt)) {
+                                    let name = luts.name(opt);
+                                    let text = match tint_color(luts.tint(opt)) {
                                         Some(c) => RichText::new(name).color(c),
                                         None => RichText::new(name),
                                     };
@@ -408,7 +408,7 @@ impl ViewerApp {
                     // per-pixel rescale/cast). 8- and 16-bit uncompressed frames
                     // decode zero-copy or with an unthreaded copy, so the control
                     // has no effect and is hidden for them.
-                    let threadable = loaded.tiff.frames.first().is_some_and(|f| {
+                    let threadable = loaded.tiff().frames.first().is_some_and(|f| {
                         f.compression != fast_tiff_lib::Compression::None || f.bits_per_sample >= 32
                     });
                     if threadable {
@@ -488,7 +488,7 @@ impl ViewerApp {
                         cmds.push(UiCommand::ToggleWindow(WindowId::METADATA));
                     }
                 });
-                if !loaded.display.rgb() {
+                if !loaded.display().layout().shown_as_rgb() {
                     ui.label(
                         RichText::new(
                             "Channels are guessed automatically (6 or fewer = channels, more = time); \
@@ -499,14 +499,14 @@ impl ViewerApp {
                     );
                 }
 
-                contrast_controls(ui, loaded, ContrastLayout::Inline, None);
+                contrast_controls(ui, &mut loaded, ContrastLayout::Inline, None);
             }
             drawn_info = info_row(ui, status);
             ui.add_space(4.0);
         });
 
         // The settings edited in place above, as the commands that set them.
-        if playback_fps != self.core.playback.fps {
+        if playback_fps != self.core.playback.fps() {
             cmds.push(UiCommand::SetFps(playback_fps));
         }
         if decode_mode != self.core.decode_mode {

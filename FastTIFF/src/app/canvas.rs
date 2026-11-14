@@ -18,7 +18,7 @@ impl ViewerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().inner_margin(egui::Margin::ZERO))
             .show_inside(ui, |ui| {
-                if self.core.document.is_none() {
+                if self.core.document().is_none() {
                     ui.centered_and_justified(|ui| {
                         ui.label(TARGET.welcome_text());
                     });
@@ -51,9 +51,8 @@ impl ViewerApp {
                 {
                     let dims = self
                         .core
-                        .document
-                        .as_ref()
-                        .and_then(|l| l.tiff.frames.first())
+                        .document()
+                        .and_then(|l| l.tiff().frames.first())
                         .map(|f| ImagePx::new(f.width, f.height));
                     let room = available.logical();
                     match dims.and_then(|image| opening.zoom(image, Some(room), 0.0)) {
@@ -147,12 +146,12 @@ impl ViewerApp {
         pinching: bool,
         cmds: &Commands,
     ) {
-        let Some(loaded) = &self.core.document else {
+        let Some(loaded) = self.core.document() else {
             return;
         };
         let (Some(w), Some(h)) = (
-            loaded.tiff.frames.first().map(|f| f.width),
-            loaded.tiff.frames.first().map(|f| f.height),
+            loaded.tiff().frames.first().map(|f| f.width),
+            loaded.tiff().frames.first().map(|f| f.height),
         ) else {
             return;
         };
@@ -468,9 +467,8 @@ impl ViewerApp {
                     // ~10% of the stack per notch, spread across the glide.
                     let n_frames = self
                         .core
-                        .document
-                        .as_ref()
-                        .map(|l| l.display.dims().frames)
+                        .document()
+                        .map(|l| l.display().dims().frames)
                         .unwrap_or(1);
                     let fast_step = (n_frames as f64 * FAST_SCROLL_RATE).max(1.0);
                     // glide < 0 is scroll-down → advance frames. Advance at a

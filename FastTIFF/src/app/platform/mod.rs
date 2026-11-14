@@ -75,7 +75,8 @@ mod naming;
 use naming::{name_from_path, suggested_name};
 
 use super::{CanvasView, Document, Opened, PanelLayout};
-use fast_tiff_viewer::plugins::{Handover, Registry, ResultTiff};
+use fast_tiff_viewer::plugins::deliver::Handover;
+use fast_tiff_viewer::plugins::{Registry, ResultTiff};
 use fast_tiff_viewer::save::SaveSource;
 use fast_tiff_viewer::view2d::{fit_zoom, opening_zoom, ImagePx, LogicalVec};
 use fast_tiff_viewer::LoadSource;

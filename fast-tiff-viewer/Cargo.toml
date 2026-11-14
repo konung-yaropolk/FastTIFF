@@ -123,7 +123,7 @@ _shared-edges = []
 
 # ---------------------------------------------------------------------------
 # Which GPU backend `sync` drives. Exactly one is required to use `Viewer::sync`
-# and `volume::build_volume`; with neither, the crate still provides the whole
+# and the 3D volume build it runs; with neither, the crate still provides the whole
 # CPU-side model (stack state, channel settings, dimension resolution, camera
 # math) — useful for tests and headless tooling.
 backend-wgpu = ["scivis-render/backend-wgpu"]

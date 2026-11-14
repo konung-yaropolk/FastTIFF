@@ -74,7 +74,7 @@ fn bins_span_the_slider_track_for_a_single_channel_stack() {
     // handle parked at a fraction of the track sits above the same fraction of
     // the plot.
     let stack = load(flat_u16_stack(1, 16, 16, 4000, 0));
-    let settings = stack.display.settings()[0];
+    let settings = stack.display().settings()[0];
     let h = &frame_histograms(&stack)[0];
     assert_eq!((h.lo, h.hi), (settings.bounds.lo, settings.bounds.hi));
 
@@ -98,7 +98,7 @@ fn eight_bit_channels_are_widened_onto_the_slider_axis() {
     // pile every pixel of a full-range ramp into bin 0.
     let stack = load(ramp_u8_stack());
     assert_eq!(
-        stack.display.settings()[0].kind(),
+        stack.display().settings()[0].kind(),
         fast_tiff_viewer::ChannelKind::Int8
     );
     let h = &frame_histograms(&stack)[0];
@@ -118,8 +118,9 @@ fn the_histogram_follows_the_current_frame() {
     let first = frame_histograms(&stack)[0].clone();
     stack.set_frame(2);
     let third = frame_histograms(&stack)[0].clone();
-    let spike =
-        |h: &fast_tiff_viewer::Histogram| h.bins.iter().position(|&b| b > 0).expect("a spike");
+    let spike = |h: &fast_tiff_viewer::histogram::Histogram| {
+        h.bins.iter().position(|&b| b > 0).expect("a spike")
+    };
     assert_ne!(
         spike(&first),
         spike(&third),
@@ -157,11 +158,7 @@ fn overlay_alpha_thins_as_channels_are_added_but_stays_visible() {
 }
 
 #[test]
-fn an_empty_stack_histograms_to_nothing_rather_than_panicking() {
-    let mut stack = load(flat_u16_stack(1, 8, 8, 1, 0));
-    // A display with no channels at all.
-    stack.display = fast_tiff_viewer::Display::default();
-    assert!(frame_histograms(&stack).is_empty());
+fn a_frame_past_the_end_histograms_the_last_one() {
     // A frame past the end cannot be asked for: it is the last frame.
     let mut stack = load(flat_u16_stack(3, 8, 8, 1, 0));
     stack.set_frame(999);
@@ -209,7 +206,7 @@ fn channels_share_one_axis_and_land_at_different_places_on_it() {
 fn the_shared_track_covers_every_channels_bounds() {
     let stack = load(multichannel_u16_stack(&[4_000, 30_000, 60_000], 16, 16));
     let (lo, hi): (f32, f32) = fast_tiff_viewer::histogram::shared_track(&stack).into();
-    for s in stack.display.settings() {
+    for s in stack.display().settings() {
         assert!(
             s.bounds.lo >= lo && s.bounds.hi <= hi,
             "{:?} escapes the track {lo}..{hi}",

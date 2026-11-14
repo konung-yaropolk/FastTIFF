@@ -4,7 +4,7 @@
 //! Pan and zoom are not applied by moving the viewport — a GPU backend would
 //! clamp an oversized one to the framebuffer and squash the picture. The image
 //! is drawn into the part of the panel it covers, and pan and zoom are the
-//! part of the image sampled there: [`Placement::inputs`] turns this view into
+//! part of the image sampled there: [`ImagePlacement::inputs`] turns this view into
 //! the [`ImageInputs`] of [`Viewer::sync`](crate::Viewer::sync).
 //!
 //! [`View2d`] is plain arithmetic in logical points ([`LogicalPt`],
@@ -24,7 +24,7 @@
 //! 2. once the panel is: [`View2d::set_panel`], the opening fit
 //!    ([`View2d::open_fitted`] or [`View2d::open_at_level`]), and
 //!    [`View2d::measure`] for this frame's
-//!    [`Layout`];
+//!    [`ImageExtent`];
 //! 3. what moves the view by hand: [`View2d::pan_to`], the autoscroll
 //!    ([`View2d::toggle_autoscroll`], [`View2d::autoscroll_by`]),
 //!    [`View2d::drag`], then [`View2d::clamp_pan`];
@@ -35,11 +35,13 @@
 
 mod autoscroll;
 mod kinetic;
-mod zoom;
+pub(crate) mod zoom;
 
 pub use crate::screen::{ImagePx, LogicalPt, LogicalRect, LogicalVec};
 pub use autoscroll::DEAD_ZONE as AUTOSCROLL_DEAD_ZONE;
-pub use zoom::{fit_zoom, opening_zoom, ZoomLadder, FIT_SNAP, ZOOM_LEVELS};
+pub use zoom::{fit_zoom, opening_zoom, ZOOM_LEVELS};
+
+use zoom::ZoomLadder;
 
 use crate::frame::ImageInputs;
 
@@ -51,20 +53,20 @@ use crate::frame::ImageInputs;
 /// enough to read as movement rather than a jump, short enough that a second
 /// notch never feels held up. Slower starts to feel like the program is
 /// deciding whether to obey.
-pub const ZOOM_GLIDE_TAU: f32 = 0.035;
+const ZOOM_GLIDE_TAU: f32 = 0.035;
 
 /// How close to the target ends the glide. A ratio, not a difference, because
 /// zoom is geometric.
 ///
-/// One percent, which is well under [`FIT_SNAP`]'s two — already described
+/// One percent, which is well under [`FIT_SNAP`](zoom::FIT_SNAP)'s two — already described
 /// there as below what anyone can see in a zoom. Chasing the last percent is
 /// pure latency: an exponential approach spends as long covering it as it did
 /// covering the first three quarters.
-pub const ZOOM_GLIDE_SNAP: f32 = 0.01;
+const ZOOM_GLIDE_SNAP: f32 = 0.01;
 
 /// Longest frame the glide will integrate. A hitch — a slow decode, a window
 /// drag — must not be turned into one enormous zoom jump on the frame after.
-pub const ZOOM_GLIDE_MAX_DT: f32 = 1.0 / 20.0;
+const ZOOM_GLIDE_MAX_DT: f32 = 1.0 / 20.0;
 
 /// A zoom step in flight: the level being glided to, and the point it turns
 /// about.
@@ -97,7 +99,7 @@ pub struct ZoomStep {
 /// what [`View2d::measure`] works out once a frame, and every step of the
 /// frame after it goes by.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Layout {
+pub struct ImageExtent {
     /// The whole image's size on screen at the zoom on screen.
     pub size: LogicalVec,
     /// The room the panel gives it.
@@ -107,7 +109,7 @@ pub struct Layout {
     pub overflow: LogicalVec,
 }
 
-impl Layout {
+impl ImageExtent {
     /// Whether the image overflows the room on either axis, and so can be
     /// panned.
     pub fn pannable(&self) -> bool {
@@ -123,12 +125,12 @@ impl Layout {
 
 /// Where the image is drawn this frame: what [`View2d::place`] decides.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Placement {
+pub struct ImagePlacement {
     /// Where the image's top-left corner would be drawn at full size:
     /// scrolled by the pan on an axis that overflows, centred on one that
     /// fits. May lie outside the panel.
     pub origin: LogicalPt,
-    /// The whole image's size on screen ([`Layout::size`]).
+    /// The whole image's size on screen ([`ImageExtent::size`]).
     pub size: LogicalVec,
     /// The whole image's rect on screen, `origin` + `size`.
     pub full: LogicalRect,
@@ -136,7 +138,7 @@ pub struct Placement {
     pub visible: LogicalRect,
 }
 
-impl Placement {
+impl ImagePlacement {
     /// Whether any of the image is on screen.
     pub fn is_visible(&self) -> bool {
         self.visible.is_positive()
@@ -292,7 +294,7 @@ impl View2d {
     }
 
     /// The zoom levels a step moves along for this image.
-    pub fn ladder(&self) -> ZoomLadder {
+    pub(crate) fn ladder(&self) -> ZoomLadder {
         ZoomLadder::of(self.fit_rung)
     }
 
@@ -464,29 +466,29 @@ impl View2d {
     /// A point of tolerance on the overflow, so sub-pixel rounding between a
     /// window's size and the panel inside it does not register as a pannable
     /// overflow.
-    pub fn measure(&self, image: ImagePx, room: LogicalVec) -> Layout {
+    pub fn measure(&self, image: ImagePx, room: LogicalVec) -> ImageExtent {
         let size = image.at_zoom(self.zoom);
         let overflow = LogicalVec::new(
             (size.x - room.x - 1.0).max(0.0),
             (size.y - room.y - 1.0).max(0.0),
         );
-        Layout {
+        ImageExtent {
             size,
             room,
             overflow,
         }
     }
 
-    /// Note whether this frame's `layout` overflows the panel, once a frame,
+    /// Note whether this frame's `extent` overflows the panel, once a frame,
     /// and say whether the image has now overflowed it steadily — this frame
     /// and the one before, with its opening fit done.
     ///
     /// The question a navigator asks before it shows itself: see
     /// `was_pannable` for why one frame of overflow is not enough. A second
     /// call in the same frame would count it twice.
-    pub fn note_pannable(&mut self, layout: &Layout) -> bool {
+    pub fn note_pannable(&mut self, extent: &ImageExtent) -> bool {
         let settled = !self.awaiting_fit;
-        let pannable = layout.pannable();
+        let pannable = extent.pannable();
         let steady = pannable && self.was_pannable && settled;
         self.was_pannable = pannable && settled;
         steady
@@ -510,10 +512,10 @@ impl View2d {
     /// click always means stop; on, anchored `at`, only where there is
     /// something to scroll — a mode that swallowed the click and then did
     /// nothing would be indistinguishable from a dead button.
-    pub fn toggle_autoscroll(&mut self, at: Option<LogicalPt>, layout: &Layout) {
+    pub fn toggle_autoscroll(&mut self, at: Option<LogicalPt>, extent: &ImageExtent) {
         self.autoscroll = match self.autoscroll {
             Some(_) => None,
-            None if layout.pannable() => at,
+            None if extent.pannable() => at,
             None => None,
         };
     }
@@ -540,32 +542,32 @@ impl View2d {
     }
 
     /// Keep the pan within how far the image overflows.
-    pub fn clamp_pan(&mut self, layout: &Layout) {
-        self.pan.x = self.pan.x.clamp(0.0, layout.overflow.x);
-        self.pan.y = self.pan.y.clamp(0.0, layout.overflow.y);
+    pub fn clamp_pan(&mut self, extent: &ImageExtent) {
+        self.pan.x = self.pan.x.clamp(0.0, extent.overflow.x);
+        self.pan.y = self.pan.y.clamp(0.0, extent.overflow.y);
     }
 
     /// Where the image goes this frame, in the panel set for it, noting the
     /// origin for the next frame's zoom input.
-    pub fn place(&mut self, layout: &Layout) -> Placement {
+    pub fn place(&mut self, extent: &ImageExtent) -> ImagePlacement {
         let panel = self.panel;
         let origin = LogicalPt::new(
-            if layout.overflow.x > 0.0 {
+            if extent.overflow.x > 0.0 {
                 panel.min.x - self.pan.x
             } else {
-                panel.min.x + (layout.room.x - layout.size.x) * 0.5
+                panel.min.x + (extent.room.x - extent.size.x) * 0.5
             },
-            if layout.overflow.y > 0.0 {
+            if extent.overflow.y > 0.0 {
                 panel.min.y - self.pan.y
             } else {
-                panel.min.y + (layout.room.y - layout.size.y) * 0.5
+                panel.min.y + (extent.room.y - extent.size.y) * 0.5
             },
         );
         self.image_origin = origin;
-        let full = LogicalRect::from_min_size(origin, layout.size);
-        Placement {
+        let full = LogicalRect::from_min_size(origin, extent.size);
+        ImagePlacement {
             origin,
-            size: layout.size,
+            size: extent.size,
             full,
             visible: full.intersect(panel),
         }
@@ -597,8 +599,8 @@ impl View2d {
     /// the image stops there: a glide left wound up against a bound would
     /// spring forward again the moment the bound moved. An image that fits has
     /// nothing to glide.
-    pub fn glide_pan(&mut self, swipe: LogicalVec, dt: f32, layout: &Layout) -> bool {
-        if !layout.pannable() {
+    pub fn glide_pan(&mut self, swipe: LogicalVec, dt: f32, extent: &ImageExtent) -> bool {
+        if !extent.pannable() {
             self.pan_glide.stop();
         }
         let motion = if swipe == LogicalVec::ZERO {
@@ -608,8 +610,8 @@ impl View2d {
         };
         if motion != LogicalVec::ZERO {
             let want = self.pan - motion;
-            self.pan.x = want.x.clamp(0.0, layout.overflow.x);
-            self.pan.y = want.y.clamp(0.0, layout.overflow.y);
+            self.pan.x = want.x.clamp(0.0, extent.overflow.x);
+            self.pan.y = want.y.clamp(0.0, extent.overflow.y);
             self.pan_glide.stop_axes(
                 (self.pan.x - want.x).abs() > 0.01,
                 (self.pan.y - want.y).abs() > 0.01,

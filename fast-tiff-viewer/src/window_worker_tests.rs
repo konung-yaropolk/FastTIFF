@@ -12,12 +12,12 @@
 //!   moment longer. When it can, the new one is built in the background and the
 //!   old one keeps being drawn, scaled — soft for a moment rather than dead for
 //!   a moment.
-//! - [`fast_tiff_viewer::window::WindowWorker`] does that building, off-thread,
+//! - [`crate::window::WindowWorker`] does that building, off-thread,
 //!   and must produce exactly what the inline path would have produced. A
 //!   background worker that quietly returned something different would be far
 //!   worse than the stall it replaces.
 
-use fast_tiff_viewer::roi::{self, Plan, Roi};
+use crate::roi::{self, Plan, Roi};
 
 // A view of the NASA Andromeda mosaic — the frame this machinery exists for.
 const W: u32 = 40_000;
@@ -336,12 +336,12 @@ fn an_overview_that_does_not_cover_the_view_is_not_offered() {
 #[cfg(all(feature = "threads", feature = "mmap"))]
 mod worker {
     use super::{roi, Roi};
+    use crate::bandcache::BandCache;
+    use crate::prefetch::{ChannelJob, Decoded};
+    use crate::window::{self, Built, WindowWorker};
+    use crate::worker::CancelToken;
+    use crate::Revision;
     use fast_tiff_lib::TiffStack;
-    use fast_tiff_viewer::bandcache::BandCache;
-    use fast_tiff_viewer::prefetch::{ChannelJob, Decoded};
-    use fast_tiff_viewer::window::{self, Built, WindowWorker};
-    use fast_tiff_viewer::worker::CancelToken;
-    use fast_tiff_viewer::Revision;
     use scivis_render::ChannelKind;
     use std::path::PathBuf;
 
@@ -592,7 +592,7 @@ mod worker {
     /// Two channels by three timepoints of 64 x 64 u16, plane `i` filled with
     /// `i * 1000 + 7`, so which IFD a window came from can be read off any of
     /// its samples.
-    fn two_channel_movie() -> fast_tiff_viewer::Document {
+    fn two_channel_movie() -> crate::Document {
         use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
         let opts = WriterOptions::new(64, 64, SampleType::U16).metadata(StackMetaWrite::new(2, 1));
         let mut w = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
@@ -600,7 +600,7 @@ mod worker {
             w.write_frame_u16(&vec![plane * 1000 + 7; 64 * 64]).unwrap();
         }
         let bytes = w.finish().unwrap().into_inner();
-        fast_tiff_viewer::Document::from_bytes(bytes, "movie.tif".into(), false).unwrap()
+        crate::Document::from_bytes(bytes, "movie.tif".into(), false).unwrap()
     }
 
     fn first_sample(plane: &Decoded) -> u16 {
@@ -624,7 +624,7 @@ mod worker {
     /// outside the worker can reach its cache to clear it.
     #[test]
     fn a_window_from_before_a_dimension_override_is_not_taken_after_it() {
-        use fast_tiff_viewer::prefetch::build_jobs;
+        use crate::prefetch::build_jobs;
         let mut stack = two_channel_movie();
         let worker =
             WindowWorker::new(std::sync::Arc::clone(&stack.tiff)).expect("worker should start");
@@ -632,7 +632,7 @@ mod worker {
         let before = stack.display.revision();
         worker.request(1, whole, before, build_jobs(&stack, 1, &[true, true]));
 
-        fast_tiff_viewer::dimensions::apply_dimension_override(&mut stack, 3, 1, 2);
+        crate::dimensions::apply_dimension_override(&mut stack, 3, 1, 2);
         let after = stack.display.revision();
         assert_ne!(after.layout, before.layout, "an override moves the layout");
 

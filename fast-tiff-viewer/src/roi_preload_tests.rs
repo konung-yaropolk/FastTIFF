@@ -7,9 +7,9 @@
 //! continuous scheme: whatever is planned must fit the device and must cover
 //! what is on screen.
 
-use fast_tiff_viewer::roi::LargeImageMode::{Preload, Tiled};
-use fast_tiff_viewer::roi::{overview_stride, plan, Budget, Plan, MAX_PRELOAD_BYTES};
-use fast_tiff_viewer::PhysicalPx;
+use crate::roi::LargeImageMode::{Preload, Tiled};
+use crate::roi::{overview_stride, plan, Budget, Plan, MAX_PRELOAD_BYTES};
+use crate::PhysicalPx;
 
 /// The file this feature exists for, and a common device limit.
 const ANDROMEDA: (u32, u32) = (40_000, 12_788);

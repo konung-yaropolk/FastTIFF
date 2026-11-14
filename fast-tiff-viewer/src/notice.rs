@@ -63,7 +63,7 @@ pub enum Notice {
     Volume(VolumeNote),
     /// The document's shape. Set when a document is installed or its axes
     /// are reassigned, for as long as that interpretation stands; shown only
-    /// in the views it applies to ([`ShapeNote::applies_to`]).
+    /// in the views it applies to.
     Shape(ShapeNote),
 }
 
@@ -84,7 +84,7 @@ impl Notice {
     /// 2D and stay there. The frozen-Z note is the other way round (see
     /// [`ShapeNote::applies_to`]). The rest are about the document, or the
     /// last attempt to open one, whichever view is on screen.
-    pub fn applies_to(&self, mode: ViewMode) -> bool {
+    pub(crate) fn applies_to(&self, mode: ViewMode) -> bool {
         match self {
             Notice::Shape(s) => s.applies_to(mode),
             Notice::Volume(_) => mode == ViewMode::Volume,
@@ -136,8 +136,8 @@ impl fmt::Display for VolumeNote {
     }
 }
 
-/// What is worth knowing about a document's shape (see
-/// [`crate::dimensions::shape_note`]).
+/// What is worth knowing about a document's shape: why the interpretation
+/// shown is not simply the file's, or not all of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShapeNote {
     /// The metadata describes `declared` planes but the file holds
@@ -159,7 +159,7 @@ impl ShapeNote {
     /// Whether this is worth showing over `mode`'s view. The frozen-Z note
     /// says that 2D shows only the first Z-slice, and the 3D view uses every
     /// one (as the volume's depth): over the volume it would be wrong.
-    pub fn applies_to(self, mode: ViewMode) -> bool {
+    pub(crate) fn applies_to(self, mode: ViewMode) -> bool {
         !(matches!(self, ShapeNote::FrozenZ(_)) && mode == ViewMode::Volume)
     }
 }

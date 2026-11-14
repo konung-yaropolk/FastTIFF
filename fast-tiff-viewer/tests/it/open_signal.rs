@@ -62,7 +62,7 @@ fn an_open_signals_exactly_once() {
         "the landing should be reported once and only once"
     );
     assert!(
-        viewer.document.is_some(),
+        viewer.document().is_some(),
         "the stack should be installed by then"
     );
 }
@@ -77,7 +77,7 @@ fn a_failed_open_still_signals() {
         LoadSource::Bytes(b"not a tiff".to_vec().into(), "bad.tif".into()),
     );
     assert_eq!(signals, 1);
-    assert!(viewer.document.is_none());
+    assert!(viewer.document().is_none());
     assert!(
         viewer
             .notices()
@@ -109,5 +109,5 @@ fn opening_a_second_file_signals_again() {
         LoadSource::Bytes(tiff_bytes(5, 8, 8).into(), "b.tif".into()),
     );
     assert_eq!(signals, 1, "the second open must report its landing too");
-    assert_eq!(viewer.document.as_ref().map(|s| s.frame_count()), Some(5));
+    assert_eq!(viewer.document().map(|s| s.frame_count()), Some(5));
 }

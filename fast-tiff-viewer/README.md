@@ -53,8 +53,8 @@ widgets and input; it borrows everything else from here.
 ## Usage
 
 ```rust,ignore
-use fast_tiff_viewer::view2d::{ImagePx, LogicalRect, LogicalVec};
-use fast_tiff_viewer::{FrameInputs, View2d, Viewer};
+use fast_tiff_viewer::view2d::{ImagePx, LogicalRect, LogicalVec, View2d};
+use fast_tiff_viewer::{FrameInputs, Viewer};
 
 let mut viewer = Viewer::new();
 viewer.open(path)?;
@@ -62,7 +62,7 @@ let mut view = View2d::default();
 let mut inputs = FrameInputs::default();
 
 // each frame:
-if viewer.playback.playing {
+if viewer.playback.playing() {
     viewer.tick_playback(now_seconds);
 }
 // Your input, through `view` (a wheel notch: `view.step_zoom`, a drag:
@@ -73,9 +73,9 @@ if viewer.playback.playing {
 view.advance_zoom_glide(dt);
 inputs.moving = view.is_moving();
 view.set_panel(panel);
-let layout = view.measure(ImagePx::new(width, height), room);
-view.clamp_pan(&layout);
-let placed = view.place(&layout);
+let extent = view.measure(ImagePx::new(width, height), room);
+view.clamp_pan(&extent);
+let placed = view.place(&extent);
 inputs.image = placed.inputs(pixels_per_point);
 
 let outcome = viewer.sync(&mut renderer, &inputs);
@@ -85,6 +85,17 @@ for notice in viewer.notices() {
     // decode, a 3D volume that did not fit, a note about the file's shape
 }
 ```
+
+What the user changes goes through operations, not fields: the frame on
+screen is `set_frame` / `step_frame` on `viewer.document_mut()`, a channel's
+contrast window and switch are `set_window` / `set_enabled` on its
+`display_mut()`, and the axes and LUTs are `Viewer::set_dimension_order`,
+`set_pseudocolor` and `set_gray_lut`. Those two are handles
+(`DocumentMut`, `DisplayMut`) that lend these operations and nothing that
+could replace the document or its display; a document arrives only through an
+open. What a display channel is — an IFD's
+intensities, an RGB or CMYK sample plane, palette indices — is
+`Display::layout()`, a `ChannelLayout`.
 
 `Viewer` holds no window, panel, zoom or pointer state — those are the
 frontend's, and what they come to each frame is handed to `sync` as

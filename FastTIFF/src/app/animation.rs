@@ -719,7 +719,7 @@ impl super::ViewerApp {
 
     /// Carry out an animation the plugin at `plugin` (called `name`) returned.
     pub(super) fn start_animation(&mut self, plugin: usize, name: &str, animation: Animation) {
-        let Some(stack) = self.core.document.as_ref() else {
+        let Some(stack) = self.core.document() else {
             self.say("Open an image first".into());
             return;
         };
@@ -742,7 +742,7 @@ impl super::ViewerApp {
             AnimationOutput::Play => None,
             AnimationOutput::SaveTiff { path } => {
                 let stem = stack
-                    .path
+                    .path()
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "stack".to_string());
@@ -775,8 +775,7 @@ impl super::ViewerApp {
         // time axis of its own. A recording stops it either way — one turn of
         // a volume that is changing underneath it is not one turn.
         if saving || !self.core.is_4d() {
-            self.core.playback.playing = false;
-            self.core.playback.last_time = None;
+            self.core.playback.stop();
         }
         let fps = animation.fps;
         let sink = recording.map(|dest| {
@@ -860,7 +859,7 @@ impl super::ViewerApp {
             && !self.core.volume_building()
             && self.volume_ui.rect.is_some();
         let ppp = ctx.pixels_per_point();
-        let movie = match (self.volume_ui.rect, self.core.document.as_ref()) {
+        let movie = match (self.volume_ui.rect, self.core.document()) {
             (Some(rect), Some(stack)) => {
                 let (w, h) = stack.dimensions().unwrap_or((1, 1));
                 // At window resolution the movie is the view's own size,

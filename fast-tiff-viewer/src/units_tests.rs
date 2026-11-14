@@ -157,7 +157,7 @@ fn the_volume_window_is_normalized_as_the_voxels_are() {
 fn imagej_ranges_are_offset_for_signed_16_bit_only() {
     let signed16 = SampleUnits::display(DisplayMap::Signed16);
     assert_eq!(
-        signed16.from_imagej((32_668.0, 33_268.0)),
+        signed16.window_from_imagej((32_668.0, 33_268.0)),
         Window::new(-100.0, 500.0)
     );
     assert_eq!(
@@ -167,7 +167,7 @@ fn imagej_ranges_are_offset_for_signed_16_bit_only() {
 
     for (what, units) in every_unit() {
         let declared = (-12.0, 200.0);
-        let window = units.from_imagej(declared);
+        let window = units.window_from_imagej(declared);
         assert_eq!(units.to_imagej(window), declared, "{what}: round trip");
         if units != signed16 {
             assert_eq!(window, Window::new(-12.0, 200.0), "{what}: no offset");

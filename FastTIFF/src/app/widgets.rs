@@ -5,7 +5,7 @@
 use super::tint_color;
 use egui::{Color32, RichText};
 use fast_tiff_viewer::channels::{channel_tint, shift_sync, ui_tint};
-use fast_tiff_viewer::{Document, Window};
+use fast_tiff_viewer::{DocumentMut, Window};
 
 /// Formats a sample value — in the file's own units, which is what every
 /// window and bound the viewer holds is in — for display, applying the stack's
@@ -55,7 +55,7 @@ const HANDLE_RADIUS: f32 = 6.0;
 
 /// A two-handle horizontal range slider editing `(min, max)` within the
 /// inclusive track `[lo, hi]` (all in the file's own sample units, as the
-/// viewer holds every window — see `fast_tiff_viewer::units`). The handles can't
+/// viewer holds every window — see `fast_tiff_viewer::SampleUnits`). The handles can't
 /// cross. `salt` disambiguates the interaction ids when several sliders share
 /// a parent (e.g. one per channel). `tint`, when set, colors the selected span
 /// with the channel's display color (composite/RGB or pseudocolor); otherwise
@@ -363,7 +363,7 @@ fn contrast_row(
 /// keeps them that way.
 ///
 /// The widgets edit copies of the settings, which are written back through
-/// `Display::set_enabled` and `Display::set_window`: a checkbox is a change of
+/// `DisplayMut::set_enabled` and `DisplayMut::set_window`: a checkbox is a change of
 /// which channels are on, and only the display's own setter records it as one.
 ///
 /// `layout` picks how each channel's three pieces are arranged — see
@@ -382,36 +382,41 @@ fn contrast_row(
 /// a palette (indexed) stack has no contrast window at all.
 pub(super) fn contrast_controls(
     ui: &mut egui::Ui,
-    loaded: &mut Document,
+    loaded: &mut DocumentMut<'_>,
     layout: ContrastLayout,
     track: Option<Window>,
 ) -> Option<egui::Rangef> {
     let mut span: Option<egui::Rangef> = None;
-    let calibration = loaded.tiff.meta.calibration;
-    let rgb = loaded.display.rgb();
+    let calibration = loaded.tiff().meta.calibration;
+    let rgb = loaded.display().layout().shown_as_rgb();
     // A palette channel's window is a fixed index→LUT identity, so
     // there's nothing to adjust — its contrast slider is suppressed.
-    let palette = loaded.display.palette;
+    let has_contrast = loaded.display().layout().has_contrast();
     // Tint for the single-channel contrast slider: the low (dark) end
     // of its chosen color LUT (grayscale/black → None → the default
     // selection color).
-    let single_tint = (loaded.display.channel_count() == 1)
-        .then(|| tint_color(loaded.display.lut(0).and_then(ui_tint)))
+    let single_tint = (loaded.display().channel_count() == 1)
+        .then(|| tint_color(loaded.display().lut(0).and_then(ui_tint)))
         .flatten();
-    if loaded.display.channel_count() > 1 {
+    if loaded.display().channel_count() > 1 {
         ui.separator();
         // Hold Shift while dragging one channel's slider to move every
         // channel's window by the same amount. Snapshot the values
         // first so we can detect which one moved and by how much.
         let shift = ui.input(|i| i.modifiers.shift);
-        let before: Vec<Window> = loaded.display.settings().iter().map(|s| s.window).collect();
+        let before: Vec<Window> = loaded
+            .display()
+            .settings()
+            .iter()
+            .map(|s| s.window)
+            .collect();
         // What the rows below edit, written back once they have all drawn.
-        let mut rows = loaded.display.settings().to_vec();
+        let mut rows = loaded.display().settings().to_vec();
         // Per-channel slider tints from each channel's display LUT —
         // colored only for composite/RGB or pseudocolor stacks, `None`
         // (default color) for plain grayscale.
         let tints: Vec<Option<Color32>> = loaded
-            .tiff
+            .tiff()
             .meta
             .channel_display
             .iter()
@@ -458,16 +463,16 @@ pub(super) fn contrast_controls(
             shift_sync(&mut rows, &before);
         }
         for (c, row) in rows.iter().enumerate() {
-            loaded.display.set_enabled(c, row.enabled);
-            loaded.display.set_window(c, row.window);
+            loaded.display_mut().set_enabled(c, row.enabled);
+            loaded.display_mut().set_window(c, row.window);
         }
         ui.label(
             RichText::new("Hold Shift while dragging to adjust all channels together.")
                 .small()
                 .weak(),
         );
-    } else if !palette {
-        if let Some(&settings) = loaded.display.settings().first() {
+    } else if has_contrast {
+        if let Some(&settings) = loaded.display().settings().first() {
             ui.separator();
             // A caption rather than a checkbox: switching off the only channel
             // would just blank the image.
@@ -481,7 +486,7 @@ pub(super) fn contrast_controls(
                 calibration,
                 single_tint,
             ));
-            loaded.display.set_window(0, window);
+            loaded.display_mut().set_window(0, window);
         }
     }
     // No `else`: a palette (indexed) image shows no contrast row at

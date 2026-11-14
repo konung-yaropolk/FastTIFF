@@ -442,3 +442,42 @@ fn the_resolution_while_moving_is_the_users_choice() {
     // Nothing smaller than full, whatever is asked for.
     assert_eq!(moving(0).downscale_after(Some(0.0)), 1);
 }
+
+/// The isosurface's colour is taken where a channel's LUT is brightest
+/// (`scivis_render::brightest_lut_t`), not from its top entry, which is black
+/// for a contrast-stretched palette. That value has to reach the uniform the
+/// shader reads, channel by channel.
+#[test]
+fn volume_params_carry_the_albedo_per_channel() {
+    // A grey ramp that peaks at index 87 and is black past it, as a stretched
+    // palette's is (see the integration suite `palette_lut`).
+    let mut lut = [[0u8; 3]; 256];
+    for (i, entry) in lut.iter_mut().enumerate().take(88) {
+        let v = (i * 255 / 87) as u8;
+        *entry = [v, v, v];
+    }
+    let albedo = scivis_render::brightest_lut_t(&lut);
+    assert!(albedo < 1.0, "the ramp peaks before its top entry");
+
+    let cam = volume_camera(&Default::default(), [1.0, 1.0, 1.0], (16, 8, 4));
+    let ch = [VolumeChannel {
+        min: 0.0,
+        max: 1.0,
+        is_float: false,
+        enabled: true,
+        albedo_t: albedo,
+    }];
+    let params = build_volume_params(
+        &cam,
+        &ch,
+        1.0,
+        scivis_render::VolumeRender::Surface,
+        100.0,
+        0.1,
+        // Surface mode ignores the gain; 1.0 is "as composited".
+        1.0,
+    );
+    assert_eq!(params.albedo_t[0], albedo);
+    // Absent channels keep the top entry, which is what an unused slot wants.
+    assert_eq!(params.albedo_t[1], 1.0);
+}

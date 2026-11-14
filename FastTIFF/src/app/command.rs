@@ -352,7 +352,7 @@ impl super::ViewerApp {
             // `point_counter::counter_window`.
             UiCommand::UndoTool => self.tools.undo(),
             UiCommand::SetViewMode(mode) => self.set_view_mode(mode),
-            UiCommand::SetFps(fps) => self.core.playback.fps = fps,
+            UiCommand::SetFps(fps) => self.core.playback.set_fps(fps),
             UiCommand::SetDecodeMode(mode) => self.core.decode_mode = mode,
             UiCommand::SetLargeImageMode(mode) => self.core.large_image_mode = mode,
             UiCommand::ToggleWindow(id) => self.windows.toggle(id),
@@ -377,21 +377,15 @@ impl super::ViewerApp {
                 let height = at.bar_height.unwrap_or(self.panel.last_h);
                 self.panel.arm_grow(height);
             }
-            UiCommand::TogglePlay => {
-                self.core.playback.playing = !self.core.playback.playing;
-                // Start each play/pause from a clean clock, so the first tick
-                // after resuming doesn't jump by however long we were paused
-                // and the keeping-up estimate starts neutral.
-                // (`decode_parallel` stays latched across a pause — if this
-                // stack needed it, it still does.)
-                self.core.playback.restart();
-            }
+            // From a clean clock either way, so the first tick after resuming
+            // doesn't jump by however long it was paused (`Playback::toggle`).
+            UiCommand::TogglePlay => self.core.playback.toggle(),
             UiCommand::SetPseudocolor(on) => self.core.set_pseudocolor(on),
             UiCommand::SetGrayLut(sel) => self.core.set_gray_lut(sel),
             UiCommand::SetDimensionOrder(c, z, f) => self.set_dimension_order(c, z, f),
             UiCommand::StepFrames(steps) => {
-                if let Some(loaded) = &mut self.core.document {
-                    loaded.set_frame(loaded.frame().saturating_add_signed(steps as isize));
+                if let Some(mut loaded) = self.core.document_mut() {
+                    loaded.step_frame(steps as isize);
                 }
             }
         }
@@ -406,12 +400,10 @@ impl super::ViewerApp {
         if mode == ViewMode::Volume {
             let is_4d = self
                 .core
-                .document
-                .as_ref()
-                .is_some_and(|l| l.display.dims().slices > 1);
+                .document()
+                .is_some_and(|l| l.display().dims().slices > 1);
             if !is_4d {
-                self.core.playback.playing = false;
-                self.core.playback.last_time = None;
+                self.core.playback.stop();
             }
         }
     }
@@ -426,12 +418,11 @@ impl super::ViewerApp {
         // while a tool is in use, since without one nothing asks.
         let before = self
             .core
-            .document
-            .as_ref()
+            .document()
             .filter(|_| !self.tools.is_empty())
             .map(super::canvas_tool::FrameStarts::of);
         self.core.set_dimension_order(c, z, f);
-        if let (Some(before), Some(stack)) = (before, self.core.document.as_ref()) {
+        if let (Some(before), Some(stack)) = (before, self.core.document()) {
             self.tools.axes_changed(&before, stack);
         }
     }

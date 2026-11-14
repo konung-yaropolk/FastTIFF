@@ -37,8 +37,8 @@ impl AppWindow for HistogramWindow {
             over_texture_limit: host.core.over_texture_limit(),
             window: host.core.resident_window(),
         };
-        match host.core.document.as_mut() {
-            Some(loaded) => histogram_window(ctx, open, loaded, resident, &mut self.log),
+        match host.core.document_mut() {
+            Some(mut loaded) => histogram_window(ctx, open, &mut loaded, resident, &mut self.log),
             None => *open = false,
         }
     }
@@ -111,7 +111,7 @@ struct Resident {
 fn histogram_window(
     ctx: &egui::Context,
     open: &mut bool,
-    loaded: &mut Document,
+    loaded: &mut DocumentMut<'_>,
     resident: Resident,
     log_scale: &mut bool,
 ) {
@@ -132,7 +132,7 @@ fn histogram_window(
     let zoomed_out = resident
         .window
         .zip(loaded.dimensions())
-        .is_some_and(|(roi, (w, h))| fast_tiff_viewer::window::spans_whole_frame(&roi, w, h));
+        .is_some_and(|(roi, (w, h))| roi.spans_whole_frame(w, h));
     let empty_note = if !resident.over_texture_limit {
         "No frame to histogram"
     } else if zoomed_out {
@@ -154,7 +154,7 @@ fn histogram_window(
             text_h,
         )
     };
-    let rows = loaded.display.settings().len().max(1) as f32 * 2.0 + 2.0;
+    let rows = loaded.display().settings().len().max(1) as f32 * 2.0 + 2.0;
     let spec = dialog::Dialog {
         id: WindowId::HISTOGRAM.0,
         title: "Histogram",
@@ -231,10 +231,10 @@ fn histogram_window(
                     // Fitted to them while it edits the document that holds
                     // them, so it is handed a copy: on a click, not a repaint.
                     let hists = loaded.histograms().shown(loaded).to_vec();
-                    fast_tiff_viewer::channels::auto_contrast(loaded, &hists);
+                    loaded.display_mut().auto_contrast(&hists);
                 }
                 if ui.button("Reset").on_hover_text(RESET_HINT).clicked() {
-                    fast_tiff_viewer::channels::reset_contrast(loaded);
+                    loaded.display_mut().reset_contrast();
                 }
             }
         });
@@ -246,7 +246,7 @@ fn histogram_window(
         let span = track.unwrap_or_else(|| plot.x_range());
         let area = egui::Rect::from_x_y_ranges(span, plot.y_range());
         let hists = loaded.histograms().shown(loaded);
-        draw_plot(ui, area, hists, &loaded.display, *log_scale, empty_note);
+        draw_plot(ui, area, hists, loaded.display(), *log_scale, empty_note);
     });
 }
 

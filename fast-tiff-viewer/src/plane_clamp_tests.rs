@@ -17,9 +17,9 @@
 //! `planes_addressed` and `build_jobs`: they are two statements of the same
 //! arithmetic, and the clamp is worth nothing if they drift apart.
 
-use fast_tiff_viewer::dimensions::{clamp_to_available, planes_addressed, shape_note};
-use fast_tiff_viewer::Dims;
-use fast_tiff_viewer::ShapeNote;
+use crate::dimensions::{clamp_to_available, planes_addressed, shape_note};
+use crate::Dims;
+use crate::ShapeNote;
 
 fn dims(channels: usize, slices: usize, frames: usize) -> Dims {
     Dims {

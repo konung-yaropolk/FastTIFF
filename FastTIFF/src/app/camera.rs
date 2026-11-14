@@ -69,7 +69,7 @@ impl ViewerApp {
         let (move_speed, scroll_speed) = (prefs.move_speed, prefs.scroll_speed);
         // The box an orbit re-pivots on and the wheel flies towards: the one
         // the shader draws (a cube until there is a stack to draw).
-        let box_he = self.core.document.as_ref().map_or([0.5; 3], |loaded| {
+        let box_he = self.core.document().map_or([0.5; 3], |loaded| {
             let (w, h) = loaded.dimensions().unwrap_or((1, 1));
             self.core.volume.box_he((w, h, loaded.volume_depth()))
         });

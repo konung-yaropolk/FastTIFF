@@ -136,7 +136,7 @@ fn core_with_a_volume() -> Viewer {
     }
     let bytes = w.finish().unwrap().into_inner();
     let mut core = Viewer::new();
-    core.document = Some(Document::from_bytes(bytes, "two.tif".into(), false).unwrap());
+    core.load_bytes(bytes, "two.tif".into()).unwrap();
     assert!(core.can_show_volume());
     core
 }

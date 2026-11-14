@@ -13,9 +13,8 @@
 
 use super::screen::{Egui as _, Logical as _};
 use super::CanvasView;
-use fast_tiff_viewer::view2d::{
-    fit_zoom, opening_zoom, ImagePx, LogicalPt, LogicalVec, View2d, ZoomLadder,
-};
+use fast_tiff_viewer::testing::ZoomLadder;
+use fast_tiff_viewer::view2d::{fit_zoom, opening_zoom, ImagePx, LogicalPt, LogicalVec, View2d};
 use fast_tiff_viewer::ImageInputs;
 
 /// The code as it was in this app before the move — in `app.rs`, the

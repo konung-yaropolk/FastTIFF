@@ -8,7 +8,8 @@
 //! thrown away, a replacement for a document that has since been closed goes
 //! to a window of its own. Only how a window is opened, and how a file is
 //! saved, differ — a process or a browser tab, a path or a download — and that
-//! last step is the [`Deliver`] the app supplies.
+//! last step is the [`Deliver`](crate::plugins::deliver::Deliver) the app
+//! supplies.
 //!
 //! This lived in the app, as three copies of the same encode-and-hand-over,
 //! one per kind of outcome, with the platform differences inside each. It is

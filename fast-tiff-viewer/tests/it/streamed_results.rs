@@ -261,7 +261,7 @@ impl HostContext for StopsOnceBegun {
 /// to open or save.
 struct NoWindows;
 
-impl fast_tiff_viewer::plugins::Deliver for NoWindows {
+impl fast_tiff_viewer::plugins::deliver::Deliver for NoWindows {
     fn phase(&mut self, _label: &str) {}
     fn report(&mut self, _fraction: f32) -> bool {
         true
@@ -272,7 +272,7 @@ impl fast_tiff_viewer::plugins::Deliver for NoWindows {
     fn open_in_new_window(
         &mut self,
         _result: fast_tiff_viewer::plugins::ResultTiff,
-    ) -> fast_tiff_viewer::plugins::Handover {
+    ) -> fast_tiff_viewer::plugins::deliver::Handover {
         panic!("a stopped run's result was opened")
     }
     fn save(
@@ -324,7 +324,10 @@ fn a_run_stopped_after_its_result_began_leaves_no_file() {
         let product = fast_tiff_viewer::plugins::deliver::finish(out, &mut h.inner, &mut NoWindows)
             .expect("a stop is not a failure");
         assert!(
-            matches!(product, fast_tiff_viewer::plugins::Product::Cancelled),
+            matches!(
+                product,
+                fast_tiff_viewer::plugins::deliver::Product::Cancelled
+            ),
             "{id}: {product:?}"
         );
         assert!(

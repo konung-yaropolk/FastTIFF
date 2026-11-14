@@ -10,7 +10,7 @@
 //! Everything here is about the two ways that goes wrong.
 //!
 //! **It is silently never kept.** The retention test has to be
-//! [`spans_whole_frame`](fast_tiff_viewer::window::spans_whole_frame), not
+//! [`spans_whole_frame`](crate::roi::Roi::spans_whole_frame), not
 //! `covers_whole_frame` — the latter also demands `stride == 1`, which a coarse
 //! overview never has. Get that wrong and nothing is ever retained, the stall
 //! stays exactly as it was, and every other test in the suite still passes.
@@ -22,16 +22,14 @@
 //! is a buffer that does not fit the texture, which is a validation failure that
 //! takes the process with it rather than merely looking wrong. So the key has to
 //! carry all of it: the frame index, and the display
-//! [`Revision`](fast_tiff_viewer::Revision) — whose `layout` moves with the
+//! [`Revision`](crate::Revision) — whose `layout` moves with the
 //! channel mapping and the formats, and whose `enabled` moves with the channel
 //! set. Each part is pinned separately below.
 
-use fast_tiff_viewer::prefetch::Decoded;
-use fast_tiff_viewer::roi::Roi;
-use fast_tiff_viewer::window::{
-    covers_whole_frame, spans_whole_frame, Built, Overview, OVERVIEW_MAX_BYTES,
-};
-use fast_tiff_viewer::Revision;
+use crate::prefetch::Decoded;
+use crate::roi::Roi;
+use crate::window::{Built, Overview, OVERVIEW_MAX_BYTES};
+use crate::Revision;
 
 // The mosaic this exists for.
 const W: u32 = 40_000;
@@ -74,9 +72,9 @@ fn capture(r: Roi, bytes: usize) -> Option<Overview> {
 #[test]
 fn a_coarse_whole_frame_window_is_retained() {
     let coarse = roi(0, 0, W, H, 16);
-    assert!(spans_whole_frame(&coarse, W, H), "it does span the frame");
+    assert!(coarse.spans_whole_frame(W, H), "it does span the frame");
     assert!(
-        !covers_whole_frame(&coarse, W, H),
+        !coarse.covers_whole_frame(W, H),
         "...but not at full resolution, which is why the two predicates are different"
     );
     assert!(
@@ -96,7 +94,7 @@ fn a_window_short_of_the_frame_is_not_retained() {
         roi(0, 100, W, H, 16),   // offset, so it misses the top
     ] {
         assert!(
-            !spans_whole_frame(&short, W, H),
+            !short.spans_whole_frame(W, H),
             "{short:?} does not span the frame"
         );
         assert!(

@@ -176,8 +176,7 @@ impl Viewer {
         // never fires here because nobody plays back a gigapixel stack; an
         // explicit Serial is still honoured, since that is a deliberate choice
         // about CPU use.
-        let windowed =
-            target.is_some_and(|r| !window::covers_whole_frame(&r.show, frame_w, frame_h));
+        let windowed = target.is_some_and(|r| !r.show.covers_whole_frame(frame_w, frame_h));
         let parallel = self.decode_mode.parallel(self.decode_parallel)
             || (windowed && self.decode_mode == DecodeMode::Auto);
         fast_tiff_lib::set_thread_parallel_decode(Some(parallel));
@@ -421,7 +420,7 @@ fn sync_movie(
     // reinterpretation of the axes every channel may read another IFD. A
     // window smaller than the frame also has to be re-cut when the view
     // leaves it. Both are [`Residency::needs_upload`].
-    let partial = !window::covers_whole_frame(&roi, fw, fh);
+    let partial = !roi.covers_whole_frame(fw, fh);
     if residency.needs_upload(&roi) {
         let jobs = build_jobs(loaded, frame_index, enabled);
 
@@ -748,7 +747,7 @@ fn capture_overview(
     mode: roi::LargeImageMode,
     bin: bool,
 ) {
-    if bin && built.frame_index == loaded.frame() && window::spans_whole_frame(&built.roi, fw, fh) {
+    if bin && built.frame_index == loaded.frame() && built.roi.spans_whole_frame(fw, fh) {
         histogram::bin_whole_view(loaded, &built);
     }
     let budget = window::overview_budget(mode);
@@ -778,7 +777,7 @@ fn upload(
     roi: &Roi,
     data: Samples<'_>,
 ) {
-    if window::covers_whole_frame(roi, width, height) {
+    if roi.covers_whole_frame(width, height) {
         match data {
             Samples::U8(v) => renderer.upload_channel_u8(channel, width, height, v),
             Samples::U16(v) => renderer.upload_channel_u16(channel, width, height, v),
@@ -971,7 +970,7 @@ fn sync_volume(
 /// channels/frames swap is honored, `time` is the 4D timepoint to build,
 /// `budget` the bytes it may take on the GPU, and the detail worth keeping is
 /// bounded by the screen `inputs` gives.
-pub fn plan_volume(
+pub(crate) fn plan_volume(
     loaded: &Document,
     renderer: &Renderer,
     time: usize,
@@ -991,7 +990,7 @@ pub fn plan_volume(
     VolumePlan {
         format: renderer.volume_texel_format(scivis_render::pack::common_kind(volume_kinds)),
         units: loaded.display.settings().iter().map(|s| s.units).collect(),
-        rgb: loaded.display.rgb(),
+        rgb: loaded.display.layout().shown_as_rgb(),
         channels: dims.channels,
         slices: dims.slices,
         frames: dims.frames,
@@ -1006,14 +1005,14 @@ pub fn plan_volume(
 /// The share of the GPU memory the renderer reports free that a volume may
 /// take; the rest is left for the frame textures, the window and everyone
 /// else on the GPU.
-pub const VOLUME_SHARE_OF_FREE: f64 = 0.5;
+pub(crate) const VOLUME_SHARE_OF_FREE: f64 = 0.5;
 
 /// The bytes a volume may take on the GPU: half of what the renderer reports
 /// free (the current volume counted as free, since it is replaced), or
 /// [`crate::volume::DEFAULT_VOLUME_BUDGET`] when it cannot tell; within
 /// [`crate::volume::MIN_VOLUME_BUDGET`]..=[`crate::volume::MAX_VOLUME_BUDGET`],
 /// and no more than `cap` (set after an upload ran out of memory).
-pub fn volume_budget(renderer: &Renderer, cap: Option<usize>) -> usize {
+pub(crate) fn volume_budget(renderer: &Renderer, cap: Option<usize>) -> usize {
     let base = renderer
         .volume_memory_available()
         .map(|free| (free as f64 * VOLUME_SHARE_OF_FREE) as usize)
@@ -1072,7 +1071,7 @@ fn out_of_memory(
 /// Whether a prefetched result still matches the wanted jobs (same channels, in
 /// order, with matching kind + dimensions). The revision/frame check happens
 /// first; this guards against any residual layout mismatch before upload.
-pub fn prefetch_matches(result: &PrefetchResult, jobs: &[ChannelJob]) -> bool {
+pub(crate) fn prefetch_matches(result: &PrefetchResult, jobs: &[ChannelJob]) -> bool {
     result.channels.len() == jobs.len()
         && result.channels.iter().zip(jobs).all(|(ch, job)| {
             ch.channel == job.channel

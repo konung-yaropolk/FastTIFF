@@ -32,7 +32,7 @@ impl ViewerApp {
                 // image, the button *will* work, and the only thing missing is
                 // the few seconds a write or an import is taking. That is a
                 // promise worth making, so the disabled hover text names it.
-                if self.core.document.is_some() {
+                if self.core.document().is_some() {
                     // Named for what each platform actually does: see
                     // `Target::save_label`.
                     let save_label = TARGET.save_label("as TIFF");
@@ -70,7 +70,7 @@ impl ViewerApp {
                 }
                 {
                     let available = self.plugins.as_ref().filter(|_| self.job.is_none());
-                    let has_stack = self.core.document.is_some();
+                    let has_stack = self.core.document().is_some();
                     let folder = TARGET.has_plugin_folder();
                     match plugins_ui::plugins_menu(ui, available, has_stack, folder) {
                         plugins_ui::MenuAction::Run(i) => cmds.push(UiCommand::StartPlugin(i)),
@@ -122,7 +122,7 @@ impl ViewerApp {
                         cmds.push(UiCommand::ToggleWindow(WindowId::RENDER_SETTINGS));
                     }
                 }
-                if self.core.document.is_none() {
+                if self.core.document().is_none() {
                     // Nothing open yet: show the version + active render backend
                     // in the space the file info will later occupy.
                     ui.separator();
@@ -132,11 +132,11 @@ impl ViewerApp {
                         render::BACKEND
                     )));
                 }
-                if let Some(loaded) = &self.core.document {
-                    let meta = &loaded.tiff.meta;
+                if let Some(loaded) = self.core.document() {
+                    let meta = &loaded.tiff().meta;
                     // What the viewer is actually showing, which is not the
                     // file's raw claim whenever an axis was reclassified.
-                    let dims = loaded.display.dims();
+                    let dims = loaded.display().dims();
                     // Reflect a toggle click made earlier in this same toolbar
                     // (the 2D/3D buttons run before this), so the layout updates
                     // on the click frame rather than one frame later.
@@ -163,31 +163,33 @@ impl ViewerApp {
                             .on_hover_text("Zoom (Ctrl+scroll to change)");
                     }
                     ui.separator();
-                    let channels_desc = if loaded.display.cmyk() {
-                        // Say what was read *and* what is shown: the file holds
-                        // four ink plates, the viewer shows three converted
-                        // components, and a printing user will want to know the
-                        // K plate is folded in rather than dropped.
-                        //
-                        // ASCII arrow on purpose: the bundled font has
-                        // no U+2192, so a real arrow renders as a tofu
-                        // box. The multiplication sign already on this
-                        // status line IS in the font, which makes that
-                        // gap easy to assume away.
-                        "CMYK->RGB".to_string()
-                    } else if loaded.display.rgb() {
-                        "RGB".to_string()
-                    } else {
-                        format!("{} channel(s)", dims.channels)
+                    let channels_desc = match loaded.display().layout() {
+                        ChannelLayout::Cmyk => {
+                            // Say what was read *and* what is shown: the file holds
+                            // four ink plates, the viewer shows three converted
+                            // components, and a printing user will want to know the
+                            // K plate is folded in rather than dropped.
+                            //
+                            // ASCII arrow on purpose: the bundled font has
+                            // no U+2192, so a real arrow renders as a tofu
+                            // box. The multiplication sign already on this
+                            // status line IS in the font, which makes that
+                            // gap easy to assume away.
+                            "CMYK->RGB".to_string()
+                        }
+                        ChannelLayout::Rgb => "RGB".to_string(),
+                        ChannelLayout::Intensity | ChannelLayout::Palette => {
+                            format!("{} channel(s)", dims.channels)
+                        }
                     };
                     let bits = loaded
-                        .tiff
+                        .tiff()
                         .frames
                         .first()
                         .map(|f| f.bits_per_sample)
                         .unwrap_or(0);
                     let (px_w, px_h) = loaded
-                        .tiff
+                        .tiff()
                         .frames
                         .first()
                         .map_or((0, 0), |f| (f.width, f.height));

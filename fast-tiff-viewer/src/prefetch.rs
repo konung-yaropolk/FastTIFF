@@ -40,7 +40,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 /// One channel's decoded pixels, in the format its GPU texture expects.
-pub enum Decoded {
+pub(crate) enum Decoded {
     U8(Vec<u8>),
     U16(Vec<u16>),
     F32(Vec<f32>),
@@ -51,7 +51,7 @@ impl Decoded {
     /// to upload. Not the sample *count*: an `F32` plane is four times the
     /// bytes of a `U8` plane of the same length, and anything budgeting memory
     /// against a count under-counts it fourfold.
-    pub fn bytes(&self) -> usize {
+    pub(crate) fn bytes(&self) -> usize {
         match self {
             Decoded::U8(v) => v.len(),
             Decoded::U16(v) => v.len() * 2,
@@ -60,7 +60,7 @@ impl Decoded {
     }
 
     /// The samples, borrowed.
-    pub fn view(&self) -> Samples<'_> {
+    pub(crate) fn view(&self) -> Samples<'_> {
         match self {
             Decoded::U8(v) => Samples::U8(v),
             Decoded::U16(v) => Samples::U16(v),
@@ -72,7 +72,7 @@ impl Decoded {
 /// One channel's pixels, borrowed: what an upload, a cut or a histogram reads,
 /// whoever owns them — a [`Decoded`] plane, or the file's own mapping.
 #[derive(Clone, Copy)]
-pub enum Samples<'a> {
+pub(crate) enum Samples<'a> {
     U8(&'a [u8]),
     U16(&'a [u16]),
     F32(&'a [f32]),
@@ -89,7 +89,7 @@ pub enum Samples<'a> {
 /// two thousand fresh pages to fault in. Only data that has to outlive the
 /// frame — a prefetched result, a cache entry — is made owned
 /// ([`into_owned`](Self::into_owned)).
-pub enum DecodedRef<'a> {
+pub(crate) enum DecodedRef<'a> {
     U8(Cow<'a, [u8]>),
     U16(Cow<'a, [u16]>),
     F32(Cow<'a, [f32]>),
@@ -97,7 +97,7 @@ pub enum DecodedRef<'a> {
 
 impl DecodedRef<'_> {
     /// The samples, borrowed.
-    pub fn view(&self) -> Samples<'_> {
+    pub(crate) fn view(&self) -> Samples<'_> {
         match self {
             DecodedRef::U8(v) => Samples::U8(v),
             DecodedRef::U16(v) => Samples::U16(v),
@@ -106,7 +106,7 @@ impl DecodedRef<'_> {
     }
 
     /// Owned pixels, copying out of the mapping only if they still borrow it.
-    pub fn into_owned(self) -> Decoded {
+    pub(crate) fn into_owned(self) -> Decoded {
         match self {
             DecodedRef::U8(v) => Decoded::U8(v.into_owned()),
             DecodedRef::U16(v) => Decoded::U16(v.into_owned()),
@@ -166,7 +166,7 @@ fn decode_channel<'a>(
 /// Decode all of one frame-request's channels into owned pixels, in `jobs`
 /// order: [`decode_jobs_borrowed`], for a result that outlives the frame —
 /// the prefetch worker's, a cache entry, a histogram source.
-pub fn decode_jobs(
+pub(crate) fn decode_jobs(
     mmap: &[u8],
     frames: &[FrameInfo],
     order: ByteOrder,
@@ -187,7 +187,7 @@ pub fn decode_jobs(
 /// single decompression pass (`read_planes_*`) instead of one full decode per
 /// channel — ~3x cheaper on compressed RGB. Non-RGB (and float) jobs decode
 /// per-channel as before.
-pub fn decode_jobs_borrowed<'a>(
+pub(crate) fn decode_jobs_borrowed<'a>(
     mmap: &'a [u8],
     frames: &[FrameInfo],
     order: ByteOrder,
@@ -267,7 +267,7 @@ fn take_plane<T>(planes: &mut [Vec<T>], plane: usize) -> anyhow::Result<Vec<T>> 
 /// How to decode one channel of a requested frame (the app computes these from
 /// the current metadata + per-channel settings and sends them to the worker).
 #[derive(Clone)]
-pub struct ChannelJob {
+pub(crate) struct ChannelJob {
     pub channel: usize, // display channel index (upload target)
     pub ifd_idx: usize, // which IFD/plane in the file
     pub plane: usize,   // sample plane within the IFD (RGB)
@@ -287,7 +287,11 @@ pub struct ChannelJob {
 /// touch a GPU. This function decides only *which* channels to fetch for the 2D
 /// view and at which timepoint; it asks for slice 0, because the 2D scrub axis
 /// is time and Z is a stride there.
-pub fn build_jobs(loaded: &Document, frame_index: usize, enabled: &[bool]) -> Vec<ChannelJob> {
+pub(crate) fn build_jobs(
+    loaded: &Document,
+    frame_index: usize,
+    enabled: &[bool],
+) -> Vec<ChannelJob> {
     let Some((width, height)) = loaded.dimensions() else {
         return Vec::new();
     };
@@ -296,7 +300,7 @@ pub fn build_jobs(loaded: &Document, frame_index: usize, enabled: &[bool]) -> Ve
     // `channels = 100` that is really a 100-frame movie — so the raw metadata
     // gives the wrong stride and addresses planes past the end of the chain.
     let dims = loaded.display.dims();
-    let rgb = loaded.display.rgb();
+    let rgb = loaded.display.layout().shown_as_rgb();
     loaded
         .display
         .settings()
@@ -339,7 +343,7 @@ pub fn build_jobs(loaded: &Document, frame_index: usize, enabled: &[bool]) -> Ve
 /// Borrowed where the decoder can (see [`DecodedRef`]): the snapshot composes
 /// a band at a time and lets each go, so a band of an uncompressed frame is
 /// read straight out of the mapping.
-pub fn decode_jobs_rows<'a>(
+pub(crate) fn decode_jobs_rows<'a>(
     mmap: &'a [u8],
     frames: &[FrameInfo],
     order: ByteOrder,
@@ -398,7 +402,7 @@ pub fn decode_jobs_rows<'a>(
 /// a strip spans the full width and cannot be split, so the columns are ignored
 /// and this behaves exactly like the row version. Callers get the region back
 /// and index against that rather than what they asked for.
-pub fn decode_jobs_region(
+pub(crate) fn decode_jobs_region(
     mmap: &[u8],
     frames: &[FrameInfo],
     order: ByteOrder,
@@ -457,7 +461,7 @@ pub fn decode_jobs_region(
 /// decoded row came from.
 ///
 /// Stripped frames only — a tiled frame narrows by cropping columns instead.
-pub fn decode_jobs_stepped(
+pub(crate) fn decode_jobs_stepped(
     mmap: &[u8],
     frames: &[FrameInfo],
     order: ByteOrder,
@@ -499,7 +503,7 @@ pub fn decode_jobs_stepped(
 }
 
 /// One decoded channel of a completed prefetch.
-pub struct DecodedChannel {
+pub(crate) struct DecodedChannel {
     pub channel: usize,
     pub width: u32,
     pub height: u32,
@@ -507,12 +511,16 @@ pub struct DecodedChannel {
     pub data: Decoded,
 }
 
-/// A fully-decoded frame produced by the worker, tagged so the app can confirm
-/// it still matches what's wanted before using it.
-pub struct PrefetchResult {
+/// A fully-decoded frame produced by the worker, tagged with what it was asked
+/// for. The viewer takes one by the worker's key
+/// ([`take_matching`](Prefetcher::take_matching)); the tags are what the tests
+/// check the worker answered with.
+pub(crate) struct PrefetchResult {
     /// The display revision the frame was asked for under: its channel layout
     /// and which channels were on.
+    #[cfg_attr(not(all(test, feature = "threads")), allow(dead_code))]
     pub revision: Revision,
+    #[cfg_attr(not(all(test, feature = "threads")), allow(dead_code))]
     pub frame_index: usize,
     pub channels: Vec<DecodedChannel>,
     /// The decoded channels' histograms, binned by the worker while it held
@@ -549,7 +557,7 @@ struct Request {
 /// `new` returns `None` when the thread cannot start, and always without the
 /// `threads` feature (notably `wasm32-unknown-unknown`). Read-ahead is a pure
 /// optimization, so callers then decode inline and nothing downstream changes.
-pub struct Prefetcher(LatestWorker<Key, Request, PrefetchResult>);
+pub(crate) struct Prefetcher(LatestWorker<Key, Request, PrefetchResult>);
 
 impl Prefetcher {
     /// Spawn a worker over `stack` — the window's own, shared: no second map,
@@ -558,7 +566,7 @@ impl Prefetcher {
     /// (uncompressed stacks — see module docs); otherwise the worker decodes
     /// ahead. Returns `None` if the thread fails to spawn — callers then just
     /// decode inline.
-    pub fn new(stack: Arc<TiffStack>, touch_only: bool) -> Option<Self> {
+    pub(crate) fn new(stack: Arc<TiffStack>, touch_only: bool) -> Option<Self> {
         let job = move |&(revision, frame_index): &Key, req: Request, cancel: &CancelToken| {
             fast_tiff_lib::set_thread_parallel_decode(Some(req.parallel));
             // Page-touch mode: absorb the next frame's soft page faults here
@@ -654,7 +662,11 @@ impl Prefetcher {
     /// Take the prefetched result iff it matches `(revision, frame_index)`;
     /// otherwise leave the slot untouched and return `None`. The caller still
     /// verifies the channel layout before using it.
-    pub fn take_matching(&self, revision: Revision, frame_index: usize) -> Option<PrefetchResult> {
+    pub(crate) fn take_matching(
+        &self,
+        revision: Revision,
+        frame_index: usize,
+    ) -> Option<PrefetchResult> {
         self.0.take_if(|key| *key == (revision, frame_index))
     }
 }

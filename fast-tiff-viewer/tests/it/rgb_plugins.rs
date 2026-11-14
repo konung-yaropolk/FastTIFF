@@ -54,7 +54,10 @@ fn host(s: &Document) -> StackHost {
 #[test]
 fn a_plugin_reads_every_colour_of_an_rgb_stack() {
     let s = rgb_stack();
-    assert!(s.display.rgb(), "the fixture is chunky RGB");
+    assert!(
+        s.display().layout().shown_as_rgb(),
+        "the fixture is chunky RGB"
+    );
     let mut h = host(&s);
     assert_eq!(h.image().channels, 3);
     assert_eq!(h.stack_info().mode, DisplayMode::Composite);
@@ -68,7 +71,7 @@ fn a_plugin_reads_every_colour_of_an_rgb_stack() {
 #[test]
 fn slice_order_invert_keeps_the_colours_and_their_tables() {
     let s = rgb_stack();
-    let luts = s.display.luts().to_vec();
+    let luts = s.display().luts().to_vec();
     let mut h = host(&s);
     let Outcome::NewDocument(img) = builtin::SliceOrderInvert
         .run(&mut h, &Params::new())
@@ -91,9 +94,9 @@ fn slice_order_invert_keeps_the_colours_and_their_tables() {
             .unwrap()
             .unwrap();
     let out = Document::from_bytes(bytes, "out.tif".into(), false).unwrap();
-    assert_eq!(out.display.dims().channels, 3);
-    assert_eq!(out.display.mode, fast_tiff_lib::DisplayMode::Composite);
-    assert_eq!(out.display.luts(), &luts[..]);
+    assert_eq!(out.display().dims().channels, 3);
+    assert_eq!(out.display().mode(), fast_tiff_lib::DisplayMode::Composite);
+    assert_eq!(out.display().luts(), &luts[..]);
 }
 
 /// A multi-channel stack was already right; it stays right.
@@ -112,7 +115,7 @@ fn a_multichannel_stack_still_crosses_whole() {
         w.write_frame_bytes(&px).unwrap();
     }
     let s = Document::from_bytes(w.finish().unwrap().into_inner(), "c2.tif".into(), false).unwrap();
-    let luts = s.display.luts().to_vec();
+    let luts = s.display().luts().to_vec();
     let Outcome::NewDocument(img) = builtin::SliceOrderInvert
         .run(&mut host(&s), &Params::new())
         .unwrap()
@@ -125,6 +128,6 @@ fn a_multichannel_stack_still_crosses_whole() {
             .unwrap()
             .unwrap();
     let out = Document::from_bytes(bytes, "out.tif".into(), false).unwrap();
-    assert_eq!(out.display.dims().channels, 2);
-    assert_eq!(out.display.luts(), &luts[..]);
+    assert_eq!(out.display().dims().channels, 2);
+    assert_eq!(out.display().luts(), &luts[..]);
 }

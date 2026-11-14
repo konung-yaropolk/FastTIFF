@@ -6,7 +6,7 @@
 //! window has: its sizing, which panels are open, what the pointer is doing.
 //! The rule for where a field belongs is "would a browser UI need this to show
 //! the right pixels?" — if yes, it's in `core`. The 2D view's zoom and pan are
-//! the core crate's too ([`fast_tiff_viewer::View2d`]), held here beside what
+//! the core crate's too ([`fast_tiff_viewer::view2d::View2d`]), held here beside what
 //! the window adds to them (`CanvasView`); the 3D navigation preferences
 //! are in the core's volume settings, beside the camera they steer.
 //!
@@ -40,14 +40,11 @@
 
 use crate::render::{self, Render};
 use egui::{Color32, RichText};
-use fast_tiff_viewer::channels::{
-    gray_lut_applicable, gray_lut_count, gray_lut_sel_name, gray_lut_sel_tint,
-    pseudocolor_applicable,
-};
 use fast_tiff_viewer::roi::LargeImageMode;
-use fast_tiff_viewer::view2d::ZoomStep;
+use fast_tiff_viewer::view2d::{View2d, ZoomStep};
 use fast_tiff_viewer::{
-    DecodeMode, Document, FrameInputs, Notice, NoticeKind, View2d, ViewMode, Viewer,
+    ChannelLayout, DecodeMode, Document, DocumentMut, FrameInputs, Notice, NoticeKind, ViewMode,
+    Viewer,
 };
 // The registry's entries are the C-boundary types themselves rather than
 // trait objects, so the traits whose methods the app calls are named here.
@@ -328,7 +325,7 @@ struct PluginRun {
     name: String,
     /// What the plugin logged, drained from its host when the run ended.
     messages: Vec<String>,
-    outcome: Result<fast_tiff_viewer::plugins::Product, String>,
+    outcome: Result<fast_tiff_viewer::plugins::deliver::Product, String>,
     /// The file the document the run was on stands for, so a result shown
     /// in this window is said to be made from it — whatever is on show by
     /// the time it lands.
@@ -351,7 +348,7 @@ impl PluginRun {
     /// goes to a new window once the document has changed:
     /// `Deliver::same_document`) or is news whatever is on show.
     fn outlived(&self, now: u64) -> bool {
-        use fast_tiff_viewer::plugins::Product;
+        use fast_tiff_viewer::plugins::deliver::Product;
         self.run_on != now
             && matches!(
                 self.outcome,
@@ -371,7 +368,7 @@ struct AppDelivery<'a> {
     same_document: &'a dyn Fn() -> bool,
 }
 
-impl fast_tiff_viewer::plugins::Deliver for AppDelivery<'_> {
+impl fast_tiff_viewer::plugins::deliver::Deliver for AppDelivery<'_> {
     fn phase(&mut self, label: &str) {
         Job::begin_phase(self.label, self.progress, label);
     }
@@ -390,7 +387,7 @@ impl fast_tiff_viewer::plugins::Deliver for AppDelivery<'_> {
     fn open_in_new_window(
         &mut self,
         result: fast_tiff_viewer::plugins::ResultTiff,
-    ) -> fast_tiff_viewer::plugins::Handover {
+    ) -> fast_tiff_viewer::plugins::deliver::Handover {
         // Named after the image, so the new window's title says what it is
         // showing rather than naming a scratch file.
         let name = format!(
@@ -1239,7 +1236,7 @@ impl ViewerApp {
 
     /// Begin a plugin: show its dialog, or run it at once if it declared none.
     fn start_plugin(&mut self, index: usize) {
-        let Some(loaded) = self.core.document.as_ref() else {
+        let Some(loaded) = self.core.document() else {
             self.say("Open an image first".into());
             return;
         };
@@ -1406,7 +1403,7 @@ impl ViewerApp {
     /// `values` untouched, so going back to a method restores what was set
     /// for it rather than resetting it.
     fn requery_dialog(&mut self, dialog: &mut PluginDialog) {
-        let Some(loaded) = self.core.document.as_ref() else {
+        let Some(loaded) = self.core.document() else {
             return;
         };
         let host = fast_tiff_viewer::plugins::StackHost::new(loaded, self.plugin_view(loaded))
@@ -1463,7 +1460,7 @@ impl ViewerApp {
     /// The registry goes with it, exactly as an import's does, which is what
     /// stops a second plugin starting while this one has the data.
     fn run_plugin(&mut self, index: usize, values: fasttiff_plugin_api::Params) {
-        let Some(loaded) = self.core.document.as_ref() else {
+        let Some(loaded) = self.core.document() else {
             self.say("Open an image first".into());
             return;
         };
@@ -1600,7 +1597,7 @@ impl ViewerApp {
             made_from,
         } = run;
 
-        use fast_tiff_viewer::plugins::Product;
+        use fast_tiff_viewer::plugins::deliver::Product;
         match outcome {
             Ok(Product::Plot(plot)) => {
                 match self.tools.plot.as_mut().filter(|p| p.plugin == index) {
@@ -1747,7 +1744,7 @@ impl ViewerApp {
     ///
     /// [`Target::place`]: platform::Target::place
     fn save_as(&mut self) {
-        let Some(stack) = self.core.document.as_ref() else {
+        let Some(stack) = self.core.document() else {
             self.say("Open an image first".into());
             return;
         };
@@ -1758,7 +1755,7 @@ impl ViewerApp {
         // What the window is titled with: the file's own name, the name an
         // imported stack is shown under, the name a browser document arrived
         // under — with a `.tif` on it.
-        let suggested = TARGET.save_name(&stack.path);
+        let suggested = TARGET.save_name(stack.path());
         let destination = match TARGET.place("", suggested) {
             Placement::At(destination) => destination,
             Placement::Ask(name) => {
@@ -1805,7 +1802,7 @@ impl ViewerApp {
 
     /// Write the open stack as a TIFF, on a worker.
     fn start_save(&mut self, path: std::path::PathBuf, name: String) {
-        let Some(stack) = self.core.document.as_ref() else {
+        let Some(stack) = self.core.document() else {
             return;
         };
         let source = fast_tiff_viewer::save::SaveSource::of(stack);
@@ -1857,7 +1854,7 @@ impl ViewerApp {
     ///
     /// [`Exporter`]: fasttiff_plugin_api::Exporter
     fn download_tiff(&mut self, name: String) {
-        let Some(stack) = self.core.document.as_ref() else {
+        let Some(stack) = self.core.document() else {
             return;
         };
         let source = fast_tiff_viewer::save::SaveSource::of(stack);
@@ -1891,7 +1888,7 @@ impl ViewerApp {
     ///
     /// Shared by the toolbar button and the hotkey, so the two cannot drift.
     fn copy_view(&mut self, ctx: &egui::Context) {
-        let Some(stack) = self.core.document.as_ref() else {
+        let Some(stack) = self.core.document() else {
             self.say("Open an image first".into());
             return;
         };
@@ -1954,7 +1951,7 @@ impl ViewerApp {
     /// An exporter writes to a path, so this is reached only with a file to
     /// write: the desktop's.
     fn start_export(&mut self, index: usize, path: std::path::PathBuf, name: String) {
-        let Some(loaded) = self.core.document.as_ref() else {
+        let Some(loaded) = self.core.document() else {
             return;
         };
         let Some(registry) = self.plugins.take() else {
@@ -2177,7 +2174,7 @@ impl ViewerApp {
         let touch = ui.input(|i| i.multi_touch());
         let pinching = touch.is_some();
         if let Some(t) = touch {
-            if self.core.document.is_some() && self.core.view_mode == ViewMode::Movie {
+            if self.core.document().is_some() && self.core.view_mode == ViewMode::Movie {
                 // Anchored between the fingers, so the picture stays under them
                 // — the touch equivalent of keeping the point under the cursor
                 // put — and translated by however far they slid. It ends any
@@ -2202,7 +2199,7 @@ impl ViewerApp {
         // height is known. Cursor-centering uses last frame's cached geometry.
         if zoom_step != 0
             && !pinching
-            && self.core.document.is_some()
+            && self.core.document().is_some()
             && self.core.view_mode == ViewMode::Movie
         {
             // Stepped off wherever the picture is *heading*, so a second notch
@@ -2226,7 +2223,7 @@ impl ViewerApp {
         // the picture is already moving on the frame the wheel turned. A pinch
         // has already ended it (it drives the zoom directly); with no picture,
         // or a 3D view, which has no zoom, it has nothing left to say.
-        if self.core.document.is_none() || self.core.view_mode != ViewMode::Movie {
+        if self.core.document().is_none() || self.core.view_mode != ViewMode::Movie {
             self.view.model.stop_zoom_glide();
         }
         let dt = ui.input(|i| i.stable_dt);
@@ -2287,15 +2284,15 @@ impl ViewerApp {
         // the frame being scrubbed to is the only one written and the movie
         // picks up again on release. Without it the clock and the scrubber
         // write the frame index in turn and the picture flickers between them.
-        self.core.playback.scrubbing = scrubber_held;
+        self.core.playback.set_scrubbing(scrubber_held);
         self.core.tick_playback(ctx.input(|i| i.time));
-        if self.core.playback.playing {
+        if self.core.playback.playing() {
             // Ask for the next repaint at the playback rate rather than
             // immediately: no point re-running egui faster than frames actually
             // change. If a frame takes longer than this to produce, egui
             // repaints as soon as it's ready, so we still render as fast as we
             // can when behind (and the core's demand estimate still detects it).
-            let fps = self.core.playback.fps.max(0.1);
+            let fps = self.core.playback.fps().max(0.1);
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(1.0 / fps));
         }
     }
@@ -2315,13 +2312,11 @@ impl ViewerApp {
         if self.core.view_mode == ViewMode::Volume
             && self
                 .core
-                .document
-                .as_ref()
-                .is_some_and(|l| l.display.dims().frames < 2)
+                .document()
+                .is_some_and(|l| l.display().dims().frames < 2)
         {
             self.core.view_mode = ViewMode::Movie;
-            self.core.playback.playing = false;
-            self.core.playback.last_time = None;
+            self.core.playback.stop();
         }
 
         // The animation's step for this frame, now that every way of leaving
@@ -2344,7 +2339,7 @@ impl ViewerApp {
             ui.ctx(),
             &mut self.view,
             &mut self.panel,
-            self.core.document.as_ref(),
+            self.core.document(),
             toolbar_response.response.rect.height(),
             scrub_bar_response.response.rect.height(),
         );

@@ -437,8 +437,10 @@ impl PointCounter {
     /// [`PointRoi::hyperstack_position`]); a group spread over frames is drawn
     /// point by point, and needs none.
     pub fn rois_for(&self, stack: &Document) -> Vec<PointRoi> {
-        let hyperstack =
-            crate::save::opens_as_imagej_hyperstack(stack.display.dims(), stack.display.rgb());
+        let hyperstack = crate::save::opens_as_imagej_hyperstack(
+            stack.display.dims(),
+            stack.display.layout().shown_as_rgb(),
+        );
         self.rois(
             |frame| imagej_position(stack, frame),
             |frame| {
@@ -542,7 +544,7 @@ impl PointCounter {
             slices: meta.slices,
             frames: meta.frames,
         };
-        let rgb = stack.display.rgb();
+        let rgb = stack.display.layout().shown_as_rgb();
         let rois: Vec<PointRoi> = stack
             .overlay
             .iter()
@@ -595,8 +597,13 @@ pub fn imagej_position(stack: &Document, frame: usize) -> u32 {
     if stack.tiff.frames.len() <= 1 {
         return 0;
     }
-    let (ifd, _) =
-        crate::dimensions::plane_index(stack.display.dims(), stack.display.rgb(), 0, 0, frame);
+    let (ifd, _) = crate::dimensions::plane_index(
+        stack.display.dims(),
+        stack.display.layout().shown_as_rgb(),
+        0,
+        0,
+        frame,
+    );
     u32::try_from(ifd + 1).unwrap_or(u32::MAX)
 }
 
@@ -616,8 +623,13 @@ pub fn frame_of_position(stack: &Document, position: u32) -> Option<usize> {
         return None;
     }
     // The IFDs between one frame's first plane and the next's.
-    let (stride, _) =
-        crate::dimensions::plane_index(stack.display.dims(), stack.display.rgb(), 0, 0, 1);
+    let (stride, _) = crate::dimensions::plane_index(
+        stack.display.dims(),
+        stack.display.layout().shown_as_rgb(),
+        0,
+        0,
+        1,
+    );
     let frame = ifd / stride.max(1);
     (frame < stack.frame_count()).then_some(frame)
 }

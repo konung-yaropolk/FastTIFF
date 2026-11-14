@@ -8,8 +8,8 @@
 //! resolved view; reading the raw one computes indices off the wrong stride and
 //! walks past the end of the IFD chain.
 
+use crate::{Document, Viewer};
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
-use fast_tiff_viewer::{Document, Viewer};
 use std::io::Cursor;
 
 /// A stack of `n` single-channel planes whose ImageJ metadata *claims*
@@ -62,7 +62,7 @@ fn every_frame_maps_to_an_ifd_that_exists() {
     // Computing the stride from the raw metadata gives `frame * 10`, which is
     // in range only for frame 0 — the "stuck on the first frame" symptom.
     for frame in 0..n {
-        for job in fast_tiff_viewer::prefetch::build_jobs(&stack, frame, &enabled) {
+        for job in crate::prefetch::build_jobs(&stack, frame, &enabled) {
             assert!(
                 job.ifd_idx < stack.tiff.frames.len(),
                 "frame {frame} -> IFD {} but the file has only {} planes",
@@ -82,8 +82,8 @@ fn every_frame_actually_decodes() {
 
     let mut first_pixels = Vec::new();
     for frame in 0..stack.frame_count() {
-        let jobs = fast_tiff_viewer::prefetch::build_jobs(&stack, frame, &enabled);
-        let decoded = fast_tiff_viewer::prefetch::decode_jobs(
+        let jobs = crate::prefetch::build_jobs(&stack, frame, &enabled);
+        let decoded = crate::prefetch::decode_jobs(
             &stack.tiff.data,
             &stack.tiff.frames,
             stack.tiff.byte_order,
@@ -91,7 +91,7 @@ fn every_frame_actually_decodes() {
         )
         .unwrap_or_else(|e| panic!("frame {frame} failed to decode: {e:#}"));
         match &decoded[0] {
-            fast_tiff_viewer::prefetch::Decoded::U16(v) => first_pixels.push(v[0]),
+            crate::prefetch::Decoded::U16(v) => first_pixels.push(v[0]),
             other => panic!(
                 "unexpected decode kind for frame {frame}: {:?}",
                 std::mem::discriminant(other)
@@ -134,7 +134,8 @@ fn volume_and_playback_gates_follow_the_resolved_view() {
 // channel", so anything addressing planes generally (a plugin API, say) would
 // reasonably route through it and silently receive slice 0 for every z.
 
-use fast_tiff_viewer::{plane_index, planes_addressed, Dims};
+use crate::dimensions::{plane_index, planes_addressed};
+use crate::Dims;
 
 fn dims(channels: usize, slices: usize, frames: usize) -> Dims {
     Dims {

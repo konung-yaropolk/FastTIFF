@@ -43,7 +43,7 @@ impl PhysicalPx {
     }
 
     /// Whether this is a size at all: finite, and at least one pixel each way.
-    pub fn is_known(self) -> bool {
+    pub(crate) fn is_known(self) -> bool {
         self.width.is_finite() && self.height.is_finite() && self.width >= 1.0 && self.height >= 1.0
     }
 
@@ -57,7 +57,7 @@ impl PhysicalPx {
     }
 
     /// The longer side in whole pixels; `0` when not known.
-    pub fn longest_side(self) -> u32 {
+    pub(crate) fn longest_side(self) -> u32 {
         self.width.max(self.height).round().max(0.0) as u32
     }
 }

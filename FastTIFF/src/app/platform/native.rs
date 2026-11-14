@@ -6,7 +6,8 @@
 use super::{Delivery, Opening, Platform, Purpose, Target};
 use crate::app::screen::{Egui as _, Logical as _};
 use crate::app::{wake_ui, CanvasView, Document, Job, Opened, PanelLayout};
-use fast_tiff_viewer::plugins::{Handover, Registry, ResultTiff};
+use fast_tiff_viewer::plugins::deliver::Handover;
+use fast_tiff_viewer::plugins::{Registry, ResultTiff};
 use fast_tiff_viewer::save::SaveSource;
 use fast_tiff_viewer::view2d::ImagePx;
 use fast_tiff_viewer::LoadSource;
@@ -281,7 +282,7 @@ impl Platform for Desktop {
         }
 
         let img_dims = document
-            .and_then(|l| l.tiff.frames.first())
+            .and_then(|l| l.tiff().frames.first())
             .map(|f| ImagePx::new(f.width, f.height));
 
         if let Some(image) = img_dims {
@@ -444,7 +445,7 @@ impl Platform for Desktop {
         let desired_title = match document {
             Some(loaded) => {
                 let name = loaded
-                    .path
+                    .path()
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();

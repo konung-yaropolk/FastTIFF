@@ -3,7 +3,7 @@
 //! note about its shape. Split from `app.rs`.
 
 use crate::channels::build_channel_settings_reporting;
-use crate::display::Dims;
+use crate::display::{ChannelLayout, Dims};
 use crate::document::{ChannelSettings, Document};
 use crate::notice::ShapeNote;
 use crate::units::SampleUnits;
@@ -29,7 +29,7 @@ use scivis_render::{ChannelKind, MAX_CHANNELS};
 /// No bounds checking: `dims` describes what the metadata claims, and whether
 /// the file actually has that plane is [`planes_addressed`]'s question (for the
 /// 2D axis) or the decoder's.
-pub fn plane_index(dims: Dims, rgb: bool, c: usize, z: usize, t: usize) -> (usize, usize) {
+pub(crate) fn plane_index(dims: Dims, rgb: bool, c: usize, z: usize, t: usize) -> (usize, usize) {
     let (channels, slices) = (dims.channels.max(1), dims.slices.max(1));
     if rgb {
         (t * slices + z, c)
@@ -46,7 +46,7 @@ pub fn plane_index(dims: Dims, rgb: bool, c: usize, z: usize, t: usize) -> (usiz
 /// second, independent formula here would be a second thing to get wrong.
 /// Chunky RGB addresses one IFD per frame (its channels are sample planes of
 /// that IFD); everything else gives each channel its own.
-pub fn planes_addressed(dims: Dims, rgb: bool) -> usize {
+pub(crate) fn planes_addressed(dims: Dims, rgb: bool) -> usize {
     let (c, z, f) = (dims.channels.max(1), dims.slices.max(1), dims.frames.max(1));
     if rgb {
         (f - 1).saturating_mul(z).saturating_add(1)
@@ -75,7 +75,11 @@ pub fn planes_addressed(dims: Dims, rgb: bool) -> usize {
 /// a single frame still does not fit — fewer IFDs in the whole file than there
 /// are channels — are the channels cut too, and Z never needs cutting because at
 /// one frame it drops out of the arithmetic entirely.
-pub fn clamp_to_available(dims: &mut Dims, rgb: bool, available: usize) -> Option<(usize, usize)> {
+pub(crate) fn clamp_to_available(
+    dims: &mut Dims,
+    rgb: bool,
+    available: usize,
+) -> Option<(usize, usize)> {
     let declared = planes_addressed(*dims, rgb);
     if available == 0 || declared <= available {
         return None;
@@ -109,7 +113,7 @@ pub fn clamp_to_available(dims: &mut Dims, rgb: bool, available: usize) -> Optio
 /// between the initial load and the manual dimension-order override so the
 /// two can't drift out of sync with each other. Its words are its
 /// [`Display`](std::fmt::Display).
-pub fn shape_note(
+pub(crate) fn shape_note(
     dims: Dims,
     triple_axis_warning: bool,
     plane_mismatch: Option<(usize, usize)>,
@@ -139,7 +143,7 @@ pub fn shape_note(
 /// position. The one place that does this, so the manual channels/frames
 /// swap can't drift out of sync with `open_file` the way the status note
 /// previously did.
-pub fn apply_resolved_dimensions(
+pub(crate) fn apply_resolved_dimensions(
     loaded: &mut Document,
     resolved: fast_tiff_lib::ResolvedDimensions,
 ) {
@@ -149,7 +153,7 @@ pub fn apply_resolved_dimensions(
 /// [`apply_resolved_dimensions`], reporting the per-channel contrast scans as
 /// they finish — the slow part of opening a file, and the only part whose
 /// length is known ahead of time.
-pub fn apply_resolved_dimensions_reporting(
+pub(crate) fn apply_resolved_dimensions_reporting(
     loaded: &mut Document,
     resolved: fast_tiff_lib::ResolvedDimensions,
     on_channel: &mut dyn FnMut(usize, usize),
@@ -165,7 +169,7 @@ pub fn apply_resolved_dimensions_reporting(
     };
     // Chunky RGB and CMYK put their channels in one IFD's sample planes, which
     // changes how many IFDs a given shape addresses. Asked of the frame rather
-    // than of `display.rgb()`, because on a fresh load `setup_rgb` has not run
+    // than of `display.layout()`, because on a fresh load `setup_rgb` has not run
     // yet — it runs after this.
     let shares_an_ifd = loaded
         .tiff
@@ -208,7 +212,7 @@ pub fn apply_resolved_dimensions_reporting(
 ///
 /// Beyond `MAX_CHANNELS` the shader has no slot to composite into, so further
 /// samples are dropped — no real file has 7+ samples/pixel.
-pub fn rgb_channel_plan(spp: usize) -> Vec<bool> {
+pub(crate) fn rgb_channel_plan(spp: usize) -> Vec<bool> {
     (0..spp.min(MAX_CHANNELS)).map(|c| c < 3).collect()
 }
 
@@ -228,7 +232,7 @@ pub fn rgb_channel_plan(spp: usize) -> Vec<bool> {
 /// the additive shader would blend in as a solid color wash over the picture.
 /// Off-by-default is the only setting that's harmless for both: the channel row
 /// is visible, and one click shows it.
-pub fn setup_rgb(loaded: &mut Document) {
+pub(crate) fn setup_rgb(loaded: &mut Document) {
     let spp = loaded
         .tiff
         .frames
@@ -237,7 +241,7 @@ pub fn setup_rgb(loaded: &mut Document) {
         .unwrap_or(3);
     let plan = rgb_channel_plan(spp);
     let planes = plan.len();
-    loaded.display.set_sample_planes(false);
+    loaded.display.set_layout(ChannelLayout::Rgb);
     loaded.display.mode = fast_tiff_lib::DisplayMode::Color;
     // 0 = red, 1 = green, 2 = blue, then the composite palette for any extras.
     loaded.display.set_luts(
@@ -290,10 +294,10 @@ pub fn setup_rgb(loaded: &mut Document) {
 /// display model (and the frame index), so it is as safe to call on a stack
 /// already on screen as on one just opened: the display's revisions moving is
 /// what has a viewer drop everything it holds of the old mapping.
-pub fn setup_cmyk(loaded: &mut Document) {
-    // Both flags: `rgb` drives the plane-of-one-IFD decode addressing shared
-    // with real RGB, `cmyk` records that these channels are derived.
-    loaded.display.set_sample_planes(true);
+pub(crate) fn setup_cmyk(loaded: &mut Document) {
+    // Addressed as RGB is (the channels are planes of one IFD), and told
+    // apart from it so the channels are known to be derived.
+    loaded.display.set_layout(ChannelLayout::Cmyk);
     loaded.display.mode = fast_tiff_lib::DisplayMode::Color;
     // R, G, B.
     loaded
@@ -324,12 +328,13 @@ pub fn setup_cmyk(loaded: &mut Document) {
 
 /// Applies a manual dimension-order change from the dropdown: reassigns the
 /// channels / Z-slices / time-frames roles to the given counts (the product
-/// stays the stack's plane count — the selector only offers permutations).
+/// stays the one in effect — [`Viewer::set_dimension_order`](crate::Viewer::set_dimension_order)
+/// ignores any other).
 /// For stacks without a real Z axis the selector passes `slices` through
 /// unchanged, so it stays a plain channels/time swap. The triple-axis
 /// warning flag is carried over — it describes the file, not the current
 /// role assignment.
-pub fn apply_dimension_override(
+pub(crate) fn apply_dimension_override(
     loaded: &mut Document,
     channels: usize,
     slices: usize,
@@ -345,3 +350,16 @@ pub fn apply_dimension_override(
     // the old channel-to-IFD mapping is refused when it arrives.
     apply_resolved_dimensions(loaded, resolved);
 }
+
+#[cfg(test)]
+#[path = "plane_addressing_tests.rs"]
+mod addressing_tests;
+#[cfg(test)]
+#[path = "plane_clamp_tests.rs"]
+mod clamp_tests;
+#[cfg(test)]
+#[path = "cmyk_display_tests.rs"]
+mod cmyk_tests;
+#[cfg(test)]
+#[path = "dimensions_tests.rs"]
+mod tests;

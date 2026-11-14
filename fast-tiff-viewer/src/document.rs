@@ -11,7 +11,7 @@
 
 use crate::channels::refresh_pseudocolor;
 use crate::dimensions::{apply_resolved_dimensions_reporting, setup_cmyk, setup_rgb};
-use crate::display::Display;
+use crate::display::{ChannelLayout, Display, DisplayMut};
 use crate::loader::LoadStage;
 use crate::prefetch::Prefetcher;
 pub use crate::units::{SampleUnits, Window};
@@ -28,13 +28,14 @@ use std::sync::Arc;
 /// [`read_plane_f32`](fast_tiff_lib::read_plane_f32) returns: `0..=255` for an
 /// 8-bit channel, possibly negative for a signed one, the data's own values for
 /// a float one. [`units`](Self::units) is the one place they are converted to
-/// anything else; see [`crate::units`].
+/// anything else; see [`SampleUnits`].
 ///
 /// A plain value: the display hands these out by shared reference only
 /// ([`Display::settings`]), and its setters
-/// ([`set_enabled`](Display::set_enabled), [`set_window`](Display::set_window))
-/// are how a shown channel changes, so a toggle is always recorded in the
-/// display's [`Revision`](crate::display::Revision).
+/// ([`set_enabled`](DisplayMut::set_enabled),
+/// [`set_window`](DisplayMut::set_window)) are how a shown channel changes,
+/// so a toggle is always recorded in the display's
+/// [`Revision`](crate::Revision).
 #[derive(Clone, Copy, Debug)]
 pub struct ChannelSettings {
     /// The contrast window: `lo` shows black, `hi` full intensity.
@@ -112,8 +113,10 @@ pub struct Document {
     /// nothing mutates a `TiffStack` after it is indexed. Everything the viewer
     /// does change — the frame index, the caches, the display model — lives in
     /// the fields below and stays with the window.
-    pub tiff: Arc<TiffStack>,
-    pub path: PathBuf,
+    pub(crate) tiff: Arc<TiffStack>,
+    /// The file's path, or for a document loaded from bytes the name it was
+    /// given; see [`path`](Self::path).
+    pub(crate) path: PathBuf,
     /// The frame on screen, on the scrub/time axis; see [`frame`](Self::frame).
     /// Below [`frame_count`](Self::frame_count): [`set_frame`](Self::set_frame)
     /// clamps, and reinterpreting the axes puts it back to 0.
@@ -123,7 +126,7 @@ pub struct Document {
     /// load. Everything mutable about the presentation lives here, so
     /// [`tiff`](Self::tiff)`.meta` stays exactly as the file was parsed — see
     /// [`crate::display`].
-    pub display: Display,
+    pub(crate) display: Display,
     /// The ImageJ overlay a save writes into the TIFF. Opening a file fills it
     /// with the point ROIs of the file's own overlay
     /// ([`StackMeta::overlay`](fast_tiff_lib::StackMeta::overlay)), so that a
@@ -132,7 +135,7 @@ pub struct Document {
     /// file's other shapes are not kept. While it is empty a save is exactly
     /// what it was without one; see [`crate::save`] for what a non-empty one
     /// changes.
-    pub overlay: Vec<fast_tiff_lib::PointRoi>,
+    pub(crate) overlay: Vec<fast_tiff_lib::PointRoi>,
     /// The workers and caches every view of this document shares.
     pub(crate) services: Services,
     /// Set when this document is a plugin's result shown in this window: the
@@ -147,7 +150,7 @@ pub struct Document {
     /// file is deleted. Their threads are not joined: each lets go of its share
     /// of the mapping a step later (see [`crate::worker`]), which the scratch
     /// file's retried delete allows for.
-    pub derived: Option<crate::plugins::result::Derived>,
+    pub(crate) derived: Option<crate::plugins::result::Derived>,
 }
 
 /// What a document runs and keeps for whoever shows it: the background
@@ -237,7 +240,7 @@ impl Document {
     ///
     /// `apply_pseudocolor` carries the frontend's persistent preference onto the
     /// new stack (it only affects multi-channel grayscale stacks — see
-    /// [`crate::channels::pseudocolor_applicable`]).
+    /// [`pseudocolor_applicable`](Self::pseudocolor_applicable)).
     #[cfg(feature = "mmap")]
     pub fn open(path: PathBuf, apply_pseudocolor: bool) -> anyhow::Result<Self> {
         Self::open_reporting(path, apply_pseudocolor, &mut |_| {})
@@ -250,7 +253,7 @@ impl Document {
     /// is countable. `on_stage` therefore sees an unquantified `Reading`
     /// followed by a counted `Contrast`, which is as honest as the work allows.
     #[cfg(feature = "mmap")]
-    pub fn open_reporting(
+    pub(crate) fn open_reporting(
         path: PathBuf,
         apply_pseudocolor: bool,
         on_stage: &mut dyn FnMut(LoadStage),
@@ -278,7 +281,7 @@ impl Document {
 
     /// [`from_bytes`](Self::from_bytes), reporting progress — see
     /// [`open_reporting`](Self::open_reporting).
-    pub fn from_bytes_reporting(
+    pub(crate) fn from_bytes_reporting(
         bytes: impl Into<fast_tiff_lib::Bytes>,
         name: PathBuf,
         apply_pseudocolor: bool,
@@ -306,7 +309,7 @@ impl Document {
             tiff: Arc::new(tiff),
             path,
             frame_index: 0,
-            display: Display::default(),
+            display: Display::empty(),
             overlay,
             services: Services::default(),
             derived: None,
@@ -335,9 +338,12 @@ impl Document {
             setup_cmyk(&mut stack);
         }
         // Palette (indexed) images: the ColorMap is already installed as the
-        // channel LUT by the lib; flag it so the fixed identity contrast window
-        // is kept and its slider can be hidden.
-        stack.display.palette = stack.tiff.frames.first().is_some_and(|f| f.is_palette());
+        // channel LUT by the lib; say so, so the fixed identity contrast
+        // window is kept and its slider can be hidden.
+        let palette = stack.tiff.frames.first().is_some_and(|f| f.is_palette());
+        if palette {
+            stack.display.set_layout(ChannelLayout::Palette);
+        }
         // Remember the file's own LUT (a single-channel image carrying a
         // ColorMap / ImageJ LUT) so the LUT selector can offer a "Built-in"
         // option that restores it. Captured now, before pseudocolor could touch
@@ -351,12 +357,55 @@ impl Document {
         // user stuck: picking any colormap replaced the ramp with the generic
         // linear one, the image went dark, and with the contrast slider
         // suppressed for palette stacks there was no way back.
-        let has_own_lut = stack.tiff.meta.has_explicit_luts || stack.display.palette;
+        let has_own_lut = stack.tiff.meta.has_explicit_luts || palette;
         stack.display.builtin_lut = (has_own_lut && stack.display.channel_count() == 1)
             .then(|| stack.tiff.meta.channel_display[0].lut);
+        // With the options known, the selector names the LUT installed: a
+        // single-channel composite file wears red, which is not option 0.
+        let channels = stack.display.channel_count();
+        stack.display.reselect_gray_lut(channels);
         refresh_pseudocolor(&mut stack, apply_pseudocolor);
 
         Ok(stack)
+    }
+
+    /// The file: its bytes, its frame index and its metadata exactly as they
+    /// were parsed. Shared with the workers that read its pixels, and never
+    /// changed after it is opened.
+    pub fn tiff(&self) -> &TiffStack {
+        &self.tiff
+    }
+
+    /// The file this document was opened from, or for one loaded from bytes
+    /// the name it was given: a label for a title bar, not necessarily a file
+    /// there is (see [`source_path`](Self::source_path)).
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// How the document is shown: the c/z/t interpretation, the channels, their
+    /// windows and LUTs (see [`Display`]).
+    pub fn display(&self) -> &Display {
+        &self.display
+    }
+
+    /// The display, to change what the user can change of it directly: a
+    /// channel's contrast window and whether it is on (see [`DisplayMut`]).
+    /// The interpretation and the LUTs change through the
+    /// [`Viewer`](crate::Viewer).
+    pub fn display_mut(&mut self) -> DisplayMut<'_> {
+        DisplayMut::new(&mut self.display)
+    }
+
+    /// The ImageJ overlay a save writes: the point ROIs the file was opened
+    /// with, until [`set_overlay`](Self::set_overlay) replaces them.
+    pub fn overlay(&self) -> &[fast_tiff_lib::PointRoi] {
+        &self.overlay
+    }
+
+    /// Replace the overlay a save writes; empty, a save writes none.
+    pub fn set_overlay(&mut self, rois: Vec<fast_tiff_lib::PointRoi>) {
+        self.overlay = rois;
     }
 
     /// The histograms of the frame on screen, binned from the decodes that
@@ -383,6 +432,12 @@ impl Document {
     /// not there.
     pub fn set_frame(&mut self, i: usize) {
         self.frame_index = i.min(self.frame_count() - 1);
+    }
+
+    /// Step `by` frames, back for a negative `by`, stopping at the first and
+    /// the last frame rather than going past or wrapping round.
+    pub fn step_frame(&mut self, by: isize) {
+        self.set_frame(self.frame_index.saturating_add_signed(by));
     }
 
     /// The stack's pixel dimensions, from the first frame.
@@ -425,5 +480,63 @@ impl Document {
         } else {
             dims.frames.max(1) as u32
         }
+    }
+}
+
+/// The [`Viewer`](crate::Viewer)'s open document, lent out to change what can
+/// be changed of it in place: the frame on screen, a channel's window and
+/// switch, the overlay a save writes. Had from
+/// [`Viewer::document_mut`](crate::Viewer::document_mut); everything else of
+/// the document reads through it.
+///
+/// A handle rather than `&mut Document`, so that the viewer's document cannot
+/// be replaced, swapped or taken in place: one arrives only through an open,
+/// which re-seeds playback, the 3D view and what the renderer holds along
+/// with it.
+///
+/// ```compile_fail
+/// # fn replace(viewer: &mut fast_tiff_viewer::Viewer, other: fast_tiff_viewer::Document) {
+/// // There is no `&mut Document` to assign through.
+/// *viewer.document_mut().unwrap() = other;
+/// # }
+/// ```
+pub struct DocumentMut<'a> {
+    doc: &'a mut Document,
+}
+
+impl std::ops::Deref for DocumentMut<'_> {
+    type Target = Document;
+
+    fn deref(&self) -> &Document {
+        self.doc
+    }
+}
+
+impl<'a> DocumentMut<'a> {
+    pub(crate) fn new(doc: &'a mut Document) -> Self {
+        DocumentMut { doc }
+    }
+
+    /// [`Document::set_frame`]: show frame `i`, or the last frame when `i` is
+    /// past it.
+    pub fn set_frame(&mut self, i: usize) {
+        self.doc.set_frame(i);
+    }
+
+    /// [`Document::step_frame`]: step `by` frames, stopping at the first and
+    /// the last.
+    pub fn step_frame(&mut self, by: isize) {
+        self.doc.step_frame(by);
+    }
+
+    /// [`Document::set_overlay`]: replace the overlay a save writes.
+    pub fn set_overlay(&mut self, rois: Vec<fast_tiff_lib::PointRoi>) {
+        self.doc.set_overlay(rois);
+    }
+
+    /// [`Document::display_mut`]: the display, to change a channel's window
+    /// and whether it is on.
+    pub fn display_mut(&mut self) -> DisplayMut<'_> {
+        self.doc.display_mut()
     }
 }

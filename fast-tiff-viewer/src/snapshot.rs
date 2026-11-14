@@ -26,8 +26,8 @@
 //! that way or a copy would not match what the user was looking at. Two things
 //! make that tractable:
 //!
-//! * The pixels come from [`build_jobs`] and the decoder the upload path uses
-//!   ([`decode_jobs_rows`] is that decode, a band of rows at a time), so the
+//! * The pixels come from `build_jobs` and the decoder the upload path uses
+//!   (`decode_jobs_rows` is that decode, a band of rows at a time), so the
 //!   sample values are byte-identical to the ones the textures hold —
 //!   including the widening and the RGB/CMYK plane addressing, which are easy
 //!   to get subtly wrong a second time.
@@ -156,7 +156,7 @@ fn rgba_bytes(width: u32, height: u32) -> u64 {
 /// floor makes such a window behave as a one-unit window rather than as an
 /// infinitely steep one. Copying a picture that was thresholded differently
 /// from the one on screen would be a quiet, plausible-looking wrong answer.
-pub fn windowed(value: f32, min: f32, max: f32) -> f32 {
+pub(crate) fn windowed(value: f32, min: f32, max: f32) -> f32 {
     let span = (max - min).max(1.0);
     ((value - min) / span).clamp(0.0, 1.0)
 }
@@ -173,7 +173,7 @@ pub fn windowed(value: f32, min: f32, max: f32) -> f32 {
 /// same entry, so `t = 0` is exactly `lut[0]` and `t = 1` exactly `lut[255]`.
 /// `Rgba8Unorm` rather than its sRGB twin, so the bytes scale linearly by 255
 /// with no transfer function in the way.
-pub fn lut_sample(lut: &Lut, t: f32) -> [f32; 3] {
+pub(crate) fn lut_sample(lut: &Lut, t: f32) -> [f32; 3] {
     let x = t.clamp(0.0, 1.0) * lut.len() as f32 - 0.5;
     let floor = x.floor();
     let frac = x - floor;

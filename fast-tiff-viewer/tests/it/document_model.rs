@@ -10,7 +10,7 @@
 //! there); the tests skip rather than fail if one is missing, so a checkout
 //! without them still builds green.
 
-use fast_tiff_viewer::channels::{channel_tint, gray_lut_applicable, pseudocolor_applicable};
+use fast_tiff_viewer::channels::channel_tint;
 use fast_tiff_viewer::{ChannelKind, Document, Viewer};
 use std::path::PathBuf;
 
@@ -68,13 +68,13 @@ fn opens_an_imagej_hyperstack_with_derived_channel_settings() {
     let (w, h) = stack.dimensions().expect("dimensions");
     assert!(w > 0 && h > 0);
     assert!(
-        !stack.display.settings().is_empty(),
+        !stack.display().settings().is_empty(),
         "every open stack gets channel settings"
     );
 
     // 16-bit unsigned planes take the R16Uint path, and each channel starts
     // enabled with a contrast window that sits inside its slider track.
-    for (c, s) in stack.display.settings().iter().enumerate() {
+    for (c, s) in stack.display().settings().iter().enumerate() {
         assert_eq!(s.kind(), ChannelKind::Int16, "channel {c}");
         assert!(s.enabled, "channel {c} should start enabled");
         let (lo, hi): (f32, f32) = s.bounds.into();
@@ -89,7 +89,7 @@ fn opens_an_imagej_hyperstack_with_derived_channel_settings() {
     }
 
     // A display LUT exists for every channel the settings cover.
-    assert!(stack.tiff.meta.channel_display.len() >= stack.display.settings().len());
+    assert!(stack.tiff().meta.channel_display.len() >= stack.display().settings().len());
 }
 
 #[test]
@@ -100,23 +100,23 @@ fn rgb_stack_becomes_three_display_channels() {
     let stack = open_stack(path, false).expect("rgb should open");
 
     assert!(
-        stack.display.rgb(),
+        stack.display().layout().shown_as_rgb(),
         "a 3-sample photometric-RGB frame should set the rgb flag"
     );
     assert_eq!(
-        stack.display.settings().len(),
+        stack.display().settings().len(),
         3,
         "R/G/B become three display channels"
     );
     // 8-bit unsigned uploads raw, without the CPU widening pass.
     assert!(stack
-        .display
+        .display()
         .settings()
         .iter()
         .all(|s| s.kind() == ChannelKind::Int8));
     // The channels/time guess and the pseudocolor toggle are meaningless here.
-    assert!(!pseudocolor_applicable(&stack));
-    assert!(!gray_lut_applicable(&stack));
+    assert!(!stack.pseudocolor_applicable());
+    assert!(stack.display().gray_luts().is_none());
 }
 
 #[test]
@@ -126,7 +126,7 @@ fn float_stack_windows_in_its_own_units() {
     };
     let stack = open_stack(path, false).expect("float should open");
 
-    let s = stack.display.settings().first().expect("one channel");
+    let s = stack.display().settings().first().expect("one channel");
     assert_eq!(
         s.kind(),
         ChannelKind::Float,
@@ -153,18 +153,18 @@ fn dimension_override_conserves_the_plane_count() {
     // The file's own labels, and the interpretation currently in effect. These
     // are deliberately two different things.
     let file_dims = {
-        let m = &viewer.document.as_ref().unwrap().tiff.meta;
+        let m = &viewer.document().unwrap().tiff().meta;
         (m.channels, m.slices, m.frames)
     };
-    let shown = viewer.document.as_ref().unwrap().display.dims();
+    let shown = viewer.document().unwrap().display().dims();
     let planes = shown.channels * shown.slices * shown.frames;
     let volume_before = viewer.volume_identity();
 
     // Swap the channel and time roles, as the dimension-order dropdown does.
     viewer.set_dimension_order(shown.frames, shown.slices, shown.channels);
 
-    let stack = viewer.document.as_ref().unwrap();
-    let after = stack.display.dims();
+    let stack = viewer.document().unwrap();
+    let after = stack.display().dims();
     assert_eq!(after.channels, shown.frames);
     assert_eq!(after.frames, shown.channels);
     assert_eq!(
@@ -176,7 +176,7 @@ fn dimension_override_conserves_the_plane_count() {
     // The point of keeping display state out of the metadata: reinterpreting
     // the axes must leave the *file's* record of them untouched, so the
     // metadata panel can still answer "what did the file actually say?".
-    let m = &stack.tiff.meta;
+    let m = &stack.tiff().meta;
     assert_eq!(
         (m.channels, m.slices, m.frames),
         file_dims,
@@ -184,10 +184,10 @@ fn dimension_override_conserves_the_plane_count() {
     );
 
     // Channel settings and LUTs were rebuilt to match the new channel count...
-    let shown_now = fast_tiff_viewer::Display::shown_channels(after.channels);
-    assert_eq!(stack.display.settings().len(), shown_now);
+    let shown_now = after.channels.min(fast_tiff_viewer::MAX_CHANNELS);
+    assert_eq!(stack.display().settings().len(), shown_now);
     assert_eq!(
-        stack.display.luts().len(),
+        stack.display().luts().len(),
         shown_now,
         "one LUT per shown channel"
     );
@@ -208,16 +208,15 @@ fn pseudocolor_tints_channels_and_reverts() {
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
 
-    if !pseudocolor_applicable(viewer.document.as_ref().unwrap()) {
+    if !viewer.document().unwrap().pseudocolor_applicable() {
         return; // this fixture carries its own colors; nothing to assert
     }
 
     viewer.set_pseudocolor(true);
     let tinted = viewer
-        .document
-        .as_ref()
+        .document()
         .unwrap()
-        .tiff
+        .tiff()
         .meta
         .channel_display
         .iter()
@@ -229,10 +228,10 @@ fn pseudocolor_tints_channels_and_reverts() {
     );
 
     viewer.set_pseudocolor(false);
-    let stack = viewer.document.as_ref().unwrap();
+    let stack = viewer.document().unwrap();
     assert!(
         stack
-            .tiff
+            .tiff()
             .meta
             .channel_display
             .iter()
@@ -248,13 +247,13 @@ fn a_failed_open_keeps_the_current_stack() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, good).expect("open");
-    assert!(viewer.document.is_some());
+    assert!(viewer.document().is_some());
 
     // Dropping a corrupt/nonexistent file must not close the good image.
     let err = load(&mut viewer, PathBuf::from("definitely-not-a-file.tif"));
     assert!(err.is_err());
     assert!(
-        viewer.document.is_some(),
+        viewer.document().is_some(),
         "a failed open must not drop the loaded stack"
     );
     assert!(viewer
@@ -269,23 +268,23 @@ fn playback_advances_by_real_elapsed_time() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    let n = viewer.document.as_ref().unwrap().frame_count();
+    let n = viewer.document().unwrap().frame_count();
     if n < 2 {
         return;
     }
 
-    viewer.playback.playing = true;
-    viewer.playback.fps = 10.0;
+    viewer.playback.play();
+    viewer.playback.set_fps(10.0);
 
     // The first tick only seeds the clock — it can't know how much time passed.
     assert_eq!(viewer.tick_playback(0.0), 0);
-    assert_eq!(viewer.document.as_ref().unwrap().frame(), 0);
+    assert_eq!(viewer.document().unwrap().frame(), 0);
 
     // A quarter-frame of real time is not yet a whole frame...
     assert_eq!(viewer.tick_playback(0.025), 0);
     // ...but it accumulates rather than being discarded: 0.025 + 0.075 = one frame.
     assert_eq!(viewer.tick_playback(0.1), 1);
-    assert_eq!(viewer.document.as_ref().unwrap().frame(), 1 % n);
+    assert_eq!(viewer.document().unwrap().frame(), 1 % n);
 
     // A long stall steps by however many frames the elapsed time demanded.
     let stepped = viewer.tick_playback(0.6);
@@ -294,7 +293,7 @@ fn playback_advances_by_real_elapsed_time() {
     // Playback wraps rather than running off the end.
     for i in 0..(2 * n) {
         viewer.tick_playback(1.0 + i as f64 * 0.1);
-        assert!(viewer.document.as_ref().unwrap().frame() < n);
+        assert!(viewer.document().unwrap().frame() < n);
     }
 }
 
@@ -305,28 +304,34 @@ fn falling_behind_latches_parallel_decode_only_in_auto() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    if viewer.document.as_ref().unwrap().frame_count() < 2 {
+    if viewer.document().unwrap().frame_count() < 2 {
         return;
     }
 
     viewer.decode_mode = fast_tiff_viewer::DecodeMode::Serial;
-    viewer.playback.playing = true;
-    viewer.playback.fps = 60.0;
+    viewer.playback.play();
+    viewer.playback.set_fps(60.0);
     // Renders far slower than the target: demand per tick is ~6 frames.
     for i in 0..40 {
         viewer.tick_playback(i as f64 * 0.1);
     }
     assert!(
-        !viewer.decode_parallel,
-        "Serial must never latch parallel decode"
+        !viewer.decodes_in_parallel(),
+        "Serial never decodes in parallel"
     );
 
+    // Before Auto has seen playback fall behind itself: had Serial latched
+    // the switch, Auto would decode in parallel from the start.
     viewer.decode_mode = fast_tiff_viewer::DecodeMode::Auto;
+    assert!(
+        !viewer.decodes_in_parallel(),
+        "Serial must never latch parallel decode"
+    );
     for i in 40..80 {
         viewer.tick_playback(i as f64 * 0.1);
     }
     assert!(
-        viewer.decode_parallel,
+        viewer.decodes_in_parallel(),
         "Auto should latch parallel decode once playback falls behind"
     );
 
@@ -336,7 +341,7 @@ fn falling_behind_latches_parallel_decode_only_in_auto() {
     };
     load(&mut viewer, again).expect("reopen");
     assert!(
-        !viewer.decode_parallel,
+        !viewer.decodes_in_parallel(),
         "a new stack starts from the serial path again"
     );
 }
@@ -357,18 +362,26 @@ fn cycling_luts_never_disturbs_the_parsed_metadata() {
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
     // Collapse to a single channel so the LUT selector applies.
-    let dims = viewer.document.as_ref().unwrap().display.dims();
+    let dims = viewer.document().unwrap().display().dims();
     viewer.set_dimension_order(1, dims.slices, dims.channels * dims.frames);
-    if !fast_tiff_viewer::channels::gray_lut_applicable(viewer.document.as_ref().unwrap()) {
+    let Some(options) = viewer
+        .document()
+        .unwrap()
+        .display()
+        .gray_luts()
+        .map(|l| l.count())
+    else {
         return;
-    }
+    };
+    // What option 0 shows, before anything else has been chosen.
+    viewer.set_gray_lut(0);
+    let first = *viewer.document().unwrap().display().lut(0).unwrap();
 
     // Snapshot what the file said, before touching a single control.
     let before: Vec<_> = viewer
-        .document
-        .as_ref()
+        .document()
         .unwrap()
-        .tiff
+        .tiff()
         .meta
         .channel_display
         .iter()
@@ -376,16 +389,14 @@ fn cycling_luts_never_disturbs_the_parsed_metadata() {
         .collect();
 
     // Walk every selector entry, then come back to index 0.
-    let options =
-        fast_tiff_viewer::channels::gray_lut_count(&viewer.document.as_ref().unwrap().display);
     for sel in 0..options {
         viewer.set_gray_lut(sel);
     }
     viewer.set_gray_lut(0);
 
-    let stack = viewer.document.as_ref().unwrap();
+    let stack = viewer.document().unwrap();
     let after: Vec<_> = stack
-        .tiff
+        .tiff()
         .meta
         .channel_display
         .iter()
@@ -404,11 +415,11 @@ fn cycling_luts_never_disturbs_the_parsed_metadata() {
     }
 
     // And the rendered LUT is back to whatever index 0 means for this stack.
-    let expected = fast_tiff_viewer::channels::gray_lut_sel_lut(&stack.display, 0);
     assert!(
-        stack.display.lut(0) == Some(&expected),
+        stack.display().lut(0) == Some(&first),
         "selecting index 0 should restore that entry's LUT"
     );
+    assert_eq!(stack.display().gray_luts().map(|l| l.selected()), Some(0));
 }
 
 /// Holding the scrubber during playback must stop the clock writing the frame
@@ -425,19 +436,19 @@ fn holding_the_scrubber_stops_playback_advancing() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    let n = viewer.document.as_ref().unwrap().frame_count();
+    let n = viewer.document().unwrap().frame_count();
     if n < 2 {
         return;
     }
 
-    viewer.playback.playing = true;
-    viewer.playback.fps = 10.0;
+    viewer.playback.play();
+    viewer.playback.set_fps(10.0);
     viewer.tick_playback(0.0);
 
     // Grab the scrubber and put the view on a particular frame, as the slider
     // widget does by writing straight into the stack.
-    viewer.playback.scrubbing = true;
-    viewer.document.as_mut().unwrap().set_frame(3 % n);
+    viewer.playback.set_scrubbing(true);
+    viewer.document_mut().unwrap().set_frame(3 % n);
 
     // Time passes — plenty of it, several frames' worth at this rate — and the
     // frame the user is holding does not move.
@@ -445,7 +456,7 @@ fn holding_the_scrubber_stops_playback_advancing() {
         let stepped = viewer.tick_playback(i as f64 * 0.05);
         assert_eq!(stepped, 0, "playback advanced while the scrubber was held");
         assert_eq!(
-            viewer.document.as_ref().unwrap().frame(),
+            viewer.document().unwrap().frame(),
             3 % n,
             "the held frame changed under the pointer at tick {i}"
         );
@@ -461,29 +472,29 @@ fn releasing_the_scrubber_resumes_playback() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    let n = viewer.document.as_ref().unwrap().frame_count();
+    let n = viewer.document().unwrap().frame_count();
     if n < 2 {
         return;
     }
 
-    viewer.playback.playing = true;
-    viewer.playback.fps = 10.0;
+    viewer.playback.play();
+    viewer.playback.set_fps(10.0);
     viewer.tick_playback(0.0);
 
-    viewer.playback.scrubbing = true;
-    viewer.document.as_mut().unwrap().set_frame(2 % n);
+    viewer.playback.set_scrubbing(true);
+    viewer.document_mut().unwrap().set_frame(2 % n);
     viewer.tick_playback(1.0);
     assert!(
-        viewer.playback.playing,
+        viewer.playback.playing(),
         "holding the scrubber must not clear `playing`"
     );
 
     // Let go, and it runs again from where it was left.
-    viewer.playback.scrubbing = false;
+    viewer.playback.set_scrubbing(false);
     viewer.tick_playback(1.0); // re-seeds the clock
     let stepped = viewer.tick_playback(1.3);
     assert_eq!(stepped, 3, "0.3 s at 10 fps is three frames");
-    assert_eq!(viewer.document.as_ref().unwrap().frame(), (2 + 3) % n);
+    assert_eq!(viewer.document().unwrap().frame(), (2 + 3) % n);
 }
 
 /// Letting go must not pay back the frames that would have played during the
@@ -500,22 +511,22 @@ fn releasing_the_scrubber_does_not_replay_the_time_it_was_held() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    let n = viewer.document.as_ref().unwrap().frame_count();
+    let n = viewer.document().unwrap().frame_count();
     if n < 2 {
         return;
     }
 
-    viewer.playback.playing = true;
-    viewer.playback.fps = 30.0;
+    viewer.playback.play();
+    viewer.playback.set_fps(30.0);
     viewer.tick_playback(0.0);
 
-    viewer.playback.scrubbing = true;
-    viewer.document.as_mut().unwrap().set_frame(1 % n);
+    viewer.playback.set_scrubbing(true);
+    viewer.document_mut().unwrap().set_frame(1 % n);
     // Held for ten seconds — three hundred frames at this rate.
     for i in 1..=100 {
         viewer.tick_playback(i as f64 * 0.1);
     }
-    viewer.playback.scrubbing = false;
+    viewer.playback.set_scrubbing(false);
 
     // The first tick after release seeds the clock and must not step at all.
     let stepped = viewer.tick_playback(10.1);
@@ -523,7 +534,7 @@ fn releasing_the_scrubber_does_not_replay_the_time_it_was_held() {
         stepped, 0,
         "released and immediately leapt {stepped} frames"
     );
-    assert_eq!(viewer.document.as_ref().unwrap().frame(), 1 % n);
+    assert_eq!(viewer.document().unwrap().frame(), 1 % n);
 }
 
 /// The flag is about the *clock*, not about being open. With nothing playing,
@@ -535,16 +546,16 @@ fn holding_the_scrubber_while_paused_changes_nothing() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    if viewer.document.as_ref().unwrap().frame_count() < 2 {
+    if viewer.document().unwrap().frame_count() < 2 {
         return;
     }
 
-    viewer.playback.playing = false;
-    viewer.playback.scrubbing = true;
+    viewer.playback.stop();
+    viewer.playback.set_scrubbing(true);
     assert_eq!(viewer.tick_playback(0.0), 0);
     assert_eq!(viewer.tick_playback(5.0), 0);
     assert!(
-        !viewer.playback.playing,
+        !viewer.playback.playing(),
         "it must not start playing on its own"
     );
 }
@@ -558,14 +569,15 @@ fn playback_is_unchanged_when_the_scrubber_is_not_held() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    let n = viewer.document.as_ref().unwrap().frame_count();
+    let n = viewer.document().unwrap().frame_count();
     if n < 2 {
         return;
     }
 
-    viewer.playback.playing = true;
-    viewer.playback.fps = 10.0;
-    assert!(!viewer.playback.scrubbing, "the default must be `not held`");
+    // Never told the scrubber is held: the default must be `not held`, or
+    // these ticks would not step.
+    viewer.playback.play();
+    viewer.playback.set_fps(10.0);
     assert_eq!(viewer.tick_playback(0.0), 0);
     assert_eq!(viewer.tick_playback(0.025), 0);
     assert_eq!(viewer.tick_playback(0.1), 1);
@@ -587,23 +599,22 @@ fn releasing_the_scrubber_does_not_carry_a_stale_fraction() {
     };
     let mut viewer = Viewer::new();
     load(&mut viewer, path).expect("open");
-    if viewer.document.as_ref().unwrap().frame_count() < 2 {
+    if viewer.document().unwrap().frame_count() < 2 {
         return;
     }
 
-    viewer.playback.playing = true;
-    viewer.playback.fps = 10.0;
+    viewer.playback.play();
+    viewer.playback.set_fps(10.0);
     viewer.tick_playback(0.0);
-    // Half a frame of carry, and no step yet.
+    // The setup needs a real carry: two half-frames make a frame...
     assert_eq!(viewer.tick_playback(0.05), 0);
-    assert!(
-        viewer.playback.accumulator > 0.4,
-        "the setup needs a real carry"
-    );
+    assert_eq!(viewer.tick_playback(0.1), 1, "half-frames should carry");
+    // ...and half a frame is carried again, with no step yet.
+    assert_eq!(viewer.tick_playback(0.15), 0);
 
-    viewer.playback.scrubbing = true;
-    viewer.tick_playback(0.1);
-    viewer.playback.scrubbing = false;
+    viewer.playback.set_scrubbing(true);
+    viewer.tick_playback(0.2);
+    viewer.playback.set_scrubbing(false);
 
     // Another half-frame after release. On its own that is not a frame; only a
     // carry smuggled across the hold would make it one.

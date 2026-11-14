@@ -24,8 +24,11 @@ impl AppWindow for RenderSettingsWindow {
     fn show(&mut self, ctx: &egui::Context, open: &mut bool, host: &mut Host<'_>) {
         let core = &mut *host.core;
         let prev_nav = core.volume.cam.nav;
-        let reset_position =
-            render_settings_window(ctx, open, &mut core.volume, core.document.as_ref());
+        // A copy, edited and put back: the window reads the document beside
+        // the settings it edits, and the viewer lends out one at a time.
+        let mut volume = core.volume;
+        let reset_position = render_settings_window(ctx, open, &mut volume, core.document());
+        core.volume = volume;
         // Keep the view continuous across a fly⇄orbit switch (the two use
         // different eye representations) instead of snapping to a default.
         if core.volume.cam.nav != prev_nav {
@@ -119,7 +122,7 @@ fn render_settings_window(
             // Max intensity: a plain gain, and nothing else to set. The default
             // is below 100% because a maximum over a few hundred samples per
             // ray is a high-order statistic and comes out hotter than the same
-            // data in 2-D — see `fast_tiff_viewer::brightness`.
+            // data in 2-D — see `fast_tiff_viewer::VolumeSettings::mip_brightness`.
             render::VolumeRender::Mip => {
                 ui.horizontal(|ui| {
                     ui.label("Brightness");
@@ -207,9 +210,9 @@ fn render_settings_window(
                     )
                     .clicked()
                 {
-                    *scale = loaded.tiff.meta.voxel_scale();
+                    *scale = loaded.tiff().meta.voxel_scale();
                 }
-                if let Some(unit) = loaded.tiff.meta.unit.as_deref().filter(|u| !u.is_empty()) {
+                if let Some(unit) = loaded.tiff().meta.unit.as_deref().filter(|u| !u.is_empty()) {
                     ui.label(RichText::new(format!("unit: {unit}")).weak());
                 }
             });

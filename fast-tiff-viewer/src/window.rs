@@ -19,28 +19,6 @@ use fast_tiff_lib::{FrameInfo, TiffStack};
 use scivis_render::ChannelKind;
 use std::sync::Arc;
 
-/// Whether a window is the entire frame at full resolution, in which case no
-/// view can leave it and nothing needs re-cutting.
-///
-/// Note the `stride == 1`: this is "the whole picture, every pixel", the test
-/// for whether any windowing is needed at all. For "spans the whole frame at
-/// whatever sampling", which is a different and weaker question, see
-/// [`spans_whole_frame`].
-pub fn covers_whole_frame(roi: &Roi, width: u32, height: u32) -> bool {
-    roi.x == 0 && roi.y == 0 && roi.w >= width && roi.h >= height && roi.stride == 1
-}
-
-/// Whether a window spans the whole frame at *any* sampling.
-///
-/// Deliberately not [`covers_whole_frame`], which also demands `stride == 1`. A
-/// fit-to-window view of a gigapixel mosaic spans the frame at a stride of 16
-/// or more and fails that test, so using it to decide what is worth retaining
-/// as an overview would retain nothing at all — and would do so silently, since
-/// every other test would still pass.
-pub fn spans_whole_frame(roi: &Roi, width: u32, height: u32) -> bool {
-    roi.x == 0 && roi.y == 0 && roi.w >= width && roi.h >= height
-}
-
 /// How many strips to step over when sampling at `stride`, or `None` when
 /// stepping does not apply and the band must be read contiguously.
 ///
@@ -65,7 +43,7 @@ fn step_for(frame: &FrameInfo, stride: u32) -> Option<u32> {
 }
 
 /// Cut a window out of a decoded plane, whatever its format.
-pub fn cut(data: Samples<'_>, width: u32, height: u32, roi: &Roi) -> Decoded {
+pub(crate) fn cut(data: Samples<'_>, width: u32, height: u32, roi: &Roi) -> Decoded {
     match data {
         Samples::U8(v) => Decoded::U8(roi::extract(v, width, height, roi)),
         Samples::U16(v) => Decoded::U16(roi::extract(v, width, height, roi)),
@@ -189,7 +167,7 @@ fn blit_band(
 /// `cancel` is asked before each band, and once it says stop the build ends
 /// with a [`Cancelled`] error (the bands already decoded stay cached). Inline
 /// callers pass [`CancelToken::never`].
-pub fn assemble(
+pub(crate) fn assemble(
     tiff: &TiffStack,
     bands: &mut BandCache,
     layout: u64,
@@ -366,7 +344,7 @@ pub fn assemble(
 // ---------------------------------------------------------------------------
 
 /// A finished window, ready to upload.
-pub struct Built {
+pub(crate) struct Built {
     pub frame_index: usize,
     pub roi: Roi,
     /// Which display channels it holds, in order: the texture each plane goes
@@ -384,10 +362,10 @@ pub struct Built {
 /// mosaic costs on an ordinary panel, which leaves room for a HiDPI one and
 /// refuses the combinations (4K, several float channels) where holding it would
 /// cost more than the stall it saves.
-pub const OVERVIEW_MAX_BYTES: usize = 64 << 20;
+pub(crate) const OVERVIEW_MAX_BYTES: usize = 64 << 20;
 
 /// The retention budget for `mode` — see [`Overview::capture`].
-pub fn overview_budget(mode: roi::LargeImageMode) -> usize {
+pub(crate) fn overview_budget(mode: roi::LargeImageMode) -> usize {
     match mode {
         roi::LargeImageMode::Preload => roi::MAX_PRELOAD_BYTES,
         roi::LargeImageMode::Tiled => OVERVIEW_MAX_BYTES,
@@ -421,7 +399,7 @@ pub fn overview_budget(mode: roi::LargeImageMode) -> usize {
 /// Getting it wrong would show pixels from another frame or another channel
 /// mapping — or, for a channel whose format changed, upload a buffer of the
 /// wrong length, a failed validation that takes the process with it.
-pub struct Overview {
+pub(crate) struct Overview {
     /// The window itself.
     pub built: Built,
     /// The display revision when this was captured.
@@ -442,14 +420,14 @@ impl Overview {
     /// small ([`OVERVIEW_MAX_BYTES`]). Under
     /// [`Preload`](roi::LargeImageMode::Preload) it *is* the mode, and refusing
     /// it would leave the planner asking every frame for a level nothing holds.
-    pub fn capture(
+    pub(crate) fn capture(
         built: Built,
         width: u32,
         height: u32,
         revision: Revision,
         budget: usize,
     ) -> Option<Overview> {
-        if !spans_whole_frame(&built.roi, width, height) {
+        if !built.roi.spans_whole_frame(width, height) {
             return None;
         }
         let bytes: usize = built.planes.iter().map(Decoded::bytes).sum();
@@ -460,14 +438,14 @@ impl Overview {
     }
 
     /// Bytes the retained planes occupy.
-    pub fn bytes(&self) -> usize {
+    pub(crate) fn bytes(&self) -> usize {
         self.built.planes.iter().map(Decoded::bytes).sum()
     }
 
     /// Whether this still describes the stack as it is now: the same frame,
     /// under the same display revision — the same channel mapping and
     /// formats, the same channels on.
-    pub fn matches(&self, frame_index: usize, revision: Revision) -> bool {
+    pub(crate) fn matches(&self, frame_index: usize, revision: Revision) -> bool {
         self.built.frame_index == frame_index && self.revision == revision
     }
 
@@ -477,7 +455,7 @@ impl Overview {
     /// window's texture size, so they are the right bytes only for that exact
     /// window. A mismatch is a buffer that does not fit the texture it is
     /// going into. (Which channels they fill is fixed by the revision.)
-    pub fn can_upload(&self, roi: &Roi, frame_index: usize, revision: Revision) -> bool {
+    pub(crate) fn can_upload(&self, roi: &Roi, frame_index: usize, revision: Revision) -> bool {
         self.matches(frame_index, revision) && self.built.roi == *roi
     }
 }
@@ -520,13 +498,13 @@ struct Job {
 /// file has nothing to fall back on, so that one is built inline and waited for.
 /// `new` returns `None` without the `threads` feature, and every window is then
 /// built inline.
-pub struct WindowWorker(LatestWorker<WindowKey, Job, Built>);
+pub(crate) struct WindowWorker(LatestWorker<WindowKey, Job, Built>);
 
 impl WindowWorker {
     /// Spawn a worker over `tiff` — the window's own, shared. `None` if the
     /// thread fails to spawn, in which case the caller builds windows inline
     /// as before.
-    pub fn new(tiff: Arc<TiffStack>) -> Option<Self> {
+    pub(crate) fn new(tiff: Arc<TiffStack>) -> Option<Self> {
         // A band cache of its own, so the two threads never contend over one.
         // Nothing else can reach it, so it is `assemble` that empties it when
         // a request arrives under another channel layout.
@@ -563,7 +541,13 @@ impl WindowWorker {
     /// forget: a request for a different window (or under another revision)
     /// cancels the one in progress, and the same one again is ignored while it
     /// is still pending.
-    pub fn request(&self, frame_index: usize, roi: Roi, revision: Revision, jobs: Vec<ChannelJob>) {
+    pub(crate) fn request(
+        &self,
+        frame_index: usize,
+        roi: Roi,
+        revision: Revision,
+        jobs: Vec<ChannelJob>,
+    ) {
         self.0.request(
             (frame_index, roi, revision),
             Job {
@@ -592,7 +576,7 @@ impl WindowWorker {
     ///
     /// A result that has not been asked about is still not discarded — the view
     /// may be about to want it, and building it again is the expensive thing.
-    pub fn take_matching(
+    pub(crate) fn take_matching(
         &self,
         frame_index: usize,
         required: &Roi,
@@ -605,5 +589,14 @@ impl WindowWorker {
 }
 
 #[cfg(test)]
+#[path = "window_assembly_tests.rs"]
+mod assembly_tests;
+#[cfg(test)]
+#[path = "window_overview_tests.rs"]
+mod overview_tests;
+#[cfg(test)]
 #[path = "window_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "window_worker_tests.rs"]
+mod worker_tests;

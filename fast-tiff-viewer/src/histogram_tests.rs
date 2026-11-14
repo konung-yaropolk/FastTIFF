@@ -52,7 +52,10 @@ fn rgb(frames: usize) -> Document {
     }
     let bytes = w.finish().expect("finish").into_inner();
     let stack = Document::from_bytes(bytes, "rgb.tif".into(), false).expect("open");
-    assert!(stack.display.rgb(), "the fixture should open as RGB");
+    assert!(
+        stack.display.layout().shown_as_rgb(),
+        "the fixture should open as RGB"
+    );
     stack
 }
 
@@ -90,6 +93,15 @@ fn show(stack: &mut Document) -> usize {
 /// binned from the planes decoded for the screen and the ones decoded for
 /// the channels switched off alike — on a stack whose channels have tracks
 /// of their own, so the shared axis is a union.
+/// A display with no channels at all — which no file opens to — histograms
+/// to nothing rather than panicking.
+#[test]
+fn an_empty_display_histograms_to_nothing_rather_than_panicking() {
+    let mut stack = movie(1, 1);
+    stack.display = crate::Display::empty();
+    assert!(frame_histograms(&stack).is_empty());
+}
+
 #[test]
 fn the_held_histograms_equal_a_whole_frame_decode() {
     for mut stack in [movie(3, 2), rgb(2)] {

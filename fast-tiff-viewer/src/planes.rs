@@ -21,7 +21,7 @@ use fast_tiff_lib::{read_plane_f32_into, TiffStack};
 /// units.
 ///
 /// `out` is resized to the plane's pixel count and its allocation reused.
-pub fn plane_f32_into(
+pub(crate) fn plane_f32_into(
     tiff: &TiffStack,
     ifd: usize,
     sample: usize,

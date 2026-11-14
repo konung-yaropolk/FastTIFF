@@ -24,7 +24,7 @@
 //! texels ([`SampleUnits::to_unorm`]), from a decoded texture sample back
 //! ([`SampleUnits::texture_to_file`]), and to and from the display range an
 //! ImageJ file declares ([`SampleUnits::to_imagej`],
-//! [`SampleUnits::from_imagej`]). The numbers those conversions are made of
+//! [`SampleUnits::window_from_imagej`]). The numbers those conversions are made of
 //! live in [`fast_tiff_lib::DisplayMap`], the decoder's own statement of what
 //! its `u16` readers do, so they cannot drift from the decode either.
 //!
@@ -41,10 +41,10 @@ use scivis_render::ChannelKind;
 /// volume builder encodes an 8-bit channel's samples with this, and
 /// [`SampleUnits::to_unorm`] divides that channel's window by it, which is
 /// what keeps a window and the voxels it is applied to on one scale.
-pub const UNORM8_MAX: f32 = u8::MAX as f32;
+pub(crate) const UNORM8_MAX: f32 = u8::MAX as f32;
 
 /// The same for an `R16Uint` texel: the largest `u16`.
-pub const UNORM16_MAX: f32 = u16::MAX as f32;
+pub(crate) const UNORM16_MAX: f32 = u16::MAX as f32;
 
 /// A contrast window, in the file's own sample units: `lo` is shown black and
 /// `hi` at full intensity, with the channel's LUT colouring what lies between.
@@ -176,7 +176,11 @@ impl SampleUnits {
     /// the display scale is taken as the channel's own units: there is nothing
     /// to convert it by, and a window held in it is exactly the window the
     /// texture is shown with.
-    pub fn of(kind: ChannelKind, frame: Option<&FrameInfo>, range: Option<(f32, f32)>) -> Self {
+    pub(crate) fn of(
+        kind: ChannelKind,
+        frame: Option<&FrameInfo>,
+        range: Option<(f32, f32)>,
+    ) -> Self {
         match kind {
             ChannelKind::Int8 => Self::RAW8,
             // No data to take a span from: the unit one, the window a float
@@ -202,7 +206,8 @@ impl SampleUnits {
     /// The decoder's map between the file's values and the texture's, for an
     /// `Int16` channel; `None` for the two kinds whose textures hold the file's
     /// values themselves.
-    pub fn display_map(self) -> Option<DisplayMap> {
+    #[cfg(test)]
+    pub(crate) fn display_map(self) -> Option<DisplayMap> {
         match self.texture {
             Texture::Display(map) => Some(map),
             Texture::Raw8 | Texture::Float { .. } => None,
@@ -212,14 +217,14 @@ impl SampleUnits {
     /// `w` in the units the channel's texture holds: what the 2D shader's
     /// window uniforms are, and what the CPU compositor compares decoded
     /// samples against so that it agrees with the shader.
-    pub fn to_texture(self, w: Window) -> (f32, f32) {
+    pub(crate) fn to_texture(self, w: Window) -> (f32, f32) {
         (self.file_to_texture(w.lo), self.file_to_texture(w.hi))
     }
 
     /// `w` for the 3D view, whose volumes are normalized: the texture window
     /// put through [`volume_affine`](Self::volume_affine), the same map the
     /// volume builder encodes that channel's samples with.
-    pub fn to_unorm(self, w: Window) -> (f32, f32) {
+    pub(crate) fn to_unorm(self, w: Window) -> (f32, f32) {
         let (lo, hi) = self.to_texture(w);
         let (scale, offset) = self.volume_affine();
         (lo * scale + offset, hi * scale + offset)
@@ -233,7 +238,7 @@ impl SampleUnits {
     /// its texture holds ([`UNORM8_MAX`], [`UNORM16_MAX`]), as a unorm texel
     /// is; a float channel is normalized over its span (see
     /// [`float`](Self::float)), `lo` to 0 and `hi` to 1.
-    pub fn volume_affine(self) -> (f32, f32) {
+    pub(crate) fn volume_affine(self) -> (f32, f32) {
         match self.texture {
             Texture::Raw8 => (1.0 / UNORM8_MAX, 0.0),
             Texture::Display(_) => (1.0 / UNORM16_MAX, 0.0),
@@ -253,7 +258,7 @@ impl SampleUnits {
     /// The file value of a sample as the channel's texture holds it: for code
     /// that has decoded texture samples in hand and needs to say what they
     /// are worth. The inverse of [`to_texture`](Self::to_texture).
-    pub fn texture_to_file(self, v: f32) -> f32 {
+    pub(crate) fn texture_to_file(self, v: f32) -> f32 {
         match self.texture {
             Texture::Raw8 | Texture::Float { .. } => v,
             Texture::Display(map) => map.to_file(v as f64) as f32,
@@ -269,7 +274,7 @@ impl SampleUnits {
     /// pixels could not be scanned. A float texture has no whole range; a float
     /// channel gets `0..1`, the window it has always opened with when there was
     /// nothing to measure.
-    pub fn full_range(self) -> Window {
+    pub(crate) fn full_range(self) -> Window {
         match self.texture {
             Texture::Raw8 => Window::new(0.0, UNORM8_MAX),
             Texture::Float { .. } => Window::new(0.0, 1.0),
@@ -286,9 +291,9 @@ impl SampleUnits {
     /// the signed values through a calibration function), and states that
     /// image's range in the offset space. So a signed 16-bit window is written
     /// offset — by the decoder's own map for it — and every other channel's is
-    /// written as it is. [`from_imagej`](Self::from_imagej) is the inverse, so
+    /// written as it is. [`window_from_imagej`](Self::window_from_imagej) is the inverse, so
     /// a range read from a file and saved again comes back unchanged.
-    pub fn to_imagej(self, w: Window) -> (f64, f64) {
+    pub(crate) fn to_imagej(self, w: Window) -> (f64, f64) {
         match self.texture {
             Texture::Display(map @ DisplayMap::Signed16) => {
                 (map.to_display(w.lo as f64), map.to_display(w.hi as f64))
@@ -299,7 +304,7 @@ impl SampleUnits {
 
     /// The window an ImageJ file's display range `(min, max)` describes: the
     /// inverse of [`to_imagej`](Self::to_imagej).
-    pub fn from_imagej(self, (lo, hi): (f64, f64)) -> Window {
+    pub(crate) fn window_from_imagej(self, (lo, hi): (f64, f64)) -> Window {
         match self.texture {
             Texture::Display(map @ DisplayMap::Signed16) => {
                 Window::new(map.to_file(lo) as f32, map.to_file(hi) as f32)

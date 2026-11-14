@@ -245,7 +245,7 @@ impl Seek for Out {
 /// metadata — calibration, names, colours, the source's LUTs — can change
 /// until it is finished ([`redescribe`](Self::redescribe)): the file's
 /// description is written last, with its directory.
-pub struct ResultWriter {
+pub(crate) struct ResultWriter {
     // Declared before `file`, so it drops first: the handle is closed before
     // the file it writes is deleted.
     w: TiffWriter<Out>,
@@ -266,7 +266,7 @@ impl ResultWriter {
     /// `luts` are the tables the source was being shown with when the run
     /// started; a result that kept the source's channels is written with
     /// them, so it opens looking like what it came from.
-    pub fn begin(spec: ImageSpec, luts: &[Lut], dest: &ResultDest) -> anyhow::Result<Self> {
+    pub(crate) fn begin(spec: ImageSpec, luts: &[Lut], dest: &ResultDest) -> anyhow::Result<Self> {
         spec.validate()
             .map_err(|e| anyhow::anyhow!("the plugin returned an unusable image: {e}"))?;
         let planes = spec
@@ -316,7 +316,7 @@ impl ResultWriter {
     /// up to then, as the C contract has always allowed. The shape cannot
     /// change — those planes are in the file already — and a `spec` that
     /// changes it is refused.
-    pub fn redescribe(&mut self, spec: ImageSpec) -> anyhow::Result<()> {
+    pub(crate) fn redescribe(&mut self, spec: ImageSpec) -> anyhow::Result<()> {
         let s = &self.spec;
         if (
             spec.width,
@@ -359,7 +359,7 @@ impl ResultWriter {
     }
 
     /// Write the next plane.
-    pub fn push(&mut self, plane: PlaneRef<'_>) -> anyhow::Result<()> {
+    pub(crate) fn push(&mut self, plane: PlaneRef<'_>) -> anyhow::Result<()> {
         let index = self.w.frames_written();
         let expect = self.planes;
         if index >= expect {
@@ -377,18 +377,13 @@ impl ResultWriter {
     }
 
     /// Planes written so far.
-    pub fn pushed(&self) -> usize {
+    pub(crate) fn pushed(&self) -> usize {
         self.w.frames_written()
     }
 
-    /// What the result was declared as.
-    pub fn spec(&self) -> &ImageSpec {
-        &self.spec
-    }
-
     /// The file it is being written to, if it is a file.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn path(&self) -> Option<&Path> {
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn path(&self) -> Option<&Path> {
         self.file.as_ref().map(|f| f.path.as_path())
     }
 
@@ -397,7 +392,7 @@ impl ResultWriter {
     /// Refused, and the file deleted, when fewer planes arrived than were
     /// declared — the words are the ones a returned image that miscounted
     /// gets.
-    pub fn finish(self) -> anyhow::Result<ResultTiff> {
+    pub(crate) fn finish(self) -> anyhow::Result<ResultTiff> {
         let ResultWriter {
             w,
             #[cfg(not(target_arch = "wasm32"))]
@@ -836,7 +831,7 @@ pub fn to_tiff_bytes_reporting(
 
 /// [`to_tiff_bytes_reporting`], taking the result and dropping each plane once
 /// it is written — see [`into_tiff_bytes`].
-pub fn into_tiff_bytes_reporting(
+pub(crate) fn into_tiff_bytes_reporting(
     image: ImageResult,
     info: Option<&StackInfo>,
     luts: &[Lut],

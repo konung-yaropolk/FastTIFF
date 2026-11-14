@@ -173,7 +173,7 @@ impl SaveSource {
     pub fn of(stack: &Document) -> Self {
         SaveSource {
             tiff: std::sync::Arc::clone(&stack.tiff),
-            display: stack.display.clone(),
+            display: stack.display.snapshot(),
             overlay: stack.overlay.clone(),
         }
     }
@@ -446,17 +446,18 @@ fn fits_classic_uncompressed(frames: usize, bytes_per_frame: usize) -> bool {
 /// Whether ImageJ opens a stack of these axes, as a save writes them, as a
 /// hyperstack: one with more than one channel (a composite), or with slices
 /// and frames both. An RGB stack's channels are its samples, not an axis.
-pub fn opens_as_imagej_hyperstack(dims: Dims, rgb: bool) -> bool {
+pub(crate) fn opens_as_imagej_hyperstack(dims: Dims, rgb: bool) -> bool {
     let channels = if rgb { 1 } else { dims.channels };
     channels > 1 || (dims.slices > 1 && dims.frames > 1)
 }
 
 /// The hyperstack position — channel, slice, frame, each from 1 — of flat
 /// stack position `position` (the IFD index plus one) in a stack of `dims`,
-/// whose IFDs are in the channel-fastest order [`plane_index`](crate::plane_index)
-/// gives. In RGB the channels are samples of one IFD, and ImageJ has a single
-/// channel: 0 for it, which is "all".
-pub fn flat_to_hyperstack(position: u32, dims: Dims, rgb: bool) -> [u32; 3] {
+/// whose IFDs are in the channel-fastest order
+/// [`plane_index`](crate::dimensions::plane_index) gives. In RGB the channels
+/// are samples of one IFD, and ImageJ has a single channel: 0 for it, which is
+/// "all".
+pub(crate) fn flat_to_hyperstack(position: u32, dims: Dims, rgb: bool) -> [u32; 3] {
     let ifd = position.saturating_sub(1) as usize;
     let (channels, slices) = (dims.channels.max(1), dims.slices.max(1));
     let (c, rest) = if rgb {
@@ -474,7 +475,12 @@ pub fn flat_to_hyperstack(position: u32, dims: Dims, rgb: bool) -> [u32; 3] {
 /// axis at 0 — all of it — is taken at its first index, or at its last with
 /// `last`, so the two give the span such a position covers. `None` for an
 /// index past the axes.
-pub fn hyperstack_to_flat([c, z, t]: [u32; 3], dims: Dims, rgb: bool, last: bool) -> Option<u32> {
+pub(crate) fn hyperstack_to_flat(
+    [c, z, t]: [u32; 3],
+    dims: Dims,
+    rgb: bool,
+    last: bool,
+) -> Option<u32> {
     let channels = if rgb { 1 } else { dims.channels.max(1) };
     let (slices, frames) = (dims.slices.max(1), dims.frames.max(1));
     let index = |v: u32, n: usize| -> Option<usize> {
@@ -620,7 +626,7 @@ fn metadata_of(stack: &SaveSource) -> StackMetaWrite {
     // The overlay — the file's own points, or the point counter's — as ImageJ
     // overlay ROIs, each where ImageJ will draw it on these axes.
     if !stack.overlay.is_empty() {
-        let rgb = stack.display.rgb();
+        let rgb = stack.display.layout().shown_as_rgb();
         // The axes the file was written with, which a hyperstack position read
         // from it is in.
         let read_in = Dims {

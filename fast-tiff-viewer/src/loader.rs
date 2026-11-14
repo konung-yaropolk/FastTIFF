@@ -121,7 +121,7 @@ mod threaded {
     use std::sync::{Arc, Mutex};
 
     /// A load in flight on a worker thread.
-    pub struct Loading {
+    pub(crate) struct Loading {
         rx: Receiver<anyhow::Result<Document>>,
         stage: Arc<Mutex<LoadStage>>,
         name: PathBuf,
@@ -138,7 +138,7 @@ mod threaded {
         /// and the closure owns the source, so a failed spawn drops it. Holding
         /// it jointly is what keeps it reachable — the worker takes it on the
         /// way in, and if the worker never runs it is still there to take back.
-        pub fn spawn(
+        pub(crate) fn spawn(
             source: LoadSource,
             apply_pseudocolor: bool,
         ) -> Result<Self, Option<LoadSource>> {
@@ -173,18 +173,18 @@ mod threaded {
         }
 
         /// How far it has got, for a progress readout.
-        pub fn stage(&self) -> LoadStage {
+        pub(crate) fn stage(&self) -> LoadStage {
             self.stage.lock().map(|s| *s).unwrap_or(LoadStage::Reading)
         }
 
         /// The file being loaded.
-        pub fn name(&self) -> &PathBuf {
+        pub(crate) fn name(&self) -> &PathBuf {
             &self.name
         }
 
         /// The finished stack, once there is one. `None` while it is still
         /// running — never blocks.
-        pub fn take(&mut self) -> Option<anyhow::Result<Document>> {
+        pub(crate) fn take(&mut self) -> Option<anyhow::Result<Document>> {
             match self.rx.try_recv() {
                 Ok(result) => Some(result),
                 // Disconnected without a result means the worker died, which
@@ -200,4 +200,4 @@ mod threaded {
 }
 
 #[cfg(feature = "threads")]
-pub use threaded::Loading;
+pub(crate) use threaded::Loading;

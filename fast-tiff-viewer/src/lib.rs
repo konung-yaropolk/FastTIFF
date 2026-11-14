@@ -16,64 +16,91 @@
 //! from here. The typical loop is:
 //!
 //! ```ignore
+//! use fast_tiff_viewer::view2d::View2d;
+//! use fast_tiff_viewer::{FrameInputs, Viewer};
+//!
 //! let mut viewer = Viewer::new();
 //! viewer.open(path)?;
 //! let mut view = View2d::default();
 //! let mut inputs = FrameInputs::default();
 //!
 //! // each frame:
-//! if viewer.playback.playing { viewer.tick_playback(now_seconds); }
+//! if viewer.playback.playing() { viewer.tick_playback(now_seconds); }
 //! // your input, through `view` (see `view2d` for a frame of it), then:
 //! view.advance_zoom_glide(dt);
 //! inputs.moving = view.is_moving();
 //! view.set_panel(panel);
-//! let layout = view.measure(image_px, room);
-//! view.clamp_pan(&layout);
-//! let placed = view.place(&layout);
+//! let extent = view.measure(image_px, room);
+//! view.clamp_pan(&extent);
+//! let placed = view.place(&extent);
 //! inputs.image = placed.inputs(pixels_per_point);
 //! let outcome = viewer.sync(&mut renderer, &inputs);
 //! // ...then draw, and repaint again if outcome.needs_repaint;
 //! // show viewer.notices() on a status line
 //! ```
 //!
+//! What the user changes goes through operations rather than fields: the
+//! frame with [`DocumentMut::set_frame`] and [`DocumentMut::step_frame`], a
+//! channel's window and switch with [`DisplayMut::set_window`] and
+//! [`DisplayMut::set_enabled`] (handles from [`Viewer::document_mut`] and
+//! [`DocumentMut::display_mut`], which lend those and nothing that could
+//! replace the document or its display), the interpretation and the LUTs
+//! with [`Viewer::set_dimension_order`], [`Viewer::set_pseudocolor`] and
+//! [`Viewer::set_gray_lut`]; a document arrives only through an open.
+//!
 //! # Features
 //!
-//! * `backend-wgpu` / `backend-glow` — which GPU backend [`sync`] drives.
-//!   Exactly one is needed for [`Viewer::sync`]; with neither, the CPU-side
-//!   model still compiles and is fully usable headless.
-//! * `threads` (default) — background read-ahead, window and volume assembly
-//!   (see [`worker`]). Turn it off for a single-threaded host such as
-//!   `wasm32-unknown-unknown`; the synchronous fallbacks are already the paths
-//!   taken when a worker fails to spawn, so nothing else changes.
+//! * `backend-wgpu` / `backend-glow` — which GPU backend [`Viewer::sync`]
+//!   drives. Exactly one is needed for it; with neither, the CPU-side model
+//!   still compiles and is fully usable headless.
+//! * `threads` (default) — background read-ahead, window and volume assembly.
+//!   Turn it off for a single-threaded host such as `wasm32-unknown-unknown`;
+//!   the synchronous fallbacks are already the paths taken when a worker
+//!   fails to spawn, so nothing else changes.
 
-pub mod bandcache;
-pub mod brightness;
+// Without a backend there is no sync, and much of what it drives — the
+// workers, the caches, the residency plans — has no caller: that build is for
+// the CPU-side model alone.
+#![cfg_attr(
+    not(any(feature = "backend-wgpu", feature = "backend-glow")),
+    allow(dead_code)
+)]
+// Everything `pub` is reachable from outside, and so is this crate's API: an
+// item only the crate uses says `pub(crate)`. And a type a public signature
+// hands out can be named by the frontend it is handed to.
+#![warn(unreachable_pub, unnameable_types)]
+
+// The modules a frontend uses as areas of their own are public; everything
+// else is the crate's, and what a frontend needs of it is re-exported below.
+// An item is reachable by one path.
+mod bandcache;
+mod brightness;
 pub mod camera;
 pub mod channels;
-pub mod colormap;
-pub mod dimensions;
-pub mod display;
-pub mod document;
-pub mod frame;
+mod colormap;
+mod dimensions;
+mod display;
+mod document;
+mod frame;
 pub mod histogram;
-pub mod loader;
-pub mod notice;
+mod loader;
+mod notice;
 /// Decoding one plane as `f32` in the file's own units. One definition, so the
 /// plugin host and anything else measuring pixels cannot disagree about what a
 /// sample is worth.
-pub mod planes;
+mod planes;
 /// Plugins — the registry, the host a plugin sees, and the ones compiled in.
 ///
 /// Built for every target, including wasm. What is desktop-only is narrower
-/// than the whole module and is gated inside it: loading a third-party shared
-/// library (`plugins::library`, `plugins::discover`) and the two built-ins that
-/// cannot work in a browser. The browser build gets the rest, which is what
-/// `plugins::Registry::new` has always been for.
+/// than the whole module and is gated inside it: finding and loading a
+/// third-party shared library (`plugins::library`, `plugins::install_dir`) and
+/// the built-ins that cannot work in a browser. The browser build gets the
+/// rest, which is what `plugins::Registry::new` has always been for.
 ///
 /// Nothing in the decode, sync or render path refers to this module, so a build
 /// that never opens the Plugins menu pays for it only in binary size.
 pub mod plugins;
-pub mod prefetch;
+mod prefetch;
 /// What one renderer holds of the document it shows, reconciled with the
 /// display model once per sync. Crate-private: a frontend asks the
 /// [`Viewer`] what it needs of it.
@@ -84,23 +111,26 @@ pub mod roi;
 pub mod save;
 mod screen;
 pub mod snapshot;
-pub mod units;
+mod units;
 pub mod view2d;
-pub mod viewer;
-pub mod volume;
-pub mod window;
-pub mod worker;
+mod viewer;
+mod volume;
+mod window;
+mod worker;
 
 #[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
-pub mod sync;
+mod sync;
+
+#[doc(hidden)]
+pub mod testing;
 
 // The GPU backend this crate was built against. Selected the same way the
 // frontend selects one, and it must be the *same* one — the app's `renderer-*`
 // features forward to both crates, which is what keeps them in step.
 #[cfg(feature = "backend-glow")]
-pub use scivis_render::glow_backend as backend;
+use scivis_render::glow_backend as backend;
 #[cfg(all(feature = "backend-wgpu", not(feature = "backend-glow")))]
-pub use scivis_render::wgpu_backend as backend;
+use scivis_render::wgpu_backend as backend;
 
 /// The concrete renderer [`Viewer::sync`] drives, so callers name it once.
 #[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
@@ -133,21 +163,18 @@ pub fn share_gpu_device(device: &wgpu::Device, queue: &wgpu::Queue, adapter: &wg
     let _ = (device, queue, adapter);
 }
 
-pub use dimensions::{plane_index, planes_addressed};
-pub use display::{Dims, Display, Revision};
-pub use document::{ChannelSettings, Document, SampleUnits, Window};
+pub use display::{ChannelLayout, Dims, Display, DisplayMut, GrayLuts, Revision};
+pub use document::{ChannelSettings, Document, DocumentMut, SampleUnits, Window};
 pub use frame::{FrameInputs, ImageInputs, Pose, VolumeInputs};
-pub use histogram::Histogram;
 pub use loader::{LoadSource, LoadStage};
 pub use notice::{Notice, NoticeKind, ShapeNote, VolumeNote};
 pub use screen::PhysicalPx;
-pub use view2d::View2d;
+#[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
+pub use sync::SyncOutcome;
 pub use viewer::{DecodeMode, Playback, ViewMode, Viewer, VolumeSettings, DEFAULT_FPS};
 
 // Re-exported so a frontend needs only this crate in its imports for the common
 // path; reach for `fast_tiff_lib` / `scivis_render` directly when you need
 // something more specific.
 pub use fast_tiff_lib::{self, TiffStack};
-pub use scivis_render::{
-    self, ChannelKind, Lut, VolumeInterp, VolumeKind, VolumeRender, MAX_CHANNELS,
-};
+pub use scivis_render::{self, ChannelKind, Lut, VolumeInterp, VolumeRender, MAX_CHANNELS};
