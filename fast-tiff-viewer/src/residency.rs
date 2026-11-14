@@ -135,6 +135,11 @@ pub(crate) struct Pending {
     /// [`Residency::luts_uploaded`]: the renderer holds none of this channel
     /// layout, or holds them as they were before a pick.
     pub(crate) upload_luts: bool,
+    /// The volume to show is another one — this document's first, or one of
+    /// the axes after an override: whatever was said of the last one (see
+    /// [`Notices::volume_replaced`](crate::notice::Notices::volume_replaced))
+    /// no longer applies.
+    pub(crate) new_volume: bool,
 }
 
 impl Residency {
@@ -148,10 +153,11 @@ impl Residency {
     /// renderer has said what it can hold. That is
     /// [`needs_upload`](Self::needs_upload).
     pub(crate) fn begin_sync(&mut self, display: &Display, frame: usize) -> Pending {
-        self.reconcile(display, frame);
+        let new_volume = self.reconcile(display, frame);
         Pending {
             release_volume: self.volume.take_release(),
             upload_luts: self.luts.is_none(),
+            new_volume,
         }
     }
 
@@ -173,8 +179,8 @@ impl Residency {
     /// rules are in the [module docs](self). Run once at the top of every sync,
     /// by [`begin_sync`](Self::begin_sync), before anything is read or
     /// uploaded, so nothing below it has to ask whether what it finds here is
-    /// still current.
-    fn reconcile(&mut self, display: &Display, frame: usize) {
+    /// still current. Returns whether the volume is now another one.
+    fn reconcile(&mut self, display: &Display, frame: usize) -> bool {
         let now = display.revision();
         if self.layout != Some(now.layout) {
             // Every display channel may now read another IFD, or have another
@@ -212,7 +218,7 @@ impl Residency {
         if self.luts.is_some_and(|l| l != display.lut_revision()) {
             self.luts = None;
         }
-        self.volume.reconcile(now.layout);
+        self.volume.reconcile(now.layout)
     }
 
     /// Record an upload of `frame`'s pixels, decoded under `revision` and cut
@@ -296,9 +302,10 @@ impl Default for VolumeResidency {
 impl VolumeResidency {
     /// Make this the residency of a volume of channel layout `layout`: when
     /// it was another one's, build again, and give back what was uploaded.
-    fn reconcile(&mut self, layout: u64) {
+    /// Returns whether it was another one's.
+    fn reconcile(&mut self, layout: u64) -> bool {
         if self.layout == Some(layout) {
-            return;
+            return false;
         }
         self.layout = Some(layout);
         // The old arrangement of the planes, or another document's: no use to
@@ -306,6 +313,7 @@ impl VolumeResidency {
         // loading state until the new one lands).
         self.release |= self.uploaded_generation.take().is_some();
         self.rebuild();
+        true
     }
 
     /// Build the same volume again, from a fresh plan (a smaller budget, say),

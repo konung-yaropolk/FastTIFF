@@ -17,13 +17,14 @@
 //! ```ignore
 //! let mut viewer = Viewer::new();
 //! viewer.open(path)?;
+//! let mut inputs = FrameInputs::default();
 //!
 //! // each frame:
 //! if viewer.playback.playing { viewer.tick_playback(now_seconds); }
-//! viewer.uv_offset = ...;  // from your pan/zoom
-//! viewer.uv_scale  = ...;
-//! let outcome = viewer.sync(&mut renderer);
-//! // ...then draw, and repaint again if outcome.needs_repaint
+//! inputs.image = ImageInputs::of_visible(...);  // from your pan/zoom
+//! let outcome = viewer.sync(&mut renderer, &inputs);
+//! // ...then draw, and repaint again if outcome.needs_repaint;
+//! // show viewer.notices() on a status line
 //! ```
 //!
 //! # Features
@@ -44,8 +45,10 @@ pub mod colormap;
 pub mod dimensions;
 pub mod display;
 pub mod document;
+pub mod frame;
 pub mod histogram;
 pub mod loader;
+pub mod notice;
 /// Decoding one plane as `f32` in the file's own units. One definition, so the
 /// plugin host and anything else measuring pixels cannot disagree about what a
 /// sample is worth.
@@ -122,9 +125,11 @@ pub fn share_gpu_device(device: &wgpu::Device, queue: &wgpu::Queue, adapter: &wg
 pub use dimensions::{plane_index, planes_addressed};
 pub use display::{Dims, Display, Revision};
 pub use document::{ChannelSettings, Document, SampleUnits, Window};
+pub use frame::{FrameInputs, ImageInputs, PhysicalPx, Pose, VolumeInputs};
 pub use histogram::Histogram;
 pub use loader::{LoadSource, LoadStage};
-pub use viewer::{DecodeMode, Playback, ViewMode, Viewer, VolumeView, DEFAULT_FPS};
+pub use notice::{Notice, NoticeKind, ShapeNote, VolumeNote};
+pub use viewer::{DecodeMode, Playback, ViewMode, Viewer, VolumeSettings, DEFAULT_FPS};
 
 // Re-exported so a frontend needs only this crate in its imports for the common
 // path; reach for `fast_tiff_lib` / `scivis_render` directly when you need

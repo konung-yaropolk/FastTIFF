@@ -416,7 +416,8 @@ impl super::ViewerApp {
         }
     }
 
-    /// Reassign the axes. That also refreshes LUTs + status; the volume is
+    /// Reassign the axes. That also refreshes the LUTs and the core's note on
+    /// the shape (this app's own message stays); the volume is
     /// rebuilt at the next sync, which finds the channel layout moved (the
     /// frame axis, i.e. the volume depth, just changed).
     fn set_dimension_order(&mut self, c: usize, z: usize, f: usize) {
@@ -446,7 +447,7 @@ impl super::ViewerApp {
                 // not an error.
                 let _ = Current::reveal_folder(&dir);
             }
-            None => self.core.status = Some("Could not determine a writable plugin folder".into()),
+            None => self.say("Could not determine a writable plugin folder".into()),
         }
     }
 }

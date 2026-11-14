@@ -46,24 +46,31 @@ widgets and input; it borrows everything else from here.
 ## Usage
 
 ```rust,ignore
-use fast_tiff_viewer::Viewer;
+use fast_tiff_viewer::{FrameInputs, ImageInputs, Viewer};
 
 let mut viewer = Viewer::new();
 viewer.open(path)?;
+let mut inputs = FrameInputs::default();
 
 // each frame:
 if viewer.playback.playing {
     viewer.tick_playback(now_seconds);
 }
-viewer.uv_offset = /* from your pan/zoom */;
-viewer.uv_scale  = /* from your pan/zoom */;
+// From your pan/zoom: the part of the image on screen, and its size in
+// physical pixels.
+inputs.image = ImageInputs::of_visible(image_min, image_size, visible_min, visible_size, ppp);
 
-let outcome = viewer.sync(&mut renderer);
+let outcome = viewer.sync(&mut renderer, &inputs);
 // …then draw, and repaint again if outcome.needs_repaint
+for notice in viewer.notices() {
+    // one line each on a status bar: a failed open, a frame that would not
+    // decode, a 3D volume that did not fit, a note about the file's shape
+}
 ```
 
 `Viewer` holds no window, panel, zoom or pointer state — those are the
-frontend's. The dividing line is *"would a browser UI need this to show the
+frontend's, and what they come to each frame is handed to `sync` as
+`FrameInputs`. The dividing line is *"would a browser UI need this to show the
 right pixels?"*; if yes, it's here.
 
 ## Features

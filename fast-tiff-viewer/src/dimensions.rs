@@ -1,10 +1,11 @@
 //! Stack-shape interpretation: applying resolved (or manually overridden)
 //! channel/Z/time roles to a loaded stack, RGB plane setup, and the derived
-//! status line. Split from `app.rs`.
+//! note about its shape. Split from `app.rs`.
 
 use crate::channels::build_channel_settings_reporting;
 use crate::display::Dims;
 use crate::document::{ChannelSettings, Document};
+use crate::notice::ShapeNote;
 use crate::units::SampleUnits;
 use scivis_render::{ChannelKind, MAX_CHANNELS};
 
@@ -103,40 +104,30 @@ pub fn clamp_to_available(dims: &mut Dims, rgb: bool, available: usize) -> Optio
     Some((declared, available))
 }
 
-/// The status note shown at the top of the window, derived from the
-/// stack's current (resolved) dimensions. Shared between the initial load
-/// and the manual dimension-order override so the two can't drift out of
-/// sync with each other.
-pub fn compute_status(
+/// The note about the stack's shape worth showing the user, derived from its
+/// current (resolved) dimensions; `None` when there is nothing to say. Shared
+/// between the initial load and the manual dimension-order override so the
+/// two can't drift out of sync with each other. Its words are its
+/// [`Display`](std::fmt::Display).
+pub fn shape_note(
     dims: Dims,
     triple_axis_warning: bool,
     plane_mismatch: Option<(usize, usize)>,
-) -> Option<String> {
+) -> Option<ShapeNote> {
     // Ahead of the others: those describe how the file has been *interpreted*,
     // this one says the file disagrees with itself. Whatever is on screen is
     // built from an arrangement the metadata does not actually back up, and the
     // reader should know that before anything else.
     if let Some((declared, available)) = plane_mismatch {
-        Some(format!(
-            "Warning: this file's metadata describes {declared} image plane(s) but the file \
-             contains {available}. Showing {} channel(s) × {} Z-slice(s) × {} frame(s), \
-             which is what fits — the rest may live in a companion file (a multi-file \
-             OME set gives every file the whole dataset's dimensions), or the file may \
-             be truncated.",
-            dims.channels, dims.slices, dims.frames
-        ))
+        Some(ShapeNote::PlaneMismatch {
+            declared,
+            available,
+            dims,
+        })
     } else if triple_axis_warning {
-        Some(format!(
-            "Warning: this file has channels, Z-slices, and time frames all present at once \
-             ({} channel(s) × {} Z-slice(s) × {} frame(s)). Z isn't shown as a separate axis here \
-             — only the first Z-slice is used; to see the whole picture, use 3D view.",
-            dims.channels, dims.slices, dims.frames
-        ))
+        Some(ShapeNote::FrozenZ(dims))
     } else if dims.channels > MAX_CHANNELS {
-        Some(format!(
-            "Note: stack has {} channels; showing the first {MAX_CHANNELS}.",
-            dims.channels
-        ))
+        Some(ShapeNote::TooManyChannels(dims.channels))
     } else {
         None
     }
@@ -146,7 +137,7 @@ pub fn compute_status(
 /// to a stack: updates the metadata, rebuilds channel_display +
 /// channel_settings to match the new channel count, and resets the scrub
 /// position. The one place that does this, so the manual channels/frames
-/// swap can't drift out of sync with `open_file` the way `self.status`
+/// swap can't drift out of sync with `open_file` the way the status note
 /// previously did.
 pub fn apply_resolved_dimensions(
     loaded: &mut Document,

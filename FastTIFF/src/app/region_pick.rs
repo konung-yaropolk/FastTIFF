@@ -142,7 +142,7 @@ impl super::ViewerApp {
         prompt: String,
     ) {
         if self.core.document.is_none() {
-            self.core.status = Some("Open an image first".into());
+            self.say("Open an image first".into());
             return;
         }
         // A rectangle is drawn on the picture. An animation running in 3D
@@ -155,7 +155,7 @@ impl super::ViewerApp {
             roi: None,
             drag: None,
         });
-        self.core.status = Some(prompt);
+        self.say(prompt);
     }
 }
 

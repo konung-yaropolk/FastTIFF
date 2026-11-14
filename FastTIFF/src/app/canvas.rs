@@ -2,6 +2,7 @@
 //! it there.
 
 use super::*;
+use fast_tiff_viewer::{ImageInputs, PhysicalPx};
 
 impl ViewerApp {
     /// Draw the central panel, queueing what the wheel over the picture asks
@@ -85,16 +86,14 @@ impl ViewerApp {
         panel_rect: egui::Rect,
         response: egui::Response,
     ) {
-        self.core.volume.aspect =
-            (panel_rect.width() / panel_rect.height().max(1.0)).clamp(0.1, 10.0);
+        // The size of the view, which is also its shape (the projection's
+        // aspect ratio).
         let ppp = ui.ctx().pixels_per_point();
-        self.core.volume.viewport_px = [
-            (panel_rect.width() * ppp).round().max(1.0) as u32,
-            (panel_rect.height() * ppp).round().max(1.0) as u32,
-        ];
+        self.sync_inputs.volume.viewport =
+            PhysicalPx::from_points(panel_rect.width(), panel_rect.height(), ppp);
         // The screen, for how much detail a volume is worth keeping.
         if let Some(monitor) = ui.ctx().input(|i| i.viewport().monitor_size) {
-            self.core.volume.screen_px = (monitor.x.max(monitor.y) * ppp).round().max(0.0) as u32;
+            self.sync_inputs.volume.screen = PhysicalPx::from_points(monitor.x, monitor.y, ppp);
         }
 
         // Until the first volume is built, show a black loading screen so
@@ -402,13 +401,16 @@ impl ViewerApp {
         let full_rect = egui::Rect::from_min_size(origin, img_px);
         let visible = full_rect.intersect(panel_rect);
         if visible.is_positive() {
-            let inv = egui::vec2(1.0 / img_px.x.max(1.0), 1.0 / img_px.y.max(1.0));
-            self.core.uv_offset = ((visible.min - origin) * inv).into();
-            self.core.uv_scale = (visible.size() * inv).into();
-            // How much room there is to draw it, which is what decides how
-            // finely an over-large image needs to be sampled.
-            let ppp = ui.ctx().pixels_per_point();
-            self.core.viewport_px = (visible.size() * ppp).into();
+            // Which part of the image that is, and how much room there is to
+            // draw it, which is what decides how finely an over-large image
+            // needs to be sampled.
+            self.sync_inputs.image = ImageInputs::of_visible(
+                origin.into(),
+                img_px.into(),
+                visible.min.into(),
+                visible.size().into(),
+                ui.ctx().pixels_per_point(),
+            );
             ui.painter()
                 .with_clip_rect(panel_rect)
                 .add(render::paint_callback(&self.render, visible));

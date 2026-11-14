@@ -258,10 +258,8 @@ fn a_failed_open_keeps_the_current_stack() {
         "a failed open must not drop the loaded stack"
     );
     assert!(viewer
-        .status
-        .as_deref()
-        .unwrap_or("")
-        .contains("Failed to open"));
+        .notices()
+        .any(|n| n.to_string().contains("Failed to open")));
 }
 
 #[test]

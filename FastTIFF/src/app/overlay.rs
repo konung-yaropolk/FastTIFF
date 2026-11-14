@@ -24,14 +24,15 @@ impl ViewerApp {
         // Rebuild the exact camera the shader used this frame (box half-extents
         // fold in the voxel scale, matching what's on screen), turned by an
         // animation's pose when one is playing, so the box turns with it.
-        let cam = self.core.volume.camera(dims);
+        let volume = &self.sync_inputs.volume;
+        let cam = self.core.volume.camera(dims, volume.pose.as_ref());
 
         let unit = loaded.tiff.meta.unit.as_deref().filter(|u| !u.is_empty());
         draw_box(
             painter,
             rect,
             &cam,
-            self.core.volume.aspect,
+            volume.aspect(),
             dims,
             self.core.volume.scale,
             unit,

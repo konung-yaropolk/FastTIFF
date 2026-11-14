@@ -1,16 +1,21 @@
 //! [`Viewer`] — the frontend-agnostic viewer state: which document is open, what
-//! it's showing, and everything the per-frame GPU sync needs.
+//! it's showing, and everything the per-frame GPU sync keeps between frames.
 //!
 //! This is the state a *second* frontend would otherwise have to reinvent. It
 //! deliberately holds no window, panel, zoom or pointer state: those are the
 //! frontend's, and the eframe app keeps them in its own `ViewerApp` alongside a
 //! `Viewer`. The dividing line is "would a browser UI need this to show the
-//! right pixels?" — if yes it lives here.
+//! right pixels?" — if yes it lives here. What the frontend's view comes to
+//! each frame — the part of the image on screen, the size of the 3D view — is
+//! handed to [`Viewer::sync`] as [`FrameInputs`](crate::FrameInputs) rather
+//! than kept here.
 
 use crate::camera::CameraState;
 use crate::channels::refresh_pseudocolor;
-use crate::dimensions::{apply_dimension_override, compute_status};
+use crate::dimensions::{apply_dimension_override, shape_note};
 use crate::document::Document;
+use crate::frame::Pose;
+use crate::notice::{Notice, NoticeKind, Notices};
 use crate::residency::Residency;
 use crate::roi::Roi;
 use scivis_render::{VolumeInterp, VolumeRender};
@@ -121,9 +126,12 @@ impl Playback {
 ///
 /// What the renderer holds of the volume, and the builds asked for, are the
 /// viewer's residency instead (see [`Viewer::volume_built`]): they follow the
-/// document, not the user's choices.
+/// document, not the user's choices. How large the view is this frame, how
+/// finely to render it and an animation's turn of it are the frontend's
+/// decisions for the frame, handed to [`Viewer::sync`] as
+/// [`VolumeInputs`](crate::frame::VolumeInputs).
 #[derive(Clone, Copy, Debug)]
-pub struct VolumeView {
+pub struct VolumeSettings {
     pub cam: CameraState,
     /// Per-axis voxel scale (x, y, z) for the volume box. Seeded from the
     /// stack's pixel calibration + Z spacing on load (else 1:1:1).
@@ -150,40 +158,11 @@ pub struct VolumeView {
     /// compensates and why the density slider otherwise changes the brightness
     /// as much as the solidity.
     pub volume_autolevel: bool,
-    /// The volume viewport aspect ratio (width/height), set by the frontend each
-    /// frame so the ray-march projection matches the on-screen rect.
-    pub aspect: f32,
-    /// The volume viewport's size in physical pixels, set by the frontend each
-    /// frame beside [`aspect`](Self::aspect). What bounds the work of a frame
-    /// (see `scivis_render::max_steps`), and what the renderer renders at.
-    pub viewport_px: [u32; 2],
-    /// How many times smaller per axis to render the view than it is shown:
-    /// 1 renders every pixel. A frontend sets
-    /// [`scivis_render::MOVING_DOWNSCALE`] while the user is moving the view,
-    /// where a sharp frame is wasted, and 1 once it is still.
-    pub downscale: u32,
-    /// The longest side of the screen in physical pixels, set by the frontend
-    /// (0 when it cannot tell). A volume keeps at most about twice this many
-    /// voxels along any axis — more than that cannot be seen even zoomed in
-    /// twofold — however much GPU memory there is.
-    pub screen_px: u32,
-    /// A turn of the volume about the middle of the volume under the centre
-    /// of the view (see `VolumeCamera::pivot_distance`), on top
-    /// of the camera — row-major, in volume coordinates. Set by a frontend playing an animation, frame by
-    /// frame; `None` the rest of the time. See [`VolumeCamera::posed`].
-    ///
-    /// Separate from [`cam`](Self::cam) on purpose: the camera is what the user
-    /// set up and the animation is seen from, and leaving it untouched is what
-    /// lets a frontend tell that the user has taken the view back (it changed)
-    /// and put the view back exactly as it was when the animation ends.
-    ///
-    /// [`VolumeCamera::posed`]: crate::camera::VolumeCamera::posed
-    pub pose: Option<[[f32; 3]; 3]>,
 }
 
-impl Default for VolumeView {
+impl Default for VolumeSettings {
     fn default() -> Self {
-        VolumeView {
+        VolumeSettings {
             cam: CameraState::default(),
             scale: [1.0, 1.0, 1.0],
             interp: VolumeInterp::Linear,
@@ -193,26 +172,25 @@ impl Default for VolumeView {
             mip_brightness: crate::brightness::MIP_DEFAULT,
             volume_brightness: 1.0,
             volume_autolevel: true,
-            aspect: 1.0,
-            viewport_px: [1920, 1080],
-            downscale: 1,
-            screen_px: 0,
-            pose: None,
         }
     }
 }
 
-impl VolumeView {
+impl VolumeSettings {
     /// The camera the ray-march uses this frame, for a volume of `dims`
-    /// voxels: the user's, turned by [`pose`](Self::pose) when an animation
-    /// has set one.
+    /// voxels: the user's, turned by `pose` when an animation has set one
+    /// ([`VolumeInputs::pose`](crate::frame::VolumeInputs::pose)).
     ///
     /// The one place it is worked out, so the shader and anything drawn over
     /// the render — the coordinate box — cannot disagree about where the
     /// volume is.
-    pub fn camera(&self, dims: (u32, u32, u32)) -> crate::camera::VolumeCamera {
+    pub fn camera(
+        &self,
+        dims: (u32, u32, u32),
+        pose: Option<&Pose>,
+    ) -> crate::camera::VolumeCamera {
         let cam = crate::camera::volume_camera(&self.cam, self.scale, dims);
-        match &self.pose {
+        match pose {
             // About the middle of the volume under the centre of the picture,
             // so it turns in place in the middle of the frame however the user
             // has panned or zoomed (see `VolumeCamera::pivot_distance`).
@@ -221,26 +199,13 @@ impl VolumeView {
         }
     }
 
-    /// How many pixels tall a render of this view has to be to keep every
-    /// pixel of the stack in view, for a volume of `dims` voxels — see
+    /// How many pixels tall a render of this view, turned by `pose`, has to
+    /// be to keep every pixel of the stack in view, for a volume of `dims`
+    /// voxels — see
     /// [`VolumeCamera::detail_height`](crate::camera::VolumeCamera::detail_height).
-    pub fn detail_height(&self, dims: (u32, u32, u32)) -> f32 {
-        let cam = self.camera(dims);
+    pub fn detail_height(&self, dims: (u32, u32, u32), pose: Option<&Pose>) -> f32 {
+        let cam = self.camera(dims, pose);
         cam.detail_height(cam.pivot_distance(), (dims.0, dims.1))
-    }
-
-    /// The most samples a ray of this view may take
-    /// (`VolumeParams::max_steps`): what keeps a frame of the whole viewport
-    /// within the frame budget (see `scivis_render::max_steps`).
-    ///
-    /// The whole viewport's even while the view renders reduced, so a reduced
-    /// frame takes as many steps along each ray as a sharp one and does a
-    /// fraction of the work, which is what reducing it is for. Worked out
-    /// from the reduced size, its rays could take up to sixteen times the
-    /// steps, and a large volume would move barely faster than it stands.
-    pub fn max_steps(&self, channels: usize) -> i32 {
-        let [w, h] = self.viewport_px;
-        scivis_render::max_steps(w as f64 * h as f64, channels, self.interp)
     }
 }
 
@@ -249,9 +214,10 @@ impl VolumeView {
 pub struct Viewer {
     /// The open document, if any: the file and how it is shown.
     pub document: Option<Document>,
-    /// A note about the stack's shape worth surfacing to the user (mislabeled
-    /// channel counts, the frozen-Z warning). `None` when there's nothing to say.
-    pub status: Option<String>,
+    /// What there is to tell the user, one notice per kind: see
+    /// [`notices`](Self::notices). Set here (an open, an axis override) and by
+    /// the sync (a decode, a volume upload).
+    pub(crate) notices: Notices,
     pub view_mode: ViewMode,
     /// User preference (persists across files): tint a multi-channel *grayscale*
     /// stack with the standard channel palette (ch1 red, ch2 green, ch3 blue, …).
@@ -279,51 +245,8 @@ pub struct Viewer {
     pub large_image_mode: crate::roi::LargeImageMode,
     /// Latched once playback falls behind in `Auto` mode. Reset per document.
     pub decode_parallel: bool,
-    /// The visible UV sub-rect of the 2D image (`offset`, `scale`), computed by
-    /// the frontend from its zoom + pan and uploaded to the shader. The image is
-    /// always drawn into the on-screen visible rect with pan/zoom done via these
-    /// UVs — never via an oversized viewport, which a GPU backend would clamp to
-    /// the framebuffer (squashing the image instead of zooming).
-    pub uv_offset: [f32; 2],
-    pub uv_scale: [f32; 2],
-    /// Size in physical pixels of the area the image is drawn into.
-    ///
-    /// Set alongside [`uv_offset`](Self::uv_offset)/[`uv_scale`](Self::uv_scale)
-    /// — it is the other half of the same question. Those say *which* part of
-    /// the image is on screen; this says how much room there is to draw it, and
-    /// together they decide how finely the image needs to be sampled. Without
-    /// it a huge image is sampled as finely as the texture budget allows, which
-    /// can be a hundred times more detail than the display can show, paid for
-    /// on every zoom step.
-    ///
-    /// Zero means "unknown", and residency falls back to the texture budget.
-    pub viewport_px: [f32; 2],
-    /// Whether the view is still moving under an animation or gesture, so any
-    /// window started now would be planned against a zoom that has already
-    /// changed by the time it is decoded.
-    ///
-    /// Set by the frontend while it is gliding a zoom step out or a pinch is
-    /// live. Windows already finished are still taken — a better picture is
-    /// always worth having — but no new one is started until the view settles.
-    /// Without this an animated zoom decodes at every sampling level it passes
-    /// through on the way, which is work the user never sees: the view is only
-    /// at each of them for a few frames, and the level it is heading for is the
-    /// only one that will still be wanted.
-    pub view_moving: bool,
-    /// Whether the frontend is showing the histograms of the frame on screen
-    /// ([`Document::histograms`]): set while its histogram panel is open.
-    ///
-    /// While it is, [`sync`](Self::sync) bins each frame it decodes for the
-    /// screen (during playback, a few times a second, and by the read-ahead
-    /// when it is reading ahead), and decodes what that did not cover: the
-    /// channels switched off, a frame already on screen when the panel opened,
-    /// and in the 3D view the 2D frame. A frame past the texture limit is
-    /// binned from a view of the whole of it instead. Off, none of that is
-    /// done, and the histograms held are left as they are. See
-    /// [`crate::histogram`].
-    pub histograms_wanted: bool,
     pub playback: Playback,
-    pub volume: VolumeView,
+    pub volume: VolumeSettings,
     /// What the renderer holds of [`document`](Self::document), in 2D and 3D: one
     /// view's side of the document, reconciled with its display model at the
     /// top of every [`sync`](Self::sync) and replaced whenever the document
@@ -365,10 +288,33 @@ fn open_failure(e: &anyhow::Error) -> String {
 
 impl Viewer {
     pub fn new() -> Self {
-        Viewer {
-            uv_scale: [1.0, 1.0],
-            ..Default::default()
-        }
+        Viewer::default()
+    }
+
+    /// What there is to tell the user about the view on screen, in
+    /// [`NoticeKind`] order: an open that failed, a frame that could not be
+    /// decoded, a volume that could not be shown as built, and the
+    /// document's shape.
+    ///
+    /// One per kind, each replaced only by its own kind and gone once it
+    /// stops applying (see [`Notice`]), so one never hides another. Only
+    /// those that apply to [`view_mode`](Self::view_mode)'s view: the note
+    /// that 2D shows the first Z-slice alone stands down over the 3D view,
+    /// which shows them all.
+    pub fn notices(&self) -> impl Iterator<Item = &Notice> + '_ {
+        let mode = self.view_mode;
+        self.notices.iter().filter(move |n| n.applies_to(mode))
+    }
+
+    /// Drop the notice of `kind`, for a frontend that has moved on.
+    ///
+    /// For the report of an attempt, [`NoticeKind::OpenFailed`]: once the
+    /// user has started other work, what the last open said is no longer
+    /// news, and left up beside that work it reads as a comment on it. The
+    /// rest describe the document on show, and come back only when the
+    /// viewer finds them again.
+    pub fn dismiss(&mut self, kind: NoticeKind) {
+        self.notices.clear(kind);
     }
 
     /// Open `path`, replacing whatever was loaded. On success every derived
@@ -377,8 +323,9 @@ impl Viewer {
     /// view.
     ///
     /// On failure the **previously loaded document stays open** and only
-    /// `status` changes, carrying the error — dropping a corrupt file onto a window must not close the good
-    /// image the user was looking at.
+    /// a [`Notice::OpenFailed`] is added, carrying the error — dropping a
+    /// corrupt file onto a window must not close the good image the user was
+    /// looking at.
     ///
     /// Frontend-side chrome (window title, zoom, open pop-ups) is *not* touched
     /// — that's the frontend's to reset.
@@ -398,6 +345,8 @@ impl Viewer {
     /// back to loading here and now, which blocks exactly as it always did.
     /// Slower to respond is a great deal better than not opening the file.
     pub fn begin_open(&mut self, source: crate::loader::LoadSource) {
+        // A new attempt: what the last one said is spent.
+        self.notices.clear(NoticeKind::OpenFailed);
         #[cfg(feature = "threads")]
         let source = match crate::loader::Loading::spawn(source, self.apply_pseudocolor) {
             Ok(loading) => {
@@ -408,7 +357,8 @@ impl Viewer {
             // better than not opening the file.
             Err(Some(source)) => source,
             Err(None) => {
-                self.status = Some("Could not start the loader".to_owned());
+                self.notices
+                    .set(Notice::OpenFailed("could not start the loader".to_owned()));
                 self.load_landed = true;
                 return;
             }
@@ -495,11 +445,14 @@ impl Viewer {
                 self.residency = Residency::default();
                 // Always start a newly-opened file in the 2D movie view.
                 self.view_mode = ViewMode::Movie;
-                self.status = compute_status(
+                // Nothing said of the last document's frame or volume is about
+                // this one, and the open that brought it succeeded.
+                self.notices.new_document();
+                self.notices.shape(shape_note(
                     doc.display.dims(),
                     doc.display.triple_axis_warning,
                     doc.display.plane_mismatch,
-                );
+                ));
                 // New document: re-evaluate decode parallelism from scratch (its
                 // per-frame decode cost is different).
                 self.decode_parallel = false;
@@ -507,15 +460,17 @@ impl Viewer {
                 Ok(())
             }
             Err(e) => {
-                self.status = Some(format!("Failed to open file: {}", open_failure(&e)));
+                // Beside whatever is said of the document still on show,
+                // which is still true of it.
+                self.notices.set(Notice::OpenFailed(open_failure(&e)));
                 Err(e)
             }
         }
     }
 
     /// Reassign which axis counts mean channels / Z / time, then refresh what
-    /// is derived from that here: the LUTs and the status note. What the
-    /// renderer holds — the frame, the volume — follows at the next sync,
+    /// is derived from that here: the LUTs and the note about the shape. What
+    /// the renderer holds — the frame, the volume — follows at the next sync,
     /// which finds the display's channel layout moved.
     pub fn set_dimension_order(&mut self, channels: usize, slices: usize, frames: usize) {
         if let Some(doc) = &mut self.document {
@@ -523,11 +478,11 @@ impl Viewer {
             // The swap rebuilds channel_display from `mode`, so re-apply the
             // pseudocolor preference on top of the fresh LUTs.
             refresh_pseudocolor(doc, self.apply_pseudocolor);
-            self.status = compute_status(
+            self.notices.shape(shape_note(
                 doc.display.dims(),
                 doc.display.triple_axis_warning,
                 doc.display.plane_mismatch,
-            );
+            ));
         }
     }
 

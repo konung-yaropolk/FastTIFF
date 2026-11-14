@@ -14,13 +14,15 @@
 use crate::camera::{build_volume_params, VolumeChannel};
 use crate::display::{ChannelMasks, Revision};
 use crate::document::Document;
+use crate::frame::{FrameInputs, ImageInputs, VolumeInputs};
 use crate::histogram::{self, Binning, HistogramSource};
+use crate::notice::{Notice, Notices, VolumeNote};
 use crate::prefetch::{
     build_jobs, decode_jobs_borrowed, ChannelJob, Decoded, PrefetchResult, Samples,
 };
 use crate::residency::{Residency, VolumeResidency};
 use crate::roi::{self, Roi, Serving};
-use crate::viewer::{DecodeMode, ViewMode, Viewer, VolumeView};
+use crate::viewer::{DecodeMode, ViewMode, Viewer, VolumeSettings};
 use crate::volume::VolumePlan;
 use crate::window;
 use crate::worker::CancelToken;
@@ -28,27 +30,34 @@ use crate::Renderer;
 use scivis_render::{ChannelKind, ChannelUniform, MAX_CHANNELS};
 
 /// What the frontend must do after a [`Viewer::sync`] call, beyond drawing.
-#[derive(Clone, Copy, Debug, Default)]
+///
+/// What the sync found that the frontend shows — the 2D frame's sampling
+/// stride, whether it is past the texture limit, the window resident, whether
+/// the volume is built, and the [notices](Viewer::notices) — stays on the
+/// [`Viewer`], to be read through its getters: a frontend lays its chrome out
+/// before the frame's sync, and so reads what the last one found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SyncOutcome {
-    /// A background volume build is in flight: schedule another frame so the
-    /// result is picked up when it lands.
+    /// Work the sync started is still to land — a volume build, a finer
+    /// window, the histograms it changed — and nothing else will ask for the
+    /// frame that shows it: schedule another.
     pub needs_repaint: bool,
 }
 
 impl Viewer {
-    /// Bring `renderer` up to date with the current state: allocate textures for
-    /// the frame size and channel layout, upload LUTs and this frame's pixels
-    /// (2D) or the volume (3D), and push the window/level + camera uniforms.
+    /// Bring `renderer` up to date with the current state and this frame's
+    /// `inputs`: allocate textures for the frame size and channel layout,
+    /// upload LUTs and this frame's pixels (2D) or the volume (3D), and push
+    /// the window/level + camera uniforms.
     ///
     /// Call once per rendered frame, *before* the draw. In the 3D view the 2D
     /// per-frame decode is skipped entirely — the volume already holds every
     /// slice.
-    pub fn sync(&mut self, renderer: &mut Renderer) -> SyncOutcome {
+    pub fn sync(&mut self, renderer: &mut Renderer, inputs: &FrameInputs) -> SyncOutcome {
         let mut outcome = SyncOutcome::default();
-        // Read before the document is borrowed mutably: residency depends on which
-        // part of the image is on screen, which is the frontend's business.
-        let (uv_offset, uv_scale) = (self.uv_offset, self.uv_scale);
-        let viewport = self.viewport_px;
+        // Which part of the image is on screen, which is the frontend's
+        // business: what the residency of the 2D frame is planned against.
+        let image = inputs.image;
         // The playback clock, while a movie plays: what the histograms'
         // throttle on this thread is measured against.
         let clock = if self.playback.playing {
@@ -56,7 +65,7 @@ impl Viewer {
         } else {
             None
         };
-        let histograms_wanted = self.histograms_wanted;
+        let histograms_wanted = inputs.histograms;
         let Some(loaded) = &mut self.document else {
             return outcome;
         };
@@ -74,6 +83,10 @@ impl Viewer {
         // call that has the renderer.
         if pending.release_volume {
             renderer.release_volume();
+        }
+        // Nor does what was said of it.
+        if pending.new_volume {
+            self.notices.volume_replaced();
         }
         // Whatever below changes the histograms, the frontend drew this
         // repaint's plot before this call and needs another to show them.
@@ -113,9 +126,7 @@ impl Viewer {
             .first()
             .map_or((0, 0), |f| (f.width, f.height));
         let large_mode = self.large_image_mode;
-        let target = plan_residency(
-            loaded, residency, renderer, current, uv_offset, uv_scale, viewport, large_mode,
-        );
+        let target = plan_residency(loaded, residency, renderer, current, &image, large_mode);
         // Size the textures to what is being *shown*, not to what is being
         // prepared: resizing now would blank the picture for as long as the new
         // window takes to build, which is the stall this avoids.
@@ -139,9 +150,10 @@ impl Viewer {
             outcome.needs_repaint = sync_volume(
                 loaded,
                 &mut self.volume,
+                &inputs.volume,
                 &mut residency.volume,
                 renderer,
-                &mut self.status,
+                &mut self.notices,
             );
             // The volume holds no 2D frame to bin, so the frame's histograms
             // are decoded for, as the 2D view does for a channel switched off:
@@ -172,12 +184,17 @@ impl Viewer {
 
         if let Some(r) = target {
             let read_ahead = self.playback.playing && !self.decode_parallel;
-            let moving = self.view_moving;
+            let moving = inputs.moving;
             match sync_movie(
                 loaded, residency, renderer, current, read_ahead, r, large_mode, moving,
             ) {
-                Ok(pending) => outcome.needs_repaint |= pending,
-                Err(e) => self.status = Some(format!("Failed to decode frame: {e:#}")),
+                Ok(movie) => {
+                    outcome.needs_repaint |= movie.pending;
+                    if movie.shown {
+                        self.notices.frame_shown();
+                    }
+                }
+                Err(e) => self.notices.decode_failed(&e),
             }
             // What showing the frame did not bin: the channels switched off,
             // a frame already on screen when the histograms were first asked
@@ -229,8 +246,8 @@ impl Viewer {
         // frame with the wrong corner of the image.
         let shown = residency.roi.or_else(|| target.map(|r| r.show));
         let (off, scale) = match (shown, loaded.tiff.frames.first()) {
-            (Some(r), Some(f)) => r.map_uv(f.width, f.height, uv_offset, uv_scale),
-            _ => (uv_offset, uv_scale),
+            (Some(r), Some(f)) => r.map_uv(f.width, f.height, image.uv_offset, image.uv_scale),
+            _ => (image.uv_offset, image.uv_scale),
         };
         renderer.set_params(uniforms, n_channels as u32, off, scale);
         outcome
@@ -253,7 +270,7 @@ struct Current {
 #[derive(Clone, Copy)]
 struct HistogramDemand {
     /// The frontend shows them
-    /// ([`Viewer::histograms_wanted`](crate::Viewer::histograms_wanted)): keep
+    /// ([`FrameInputs::histograms`](crate::FrameInputs::histograms)): keep
     /// what the read-ahead binned.
     wanted: bool,
     /// And this thread may bin, and decode, for them now: wanted, and not
@@ -294,15 +311,12 @@ fn note_histograms(
 ///   whole frame is resident. Planning it as the whole frame is what makes this
 ///   work without a cache: a window covering everything always serves the next
 ///   view, so nothing is ever re-cut and nothing has to be decoded twice.
-#[allow(clippy::too_many_arguments)]
 fn plan_residency(
     loaded: &Document,
     residency: &mut Residency,
     renderer: &Renderer,
     current: Current,
-    uv_offset: [f32; 2],
-    uv_scale: [f32; 2],
-    viewport: [f32; 2],
+    image: &ImageInputs,
     mode: roi::LargeImageMode,
 ) -> Option<Serving> {
     let first = loaded.tiff.frames.first()?;
@@ -335,7 +349,14 @@ fn plan_residency(
     }
 
     let budget = roi::Budget::new(max_axis, bytes_per_texel, mode);
-    let plan = roi::plan(w, h, uv_offset, uv_scale, viewport, budget);
+    let plan = roi::plan(
+        w,
+        h,
+        image.uv_offset,
+        image.uv_scale,
+        image.viewport,
+        budget,
+    );
 
     // An overview held here is of this frame under this revision: the
     // reconcile at the top of the sync dropped any other. A stale one let
@@ -352,6 +373,16 @@ fn plan_residency(
     Some(serving)
 }
 
+/// What [`sync_movie`] did, when nothing it decoded failed.
+struct MovieSync {
+    /// A finer window is still being built: keep the frames coming until it
+    /// lands.
+    pending: bool,
+    /// The textures were filled with the frame on screen: a decode failure
+    /// said of an earlier one no longer applies.
+    shown: bool,
+}
+
 /// 2D path: decode and upload this frame's enabled channels (from the prefetch
 /// worker when its result matches, else inline), then queue the read-ahead for
 /// the next frame when `read_ahead` is set.
@@ -365,7 +396,7 @@ fn sync_movie(
     plan: Serving,
     mode: roi::LargeImageMode,
     view_moving: bool,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<MovieSync> {
     let roi = plan.show;
     let revision = current.revision;
     let (kinds, enabled) = (current.masks.kinds(), current.masks.enabled());
@@ -376,6 +407,7 @@ fn sync_movie(
     // is built (see `capture_overview`).
     let bin = current.histograms.inline;
     let mut result = Ok(());
+    let mut shown = false;
     let frame_index = loaded.frame();
     let (fw, fh) = loaded
         .tiff
@@ -522,7 +554,10 @@ fn sync_movie(
                 }
             }
         }
+        // Recorded even when the decode failed, so a frame that cannot be
+        // decoded is not retried on every repaint.
         residency.uploaded(roi, frame_index, revision);
+        shown = result.is_ok();
     }
 
     // Read-ahead: while playing and keeping up (serial regime), ask the worker
@@ -585,6 +620,7 @@ fn sync_movie(
                 }
                 residency.uploaded(roi, frame_index, revision);
                 residency.pending_window = None;
+                shown = true;
                 capture_overview(loaded, residency, built, fw, fh, revision, mode, bin);
             }
             None => match &loaded.services.window_worker {
@@ -636,6 +672,7 @@ fn sync_movie(
                         // means the next sync re-decodes a window already
                         // uploaded.
                         residency.uploaded(plan.want, frame_index, revision);
+                        shown = true;
                         let built = window::Built {
                             frame_index,
                             roi: plan.want,
@@ -648,7 +685,7 @@ fn sync_movie(
             },
         }
     }
-    result.map(|()| pending)
+    result.map(|()| MovieSync { pending, shown })
 }
 
 /// Keep the histograms of a frame taken from the read-ahead: the ones its
@@ -781,10 +818,11 @@ fn upload_texture(renderer: &mut Renderer, channel: usize, w: u32, h: u32, data:
 /// the depth and `time` stays 0.
 fn sync_volume(
     loaded: &mut Document,
-    view: &mut VolumeView,
+    view: &mut VolumeSettings,
+    inputs: &VolumeInputs,
     res: &mut VolumeResidency,
     renderer: &mut Renderer,
-    status: &mut Option<String>,
+    notices: &mut Notices,
 ) -> bool {
     let mut needs_repaint = false;
     let is_4d = loaded.display.dims().slices > 1;
@@ -797,7 +835,7 @@ fn sync_volume(
     // replaced, and the new one owes it nothing.
     if let Some((error, bytes)) = renderer.take_late_upload_error() {
         if res.uploaded_generation == Some(res.generation) {
-            out_of_memory(res, status, &error, bytes);
+            out_of_memory(res, notices, &error, bytes);
         }
     }
     // Until the GPU has said there was room for the volume, it is not drawn,
@@ -810,7 +848,7 @@ fn sync_volume(
         let budget = *res
             .planned_budget
             .get_or_insert_with(|| volume_budget(renderer, res.budget_cap));
-        let plan = plan_volume(loaded, renderer, time, budget, view);
+        let plan = plan_volume(loaded, renderer, time, budget, view, inputs);
         let mut handled = false;
         // Started on first 3D use, over the same stack as the window — so a
         // stack held in memory gets one too.
@@ -818,7 +856,7 @@ fn sync_volume(
             if let Some(built) = builder.take_matching(res.generation, time) {
                 let generation = res.generation;
                 if let Some(volume) = built {
-                    upload_volume(renderer, &volume, res, status);
+                    upload_volume(renderer, &volume, res, notices);
                 }
                 // Mark built even on failure so we don't retry every frame (the
                 // canvas just stays black) — unless the upload ran out of
@@ -845,7 +883,7 @@ fn sync_volume(
             let generation = res.generation;
             let inline = CancelToken::never();
             if let Ok(Some(volume)) = crate::volume::build_volume(&loaded.tiff, &plan, &inline) {
-                upload_volume(renderer, &volume, res, status);
+                upload_volume(renderer, &volume, res, notices);
             }
             if res.generation == generation {
                 res.built_frame = Some(time);
@@ -854,7 +892,8 @@ fn sync_volume(
     }
 
     renderer.set_volume_interp(view.interp);
-    renderer.set_volume_target(view.viewport_px[0], view.viewport_px[1], view.downscale);
+    let [vw, vh] = inputs.viewport.whole();
+    renderer.set_volume_target(vw, vh, inputs.downscale);
 
     // Per-channel window/level, in the sampled texture's units: normalized the
     // way the volume builder normalized the voxels (integers as unorm, floats
@@ -896,7 +935,7 @@ fn sync_volume(
     let windows = &windows[..n];
 
     let (w, h) = loaded.dimensions().unwrap_or((1, 1));
-    let cam = view.camera((w, h, loaded.volume_depth()));
+    let cam = view.camera((w, h, loaded.volume_depth()), inputs.pose.as_ref());
     // Cache the box extents so the orbit re-pivot can ray-cast the box.
     view.cam.box_he = cam.box_he;
     // The gain, decided here rather than in the shader because which of the
@@ -914,7 +953,7 @@ fn sync_volume(
     let mut params = build_volume_params(
         &cam,
         windows,
-        view.aspect,
+        inputs.aspect(),
         view.render,
         view.density,
         view.iso,
@@ -922,7 +961,7 @@ fn sync_volume(
     );
     // However large the volume and the panel, a frame stays a bounded amount
     // of GPU work: see `scivis_render::FRAME_SAMPLE_BUDGET`.
-    params.max_steps = view.max_steps(windows.len());
+    params.max_steps = inputs.max_steps(windows.len(), view.interp);
     renderer.set_volume_params(params);
     // A rebuild started this frame (the GPU ran out of memory): its loading
     // and its result need frames of their own, wherever the view is.
@@ -931,14 +970,16 @@ fn sync_volume(
 
 /// Snapshot everything the volume builder needs (see [`VolumePlan`]): the
 /// dimensions come from the stack's (possibly manually overridden) metadata so a
-/// channels/frames swap is honored, `time` is the 4D timepoint to build, and
-/// `budget` the bytes it may take on the GPU.
+/// channels/frames swap is honored, `time` is the 4D timepoint to build,
+/// `budget` the bytes it may take on the GPU, and the detail worth keeping is
+/// bounded by the screen `inputs` gives.
 pub fn plan_volume(
     loaded: &Document,
     renderer: &Renderer,
     time: usize,
     budget: usize,
-    view: &VolumeView,
+    view: &VolumeSettings,
+    inputs: &VolumeInputs,
 ) -> VolumePlan {
     // The volume format each channel's kind maps to, on the stack: bounded by
     // MAX_CHANNELS, and asked for on every 3D frame a build is outstanding.
@@ -960,7 +1001,7 @@ pub fn plan_volume(
         max_dim: renderer.max_3d_texture_size(),
         budget,
         scale: view.scale,
-        detail_cap: crate::volume::detail_cap(view.screen_px),
+        detail_cap: crate::volume::detail_cap(inputs.screen),
     }
 }
 
@@ -993,14 +1034,17 @@ fn upload_volume(
     renderer: &mut Renderer,
     volume: &crate::volume::BuiltVolume,
     res: &mut VolumeResidency,
-    status: &mut Option<String>,
+    notices: &mut Notices,
 ) {
     match renderer.upload_packed_volume(volume) {
-        Ok(()) => res.uploaded_generation = Some(res.generation),
-        Err(e @ scivis_render::VolumeUploadError::OutOfMemory(_)) => {
-            out_of_memory(res, status, &e, volume.layout.total_bytes());
+        Ok(()) => {
+            res.uploaded_generation = Some(res.generation);
+            notices.volume_uploaded();
         }
-        Err(e) => *status = Some(format!("3D: {e}")),
+        Err(e @ scivis_render::VolumeUploadError::OutOfMemory(_)) => {
+            out_of_memory(res, notices, &e, volume.layout.total_bytes());
+        }
+        Err(e) => notices.set(Notice::Volume(VolumeNote::Failed(e.to_string()))),
     }
 }
 
@@ -1012,20 +1056,17 @@ fn upload_volume(
 /// the same size and fail the same way.
 fn out_of_memory(
     res: &mut VolumeResidency,
-    status: &mut Option<String>,
+    notices: &mut Notices,
     why: &scivis_render::VolumeUploadError,
     bytes: usize,
 ) {
     let cap = bytes / 2;
     if cap < crate::volume::MIN_VOLUME_BUDGET {
-        *status = Some(format!(
-            "3D: not enough GPU memory even for a small volume ({why})"
-        ));
+        notices.set(Notice::Volume(VolumeNote::NoRoom(why.to_string())));
         return;
     }
     log::warn!("3D volume upload ran out of GPU memory ({why}); rebuilding smaller");
-    *status =
-        Some("3D: the volume did not fit in GPU memory; showing it at a lower resolution".into());
+    notices.set(Notice::Volume(VolumeNote::Reduced));
     res.budget_cap = Some(cap);
     res.rebuild();
 }

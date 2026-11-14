@@ -401,10 +401,12 @@ fn a_sync_is_asked_for_what_each_change_left_stale() {
     let nothing = Pending {
         release_volume: false,
         upload_luts: false,
+        new_volume: false,
     };
     let everything = Pending {
         release_volume: true,
         upload_luts: true,
+        new_volume: true,
     };
     let mut stack = movie();
     let sync = |r: &mut Residency, s: &Document| r.begin_sync(&s.display, s.frame());

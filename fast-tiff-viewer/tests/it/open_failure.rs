@@ -8,16 +8,20 @@
 //! one sends you looking for a better copy of the file, the other for a
 //! different program. These tests hold that line in both directions.
 
-use fast_tiff_viewer::Viewer;
+use fast_tiff_viewer::{Notice, NoticeKind, Viewer};
 use std::path::PathBuf;
 
 /// Drive a failed open the way the browser entry point does, and return the
-/// status line the user would read.
+/// line the user would read.
 fn status_after_opening(bytes: Vec<u8>, name: &str) -> String {
     let mut viewer = Viewer::new();
     let err = viewer.load_bytes(bytes, PathBuf::from(name));
     assert!(err.is_err(), "{name} was supposed to fail to open");
-    viewer.status.expect("a failed open should leave a status")
+    let notices: Vec<&Notice> = viewer.notices().collect();
+    match notices[..] {
+        [n @ Notice::OpenFailed(_)] => n.to_string(),
+        _ => panic!("a failed open should leave its one notice, not {notices:?}"),
+    }
 }
 
 /// The case the wording was changed for: bytes that are not any format this
@@ -83,4 +87,64 @@ fn a_truncated_file_is_not_reported_as_unsupported() {
         "too short to classify, so it should not be classified: {status}"
     );
     assert!(status.contains("too small"), "{status}");
+}
+
+// ------------------------------------------- beside what else is said
+
+/// A stack of 4 x 4 planes: `channels` x `slices` x two time frames, with the
+/// metadata to say so.
+fn stack_of(channels: usize, slices: usize) -> Vec<u8> {
+    use fast_tiff_viewer::fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
+    let opts =
+        WriterOptions::new(4, 4, SampleType::U16).metadata(StackMetaWrite::new(channels, slices));
+    let mut w = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+    for plane in 0..(channels * slices * 2) as u16 {
+        w.write_frame_u16(&[plane * 100; 16]).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
+fn kinds(viewer: &Viewer) -> Vec<NoticeKind> {
+    viewer.notices().map(Notice::kind).collect()
+}
+
+/// A failed open is said beside the note about the document still on show,
+/// which is still true of it, rather than in its place; and it goes when the
+/// frontend moves on, or the next open succeeds — taking nothing with it
+/// that the document on show still has to say.
+#[test]
+fn a_failed_open_is_said_beside_the_document_it_left_open() {
+    let mut viewer = Viewer::new();
+    viewer
+        .load_bytes(stack_of(2, 2), PathBuf::from("czt.tif"))
+        .expect("a hyperstack opens");
+    assert_eq!(
+        kinds(&viewer),
+        [NoticeKind::Shape],
+        "channels, slices and frames at once: 2D shows the first slice"
+    );
+    // Which the 3D view does not: it shows them all.
+    viewer.view_mode = fast_tiff_viewer::ViewMode::Volume;
+    assert_eq!(kinds(&viewer), []);
+    viewer.view_mode = fast_tiff_viewer::ViewMode::Movie;
+
+    assert!(viewer
+        .load_bytes(b"not an image".to_vec(), PathBuf::from("bad.dat"))
+        .is_err());
+    assert_eq!(kinds(&viewer), [NoticeKind::OpenFailed, NoticeKind::Shape]);
+
+    viewer.dismiss(NoticeKind::OpenFailed);
+    assert_eq!(kinds(&viewer), [NoticeKind::Shape]);
+
+    assert!(viewer
+        .load_bytes(b"not an image".to_vec(), PathBuf::from("bad.dat"))
+        .is_err());
+    viewer
+        .load_bytes(stack_of(2, 1), PathBuf::from("ct.tif"))
+        .expect("a movie of two channels opens");
+    assert_eq!(
+        kinds(&viewer),
+        [],
+        "the open succeeded, and the new document has nothing to say"
+    );
 }

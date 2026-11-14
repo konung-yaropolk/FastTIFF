@@ -361,7 +361,7 @@ impl Document {
 
     /// The histograms of the frame on screen, binned from the decodes that
     /// showed it while a frontend asks for them
-    /// ([`Viewer::histograms_wanted`](crate::Viewer::histograms_wanted)). A
+    /// ([`FrameInputs::histograms`](crate::FrameInputs::histograms)). A
     /// frontend plots these rather than decoding the frame again; see
     /// [`crate::histogram`].
     pub fn histograms(&self) -> &crate::histogram::FrameHistograms {

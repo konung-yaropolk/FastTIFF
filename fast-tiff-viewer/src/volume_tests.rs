@@ -450,29 +450,19 @@ fn a_float_volume_past_the_half_float_range_stays_finite() {
 
 #[test]
 fn the_detail_cap_follows_the_screen_with_a_floor() {
-    assert_eq!(detail_cap(0), u32::MAX, "unknown screen: no cap");
-    assert_eq!(detail_cap(1920), 3840);
-    assert_eq!(detail_cap(800), 2048);
-}
-
-#[test]
-fn a_reduced_view_takes_as_many_steps_per_ray_as_a_sharp_one() {
-    let mut v = crate::viewer::VolumeView {
-        viewport_px: [1921, 1081],
-        ..Default::default()
-    };
-    let sharp = v.max_steps(2);
+    use crate::frame::PhysicalPx;
     assert_eq!(
-        sharp,
-        scivis_render::max_steps(1921.0 * 1081.0, 2, v.interp),
-        "the whole viewport's"
+        detail_cap(PhysicalPx::UNKNOWN),
+        u32::MAX,
+        "unknown screen: no cap"
     );
-    v.downscale = 4;
+    assert_eq!(detail_cap(PhysicalPx::new(1920.0, 1080.0)), 3840);
     assert_eq!(
-        v.max_steps(2),
-        sharp,
-        "a reduced frame's rays take the steps a sharp frame's do, so it does a sixteenth of the work"
+        detail_cap(PhysicalPx::new(1080.0, 1920.0)),
+        3840,
+        "the longer side"
     );
+    assert_eq!(detail_cap(PhysicalPx::new(800.0, 600.0)), 2048);
 }
 
 /// The budget's bounds are ordered on every target: a ceiling that wrapped

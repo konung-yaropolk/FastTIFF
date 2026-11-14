@@ -41,7 +41,7 @@ use fast_tiff_viewer::channels::{
     pseudocolor_applicable,
 };
 use fast_tiff_viewer::roi::LargeImageMode;
-use fast_tiff_viewer::{DecodeMode, Document, ViewMode, Viewer};
+use fast_tiff_viewer::{DecodeMode, Document, FrameInputs, Notice, NoticeKind, ViewMode, Viewer};
 // The registry's entries are the C-boundary types themselves rather than
 // trait objects, so the traits whose methods the app calls are named here.
 use fasttiff_plugin_api::{Exporter as _, Importer as _, Plugin as _};
@@ -602,6 +602,101 @@ fn info_key(status: Option<&str>, label: Option<&str>) -> String {
     key
 }
 
+/// One line of the status row, and whether it reads as *done* (green) rather
+/// than as something to be aware of (amber).
+#[derive(Clone, Debug, PartialEq)]
+struct StatusLine {
+    text: String,
+    done: bool,
+}
+
+/// What the status row says: this app's last message (`message`, green when
+/// it is the one recorded as `good`), then what the core has to say of the
+/// document and of the view on screen (`notices`, see [`Viewer::notices`]),
+/// one line each, leaving out those standing `aside` for a progress bar (see
+/// [`stand_aside`]).
+///
+/// The core's notes are its own kinds and none replaces another or this
+/// app's message, so a refusal or a save no longer wipes the note about the
+/// file's shape.
+fn status_lines<'a>(
+    message: Option<&str>,
+    good: Option<&str>,
+    notices: impl IntoIterator<Item = &'a Notice>,
+    aside: &[Notice],
+) -> Vec<StatusLine> {
+    let mut lines: Vec<StatusLine> = message
+        .map(|m| StatusLine {
+            text: m.to_string(),
+            done: good == Some(m),
+        })
+        .into_iter()
+        .collect();
+    lines.extend(
+        notices
+            .into_iter()
+            .filter(|n| !aside.contains(n))
+            .map(|n| StatusLine {
+                text: n.to_string(),
+                done: false,
+            }),
+    );
+    lines
+}
+
+/// Keep `aside` for this frame: while something is `working`, the core's
+/// notices that were already up when its bar appeared (the first frame it is
+/// `working`), and none once it is done.
+///
+/// The row is then the progress bar's, and a note about the document on
+/// show, said before the load of another or a save began, would read as a
+/// comment on it, as an old message would (which is why starting one clears
+/// this app's, see [`ViewerApp::begin_job`]). Those stand aside, still held,
+/// and come back when the work is done. What the core finds while the work
+/// runs is news, and shows beside the bar as it always did: a volume that
+/// ran out of GPU memory during a long save says so then, not after it. So
+/// does a note that went away and came back: one is kept aside only while it
+/// is still `shown` (the notices for the view on screen, as
+/// [`Viewer::notices`] lists them).
+fn stand_aside<'a, I: Iterator<Item = &'a Notice>>(
+    aside: &mut Option<Vec<Notice>>,
+    working: bool,
+    shown: impl Fn() -> I,
+) {
+    if !working {
+        *aside = None;
+    } else if let Some(aside) = aside {
+        aside.retain(|n| shown().any(|m| m == n));
+    } else {
+        *aside = Some(shown().cloned().collect());
+    }
+}
+
+/// The status row's text: a line each, each in its own voice, as the one
+/// label the row has room for before the progress bar — one line laid out
+/// exactly as a single `RichText` label of it is. Its `text` is the lines
+/// joined by line breaks.
+fn status_label(ui: &egui::Ui, lines: Vec<StatusLine>) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    for line in lines {
+        if let Some(last) = job.sections.last_mut() {
+            // The break ends the line before, in its voice. Every line is in
+            // the same small font, so which line it belongs to lays nothing
+            // out differently.
+            job.text.push('\n');
+            last.byte_range.end = job.text.len();
+        }
+        let color = if line.done { STATUS_DONE } else { STATUS_NOTE };
+        RichText::new(line.text).color(color).small().append_to(
+            &mut job,
+            ui.style(),
+            egui::FontSelection::Default,
+            ui.text_valign(),
+        );
+    }
+    job
+}
+
 /// A slow thing running on a worker: what to call it, how far it has got, and
 /// how to ask it to stop.
 ///
@@ -729,8 +824,9 @@ pub enum Opened {
 ///
 /// Pan and zoom are *not* applied by moving the viewport — a GPU backend would
 /// clamp an oversized one to the framebuffer and squash the picture. They are
-/// turned into the UV sub-rect the shader samples (`Viewer::uv_offset` /
-/// `uv_scale`); these fields are the frontend's side of that conversion.
+/// turned into the UV sub-rect the shader samples
+/// ([`ImageInputs`](fast_tiff_viewer::ImageInputs), handed to the core's sync);
+/// these fields are the frontend's side of that conversion.
 struct View2d {
     /// Zoom factor: 1.0 = one window pixel per image pixel. The window is only
     /// resized in response to an explicit event (opening a file, a zoom step) —
@@ -1056,20 +1152,40 @@ pub struct ViewerApp {
     /// The desktop or the browser: what this app does that the two hosts do
     /// their own way. See [`platform`].
     platform: Current,
+    /// What the last thing this app did has to say: a refusal, a plugin's
+    /// outcome, a save. Shown on the status line first, above what the core
+    /// has to say of the document ([`Viewer::notices`]), which this neither
+    /// replaces nor is replaced by. Written only through
+    /// [`say`](Self::say), which also drops the report of a failed open.
+    status: Option<String>,
     /// The status message that should read as *done*, not as *careful*.
     ///
     /// The status line is amber, which is right for what it usually carries: a
-    /// dimension note, a refusal, a plugin's error. It is wrong for "opened it
+    /// refusal, a plugin's error, the core's notes. It is wrong for "opened it
     /// in a new window", where amber reads as a warning about work that in fact
     /// succeeded.
     ///
-    /// Held as the message itself rather than as a flag beside it. `core.status`
-    /// is written from a dozen places — the loader, the dimension notes, every
-    /// plugin outcome — and a flag set here would still be set once one of them
-    /// replaced the text underneath it, colouring somebody else's message green.
-    /// Comparing the text means the colour can only ever apply to the message it
-    /// was set for.
+    /// Held as the message itself rather than as a flag beside it.
+    /// [`status`](Self::status) is written from a dozen places — every plugin
+    /// outcome, every refusal — and a flag set here would still be set once one
+    /// of them replaced the text underneath it, colouring somebody else's
+    /// message green. Comparing the text means the colour can only ever apply
+    /// to the message it was set for.
     good_status: Option<String>,
+    /// The core's notices standing aside while a progress bar is up: those
+    /// that were up when it appeared. See [`stand_aside`].
+    notices_aside: Option<Vec<Notice>>,
+    /// What this app decides each frame for the core's
+    /// [`sync`](Viewer::sync): the part of the 2D image on screen, the size of
+    /// the 3D view and how finely to render it, an animation's pose, whether
+    /// the view is moving and the histograms are open.
+    ///
+    /// Written where each is decided, as the frame is laid out, and handed to
+    /// the sync once it has been. Kept from one frame to the next, and not
+    /// reset with a document, as the core kept them before they were inputs:
+    /// a frame that does not lay a view out leaves what the last one that did
+    /// decided.
+    sync_inputs: FrameInputs,
     /// The pop-up windows — metadata, histogram, render settings — and which
     /// are open.
     windows: Windows,
@@ -1187,7 +1303,10 @@ impl ViewerApp {
             tools: Tools::default(),
             picked: None,
             platform: Current::new(),
+            status: None,
             good_status: None,
+            notices_aside: None,
+            sync_inputs: FrameInputs::default(),
             windows: Windows::new(),
             volume_ui: VolumeUi::default(),
             animation: Default::default(),
@@ -1205,8 +1324,8 @@ impl ViewerApp {
     }
 
     /// Hand an opened file to the core, then reset the chrome that described
-    /// the previous one. The core records any failure in `core.status`, which
-    /// the bottom bar shows, and keeps the old stack loaded.
+    /// the previous one. The core records any failure as a notice, which the
+    /// bottom bar shows, and keeps the old stack loaded.
     fn apply_opened(&mut self, opened: Opened) {
         // Started, not done: opening walks the whole IFD chain and then decodes
         // a frame per channel to find its display range, which on a large stack
@@ -1238,7 +1357,7 @@ impl ViewerApp {
             Opened::Path(path) => match Current::path_source(path) {
                 Ok(source) => source,
                 Err(why) => {
-                    self.core.status = Some(why);
+                    self.say(why);
                     return;
                 }
             },
@@ -1277,13 +1396,22 @@ impl ViewerApp {
         handles
     }
 
-    /// Drop the last thing said, message and green-ness together.
+    /// Drop the last thing said, message and green-ness together, and the
+    /// core's report of the last open: what the last attempt said, rather
+    /// than what is true of the document on show, which stays.
     ///
     /// Both, always: `good_status` is what makes the text green, and leaving it
     /// set while replacing the text would paint the next message green whether
     /// or not it reported success.
     fn clear_status(&mut self) {
-        self.core.status = None;
+        self.clear_message();
+        self.core.dismiss(NoticeKind::OpenFailed);
+    }
+
+    /// Drop this app's own message, and its green-ness with it, leaving what
+    /// the core has to say.
+    fn clear_message(&mut self) {
+        self.status = None;
         self.good_status = None;
     }
 
@@ -1292,11 +1420,24 @@ impl ViewerApp {
     /// The status line is amber, which is right for a dimension note or a
     /// refusal and wrong for work that succeeded. Green is asked for by
     /// recording the message itself rather than setting a flag beside it:
-    /// `core.status` is written from a dozen places, and a flag would still be
-    /// set once one of them replaced the text underneath it.
+    /// `status` is written from a dozen places, and a flag would still be set
+    /// once one of them replaced the text underneath it.
     fn report_done(&mut self, message: String) {
         self.good_status = Some(message.clone());
-        self.core.status = Some(message);
+        self.say(message);
+    }
+
+    /// Say `message` on the status line, in place of this app's last one.
+    ///
+    /// Every message of this app's goes through here or
+    /// [`report_done`](Self::report_done), because saying anything is work
+    /// the user has moved on to: it also drops the core's report of the last
+    /// open ([`NoticeKind::OpenFailed`], see [`Viewer::dismiss`]), which
+    /// beside "Copied 512 x 512 image" would read as a comment on the copy.
+    /// The core's notes about the document on show stay.
+    fn say(&mut self, message: String) {
+        self.status = Some(message);
+        self.core.dismiss(NoticeKind::OpenFailed);
     }
 
     /// Reset everything that described the previous file, once a load has
@@ -1307,6 +1448,10 @@ impl ViewerApp {
     fn finish_open(&mut self) {
         self.document
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // The landing is the news now, said by the core (the new document's
+        // notes, or why it did not open): whatever this app said while it was
+        // on its way is not about it.
+        self.clear_message();
         self.view.reset();
         self.tools.reset();
         self.panel.reset();
@@ -1327,7 +1472,7 @@ impl ViewerApp {
                     self.job = None;
                     match result {
                         Ok(opened) => self.apply_opened(opened),
-                        Err(message) => self.core.status = Some(message),
+                        Err(message) => self.say(message),
                     }
                 }
                 Incoming::Ran(registry, run) => {
@@ -1342,12 +1487,8 @@ impl ViewerApp {
                     self.job = None;
                     match result {
                         WriteOutcome::Done => self.report_done(format!("Saved {name}")),
-                        WriteOutcome::Cancelled => {
-                            self.core.status = Some(format!("Stopped saving {name}"))
-                        }
-                        WriteOutcome::Failed(e) => {
-                            self.core.status = Some(format!("Could not save {name}: {e}"))
-                        }
+                        WriteOutcome::Cancelled => self.say(format!("Stopped saving {name}")),
+                        WriteOutcome::Failed(e) => self.say(format!("Could not save {name}: {e}")),
                     }
                 }
             }
@@ -1357,13 +1498,13 @@ impl ViewerApp {
     /// Begin a plugin: show its dialog, or run it at once if it declared none.
     fn start_plugin(&mut self, index: usize) {
         let Some(loaded) = self.core.document.as_ref() else {
-            self.core.status = Some("Open an image first".into());
+            self.say("Open an image first".into());
             return;
         };
         // A plain TIFF save does not take the registry, so the menu being
         // reachable is not on its own proof that nothing is running.
         if self.job.is_some() {
-            self.core.status = Some(self.busy_message());
+            self.say(self.busy_message());
             return;
         }
         // The dialog may depend on what is open — how many slices there are,
@@ -1382,7 +1523,7 @@ impl ViewerApp {
         let decls = match entry.plugin.dialog(&host) {
             Ok(d) => d,
             Err(e) => {
-                self.core.status = Some(format!("{title}: {e}"));
+                self.say(format!("{title}: {e}"));
                 return;
             }
         };
@@ -1542,7 +1683,7 @@ impl ViewerApp {
         let decls = match entry.plugin.dialog(&host) {
             Ok(d) => d,
             Err(e) => {
-                self.core.status = Some(format!("{}: {e}", dialog.title));
+                self.say(format!("{}: {e}", dialog.title));
                 return;
             }
         };
@@ -1581,18 +1722,18 @@ impl ViewerApp {
     /// stops a second plugin starting while this one has the data.
     fn run_plugin(&mut self, index: usize, values: fasttiff_plugin_api::Params) {
         let Some(loaded) = self.core.document.as_ref() else {
-            self.core.status = Some("Open an image first".into());
+            self.say("Open an image first".into());
             return;
         };
         // Reachable with a job already running: the dialog may have been left
         // open while a save was started behind it. Taking the registry is not
         // enough of a check on its own — a plain save never takes it.
         if self.job.is_some() {
-            self.core.status = Some(self.busy_message());
+            self.say(self.busy_message());
             return;
         }
         let Some(registry) = self.plugins.take() else {
-            self.core.status = Some(self.busy_message());
+            self.say(self.busy_message());
             return;
         };
         let Some(name) = registry.entries().get(index).map(|e| e.info.name.clone()) else {
@@ -1701,7 +1842,7 @@ impl ViewerApp {
             log::info!("{}: {m}", run.name);
         }
         if run.outlived(self.document.load(std::sync::atomic::Ordering::Relaxed)) {
-            self.core.status = Some(format!(
+            self.say(format!(
                 "{}: not shown, as another image was opened while it ran",
                 run.name
             ));
@@ -1742,15 +1883,15 @@ impl ViewerApp {
                     .plot
                     .as_ref()
                     .is_some_and(|p| p.plugin == index && p.stale) => {}
-            Ok(Product::Cancelled) => self.core.status = Some(format!("{name}: cancelled")),
-            Ok(Product::Message(m)) => self.core.status = Some(format!("{name}: {m}")),
+            Ok(Product::Cancelled) => self.say(format!("{name}: cancelled")),
+            Ok(Product::Message(m)) => self.say(format!("{name}: {m}")),
             // The window is already on its way; there is nothing left to do
             // here but say so.
             Ok(Product::NewWindow(what)) => {
                 self.report_done(format!("{name}: opened {what} in a new window"))
             }
             Ok(Product::Inline { result, why }) => {
-                self.core.status = Some(format!(
+                self.say(format!(
                     "{name}: could not open a new window ({why}); showing it here"
                 ));
                 self.open_result(&name, result, made_from);
@@ -1765,7 +1906,7 @@ impl ViewerApp {
             Ok(Product::SelectRegion(prompt)) => {
                 self.start_region_pick(index, params, &name, prompt)
             }
-            Err(e) => self.core.status = Some(format!("{name}: {e}")),
+            Err(e) => self.say(format!("{name}: {e}")),
         }
     }
 
@@ -1785,7 +1926,7 @@ impl ViewerApp {
     ) {
         match result.into_document(made_from) {
             Ok(source) => self.apply_opened(Opened::Source(source)),
-            Err(e) => self.core.status = Some(format!("{plugin}: could not open its result: {e}")),
+            Err(e) => self.say(format!("{plugin}: could not open its result: {e}")),
         }
     }
 
@@ -1825,7 +1966,7 @@ impl ViewerApp {
             if ext.is_none_or(|e| !self.claimed_extensions.contains(&e)) {
                 return Err(path);
             }
-            self.core.status = Some(self.busy_message());
+            self.say(self.busy_message());
             return Ok(());
         };
         self.claimed_extensions = registry.claimed_extensions();
@@ -1865,11 +2006,11 @@ impl ViewerApp {
     /// [`Target::place`]: platform::Target::place
     fn save_as(&mut self) {
         let Some(stack) = self.core.document.as_ref() else {
-            self.core.status = Some("Open an image first".into());
+            self.say("Open an image first".into());
             return;
         };
         if self.job.is_some() {
-            self.core.status = Some(self.busy_message());
+            self.say(self.busy_message());
             return;
         }
         // What the window is titled with: the file's own name, the name an
@@ -1987,7 +2128,7 @@ impl ViewerApp {
             // "Saved" rather than "Downloaded": where it went is the browser's
             // business, and the user asked to save their image.
             Ok(()) => self.report_done(format!("Saved {name}")),
-            Err(e) => self.core.status = Some(format!("Could not save {name}: {e}")),
+            Err(e) => self.say(format!("Could not save {name}: {e}")),
         }
     }
 
@@ -2009,18 +2150,18 @@ impl ViewerApp {
     /// Shared by the toolbar button and the hotkey, so the two cannot drift.
     fn copy_view(&mut self, ctx: &egui::Context) {
         let Some(stack) = self.core.document.as_ref() else {
-            self.core.status = Some("Open an image first".into());
+            self.say("Open an image first".into());
             return;
         };
         if self.job.is_some() {
-            self.core.status = Some(self.busy_message());
+            self.say(self.busy_message());
             return;
         }
         if self.core.view_mode == ViewMode::Volume {
             // Nothing has been painted yet on the frame a file opens in, so
             // there is no view to grab. Saying so beats copying a blank.
             let Some(rect) = self.volume_ui.rect else {
-                self.core.status = Some("The 3D view has not been drawn yet".into());
+                self.say("The 3D view has not been drawn yet".into());
                 return;
             };
             copy_view::request_volume(ctx);
@@ -2033,7 +2174,7 @@ impl ViewerApp {
                 copy_view::put(ctx, copy_view::image_of(&snap));
                 self.report_done(format!("Copied {w} x {h} image"));
             }
-            Err(e) => self.core.status = Some(format!("Could not copy the view: {e:#}")),
+            Err(e) => self.say(format!("Could not copy the view: {e:#}")),
         }
     }
 
@@ -2059,7 +2200,7 @@ impl ViewerApp {
                 copy_view::put(ctx, image);
                 self.report_done(format!("Copied {w} x {h} view"));
             }
-            None => self.core.status = Some("The 3D view is too small to copy".into()),
+            None => self.say("The 3D view is too small to copy".into()),
         }
     }
 
@@ -2075,7 +2216,7 @@ impl ViewerApp {
             return;
         };
         let Some(registry) = self.plugins.take() else {
-            self.core.status = Some(self.busy_message());
+            self.say(self.busy_message());
             return;
         };
         let Some(plugin_name) = registry.exporters().get(index).map(|e| e.info.name.clone()) else {
@@ -2372,7 +2513,7 @@ impl ViewerApp {
         // does not start decoding a window for a zoom about to be left behind.
         // Read *after* the advance, so the frame a glide lands on plans at once
         // rather than waiting one more.
-        self.core.view_moving = self.view.zoom_glide.is_some() || pinching;
+        self.sync_inputs.moving = self.view.zoom_glide.is_some() || pinching;
         pinching
     }
 
@@ -2485,11 +2626,11 @@ impl ViewerApp {
         // Bring the GPU up to date with the core state, then honor a pending
         // background volume build by scheduling another frame. The histograms
         // are binned from what the sync decodes, while their window is open.
-        self.core.histograms_wanted = self.windows.is_open(WindowId::HISTOGRAM);
+        self.sync_inputs.histograms = self.windows.is_open(WindowId::HISTOGRAM);
         let render = std::sync::Arc::clone(&self.render);
         let outcome = match render.lock() {
             Ok(mut resources) => {
-                let outcome = self.core.sync(&mut resources);
+                let outcome = self.core.sync(&mut resources, &self.sync_inputs);
                 // A recording's frame, now that the GPU has this frame's pose.
                 self.capture_animation_frame(&mut resources);
                 outcome

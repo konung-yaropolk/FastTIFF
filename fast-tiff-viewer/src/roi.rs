@@ -30,6 +30,8 @@
 //! as a texture the device rejects (fatal) or a seam at the edge of the view.
 //! In texel space each is exact.
 
+use crate::frame::PhysicalPx;
+
 /// Bytes of texture the resident window may occupy, summed across channels.
 ///
 /// A budget rather than an axis count because what matters is VRAM, and a
@@ -384,7 +386,8 @@ impl Roi {
 }
 
 /// Plan residency for a view showing the image-normalised range
-/// `uv_offset .. uv_offset + uv_scale` of a `width` x `height` frame.
+/// `uv_offset .. uv_offset + uv_scale` of a `width` x `height` frame, drawn
+/// into `viewport` (see [`ImageInputs`](crate::frame::ImageInputs)).
 ///
 /// The result always fits everything [`Budget`] bounds and always covers the
 /// visible region.
@@ -393,7 +396,7 @@ pub fn plan(
     height: u32,
     uv_offset: [f32; 2],
     uv_scale: [f32; 2],
-    viewport: [f32; 2],
+    viewport: PhysicalPx,
     budget: Budget,
 ) -> Plan {
     let Budget {
@@ -482,7 +485,7 @@ fn plan_preloaded(
     width: u32,
     height: u32,
     visible: (u32, u32, u32, u32),
-    viewport: [f32; 2],
+    viewport: PhysicalPx,
     max_axis: u32,
     bytes_per_texel: usize,
 ) -> Plan {
@@ -554,14 +557,14 @@ fn needed_texels(v: u32, len: u32, stride: u32) -> u32 {
 /// free to take any value changes on nearly every zoom step, and each change
 /// re-decodes the window, which is precisely the stall this is meant to avoid.
 ///
-/// `viewport` of zero means the frontend has not said how large it is; the
-/// result is then 1 and residency falls back to being bounded by the texture
-/// budget alone, which is correct if wasteful.
-fn display_stride(vw: u32, vh: u32, viewport: [f32; 2]) -> u32 {
-    let (pw, ph) = (viewport[0], viewport[1]);
-    if !(pw.is_finite() && ph.is_finite()) || pw < 1.0 || ph < 1.0 {
+/// A `viewport` not [known](PhysicalPx::is_known) means the frontend has not
+/// said how large it is; the result is then 1 and residency falls back to
+/// being bounded by the texture budget alone, which is correct if wasteful.
+fn display_stride(vw: u32, vh: u32, viewport: PhysicalPx) -> u32 {
+    if !viewport.is_known() {
         return 1;
     }
+    let (pw, ph) = (viewport.width, viewport.height);
     // Source pixels per screen pixel, on the axis that needs the most.
     let ratio = (vw as f32 / pw).max(vh as f32 / ph);
     if !ratio.is_finite() || ratio < 2.0 {

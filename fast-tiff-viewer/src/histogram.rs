@@ -44,7 +44,7 @@
 //! one.
 //!
 //! All of that only while a frontend asks for them
-//! ([`Viewer::histograms_wanted`](crate::Viewer::histograms_wanted)). While a
+//! ([`FrameInputs::histograms`](crate::FrameInputs::histograms)). While a
 //! movie plays, a frame is binned at most once every [`PLAYBACK_INTERVAL`] of
 //! its clock: by the read-ahead's worker when it is reading ahead, which is
 //! asked to bin only then, since a frame it bins is published that much later;

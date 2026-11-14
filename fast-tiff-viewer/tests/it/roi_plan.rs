@@ -21,10 +21,11 @@
 
 use fast_tiff_viewer::roi::LargeImageMode::Tiled;
 use fast_tiff_viewer::roi::{extract, plan, Budget, Roi, MAX_ROI_BYTES};
+use fast_tiff_viewer::PhysicalPx;
 
 /// A viewport large enough that it never drives the stride — so the tests below
 /// exercise the texture-budget path unless they say otherwise.
-const HUGE_PANEL: [f32; 2] = [100_000.0, 100_000.0];
+const HUGE_PANEL: PhysicalPx = PhysicalPx::new(100_000.0, 100_000.0);
 
 /// Shorthand: the window to upload for a view.
 fn resident(w: u32, h: u32, off: [f32; 2], scale: [f32; 2], max_axis: u32, bpt: usize) -> Roi {
@@ -625,7 +626,7 @@ fn only_frames_past_the_texture_limit_need_a_window() {
 // ---------------------------------------------------------------------------
 
 /// A typical panel, in physical pixels.
-const PANEL: [f32; 2] = [1900.0, 1000.0];
+const PANEL: PhysicalPx = PhysicalPx::new(1900.0, 1000.0);
 
 /// The whole point: showing a 40000-pixel mosaic on a 1900-pixel panel should
 /// not build a texture with twenty thousand columns. Detail the display cannot
@@ -651,7 +652,7 @@ fn a_zoomed_out_view_is_sampled_for_the_screen_not_the_file() {
     assert!(
         tw <= 4_000,
         "texture is {tw} wide for a {} pixel panel",
-        PANEL[0]
+        PANEL.width
     );
     let mb = (tw as f64 * th as f64 * RGB8 as f64) / 1e6;
     assert!(
@@ -666,8 +667,8 @@ fn a_zoomed_out_view_is_sampled_for_the_screen_not_the_file() {
 fn the_texture_always_has_at_least_a_sample_per_screen_pixel() {
     let (w, h) = ANDROMEDA;
     for &zoom in &[0.05f32, 0.1, 0.25, 0.5, 1.0, 2.0] {
-        let vw = (PANEL[0] / zoom).min(w as f32);
-        let vh = (PANEL[1] / zoom).min(h as f32);
+        let vw = (PANEL.width / zoom).min(w as f32);
+        let vh = (PANEL.height / zoom).min(h as f32);
         let uv_scale = [vw / w as f32, vh / h as f32];
         let uv_off = [
             (0.5 - uv_scale[0] / 2.0).max(0.0),
@@ -690,7 +691,7 @@ fn the_texture_always_has_at_least_a_sample_per_screen_pixel() {
         // already everything there is. So the bar is the lesser of what the
         // screen can draw and what the image actually holds.
         let visible_texels = vw / r.stride as f32;
-        let want = vw.min(PANEL[0]);
+        let want = vw.min(PANEL.width);
         assert!(
             visible_texels >= want * 0.9,
             "zoom {zoom}: {visible_texels:.0} texels where {want:.0} were available — too soft ({r:?})"
@@ -707,8 +708,8 @@ fn zooming_crosses_only_a_few_sampling_levels() {
     let mut strides = Vec::new();
     for i in 0..40 {
         let zoom = 0.05 * 1.12f32.powi(i); // a smooth sweep from fit to ~4x
-        let vw = (PANEL[0] / zoom).min(w as f32);
-        let vh = (PANEL[1] / zoom).min(h as f32);
+        let vw = (PANEL.width / zoom).min(w as f32);
+        let vh = (PANEL.height / zoom).min(h as f32);
         let uv_scale = [vw / w as f32, vh / h as f32];
         let uv_off = [
             (0.5 - uv_scale[0] / 2.0).max(0.0),
@@ -750,8 +751,8 @@ fn no_zoom_level_builds_a_huge_texture() {
     let (w, h) = ANDROMEDA;
     for i in 0..40 {
         let zoom = 0.05 * 1.12f32.powi(i);
-        let vw = (PANEL[0] / zoom).min(w as f32);
-        let vh = (PANEL[1] / zoom).min(h as f32);
+        let vw = (PANEL.width / zoom).min(w as f32);
+        let vh = (PANEL.height / zoom).min(h as f32);
         let uv_scale = [vw / w as f32, vh / h as f32];
         let uv_off = [
             (0.5 - uv_scale[0] / 2.0).max(0.0),
@@ -784,7 +785,8 @@ fn an_unknown_viewport_falls_back_to_the_budget() {
     // is still nonsense, and taken at face value it asks for a stride of tens
     // of thousands — a 1x1 texture that would flash the moment the viewport
     // became real. Nonsense in, ordinary picture out.
-    for panel in [[0.0f32, 0.0], [f32::NAN, 10.0], [-5.0, 5.0], [0.5, 1000.0]] {
+    for [pw, ph] in [[0.0f32, 0.0], [f32::NAN, 10.0], [-5.0, 5.0], [0.5, 1000.0]] {
+        let panel = PhysicalPx::new(pw, ph);
         let r = plan(
             w,
             h,

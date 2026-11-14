@@ -38,8 +38,9 @@ impl ViewerApp {
         }
         self.volume_ui.last_camera = Some((mark, frame));
         let since = self.volume_ui.moved_at.map(|t| now - t);
-        self.core.volume.downscale = downscale_after(since, self.volume_ui.prefs.moving_downscale);
-        if let Some(s) = since.filter(|_| self.core.volume.downscale > 1) {
+        let downscale = downscale_after(since, self.volume_ui.prefs.moving_downscale);
+        self.sync_inputs.volume.downscale = downscale;
+        if let Some(s) = since.filter(|_| downscale > 1) {
             // The sharp frame is due when the settle time runs out, input or
             // not.
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(

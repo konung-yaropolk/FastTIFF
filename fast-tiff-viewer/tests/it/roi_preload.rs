@@ -9,6 +9,7 @@
 
 use fast_tiff_viewer::roi::LargeImageMode::{Preload, Tiled};
 use fast_tiff_viewer::roi::{overview_stride, plan, Budget, Plan, MAX_PRELOAD_BYTES};
+use fast_tiff_viewer::PhysicalPx;
 
 /// The file this feature exists for, and a common device limit.
 const ANDROMEDA: (u32, u32) = (40_000, 12_788);
@@ -16,10 +17,10 @@ const MAX_AXIS: u32 = 16_384;
 /// Three 8-bit channels, the Andromeda case.
 const RGB8: usize = 3;
 /// An ordinary panel, so the display bound is the one that bites.
-const PANEL: [f32; 2] = [1920.0, 1080.0];
+const PANEL: PhysicalPx = PhysicalPx::new(1920.0, 1080.0);
 const WHOLE: ([f32; 2], [f32; 2]) = ([0.0, 0.0], [1.0, 1.0]);
 
-fn preload(w: u32, h: u32, off: [f32; 2], scale: [f32; 2], panel: [f32; 2]) -> Plan {
+fn preload(w: u32, h: u32, off: [f32; 2], scale: [f32; 2], panel: PhysicalPx) -> Plan {
     plan(
         w,
         h,
@@ -145,7 +146,11 @@ fn every_planned_window_fits_the_device_and_covers_the_view() {
     // rejects takes the process with it, and a window short of the view shows
     // the edge of the data.
     let (w, h) = ANDROMEDA;
-    for panel in [[800.0, 600.0], PANEL, [3840.0, 2160.0]] {
+    for panel in [
+        PhysicalPx::new(800.0, 600.0),
+        PANEL,
+        PhysicalPx::new(3840.0, 2160.0),
+    ] {
         let mut px = w as f32;
         while px > 100.0 {
             for cx in [0.0f32, 0.3, 0.5, 0.97] {

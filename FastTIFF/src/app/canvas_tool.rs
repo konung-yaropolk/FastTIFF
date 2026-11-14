@@ -616,12 +616,12 @@ impl super::ViewerApp {
     /// Do what the tool in `slot` asked.
     pub(super) fn on_tool_event(&mut self, slot: ToolSlot, event: ToolEvent) {
         match event {
-            ToolEvent::Status(message) => self.core.status = Some(message),
+            ToolEvent::Status(message) => self.say(message),
             ToolEvent::Close(message) => {
                 self.tools.close(slot);
-                self.core.status = Some(message);
+                self.say(message);
             }
-            ToolEvent::Busy => self.core.status = Some(self.busy_message()),
+            ToolEvent::Busy => self.say(self.busy_message()),
             ToolEvent::Run {
                 plugin,
                 params,

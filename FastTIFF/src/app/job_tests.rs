@@ -177,6 +177,173 @@ fn the_two_parts_of_the_key_stay_separate() {
     assert_eq!(info_key(None, None), "");
 }
 
+// ---------------------------------------------- what the status line says
+
+use super::{stand_aside, status_label, status_lines, StatusLine};
+use fast_tiff_viewer::{Notice, ShapeNote, VolumeNote};
+
+fn texts(lines: &[StatusLine]) -> Vec<&str> {
+    lines.iter().map(|l| l.text.as_str()).collect()
+}
+
+/// The app's message alone reads as it always did: amber, unless it is the
+/// one recorded as done.
+#[test]
+fn a_message_is_green_only_when_it_is_the_one_that_finished() {
+    let note = status_lines(Some("Open an image first"), None, [], &[]);
+    assert_eq!(
+        note,
+        [StatusLine {
+            text: "Open an image first".into(),
+            done: false
+        }]
+    );
+    let done = status_lines(Some("Saved a.tif"), Some("Saved a.tif"), [], &[]);
+    assert!(done[0].done);
+    let other = status_lines(Some("Could not save a.tif"), Some("Saved a.tif"), [], &[]);
+    assert!(!other[0].done, "another message under the green one's text");
+    assert!(status_lines(None, Some("Saved a.tif"), [], &[]).is_empty());
+}
+
+/// The bug the notices exist for, on the line itself: a save, or a refusal,
+/// used to replace the note about the file's shape for good, and a decode
+/// failure to replace it until the next open. Now each says its own piece,
+/// the app's message first, in amber except a success.
+#[test]
+fn the_message_and_every_notice_share_the_line() {
+    let shape = Notice::Shape(ShapeNote::TooManyChannels(9));
+    let failed = Notice::DecodeFailed("LZW: bad code".into());
+    let lines = status_lines(
+        Some("Saved a.tif"),
+        Some("Saved a.tif"),
+        [&failed, &shape],
+        &[],
+    );
+    assert_eq!(
+        texts(&lines),
+        [
+            "Saved a.tif",
+            "Failed to decode frame: LZW: bad code",
+            "Note: stack has 9 channels; showing the first 6."
+        ]
+    );
+    assert_eq!(
+        lines.iter().map(|l| l.done).collect::<Vec<_>>(),
+        [true, false, false]
+    );
+    // With no message of the app's, the core's alone.
+    assert_eq!(
+        texts(&status_lines(None, None, [&shape], &[])),
+        [shape.to_string()]
+    );
+}
+
+/// While a load or a job runs, the row is the progress bar's: what was said
+/// of the document on show before it appeared stands aside rather than
+/// squeezing the bar or reading as a comment on it, and the app's message
+/// (said since the work began, since starting it cleared the last) stays
+/// beside the bar as it did. What the core finds while the work runs shows
+/// beside the bar, as it did when it was written over the one message: a 3D
+/// view that runs out of GPU memory during a long save says so then.
+#[test]
+fn the_notices_stand_aside_while_something_is_in_progress() {
+    let shape = Notice::Shape(ShapeNote::TooManyChannels(9));
+    let reduced = Notice::Volume(VolumeNote::Reduced);
+    let no_room = Notice::Volume(VolumeNote::NoRoom("out of memory".into()));
+    let mut aside = None;
+    let mut held = vec![shape.clone(), reduced.clone()];
+    let line = |held: &[Notice], aside: &Option<Vec<Notice>>| {
+        status_lines(
+            Some("Busy"),
+            None,
+            held,
+            aside.as_deref().unwrap_or_default(),
+        )
+        .into_iter()
+        .map(|l| l.text)
+        .collect::<Vec<_>>()
+    };
+
+    // No bar: all of it.
+    stand_aside(&mut aside, false, || held.iter());
+    assert_eq!(line(&held, &aside).len(), 3);
+
+    // The bar appears: what was up stands aside, the message stays.
+    stand_aside(&mut aside, true, || held.iter());
+    assert_eq!(line(&held, &aside), ["Busy"]);
+    stand_aside(&mut aside, true, || held.iter());
+    assert_eq!(line(&held, &aside), ["Busy"], "and stays aside");
+
+    // Found while it runs: news, beside the bar. The volume's note is of a
+    // kind already aside, but not the one that was.
+    held[1] = no_room.clone();
+    stand_aside(&mut aside, true, || held.iter());
+    assert_eq!(
+        line(&held, &aside),
+        ["Busy".to_string(), no_room.to_string()]
+    );
+
+    // A note that went away and came back is news too.
+    held.remove(0);
+    stand_aside(&mut aside, true, || held.iter());
+    held.push(shape.clone());
+    stand_aside(&mut aside, true, || held.iter());
+    assert_eq!(
+        line(&held, &aside),
+        ["Busy".to_string(), no_room.to_string(), shape.to_string()]
+    );
+
+    // Done: all of it again, and the next bar starts from what is up then.
+    stand_aside(&mut aside, false, || held.iter());
+    assert_eq!(aside, None);
+    assert_eq!(line(&held, &aside).len(), 3);
+    stand_aside(&mut aside, true, || held.iter());
+    assert_eq!(line(&held, &aside), ["Busy"]);
+}
+
+/// One line is laid out exactly as the single amber label the status line
+/// used to be, so the common case looks as it did; more are a line each, in
+/// the same row.
+#[test]
+fn one_line_is_the_label_it_always_was() {
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(400.0, 300.0),
+        )),
+        ..Default::default()
+    };
+    let text = "Note: stack has 9 channels; showing the first 6.";
+    let one = [StatusLine {
+        text: text.into(),
+        done: false,
+    }];
+    let two = [one[0].clone(), one[0].clone()];
+    let mut sizes = None;
+    // Two passes: the first loads fonts.
+    for _ in 0..2 {
+        let _ = ctx.run_ui(input.clone(), |ui| {
+            let mut row = |add: &dyn Fn(&mut egui::Ui) -> egui::Response| {
+                ui.horizontal(|ui| add(ui).rect.size()).inner
+            };
+            let old =
+                row(&|ui| ui.label(egui::RichText::new(text).color(super::STATUS_NOTE).small()));
+            let new = row(&|ui| ui.label(status_label(ui, one.to_vec())));
+            let both = row(&|ui| ui.label(status_label(ui, two.to_vec())));
+            // The label's text is the row's height key: the lines, a line
+            // each, as joining them gave.
+            let joined = status_label(ui, two.to_vec()).text;
+            assert_eq!(joined, format!("{text}\n{text}"));
+            sizes = Some((old, new, both));
+        });
+    }
+    let (old, new, both) = sizes.expect("laid out");
+    assert_eq!(old, new);
+    assert_eq!(both.x, old.x, "{both:?} vs {old:?}");
+    assert!(both.y > old.y * 1.5, "two lines {both:?} vs one {old:?}");
+}
+
 // ------------------------------------------------- the bar really is wide
 
 /// Lay the info row out in a real (headless) egui context and report the
@@ -349,6 +516,66 @@ fn a_plain_load_clears_the_status_too() {
     assert!(
         before.contains("self.clear_status()"),
         "a load shows the progress readout, so it must clear the last message first"
+    );
+}
+
+/// Whatever this app says next drops the report of a failed open, as it did
+/// when the two shared one string: open A, drop a corrupt B, press Ctrl+C,
+/// and the line reads "Copied 512 x 512 image" alone, not with "Failed to
+/// open file" under it for as long as nothing else starts.
+///
+/// Checked on the source, as `begin_job` is: every message goes through
+/// `say` (or `report_done`, which calls it), and `say` dismisses the
+/// failure. A new `self.status = Some(..)` anywhere else is the regression.
+#[test]
+fn every_message_drops_the_report_of_a_failed_open() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let mut sources = vec![std::path::PathBuf::from(format!("{dir}/app.rs"))];
+    let mut stack = vec![std::path::PathBuf::from(format!("{dir}/app"))];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).expect("the app's sources") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && !path.to_string_lossy().ends_with("_tests.rs")
+            {
+                sources.push(path);
+            }
+        }
+    }
+    let mut writes = Vec::new();
+    for path in &sources {
+        let src = std::fs::read_to_string(path).expect("a source file");
+        for (i, line) in src.lines().enumerate() {
+            if line.contains("self.status = Some(") {
+                writes.push(format!("{}:{}", path.display(), i + 1));
+            }
+        }
+    }
+    assert_eq!(
+        writes.len(),
+        1,
+        "the app's message is written outside `say` at {writes:?}; call `self.say(..)`, \
+         which also drops the report of a failed open"
+    );
+
+    let src = std::fs::read_to_string(format!("{dir}/app.rs")).expect("app.rs");
+    let say = src.find("fn say(").expect("`say` should still exist");
+    let body = &src[say..say + src[say..].find("\n    }").expect("the end of `say`")];
+    assert!(
+        body.contains("self.status = Some("),
+        "`say` is the one write"
+    );
+    assert!(
+        body.contains("self.core.dismiss(NoticeKind::OpenFailed)"),
+        "`say` must drop the report of a failed open"
+    );
+    let done = src.find("fn report_done(").expect("`report_done`");
+    let body = &src[done..done + src[done..].find("\n    }").expect("the end")];
+    assert!(
+        body.contains("self.say("),
+        "`report_done` must say through `say`"
     );
 }
 

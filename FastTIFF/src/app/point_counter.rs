@@ -513,7 +513,7 @@ impl super::ViewerApp {
     /// says so on the status line.
     pub(super) fn open_point_counter(&mut self, ctx: &egui::Context) {
         let Some(stack) = self.core.document.as_ref() else {
-            self.core.status = Some("Open an image first".into());
+            self.say("Open an image first".into());
             return;
         };
         // Points are placed on the picture. An animation running in 3D stops
@@ -567,7 +567,7 @@ impl super::ViewerApp {
             return;
         };
         if rois.is_empty() {
-            self.core.status = Some(format!("{NAME}: no points to save yet"));
+            self.say(format!("{NAME}: no points to save yet"));
             return;
         }
         let Some(stack) = self.core.document.as_ref() else {
@@ -577,7 +577,7 @@ impl super::ViewerApp {
         let bytes = match fast_tiff_lib::roi_set_zip(&rois) {
             Ok(bytes) => bytes,
             Err(e) => {
-                self.core.status = Some(format!("Could not save the ROI set: {e}"));
+                self.say(format!("Could not save the ROI set: {e}"));
                 return;
             }
         };
@@ -624,7 +624,7 @@ impl super::ViewerApp {
 
         match wrote {
             Ok(()) => self.report_done(format!("Saved {} to {name}", summary(&rois))),
-            Err(e) => self.core.status = Some(format!("Could not save {name}: {e}")),
+            Err(e) => self.say(format!("Could not save {name}: {e}")),
         }
     }
 
@@ -645,7 +645,7 @@ impl super::ViewerApp {
             // Deleting every point and adding again is how an overlay added
             // by mistake comes off.
             if stack.overlay.is_empty() {
-                self.core.status = Some(format!("{NAME}: no points to add yet"));
+                self.say(format!("{NAME}: no points to add yet"));
             } else {
                 stack.overlay.clear();
                 self.report_done(

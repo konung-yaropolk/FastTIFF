@@ -79,7 +79,9 @@ fn a_failed_open_still_signals() {
     assert_eq!(signals, 1);
     assert!(viewer.document.is_none());
     assert!(
-        viewer.status.is_some(),
+        viewer
+            .notices()
+            .any(|n| n.kind() == fast_tiff_viewer::NoticeKind::OpenFailed),
         "a failure should leave something to show"
     );
 }

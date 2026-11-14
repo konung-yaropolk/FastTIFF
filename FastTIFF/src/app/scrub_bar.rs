@@ -42,9 +42,6 @@ impl ViewerApp {
         // Read here, before the stack is borrowed for the controls: what the
         // last sync found the frame to be on this device.
         let over_texture_limit = self.core.over_texture_limit();
-        let current_status = self.core.status.clone();
-        // Green only for the message it was recorded for; see `good_status`.
-        let status_is_good = current_status.is_some() && current_status == self.good_status;
 
         // The readout is the same whichever slow thing is running: a worker —
         // import, plugin, save, export — or the core opening a file on its own.
@@ -65,6 +62,20 @@ impl ViewerApp {
             Some((stage.label().to_string(), stage.fraction()))
         });
         let load_stage = progress.is_some();
+        // What the status line says: this app's last message (green only for
+        // the message it was recorded for; see `good_status`), then what the
+        // core has to say of the document and of the view on screen, which
+        // leaves out what is about the other view (the frozen-Z note over the
+        // volume, a volume's note over the 2D picture), and, while a bar is
+        // up, what was said before it appeared. Read here, before the stack is
+        // borrowed for the controls.
+        stand_aside(&mut self.notices_aside, load_stage, || self.core.notices());
+        let status = status_lines(
+            self.status.as_deref(),
+            self.good_status.as_deref(),
+            self.core.notices(),
+            self.notices_aside.as_deref().unwrap_or_default(),
+        );
         // Filled in below by the bar itself, if it draws a status line.
         let mut drawn_info: Option<String> = None;
         // Whether the info row offers a stop button: only for work this app is
@@ -85,25 +96,28 @@ impl ViewerApp {
         // Returns what it drew, which is what the window's height bookkeeping
         // compares against — a row that appears has to come out of the window
         // rather than out of the canvas.
-        let info_row = |ui: &mut egui::Ui, status: Option<(&str, bool)>| -> Option<String> {
-            if progress.is_none() && status.is_none() {
+        let info_row = |ui: &mut egui::Ui, status: Vec<StatusLine>| -> Option<String> {
+            if progress.is_none() && status.is_empty() {
                 return None;
             }
-            let key = info_key(
-                status.map(|(s, _)| s),
-                progress.as_ref().map(|(label, _)| label.as_str()),
-            );
+            let label = progress.as_ref().map(|(label, _)| label.as_str());
             ui.separator();
-            ui.horizontal(|ui| {
+            let key = ui.horizontal(|ui| {
                 // The status goes first so the bar can have the rest of the
                 // row. An `egui::ProgressBar` with no `desired_width` takes
                 // `available_size_before_wrap().x`, so whatever is placed
                 // before it decides how wide it ends up — and anything placed
                 // after it would be squeezed out of the row entirely.
-                if let Some((status, good)) = status {
-                    let color = if good { STATUS_DONE } else { STATUS_NOTE };
-                    ui.label(RichText::new(status).color(color).small());
-                }
+                //
+                // The key is the label's own text: the lines, a line each.
+                let key = if status.is_empty() {
+                    info_key(None, label)
+                } else {
+                    let job = status_label(ui, status);
+                    let key = info_key(Some(&job.text), label);
+                    ui.label(job);
+                    key
+                };
                 if let Some((label, fraction)) = &progress {
                     // Also before the bar, and for the same reason.
                     if can_stop && ui.small_button("✖").on_hover_text("Stop").clicked() {
@@ -111,8 +125,9 @@ impl ViewerApp {
                     }
                     ui.add(progress_bar(label, *fraction));
                 }
+                key
             });
-            Some(key)
+            Some(key.inner)
         };
         let response = egui::Panel::bottom("scrub_bar").show_inside(ui, |ui| {
             let Some(loaded) = &mut self.core.document else {
@@ -122,7 +137,7 @@ impl ViewerApp {
                 // Still worth a row with nothing open: this is where the first
                 // file's progress is reported, and where a plugin's "open an
                 // image first" lands.
-                drawn_info = info_row(ui, current_status.as_deref().map(|s| (s, status_is_good)));
+                drawn_info = info_row(ui, status);
                 return;
             };
             ui.add_space(4.0);
@@ -486,19 +501,7 @@ impl ViewerApp {
 
                 contrast_controls(ui, loaded, ContrastLayout::Inline, None);
             }
-            // The triple-axis note explains that 2D freezes Z at its first
-            // slice — but the 3D view *does* use Z (as the volume depth), so
-            // showing it there would be wrong. When `triple_axis_warning` is
-            // set, the status IS that note (`compute_status` short-circuits on
-            // it), so this suppresses exactly the right message.
-            let suppressed = view_is_volume && loaded.display.triple_axis_warning;
-            drawn_info = info_row(
-                ui,
-                current_status
-                    .as_deref()
-                    .filter(|_| !suppressed)
-                    .map(|s| (s, status_is_good)),
-            );
+            drawn_info = info_row(ui, status);
             ui.add_space(4.0);
         });
 

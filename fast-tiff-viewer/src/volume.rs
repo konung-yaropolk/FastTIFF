@@ -62,14 +62,13 @@ pub const MAX_VOLUME_BUDGET: usize = if usize::BITS >= 64 {
 /// A built volume, packed for upload.
 pub type BuiltVolume = PackedVolume;
 
-/// The most voxels a volume keeps along any axis for a screen whose longest
-/// side is `screen_px` pixels (0: unknown, no cap): twice the screen, so a
+/// The most voxels a volume keeps along any axis for `screen` (no cap when
+/// the frontend cannot tell its size): twice the screen's longest side, so a
 /// view zoomed in twofold is still sharp, and never under 2048.
-pub fn detail_cap(screen_px: u32) -> u32 {
-    if screen_px == 0 {
-        u32::MAX
-    } else {
-        screen_px.saturating_mul(2).max(2048)
+pub fn detail_cap(screen: crate::frame::PhysicalPx) -> u32 {
+    match screen.longest_side() {
+        0 => u32::MAX,
+        side => side.saturating_mul(2).max(2048),
     }
 }
 

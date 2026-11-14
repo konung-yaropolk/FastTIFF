@@ -17,8 +17,9 @@
 //! `planes_addressed` and `build_jobs`: they are two statements of the same
 //! arithmetic, and the clamp is worth nothing if they drift apart.
 
-use fast_tiff_viewer::dimensions::{clamp_to_available, compute_status, planes_addressed};
+use fast_tiff_viewer::dimensions::{clamp_to_available, planes_addressed, shape_note};
 use fast_tiff_viewer::Dims;
+use fast_tiff_viewer::ShapeNote;
 
 fn dims(channels: usize, slices: usize, frames: usize) -> Dims {
     Dims {
@@ -191,8 +192,9 @@ fn an_empty_file_is_declined_rather_than_divided_by() {
 /// file's own metadata does not support.
 #[test]
 fn the_mismatch_is_reported_with_both_numbers() {
-    let note = compute_status(dims(2, 1, 10), false, Some((40, 20)))
-        .expect("a mismatch must produce a note");
+    let note = shape_note(dims(2, 1, 10), false, Some((40, 20)))
+        .expect("a mismatch must produce a note")
+        .to_string();
     assert!(note.contains("40"), "should say what was declared: {note}");
     assert!(
         note.contains("20"),
@@ -208,17 +210,25 @@ fn the_mismatch_is_reported_with_both_numbers() {
 /// says the file disagrees with itself.
 #[test]
 fn the_mismatch_outranks_the_other_notes() {
-    let both = compute_status(dims(2, 3, 10), true, Some((40, 20))).expect("some note");
+    let both = shape_note(dims(2, 3, 10), true, Some((40, 20))).expect("some note");
     assert!(
-        both.contains("40"),
+        matches!(
+            both,
+            ShapeNote::PlaneMismatch {
+                declared: 40,
+                available: 20,
+                ..
+            }
+        ),
         "the triple-axis note displaced it: {both}"
     );
 
     // And with no mismatch the other notes still come through unchanged.
-    let triple = compute_status(dims(2, 3, 10), true, None).expect("some note");
-    assert!(triple.contains("Z-slice"), "{triple}");
+    let triple = shape_note(dims(2, 3, 10), true, None).expect("some note");
+    assert_eq!(triple, ShapeNote::FrozenZ(dims(2, 3, 10)));
+    assert!(triple.to_string().contains("Z-slice"), "{triple}");
     assert_eq!(
-        compute_status(dims(1, 1, 10), false, None),
+        shape_note(dims(1, 1, 10), false, None),
         None,
         "a plain stack says nothing"
     );

@@ -7,7 +7,7 @@
 //!
 //! # The camera is not touched
 //!
-//! A pose turns the *volume* (see `VolumeView::pose` in `fast-tiff-viewer`),
+//! A pose turns the *volume* (see `VolumeInputs::pose` in `fast-tiff-viewer`),
 //! and the user's camera stays exactly as they left it. That is what makes the
 //! stop rule cheap and exact: every way of moving the view — a drag, the wheel,
 //! the arrow and WASD keys, Reset, switching the navigation style — changes the
@@ -363,7 +363,7 @@ impl Running {
 /// The size of a movie of the 3D view, in pixels: the shape of the view as it
 /// is on screen (`panel`, in pixels), as large as it takes for a pixel of the
 /// stack in view to be at least a pixel of the movie (`detail_height` — see
-/// `VolumeView::detail_height`), and never smaller than the view on screen.
+/// `VolumeSettings::detail_height`), and never smaller than the view on screen.
 ///
 /// Scaled down, keeping the shape, to `max_side`. `None` for a view with no
 /// size to copy.
@@ -722,14 +722,14 @@ impl super::ViewerApp {
     /// Carry out an animation the plugin at `plugin` (called `name`) returned.
     pub(super) fn start_animation(&mut self, plugin: usize, name: &str, animation: Animation) {
         let Some(stack) = self.core.document.as_ref() else {
-            self.core.status = Some("Open an image first".into());
+            self.say("Open an image first".into());
             return;
         };
         // The plugin checks this too, but the rule is the host's: the 3D view
         // is what it is, and a plugin built against another idea of it should
         // hear why nothing happened.
         if !self.core.can_show_volume() {
-            self.core.status = Some(format!(
+            self.say(format!(
                 "{name}: this stack has no 3D view to animate — it needs at least two planes"
             ));
             return;
@@ -737,7 +737,7 @@ impl super::ViewerApp {
         // Playing needs nothing the writer has; a second recording would
         // need the slot the first one's file is still being finished in.
         if self.animation.saving.is_some() && !matches!(animation.output, AnimationOutput::Play) {
-            self.core.status = Some(format!("{name}: the last animation is still being written"));
+            self.say(format!("{name}: the last animation is still being written"));
             return;
         }
         let recording = match &animation.output {
@@ -753,13 +753,13 @@ impl super::ViewerApp {
                     // The user closed the save dialog: they changed their mind,
                     // which is not a failure and not worth more than a word.
                     None => {
-                        self.core.status = Some(format!("{name}: not saved"));
+                        self.say(format!("{name}: not saved"));
                         return;
                     }
                 }
             }
             other => {
-                self.core.status = Some(format!(
+                self.say(format!(
                     "{name}: asked for its animation to go somewhere this version of \
                      FastTIFF does not know ({other:?})"
                 ));
@@ -793,7 +793,7 @@ impl super::ViewerApp {
             sink,
         ));
         if saving {
-            self.core.status = Some(format!("{name}: recording…"));
+            self.say(format!("{name}: recording…"));
         }
         self.requery_dialog_of(plugin);
     }
@@ -809,11 +809,11 @@ impl super::ViewerApp {
 
     /// Put the view back as it was, and say why a recording did not finish.
     fn end_animation(&mut self, run: Running, why: Ended) {
-        self.core.volume.pose = None;
+        self.sync_inputs.volume.pose = None;
         if run.recording.is_some() {
             // Dropping the recording drops its sink, and the writer removes
             // whatever part of the file it had written.
-            self.core.status = Some(why.recording_message());
+            self.say(why.recording_message());
         }
         self.requery_dialog_of(run.plugin);
     }
@@ -830,9 +830,7 @@ impl super::ViewerApp {
                     self.animation.saving = None;
                     match result {
                         Ok(n) => self.report_done(format!("Saved a {n}-frame animation: {dest}")),
-                        Err(why) => {
-                            self.core.status = Some(format!("Could not save the animation: {why}"))
-                        }
+                        Err(why) => self.say(format!("Could not save the animation: {why}")),
                     }
                 }
                 None => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
@@ -876,7 +874,10 @@ impl super::ViewerApp {
                 let detail = if window {
                     0.0
                 } else {
-                    self.core.volume.detail_height((w, h, stack.volume_depth()))
+                    let pose = self.sync_inputs.volume.pose.as_ref();
+                    self.core
+                        .volume
+                        .detail_height((w, h, stack.volume_depth()), pose)
                 };
                 movie_size((rect.width() * ppp, rect.height() * ppp), detail, max_side)
             }
@@ -899,7 +900,7 @@ impl super::ViewerApp {
                 capture,
                 repaint_after,
             } => {
-                self.core.volume.pose = Some(pose);
+                self.sync_inputs.volume.pose = Some(pose);
                 // Rendered once this frame's pose has reached the GPU: see
                 // `capture_animation_frame`.
                 self.animation.capture.request = capture;
@@ -908,11 +909,12 @@ impl super::ViewerApp {
                         .size
                         .map(|(w, h)| format!(", {w} x {h}"))
                         .unwrap_or_default();
-                    self.core.status = Some(format!(
+                    let message = format!(
                         "Recording animation: {} of {} frames{size}",
                         rec.done,
                         run.total()
-                    ));
+                    );
+                    self.say(message);
                 }
                 if repaint_after > 0.0 {
                     ctx.request_repaint_after(std::time::Duration::from_secs_f64(repaint_after));
@@ -926,10 +928,10 @@ impl super::ViewerApp {
             }
             Step::Recorded => {
                 let run = self.animation.running.take().expect("running");
-                self.core.volume.pose = None;
+                self.sync_inputs.volume.pose = None;
                 let rec = run.recording.expect("a recording");
                 let dest = rec.dest.clone();
-                self.core.status = Some(format!("Writing animation: {}", dest.name()));
+                self.say(format!("Writing animation: {}", dest.name()));
                 self.animation.saving = Some(rec.frames.finish(dest));
                 self.requery_dialog_of(run.plugin);
                 ctx.request_repaint();
