@@ -129,6 +129,62 @@ fn box_half_extents_normalize_the_longest_scaled_axis() {
     assert!((v.box_he[2] - 0.2).abs() < 1e-4, "{:?}", v.box_he);
 }
 
+/// The re-pivot and the wheel ray-cast against the box they are handed, the
+/// one the shader draws for the volume on show: the camera keeps no copy of
+/// it that a frame could leave stale.
+#[test]
+fn the_repivot_and_the_wheel_use_the_box_they_are_given() {
+    // Straight down -z from 3 away.
+    let mut cam = CameraState {
+        yaw: 0.0,
+        pitch: 0.0,
+        dist: 3.0,
+        target: [0.0; 3],
+        orbit_point: OrbitPoint::ScreenCenter,
+        ..Default::default()
+    };
+    let flat = [0.5, 0.5, 0.25];
+    let mut deep = cam;
+    cam.repivot(flat);
+    assert!(
+        dist2(cam.target, [0.0, 0.0, 0.25]) < 1e-8,
+        "{:?}",
+        cam.target
+    );
+    assert!((cam.dist - 2.75).abs() < 1e-5, "{}", cam.dist);
+    deep.repivot([0.5; 3]);
+    assert!(
+        dist2(deep.target, [0.0, 0.0, 0.5]) < 1e-8,
+        "{:?}",
+        deep.target
+    );
+
+    // The wheel's step grows with the distance to the box.
+    let mut near = CameraState {
+        orbit_point: OrbitPoint::VolumeCenter,
+        ..cam
+    };
+    let mut far = near;
+    let (z0, z1) = (near.target[2], far.target[2]);
+    near.wheel_fly(1.0, 1.0, [0.5; 3]);
+    far.wheel_fly(1.0, 1.0, [0.01; 3]);
+    assert!(
+        (far.target[2] - z1).abs() > (near.target[2] - z0).abs(),
+        "a box further off is approached faster"
+    );
+}
+
+/// What a frontend hands the camera is the box the shader draws.
+#[test]
+fn the_settings_box_is_the_shaders() {
+    let settings = crate::VolumeSettings {
+        scale: [1.0, 2.0, 4.0],
+        ..Default::default()
+    };
+    let dims = (100, 50, 10);
+    assert_eq!(settings.box_he(dims), settings.camera(dims, None).box_he);
+}
+
 #[test]
 fn degenerate_dimensions_stay_finite() {
     let cam = CameraState::default();
@@ -341,4 +397,48 @@ fn an_axis_that_misses_the_volume_pivots_nearest_its_centre() {
     // Looking away from it: no point behind the eye.
     cam.forward = [0.0, 0.0, 1.0];
     assert_eq!(cam.pivot_distance(), 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// The navigation preferences
+// ---------------------------------------------------------------------------
+
+/// Where every frontend starts the user off: the base speeds, the coarse
+/// frame the renderer suggests while moving, and no coordinate box.
+#[test]
+fn the_navigation_preferences_start_at_the_defaults() {
+    let prefs = VolumeNavPrefs::default();
+    assert!(!prefs.show_coord_box);
+    assert_eq!(prefs.move_speed, 1.0);
+    assert_eq!(prefs.scroll_speed, 1.0);
+    assert_eq!(prefs.moving_downscale, scivis_render::MOVING_DOWNSCALE);
+}
+
+#[test]
+fn the_view_is_reduced_while_it_moves_and_sharp_once_it_settles() {
+    let prefs = VolumeNavPrefs {
+        moving_downscale: 4,
+        ..Default::default()
+    };
+    assert_eq!(prefs.downscale_after(None), 1, "never moved");
+    assert_eq!(prefs.downscale_after(Some(0.0)), 4);
+    assert_eq!(prefs.downscale_after(Some(0.1)), 4);
+    assert_eq!(prefs.downscale_after(Some(VolumeNavPrefs::SETTLE_S)), 1);
+    assert_eq!(prefs.downscale_after(Some(5.0)), 1);
+    // A clock that ran backwards is not a movement.
+    assert_eq!(prefs.downscale_after(Some(-1.0)), 1);
+}
+
+#[test]
+fn the_resolution_while_moving_is_the_users_choice() {
+    let moving = |moving_downscale| VolumeNavPrefs {
+        moving_downscale,
+        ..Default::default()
+    };
+    // Full, 50% and 25% in the settings.
+    assert_eq!(moving(1).downscale_after(Some(0.0)), 1);
+    assert_eq!(moving(2).downscale_after(Some(0.0)), 2);
+    assert_eq!(moving(4).downscale_after(Some(0.0)), 4);
+    // Nothing smaller than full, whatever is asked for.
+    assert_eq!(moving(0).downscale_after(Some(0.0)), 1);
 }

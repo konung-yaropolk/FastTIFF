@@ -3,9 +3,29 @@
 use super::*;
 use scivis_render::VolumeInterp;
 
+/// The image at `min`, `size` across, seen through `visible`.
+fn of_visible(
+    min: [f32; 2],
+    size: [f32; 2],
+    vis_min: [f32; 2],
+    vis_size: [f32; 2],
+    ppp: f32,
+) -> ImageInputs {
+    let visible = LogicalRect::from_min_size(
+        LogicalPt::new(vis_min[0], vis_min[1]),
+        LogicalVec::new(vis_size[0], vis_size[1]),
+    );
+    ImageInputs::of_visible(
+        LogicalPt::new(min[0], min[1]),
+        LogicalVec::new(size[0], size[1]),
+        visible,
+        ppp,
+    )
+}
+
 #[test]
 fn physical_pixels_are_points_times_the_scale() {
-    let px = PhysicalPx::from_points(800.0, 600.0, 1.25);
+    let px = LogicalVec::new(800.0, 600.0).to_physical(1.25);
     assert_eq!(px, PhysicalPx::new(1000.0, 750.0));
     assert!(px.is_known());
 }
@@ -47,7 +67,10 @@ fn the_longest_side_scales_like_the_side_it_was() {
         (3.3, 7.7, 2.75),
     ] {
         let before = (w.max(h) * ppp).round().max(0.0) as u32;
-        assert_eq!(PhysicalPx::from_points(w, h, ppp).longest_side(), before);
+        assert_eq!(
+            LogicalVec::new(w, h).to_physical(ppp).longest_side(),
+            before
+        );
     }
 }
 
@@ -66,7 +89,7 @@ fn the_whole_image_is_the_default_view() {
 /// An image that fits: all of it, in as many pixels as it is drawn at.
 #[test]
 fn a_fitted_image_is_all_on_screen() {
-    let i = ImageInputs::of_visible(
+    let i = of_visible(
         [10.0, 20.0],
         [400.0, 300.0],
         [10.0, 20.0],
@@ -84,7 +107,7 @@ fn a_fitted_image_is_all_on_screen() {
 fn an_overflowing_image_shows_the_window_under_the_panel() {
     // The image is drawn 1000 x 500 points from (-200, -100): panned right
     // and down by a fifth. The panel is 500 x 250 points at (0, 0).
-    let i = ImageInputs::of_visible(
+    let i = of_visible(
         [-200.0, -100.0],
         [1000.0, 500.0],
         [0.0, 0.0],
@@ -100,15 +123,25 @@ fn an_overflowing_image_shows_the_window_under_the_panel() {
 /// here, so the residency planned from it is the same.
 #[test]
 fn the_window_is_the_canvas_arithmetic() {
-    let (origin, img, vis_min, vis, ppp) = (
+    let (origin, img, vis_min, vis_max, ppp) = (
         [13.7_f32, -41.3],
         [2345.6_f32, 1234.5],
         [20.0_f32, 30.0],
-        [811.3_f32, 607.9],
+        [831.3_f32, 637.9],
         1.25_f32,
     );
+    // The visible rect's size as the canvas took it, `max - min`.
+    let vis = [vis_max[0] - vis_min[0], vis_max[1] - vis_min[1]];
     let inv = [1.0 / img[0].max(1.0), 1.0 / img[1].max(1.0)];
-    let i = ImageInputs::of_visible(origin, img, vis_min, vis, ppp);
+    let i = ImageInputs::of_visible(
+        LogicalPt::new(origin[0], origin[1]),
+        LogicalVec::new(img[0], img[1]),
+        LogicalRect {
+            min: LogicalPt::new(vis_min[0], vis_min[1]),
+            max: LogicalPt::new(vis_max[0], vis_max[1]),
+        },
+        ppp,
+    );
     assert_eq!(
         i.uv_offset,
         [
@@ -124,7 +157,7 @@ fn the_window_is_the_canvas_arithmetic() {
 /// than dividing by zero.
 #[test]
 fn an_empty_image_gives_a_finite_window() {
-    let i = ImageInputs::of_visible([0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 1.0);
+    let i = of_visible([0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 1.0);
     assert!(i.uv_offset.iter().chain(&i.uv_scale).all(|v| v.is_finite()));
     assert!(!i.viewport.is_known());
 }

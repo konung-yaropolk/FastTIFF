@@ -149,7 +149,7 @@ impl Viewer {
             residency.overview = None;
             outcome.needs_repaint = sync_volume(
                 loaded,
-                &mut self.volume,
+                &self.volume,
                 &inputs.volume,
                 &mut residency.volume,
                 renderer,
@@ -818,7 +818,7 @@ fn upload_texture(renderer: &mut Renderer, channel: usize, w: u32, h: u32, data:
 /// the depth and `time` stays 0.
 fn sync_volume(
     loaded: &mut Document,
-    view: &mut VolumeSettings,
+    view: &VolumeSettings,
     inputs: &VolumeInputs,
     res: &mut VolumeResidency,
     renderer: &mut Renderer,
@@ -936,8 +936,6 @@ fn sync_volume(
 
     let (w, h) = loaded.dimensions().unwrap_or((1, 1));
     let cam = view.camera((w, h, loaded.volume_depth()), inputs.pose.as_ref());
-    // Cache the box extents so the orbit re-pivot can ray-cast the box.
-    view.cam.box_he = cam.box_he;
     // The gain, decided here rather than in the shader because which of the
     // three answers applies depends on the mode — see [`crate::brightness`].
     let brightness = match view.render {

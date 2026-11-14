@@ -12,7 +12,8 @@ in sight.
   scivis-render     GPU pipelines, textures, ray-marching
         │
   fast-tiff-viewer  ← this crate: document model, channel settings,
-        │             c/z/t interpretation, camera, decode→GPU sync
+        │             c/z/t interpretation, 2D view, 3D camera,
+        │             decode→GPU sync
   frontend          egui desktop app, or a wasm/JS web UI
 ```
 
@@ -37,8 +38,14 @@ widgets and input; it borrows everything else from here.
   memory budget, parallel across output slices, on a background thread.
 - **Reads ahead** while playback keeps up: decode-ahead for compressed stacks,
   page-touch for uncompressed ones (where decoding is already zero-copy).
+- **Keeps the 2D view** — the zoom ladder and the fit that joins it, pan,
+  the zoom and swipe glides, autoscroll, wheel travel — as plain arithmetic in
+  logical points (`view2d`), and works out where that puts the image and the
+  part of it `sync` samples.
 - **Drives the 3D camera** — four navigation styles, orbit/fly conversion,
-  ray/box re-pivoting — as plain `f32` math over `(dx, dy)` deltas.
+  ray/box re-pivoting — as plain `f32` math over `(dx, dy)` deltas, with the
+  user's navigation preferences (speeds, the resolution while moving, the
+  coordinate box) beside it.
 - **Keeps the playback clock**, advancing by real elapsed time so a movie runs at
   the file's fps regardless of render cadence, and latching parallel decode when
   it starts dropping frames.
@@ -46,19 +53,30 @@ widgets and input; it borrows everything else from here.
 ## Usage
 
 ```rust,ignore
-use fast_tiff_viewer::{FrameInputs, ImageInputs, Viewer};
+use fast_tiff_viewer::view2d::{ImagePx, LogicalRect, LogicalVec};
+use fast_tiff_viewer::{FrameInputs, View2d, Viewer};
 
 let mut viewer = Viewer::new();
 viewer.open(path)?;
+let mut view = View2d::default();
 let mut inputs = FrameInputs::default();
 
 // each frame:
 if viewer.playback.playing {
     viewer.tick_playback(now_seconds);
 }
-// From your pan/zoom: the part of the image on screen, and its size in
-// physical pixels.
-inputs.image = ImageInputs::of_visible(image_min, image_size, visible_min, visible_size, ppp);
+// Your input, through `view` (a wheel notch: `view.step_zoom`, a drag:
+// `view.drag`, ...). Once a frame, the zoom glide, which also says whether the
+// view is moving (a glide or a pinch: no new window is decoded for a zoom it
+// is passing through). Then the panel it is drawn in: the part of the image on
+// screen, and its size in physical pixels.
+view.advance_zoom_glide(dt);
+inputs.moving = view.is_moving();
+view.set_panel(panel);
+let layout = view.measure(ImagePx::new(width, height), room);
+view.clamp_pan(&layout);
+let placed = view.place(&layout);
+inputs.image = placed.inputs(pixels_per_point);
 
 let outcome = viewer.sync(&mut renderer, &inputs);
 // …then draw, and repaint again if outcome.needs_repaint
@@ -70,7 +88,9 @@ for notice in viewer.notices() {
 
 `Viewer` holds no window, panel, zoom or pointer state — those are the
 frontend's, and what they come to each frame is handed to `sync` as
-`FrameInputs`. The dividing line is *"would a browser UI need this to show the
+`FrameInputs`. The 2D view's zoom and pan are a `View2d` the frontend keeps
+and feeds its input to, so that a second frontend reuses the arithmetic and
+not only the result. The dividing line is *"would a browser UI need this to show the
 right pixels?"*; if yes, it's here.
 
 ## Features

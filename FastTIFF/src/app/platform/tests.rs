@@ -3,7 +3,11 @@
 
 use super::*;
 
-const IMAGE: egui::Vec2 = egui::vec2(1000.0, 800.0);
+const IMAGE: ImagePx = ImagePx::new(1000, 800);
+
+fn room(w: f32, h: f32) -> Option<LogicalVec> {
+    Some(LogicalVec::new(w, h))
+}
 
 // ---------------------------------------------------------------- the build
 
@@ -30,34 +34,37 @@ fn each_target_fits_a_new_picture_its_own_way() {
 /// which the picture and the chrome fit the monitor's work area.
 #[test]
 fn the_desktop_opens_at_the_largest_level_that_fits_the_monitor() {
-    let monitor = Some(egui::vec2(1800.0, 1000.0));
+    let monitor = room(1800.0, 1000.0);
     // Fits at 1:1 with room to spare: 100%, never more.
     assert_eq!(Opening::SizeWindow.zoom(IMAGE, monitor, 60.0), Some(1.0));
     // 800 + 250 of chrome is taller than the monitor; 75% is the next rung.
     assert_eq!(Opening::SizeWindow.zoom(IMAGE, monitor, 250.0), Some(0.75));
     // A mosaic: the first rung at which it fits, on the ladder.
-    let big = egui::vec2(40_000.0, 30_000.0);
+    let big = ImagePx::new(40_000, 30_000);
     let z = Opening::SizeWindow.zoom(big, monitor, 60.0).unwrap();
-    assert!(ZOOM_LEVELS.contains(&z), "{z} is not a ladder level");
-    assert!(big.x * z <= 1800.0 && big.y * z + 60.0 <= 1000.0);
+    assert!(
+        fast_tiff_viewer::view2d::ZOOM_LEVELS.contains(&z),
+        "{z} is not a ladder level"
+    );
+    assert!(40_000.0 * z <= 1800.0 && 30_000.0 * z + 60.0 <= 1000.0);
 }
 
 #[test]
 fn the_desktop_opens_too_large_a_picture_at_the_smallest_level() {
-    let monitor = Some(egui::vec2(800.0, 600.0));
-    let huge = egui::vec2(1.0e7, 1.0e7);
+    let monitor = room(800.0, 600.0);
+    let huge = ImagePx::new(10_000_000, 10_000_000);
     assert_eq!(
         Opening::SizeWindow.zoom(huge, monitor, 60.0),
-        Some(ZOOM_LEVELS[0])
+        Some(fast_tiff_viewer::view2d::ZOOM_LEVELS[0])
     );
 }
 
 /// The browser fits the canvas exactly, off the ladder, and never magnifies.
 #[test]
 fn the_browser_fits_the_canvas_exactly() {
-    let canvas = Some(egui::vec2(1600.0, 400.0));
+    let canvas = room(1600.0, 400.0);
     assert_eq!(Opening::FitCanvas.zoom(IMAGE, canvas, 0.0), Some(0.5));
-    let roomy = Some(egui::vec2(4000.0, 4000.0));
+    let roomy = room(4000.0, 4000.0);
     assert_eq!(Opening::FitCanvas.zoom(IMAGE, roomy, 0.0), Some(1.0));
     // The chrome is the canvas's business, not the fit's.
     assert_eq!(Opening::FitCanvas.zoom(IMAGE, canvas, 300.0), Some(0.5));
@@ -70,10 +77,7 @@ fn neither_fits_before_it_knows_the_room() {
         assert_eq!(opening.zoom(IMAGE, None, 60.0), None, "{opening:?}");
     }
     // A canvas laid out at nothing is not a size either.
-    assert_eq!(
-        Opening::FitCanvas.zoom(IMAGE, Some(egui::Vec2::ZERO), 0.0),
-        None
-    );
+    assert_eq!(Opening::FitCanvas.zoom(IMAGE, room(0.0, 0.0), 0.0), None);
 }
 
 // -------------------------------------------------------- the plugin folder

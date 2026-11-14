@@ -30,7 +30,7 @@
 //! as a texture the device rejects (fatal) or a seam at the edge of the view.
 //! In texel space each is exact.
 
-use crate::frame::PhysicalPx;
+use crate::screen::PhysicalPx;
 
 /// Bytes of texture the resident window may occupy, summed across channels.
 ///

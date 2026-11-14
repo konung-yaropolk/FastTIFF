@@ -5,13 +5,15 @@ use super::*;
 use crate::render;
 use egui::RichText;
 use fast_tiff_viewer::camera::{NavMode, OrbitPoint};
+use fast_tiff_viewer::VolumeSettings;
 
 impl WindowId {
     pub(in crate::app) const RENDER_SETTINGS: WindowId = WindowId("render_settings");
 }
 
-/// The window. Everything it edits is the core's volume settings and the 3D
-/// preferences, both handed in each frame, so it keeps nothing of its own.
+/// The window. Everything it edits is the core's volume settings — the
+/// camera, how the volume is drawn, and the user's navigation preferences —
+/// handed in each frame, so it keeps nothing of its own.
 pub(super) struct RenderSettingsWindow;
 
 impl AppWindow for RenderSettingsWindow {
@@ -21,29 +23,9 @@ impl AppWindow for RenderSettingsWindow {
 
     fn show(&mut self, ctx: &egui::Context, open: &mut bool, host: &mut Host<'_>) {
         let core = &mut *host.core;
-        let prefs = &mut *host.prefs;
         let prev_nav = core.volume.cam.nav;
-        let mut reset_position = false;
-        render_settings_window(
-            ctx,
-            open,
-            &mut core.volume.scale,
-            &mut core.volume.interp,
-            &mut prefs.moving_downscale,
-            &mut core.volume.cam.nav,
-            &mut core.volume.cam.orbit_point,
-            &mut prefs.move_speed,
-            &mut prefs.scroll_speed,
-            &mut core.volume.render,
-            &mut core.volume.density,
-            &mut core.volume.iso,
-            &mut core.volume.mip_brightness,
-            &mut core.volume.volume_brightness,
-            &mut core.volume.volume_autolevel,
-            &mut prefs.show_coord_box,
-            &mut reset_position,
-            core.document.as_ref(),
-        );
+        let reset_position =
+            render_settings_window(ctx, open, &mut core.volume, core.document.as_ref());
         // Keep the view continuous across a fly⇄orbit switch (the two use
         // different eye representations) instead of snapping to a default.
         if core.volume.cam.nav != prev_nav {
@@ -64,12 +46,12 @@ impl AppWindow for RenderSettingsWindow {
     }
 }
 
-/// The 3D render-settings pop-up: rendering method and the controls belonging
-/// to it, per-axis voxel scale (x:y:z), interpolation, the resolution while the
-/// view moves (`moving_downscale`: how many times smaller per axis, 1 for
-/// full), navigation style, and a camera-reset button. Scale defaults to the stack's pixel calibration (with a
-/// button to re-seed it). `reset_position` is set true when the user clicks
-/// Reset position.
+/// The 3D render-settings pop-up over `volume`: rendering method and the
+/// controls belonging to it, per-axis voxel scale (x:y:z), interpolation, the
+/// resolution while the view moves (`moving_downscale`: how many times smaller
+/// per axis, 1 for full), navigation style and speeds, the coordinate box, and
+/// a camera-reset button. Scale defaults to `loaded`'s pixel calibration (with
+/// a button to re-seed it). Returns whether the user clicked Reset position.
 ///
 /// # The mode's controls, and only the mode's
 ///
@@ -82,27 +64,33 @@ impl AppWindow for RenderSettingsWindow {
 ///
 /// The exception that proves the rule is the mode selector itself, which is
 /// always all three — that *is* the reachable state.
-#[allow(clippy::too_many_arguments)]
 fn render_settings_window(
     ctx: &egui::Context,
     open: &mut bool,
-    scale: &mut [f32; 3],
-    interp: &mut render::VolumeInterp,
-    moving_downscale: &mut u32,
-    nav: &mut NavMode,
-    orbit_point: &mut OrbitPoint,
-    move_speed: &mut f32,
-    scroll_speed: &mut f32,
-    render_mode: &mut render::VolumeRender,
-    density: &mut f32,
-    iso: &mut f32,
-    mip_brightness: &mut f32,
-    volume_brightness: &mut f32,
-    volume_autolevel: &mut bool,
-    show_coord_box: &mut bool,
-    reset_position: &mut bool,
+    volume: &mut VolumeSettings,
     loaded: Option<&Document>,
-) {
+) -> bool {
+    let mut reset_position = false;
+    // Taken apart whole, with no `..`: a setting added to the volume is a
+    // compile error here until someone decides whether this window shows it.
+    let VolumeSettings {
+        cam,
+        navigation,
+        scale,
+        interp,
+        render: render_mode,
+        density,
+        iso,
+        mip_brightness,
+        volume_brightness,
+        volume_autolevel,
+    } = volume;
+    let nav = &mut cam.nav;
+    let orbit_point = &mut cam.orbit_point;
+    let moving_downscale = &mut navigation.moving_downscale;
+    let move_speed = &mut navigation.move_speed;
+    let scroll_speed = &mut navigation.scroll_speed;
+    let show_coord_box = &mut navigation.show_coord_box;
     let spec = dialog::Dialog {
         id: WindowId::RENDER_SETTINGS.0,
         title: "3D render settings",
@@ -324,8 +312,9 @@ fn render_settings_window(
                 .on_hover_text("Recenter the camera to the default three-quarter view")
                 .clicked()
             {
-                *reset_position = true;
+                reset_position = true;
             }
         });
     });
+    reset_position
 }

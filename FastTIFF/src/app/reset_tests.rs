@@ -9,67 +9,61 @@
 
 use super::*;
 
-/// A view with every field moved off its fresh value.
-fn used_view() -> View2d {
-    let mut glide = kinetic::Glide::default();
-    glide.push(egui::vec2(40.0, -25.0), 1.0 / 60.0);
-    assert!(glide.is_moving(), "the fixture's glide should be moving");
-    View2d {
-        zoom: 3.0,
-        pan: egui::vec2(12.0, 34.0),
-        pending_initial_fit: false,
-        fit_zoom: Some(0.4),
+/// A view moved off its fresh value in every way the window can: zoomed,
+/// panned, stepped, autoscrolling, with a resize, a reposition and a
+/// navigator drag in flight. The core view's own reset is pinned with it,
+/// in `fast-tiff-viewer`'s `view2d/tests.rs`.
+fn used_view() -> CanvasView {
+    use fast_tiff_viewer::view2d::{ImagePx, LogicalPt, LogicalRect, LogicalVec};
+    let mut model = View2d::default();
+    model.set_panel(LogicalRect::from_min_size(
+        LogicalPt::new(0.0, 30.0),
+        LogicalVec::new(640.0, 480.0),
+    ));
+    let layout = model.measure(ImagePx::new(4000, 3000), LogicalVec::new(640.0, 480.0));
+    model.open_fitted(0.4);
+    model.drag(LogicalVec::new(-12.0, -34.0));
+    model.toggle_autoscroll(Some(LogicalPt::new(100.0, 200.0)), &layout);
+    let step = model.step_zoom(1, None).expect("a rung above");
+    assert!(model.is_zoom_gliding());
+    CanvasView {
+        model,
         resize_to_zoom: true,
-        zoom_reposition: Some((2.0, egui::pos2(5.0, 6.0))),
-        zoom_glide: Some(ZoomGlide {
-            target: 4.0,
-            anchor: egui::pos2(7.0, 8.0),
-        }),
-        scroll_accum: 0.75,
-        image_origin: egui::pos2(-3.0, 9.0),
-        panel_rect: egui::Rect::from_min_size(egui::pos2(0.0, 30.0), egui::vec2(640.0, 480.0)),
-        pan_glide: glide,
-        was_pannable: true,
+        zoom_reposition: Some(step),
         minimap_drag: true,
-        autoscroll: Some(egui::pos2(100.0, 200.0)),
     }
 }
 
-/// The transform and every gesture over it go back to where a freshly opened
-/// picture starts, with the opening fit still to come.
+/// The view and every gesture over it go back to where a freshly opened
+/// picture starts, with the opening fit still to come; the window's resize
+/// and the navigator's drag go with the picture they were for.
 #[test]
 fn a_new_document_resets_the_view_to_a_fresh_one_awaiting_its_fit() {
     let mut view = used_view();
     view.reset();
     let fresh = View2d::default();
-    assert_eq!(view.zoom, fresh.zoom);
-    assert_eq!(view.pan, fresh.pan);
-    assert!(view.pending_initial_fit, "the opening fit is still to come");
-    assert_eq!(view.fit_zoom, fresh.fit_zoom);
-    assert_eq!(view.resize_to_zoom, fresh.resize_to_zoom);
-    assert_eq!(view.zoom_glide, fresh.zoom_glide);
-    assert_eq!(view.was_pannable, fresh.was_pannable);
-    assert_eq!(view.minimap_drag, fresh.minimap_drag);
-    assert_eq!(view.autoscroll, fresh.autoscroll);
-    assert!(
-        !view.pan_glide.is_moving(),
-        "no momentum from the last picture"
-    );
+    assert_eq!(view.model.zoom(), fresh.zoom());
+    assert_eq!(view.model.pan(), fresh.pan());
+    assert!(view.model.awaits_fit(), "the opening fit is still to come");
+    assert_eq!(view.model.fit_rung(), None);
+    assert!(!view.model.is_zoom_gliding());
+    assert_eq!(view.model.autoscroll(), None);
+    assert!(!view.resize_to_zoom);
+    assert!(!view.minimap_drag);
 }
 
 /// What the reset leaves alone: the last layout's geometry, which the next
-/// frame recomputes; a zoom reposition, which a zoom step's own frame takes;
-/// and wheel travel short of a frame. None of it was ever reset, and a reset
-/// that started dropping it would be a change of behaviour.
+/// frame recomputes, and a zoom reposition, which a zoom step's own frame
+/// takes. None of it was ever reset, and a reset that started dropping it
+/// would be a change of behaviour.
 #[test]
 fn a_new_document_keeps_the_views_layout_bookkeeping() {
     let used = used_view();
     let mut view = used_view();
     view.reset();
-    assert_eq!(view.image_origin, used.image_origin);
-    assert_eq!(view.panel_rect, used.panel_rect);
+    assert_eq!(view.model.image_origin(), used.model.image_origin());
+    assert_eq!(view.model.panel(), used.model.panel());
     assert_eq!(view.zoom_reposition, used.zoom_reposition);
-    assert_eq!(view.scroll_accum, used.scroll_accum);
 }
 
 /// The channels panel is rebuilt wholesale, a grow caught in flight included.
@@ -88,15 +82,17 @@ fn a_new_document_rebuilds_the_channels_panel() {
     assert_eq!(panel.last_h, 0.0);
 }
 
-/// The 3D preferences and the panel's bookkeeping start where the app always
-/// started them; a new document has no reset for them at all.
+/// The 3D preferences start where the app always started them — the core's
+/// defaults, which are the renderer's — and the panel's bookkeeping empty; a
+/// new document has no reset for either.
 #[test]
 fn the_volume_ui_starts_with_the_default_preferences() {
+    let prefs = Viewer::new().volume.navigation;
+    assert!(!prefs.show_coord_box);
+    assert_eq!(prefs.move_speed, 1.0);
+    assert_eq!(prefs.scroll_speed, 1.0);
+    assert_eq!(prefs.moving_downscale, render::MOVING_DOWNSCALE);
     let ui = VolumeUi::default();
-    assert!(!ui.prefs.show_coord_box);
-    assert_eq!(ui.prefs.move_speed, 1.0);
-    assert_eq!(ui.prefs.scroll_speed, 1.0);
-    assert_eq!(ui.prefs.moving_downscale, render::MOVING_DOWNSCALE);
     assert!(ui.rect.is_none() && ui.pending_copy.is_none());
     assert!(!ui.pressed);
     assert!(ui.last_camera.is_none() && ui.moved_at.is_none());

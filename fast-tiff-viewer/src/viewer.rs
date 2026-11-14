@@ -10,7 +10,7 @@
 //! handed to [`Viewer::sync`] as [`FrameInputs`](crate::FrameInputs) rather
 //! than kept here.
 
-use crate::camera::CameraState;
+use crate::camera::{CameraState, VolumeNavPrefs};
 use crate::channels::refresh_pseudocolor;
 use crate::dimensions::{apply_dimension_override, shape_note};
 use crate::document::Document;
@@ -121,8 +121,8 @@ impl Playback {
     }
 }
 
-/// The 3D volume view's camera and appearance: how the user has set the view
-/// up.
+/// The 3D volume view's camera, appearance and navigation preferences: how
+/// the user has set the view up.
 ///
 /// What the renderer holds of the volume, and the builds asked for, are the
 /// viewer's residency instead (see [`Viewer::volume_built`]): they follow the
@@ -133,6 +133,10 @@ impl Playback {
 #[derive(Clone, Copy, Debug)]
 pub struct VolumeSettings {
     pub cam: CameraState,
+    /// How fast the camera moves for the user's input, how coarsely the view
+    /// renders while it does, and the guide drawn over it: the user's, kept
+    /// across files.
+    pub navigation: VolumeNavPrefs,
     /// Per-axis voxel scale (x, y, z) for the volume box. Seeded from the
     /// stack's pixel calibration + Z spacing on load (else 1:1:1).
     pub scale: [f32; 3],
@@ -164,6 +168,7 @@ impl Default for VolumeSettings {
     fn default() -> Self {
         VolumeSettings {
             cam: CameraState::default(),
+            navigation: VolumeNavPrefs::default(),
             scale: [1.0, 1.0, 1.0],
             interp: VolumeInterp::Linear,
             render: VolumeRender::Mip,
@@ -197,6 +202,15 @@ impl VolumeSettings {
             Some(r) => cam.posed(r, cam.focus(cam.pivot_distance())),
             None => cam,
         }
+    }
+
+    /// The volume box's half-extents, for a volume of `dims` voxels: the box
+    /// the shader draws, which an orbit's re-pivot
+    /// ([`CameraState::repivot`]) and the wheel
+    /// ([`CameraState::wheel_fly`]) ray-cast against. A pose turns the
+    /// camera, not the box, so it takes none.
+    pub fn box_he(&self, dims: (u32, u32, u32)) -> [f32; 3] {
+        crate::camera::box_half_extents(self.scale, dims)
     }
 
     /// How many pixels tall a render of this view, turned by `pose`, has to

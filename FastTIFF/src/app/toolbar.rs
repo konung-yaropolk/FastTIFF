@@ -157,7 +157,7 @@ impl ViewerApp {
                         // there: the number is what the wheel selected, and
                         // running it through the intermediate frames turns a
                         // readout into a blur nobody can read.
-                        let pct = format!("{:.2}", self.view.zoom_settled() * 100.0);
+                        let pct = format!("{:.2}", self.view.model.zoom_settled() * 100.0);
                         let pct = pct.trim_end_matches('0').trim_end_matches('.');
                         ui.label(RichText::new(format!("{pct}%")).monospace())
                             .on_hover_text("Zoom (Ctrl+scroll to change)");

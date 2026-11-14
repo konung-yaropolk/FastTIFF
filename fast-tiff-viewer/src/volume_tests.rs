@@ -450,7 +450,7 @@ fn a_float_volume_past_the_half_float_range_stays_finite() {
 
 #[test]
 fn the_detail_cap_follows_the_screen_with_a_floor() {
-    use crate::frame::PhysicalPx;
+    use crate::screen::PhysicalPx;
     assert_eq!(
         detail_cap(PhysicalPx::UNKNOWN),
         u32::MAX,

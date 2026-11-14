@@ -2,7 +2,7 @@
 //! it there.
 
 use super::*;
-use fast_tiff_viewer::{ImageInputs, PhysicalPx};
+use fast_tiff_viewer::view2d::{ImagePx, AUTOSCROLL_DEAD_ZONE};
 
 impl ViewerApp {
     /// Draw the central panel, queueing what the wheel over the picture asks
@@ -28,7 +28,7 @@ impl ViewerApp {
                 let available = ui.available_size();
                 let (panel_rect, response) =
                     ui.allocate_exact_size(available, egui::Sense::click_and_drag());
-                self.view.panel_rect = panel_rect;
+                self.view.model.set_panel(panel_rect.logical());
 
                 // Fit the image to the canvas on open, where the platform fits
                 // a fresh picture to its canvas rather than sizing a window
@@ -46,7 +46,7 @@ impl ViewerApp {
                 // unfitted when the user came back to 2D.
                 let opening = TARGET.opening();
                 if opening == platform::Opening::FitCanvas
-                    && self.view.pending_initial_fit
+                    && self.view.model.awaits_fit()
                     && self.core.view_mode == ViewMode::Movie
                 {
                     let dims = self
@@ -54,14 +54,11 @@ impl ViewerApp {
                         .document
                         .as_ref()
                         .and_then(|l| l.tiff.frames.first())
-                        .map(|f| egui::vec2(f.width as f32, f.height as f32));
-                    match dims.and_then(|image| opening.zoom(image, Some(available), 0.0)) {
-                        Some(z) => {
-                            self.view.zoom = z;
-                            self.view.fit_zoom = Some(z);
-                            self.view.pan = egui::Vec2::ZERO;
-                            self.view.pending_initial_fit = false;
-                        }
+                        .map(|f| ImagePx::new(f.width, f.height));
+                    let room = available.logical();
+                    match dims.and_then(|image| opening.zoom(image, Some(room), 0.0)) {
+                        // A rung of its own, for as long as the image is open.
+                        Some(z) => self.view.model.open_fitted(z),
                         // No canvas size yet — it has not been laid out. Come back
                         // next frame rather than fitting to nothing.
                         None => ui.ctx().request_repaint(),
@@ -89,11 +86,10 @@ impl ViewerApp {
         // The size of the view, which is also its shape (the projection's
         // aspect ratio).
         let ppp = ui.ctx().pixels_per_point();
-        self.sync_inputs.volume.viewport =
-            PhysicalPx::from_points(panel_rect.width(), panel_rect.height(), ppp);
+        self.sync_inputs.volume.viewport = panel_rect.size().logical().to_physical(ppp);
         // The screen, for how much detail a volume is worth keeping.
         if let Some(monitor) = ui.ctx().input(|i| i.viewport().monitor_size) {
-            self.sync_inputs.volume.screen = PhysicalPx::from_points(monitor.x, monitor.y, ppp);
+            self.sync_inputs.volume.screen = monitor.logical().to_physical(ppp);
         }
 
         // Until the first volume is built, show a black loading screen so
@@ -130,7 +126,7 @@ impl ViewerApp {
             .add(render::paint_volume_callback(&self.render, panel_rect));
         // Coordinate-box overlay, drawn on top of the ray-march with the
         // 2D painter (aligned via the same camera; see `overlay`).
-        if self.volume_ui.prefs.show_coord_box {
+        if self.core.volume.navigation.show_coord_box {
             let painter = ui.painter().with_clip_rect(panel_rect);
             self.draw_coord_box(&painter, panel_rect);
         }
@@ -161,14 +157,16 @@ impl ViewerApp {
             return;
         };
 
-        let img_px = egui::vec2(w as f32 * self.view.zoom, h as f32 * self.view.zoom);
-        // A 1px tolerance so sub-pixel rounding between the window size and
-        // the panel's available area doesn't register as a pannable overflow.
-        let overflow = egui::vec2(
-            (img_px.x - available.x - 1.0).max(0.0),
-            (img_px.y - available.y - 1.0).max(0.0),
-        );
-        let pannable = overflow.x > 0.0 || overflow.y > 0.0;
+        // The picture at this frame's zoom, against the room the panel gives
+        // it: how large it is drawn, and how far it overflows (with a point of
+        // tolerance for the sub-pixel rounding between the window's size and
+        // the panel's). Every step below goes by this one measurement.
+        let layout = self
+            .view
+            .model
+            .measure(ImagePx::new(w, h), available.logical());
+        let img_px = layout.size.egui();
+        let pannable = layout.pannable();
 
         // A canvas tool takes the *primary* drag: while one has it,
         // dragging on the picture with the left button draws rather than
@@ -190,12 +188,9 @@ impl ViewerApp {
         // Gated on the same `steady_pannable` that decides whether the map
         // is *drawn*, so it is never clickable while invisible — an
         // invisible hit target in the corner of the image would be a
-        // mystery rather than a feature. The `was_pannable` bookkeeping
-        // moves up here with it, which is where it belongs anyway: it is
-        // part of this frame's decision, not of the painting.
-        let settled = !self.view.pending_initial_fit;
-        let steady_pannable = pannable && self.view.was_pannable && settled;
-        self.view.was_pannable = pannable && settled;
+        // mystery rather than a feature. Asked here, once a frame, since the
+        // view notes the answer for the next frame's.
+        let steady_pannable = self.view.model.note_pannable(&layout);
         let map = steady_pannable
             .then(|| minimap::frame_box(panel_rect, img_px.x, img_px.y))
             .flatten();
@@ -245,19 +240,19 @@ impl ViewerApp {
         // what keeps the two gestures from disagreeing about where the
         // view ends up.
         if let Some((outer, at)) = map_action {
-            // As with the picture: a hand on it ends any glide.
-            self.view.pan_glide.stop();
             // How much of the image is on screen, which is what `pan_for`
             // centres on the clicked point: the panel on an axis that
-            // overflows, the whole image on one that fits.
-            let view = egui::vec2(img_px.x.min(available.x), img_px.y.min(available.y));
-            self.view.pan = minimap::pan_for(outer, img_px, view, at);
+            // overflows, the whole image on one that fits. As with the
+            // picture, a hand on it ends any glide.
+            let view = layout.shown().egui();
+            self.view
+                .model
+                .pan_to(minimap::pan_for(outer, img_px, view, at).logical());
         }
 
         // Autoscroll: the sticky mode a middle-click turns on, where the
         // view drifts towards wherever the pointer sits. See
-        // [`autoscroll`] for the curve and why the mode is worth having
-        // beside the drag.
+        // `View2d::autoscroll_by` for the curve.
         //
         // A *click* toggles it, never a drag, and that is what lets the
         // two gestures share the middle button without a mode switch: a
@@ -271,19 +266,14 @@ impl ViewerApp {
         // left-click or a drag that ends the mode below is spent on that,
         // and must not also add or move a point or start a region
         // (`CanvasGesture::taken`).
-        let autoscroll_was_on = self.view.autoscroll.is_some();
+        let autoscroll_was_on = self.view.model.autoscroll().is_some();
         if response.clicked_by(egui::PointerButton::Middle) {
             // Toggling off from anywhere, so a second middle-click always
             // means stop — including the one that would otherwise re-anchor
-            // the mode somewhere new and leave no way out but the keyboard.
-            self.view.autoscroll = match self.view.autoscroll {
-                Some(_) => None,
-                // Only where there is something to scroll. A mode that
-                // swallowed the click and then did nothing would be
-                // indistinguishable from a dead button.
-                None if pannable => response.interact_pointer_pos(),
-                None => None,
-            };
+            // the mode somewhere new and leave no way out but the keyboard —
+            // and on only where there is something to scroll.
+            let at = response.interact_pointer_pos().map(|p| p.logical());
+            self.view.model.toggle_autoscroll(at, &layout);
         }
         // Every other way out. A left- or right-click is how anyone leaves
         // this mode by reflex; taking hold of the picture or the map means
@@ -295,37 +285,32 @@ impl ViewerApp {
         // A drag start cannot collide with the toggle above — egui reports
         // a gesture as a click or as a drag, never both — so the order of
         // these two blocks does not decide anything.
-        if self.view.autoscroll.is_some()
+        if self.view.model.autoscroll().is_some()
             && (!pannable
                 || response.drag_started()
                 || response.clicked_by(egui::PointerButton::Primary)
                 || response.clicked_by(egui::PointerButton::Secondary)
                 || ui.input(|i| i.key_pressed(egui::Key::Escape)))
         {
-            self.view.autoscroll = None;
+            self.view.model.end_autoscroll();
         }
-        if let Some(anchor) = self.view.autoscroll {
+        if self.view.model.autoscroll().is_some() {
             // `latest_pos` rather than `hover_pos`: the pointer may be over
             // a panel or off the window entirely while the mode runs, and
             // "keep scrolling the way I left it pointing" is the behaviour
             // every platform's version has.
             if let Some(at) = ui.input(|i| i.pointer.latest_pos()) {
-                let dt = ui.input(|i| i.stable_dt);
                 // `stable_dt` rather than the raw frame time: this is
                 // multiplied by a velocity every frame, so a single long
                 // frame — a decode, a window resize — would otherwise land
                 // as a jump of hundreds of points.
-                let v = autoscroll::velocity(anchor, at);
-                // Opposite sign to the drag below, and deliberately: a drag
-                // moves the *picture* under the pointer, while this moves
-                // the *view* towards it. Pointing below the anchor scrolls
-                // down, which means showing a lower part of the image,
-                // which means a larger pan.
-                self.view.pan += v * dt;
-                // The mode animates, so it has to ask for the frames. Only
-                // while actually moving: parked in the dead zone it should
-                // cost no more than any other idle window.
-                if v != egui::Vec2::ZERO {
+                let dt = ui.input(|i| i.stable_dt);
+                // Opposite in sign to the drag below: pointing below the
+                // anchor shows a lower part of the image. The mode animates,
+                // so it has to ask for the frames — only while actually
+                // moving: parked in the dead zone it should cost no more than
+                // any other idle window.
+                if self.view.model.autoscroll_by(at.logical(), dt) {
                     ui.ctx().request_repaint();
                 }
             }
@@ -343,28 +328,16 @@ impl ViewerApp {
         if pannable && pans {
             // Taking hold of the picture ends any glide: the hand on it now
             // decides where it goes.
-            self.view.pan_glide.stop();
-            self.view.pan -= response.drag_delta();
+            self.view.model.drag(response.drag_delta().logical());
         }
-        self.view.pan.x = self.view.pan.x.clamp(0.0, overflow.x);
-        self.view.pan.y = self.view.pan.y.clamp(0.0, overflow.y);
+        self.view.model.clamp_pan(&layout);
 
         // Where the image's top-left *would* be if drawn full-size: scrolled
-        // by `pan` on an overflowing axis, centered on an axis that fits.
-        // (Cached for cursor-centered zoom; may lie outside the panel.)
-        let origin = egui::pos2(
-            if overflow.x > 0.0 {
-                panel_rect.min.x - self.view.pan.x
-            } else {
-                panel_rect.min.x + (available.x - img_px.x) * 0.5
-            },
-            if overflow.y > 0.0 {
-                panel_rect.min.y - self.view.pan.y
-            } else {
-                panel_rect.min.y + (available.y - img_px.y) * 0.5
-            },
-        );
-        self.view.image_origin = origin;
+        // by the pan on an overflowing axis, centered on an axis that fits
+        // (kept by the view for a zoom about the cursor; may lie outside the
+        // panel), and which part of it is inside the panel.
+        let placed = self.view.model.place(&layout);
+        let origin = placed.origin.egui();
 
         // The tool that has the primary button, now that the transform for
         // this frame is settled: this frame of the pointer, in the picture's
@@ -374,7 +347,7 @@ impl ViewerApp {
         // gesture would do two things.
         let xf = ImageXform {
             origin,
-            zoom: self.view.zoom,
+            zoom: self.view.model.zoom(),
             size: (w, h),
         };
         let gesture = CanvasGesture {
@@ -398,19 +371,13 @@ impl ViewerApp {
         // via UVs. Drawing into an oversized rect doesn't work: the callback
         // viewport is clamped to the framebuffer, which would just squash the
         // whole image back to fit instead of zooming.
-        let full_rect = egui::Rect::from_min_size(origin, img_px);
-        let visible = full_rect.intersect(panel_rect);
-        if visible.is_positive() {
+        let full_rect = placed.full.egui();
+        let visible = placed.visible.egui();
+        if placed.is_visible() {
             // Which part of the image that is, and how much room there is to
             // draw it, which is what decides how finely an over-large image
             // needs to be sampled.
-            self.sync_inputs.image = ImageInputs::of_visible(
-                origin.into(),
-                img_px.into(),
-                visible.min.into(),
-                visible.size().into(),
-                ui.ctx().pixels_per_point(),
-            );
+            self.sync_inputs.image = placed.inputs(ui.ctx().pixels_per_point());
             ui.painter()
                 .with_clip_rect(panel_rect)
                 .add(render::paint_callback(&self.render, visible));
@@ -446,7 +413,7 @@ impl ViewerApp {
         // the only way to know the mode is on at all is that the picture
         // is moving — which is also what it looks like when something else
         // has gone wrong.
-        if let Some(anchor) = self.view.autoscroll {
+        if let Some(anchor) = self.view.model.autoscroll().map(|a| a.egui()) {
             let painter = ui.painter().with_clip_rect(panel_rect);
             let (ink, opposite) = minimap::contrasting_ink(ui.visuals());
             // A ring the size of the dead zone, so the thing on screen is
@@ -456,11 +423,11 @@ impl ViewerApp {
             // which can be any brightness.
             for (r, w, c) in [
                 (
-                    autoscroll::DEAD_ZONE + 1.0,
+                    AUTOSCROLL_DEAD_ZONE + 1.0,
                     3.0,
                     opposite.gamma_multiply(0.6),
                 ),
-                (autoscroll::DEAD_ZONE, 1.5_f32, ink),
+                (AUTOSCROLL_DEAD_ZONE, 1.5_f32, ink),
             ] {
                 painter.circle_stroke(anchor, r, egui::Stroke::new(w, c));
             }
@@ -473,7 +440,7 @@ impl ViewerApp {
         let hover = gesture.hover;
         let over_map = map.zip(hover).is_some_and(|(outer, at)| outer.contains(at));
         response.on_hover_cursor(tools.cursor(
-            self.view.autoscroll.is_some(),
+            self.view.model.autoscroll().is_some(),
             over_map || on_map,
             |slot| self.tools.get(slot)?.cursor(hover, &xf, frame),
             pannable,
@@ -513,11 +480,8 @@ impl ViewerApp {
                     // their different render speeds. Fractions accumulate so
                     // short stacks still move.
                     let dir = if glide < 0.0 { 1.0 } else { -1.0 };
-                    self.view.scroll_accum +=
-                        (dir * fast_step * FAST_SCROLL_GLIDE_RATE * dt as f64) as f32;
-                    let steps = self.view.scroll_accum.trunc();
-                    self.view.scroll_accum -= steps;
-                    let steps = steps as i32;
+                    let by = (dir * fast_step * FAST_SCROLL_GLIDE_RATE * dt as f64) as f32;
+                    let steps = self.view.model.scrub(by);
                     if steps != 0 {
                         cmds.push(UiCommand::StepFrames(steps));
                     }
@@ -529,16 +493,13 @@ impl ViewerApp {
                     ui.input(|i| scroll::classify(&i.events, pannable));
                 pan_swipe = swipe;
                 // egui scroll is +y up; we scrub the next frame on scroll-down.
-                self.view.scroll_accum -= notches;
-                let steps = self.view.scroll_accum.trunc();
-                self.view.scroll_accum -= steps;
-                let steps = steps as i32;
+                let steps = self.view.model.scrub(-notches);
                 if steps != 0 {
                     cmds.push(UiCommand::StepFrames(steps));
                 }
             }
         } else {
-            self.view.scroll_accum = 0.0;
+            self.view.model.forget_scrub();
         }
 
         // Move the field of view by swipe, and keep moving for a moment
@@ -548,32 +509,13 @@ impl ViewerApp {
         // the picture had hit something.
         //
         // The sign matches dragging — the picture follows the fingers —
-        // because they are the same gesture done two ways, and having them
-        // disagree would be worse than either choice.
+        // because they are the same gesture done two ways, and an axis that
+        // runs into the edge of the image stops there (see
+        // `View2d::glide_pan`).
         let dt = ui.input(|i| i.stable_dt);
-        if !pannable {
-            self.view.pan_glide.stop();
-        }
-        let motion = if pan_swipe == egui::Vec2::ZERO {
-            self.view.pan_glide.coast(dt)
-        } else {
-            self.view.pan_glide.push(pan_swipe, dt)
-        };
-        if motion != egui::Vec2::ZERO {
-            let want = self.view.pan - motion;
-            self.view.pan.x = want.x.clamp(0.0, overflow.x);
-            self.view.pan.y = want.y.clamp(0.0, overflow.y);
-            // Clamped means that axis ran into the edge of the image. Stop
-            // it there: a glide left wound up against a bound would spring
-            // forward again the moment the bound moved.
-            self.view.pan_glide.stop_axes(
-                (self.view.pan.x - want.x).abs() > 0.01,
-                (self.view.pan.y - want.y).abs() > 0.01,
-            );
-        }
         // A coast is motion with no input behind it, so nothing else will
         // ask for the next frame.
-        if self.view.pan_glide.is_moving() {
+        if self.view.model.glide_pan(pan_swipe.logical(), dt, &layout) {
             ui.ctx().request_repaint();
         }
     }

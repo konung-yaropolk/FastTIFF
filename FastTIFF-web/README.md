@@ -67,7 +67,7 @@ to the nearest fixed level would either crop a sliver off the image or leave a
 margin you did not ask for.
 
 The exact factor is then inserted into that image's zoom ladder
-(`app::zoom_ladder`) for as long as the file is open, so wheeling out returns to
+(`fast_tiff_viewer::view2d::ZoomLadder`) for as long as the file is open, so wheeling out returns to
 the fitted view rather than stepping past it to 50%. It is dropped on the next
 open, since it describes one picture in one canvas.
 

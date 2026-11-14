@@ -52,7 +52,7 @@
 //! [`Platform::manage_window`] is the exception. The desktop's window sizer is
 //! app policy over the view's and the panel's own state — the opening fit, a
 //! resize a zoom step asked for, the point that step repositions around, a
-//! panel grow in flight — so it is handed [`View2d`] and [`PanelLayout`]
+//! panel grow in flight — so it is handed [`CanvasView`] and [`PanelLayout`]
 //! themselves and works on them, the panel's grow half (`grow_delta`,
 //! `waiting`) being in `native.rs`. In the browser that state is kept up and
 //! never acted on: `resize_to_zoom`, `zoom_reposition`, and the panel's
@@ -74,9 +74,10 @@ pub(super) use web::Browser as Current;
 mod naming;
 use naming::{name_from_path, suggested_name};
 
-use super::{Document, Opened, PanelLayout, View2d, ZOOM_LEVELS};
+use super::{CanvasView, Document, Opened, PanelLayout};
 use fast_tiff_viewer::plugins::{Handover, Registry, ResultTiff};
 use fast_tiff_viewer::save::SaveSource;
+use fast_tiff_viewer::view2d::{fit_zoom, opening_zoom, ImagePx, LogicalVec};
 use fast_tiff_viewer::LoadSource;
 use fasttiff_plugin_api::FileType;
 use std::path::{Path, PathBuf};
@@ -207,7 +208,7 @@ pub(super) trait Platform: Sized {
     fn manage_window(
         &mut self,
         ctx: &egui::Context,
-        view: &mut View2d,
+        view: &mut CanvasView,
         panel: &mut PanelLayout,
         document: Option<&Document>,
         toolbar_h: f32,
@@ -486,7 +487,7 @@ impl Target {
 }
 
 impl Opening {
-    /// The zoom an `image` (width, height) that has just opened is shown at.
+    /// The zoom an `image` that has just opened is shown at.
     ///
     /// `room` is the monitor's work area for [`Opening::SizeWindow`] and the
     /// canvas for [`Opening::FitCanvas`], and `chrome_h` the height of the
@@ -495,38 +496,23 @@ impl Opening {
     /// the monitor's size can be unreported until the window first gets
     /// input, and a canvas has no size before it is first laid out — so the
     /// caller waits rather than fitting to nothing.
+    ///
+    /// The arithmetic is the core view's ([`opening_zoom`], [`fit_zoom`]);
+    /// which of the two a host uses is this decision.
     pub(super) fn zoom(
         self,
-        image: egui::Vec2,
-        room: Option<egui::Vec2>,
+        image: ImagePx,
+        room: Option<LogicalVec>,
         chrome_h: f32,
     ) -> Option<f32> {
         let room = room?;
         match self {
-            Opening::SizeWindow => {
-                // Largest zoom level at most 100% that still fits the work area.
-                for &z in ZOOM_LEVELS.iter().rev().filter(|&&z| z <= 1.0) {
-                    if image.x * z <= room.x && image.y * z + chrome_h <= room.y {
-                        return Some(z);
-                    }
-                }
-                // Even the smallest level overflows: open there and pan.
-                Some(ZOOM_LEVELS[0])
-            }
-            Opening::FitCanvas => fit_to_panel(image.x, image.y, room),
+            // Largest zoom level at most 100% that still fits the work area;
+            // where even the smallest overflows, open there and pan.
+            Opening::SizeWindow => Some(opening_zoom(image, room, chrome_h)),
+            Opening::FitCanvas => fit_zoom(image, room),
         }
     }
-}
-
-/// The zoom at which an `img_w` x `img_h` image exactly fits `avail`, capped at
-/// 1:1 so a small image is not magnified into a blur. `None` for a degenerate
-/// size on either side.
-pub(super) fn fit_to_panel(img_w: f32, img_h: f32, avail: egui::Vec2) -> Option<f32> {
-    if !(img_w >= 1.0 && img_h >= 1.0 && avail.x >= 1.0 && avail.y >= 1.0) {
-        return None;
-    }
-    let z = (avail.x / img_w).min(avail.y / img_h).min(1.0);
-    z.is_finite().then_some(z).filter(|z| *z > 0.0)
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@
 
 use super::*;
 
-const AT: egui::Pos2 = egui::Pos2 { x: 400.0, y: 300.0 };
+const AT: LogicalPt = LogicalPt::new(400.0, 300.0);
 
 /// Resting. The pointer never sits exactly where it was clicked — the click
 /// itself nudges it — so a curve through the origin would make the view creep
@@ -29,10 +29,10 @@ fn inside_the_dead_zone_nothing_moves() {
         // rather than a sliver where it scrolls immeasurably slowly.
         (DEAD_ZONE, 0.0),
     ] {
-        let v = velocity(AT, AT + egui::vec2(dx, dy));
+        let v = velocity(AT, AT + LogicalVec::new(dx, dy));
         assert_eq!(
             v,
-            egui::Vec2::ZERO,
+            LogicalVec::ZERO,
             "({dx}, {dy}) is within the dead zone but gave {v:?}"
         );
     }
@@ -42,7 +42,7 @@ fn inside_the_dead_zone_nothing_moves() {
 /// gently or there is no low gear to steer with.
 #[test]
 fn just_outside_the_dead_zone_it_creeps() {
-    let v = velocity(AT, AT + egui::vec2(DEAD_ZONE + 1.0, 0.0));
+    let v = velocity(AT, AT + LogicalVec::new(DEAD_ZONE + 1.0, 0.0));
     assert!(v.x > 0.0, "should have started moving: {v:?}");
     assert!(
         v.x < GAIN * 2.0,
@@ -59,7 +59,7 @@ fn just_outside_the_dead_zone_it_creeps() {
 fn the_view_moves_exactly_towards_the_pointer() {
     for i in 0..32 {
         let a = i as f32 * std::f32::consts::TAU / 32.0;
-        let dir = egui::vec2(a.cos(), a.sin());
+        let dir = LogicalVec::new(a.cos(), a.sin());
         // Well outside the dead zone, so the cap is not in play either.
         let v = velocity(AT, AT + dir * 100.0);
         let got = v.length();
@@ -78,8 +78,8 @@ fn the_view_moves_exactly_towards_the_pointer() {
 /// the anchor — the distinction that makes the low gear exist.
 #[test]
 fn speed_is_proportional_to_the_offset_past_the_dead_zone() {
-    let one = velocity(AT, AT + egui::vec2(DEAD_ZONE + 50.0, 0.0)).x;
-    let two = velocity(AT, AT + egui::vec2(DEAD_ZONE + 100.0, 0.0)).x;
+    let one = velocity(AT, AT + LogicalVec::new(DEAD_ZONE + 50.0, 0.0)).x;
+    let two = velocity(AT, AT + LogicalVec::new(DEAD_ZONE + 100.0, 0.0)).x;
     assert!(
         (two - one * 2.0).abs() < 1e-2,
         "{one} then {two}: should have doubled"
@@ -97,7 +97,7 @@ fn speed_is_proportional_to_the_offset_past_the_dead_zone() {
 fn pushing_further_never_scrolls_slower() {
     let mut last = -1.0;
     for d in [0.0f32, 6.0, 12.0, 13.0, 50.0, 200.0, 700.0, 2000.0, 20000.0] {
-        let got = velocity(AT, AT + egui::vec2(d, 0.0)).length();
+        let got = velocity(AT, AT + LogicalVec::new(d, 0.0)).length();
         assert!(
             got >= last - 1e-3,
             "slowed down at {d} points: {got} < {last}"
@@ -112,14 +112,14 @@ fn pushing_further_never_scrolls_slower() {
 #[test]
 fn the_speed_is_capped() {
     for d in [1000.0f32, 5000.0, 100_000.0] {
-        let got = velocity(AT, AT + egui::vec2(d, d)).length();
+        let got = velocity(AT, AT + LogicalVec::new(d, d)).length();
         assert!(
             got <= MAX_SPEED + 1e-2,
             "{d} points out gave {got} points/s, over the {MAX_SPEED} cap"
         );
     }
     // And the cap is actually reached, or it is not a cap but a coincidence.
-    let far = velocity(AT, AT + egui::vec2(100_000.0, 0.0)).length();
+    let far = velocity(AT, AT + LogicalVec::new(100_000.0, 0.0)).length();
     assert!(
         (far - MAX_SPEED).abs() < 1e-2,
         "expected the cap, got {far}"
@@ -131,10 +131,10 @@ fn the_speed_is_capped() {
 #[test]
 fn every_direction_carries_its_own_sign() {
     let d = DEAD_ZONE + 100.0;
-    assert!(velocity(AT, AT + egui::vec2(d, 0.0)).x > 0.0, "right");
-    assert!(velocity(AT, AT + egui::vec2(-d, 0.0)).x < 0.0, "left");
-    assert!(velocity(AT, AT + egui::vec2(0.0, d)).y > 0.0, "down");
-    assert!(velocity(AT, AT + egui::vec2(0.0, -d)).y < 0.0, "up");
+    assert!(velocity(AT, AT + LogicalVec::new(d, 0.0)).x > 0.0, "right");
+    assert!(velocity(AT, AT + LogicalVec::new(-d, 0.0)).x < 0.0, "left");
+    assert!(velocity(AT, AT + LogicalVec::new(0.0, d)).y > 0.0, "down");
+    assert!(velocity(AT, AT + LogicalVec::new(0.0, -d)).y < 0.0, "up");
 }
 
 /// A non-finite pointer position — which a lost or synthesised event can
@@ -144,12 +144,12 @@ fn every_direction_carries_its_own_sign() {
 #[test]
 fn a_non_finite_pointer_does_not_move_the_view() {
     for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-        for p in [egui::pos2(bad, 300.0), egui::pos2(400.0, bad)] {
+        for p in [LogicalPt::new(bad, 300.0), LogicalPt::new(400.0, bad)] {
             let v = velocity(AT, p);
-            assert_eq!(v, egui::Vec2::ZERO, "pointer {p:?} gave {v:?}");
+            assert_eq!(v, LogicalVec::ZERO, "pointer {p:?} gave {v:?}");
         }
         // And a non-finite anchor, which is the same arithmetic the other way.
-        let v = velocity(egui::pos2(bad, bad), AT);
-        assert_eq!(v, egui::Vec2::ZERO, "anchor ({bad}, {bad}) gave {v:?}");
+        let v = velocity(LogicalPt::new(bad, bad), AT);
+        assert_eq!(v, LogicalVec::ZERO, "anchor ({bad}, {bad}) gave {v:?}");
     }
 }

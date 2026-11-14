@@ -409,8 +409,9 @@ fn a_non_finite_frame_extent_yields_no_map() {
 // gesture actually depends on, and the one that would break silently if either
 // function's idea of `room` drifted from the other's.
 
-/// The pan the caller ends up with: `pan_for`, then the clamp `app.rs` applies
-/// to `view.pan` on every frame however it changed.
+/// The pan the caller ends up with: `pan_for`, then the clamp the canvas
+/// applies to the view's pan on every frame however it changed
+/// (`View2d::clamp_pan`).
 fn clamped_pan(
     outer: egui::Rect,
     frame: egui::Vec2,
@@ -422,8 +423,8 @@ fn clamped_pan(
     egui::vec2(p.x.clamp(0.0, overflow.x), p.y.clamp(0.0, overflow.y))
 }
 
-/// The view box that results from panning to `pan` — the geometry `app.rs`
-/// builds, reduced to what `view_box` needs.
+/// The view box that results from panning to `pan` — the geometry
+/// `View2d::place` builds, reduced to what `view_box` needs.
 fn box_after(
     outer: egui::Rect,
     frame: egui::Vec2,

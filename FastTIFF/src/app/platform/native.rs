@@ -4,9 +4,11 @@
 //! here — they are [`Target`]'s, and this applies `Target::Desktop`'s.
 
 use super::{Delivery, Opening, Platform, Purpose, Target};
-use crate::app::{wake_ui, Document, Job, Opened, PanelLayout, View2d};
+use crate::app::screen::{Egui as _, Logical as _};
+use crate::app::{wake_ui, CanvasView, Document, Job, Opened, PanelLayout};
 use fast_tiff_viewer::plugins::{Handover, Registry, ResultTiff};
 use fast_tiff_viewer::save::SaveSource;
+use fast_tiff_viewer::view2d::ImagePx;
 use fast_tiff_viewer::LoadSource;
 use fasttiff_plugin_api::FileType;
 use std::path::{Path, PathBuf};
@@ -247,7 +249,7 @@ impl Platform for Desktop {
     fn manage_window(
         &mut self,
         ctx: &egui::Context,
-        view: &mut View2d,
+        view: &mut CanvasView,
         panel: &mut PanelLayout,
         document: Option<&Document>,
         toolbar_h: f32,
@@ -280,21 +282,19 @@ impl Platform for Desktop {
 
         let img_dims = document
             .and_then(|l| l.tiff.frames.first())
-            .map(|f| (f.width as f32, f.height as f32));
+            .map(|f| ImagePx::new(f.width, f.height));
 
-        if let Some((img_w, img_h)) = img_dims {
+        if let Some(image) = img_dims {
+            let (img_w, img_h) = (image.width as f32, image.height as f32);
             // On open: pick the largest zoom level ≤ 100% at which the image +
             // chrome still fits the monitor (a huge image opens scaled down, a
             // normal one at 100%). Deferred to here because the chrome height
             // and monitor size aren't known at open time.
-            if view.pending_initial_fit {
-                let image = egui::vec2(img_w, img_h);
-                if let Some(z) =
-                    Opening::SizeWindow.zoom(image, monitor_work_area(ctx), chrome_height)
-                {
-                    view.zoom = z;
-                    view.pan = egui::Vec2::ZERO;
-                    view.pending_initial_fit = false;
+            if view.model.awaits_fit() {
+                let room = monitor_work_area(ctx).map(|m| m.logical());
+                if let Some(z) = Opening::SizeWindow.zoom(image, room, chrome_height) {
+                    // A fixed level, and so no rung of its own.
+                    view.model.open_at_level(z);
                     view.resize_to_zoom = true;
                 } else {
                     // Monitor size not reported yet (can stay unknown until the
@@ -324,7 +324,7 @@ impl Platform for Desktop {
                 // the destination while the picture is still on its way there.
                 // Sizing to the animated value instead would resize the window
                 // on every frame of every step.
-                let settled = view.zoom_settled();
+                let settled = view.model.zoom_settled();
                 let window_scale = match monitor_work_area(ctx) {
                     Some(m) => {
                         let fit = (m.x / img_w).min((m.y - chrome_height).max(1.0) / img_h);
@@ -344,8 +344,9 @@ impl Platform for Desktop {
             // whether to move the window so the cursor's point stays on the same
             // desktop spot.
             let mut reposition: Option<egui::Pos2> = None;
-            if let Some((old_zoom, cursor)) = view.zoom_reposition.take() {
-                let new_zoom = view.zoom_settled();
+            if let Some(step) = view.zoom_reposition.take() {
+                let (old_zoom, cursor) = (step.from, step.anchor);
+                let new_zoom = view.model.zoom_settled();
                 let fits = monitor_work_area(ctx)
                     .map(|m| img_w * new_zoom <= m.x && img_h * new_zoom + chrome_height <= m.y)
                     .unwrap_or(true);
@@ -387,7 +388,8 @@ impl Platform for Desktop {
                 if follow {
                     if let Some(outer) = ctx.input(|i| i.viewport().outer_rect.map(|r| r.min)) {
                         let ratio = new_zoom / old_zoom;
-                        reposition = Some(outer + (cursor - view.panel_rect.min) * (1.0 - ratio));
+                        let from_panel = (cursor - view.model.panel().min).egui();
+                        reposition = Some(outer + from_panel * (1.0 - ratio));
                     }
                 }
             }

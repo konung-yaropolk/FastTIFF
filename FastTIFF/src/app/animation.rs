@@ -77,9 +77,7 @@ const WRITER_WAIT: f64 = 0.01;
 
 /// The user's camera, as it was when the animation started.
 ///
-/// Everything the user can change by moving the view, and nothing the host
-/// changes behind them: `box_he` is a cache the renderer refreshes every frame
-/// and is deliberately left out.
+/// Everything the user can change by moving the view: the whole camera.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct CameraMark {
     yaw: f32,

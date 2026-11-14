@@ -30,10 +30,9 @@ pub(super) struct WindowId(&'static str);
 
 /// What a pop-up may read and edit while it is drawn.
 pub(super) struct Host<'a> {
-    /// Everything that isn't GUI: the document, its display, the 3D view.
+    /// Everything that isn't GUI: the document, its display, the 3D view and
+    /// the user's preferences for it.
     pub(super) core: &'a mut Viewer,
-    /// The 3D preferences the render-settings window edits.
-    pub(super) prefs: &'a mut VolumePrefs,
 }
 
 /// One pop-up window.

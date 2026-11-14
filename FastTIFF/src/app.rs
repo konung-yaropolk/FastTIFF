@@ -3,9 +3,12 @@
 //! All non-GUI state and logic lives in `fast_tiff_viewer::Viewer` — the loaded
 //! stack, channel settings, playback clock, 3D camera, and the per-frame
 //! decode→GPU sync. `ViewerApp` holds one of those plus the things only a
-//! desktop window has: zoom, pan, window sizing, which panels are open. The
-//! rule for where a field belongs is "would a browser UI need this to show the
-//! right pixels?" — if yes, it's in `core`.
+//! window has: its sizing, which panels are open, what the pointer is doing.
+//! The rule for where a field belongs is "would a browser UI need this to show
+//! the right pixels?" — if yes, it's in `core`. The 2D view's zoom and pan are
+//! the core crate's too ([`fast_tiff_viewer::View2d`]), held here beside what
+//! the window adds to them (`CanvasView`); the 3D navigation preferences
+//! are in the core's volume settings, beside the camera they steer.
 //!
 //! The GPU is reached only through `crate::render`, the eframe adapter over
 //! `scivis-render`, so nothing here mentions glow or wgpu.
@@ -29,6 +32,7 @@
 //!     one place that knows which of the two this is
 //!   * `point_counter` — clicking points onto the picture, counted in groups
 //!   * `scale`   — how large the chrome is drawn (the web build runs bigger)
+//!   * `screen`  — egui's positions and rects as the core's 2D view's, and back
 //!   * `scrub_bar` — the bottom bar: playback, channels, contrast, status
 //!   * `toolbar` — the top bar: open, save, copy, plugins, 2D/3D
 //!   * `widgets` — the contrast range slider + value formatting
@@ -41,7 +45,10 @@ use fast_tiff_viewer::channels::{
     pseudocolor_applicable,
 };
 use fast_tiff_viewer::roi::LargeImageMode;
-use fast_tiff_viewer::{DecodeMode, Document, FrameInputs, Notice, NoticeKind, ViewMode, Viewer};
+use fast_tiff_viewer::view2d::ZoomStep;
+use fast_tiff_viewer::{
+    DecodeMode, Document, FrameInputs, Notice, NoticeKind, View2d, ViewMode, Viewer,
+};
 // The registry's entries are the C-boundary types themselves rather than
 // trait objects, so the traits whose methods the app calls are named here.
 use fasttiff_plugin_api::{Exporter as _, Importer as _, Plugin as _};
@@ -49,7 +56,6 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 mod animation;
-mod autoscroll;
 mod camera;
 mod canvas;
 mod canvas_tool;
@@ -57,7 +63,6 @@ mod clipboard;
 mod command;
 mod copy_view;
 mod dialog;
-mod kinetic;
 mod minimap;
 mod overlay;
 mod platform;
@@ -69,6 +74,7 @@ mod plugins_ui;
 mod point_counter;
 mod region_pick;
 mod scale;
+mod screen;
 mod scroll;
 mod scrub_bar;
 mod toolbar;
@@ -83,6 +89,7 @@ use command::{Applying, Commands, Step, UiCommand, Via, FRAME};
 use command::Phase;
 use platform::{Current, Destination, Placement, Platform as _, Purpose, TARGET, WEB};
 use scale::UI_SCALE;
+use screen::{Egui as _, Logical as _};
 use widgets::{contrast_controls, histogram_button, ContrastLayout};
 use windows::{WindowId, Windows};
 
@@ -108,17 +115,6 @@ pub fn install_chrome(ctx: &egui::Context) {
 fn tint_color(tint: Option<[u8; 3]>) -> Option<Color32> {
     tint.map(|[r, g, b]| Color32::from_rgb(r, g, b))
 }
-
-/// Discrete zoom levels the viewer snaps to (3.1% … 3200%). Zooming in/out
-/// steps between adjacent levels. Above 100% the levels are mostly whole-number
-/// magnifications (200%, 300%, 400%, …), where one source pixel maps to an exact
-/// NxN block of screen pixels — crisp and uniform under our nearest sampling —
-/// with 150% as the one fractional step for finer control. The stored values
-/// are rounded to the percentages shown in the UI (e.g. 0.333 reads as 33.3%).
-const ZOOM_LEVELS: [f32; 21] = [
-    0.031, 0.042, 0.063, 0.083, 0.125, 0.167, 0.25, 0.333, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-    8.0, 12.0, 16.0, 24.0, 32.0,
-];
 
 /// Fast-scroll rate is a fraction of movie total frames number to be skipped
 /// per mouse wheel notch or arrow press when Shift is held. (0.1 means 10% of the stack)
@@ -184,38 +180,6 @@ fn trim_num(v: f64) -> String {
         s
     }
 }
-
-/// How close a fit factor must be to a fixed level before it counts as that
-/// level rather than being inserted next to it.
-///
-/// Two steps a percent apart are one step as far as the eye and the wheel are
-/// concerned, and the pair would cost a wheel notch to cross for no visible
-/// change. 2% is below what anyone can see in a zoom and well above the
-/// rounding in the table.
-const FIT_SNAP: f32 = 0.02;
-
-/// Time constant of the glide a zoom step takes to its new level.
-///
-/// The approach is exponential, so a step is about 63% done after this long.
-/// With [`ZOOM_GLIDE_SNAP`] ending it, one rung of the ladder takes about
-/// 130 ms and the longest run across the whole ladder about 190 ms — long
-/// enough to read as movement rather than a jump, short enough that a second
-/// notch never feels held up. Slower starts to feel like the program is
-/// deciding whether to obey.
-const ZOOM_GLIDE_TAU: f32 = 0.035;
-
-/// How close to the target ends the glide. A ratio, not a difference, because
-/// zoom is geometric.
-///
-/// One percent, which is well under [`FIT_SNAP`]'s two — already described
-/// there as below what anyone can see in a zoom. Chasing the last percent is
-/// pure latency: an exponential approach spends as long covering it as it did
-/// covering the first three quarters.
-const ZOOM_GLIDE_SNAP: f32 = 0.01;
-
-/// Longest frame the glide will integrate. A hitch — a slow decode, a window
-/// drag — must not be turned into one enormous zoom jump on the frame after.
-const ZOOM_GLIDE_MAX_DT: f32 = 1.0 / 20.0;
 
 /// Read `path` with whichever registered importer claims it, reporting how far
 /// it has got into `progress` as a permille.
@@ -303,66 +267,6 @@ const ICON_COPY: &str = "🗐";
 const ICON_PLUGINS: &str = "☰";
 const ICON_SETTINGS: &str = "⚙";
 const ICON_SIZE: f32 = 14.0;
-
-/// A zoom step in flight: the level being glided to, and the point it turns
-/// about.
-///
-/// Only the *drawn* zoom is animated. Everything the window does — resizing to
-/// the image, keeping the cursor's point on the same desktop spot — is decided
-/// once from the target, exactly as it was when the zoom snapped, so the window
-/// still moves once per step rather than sixty times.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct ZoomGlide {
-    /// The ladder rung being approached.
-    target: f32,
-    /// Screen point held fixed while the picture scales about it.
-    anchor: egui::Pos2,
-}
-
-/// The zoom levels in effect: the fixed ladder, plus this image's exact
-/// fit-to-window factor when it has one and it is not already on the ladder.
-///
-/// Inserted in order rather than appended, so stepping through it is monotonic.
-fn zoom_ladder(fit: Option<f32>) -> Vec<f32> {
-    let mut levels = ZOOM_LEVELS.to_vec();
-    if let Some(f) = fit.filter(|f| f.is_finite() && *f > 0.0) {
-        if !levels.iter().any(|z| (z - f).abs() <= f * FIT_SNAP) {
-            levels.insert(levels.partition_point(|z| *z < f), f);
-        }
-    }
-    levels
-}
-
-/// The next zoom level in `dir` (+1 = in, −1 = out) from whichever level is
-/// nearest `current`, clamped to the ends of the ladder.
-///
-/// `fit` is the open image's fit-to-window factor, which joins the ladder for
-/// as long as that image is open — so zooming back out lands on the fitted view
-/// instead of stepping past it to the nearest fixed level.
-fn stepped_zoom(current: f32, dir: i32, fit: Option<f32>) -> f32 {
-    let levels = zoom_ladder(fit);
-    let nearest = levels
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| {
-            (**a - current)
-                .abs()
-                .partial_cmp(&(**b - current).abs())
-                .unwrap()
-        })
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-    let next = (nearest as i32 + dir).clamp(0, levels.len() as i32 - 1) as usize;
-    levels[next]
-}
-
-/// The range a continuous zoom — a pinch — may take: the ends of this image's
-/// ladder. The stepped path cannot leave the ladder, so this is what keeps a
-/// pinch from running off to a scale no wheel notch could ever return from.
-fn zoom_bounds(fit: Option<f32>) -> (f32, f32) {
-    let ladder = zoom_ladder(fit);
-    (ladder[0], ladder[ladder.len() - 1])
-}
 
 /// What a job sends back once it is done: everything that arrives from
 /// somewhere other than this frame's user input, but for files, which come in
@@ -819,58 +723,28 @@ pub enum Opened {
     Source(fast_tiff_viewer::LoadSource),
 }
 
-/// Where the image sits in the viewport: the 2D pan/zoom transform and the
-/// geometry derived from it each frame.
+/// The 2D view, and what this app adds to it: a window sized around the
+/// picture, and the navigator's hold on a drag.
 ///
-/// Pan and zoom are *not* applied by moving the viewport — a GPU backend would
-/// clamp an oversized one to the framebuffer and squash the picture. They are
-/// turned into the UV sub-rect the shader samples
-/// ([`ImageInputs`](fast_tiff_viewer::ImageInputs), handed to the core's sync);
-/// these fields are the frontend's side of that conversion.
-struct View2d {
-    /// Zoom factor: 1.0 = one window pixel per image pixel. The window is only
-    /// resized in response to an explicit event (opening a file, a zoom step) —
-    /// never every frame — so the user can freely resize or maximize it.
-    /// Between those events the image scales to fit, aspect locked.
-    zoom: f32,
-    pan: egui::Vec2,
-    /// Set when a file opens: the next frame computes a fit-to-screen zoom and
-    /// sizes the window once. Deferred because the chrome height and monitor
-    /// size aren't known at open time.
-    pending_initial_fit: bool,
-    /// The exact zoom at which the open image fits the view, once computed, and
-    /// an extra rung on this image's zoom ladder (see [`zoom_ladder`]).
-    ///
-    /// Per image, so it is cleared on open: it is a property of this picture in
-    /// this window, and carrying a previous file's factor over would leave a
-    /// rung that fits nothing. `None` on the desktop, where the window is
-    /// resized to the image and the opening zoom is a fixed level already.
-    fit_zoom: Option<f32>,
-    /// Set when something (initial fit, or a zoom step) wants the window resized
-    /// to match `zoom` this frame. Applied once, then cleared.
+/// The view itself — the zoom and pan, the opening fit, the glides, the
+/// autoscroll anchor, wheel travel, and where all that puts the picture — is
+/// the core's [`View2d`], arithmetic in logical points that the canvas feeds
+/// this frame's input and turns into the sync's
+/// [`ImageInputs`](fast_tiff_viewer::ImageInputs). What is here is the
+/// window's.
+#[derive(Default)]
+struct CanvasView {
+    /// The view: see [`View2d`].
+    model: View2d,
+    /// Set when something (the opening fit, or a zoom step) wants the window
+    /// resized to match the zoom this frame. Applied once, then cleared. The
+    /// window is only resized in response to such an event — never every
+    /// frame — so the user can freely resize or maximize it; between those
+    /// events the image scales to fit, aspect locked.
     resize_to_zoom: bool,
-    /// A pending (zoom, anchor) so a zoom step can keep the point under the
-    /// cursor put, applied once the new layout is known.
-    zoom_reposition: Option<(f32, egui::Pos2)>,
-    /// A zoom step being glided out, if one is in flight. See [`ZoomGlide`].
-    zoom_glide: Option<ZoomGlide>,
-    /// Sub-notch wheel deltas accumulated until they add up to a frame step.
-    scroll_accum: f32,
-    /// Top-left of the drawn image in screen space, from the last frame.
-    image_origin: egui::Pos2,
-    /// The central panel's rect, from the last frame.
-    panel_rect: egui::Rect,
-    /// Inertia for swipe-panning, so the view keeps moving for a moment after
-    /// the fingers leave the trackpad. See [`kinetic`].
-    pan_glide: kinetic::Glide,
-    /// Whether the image overflowed the panel on the *previous* frame.
-    ///
-    /// A zoom step changes the image's size immediately but the window that
-    /// holds it only on the frame after, so between the two the image genuinely
-    /// overflows a panel that is about to grow to fit it. Requiring the
-    /// overflow to survive a frame is what stops the navigator blinking on
-    /// during a zoom between two views that both fit.
-    was_pannable: bool,
+    /// A zoom step the window has still to follow, keeping the point under
+    /// the cursor put once the new layout is known.
+    zoom_reposition: Option<ZoomStep>,
     /// Whether the drag in flight began on the navigator, and is therefore
     /// moving the view rather than dragging the picture.
     ///
@@ -880,123 +754,22 @@ struct View2d {
     /// drag begun on the picture that happens to pass over the map must not
     /// start teleporting the view half way through.
     minimap_drag: bool,
-    /// Where an autoscroll gesture is anchored, when that mode is on.
-    ///
-    /// The anchor is the whole of the mode's state: the velocity is a function
-    /// of where the pointer is *relative to it* (see [`autoscroll`]), so there
-    /// is no accumulated speed to keep and nothing to decay. Holding the point
-    /// rather than a flag is also what lets the marker be drawn where the
-    /// gesture started, which is the only thing telling the user where neutral
-    /// is.
-    ///
-    /// Cleared on open along with the rest of the transform: an anchor is a
-    /// position in *this* window over *this* picture.
-    autoscroll: Option<egui::Pos2>,
 }
 
-impl View2d {
+impl CanvasView {
     /// Forget the picture that was open, now that another has landed.
     ///
-    /// Everything goes back to [`Default`] but the fields named here, so a
-    /// field added to the view is reset unless someone decides it should not
-    /// be. What that drops, and why it has to:
-    ///
-    /// * the zoom and pan: the new picture starts at 1:1, and on native the
-    ///   next frame computes a fit-to-screen zoom and sizes the window once (on
-    ///   the web `pending_initial_fit` is consumed by the canvas layout
-    ///   instead); the fit factor belongs to the last picture;
-    /// * `was_pannable`: a new file starts with no history of overflowing, or
-    ///   the navigator would draw on its first frame from the previous file's
-    ///   answer;
-    /// * `pan_glide`: momentum from the last picture means nothing in this one;
-    /// * `autoscroll` and `minimap_drag`: positions on screen tied to a
-    ///   transform that has just been reset. An autoscroll anchor would park
-    ///   the new picture's neutral point wherever the last click happened to
-    ///   land, and a navigator drag would carry on moving a view of an image
-    ///   that is no longer open;
-    /// * `zoom_glide`: a glide belongs to the picture that was on screen, and
-    ///   carrying one into a new file would slide the fresh image away from the
-    ///   zoom it just opened at; `resize_to_zoom` with it.
+    /// The view resets itself ([`View2d::reset`]: it keeps the last layout and
+    /// wheel travel short of a frame, and waits for the opening fit). Of the
+    /// window's part, a resize goes with the picture it was for, and so does a
+    /// navigator drag, which would carry on moving a view of an image that is
+    /// no longer open. A zoom reposition is kept: a zoom step sets it and the
+    /// same frame's window sizing takes it (natively — the browser never reads
+    /// it).
     fn reset(&mut self) {
-        *self = View2d {
-            // The opening fit, still to come.
-            pending_initial_fit: true,
-            // Kept: the last layout's geometry, which the next frame lays out
-            // afresh; a zoom reposition, which a zoom step sets and the same
-            // frame's window sizing takes (natively — the browser never reads
-            // it); and wheel travel short of one frame.
-            image_origin: self.image_origin,
-            panel_rect: self.panel_rect,
-            zoom_reposition: self.zoom_reposition,
-            scroll_accum: self.scroll_accum,
-            ..View2d::default()
-        };
-    }
-
-    /// The zoom the picture is heading for: the glide's target while one is in
-    /// flight, otherwise what is on screen.
-    ///
-    /// Everything outside the drawing itself asks this rather than [`Self::zoom`]
-    /// — the window size, the reposition, the next step off the ladder — so a
-    /// glide changes when the picture arrives, never where it is going.
-    fn zoom_settled(&self) -> f32 {
-        self.zoom_glide.map_or(self.zoom, |g| g.target)
-    }
-
-    /// Scale the picture about `anchor`, keeping whatever sits under that point
-    /// under it. The pan is expressed against the previous frame's cached
-    /// geometry, which is what the stepped path used before it animated.
-    fn zoom_about(&mut self, anchor: egui::Pos2, new_zoom: f32) {
-        let p = (anchor - self.image_origin) / self.zoom;
-        self.pan = self.panel_rect.min - (anchor - p * new_zoom);
-        self.zoom = new_zoom;
-    }
-
-    /// Advance a glide by `dt`, returning whether one is still running.
-    ///
-    /// Exponential approach, integrated in the logarithm so the picture changes
-    /// by the same *ratio* every frame: zoom is geometric, and interpolating it
-    /// linearly would crawl at the bottom of a step and race at the top.
-    fn advance_zoom_glide(&mut self, dt: f32) -> bool {
-        let Some(glide) = self.zoom_glide else {
-            return false;
-        };
-        let dt = dt.clamp(0.0, ZOOM_GLIDE_MAX_DT);
-        let from = self.zoom;
-        if !(from > 0.0 && glide.target > 0.0) {
-            self.zoom_glide = None;
-            return false;
-        }
-        let alpha = 1.0 - (-dt / ZOOM_GLIDE_TAU).exp();
-        let next = (from.ln() + (glide.target.ln() - from.ln()) * alpha).exp();
-        let arrived = !next.is_finite() || (next / glide.target - 1.0).abs() <= ZOOM_GLIDE_SNAP;
-        let new_zoom = if arrived { glide.target } else { next };
-        self.zoom_about(glide.anchor, new_zoom);
-        if arrived {
-            self.zoom_glide = None;
-        }
-        !arrived
-    }
-}
-
-impl Default for View2d {
-    fn default() -> Self {
-        View2d {
-            zoom: 1.0,
-            pan: egui::Vec2::ZERO,
-            pending_initial_fit: false,
-            fit_zoom: None,
-            resize_to_zoom: false,
-            zoom_reposition: None,
-            zoom_glide: None,
-            scroll_accum: 0.0,
-            image_origin: egui::Pos2::ZERO,
-            panel_rect: egui::Rect::ZERO,
-            was_pannable: false,
-            minimap_drag: false,
-            autoscroll: None,
-            pan_glide: kinetic::Glide::default(),
-        }
+        self.model.reset();
+        self.resize_to_zoom = false;
+        self.minimap_drag = false;
     }
 }
 
@@ -1095,8 +868,8 @@ pub struct ViewerApp {
     /// callback. Created once at startup (see `crate::render::init`).
     render: Render,
     /// Where the image sits in the viewport (pan/zoom and the geometry derived
-    /// from it).
-    view: View2d,
+    /// from it), and the window's part in it.
+    view: CanvasView,
     /// The collapsible channels panel's layout bookkeeping.
     panel: PanelLayout,
     /// The plugins, importers and exporters, unless a job currently has them.
@@ -1189,49 +962,21 @@ pub struct ViewerApp {
     /// The pop-up windows — metadata, histogram, render settings — and which
     /// are open.
     windows: Windows,
-    /// The 3D view's preferences, and what the frames between need to
-    /// remember about it.
+    /// What the frames between need to remember about the 3D view.
     volume_ui: VolumeUi,
     /// A plugin's animation of the 3D view, playing or being recorded. See
     /// [`animation`].
     animation: animation::Animations,
 }
 
-/// The user's 3D input preferences. Edited in the render-settings window, and
-/// kept across files.
-struct VolumePrefs {
-    /// Overlay: draw the volume's bounding box with x/y/z coordinate ticks.
-    show_coord_box: bool,
-    /// User-adjustable 3D navigation speeds (multipliers on the built-in base
-    /// rates). `move_speed` scales WASD / Space / Shift translation;
-    /// `scroll_speed` scales the mouse-wheel fly.
-    move_speed: f32,
-    scroll_speed: f32,
-    /// How many times smaller, per axis, the 3D view renders while the user
-    /// moves it: 1 (full), 2 or 4.
-    moving_downscale: u32,
-}
-
-impl Default for VolumePrefs {
-    fn default() -> Self {
-        VolumePrefs {
-            show_coord_box: false,
-            move_speed: 1.0,
-            scroll_speed: 1.0,
-            moving_downscale: render::MOVING_DOWNSCALE,
-        }
-    }
-}
-
-/// The 3D view's side of the frontend: the user's preferences for it, and
-/// what one frame leaves for the next about it.
+/// The 3D view's side of the frontend: what one frame leaves for the next
+/// about it. The user's preferences for it are the core's, beside the camera
+/// ([`VolumeSettings::navigation`](fast_tiff_viewer::VolumeSettings::navigation)).
 ///
-/// Nothing here is reset when a document lands: the preferences are the
-/// user's, and the rest describes the panel and the camera, which are still
-/// there.
+/// Nothing here is reset when a document lands: it describes the panel and
+/// the camera, which are still there.
 #[derive(Default)]
 struct VolumeUi {
-    prefs: VolumePrefs,
     /// The 3-D panel's rect, recorded as it is painted.
     ///
     /// Copying the 3-D view is a screenshot of the window cropped to this, and
@@ -1251,15 +996,12 @@ struct VolumeUi {
     /// (`cumulative_frame_nr`), to tell a frame that moved it.
     last_camera: Option<(animation::CameraMark, u64)>,
     /// When the user last moved the 3D view (the frontend clock, seconds).
-    /// Until [`VOLUME_SETTLE_S`] after it, the view renders at reduced size.
+    /// Until [`VolumeNavPrefs::SETTLE_S`] after it, the view renders at
+    /// reduced size.
+    ///
+    /// [`VolumeNavPrefs::SETTLE_S`]: fast_tiff_viewer::camera::VolumeNavPrefs::SETTLE_S
     moved_at: Option<f64>,
 }
-
-/// How long the 3D view stays at reduced resolution after the user last moved
-/// it, in seconds: long enough that a drag with pauses in it, or a run of wheel
-/// clicks, does not flick between sharp and coarse frames; short enough that
-/// the sharp frame arrives as soon as the hand stops.
-const VOLUME_SETTLE_S: f64 = 0.15;
 
 /// A plugin's dialog, while it is open.
 struct PluginDialog {
@@ -1291,7 +1033,7 @@ impl ViewerApp {
         let mut app = Self {
             core: Viewer::new(),
             render,
-            view: View2d::default(),
+            view: CanvasView::default(),
             panel: PanelLayout::default(),
             plugins: Some(Current::registry()),
             plugin_dialog: None,
@@ -2436,20 +2178,15 @@ impl ViewerApp {
         let pinching = touch.is_some();
         if let Some(t) = touch {
             if self.core.document.is_some() && self.core.view_mode == ViewMode::Movie {
-                let old_zoom = self.view.zoom;
-                let (lo, hi) = zoom_bounds(self.view.fit_zoom);
-                let new_zoom = (old_zoom * t.zoom_delta).clamp(lo, hi);
                 // Anchored between the fingers, so the picture stays under them
                 // — the touch equivalent of keeping the point under the cursor
-                // put — and translated by however far they slid, so a pinch can
-                // pan and zoom at once the way it does everywhere else.
-                let p = (t.center_pos - self.view.image_origin) / old_zoom;
-                self.view.pan =
-                    self.view.panel_rect.min - (t.center_pos - p * new_zoom) - t.translation_delta;
-                self.view.zoom = new_zoom;
-                // A pinch is already continuous; a glide underneath it would be
-                // two things steering the same value.
-                self.view.zoom_glide = None;
+                // put — and translated by however far they slid. It ends any
+                // glide, which would be two things steering the same value.
+                self.view.model.pinch(
+                    t.center_pos.logical(),
+                    t.zoom_delta,
+                    t.translation_delta.logical(),
+                );
                 // Deliberately no `resize_to_zoom`: a gesture runs for many
                 // frames, and resizing the window under the fingers on each of
                 // them makes the thing being touched move away from the touch.
@@ -2468,52 +2205,42 @@ impl ViewerApp {
             && self.core.document.is_some()
             && self.core.view_mode == ViewMode::Movie
         {
-            // Stepped off wherever the picture is *heading*, not where it has
-            // got to, so a second notch during a glide advances a second rung
-            // instead of re-deciding the first one.
-            let old_zoom = self.view.zoom;
-            let from = self.view.zoom_settled();
-            let new_zoom = stepped_zoom(from, zoom_step, self.view.fit_zoom);
-            if (new_zoom - from).abs() > f32::EPSILON {
-                let cursor = ui
-                    .ctx()
-                    .input(|i| i.pointer.latest_pos())
-                    .filter(|p| self.view.panel_rect.contains(*p))
-                    .unwrap_or_else(|| self.view.panel_rect.center());
-                // The picture glides to the new rung about the cursor; the
-                // window is told about the destination now, so it still resizes
-                // and repositions once per step rather than once per frame.
-                self.view.zoom_glide = Some(ZoomGlide {
-                    target: new_zoom,
-                    anchor: cursor,
-                });
+            // Stepped off wherever the picture is *heading*, so a second notch
+            // during a glide advances a second rung, and glided to about the
+            // cursor (see `View2d::step_zoom`).
+            let cursor = ui.ctx().input(|i| i.pointer.latest_pos());
+            if let Some(step) = self
+                .view
+                .model
+                .step_zoom(zoom_step, cursor.map(|p| p.logical()))
+            {
+                // The window is told about the destination now, so it still
+                // resizes and repositions once per step rather than once per
+                // frame.
                 self.view.resize_to_zoom = true;
-                self.view.zoom_reposition = Some((old_zoom, cursor));
+                self.view.zoom_reposition = Some(step);
             }
         }
 
         // Advance the glide, in this same frame as the step that started it, so
-        // the picture is already moving on the frame the wheel turned.
-        if self.view.zoom_glide.is_some() {
-            if pinching || self.core.document.is_none() || self.core.view_mode != ViewMode::Movie {
-                // A pinch drives the zoom directly and a 3D view has none;
-                // either way the glide has nothing left to say.
-                self.view.zoom_glide = None;
-            } else {
-                let dt = ui.input(|i| i.stable_dt);
-                if self.view.advance_zoom_glide(dt) {
-                    // Nothing else would ask for the next frame once the wheel
-                    // stops turning.
-                    ui.ctx().request_repaint();
-                }
-            }
+        // the picture is already moving on the frame the wheel turned. A pinch
+        // has already ended it (it drives the zoom directly); with no picture,
+        // or a 3D view, which has no zoom, it has nothing left to say.
+        if self.core.document.is_none() || self.core.view_mode != ViewMode::Movie {
+            self.view.model.stop_zoom_glide();
+        }
+        let dt = ui.input(|i| i.stable_dt);
+        if self.view.model.advance_zoom_glide(dt) {
+            // Nothing else would ask for the next frame once the wheel stops
+            // turning.
+            ui.ctx().request_repaint();
         }
 
-        // Tell the residency planner whether the view is still moving, so it
-        // does not start decoding a window for a zoom about to be left behind.
-        // Read *after* the advance, so the frame a glide lands on plans at once
-        // rather than waiting one more.
-        self.sync_inputs.moving = self.view.zoom_glide.is_some() || pinching;
+        // Tell the residency planner whether the view is still moving, a
+        // glide or a pinch, so it does not start decoding a window for a zoom
+        // about to be left behind. Noted by the advance, *after* it, so the
+        // frame a glide lands on plans at once rather than waiting one more.
+        self.sync_inputs.moving = self.view.model.is_moving();
         pinching
     }
 
@@ -2546,7 +2273,6 @@ impl ViewerApp {
     fn popups(&mut self, ctx: &egui::Context) {
         let mut host = windows::Host {
             core: &mut self.core,
-            prefs: &mut self.volume_ui.prefs,
         };
         self.windows.show(ctx, &mut host);
     }
@@ -2660,8 +2386,8 @@ impl eframe::App for ViewerApp {
 }
 
 #[cfg(test)]
-#[path = "app/zoom_tests.rs"]
-mod zoom_tests;
+#[path = "app/view2d_oracle_tests.rs"]
+mod view2d_oracle_tests;
 
 #[cfg(test)]
 #[path = "app/readout_tests.rs"]

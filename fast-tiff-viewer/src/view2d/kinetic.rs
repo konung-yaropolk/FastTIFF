@@ -1,9 +1,11 @@
 //! Inertia for the panned view: motion that keeps going briefly after the
 //! fingers leave the trackpad, and dies away.
 //!
-//! Kept apart from the input handling because it is arithmetic and nothing
-//! else — no egui events, no state beyond a velocity — which is what makes the
+//! Kept apart from the rest of the view because it is arithmetic and nothing
+//! else — no events, no state beyond a velocity — which is what makes the
 //! feel of it adjustable, and checkable, without a display.
+
+use crate::screen::LogicalVec;
 
 /// How quickly a glide dies away, as an e-folding time in seconds.
 ///
@@ -32,9 +34,9 @@ const MIN_SPEED: f32 = 24.0;
 const SMOOTHING: f32 = 0.4;
 
 /// Movement that continues after its input stops.
-#[derive(Default, Clone, Copy, Debug)]
-pub(super) struct Glide {
-    velocity: egui::Vec2,
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Glide {
+    velocity: LogicalVec,
 }
 
 impl Glide {
@@ -42,7 +44,7 @@ impl Glide {
     ///
     /// Returns the movement to apply now, which is exactly what was asked for —
     /// input is never damped, only what follows it.
-    pub(super) fn push(&mut self, delta: egui::Vec2, dt: f32) -> egui::Vec2 {
+    pub(crate) fn push(&mut self, delta: LogicalVec, dt: f32) -> LogicalVec {
         if dt > 0.0 && dt.is_finite() {
             let sample = delta / dt;
             self.velocity += (sample - self.velocity) * SMOOTHING;
@@ -51,34 +53,34 @@ impl Glide {
     }
 
     /// Advance one frame with no input, returning the movement to apply.
-    pub(super) fn coast(&mut self, dt: f32) -> egui::Vec2 {
+    pub(crate) fn coast(&mut self, dt: f32) -> LogicalVec {
         if !(dt > 0.0 && dt.is_finite() && self.is_moving()) {
-            return egui::Vec2::ZERO;
+            return LogicalVec::ZERO;
         }
         let step = self.velocity * dt;
         self.velocity *= (-dt / TAU).exp();
         if self.velocity.length() < MIN_SPEED {
-            self.velocity = egui::Vec2::ZERO;
+            self.velocity = LogicalVec::ZERO;
         }
         step
     }
 
     /// Whether a glide is still running, and so whether the frame after this
     /// one has to be drawn.
-    pub(super) fn is_moving(&self) -> bool {
+    pub(crate) fn is_moving(&self) -> bool {
         self.velocity.length() >= MIN_SPEED
     }
 
     /// Stop dead. For anything that makes the motion meaningless — a grab on
     /// the image, a new file, a jump to another view.
-    pub(super) fn stop(&mut self) {
-        self.velocity = egui::Vec2::ZERO;
+    pub(crate) fn stop(&mut self) {
+        self.velocity = LogicalVec::ZERO;
     }
 
     /// Stop on whichever axes are named, for running into the edge of the
     /// image: a glide that kept its speed while pinned against a bound would
     /// spring back the moment the bound moved.
-    pub(super) fn stop_axes(&mut self, x: bool, y: bool) {
+    pub(crate) fn stop_axes(&mut self, x: bool, y: bool) {
         if x {
             self.velocity.x = 0.0;
         }

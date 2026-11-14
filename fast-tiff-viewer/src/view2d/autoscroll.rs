@@ -18,12 +18,13 @@
 //! Because it is a feel, expressed as arithmetic, and the two reasons to keep
 //! those separate from the event loop both apply. A response curve is tuned by
 //! reading numbers, not by watching a picture; and nothing here needs a
-//! display, a mouse or an egui context to be checked, so the dead zone and the
-//! cap can be held to their promises in ordinary tests. [`kinetic`] and
-//! [`scroll`] are next door for the same reason.
+//! display, a mouse or a toolkit to be checked, so the dead zone and the cap
+//! can be held to their promises in ordinary tests. [`kinetic`] is next door
+//! for the same reason.
 //!
 //! [`kinetic`]: super::kinetic
-//! [`scroll`]: super::scroll
+
+use crate::screen::{LogicalPt, LogicalVec};
 
 /// Radius around the anchor, in points, inside which nothing scrolls.
 ///
@@ -33,14 +34,14 @@
 /// is no way to make it stop short of leaving the mode. The dead zone is what
 /// gives the gesture a neutral position to come back to.
 ///
-/// Twelve points: comfortably larger than the jitter of a hand resting on a
-/// mouse, and small enough that the scroll starts as soon as you mean it to.
+/// Comfortably larger than the jitter of a hand resting on a mouse, and small
+/// enough that the scroll starts as soon as you mean it to.
 ///
-/// Visible to the caller because the marker it draws at the anchor is a ring of
-/// exactly this radius. The thing on screen and the thing the arithmetic uses
-/// have to be the same number, or the ring becomes a decoration that lies about
-/// where the gesture is parked.
-pub(super) const DEAD_ZONE: f32 = 18.0;
+/// Public because a frontend draws a ring of exactly this radius at the
+/// anchor. The thing on screen and the thing the arithmetic uses have to be
+/// the same number, or the ring becomes a decoration that lies about where
+/// the gesture is parked.
+pub const DEAD_ZONE: f32 = 18.0;
 
 /// Points of scroll per second, per point of pointer offset past
 /// [`DEAD_ZONE`].
@@ -78,20 +79,20 @@ const MAX_SPEED: f32 = 40000.0;
 /// start off horizontal and swing round as the vertical component cleared — the
 /// view curving away from the direction the hand is pointing, which reads as
 /// the control fighting you.
-pub(super) fn velocity(anchor: egui::Pos2, pointer: egui::Pos2) -> egui::Vec2 {
+pub(crate) fn velocity(anchor: LogicalPt, pointer: LogicalPt) -> LogicalVec {
     let offset = pointer - anchor;
     let len = offset.length();
-    // `is_finite` before the comparison, for the same reason the minimap checks
-    // its extents: a NaN position compares false against everything, so
+    // `is_finite` before the comparison: a NaN position compares false
+    // against everything, so
     // `len <= DEAD_ZONE` alone would wave it through and the view would be
     // panned by a NaN — which, unlike a wrong number, cannot be recovered from
     // by moving the mouse back.
     if !len.is_finite() || len <= DEAD_ZONE {
-        return egui::Vec2::ZERO;
+        return LogicalVec::ZERO;
     }
     let speed = ((len - DEAD_ZONE) * GAIN).min(MAX_SPEED);
-    // `offset / len` rather than `normalized()`: the length is already computed
-    // and known non-zero here, which `normalized()` cannot assume.
+    // `offset / len` rather than normalising: the length is already computed
+    // and known non-zero here.
     (offset / len) * speed
 }
 

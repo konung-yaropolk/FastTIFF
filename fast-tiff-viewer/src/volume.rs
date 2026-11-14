@@ -65,7 +65,7 @@ pub type BuiltVolume = PackedVolume;
 /// The most voxels a volume keeps along any axis for `screen` (no cap when
 /// the frontend cannot tell its size): twice the screen's longest side, so a
 /// view zoomed in twofold is still sharp, and never under 2048.
-pub fn detail_cap(screen: crate::frame::PhysicalPx) -> u32 {
+pub fn detail_cap(screen: crate::screen::PhysicalPx) -> u32 {
     match screen.longest_side() {
         0 => u32::MAX,
         side => side.saturating_mul(2).max(2048),

@@ -83,6 +83,56 @@ pub fn vol_dist_clamped(dist: f32) -> f32 {
     dist.clamp(VOL_DIST_MIN, VOL_DIST_MAX)
 }
 
+/// The user's preferences for moving about the 3D view, and for the guide
+/// drawn over it: kept across files, beside the camera they steer
+/// ([`VolumeSettings::navigation`](crate::VolumeSettings::navigation)).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VolumeNavPrefs {
+    /// Multiplier on [`FLY_UNITS_PER_SEC`]: WASD / Space / Shift translation.
+    pub move_speed: f32,
+    /// Multiplier on the wheel's fly ([`CameraState::wheel_fly`]).
+    pub scroll_speed: f32,
+    /// How many times smaller, per axis, the view renders while the user
+    /// moves it: 1 (full), 2 or 4. See [`downscale_after`](Self::downscale_after).
+    pub moving_downscale: u32,
+    /// Draw the volume's bounding box with x/y/z coordinate ticks over the
+    /// render.
+    pub show_coord_box: bool,
+}
+
+impl Default for VolumeNavPrefs {
+    fn default() -> Self {
+        VolumeNavPrefs {
+            move_speed: 1.0,
+            scroll_speed: 1.0,
+            moving_downscale: scivis_render::MOVING_DOWNSCALE,
+            show_coord_box: false,
+        }
+    }
+}
+
+impl VolumeNavPrefs {
+    /// How long the 3D view stays at reduced resolution after the user last
+    /// moved it, in seconds: long enough that a drag with pauses in it, or a
+    /// run of wheel clicks, does not flick between sharp and coarse frames;
+    /// short enough that the sharp frame arrives as soon as the hand stops.
+    pub const SETTLE_S: f64 = 0.15;
+
+    /// How many times smaller to render the 3D view, `since` seconds after the
+    /// user last moved it (`None`: never) — what a frontend hands the sync as
+    /// [`VolumeInputs::downscale`](crate::VolumeInputs::downscale):
+    /// [`moving_downscale`](Self::moving_downscale) until
+    /// [`SETTLE_S`](Self::SETTLE_S) is up, and never less than full size. A
+    /// clock that ran backwards is not a movement.
+    pub fn downscale_after(&self, since: Option<f64>) -> u32 {
+        if since.is_some_and(|s| (0.0..Self::SETTLE_S).contains(&s)) {
+            self.moving_downscale.max(1)
+        } else {
+            1
+        }
+    }
+}
+
 /// The live 3D camera. Orbit modes keep the eye implicit at
 /// `target - forward*dist`; the free-fly mode stores it directly in `fly_pos`.
 /// [`CameraState::sync_for_nav`] converts between the two so switching modes
@@ -99,10 +149,6 @@ pub struct CameraState {
     pub target: [f32; 3],
     /// Free-fly eye position (world space), for [`NavMode::WasdFly`].
     pub fly_pos: [f32; 3],
-    /// The volume box half-extents from the last sync (mirrors the shader's
-    /// `box_he`), cached so the orbit re-pivot can ray-cast against the box
-    /// without the stack dimensions on hand.
-    pub box_he: [f32; 3],
     pub nav: NavMode,
     /// What an orbit drag rotates around. Persists across files (a preference).
     pub orbit_point: OrbitPoint,
@@ -116,7 +162,6 @@ impl Default for CameraState {
             dist: 3.0,
             target: [0.0, 0.0, 0.0],
             fly_pos: [0.0, 0.0, 3.0],
-            box_he: [0.5, 0.5, 0.5],
             nav: NavMode::Cad,
             orbit_point: OrbitPoint::VolumeCenter,
         };
@@ -197,10 +242,13 @@ impl CameraState {
     /// is 0, so the pivot lands on the eye itself — the camera rotates in place.
     /// If the focal ray misses the box, the pivot falls to the focal-axis point
     /// nearest the box center (still on the axis, so the eye never jumps).
-    pub fn repivot_to_focal(&mut self) {
+    ///
+    /// `box_he` is the box's half-extents, the shader's:
+    /// [`VolumeSettings::box_he`](crate::VolumeSettings::box_he).
+    pub fn repivot_to_focal(&mut self, box_he: [f32; 3]) {
         let (forward, _, _) = self.basis();
         let eye = self.eye(forward);
-        let t = focal_box_entry(eye, forward, self.box_he).unwrap_or_else(|| {
+        let t = focal_box_entry(eye, forward, box_he).unwrap_or_else(|| {
             (-(eye[0] * forward[0] + eye[1] * forward[1] + eye[2] * forward[2])).max(0.0)
         });
         self.target = [
@@ -216,9 +264,10 @@ impl CameraState {
     /// pivot (to the focal box entry); the volume-center mode orbits rigidly
     /// around the origin (see `orbit_center`) and must NOT touch the look-at
     /// here, or an off-center view would snap back to center on every orbit.
-    pub fn repivot(&mut self) {
+    /// `box_he` as for [`repivot_to_focal`](Self::repivot_to_focal).
+    pub fn repivot(&mut self, box_he: [f32; 3]) {
         if self.orbit_point == OrbitPoint::ScreenCenter {
-            self.repivot_to_focal();
+            self.repivot_to_focal(box_he);
         }
     }
 
@@ -312,8 +361,9 @@ impl CameraState {
     /// Wheel: a linear fly along the focal axis (not a zoom). In fly mode it
     /// moves the eye; in orbit modes it moves the whole camera (eye + pivot).
     /// Speed is spectator-slow inside the box and grows with the eye's distance
-    /// from the box, so far views approach fast and near ones creep.
-    pub fn wheel_fly(&mut self, wheel: f32, scroll_speed: f32) {
+    /// from the box, so far views approach fast and near ones creep. `box_he`
+    /// as for [`repivot_to_focal`](Self::repivot_to_focal).
+    pub fn wheel_fly(&mut self, wheel: f32, scroll_speed: f32, box_he: [f32; 3]) {
         let (forward, _, _) = self.basis();
         if self.nav.is_fly() {
             for (p, f) in self.fly_pos.iter_mut().zip(forward) {
@@ -321,7 +371,7 @@ impl CameraState {
             }
         } else {
             let eye = self.eye(forward);
-            let to_box = focal_box_entry(eye, forward, self.box_he)
+            let to_box = focal_box_entry(eye, forward, box_he)
                 .unwrap_or_else(|| (eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]).sqrt());
             let m = wheel * (to_box * 0.15).max(FLY_WHEEL) * scroll_speed;
             self.target = [
@@ -566,26 +616,32 @@ pub fn volume_basis(yaw: f32, pitch: f32) -> ([f32; 3], [f32; 3], [f32; 3]) {
 pub fn volume_camera(cam: &CameraState, scale: [f32; 3], dims: (u32, u32, u32)) -> VolumeCamera {
     let (forward, right, up) = volume_basis(cam.yaw, cam.pitch);
     let eye = cam.eye(forward);
-
-    let phys = [
-        dims.0 as f32 * scale[0],
-        dims.1 as f32 * scale[1],
-        dims.2 as f32 * scale[2],
-    ];
-    let m = phys[0].max(phys[1]).max(phys[2]).max(1e-6);
-    let box_he = [
-        (0.5 * phys[0] / m).max(1e-3),
-        (0.5 * phys[1] / m).max(1e-3),
-        (0.5 * phys[2] / m).max(1e-3),
-    ];
     VolumeCamera {
         eye,
         forward,
         right,
         up,
         tan_half_fov: TAN_HALF_FOV,
-        box_he,
+        box_he: box_half_extents(scale, dims),
     }
+}
+
+/// The volume box's half-extents in world space, for a volume of `dims`
+/// voxels of size `scale`: its largest scaled axis is 0.5, and none is less
+/// than 1e-3. What the shader draws ([`VolumeCamera::box_he`]) and the
+/// camera's re-pivot and wheel ray-cast against.
+pub(crate) fn box_half_extents(scale: [f32; 3], dims: (u32, u32, u32)) -> [f32; 3] {
+    let phys = [
+        dims.0 as f32 * scale[0],
+        dims.1 as f32 * scale[1],
+        dims.2 as f32 * scale[2],
+    ];
+    let m = phys[0].max(phys[1]).max(phys[2]).max(1e-6);
+    [
+        (0.5 * phys[0] / m).max(1e-3),
+        (0.5 * phys[1] / m).max(1e-3),
+        (0.5 * phys[2] / m).max(1e-3),
+    ]
 }
 
 /// One channel's contribution to the ray-march uniforms.

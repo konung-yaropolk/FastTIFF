@@ -7,7 +7,8 @@
 //!   scivis-render     GPU pipelines, textures, ray-marching
 //!         │
 //!   fast-tiff-viewer  ← you are here: document model, channel settings,
-//!         │             c/z/t interpretation, camera, decode→GPU sync
+//!         │             c/z/t interpretation, 2D view, 3D camera,
+//!         │             decode→GPU sync
 //!   frontend          egui app, or a wasm/JS web UI
 //! ```
 //!
@@ -17,11 +18,19 @@
 //! ```ignore
 //! let mut viewer = Viewer::new();
 //! viewer.open(path)?;
+//! let mut view = View2d::default();
 //! let mut inputs = FrameInputs::default();
 //!
 //! // each frame:
 //! if viewer.playback.playing { viewer.tick_playback(now_seconds); }
-//! inputs.image = ImageInputs::of_visible(...);  // from your pan/zoom
+//! // your input, through `view` (see `view2d` for a frame of it), then:
+//! view.advance_zoom_glide(dt);
+//! inputs.moving = view.is_moving();
+//! view.set_panel(panel);
+//! let layout = view.measure(image_px, room);
+//! view.clamp_pan(&layout);
+//! let placed = view.place(&layout);
+//! inputs.image = placed.inputs(pixels_per_point);
 //! let outcome = viewer.sync(&mut renderer, &inputs);
 //! // ...then draw, and repaint again if outcome.needs_repaint;
 //! // show viewer.notices() on a status line
@@ -73,8 +82,10 @@ pub mod roi;
 /// Writing the open stack back out as a TIFF. Native only: it writes to a
 /// path, and a browser has none.
 pub mod save;
+mod screen;
 pub mod snapshot;
 pub mod units;
+pub mod view2d;
 pub mod viewer;
 pub mod volume;
 pub mod window;
@@ -125,10 +136,12 @@ pub fn share_gpu_device(device: &wgpu::Device, queue: &wgpu::Queue, adapter: &wg
 pub use dimensions::{plane_index, planes_addressed};
 pub use display::{Dims, Display, Revision};
 pub use document::{ChannelSettings, Document, SampleUnits, Window};
-pub use frame::{FrameInputs, ImageInputs, PhysicalPx, Pose, VolumeInputs};
+pub use frame::{FrameInputs, ImageInputs, Pose, VolumeInputs};
 pub use histogram::Histogram;
 pub use loader::{LoadSource, LoadStage};
 pub use notice::{Notice, NoticeKind, ShapeNote, VolumeNote};
+pub use screen::PhysicalPx;
+pub use view2d::View2d;
 pub use viewer::{DecodeMode, Playback, ViewMode, Viewer, VolumeSettings, DEFAULT_FPS};
 
 // Re-exported so a frontend needs only this crate in its imports for the common

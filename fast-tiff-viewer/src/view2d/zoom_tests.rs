@@ -11,16 +11,28 @@
 //! for ever is worse than the jump it replaced, and one that depends on frame
 //! rate looks different on every machine.
 
-use super::platform::fit_to_panel;
+use super::super::{LogicalPt, LogicalRect, View2d, ZoomGlide};
 use super::*;
+
+fn ladder(fit: Option<f32>) -> Vec<f32> {
+    ZoomLadder::of(fit).rungs().to_vec()
+}
+
+fn stepped(current: f32, dir: i32, fit: Option<f32>) -> f32 {
+    ZoomLadder::of(fit).step(current, dir)
+}
+
+fn fit(w: u32, h: u32, room: (f32, f32)) -> Option<f32> {
+    fit_zoom(ImagePx::new(w, h), LogicalVec::new(room.0, room.1))
+}
 
 #[test]
 fn without_a_fit_the_ladder_is_the_fixed_one() {
-    assert_eq!(zoom_ladder(None), ZOOM_LEVELS.to_vec());
+    assert_eq!(ladder(None), ZOOM_LEVELS.to_vec());
     // A nonsense factor is ignored rather than poisoning the ladder.
     for bad in [f32::NAN, f32::INFINITY, 0.0, -0.5] {
         assert_eq!(
-            zoom_ladder(Some(bad)),
+            ladder(Some(bad)),
             ZOOM_LEVELS.to_vec(),
             "{bad} was inserted"
         );
@@ -29,7 +41,7 @@ fn without_a_fit_the_ladder_is_the_fixed_one() {
 
 #[test]
 fn a_fit_between_two_levels_becomes_a_rung_in_order() {
-    let ladder = zoom_ladder(Some(0.287));
+    let ladder = ladder(Some(0.287));
     assert_eq!(ladder.len(), ZOOM_LEVELS.len() + 1);
     assert!(
         ladder.windows(2).all(|w| w[0] < w[1]),
@@ -47,13 +59,23 @@ fn a_fit_that_is_already_a_level_adds_nothing() {
     // Exactly on one, and near enough to one to be indistinguishable.
     for f in [0.5, 0.501, 0.4995, 1.0] {
         assert_eq!(
-            zoom_ladder(Some(f)).len(),
+            ladder(Some(f)).len(),
             ZOOM_LEVELS.len(),
             "{f} duplicated a level"
         );
     }
     // Just outside the snap tolerance, so it does earn its own rung.
-    assert_eq!(zoom_ladder(Some(0.52)).len(), ZOOM_LEVELS.len() + 1);
+    assert_eq!(ladder(Some(0.52)).len(), ZOOM_LEVELS.len() + 1);
+}
+
+/// A fit past either end is the new end, and the ladder's ends are what a
+/// pinch is held within.
+#[test]
+fn a_fit_past_either_end_is_the_new_end() {
+    assert_eq!(ZoomLadder::of(None).bounds(), (0.031, 32.0));
+    assert_eq!(ZoomLadder::of(Some(0.004)).bounds(), (0.004, 32.0));
+    assert_eq!(ZoomLadder::of(Some(50.0)).bounds(), (0.031, 50.0));
+    assert_eq!(*ladder(Some(50.0)).last().unwrap(), 50.0);
 }
 
 #[test]
@@ -61,17 +83,17 @@ fn zooming_out_from_the_fit_and_back_returns_to_it() {
     // The behaviour the feature is for: the fitted view is reachable by wheel,
     // not just at load.
     let fit = 0.287;
-    let inned = stepped_zoom(fit, 1, Some(fit));
+    let inned = stepped(fit, 1, Some(fit));
     assert!(inned > fit, "zooming in did not move: {inned}");
     assert_eq!(
-        stepped_zoom(inned, -1, Some(fit)),
+        stepped(inned, -1, Some(fit)),
         fit,
         "did not come back to the fit"
     );
 
-    let outed = stepped_zoom(fit, -1, Some(fit));
+    let outed = stepped(fit, -1, Some(fit));
     assert!(outed < fit, "zooming out did not move: {outed}");
-    assert_eq!(stepped_zoom(outed, 1, Some(fit)), fit);
+    assert_eq!(stepped(outed, 1, Some(fit)), fit);
 }
 
 #[test]
@@ -79,46 +101,76 @@ fn a_fit_below_every_level_becomes_the_new_floor() {
     // A mosaic can need less than the ladder's 3.1%; the fitted view must still
     // be reachable, and zooming out must stop there rather than above it.
     let fit = 0.004;
-    let ladder = zoom_ladder(Some(fit));
+    let ladder = ladder(Some(fit));
     assert_eq!(ladder[0], fit);
     assert_eq!(
-        stepped_zoom(fit, -1, Some(fit)),
+        stepped(fit, -1, Some(fit)),
         fit,
         "zoom-out should clamp at the fit"
     );
-    assert!(stepped_zoom(fit, 1, Some(fit)) > fit);
+    assert!(stepped(fit, 1, Some(fit)) > fit);
 }
 
 #[test]
 fn stepping_is_unchanged_when_there_is_no_fit() {
-    assert_eq!(stepped_zoom(1.0, 1, None), 1.5);
-    assert_eq!(stepped_zoom(1.0, -1, None), 0.75);
-    assert_eq!(stepped_zoom(32.0, 1, None), 32.0, "clamps at the top");
-    assert_eq!(stepped_zoom(0.031, -1, None), 0.031, "clamps at the bottom");
+    assert_eq!(stepped(1.0, 1, None), 1.5);
+    assert_eq!(stepped(1.0, -1, None), 0.75);
+    assert_eq!(stepped(32.0, 1, None), 32.0, "clamps at the top");
+    assert_eq!(stepped(0.031, -1, None), 0.031, "clamps at the bottom");
+}
+
+/// A zoom that is not a number steps off the bottom rung rather than
+/// panicking: the ladder is public, and nothing else stops one reaching it.
+#[test]
+fn stepping_from_not_a_number_starts_at_the_bottom() {
+    let ladder = ZoomLadder::of(Some(0.4));
+    let rungs = ladder.rungs();
+    assert_eq!(ladder.step(f32::NAN, 1), rungs[1]);
+    assert_eq!(ladder.step(f32::NAN, -1), rungs[0]);
 }
 
 #[test]
 fn the_fit_fills_the_shorter_axis_and_never_magnifies() {
     // Letterboxed: limited by height.
-    let z = fit_to_panel(1000.0, 1000.0, egui::vec2(2000.0, 500.0)).unwrap();
+    let z = fit(1000, 1000, (2000.0, 500.0)).unwrap();
     assert!((z - 0.5).abs() < 1e-6, "{z}");
     // Pillarboxed: limited by width.
-    let z = fit_to_panel(1000.0, 1000.0, egui::vec2(400.0, 5000.0)).unwrap();
+    let z = fit(1000, 1000, (400.0, 5000.0)).unwrap();
     assert!((z - 0.4).abs() < 1e-6, "{z}");
     // A small image is left at 1:1 rather than blown up — nearest sampling
     // makes a magnified thumbnail a block of squares, not a bigger picture.
-    assert_eq!(
-        fit_to_panel(100.0, 80.0, egui::vec2(1600.0, 900.0)),
-        Some(1.0)
-    );
+    assert_eq!(fit(100, 80, (1600.0, 900.0)), Some(1.0));
 }
 
 #[test]
 fn the_fit_declines_a_canvas_that_has_no_size_yet() {
-    assert_eq!(fit_to_panel(1000.0, 1000.0, egui::vec2(0.0, 0.0)), None);
-    assert_eq!(fit_to_panel(1000.0, 1000.0, egui::vec2(800.0, 0.0)), None);
-    assert_eq!(fit_to_panel(0.0, 0.0, egui::vec2(800.0, 600.0)), None);
-    assert_eq!(fit_to_panel(f32::NAN, 10.0, egui::vec2(800.0, 600.0)), None);
+    assert_eq!(fit(1000, 1000, (0.0, 0.0)), None);
+    assert_eq!(fit(1000, 1000, (800.0, 0.0)), None);
+    assert_eq!(fit(0, 0, (800.0, 600.0)), None);
+    assert_eq!(fit(1000, 1000, (f32::NAN, 600.0)), None);
+}
+
+/// A window sized around the picture opens at a fixed ladder level, the
+/// largest at most 100% at which the picture and the chrome fit the room.
+#[test]
+fn the_opening_zoom_is_the_largest_level_that_fits() {
+    let image = ImagePx::new(1000, 800);
+    let monitor = LogicalVec::new(1800.0, 1000.0);
+    // Fits at 1:1 with room to spare: 100%, never more.
+    assert_eq!(opening_zoom(image, monitor, 60.0), 1.0);
+    // 800 + 250 of chrome is taller than the monitor; 75% is the next rung.
+    assert_eq!(opening_zoom(image, monitor, 250.0), 0.75);
+    // A mosaic: the first rung at which it fits, on the ladder.
+    let big = ImagePx::new(40_000, 30_000);
+    let z = opening_zoom(big, monitor, 60.0);
+    assert!(ZOOM_LEVELS.contains(&z), "{z} is not a ladder level");
+    assert!(40_000.0 * z <= 1800.0 && 30_000.0 * z + 60.0 <= 1000.0);
+    // Too large for even the smallest: the smallest, and pan.
+    let huge = ImagePx::new(10_000_000, 10_000_000);
+    assert_eq!(
+        opening_zoom(huge, LogicalVec::new(800.0, 600.0), 60.0),
+        ZOOM_LEVELS[0]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -129,11 +181,11 @@ fn the_fit_declines_a_canvas_that_has_no_size_yet() {
 fn gliding(from: f32, target: f32) -> View2d {
     View2d {
         zoom: from,
-        panel_rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 800.0)),
-        image_origin: egui::pos2(0.0, 0.0),
+        panel: LogicalRect::from_min_size(LogicalPt::ZERO, LogicalVec::new(1000.0, 800.0)),
+        image_origin: LogicalPt::ZERO,
         zoom_glide: Some(ZoomGlide {
             target,
-            anchor: egui::pos2(500.0, 400.0),
+            anchor: LogicalPt::new(500.0, 400.0),
         }),
         ..Default::default()
     }
@@ -160,7 +212,7 @@ fn a_glide_reaches_its_target_and_stops() {
     let mut v = gliding(1.0, 4.0);
     let seen = run(&mut v, 1.0 / 60.0);
     assert_eq!(v.zoom, 4.0, "a glide must land on the rung, not near it");
-    assert!(v.zoom_glide.is_none(), "and must not still be running");
+    assert!(!v.is_zoom_gliding(), "and must not still be running");
     assert!(
         !v.advance_zoom_glide(1.0 / 60.0),
         "nor restart when advanced again"
@@ -245,7 +297,7 @@ fn one_very_long_frame_does_not_swallow_the_whole_glide() {
         v.zoom < 8.0,
         "a two-second frame jumped straight to the target"
     );
-    assert!(v.zoom_glide.is_some(), "and ended the glide with it");
+    assert!(v.is_zoom_gliding(), "and ended the glide with it");
 }
 
 /// The anchor is the point under the cursor, and the whole reason a zoom is
@@ -253,16 +305,16 @@ fn one_very_long_frame_does_not_swallow_the_whole_glide() {
 /// frame of the glide, not merely at the end.
 #[test]
 fn the_anchored_point_stays_put_for_the_whole_glide() {
-    let anchor = egui::pos2(500.0, 400.0);
+    let anchor = LogicalPt::new(500.0, 400.0);
     let mut v = gliding(1.0, 4.0);
     let p0 = (anchor - v.image_origin) / v.zoom;
     for _ in 0..600 {
         let running = v.advance_zoom_glide(1.0 / 60.0);
-        // `image_origin` is the previous frame's cache; the drawing recomputes
-        // it as `panel_rect.min - pan` on an overflowing axis, which is what
-        // this reproduces. (Getting the sign wrong here is how this test first
+        // `image_origin` is the previous frame's placement; the drawing puts
+        // it at `panel.min - pan` on an overflowing axis, which is what this
+        // reproduces. (Getting the sign wrong here is how this test first
         // failed against correct code.)
-        v.image_origin = v.panel_rect.min - v.pan;
+        v.image_origin = v.panel.min - v.pan;
         let here = v.image_origin + p0 * v.zoom;
         assert!(
             (here - anchor).length() < 0.5,
@@ -307,12 +359,14 @@ fn the_settled_zoom_is_the_destination_while_gliding() {
 fn a_second_step_mid_glide_advances_another_rung() {
     let mut v = gliding(1.0, 2.0);
     v.advance_zoom_glide(1.0 / 60.0);
-    assert!(v.zoom_glide.is_some(), "still gliding");
-    let next = stepped_zoom(v.zoom_settled(), 1, None);
+    assert!(v.is_zoom_gliding(), "still gliding");
+    let step = v.step_zoom(1, None).expect("a rung above");
     assert!(
-        next > 2.0,
-        "a second notch should pass the rung being approached, got {next}"
+        v.zoom_settled() > 2.0,
+        "a second notch should pass the rung being approached, got {}",
+        v.zoom_settled()
     );
+    assert_eq!(step.from, v.zoom, "the step starts from what is on screen");
 }
 
 /// A glide asked to go where it already is finishes rather than spinning, and a
@@ -321,7 +375,7 @@ fn a_second_step_mid_glide_advances_another_rung() {
 fn a_degenerate_glide_ends_immediately() {
     let mut v = gliding(3.0, 3.0);
     assert!(!v.advance_zoom_glide(1.0 / 60.0), "already there");
-    assert!(v.zoom_glide.is_none());
+    assert!(!v.is_zoom_gliding());
 
     for bad in [0.0f32, -1.0] {
         let mut v = gliding(bad, 2.0);
@@ -329,13 +383,13 @@ fn a_degenerate_glide_ends_immediately() {
             !v.advance_zoom_glide(1.0 / 60.0),
             "zoom {bad} should not glide"
         );
-        assert!(v.zoom_glide.is_none());
+        assert!(!v.is_zoom_gliding());
         let mut v = gliding(1.0, bad);
         assert!(
             !v.advance_zoom_glide(1.0 / 60.0),
             "target {bad} should not glide"
         );
-        assert!(v.zoom_glide.is_none());
+        assert!(!v.is_zoom_gliding());
     }
 }
 

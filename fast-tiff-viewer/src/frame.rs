@@ -12,53 +12,10 @@
 //! Sizes on screen are [`PhysicalPx`] everywhere: the device's own pixels,
 //! which is what a GPU renders into and what decides how much detail is worth
 //! decoding. A frontend thinking in logical points converts once, with
-//! [`PhysicalPx::from_points`].
+//! [`LogicalVec::to_physical`]; the 2D view's part is worked out for it, by
+//! [`Placement::inputs`](crate::view2d::Placement::inputs).
 
-/// A size in physical pixels: the display device's own, which is what a GPU
-/// renders into.
-///
-/// Fractional, because a panel laid out in logical points on a display
-/// scaled by 1.25 or 1.5 is rarely a whole number of them; [`whole`](Self::whole)
-/// is the size a render target is made at. Zero means "not known".
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct PhysicalPx {
-    pub width: f32,
-    pub height: f32,
-}
-
-impl PhysicalPx {
-    /// A size the frontend has not told: residency falls back to the texture
-    /// budget, and a volume keeps whatever detail the GPU can hold.
-    pub const UNKNOWN: PhysicalPx = PhysicalPx::new(0.0, 0.0);
-
-    pub const fn new(width: f32, height: f32) -> Self {
-        PhysicalPx { width, height }
-    }
-
-    /// `width` x `height` logical points on a display of `pixels_per_point`.
-    pub fn from_points(width: f32, height: f32, pixels_per_point: f32) -> Self {
-        PhysicalPx::new(width * pixels_per_point, height * pixels_per_point)
-    }
-
-    /// Whether this is a size at all: finite, and at least one pixel each way.
-    pub fn is_known(self) -> bool {
-        self.width.is_finite() && self.height.is_finite() && self.width >= 1.0 && self.height >= 1.0
-    }
-
-    /// Whole pixels, at least one each way: the size a render target is made
-    /// at.
-    pub fn whole(self) -> [u32; 2] {
-        [
-            self.width.round().max(1.0) as u32,
-            self.height.round().max(1.0) as u32,
-        ]
-    }
-
-    /// The longer side in whole pixels; `0` when not known.
-    pub fn longest_side(self) -> u32 {
-        self.width.max(self.height).round().max(0.0) as u32
-    }
-}
+use crate::screen::{LogicalPt, LogicalRect, LogicalVec, PhysicalPx};
 
 /// What a frontend decides for one frame. See the [module docs](self).
 ///
@@ -77,7 +34,8 @@ pub struct FrameInputs {
     /// any window started now would be planned against a zoom that has
     /// already changed by the time it is decoded.
     ///
-    /// Set while a zoom step is gliding out or a pinch is live. Windows already
+    /// Set while a zoom step is gliding out or a pinch is live: a 2D view's
+    /// [`View2d::is_moving`](crate::View2d::is_moving). Windows already
     /// finished are still taken — a better picture is always worth having —
     /// but no new one is started until the view settles. Without this an
     /// animated zoom decodes at every sampling level it passes through on the
@@ -139,27 +97,26 @@ impl Default for ImageInputs {
 }
 
 impl ImageInputs {
-    /// The part of an image laid out at `image_min` with size `image_size`
-    /// that shows through the rect `visible_min` + `visible_size`, all four in
-    /// logical points, on a display of `pixels_per_point`.
+    /// The part of an image laid out at `image_min`, `image_size` across,
+    /// that shows through `visible`, on a display of `pixels_per_point`.
     ///
     /// `visible` is the image's rect cut to the panel, which is all a frontend
-    /// draws: the image overflowing the panel is what pan and zoom are.
-    pub fn of_visible(
-        image_min: [f32; 2],
-        image_size: [f32; 2],
-        visible_min: [f32; 2],
-        visible_size: [f32; 2],
+    /// draws: the image overflowing the panel is what pan and zoom are. The
+    /// size is the image's own rather than its rect's, which is not always the
+    /// same number once added to the corner and taken off it again.
+    pub(crate) fn of_visible(
+        image_min: LogicalPt,
+        image_size: LogicalVec,
+        visible: LogicalRect,
         pixels_per_point: f32,
     ) -> Self {
-        let inv = [1.0 / image_size[0].max(1.0), 1.0 / image_size[1].max(1.0)];
+        let inv = [1.0 / image_size.x.max(1.0), 1.0 / image_size.y.max(1.0)];
+        let offset = visible.min - image_min;
+        let size = visible.size();
         ImageInputs {
-            uv_offset: [
-                (visible_min[0] - image_min[0]) * inv[0],
-                (visible_min[1] - image_min[1]) * inv[1],
-            ],
-            uv_scale: [visible_size[0] * inv[0], visible_size[1] * inv[1]],
-            viewport: PhysicalPx::from_points(visible_size[0], visible_size[1], pixels_per_point),
+            uv_offset: [offset.x * inv[0], offset.y * inv[1]],
+            uv_scale: [size.x * inv[0], size.y * inv[1]],
+            viewport: size.to_physical(pixels_per_point),
         }
     }
 }
@@ -176,9 +133,11 @@ pub struct VolumeInputs {
     /// ray-march projection's aspect ratio ([`aspect`](Self::aspect)).
     pub viewport: PhysicalPx,
     /// How many times smaller per axis to render the view than it is shown:
-    /// 1 renders every pixel. A frontend sets
-    /// [`scivis_render::MOVING_DOWNSCALE`] while the user is moving the view,
-    /// where a sharp frame is wasted, and 1 once it is still.
+    /// 1 renders every pixel. A frontend sets the user's reduction while the
+    /// user is moving the view, where a sharp frame is wasted, and 1 once it
+    /// is still: what
+    /// [`VolumeNavPrefs::downscale_after`](crate::camera::VolumeNavPrefs::downscale_after)
+    /// says.
     pub downscale: u32,
     /// The size of the screen (unknown when the frontend cannot tell). A
     /// volume keeps at most about twice its longest side in voxels along any
