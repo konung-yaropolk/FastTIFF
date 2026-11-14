@@ -314,10 +314,11 @@ which a single `cfg` points at the desktop or the browser implementation.
   the renderer. A `threads` feature (on by default) can be turned off for a
   single-threaded host such as `wasm32-unknown-unknown`.
 - **`FastTIFF/`** — the GUI binary: eframe/egui for the window and controls.
-  It holds a `fast_tiff_viewer::Viewer` plus the things only a desktop window has
-  (zoom, pan, window sizing, which panels are open). `src/render.rs` is the sole
-  file bridging the renderer to eframe — a browser frontend writes its own
-  ~150-line equivalent and reuses everything else.
+  It holds a `fast_tiff_viewer::Viewer` and the 2D view it feeds input to (the
+  core's `fast_tiff_viewer::view2d::View2d`: zoom, pan, glides), plus the things
+  only a window has (its sizing, which panels are open, the canvas tools).
+  `src/render.rs` is the sole file bridging the renderer to eframe, for the
+  desktop and the browser both.
 - **`oir-reader/`** — the Olympus/Evident OIR reader behind the OIR importer:
   the container, split and unfinished recordings, and the acquisition record
   in FluoView's own export format. Memory-mapped where the platform allows, a
@@ -356,7 +357,7 @@ cargo add fast-tiff-lib
 [![Crates.io](https://img.shields.io/crates/v/fast-tiff-lib?color=green)](https://crates.io/crates/fast-tiff-lib)
 [![Downloads](https://img.shields.io/crates/d/fast-tiff-lib)](https://crates.io/crates/fast-tiff-lib)
 [![License](https://img.shields.io/badge/License-MPL--2.0-green)](https://github.com/konung-yaropolk/FastTIFF/blob/main/fast-tiff-lib/LICENSE)
-[![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
+[![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/docsrs/fast-tiff-lib?label=docs.rs)](https://docs.rs/fast-tiff-lib)
 
 It's a *specialized* engine for lazily scrubbing large scientific hyperstacks
@@ -746,9 +747,12 @@ of `plugin-oir`, whose `oir-reader` crate parses its XML and maps its files with
 the quick-xml and memmap2 that fast-tiff-lib already uses. (A plugin
 that reuses a dependency the library needs anyway cannot be dropped from the
 graph by turning the plugin off; `cargo tree --invert` shows who the real user
-is.) `plugin-suite2p-stabilize` is also the only
-GPL-3 code in the tree, which is why `fast-tiff-viewer` is licensed GPL-3 where
-the other library crates are MPL-2.0.
+is.) The two registration plugins also bring GPL-3 code with them: the
+registration crates that the `plugin-suite2p-stabilize` and
+`plugin-turboreg-stabilize` features compile in (`suite2p-registration`,
+`turboreg-registration`, and the `image-registration-support` they share) are
+GPL-3.0-only, which is why `fast-tiff-viewer` is licensed GPL-3 where
+`fast-tiff-lib`, `scivis-render`, `oir-reader` and the plugin SDK are MPL-2.0.
 
 Because these features live in `default`, `--no-default-features` drops the
 plugins along with whatever it was really for — notably the glow renderer, which
@@ -926,7 +930,9 @@ former without disturbing the latter.
 For multi-channel/multi-slice stacks, the formula mapping (frame, slice,
 channel) to a position in the IFD chain assumes ImageJ's default `xyczt`
 plane order (channel varies fastest, then Z, then T) - see
-`build_jobs()` in `fast-tiff-viewer/src/sync.rs`. This is what ImageJ's TIFF writer
+`plane_index()` in `fast-tiff-viewer/src/dimensions.rs`, which the 2D read-ahead
+(`build_jobs()` in `fast-tiff-viewer/src/prefetch.rs`) and the 3D volume both
+address planes through. This is what ImageJ's TIFF writer
 uses by default. If a particular file was produced with reordered planes,
 this is the one-line formula to change.
 

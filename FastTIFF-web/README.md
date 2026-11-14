@@ -90,8 +90,17 @@ that this scales the *style*, so anything a pop-up sizes in literal points has
 to be expressed relative to the text (see `PLOT_TEXT_HEIGHTS`) or it will keep
 the enlarged scale while the text around it shrinks back.
 
-The panel's control row wraps to as many lines as it needs, which is what keeps
-the enlarged chrome usable in a narrow window.
+The toolbar and the panel's control row wrap to as many lines as they need,
+which is what keeps the enlarged chrome usable in a narrow window.
+
+Ctrl with Plus, Equals or Minus steps the picture's zoom on both hosts.
+egui's own keyboard zoom, which would scale the whole interface on the same
+chords and put Ctrl+0 back at 100% rather than 125%, is off on both:
+`install_chrome` turns it off on either host, and eframe's web runner already
+has it off before the app is created. In the browser the same press also
+zooms the page, since eframe does not prevent those keys' default: one
+Ctrl+Plus steps the picture and enlarges the page around it. The page zoom
+changes the device pixel ratio, not the 125% the chrome is drawn at.
 
 ## One interface, two hosts
 

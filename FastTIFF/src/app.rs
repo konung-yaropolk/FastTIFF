@@ -109,6 +109,14 @@ pub fn install_chrome(ctx: &egui::Context) {
     ctx.set_theme(egui::ThemePreference::Dark);
     // Bigger on the web than on the desktop — see `scale`.
     ctx.set_zoom_factor(UI_SCALE);
+    // Ctrl with Plus, Equals or Minus steps the picture's zoom (`zoom_input`).
+    // egui's own keyboard zoom, on by default, takes the same chords (and
+    // Ctrl+0) to scale the whole interface, so one press zoomed both, and the
+    // chrome left the size it is drawn at, which the desktop's window sizing
+    // measures and `scale::unscaled` divides by. Off here on both hosts, as
+    // eframe's web runner already has it. In the browser the page zoom still
+    // takes those chords as well: eframe does not prevent their default.
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
 }
 
 /// Turn a core LUT tint (raw RGB, or `None` for "plain grayscale — use the

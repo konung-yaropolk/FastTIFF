@@ -8,7 +8,8 @@
 //! [`eframe::Frame`] eframe has for testing an app (`Frame::_new_kittest`,
 //! hidden from its docs; `egui_kittest` is built on it). What the app asks of
 //! its window comes back as viewport commands, and the window does with a
-//! resize what a real one does: the next frame is laid out at the new size.
+//! resize what a real one does: the next frame is laid out at the new size,
+//! or at the one the window manager allows ([`Manager`]).
 //!
 //! No GPU. The app is built without a renderer ([`ViewerApp::render`] is
 //! `None`), so a frame is decided and laid out as in a real run and only the
@@ -58,6 +59,18 @@ pub(super) const CTRL: Modifiers = Modifiers {
     ..Modifiers::NONE
 };
 
+/// What the window manager does with a size the app asks its window for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Manager {
+    /// Gives the window that size, by the next frame.
+    Obliging,
+    /// Leaves the window the size it is, as a tiling manager does.
+    Refusing,
+    /// Gives it that size up to this one on each axis, as a window that
+    /// would run off its monitor is stopped short.
+    AtMost(Vec2),
+}
+
 /// A window, its app, and what the last frame put out.
 pub(super) struct Headless {
     pub(super) app: ViewerApp,
@@ -68,6 +81,8 @@ pub(super) struct Headless {
     pixels_per_point: f32,
     /// The window manager has the window's size: maximized.
     maximized: bool,
+    /// What becomes of a size the app asks for.
+    pub(super) manager: Manager,
     /// The frontend clock (`RawInput::time`), seconds.
     time: f64,
     modifiers: Modifiers,
@@ -100,6 +115,7 @@ impl Headless {
             size: Vec2::new(800.0, 600.0),
             pixels_per_point: 1.0,
             maximized: target.is_web(),
+            manager: Manager::Obliging,
             time: 0.0,
             modifiers: Modifiers::NONE,
             events: Vec::new(),
@@ -168,7 +184,11 @@ impl Headless {
         if let Some(root) = output.viewport_output.get(&ViewportId::ROOT) {
             for command in &root.commands {
                 if let ViewportCommand::InnerSize(size) = command {
-                    self.size = *size;
+                    self.size = match self.manager {
+                        Manager::Obliging => *size,
+                        Manager::Refusing => self.size,
+                        Manager::AtMost(largest) => size.min(largest),
+                    };
                 }
                 self.sent.push(command.clone());
             }
@@ -198,12 +218,13 @@ impl Headless {
     }
 
     /// Run frames until the window stops asking for them, as an idle one
-    /// does; panics, saying what asked, if it never does.
-    pub(super) fn settle(&mut self) {
-        for _ in 0..30 {
+    /// does, and say how many that took; panics, saying what asked, if it
+    /// never does.
+    pub(super) fn settle(&mut self) -> usize {
+        for frames in 1..=30 {
             self.frame();
             if self.repaint_after() == std::time::Duration::MAX {
-                return;
+                return frames;
             }
         }
         // What asked, on the frame before this one.
@@ -402,6 +423,22 @@ impl Headless {
         out
     }
 
+    /// The upright lines the last frame drew, separators among them, as the
+    /// `x` each is at and the span of `y` it covers.
+    pub(super) fn upright_lines(&self) -> Vec<(f32, egui::Rangef)> {
+        let mut out = Vec::new();
+        for clipped in &self.output.shapes {
+            walk(&clipped.shape, &mut |shape| {
+                if let egui::Shape::LineSegment { points: [a, b], .. } = shape {
+                    if a.x == b.x {
+                        out.push((a.x, egui::Rangef::new(a.y.min(b.y), a.y.max(b.y))));
+                    }
+                }
+            });
+        }
+        out
+    }
+
     /// The titles the app gave its window, oldest first.
     pub(super) fn titles(&self) -> Vec<&str> {
         self.sent
@@ -449,6 +486,61 @@ pub(super) fn stack(w: u32, h: u32, frames: u8) -> Vec<u8> {
             .unwrap();
     }
     writer.finish().unwrap().into_inner()
+}
+
+/// A `frames`-IFD 8-bit palette (indexed) stack `w` x `h` whose ImageJ
+/// header says it has `channels` channels, as TIFF bytes: every IFD points at
+/// the same grey-ramp ColorMap, header and pixels. Built by hand, since the
+/// writer has no palette mode.
+pub(super) fn palette_stack(w: u32, h: u32, frames: u32, channels: u32) -> Vec<u8> {
+    let header = format!(
+        "ImageJ=1.54p\nimages={frames}\nchannels={channels}\nframes={}\nhyperstack=true\n\0",
+        frames / channels
+    );
+    const ENTRIES: u16 = 11;
+    let ifd_len = 2 + u32::from(ENTRIES) * 12 + 4;
+    let color_map = 8 + frames * ifd_len;
+    let description = color_map + 768 * 2;
+    let pixels = description + header.len() as u32;
+    let mut out = b"II\x2a\0\x08\0\0\0".to_vec();
+    for f in 0..frames {
+        out.extend_from_slice(&ENTRIES.to_le_bytes());
+        // Tag, type (3 SHORT, 4 LONG, 2 ASCII), count, value or offset. A
+        // SHORT sits in the low half of the value field.
+        for (tag, ty, count, value) in [
+            (256u16, 3u16, 1u32, w),
+            (257, 3, 1, h),
+            (258, 3, 1, 8),
+            (259, 3, 1, 1),
+            (262, 3, 1, 3), // palette
+            (270, 2, header.len() as u32, description),
+            (273, 4, 1, pixels),
+            (277, 3, 1, 1),
+            (278, 3, 1, h),
+            (279, 4, 1, w * h),
+            (320, 3, 768, color_map),
+        ] {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&ty.to_le_bytes());
+            out.extend_from_slice(&count.to_le_bytes());
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        let next = if f + 1 < frames {
+            8 + (f + 1) * ifd_len
+        } else {
+            0
+        };
+        out.extend_from_slice(&next.to_le_bytes());
+    }
+    // All reds, then greens, then blues, 16 bits an entry.
+    for _ in 0..3 {
+        for i in 0..256u16 {
+            out.extend_from_slice(&(i << 8).to_le_bytes());
+        }
+    }
+    out.extend_from_slice(header.as_bytes());
+    out.extend((0..w * h).map(|i| i as u8));
+    out
 }
 
 /// A file in the temporary directory, named for this process, removed again

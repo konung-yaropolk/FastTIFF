@@ -480,8 +480,11 @@ impl Document {
     /// only multi-channel grayscale stacks (composite files already carry
     /// colors; RGB is handled separately) can be optionally tinted with the
     /// channel palette ([`Viewer::set_pseudocolor`](crate::Viewer::set_pseudocolor)).
+    /// Not a palette stack's: its pixels are indices into the file's
+    /// ColorMap, which every channel wears, and a tint ramp would show the
+    /// indices instead of the picture.
     pub fn pseudocolor_applicable(&self) -> bool {
-        !self.display.layout().shown_as_rgb()
+        self.display.layout() == crate::ChannelLayout::Intensity
             && self.display.channel_count() > 1
             && self.display.mode == fast_tiff_lib::DisplayMode::Grayscale
             // The file's own per-channel LUTs win: don't override them with

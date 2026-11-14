@@ -22,14 +22,46 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 /// builder for the user's own resizing.
 const MIN_WINDOW: f32 = 256.0;
 
-/// The desktop host.
-pub(crate) struct Desktop;
+/// How many frames a resize is watched for ([`Resized`]) before it is given
+/// up on. A window manager applies one a frame or two later, or never (a size
+/// past the monitor's, a tiling manager), and each frame waited asks for the
+/// next, so this is a bound on that as well.
+const RESIZE_WAIT: u8 = 10;
+
+/// The desktop host. What it keeps is its window sizer's: the last resize it
+/// asked for, until the window is seen to take it.
+pub(crate) struct Desktop {
+    resized: Option<Resized>,
+}
+
+/// A resize the window was asked for, and the chrome it was worked out
+/// around: the toolbar and the bottom bar as they were laid out on the frame
+/// that asked.
+///
+/// The toolbar wraps at the window's width (as the open panel's control row
+/// does), so a resize that changes the width can change how many rows it
+/// takes, and the height asked for was the picture's plus the toolbar's rows
+/// at the old width. So once the window has the size, the chrome laid out at
+/// it is compared with this, and when they differ the window is sized once
+/// more, around the chrome as it now is. Only once: that second size has the
+/// same width (unless the monitor caps the height, in which case the picture
+/// overflows the window anyway), the rows follow the width, and so there is
+/// nothing left for a third to correct and nothing to loop on.
+#[derive(Clone, Copy, Debug)]
+struct Resized {
+    /// The inner size asked for, in points.
+    size: egui::Vec2,
+    /// The chrome's height it was worked out around, in points.
+    chrome_h: f32,
+    /// Frames left to see the window at `size`.
+    frames_left: u8,
+}
 
 impl Platform for Desktop {
     const WEB: bool = false;
 
     fn new() -> Self {
-        Desktop
+        Desktop { resized: None }
     }
 
     fn registry() -> Registry {
@@ -242,7 +274,9 @@ impl Platform for Desktop {
     /// Window sizing happens ONLY in response to explicit events — a freshly
     /// opened file, or a zoom change — never every frame. That's what lets the
     /// window be freely resized and maximized without shaking or being
-    /// snapped back.
+    /// snapped back. The one follow-up is the resize's own: once the window
+    /// has the size, a second one if the toolbar wrapped to other rows there
+    /// ([`Resized`]).
     fn manage_window(
         &mut self,
         ctx: &egui::Context,
@@ -277,6 +311,21 @@ impl Platform for Desktop {
             ctx.request_repaint();
         }
 
+        // The last resize asked for: once the window is seen at its size,
+        // whether the chrome laid out there is the height it was worked out
+        // around. Until then, keep the frames coming, for a while.
+        let mut chrome_moved = false;
+        if let Some(mut asked) = self.resized.take() {
+            let at = ctx.content_rect().size();
+            if (at - asked.size).abs().max_elem() < 1.0 {
+                chrome_moved = (chrome_height - asked.chrome_h).abs() > 0.5;
+            } else if asked.frames_left > 0 {
+                asked.frames_left -= 1;
+                self.resized = Some(asked);
+                ctx.request_repaint();
+            }
+        }
+
         let img_dims = document
             .and_then(|l| l.tiff().frames.first())
             .map(|f| ImagePx::new(f.width, f.height));
@@ -300,6 +349,16 @@ impl Platform for Desktop {
                     // would peg a CPU core while the app sits idle on load.
                     ctx.request_repaint_after(std::time::Duration::from_millis(100));
                 }
+            }
+
+            // The window took the size last asked for, and the chrome laid out
+            // at it is another height (the toolbar wrapped to other rows at
+            // its width): size it again, around the chrome as it is now. That
+            // second look is not watched in its turn (see `Resized`), unless
+            // something else asked for a resize this frame too, which is.
+            let second_look = chrome_moved && !view.resize_to_zoom;
+            if chrome_moved {
+                view.resize_to_zoom = true;
             }
 
             // When the window manager owns the size — maximized or full screen —
@@ -397,6 +456,13 @@ impl Platform for Desktop {
                 if let Some(size) = target_window {
                     let (w, h) = (size.x, size.y);
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                    if !second_look {
+                        self.resized = Some(Resized {
+                            size,
+                            chrome_h: chrome_height,
+                            frames_left: RESIZE_WAIT,
+                        });
+                    }
 
                     // Keep the window fully on the desktop. The target position is
                     // the cursor-zoom move (or the current position when none).

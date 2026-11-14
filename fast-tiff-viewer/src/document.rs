@@ -315,6 +315,15 @@ impl Document {
             derived: None,
         };
 
+        // Palette (indexed) images: the ColorMap is already installed as the
+        // channel LUT by the lib; say so, so the fixed identity contrast
+        // window is kept and its slider can be hidden. Ahead of the LUTs being
+        // seeded for the channels, which gives every palette channel that map
+        // (`Display::reseed_luts`).
+        let palette = stack.tiff.frames.first().is_some_and(|f| f.is_palette());
+        if palette {
+            stack.display.set_layout(ChannelLayout::Palette);
+        }
         let (c, z, f) = (
             stack.tiff.meta.channels,
             stack.tiff.meta.slices,
@@ -336,13 +345,6 @@ impl Document {
         // photometric=2, and these planes are derived, not stored.
         if stack.tiff.frames.first().is_some_and(|f| f.is_cmyk()) {
             setup_cmyk(&mut stack);
-        }
-        // Palette (indexed) images: the ColorMap is already installed as the
-        // channel LUT by the lib; say so, so the fixed identity contrast
-        // window is kept and its slider can be hidden.
-        let palette = stack.tiff.frames.first().is_some_and(|f| f.is_palette());
-        if palette {
-            stack.display.set_layout(ChannelLayout::Palette);
         }
         // Remember the file's own LUT (a single-channel image carrying a
         // ColorMap / ImageJ LUT) so the LUT selector can offer a "Built-in"

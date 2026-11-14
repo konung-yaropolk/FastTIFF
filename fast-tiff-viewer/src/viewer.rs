@@ -571,8 +571,21 @@ impl Viewer {
     /// The counts are a reassignment of the axes in effect, so their product
     /// is theirs: a triple that would address more or fewer planes (or none)
     /// is ignored, as no reading of the file it describes.
+    ///
+    /// Ignored too on a stack whose channels are the sample planes of each
+    /// IFD ([`ChannelLayout::shown_as_rgb`](crate::ChannelLayout::shown_as_rgb):
+    /// RGB and CMYK). The file's format fixes those channels, and the axis
+    /// counts, which say one channel there, would rebuild the display around
+    /// that one: the red plane, alone. A palette stack's channels are IFDs of
+    /// their own, as an intensity stack's are, and are rebuilt as an open
+    /// with those counts builds them (each window pinned to the identity, and
+    /// each channel wearing the file's ColorMap, with no pseudocolor over it),
+    /// so it is reassigned like one.
     pub fn set_dimension_order(&mut self, channels: usize, slices: usize, frames: usize) {
         if let Some(doc) = &mut self.document {
+            if doc.display.layout().shown_as_rgb() {
+                return;
+            }
             let now = doc.display.dims();
             let planes = |c: usize, z: usize, t: usize| c.checked_mul(z)?.checked_mul(t);
             if planes(channels, slices, frames) != planes(now.channels, now.slices, now.frames) {

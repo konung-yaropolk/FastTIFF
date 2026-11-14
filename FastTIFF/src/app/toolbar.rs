@@ -13,7 +13,17 @@ impl ViewerApp {
         let current_view_mode = self.core.view_mode;
         let can_show_volume = self.core.can_show_volume();
         egui::Panel::top("toolbar").show_inside(ui, |ui| {
-            ui.horizontal(|ui| {
+            // Wrapped, as the bottom bar's controls are (`scrub_bar`): a
+            // window as narrow as a small picture (a 320-pixel image opens a
+            // 320-point window), or a phone's page, has less room than the
+            // row needs, and its tail (the frame counter, the time) ran on
+            // past the right edge, out of sight. Each item moves down whole,
+            // a label included, rather than breaking mid-text. On the desktop
+            // the window is sized around the rows the toolbar wraps to at
+            // the window's width (see `manage_window`), so the picture keeps
+            // its size.
+            ui.horizontal_wrapped(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 if ui
                     .button(RichText::new(ICON_OPEN).size(ICON_SIZE))
                     .on_hover_text("Open a file…")
@@ -125,12 +135,14 @@ impl ViewerApp {
                 if self.core.document().is_none() {
                     // Nothing open yet: show the version + active render backend
                     // in the space the file info will later occupy.
-                    ui.separator();
-                    ui.label(RichText::new(format!(
-                        "FastTIFF v{}, Renderer: {}",
-                        env!("CARGO_PKG_VERSION"),
-                        render::BACKEND
-                    )));
+                    separated_label(
+                        ui,
+                        RichText::new(format!(
+                            "FastTIFF v{}, Renderer: {}",
+                            env!("CARGO_PKG_VERSION"),
+                            render::BACKEND
+                        )),
+                    );
                 }
                 if let Some(loaded) = self.core.document() {
                     let meta = &loaded.tiff().meta;
@@ -149,7 +161,6 @@ impl ViewerApp {
 
                     // Zoom is a 2D-only concept — hidden entirely in 3D.
                     if !in_3d {
-                        ui.separator();
                         // Up to 2 decimals, trailing zeros trimmed: 3.1%, 33.3%,
                         // 100%, 3200% — so the fractional small zooms read correctly.
                         //
@@ -159,10 +170,9 @@ impl ViewerApp {
                         // readout into a blur nobody can read.
                         let pct = format!("{:.2}", self.view.model.zoom_settled() * 100.0);
                         let pct = pct.trim_end_matches('0').trim_end_matches('.');
-                        ui.label(RichText::new(format!("{pct}%")).monospace())
+                        separated_label(ui, RichText::new(format!("{pct}%")).monospace())
                             .on_hover_text("Zoom (Ctrl+scroll to change)");
                     }
-                    ui.separator();
                     let channels_desc = match loaded.display().layout() {
                         ChannelLayout::Cmyk => {
                             // Say what was read *and* what is shown: the file holds
@@ -193,7 +203,7 @@ impl ViewerApp {
                         .frames
                         .first()
                         .map_or((0, 0), |f| (f.width, f.height));
-                    ui.label(format!("{px_w}×{px_h} px, {bits}-bit, {channels_desc}"));
+                    separated_label(ui, format!("{px_w}×{px_h} px, {bits}-bit, {channels_desc}"));
                     // The same frame in real units, when the file says how big a
                     // pixel is. Next to the pixel count rather than replacing it:
                     // the two answer different questions — how much data there is
@@ -206,8 +216,7 @@ impl ViewerApp {
                         px_w,
                         px_h,
                     ) {
-                        ui.separator();
-                        ui.label(physical).on_hover_text(
+                        separated_label(ui, physical).on_hover_text(
                             "Physical size, from the pixel calibration in the file's metadata \
                              (OME PhysicalSize, or the TIFF resolution tags).",
                         );
@@ -220,8 +229,8 @@ impl ViewerApp {
                     // the kind of wrong a viewer must never be.
                     let gpu_stride = self.core.gpu_stride();
                     if gpu_stride > 1 {
-                        ui.separator();
-                        ui.label(
+                        separated_label(
+                            ui,
                             RichText::new(format!("1/{gpu_stride} scale"))
                                 .color(Color32::from_rgb(230, 170, 60)),
                         )
@@ -229,9 +238,9 @@ impl ViewerApp {
                     }
 
                     if !hide_frame_info {
-                        ui.separator();
                         let frame_digits = dims.frames.to_string().len();
-                        ui.label(
+                        separated_label(
+                            ui,
                             RichText::new(format!(
                                 "Frame {:>frame_digits$} / {}",
                                 loaded.frame() + 1,
@@ -240,11 +249,11 @@ impl ViewerApp {
                             .monospace(),
                         );
                         if let Some(interval) = meta.frame_interval_s {
-                            ui.separator();
                             let max_time = dims.frames.saturating_sub(1) as f64 * interval;
                             let time_width = format!("{max_time:.3}").len();
                             let current_time = loaded.frame() as f64 * interval;
-                            ui.label(
+                            separated_label(
+                                ui,
                                 RichText::new(format!("t = {current_time:>time_width$.3}s"))
                                     .monospace(),
                             );
@@ -254,6 +263,39 @@ impl ViewerApp {
             });
         })
     }
+}
+
+/// How wide a toolbar separator is, in points: egui's own default, given
+/// explicitly so that [`separated_label`] measures what it draws.
+const SEPARATOR_SPACING: f32 = 6.0;
+
+/// `text` as a label in the wrapping toolbar row, after a separator that is
+/// left out where the row breaks before the label, so that no row ends on a
+/// separator or starts with one. The label is laid out first, for its width;
+/// where it and the separator do not both fit, the row is ended there and
+/// the label starts the next.
+///
+/// Only the labels, which run from the zoom readout on: the few controls
+/// ahead of them fit on the first row of any window the desktop allows
+/// (`MIN_WINDOW`, 256 points), so their separators do not meet a break
+/// there.
+fn separated_label(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
+    let galley = text.into().into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::FontSelection::Default,
+    );
+    // The separator, the gap after it, and half a point for the layout's
+    // rounding: a break where the pair would just have fitted costs nothing,
+    // and a separator left at a row's end is what this is for.
+    let separator = SEPARATOR_SPACING + ui.spacing().item_spacing.x + 0.5;
+    if ui.available_size_before_wrap().x >= separator + galley.size().x {
+        ui.add(egui::Separator::default().spacing(SEPARATOR_SPACING));
+    } else {
+        ui.end_row();
+    }
+    ui.label(galley)
 }
 
 /// What the "1/N scale" badge says on hover, for a frame shown at one pixel

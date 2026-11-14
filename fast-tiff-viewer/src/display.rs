@@ -535,8 +535,14 @@ impl Display {
     /// regenerated, what the single-channel selector had chosen is no longer
     /// what is shown, so it goes to the option that is
     /// ([`reselect_gray_lut`](Self::reselect_gray_lut)).
+    ///
+    /// A [`Palette`](ChannelLayout::Palette) stack's channels all wear the
+    /// file's ColorMap, which the metadata gives as the first channel's LUT:
+    /// every channel's pixels are indices into that one map, and through any
+    /// other LUT they are numbers, not the picture.
     pub(crate) fn reseed_luts(&mut self, meta: &StackMeta, channels: usize) {
         let keep = channels == self.luts.len();
+        let palette = self.layout == ChannelLayout::Palette;
         self.lut_revision = next_revision();
         self.luts = (0..channels)
             .map(|c| {
@@ -544,7 +550,7 @@ impl Display {
                     self.luts[c]
                 } else {
                     meta.channel_display
-                        .get(c)
+                        .get(if palette { 0 } else { c })
                         .map(|d| d.lut)
                         .unwrap_or_else(|| fast_tiff_lib::default_lut_for(self.mode, c))
                 }

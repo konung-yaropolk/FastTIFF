@@ -2,7 +2,7 @@
 //! does with what arrives, in the order `command::FRAME` takes its steps —
 //! which no test of a helper the frame calls can see.
 
-use super::headless::{stack, Headless, TempFile, CTRL, DT};
+use super::headless::{palette_stack, stack, Headless, Manager, TempFile, CTRL, DT};
 use super::platform::Target;
 use super::screen::Egui as _;
 use super::windows::WindowId;
@@ -407,6 +407,220 @@ fn a_wheel_notch_is_applied_after_the_canvas_and_before_the_frame_ends() {
     assert!(h.shows("Frame 2 / 3"), "{:?}", h.texts());
 }
 
+// ------------------------------------------------------------ the zoom keys
+
+/// Ctrl with Plus, Equals or Minus steps the picture's zoom a rung, and the
+/// interface stays at the scale its host draws it at; Ctrl+0 leaves that
+/// scale alone too. egui's own keyboard zoom takes the same chords to scale
+/// the whole interface, and a press used to do both.
+#[test]
+fn the_zoom_keys_zoom_the_picture_and_not_the_interface() {
+    for target in [Target::Desktop, Target::Browser] {
+        let mut h = Headless::new(target)
+            .sized(vec2(800.0, 600.0), 1.0)
+            .maximized(true);
+        // The scale the target's host draws its chrome at, as its
+        // `install_chrome` sets it: this build's is the desktop's.
+        h.ctx.set_zoom_factor(target.ui_scale());
+        h.open_bytes(stack(320, 200, 2), "zoomed.tif");
+        h.settle();
+        let scale = h.ctx.zoom_factor();
+        assert_eq!(scale, target.ui_scale(), "{target:?}");
+        let zoom = |h: &Headless| h.app.view.model.zoom_settled();
+        let opened = zoom(&h);
+
+        h.key(Key::Plus, CTRL);
+        let up = zoom(&h);
+        assert!(up > opened, "{target:?}: {opened} -> {up}");
+        assert_eq!(h.ctx.zoom_factor(), scale, "{target:?}: Ctrl+Plus");
+        h.key(Key::Minus, CTRL);
+        assert_eq!(zoom(&h), opened, "{target:?}: a rung down again");
+        assert_eq!(h.ctx.zoom_factor(), scale, "{target:?}: Ctrl+Minus");
+        h.key(Key::Equals, CTRL);
+        assert_eq!(zoom(&h), up, "{target:?}: Ctrl+= is Ctrl+Plus");
+        assert_eq!(h.ctx.zoom_factor(), scale, "{target:?}: Ctrl+=");
+
+        h.key(Key::Num0, CTRL);
+        assert_eq!(h.ctx.zoom_factor(), scale, "{target:?}: Ctrl+0");
+        assert_eq!(zoom(&h), up, "{target:?}: and no zoom of the picture's");
+    }
+}
+
+// ----------------------------------------------------------- the toolbar
+
+/// A window as narrow as a small picture still shows the whole toolbar: the
+/// row wraps, as the bottom bar's does, where it ran on past the right edge
+/// with the frame counter in it.
+///
+/// The desktop's window opens wide, with the toolbar on one row, and is sized
+/// down to the picture, where it takes two: the window is sized again around
+/// the toolbar as it wraps at its new width, so the picture keeps its size. A
+/// browser's canvas is as narrow as its page.
+#[test]
+fn a_narrow_window_wraps_the_toolbar_and_keeps_the_picture_its_size() {
+    for (target, width) in [(Target::Desktop, 800.0), (Target::Browser, 320.0)] {
+        let mut h = Headless::new(target)
+            .sized(vec2(width, 600.0), 1.0)
+            .maximized(target.is_web());
+        h.open_bytes(stack(320, 200, 3), "narrow.tif");
+        if target == Target::Desktop {
+            // The frame it landed on, laid out at the window's old width.
+            let open = h.text_rect(super::ICON_OPEN);
+            let counter = h.text_rect("Frame 1 / 3");
+            assert!(counter.min.y < open.max.y, "one row: {counter:?}, {open:?}");
+        }
+        h.settle();
+        assert_eq!(h.size().x, 320.0, "{target:?}");
+
+        let width = h.size().x;
+        let open = h.text_rect(super::ICON_OPEN);
+        let counter = h.text_rect("Frame 1 / 3");
+        assert!(
+            counter.max.x <= width,
+            "{target:?}: {counter:?} in a window {width} wide"
+        );
+        assert!(
+            counter.min.y > open.max.y,
+            "{target:?}: on a row below the first, {counter:?} under {open:?}"
+        );
+        assert!(
+            h.texts().iter().all(|(_, rect)| rect.max.x <= width + 0.5),
+            "{target:?}: {:?}",
+            h.texts()
+        );
+        if target == Target::Desktop {
+            assert_eq!(
+                h.app.sync_inputs.image.viewport,
+                PhysicalPx::new(320.0, 200.0),
+                "the picture keeps its size"
+            );
+            // Around the toolbar's one row, and once more around its two.
+            let [first, second] = h.resizes()[..] else {
+                panic!("{:?}", h.resizes());
+            };
+            assert_eq!((first.x, second.x), (320.0, 320.0));
+            assert!(second.y > first.y, "{first:?} then {second:?}");
+
+            // Zoomed in to 200%, the window is wide enough for one row again,
+            // and is sized around it; back at 100%, around two.
+            for (key, z, rows) in [(Key::Plus, 2.0, 1), (Key::Minus, 1.0, 2)] {
+                h.key(key, CTRL);
+                h.settle();
+                h.key(key, CTRL);
+                h.settle();
+                assert_eq!(h.app.view.model.zoom(), z);
+                let open = h.text_rect(super::ICON_OPEN);
+                let counter = h.text_rect("Frame 1 / 3");
+                assert_eq!(1 + usize::from(counter.min.y > open.max.y), rows, "at {z}");
+                assert_eq!(
+                    h.app.sync_inputs.image.viewport,
+                    PhysicalPx::new(320.0 * z, 200.0 * z),
+                    "at {z}"
+                );
+            }
+        }
+    }
+}
+
+/// However the toolbar wraps, each of its separators has something on its
+/// row to either side: where the row breaks before an item, the separator
+/// ahead of it is left out rather than left at the end of one row or the
+/// start of the next.
+#[test]
+fn no_toolbar_row_ends_or_starts_on_a_separator() {
+    for (target, (w, h_px), width) in [
+        // Sized to the picture: 320 points wide, two rows.
+        (Target::Desktop, (320, 200), 800.0),
+        // Held at the smallest window, 256 points wide, three rows.
+        (Target::Desktop, (100, 80), 800.0),
+        (Target::Browser, (320, 200), 320.0),
+        (Target::Browser, (100, 80), 256.0),
+    ] {
+        let mut h = Headless::new(target)
+            .sized(vec2(width, 600.0), 1.0)
+            .maximized(target.is_web());
+        h.open_bytes(stack(w, h_px, 3), "rows.tif");
+        h.settle();
+        let case = format!("{target:?}, {w} x {h_px} in {}", h.size().x);
+        let top = h.app.view.model.panel().egui().min.y;
+        let items: Vec<egui::Rect> = (h.texts().into_iter())
+            .map(|(_, rect)| rect)
+            .filter(|rect| rect.max.y <= top)
+            .collect();
+        let rows = |items: &[egui::Rect]| {
+            let mut tops: Vec<i32> = items.iter().map(|r| r.center().y as i32).collect();
+            tops.sort_unstable();
+            tops.dedup_by(|a, b| (*a - *b).abs() < 8);
+            tops.len()
+        };
+        assert!(rows(&items) > 1, "{case}: the toolbar wraps, {items:?}");
+        let separators: Vec<_> = (h.upright_lines().into_iter())
+            .filter(|(_, ys)| ys.max <= top)
+            .collect();
+        assert!(!separators.is_empty(), "{case}");
+        for (x, ys) in separators {
+            let on_its_row = |r: &&egui::Rect| ys.contains(r.center().y);
+            assert!(
+                items.iter().filter(on_its_row).any(|r| r.max.x <= x),
+                "{case}: a row starts on the separator at {x}, {ys:?}: {:?}",
+                h.texts()
+            );
+            assert!(
+                items.iter().filter(on_its_row).any(|r| r.min.x >= x),
+                "{case}: a row ends on the separator at {x}, {ys:?}: {:?}",
+                h.texts()
+            );
+        }
+    }
+}
+
+/// A window manager need not give the window the size asked for: it can
+/// leave it as it is, as a tiling one does, or stop it short, as at a
+/// monitor's edge. A resize is waited on for a few frames and then let go,
+/// so the window settles; and the one that corrects it for a toolbar that
+/// wrapped at the new width is not waited on at all: stopped short of it,
+/// the window settles as soon as one that took it does, and either way it
+/// was asked for two sizes and no more.
+#[test]
+fn a_resize_the_window_does_not_take_is_let_go() {
+    // Left the size it is: the open's resize is asked for once, waited on a
+    // while, and let go.
+    let mut h = Headless::new(Target::Desktop).sized(vec2(800.0, 600.0), 1.0);
+    h.manager = Manager::Refusing;
+    h.open_bytes(stack(320, 200, 3), "refused.tif");
+    h.settle();
+    assert_eq!(h.size(), vec2(800.0, 600.0));
+    assert_eq!(h.resizes().len(), 1, "{:?}", h.resizes());
+
+    // Given the open's size, around one toolbar row, and then the
+    // correction around two, or held to its height short of it.
+    let corrected = |held: bool| {
+        let mut h = Headless::new(Target::Desktop).sized(vec2(800.0, 600.0), 1.0);
+        h.open_bytes(stack(320, 200, 3), "held.tif");
+        for _ in 0..10 {
+            if !h.resizes().is_empty() {
+                break;
+            }
+            h.frame();
+        }
+        assert_eq!(h.resizes().len(), 1, "the open's: {:?}", h.resizes());
+        if held {
+            h.manager = Manager::AtMost(h.size());
+        }
+        let frames = h.settle();
+        (h, frames)
+    };
+    let (took, frames_took) = corrected(false);
+    let (held, frames_held) = corrected(true);
+    let [first, second] = took.resizes()[..] else {
+        panic!("{:?}", took.resizes());
+    };
+    assert!(second.y > first.y, "{first:?} then {second:?}");
+    assert_eq!(held.resizes(), took.resizes());
+    assert_eq!((took.size(), held.size()), (second, first));
+    assert_eq!(frames_held, frames_took, "the correction is not waited on");
+}
+
 // ------------------------------------------------------------- the panel
 
 /// Opening the channels panel on the desktop grows the window by the
@@ -436,4 +650,70 @@ fn the_desktop_window_grows_by_the_panel_it_opens() {
     assert!(!h.app.panel.expanded);
     assert_eq!(h.size(), closed);
     assert_eq!(h.app.sync_inputs.image, image);
+}
+
+/// A stack of several channels has a row each in the panel, which edits a
+/// copy of the channel settings and writes it back: a row's switch reaches
+/// its own channel and no other, and the others' windows are as they were.
+#[test]
+fn each_channel_has_a_row_in_the_panel_and_its_switch_is_its_own() {
+    use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
+    let (w, h_px, channels) = (64, 48, 3);
+    let opts =
+        WriterOptions::new(w, h_px, SampleType::U16).metadata(StackMetaWrite::new(channels, 1));
+    let mut writer = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+    for plane in 0..channels as u16 * 2 {
+        let px: Vec<u16> = (0..w * h_px)
+            .map(|i| (plane + 1) * 1000 + i as u16)
+            .collect();
+        writer.write_frame_u16(&px).unwrap();
+    }
+    let bytes = writer.finish().unwrap().into_inner();
+
+    let mut h = Headless::new(Target::Desktop)
+        .sized(vec2(800.0, 900.0), 1.0)
+        .maximized(true);
+    h.open_bytes(bytes, "channels.tif");
+    open_panel(&mut h);
+    let display = |h: &Headless| h.app.core.document().unwrap().display().settings().to_vec();
+    let before = display(&h);
+    assert_eq!(before.len(), channels);
+    for c in 1..=channels {
+        assert!(h.drew(&format!("Ch {c}")), "{:?}", h.texts());
+    }
+
+    h.click_text("Ch 2");
+    let after = display(&h);
+    let enabled: Vec<bool> = after.iter().map(|s| s.enabled).collect();
+    assert_eq!(enabled, [true, false, true]);
+    for (c, (was, is)) in before.iter().zip(&after).enumerate() {
+        assert_eq!(was.window, is.window, "channel {}", c + 1);
+    }
+}
+
+/// A palette stack's channels have a switch each in the panel and nothing
+/// else: their pixels are ColorMap indices, so there is no window to drag
+/// (the display refuses one) and no pseudocolor to tint them with.
+#[test]
+fn a_palette_stack_has_switches_and_no_sliders_in_the_panel() {
+    let mut h = Headless::new(Target::Desktop)
+        .sized(vec2(800.0, 900.0), 1.0)
+        .maximized(true);
+    h.open_bytes(palette_stack(64, 48, 4, 2), "palette.tif");
+    open_panel(&mut h);
+    let display = h.app.core.document().unwrap().display();
+    assert_eq!(display.layout(), fast_tiff_viewer::ChannelLayout::Palette);
+    assert_eq!(display.channel_count(), 2);
+    for c in 1..=2 {
+        assert!(h.drew(&format!("Ch {c}")), "{:?}", h.texts());
+    }
+    for absent in ["Hold Shift", "Apply pseudocolor", " – "] {
+        assert!(!h.shows(absent), "{absent:?} in {:?}", h.texts());
+    }
+
+    h.click_text("Ch 2");
+    let enabled: Vec<bool> = (h.app.core.document().unwrap().display().settings().iter())
+        .map(|s| s.enabled)
+        .collect();
+    assert_eq!(enabled, [true, false]);
 }

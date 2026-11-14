@@ -1,6 +1,6 @@
 # fast-tiff-viewer
 
-[![License](https://img.shields.io/badge/License-MPL--2.0-green)](https://github.com/konung-yaropolk/FastTIFF/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/License-GPL--3.0--only-green)](https://github.com/konung-yaropolk/FastTIFF/blob/main/LICENSE)
 
 The frontend-agnostic viewer core for multi-frame scientific TIFF stacks:
 everything between "a TIFF on disk" and "pixels on the GPU", with no GUI toolkit
@@ -117,5 +117,12 @@ keeps them in step.
 
 ## License
 
-MPL-2.0. File-level copyleft: changes to these files stay open, but a consuming
-application doesn't have to be MPL.
+GPL-3.0-only, where the library crates it builds on (`fast-tiff-lib`,
+`scivis-render`, `oir-reader`) are MPL-2.0. Two of the built-in plugins, both
+in the default `builtin-plugins`, compile a registration crate into this one:
+`plugin-suite2p-stabilize` links `suite2p-registration` (a port of suite2p's
+registration) and `plugin-turboreg-stabilize` links `turboreg-registration`,
+both of them with the `image-registration-support` they share, and all three
+are GPL-3.0-only. The copyleft travels with them into whatever links
+them, so an application built on this crate is GPL-3.0 too, as `FastTIFF` and
+`FastTIFF-web` are.

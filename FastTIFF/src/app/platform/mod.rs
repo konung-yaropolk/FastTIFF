@@ -58,7 +58,9 @@
 //! `waiting`) being in `native.rs`. In the browser that state is kept up and
 //! never acted on: `resize_to_zoom`, `zoom_reposition`, and the panel's
 //! `grow_armed` and `old_h`. No lint says so, since the app's own code writes
-//! those fields too.
+//! those fields too. What only the sizer reads, the last resize it asked for
+//! while it waits to see the window take it, is the desktop's own (`Desktop`),
+//! and the browser has none.
 //!
 //! [`ViewerApp`]: super::ViewerApp
 

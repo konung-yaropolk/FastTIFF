@@ -5,7 +5,7 @@
 use super::tint_color;
 use egui::{Color32, RichText};
 use fast_tiff_viewer::channels::{channel_tint, shift_sync, ui_tint};
-use fast_tiff_viewer::{DocumentMut, Window};
+use fast_tiff_viewer::{DocumentMut, Window, MAX_CHANNELS};
 
 /// Formats a sample value — in the file's own units, which is what every
 /// window and bound the viewer holds is in — for display, applying the stack's
@@ -355,7 +355,8 @@ fn contrast_row(
 
 /// The per-channel contrast controls: one enable-checkbox and two-handle window
 /// slider per channel, or a single unlabelled row when the stack has one
-/// channel, plus the Shift-to-move-all-together behaviour.
+/// channel, plus the Shift-to-move-all-together behaviour. A palette stack's
+/// channels have the checkboxes alone, and its one channel nothing.
 ///
 /// Shared by the bottom panel and the histogram window. They are the same
 /// control in two places — a value dragged in one is visibly live in the other,
@@ -404,24 +405,45 @@ pub(super) fn contrast_controls(
         // channel's window by the same amount. Snapshot the values
         // first so we can detect which one moved and by how much.
         let shift = ui.input(|i| i.modifiers.shift);
-        let before: Vec<Window> = loaded
-            .display()
-            .settings()
-            .iter()
-            .map(|s| s.window)
-            .collect();
-        // What the rows below edit, written back once they have all drawn.
-        let mut rows = loaded.display().settings().to_vec();
+        // What the rows below edit, written back once they have all drawn,
+        // and each window as the frame began. Copies on the stack rather
+        // than in a `Vec`, since this runs on every frame the panel is up:
+        // the settings are `Copy`, and a display holds at most
+        // `MAX_CHANNELS` of them.
+        let shown = loaded.display().settings();
+        let n = shown.len();
+        let mut rows = [shown[0]; MAX_CHANNELS];
+        rows[..n].copy_from_slice(shown);
+        let rows = &mut rows[..n];
+        let mut before = [rows[0].window; MAX_CHANNELS];
+        for (window, row) in before.iter_mut().zip(rows.iter()) {
+            *window = row.window;
+        }
+        let before = &before[..n];
         // Per-channel slider tints from each channel's display LUT —
         // colored only for composite/RGB or pseudocolor stacks, `None`
         // (default color) for plain grayscale.
-        let tints: Vec<Option<Color32>> = loaded
-            .tiff()
-            .meta
-            .channel_display
-            .iter()
-            .map(|cd| tint_color(channel_tint(&cd.lut)))
-            .collect();
+        let channel_display = &loaded.tiff().meta.channel_display;
+        if !has_contrast {
+            // A palette stack's channels: a switch each, side by side, and no
+            // window to drag (see the single-channel case below).
+            ui.horizontal_wrapped(|ui| {
+                for (c, settings) in rows.iter_mut().enumerate() {
+                    draw_head(
+                        ui,
+                        RowHead::Toggle {
+                            label: format!("Ch {}", c + 1),
+                            enabled: &mut settings.enabled,
+                            hover: None,
+                        },
+                    );
+                }
+            });
+            for (c, row) in rows.iter().enumerate() {
+                loaded.display_mut().set_enabled(c, row.enabled);
+            }
+            return None;
+        }
         // One entry per channel, stacked vertically.
         for (c, settings) in rows.iter_mut().enumerate() {
             let label = if rgb {
@@ -454,13 +476,15 @@ pub(super) fn contrast_controls(
                 },
                 (&mut settings.window, track.unwrap_or(settings.bounds)),
                 calibration,
-                tints.get(c).copied().flatten(),
+                channel_display
+                    .get(c)
+                    .and_then(|cd| tint_color(channel_tint(&cd.lut))),
             ));
         }
         // Shift-sync: if a slider moved this frame, carry the same delta to
         // every other enabled channel.
         if shift {
-            shift_sync(&mut rows, &before);
+            shift_sync(rows, before);
         }
         for (c, row) in rows.iter().enumerate() {
             loaded.display_mut().set_enabled(c, row.enabled);
@@ -490,10 +514,10 @@ pub(super) fn contrast_controls(
         }
     }
     // No `else`: a palette (indexed) image shows no contrast row at
-    // all. Its pixels are colour-table indices rather than
-    // intensities — index 37 isn't brighter than 12, the map
-    // decides — so there is no window to adjust. Changing the table
-    // is the LUT selector's job.
+    // all, and as several channels only their switches. Its pixels are
+    // colour-table indices rather than intensities — index 37 isn't
+    // brighter than 12, the map decides — so there is no window to
+    // adjust. Changing the table is the LUT selector's job.
 
     span
 }

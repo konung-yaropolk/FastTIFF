@@ -42,6 +42,23 @@ fn rgb(frames: usize) -> Viewer {
     viewer
 }
 
+/// `frames` chunky 8-bit CMYK (Separated) frames, as a viewer opened on them.
+fn cmyk(frames: usize) -> Viewer {
+    let opts = WriterOptions::new(W, H, SampleType::U8)
+        .samples_per_pixel(4)
+        .cmyk(true)
+        .metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    for f in 0..frames as u32 {
+        let px: Vec<u8> = (0..W * H * 4).map(|i| (i * 5 + f * 40) as u8).collect();
+        w.write_frame_u8(&px).unwrap();
+    }
+    let mut viewer = Viewer::new();
+    let bytes = w.finish().unwrap().into_inner();
+    viewer.load_bytes(bytes, "cmyk.tif".into()).expect("open");
+    viewer
+}
+
 fn doc(viewer: &Viewer) -> &Document {
     viewer.document().expect("a stack is open")
 }
@@ -208,6 +225,38 @@ fn a_dimension_override_keeps_the_layout() {
     assert_eq!(d.dims().channels, 3);
     assert_eq!(d.layout(), ChannelLayout::Intensity);
     assert_ne!(d.revision().layout, before.layout, "but the planes moved");
+}
+
+/// An RGB or a CMYK stack's channels are the sample planes of each IFD, which
+/// the file's format fixes, so there are no axes to reassign: neither a swap
+/// of its four frames into channels nor the counts in effect (which say one
+/// channel) change anything. Rebuilt for those counts, the display was one
+/// channel, the red plane alone.
+#[test]
+fn a_dimension_order_on_rgb_or_cmyk_is_ignored() {
+    for (mut viewer, layout) in [(rgb(4), ChannelLayout::Rgb), (cmyk(4), ChannelLayout::Cmyk)] {
+        let (dims, revision, luts) = {
+            let d = doc(&viewer).display();
+            assert_eq!(d.layout(), layout);
+            assert_eq!(d.channel_count(), 3, "{layout:?}");
+            (d.dims(), d.revision(), d.luts().to_vec())
+        };
+        assert_eq!(
+            (dims.channels, dims.frames),
+            (1, 4),
+            "{layout:?}: what the counts say, and a swap that is one"
+        );
+        let (c, z, t) = (dims.channels, dims.slices, dims.frames);
+        for (c, z, t) in [(c, z, t), (t, z, c)] {
+            viewer.set_dimension_order(c, z, t);
+            let d = doc(&viewer).display();
+            assert_eq!(d.layout(), layout, "({c}, {z}, {t})");
+            assert_eq!(d.dims(), dims, "{layout:?} ({c}, {z}, {t})");
+            assert_eq!(d.revision(), revision, "{layout:?} ({c}, {z}, {t})");
+            assert_eq!(d.channel_count(), 3, "{layout:?} ({c}, {z}, {t})");
+            assert_eq!(d.luts(), luts, "{layout:?} ({c}, {z}, {t})");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
