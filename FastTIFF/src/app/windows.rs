@@ -33,6 +33,10 @@ pub(super) struct Host<'a> {
     /// Everything that isn't GUI: the document, its display, the 3D view and
     /// the user's preferences for it.
     pub(super) core: &'a mut Viewer,
+    /// Which document that is, as the window counts them
+    /// (`ViewerApp::document_generation`): what a pop-up keeps what it works
+    /// out from the document against (see [`super::cached`]).
+    pub(super) generation: u64,
 }
 
 /// One pop-up window.
@@ -62,7 +66,7 @@ impl Windows {
     /// The app's pop-ups, all closed.
     pub(super) fn new() -> Self {
         Self::of(vec![
-            Box::new(metadata::MetadataWindow),
+            Box::new(metadata::MetadataWindow::default()),
             Box::new(histogram::HistogramWindow::default()),
             Box::new(render_settings::RenderSettingsWindow),
         ])

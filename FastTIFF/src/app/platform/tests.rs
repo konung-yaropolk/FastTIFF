@@ -19,7 +19,7 @@ fn this_build_is_the_target_it_was_compiled_for() {
         Target::Desktop
     };
     assert_eq!(TARGET, expected);
-    assert_eq!(WEB, TARGET.is_web());
+    assert_eq!(<Current as Platform>::WEB, TARGET.is_web());
 }
 
 // ------------------------------------------------- how a fresh picture fits

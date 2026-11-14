@@ -17,10 +17,14 @@
 //! the canvas, each laid out by a method of its own. What their widgets ask for
 //! is queued as a `command::UiCommand` rather than done from inside egui's
 //! closures, and applied at the points of the frame `command` documents.
+//! Tests run whole frames of it with no window and no GPU (`headless`): the
+//! frame is decided as in a real run, and only the sync with a device is
+//! left out.
 //!
 //! Supporting clusters live in child modules (which share this module's
 //! privacy, so the split adds no `pub` surface beyond `pub(super)`):
 //!   * `animation` — a plugin's animation of the 3D view, played or recorded
+//!   * `cached` — what is worked out from the document, kept until it changes
 //!   * `camera`  — egui input → the core camera
 //!   * `canvas`  — the central panel: the picture, in 2D or 3D
 //!   * `canvas_tool` — the tools that take the left button on the picture,
@@ -53,6 +57,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 mod animation;
+mod cached;
 mod camera;
 mod canvas;
 mod canvas_tool;
@@ -84,7 +89,7 @@ use command::{Applying, Commands, Step, UiCommand, Via, FRAME};
 // phases; the code goes by `FRAME` and never names one.
 #[cfg(doc)]
 use command::Phase;
-use platform::{Current, Destination, Placement, Platform as _, Purpose, TARGET, WEB};
+use platform::{Current, Destination, Placement, Platform as _, Purpose, Target, TARGET};
 use scale::UI_SCALE;
 use screen::{Egui as _, Logical as _};
 use widgets::{contrast_controls, histogram_button, ContrastLayout};
@@ -862,8 +867,15 @@ pub struct ViewerApp {
     /// clock, 3D camera, and the decode→GPU sync. See `fast_tiff_viewer`.
     core: Viewer,
     /// GPU textures/shader for compositing the image, shared with the paint
-    /// callback. Created once at startup (see `crate::render::init`).
-    render: Render,
+    /// callback. Created once at startup (see `crate::render::init`), and
+    /// there in every real run.
+    ///
+    /// `None` only in a test running whole frames with no GPU at all (see
+    /// `headless`): the frame is laid out and decided as in a real run, and
+    /// what needs a device — bringing it up to date with the frame
+    /// ([`Viewer::sync`]), painting the picture, an animation's off-screen
+    /// render — is left out. The core is the same CPU-side model either way.
+    render: Option<Render>,
     /// Where the image sits in the viewport (pan/zoom and the geometry derived
     /// from it), and the window's part in it.
     view: CanvasView,
@@ -922,6 +934,19 @@ pub struct ViewerApp {
     /// The desktop or the browser: what this app does that the two hosts do
     /// their own way. See [`platform`].
     platform: Current,
+    /// The host whose decisions the frame follows where they are the frame's
+    /// own: how a picture that has just opened is fitted, what the canvas
+    /// says with nothing open, and which pop-ups a new document closes.
+    ///
+    /// [`TARGET`] in every real run. A test runs the browser's decisions
+    /// natively by naming it here. What the host *does* is still
+    /// [`Current`]'s, and a decision that only picks one of its effects —
+    /// where a save goes, whether a job runs behind the frame — goes by
+    /// `TARGET`, the target `Current` is for, so the two cannot disagree.
+    target: Target,
+    /// The window's title, worked out for the document on show and given to
+    /// the window when it changes ([`Platform::title_window`]).
+    title: cached::Cached<u64, String>,
     /// What the last thing this app did has to say: a refusal, a plugin's
     /// outcome, a save. Shown on the status line first, above what the core
     /// has to say of the document ([`Viewer::notices`]), which this neither
@@ -1009,6 +1034,21 @@ struct PluginDialog {
     values: fasttiff_plugin_api::Params,
 }
 
+/// The window's title: the file's name, or the app's when nothing is open.
+fn window_title(document: Option<&Document>) -> String {
+    match document {
+        Some(loaded) => {
+            let name = loaded
+                .path()
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            format!("{name} • FastTIFF")
+        }
+        None => "FastTIFF".to_string(),
+    }
+}
+
 /// The window title for a file an importer converted.
 ///
 /// The source file's own name, extension and all, marked as converted. What
@@ -1025,16 +1065,36 @@ fn imported_label(path: &std::path::Path, fallback: &str) -> String {
 }
 
 impl ViewerApp {
+    /// The window a host runs: `initial` is the file it was started with, if
+    /// any, and `render` the GPU resources made from the host's device
+    /// ([`render::init`]).
     pub fn new(initial: Option<Opened>, render: Render) -> Self {
+        let mut app = Self::assemble(Some(render), TARGET, Current::registry());
+        Current::sweep_old_results();
+        if let Some(opened) = initial {
+            app.apply_opened(opened);
+        }
+        app
+    }
+
+    /// A window with nothing open, drawing through `render` when there is
+    /// one, following `target`'s decisions and offering `plugins`. What
+    /// [`new`](Self::new) builds a host's window from, and a test one with no
+    /// GPU (`headless`).
+    fn assemble(
+        render: Option<Render>,
+        target: Target,
+        plugins: fast_tiff_viewer::plugins::Registry,
+    ) -> Self {
         let (open_tx, open_rx) = channel();
-        let mut app = Self {
+        Self {
             core: Viewer::new(),
             render,
             view: CanvasView::default(),
             panel: PanelLayout::default(),
-            plugins: Some(Current::registry()),
+            claimed_extensions: plugins.claimed_extensions(),
+            plugins: Some(plugins),
             plugin_dialog: None,
-            claimed_extensions: Vec::new(),
             document: Default::default(),
             open_tx,
             open_rx,
@@ -1042,6 +1102,8 @@ impl ViewerApp {
             tools: Tools::default(),
             picked: None,
             platform: Current::new(),
+            target,
+            title: Default::default(),
             status: None,
             good_status: None,
             notices_aside: None,
@@ -1049,17 +1111,7 @@ impl ViewerApp {
             windows: Windows::new(),
             volume_ui: VolumeUi::default(),
             animation: Default::default(),
-        };
-        app.claimed_extensions = app
-            .plugins
-            .as_ref()
-            .map(|r| r.claimed_extensions())
-            .unwrap_or_default();
-        Current::sweep_old_results();
-        if let Some(opened) = initial {
-            app.apply_opened(opened);
         }
-        app
     }
 
     /// Hand an opened file to the core, then reset the chrome that described
@@ -1196,7 +1248,16 @@ impl ViewerApp {
         self.panel.reset();
         // The pop-ups mostly stay up on the desktop, repointed at the new
         // document; each says for itself (`AppWindow::outlives_document`).
-        self.windows.reset(&self.core, WEB);
+        self.windows.reset(&self.core, self.target.is_web());
+    }
+
+    /// Which document is on show, as this window counts them
+    /// ([`document`](Self::document)): moved each time a load lands, one
+    /// that failed and left the last document up included, and by nothing
+    /// else. What is worked out from the document is kept against it (see
+    /// [`cached`]).
+    fn document_generation(&self) -> u64 {
+        self.document.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Apply whatever arrived since the last frame ([`Incoming`]): the result
@@ -2269,6 +2330,7 @@ impl ViewerApp {
     /// The pop-up windows that are open, in the order they were registered.
     fn popups(&mut self, ctx: &egui::Context) {
         let mut host = windows::Host {
+            generation: self.document_generation(),
             core: &mut self.core,
         };
         self.windows.show(ctx, &mut host);
@@ -2333,8 +2395,8 @@ impl ViewerApp {
         toolbar_response: &egui::InnerResponse<()>,
         scrub_bar_response: &egui::InnerResponse<()>,
     ) {
-        // Window chrome (sizing, position, title): the desktop's alone, and
-        // nothing in a browser, whose canvas the page sizes.
+        // Window chrome (sizing, position): the desktop's alone, and nothing
+        // in a browser, whose canvas the page sizes.
         self.platform.manage_window(
             ui.ctx(),
             &mut self.view,
@@ -2343,12 +2405,23 @@ impl ViewerApp {
             toolbar_response.response.rect.height(),
             scrub_bar_response.response.rect.height(),
         );
+        // Its title: the file's, worked out once per document and sent when
+        // it changes.
+        let generation = self.document_generation();
+        let document = self.core.document();
+        if let Some(title) = self.title.changed(generation, || window_title(document)) {
+            Current::title_window(ui.ctx(), title);
+        }
 
         // Bring the GPU up to date with the core state, then honor a pending
         // background volume build by scheduling another frame. The histograms
         // are binned from what the sync decodes, while their window is open.
         self.sync_inputs.histograms = self.windows.is_open(WindowId::HISTOGRAM);
-        let render = std::sync::Arc::clone(&self.render);
+        // With no GPU (a test's headless window) there is nothing to bring up
+        // to date, and nothing the sync would have started to repaint for.
+        let Some(render) = self.render.clone() else {
+            return;
+        };
         let outcome = match render.lock() {
             Ok(mut resources) => {
                 let outcome = self.core.sync(&mut resources, &self.sync_inputs);
@@ -2403,3 +2476,11 @@ mod reset_tests;
 #[cfg(test)]
 #[path = "app/job_tests.rs"]
 mod job_tests;
+
+#[cfg(test)]
+#[path = "app/headless.rs"]
+mod headless;
+
+#[cfg(test)]
+#[path = "app/scenario_tests.rs"]
+mod scenario_tests;

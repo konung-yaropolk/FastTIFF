@@ -179,6 +179,8 @@ impl Platform for Browser {
     ) {
     }
 
+    fn title_window(_ctx: &egui::Context, _title: &str) {}
+
     /// Not closed over here, as it has never been: the browser's own console
     /// has the panic, and the page can be reloaded.
     fn gpu_lost() -> Option<String> {

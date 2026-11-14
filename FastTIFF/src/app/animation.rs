@@ -839,7 +839,7 @@ impl super::ViewerApp {
         let (shot, max_side) = {
             let mut shot = self.animation.capture.failed.take().map(Err);
             let mut max_side = MOVIE_MAX_SIDE;
-            if let Ok(mut resources) = self.render.lock() {
+            if let Some(Ok(mut resources)) = self.render.as_ref().map(|r| r.lock()) {
                 if self.animation.capture.in_flight && shot.is_none() {
                     shot = resources.take_volume_capture();
                 }

@@ -18,8 +18,9 @@
 //!   or a new tab, the OS window. [`ViewerApp`] holds one and calls through it.
 //!
 //! So nothing outside this module tests which target it was compiled for:
-//! what differs is asked of [`TARGET`] (or of [`WEB`], where the pop-up
-//! windows take the platform as a `bool`) and done through [`Current`].
+//! what differs is asked of [`TARGET`] — or, for the decisions that are the
+//! frame's own, of the app's `target`, which a test can set to the other
+//! host — and done through [`Current`].
 //!
 //! The `cfg` pair below picks the implementation, and is the only one that
 //! does. Elsewhere the crate gates only what cannot compile on the other
@@ -84,11 +85,8 @@ use fasttiff_plugin_api::FileType;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32};
 
-/// Whether this is the browser build, for what takes the platform as a `bool`.
-pub(super) const WEB: bool = <Current as Platform>::WEB;
-
 /// The target this build is for.
-pub(super) const TARGET: Target = if WEB {
+pub(super) const TARGET: Target = if <Current as Platform>::WEB {
     Target::Browser
 } else {
     Target::Desktop
@@ -100,7 +98,7 @@ pub(super) const TARGET: Target = if WEB {
 /// whichever this build is for. Associated functions where nothing is kept
 /// between calls — a worker runs some of them, and holds no `&self` — and
 /// methods where the host keeps something: the browser's picker answers
-/// through a channel of its own, and the desktop remembers the title it set.
+/// through a channel of its own.
 pub(super) trait Platform: Sized {
     /// Whether this is the browser.
     const WEB: bool;
@@ -202,10 +200,10 @@ pub(super) trait Platform: Sized {
         cancel: &AtomicBool,
     ) -> Handover;
 
-    /// Size, place and title the OS window in response to this frame's
-    /// events: `toolbar_h` and `bar_h` are the heights of the chrome above
-    /// and below the picture, just laid out. A browser canvas is sized by the
-    /// page, and none of it means anything there.
+    /// Size and place the OS window in response to this frame's events:
+    /// `toolbar_h` and `bar_h` are the heights of the chrome above and below
+    /// the picture, just laid out. A browser canvas is sized by the page, and
+    /// none of it means anything there.
     fn manage_window(
         &mut self,
         ctx: &egui::Context,
@@ -215,6 +213,10 @@ pub(super) trait Platform: Sized {
         toolbar_h: f32,
         bar_h: f32,
     );
+
+    /// Give the OS window the title `title`, which has just changed. A
+    /// browser tab is titled by its page.
+    fn title_window(ctx: &egui::Context, title: &str);
 
     /// Why the graphics device is gone, once it is: what the frame loop
     /// closes with rather than let egui draw without one. The renderer

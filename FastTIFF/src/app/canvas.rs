@@ -20,7 +20,7 @@ impl ViewerApp {
             .show_inside(ui, |ui| {
                 if self.core.document().is_none() {
                     ui.centered_and_justified(|ui| {
-                        ui.label(TARGET.welcome_text());
+                        ui.label(self.target.welcome_text());
                     });
                     return;
                 }
@@ -44,7 +44,7 @@ impl ViewerApp {
                 // Held back until the 2D view is the one on screen: in 3D the zoom
                 // is unused, and consuming the flag there would leave the image
                 // unfitted when the user came back to 2D.
-                let opening = TARGET.opening();
+                let opening = self.target.opening();
                 if opening == platform::Opening::FitCanvas
                     && self.view.model.awaits_fit()
                     && self.core.view_mode == ViewMode::Movie
@@ -120,9 +120,11 @@ impl ViewerApp {
         // time this panel may not be being laid out at all.
         self.volume_ui.rect = Some(panel_rect);
         response.on_hover_cursor(egui::CursorIcon::Crosshair);
-        ui.painter()
-            .with_clip_rect(panel_rect)
-            .add(render::paint_volume_callback(&self.render, panel_rect));
+        if let Some(render) = &self.render {
+            ui.painter()
+                .with_clip_rect(panel_rect)
+                .add(render::paint_volume_callback(render, panel_rect));
+        }
         // Coordinate-box overlay, drawn on top of the ray-march with the
         // 2D painter (aligned via the same camera; see `overlay`).
         if self.core.volume.navigation.show_coord_box {
@@ -377,9 +379,11 @@ impl ViewerApp {
             // draw it, which is what decides how finely an over-large image
             // needs to be sampled.
             self.sync_inputs.image = placed.inputs(ui.ctx().pixels_per_point());
-            ui.painter()
-                .with_clip_rect(panel_rect)
-                .add(render::paint_callback(&self.render, visible));
+            if let Some(render) = &self.render {
+                ui.painter()
+                    .with_clip_rect(panel_rect)
+                    .add(render::paint_callback(render, visible));
+            }
         }
 
         // The tools' regions and marks, over the picture and clipped to the

@@ -23,17 +23,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 const MIN_WINDOW: f32 = 256.0;
 
 /// The desktop host.
-pub(crate) struct Desktop {
-    /// The window title last sent via `ViewportCommand::Title`, so it is sent
-    /// again only when it changes.
-    last_title: Option<String>,
-}
+pub(crate) struct Desktop;
 
 impl Platform for Desktop {
     const WEB: bool = false;
 
     fn new() -> Self {
-        Desktop { last_title: None }
+        Desktop
     }
 
     fn registry() -> Registry {
@@ -440,23 +436,10 @@ impl Platform for Desktop {
                 view.resize_to_zoom = false;
             }
         }
+    }
 
-        // Window title: loaded filename, or the app name when nothing is open.
-        let desired_title = match document {
-            Some(loaded) => {
-                let name = loaded
-                    .path()
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                format!("{name} • FastTIFF")
-            }
-            None => "FastTIFF".to_string(),
-        };
-        if self.last_title.as_deref() != Some(desired_title.as_str()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(desired_title.clone()));
-            self.last_title = Some(desired_title);
-        }
+    fn title_window(ctx: &egui::Context, title: &str) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.to_owned()));
     }
 
     fn gpu_lost() -> Option<String> {

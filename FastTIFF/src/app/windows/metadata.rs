@@ -2,15 +2,20 @@
 
 use super::*;
 
+use super::super::cached::Cached;
 use egui::RichText;
-use std::sync::Arc;
 
 impl WindowId {
     pub(in crate::app) const METADATA: WindowId = WindowId("file_metadata");
 }
 
-/// The window. It reads the document and keeps nothing of its own.
-pub(super) struct MetadataWindow;
+/// The window. It reads the document, and keeps only what it parsed of it.
+#[derive(Default)]
+pub(super) struct MetadataWindow {
+    /// The OME-XML's tree, parsed when its section is first open and kept
+    /// for as long as the document it is of is the one on show.
+    ome: OmeTree,
+}
 
 impl AppWindow for MetadataWindow {
     fn id(&self) -> WindowId {
@@ -19,7 +24,7 @@ impl AppWindow for MetadataWindow {
 
     fn show(&mut self, ctx: &egui::Context, open: &mut bool, host: &mut Host<'_>) {
         match host.core.document() {
-            Some(loaded) => metadata_window(ctx, open, loaded),
+            Some(loaded) => metadata_window(ctx, open, loaded, &mut self.ome, host.generation),
             None => *open = false,
         }
     }
@@ -39,7 +44,15 @@ impl AppWindow for MetadataWindow {
     }
 }
 
-fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Document) {
+/// `ome` is the window's OME tree, and `generation` which document `loaded`
+/// is ([`Host::generation`]).
+fn metadata_window(
+    ctx: &egui::Context,
+    open: &mut bool,
+    loaded: &Document,
+    ome: &mut OmeTree,
+    generation: u64,
+) {
     let tiff = loaded.tiff();
     let spec = dialog::Dialog {
         id: WindowId::METADATA.0,
@@ -186,7 +199,7 @@ fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Document) {
         ui.add_space(12.0);
         egui::CollapsingHeader::new("OME-TIFF metadata")
             .default_open(false)
-            .show(ui, |ui| ome_metadata(ui, tiff));
+            .show(ui, |ui| ome_metadata(ui, tiff, ome, generation));
 
         ui.add_space(12.0);
         ui.heading("ImageJ metadata");
@@ -259,15 +272,27 @@ fn metadata_window(ctx: &egui::Context, open: &mut bool, loaded: &Document) {
 
 type OmeElement = fast_tiff_lib::metadata::ome::XmlElement;
 
+/// The parsed tree of a document's OME-XML (`None` when it is not
+/// well-formed), by the document it is of.
+type OmeTree = Cached<u64, Option<OmeElement>>;
+
 /// The OME-XML an OME-TIFF keeps in its ImageDescription, as tables: each
 /// element's attributes, a table for a run of same-named elements (a `Plane`
 /// for every plane, a `Channel` for every channel), and a section for anything
 /// nested deeper.
 ///
-/// Parsed when the section is first opened, and once per file: the XML of a
-/// long recording carries a `Plane` per plane and runs to megabytes, and this
-/// window is drawn every frame.
-fn ome_metadata(ui: &mut egui::Ui, tiff: &fast_tiff_lib::TiffStack) {
+/// Parsed when the section is first opened, and once per landing: the XML of
+/// a long recording carries a `Plane` per plane and runs to megabytes, and
+/// this window is drawn every frame. A failed open is a landing too
+/// (`generation` moves), and parses the file that stayed up once more: a
+/// one-off, kept rather than a second count of documents beside the one
+/// plugin runs are told apart by.
+fn ome_metadata(
+    ui: &mut egui::Ui,
+    tiff: &fast_tiff_lib::TiffStack,
+    ome: &mut OmeTree,
+    generation: u64,
+) {
     let Some(desc) = tiff
         .description
         .as_deref()
@@ -276,7 +301,7 @@ fn ome_metadata(ui: &mut egui::Ui, tiff: &fast_tiff_lib::TiffStack) {
         ui.label(RichText::new("(this file carries no OME-XML)").weak());
         return;
     };
-    match ome_tree(ui.ctx(), tiff, desc).as_ref() {
+    match ome.get(generation, || fast_tiff_lib::metadata::ome::xml_tree(desc)) {
         Some(root) => {
             ui.label(RichText::new(&root.name).strong());
             ome_element(ui, root, egui::Id::new("ome_tree"), 0);
@@ -291,31 +316,6 @@ fn ome_metadata(ui: &mut egui::Ui, tiff: &fast_tiff_lib::TiffStack) {
             );
         }
     }
-}
-
-/// The parsed tree of `desc`, from the last time it was parsed if that was
-/// this file's. Keyed by where the stack and its description live, so a file
-/// opened in its place is parsed afresh.
-fn ome_tree(
-    ctx: &egui::Context,
-    tiff: &fast_tiff_lib::TiffStack,
-    desc: &str,
-) -> Arc<Option<OmeElement>> {
-    type Cached = ((usize, usize, usize), Arc<Option<OmeElement>>);
-    let key = (
-        std::ptr::from_ref(tiff) as usize,
-        desc.as_ptr() as usize,
-        desc.len(),
-    );
-    let id = egui::Id::new("ome_tree_cache");
-    if let Some((k, tree)) = ctx.data(|d| d.get_temp::<Cached>(id)) {
-        if k == key {
-            return tree;
-        }
-    }
-    let tree = Arc::new(fast_tiff_lib::metadata::ome::xml_tree(desc));
-    ctx.data_mut(|d| d.insert_temp::<Cached>(id, (key, tree.clone())));
-    tree
 }
 
 fn ome_attr<'a>(el: &'a OmeElement, key: &str) -> Option<&'a str> {

@@ -51,7 +51,10 @@ fn probes(drawn: &Rc<RefCell<Vec<&'static str>>>) -> Windows {
 /// Draw `windows` once, as the frame does.
 fn show(windows: &mut Windows) {
     let mut core = Viewer::new();
-    let mut host = Host { core: &mut core };
+    let mut host = Host {
+        core: &mut core,
+        generation: 0,
+    };
     windows.show(&egui::Context::default(), &mut host);
 }
 
