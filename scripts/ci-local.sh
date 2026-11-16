@@ -117,12 +117,14 @@ step() {
 # reports it as a missing candidate. Only a crate that is published needs the
 # field: crates.io wants every dependency of a published crate published too,
 # with a version. The published ones are those publish-lib.yml publishes, so a
-# pin anywhere else fails here.
+# pin anywhere else fails here. `.claude` holds agents' worktrees: copies of
+# this tree at other commits, which are not this checkout's manifests.
 no_pinned_paths() {
     local published file name bad=0
     published=$(sed -n 's/.*cargo publish -p \([a-z0-9_-]*\).*/\1/p' .github/workflows/publish-lib.yml)
     for file in $(grep -rlE '^[a-zA-Z0-9_-]+ *= *\{.*(path.*version|version.*path) *=' \
-                      --include=Cargo.toml --exclude-dir=target --exclude-dir=.git .); do
+                      --include=Cargo.toml --exclude-dir=target --exclude-dir=.git \
+                      --exclude-dir=.claude .); do
         name=$(sed -n 's/^name = "\(.*\)"/\1/p' "$file" | head -n 1)
         if ! printf '%s\n' $published | grep -qx "$name"; then
             grep -nE '^[a-zA-Z0-9_-]+ *= *\{.*(path.*version|version.*path) *=' "$file" | sed "s|^|$file:|"
