@@ -12,6 +12,17 @@
 //! below carries the name and the default it has in suite2p's `default_ops`, so
 //! a value copied from a lab's `ops.npy` means the same thing here.
 //!
+//! The run is a feeder of the crate's [`Session`]: it reads the frames the
+//! session names, reports progress, honours a cancel and stores what comes
+//! back. Which frames build the reference, the comb, the batches and the
+//! window they give the temporal smoothing, a second pass, the block field
+//! and the bad frames are the session's, so the viewer and the C library
+//! give the same answer for the same frames and settings. This used to
+//! sequence the crate's stages itself, and drifted: it once measured frame by
+//! frame on one thread, bounded its batches where the crate did not, never
+//! ran the second pass of a two-step registration and never counted a bad
+//! frame.
+//!
 //! # Reference by one channel, applied to all
 //!
 //! A two-channel recording is one movie photographed twice at once, so both
@@ -28,69 +39,89 @@ use fasttiff_plugin_api::{
     HostContext, ImageSpec, ImageStream, Outcome, ParamDecl, Params, Plane, Plugin, PluginError,
     PluginInfo, StreamTarget,
 };
-use suite2p_registration::{
-    area::common_area, compute_reference, fft::Fft2, masks::reference_filters_normed, nonrigid,
-    work, Border, Cut, Frames, Settings, Shift,
-};
+use suite2p_registration::{work, Border, Measured, Registered, Session};
 
-/// How many workers a parallel backend should spread the block filters over.
-///
-/// From the standard library rather than from rayon: rayon is behind this
-/// crate's `threads` feature and the registration crate always has it, so
-/// asking it here would pull it into a build that turned threads off. The count
-/// is a scheduling hint — one too many costs a little memory, not correctness.
-fn workers_available() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+/// How many planes are corrected in one parallel sweep. A bound rather than
+/// a whole batch: a recording with several channels and slices has many planes
+/// per timepoint, and a batch of all of them at once would be an unpredictable
+/// amount of memory.
+const APPLY_CHUNK: usize = 64;
+
+/// How a chunk of planes is put back where it belongs.
+#[derive(Clone, Copy)]
+enum Correction<'a, 's> {
+    /// By the batch the last pass has just measured, at full size.
+    Batch(&'a Measured<'s>),
+    /// By the finished registration, moved and cut to the common area: a
+    /// crop's area depends on every frame, so its planes wait for the end.
+    Crop(&'a Registered, usize, usize),
 }
 
-/// How one batch's planes are corrected and stored — the same for every chunk
-/// of it.
-struct Correction<'a> {
-    ly: usize,
-    lx: usize,
-    shifts: &'a [Shift],
-    warp: Option<(&'a nonrigid::Blocks, &'a [Vec<nonrigid::BlockShift>])>,
-    settings: &'a Settings,
+/// The result as it is handed to the host: planes, as recorded, gathered into
+/// chunks, corrected a chunk at a time, stored at the file's width and pushed.
+///
+/// A chunk is the most of the result this plugin ever holds: each corrected
+/// plane is encoded into `stored` and pushed, and the host has written it
+/// before the next one is made.
+struct Writer {
     store: Store,
+    stored: Stored,
+    pending: Vec<Vec<f32>>,
+    at: Vec<usize>,
 }
 
-/// Correct a chunk of read planes and hand them to the host as the result's
-/// next planes.
-///
-/// Split out only because it is called from two places — once when the chunk
-/// fills and once for whatever is left at the end of a batch — and getting one
-/// of those wrong loses planes off the end of the recording.
-///
-/// The chunk is the most of the result this plugin ever holds: each corrected
-/// plane is stored at the file's width into `stored` and pushed, and the host
-/// has written it before the next one is made.
-fn flush(
-    pending: &mut Vec<Vec<f32>>,
-    at: &mut Vec<usize>,
-    host: &mut dyn HostContext,
-    out: &mut ImageStream,
-    stored: &mut Stored,
-    how: &Correction<'_>,
-) -> Result<(), PluginError> {
-    if pending.is_empty() {
-        return Ok(());
+impl Writer {
+    /// Queue `plane`, of frame `t`, and correct and push the chunk once it is
+    /// full. How many planes went out, for the progress bar.
+    fn put(
+        &mut self,
+        plane: Vec<f32>,
+        t: usize,
+        how: Correction<'_, '_>,
+        host: &mut dyn HostContext,
+        out: &mut ImageStream,
+    ) -> Result<usize, PluginError> {
+        self.pending.push(plane);
+        self.at.push(t);
+        if self.pending.len() < APPLY_CHUNK {
+            return Ok(0);
+        }
+        self.flush(how, host, out)
     }
-    suite2p_registration::pipeline::apply_batch(
-        pending,
-        how.ly,
-        how.lx,
-        at,
-        how.shifts,
-        how.warp,
-        how.settings,
-    );
-    for v in pending.drain(..) {
-        out.push(host, how.store.encode(&v, stored))?;
+
+    /// Correct and push whatever is queued. Called when a chunk fills and
+    /// once for what is left at the end of a batch, and getting the second
+    /// wrong loses planes off the end of the recording.
+    fn flush(
+        &mut self,
+        how: Correction<'_, '_>,
+        host: &mut dyn HostContext,
+        out: &mut ImageStream,
+    ) -> Result<usize, PluginError> {
+        if self.pending.is_empty() {
+            return Ok(0);
+        }
+        match how {
+            Correction::Batch(measured) => measured.apply(&mut self.pending, &self.at),
+            Correction::Crop(registered, ly, lx) => registered
+                .apply_batch(&mut self.pending, ly, lx, &self.at)
+                .map_err(no_common_area)?,
+        }
+        let n = self.pending.len();
+        for v in self.pending.drain(..) {
+            out.push(host, self.store.encode(&v, &mut self.stored))?;
+        }
+        self.at.clear();
+        Ok(n)
     }
-    at.clear();
-    Ok(())
+}
+
+fn no_common_area(none: suite2p_registration::NoCommonArea) -> PluginError {
+    shared::no_common_area(
+        none,
+        "a smaller Max shift — and Max block shift for a non-rigid run — keeps the search in \
+         bounds",
+    )
 }
 
 /// Motion correction for a timelapse, by suite2p's method.
@@ -138,10 +169,7 @@ impl Plugin for Stabilize {
         // Refused, not quietly downgraded. Someone who picked a device and got
         // the CPU instead would have no way to tell the difference from a slow
         // GPU run.
-        if let Some(why) = settings
-            .backend
-            .unavailable_reason(info.height as usize, info.width as usize)
-        {
+        if let Some(why) = settings.backend.unavailable_reason(ly, lx) {
             return Err(PluginError::unsupported(why));
         }
         // suite2p's `align_by_chan2` is 1-based `align_by_chan` under the hood;
@@ -149,118 +177,44 @@ impl Plugin for Stabilize {
         // "the other one" is the only choice anyone makes.
         let align_by = usize::from(settings.align_by_chan2).min(info.channels.saturating_sub(1));
 
-        // The reference is built from a sample rather than the whole recording:
-        // 300 frames is plenty to find what the field looks like at rest, and a
-        // twenty-minute recording is tens of thousands. Reading all of them to
-        // build one average would be the slowest part of the run by far.
-        let step = (info.frames / settings.nimg_init).max(1);
-        let sample_len = info.frames.div_ceil(step);
+        let mut session = Session::new(ly, lx, info.frames, &settings);
+        // The batch is bounded by memory in the crate, for every caller alike;
+        // when that shortens the temporal smoothing's window, it is said.
+        if let Some(note) = session.shortened_window() {
+            host.log(&note);
+        }
+        let passes = session.passes();
 
         // One bar for the whole run, divided by how long each stage takes
         // rather than by how many stages there are — see `work`. Split evenly,
         // it gave a tenth to reading the sample (a blink), a fifth to building
         // the reference (most of the run) and the rest to the pass over the
         // recording, so it raced, froze for seconds, and raced again.
-        let planes_per_frame = info.channels.max(1) * info.slices.max(1);
+        let slices = info.slices.max(1);
+        let channels = info.channels.max(1);
+        let planes_per_frame = channels * slices;
         // A single-plane recording's measurement plane is the one corrected,
         // so it is not read a second time. See the pass below. A crop reads
         // every plane again: it moves them only once every frame is measured.
         let cropping = settings.border == Border::Crop;
         let reread = planes_per_frame > 1 || cropping;
-        let measure_work =
-            work::READ + work::CORRELATION + if settings.nonrigid { work::BLOCKS } else { 0.0 };
         let plane_work = if settings.nonrigid {
             work::WARP
         } else {
             work::SHIFT
         } + if reread { work::READ } else { 0.0 };
+        let sample_len = session.reference_frames().len();
         let reading = sample_len as f64 * work::READ;
         let referencing = work::reference(sample_len, settings.reference_iterations);
-        let registering =
-            info.frames as f64 * (measure_work + planes_per_frame as f64 * plane_work);
-        let total = (reading + referencing + registering).max(f64::MIN_POSITIVE);
+        let frames = info.frames as f64;
+        // Every pass reads the sample, builds a reference and measures every
+        // frame; the last also measures the deformation and moves the planes.
+        let per_pass = reading + referencing + frames * (work::READ + work::CORRELATION);
+        let blocks = if settings.nonrigid { work::BLOCKS } else { 0.0 };
+        let last_pass = frames * (blocks + planes_per_frame as f64 * plane_work);
+        let total = (passes as f64 * per_pass + last_pass).max(f64::MIN_POSITIVE);
         let at = move |done: f64| (done / total) as f32;
 
-        let mut sample: Vec<Vec<f32>> = Vec::with_capacity(sample_len);
-        let mut plane = Vec::new();
-        for t in (0..info.frames).step_by(step) {
-            if !host.progress(at(sample.len() as f64 * work::READ)) {
-                return Ok(Outcome::Cancelled);
-            }
-            host.read_plane_f32(Plane::new(align_by, 0, t), &mut plane)?;
-            sample.push(plane.clone());
-        }
-        let bidi = if settings.do_bidiphase && settings.bidiphase == 0 {
-            suite2p_registration::bidiphase::compute(&sample, ly, lx)
-        } else {
-            settings.bidiphase
-        };
-        if bidi != 0 {
-            for f in sample.iter_mut() {
-                suite2p_registration::bidiphase::shift(f, ly, lx, bidi);
-            }
-        }
-
-        let sample_movie = Frames {
-            ly,
-            lx,
-            frames: &sample,
-        };
-        // An earlier run's trouble is not this one's.
-        #[cfg(feature = "gpu-registration")]
-        let _ = suite2p_registration::gpu::take_trouble();
-        let Some(reference) = compute_reference(&sample_movie, &settings, &mut |f| {
-            host.progress(at(reading + f as f64 * referencing))
-        }) else {
-            return Ok(Outcome::Cancelled);
-        };
-        drop(sample);
-        gpu_trouble(&settings)?;
-
-        // Now one pass over the recording: measure each timepoint's shift on
-        // the chosen channel, then apply it to every channel of that timepoint.
-        // Streamed rather than held, so the movie is never resident twice.
-        let mut fft = Fft2::new(ly, lx);
-        let filters = reference_filters_normed(
-            &mut fft,
-            &reference,
-            ly,
-            lx,
-            settings.spatial_taper,
-            settings.smooth_sigma,
-            settings.norm_frames,
-        );
-
-        // The deformation grid, when one was asked for. Built once from the
-        // reference: every frame's blocks are the same blocks, which is what
-        // makes the per-block shifts comparable between frames.
-        // One set of block filters per worker, built once for the whole run.
-        // Every block carries its own FFT plan and scratch, so workers cannot
-        // share a set; building them per batch instead would pay a transform per
-        // block per batch, which over a long recording is thousands of them.
-        let workers = if settings.backend == suite2p_registration::Backend::SingleThread {
-            1
-        } else {
-            workers_available()
-        };
-        let mut nonrigid = settings.nonrigid.then(|| {
-            let blocks = nonrigid::make_blocks(ly, lx, settings.block_size, settings.subpixel);
-            let sets = nonrigid::filter_sets(
-                &reference,
-                lx,
-                &blocks,
-                settings.spatial_taper,
-                settings.smooth_sigma,
-                workers,
-            );
-            (blocks, sets)
-        });
-        let clip = settings
-            .norm_frames
-            .then(|| suite2p_registration::pipeline::percentile_range(&reference));
-
-        let slices = info.slices.max(1);
-        let channels = info.channels.max(1);
         // How a corrected plane is stored in the result (`shared::Store`).
         //
         // **The file's own width, always.** A stabilised recording is the recording
@@ -281,6 +235,12 @@ impl Plugin for Stabilize {
         //
         // A float source stays float, having nothing to round to.
         let store = Store::of(info.pixel_type);
+        let mut writer = Writer {
+            store,
+            stored: Stored::default(),
+            pending: Vec::new(),
+            at: Vec::new(),
+        };
         // The result, declared up front and handed to the host a plane at a
         // time as each is corrected: it is the recording's size, and holding
         // it to hand back at the end is what made a long recording need two or
@@ -308,201 +268,131 @@ impl Plugin for Stabilize {
         } else {
             Some(ImageStream::begin(host, spec_of(info.width, info.height))?)
         };
-        let mut stored = Stored::default();
-        let mut shifts: Vec<Shift> = Vec::with_capacity(info.frames);
-        let mut plane = Vec::new();
-        // Every frame's block field, for a crop: the area to cut to depends on
-        // the whole recording, so the frames are measured first and moved
-        // after, each once — straight from the raw plane into the area.
-        let mut fields_kept: Vec<Vec<nonrigid::BlockShift>> = Vec::new();
 
-        // One pass over the recording, a batch at a time.
-        //
-        // A batch rather than a frame, because `measure_batch` is where the
-        // chosen backend lives — measuring frame by frame here, which is what
-        // this did, ran the whole recording on one thread whatever the dialog
-        // said, and made the three backends indistinguishable. It is also what
-        // `smooth_sigma_time` smooths across, so a frame-at-a-time pass ignored
-        // that setting entirely on the recording while honouring it on the
-        // reference.
-        // Bounded by memory as well as by the setting: a batch is held as
-        // `f32`, and 100 frames of a 2048-pixel-square recording is a gigabyte
-        // and a half. At the default frame size the budget is far larger than
-        // the default batch, so the common case is exactly what was asked for.
-        const BATCH_BUDGET: usize = 256 << 20;
-        let per_frame = (ly * lx * std::mem::size_of::<f32>()).max(1);
-        let batch = settings
-            .batch_size
-            .max(1)
-            .min((BATCH_BUDGET / per_frame).max(1));
-        if batch < settings.batch_size && settings.smooth_sigma_time > 0.0 {
-            // Only worth saying when it changes the answer. `smooth_sigma_time`
-            // smooths within a batch, so a smaller batch is a shorter window;
-            // with it off, the batch is a scheduling detail and nothing else.
-            host.log(&format!(
-                "batch size reduced from {} to {batch} to bound memory at this frame size; \
-                 smooth_sigma_time smooths within a batch, so its window is shorter",
-                settings.batch_size
-            ));
-        }
-        // How many planes are resampled in one parallel sweep. A bound rather
-        // than the whole batch: a recording with several channels and slices has
-        // many planes per timepoint, and a batch of all of them at once would be
-        // an unpredictable amount of memory.
-        const APPLY_CHUNK: usize = 64;
+        // An earlier run's trouble is not this one's.
+        #[cfg(feature = "gpu-registration")]
+        let _ = suite2p_registration::gpu::take_trouble();
 
+        // The measurement channel of the batch being measured, as read — and
+        // as recorded again once measured. Its buffers are kept from batch to
+        // batch, except a single-plane recording's on the last pass, which go
+        // on into the result.
         let mut batch_frames: Vec<Vec<f32>> = Vec::new();
-        let mut pending: Vec<Vec<f32>> = Vec::new();
-        let mut pending_at: Vec<usize> = Vec::new();
-
         // Work done so far, in `work` units, reported as each piece lands.
-        let mut done = reading + referencing;
-        let mut t0 = 0;
-        while t0 < info.frames {
-            let t1 = (t0 + batch).min(info.frames);
-            let frames_here = (t1 - t0) as f64;
-            if !host.progress(at(done)) {
-                return Ok(Outcome::Cancelled);
-            }
-
-            // The measurement channel for this batch.
+        let mut done = 0.0;
+        // Once, or twice for a two-step registration: a reference from the
+        // frames the session names, then the recording a batch at a time.
+        while session.needs_reference() {
+            // A second pass's reference is built with the first pass's batch
+            // buffers idle; held through it, they were a batch more at the
+            // run's peak, which is the sample and the copy the pick makes.
             batch_frames.clear();
-            for t in t0..t1 {
-                host.read_plane_f32(Plane::new(align_by, 0, t), &mut plane)?;
-                if bidi != 0 {
-                    suite2p_registration::bidiphase::shift(&mut plane, ly, lx, bidi);
-                }
-                batch_frames.push(std::mem::take(&mut plane));
-            }
-            done += frames_here * work::READ;
-            host.progress(at(done));
-
-            let batch_shifts = suite2p_registration::pipeline::measure_batch(
-                ly,
-                lx,
-                &filters,
-                &batch_frames,
-                &settings,
-            );
-            gpu_trouble(&settings)?;
-            done += frames_here * work::CORRELATION;
-            if !host.progress(at(done)) {
-                return Ok(Outcome::Cancelled);
-            }
-
-            let fields = nonrigid.as_mut().map(|(blocks, sets)| {
-                nonrigid::measure_blocks_batch(
-                    sets,
-                    ly,
-                    lx,
-                    blocks,
-                    &batch_frames,
-                    &batch_shifts,
-                    &nonrigid::BlockSearch {
-                        maxregshift_nr: settings.maxregshift_nr,
-                        snr_thresh: settings.snr_thresh,
-                        subpixel: settings.subpixel,
-                        clip,
-                    },
-                )
-            });
-            if fields.is_some() {
-                done += frames_here * work::BLOCKS;
+            let mut sample: Vec<Vec<f32>> = Vec::with_capacity(sample_len);
+            for &t in session.reference_frames() {
                 if !host.progress(at(done)) {
                     return Ok(Outcome::Cancelled);
                 }
+                let mut plane = Vec::new();
+                host.read_plane_f32(Plane::new(align_by, 0, t), &mut plane)?;
+                sample.push(plane);
+                done += work::READ;
             }
-            if cropping {
-                fields_kept.extend(fields.unwrap_or_default());
-                shifts.extend_from_slice(&batch_shifts);
-                t0 = t1;
-                continue;
+            let base = done;
+            let built = session.build_reference(sample, &mut |f| {
+                host.progress(at(base + f as f64 * referencing))
+            });
+            if built.is_none() {
+                return Ok(Outcome::Cancelled);
             }
-            let correction = Correction {
-                ly,
-                lx,
-                shifts: &batch_shifts,
-                warp: nonrigid
-                    .as_ref()
-                    .zip(fields.as_ref())
-                    .map(|((blocks, _), f)| (blocks, f.as_slice())),
-                settings: &settings,
-                store,
-            };
+            done = base + referencing;
+            gpu_trouble(&settings)?;
 
-            // Now the planes themselves. xyczt: channel fastest, then z, then t
-            // — the order the host expects a result's planes in.
-            for t in t0..t1 {
-                for z in 0..slices {
-                    for c in 0..channels {
-                        // The measurement channel of a plain single-channel,
-                        // single-slice recording is the plane being corrected,
-                        // and it is already here. Re-reading and re-converting
-                        // it is a second pass over the whole recording for
-                        // nothing, and that is the common case.
-                        if channels == 1 && slices == 1 && c == align_by {
-                            pending.push(std::mem::take(&mut batch_frames[t - t0]));
-                        } else {
-                            host.read_plane_f32(Plane::new(c, z, t), &mut plane)?;
-                            if bidi != 0 {
-                                suite2p_registration::bidiphase::shift(&mut plane, ly, lx, bidi);
-                            }
-                            pending.push(std::mem::take(&mut plane));
-                        }
-                        pending_at.push(t - t0);
-                        if pending.len() >= APPLY_CHUNK {
-                            done += pending.len() as f64 * plane_work;
-                            let stream = out.as_mut().expect("begun unless cropping");
-                            flush(&mut pending, &mut pending_at, host, stream, &mut stored, &correction)?;
-                            if !host.progress(at(done)) {
-                                return Ok(Outcome::Cancelled);
+            while let Some(batch) = session.next_batch() {
+                let frames_here = batch.len() as f64;
+                if !host.progress(at(done)) {
+                    return Ok(Outcome::Cancelled);
+                }
+                batch_frames.resize_with(batch.len(), Vec::new);
+                for (buf, t) in batch_frames.iter_mut().zip(batch.clone()) {
+                    host.read_plane_f32(Plane::new(align_by, 0, t), buf)?;
+                }
+                done += frames_here * work::READ;
+                host.progress(at(done));
+
+                // In place: these buffers are the plugin's own, so the session
+                // undoes the comb (or a first pass's shift) in them and hands
+                // them back as recorded, rather than copying the batch to
+                // correct it. A copy was a second batch held, and with a
+                // small `nimg_init` that was the run's peak.
+                let measured = session.measure_in_place(&mut batch_frames);
+                gpu_trouble(&settings)?;
+                done += frames_here * work::CORRELATION;
+                if !measured.is_final() {
+                    continue;
+                }
+                done += frames_here * blocks;
+                if !host.progress(at(done)) {
+                    return Ok(Outcome::Cancelled);
+                }
+                let Some(stream) = out.as_mut() else {
+                    // A crop moves its planes once every frame is measured.
+                    continue;
+                };
+
+                // Now the planes themselves, as recorded: the batch undoes the
+                // comb as it moves them. xyczt — channel fastest, then z, then
+                // t — the order the host expects a result's planes in.
+                let how = Correction::Batch(&measured);
+                for t in batch.clone() {
+                    for z in 0..slices {
+                        for c in 0..channels {
+                            // The measurement channel of a plain single-channel,
+                            // single-slice recording is the plane being
+                            // corrected, and it is already here. Re-reading and
+                            // re-converting it is a second pass over the whole
+                            // recording for nothing, and that is the common
+                            // case.
+                            let plane = if planes_per_frame == 1 {
+                                std::mem::take(&mut batch_frames[t - batch.start])
+                            } else {
+                                let mut plane = Vec::new();
+                                host.read_plane_f32(Plane::new(c, z, t), &mut plane)?;
+                                plane
+                            };
+                            let pushed = writer.put(plane, t, how, host, stream)?;
+                            if pushed > 0 {
+                                done += pushed as f64 * plane_work;
+                                if !host.progress(at(done)) {
+                                    return Ok(Outcome::Cancelled);
+                                }
                             }
                         }
                     }
                 }
+                done += writer.flush(how, host, stream)? as f64 * plane_work;
             }
-            done += pending.len() as f64 * plane_work;
-            let stream = out.as_mut().expect("begun unless cropping");
-            flush(&mut pending, &mut pending_at, host, stream, &mut stored, &correction)?;
-
-            shifts.extend_from_slice(&batch_shifts);
-            t0 = t1;
         }
+        drop(batch_frames);
+        let registered = session.finish();
+
         // A crop: every frame measured, so the area is known — then every
         // plane read again, moved and cut in one resampling.
         if cropping {
-            let warp = nonrigid
-                .as_ref()
-                .map(|(blocks, _)| (blocks, fields_kept.as_slice()));
-            let parallel = settings.backend != suite2p_registration::Backend::SingleThread;
-            let area = common_area(ly, lx, &shifts, warp, bidi, parallel).map_err(|none| {
-                shared::no_common_area(
-                    none,
-                    "a smaller Max shift — and Max block shift for a non-rigid run — keeps the \
-                     search in bounds",
-                )
-            })?;
-            let cut = Cut::new(ly, lx, area, &shifts, warp);
+            let area = registered.common_area(ly, lx).map_err(no_common_area)?;
             // The cut frame's size is known now, so the result begins here.
-            let mut stream =
-                ImageStream::begin(host, spec_of(area.width as u32, area.height as u32))?;
+            let stream = out.insert(ImageStream::begin(
+                host,
+                spec_of(area.width as u32, area.height as u32),
+            )?);
+            let how = Correction::Crop(&registered, ly, lx);
             for t in 0..info.frames {
                 for z in 0..slices {
                     for c in 0..channels {
+                        let mut plane = Vec::new();
                         host.read_plane_f32(Plane::new(c, z, t), &mut plane)?;
-                        if bidi != 0 {
-                            suite2p_registration::bidiphase::shift(&mut plane, ly, lx, bidi);
-                        }
-                        pending.push(std::mem::take(&mut plane));
-                        pending_at.push(t);
-                        if pending.len() >= APPLY_CHUNK {
-                            done += pending.len() as f64 * plane_work;
-                            let moved = cut.apply_batch(&pending, &pending_at, parallel);
-                            for v in &moved {
-                                stream.push(host, store.encode(v, &mut stored))?;
-                            }
-                            pending.clear();
-                            pending_at.clear();
+                        let pushed = writer.put(plane, t, how, host, stream)?;
+                        if pushed > 0 {
+                            done += pushed as f64 * plane_work;
                             if !host.progress(at(done)) {
                                 return Ok(Outcome::Cancelled);
                             }
@@ -510,11 +400,7 @@ impl Plugin for Stabilize {
                     }
                 }
             }
-            let moved = cut.apply_batch(&pending, &pending_at, parallel);
-            for v in &moved {
-                stream.push(host, store.encode(v, &mut stored))?;
-            }
-            out = Some(stream);
+            writer.flush(how, host, stream)?;
             host.log(&if area.is_upright() {
                 format!(
                     "cropped to the common area: {} x {} pixels from ({}, {})",
@@ -535,31 +421,40 @@ impl Plugin for Stabilize {
         // The estimate only divides the bar; the end of the work is the end of
         // it, whatever the sum came to.
         host.progress(1.0);
+        host.log(&summary(&registered, align_by, passes));
 
-        let moved = shifts.iter().filter(|s| s.dy != 0 || s.dx != 0).count();
-        let worst = shifts
-            .iter()
-            .map(|s| s.dy.abs().max(s.dx.abs()))
-            .max()
-            .unwrap_or(0);
-        host.log(&format!(
-            "registered {} frames on channel {}{}; {moved} moved, largest shift {worst} px{}",
-            info.frames,
-            align_by + 1,
-            match &nonrigid {
-                Some((b, _)) => format!(", non-rigid over {} blocks", b.blocks.len()),
-                None => String::new(),
-            },
-            if bidi != 0 {
-                format!("; bidirectional offset {bidi} px")
-            } else {
-                String::new()
-            }
-        ));
-
-        out.expect("begun before the planes, cropping or not")
+        out.expect("begun before the planes, or once a crop's area was known")
             .finish(StreamTarget::NewDocument)
     }
+}
+
+/// What the run did, in a line: how much moved, and how much of the
+/// recording looks bad — counted, never dropped, which the dialog promises.
+fn summary(registered: &Registered, align_by: usize, passes: usize) -> String {
+    let shifts = &registered.shifts;
+    let moved = shifts.iter().filter(|s| s.dy != 0 || s.dx != 0).count();
+    let worst = shifts
+        .iter()
+        .map(|s| s.dy.abs().max(s.dx.abs()))
+        .max()
+        .unwrap_or(0);
+    let bad = registered.bad_frames.iter().filter(|&&b| b).count();
+    format!(
+        "registered {} frames on channel {}{}{}; {moved} moved, largest shift {worst} px{}; \
+         {bad} flagged as bad (kept)",
+        shifts.len(),
+        align_by + 1,
+        if passes > 1 { ", in two passes" } else { "" },
+        match &registered.nonrigid {
+            Some(nr) => format!(", non-rigid over {} blocks", nr.blocks.blocks.len()),
+            None => String::new(),
+        },
+        if registered.bidiphase != 0 {
+            format!("; bidirectional offset {} px", registered.bidiphase)
+        } else {
+            String::new()
+        }
+    )
 }
 
 /// Stop the run, saying why, if the device failed part of it.

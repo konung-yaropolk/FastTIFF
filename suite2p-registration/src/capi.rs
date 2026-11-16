@@ -33,7 +33,7 @@ use c_api_support::{status, Errors};
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CString};
 
-use crate::{bidiphase, register, Backend, Border, Frames, Registered, Settings};
+use crate::{register, Backend, Border, Frames, Registered, Settings};
 
 /// The call did what it was asked.
 pub const S2P_OK: c_int = status::OK;
@@ -697,10 +697,12 @@ pub unsafe extern "C" fn s2p_registered_apply(
             return ERRORS.fail(S2P_INVALID_ARGUMENT, format!("frame {t} is past the end"));
         }
         let (ly, lx) = (r.ly, r.lx);
-        // Copied first, so `out` may be `frame`.
-        let mut moved = std::slice::from_raw_parts(frame, ly * lx).to_vec();
-        bidiphase::shift(&mut moved, ly, lx, r.inner.bidiphase);
-        let moved = match r.inner.apply(&moved, ly, lx, t) {
+        // `apply` undoes the comb itself and hands back a frame of its own,
+        // and `frame` is read only while it runs, so `out` may be `frame`.
+        let moved = match r
+            .inner
+            .apply(std::slice::from_raw_parts(frame, ly * lx), ly, lx, t)
+        {
             Ok(moved) => moved,
             Err(none) => return ERRORS.fail(S2P_NO_COMMON_AREA, none.to_string()),
         };

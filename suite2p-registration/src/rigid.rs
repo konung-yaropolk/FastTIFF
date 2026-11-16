@@ -149,6 +149,28 @@ pub fn shift_frame(frame: &[f32], ly: usize, lx: usize, dy: i32, dx: i32) -> Vec
     out
 }
 
+/// [`shift_frame`], in place: the frame's own buffer, rotated.
+///
+/// A roll is a permutation, so it needs no second frame to land in: turning
+/// the whole buffer by `dy` rows and then each row by `dx` puts every sample
+/// exactly where [`shift_frame`] would, without allocating one. That matters
+/// where the frames being rolled are a batch or a reference sample, which is
+/// hundreds of megabytes that would otherwise be held twice.
+pub(crate) fn roll(frame: &mut [f32], ly: usize, lx: usize, dy: i32, dx: i32) {
+    if ly == 0 || lx == 0 || (dy == 0 && dx == 0) {
+        return;
+    }
+    let frame = &mut frame[..ly * lx];
+    // Output row `y` is input row `y + dy`: a left rotation by `dy` rows.
+    frame.rotate_left(dy.rem_euclid(ly as i32) as usize * lx);
+    let dx = dx.rem_euclid(lx as i32) as usize;
+    if dx != 0 {
+        for row in frame.chunks_exact_mut(lx) {
+            row.rotate_left(dx);
+        }
+    }
+}
+
 /// Move a frame by `(dy, dx)`, filling what it uncovers as `border` says.
 ///
 /// The same sign as [`shift_frame`]: output `(y, x)` comes from input

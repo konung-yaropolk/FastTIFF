@@ -137,7 +137,9 @@ fn a_registration_through_c_matches_the_rust_one() {
 }
 
 /// A bidirectional offset the run corrected is corrected again when a frame
-/// is applied: the shifts were measured on corrected frames.
+/// is applied, once: the shifts were measured on corrected frames. The C call
+/// and the Rust one take the frame as recorded and agree; the C one used to
+/// undo the comb itself before calling a Rust `apply` that did not.
 #[test]
 fn apply_includes_the_bidiphase_correction() {
     let (ly, lx) = (64, 64);
@@ -163,15 +165,26 @@ fn apply_includes_the_bidiphase_correction() {
     assert_eq!(unsafe { s2p_registered_bidiphase(r) }, 2);
 
     let frame = pixels[ly * lx..2 * ly * lx].to_vec();
-    let mut combed = frame.clone();
-    bidiphase::shift(&mut combed, ly, lx, 2);
-    let want = unsafe { &*r }.inner.apply(&combed, ly, lx, 1).unwrap();
+    let mut combless = frame.clone();
+    crate::bidiphase::shift(&mut combless, ly, lx, 2);
+    let (mut dy, mut dx) = (0, 0);
+    assert_eq!(
+        unsafe { s2p_registered_shift(r, 1, &mut dy, &mut dx, std::ptr::null_mut()) },
+        S2P_OK
+    );
+    // The default border is suite2p's roll.
+    let want = crate::shift_frame(&combless, ly, lx, dy, dx);
     let mut got = vec![0.0f32; ly * lx];
     assert_eq!(
         unsafe { s2p_registered_apply(r, frame.as_ptr(), 1, got.as_mut_ptr()) },
         S2P_OK
     );
     assert_eq!(got, want);
+    assert_eq!(
+        unsafe { &*r }.inner.apply(&frame, ly, lx, 1).unwrap(),
+        want,
+        "the Rust apply takes the frame as recorded too"
+    );
     unsafe { s2p_registered_free(r) };
 }
 

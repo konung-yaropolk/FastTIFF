@@ -76,9 +76,10 @@
 //!     let _ = (t, shift.dy, shift.dx, shift.corr);
 //! }
 //!
-//! // Put a frame back where it belongs — the rigid shift, or the warp with the
-//! // rigid shift folded in when there is a block field. One call, so it cannot
-//! // be applied twice or the deformation forgotten. It can fail only under
+//! // Put a frame back where it belongs: the frame as recorded, any channel of
+//! // timepoint 1. The comb undone, then the rigid shift, or the warp with the
+//! // rigid shift folded in when there is a block field. One call, so none of
+//! // it can be done twice or forgotten. It can fail only under
 //! // `Border::Crop`, when the frames share no area to crop to.
 //! let corrected: Vec<f32> = out.apply(&movie[1], ly, lx, 1).expect("no crop asked for");
 //! # let _ = corrected;
@@ -118,15 +119,22 @@
 //! has the rest: what lands where, how to link it, and what a C caller should
 //! know.
 //!
-//! # Doing it by hand
+//! # A recording that does not fit in memory
 //!
-//! [`register`] is the whole pipeline, and it wants every frame in memory at
-//! once. A host that streams a recording off disk can use the same stages
-//! directly instead: [`compute_reference`] to build the reference,
-//! [`masks::reference_filters_normed`] to prepare it,
-//! [`pipeline::measure_batch`] for a batch of frames at a time, and
-//! [`pipeline::apply_batch`] to move the planes. That is what this crate's own
-//! viewer does, and it is why each stage is public.
+//! [`register`] wants every frame in memory at once. A host that streams a
+//! recording off disk feeds a [`Session`] instead: it reads the frames the
+//! session names for the reference, then the recording a batch at a time,
+//! and moves each batch's planes once the last pass has measured it. The
+//! session does the rest, in the one order there is — the comb, the
+//! reference, the batches and their window, a second pass, the block field,
+//! the bad frames — and [`register`] is a feeder of one too, so the two get
+//! the same answer. This crate's viewer is such a host. See [`session`].
+//!
+//! The stages a session runs stay public — [`compute_reference`],
+//! [`masks::reference_filters_normed`], [`pipeline::measure_batch`],
+//! [`pipeline::apply_batch`] — for timing them and for testing one against
+//! another. Sequencing them into a registration is the session's job: a host
+//! that did it itself would be a second copy of the pipeline to keep in step.
 
 // A published crate, so every public item says what it is.
 #![warn(missing_docs)]
@@ -147,6 +155,7 @@ pub mod nonrigid;
 pub(crate) use image_registration_support::par;
 pub mod pipeline;
 pub mod rigid;
+pub mod session;
 pub mod settings;
 pub mod work;
 
@@ -156,6 +165,7 @@ pub use area::{Area, Cut, NoCommonArea};
 use fft::Fft2;
 use masks::reference_filters_normed;
 pub use rigid::{shift_frame, shift_frame_bordered, Shift};
+pub use session::{Measured, Session};
 pub use settings::{Backend, Border, Settings};
 
 /// A movie to register: frames of `ly * lx`, row-major.
@@ -341,25 +351,35 @@ pub fn compute_reference(
     settings: &Settings,
     on_progress: &mut dyn FnMut(f32) -> bool,
 ) -> Option<Vec<f32>> {
-    let (ly, lx) = (movie.ly, movie.lx);
-    if movie.frames.is_empty() || ly == 0 || lx == 0 {
+    // The frames as they are shifted onto the reference, refined each pass.
+    let mut aligned: Vec<Vec<f32>> = movie.frames.to_vec();
+    refine_reference(&mut aligned, movie.ly, movie.lx, settings, on_progress)
+}
+
+/// [`compute_reference`] on frames it may move: `aligned` is the working
+/// space, rolled onto the reference pass by pass, so a [`Session`] that owns
+/// its sample holds it once rather than once more for the refinement.
+pub(crate) fn refine_reference(
+    aligned: &mut [Vec<f32>],
+    ly: usize,
+    lx: usize,
+    settings: &Settings,
+    on_progress: &mut dyn FnMut(f32) -> bool,
+) -> Option<Vec<f32>> {
+    if aligned.is_empty() || ly == 0 || lx == 0 {
         return Some(vec![0.0; ly * lx]);
     }
     let niter = settings.reference_iterations.max(1);
-    let n = movie.frames.len();
+    let n = aligned.len();
     let total = work::reference(n, niter).max(f64::MIN_POSITIVE);
     let pick_share = work::pick(n);
-    let mut reference =
-        pick_initial_reference_reporting(movie.frames, ly, lx, settings, &mut |f| {
-            on_progress((f as f64 * pick_share / total) as f32)
-        })?;
+    let mut reference = pick_initial_reference_reporting(aligned, ly, lx, settings, &mut |f| {
+        on_progress((f as f64 * pick_share / total) as f32)
+    })?;
     let mut fft = Fft2::new(ly, lx);
     // How much of a pass each half is, for reporting between them.
     let measured = n as f64 * work::CORRELATION;
     let shifted = n as f64 * work::SHIFT;
-
-    // The frames as they are shifted onto the reference, refined each pass.
-    let mut aligned: Vec<Vec<f32>> = movie.frames.to_vec();
 
     for iter in 0..niter {
         let before = pick_share + iter as f64 * (measured + shifted);
@@ -380,21 +400,23 @@ pub fn compute_reference(
         // caller asked for too — it is eight passes over `nimg_init` frames,
         // which is not free.
         let shifts: Vec<Shift> =
-            crate::pipeline::measure_batch(ly, lx, &filters, &aligned, settings);
+            crate::pipeline::measure_batch(ly, lx, &filters, aligned, settings);
         if !on_progress(((before + measured) / total) as f32) {
             return None;
         }
         // Eight passes over the sample, so this is `8 * nimg_init` whole-frame
         // resamples — worth the same parallelism the measurement above gets.
+        // In place: a roll is a permutation, and the frame's own buffer is
+        // where it lands (`rigid::roll`, which is `shift_frame` exactly).
         if settings.backend == Backend::SingleThread {
             for (frame, s) in aligned.iter_mut().zip(&shifts) {
-                *frame = shift_frame(frame, ly, lx, s.dy, s.dx);
+                rigid::roll(frame, ly, lx, s.dy, s.dx);
             }
         } else {
             aligned
                 .par_iter_mut()
                 .zip(shifts.par_iter())
-                .for_each(|(frame, s)| *frame = shift_frame(frame, ly, lx, s.dy, s.dx));
+                .for_each(|(frame, s)| rigid::roll(frame, ly, lx, s.dy, s.dx));
         }
 
         // Keep the best-correlated frames — more of them each pass.
@@ -447,7 +469,9 @@ pub struct Registered {
     pub shifts: Vec<Shift>,
     /// The reference every frame was aligned to.
     pub reference: Vec<f32>,
-    /// The bidirectional offset applied, if any.
+    /// The bidirectional offset the run corrected, measured on the reference
+    /// sample or given; 0 for none. The shifts were measured on frames with it
+    /// undone, and every `apply` undoes it again on the frame it moves.
     pub bidiphase: i32,
     /// Which frames look like outliers — a large deviation from the local
     /// median, a poor correlation, or a shift that hit the limit.
@@ -462,6 +486,10 @@ pub struct Registered {
     /// the frame: [`Settings::border`] from the run — suite2p's own output
     /// unless that asked otherwise — and free to change before applying.
     pub border: Border,
+    /// Whether moving frames and finding the common area may use every
+    /// core: the run's backend was not [`Backend::SingleThread`], which means
+    /// one thread for the whole registration.
+    parallel: bool,
     /// [`Registered::common_area`], once asked for, with the frame size it was
     /// asked for at. Kept because [`Border::Crop`] needs it for every frame
     /// and finding it reads every frame's correction.
@@ -472,16 +500,25 @@ pub struct Registered {
 pub struct NonRigid {
     /// The grid the field is defined on.
     pub blocks: nonrigid::Blocks,
-    /// One entry per frame, each one shift per block.
+    /// One entry per frame, each one shift per block — or none at all, from a
+    /// [`Session`] that was not asked to keep them
+    /// ([`Session::keep_fields`]): its feeder moved each batch's planes as it
+    /// went, and a field per frame of a long recording is memory that grows
+    /// with it. Such a registration names its grid but cannot move a frame
+    /// afterwards; [`Registered::apply`] refuses rather than move it rigidly.
     pub shifts: Vec<Vec<nonrigid::BlockShift>>,
 }
 
 impl Registered {
     /// Put frame `t` back where it belongs.
     ///
-    /// The rigid shift alone when there is no block field, and the warp — which
+    /// `frame` is as recorded — frame `t` of the channel measured, or of any
+    /// other, which is how a second channel follows the first. The comb the
+    /// run found is undone first ([`bidiphase`](Self::bidiphase)), then the
+    /// rigid shift alone when there is no block field, and the warp — which
     /// folds the rigid shift in — when there is. One call, so a caller cannot
-    /// apply the rigid part twice or forget the deformation.
+    /// apply the rigid part twice, forget the deformation, or undo the comb
+    /// twice or not at all.
     ///
     /// Under [`Border::Crop`] the frame comes back cut to
     /// [`common_area`](Self::common_area) — and when the frames moved so far
@@ -489,6 +526,13 @@ impl Registered {
     /// there is no way to crop them that keeps anything, and a frame with its
     /// edges handled some other way would not be what was asked for. Under
     /// every other border it cannot fail.
+    ///
+    /// # Panics
+    ///
+    /// For a frame past the last measured, and for a non-rigid registration
+    /// whose block fields were not kept ([`NonRigid::shifts`]): moved by
+    /// nothing, or rigidly where it should have been warped, the frame would
+    /// come back looking registered and not be.
     pub fn apply(
         &self,
         frame: &[f32],
@@ -496,28 +540,79 @@ impl Registered {
         lx: usize,
         t: usize,
     ) -> Result<Vec<f32>, NoCommonArea> {
-        let rigid = self.shifts.get(t).copied().unwrap_or(Shift {
-            dy: 0,
-            dx: 0,
-            corr: 0.0,
-        });
-        if self.border == Border::Crop {
-            let area = self.common_area(ly, lx)?;
-            return Ok(Cut::new(ly, lx, area, &self.shifts, self.warp()).apply(frame, t));
-        }
-        Ok(match &self.nonrigid {
-            Some(nr) if t < nr.shifts.len() => {
-                nonrigid::warp(frame, ly, lx, &nr.blocks, &nr.shifts[t], rigid, self.border)
-            }
-            _ => shift_frame_bordered(frame, ly, lx, rigid.dy, rigid.dx, self.border),
+        Ok(self.moving(ly, lx)?.one(frame, t))
+    }
+
+    /// [`apply`](Self::apply) for a batch of planes, in place: `planes[i]`,
+    /// as recorded, belongs to frame `frame_of[i]`. Every core does a share
+    /// unless the run was single-threaded.
+    ///
+    /// Under [`Border::Crop`] each plane is replaced by its cut, the common
+    /// area's size, moved and cut in one resampling — or, when there is no
+    /// common area, this is [`NoCommonArea`] and the planes are left as they
+    /// were.
+    ///
+    /// # Panics
+    ///
+    /// As [`apply`](Self::apply) does, and when `planes` and `frame_of`
+    /// differ in length — before any plane is moved.
+    pub fn apply_batch(
+        &self,
+        planes: &mut [Vec<f32>],
+        ly: usize,
+        lx: usize,
+        frame_of: &[usize],
+    ) -> Result<(), NoCommonArea> {
+        self.moving(ly, lx)?.apply(planes, frame_of, self.parallel);
+        Ok(())
+    }
+
+    /// How this registration moves a plane of `ly * lx`: through the one
+    /// [`Moving`](pipeline::Moving) every apply in the crate goes through, cut
+    /// to the common area under [`Border::Crop`].
+    fn moving(&self, ly: usize, lx: usize) -> Result<pipeline::Moving<'_>, NoCommonArea> {
+        let cut = match self.border {
+            Border::Crop => Some(Cut::new(
+                ly,
+                lx,
+                self.common_area(ly, lx)?,
+                &self.shifts,
+                self.warp(),
+            )),
+            _ => None,
+        };
+        Ok(pipeline::Moving {
+            ly,
+            lx,
+            shifts: &self.shifts,
+            warp: self.warp().map(|(blocks, fields)| pipeline::Warp {
+                blocks,
+                fields,
+                first: 0,
+            }),
+            border: self.border,
+            bidiphase: self.bidiphase,
+            cut,
         })
     }
 
     /// The block field as the area module takes it.
+    ///
+    /// # Panics
+    ///
+    /// When the session that measured it kept no fields
+    /// ([`NonRigid::shifts`]): the area and every move would be found from
+    /// the rigid shifts alone, and look right.
     fn warp(&self) -> Option<(&nonrigid::Blocks, &[Vec<nonrigid::BlockShift>])> {
-        self.nonrigid
-            .as_ref()
-            .map(|nr| (&nr.blocks, nr.shifts.as_slice()))
+        self.nonrigid.as_ref().map(|nr| {
+            assert_eq!(
+                nr.shifts.len(),
+                self.shifts.len(),
+                "this registration kept no block field for each frame (Session::keep_fields), \
+                 so it cannot move frames or find their common area afterwards"
+            );
+            (&nr.blocks, nr.shifts.as_slice())
+        })
     }
 
     /// The largest rectangle every frame covers once moved, at any angle
@@ -527,13 +622,26 @@ impl Registered {
     /// Found from every frame's shift and block field the first time it is
     /// asked for, and kept: changing [`shifts`](Self::shifts) or
     /// [`nonrigid`](Self::nonrigid) afterwards is not seen.
+    ///
+    /// # Panics
+    ///
+    /// For a non-rigid registration whose block fields were not kept
+    /// ([`NonRigid::shifts`]), as [`apply`](Self::apply) does. A session run
+    /// under [`Border::Crop`] keeps them.
     pub fn common_area(&self, ly: usize, lx: usize) -> Result<Area, NoCommonArea> {
         if let Some(((h, w), area)) = self.area.get() {
             if (*h, *w) == (ly, lx) {
                 return *area;
             }
         }
-        let area = area::common_area(ly, lx, &self.shifts, self.warp(), self.bidiphase, true);
+        let area = area::common_area(
+            ly,
+            lx,
+            &self.shifts,
+            self.warp(),
+            self.bidiphase,
+            self.parallel,
+        );
         let _ = self.area.set(((ly, lx), area));
         area
     }
@@ -552,230 +660,69 @@ impl Registered {
 
 /// Register a movie: measure each frame's shift against a computed reference.
 ///
-/// The frames themselves are not moved here — [`shift_frame`] does that, and
-/// keeping it separate is what lets a caller apply the same shifts to a second
-/// channel that was aligned by the first.
+/// The frames themselves are not moved here — [`Registered::apply`] does that,
+/// and keeping it separate is what lets a caller apply the same shifts to a
+/// second channel that was aligned by the first.
+///
+/// Every frame in memory, fed to a [`Session`]: the reference sample the
+/// session names, then the recording in the batches it names, borrowed where
+/// they are rather than copied. A host that streams a recording off disk
+/// feeds a session the same way, so the two get the same answer.
 ///
 /// `on_progress` is called with a fraction and returns `false` to stop, which
 /// returns `None`.
+///
+/// # Panics
+///
+/// When a frame is not `ly * lx` samples.
 pub fn register(
     movie: &Frames<'_>,
     settings: &Settings,
     on_progress: &mut dyn FnMut(f32) -> bool,
 ) -> Option<Registered> {
-    let passes = if settings.two_step_registration { 2 } else { 1 };
-    let (ly, lx) = (movie.ly, movie.lx);
+    let n = movie.frames.len();
+    let mut session = Session::new(movie.ly, movie.lx, n, settings);
+    // The caller moves frames once this returns, so every frame's field
+    // goes with the result.
+    session.keep_fields();
 
-    // The bidirectional phase once, for every pass and for the block field.
-    // A second pass that measured it again would measure frames the first
-    // pass had already shifted, and a shift by an odd number of rows swaps
-    // which lines are the odd ones: the comb it found came out mirrored, and
-    // applying that doubled the comb instead of removing it. So it is measured
-    // and corrected here, and each pass runs on corrected frames with nothing
-    // left to measure.
-    let bidi = if settings.do_bidiphase && settings.bidiphase == 0 {
-        bidiphase::compute(movie.frames, ly, lx)
-    } else {
-        settings.bidiphase
-    };
-    let corrected: Vec<Vec<f32>> = movie
-        .frames
-        .iter()
-        .map(|f| {
-            let mut f = f.clone();
-            bidiphase::shift(&mut f, ly, lx, bidi);
-            f
-        })
-        .collect();
-    let per_pass = Settings {
-        do_bidiphase: false,
-        bidiphase: 0,
-        ..*settings
-    };
-    // The second pass's input: the corrected frames moved by the first.
-    let mut shifted: Option<Vec<Vec<f32>>> = None;
-    let mut total: Vec<Shift> = vec![
-        Shift {
-            dy: 0,
-            dx: 0,
-            corr: 0.0
-        };
-        movie.frames.len()
-    ];
-    let mut last: Option<Registered> = None;
+    // One bar for the whole run, divided by what each stage costs (`work`).
+    let referencing = work::reference(
+        session.reference_frames().len(),
+        settings.reference_iterations,
+    );
+    let blocks = if settings.nonrigid { work::BLOCKS } else { 0.0 };
+    let total = (session.passes() as f64 * (referencing + n as f64 * work::CORRELATION)
+        + n as f64 * blocks)
+        .max(f64::MIN_POSITIVE);
+    let mut done = 0.0;
 
-    for pass in 0..passes {
-        let span = 1.0 / passes as f32;
-        let base = pass as f32 * span;
-        let working = shifted.as_deref().unwrap_or(&corrected);
-        let out = register_once(
-            &Frames {
-                ly,
-                lx,
-                frames: working,
-            },
-            &per_pass,
-            &mut |f| on_progress(base + f * span),
-        )?;
-
-        // The second pass measures what is left after the first, so the shift
-        // a caller applies is the sum. Registering the already-registered
-        // frames and reporting only the residual would leave the movie moving.
-        for (t, s) in out.shifts.iter().enumerate() {
-            total[t].dy += s.dy;
-            total[t].dx += s.dx;
-            total[t].corr = s.corr;
-        }
-        if pass + 1 < passes {
-            shifted = Some(
-                working
-                    .iter()
-                    .zip(&out.shifts)
-                    .map(|(f, s)| shift_frame(f, ly, lx, s.dy, s.dx))
-                    .collect(),
-            );
-        }
-        last = Some(out);
-    }
-
-    let mut out = last?;
-    out.shifts = total;
-    out.bidiphase = bidi;
-    out.bad_frames = crate::pipeline::bad_frames(&out.shifts, ly, lx, settings);
-
-    // The deformation is measured *after* the rigid shift, on frames already
-    // brought onto the reference — so a block is looking for the few pixels the
-    // tissue stretched, not the tens the animal moved. Measuring both at once
-    // would need every block's search window to cover the whole motion, and a
-    // 64-pixel block cannot see 50 pixels of travel.
-    if settings.nonrigid {
-        let blocks = nonrigid::make_blocks(ly, lx, settings.block_size, settings.subpixel);
-        let mut filters = nonrigid::block_filters(
-            &out.reference,
-            lx,
-            &blocks,
-            settings.spatial_taper,
-            settings.smooth_sigma,
-        );
-        let clip = settings
-            .norm_frames
-            .then(|| crate::pipeline::percentile_range(&out.reference));
-
-        // The corrected frames: the reference has no comb, so a block matched
-        // against a combed frame would be measuring the comb too.
-        let mut per_frame = Vec::with_capacity(corrected.len());
-        for (t, frame) in corrected.iter().enumerate() {
-            if !on_progress(0.9 + 0.1 * t as f32 / movie.frames.len().max(1) as f32) {
+    while session.needs_reference() {
+        let sample = session
+            .reference_frames()
+            .iter()
+            .map(|&t| movie.frames[t].clone())
+            .collect();
+        let base = done;
+        session.build_reference(sample, &mut |f| {
+            on_progress(((base + f as f64 * referencing) / total) as f32)
+        })?;
+        done += referencing;
+        while let Some(batch) = session.next_batch() {
+            if !on_progress((done / total) as f32) {
                 return None;
             }
-            let r = out.shifts[t];
-            let rigid_corrected = shift_frame(frame, ly, lx, r.dy, r.dx);
-            per_frame.push(nonrigid::measure_blocks(
-                &mut filters,
-                &rigid_corrected,
-                lx,
-                &blocks,
-                &nonrigid::BlockSearch {
-                    maxregshift_nr: settings.maxregshift_nr,
-                    snr_thresh: settings.snr_thresh,
-                    subpixel: settings.subpixel,
-                    clip,
-                },
-            ));
+            let frames = batch.len() as f64;
+            let measured = session.measure(&movie.frames[batch]);
+            done += frames * work::CORRELATION
+                + if measured.is_final() {
+                    frames * blocks
+                } else {
+                    0.0
+                };
         }
-        out.nonrigid = Some(NonRigid {
-            blocks,
-            shifts: per_frame,
-        });
     }
-    Some(out)
-}
-
-/// One registration pass. [`register`] runs this twice when
-/// `two_step_registration` is on.
-fn register_once(
-    movie: &Frames<'_>,
-    settings: &Settings,
-    on_progress: &mut dyn FnMut(f32) -> bool,
-) -> Option<Registered> {
-    let (ly, lx) = (movie.ly, movie.lx);
-
-    // Bidirectional phase first: it is a within-frame artefact, and measuring
-    // motion through a combed picture measures the comb as well.
-    //
-    // Measured only when asked for *and* no fixed offset was supplied, which is
-    // suite2p's rule (`do_bidiphase and settings["bidiphase"] == 0`). Someone
-    // who typed in their scope's offset does not want it re-derived every run.
-    let bidi = if settings.do_bidiphase && settings.bidiphase == 0 {
-        bidiphase::compute(movie.frames, ly, lx)
-    } else {
-        settings.bidiphase
-    };
-    let corrected: Vec<Vec<f32>> = if bidi != 0 {
-        movie
-            .frames
-            .iter()
-            .map(|f| {
-                let mut f = f.clone();
-                bidiphase::shift(&mut f, ly, lx, bidi);
-                f
-            })
-            .collect()
-    } else {
-        movie.frames.to_vec()
-    };
-
-    // The reference is built from a sample, not the whole recording: 300 frames
-    // is enough to find what the field looks like at rest, and a 20-minute
-    // recording is tens of thousands.
-    let step = (corrected.len() / settings.nimg_init.max(1)).max(1);
-    let sample: Vec<Vec<f32>> = corrected.iter().step_by(step).cloned().collect();
-    let reference = compute_reference(
-        &Frames {
-            ly,
-            lx,
-            frames: &sample,
-        },
-        settings,
-        &mut |f| on_progress(f * 0.33),
-    )?;
-    drop(sample);
-
-    let mut fft = Fft2::new(ly, lx);
-    let filters = reference_filters_normed(
-        &mut fft,
-        &reference,
-        ly,
-        lx,
-        settings.spatial_taper,
-        settings.smooth_sigma,
-        settings.norm_frames,
-    );
-    drop(fft);
-
-    // In batches, because `smooth_sigma_time` smooths *within* one — which is
-    // also why `batch_size` changes the answer when that is non-zero, and only
-    // then.
-    let batch = settings.batch_size.max(1);
-    let mut shifts = Vec::with_capacity(corrected.len());
-    for (i, chunk) in corrected.chunks(batch).enumerate() {
-        if !on_progress(0.33 + 0.67 * (i * batch) as f32 / corrected.len().max(1) as f32) {
-            return None;
-        }
-        shifts.extend(crate::pipeline::measure_batch(
-            ly, lx, &filters, chunk, settings,
-        ));
-    }
-
-    Some(Registered {
-        shifts,
-        reference,
-        bidiphase: bidi,
-        bad_frames: Vec::new(),
-        nonrigid: None,
-        border: settings.border,
-        area: Default::default(),
-    })
+    Some(session.finish())
 }
 
 #[cfg(test)]

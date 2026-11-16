@@ -11,11 +11,13 @@
 
 //! Measuring a batch of frames, on whichever backend was asked for.
 
+use crate::area::Cut;
 use crate::fft::{Fft2, FftPlans2};
 use crate::masks::RefFilters;
+use crate::nonrigid::{BlockShift, Blocks};
 use crate::par::*;
 use crate::rigid::{correlation_map, lcorr_for, peak_of, Shift};
-use crate::settings::{Backend, Settings};
+use crate::settings::{Backend, Border, Settings};
 
 /// The 1st and 99th percentile of an image, as `norm_frames` uses.
 ///
@@ -79,6 +81,37 @@ pub fn smooth_in_time(maps: &mut [Vec<f32>], sigma: f64) {
     }
 }
 
+/// The most a batch of frames may hold, in bytes, as `f32`: 256 MiB.
+///
+/// A host streaming a recording holds a batch while it is measured, and
+/// `batch_size` frames of a large field are a lot of memory — the default 100
+/// of a 2048-pixel-square recording is a gigabyte and a half. At the frame
+/// sizes two-photon recordings come in (512 square and below) the budget is
+/// far above the default batch, so it changes nothing there.
+pub const BATCH_BUDGET: usize = 256 << 20;
+
+/// How many frames one batch really holds at this frame size: `batch_size`,
+/// unless that many would be more than [`BATCH_BUDGET`], and at least one.
+///
+/// One rule for every way into a registration, and that is why it is here.
+/// The batch is the window `smooth_sigma_time` smooths across, so a smaller
+/// batch is a shorter window and a different answer; when the streaming
+/// viewer bounded its batches and an in-memory caller did not, the two
+/// returned different shifts for the same frames and the same settings at
+/// large frame sizes. Every caller goes through [`Session`](crate::Session),
+/// which asks this, and [`Session::shortened_window`](crate::Session::shortened_window)
+/// says when it has shortened the window.
+pub fn batch_len(ly: usize, lx: usize, settings: &Settings) -> usize {
+    let per_frame = ly
+        .saturating_mul(lx)
+        .saturating_mul(std::mem::size_of::<f32>())
+        .max(1);
+    settings
+        .batch_size
+        .max(1)
+        .min((BATCH_BUDGET / per_frame).max(1))
+}
+
 /// Measure the shift of every frame in a batch.
 ///
 /// The backend decides where the correlation maps are computed and nothing
@@ -90,11 +123,15 @@ pub fn smooth_in_time(maps: &mut [Vec<f32>], sigma: f64) {
 /// with the `gpu` feature and the frame size suits its radix-2 FFT.
 /// [`Backend::unavailable_reason`] is what the caller checks first, so nobody
 /// selects a device and is quietly handed something else.
-pub fn measure_batch(
+///
+/// `frames` is anything that lends `ly * lx` samples per frame — `Vec<f32>`s,
+/// or slices of one buffer — so a caller holding its frames some other way
+/// does not copy them to measure them.
+pub fn measure_batch<F: AsRef<[f32]> + Sync>(
     ly: usize,
     lx: usize,
     filters: &RefFilters,
-    frames: &[Vec<f32>],
+    frames: &[F],
     settings: &Settings,
 ) -> Vec<Shift> {
     let lcorr = lcorr_for(ly, lx, settings.maxregshift);
@@ -121,7 +158,7 @@ pub fn measure_batch(
             let mut fft = Fft2::new(ly, lx);
             frames
                 .iter()
-                .map(|f| correlation_map(&mut fft, filters, f, settings.maxregshift, clip))
+                .map(|f| correlation_map(&mut fft, filters, f.as_ref(), settings.maxregshift, clip))
                 .collect()
         }
         // A frame at a time, to whichever core is free. The plans are built
@@ -137,7 +174,7 @@ pub fn measure_batch(
                 .par_iter()
                 .map_init(
                     || Fft2::with_plans(&plans),
-                    |fft, f| correlation_map(fft, filters, f, settings.maxregshift, clip),
+                    |fft, f| correlation_map(fft, filters, f.as_ref(), settings.maxregshift, clip),
                 )
                 .collect()
         }
@@ -160,60 +197,171 @@ pub fn measure_batch(
 /// folded into the warp rather than applied before it, so a pixel is resampled
 /// once.
 ///
+/// The planes are as recorded, as every apply in the crate takes them:
+/// `bidiphase` is the offset the run measured them with
+/// ([`Registered::bidiphase`](crate::Registered::bidiphase)), undone first; 0
+/// for none. An argument rather than the caller's job, because a caller who
+/// has to remember to undo the comb can forget it, or do it twice.
+///
 /// This is the other half of the run, next to [`measure_batch`]: a whole
 /// recording is resampled here, one output pixel at a time, and leaving it on
 /// one thread was enough on its own to hide which backend the measuring used.
 ///
-/// Under [`Border::Crop`](crate::Border::Crop) the planes are resampled as
-/// under `Constant`, at full size: the area to cut them to depends on every
-/// frame of the recording, and a batch is only some of them. Measure every
-/// batch first, find the area with [`common_area`](crate::area::common_area),
-/// and move and cut the planes with a [`Cut`](crate::area::Cut) instead.
+/// Under [`Border::Crop`] the planes are resampled as under `Constant`, at
+/// full size: the area to cut them to depends on every frame of the
+/// recording, and a batch is only some of them.
+/// [`Registered::apply_batch`](crate::Registered::apply_batch) moves and cuts
+/// them once every frame is measured.
+///
+/// # Panics
+///
+/// When `planes` and `frame_of` differ in length, or a plane's frame has no
+/// shift (or, in a warp, no field): moved by nothing, or by another frame's
+/// correction, it would come back looking registered and not be.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_batch(
     planes: &mut [Vec<f32>],
     ly: usize,
     lx: usize,
     frame_of: &[usize],
     shifts: &[Shift],
-    warp: Option<(
-        &crate::nonrigid::Blocks,
-        &[Vec<crate::nonrigid::BlockShift>],
-    )>,
+    warp: Option<(&Blocks, &[Vec<BlockShift>])>,
+    bidiphase: i32,
     settings: &Settings,
 ) {
-    let correct = |plane: &mut Vec<f32>, t: usize| {
-        // A plane with no measurement is left exactly as it is. It cannot
-        // happen through the plugin, which pairs them, and silently moving it
-        // by someone else's shift would be worse than not moving it.
-        let Some(&shift) = shifts.get(t) else {
-            return;
-        };
-        *plane = match warp.and_then(|(blocks, fields)| fields.get(t).map(|f| (blocks, f))) {
-            Some((blocks, field)) => {
-                crate::nonrigid::warp(plane, ly, lx, blocks, field, shift, settings.border)
+    let how = Moving {
+        ly,
+        lx,
+        shifts,
+        warp: warp.map(|(blocks, fields)| Warp {
+            blocks,
+            fields,
+            first: 0,
+        }),
+        border: settings.border,
+        bidiphase,
+        cut: None,
+    };
+    how.apply(planes, frame_of, settings.backend != Backend::SingleThread);
+}
+
+/// A block field to warp by: the grid, and the fields held, `fields[0]` being
+/// frame `first`'s — every frame's for a finished registration, one batch's
+/// for a [`Session`](crate::Session) that does not keep them.
+pub(crate) struct Warp<'a> {
+    pub blocks: &'a Blocks,
+    pub fields: &'a [Vec<BlockShift>],
+    pub first: usize,
+}
+
+/// How planes are moved onto the reference, for every way the crate moves
+/// one — [`apply_batch`], [`Session::apply`](crate::Session::apply),
+/// [`Registered::apply`](crate::Registered::apply) and its `apply_batch` — so
+/// that the order is written once: the comb undone, then the cut, the warp or
+/// the shift.
+pub(crate) struct Moving<'a> {
+    pub ly: usize,
+    pub lx: usize,
+    pub shifts: &'a [Shift],
+    pub warp: Option<Warp<'a>>,
+    pub border: Border,
+    /// Undone on each plane before it moves; 0 for none.
+    pub bidiphase: i32,
+    /// Under [`Border::Crop`], once the area is known: moved and cut in one
+    /// resampling, from the plane with its comb undone.
+    pub cut: Option<Cut<'a>>,
+}
+
+impl Moving<'_> {
+    /// Refuse a plane there is no correction for, before any plane is
+    /// touched: one of a frame with no shift, or with no block field held.
+    fn check(&self, planes: usize, frame_of: &[usize]) {
+        assert_eq!(
+            planes,
+            frame_of.len(),
+            "one frame index per plane: {planes} planes and {} indices",
+            frame_of.len()
+        );
+        for &t in frame_of {
+            assert!(
+                t < self.shifts.len(),
+                "a plane of frame {t}, which has no shift: {} frames are measured",
+                self.shifts.len()
+            );
+            if let Some(w) = &self.warp {
+                let held = w.first..w.first + w.fields.len();
+                assert!(
+                    held.contains(&t),
+                    "frame {t}'s block field is not held, only frames {held:?}'s: a session \
+                     holds one batch's at a time unless asked to keep them (Session::keep_fields)"
+                );
             }
+        }
+    }
+
+    /// Frame `t`'s correction, on a plane with its comb undone already.
+    fn moved(&self, combless: &[f32], t: usize) -> Vec<f32> {
+        if let Some(cut) = &self.cut {
+            return cut.apply(combless, t);
+        }
+        let shift = self.shifts[t];
+        let (ly, lx) = (self.ly, self.lx);
+        match &self.warp {
+            Some(w) => crate::nonrigid::warp(
+                combless,
+                ly,
+                lx,
+                w.blocks,
+                &w.fields[t - w.first],
+                shift,
+                self.border,
+            ),
             None => crate::rigid::shift_frame_bordered(
-                plane,
+                combless,
                 ly,
                 lx,
                 shift.dy,
                 shift.dx,
-                settings.border,
+                self.border,
             ),
-        };
-    };
-    // `Single-thread CPU` means one thread for the whole registration, not just
-    // for the measuring — someone who picks it wants a run they can compare
-    // against, or a machine they can still use while it runs.
-    if settings.backend == Backend::SingleThread {
-        for (plane, &t) in planes.iter_mut().zip(frame_of) {
-            correct(plane, t);
         }
-    } else {
-        planes
-            .par_iter_mut()
-            .zip(frame_of.par_iter())
-            .for_each(|(plane, &t)| correct(plane, t));
+    }
+
+    /// A plane of frame `t`, as recorded, moved: a new plane, the one given
+    /// left as it is.
+    pub fn one(&self, plane: &[f32], t: usize) -> Vec<f32> {
+        self.check(1, &[t]);
+        if self.bidiphase == 0 {
+            return self.moved(plane, t);
+        }
+        let mut combless = plane.to_vec();
+        crate::bidiphase::shift(&mut combless, self.ly, self.lx, self.bidiphase);
+        self.moved(&combless, t)
+    }
+
+    /// Move `planes[i]`, as recorded, by frame `frame_of[i]`'s correction, in
+    /// place, on every core when `parallel`.
+    pub fn apply(&self, planes: &mut [Vec<f32>], frame_of: &[usize], parallel: bool) {
+        self.check(planes.len(), frame_of);
+        let (ly, lx) = (self.ly, self.lx);
+        let correct = |plane: &mut Vec<f32>, t: usize| {
+            // The comb first: the shift was measured on frames without it.
+            crate::bidiphase::shift(plane, ly, lx, self.bidiphase);
+            *plane = self.moved(plane, t);
+        };
+        // `Single-thread CPU` means one thread for the whole registration, not
+        // just for the measuring — someone who picks it wants a run they can
+        // compare against, or a machine they can still use while it runs.
+        if !parallel {
+            for (plane, &t) in planes.iter_mut().zip(frame_of) {
+                correct(plane, t);
+            }
+        } else {
+            planes
+                .par_iter_mut()
+                .zip(frame_of.par_iter())
+                .for_each(|(plane, &t)| correct(plane, t));
+        }
     }
 }
 
@@ -234,11 +382,15 @@ pub fn bad_frames(shifts: &[Shift], ly: usize, lx: usize, settings: &Settings) -
     }
     // suite2p's `filter_window`: odd, and never more than 101 frames wide.
     let window = ((n / 2) * 2).saturating_sub(1).clamp(1, 101);
-    let median_of = |v: &[f32], i: usize| -> f32 {
+    // One window's worth, reused: three medians a frame, and a window
+    // allocated for each was three allocations a frame of the recording.
+    let mut w: Vec<f32> = Vec::with_capacity(window);
+    let mut median_of = |v: &[f32], i: usize| -> f32 {
         let half = window / 2;
         let lo = i.saturating_sub(half);
         let hi = (i + half + 1).min(v.len());
-        let mut w: Vec<f32> = v[lo..hi].to_vec();
+        w.clear();
+        w.extend_from_slice(&v[lo..hi]);
         w.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         w[w.len() / 2]
     };

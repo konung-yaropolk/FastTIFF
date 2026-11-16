@@ -452,3 +452,253 @@ fn the_edge_choice_reaches_the_settings() {
     }
     assert!(offered(&decls_for(&info(1, 1, 10))).contains(&"edges".to_string()));
 }
+
+// ------------------------------------------------ the run, against the library
+
+/// A field of many small features, so every block has something to lock onto.
+fn textured(ly: usize, lx: usize) -> Vec<f32> {
+    let mut f = vec![10.0f32; ly * lx];
+    let mut seed = 12345u64;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize
+    };
+    for _ in 0..40 {
+        let (cy, cx) = (next() % ly, next() % lx);
+        let amp = 80.0 + (next() % 120) as f32;
+        for y in cy.saturating_sub(4)..(cy + 5).min(ly) {
+            for x in cx.saturating_sub(4)..(cx + 5).min(lx) {
+                let d2 = ((y as f32 - cy as f32).powi(2) + (x as f32 - cx as f32).powi(2)) / 4.0;
+                f[y * lx + x] += amp * (-d2).exp();
+            }
+        }
+    }
+    f
+}
+
+/// The recording: the field moved along `path`, with a comb on frame `t` that
+/// a bidirectional offset of `comb[t]` undoes.
+fn recording(ly: usize, lx: usize, path: &[(i32, i32)], comb: &[i32]) -> Vec<Vec<f32>> {
+    let base = textured(ly, lx);
+    path.iter()
+        .zip(comb)
+        .map(|(&(dy, dx), &c)| {
+            let mut f = suite2p_registration::shift_frame(&base, ly, lx, -dy, -dx);
+            suite2p_registration::bidiphase::shift(&mut f, ly, lx, -c);
+            f
+        })
+        .collect()
+}
+
+/// Those planes as a float TIFF of `channels` channels, in the file's own
+/// order (channel fastest, then time), opened as the menu opens one.
+fn document(
+    planes: &[Vec<f32>],
+    ly: usize,
+    lx: usize,
+    channels: usize,
+) -> crate::document::Document {
+    use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
+    let opts = WriterOptions::new(lx as u32, ly as u32, SampleType::F32)
+        .metadata(StackMetaWrite::new(channels, 1));
+    let mut w = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+    for f in planes {
+        w.write_frame_f32(f).unwrap();
+    }
+    let bytes = w.finish().unwrap().into_inner();
+    crate::document::Document::from_bytes(bytes, "moving.tif".into(), false).expect("open")
+}
+
+fn run_on(doc: &crate::document::Document, params: &Params) -> (Vec<Vec<f32>>, Vec<String>) {
+    use fasttiff_plugin_api::{VolumeMode, VolumeView};
+    let view = crate::plugins::describe_view(
+        doc,
+        0,
+        false,
+        VolumeView {
+            mode: VolumeMode::Mip,
+            density: 1.0,
+            iso: 0.5,
+            eye: [0.0; 3],
+            forward: [0.0, 0.0, 1.0],
+            up: [0.0, 1.0, 0.0],
+            right: [1.0, 0.0, 0.0],
+        },
+    );
+    let mut host = crate::plugins::StackHost::new(doc, view);
+    let Outcome::NewDocument(out) = Stabilize.run(&mut host, params).expect("run") else {
+        panic!("stabilization should produce a new document");
+    };
+    let planes = out
+        .planes
+        .into_iter()
+        .map(|p| match p {
+            PlaneData::F32(v) => v,
+            other => panic!("a float source came back {:?}", other.pixel_type()),
+        })
+        .collect();
+    (planes, host.messages)
+}
+
+/// The viewer and the library register alike: what the built-in hands back is
+/// what `register` (and so `s2p_register`) measures, moved by its own
+/// `apply`, plane for plane and bit for bit — cropped or not, rigid or warped.
+///
+/// The settings are the ones where the two used to part. A two-step run, which
+/// the built-in offered and did not do; a comb measured on the reference
+/// sample, as suite2p and the built-in did, where the library measured the
+/// whole recording (the sample's frames read 2 here and the rest -3); the
+/// temporal smoothing over short batches; and bad frames, which the built-in
+/// never flagged and now counts — a threshold low enough that some are, so a
+/// count that was never filled would show.
+#[test]
+fn the_built_in_registers_as_the_library_does() {
+    let (ly, lx) = (48, 48);
+    let path = [
+        (0, 0),
+        (2, -1),
+        (-3, 2),
+        (1, 3),
+        (-2, 0),
+        (3, 3),
+        (0, -2),
+        (1, 1),
+        (-1, 2),
+    ];
+    let nimg_init = 3;
+    let sample = suite2p_registration::session::reference_sample(path.len(), nimg_init);
+    let comb: Vec<i32> = (0..path.len())
+        .map(|t| if sample.contains(&t) { 2 } else { -3 })
+        .collect();
+    let frames = recording(ly, lx, &path, &comb);
+    let doc = document(&frames, ly, lx, 1);
+
+    for (edges, cropped) in [(0, false), (2, true)] {
+        for nonrigid in [false, true] {
+            let mut params = Params::new();
+            for (k, v) in [
+                ("spatial_taper", ParamValue::Float(5.0)),
+                ("maxregshift", ParamValue::Float(0.3)),
+                ("nimg_init", ParamValue::Int(nimg_init as i64)),
+                ("do_bidiphase", ParamValue::Bool(true)),
+                ("two_step_registration", ParamValue::Bool(true)),
+                ("smooth_sigma_time", ParamValue::Float(1.0)),
+                ("batch_size", ParamValue::Int(4)),
+                ("nonrigid", ParamValue::Bool(nonrigid)),
+                ("block_size", ParamValue::Int(24)),
+                ("edges", ParamValue::Choice(edges)),
+                ("th_badframes", ParamValue::Float(0.01)),
+            ] {
+                params.set(k, v);
+            }
+            let settings = super::params::settings_from(&params);
+            assert_eq!(settings.border == suite2p_registration::Border::Crop, cropped);
+
+            let library = suite2p_registration::register(
+                &suite2p_registration::Frames {
+                    ly,
+                    lx,
+                    frames: &frames,
+                },
+                &settings,
+                &mut |_| true,
+            )
+            .expect("not cancelled");
+            assert_eq!(library.bidiphase, 2, "measured on the sample");
+
+            let (planes, log) = run_on(&doc, &params);
+            assert_eq!(planes.len(), frames.len());
+            for (t, plane) in planes.iter().enumerate() {
+                let want = library.apply(&frames[t], ly, lx, t).expect("an area");
+                assert!(
+                    *plane == want,
+                    "crop {cropped}, non-rigid {nonrigid}: frame {t} differs from the library's"
+                );
+            }
+            let summary = log
+                .iter()
+                .find(|m| m.starts_with("registered"))
+                .expect("a summary");
+            let bad = library.bad_frames.iter().filter(|&&b| b).count();
+            assert!(bad > 0, "the fixture: some frames are flagged");
+            assert!(summary.contains("in two passes"), "{summary}");
+            assert!(summary.contains("bidirectional offset 2 px"), "{summary}");
+            assert!(
+                summary.contains(&format!("{bad} flagged as bad")),
+                "{summary}"
+            );
+        }
+    }
+}
+
+/// The same for the path a single-plane recording skips: two channels,
+/// measured on the second (`align_by_chan2`), with a comb. Every plane is then
+/// read again as recorded and moved by the session, which undoes the comb
+/// itself — where the built-in once undid it by hand at each read site. The
+/// first channel holds still, so a run that measured it instead would move
+/// nothing and show.
+#[test]
+fn every_channel_registers_as_the_library_moves_it() {
+    let (ly, lx) = (48, 48);
+    let path = [(0, 0), (2, -1), (-3, 2), (1, 3), (-2, 0), (3, 3), (0, -2)];
+    let comb = [2; 7];
+    let moving = recording(ly, lx, &path, &comb);
+    let still = recording(ly, lx, &[(5, 5); 7], &comb);
+    let planes: Vec<Vec<f32>> = still
+        .iter()
+        .zip(&moving)
+        .flat_map(|(a, b)| [a.clone(), b.clone()])
+        .collect();
+    let doc = document(&planes, ly, lx, 2);
+
+    for (edges, cropped) in [(0, false), (2, true)] {
+        for nonrigid in [false, true] {
+            let mut params = Params::new();
+            for (k, v) in [
+                ("spatial_taper", ParamValue::Float(5.0)),
+                ("maxregshift", ParamValue::Float(0.3)),
+                ("align_by_chan2", ParamValue::Bool(true)),
+                ("do_bidiphase", ParamValue::Bool(true)),
+                ("batch_size", ParamValue::Int(3)),
+                ("nonrigid", ParamValue::Bool(nonrigid)),
+                ("block_size", ParamValue::Int(24)),
+                ("edges", ParamValue::Choice(edges)),
+            ] {
+                params.set(k, v);
+            }
+            let settings = super::params::settings_from(&params);
+            assert!(settings.align_by_chan2);
+            let library = suite2p_registration::register(
+                &suite2p_registration::Frames {
+                    ly,
+                    lx,
+                    frames: &moving,
+                },
+                &settings,
+                &mut |_| true,
+            )
+            .expect("not cancelled");
+            assert_eq!(library.bidiphase, 2, "the fixture: a comb to undo");
+            assert!(library.shifts.iter().any(|s| s.dy != 0 || s.dx != 0));
+
+            let (out, log) = run_on(&doc, &params);
+            assert_eq!(out.len(), planes.len());
+            for t in 0..path.len() {
+                for (c, channel) in [&still, &moving].into_iter().enumerate() {
+                    let want = library.apply(&channel[t], ly, lx, t).expect("an area");
+                    assert!(
+                        out[t * 2 + c] == want,
+                        "crop {cropped}, non-rigid {nonrigid}: channel {c} of frame {t} \
+                         differs from the library's"
+                    );
+                }
+            }
+            assert!(
+                log.iter().any(|m| m.starts_with("registered 7 frames on channel 2")),
+                "{log:?}"
+            );
+        }
+    }
+}

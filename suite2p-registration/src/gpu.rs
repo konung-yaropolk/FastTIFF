@@ -216,16 +216,17 @@ pub fn take_trouble() -> Option<String> {
 /// carries it is done, and a whole batch at once is a hundred megabytes and
 /// more of it, asked for when a card short of memory can least spare it. A
 /// staging allocation that fails can lose the device.
-fn upload_frames(
+fn upload_frames<F: AsRef<[f32]>>(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     raw: &wgpu::Buffer,
-    frames: &[Vec<f32>],
+    frames: &[F],
     pixels: usize,
 ) -> Result<(), String> {
     let mut pending = 0usize;
     let mut before: Option<wgpu::SubmissionIndex> = None;
     for (i, frame) in frames.iter().enumerate() {
+        let frame = frame.as_ref();
         let samples = &frame[..pixels.min(frame.len())];
         scoped(device, || {
             queue.write_buffer(raw, (i * pixels * 4) as u64, bytemuck::cast_slice(samples))
@@ -628,7 +629,7 @@ impl GpuContext {
     /// The same `(2*lcorr+1)^2` row-major windows [`crate::rigid::correlation_map`]
     /// returns, one per frame, in order. Call [`set_reference`](Self::set_reference)
     /// first.
-    pub fn maps(&mut self, frames: &[Vec<f32>], max_shift: f64) -> Vec<Vec<f32>> {
+    pub fn maps<F: AsRef<[f32]>>(&mut self, frames: &[F], max_shift: f64) -> Vec<Vec<f32>> {
         let (ly, lx) = (self.ly, self.lx);
         let pixels = ly * lx;
         let lcorr = lcorr_for(ly, lx, max_shift);
@@ -745,7 +746,7 @@ impl GpuContext {
     pub fn shift_of(&mut self, frame: &[f32], filters: &RefFilters, max_shift: f64) -> Shift {
         self.set_reference(filters);
         let lcorr = lcorr_for(self.ly, self.lx, max_shift);
-        let maps = self.maps(std::slice::from_ref(&frame.to_vec()), max_shift);
+        let maps = self.maps(std::slice::from_ref(&frame), max_shift);
         peak_of(&maps[0], lcorr)
     }
 }
@@ -780,11 +781,11 @@ pub fn release_resident() {
 /// as the adapter having gone away between the availability check and the run.
 /// Always `None` in a browser, where there is no device (see [`shared_device`]).
 #[cfg(target_arch = "wasm32")]
-pub fn maps_of(
+pub fn maps_of<F: AsRef<[f32]>>(
     _ly: usize,
     _lx: usize,
     _filters: &RefFilters,
-    _frames: &[Vec<f32>],
+    _frames: &[F],
     _max_shift: f64,
 ) -> Option<Vec<Vec<f32>>> {
     None
@@ -795,11 +796,11 @@ pub fn maps_of(
 /// `None` when no device can be opened for this size, which the caller treats
 /// as the adapter having gone away between the availability check and the run.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn maps_of(
+pub fn maps_of<F: AsRef<[f32]>>(
     ly: usize,
     lx: usize,
     filters: &RefFilters,
-    frames: &[Vec<f32>],
+    frames: &[F],
     max_shift: f64,
 ) -> Option<Vec<Vec<f32>>> {
     let mut slot = RESIDENT.lock().unwrap_or_else(|e| e.into_inner());

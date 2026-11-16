@@ -56,9 +56,10 @@ for (t, shift) in out.shifts.iter().enumerate() {
 }
 println!("{} frame(s) flagged", out.bad_frames.iter().filter(|b| **b).count());
 
-// Put a frame back where it belongs. One call, so the rigid shift cannot be
-// applied twice or the deformation forgotten. It can fail only under
-// `Border::Crop`, when the frames share no area to crop to.
+// Put a frame back where it belongs: the frame as recorded, any channel of
+// timepoint 1. One call, so the comb is undone once, the rigid shift cannot be
+// applied twice and the deformation cannot be forgotten. It can fail only
+// under `Border::Crop`, when the frames share no area to crop to.
 let corrected: Vec<f32> = out.apply(&movie[1], ly, lx, 1).expect("no crop asked for");
 # let _ = corrected;
 # }
@@ -66,6 +67,72 @@ let corrected: Vec<f32> = out.apply(&movie[1], ly, lx, 1).expect("no crop asked 
 
 The closure is progress: it is called with a fraction and returns `false` to
 stop, which makes `register` return `None`.
+
+### A recording that does not fit in memory
+
+`register` wants every frame at once. A host that reads a recording off disk
+feeds a `Session` instead, which names the frames it wants and does the rest:
+
+```rust
+use suite2p_registration::{Border, Session, Settings};
+
+# fn main() {
+# let (ly, lx) = (32, 32);
+# let n_frames = 6;
+# let read = |_t: usize| vec![1.0f32; ly * lx];
+let settings = Settings { nonrigid: false, spatial_taper: 5.0, ..Settings::default() };
+let mut session = Session::new(ly, lx, n_frames, &settings);
+while session.needs_reference() {            // once, or twice for two-step
+    let sample = session.reference_frames().iter().map(|&t| read(t)).collect();
+    session.build_reference(sample, &mut |_fraction| true).expect("not cancelled");
+    while let Some(batch) = session.next_batch() {
+        let mut frames: Vec<Vec<f32>> = batch.clone().map(read).collect();
+        // Ours, so corrected where they are and handed back as recorded.
+        let measured = session.measure_in_place(&mut frames);
+        if measured.is_final() && settings.border != Border::Crop {
+            let at: Vec<usize> = batch.collect();
+            measured.apply(&mut frames, &at);  // or any channel of these timepoints
+            // ... and now they can be written out
+        }
+    }
+}
+let registered = session.finish();             // shifts, bad frames, block field
+# let _ = registered;
+# }
+```
+
+Under `Border::Crop` the planes wait for `finish`: the area to cut to depends on
+every frame. Read them again then and hand them to `Registered::apply_batch`,
+which moves and cuts them in one resampling — what this repository's viewer
+does.
+
+Frames go in as recorded, everywhere: the session undoes the scanner's comb
+itself, on the sample, the batches and every plane it moves. It picks the
+reference sample as suite2p does (`nimg_init` frames, `np.linspace` over the
+recording), measures the comb on that sample, chooses the batches — they are
+the window `smooth_sigma_time` smooths across, so where they fall is part of
+the answer, and a batch is bounded to `pipeline::BATCH_BUDGET` (256 MiB) of
+frames, which `shortened_window` reports — runs the second pass of
+`two_step_registration`, measures the block field and flags the bad frames.
+`register` is a feeder of one too, and so is this repository's viewer, which is
+what keeps them giving the same answer.
+
+What a session holds is bounded whatever the length of the recording: the
+reference sample while the reference is built, then a batch, plus a shift per
+frame.
+
+- `measure` borrows a batch and never writes it — for frames the caller cannot
+  lend mutably, like `register`'s movie. Frames with a comb to undo, or a first
+  pass's shift to apply, are copied into one batch-sized buffer kept from batch
+  to batch. A feeder whose batch is its own hands it to `measure_in_place`
+  instead, which corrects the frames where they are and hands them back bit for
+  bit, so the batch is held once.
+- A non-rigid run's block fields are held a batch at a time — the ones that
+  batch's planes are moved by — unless the feeder asks to keep every frame's
+  (`keep_fields`) to move frames after `finish`. `register` asks, and a crop
+  keeps them regardless; a field per frame grows with the recording.
+- Everything a `Measured` says, the session says too (`shifts`, `field`,
+  `apply`), for a caller that cannot hold a borrow from one call to the next.
 
 ### Settings
 
@@ -135,16 +202,18 @@ several submissions.
 
 ## Lower-level pieces
 
-`register` is the whole pipeline, but every stage of it is public, because a
-host that streams a recording off disk cannot hand over one `Vec` of every
-frame:
+`register` and `Session` are the whole pipeline, but every stage of it is
+public, for timing a stage or testing one against another. Sequencing them into
+a registration is the session's job; a host that did it itself would be a
+second copy of the pipeline to keep in step.
 
 | module | what is in it |
 |---|---|
+| [`session`] | `Session`, `Measured`, `reference_sample` |
 | [`rigid`] | `correlation_map`, `peak_of`, `phase_correlate`, `shift_frame` |
 | [`nonrigid`] | the block grid, `measure_blocks`, `warp` |
 | [`masks`] | the taper and the whitened reference spectrum (`RefFilters`) |
-| [`pipeline`] | `measure_batch`, `apply_batch`, `smooth_in_time`, `bad_frames` |
+| [`pipeline`] | `measure_batch`, `apply_batch`, `batch_len`, `smooth_in_time`, `bad_frames` |
 | [`bidiphase`] | `compute` and `shift` for the scanner comb |
 | [`fft`] | the cached 2D transform, `fftshift`, `ifftshift` |
 | [`settings`] | `Settings`, `Backend`, `Border` |
@@ -222,10 +291,13 @@ What a C caller should know:
   long as the library is built with `panic = "unwind"`, the default.
 - **Measure once, apply to every channel.** `s2p_registered_apply` takes any
   frame of timepoint `t`, which is how a second channel follows the first.
-- **The frames are copied** by `s2p_register`, and the registration keeps
-  working copies of its own: while it runs it needs about four times the stack's
-  size in memory, counting the caller's. The caller's buffer is free once it
-  returns.
+- **The frames are copied** by `s2p_register`, once: while it runs it needs
+  about twice the stack's size in memory, counting the caller's, plus twice
+  the `nimg_init` frames the reference is built from (the sample, and the copy
+  the initial pick makes of it), and one batch more when a comb is corrected or
+  a second pass run. The caller's buffer is free once it returns.
+- **Frames go in as recorded.** `s2p_registered_apply` undoes the scanner's
+  comb itself before it moves a frame.
 - **Threads.** Separate results can be used on separate threads; one result
   can be applied from several at once, but not while
   `s2p_registered_set_border` changes it. `s2p_last_error` is per thread.

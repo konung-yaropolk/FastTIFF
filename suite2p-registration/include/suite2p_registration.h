@@ -58,9 +58,9 @@ extern "C" {
  * start from s2p_settings_default(): the field list can grow.
  */
 typedef struct S2pSettings {
-    size_t nimg_init;            /* frames sampled to build the reference */
+    size_t nimg_init;            /* frames sampled evenly over the recording for the reference */
     size_t reference_iterations; /* passes refining the reference */
-    size_t batch_size;           /* frames measured together */
+    size_t batch_size;           /* frames measured together; at most 256 MiB of them */
     size_t block_size[2];        /* non-rigid block, rows then columns */
     size_t subpixel;             /* non-rigid sub-pixel precision, 1/subpixel */
     double maxregshift;          /* largest rigid shift, fraction of the smaller side */
@@ -75,7 +75,7 @@ typedef struct S2pSettings {
     int border;                  /* S2P_BORDER_* */
     bool norm_frames;            /* clip frames to the reference's range before correlating */
     bool two_step_registration;  /* register twice, the second pass on the first's output */
-    bool do_bidiphase;           /* measure the bidirectional offset when bidiphase is 0 */
+    bool do_bidiphase;           /* measure the bidirectional offset (on the sample) when bidiphase is 0 */
     bool nonrigid;               /* measure a per-block deformation on top of the rigid shift */
 } S2pSettings;
 
@@ -158,11 +158,12 @@ int s2p_registered_common_area(const S2pRegistered *r, double *y, double *x,
 
 /*
  * Put frame t back where it belongs: the bidirectional correction, then the
- * shift or warp. `frame` holds ly * lx floats; `out` holds the output size
- * (s2p_registered_output_size), which is ly * lx unless the border is
- * S2P_BORDER_CROP. They may be the same buffer. Any channel's frame t can be
- * passed: that is how a second channel moves with the first. Under
- * S2P_BORDER_CROP with no common area: S2P_NO_COMMON_AREA, `out` untouched.
+ * shift or warp. `frame` holds ly * lx floats, as recorded (the comb is
+ * undone here); `out` holds the output size (s2p_registered_output_size),
+ * which is ly * lx unless the border is S2P_BORDER_CROP. They may be the
+ * same buffer. Any channel's frame t can be passed: that is how a second
+ * channel moves with the first. Under S2P_BORDER_CROP with no common area:
+ * S2P_NO_COMMON_AREA, `out` untouched.
  */
 int s2p_registered_apply(const S2pRegistered *r, const float *frame, size_t t, float *out);
 
