@@ -7,7 +7,7 @@
 
 use super::*;
 use fasttiff_plugin_api::{ImageInfo, ParamKind, ParamValue, PixelType};
-use turboreg_registration::Settings;
+use turboreg_registration::{Settings, Transformation};
 
 fn info(channels: usize, slices: usize, frames: usize) -> ImageInfo {
     ImageInfo {
@@ -258,4 +258,352 @@ fn the_edge_choice_is_the_border_it_names() {
         assert_eq!(params::border_from(&p), want, "option {choice}");
     }
     assert!(keys(&decls_with(&info(1, 1, 10), &[])).contains(&"edges".to_string()));
+}
+
+// ------------------------------------------------------------ the run itself
+
+use fasttiff_plugin_api::{Outcome, PlaneData, StackInfo, ViewParams, VolumeMode, VolumeView};
+use turboreg_registration::{register_stack, Backend, Frames, Reference};
+
+/// A stack in memory, `xyczt`, that keeps the planes it was asked for, and
+/// where the bar stood when each was asked for, and can be told to stop.
+struct Memory {
+    image: ImageInfo,
+    view: ViewParams,
+    info: StackInfo,
+    planes: Vec<Vec<f32>>,
+    reads: Vec<Plane>,
+    /// The progress last reported before each of `reads`.
+    read_at: Vec<f32>,
+    progress: f32,
+    progress_calls: usize,
+    stop_after: Option<usize>,
+}
+
+impl Memory {
+    /// `channels` textures drifting a little further each of `frames` frames.
+    fn drifting(w: u32, h: u32, channels: usize, frames: usize) -> Self {
+        let (w, h) = (w as usize, h as usize);
+        let mut planes = Vec::new();
+        for t in 0..frames {
+            let (dx, dy) = (0.7 * t as f32, -0.45 * t as f32 + 0.05 * (t * t) as f32);
+            for c in 0..channels {
+                let k = 1.0 + 0.35 * c as f32;
+                planes.push(
+                    (0..w * h)
+                        .map(|i| {
+                            let (x, y) = ((i % w) as f32 - dx, (i / w) as f32 - dy);
+                            300.0
+                                + ((x * 0.21 * k).sin() * (y * 0.17).cos()) * 90.0
+                                + (x * 0.09 + y * 0.13 * k).sin() * 30.0
+                                + 4.0 * ((t * 7 + c * 3) % 5) as f32
+                        })
+                        .collect(),
+                );
+            }
+        }
+        Memory {
+            image: ImageInfo {
+                width: w as u32,
+                height: h as u32,
+                channels,
+                slices: 1,
+                frames,
+                samples_per_pixel: 1,
+                pixel_type: PixelType::F32,
+            },
+            view: ViewParams {
+                frame_index: 0,
+                volume_view: false,
+                channels: Vec::new(),
+                luts: Vec::new(),
+                volume: VolumeView {
+                    mode: VolumeMode::Mip,
+                    density: 1.0,
+                    iso: 0.5,
+                    eye: [0.0; 3],
+                    forward: [0.0, 0.0, 1.0],
+                    up: [0.0, 1.0, 0.0],
+                    right: [1.0, 0.0, 0.0],
+                },
+            },
+            info: StackInfo {
+                name: "drift".into(),
+                ..Default::default()
+            },
+            planes,
+            reads: Vec::new(),
+            read_at: Vec::new(),
+            progress: 0.0,
+            progress_calls: 0,
+            stop_after: None,
+        }
+    }
+
+    fn plane(&self, p: Plane) -> &[f32] {
+        &self.planes[p.t * self.image.channels + p.c]
+    }
+}
+
+impl HostContext for Memory {
+    fn image(&self) -> ImageInfo {
+        self.image
+    }
+    fn view(&self) -> &ViewParams {
+        &self.view
+    }
+    fn stack_info(&self) -> &StackInfo {
+        &self.info
+    }
+    fn read_plane_u16(&mut self, _: Plane, _: &mut Vec<u16>) -> Result<(), PluginError> {
+        unreachable!("TurboReg reads float planes")
+    }
+    fn read_plane_f32(&mut self, p: Plane, out: &mut Vec<f32>) -> Result<(), PluginError> {
+        self.reads.push(p);
+        self.read_at.push(self.progress);
+        out.clear();
+        out.extend_from_slice(self.plane(p));
+        Ok(())
+    }
+    fn progress(&mut self, fraction: f32) -> bool {
+        self.progress = fraction;
+        self.progress_calls += 1;
+        self.stop_after.is_none_or(|n| self.progress_calls <= n)
+    }
+    fn log(&mut self, _: &str) {}
+}
+
+/// The dialog's values for a run.
+fn chosen(
+    reference: Reference,
+    window: usize,
+    n_frames: usize,
+    measure: usize,
+    backend: Backend,
+) -> Params {
+    let mut p = Params::new();
+    let model = Transformation::all()
+        .iter()
+        .position(|t| *t == Transformation::Translation)
+        .unwrap();
+    p.set("transformation", ParamValue::Choice(model));
+    let options = params::reference_options(Transformation::Translation);
+    let r = options.iter().position(|r| *r == reference).unwrap();
+    p.set("reference", ParamValue::Choice(r));
+    p.set("moving_average", ParamValue::Int(window as i64));
+    p.set("n_frames", ParamValue::Int(n_frames as i64));
+    p.set("ref_channel", ParamValue::Choice(measure));
+    let b = Backend::all().iter().position(|b| *b == backend).unwrap();
+    p.set("backend", ParamValue::Choice(b));
+    p
+}
+
+/// The run reads the measurement a batch at a time, as the crate's session
+/// asks for it, and the stack it hands back is the one the crate registers
+/// from memory and moves, plane for plane, to the bit: the measurement (a
+/// channel, or the channel mean in `f64`), the target's frames read first,
+/// the smoothing across batch edges, the border. Then every plane is read
+/// once, in `xyczt` order, to be moved.
+#[test]
+fn the_run_registers_what_the_crate_registers_from_memory() {
+    let (w, h, channels, frames) = (40u32, 32u32, 2usize, 9usize);
+    let mut cases = Vec::new();
+    for reference in Reference::all() {
+        for window in [1, 3] {
+            cases.push(chosen(reference, window, 2, 0, Backend::SingleThread));
+        }
+    }
+    cases.push(chosen(Reference::First, 1, 1, 2, Backend::SingleThread));
+    if Backend::MultiThread.available() {
+        cases.push(chosen(Reference::Mean, 3, 1, 0, Backend::MultiThread));
+        cases.push(chosen(Reference::Previous, 1, 1, 1, Backend::MultiThread));
+    }
+    for p in cases {
+        let mut host = Memory::drifting(w, h, channels, frames);
+        let settings = params::settings_from(&p);
+        let measure_on = params::measure_channel(&p, channels);
+        let what = format!("{settings:?}, measured on {measure_on:?}");
+        let Outcome::NewDocument(out) = TurboReg.run(&mut host, &p).expect("run") else {
+            panic!("{what}: registration should produce a new document");
+        };
+
+        // The crate, from memory.
+        let (ly, lx) = (h as usize, w as usize);
+        let movie: Vec<Vec<f32>> = (0..frames)
+            .map(|t| match measure_on {
+                Some(c) => host.plane(Plane::new(c, 0, t)).to_vec(),
+                None => {
+                    let mut sum: Vec<f64> = host
+                        .plane(Plane::new(0, 0, t))
+                        .iter()
+                        .map(|&v| v as f64)
+                        .collect();
+                    for c in 1..channels {
+                        for (a, &v) in sum.iter_mut().zip(host.plane(Plane::new(c, 0, t))) {
+                            *a += v as f64;
+                        }
+                    }
+                    sum.iter().map(|&v| (v / channels as f64) as f32).collect()
+                }
+            })
+            .collect();
+        let mut want = register_stack(
+            &Frames {
+                ly,
+                lx,
+                frames: &movie,
+            },
+            &settings,
+            &mut |_| true,
+        )
+        .expect("the crate registers it");
+        want.border = params::border_from(&p);
+        assert_eq!(out.planes.len(), frames * channels, "{what}");
+        for t in 0..frames {
+            for c in 0..channels {
+                let moved = want
+                    .apply(host.plane(Plane::new(c, 0, t)), ly, lx, t)
+                    .unwrap();
+                let PlaneData::F32(got) = &out.planes[t * channels + c] else {
+                    panic!("{what}: a float stack comes back float");
+                };
+                assert!(
+                    got.iter()
+                        .map(|v| v.to_bits())
+                        .eq(moved.iter().map(|v| v.to_bits())),
+                    "{what}: frame {t} channel {c}"
+                );
+            }
+        }
+
+        // What was read: the session's plan, a measurement per frame it asked
+        // for, and then every plane once.
+        let plan = turboreg_registration::Session::new(ly, lx, frames, &settings)
+            .unwrap()
+            .plan();
+        let measure = |t: usize| -> Vec<Plane> {
+            match measure_on {
+                Some(c) => vec![Plane::new(c, 0, t)],
+                None => (0..channels).map(|c| Plane::new(c, 0, t)).collect(),
+            }
+        };
+        let expect: Vec<Plane> = plan
+            .reference
+            .chain(plan.fit)
+            .flat_map(measure)
+            .chain((0..frames).flat_map(|t| (0..channels).map(move |c| Plane::new(c, 0, t))))
+            .collect();
+        assert_eq!(host.reads, expect, "{what}");
+    }
+}
+
+/// Stopping is honoured at every point the bar moves: while the target's
+/// frames are read, while the stack is fitted, and while it is moved — and
+/// there and then, the call that said stop being the last. A run that only
+/// noticed when the moved planes were streamed would also end `Cancelled`.
+#[test]
+fn a_run_stops_wherever_it_is_asked_to() {
+    let p = chosen(Reference::Mean, 3, 1, 0, Backend::SingleThread);
+    let mut whole = Memory::drifting(24, 20, 2, 5);
+    assert!(matches!(
+        TurboReg.run(&mut whole, &p),
+        Ok(Outcome::NewDocument(_))
+    ));
+    let calls = whole.progress_calls;
+    for stop_after in [0, 3, calls / 2, calls - 2] {
+        let mut host = Memory::drifting(24, 20, 2, 5);
+        host.stop_after = Some(stop_after);
+        assert!(
+            matches!(TurboReg.run(&mut host, &p), Ok(Outcome::Cancelled)),
+            "stopped after {stop_after} of {calls} progress calls"
+        );
+        assert_eq!(
+            host.progress_calls,
+            stop_after + 1,
+            "the run went on after call {} said stop",
+            stop_after + 1
+        );
+    }
+}
+
+/// What the crate cannot run, or could not finish, comes back as the run's
+/// error in the host's terms: a refusal for what cannot run here, a failure
+/// for frames the GPU lost, which says what will run instead.
+#[test]
+fn a_registration_that_cannot_run_or_finish_says_why() {
+    let unchainable = plugin_error(Error::Unchainable);
+    assert!(
+        matches!(&unchainable, PluginError::Unsupported(why) if why.contains("first frame")),
+        "{unchainable}"
+    );
+    assert!(matches!(
+        plugin_error(Error::Unavailable("no card".into())),
+        PluginError::Unsupported(why) if why == "no card"
+    ));
+    let device = plugin_error(Error::Device {
+        failed: 3,
+        frames: 9,
+        why: "no room".into(),
+    });
+    let PluginError::Failed(why) = &device else {
+        panic!("{device}");
+    };
+    assert!(
+        why.starts_with("3 of 9 frames could not be registered on the GPU: no room. ")
+            && why.contains(Backend::MultiThread.label()),
+        "{why}"
+    );
+}
+
+/// The measurement is read in step with the fits, never more than a batch
+/// ahead of them: before a frame's measurement is read, every frame of the
+/// batches before its own has been registered, which the bar shows. The run
+/// used to read the whole measurement movie first, with the bar at the
+/// reading's share alone, and only then register any of it. On one thread a
+/// batch is a frame; on every core, a stack of a few batches.
+#[test]
+fn the_measurement_is_read_a_batch_at_a_time() {
+    let (w, h) = (24u32, 20u32);
+    let mut runs = vec![(Backend::SingleThread, 6)];
+    if Backend::MultiThread.available() {
+        let s = Settings {
+            backend: Backend::MultiThread,
+            ..Settings::default()
+        };
+        let per = turboreg_registration::Session::new(h as usize, w as usize, 1000, &s)
+            .unwrap()
+            .batch_len();
+        runs.push((Backend::MultiThread, 2 * per + 3));
+    }
+    for (backend, frames) in runs {
+        let p = chosen(Reference::Previous, 1, 1, 0, backend);
+        let settings = params::settings_from(&p);
+        let session =
+            turboreg_registration::Session::new(h as usize, w as usize, frames, &settings).unwrap();
+        let per = session.batch_len();
+        assert!(per < frames, "{backend:?}: more than one batch");
+        assert_eq!(session.plan().fit, 0..frames);
+
+        let mut host = Memory::drifting(w, h, 1, frames);
+        assert!(matches!(
+            TurboReg.run(&mut host, &p),
+            Ok(Outcome::NewDocument(_))
+        ));
+        // One channel, one slice: a read per frame to measure, each fitted
+        // (frame 0 is read for frame 1 to be fitted against), then a read per
+        // frame to move.
+        let n = frames as f64;
+        let total = n * work::READ + n * work::REGISTER + n * (work::READ + work::WARP);
+        assert_eq!(host.reads.len(), 2 * frames);
+        for t in 0..frames {
+            assert_eq!(host.reads[t], Plane::new(0, 0, t));
+            let registered = (t - t % per) as f64;
+            assert!(
+                host.read_at[t] as f64 * total + 1e-3 >= registered * work::REGISTER,
+                "{backend:?}: frame {t} was read with the bar at {}, before the {registered} \
+                 frames ahead of it were registered",
+                host.read_at[t]
+            );
+        }
+    }
 }

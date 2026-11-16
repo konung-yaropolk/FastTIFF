@@ -15,7 +15,13 @@
 //! # The algorithm is EPFL's
 //!
 //! [`turboreg_registration`] is the implementation; this file is only the
-//! plugin around it — the dialog, reading planes, and streaming the result.
+//! plugin around it — the dialog, reading the planes the crate's
+//! [`Session`] asks for, and streaming the result. What is fitted against
+//! what, in what order and in batches of what size, and whether the GPU lost
+//! frames on the way, is the session's to decide, as it is for the C
+//! interface and `register_stack`, so the three cannot drift apart; and the
+//! recording is never held, only a batch of its measurement at a time and then
+//! one plane being moved.
 //! See that crate's manifest for the licensing, which is not the obvious one.
 //!
 //! # Measured on one channel, applied to all
@@ -34,7 +40,7 @@ use fasttiff_plugin_api::{
     HostContext, ImageSpec, ImageStream, Outcome, ParamDecl, Params, Plane, Plugin, PluginError,
     PluginInfo,
 };
-use turboreg_registration::{register_stack, Backend, Frames, Reference, Transformation};
+use turboreg_registration::{Backend, Batch, Error, Pass, Reference, Session, Wanted};
 
 /// Where a run went, for the log line — naming the card for a GPU run, since
 /// "GPU" on a machine with an integrated and a discrete one does not say which.
@@ -64,37 +70,64 @@ mod work {
     pub(super) const WARP: f64 = 6.0;
 }
 
-/// The measurement image for one timepoint: one channel's plane, or the mean of
-/// all of them.
+/// The measurement image for timepoint `t` into `out`: one channel's plane, or
+/// the mean of all of them. `scratch` and `sum` are the mean's working space,
+/// kept by the caller so that a batch after the first allocates nothing.
 fn measurement(
     host: &mut dyn HostContext,
     channel: Option<usize>,
     channels: usize,
     t: usize,
+    out: &mut Vec<f32>,
     scratch: &mut Vec<f32>,
-) -> Result<Vec<f32>, PluginError> {
+    sum: &mut Vec<f64>,
+) -> Result<(), PluginError> {
     match channel {
-        Some(c) => {
-            host.read_plane_f32(Plane::new(c, 0, t), scratch)?;
-            Ok(scratch.clone())
-        }
+        Some(c) => host.read_plane_f32(Plane::new(c, 0, t), out),
+        // The mean of one channel is the channel.
+        None if channels <= 1 => host.read_plane_f32(Plane::new(0, 0, t), out),
         None => {
             // The mean across channels. Accumulated in f64 so a 16-bit stack
             // with many channels cannot lose its low bits to repeated rounding.
-            let mut acc: Vec<f64> = Vec::new();
             for c in 0..channels {
                 host.read_plane_f32(Plane::new(c, 0, t), scratch)?;
-                if acc.is_empty() {
-                    acc = scratch.iter().map(|&v| v as f64).collect();
+                if c == 0 {
+                    sum.clear();
+                    sum.extend(scratch.iter().map(|&v| v as f64));
                 } else {
-                    for (a, &v) in acc.iter_mut().zip(scratch.iter()) {
+                    for (a, &v) in sum.iter_mut().zip(scratch.iter()) {
                         *a += v as f64;
                     }
                 }
             }
-            let n = channels.max(1) as f64;
-            Ok(acc.iter().map(|&v| (v / n) as f32).collect())
+            let n = channels as f64;
+            out.clear();
+            out.extend(sum.iter().map(|&v| (v / n) as f32));
+            Ok(())
         }
+    }
+}
+
+/// A registration that could not start, or could not finish, as the run's
+/// error.
+fn plugin_error(e: Error) -> PluginError {
+    match e {
+        // The dialog does not offer this combination, but a saved parameter
+        // set or a scripted call can still carry it.
+        Error::Unchainable => {
+            PluginError::unsupported(format!("{e}; use the first frame or the mean"))
+        }
+        // Refused, not quietly downgraded: someone who picked a backend and
+        // got a different one would have no way to tell.
+        Error::Unavailable(why) => PluginError::unsupported(why),
+        // Frames the device failed are not fitted for want of the device, not
+        // because the data would not fit: a stack that came back with them
+        // unmoved would be no result, so the run fails and says what will run.
+        Error::Device { .. } => PluginError::failed(format!(
+            "{e}. {} runs on the processor and needs no GPU memory.",
+            Backend::MultiThread.label()
+        )),
+        other => PluginError::failed(other.to_string()),
     }
 }
 
@@ -135,78 +168,58 @@ impl Plugin for TurboReg {
         }
 
         let settings = params::settings_from(params);
-        // Refused, not quietly downgraded: someone who picked a backend and got
-        // a different one would have no way to tell.
-        if let Some(why) = settings.backend.unavailable_reason(ly, lx) {
-            return Err(PluginError::unsupported(why));
-        }
-        // The dialog does not offer this combination, but a saved parameter set
-        // or a scripted call can still carry it.
-        if settings.reference == Reference::Previous
-            && settings.transformation == Transformation::Bilinear
-        {
-            return Err(PluginError::unsupported(
-                "a bilinear warp cannot be chained onto another, so it cannot be registered \
-                 against the previous frame; use the first frame or the mean",
-            ));
-        }
+        let mut session = Session::new(ly, lx, info.frames, &settings).map_err(plugin_error)?;
 
         let channels = info.channels.max(1);
         let slices = info.slices.max(1);
         let measure_on = params::measure_channel(params, channels);
 
-        // One bar for the whole run, divided by how long each stage takes.
+        // One bar for the whole run, divided by how long each stage takes:
+        // every frame the session asks for is read, the ones it fits are
+        // registered, and then every plane is read and moved.
         let reads_per_measurement = measure_on.map_or(channels, |_| 1) as f64;
+        let read = reads_per_measurement * work::READ;
+        let plan = session.plan();
         let planes = (channels * slices) as f64;
-        let total = info.frames as f64
-            * (reads_per_measurement * work::READ
-                + work::REGISTER
-                + planes * (work::READ + work::WARP));
+        let total = (plan.reference.len() + plan.fit.len()) as f64 * read
+            + plan.fit.len() as f64 * work::REGISTER
+            + info.frames as f64 * planes * (work::READ + work::WARP);
         let total = total.max(f64::MIN_POSITIVE);
         let at = move |done: f64| (done / total) as f32;
 
-        // The measurement movie, one plane per timepoint.
-        let mut scratch = Vec::new();
-        let mut movie: Vec<Vec<f32>> = Vec::with_capacity(info.frames);
-        for t in 0..info.frames {
-            if !host.progress(at(t as f64 * reads_per_measurement * work::READ)) {
+        // The measurement, a batch at a time, as the session asks for it: the
+        // frames of its target first where it builds one, then the stack.
+        // Only a batch is ever held; the buffers are the next batch's too.
+        let mut batch: Vec<Vec<f32>> = Vec::new();
+        let (mut scratch, mut sum) = (Vec::new(), Vec::new());
+        let mut done = 0.0;
+        while let Some(Wanted { frames, pass }) = session.wanted() {
+            let count = frames.len();
+            if batch.len() < count {
+                batch.resize_with(count, Vec::new);
+            }
+            for (frame, t) in batch.iter_mut().zip(frames) {
+                if !host.progress(at(done)) {
+                    return Ok(Outcome::Cancelled);
+                }
+                measurement(host, measure_on, channels, t, frame, &mut scratch, &mut sum)?;
+                done += read;
+            }
+            if !host.progress(at(done)) {
                 return Ok(Outcome::Cancelled);
             }
-            movie.push(measurement(host, measure_on, channels, t, &mut scratch)?);
-        }
-        let reading = info.frames as f64 * reads_per_measurement * work::READ;
-
-        let frames = Frames {
-            ly,
-            lx,
-            frames: &movie,
-        };
-        let registering = info.frames as f64 * work::REGISTER;
-        // An earlier run's trouble is not this one's.
-        #[cfg(feature = "gpu-registration")]
-        let _ = turboreg_registration::gpu::take_trouble();
-        let Some(mut result) = register_stack(&frames, &settings, &mut |f| {
-            host.progress(at(reading + f as f64 * registering))
-        }) else {
-            return Ok(Outcome::Cancelled);
-        };
-        result.border = params::border_from(params);
-        drop(movie);
-        // Frames the device failed are not fitted for want of the device, not
-        // because the data would not fit: a stack that came back with them
-        // unmoved would be no result, so the run fails and says why.
-        #[cfg(feature = "gpu-registration")]
-        if settings.backend == Backend::Gpu && !result.failed.is_empty() {
-            if let Some(why) = turboreg_registration::gpu::take_trouble() {
-                return Err(PluginError::failed(format!(
-                    "{} of {} frames could not be registered on the GPU: {why}. {} \
-                     runs on the processor and needs no GPU memory.",
-                    result.failed.len(),
-                    info.frames,
-                    Backend::MultiThread.label()
-                )));
+            session
+                .feed(Batch::Split(&batch[..count]))
+                .map_err(plugin_error)?;
+            if pass == Pass::Fit {
+                done += count as f64 * work::REGISTER;
             }
         }
+        drop((batch, sum));
+        // Frames the GPU failed fail the run here (`Error::Device`): the
+        // session takes the device's reasons for its own batches.
+        let mut result = session.finish().map_err(plugin_error)?;
+        result.border = params::border_from(params);
 
         // What comes out: the frame, or under a crop the common area — found
         // from every frame's transformation before anything is resampled, so
@@ -256,7 +269,6 @@ impl Plugin for TurboReg {
         };
         let mut out = ImageStream::begin(host, spec)?;
         let mut stored = Stored::default();
-        let mut done = reading + registering;
         // xyczt: channel fastest, then z, then t — the order the host expects.
         for t in 0..info.frames {
             for z in 0..slices {

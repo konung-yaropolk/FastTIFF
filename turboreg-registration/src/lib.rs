@@ -37,10 +37,17 @@
 //! reference implementation is hard to trust. [`Transformation`] is its
 //! transformation constants, [`Reference`] its `reference=` argument.
 //!
-//! Measuring and applying are kept apart, as in the sibling crate: [`register`]
-//! returns matrices and moves nothing. That is what lets a multi-channel
-//! recording be measured on one channel and moved on all of them, which is the
-//! only way to keep channels registered *to each other*.
+//! Measuring and applying are kept apart, as in the sibling crate:
+//! [`register_stack`] returns matrices and moves nothing. That is what lets a
+//! multi-channel recording be measured on one channel and moved on all of them,
+//! which is the only way to keep channels registered *to each other*.
+//!
+//! A stack does not have to be in memory to be registered. A [`Session`] asks
+//! for the frames it needs a batch at a time and is handed them from wherever
+//! they are — a file read plane by plane, say — and [`register_stack`] and the
+//! C interface are the same session fed from memory. What a run computes, and
+//! in what order, is decided there once; see the `session` module, which also
+//! says which frames it asks for twice.
 //!
 //! # The matrix direction, which is the thing to get right
 //!
@@ -72,12 +79,14 @@ pub mod gpu;
 pub mod optimize;
 pub(crate) use image_registration_support::par;
 pub mod pyramid;
+pub mod session;
 pub mod settings;
 pub mod spline;
 pub mod transform;
 
 pub use area::{Area, NoCommonArea};
 pub use optimize::{register_pair, Fit};
+pub use session::{Batch, Error, Pass, Plan, Session, Wanted};
 pub use settings::{Backend, Border, Reference, Settings, Transformation};
 pub use transform::{Matrix, Point};
 
@@ -190,69 +199,15 @@ impl Registered {
     }
 }
 
-/// Pixels per piece of a stack-wide average. Fixed, like the optimiser's row
-/// pieces: each pixel's sum runs over the frames in order on whichever thread
-/// takes its piece, so the result does not depend on how many there are.
-const PIXELS_PER_CHUNK: usize = 4096;
-
-/// The mean of the first `len` frames.
+/// Register a stack held in memory, every frame against whatever
+/// [`Settings::reference`] says.
 ///
-/// Parallel across pixels rather than across frames: every pixel's sum is
-/// still taken over the frames in order, so the answer is bit-identical to a
-/// single-threaded mean, and each piece walks the frames contiguously.
-fn mean_of(frames: &[Vec<f32>], len: usize, parallel: bool) -> Vec<f32> {
-    let take = len.clamp(1, frames.len().max(1));
-    let n = frames.first().map_or(0, |f| f.len());
-    let mut out = vec![0.0f32; n];
-    par::for_each_chunk_mut(&mut out, PIXELS_PER_CHUNK, parallel, |i, piece| {
-        let base = i * PIXELS_PER_CHUNK;
-        let mut acc = vec![0.0f64; piece.len()];
-        for f in frames.iter().take(take) {
-            for (a, &v) in acc.iter_mut().zip(&f[base..base + piece.len()]) {
-                *a += v as f64;
-            }
-        }
-        for (o, a) in piece.iter_mut().zip(acc) {
-            *o = (a / take as f64) as f32;
-        }
-    });
-    out
-}
-
-/// Smooth the stack over time with a centred box window.
-///
-/// For a recording too dim to register frame by frame: averaging neighbours
-/// raises what the optimiser is matching without moving it, because the window
-/// is centred. An odd window is used whatever is asked for — an even one is
-/// off-centre by half a frame, which is a drift.
-///
-/// Each output frame is independent of the others, so they are built in
-/// parallel when `parallel`; each one still sums its window in frame order.
-fn moving_average(frames: &[Vec<f32>], window: usize, parallel: bool) -> Vec<Vec<f32>> {
-    let w = window.max(1) | 1;
-    if w == 1 || frames.len() < 2 {
-        return frames.to_vec();
-    }
-    let half = (w / 2) as isize;
-    let n = frames.len() as isize;
-    let times: Vec<usize> = (0..frames.len()).collect();
-    par::map_in_order(&times, parallel, |&t| {
-        let t = t as isize;
-        let lo = (t - half).max(0);
-        let hi = (t + half).min(n - 1);
-        let count = (hi - lo + 1) as f64;
-        let len = frames[0].len();
-        let mut acc = vec![0.0f64; len];
-        for f in frames.iter().take((hi + 1) as usize).skip(lo as usize) {
-            for (a, &v) in acc.iter_mut().zip(f.iter()) {
-                *a += v as f64;
-            }
-        }
-        acc.iter().map(|&v| (v / count) as f32).collect()
-    })
-}
-
-/// Register a stack, every frame against whatever [`Settings::reference`] says.
+/// A [`Session`] fed from `movie`, batch by batch: the frames are read where
+/// they are, and the registration holds a batch's worth of working memory
+/// beside them — plus, with a moving average of `2h + 1` frames, a copy of the
+/// `2h` before each batch — not a copy of the movie, unless the window is as
+/// wide as it. A stack too large to hold, or read from a file, goes through a
+/// [`Session`] directly.
 ///
 /// The frames themselves are not moved: this returns matrices, and
 /// [`Registered::apply`] moves one. Keeping those apart is what lets a
@@ -260,134 +215,17 @@ fn moving_average(frames: &[Vec<f32>], window: usize, parallel: bool) -> Vec<Vec
 /// which is the only way to keep the channels registered to *each other*.
 ///
 /// `on_progress` is called with a fraction and returns `false` to stop, which
-/// returns `None`.
+/// is [`Error::Cancelled`]. A combination the method cannot run, or a backend
+/// that cannot run here, is refused before anything is fitted
+/// ([`Session::new`]); frames the GPU failed fail the run
+/// ([`Error::Device`]).
 pub fn register_stack(
     movie: &Frames<'_>,
     settings: &Settings,
     on_progress: &mut dyn FnMut(f32) -> bool,
-) -> Option<Registered> {
-    let (ly, lx) = (movie.ly, movie.lx);
-    let n = movie.frames.len();
-    let threaded = settings.backend.threaded();
-    if n == 0 || ly == 0 || lx == 0 {
-        return Some(Registered {
-            matrices: Vec::new(),
-            reference: None,
-            failed: Vec::new(),
-            threaded,
-            border: Border::default(),
-            area: Default::default(),
-        });
-    }
-    // Bilinear cannot be chained: the composition of two bilinear maps is not
-    // bilinear. Refused rather than silently substituted, as pystackreg does.
-    if settings.reference == Reference::Previous
-        && settings.transformation == Transformation::Bilinear
-    {
-        return None;
-    }
-
-    let measured = moving_average(movie.frames, settings.moving_average, threaded);
-    let mut matrices = vec![Matrix::identity(); n];
-    let mut failed = Vec::new();
-
-    // Which frame each pair registers, and against what. Frame 0 is never
-    // fitted under `First` or `Previous`: it is the reference itself, or the
-    // start of the chain, and keeps the identity.
-    let reference = match settings.reference {
-        // The first `n_frames` averaged; one means frame 0 alone.
-        Reference::First => Some(mean_of(&measured, settings.n_frames.max(1), threaded)),
-        Reference::Mean => Some(mean_of(&measured, n, threaded)),
-        Reference::Previous => None,
-    };
-    let start = usize::from(settings.reference != Reference::Mean);
-    let targets: Vec<usize> = (start..n).collect();
-    // Under `Previous` each frame is fitted against the raw frame before it —
-    // not that frame registered — so these pairs are as independent of each
-    // other as any others, and run like them. Only the composition below is a
-    // chain.
-    let pairs: Vec<(&[f32], &[f32])> = targets
-        .iter()
-        .map(|&t| {
-            let against = match &reference {
-                Some(r) => &r[..],
-                None => &measured[t - 1][..],
-            };
-            (against, &measured[t][..])
-        })
-        .collect();
-
-    // In batches, so the run reports how far it has got and can be stopped
-    // between them. A batch is a scheduling unit only: every pair is fitted
-    // independently, so the batch size cannot change an answer.
-    let per = batch_size(settings, lx, ly);
-    let parallel = settings.backend.parallel_for(settings.reference);
-    let mut fits: Vec<Option<optimize::Fit>> = Vec::with_capacity(pairs.len());
-    for chunk in pairs.chunks(per) {
-        if !on_progress(fits.len() as f32 / pairs.len().max(1) as f32) {
-            return None;
-        }
-        fits.extend(optimize::register_pairs(chunk, lx, ly, settings, parallel));
-    }
-
-    match settings.reference {
-        Reference::Previous => {
-            // Compose down the stack, so frame t's matrix is expressed against
-            // frame 0: frame t - 1's, followed by the step from t - 1 to t. A
-            // frame that could not be fitted keeps its predecessor's matrix, so
-            // the chain carries on past it rather than snapping back to the
-            // identity.
-            for (&t, fit) in targets.iter().zip(fits) {
-                match fit {
-                    Some(f) => {
-                        matrices[t] = matrices[t - 1].compose(&f.matrix).unwrap_or(f.matrix);
-                    }
-                    None => {
-                        failed.push(t);
-                        matrices[t] = matrices[t - 1];
-                    }
-                }
-            }
-        }
-        Reference::First | Reference::Mean => {
-            for (&t, fit) in targets.iter().zip(fits) {
-                match fit {
-                    Some(f) => matrices[t] = f.matrix,
-                    None => failed.push(t),
-                }
-            }
-        }
-    }
-    if !on_progress(1.0) {
-        return None;
-    }
-    Some(Registered {
-        matrices,
-        reference,
-        failed,
-        threaded,
-        border: Border::default(),
-        area: Default::default(),
-    })
-}
-
-/// How many pairs go in one batch: one progress report, and one chance to be
-/// stopped, per batch.
-///
-/// On the GPU, a batch is as many frames as the device holds at once, which is
-/// also the unit the device works in. On the CPU, enough to keep every thread
-/// busy with some to spare for the uneven ones; on one thread, one frame, so
-/// progress moves as each frame finishes.
-fn batch_size(settings: &Settings, lx: usize, ly: usize) -> usize {
-    match settings.backend {
-        #[cfg(feature = "gpu")]
-        Backend::Gpu => gpu::lanes_for(lx, ly).max(1),
-        Backend::SingleThread => 1,
-        _ => {
-            let _ = (lx, ly);
-            (4 * par::workers()).max(8)
-        }
-    }
+) -> Result<Registered, Error> {
+    Session::new(movie.ly, movie.lx, movie.frames.len(), settings)?
+        .run(Batch::Split(movie.frames), on_progress)
 }
 
 #[cfg(test)]

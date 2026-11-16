@@ -34,7 +34,7 @@ use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CString};
 
 use crate::{
-    register_stack, Backend, Border, Frames, Reference, Registered, Settings, Transformation,
+    Backend, Batch, Border, Error, Reference, Registered, Session, Settings, Transformation,
 };
 
 /// The call did what it was asked.
@@ -225,9 +225,26 @@ static ERRORS: Errors = Errors::new(
     "the registration",
 );
 
-/// Held for the length of a GPU run; see [`tr_register`].
-#[cfg(feature = "gpu")]
-static GPU_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// A run's [`Error`] as the status a C caller gets, its words in
+/// [`tr_last_error`].
+fn fail_with(e: Error) -> c_int {
+    let status = match e {
+        // `to_settings` refuses it first, in words that name the constants.
+        Error::Unchainable => TR_INVALID_ARGUMENT,
+        Error::Unavailable(_) => TR_UNAVAILABLE,
+        Error::Cancelled => {
+            return ERRORS.fail(TR_CANCELLED, "the progress callback asked to stop")
+        }
+        // Frames the device failed are not fitted for want of the device, not
+        // because the data would not fit: a caller that asked for the GPU is
+        // told, rather than handed frames that will not move.
+        Error::Device { .. } => TR_FAILED,
+        // `tr_register` feeds the session what it asks for, so these would be
+        // this library's mistake, not the caller's.
+        Error::Batch(_) | Error::Unfinished => TR_FAILED,
+    };
+    ERRORS.fail(status, e.to_string())
+}
 
 /// The handle behind `r`, or the status to return for a null one.
 ///
@@ -295,9 +312,13 @@ pub extern "C" fn tr_backend_available(backend: c_int, ly: usize, lx: usize) -> 
 /// NULL.
 ///
 /// `settings` may be NULL for the defaults. `progress` may be NULL; `user` is
-/// handed to it untouched. The frames are copied, so the caller's buffer is
-/// free again as soon as this returns. GPU runs started from several threads
-/// take turns; CPU runs do not.
+/// handed to it untouched. The frames are read where they are, a batch at a
+/// time, and not copied: beside them the run holds a batch's working memory —
+/// plus, with a moving average of `2h + 1` frames, a copy of the `2h` before
+/// each batch — not a second stack, unless the window is as wide as the
+/// stack. The buffer is the caller's again once this returns, and must not
+/// change while it runs. GPU runs started from several threads take turns on
+/// the device, a batch at a time; CPU runs do not.
 ///
 /// Frames the fit gave up on keep the identity and are reported by
 /// [`tr_registered_failed`], not refused — except under `TR_BACKEND_GPU`, where
@@ -350,54 +371,23 @@ pub unsafe extern "C" fn tr_register(
                 Err(why) => return ERRORS.fail(TR_INVALID_ARGUMENT, why),
             },
         };
-        if let Some(why) = settings.backend.unavailable_reason(ly, lx) {
-            return ERRORS.fail(TR_UNAVAILABLE, why);
-        }
-
-        let movie: Vec<Vec<f32>> = std::slice::from_raw_parts(frames, len)
-            .chunks_exact(ly * lx)
-            .map(<[f32]>::to_vec)
-            .collect();
-        // GPU runs take turns. Whether the device failed part of a run is
-        // reported through one slot per process (`gpu::take_trouble`), so two
-        // at once could clear or take each other's report — a failed run
-        // coming back as OK. They share one device anyway.
-        #[cfg(feature = "gpu")]
-        let _turn = (settings.backend == Backend::Gpu)
-            .then(|| GPU_TURN.lock().unwrap_or_else(|e| e.into_inner()));
-        // An earlier run's trouble is not this one's.
-        #[cfg(feature = "gpu")]
-        let _ = crate::gpu::take_trouble();
+        let session = match Session::new(ly, lx, n_frames, &settings) {
+            Ok(session) => session,
+            Err(e) => return fail_with(e),
+        };
         let mut on_progress = |fraction: f32| match progress {
             Some(report) => report(fraction, user) != 0,
             None => true,
         };
-        let Some(mut inner) = register_stack(
-            &Frames {
-                ly,
-                lx,
-                frames: &movie,
-            },
-            &settings,
-            &mut on_progress,
-        ) else {
-            return ERRORS.fail(TR_CANCELLED, "the progress callback asked to stop");
+        // The caller's frames, read in place batch by batch: nothing of the
+        // stack is copied. The session holds a batch's working memory, takes
+        // the device's reasons for its own GPU batches and no other run's
+        // (`Error::Device`), and takes turns on the device with other runs.
+        let stack = std::slice::from_raw_parts(frames, len);
+        let mut inner = match session.run(Batch::Packed(stack), &mut on_progress) {
+            Ok(inner) => inner,
+            Err(e) => return fail_with(e),
         };
-        // Frames the device failed are not fitted for want of the device, not
-        // because the data would not fit: a caller that asked for the GPU is
-        // told, rather than handed frames that will not move.
-        #[cfg(feature = "gpu")]
-        if settings.backend == Backend::Gpu && !inner.failed.is_empty() {
-            if let Some(why) = crate::gpu::take_trouble() {
-                return ERRORS.fail(
-                    TR_FAILED,
-                    format!(
-                        "{} of {n_frames} frames could not be registered on the GPU: {why}",
-                        inner.failed.len()
-                    ),
-                );
-            }
-        }
         inner.border = border;
         out.write(Box::into_raw(Box::new(TrRegistered { inner, ly, lx })));
         TR_OK

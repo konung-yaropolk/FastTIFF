@@ -28,11 +28,54 @@ than let it open one. A second device opened beside a renderer's, on a card
 whose memory the two have overrun, can deadlock both, and the system then
 resets the GPU and every device in the process is lost. On the one device,
 everything the registration allocates or submits runs inside error scopes: a
-card with no room left for its buffers fails the batch (its frames are
-reported as not fitted, and `gpu::take_trouble` says why) instead of
-panicking. wgpu still treats running out of memory for its own staging, a
+card with no room left for its buffers fails the batch instead of panicking,
+and a registration in which the device failed frames fails as
+`Error::Device`, saying why (`gpu::take_trouble` has the reason for a pair
+registered directly). Registrations on several threads take turns on the
+device a batch at a time, so each gets its own batches' reasons (start them
+from ordinary threads, not from inside rayon tasks, which could deadlock on
+that turn). wgpu still treats running out of memory for its own staging, a
 pipeline or a submission as losing the device — the host's, when it is shared
 — so uploads go a slab at a time to keep that staging small.
+
+## A stack that is not in memory
+
+`register_stack` takes a stack held in memory. A recording too large for that,
+or read from a file plane by plane, goes through a `Session`, which asks for
+the frames it needs a batch at a time and keeps only what a batch needs:
+
+```rust
+use turboreg_registration::{Batch, Session, Settings};
+
+let mut session = Session::new(ly, lx, frames, &Settings::default())?;
+let mut batch: Vec<Vec<f32>> = Vec::new();
+while let Some(wanted) = session.wanted() {
+    batch.clear();
+    batch.extend(wanted.frames.map(|t| read_frame(t))); // from a file, say
+    session.feed(Batch::Split(&batch))?;
+}
+let registered = session.finish()?;
+```
+
+The batch size is the session's (`Session::batch_len`), decided once for every
+caller: as many frames as the GPU takes at once, or on the CPU a few per core
+within 256 MiB of frames. Under `Reference::First` and `Reference::Mean` the
+frames that make the target are asked for first, in a pass of their own, and
+then the stack, from the first frame fitted or the first its window reaches
+back to; `Session::plan` says which frames each pass reads, for dividing a
+progress bar. What both passes need is read twice: nothing under the
+first-frame default with no smoothing, the target's frames and their windows
+with a longer target or a moving average, and every frame under the mean. So
+a source that can be read only once, such as a camera, can feed
+`Reference::Previous` or that default and nothing else. A moving average
+reaches across batch edges through a ring of the `2h` frames before each
+batch (for a window of `2h + 1`; a window wider than the stack is the whole
+stack), so the answers are the ones `register_stack` gives, bit for bit,
+whatever the batches. A batch is lent as one buffer (`Batch::Packed`), a
+buffer per frame (`Batch::Split`) or a borrowed slice per frame
+(`Batch::Slices`), and never copied whole. The viewer's
+TurboReg plugin registers a file this way, and `register_stack` and
+`tr_register` are the same session fed from memory.
 
 ## From C and C++
 
@@ -106,14 +149,18 @@ What a C caller should know:
   long as the library is built with `panic = "unwind"`, the default.
 - **Measure once, apply to every channel.** `tr_registered_apply` takes any
   frame of timepoint `t`, which is how a second channel follows the first.
-- **The frames are copied** by `tr_register`, and the registration keeps
-  working copies of its own: while it runs it needs about three times the stack's
-  size in memory, counting the caller's. The caller's buffer is free once it
-  returns.
+- **The frames are read in place** by `tr_register`, a batch at a time, and
+  not copied: beside the caller's stack the registration holds one batch's
+  working memory (a few frames per core, at most 256 MiB of them, or what the
+  GPU takes at once, and the fits' own), plus, with a moving average of
+  `2h + 1` frames, a copy of the `2h` frames before each batch. That is not a
+  second stack unless the window is as wide as the stack. Keep the buffer
+  unchanged until the call returns; it is the caller's again afterwards.
 - **Threads.** Separate results can be used on separate threads; one result
   can be applied from several at once, but not while
   `tr_registered_set_border` changes it. `tr_last_error` is per thread.
-  GPU runs started from several threads take turns on the one device.
+  GPU runs started from several threads take turns on the one device, a
+  batch at a time.
 - **One header per version.** The header describes the library it shipped
   with; check `tr_version()` if they may have come apart.
 - **Licence.** The library is GPL-3.0-only, and so is a program distributed with it linked in, statically or dynamically; see Licensing below.

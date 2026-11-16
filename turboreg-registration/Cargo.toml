@@ -48,11 +48,11 @@ categories = ["science", "algorithms", "multimedia::images"]
 # path, as a published crate's dependency must be.
 c-api-support = { path = "../c-api-support", version = "0.1.0", optional = true }
 # Parallel CPU registration. Frames are independent once the reference is
-# fixed, so a stack is an embarrassingly parallel map — except under
-# `Reference::Previous`, which is a chain and cannot be. It goes through the
-# `par` of `image-registration-support` (re-exported as this crate's): rayon
-# behind `threads`, sequential stand-ins without it, for the browser's sake, as
-# in `suite2p-registration`.
+# fixed, so a stack is an embarrassingly parallel map — `Reference::Previous`
+# included, whose fits are against the raw frame before and only compose in a
+# chain. It goes through the `par` of `image-registration-support`
+# (re-exported as this crate's): rayon behind `threads`, sequential stand-ins
+# without it, for the browser's sake, as in `suite2p-registration`.
 #
 # A version as well as the path: this crate is published, and a published
 # crate's dependencies must be on crates.io too.

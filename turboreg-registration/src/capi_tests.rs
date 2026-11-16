@@ -2,7 +2,7 @@
 //! refusal a status with a reason rather than a crash.
 
 use super::*;
-use crate::{transform, Matrix};
+use crate::{register_stack, transform, Frames, Matrix};
 use std::ffi::CStr;
 
 const W: usize = 48;
@@ -181,7 +181,140 @@ fn the_callback_can_stop_a_run() {
     };
     assert_eq!(status, TR_CANCELLED);
     assert!(r.is_null(), "a stopped run hands back nothing");
-    assert!(calls >= 1);
+    // Stopped when the callback said so, not merely reported as stopped at
+    // the end: the first call, which said stop, is the only one.
+    assert_eq!(calls, 1);
+}
+
+/// A backend that cannot run here is `TR_UNAVAILABLE` from `tr_register` as
+/// from `tr_backend_available`, with the same reason, and nothing is handed
+/// back; one that can runs. Which backends that covers depends on the build
+/// and the machine — the GPU without the `gpu` feature or an adapter, the
+/// thread pool without `threads` — so every backend is tried and held to
+/// whichever `tr_backend_available` says.
+#[test]
+fn an_unavailable_backend_is_refused_as_unavailable() {
+    let pixels = stack();
+    for backend in [
+        TR_BACKEND_SINGLE_THREAD,
+        TR_BACKEND_MULTI_THREAD,
+        TR_BACKEND_GPU,
+    ] {
+        let s = TrSettings {
+            backend,
+            ..settings()
+        };
+        let available = tr_backend_available(backend, H, W);
+        let why = last_error();
+        let mut r = std::ptr::dangling_mut::<TrRegistered>();
+        let status = unsafe {
+            tr_register(
+                pixels.as_ptr(),
+                N,
+                H,
+                W,
+                &s,
+                None,
+                std::ptr::null_mut(),
+                &mut r,
+            )
+        };
+        if available == TR_UNAVAILABLE {
+            assert_eq!(status, TR_UNAVAILABLE, "{backend}: {}", last_error());
+            assert!(r.is_null(), "{backend}: a refused run hands back nothing");
+            assert_eq!(last_error(), why, "{backend}");
+        } else {
+            assert_eq!(available, TR_OK, "{backend}");
+            assert_eq!(status, TR_OK, "{backend}: {}", last_error());
+            unsafe { tr_registered_free(r) };
+        }
+    }
+}
+
+/// A window wider than the stack is the whole stack for every frame, and is
+/// registered as one: `moving_average` is only refused at zero, so a C caller
+/// can ask for any width at all, and one of 2^40 frames used to abort the
+/// process allocating a ring of that size.
+#[test]
+fn a_window_wider_than_the_stack_registers() {
+    let pixels = stack();
+    let matrices = |moving_average: usize| -> Vec<[f64; 8]> {
+        let s = TrSettings {
+            moving_average,
+            ..settings()
+        };
+        let mut r = std::ptr::null_mut();
+        let status = unsafe {
+            tr_register(
+                pixels.as_ptr(),
+                N,
+                H,
+                W,
+                &s,
+                None,
+                std::ptr::null_mut(),
+                &mut r,
+            )
+        };
+        assert_eq!(status, TR_OK, "{moving_average}: {}", last_error());
+        let out = (0..N)
+            .map(|t| {
+                let mut c = [0.0f64; 8];
+                assert_eq!(unsafe { tr_registered_matrix(r, t, c.as_mut_ptr()) }, TR_OK);
+                c
+            })
+            .collect();
+        unsafe { tr_registered_free(r) };
+        out
+    };
+    let whole = matrices(2 * N - 1);
+    for window in [usize::MAX, usize::MAX / 2 + 1, 1 << 30] {
+        assert_eq!(matrices(window), whole, "{window}");
+    }
+}
+
+/// A batch the GPU fails is `TR_FAILED`, saying how many frames and why —
+/// what the session reports, in a C caller's terms. Skipped without a usable
+/// adapter.
+#[cfg(feature = "gpu")]
+#[test]
+fn frames_the_gpu_fails_are_tr_failed() {
+    if !crate::gpu::available() {
+        return;
+    }
+    let (w, h) = (192, 160);
+    let pixels: Vec<f32> = (0..N * w * h)
+        .map(|i| {
+            let (x, y, t) = ((i % w) as f32, ((i / w) % h) as f32, (i / (w * h)) as f32);
+            100.0 + ((x - 0.5 * t) * 0.2).sin() * 30.0 + ((y + 0.3 * t) * 0.15).cos() * 20.0
+        })
+        .collect();
+    let s = TrSettings {
+        backend: TR_BACKEND_GPU,
+        ..settings()
+    };
+    let mut r = std::ptr::dangling_mut::<TrRegistered>();
+    crate::gpu::NO_ROOM.with(|no_room| no_room.set(true));
+    let status = unsafe {
+        tr_register(
+            pixels.as_ptr(),
+            N,
+            h,
+            w,
+            &s,
+            None,
+            std::ptr::null_mut(),
+            &mut r,
+        )
+    };
+    crate::gpu::NO_ROOM.with(|no_room| no_room.set(false));
+    assert_eq!(status, TR_FAILED);
+    assert!(r.is_null());
+    let why = last_error();
+    assert!(
+        why.contains("could not be registered on the GPU") && why.contains("no room"),
+        "{why}"
+    );
 }
 
 /// What C can say and Rust cannot comes back as a status and a reason.

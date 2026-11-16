@@ -78,8 +78,9 @@
 //! the same card, and on a small card the two can overrun it. So nothing here
 //! fails the way wgpu fails by default, which is to panic: every allocation
 //! and every round runs inside error scopes, and a level the device has no
-//! room for fails its batch — its frames are reported as not fitted, and
-//! [`take_trouble`] says why.
+//! room for fails its batch: its frames are not fitted, and a registration
+//! fails as [`Error::Device`](crate::Error::Device), saying why
+//! ([`take_trouble`] has the reason for a pair registered directly).
 //!
 //! What a scope cannot do is keep the device. wgpu (29) survives running out
 //! of memory for a buffer or a texture, which is where nearly all of this
@@ -248,17 +249,57 @@ static ROUND: Mutex<()> = Mutex::new(());
 /// Why the device last failed a batch, until [`take_trouble`] takes it.
 static TROUBLE: Trouble = Trouble::new();
 
-fn note_trouble(why: String) {
+pub(crate) fn note_trouble(why: String) {
     TROUBLE.note(why);
 }
 
 /// Why the device failed a batch since this was last asked, if it did: no
 /// room on it for a level's planes, or a device that stopped answering. The
-/// batch's frames are reported as not fitted (`Registered::failed`); this is
-/// the sentence that says why. Ask after a run, and once before it to forget
-/// an earlier one's.
+/// batch's frames come back as not fitted; this is the sentence that says
+/// why.
+///
+/// For [`register_pair`](crate::register_pair) and
+/// [`optimize::register_pairs`](crate::optimize::register_pairs) called
+/// directly: ask after them, and once before to forget an earlier caller's. A
+/// [`Session`](crate::Session) — and so `register_stack`, the C interface and
+/// the viewer — takes its own batches' reasons and fails as
+/// [`Error::Device`](crate::Error::Device), and those batches take turns to
+/// keep each reason with its batch. A direct call does not take a turn, so
+/// one made while sessions run elsewhere in the process may find their
+/// reasons, or lose its own to them.
 pub fn take_trouble() -> Option<String> {
     TROUBLE.take()
+}
+
+/// Held by each batch a session sends to the device, from emptying the
+/// trouble slot to taking what the batch put there; see [`attributed`].
+pub(crate) static TURN: Mutex<()> = Mutex::new(());
+
+/// Run `work` — one batch of device work — and say why the device failed it,
+/// if it did.
+///
+/// The reason is noted in one slot per process, so two batches at once could
+/// take each other's: a failed run coming back clean, a clean one failing.
+/// Batches take turns here instead, and the slot is emptied first, so neither
+/// an earlier caller's reason nor a concurrent one's is this batch's. Taking
+/// turns also keeps one batch's levels on the card at a time, whoever's they
+/// are, which is what the budget of [`lanes_for`] assumes; the device runs one
+/// submission at a time regardless (`ROUND`).
+pub(crate) fn attributed<R>(work: impl FnOnce() -> R) -> (R, Option<String>) {
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = TROUBLE.take();
+    let done = work();
+    (done, TROUBLE.take())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: every level built on this thread fails as a full card fails
+    /// it, which no real card can be relied on to do on cue. A level is built
+    /// on the thread that called for the batch (the pairs of a batch are lanes
+    /// of one dispatch, never spread over threads), so a test can fail its own
+    /// batches and no other test's.
+    pub(crate) static NO_ROOM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Copy each slot's four planes into `coeffs`, [`UPLOAD_SLAB`] bytes a
@@ -355,6 +396,13 @@ impl GpuLevel {
         let pixels = w * h;
         let slots = planes.len();
         if pixels == 0 || slots == 0 {
+            return None;
+        }
+        #[cfg(test)]
+        if NO_ROOM.with(|no_room| no_room.get()) {
+            note_trouble(format!(
+                "the GPU had no room for a {w} x {h} level of {slots} frame(s) (a test's)"
+            ));
             return None;
         }
         let limits = device.limits();

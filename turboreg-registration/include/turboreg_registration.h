@@ -97,8 +97,10 @@ int tr_backend_available(int backend, size_t ly, size_t lx);
 /*
  * Register `n_frames` frames of `ly` x `lx`, one after another in `frames`.
  * `settings` may be NULL for the defaults, `progress` NULL for none; `user`
- * goes to `progress` untouched. The frames are copied. On TR_OK `*out` is the
- * result; otherwise it is NULL. GPU runs from several threads take turns.
+ * goes to `progress` untouched. The frames are read in place, a batch at a
+ * time, not copied: keep them unchanged until this returns. On TR_OK `*out`
+ * is the result; otherwise it is NULL. GPU runs from several threads take
+ * turns on the device, a batch at a time.
  */
 int tr_register(const float *frames, size_t n_frames, size_t ly, size_t lx,
                 const TrSettings *settings, TrProgress progress, void *user,
