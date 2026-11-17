@@ -124,6 +124,26 @@ fn sample_channel_f(tex: texture_2d<f32>, uv: vec2<f32>, footprint: vec2<f32>) -
     return sum / (fn_ * fn_);
 }
 
+// A channel's value at `uv`, read from the one of its two textures that holds
+// its data: the float one if `is_float`, else the integer one. The other is a
+// 1x1 dummy, and is not read.
+//
+// A branch, not a `select`, which reads both (the dummy's one texel too):
+// `is_float` comes from the uniform buffer, so every pixel of a draw takes
+// the same side, and reading only that side took 17 to 38% off the
+// composite's GPU time (six 2048 x 2048 channels into 1080p, on Vulkan and
+// DX12 alike). Nothing on either side needs uniform control flow (textureLoad
+// and textureDimensions take no derivatives), so WGSL's uniformity analysis
+// accepts the branch whatever it can prove of `is_float`; the LUT read that
+// does need it, `textureSample` in `apply_channel`, comes after the call has
+// returned.
+fn channel_value(itex: texture_2d<u32>, ftex: texture_2d<f32>, is_float: bool, uv: vec2<f32>, footprint: vec2<f32>) -> f32 {
+    if (is_float) {
+        return sample_channel_f(ftex, uv, footprint);
+    }
+    return sample_channel(itex, uv, footprint);
+}
+
 fn apply_channel(value: f32, channel_index: i32, cp: ChannelParams) -> vec3<f32> {
     let span = max(cp.min_max.y - cp.min_max.x, 1.0);
     let t = clamp((value - cp.min_max.x) / span, 0.0, 1.0);
@@ -141,25 +161,27 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Computed in uniform control flow (derivatives must not be in a branch).
     let footprint = fwidth(uv);
 
-    // Per channel, sample the integer or the float texture depending on
-    // `is_float`. `select` computes both (the unused one reads a 1x1 dummy,
-    // which is cheap) and picks; textureLoad needs no derivatives, so this is
-    // safe in uniform control flow.
-    color += apply_channel(select(sample_channel(ch0_tex, uv, footprint), sample_channel_f(ch0_ftex, uv, footprint), params.channels[0].is_float > 0.5), 0, params.channels[0]);
+    // Per channel, its value from the texture its kind uses (`channel_value`),
+    // through its window and LUT row. Every `if` here is on a uniform, so each
+    // `apply_channel` call, and its textureSample, is in uniform control flow,
+    // as WGSL requires. Keep it so: naga does not check that in a fragment
+    // shader, so neither does `tests/it/wgsl.rs`, but a browser's Tint does,
+    // and refuses the module.
+    color += apply_channel(channel_value(ch0_tex, ch0_ftex, params.channels[0].is_float > 0.5, uv, footprint), 0, params.channels[0]);
     if (params.num_channels > 1u) {
-        color += apply_channel(select(sample_channel(ch1_tex, uv, footprint), sample_channel_f(ch1_ftex, uv, footprint), params.channels[1].is_float > 0.5), 1, params.channels[1]);
+        color += apply_channel(channel_value(ch1_tex, ch1_ftex, params.channels[1].is_float > 0.5, uv, footprint), 1, params.channels[1]);
     }
     if (params.num_channels > 2u) {
-        color += apply_channel(select(sample_channel(ch2_tex, uv, footprint), sample_channel_f(ch2_ftex, uv, footprint), params.channels[2].is_float > 0.5), 2, params.channels[2]);
+        color += apply_channel(channel_value(ch2_tex, ch2_ftex, params.channels[2].is_float > 0.5, uv, footprint), 2, params.channels[2]);
     }
     if (params.num_channels > 3u) {
-        color += apply_channel(select(sample_channel(ch3_tex, uv, footprint), sample_channel_f(ch3_ftex, uv, footprint), params.channels[3].is_float > 0.5), 3, params.channels[3]);
+        color += apply_channel(channel_value(ch3_tex, ch3_ftex, params.channels[3].is_float > 0.5, uv, footprint), 3, params.channels[3]);
     }
     if (params.num_channels > 4u) {
-        color += apply_channel(select(sample_channel(ch4_tex, uv, footprint), sample_channel_f(ch4_ftex, uv, footprint), params.channels[4].is_float > 0.5), 4, params.channels[4]);
+        color += apply_channel(channel_value(ch4_tex, ch4_ftex, params.channels[4].is_float > 0.5, uv, footprint), 4, params.channels[4]);
     }
     if (params.num_channels > 5u) {
-        color += apply_channel(select(sample_channel(ch5_tex, uv, footprint), sample_channel_f(ch5_ftex, uv, footprint), params.channels[5].is_float > 0.5), 5, params.channels[5]);
+        color += apply_channel(channel_value(ch5_tex, ch5_ftex, params.channels[5].is_float > 0.5, uv, footprint), 5, params.channels[5]);
     }
 
     return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);

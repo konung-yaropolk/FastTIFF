@@ -75,8 +75,8 @@ pub const ALPHA_OPAQUE: f32 = 0.995;
 /// most this squared reads a pixel.
 pub const MAX_MINIFY_TAPS: f32 = 4.0;
 
-/// The textures the composite's fragment shader samples: two a channel, and
-/// the LUTs.
+/// The textures the composite's fragment shader binds: two a channel (of
+/// which it reads the one the channel's kind uses), and the LUTs.
 const COMPOSITE_TEXTURES: usize = 2 * MAX_CHANNELS + 1;
 
 // 16 is as many as a GL 3 context or a WebGPU device has to let one fragment

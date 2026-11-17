@@ -23,6 +23,15 @@ use scivis_render::MAX_CHANNELS;
 ///
 /// With no optional capabilities: what a WebGPU device without features
 /// accepts, the least a host may hand the renderer.
+///
+/// What it does not catch: naga 29 does not hold a fragment shader's
+/// derivatives and implicitly levelled samples (`fwidth`, `textureSample`) to
+/// uniform control flow, as WGSL does (its analyzer turns those requirements
+/// off, `DISABLE_UNIFORMITY_REQ_FOR_FRAGMENT_STAGE`); a `textureSample` under
+/// a branch on an interpolated value passes here. A browser's WebGPU on Tint
+/// (Chrome's) refuses such a module. The composite is the one shader with
+/// such calls, and keeps them in uniform control flow by how it is written
+/// (its `fs_main` says how).
 fn validate(name: &str, src: &str) -> naga::Module {
     let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| {
         panic!("{name}: parse: {}", e.emit_to_string(src));

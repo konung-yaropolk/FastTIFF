@@ -68,8 +68,8 @@ pub use renderer::{ImageRenderer, VolumeCaps, VolumeRenderer};
 /// backends (texture/uniform array sizes, written into their shaders by
 /// [`shaders`]) and by the host's channel state.
 ///
-/// At most 7, which the build asserts: the 2D composite samples two textures
-/// a channel and the LUTs in one shader, of the 16 every GPU allows it, and
+/// At most 7, which the build asserts: the 2D composite binds two textures a
+/// channel and the LUTs to one shader, of the 16 every GPU allows it, and
 /// the volume packs its channels four to a texture, in two. Within that, a
 /// change here reaches every array, LUT row and binding on its own; the
 /// shader tests then say which per-channel lines need writing out for it.
