@@ -42,13 +42,21 @@
 #[cfg(feature = "backend-glow")]
 pub mod glow_backend;
 pub mod pack;
+pub mod shaders;
 #[cfg(feature = "backend-wgpu")]
 pub mod vram;
 #[cfg(feature = "backend-wgpu")]
 pub mod wgpu_backend;
 
 /// Maximum number of display channels composited at once. Shared by both
-/// backends (texture/uniform array sizes) and by the host's channel state.
+/// backends (texture/uniform array sizes, written into their shaders by
+/// [`shaders`]) and by the host's channel state.
+///
+/// At most 7, which the build asserts: the 2D composite samples two textures
+/// a channel and the LUTs in one shader, of the 16 every GPU allows it, and
+/// the volume packs its channels four to a texture, in two. Within that, a
+/// change here reaches every array, LUT row and binding on its own; the
+/// shader tests then say which per-channel lines need writing out for it.
 pub const MAX_CHANNELS: usize = 6;
 
 /// A channel's display lookup table: 256 RGB entries, indexed by windowed
@@ -144,12 +152,16 @@ pub enum VolumeInterp {
 }
 
 impl VolumeInterp {
-    /// The `u_interp` value the fragment shader branches on (0 = point/linear via
-    /// the GL filter, 1 = in-shader tricubic). Only the glow backend consumes it.
-    pub fn shader_mode(self) -> i32 {
+    /// The code both backends' volume shaders branch on (`INTERP_NEAREST`,
+    /// `INTERP_LINEAR` and `INTERP_CUBIC` in their sources, written in by
+    /// [`shaders`]). The glow backend leaves nearest and linear to the GL
+    /// filter and branches only on cubic; the wgpu backend, with one linear
+    /// sampler for all three, snaps a nearest read to the texel itself.
+    pub const fn shader_mode(self) -> i32 {
         match self {
-            VolumeInterp::Nearest | VolumeInterp::Linear => 0,
-            VolumeInterp::Cubic => 1,
+            VolumeInterp::Nearest => 0,
+            VolumeInterp::Linear => 1,
+            VolumeInterp::Cubic => 2,
         }
     }
 }
@@ -171,8 +183,10 @@ pub enum VolumeRender {
 }
 
 impl VolumeRender {
-    /// The `u_mode` value the fragment shader branches on.
-    pub fn shader_mode(self) -> i32 {
+    /// The code both backends' volume shaders branch on (`MODE_MIP`,
+    /// `MODE_ALPHA` and `MODE_SURFACE` in their sources, written in by
+    /// [`shaders`]).
+    pub const fn shader_mode(self) -> i32 {
         match self {
             VolumeRender::Mip => 0,
             VolumeRender::Alpha => 1,
@@ -213,10 +227,9 @@ pub struct VolumeParams {
     /// [`brightest_lut_t`] computes the right value; `1.0` reproduces the old
     /// top-entry behaviour. Ignored by MIP and alpha DVR.
     pub albedo_t: [f32; MAX_CHANNELS],
-    /// Ray-march compositing mode (see [`VolumeRender::shader_mode`]): 0 = MIP,
-    /// 1 = alpha DVR, 2 = isosurface. The sample count is derived in-shader from
-    /// the voxel size.
-    pub render_mode: i32,
+    /// How the ray-march composites its samples. The sample count is derived
+    /// in-shader from the voxel size.
+    pub render_mode: VolumeRender,
     /// Alpha-DVR opacity scale (higher = more solid). Ignored by MIP/surface.
     pub density: f32,
     /// A gain applied to the composited colour, for MIP and alpha DVR.
@@ -241,7 +254,8 @@ pub struct VolumeParams {
     pub box_he: [f32; 3],
     /// The most samples one ray may take; see [`max_steps`]. Fewer than the
     /// ray would take at half-voxel spacing means a coarser spacing for that
-    /// ray. `0` or less means only the shaders' own ceiling of 4096 applies.
+    /// ray. `0` or less means only the shaders' own ceiling,
+    /// [`SHADER_MAX_STEPS`], applies.
     pub max_steps: i32,
 }
 
@@ -258,7 +272,13 @@ pub struct VolumeParams {
 /// it.
 pub const FRAME_SAMPLE_BUDGET: f64 = 1.5e9;
 
-/// The ceiling the shaders put on steps per ray, whatever `max_steps` says.
+/// The ceiling the shaders put on steps per ray, whatever `max_steps` says
+/// (`MAX_STEPS` in their sources, written in by [`shaders`]).
+///
+/// High enough that the largest volume the memory budget admits (a diagonal
+/// of some 1600 voxels) still gets half-voxel sampling. The march loops run
+/// as many steps as a ray needs, at most this many, so an ordinary volume
+/// never pays for the headroom.
 pub const SHADER_MAX_STEPS: i32 = 4096;
 
 /// The fewest steps [`max_steps`] allows, so a huge panel still shows a

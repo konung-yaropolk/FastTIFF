@@ -1100,6 +1100,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "glow"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1109,6 +1115,28 @@ dependencies = [
  "slotmap",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "glslang"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8fccba569493100739248dd04ec4b320967a5703237496b66bacfd4dff610ee"
+dependencies = [
+ "bitflags 2.13.0",
+ "glslang-sys",
+ "rustc-hash 2.1.2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "glslang-sys"
+version = "0.9.2+e1b562a"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ac997482faa54527938d8cc23eeef882d9a68cbce4a9d10bb3d6dbf0d2fbf0"
+dependencies = [
+ "cc",
+ "glob",
 ]
 
 [[package]]
@@ -2597,12 +2625,17 @@ dependencies = [
  "ash",
  "bytemuck",
  "glow",
+ "glslang",
  "half",
+ "khronos-egl",
  "naga",
+ "pollster",
  "rayon",
+ "scivis-render",
  "wasm-bindgen-futures",
  "wgpu",
  "windows",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

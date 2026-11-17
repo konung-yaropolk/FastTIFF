@@ -9,6 +9,11 @@
 // raw sample values — no contrast/color math happens on the CPU at all,
 // which is what makes scrubbing through huge stacks fast: changing frames
 // is just a texture upload, not a CPU-side image processing pass.
+//
+// Not a complete module on its own: the constants in capitals and the
+// per-channel textures `chN_tex` / `chN_ftex` are written in ahead of it by
+// `composite_wgsl` in `scivis-render/src/shaders.rs`, from the Rust values
+// the glow backend's copy (`composite.frag.glsl`) is given too.
 
 struct ChannelParams {
     min_max: vec2<f32>,
@@ -19,7 +24,7 @@ struct ChannelParams {
 };
 
 struct Params {
-    channels: array<ChannelParams, 6>,
+    channels: array<ChannelParams, MAX_CHANNELS>,
     // Maps the quad's 0..1 UV onto the visible sub-rectangle of the image:
     // sampled_uv = uv_offset + uv * uv_scale. With (0,0)/(1,1) the whole image
     // fills the quad; smaller values show a zoomed/panned sub-region.
@@ -31,22 +36,12 @@ struct Params {
     _pad2: u32,
 };
 
+// The numbers are `composite_bindings` in `shaders.rs`. Each channel's
+// integer texture (R8Uint/R16Uint) and float texture (R32F, read when
+// params.channels[c].is_float == 1) follow, declared there.
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var ch0_tex: texture_2d<u32>;
-@group(0) @binding(2) var ch1_tex: texture_2d<u32>;
-@group(0) @binding(3) var ch2_tex: texture_2d<u32>;
-@group(0) @binding(4) var ch3_tex: texture_2d<u32>;
-@group(0) @binding(5) var ch4_tex: texture_2d<u32>;
-@group(0) @binding(6) var ch5_tex: texture_2d<u32>;
-@group(0) @binding(7) var lut_tex: texture_2d_array<f32>;
-@group(0) @binding(8) var lut_sampler: sampler;
-// Per-channel float textures (R32F), used when params.channels[c].is_float == 1.
-@group(0) @binding(9) var ch0_ftex: texture_2d<f32>;
-@group(0) @binding(10) var ch1_ftex: texture_2d<f32>;
-@group(0) @binding(11) var ch2_ftex: texture_2d<f32>;
-@group(0) @binding(12) var ch3_ftex: texture_2d<f32>;
-@group(0) @binding(13) var ch4_ftex: texture_2d<f32>;
-@group(0) @binding(14) var ch5_ftex: texture_2d<f32>;
+@group(0) @binding(1) var lut_tex: texture_2d_array<f32>;
+@group(0) @binding(2) var lut_sampler: sampler;
 
 struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -88,7 +83,7 @@ fn load_texel(tex: texture_2d<u32>, uv: vec2<f32>, dims: vec2<f32>) -> f32 {
 fn sample_channel(tex: texture_2d<u32>, uv: vec2<f32>, footprint: vec2<f32>) -> f32 {
     let dims = vec2<f32>(textureDimensions(tex));
     let texels = footprint * dims; // source texels covered by this output pixel
-    let n = i32(clamp(ceil(max(texels.x, texels.y)), 1.0, 4.0));
+    let n = i32(clamp(ceil(max(texels.x, texels.y)), 1.0, MAX_MINIFY_TAPS));
     if (n <= 1) {
         return load_texel(tex, uv, dims);
     }
@@ -114,7 +109,7 @@ fn load_texel_f(tex: texture_2d<f32>, uv: vec2<f32>, dims: vec2<f32>) -> f32 {
 fn sample_channel_f(tex: texture_2d<f32>, uv: vec2<f32>, footprint: vec2<f32>) -> f32 {
     let dims = vec2<f32>(textureDimensions(tex));
     let texels = footprint * dims;
-    let n = i32(clamp(ceil(max(texels.x, texels.y)), 1.0, 4.0));
+    let n = i32(clamp(ceil(max(texels.x, texels.y)), 1.0, MAX_MINIFY_TAPS));
     if (n <= 1) {
         return load_texel_f(tex, uv, dims);
     }

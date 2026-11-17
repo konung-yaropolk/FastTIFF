@@ -4,9 +4,28 @@
 //! a separate link of this crate and everything it depends on, and in the
 //! release workflow's `cargo test --release` a separate single-threaded
 //! fat-LTO link. As modules of one binary they link once. A module that
-//! only applies to some builds says so with its own `#![cfg(...)]`.
+//! only applies to some builds says so with its own `#![cfg(...)]`, or here
+//! where it is a backend it needs.
+//!
+//! In this repository every build of these tests has both backends (the
+//! crate is its own dev-dependency, with both on: see its `Cargo.toml`). A
+//! copy built from crates.io has only the features it is asked for, so the
+//! modules that drive a backend are gated on it, and the rest, which need
+//! none, run in every build.
 //!
 //! Run one suite with `cargo test -p scivis-render --test it <module>::`.
 
+#[cfg(feature = "backend-glow")]
+mod gl;
+mod glsl;
+// Every suite that drives a GPU draws with glow: `gl` alone, `parity`
+// against wgpu.
+#[cfg(feature = "backend-glow")]
+mod headless;
 mod markers;
+#[cfg(all(feature = "backend-glow", feature = "backend-wgpu"))]
+mod parity;
+#[cfg(feature = "backend-glow")]
+mod scene;
+mod unrolled;
 mod wgsl;

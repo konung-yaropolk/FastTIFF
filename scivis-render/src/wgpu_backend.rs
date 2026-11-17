@@ -26,6 +26,7 @@
 //! then scales up.
 
 use crate::pack::{self, BrickMaxima, PackedVolume, TexelFormat, Visibility, VolumeLayout};
+use crate::shaders::{self, composite_bindings as binding};
 use crate::{
     capture_tiles, tile_params, ChannelKind, ChannelUniform, Lut, VolumeImage, VolumeInterp,
     VolumeKind, VolumeParams, VolumeUploadError, CAPTURE_TILE, MAX_CHANNELS,
@@ -34,11 +35,6 @@ use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 
 const LUT_WIDTH: u32 = 256;
-/// Bind-group binding indices. Integer channel textures occupy `1..=MAX_CHANNELS`,
-/// then the LUT array, the sampler, and finally the float channel textures.
-const LUT_BINDING: u32 = MAX_CHANNELS as u32 + 1;
-const SAMPLER_BINDING: u32 = MAX_CHANNELS as u32 + 2;
-const FTEX_BINDING_BASE: u32 = MAX_CHANNELS as u32 + 3;
 
 /// Short human-readable backend name, for a host that wants to show it.
 pub const BACKEND: &str = "wgpu";
@@ -55,6 +51,13 @@ pub fn optional_features(adapter: &wgpu::Adapter) -> wgpu::Features {
     adapter.features() & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
 }
 
+// The uniforms, as the shaders lay them out. Each field matches the member of
+// the same name in the WGSL struct, at the same offset and of the same size,
+// which `wgpu_backend_tests.rs` checks against naga's layout of the shader: a
+// field added on one side only fails a test instead of a draw. `Pod` rules
+// out padding the compiler would add, so the padding the shader has is named.
+
+/// One channel of the composite's uniform: `ChannelParams` in `composite.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ChannelParamsGpu {
@@ -63,6 +66,7 @@ struct ChannelParamsGpu {
     is_float: f32,
 }
 
+/// The composite's uniform: `Params` in `composite.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ParamsGpu {
@@ -71,11 +75,13 @@ struct ParamsGpu {
     uv_offset: [f32; 2],
     uv_scale: [f32; 2],
     num_channels: u32,
-    _pad: [u32; 3],
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
-/// Volume uniform, matching `VolParams` in `volume.wgsl`. Every field is a vec4
-/// (or vec4-packed) so the std140-style uniform layout is unambiguous.
+/// The volume's uniform: `VolParams` in `volume.wgsl`. Every field is a vec4
+/// (or vec4-packed) so the uniform layout is unambiguous.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct VolParamsGpu {
@@ -145,8 +151,8 @@ pub struct ImageRenderResources {
     volume_lost: Option<(VolumeUploadError, usize)>,
     /// Whether the device has `TEXTURE_FORMAT_16BIT_NORM` (see `optional_features`).
     volume_unorm16: bool,
-    /// `interp` for the shader: 0 = nearest, 1 = linear, 2 = cubic.
-    volume_interp_mode: i32,
+    /// How the volume is sampled (see `set_volume_interp`).
+    volume_interp: VolumeInterp,
     /// Empty-space skipping and mip levels on (both, unless switched off with
     /// `set_volume_acceleration`).
     accel_skip: bool,
@@ -222,11 +228,11 @@ impl ImageRenderResources {
         let device = &gpu;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("FastTIFFcomposite shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/composite.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders::composite_wgsl().into()),
         });
 
         let mut layout_entries = vec![wgpu::BindGroupLayoutEntry {
-            binding: 0,
+            binding: binding::PARAMS,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
@@ -235,11 +241,8 @@ impl ImageRenderResources {
             },
             count: None,
         }];
-        for c in 0..MAX_CHANNELS as u32 {
-            layout_entries.push(int_texture_entry(c + 1));
-        }
         layout_entries.push(wgpu::BindGroupLayoutEntry {
-            binding: LUT_BINDING,
+            binding: binding::LUT,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -249,13 +252,16 @@ impl ImageRenderResources {
             count: None,
         });
         layout_entries.push(wgpu::BindGroupLayoutEntry {
-            binding: SAMPLER_BINDING,
+            binding: binding::SAMPLER,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count: None,
         });
         for c in 0..MAX_CHANNELS as u32 {
-            layout_entries.push(float_texture_entry(FTEX_BINDING_BASE + c));
+            layout_entries.push(int_texture_entry(binding::INT_TEXTURE + c));
+        }
+        for c in 0..MAX_CHANNELS as u32 {
+            layout_entries.push(float_texture_entry(binding::FLOAT_TEXTURE + c));
         }
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("FastTIFFbind group layout"),
@@ -361,7 +367,7 @@ impl ImageRenderResources {
             volume_checks: [None, None],
             volume_lost: None,
             volume_unorm16,
-            volume_interp_mode: 1, // linear
+            volume_interp: VolumeInterp::Linear,
             accel_skip: true,
             accel_lod: true,
             volume_params: None,
@@ -743,15 +749,11 @@ impl ImageRenderResources {
         self.volume_downscale = downscale.max(1);
     }
 
-    /// Store the sampling mode for the shader (0 = nearest, 1 = linear, 2 = cubic).
-    /// A single linear sampler serves all three (nearest snaps to texel centers,
-    /// cubic reconstructs in-shader), so no GPU state changes here.
+    /// Store the sampling mode for the shader. A single linear sampler serves
+    /// all three (nearest snaps to texel centers, cubic reconstructs
+    /// in-shader), so no GPU state changes here.
     pub fn set_volume_interp(&mut self, interp: VolumeInterp) {
-        self.volume_interp_mode = match interp {
-            VolumeInterp::Nearest => 0,
-            VolumeInterp::Linear => 1,
-            VolumeInterp::Cubic => 2,
-        };
+        self.volume_interp = interp;
     }
 
     /// Stash the ray-march params. They reach the GPU in `prepare_volume`,
@@ -887,8 +889,8 @@ impl ImageRenderResources {
             gain: [p.brightness, 0.0, 0.0, 0.0],
             modes: [
                 p.num_channels,
-                p.render_mode,
-                self.volume_interp_mode,
+                p.render_mode.shader_mode(),
+                self.volume_interp.shader_mode(),
                 p.max_steps,
             ],
             accel: accel_uniform(
@@ -1361,7 +1363,9 @@ impl ImageRenderResources {
             uv_offset,
             uv_scale,
             num_channels,
-            _pad: [0; 3],
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         };
         for (i, c) in channels.iter().take(MAX_CHANNELS).enumerate() {
             gpu.channels[i] = ChannelParamsGpu {
@@ -1493,27 +1497,29 @@ fn build_bind_group(
         ..Default::default()
     });
 
-    let mut entries = vec![wgpu::BindGroupEntry {
-        binding: 0,
-        resource: uniform_buffer.as_entire_binding(),
-    }];
+    let mut entries = vec![
+        wgpu::BindGroupEntry {
+            binding: binding::PARAMS,
+            resource: uniform_buffer.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: binding::LUT,
+            resource: wgpu::BindingResource::TextureView(&lut_view),
+        },
+        wgpu::BindGroupEntry {
+            binding: binding::SAMPLER,
+            resource: wgpu::BindingResource::Sampler(sampler),
+        },
+    ];
     for (i, view) in channel_views.iter().enumerate() {
         entries.push(wgpu::BindGroupEntry {
-            binding: i as u32 + 1,
+            binding: binding::INT_TEXTURE + i as u32,
             resource: wgpu::BindingResource::TextureView(view),
         });
     }
-    entries.push(wgpu::BindGroupEntry {
-        binding: LUT_BINDING,
-        resource: wgpu::BindingResource::TextureView(&lut_view),
-    });
-    entries.push(wgpu::BindGroupEntry {
-        binding: SAMPLER_BINDING,
-        resource: wgpu::BindingResource::Sampler(sampler),
-    });
     for (i, view) in fchannel_views.iter().enumerate() {
         entries.push(wgpu::BindGroupEntry {
-            binding: FTEX_BINDING_BASE + i as u32,
+            binding: binding::FLOAT_TEXTURE + i as u32,
             resource: wgpu::BindingResource::TextureView(view),
         });
     }
@@ -1580,7 +1586,7 @@ fn create_volume_resources(
 ) -> VolumeResources {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("FastTIFFvolume shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/volume.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(shaders::volume_wgsl().into()),
     });
 
     let entries = [
@@ -1686,7 +1692,7 @@ fn create_blit_pipeline(
 ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("FastTIFFvolume blit shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(shaders::blit_wgsl().into()),
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("FastTIFFvolume blit bind group layout"),
@@ -1955,3 +1961,7 @@ fn swizzle(format: wgpu::TextureFormat) -> Option<[usize; 3]> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "wgpu_backend_tests.rs"]
+mod tests;

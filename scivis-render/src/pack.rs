@@ -35,6 +35,13 @@ pub const MAX_LEVELS: u32 = 4;
 /// Channels one packed texture holds.
 const PER_TEXTURE: usize = 4;
 
+// Both backends bind two packed textures (`vol_a`, `vol_b` in their volume
+// shaders), so that is as many channels as a volume can have.
+const _: () = assert!(
+    MAX_CHANNELS <= 2 * PER_TEXTURE,
+    "MAX_CHANNELS is more than the volume's two packed textures hold"
+);
+
 /// How one stored component is encoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TexelFormat {
@@ -586,11 +593,7 @@ impl Visibility {
             num_channels: params.num_channels.clamp(0, MAX_CHANNELS as i32) as usize,
             windows: params.windows,
             enabled,
-            render: match params.render_mode {
-                1 => VolumeRender::Alpha,
-                2 => VolumeRender::Surface,
-                _ => VolumeRender::Mip,
-            },
+            render: params.render_mode,
             iso: params.iso,
         }
     }

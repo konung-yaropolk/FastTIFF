@@ -21,30 +21,17 @@
 // whole volume far away, or the view rendered at a fraction of its size while
 // it moves), the ray reads a coarser mip level — each level the *maximum* of
 // the one below, so nothing bright is lost — and steps accordingly.
-
-// ---------------------------------------------------------------------------
-// Isosurface appearance (render mode 2). Both are compile-time constants: they
-// are a fixed look, not per-frame state, so they cost no uniform slot and stay
-// in step with the glow backend's copy of the same two values.
 //
-//   SURFACE_GRAY     Albedo the surface is scaled to. 1.0 is a blown-out white
-//                    for a plain grayscale stack; lower reads as softer gray.
-//                    (Blender's classic default base color is 0.8.)
-//   SURFACE_CONTRAST Split between ambient and camera-headlight diffuse:
-//                    shade = (1 - CONTRAST) + CONTRAST * diff. 0.0 is flat and
-//                    unshaded, 1.0 falls all the way to black at silhouettes.
-// ---------------------------------------------------------------------------
-const SURFACE_GRAY: f32 = 0.6;
-const SURFACE_CONTRAST: f32 = 0.85;
-
-// data = (window.x, window.y, enabled, albedo_t); packed in a vec4 so the uniform
-// array element is 16-byte aligned.
-struct VolChannel {
-    data: vec4<f32>,
-};
+// Not a complete module on its own: the constants in capitals (the channel
+// count, the step cap MAX_STEPS, the isosurface look SURFACE_GRAY and
+// SURFACE_CONTRAST, the MODE_* and INTERP_* codes) are written in ahead of it
+// by `volume_wgsl` in `scivis-render/src/shaders.rs`, from the Rust values the
+// glow backend's copy (`volume.frag.glsl`) is given too. Their docs are there.
 
 struct VolParams {
-    channels: array<VolChannel, 6>,
+    // Per channel: (window min, window max, enabled, isosurface albedo t), a
+    // vec4 so the uniform array's stride is the 16 bytes it must be.
+    channels: array<vec4<f32>, MAX_CHANNELS>,
     cam_eye: vec4<f32>,
     cam_forward: vec4<f32>,
     cam_right: vec4<f32>,
@@ -52,7 +39,7 @@ struct VolParams {
     box_he: vec4<f32>,
     misc: vec4<f32>,   // tan_half_fov, aspect, density, iso
     gain: vec4<f32>,   // brightness, unused x3
-    modes: vec4<i32>,  // num_channels, render_mode (0=MIP,1=alpha,2=surface), interp (0=nearest,1=linear,2=cubic), max steps (<= 0: MAX_STEPS)
+    modes: vec4<i32>,  // num_channels, render mode (MODE_*), interp (INTERP_*), max steps (<= 0: MAX_STEPS)
     // (size of one pixel at unit distance, highest mip level a MIP may read,
     //  brick size in voxels, skip empty bricks: 1 or 0)
     accel: vec4<f32>,
@@ -64,12 +51,6 @@ struct VolParams {
 @group(0) @binding(3) var occ: texture_3d<f32>;
 @group(0) @binding(4) var lut_tex: texture_2d_array<f32>;
 @group(0) @binding(5) var samp: sampler;
-
-// Upper bound on ray-march samples. High enough that the largest volume the
-// memory budget admits (~1600-voxel diagonal) still gets half-voxel sampling;
-// the loops run `n` iterations (n <= MAX_STEPS), so ordinary volumes never pay
-// for the headroom.
-const MAX_STEPS: i32 = 4096;
 
 struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -126,10 +107,10 @@ fn sample_cubic(tex: texture_3d<f32>, coord: vec3<f32>, lvl: i32) -> vec4<f32> {
 
 // Every component of `tex` at `tc`, level `lvl`, with the chosen filter.
 fn sample3d(tex: texture_3d<f32>, tc: vec3<f32>, lvl: i32) -> vec4<f32> {
-    if (P.modes.z == 2) {
+    if (P.modes.z == INTERP_CUBIC) {
         return sample_cubic(tex, tc, lvl);
     }
-    if (P.modes.z == 0) {
+    if (P.modes.z == INTERP_NEAREST) {
         // Nearest: snap to the texel center so the linear sampler returns it exactly.
         let dim = vec3<f32>(textureDimensions(tex, lvl));
         let c = (floor(tc * dim) + vec3<f32>(0.5)) / dim;
@@ -155,7 +136,7 @@ fn fetch(tc: vec3<f32>, lvl: i32, need_a: bool, need_b: bool) -> Raw {
 }
 
 fn norm_ch(v: f32, idx: i32) -> f32 {
-    let win = P.channels[idx].data.xy;
+    let win = P.channels[idx].xy;
     return clamp((v - win.x) / max(win.y - win.x, 1e-6), 0.0, 1.0);
 }
 fn lut_col(t: f32, idx: i32) -> vec3<f32> {
@@ -163,12 +144,12 @@ fn lut_col(t: f32, idx: i32) -> vec3<f32> {
 }
 // Whether channel `idx` is present and switched on.
 fn on(idx: i32) -> bool {
-    return idx < P.modes.x && P.channels[idx].data.z > 0.5;
+    return idx < P.modes.x && P.channels[idx].z > 0.5;
 }
 // Where to sample this channel's LUT for the isosurface albedo. Not always the
 // top entry: a LUT that peaks early and ends dark would paint a black surface.
 fn albedo_t(idx: i32) -> f32 {
-    return P.channels[idx].data.w;
+    return P.channels[idx].w;
 }
 
 // World point -> volume texcoord, with Y and Z flipped so the volume matches the
@@ -292,7 +273,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // the ray, because along it the step decides, and a level's maximum keeps
     // whatever it covers.
     var lvl = 0;
-    if (P.modes.y == 0 && P.accel.y > 0.5) {
+    if (P.modes.y == MODE_MIP && P.accel.y > 0.5) {
         let foot = t0 * P.accel.x;
         let lat = voxel0 * sqrt(max(vec3<f32>(1.0) - rd * rd, vec3<f32>(0.0)));
         let lateral = max(lat.x, max(lat.y, lat.z));
@@ -325,7 +306,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let skip = P.accel.w > 0.5 && dt > 0.0;
     let dtc = vec3<f32>(rd.x, -rd.y, -rd.z) * (0.5 / he);
 
-    if (P.modes.y == 1) {
+    if (P.modes.y == MODE_ALPHA) {
         // Alpha DVR (ImageJ 3D Viewer "Volume"): emission-absorption, front-to-back.
         // The edge fade applies to the *windowed* value (fading raw values breaks
         // float data whose window doesn't start at 0). Disabled channels are
@@ -356,7 +337,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             if (wsum > 1e-6) { albedo = emit / wsum; }
             col += (1.0 - acc) * a * albedo;
             acc += (1.0 - acc) * a;
-            if (acc > 0.995) { break; }
+            if (acc > ALPHA_OPAQUE) { break; }
             i = i + 1;
         }
         // Clamped *after* the gain, so a gain above 1 brightens what is there
@@ -364,7 +345,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         return vec4<f32>(clamp(col * P.gain.x, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
     }
 
-    if (P.modes.y == 2) {
+    if (P.modes.y == MODE_SURFACE) {
         // Isosurface: walk the ray until the composite field first reaches `iso`,
         // refine the crossing between the two bracketing samples, then shade the
         // hit from the field gradient with a camera headlight (two-sided, so both

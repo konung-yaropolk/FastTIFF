@@ -698,7 +698,7 @@ pub(crate) fn build_volume_params(
         enabled,
         is_float,
         albedo_t,
-        render_mode: render.shader_mode(),
+        render_mode: render,
         density,
         iso,
         brightness,

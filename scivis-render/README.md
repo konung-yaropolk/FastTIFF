@@ -98,7 +98,7 @@ let mut r = glow_backend::ImageRenderResources::new(gl.clone());
 
 | Type | Meaning |
 |---|---|
-| `MAX_CHANNELS` | `6`. Channels past this are ignored by every method. |
+| `MAX_CHANNELS` | `6`. Channels past this are ignored by every method. The shaders take it (and the other numbers they share with Rust) from `shaders`, which assembles their sources; see Testing. |
 | `Lut` | `[[u8; 3]; 256]` — RGB indexed by windowed intensity. |
 | `ChannelKind` | `Int8` / `Int16` / `Float` — which texture a channel uploads to. |
 | `ChannelUniform` | `{ min, max, enabled, is_float }` for one channel. |
@@ -400,10 +400,41 @@ while the majors match; a host on a different major gets a type mismatch at the
 
 ## Testing
 
-The WGSL shaders are validated offline with `naga` — the same front-end wgpu uses
-at runtime — so a broken shader is a failing `cargo test` rather than a blank
-canvas at startup. No GPU required, and it runs regardless of which backend
-feature is enabled.
+Every shader is written twice, in WGSL (`src/shaders/*.wgsl`) and in GLSL 1.40
+(`src/shaders/*.glsl`), and neither file is complete on its own: the numbers
+both share with Rust — `MAX_CHANNELS`, the step cap, the isosurface look, the
+mode codes — are defined once in `src/shaders.rs` and written in ahead of each
+when a backend builds its pipelines. `cargo test -p scivis-render` builds both
+backends whatever features are asked for, and checks:
+
+* the WGSL, as assembled, with `naga` — the front-end wgpu uses at runtime —
+  with no optional capabilities (`tests/it/wgsl.rs`);
+* the GLSL, as assembled, compiled and linked by glslang, Khronos' reference
+  compiler, held to the version it declares, and the interface between each
+  program's two stages, which glslang leaves to the driver (`tests/it/glsl.rs`).
+  glslang is a dev-dependency built from C++ by `cc`, once per target
+  directory and profile: 12 s debug and 35 s release on 16 threads;
+* that the Rust uniform structs are laid out field for field as naga lays out
+  the WGSL ones: names, offsets, sizes and types (`src/wgpu_backend_tests.rs`);
+* that the per-channel lines both languages make us write out by hand cover
+  exactly `MAX_CHANNELS` channels, each line one channel's alone, and read each
+  from where the volume packer put it (`tests/it/unrolled.rs`).
+
+None of these needs a GPU. Two more do. `tests/it/gl.rs` has the glow backend
+build its programs on the machine's own OpenGL driver (a headless WGL context
+on Windows, surfaceless EGL on Linux, GL 3.1 or later) and draw a fixed scene
+in every mode, with no GL error. `tests/it/parity.rs` draws that scene, a 2D
+composite and a volume of `MAX_CHANNELS` channels each, in every render and
+sampling mode, through both backends and compares the pictures within
+tolerances it documents: the check that the two copies of each shader still
+mean the same thing. That one also needs a hardware wgpu adapter. Without
+what they need, both skip, saying so on the test run's output whether it
+passes or not; with `SCIVIS_RENDER_REQUIRE_GL=1` in the environment, a
+missing GL context fails them instead, as the Linux CI job has it.
+
+A copy of this crate from crates.io builds only the backends it is asked
+for, and runs the suites those allow: the GPU ones need `backend-glow`, and
+`parity` `backend-wgpu` as well.
 
 ## License
 

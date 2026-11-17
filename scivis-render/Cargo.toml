@@ -10,14 +10,14 @@ repository = "https://github.com/konung-yaropolk/FastTIFF"
 keywords = ["wgpu", "volume-rendering", "raymarching", "microscopy", "imaging"]
 categories = ["rendering", "visualization", "graphics", "science"]
 
-# The WGSL sources are `include_str!`d into the wgpu backend, so they must ship
+# The shader sources are `include_str!`d by `src/shaders.rs`, so they must ship
 # with the crate.
 include = [
     "src/**/*.rs",
     "src/**/*.wgsl",
-    # The shader-validation tests are this crate's only tests and need no
-    # fixtures, so ship them — a published crate you can't `cargo test` is
-    # strictly worse than a few KB larger.
+    "src/**/*.glsl",
+    # The tests need no fixtures, so ship them — a published crate you can't
+    # `cargo test` is strictly worse than a few KB larger.
     "tests/**/*.rs",
     "Cargo.toml",
     "README.md",
@@ -75,3 +75,39 @@ wasm-bindgen-futures = { workspace = true, optional = true }
 # which backend feature is on. naga is already in the tree via wgpu.
 [dev-dependencies]
 naga = { workspace = true, features = ["wgsl-in"] }
+# This crate itself, with both backends, so that every build of its tests has
+# both, whatever features the build was asked for: the tests check each
+# backend against its shaders and the two against each other. A dependency on
+# its own path is how a package turns features on for its tests alone. A
+# published copy drops it, so its test suites that drive a backend are gated
+# on that backend's feature (`tests/it/main.rs`): built with one backend, or
+# none, it still builds and runs the rest.
+scivis-render = { path = ".", features = ["backend-wgpu", "backend-glow"] }
+# Waiting on wgpu's adapter and device in the GPU tests. Already in the tree.
+pollster = { workspace = true }
+
+# glslang, Khronos' reference GLSL compiler, which compiles and links the glow
+# programs with no GPU and no driver (`tests/it/glsl.rs`): the one GLSL check
+# that runs on every CI machine. Its C++ is built by `cc`, no CMake, once per
+# target directory and profile: 12 s for a debug build and 35 s for a release
+# one on 16 threads (a CI runner has fewer). Not for the browser, where no
+# test runs.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+glslang = "0.9"
+
+# An OpenGL context with nothing on screen, for the tests that build and draw
+# with the glow programs on the machine's own driver and compare the
+# backends' pictures (`tests/it/headless.rs`): WGL through a hidden window on
+# Windows, EGL with no surface (Mesa's) on Linux. Both are already in the
+# tree, through eframe and wgpu; these add only declarations.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_OpenGL",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+khronos-egl = { version = "6", features = ["dynamic"] }
