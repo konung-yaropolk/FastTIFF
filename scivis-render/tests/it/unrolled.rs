@@ -13,7 +13,7 @@
 //!
 //! They also catch the other way such a line goes wrong, which compiles in
 //! both languages and draws: a channel's line that takes one of its values
-//! from a neighbour's slot (`ch_min_max[4]` on channel 5's line, say). Every
+//! from a neighbour's slot (`ch_params[4]` on channel 5's line, say). Every
 //! channel index on a per-channel line has to be that line's own.
 
 use scivis_render::MAX_CHANNELS;

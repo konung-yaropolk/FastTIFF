@@ -247,11 +247,6 @@ impl FrameHistograms {
     }
 }
 
-// The rest is driven by `crate::sync`, which needs a GPU backend.
-#[cfg_attr(
-    not(any(feature = "backend-wgpu", feature = "backend-glow")),
-    allow(dead_code)
-)]
 impl FrameHistograms {
     /// Moves whenever the held histograms change.
     pub(crate) fn version(&self) -> u64 {
@@ -328,10 +323,6 @@ impl FrameHistograms {
 /// else — and say which channels are still to be binned for it.
 ///
 /// One flag per channel, indexed by channel; the form [`build_jobs`] takes.
-#[cfg_attr(
-    not(any(feature = "backend-wgpu", feature = "backend-glow")),
-    allow(dead_code)
-)]
 pub(crate) fn prepare(stack: &mut Document, source: HistogramSource) -> [bool; MAX_CHANNELS] {
     if !stack.services.histograms.holds(stack, source) {
         let key = HistogramKey::of(stack);
@@ -357,10 +348,6 @@ pub(crate) fn prepare(stack: &mut Document, source: HistogramSource) -> [bool; M
 /// Bin the planes just decoded to show the frame, for the channels `missing`
 /// selects (see [`prepare`]); the rest are skipped. `planes` pairs each plane
 /// with its display channel.
-#[cfg_attr(
-    not(any(feature = "backend-wgpu", feature = "backend-glow")),
-    allow(dead_code)
-)]
 pub(crate) fn bin_shown<'a>(
     stack: &Document,
     missing: &[bool; MAX_CHANNELS],
@@ -398,10 +385,6 @@ pub(crate) fn bin_shown<'a>(
 ///
 /// Returns how many channels it decoded. None after a channel toggle, since
 /// every channel is binned under a key a toggle does not move.
-#[cfg_attr(
-    not(any(feature = "backend-wgpu", feature = "backend-glow")),
-    allow(dead_code)
-)]
 pub(crate) fn complete(stack: &mut Document, residency: &Residency, start: bool) -> usize {
     if residency.over_texture_limit {
         from_overview(stack, residency.overview.as_ref());
@@ -473,10 +456,6 @@ fn from_overview(stack: &mut Document, overview: Option<&Overview>) {
 /// frame past the texture limit is histogrammed from, as it is built — a view
 /// too large to keep as the overview is binned only then — and as the
 /// overview later.
-#[cfg_attr(
-    not(any(feature = "backend-wgpu", feature = "backend-glow")),
-    allow(dead_code)
-)]
 pub(crate) fn bin_whole_view(stack: &mut Document, view: &crate::window::Built) {
     let source = HistogramSource::Overview {
         stride: view.roi.stride.max(1),

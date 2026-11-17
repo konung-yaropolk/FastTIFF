@@ -2464,9 +2464,9 @@ impl ViewerApp {
         };
         let outcome = match render.lock() {
             Ok(mut resources) => {
-                let outcome = self.core.sync(&mut resources, &self.sync_inputs);
+                let outcome = self.core.sync(&mut *resources, &self.sync_inputs);
                 // A recording's frame, now that the GPU has this frame's pose.
-                self.capture_animation_frame(&mut resources);
+                self.capture_animation_frame(&mut *resources);
                 outcome
             }
             Err(_) => Default::default(),

@@ -8,8 +8,17 @@
 //! the volume needs rebuilding — is domain logic a second frontend would
 //! otherwise have to duplicate.
 //!
-//! Only compiled with a GPU backend selected; without one the rest of the crate
-//! still provides the full CPU-side model.
+//! Generic over scivis-render's [`ImageRenderer`] and [`VolumeRenderer`]
+//! rather than written for one backend: the frontend's renderer is handed in,
+//! and the sync is compiled for it, so a call costs what a call on the
+//! backend's own type does. It is what lets this crate build with no backend,
+//! and what lets the tests (`sync_tests.rs`) hand it a renderer that keeps
+//! what it is sent (`recorder.rs`). What the sync asks of the device it hands
+//! on as plain values, so the residency plan, the volume plan and the budget
+//! are worked out from numbers, not from a GPU: the 2D limit on every sync and
+//! the [`VolumeCaps`] on every volume plan (both fields a backend set when it
+//! was made, so a read costs nothing), and the free memory once a volume
+//! generation, as asking the driver can cost a system call or two.
 
 use crate::camera::{build_volume_params, VolumeChannel};
 use crate::display::{ChannelMasks, Revision};
@@ -26,8 +35,9 @@ use crate::viewer::{DecodeMode, ViewMode, Viewer, VolumeSettings};
 use crate::volume::VolumePlan;
 use crate::window;
 use crate::worker::CancelToken;
-use crate::Renderer;
-use scivis_render::{ChannelKind, ChannelUniform, MAX_CHANNELS};
+use scivis_render::{
+    ChannelKind, ChannelUniform, ImageRenderer, VolumeCaps, VolumeRenderer, MAX_CHANNELS,
+};
 
 /// What the frontend must do after a [`Viewer::sync`] call, beyond drawing.
 ///
@@ -53,7 +63,11 @@ impl Viewer {
     /// Call once per rendered frame, *before* the draw. In the 3D view the 2D
     /// per-frame decode is skipped entirely — the volume already holds every
     /// slice.
-    pub fn sync(&mut self, renderer: &mut Renderer, inputs: &FrameInputs) -> SyncOutcome {
+    pub fn sync<R: VolumeRenderer>(
+        &mut self,
+        renderer: &mut R,
+        inputs: &FrameInputs,
+    ) -> SyncOutcome {
         let mut outcome = SyncOutcome::default();
         // Which part of the image is on screen, which is the frontend's
         // business: what the residency of the 2D frame is planned against.
@@ -126,7 +140,8 @@ impl Viewer {
             .first()
             .map_or((0, 0), |f| (f.width, f.height));
         let large_mode = self.large_image_mode;
-        let target = plan_residency(loaded, residency, renderer, current, &image, large_mode);
+        let max_2d = renderer.max_2d_texture_size();
+        let target = plan_residency(loaded, residency, max_2d, current, &image, large_mode);
         // Size the textures to what is being *shown*, not to what is being
         // prepared: resizing now would blank the picture for as long as the new
         // window takes to build, which is the stall this avoids.
@@ -296,10 +311,11 @@ fn note_histograms(
     changed && clock.is_none()
 }
 
-/// Decide which window of the current frame should be on the GPU, recording
-/// what that says about the frame (its stride, whether it is past the texture
-/// limit) in the residency. Returns the window now being targeted, or `None`
-/// when there is no frame to show.
+/// Decide which window of the current frame should be on the GPU, whose 2D
+/// textures are at most `max_axis` a side, recording what that says about the
+/// frame (its stride, whether it is past the texture limit) in the residency.
+/// Returns the window now being targeted, or `None` when there is no frame to
+/// show.
 ///
 /// Three outcomes, in decreasing order of how good the picture is:
 ///
@@ -313,14 +329,13 @@ fn note_histograms(
 fn plan_residency(
     loaded: &Document,
     residency: &mut Residency,
-    renderer: &Renderer,
+    max_axis: u32,
     current: Current,
     image: &ImageInputs,
     mode: roi::LargeImageMode,
 ) -> Option<Serving> {
     let first = loaded.tiff.frames.first()?;
     let (w, h) = (first.width, first.height);
-    let max_axis = renderer.max_2d_texture_size();
 
     // Every display channel gets a full-size texture, disabled or not, so the
     // per-texel cost is the sum over all of them.
@@ -386,10 +401,10 @@ struct MovieSync {
 /// worker when its result matches, else inline), then queue the read-ahead for
 /// the next frame when `read_ahead` is set.
 #[allow(clippy::too_many_arguments)]
-fn sync_movie(
+fn sync_movie<R: ImageRenderer>(
     loaded: &mut Document,
     residency: &mut Residency,
-    renderer: &mut Renderer,
+    renderer: &mut R,
     current: Current,
     read_ahead: bool,
     plan: Serving,
@@ -769,8 +784,8 @@ fn capture_overview(
 /// The common case — the whole frame, full resolution — hands the decoded plane
 /// straight to the GPU with no copy, which is what it did before any of this
 /// existed. Only a real window pays for the cut.
-fn upload(
-    renderer: &mut Renderer,
+fn upload<R: ImageRenderer>(
+    renderer: &mut R,
     channel: usize,
     width: u32,
     height: u32,
@@ -796,7 +811,13 @@ fn upload(
 }
 
 /// Write an already-sized plane to its texture.
-fn upload_texture(renderer: &mut Renderer, channel: usize, w: u32, h: u32, data: &Decoded) {
+fn upload_texture<R: ImageRenderer>(
+    renderer: &mut R,
+    channel: usize,
+    w: u32,
+    h: u32,
+    data: &Decoded,
+) {
     match data {
         Decoded::U8(v) => renderer.upload_channel_u8(channel, w, h, v),
         Decoded::U16(v) => renderer.upload_channel_u16(channel, w, h, v),
@@ -815,12 +836,12 @@ fn upload_texture(renderer: &mut Renderer, channel: usize, w: u32, h: u32, data:
 /// case (`slices > 1`) the volume depth is Z at the current frame_index (time),
 /// so playback animates the volume through time; otherwise the frame axis *is*
 /// the depth and `time` stays 0.
-fn sync_volume(
+fn sync_volume<R: VolumeRenderer>(
     loaded: &mut Document,
     view: &VolumeSettings,
     inputs: &VolumeInputs,
     res: &mut VolumeResidency,
-    renderer: &mut Renderer,
+    renderer: &mut R,
     notices: &mut Notices,
 ) -> bool {
     let mut needs_repaint = false;
@@ -844,10 +865,12 @@ fn sync_volume(
     }
 
     if res.built_frame != Some(time) {
-        let budget = *res
-            .planned_budget
-            .get_or_insert_with(|| volume_budget(renderer, res.budget_cap));
-        let plan = plan_volume(loaded, renderer, time, budget, view, inputs);
+        // The driver is asked what is free once a generation, not once a
+        // frame: it can cost a system call or two.
+        let budget = *res.planned_budget.get_or_insert_with(|| {
+            volume_budget(renderer.volume_memory_available(), res.budget_cap)
+        });
+        let plan = plan_volume(loaded, renderer.volume_caps(), time, budget, view, inputs);
         let mut handled = false;
         // Started on first 3D use, over the same stack as the window — so a
         // stack held in memory gets one too.
@@ -893,7 +916,27 @@ fn sync_volume(
     renderer.set_volume_interp(view.interp);
     let [vw, vh] = inputs.viewport.whole();
     renderer.set_volume_target(vw, vh, inputs.downscale);
+    renderer.set_volume_params(ray_march_params(loaded, view, inputs));
+    // A rebuild started this frame (the GPU ran out of memory): its loading
+    // and its result need frames of their own, wherever the view is.
+    needs_repaint || res.generation != generation
+}
 
+/// This frame's ray-march params: the camera, and each channel's window,
+/// switch and isosurface colour, from the display and the view.
+///
+/// Apart from [`sync_volume`], because it asks nothing of the renderer. Not
+/// generic, it is compiled once, in this crate, beside the helpers it calls,
+/// as it was when the sync took one concrete backend. Left inside the generic
+/// sync, it is compiled in the frontend's crate, where those helpers are
+/// across a crate boundary: so built, a 3D sync measured some 55 ns (a tenth)
+/// slower than with the concrete backend, under the release profile's fat
+/// LTO, and apart it is within 10 ns of that.
+fn ray_march_params(
+    loaded: &Document,
+    view: &VolumeSettings,
+    inputs: &VolumeInputs,
+) -> scivis_render::VolumeParams {
     // Per-channel window/level, in the sampled texture's units: normalized the
     // way the volume builder normalized the voxels (integers as unorm, floats
     // over the channel's span), which is
@@ -959,20 +1002,18 @@ fn sync_volume(
     // However large the volume and the panel, a frame stays a bounded amount
     // of GPU work: see `scivis_render::FRAME_SAMPLE_BUDGET`.
     params.max_steps = inputs.max_steps(windows.len(), view.interp);
-    renderer.set_volume_params(params);
-    // A rebuild started this frame (the GPU ran out of memory): its loading
-    // and its result need frames of their own, wherever the view is.
-    needs_repaint || res.generation != generation
+    params
 }
 
 /// Snapshot everything the volume builder needs (see [`VolumePlan`]): the
 /// dimensions come from the stack's (possibly manually overridden) metadata so a
 /// channels/frames swap is honored, `time` is the 4D timepoint to build,
-/// `budget` the bytes it may take on the GPU, and the detail worth keeping is
-/// bounded by the screen `inputs` gives.
+/// `budget` the bytes it may take on the GPU, `caps` what the renderer can
+/// hold of it and how it stores it, and the detail worth keeping is bounded
+/// by the screen `inputs` gives.
 pub(crate) fn plan_volume(
     loaded: &Document,
-    renderer: &Renderer,
+    caps: VolumeCaps,
     time: usize,
     budget: usize,
     view: &VolumeSettings,
@@ -988,14 +1029,14 @@ pub(crate) fn plan_volume(
     let volume_kinds = &volume_kinds[..masks.len()];
     let dims = loaded.display.dims();
     VolumePlan {
-        format: renderer.volume_texel_format(scivis_render::pack::common_kind(volume_kinds)),
+        format: caps.texel_format(scivis_render::pack::common_kind(volume_kinds)),
         units: loaded.display.settings().iter().map(|s| s.units).collect(),
         rgb: loaded.display.layout().shown_as_rgb(),
         channels: dims.channels,
         slices: dims.slices,
         frames: dims.frames,
         time,
-        max_dim: renderer.max_3d_texture_size(),
+        max_dim: caps.max_3d_size,
         budget,
         scale: view.scale,
         detail_cap: crate::volume::detail_cap(inputs.screen),
@@ -1007,14 +1048,13 @@ pub(crate) fn plan_volume(
 /// else on the GPU.
 pub(crate) const VOLUME_SHARE_OF_FREE: f64 = 0.5;
 
-/// The bytes a volume may take on the GPU: half of what the renderer reports
-/// free (the current volume counted as free, since it is replaced), or
-/// [`crate::volume::DEFAULT_VOLUME_BUDGET`] when it cannot tell; within
+/// The bytes a volume may take on the GPU: half of `free`, what the renderer
+/// reports free (the current volume counted as free, since it is replaced),
+/// or [`crate::volume::DEFAULT_VOLUME_BUDGET`] when it cannot tell; within
 /// [`crate::volume::MIN_VOLUME_BUDGET`]..=[`crate::volume::MAX_VOLUME_BUDGET`],
 /// and no more than `cap` (set after an upload ran out of memory).
-pub(crate) fn volume_budget(renderer: &Renderer, cap: Option<usize>) -> usize {
-    let base = renderer
-        .volume_memory_available()
+pub(crate) fn volume_budget(free: Option<u64>, cap: Option<usize>) -> usize {
+    let base = free
         .map(|free| (free as f64 * VOLUME_SHARE_OF_FREE) as usize)
         .unwrap_or(crate::volume::DEFAULT_VOLUME_BUDGET);
     base.clamp(
@@ -1027,8 +1067,8 @@ pub(crate) fn volume_budget(renderer: &Renderer, cap: Option<usize>) -> usize {
 /// Upload a built volume. When the GPU ran out of memory, rebuild it at no
 /// more than half the size that failed (and say so), unless that is below the
 /// smallest budget there is.
-fn upload_volume(
-    renderer: &mut Renderer,
+fn upload_volume<R: VolumeRenderer>(
+    renderer: &mut R,
     volume: &crate::volume::BuiltVolume,
     res: &mut VolumeResidency,
     notices: &mut Notices,
@@ -1080,3 +1120,7 @@ pub(crate) fn prefetch_matches(result: &PrefetchResult, jobs: &[ChannelJob]) -> 
                 && ch.height == job.height
         })
 }
+
+#[cfg(test)]
+#[path = "sync_tests.rs"]
+mod tests;

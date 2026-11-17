@@ -49,6 +49,7 @@
 use super::platform::{Current, Destination, Placement, Platform as _, Purpose, TARGET};
 use fast_tiff_lib::{Compression, SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::camera::{CameraState, NavMode, OrbitPoint};
+use fast_tiff_viewer::{ImageRenderer as _, VolumeRenderer};
 use fasttiff_plugin_api::{Animation, AnimationOutput, MovieResolution};
 use scivis_render::VolumeImage;
 use std::io::{Seek, Write};
@@ -969,7 +970,7 @@ impl super::ViewerApp {
     /// Render the pose a recording asked for, off screen. Called with the
     /// renderer just brought up to date with this frame, so the pose rendered
     /// is the one the view shows.
-    pub(super) fn capture_animation_frame(&mut self, resources: &mut fast_tiff_viewer::Renderer) {
+    pub(super) fn capture_animation_frame(&mut self, resources: &mut impl VolumeRenderer) {
         let Some((w, h)) = self.animation.capture.request.take() else {
             return;
         };

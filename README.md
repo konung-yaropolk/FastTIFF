@@ -304,14 +304,16 @@ which a single `cfg` points at the desktop or the browser implementation.
   compositing pipeline, per-channel textures and LUTs, and the volume
   ray-marcher. Never creates a device, a surface or a window — construction
   takes the host's device, painting takes the host's render pass. Two additive
-  backends (`backend-wgpu`, `backend-glow`). Its WGSL shaders are validated
+  backends (`backend-wgpu`, `backend-glow`), both implementing its
+  `ImageRenderer` and `VolumeRenderer` traits. Its WGSL shaders are validated
   offline with naga, so a broken shader fails `cargo test` instead of showing a
   blank canvas.
 - **`fast-tiff-viewer/`** — everything between "a TIFF on disk" and "pixels on the
   GPU": the document model, per-channel contrast/LUT derivation, c/z/t
   interpretation, the display-channel → IFD mapping, 3D volume assembly,
   read-ahead, the camera, the playback clock, and the per-frame sync that drives
-  the renderer. A `threads` feature (on by default) can be turned off for a
+  the renderer, generic over those traits so it builds, and is tested, with no
+  backend. A `threads` feature (on by default) can be turned off for a
   single-threaded host such as `wasm32-unknown-unknown`.
 - **`FastTIFF/`** — the GUI binary: eframe/egui for the window and controls.
   It holds a `fast_tiff_viewer::Viewer` and the 2D view it feeds input to (the

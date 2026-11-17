@@ -638,10 +638,6 @@ impl Prefetcher {
     ///
     /// Page-touch mode decodes nothing ahead, so it bins nothing either: the
     /// interface thread bins what it decodes inline.
-    #[cfg_attr(
-        not(any(feature = "backend-wgpu", feature = "backend-glow")),
-        allow(dead_code)
-    )]
     pub(crate) fn request(
         &self,
         revision: Revision,

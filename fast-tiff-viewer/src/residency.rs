@@ -44,13 +44,6 @@
 //! to be filled again; it acts on nothing it reads here by itself. So what a
 //! change asks of the renderer is answered without one, and tested so.
 
-// Reconciled and filled by the per-frame GPU path (`crate::sync`), which
-// needs a backend; without one a viewer holds a residency nothing uses.
-#![cfg_attr(
-    not(any(feature = "backend-wgpu", feature = "backend-glow")),
-    allow(dead_code)
-)]
-
 use crate::display::{Display, Revision};
 use crate::roi::Roi;
 use crate::window::Overview;

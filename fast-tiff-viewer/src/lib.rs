@@ -48,23 +48,23 @@
 //! with [`Viewer::set_dimension_order`], [`Viewer::set_pseudocolor`] and
 //! [`Viewer::set_gray_lut`]; a document arrives only through an open.
 //!
+//! # The renderer
+//!
+//! [`Viewer::sync`] drives whatever renderer it is handed, through the two
+//! traits of `scivis_render` ([`ImageRenderer`] for the 2D frame,
+//! [`VolumeRenderer`] for the 3D view): it is generic over them, so it is
+//! compiled for the backend the frontend constructs, and calls it directly.
+//! This crate names no backend and needs none to build: the frontend picks
+//! one where it makes it (FastTIFF in `FastTIFF/src/render.rs`), and the
+//! tests here hand the sync a double that records what it is sent.
+//!
 //! # Features
 //!
-//! * `backend-wgpu` / `backend-glow` — which GPU backend [`Viewer::sync`]
-//!   drives. Exactly one is needed for it; with neither, the CPU-side model
-//!   still compiles and is fully usable headless.
 //! * `threads` (default) — background read-ahead, window and volume assembly.
 //!   Turn it off for a single-threaded host such as `wasm32-unknown-unknown`;
 //!   the synchronous fallbacks are already the paths taken when a worker
 //!   fails to spawn, so nothing else changes.
 
-// Without a backend there is no sync, and much of what it drives — the
-// workers, the caches, the residency plans — has no caller: that build is for
-// the CPU-side model alone.
-#![cfg_attr(
-    not(any(feature = "backend-wgpu", feature = "backend-glow")),
-    allow(dead_code)
-)]
 // Everything `pub` is reachable from outside, and so is this crate's API: an
 // item only the crate uses says `pub(crate)`. And a type a public signature
 // hands out can be named by the frontend it is handed to.
@@ -101,6 +101,9 @@ mod planes;
 /// that never opens the Plugins menu pays for it only in binary size.
 pub mod plugins;
 mod prefetch;
+/// A renderer that records what the sync sends it, for its tests.
+#[cfg(test)]
+mod recorder;
 /// What one renderer holds of the document it shows, reconciled with the
 /// display model once per sync. Crate-private: a frontend asks the
 /// [`Viewer`] what it needs of it.
@@ -111,6 +114,7 @@ pub mod roi;
 pub mod save;
 mod screen;
 pub mod snapshot;
+mod sync;
 mod units;
 pub mod view2d;
 mod viewer;
@@ -118,23 +122,8 @@ mod volume;
 mod window;
 mod worker;
 
-#[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
-mod sync;
-
 #[doc(hidden)]
 pub mod testing;
-
-// The GPU backend this crate was built against. Selected the same way the
-// frontend selects one, and it must be the *same* one — the app's `renderer-*`
-// features forward to both crates, which is what keeps them in step.
-#[cfg(feature = "backend-glow")]
-use scivis_render::glow_backend as backend;
-#[cfg(all(feature = "backend-wgpu", not(feature = "backend-glow")))]
-use scivis_render::wgpu_backend as backend;
-
-/// The concrete renderer [`Viewer::sync`] drives, so callers name it once.
-#[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
-pub type Renderer = backend::ImageRenderResources;
 
 /// Run the registrations' GPU paths (TurboReg, suite2p) on the frontend's own
 /// wgpu device instead of each opening one. Call once at startup, before any
@@ -169,7 +158,6 @@ pub use frame::{FrameInputs, ImageInputs, Pose, VolumeInputs};
 pub use loader::{LoadSource, LoadStage};
 pub use notice::{Notice, NoticeKind, ShapeNote, VolumeNote};
 pub use screen::PhysicalPx;
-#[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
 pub use sync::SyncOutcome;
 pub use viewer::{DecodeMode, Playback, ViewMode, Viewer, VolumeSettings, DEFAULT_FPS};
 
@@ -177,4 +165,6 @@ pub use viewer::{DecodeMode, Playback, ViewMode, Viewer, VolumeSettings, DEFAULT
 // path; reach for `fast_tiff_lib` / `scivis_render` directly when you need
 // something more specific.
 pub use fast_tiff_lib::{self, TiffStack};
-pub use scivis_render::{self, ChannelKind, Lut, VolumeInterp, VolumeRender, MAX_CHANNELS};
+pub use scivis_render::{
+    self, ChannelKind, ImageRenderer, Lut, VolumeInterp, VolumeRender, VolumeRenderer, MAX_CHANNELS,
+};

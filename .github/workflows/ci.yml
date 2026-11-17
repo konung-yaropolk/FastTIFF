@@ -161,12 +161,16 @@ jobs:
       - name: Check core without threads (wasm-shaped)
         run: bash scripts/ci-local.sh viewer-no-threads
 
-      # And with no GPU backend at all, and no plugins: the CPU-side model must
-      # stand alone, so headless tooling can use it without pulling in wgpu,
-      # glow, an FFT or a registration crate. This is also what holds the plugin
-      # features honest — with every one of them off, nothing outside
-      # `plugins/builtin/` may still refer to a plugin.
-      - name: Check core with no backend
+      # And with no plugins as well as no threads. The viewer builds no GPU
+      # backend in any build now (the sync is generic over scivis-render's
+      # traits, and the frontend hands it its renderer), so what this step
+      # adds to the one above is the plugins off: the CPU-side model must
+      # stand alone, so headless tooling can use it without pulling in an FFT
+      # or a registration crate, and with every plugin feature off nothing
+      # outside `plugins/builtin/` may still refer to a plugin. The step keeps
+      # its name, `viewer-no-backend`, from when the viewer had backend
+      # features.
+      - name: Check core with no plugins and no threads
         run: bash scripts/ci-local.sh viewer-no-backend
 
   # macOS compiles the `#[cfg(target_os = "macos")]` code no other job sees —

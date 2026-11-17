@@ -15,11 +15,15 @@
 //!
 //! Run one suite with `cargo test -p scivis-render --test it <module>::`.
 
+// The GPU suites share `headless` and `scene`, which are built with glow, so
+// each is gated on it: `gl` draws with glow alone, `parity` against wgpu, and
+// `caps` checks each backend's volume caps on its own (its wgpu half gated on
+// wgpu as well).
+#[cfg(feature = "backend-glow")]
+mod caps;
 #[cfg(feature = "backend-glow")]
 mod gl;
 mod glsl;
-// Every suite that drives a GPU draws with glow: `gl` alone, `parity`
-// against wgpu.
 #[cfg(feature = "backend-glow")]
 mod headless;
 mod markers;

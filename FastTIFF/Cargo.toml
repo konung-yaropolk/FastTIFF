@@ -25,9 +25,10 @@ license = "GPL-3.0-only"
 default = ["renderer-wgpu", "builtin-plugins"]
 # Each feature turns on the matching eframe backend AND the matching backend in
 # `scivis-render`, so the *unused* renderer's entire dependency subtree is
-# excluded from the build (`cargo tree`).
-renderer-wgpu = ["eframe/wgpu", "scivis-render/backend-wgpu", "fast-tiff-viewer/backend-wgpu", "fast-tiff-viewer/gpu-registration"]
-renderer-glow = ["eframe/glow", "scivis-render/backend-glow", "fast-tiff-viewer/backend-glow"]
+# excluded from the build (`cargo tree`). The viewer has no backend feature to
+# keep in step: its sync is generic over the renderer `render.rs` makes.
+renderer-wgpu = ["eframe/wgpu", "scivis-render/backend-wgpu", "fast-tiff-viewer/gpu-registration"]
+renderer-glow = ["eframe/glow", "scivis-render/backend-glow"]
 
 # ---------------------------------------------------------------------------
 # Which built-in plugins this binary carries.

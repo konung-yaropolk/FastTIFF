@@ -25,11 +25,12 @@ include = [
 ]
 
 # Backends are additive, not exclusive — nothing here forbids compiling both
-# (they're independent modules over independent GPU crates). A *host* that can
-# only drive one, like the eframe app, enforces that on its own side; a host
-# that wants runtime fallback can build both. Neither enabled leaves just the
-# shared parameter types, which is what a CPU-side caller (volume budgeting,
-# window/level math) needs.
+# (they're independent modules over independent GPU crates, implementing the
+# same two traits). A *host* that can only drive one, like the eframe app,
+# enforces that on its own side; a host that wants runtime fallback can build
+# both. Neither enabled leaves the shared parameter types and the renderer
+# traits, which is what a CPU-side caller (volume budgeting, window/level
+# math, code generic over a renderer, a test double) needs.
 [features]
 default = []
 backend-wgpu = ["dep:wgpu", "dep:bytemuck", "dep:windows", "dep:ash", "dep:wasm-bindgen-futures"]
@@ -50,7 +51,11 @@ glow = { version = "0.17", optional = true }
 # f32 <-> f16 for half-float volume texels (`pack`); already in wgpu's tree.
 half = "2"
 rayon = { workspace = true, optional = true }
-bytemuck = { workspace = true, optional = true }
+# The uniform blocks both backends hand their shaders (`uniforms`) derive
+# `Pod`. `derive` is said here, where the derives are, rather than left to
+# wgpu's turning it on: a glow-only build has no wgpu. Its proc-macro is
+# already in the app's tree either way (through epaint).
+bytemuck = { workspace = true, features = ["derive"], optional = true }
 
 # Asking the driver how much GPU memory there is (`vram`), on the backends
 # wgpu uses there. Both are already in wgpu's tree at these versions, so they

@@ -1,4 +1,5 @@
-//! Compile-time assertions on the thread-safety of `ImageRenderResources`.
+//! Compile-time assertions on the thread-safety of `ImageRenderResources`,
+//! and on the traits each backend's implements.
 //!
 //! A host that wraps the renderer for its drawing layer (egui's paint callbacks
 //! demand `Send + Sync + 'static`) needs to know exactly which markers hold.
@@ -10,12 +11,25 @@
 
 fn assert_send<T: Send>() {}
 fn assert_sync<T: Sync>() {}
+fn assert_renders<T: scivis_render::VolumeRenderer>() {}
 
 #[cfg(feature = "backend-wgpu")]
 #[test]
 fn wgpu_resources_are_send_and_sync() {
     assert_send::<scivis_render::wgpu_backend::ImageRenderResources>();
     assert_sync::<scivis_render::wgpu_backend::ImageRenderResources>();
+}
+
+/// Each backend is a renderer a host can be generic over: the 2D composite
+/// and the volume, `VolumeRenderer` being the both of them. On every target,
+/// wasm included, where only these traits stand between a host's sync and
+/// the backend it was built with.
+#[test]
+fn every_backend_is_a_renderer() {
+    #[cfg(feature = "backend-wgpu")]
+    assert_renders::<scivis_render::wgpu_backend::ImageRenderResources>();
+    #[cfg(feature = "backend-glow")]
+    assert_renders::<scivis_render::glow_backend::ImageRenderResources>();
 }
 
 // Native only: on wasm, `glow::Context` wraps web-sys handles that are neither

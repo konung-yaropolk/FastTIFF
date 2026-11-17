@@ -347,13 +347,7 @@ fn sources_are_ascii() {
 fn per_channel_code_covers_every_channel() {
     let what = "composite.frag.glsl";
     let composite = include_str!("../../src/shaders/composite.frag.glsl");
-    for array in [
-        "ch_tex[",
-        "ch_ftex[",
-        "ch_is_float[",
-        "ch_min_max[",
-        "ch_enabled[",
-    ] {
+    for array in ["ch_tex[", "ch_ftex[", "ch_params["] {
         assert_every_channel(what, composite, array, "]");
     }
     assert_every_channel_arg(what, composite, "apply_channel", Arg::At(1));

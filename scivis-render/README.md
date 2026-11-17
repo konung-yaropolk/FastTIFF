@@ -44,21 +44,46 @@ Two, selected by feature and **additive** — nothing stops you compiling both:
 | `backend-wgpu` | DX12 / Vulkan / Metal / WebGPU |
 | `backend-glow` | OpenGL 3.x / WebGL2 |
 
-With neither feature you still get the shared parameter types — enough for
-CPU-side code that budgets volume memory or computes window/level.
+With neither feature you still get the shared parameter types and the two
+renderer traits — enough for CPU-side code that budgets volume memory,
+computes window/level, or is generic over a renderer it is handed.
 
-Both backends expose the **same inherent method set** on their
-`ImageRenderResources`, so a host picks one with a `#[cfg]` re-export and writes
-its call sites once. There is deliberately **no** `Renderer` trait: the two
-`paint` methods can't share a signature (a wgpu render pass vs. a live GL
-context), and a cfg-selected façade already gives static dispatch for free.
+Both backends' `ImageRenderResources` implement two traits, `ImageRenderer`
+(the 2D composite) and `VolumeRenderer` (the 3D view, which includes the
+first), so a host writes its per-frame code once, generic over them, and names
+a backend only where it constructs one and hands it to its drawing layer.
+Generic, not `dyn`: the host's code is compiled for the backend it is given,
+and a call costs what a call on the backend's own type does. What cannot share
+a signature stays on each type: construction (a wgpu device, or a GL context)
+and painting (into a wgpu render pass, or with a live GL context).
+
+What both backends work out on the CPU is done once, in this crate, and both
+consume it: the composite's uniform block (`uniforms::CompositeParams`, laid out
+as both shading languages read it), the LUT texels, the volume's acceleration
+uniform, and how a device stores a volume (`VolumeCaps`). The backends differ
+only in what they hand the GPU, and where they store volumes differently, on
+purpose, `VolumeCaps` says so.
 
 ---
 
 # API
 
-Everything lives on one type, `ImageRenderResources`, in either
-`scivis_render::wgpu_backend` or `scivis_render::glow_backend`.
+Each backend is one type, `ImageRenderResources`, in either
+`scivis_render::wgpu_backend` or `scivis_render::glow_backend`. Most of what it
+does is the two traits below, `ImageRenderer` and `VolumeRenderer`; bring them
+into scope (`use scivis_render::{ImageRenderer as _, VolumeRenderer as _};`) to
+call their methods on a backend's own type, or write a function generic over
+them:
+
+```rust,ignore
+fn show<R: scivis_render::ImageRenderer>(r: &mut R, frame: &Frame) {
+    r.ensure_size(frame.width, frame.height, &frame.kinds);
+    // ...
+}
+```
+
+Construction and painting are each type's own (see Construction, and
+`paint` / `paint_volume` below), since they take the backend's GPU objects.
 
 ## Lifecycle
 
@@ -73,14 +98,18 @@ The API is a state machine in three tiers, from least to most frequent:
                  paint(...)
 ```
 
-Calls at a coarser tier invalidate finer ones: `ensure_size` reallocates
-textures, so every channel must be re-uploaded after it changes anything.
+`ensure_size` reallocates the channel textures, so every channel's pixels
+must be re-uploaded after it changes anything; the LUTs survive it.
 `ensure_size` is cheap to call every frame — it compares the requested size and
 per-channel kinds against what's allocated and returns immediately if they
 match, so you can call it unconditionally.
 
-**Mutability tells you the cost.** Uploads take `&self` — they only queue GPU
-writes. Anything that can reallocate or restage takes `&mut self`.
+Everything that changes what the renderer holds takes `&mut self`, uploads
+included. The tiers above, not the receiver, say what a call costs: the two
+backends only queue an upload's write, and only `ensure_size` and a volume
+upload allocate. A `&self` upload would have made any renderer that keeps
+its pixels itself (a test double, a CPU compositor) reach for interior
+mutability.
 
 ## Construction
 
@@ -106,8 +135,19 @@ let mut r = glow_backend::ImageRenderResources::new(gl.clone());
 | `VolumeInterp` | `Nearest` / `Linear` / `Cubic`. |
 | `VolumeRender` | `Mip` / `Alpha` / `Surface`. |
 | `VolumeParams` | Camera basis + per-channel windows + mode, for one 3D frame. |
+| `VolumeCaps` | What a device holds of a volume: its 3D limit, and how it stores each kind of sample. |
+| `uniforms::CompositeParams` | The 2D composite's uniform block, as both backends hand it to their shaders. |
 
 ## 2D image
+
+`ImageRenderer`:
+
+```rust,ignore
+fn max_2d_texture_size(&self) -> u32
+```
+The device's per-axis 2D-texture limit, asked once when the backend is made.
+A frame past it cannot be uploaded at all: subsample or window it to fit, as
+FastTIFF's viewer does.
 
 ```rust,ignore
 fn ensure_size(&mut self, width: u32, height: u32, kinds: &[ChannelKind])
@@ -117,9 +157,9 @@ channel. Channels past `kinds.len()` become unused (1×1 dummies). No-op when
 nothing changed; otherwise reallocates and **invalidates all uploaded pixels**.
 
 ```rust,ignore
-fn upload_channel_u8 (&self, channel: usize, width: u32, height: u32, samples: &[u8])
-fn upload_channel_u16(&self, channel: usize, width: u32, height: u32, samples: &[u16])
-fn upload_channel_f32(&self, channel: usize, width: u32, height: u32, samples: &[f32])
+fn upload_channel_u8 (&mut self, channel: usize, width: u32, height: u32, samples: &[u8])
+fn upload_channel_u16(&mut self, channel: usize, width: u32, height: u32, samples: &[u16])
+fn upload_channel_f32(&mut self, channel: usize, width: u32, height: u32, samples: &[f32])
 ```
 Upload one channel's pixels, row-major, tightly packed, `width * height` samples.
 
@@ -132,10 +172,12 @@ into the 1×1 dummy that the unused format was shrunk to) or garbled pixels
 silently.
 
 ```rust,ignore
-fn upload_lut(&self, channel: usize, lut: &Lut)
+fn upload_lut(&mut self, channel: usize, lut: &Lut)
 ```
 Set one channel's color table. Sticky — upload once and it persists across
-frames until `ensure_size` reallocates.
+frames until it is replaced. `ensure_size` leaves the LUTs alone (it
+reallocates only the channel textures), which is what lets FastTIFF's viewer
+resize to another window of a large frame without sending its LUTs again.
 
 ```rust,ignore
 fn set_params(&mut self, channels: &[ChannelUniform], num_channels: u32,
@@ -157,20 +199,30 @@ it's easy to go wrong:
 If your UI keeps one `0..65535` slider for every channel (as FastTIFF does),
 divide by `257` before handing an `Int8` channel's window over.
 
+Both backends pack these into one `uniforms::CompositeParams`: the wgpu one
+writes it to its uniform buffer here, the glow one keeps it and sets it as
+uniforms when it paints.
+
 ```rust,ignore
-fn paint(&self, render_pass: &mut wgpu::RenderPass)   // wgpu
-fn paint(&self, gl: &glow::Context)                   // glow
+fn paint(&self, render_pass: &mut wgpu::RenderPass)   // wgpu, inherent
+fn paint(&self, gl: &glow::Context)                   // glow, inherent
 ```
 Draw the composited image. Assumes **you** have already set the viewport and
 scissor to the target rect — that's host state, and this crate won't touch it.
 
 ## 3D volume
 
+`VolumeRenderer`, which includes `ImageRenderer`: the volume is drawn through
+the same LUTs.
+
 ```rust,ignore
-fn max_3d_texture_size(&self) -> u32
+fn volume_caps(&self) -> VolumeCaps
 ```
-The device's per-axis 3D-texture limit. Reduce your volume to fit it before
-uploading; there is no automatic downscale.
+What the device holds of a volume, asked once when the backend is made:
+`max_3d_size`, its per-axis 3D-texture limit (reduce your volume to fit it
+before uploading; there is no automatic downscale), and whether it filters
+16-bit unorm (`unorm16`) and full-float (`float32`) textures, which decides
+how each kind of sample is stored.
 
 ### Packing a volume (`pack`)
 
@@ -182,12 +234,16 @@ won't stall a frame — FastTIFF does it on its volume-building thread — and t
 upload is then a plain copy.
 
 ```rust,ignore
-fn volume_texel_format(&self, kind: VolumeKind) -> pack::TexelFormat
+VolumeCaps::texel_format(&self, kind: VolumeKind) -> pack::TexelFormat
+VolumeCaps::check(&self, layout: &pack::VolumeLayout) -> Result<(), VolumeUploadError>
 ```
 How this device stores a volume of `kind` (use `pack::common_kind` for mixed
-channels). wgpu: 8-bit → `Unorm8`; 16-bit → `Unorm16` with the
-`TEXTURE_FORMAT_16BIT_NORM` feature, else `Float16`; float → `Float16`. glow:
-native widths (`Unorm8`, `Unorm16`, `Float32`).
+channels), and whether a packed volume is one it can take. The backends differ
+here on purpose. glow: native widths (`Unorm8`, `Unorm16`, `Float32`), since
+OpenGL 3 filters all three as core. wgpu: 8-bit → `Unorm8`; 16-bit → `Unorm16`
+with the `TEXTURE_FORMAT_16BIT_NORM` feature, else `Float16`; float → `Float16`,
+since a full float is filterable only under `FLOAT32_FILTERABLE`, which many
+devices lack and the backend does not ask for.
 
 ```rust,ignore
 let layout = pack::VolumeLayout::new((w, h, d), channels, format);
@@ -214,7 +270,8 @@ Re-uploading the same shape and format refills in place with no reallocation —
 which is what makes stepping through 4D timepoints cheap; a volume of another
 shape frees the old one's memory before it asks for its own. A volume whose
 buffers are not the sizes its layout says (`PackedVolume::check`: one never
-`finish`ed, say) is refused as `Unsupported`. Fails with
+`finish`ed, say), or that `VolumeCaps::check` refuses, is refused as
+`Unsupported`. Fails with
 `VolumeUploadError::OutOfMemory` when the GPU has no room (wgpu reports it per
 texture, before anything is written to it), leaving placeholders and no volume:
 build a smaller one and try again. Don't rely on that alone, though: a driver
@@ -222,20 +279,28 @@ may overcommit rather than fail (DX12 does, by several GB on a 2 GB card, and
 OpenGL only fails for absurd sizes).
 
 ```rust,ignore
+fn release_volume(&mut self)
+```
+Give the volume's GPU memory back, placeholders in its place, for a host whose
+volume has no further use (the stack it was built from closed or replaced).
+
+```rust,ignore
 fn take_late_upload_error(&mut self) -> Option<(VolumeUploadError, usize)>
+fn volume_pending(&mut self) -> bool
 ```
 In a browser, WebGPU says whether there was room through a promise an upload
 cannot wait for. The upload then returns `Ok`, the volume is not drawn until
 the answer is in (a texture there was no room for would invalidate the whole
 frame, the host's UI included), and a refusal turns up here, with the bytes
 the volume took: the volume is gone, as after a failed upload. Ask once a
-frame. Always `None` elsewhere.
+frame. Always `None` elsewhere. While `volume_pending` says the answer is not
+in, keep frames coming: nothing else asks for the one that draws the volume.
 
 Size the volume against:
 
 ```rust,ignore
 fn volume_memory_available(&self) -> Option<u64>
-fn set_adapter(&mut self, adapter: wgpu::Adapter)   // wgpu only: what to ask
+fn set_adapter(&mut self, adapter: wgpu::Adapter)   // wgpu only, inherent: what to ask
 ```
 GPU memory a new volume could take: the driver's budget less what the process
 uses, plus what the current volume holds (a new one replaces it). wgpu asks
@@ -294,9 +359,9 @@ Both on unless switched off, for comparing, measuring or ruling them out:
 A MIP ray also stops once every channel is at the top of its window.
 
 ```rust,ignore
-fn prepare_volume(&mut self, encoder: &mut wgpu::CommandEncoder)   // wgpu
-fn paint_volume(&self, render_pass: &mut wgpu::RenderPass)         // wgpu
-fn paint_volume(&mut self, gl: &glow::Context)                     // glow
+fn prepare_volume(&mut self, encoder: &mut wgpu::CommandEncoder)   // wgpu, inherent
+fn paint_volume(&self, render_pass: &mut wgpu::RenderPass)         // wgpu, inherent
+fn paint_volume(&mut self, gl: &glow::Context)                     // glow, inherent
 ```
 **wgpu ordering:** `prepare_volume` must run once per 3D frame *before*
 `paint_volume`: it writes the uniform and, when reduced, records the reduced
@@ -328,7 +393,9 @@ device. GPU memory holds one tile, not the whole picture. `capture_tiles` and
 
 ## Backend-specific extras
 
-Only on `wgpu_backend`:
+Inherent on each type, beside `new`, `paint` and `paint_volume`. Only on
+`wgpu_backend`, as well as `prepare_volume`, `write_volume_uniform` and
+`set_adapter`:
 
 ```rust,ignore
 fn optional_features(adapter: &wgpu::Adapter) -> wgpu::Features
@@ -341,8 +408,8 @@ it, so this is a quality knob, not a requirement.
 
 Also `BACKEND: &str` on both (`"wgpu"` / `"glow"`), for a UI that wants to show
 which one is live. A volume's bytes per sample are those of the format
-`volume_texel_format(kind)` returns (`TexelFormat::bytes`); a 2D channel's are
-`ChannelKind::bytes_per_sample`.
+`volume_caps().texel_format(kind)` returns (`TexelFormat::bytes`); a 2D
+channel's are `ChannelKind::bytes_per_sample`.
 
 Features: `backend-wgpu` and `backend-glow` (additive), and `rayon` to build a
 packed volume's mip chain and brick maxima across threads.
@@ -351,6 +418,7 @@ packed volume's mip chain and brick maxima across threads.
 
 ```rust,ignore
 use scivis_render::{wgpu_backend::ImageRenderResources, ChannelKind, ChannelUniform};
+use scivis_render::ImageRenderer as _;
 
 let mut r = ImageRenderResources::new(device.clone(), queue.clone(), target_format);
 
@@ -415,26 +483,39 @@ backends whatever features are asked for, and checks:
   glslang is a dev-dependency built from C++ by `cc`, once per target
   directory and profile: 12 s debug and 35 s release on 16 threads;
 * that the Rust uniform structs are laid out field for field as naga lays out
-  the WGSL ones: names, offsets, sizes and types (`src/wgpu_backend_tests.rs`);
+  the WGSL ones: names, offsets, sizes and types (`src/wgpu_backend_tests.rs`),
+  and the composite's shared one as the GLSL reads it, a `vec4` a channel
+  (`src/uniforms_tests.rs`);
+* what both backends work out on the CPU, against what each one's own copy of
+  it did: the uniform block, the LUT texels, the acceleration uniform, when the
+  textures are remade, the occupancy worked out again and a capture may start
+  (`src/uniforms_tests.rs`, `src/cpu_state_tests.rs`), and the texel policy,
+  `VolumeCaps` as a function of the kind, for caps written out as each
+  backend reports them (`src/renderer_tests.rs`);
 * that the per-channel lines both languages make us write out by hand cover
   exactly `MAX_CHANNELS` channels, each line one channel's alone, and read each
   from where the volume packer put it (`tests/it/unrolled.rs`).
 
-None of these needs a GPU. Two more do. `tests/it/gl.rs` has the glow backend
+None of these needs a GPU. Three more do. `tests/it/gl.rs` has the glow backend
 build its programs on the machine's own OpenGL driver (a headless WGL context
 on Windows, surfaceless EGL on Linux, GL 3.1 or later) and draw a fixed scene
 in every mode, with no GL error. `tests/it/parity.rs` draws that scene, a 2D
 composite and a volume of `MAX_CHANNELS` channels each, in every render and
 sampling mode, through both backends and compares the pictures within
 tolerances it documents: the check that the two copies of each shader still
-mean the same thing. That one also needs a hardware wgpu adapter. Without
-what they need, both skip, saying so on the test run's output whether it
-passes or not; with `SCIVIS_RENDER_REQUIRE_GL=1` in the environment, a
-missing GL context fails them instead, as the Linux CI job has it.
+mean the same thing. That one also needs a hardware wgpu adapter.
+`tests/it/caps.rs` holds each backend, made on a real device, to the caps it
+reports (set in its own `new`, which nothing else reads), and draws the
+scene's volume as 16-bit and as float samples standing for the same values,
+held to the 8-bit picture: the only draw of those volume textures in the
+suites. Without what they need, these skip, saying so on the test run's
+output whether it passes or not; with `SCIVIS_RENDER_REQUIRE_GL=1` in the
+environment, a missing GL context fails them instead, as the Linux CI job has
+it.
 
 A copy of this crate from crates.io builds only the backends it is asked
 for, and runs the suites those allow: the GPU ones need `backend-glow`, and
-`parity` `backend-wgpu` as well.
+`parity` and the wgpu half of `caps` `backend-wgpu` as well.
 
 ## License
 

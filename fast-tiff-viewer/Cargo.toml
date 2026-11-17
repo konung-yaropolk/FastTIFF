@@ -122,12 +122,12 @@ _shared-store = []
 _shared-edges = []
 
 # ---------------------------------------------------------------------------
-# Which GPU backend `sync` drives. Exactly one is required to use `Viewer::sync`
-# and the 3D volume build it runs; with neither, the crate still provides the whole
-# CPU-side model (stack state, channel settings, dimension resolution, camera
-# math) — useful for tests and headless tooling.
-backend-wgpu = ["scivis-render/backend-wgpu"]
-backend-glow = ["scivis-render/backend-glow"]
+# No feature picks a GPU backend. `Viewer::sync` is generic over the renderer
+# traits of `scivis-render` and is compiled for whichever backend the frontend
+# hands it, so this crate builds no backend of its own, and every build of it
+# has the sync and its tests. There were `backend-wgpu` / `backend-glow`
+# features here once, which the app had to keep matched with its own.
+#
 # The registration plugins' GPU paths (`stabilize` and `turboreg`). Off by
 # default: each is a compute pipeline of its own, not the renderer's, so it
 # pulls wgpu into builds that would not otherwise have it — including the glow

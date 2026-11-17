@@ -11,7 +11,8 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use scivis_render::{
-    brightest_lut_t, ChannelUniform, Lut, VolumeKind, VolumeParams, VolumeRender, MAX_CHANNELS,
+    brightest_lut_t, ChannelKind, ChannelUniform, ImageRenderer, Lut, VolumeInterp, VolumeKind,
+    VolumeParams, VolumeRender, VolumeRenderer, MAX_CHANNELS,
 };
 
 /// The share of an RGBA picture's pixels that are not all but black: a
@@ -163,40 +164,33 @@ pub fn uniforms(channels: &[Channel], view: &View) -> Vec<ChannelUniform> {
         .collect()
 }
 
-/// Upload `channels` to the renderer `r` (of either backend: both have the
-/// same methods, and no trait) and set it to show `view`.
-macro_rules! show_image {
-    ($r:expr, $channels:expr, $view:expr) => {{
-        use ::scivis_render::ChannelKind;
-        use $crate::scene::{Samples, H, W};
-        let (r, channels, view) = (&mut $r, $channels, $view);
-        let kinds: Vec<ChannelKind> = channels
-            .iter()
-            .map(|c| match c.samples {
-                Samples::U8(_) => ChannelKind::Int8,
-                Samples::U16(_) => ChannelKind::Int16,
-                Samples::F32(_) => ChannelKind::Float,
-            })
-            .collect();
-        r.ensure_size(W, H, &kinds);
-        for (c, channel) in channels.iter().enumerate() {
-            r.upload_lut(c, &channel.lut);
-            match &channel.samples {
-                Samples::U8(s) => r.upload_channel_u8(c, W, H, s),
-                Samples::U16(s) => r.upload_channel_u16(c, W, H, s),
-                Samples::F32(s) => r.upload_channel_f32(c, W, H, s),
-            }
+/// Upload `channels` to the renderer `r`, of either backend, and set it to
+/// show `view`.
+pub fn show_image(r: &mut impl ImageRenderer, channels: &[Channel], view: &View) {
+    let kinds: Vec<ChannelKind> = channels
+        .iter()
+        .map(|c| match c.samples {
+            Samples::U8(_) => ChannelKind::Int8,
+            Samples::U16(_) => ChannelKind::Int16,
+            Samples::F32(_) => ChannelKind::Float,
+        })
+        .collect();
+    r.ensure_size(W, H, &kinds);
+    for (c, channel) in channels.iter().enumerate() {
+        r.upload_lut(c, &channel.lut);
+        match &channel.samples {
+            Samples::U8(s) => r.upload_channel_u8(c, W, H, s),
+            Samples::U16(s) => r.upload_channel_u16(c, W, H, s),
+            Samples::F32(s) => r.upload_channel_f32(c, W, H, s),
         }
-        let uniforms = $crate::scene::uniforms(channels, view);
-        r.set_params(
-            &uniforms,
-            channels.len() as u32,
-            view.uv_offset,
-            view.uv_scale,
-        );
-    }};
+    }
+    r.set_params(
+        &uniforms(channels, view),
+        channels.len() as u32,
+        view.uv_offset,
+        view.uv_scale,
+    );
 }
-pub(crate) use show_image;
 
 // --- 3D volume -----------------------------------------------------------
 
@@ -238,6 +232,30 @@ pub fn volume() -> Vec<(VolumeKind, Vec<u8>)> {
     ];
     assert_eq!(channels.len(), MAX_CHANNELS);
     channels
+}
+
+/// [`volume`] with every channel's samples as `kind`, standing for the same
+/// normalized values: `v * 257` as 16-bit, `v / 255` as float. So each kind
+/// draws the 8-bit volume's picture with the same windows, and a backend that
+/// stores one kind otherwise than it says shows (`caps.rs`).
+pub fn volume_as(kind: VolumeKind) -> Vec<(VolumeKind, Vec<u8>)> {
+    volume()
+        .into_iter()
+        .map(|(_, voxels)| {
+            let bytes = match kind {
+                VolumeKind::U8 => voxels,
+                VolumeKind::U16 => voxels
+                    .iter()
+                    .flat_map(|&v| (v as u16 * 257).to_ne_bytes())
+                    .collect(),
+                VolumeKind::F32 => voxels
+                    .iter()
+                    .flat_map(|&v| (v as f32 / 255.0).to_ne_bytes())
+                    .collect(),
+            };
+            (kind, bytes)
+        })
+        .collect()
 }
 
 pub fn volume_luts() -> [Lut; MAX_CHANNELS] {
@@ -308,20 +326,33 @@ pub fn volume_params(mode: VolumeRender, distance: f32, on: [bool; MAX_CHANNELS]
     }
 }
 
-/// Upload the volume to `r` (of either backend) and set it to render as
+/// Upload the volume to `r`, of either backend, and set it to render as
 /// `mode` with `interp`, from `distance` away, with the channels `on`.
-macro_rules! show_volume {
-    ($r:expr, $mode:expr, $interp:expr, $distance:expr, $on:expr) => {{
-        use $crate::scene::{volume, volume_luts, volume_params, DIMS};
-        let r = &mut $r;
-        let (w, h, d) = DIMS;
-        r.upload_volumes(w, h, d, &volume())
-            .expect("the volume uploads");
-        for (c, lut) in volume_luts().iter().enumerate() {
-            r.upload_lut(c, lut);
-        }
-        r.set_volume_interp($interp);
-        r.set_volume_params(volume_params($mode, $distance, $on));
-    }};
+pub fn show_volume(
+    r: &mut impl VolumeRenderer,
+    mode: VolumeRender,
+    interp: VolumeInterp,
+    distance: f32,
+    on: [bool; MAX_CHANNELS],
+) {
+    show_volume_as(r, VolumeKind::U8, mode, interp, distance, on);
 }
-pub(crate) use show_volume;
+
+/// [`show_volume`], with the volume's samples as `kind` ([`volume_as`]).
+pub fn show_volume_as(
+    r: &mut impl VolumeRenderer,
+    kind: VolumeKind,
+    mode: VolumeRender,
+    interp: VolumeInterp,
+    distance: f32,
+    on: [bool; MAX_CHANNELS],
+) {
+    let (w, h, d) = DIMS;
+    r.upload_volumes(w, h, d, &volume_as(kind))
+        .expect("the volume uploads");
+    for (c, lut) in volume_luts().iter().enumerate() {
+        r.upload_lut(c, lut);
+    }
+    r.set_volume_interp(interp);
+    r.set_volume_params(volume_params(mode, distance, on));
+}

@@ -249,14 +249,14 @@ step lib-no-default      -- cargo test -p fast-tiff-lib --no-default-features --
 step msrv                -- msrv
 step wasm-target         -- rustup target add wasm32-unknown-unknown
 step lib-wasm            -- cargo check -p fast-tiff-lib --target wasm32-unknown-unknown --no-default-features
-step viewer-wasm         -- cargo check -p fast-tiff-viewer --target wasm32-unknown-unknown --no-default-features --features backend-wgpu,builtin-plugins
+step viewer-wasm         -- cargo check -p fast-tiff-viewer --target wasm32-unknown-unknown --no-default-features --features builtin-plugins
 step oir-no-default      -- env RUSTDOCFLAGS="-D warnings" cargo test -p oir-reader --no-default-features
 step oir-wasm            -- cargo check -p oir-reader --target wasm32-unknown-unknown --all-targets
 step oir-wasm-no-default -- cargo check -p oir-reader --target wasm32-unknown-unknown --no-default-features
 step oir-doc             -- env RUSTDOCFLAGS="-D warnings" cargo doc -p oir-reader --no-deps
 step published-package slow -- package -p c-api-support -p image-registration-support -p fast-tiff-lib -p oir-reader -p suite2p-registration -p turboreg-registration
 step web-check           -- cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
-step viewer-no-threads   -- cargo test -p fast-tiff-viewer --no-default-features --features backend-wgpu,builtin-plugins
+step viewer-no-threads   -- cargo test -p fast-tiff-viewer --no-default-features --features builtin-plugins
 step viewer-no-backend   -- cargo check -p fast-tiff-viewer --no-default-features
 step macos-intel explicit -- env MACOSX_DEPLOYMENT_TARGET=11.0 cargo check --release --target x86_64-apple-darwin -p FastTIFF --no-default-features --features renderer-wgpu,builtin-plugins
 step web-bundle slow     -- in_dir FastTIFF-web wasm-pack build --target web --out-dir pkg --release

@@ -30,7 +30,7 @@ use crate::scene::{self, show_image, show_volume, ALL, VIEWS};
 use glow::HasContext as _;
 use scivis_render::glow_backend::ImageRenderResources;
 use scivis_render::shaders::{self, GlslProgram};
-use scivis_render::{VolumeInterp, VolumeRender, MAX_CHANNELS};
+use scivis_render::{VolumeInterp, VolumeRender, VolumeRenderer as _, MAX_CHANNELS};
 use std::sync::Arc;
 
 /// `program` compiled and linked on `gl`, the way the backend does it.
@@ -103,7 +103,7 @@ fn the_backend_draws_every_mode_without_a_gl_error() {
 
     let channels = scene::image();
     for view in &VIEWS {
-        show_image!(r, &channels, view);
+        show_image(&mut r, &channels, view);
         assert_no_error(gl, "uploading the image");
         let what = format!("the composite, {}", view.name);
         let rgba = headless::draw_offscreen(gl, view.size, || r.paint(gl));
@@ -123,7 +123,7 @@ fn the_backend_draws_every_mode_without_a_gl_error() {
     ];
     for mode in modes {
         for interp in interps {
-            show_volume!(r, mode, interp, 1.5, ALL);
+            show_volume(&mut r, mode, interp, 1.5, ALL);
             assert_no_error(gl, "uploading the volume");
             r.capture_volume(32, 24).expect("a capture starts");
             let what = format!("the volume, {mode:?}, {interp:?}");

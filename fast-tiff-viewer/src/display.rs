@@ -175,20 +175,11 @@ impl ChannelMasks {
     }
 
     /// How many channels are shown.
-    // Read by the per-frame GPU path (`crate::sync`), which needs a backend.
-    #[cfg_attr(
-        not(any(feature = "backend-wgpu", feature = "backend-glow")),
-        allow(dead_code)
-    )]
     pub(crate) fn len(&self) -> usize {
         self.len
     }
 
     /// Each channel's texture format, in channel order.
-    #[cfg_attr(
-        not(any(feature = "backend-wgpu", feature = "backend-glow")),
-        allow(dead_code)
-    )]
     pub(crate) fn kinds(&self) -> &[ChannelKind] {
         &self.kinds[..self.len]
     }
@@ -402,11 +393,6 @@ impl Display {
     /// sequence as the [`Revision`], so no two stacks' LUTs share a number.
     /// What holds a copy of them (a renderer's LUT texture) records the number
     /// it copied and compares.
-    // Read by the per-frame GPU path (`crate::sync`), which needs a backend.
-    #[cfg_attr(
-        not(any(feature = "backend-wgpu", feature = "backend-glow")),
-        allow(dead_code)
-    )]
     pub(crate) fn lut_revision(&self) -> u64 {
         self.lut_revision
     }

@@ -1,7 +1,8 @@
 //! The uniform structs against the WGSL structs they are copied into.
 //!
-//! `ParamsGpu`, `ChannelParamsGpu` and `VolParamsGpu` go to the GPU byte for
-//! byte (`bytemuck::bytes_of`), into buffers the shaders read as `Params`,
+//! `CompositeParams` and its `ChannelParams` (shared with the glow backend, in
+//! `uniforms`) and `VolParamsGpu` go to the GPU byte for byte
+//! (`bytemuck::bytes_of`), into buffers the shaders read as `Params`,
 //! `ChannelParams` and `VolParams`. Nothing but these tests ties the two
 //! declarations together. A field added on one side only still compiles and
 //! validates; then a buffer of the wrong size is fatal to wgpu at the first
@@ -10,6 +11,7 @@
 //! name, offset, size and type, and the size of the whole.
 
 use super::*;
+use crate::uniforms::ChannelParams;
 use std::mem::{offset_of, size_of, size_of_val};
 
 /// A type's shape, spelled alike for Rust and WGSL: scalars by name, vectors
@@ -45,7 +47,7 @@ impl<T: Shape, const N: usize> Shape for [T; N] {
     }
 }
 
-impl Shape for ChannelParamsGpu {
+impl Shape for ChannelParams {
     fn shape() -> String {
         "ChannelParams".into()
     }
@@ -158,9 +160,9 @@ fn assert_same_layout(
 fn composite_uniform_is_laid_out_as_the_shader_reads_it() {
     let src = crate::shaders::composite_wgsl();
     assert_same_layout(
-        "ChannelParamsGpu",
-        size_of::<ChannelParamsGpu>(),
-        fields!(ChannelParamsGpu {
+        "ChannelParams",
+        size_of::<ChannelParams>(),
+        fields!(ChannelParams {
             min_max,
             enabled,
             is_float,
@@ -169,9 +171,9 @@ fn composite_uniform_is_laid_out_as_the_shader_reads_it() {
         "ChannelParams",
     );
     assert_same_layout(
-        "ParamsGpu",
-        size_of::<ParamsGpu>(),
-        fields!(ParamsGpu {
+        "CompositeParams",
+        size_of::<CompositeParams>(),
+        fields!(CompositeParams {
             channels,
             uv_offset,
             uv_scale,

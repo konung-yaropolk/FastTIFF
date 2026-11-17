@@ -39,7 +39,10 @@ use std::sync::{Arc, Mutex};
 // `fast_tiff_viewer`, which is what actually drives the GPU.
 pub use scivis_render::{VolumeInterp, VolumeRender, MOVING_DOWNSCALE};
 
-// Pick the one backend the selected eframe renderer can drive. The
+// Pick the one backend the selected eframe renderer can drive. This is the
+// only place the app names one: `fast_tiff_viewer`'s sync is generic over
+// scivis-render's renderer traits, and is compiled for whatever `init` makes
+// here, so nothing else has to be kept in step with this choice. The
 // `not(renderer-glow)` guard on the wgpu arm means enabling *both* features (a
 // hard error, above) selects only glow here — so the build fails with the clean
 // `compile_error!` message rather than a duplicate-definition cascade.

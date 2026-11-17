@@ -54,7 +54,8 @@ use crate::scene::{self, show_image, show_volume, Channel, View, ALL, VIEWS};
 use glow::HasContext as _;
 use scivis_render::pack::{TexelFormat, VolumeLayout};
 use scivis_render::{
-    glow_backend, wgpu_backend, VolumeImage, VolumeInterp, VolumeRender, MAX_CHANNELS,
+    glow_backend, wgpu_backend, VolumeImage, VolumeInterp, VolumeRender, VolumeRenderer as _,
+    MAX_CHANNELS,
 };
 
 /// The format both backends render into here.
@@ -195,7 +196,7 @@ fn both() -> Option<(&'static Wgpu, Gl)> {
 fn wgpu_image(gpu: &Wgpu, channels: &[Channel], view: &View) -> Picture {
     let mut r =
         wgpu_backend::ImageRenderResources::new(gpu.device.clone(), gpu.queue.clone(), FORMAT);
-    show_image!(r, channels, view);
+    show_image(&mut r, channels, view);
     let (width, height) = view.size;
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("parity target"),
@@ -273,7 +274,7 @@ fn wgpu_image(gpu: &Wgpu, channels: &[Channel], view: &View) -> Picture {
 
 fn glow_image(gl: &Gl, channels: &[Channel], view: &View) -> Picture {
     let mut r = glow_backend::ImageRenderResources::new(gl.gl.clone());
-    show_image!(r, channels, view);
+    show_image(&mut r, channels, view);
     let rgba = headless::draw_offscreen(&gl.gl, view.size, || r.paint(&gl.gl));
     headless::assert_no_error(&gl.gl, view.name);
     Picture {
@@ -360,7 +361,7 @@ fn wgpu_volume(
 ) -> Picture {
     let mut r =
         wgpu_backend::ImageRenderResources::new(gpu.device.clone(), gpu.queue.clone(), FORMAT);
-    show_volume!(r, mode, interp, view.distance, on);
+    show_volume(&mut r, mode, interp, view.distance, on);
     r.capture_volume(view.size.0, view.size.1)
         .expect("a capture starts");
     loop {
@@ -381,7 +382,7 @@ fn glow_volume(
     on: [bool; MAX_CHANNELS],
 ) -> Picture {
     let mut r = glow_backend::ImageRenderResources::new(gl.gl.clone());
-    show_volume!(r, mode, interp, view.distance, on);
+    show_volume(&mut r, mode, interp, view.distance, on);
     // SAFETY: the context is current on this thread.
     unsafe { gl.gl.disable(glow::DITHER) };
     r.capture_volume(view.size.0, view.size.1)

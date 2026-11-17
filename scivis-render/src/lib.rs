@@ -5,12 +5,19 @@
 //!   * [`wgpu_backend`] — DX12 / Vulkan / Metal / WebGPU (feature `backend-wgpu`)
 //!   * [`glow_backend`] — OpenGL / WebGL2 (feature `backend-glow`)
 //!
-//! Both expose the same inherent method set on their `ImageRenderResources`, so
-//! a host picks one with a `#[cfg]` re-export and writes its call sites once.
-//! There is deliberately **no** `dyn Renderer` trait: the two `paint` methods
-//! can't share a signature (a wgpu render pass vs. a live GL context), and the
-//! cfg-selected façade already gives static dispatch for free. Add a trait only
-//! if you ever need both backends live in one binary.
+//! Both backends' `ImageRenderResources` implement the two traits of
+//! [`renderer`], [`ImageRenderer`] (the 2D composite) and [`VolumeRenderer`]
+//! (the 3D view), so a host writes its per-frame code once, generic over them,
+//! and names a backend only where it constructs one and hands it to its
+//! drawing layer: the two `paint` methods cannot share a signature (a wgpu
+//! render pass vs. a live GL context), and they stay inherent. Generic, not
+//! `dyn`: the host's code is compiled for the backend it hands in. The
+//! backends are additive, so a host may build both.
+//!
+//! What both backends work out on the CPU — the composite's uniform block,
+//! the LUT texels, the volume's acceleration uniform — is in [`uniforms`],
+//! and how a device stores a volume is [`VolumeCaps`], so the backends differ
+//! only in what they hand the GPU.
 //!
 //! # What a host owns, and what this crate owns
 //!
@@ -22,6 +29,8 @@
 //! under a native eframe app and a browser canvas.
 //!
 //! ```ignore
+//! use scivis_render::ImageRenderer as _;
+//!
 //! // Once, at startup — from whatever created your device:
 //! let mut r = ImageRenderResources::new(device.clone(), queue.clone(), target_format);
 //!
@@ -36,17 +45,23 @@
 //! r.paint(&mut render_pass);
 //! ```
 //!
-//! Uploads take `&self` (they only queue GPU writes); anything that can
-//! reallocate or restage takes `&mut self`.
+//! Everything that changes what the renderer holds takes `&mut self`, the
+//! uploads included (see [`ImageRenderer`] for why).
 
+#[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
+mod cpu_state;
 #[cfg(feature = "backend-glow")]
 pub mod glow_backend;
 pub mod pack;
+pub mod renderer;
 pub mod shaders;
+pub mod uniforms;
 #[cfg(feature = "backend-wgpu")]
 pub mod vram;
 #[cfg(feature = "backend-wgpu")]
 pub mod wgpu_backend;
+
+pub use renderer::{ImageRenderer, VolumeCaps, VolumeRenderer};
 
 /// Maximum number of display channels composited at once. Shared by both
 /// backends (texture/uniform array sizes, written into their shaders by
@@ -127,9 +142,10 @@ impl From<ChannelKind> for VolumeKind {
 ///   * `U16` — `R16` unorm (16-bit source, or CPU-widened 8-bit/rescaled ints)
 ///   * `F32` — a float texture (32-bit float source): `R32F` on glow, and a
 ///     half float on wgpu, where full float is not filterable without an
-///     optional feature. A builder should normalize float samples to a span of
-///     about `0..=1` before packing them, as the viewer does, since a half
-///     float holds nothing past 65504.
+///     optional feature ([`VolumeCaps`] says which a device has). A builder
+///     should normalize float samples to a span of about `0..=1` before
+///     packing them, as the viewer does, since a half float holds nothing
+///     past 65504.
 ///
 /// Unlike the 2D integer path (which uses `usampler`, NEAREST-only), the volume
 /// uses *normalized* textures so trilinear interpolation is available.
@@ -402,7 +418,7 @@ pub struct VolumeImage {
 }
 
 /// One channel's window/level + on/off state, as the host produces it each
-/// frame. The backend maps it to whatever GPU representation it uses.
+/// frame. Both backends pack it into [`uniforms::CompositeParams`].
 #[derive(Clone, Copy, Debug)]
 pub struct ChannelUniform {
     pub min: f32,

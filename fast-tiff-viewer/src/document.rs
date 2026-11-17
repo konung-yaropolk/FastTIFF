@@ -188,11 +188,6 @@ pub(crate) struct Services {
     pub(crate) histograms: crate::histogram::FrameHistograms,
 }
 
-// Started by the per-frame GPU path (`crate::sync`), which needs a backend.
-#[cfg_attr(
-    not(any(feature = "backend-wgpu", feature = "backend-glow")),
-    allow(dead_code)
-)]
 impl Services {
     /// The read-ahead worker over `tiff`, started if it is not running.
     pub(crate) fn start_prefetch(&mut self, tiff: &Arc<TiffStack>) -> Option<&Prefetcher> {

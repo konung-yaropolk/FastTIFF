@@ -78,6 +78,8 @@ view.clamp_pan(&extent);
 let placed = view.place(&extent);
 inputs.image = placed.inputs(pixels_per_point);
 
+// `renderer` is either scivis-render backend's `ImageRenderResources`, or
+// anything else implementing its `VolumeRenderer`: `sync` is generic over it.
 let outcome = viewer.sync(&mut renderer, &inputs);
 // …then draw, and repaint again if outcome.needs_repaint
 for notice in viewer.notices() {
@@ -108,12 +110,14 @@ right pixels?"*; if yes, it's here.
 
 | Feature | Default | Effect |
 |---|---|---|
-| `backend-wgpu` / `backend-glow` | — | Which GPU backend `Viewer::sync` drives. Exactly one is needed to sync; with neither, the CPU-side model still compiles and is fully usable headless. |
 | `threads` | on | Background read-ahead and volume assembly. Turn it off for a single-threaded host such as `wasm32-unknown-unknown`; the synchronous fallbacks are already the paths taken when a worker fails to spawn, so nothing else changes. |
 
-Note that the backend feature must match the one the frontend selects — in the
-FastTIFF app, the `renderer-*` features forward to both crates, which is what
-keeps them in step.
+No feature picks a GPU backend. `Viewer::sync` takes any renderer that
+implements scivis-render's `VolumeRenderer` (which includes its
+`ImageRenderer`), and is compiled for the one the frontend hands it — static
+dispatch, as if it named it — so this crate builds no backend at all, and the
+frontend picks one where it constructs it. The sync's own tests drive it with
+a double that records what it is sent (`src/sync_tests.rs`), with no GPU.
 
 ## License
 
