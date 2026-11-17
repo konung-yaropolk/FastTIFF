@@ -21,7 +21,7 @@
 
 use super::*;
 use egui::PointerButton::{Middle, Primary};
-use fast_tiff_viewer::plugins::builtin::point_counter::PointCounter;
+use fast_tiff_viewer::point_counter::PointCounter;
 use fasttiff_plugin_api::{Plot, SelectionKind, Shape};
 
 // ------------------------------------------------------------ the arbitration

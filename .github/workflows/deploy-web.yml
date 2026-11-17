@@ -19,11 +19,14 @@ on:
       - "FastTIFF/**"
       - "fast-tiff-lib/**"
       - "fast-tiff-viewer/**"
+      - "fasttiff-builtin-plugins/**"
       - "scivis-render/**"
       - "fasttiff-plugin-api/**"
       - "fasttiff-plugin-abi/**"
+      - "fasttiff-plugin/**"
       - "suite2p-registration/**"
       - "turboreg-registration/**"
+      - "image-registration-support/**"
       # The web crate is a workspace member: the root lock is its lock, and the
       # root manifest holds its profile and its dependency versions.
       - "Cargo.toml"

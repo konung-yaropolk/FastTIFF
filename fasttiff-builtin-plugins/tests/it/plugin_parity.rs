@@ -22,8 +22,9 @@
 #![cfg(feature = "builtin-plugins")]
 
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
-use fast_tiff_viewer::plugins::{builtin, describe_view, Origin, Registry, StackHost};
+use fast_tiff_viewer::plugins::{describe_view, Origin, Registry, StackHost};
 use fast_tiff_viewer::Document;
+use fasttiff_builtin_plugins as builtin;
 use fasttiff_plugin_api::{
     ExportRequest, Exporter, ImageResult, ImportRequest, Importer, Outcome, ParamDecl, ParamKind,
     ParamValue, Params, Plugin, PluginError, StackInfo, VolumeMode, VolumeView,
@@ -258,7 +259,7 @@ fn every_built_in_filter_answers_the_same_through_the_boundary() {
         crop_same_both_ways(&s);
     }
 
-    let mut installed: Vec<String> = Registry::new()
+    let mut installed: Vec<String> = Registry::new(builtin::register)
         .entries()
         .iter()
         .map(|e| e.info.id.clone())

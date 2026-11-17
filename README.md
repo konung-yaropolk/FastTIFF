@@ -270,8 +270,8 @@ one):
         │
   fast-tiff-viewer  document model, channel settings, decode → GPU sync,
         │           and the plugin host
-  FastTIFF          the egui UI (lib) + the native binary
-        │
+  FastTIFF          the egui UI (lib) + the native binary, which hands
+        │           the built-in plugins to the host
   FastTIFF-web      a browser host around the same UI
 ```
 
@@ -283,6 +283,20 @@ on to build a plugin, and which therefore depend on nothing of ours:
   fasttiff-plugin-api   the plain-Rust traits both sides implement
   fasttiff-plugin       the macro that generates the boundary from them
 ```
+
+And the plugins the app compiles in, written against those three and not
+against the viewer, beside the algorithm and format crates they use:
+
+```text
+  fasttiff-builtin-plugins     every built-in plugin, GPL-3.0
+  suite2p-registration         suite2p's registration, ported; GPL-3.0
+  turboreg-registration        TurboReg/StackReg; GPL-3.0
+  image-registration-support   what the two registrations share; GPL-3.0
+  oir-reader                   the Olympus OIR reader; MPL-2.0
+```
+
+The C APIs of `fast-tiff-lib`, `oir-reader` and the two registration crates
+share their scaffolding, `c-api-support` (MPL-2.0); no plugin uses it.
 
 `FastTIFF` is a lib + bin: the library half holds the egui interface, and both
 the desktop binary and the web build construct the same `ViewerApp`. The UI is
@@ -314,7 +328,17 @@ which a single `cfg` points at the desktop or the browser implementation.
   read-ahead, the camera, the playback clock, and the per-frame sync that drives
   the renderer, generic over those traits so it builds, and is tested, with no
   backend. A `threads` feature (on by default) can be turned off for a
-  single-threaded host such as `wasm32-unknown-unknown`.
+  single-threaded host such as `wasm32-unknown-unknown`. It is also the plugin
+  host — the registry, the C boundary, the library loader — and names no
+  plugin itself: the application hands it the built-ins at start-up.
+  MPL-2.0.
+- **`fasttiff-builtin-plugins/`** — the built-in plugins, every one of them,
+  each a Cargo feature. Written against the plugin SDK and the algorithm and
+  format crates, with the viewer only as a test dependency, so a built-in can
+  do nothing a plugin library could not. GPL-3.0-only, because the two
+  registration plugins link the GPL-3.0 registration crates; keeping them all
+  here is what lets the viewer be MPL-2.0. An edit to a plugin rebuilds this
+  crate and the app, not the viewer core.
 - **`FastTIFF/`** — the GUI binary: eframe/egui for the window and controls.
   It holds a `fast_tiff_viewer::Viewer` and the 2D view it feeds input to (the
   core's `fast_tiff_viewer::view2d::View2d`: zoom, pan, glides), plus the things
@@ -325,7 +349,7 @@ which a single `cfg` points at the desktop or the browser implementation.
   the container, split and unfinished recordings, and the acquisition record
   in FluoView's own export format. Memory-mapped where the platform allows, a
   bounded buffered reader elsewhere, and it builds for
-  `wasm32-unknown-unknown`. The importer in `fast-tiff-viewer` is the glue
+  `wasm32-unknown-unknown`. The importer in `fasttiff-builtin-plugins` is the glue
   around it. **Published on crates.io** under MPL-2.0 — see below.
 - **`fasttiff-plugin-abi/`**, **`fasttiff-plugin-api/`**,
   **`fasttiff-plugin/`** — the plugin contract, split by what may change.
@@ -373,8 +397,8 @@ automatic BigTIFF upgrade, and metadata in either dialect from one neutral
 builder. Full format coverage, a comparison against libtiff / the `tiff` crate /
 TinyTIFF, and benchmarks are in [`fast-tiff-lib/README.md`](fast-tiff-lib/README.md).
 
-Note the licenses differ: the viewer is GPLv3, but the crate is **MPL-2.0**, so
-it can be used in projects that couldn't take a GPL dependency.
+Note the licenses differ: the FastTIFF application is GPLv3, but the crate is
+**MPL-2.0**, so it can be used in projects that couldn't take a GPL dependency.
 
 ## The OIR reader is a standalone crate too
 
@@ -718,14 +742,17 @@ cargo test --manifest-path plugins/example/Cargo.toml
 
 ### Built-in plugins, and choosing which get compiled in
 
-Some plugins ship *inside* the binary rather than as libraries: Crop, Invert, Z
+Some plugins ship *inside* the binary rather than as libraries, from the
+`fasttiff-builtin-plugins` crate: Crop, Invert, Z
 Project, Plot third axis, the three Slice tools, 3D animation, Generate PSF,
 Deconvolve,
 suite2p stabilization, TurboReg stabilization, the PNG importer/exporter, the
 Olympus OIR reader and the two MRI importers below.
-They are written against the same contract a `.dll` is, and installed through
-it: the app registers each one through the same C ABI a library is registered
-through, only in its own process. So being compiled in is a matter of where the
+They are written against the same contract a `.dll` is — the crate depends on
+the plugin SDK and not on the viewer, so it cannot do otherwise — and installed
+through it: the app hands them to the viewer's registry at start-up, which
+registers each one through the same C ABI a library is registered through,
+only in its own process. So being compiled in is a matter of where the
 code lives, not of how it is treated — a built-in is built fresh for each call,
 has its results checked, has its panics contained and is shown exactly what a
 library is, and a library can do everything a built-in can. A test runs every
@@ -755,8 +782,10 @@ is.) The two registration plugins also bring GPL-3 code with them: the
 registration crates that the `plugin-suite2p-stabilize` and
 `plugin-turboreg-stabilize` features compile in (`suite2p-registration`,
 `turboreg-registration`, and the `image-registration-support` they share) are
-GPL-3.0-only, which is why `fast-tiff-viewer` is licensed GPL-3 where
-`fast-tiff-lib`, `scivis-render`, `oir-reader` and the plugin SDK are MPL-2.0.
+GPL-3.0-only, which is why `fasttiff-builtin-plugins` is licensed GPL-3 where
+`fast-tiff-lib`, `scivis-render`, `oir-reader`, `fast-tiff-viewer` and the
+plugin SDK are MPL-2.0. All the built-ins are in that one crate, the GPL two
+and the rest, so that the viewer core links nothing copyleft.
 
 Because these features live in `default`, `--no-default-features` drops the
 plugins along with whatever it was really for — notably the glow renderer, which

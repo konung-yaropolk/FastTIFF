@@ -1,7 +1,7 @@
 //! Running a plugin end to end against a real stack.
 //!
-//! The registry's own bookkeeping is unit-tested next to it; this is the part
-//! that matters — that a plugin reaches the right pixels through
+//! The registry's own bookkeeping is unit-tested in the viewer, beside it; this is
+//! the part that matters — that a plugin reaches the right pixels through
 //! [`StackHost`] and hands back a result the host can use. When the `.dll` lane
 //! lands these same assertions become its oracle: the identical filter, run
 //! through the C boundary, must produce byte-identical output.
@@ -18,14 +18,16 @@
 //! So this file is the full set or nothing, and `builtin-plugins` is the full
 //! set. That is the configuration that ships and the one CI runs; a build that
 //! trims plugins is a product decision taken *after* this suite has passed, not
-//! a configuration this suite has an opinion about. The registry's own
-//! bookkeeping — including that a plugin left out really is gone — is unit-
-//! tested next to it in `src/plugins/mod_tests.rs`, which does gate per feature.
+//! a configuration this suite has an opinion about. What is installed —
+//! including that a plugin left out really is gone — is tested beside it in
+//! `registry.rs`, which does gate per feature; the registry's own bookkeeping,
+//! in the viewer, with plugins of its own.
 #![cfg(feature = "builtin-plugins")]
 
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
-use fast_tiff_viewer::plugins::{builtin, describe_view, StackHost};
+use fast_tiff_viewer::plugins::{describe_view, StackHost};
 use fast_tiff_viewer::Document;
+use fasttiff_builtin_plugins as builtin;
 use fasttiff_plugin_api::{
     DisplayMode, HostContext, ImageResult, Outcome, ParamKind, ParamValue, Params, PixelType,
     Plane, PlaneData, Plugin, PluginError, Spacing, StackInfo, VolumeMode, VolumeView,
@@ -681,7 +683,7 @@ fn expected_mean(c: usize, z: usize, t: usize) -> f32 {
 
 #[test]
 fn plot_third_axis_is_installed() {
-    let reg = fast_tiff_viewer::plugins::Registry::new();
+    let reg = fast_tiff_viewer::plugins::Registry::new(builtin::register);
     let i = reg
         .find("dev.fasttiff.plot-axis")
         .expect("Plot third axis should be a built-in");
@@ -889,7 +891,7 @@ fn wandering_stack(ly: u32, lx: u32, path: &[(i32, i32)], channels: usize) -> Do
 
 #[test]
 fn stabilize_is_installed_in_its_own_submenu() {
-    let reg = fast_tiff_viewer::plugins::Registry::new();
+    let reg = fast_tiff_viewer::plugins::Registry::new(builtin::register);
     let i = reg
         .find("dev.fasttiff.stabilize")
         .expect("suite2p stabilization should be a built-in");
@@ -1432,7 +1434,7 @@ const DRIFT: [(f32, f32); 4] = [(0.0, 0.0), (1.5, -2.25), (-3.0, 1.0), (2.75, 3.
 
 #[test]
 fn turboreg_is_installed_next_to_stabilize() {
-    let reg = fast_tiff_viewer::plugins::Registry::new();
+    let reg = fast_tiff_viewer::plugins::Registry::new(builtin::register);
     let i = reg
         .find("dev.fasttiff.turboreg")
         .expect("TurboReg stabilization should be a built-in");

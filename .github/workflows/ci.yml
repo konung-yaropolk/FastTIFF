@@ -123,9 +123,10 @@ jobs:
         run: bash scripts/ci-local.sh lib-no-default
 
       # And that it genuinely builds for the wasm target, not just with the
-      # features off on a native host.
+      # features off on a native host: the library, the viewer core, and the
+      # built-in plugins the browser build carries.
       - name: Check the wasm target
-        run: bash scripts/ci-local.sh wasm-target lib-wasm viewer-wasm
+        run: bash scripts/ci-local.sh wasm-target lib-wasm viewer-wasm plugins-wasm
 
       # The OIR reader on its own. `cargo test --workspace` above reads every
       # fixture mapped; this reads them through the buffered path alone, as a
@@ -134,9 +135,9 @@ jobs:
       # only on the feature. Then the docs, with no broken links. (The crate as
       # published is checked with the others, in `published-package`.)
       #
-      # The viewer's importer gets the buffered path too, for free: the "core
-      # without threads" step below builds the viewer without `mmap`, and its
-      # tests read every importer fixture both ways and compare.
+      # The OIR importer gets the buffered path too, for free: the plugins'
+      # step "without threads" below builds them without `mmap`, and the
+      # importer's tests read every fixture both ways and compare.
       - name: OIR reader without mmap, for the browser, and as packaged
         run: bash scripts/ci-local.sh oir-no-default oir-wasm oir-wasm-no-default oir-doc
 
@@ -155,22 +156,23 @@ jobs:
       # compiles. Nothing in the desktop app selects it, so without this step the
       # `#[cfg(not(feature = "threads"))]` fallbacks would rot unnoticed.
       #
-      # With the plugins, deliberately: deconvolution has single-threaded
-      # fallbacks of its own (`deconvolve/par.rs`) and this is the only step
-      # that runs them. The no-plugins shape is the step after this one.
-      - name: Check core without threads (wasm-shaped)
-        run: bash scripts/ci-local.sh viewer-no-threads
+      # And of the built-in plugins, every one of them on, in a run of its own:
+      # deconvolution has single-threaded fallbacks of its own
+      # (`deconvolve/par.rs`) and this is the only step that runs them. The
+      # plugins' tests build the viewer without its default features too, so
+      # neither run hands the other a threaded build.
+      - name: Check core and plugins without threads (wasm-shaped)
+        run: bash scripts/ci-local.sh viewer-no-threads plugins-no-threads
 
-      # And with no plugins as well as no threads. The viewer builds no GPU
-      # backend in any build now (the sync is generic over scivis-render's
-      # traits, and the frontend hands it its renderer), so what this step
-      # adds to the one above is the plugins off: the CPU-side model must
-      # stand alone, so headless tooling can use it without pulling in an FFT
-      # or a registration crate, and with every plugin feature off nothing
-      # outside `plugins/builtin/` may still refer to a plugin. The step keeps
-      # its name, `viewer-no-backend`, from when the viewer had backend
-      # features.
-      - name: Check core with no plugins and no threads
+      # And with no plugins as well as no threads. The viewer has neither a GPU
+      # backend nor a plugin of its own in any build now (the sync is generic
+      # over scivis-render's traits, and the frontend hands it its renderer and
+      # its built-in plugins), so what this step adds to the one above is the
+      # plugins crate with every plugin off: `register` with nothing in it, and
+      # nothing outside a plugin's own module that still refers to it. The
+      # step keeps its name, `viewer-no-backend`, from when the viewer had
+      # backend features.
+      - name: Check core and plugins with no plugins and no threads
         run: bash scripts/ci-local.sh viewer-no-backend
 
   # macOS compiles the `#[cfg(target_os = "macos")]` code no other job sees —

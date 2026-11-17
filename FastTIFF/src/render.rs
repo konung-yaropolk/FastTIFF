@@ -146,9 +146,9 @@ mod glue {
         // And the GPU registrations run on this device rather than opening
         // their own: a second device can deadlock against this one on a card
         // short of memory (see `share_gpu_device`). The registrations' GPU
-        // paths are the desktop's alone, so the viewer has this nowhere else.
+        // paths are the desktop's alone, so the plugins have this nowhere else.
         #[cfg(not(target_arch = "wasm32"))]
-        fast_tiff_viewer::share_gpu_device(&rs.device, &rs.queue, &rs.adapter.get_info());
+        fasttiff_builtin_plugins::share_gpu_device(&rs.device, &rs.queue, &rs.adapter.get_info());
         // A lost device is noted, so the app can close saying why rather than
         // let egui panic on its next draw (see `gpu_lost`) — where the
         // platform closes over it at all, which the browser does not

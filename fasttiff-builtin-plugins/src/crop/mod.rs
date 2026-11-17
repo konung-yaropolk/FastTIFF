@@ -24,7 +24,7 @@ use fasttiff_plugin_api::{
     PluginInfo, Roi, StreamTarget,
 };
 
-use crate::plugins::builtin::shared::{Store, Stored};
+use crate::shared::{Store, Stored};
 
 /// What the status line says while the rectangle is being drawn.
 pub(crate) const PROMPT: &str =

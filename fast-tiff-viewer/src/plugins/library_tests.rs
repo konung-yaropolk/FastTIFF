@@ -1954,22 +1954,23 @@ fn a_plugin_is_built_fresh_for_every_call() {
     }
 }
 
-/// The app's own plugins are in the registry through the same boundary as a
-/// library's — they simply have no file behind them.
+/// A plugin handed in as a built-in is in the registry through the same
+/// boundary as a library's — it simply has no file behind it. (That the
+/// application's own set arrives this way is tested where that set is, in
+/// `fasttiff-builtin-plugins`.)
 #[test]
 fn the_built_ins_come_through_the_boundary_with_no_file_behind_them() {
-    let reg = super::super::Registry::new();
+    use fasttiff_plugin::Registrar;
+    let reg = super::super::Registry::new(|r| {
+        r.plugin::<Counter>();
+        r.plugin::<Follows>();
+    });
     assert!(reg.problems.is_empty(), "{:?}", reg.problems);
+    assert_eq!(reg.len(), 2);
     for e in reg.entries() {
         assert_eq!(e.origin, super::super::Origin::BuiltIn);
         assert!(e.plugin.source().is_none(), "{} has a source", e.info.id);
         assert_eq!(e.plugin.info(), e.info);
-    }
-    for e in reg.importers() {
-        assert!(e.importer.source().is_none(), "{} has a source", e.info.id);
-    }
-    for e in reg.exporters() {
-        assert!(e.exporter.source().is_none(), "{} has a source", e.info.id);
     }
 }
 

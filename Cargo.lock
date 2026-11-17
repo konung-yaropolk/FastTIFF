@@ -13,6 +13,7 @@ dependencies = [
  "env_logger",
  "fast-tiff-lib",
  "fast-tiff-viewer",
+ "fasttiff-builtin-plugins",
  "fasttiff-plugin-api",
  "image",
  "js-sys",
@@ -889,15 +890,27 @@ dependencies = [
  "fasttiff-plugin",
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
+ "libloading 0.9.0",
+ "log",
+ "rayon",
+ "scivis-render",
+]
+
+[[package]]
+name = "fasttiff-builtin-plugins"
+version = "0.1.0"
+dependencies = [
+ "fast-tiff-lib",
+ "fast-tiff-viewer",
+ "fasttiff-plugin",
+ "fasttiff-plugin-api",
  "flate2",
  "image-registration-support",
- "libloading 0.9.0",
  "log",
  "oir-reader",
  "png",
  "rayon",
  "rustfft",
- "scivis-render",
  "suite2p-registration",
  "turboreg-registration",
  "wgpu",

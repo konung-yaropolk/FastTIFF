@@ -1,6 +1,6 @@
 # fast-tiff-viewer
 
-[![License](https://img.shields.io/badge/License-GPL--3.0--only-green)](https://github.com/konung-yaropolk/FastTIFF/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/License-MPL--2.0-green)](https://github.com/konung-yaropolk/FastTIFF/blob/main/fast-tiff-viewer/LICENSE)
 
 The frontend-agnostic viewer core for multi-frame scientific TIFF stacks:
 everything between "a TIFF on disk" and "pixels on the GPU", with no GUI toolkit
@@ -49,6 +49,22 @@ widgets and input; it borrows everything else from here.
 - **Keeps the playback clock**, advancing by real elapsed time so a movie runs at
   the file's fps regardless of render cadence, and latching parallel decode when
   it starts dropping frames.
+- **Hosts plugins** (`plugins`): the registry, the host a plugin sees, the C
+  boundary every plugin crosses, and on the desktop the loader for plugin
+  libraries. It names no plugin itself. The ones an application compiles in
+  are handed to it at start-up — FastTIFF's are the
+  [`fasttiff-builtin-plugins`](../fasttiff-builtin-plugins) crate:
+
+  ```rust,ignore
+  let registry = Registry::with_installed(fasttiff_builtin_plugins::register);
+  ```
+
+  The registry implements `fasttiff_plugin::Registrar`, and installs every
+  plugin type it is handed there through the C ABI, as a built-in.
+- **Models the point counter** (`point_counter`): points clicked onto the
+  picture in named groups, with undo, exported as ImageJ point ROIs. A tool
+  rather than a plugin, until the plugin contract has a kind of plugin for
+  one.
 
 ## Usage
 
@@ -111,6 +127,11 @@ right pixels?"*; if yes, it's here.
 | Feature | Default | Effect |
 |---|---|---|
 | `threads` | on | Background read-ahead and volume assembly. Turn it off for a single-threaded host such as `wasm32-unknown-unknown`; the synchronous fallbacks are already the paths taken when a worker fails to spawn, so nothing else changes. |
+| `mmap` | on | Memory-mapped files, and with them `Viewer::open` by path. Off for a browser, where a document arrives as bytes (`Viewer::load_bytes`). |
+| `codec-zstd` | on | fast-tiff-lib's ZSTD codec, a C dependency, so not for wasm. |
+
+No feature picks a plugin: the plugins are another crate's, handed in by the
+application, so this one compiles the same whichever of them it carries.
 
 No feature picks a GPU backend. `Viewer::sync` takes any renderer that
 implements scivis-render's `VolumeRenderer` (which includes its
@@ -121,12 +142,12 @@ a double that records what it is sent (`src/sync_tests.rs`), with no GPU.
 
 ## License
 
-GPL-3.0-only, where the library crates it builds on (`fast-tiff-lib`,
-`scivis-render`, `oir-reader`) are MPL-2.0. Two of the built-in plugins, both
-in the default `builtin-plugins`, compile a registration crate into this one:
-`plugin-suite2p-stabilize` links `suite2p-registration` (a port of suite2p's
-registration) and `plugin-turboreg-stabilize` links `turboreg-registration`,
-both of them with the `image-registration-support` they share, and all three
-are GPL-3.0-only. The copyleft travels with them into whatever links
-them, so an application built on this crate is GPL-3.0 too, as `FastTIFF` and
+MPL-2.0, as the crates it builds on (`fast-tiff-lib`, `scivis-render`) and the
+plugin SDK are. It was GPL-3.0-only while the built-in plugins were compiled
+into it: two of them link GPL-3.0-only registration crates
+(`suite2p-registration`, `turboreg-registration`, and the
+`image-registration-support` they share). Those plugins are the
+[`fasttiff-builtin-plugins`](../fasttiff-builtin-plugins) crate now, which is
+GPL-3.0-only, and this crate links nothing copyleft. An application that hands
+it those plugins links them, and is GPL-3.0 for that — `FastTIFF` and
 `FastTIFF-web` are.

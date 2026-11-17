@@ -21,7 +21,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 # Which built-in plugins the bundle carries, forwarded one for one to the shared
-# UI crate and from there to `fast-tiff-viewer`, where the list is documented.
+# UI crate and from there to `fasttiff-builtin-plugins`, where the list is
+# documented.
 # `wasm-pack build` passes no feature flags, so `default` is what ships; to trim
 # the bundle, pass them through:
 #

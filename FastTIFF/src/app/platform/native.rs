@@ -65,8 +65,9 @@ impl Platform for Desktop {
     }
 
     fn registry() -> Registry {
-        // Scans the plugin folders and loads every shared library it finds.
-        Registry::with_installed()
+        // The plugins compiled in, then every shared library in the plugin
+        // folders.
+        Registry::with_installed(fasttiff_builtin_plugins::register)
     }
 
     /// On a thread of its own, so the window does not wait for it.

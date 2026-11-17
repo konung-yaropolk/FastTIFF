@@ -6,7 +6,7 @@
 //! in `default_ops`, so a value copied from a lab's `ops.npy` means the same
 //! thing.
 
-use crate::plugins::builtin::shared::{edges_from, edges_param, Edges};
+use crate::shared::{edges_from, edges_param, Edges};
 use fasttiff_plugin_api::{ImageInfo, ParamDecl, ParamKind, Params};
 use suite2p_registration::{Backend, Border, Settings};
 

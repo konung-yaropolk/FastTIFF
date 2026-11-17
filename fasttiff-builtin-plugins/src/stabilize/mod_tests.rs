@@ -499,7 +499,7 @@ fn document(
     ly: usize,
     lx: usize,
     channels: usize,
-) -> crate::document::Document {
+) -> fast_tiff_viewer::Document {
     use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
     let opts = WriterOptions::new(lx as u32, ly as u32, SampleType::F32)
         .metadata(StackMetaWrite::new(channels, 1));
@@ -508,12 +508,12 @@ fn document(
         w.write_frame_f32(f).unwrap();
     }
     let bytes = w.finish().unwrap().into_inner();
-    crate::document::Document::from_bytes(bytes, "moving.tif".into(), false).expect("open")
+    fast_tiff_viewer::Document::from_bytes(bytes, "moving.tif".into(), false).expect("open")
 }
 
-fn run_on(doc: &crate::document::Document, params: &Params) -> (Vec<Vec<f32>>, Vec<String>) {
+fn run_on(doc: &fast_tiff_viewer::Document, params: &Params) -> (Vec<Vec<f32>>, Vec<String>) {
     use fasttiff_plugin_api::{VolumeMode, VolumeView};
-    let view = crate::plugins::describe_view(
+    let view = fast_tiff_viewer::plugins::describe_view(
         doc,
         0,
         false,
@@ -527,7 +527,7 @@ fn run_on(doc: &crate::document::Document, params: &Params) -> (Vec<Vec<f32>>, V
             right: [1.0, 0.0, 0.0],
         },
     );
-    let mut host = crate::plugins::StackHost::new(doc, view);
+    let mut host = fast_tiff_viewer::plugins::StackHost::new(doc, view);
     let Outcome::NewDocument(out) = Stabilize.run(&mut host, params).expect("run") else {
         panic!("stabilization should produce a new document");
     };

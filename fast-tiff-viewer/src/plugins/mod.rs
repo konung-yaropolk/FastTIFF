@@ -1,18 +1,24 @@
 //! The plugin host: what is installed, and what running one means.
 //!
 //! Lives in the viewer core rather than the app because it needs the stack, not
-//! the window — and because the browser build gets the built-in plugins for
-//! free that way. The app supplies only the dialog and the menu.
+//! the window — and because the browser build gets the same host that way. The
+//! app supplies only the dialog and the menu.
 //!
 //! Every plugin reaches the [`Registry`] through the C ABI — a `.dll`/`.so`
 //! through its query function, and a built-in through the same registration
 //! run in this process (see [`library`]). So there is one kind of entry, held
 //! to one set of rules, and the only difference between a built-in and a
 //! library is the [`Origin`] the menu shows.
+//!
+//! The built-ins themselves are not here. They are the
+//! `fasttiff-builtin-plugins` crate, written against the plugin SDK alone, and
+//! the application hands them in when it builds the registry
+//! ([`Registry::new`], [`Registry::with_installed`]): the registry implements
+//! the SDK's [`Registrar`](fasttiff_plugin::Registrar), and each type it is
+//! handed there it installs through the C ABI as a built-in. So this host
+//! knows no plugin by name, and builds the same whichever of them an
+//! application carries.
 
-/// The plugins compiled into this build. Everything else in this module is the
-/// *interface* they are written against; nothing here reaches into it.
-pub mod builtin;
 /// What happens to a run's result once it is over, up to the platform's last
 /// step.
 pub mod deliver;
@@ -94,18 +100,21 @@ pub struct Registry {
     pub problems: Vec<String>,
 }
 
-impl Default for Registry {
-    fn default() -> Self {
-        Registry::new()
-    }
-}
-
 impl Registry {
-    /// The built-ins only. Touches no filesystem and loads no code, which is
-    /// what the tests and the browser build want.
-    pub fn new() -> Self {
+    /// The built-ins `builtins` installs, and nothing else. Touches no
+    /// filesystem and loads no code, which is what the tests and the browser
+    /// build want.
+    ///
+    /// `builtins` is handed this registry as a
+    /// [`Registrar`](fasttiff_plugin::Registrar), and every type it registers
+    /// there is installed through the C ABI as [`Origin::BuiltIn`] — an
+    /// application passes `fasttiff_builtin_plugins::register`. Then the menu
+    /// is sorted. Generic rather than a function pointer or a trait object, so
+    /// each registration is a direct call, as it was when the registry named
+    /// the built-ins itself.
+    pub fn new(builtins: impl FnOnce(&mut Registry)) -> Self {
         let mut reg = Registry::empty();
-        builtin::register(&mut reg);
+        builtins(&mut reg);
         reg.sort();
         reg
     }
@@ -121,17 +130,21 @@ impl Registry {
         }
     }
 
-    /// The built-ins plus every plugin library on the search path. This is what
-    /// the desktop application calls at startup; the browser build calls
-    /// [`new`](Self::new), there being nothing to search and no way to load it.
+    /// The built-ins `builtins` installs, as [`new`](Self::new) has them, plus
+    /// every plugin library on the search path. This is what the desktop
+    /// application calls at startup; the browser build calls `new`, there being
+    /// nothing to search and no way to load it.
     ///
     /// Built-ins are added first so that a library cannot displace one by
     /// claiming its id — [`add`](Self::add) keeps the first registration and
     /// reports the clash, and "the app's own plugin wins" is the safer of the
-    /// two answers.
+    /// two answers. Taking the built-ins here, rather than leaving the
+    /// application to add them to a registry it already has, is what keeps
+    /// that order: there is no moment at which a library is in and a built-in
+    /// is not yet.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_installed() -> Self {
-        let mut reg = Registry::new();
+    pub fn with_installed(builtins: impl FnOnce(&mut Registry)) -> Self {
+        let mut reg = Registry::new(builtins);
         library::load_all(&mut reg);
         reg.sort();
         reg
@@ -445,6 +458,28 @@ impl Registry {
             }
         }
         groups
+    }
+}
+
+/// How the built-ins arrive: [`Registry::new`] hands the registry to the
+/// application's set of them as their [`Registrar`](fasttiff_plugin::Registrar).
+///
+/// Everything installed by type is compiled into the application — a library
+/// arrives as a query function, through [`library::load_all`] — so each is
+/// [`Origin::BuiltIn`], and goes through the C ABI by [`add`](Registry::add)
+/// and its two siblings, like any other. A refusal is recorded in
+/// [`problems`](Registry::problems), and the rest are still installed.
+impl fasttiff_plugin::Registrar for Registry {
+    fn plugin<T: Plugin + Default + 'static>(&mut self) {
+        self.add::<T>(Origin::BuiltIn);
+    }
+
+    fn importer<T: Importer + Default + 'static>(&mut self) {
+        self.add_importer::<T>(Origin::BuiltIn);
+    }
+
+    fn exporter<T: Exporter + Default + 'static>(&mut self) {
+        self.add_exporter::<T>(Origin::BuiltIn);
     }
 }
 

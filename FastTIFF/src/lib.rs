@@ -32,10 +32,10 @@ compile_error!(
      `--no-default-features` that forgot to name them again: add `builtin-plugins` \
      to the feature list (e.g. `--features renderer-glow,builtin-plugins`, or \
      `FastTIFF/builtin-plugins` from the workspace root). It has to be this \
-     crate's own feature: naming `fast-tiff-viewer/builtin-plugins` instead \
-     compiles the plugins into the viewer and leaves this binary unable to \
-     see them. If a binary without plugins is what you actually want, say \
-     so with \
+     crate's own feature: naming `fasttiff-builtin-plugins/builtin-plugins` \
+     instead compiles the plugins in but not this crate's `_any-builtin`, \
+     which is what this check reads. If a binary without plugins is what you \
+     actually want, say so with \
      `--features plugins-none`."
 );
 

@@ -7,8 +7,9 @@
 #![cfg(feature = "plugin-stack-tools")]
 
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
-use fast_tiff_viewer::plugins::{builtin, describe_view, StackHost};
+use fast_tiff_viewer::plugins::{describe_view, StackHost};
 use fast_tiff_viewer::Document;
+use fasttiff_builtin_plugins as builtin;
 use fasttiff_plugin_api::{
     DisplayMode, HostContext, Outcome, Params, Plane, PlaneData, Plugin, VolumeMode, VolumeView,
 };

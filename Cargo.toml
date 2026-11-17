@@ -4,16 +4,23 @@ resolver = "2"
 #   fast-tiff-lib     file I/O, IFD index, decode, metadata
 #   oir-reader        the Olympus OIR container reader, standalone beside it
 #   scivis-render     GPU pipelines, textures, ray-marching
-#   fast-tiff-viewer  document model, channel settings, decode -> GPU sync
+#   fast-tiff-viewer  document model, channel settings, decode -> GPU sync,
+#                     and the plugin host
 #   FastTIFF          the egui UI (its library) and the desktop host (its binary)
 #   FastTIFF-web      the browser host around that same library
+#
+# Beside the viewer, not under it: `fasttiff-builtin-plugins`, the plugins the
+# applications compile in. It is written against the plugin SDK
+# (`fasttiff-plugin-api`, `-abi`, `fasttiff-plugin`) and the algorithm and
+# format crates, not against the viewer, and the applications hand it to the
+# viewer's registry at start-up.
 #
 # The browser host is a member like the others, so the bundle the site serves
 # is built from the lock `cargo test --workspace` runs against. Being a member
 # costs the desktop build nothing: everything that crate depends on is behind
 # `cfg(target_arch = "wasm32")`, and under resolver 2 a dependency for a target
 # that is not being built adds no features to the ones that are.
-members = ["fast-tiff-lib", "oir-reader", "scivis-render", "fast-tiff-viewer", "fasttiff-plugin-api", "fasttiff-plugin-abi", "fasttiff-plugin", "FastTIFF", "FastTIFF-web", "c-api-support", "plugins/PI-derivatives-check", "image-registration-support", "suite2p-registration", "turboreg-registration"]
+members = ["fast-tiff-lib", "oir-reader", "scivis-render", "fast-tiff-viewer", "fasttiff-plugin-api", "fasttiff-plugin-abi", "fasttiff-plugin", "fasttiff-builtin-plugins", "FastTIFF", "FastTIFF-web", "c-api-support", "plugins/PI-derivatives-check", "image-registration-support", "suite2p-registration", "turboreg-registration"]
 # The fuzz harness is its own crate: it needs nightly + libFuzzer, so keeping it
 # out of the workspace means `cargo build/test --workspace` stays stable-only.
 # Run it with `cargo +nightly fuzz run <target>` from `fast-tiff-lib/`.

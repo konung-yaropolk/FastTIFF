@@ -3,16 +3,24 @@
 //!
 //! # Not a registry plugin
 //!
-//! It is in the Plugins menu, under Analysis, and its code is here with the
-//! other built-ins — but it is the one directory here not written against
-//! `fasttiff_plugin_api` alone. A plugin is constructed afresh for every run
-//! and keeps nothing between them, and what crosses the plugin boundary has no
-//! point shape, while this is a session: a list of points that grows click by
-//! click, an undo history, and marks drawn over the picture for as long as its
-//! window is open. So it uses the viewer's own types ([`Document`]), has no entry
-//! in [`register`](super::register), and has no `plugin-…` feature: the
-//! applications refer to it directly, and it brings no dependency for a feature
-//! to leave out.
+//! It is in the Plugins menu, under Analysis, beside the built-in plugins —
+//! but it is not one of them, and is not in `fasttiff-builtin-plugins` with
+//! them, because it cannot be written against `fasttiff_plugin_api` alone. A
+//! plugin is constructed afresh for every run and keeps nothing between them,
+//! and what crosses the plugin boundary has no point shape, while this is a
+//! session: a list of points that grows click by click, an undo history, and
+//! marks drawn over the picture for as long as its window is open. So it uses
+//! the viewer's own types ([`Document`], the save's hyperstack arithmetic, the
+//! plane addressing), which a crate of plugins cannot reach, is registered
+//! nowhere, and has no `plugin-…` feature: the applications refer to it
+//! directly, list it in the menu by hand, and it brings no dependency for a
+//! feature to leave out.
+//!
+//! That is meant to end. When the plugin contract gains an interactive tool —
+//! a plugin that keeps a session, takes the pointer and draws over the
+//! picture — this becomes one, moves to the plugins crate, and is installed
+//! through the registry like the rest; what it needs of the document here
+//! becomes what the contract offers a tool.
 //!
 //! Where its parts are:
 //!
@@ -41,9 +49,8 @@
 //!
 //! A point is in image coordinates where pixel `(i, j)` covers
 //! `[i, i+1) x [j, j+1)` — continuous, so a click in the middle of pixel
-//! `(10, 20)` is `(10.5, 20.5)`. They are the coordinates a
-//! [`RoiPoint`](fast_tiff_lib::RoiPoint) takes, which converts them to
-//! ImageJ's own on the way out.
+//! `(10, 20)` is `(10.5, 20.5)`. They are the coordinates a [`RoiPoint`]
+//! takes, which converts them to ImageJ's own on the way out.
 //!
 //! # Frames
 //!

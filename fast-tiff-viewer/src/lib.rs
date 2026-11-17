@@ -58,12 +58,37 @@
 //! one where it makes it (FastTIFF in `FastTIFF/src/render.rs`), and the
 //! tests here hand the sync a double that records what it is sent.
 //!
+//! # Plugins
+//!
+//! The plugin host is here ([`plugins`]): the registry, the host a plugin
+//! sees, the C boundary and, on the desktop, the loader for plugin libraries.
+//! The plugins the application compiles in are not: they are the
+//! `fasttiff-builtin-plugins` crate, which the application hands to the
+//! registry when it builds it ([`plugins::Registry::new`]). So this crate
+//! names no plugin, has no plugin features, and links none of their
+//! dependencies — the registration crates, the FFT, the image codecs.
+//!
+//! The one plugin-like thing that is here is the [`point_counter`]: a tool on
+//! the picture rather than a registry plugin, written against the document
+//! because the plugin contract has no kind of plugin for a tool yet.
+//!
 //! # Features
 //!
 //! * `threads` (default) — background read-ahead, window and volume assembly.
 //!   Turn it off for a single-threaded host such as `wasm32-unknown-unknown`;
 //!   the synchronous fallbacks are already the paths taken when a worker
 //!   fails to spawn, so nothing else changes.
+//! * `mmap` (default) — memory-mapped files, and with them `Viewer::open`
+//!   by path; without it a document arrives as bytes.
+//! * `codec-zstd` (default) — fast-tiff-lib's ZSTD codec, a C dependency, so
+//!   not for wasm.
+//!
+//! # Licence
+//!
+//! MPL-2.0, as `fast-tiff-lib`, `scivis-render` and the plugin SDK are. It
+//! was GPL-3.0 while the built-in plugins were compiled into it, two of which
+//! link GPL-3.0-only registration crates; those are in
+//! `fasttiff-builtin-plugins` now, and this crate links nothing copyleft.
 
 // Everything `pub` is reachable from outside, and so is this crate's API: an
 // item only the crate uses says `pub(crate)`. And a type a public signature
@@ -89,17 +114,25 @@ mod notice;
 /// plugin host and anything else measuring pixels cannot disagree about what a
 /// sample is worth.
 mod planes;
-/// Plugins — the registry, the host a plugin sees, and the ones compiled in.
-///
-/// Built for every target, including wasm. What is desktop-only is narrower
-/// than the whole module and is gated inside it: finding and loading a
-/// third-party shared library (`plugins::library`, `plugins::install_dir`) and
-/// the built-ins that cannot work in a browser. The browser build gets the
-/// rest, which is what `plugins::Registry::new` has always been for.
-///
-/// Nothing in the decode, sync or render path refers to this module, so a build
-/// that never opens the Plugins menu pays for it only in binary size.
+// Plugins — the registry, the host a plugin sees, and the C boundary every
+// plugin crosses; the plugins themselves are handed in.
+//
+// Built for every target, including wasm. What is desktop-only is narrower
+// than the whole module and is gated inside it: finding and loading a
+// third-party shared library (`plugins::library`, `plugins::install_dir`).
+// The browser build gets the rest, which is what `plugins::Registry::new` has
+// always been for.
+//
+// Nothing in the decode, sync or render path refers to this module, so a build
+// that never opens the Plugins menu pays for it only in binary size. (A
+// comment, not docs: outer docs would have rustdoc resolve the module's own
+// links from here.)
 pub mod plugins;
+// The point counter: points clicked onto the picture, counted in groups and
+// exported as ImageJ point ROIs. In the Plugins menu, but a tool rather than
+// a registry plugin; see the module for why it is here. (A comment, not docs:
+// outer docs would have rustdoc resolve the module's own links from here.)
+pub mod point_counter;
 mod prefetch;
 /// A renderer that records what the sync sends it, for its tests.
 #[cfg(test)]
@@ -124,33 +157,6 @@ mod worker;
 
 #[doc(hidden)]
 pub mod testing;
-
-/// Run the registrations' GPU paths (TurboReg, suite2p) on the frontend's own
-/// wgpu device instead of each opening one. Call once at startup, before any
-/// of them runs; a frontend that draws with wgpu always should.
-///
-/// Opening a second device beside the renderer's, on a card whose memory the
-/// two have overrun, can deadlock both, and then the system resets the GPU
-/// and every device in the process is lost — which is how a TurboReg run on a
-/// 4096 x 4096 stack, with a 3D volume resident, took the application down.
-/// On the one device a registration short of memory fails its batch and says
-/// so instead (see `image_registration_support::gpu::use_device`).
-///
-/// One call for every registration: the registration crates share one device
-/// slot, so a GPU path added to either is on the renderer's device without
-/// being added here.
-#[cfg(all(feature = "gpu-registration", not(target_arch = "wasm32")))]
-pub fn share_gpu_device(device: &wgpu::Device, queue: &wgpu::Queue, adapter: &wgpu::AdapterInfo) {
-    #[cfg(any(
-        feature = "plugin-suite2p-stabilize",
-        feature = "plugin-turboreg-stabilize"
-    ))]
-    if !image_registration_support::gpu::use_device(device.clone(), queue.clone(), adapter) {
-        log::warn!("a registration had opened a GPU device of its own already");
-    }
-    // Both plugins may be compiled out.
-    let _ = (device, queue, adapter);
-}
 
 pub use display::{ChannelLayout, Dims, Display, DisplayMut, GrayLuts, Revision};
 pub use document::{ChannelSettings, Document, DocumentMut, SampleUnits, Window};

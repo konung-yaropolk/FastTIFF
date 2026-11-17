@@ -269,9 +269,9 @@ fn the_acquisition_record_reaches_tag_270_of_the_written_file() {
     assert_eq!(info.unit.as_deref(), Some("micron"));
 
     // Through the writer and back out again.
-    let stack = crate::plugins::to_stack(&r.image, r.info.as_ref(), false).expect("open");
+    let stack = fast_tiff_viewer::plugins::to_stack(&r.image, r.info.as_ref(), false).expect("open");
     let written = stack
-        .tiff
+        .tiff()
         .description
         .as_deref()
         .expect("tag 270 should have been written");
@@ -286,7 +286,7 @@ fn the_acquisition_record_reaches_tag_270_of_the_written_file() {
     // f64 comes back rounded to what a numerator over a denominator can say.
     // That is the format's limit rather than this importer's, and it is why the
     // exact value is taken from the record rather than read back out of here.
-    let written_pixel = stack.tiff.meta.pixel_width.expect("the calibration");
+    let written_pixel = stack.tiff().meta.pixel_width.expect("the calibration");
     assert!(
         (written_pixel - 0.621480569402239).abs() < 1e-6,
         "the calibration was lost on the way to the file: {written_pixel}"
@@ -635,7 +635,7 @@ fn a_cancelled_import_is_reported_as_cancelled() {
 /// OIR samples are unpublished research data. Point it at one to run it —
 ///
 /// ```text
-/// FASTTIFF_OIR_SAMPLE=/path/to/file.oir cargo test -p fast-tiff-viewer -- --ignored oir
+/// FASTTIFF_OIR_SAMPLE=/path/to/file.oir cargo test -p fasttiff-builtin-plugins -- --ignored oir
 /// ```
 ///
 /// When a `<stem>.tif` sits beside the `.oir` — FluoView writes both — every

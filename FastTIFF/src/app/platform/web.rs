@@ -34,7 +34,7 @@ impl Platform for Browser {
     fn registry() -> Registry {
         // The built-ins alone: nothing to scan, and no `dlopen` to load a
         // library with — the only difference between the two Plugins menus.
-        Registry::new()
+        Registry::new(fasttiff_builtin_plugins::register)
     }
 
     /// Results are kept in memory here, so there is nothing to sweep.

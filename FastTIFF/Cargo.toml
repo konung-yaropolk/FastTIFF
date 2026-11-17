@@ -26,16 +26,19 @@ default = ["renderer-wgpu", "builtin-plugins"]
 # Each feature turns on the matching eframe backend AND the matching backend in
 # `scivis-render`, so the *unused* renderer's entire dependency subtree is
 # excluded from the build (`cargo tree`). The viewer has no backend feature to
-# keep in step: its sync is generic over the renderer `render.rs` makes.
-renderer-wgpu = ["eframe/wgpu", "scivis-render/backend-wgpu", "fast-tiff-viewer/gpu-registration"]
+# keep in step: its sync is generic over the renderer `render.rs` makes. The
+# wgpu one also gives the registration plugins their GPU paths, which run on
+# the renderer's device (`fasttiff_builtin_plugins::share_gpu_device`).
+renderer-wgpu = ["eframe/wgpu", "scivis-render/backend-wgpu", "fasttiff-builtin-plugins/gpu-registration"]
 renderer-glow = ["eframe/glow", "scivis-render/backend-glow"]
 
 # ---------------------------------------------------------------------------
 # Which built-in plugins this binary carries.
 #
-# One feature per plugin, forwarded straight to `fast-tiff-viewer`, where the
-# list is documented and the dependencies hang off it. `builtin-plugins` is
-# every one that ships and is in `default`, so an ordinary build is unchanged.
+# One feature per plugin, forwarded straight to `fasttiff-builtin-plugins`,
+# where the list is documented and the dependencies hang off it.
+# `builtin-plugins` is every one that ships and is in `default`, so an ordinary
+# build is unchanged.
 #
 # To leave one out, name the ones you want:
 #
@@ -62,21 +65,27 @@ builtin-plugins = [
     "plugin-oir",
     "plugin-nifti",
     "plugin-dicom",
+    # And the plugins crate's own name for the same set. It adds no plugin to
+    # the ones above, but the crate's integration suites — the run of every
+    # plugin against a real document (`fasttiff-builtin-plugins/tests/it/plugins.rs`,
+    # and the parity and streaming suites beside it) — are compiled only under
+    # it, so a test run that asks for this feature runs them. The glow test run
+    # is one, and it is the only test run the Linux CI job has.
+    "fasttiff-builtin-plugins/builtin-plugins",
 ]
-plugin-invert = ["fast-tiff-viewer/plugin-invert", "_any-builtin"]
-plugin-zproject = ["fast-tiff-viewer/plugin-zproject", "_any-builtin"]
-plugin-plot-axis = ["fast-tiff-viewer/plugin-plot-axis", "_any-builtin"]
-plugin-stack-tools = ["fast-tiff-viewer/plugin-stack-tools", "_any-builtin"]
-plugin-animation-3d = ["fast-tiff-viewer/plugin-animation-3d", "_any-builtin"]
-plugin-crop = ["fast-tiff-viewer/plugin-crop", "_any-builtin"]
-plugin-suite2p-stabilize = ["fast-tiff-viewer/plugin-suite2p-stabilize", "_any-builtin"]
-plugin-turboreg-stabilize = ["fast-tiff-viewer/plugin-turboreg-stabilize", "_any-builtin"]
-plugin-deconvolve = ["fast-tiff-viewer/plugin-deconvolve", "_any-builtin"]
-plugin-png = ["fast-tiff-viewer/plugin-png", "_any-builtin"]
-plugin-oir = ["fast-tiff-viewer/plugin-oir", "_any-builtin"]
-plugin-nifti = ["fast-tiff-viewer/plugin-nifti", "_any-builtin"]
-plugin-dicom = ["fast-tiff-viewer/plugin-dicom", "_any-builtin"]
-# The worked example for plugin authors; off by default there and here.
+plugin-invert = ["fasttiff-builtin-plugins/plugin-invert", "_any-builtin"]
+plugin-zproject = ["fasttiff-builtin-plugins/plugin-zproject", "_any-builtin"]
+plugin-plot-axis = ["fasttiff-builtin-plugins/plugin-plot-axis", "_any-builtin"]
+plugin-stack-tools = ["fasttiff-builtin-plugins/plugin-stack-tools", "_any-builtin"]
+plugin-animation-3d = ["fasttiff-builtin-plugins/plugin-animation-3d", "_any-builtin"]
+plugin-crop = ["fasttiff-builtin-plugins/plugin-crop", "_any-builtin"]
+plugin-suite2p-stabilize = ["fasttiff-builtin-plugins/plugin-suite2p-stabilize", "_any-builtin"]
+plugin-turboreg-stabilize = ["fasttiff-builtin-plugins/plugin-turboreg-stabilize", "_any-builtin"]
+plugin-deconvolve = ["fasttiff-builtin-plugins/plugin-deconvolve", "_any-builtin"]
+plugin-png = ["fasttiff-builtin-plugins/plugin-png", "_any-builtin"]
+plugin-oir = ["fasttiff-builtin-plugins/plugin-oir", "_any-builtin"]
+plugin-nifti = ["fasttiff-builtin-plugins/plugin-nifti", "_any-builtin"]
+plugin-dicom = ["fasttiff-builtin-plugins/plugin-dicom", "_any-builtin"]
 # "Yes, really, no plugins." It enables nothing; it exists so that the guard in
 # `src/lib.rs` can tell a deliberate build from a forgotten feature.
 plugins-none = []
@@ -121,6 +130,11 @@ rfd = "0.17"
 # The plugin contract. Shared, like the plugin system itself now is: the
 # browser build runs the built-in plugins and so needs the dialog types.
 fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
+# The plugins this application compiles in, handed to the viewer's registry at
+# start-up (`app/platform/`). GPL-3.0-only, as this crate is: two of them link
+# the GPL registration crates. Which of them are in is the `plugin-*` features
+# above; the bare dependency, with none of them, is an empty `register`.
+fasttiff-builtin-plugins = { path = "../fasttiff-builtin-plugins", default-features = false }
 log = { workspace = true }
 env_logger = "0.11"
 # Decodes the bundled PNG into RGBA for the application icon (see `window_icon`
@@ -136,6 +150,13 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # `rfd`'s blocking dialog and the process fan-out are likewise native-only.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 fast-tiff-viewer = { path = "../fast-tiff-viewer", features = ["threads", "mmap", "codec-zstd"] }
+# And the plugins' share of the same: deconvolution's threads, and the OIR
+# importer's memory maps. `default-features = false` here too, and it matters:
+# a dependency's defaults are on if any one of its declarations leaves them
+# on, and the plugins' defaults include every plugin, which would quietly undo
+# a build that names only some of them. (The viewer, declared the same way
+# above, had exactly that while the plugins were its defaults.)
+fasttiff-builtin-plugins = { path = "../fasttiff-builtin-plugins", default-features = false, features = ["threads", "mmap"] }
 # Also depended on directly (the UI names `Compression`, `SampleFormat`, …),
 # so its host-dependent features need topping up here too — otherwise the
 # C zstd codec follows the direct edge into the wasm build.

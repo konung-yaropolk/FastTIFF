@@ -53,7 +53,7 @@ TOKEN = re.compile(
     r'((?:\.{1,2}/)?(?:[\w-]+/)*[\w-]+(?:\.[\w-]+)*\.(?:' + '|'.join(EXTS) + r'))'
     r'(?![\w/-])'
 )
-# A directory, written as code: `plugins/builtin/`. Only in backticks, where it
+# A directory, written as code: `plugins/example/`. Only in backticks, where it
 # is unambiguously a path, and only with its trailing slash.
 DIRREF = re.compile(r'`((?:\.{1,2}/)?(?:[\w.-]+/)+)`')
 URL = re.compile(r'\b[a-z][a-z0-9+.-]*://\S+')

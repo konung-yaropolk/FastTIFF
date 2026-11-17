@@ -20,7 +20,7 @@
 //!
 //! One picks a channel, the other picks a target in time. The labels say so.
 
-use crate::plugins::builtin::shared::{edges_from, edges_param, Edges};
+use crate::shared::{edges_from, edges_param, Edges};
 use fasttiff_plugin_api::{ImageInfo, ParamDecl, ParamKind, Params};
 use turboreg_registration::{Backend, Border, Reference, Settings, Transformation};
 
@@ -249,7 +249,7 @@ pub(super) fn declare(info: &ImageInfo, chosen: &Params) -> Vec<ParamDecl> {
         ),
     );
 
-    decls.push(crate::plugins::builtin::shared::in_new_window());
+    decls.push(crate::shared::in_new_window());
     decls
 }
 

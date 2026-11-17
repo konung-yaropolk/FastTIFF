@@ -337,7 +337,7 @@ pub(super) struct FrameStarts(Vec<u32>);
 impl FrameStarts {
     /// The stack's, as its axes are now.
     pub(super) fn of(stack: &Document) -> Self {
-        FrameStarts(fast_tiff_viewer::plugins::builtin::point_counter::frame_starts(stack))
+        FrameStarts(fast_tiff_viewer::point_counter::frame_starts(stack))
     }
 
     /// One per frame, in frame order: the ImageJ stack position each starts

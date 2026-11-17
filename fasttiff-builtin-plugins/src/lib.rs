@@ -1,23 +1,27 @@
-//! The plugins compiled into this build.
+//! The plugins FastTIFF compiles in.
 //!
-//! Everything in this directory is a *plugin*. Everything in the directory
-//! above it is the *interface* plugins are written against — the registry, the
-//! search path, the host context, the shared-library loader. The split is worth
-//! keeping sharp: a file here may only use `fasttiff_plugin_api`, exactly as a
-//! third-party plugin would, so if one of these ever needs something the API
-//! does not offer, that is a gap in the contract rather than a reason to reach
-//! sideways into the viewer.
+//! Everything in this crate is a *plugin*, written against what a third-party
+//! plugin is written against and nothing else: the traits and types of
+//! `fasttiff_plugin_api`, and the [`Registrar`] of `fasttiff_plugin` they are
+//! installed through. The host they run in, `fast-tiff-viewer`, is not a
+//! dependency (only a dev-dependency, for the tests). That is the point of the
+//! crate: a plugin here that needed something the contract does not offer
+//! used to be able to reach sideways into the viewer, and a rule against it
+//! was a comment; here it does not compile, and the gap is a gap in the
+//! contract, to be closed there.
 //!
 //! Being compiled in is a *place*, not a different kind of plugin. These
-//! implement the same [`Plugin`], [`Importer`] and [`Exporter`] traits a `.dll`
-//! does, and [`register`] installs them through the same C ABI a `.dll` is
-//! installed through — the same registration, run in this process instead of
-//! from a library's query function. From then on every call they receive goes
+//! implement the same [`Plugin`](fasttiff_plugin_api::Plugin),
+//! [`Importer`](fasttiff_plugin_api::Importer) and
+//! [`Exporter`](fasttiff_plugin_api::Exporter) traits a `.dll`
+//! does, and [`register`] hands each to the host's [`Registrar`], which in
+//! FastTIFF installs it through the same C ABI a `.dll` is installed through —
+//! the same registration, run in the application's process instead of from a
+//! library's query function. From then on every call they receive goes
 //! through the host table and sinks a library's does, so there is nothing a
 //! built-in can do that a library cannot, and no rule one is held to that the
-//! other is not. The registry knows the difference only by the
-//! [`Origin`](super::Origin) tag it stores alongside. They exist for four
-//! reasons:
+//! other is not. The registry knows the difference only by the `Origin` tag it
+//! stores alongside. They exist for these reasons:
 //!
 //! * The browser build can never load a shared library, and still gets a
 //!   working Plugins menu.
@@ -39,13 +43,28 @@
 //!   of arithmetic that has to stay cancellable, and nine published algorithms
 //!   behind one menu entry.
 //!
+//! # Installing them
+//!
+//! An application hands [`register`] to the registry it builds — FastTIFF's
+//! desktop host as
+//!
+//! ```ignore
+//! let registry = Registry::with_installed(fasttiff_builtin_plugins::register);
+//! ```
+//!
+//! and the browser's with `Registry::new`, which has no libraries to look for.
+//! The registry runs it first, so that a library cannot displace a built-in
+//! by claiming its id, and then sorts the menu; the registry is generic over
+//! it, so the calls are as direct as they were when the registry knew the
+//! built-ins by name.
+//!
 //! # Which of them are here
 //!
 //! One Cargo feature per directory, named `plugin-<directory>`, and
 //! `builtin-plugins` is every one that ships. All of them are on by default;
 //! the manifest is where the list lives and what it costs to drop one is
 //! written there. The effect is total: a plugin whose feature is off has no
-//! module, no entry in the lists below, no menu entry, and — for the four that
+//! module, no entry in the lists below, no menu entry, and — for those that
 //! bring one — no dependency compiled or linked.
 //!
 //! Two kinds of `cfg` therefore appear below, and they mean different things:
@@ -88,6 +107,30 @@
 //! `cdylib` crate's `src/` and nothing inside it has to change. [`oir`] went
 //! one step further and gave its reader away: the container and record code
 //! became the `oir-reader` crate, and the directory kept the importer.
+//!
+//! # What is not here
+//!
+//! The point counter. It is in the Plugins menu, but it is a tool rather than
+//! a registry plugin: a session of clicks on the picture with an undo history
+//! and marks drawn over it for as long as its window is open, where a plugin
+//! is built for one call and returns. The contract has no kind of plugin for
+//! that yet, so it is written against the viewer's own document and lives
+//! there (`fast_tiff_viewer::point_counter`), and the application lists it
+//! beside these by hand. When the contract gains an interactive tool kind, it
+//! moves here, and [`Registrar`] gains the method that installs one.
+//!
+//! # Licence
+//!
+//! GPL-3.0-only, where the viewer and the plugin SDK are MPL-2.0. The two
+//! registration plugins link GPL-3.0-only crates (`suite2p-registration`,
+//! `turboreg-registration` and the `image-registration-support` they share),
+//! and the copyleft travels with them; keeping every plugin in this one crate
+//! is what lets the core they plug into stay MPL. A build with both of them
+//! left out links none of the registration crates, but this crate is
+//! GPL-3.0-only itself, so whatever links it is GPL-3.0 whichever plugins are
+//! on: the features choose what is built, not the licence it is built under.
+
+use fasttiff_plugin::Registrar;
 
 /// The one table of built-ins: for each, the condition it is compiled under,
 /// its module, and the plugins, importers and exporters it registers.
@@ -118,17 +161,42 @@ macro_rules! builtins {
             };
         )*
 
-        /// [`register`]'s body: every entry of the table, in its order.
-        fn register_table(reg: &mut Registry, o: Origin) {
+        /// Install every plugin compiled into this build.
+        ///
+        /// One list for all three kinds, in registration order. Order is not
+        /// load-bearing for the filters — the menu sorts by path and name, and
+        /// a registry only uses order to break an id clash — but it is the
+        /// tie-break for the other two, so it is a real decision there:
+        ///
+        /// * **Importers**, when two are equally confident about a file: the
+        ///   more specific format goes first. OIR first, being the specific
+        ///   one; every importer here answers on a signature of its own, so the
+        ///   order between them rarely decides anything. The exception, and the
+        ///   reason the order is still worth keeping deliberate: NIfTI claims
+        ///   `.gz` as well as `.nii`, because `.nii.gz` has `gz` for its
+        ///   extension and there is no way to declare a two-part one. It is
+        ///   therefore the one importer here that is offered files it will
+        ///   decline, and it declines them in `probe` by looking at the name
+        ///   and the magic rather than by being asked last. Anything added
+        ///   after it that also wants `.gz` should be put *before* it.
+        /// * **Exporters**, when two claim one extension. An exporter cannot be
+        ///   probed, so order is the *only* tie-break.
+        ///
+        /// The order is the `builtins!` table's; each plugin is installed under
+        /// its own `cfg`, since any of them may be absent (see the feature note
+        /// in the crate docs). Generic over the registrar, so an application's
+        /// registry calls into each plugin's registration directly.
+        pub fn register(reg: &mut impl Registrar) {
             // Every line is conditional, so a build with every plugin left
-            // out uses neither — and must still build without a warning.
-            let _ = (&reg, o);
+            // out uses nothing of `reg` — and must still build without a
+            // warning.
+            let _ = &reg;
             $(
                 #[cfg($cfg)]
                 {
-                    $($(reg.add::<$plugin>(o);)+)?
-                    $($(reg.add_importer::<$importer>(o);)+)?
-                    $($(reg.add_exporter::<$exporter>(o);)+)?
+                    $($(reg.plugin::<$plugin>();)+)?
+                    $($(reg.importer::<$importer>();)+)?
+                    $($(reg.exporter::<$exporter>();)+)?
                 }
             )*
         }
@@ -182,10 +250,6 @@ builtins! {
     png if (feature = "plugin-png") => importers(PngImport) exporters(Png);
 }
 
-/// The one directory here that is not a registry plugin, and so has no
-/// feature and no entry in [`register`]: a tool on the picture, kept with the
-/// built-ins because it is listed with them. See the module for why.
-pub mod point_counter;
 /// What more than one of them is built from, and the reason each of them can be
 /// chosen on its own.
 ///
@@ -200,30 +264,30 @@ pub mod point_counter;
 ))]
 pub(crate) mod shared;
 
-use super::{Origin, Registry};
-
-/// Install every plugin compiled into this build, through the C ABI.
+/// Run the registrations' GPU paths (TurboReg, suite2p) on the frontend's own
+/// wgpu device instead of each opening one. Call once at startup, before any
+/// of them runs; a frontend that draws with wgpu always should.
 ///
-/// One list for all three kinds, in registration order. Order is not
-/// load-bearing for the filters — the menu sorts by path and name, and `add`
-/// only uses order to break an id clash — but it is the tie-break for the
-/// other two, so it is a real decision there:
+/// Opening a second device beside the renderer's, on a card whose memory the
+/// two have overrun, can deadlock both, and then the system resets the GPU
+/// and every device in the process is lost — which is how a TurboReg run on a
+/// 4096 x 4096 stack, with a 3D volume resident, took the application down.
+/// On the one device a registration short of memory fails its batch and says
+/// so instead (see `image_registration_support::gpu::use_device`).
 ///
-/// * **Importers**, when two are equally confident about a file: the more
-///   specific format goes first. OIR first, being the specific one; every
-///   importer here answers on a signature of its own, so the order between
-///   them rarely decides anything. The exception, and the reason the order is
-///   still worth keeping deliberate: NIfTI claims `.gz` as well as `.nii`,
-///   because `.nii.gz` has `gz` for its extension and there is no way to
-///   declare a two-part one. It is therefore the one importer here that is
-///   offered files it will decline, and it declines them in `probe` by looking
-///   at the name and the magic rather than by being asked last. Anything added
-///   after it that also wants `.gz` should be put *before* it.
-/// * **Exporters**, when two claim one extension. An exporter cannot be
-///   probed, so order is the *only* tie-break.
-///
-/// The order is the `builtins!` table's above; each plugin is installed under
-/// its own `cfg`, since any of them may be absent (see the feature note above).
-pub fn register(reg: &mut Registry) {
-    register_table(reg, Origin::BuiltIn);
+/// One call for every registration: the registration crates share one device
+/// slot, so a GPU path added to either is on the renderer's device without
+/// being added here. Here rather than in the viewer because the registrations
+/// are: the viewer has no registration to hand a device to.
+#[cfg(all(feature = "gpu-registration", not(target_arch = "wasm32")))]
+pub fn share_gpu_device(device: &wgpu::Device, queue: &wgpu::Queue, adapter: &wgpu::AdapterInfo) {
+    #[cfg(any(
+        feature = "plugin-suite2p-stabilize",
+        feature = "plugin-turboreg-stabilize"
+    ))]
+    if !image_registration_support::gpu::use_device(device.clone(), queue.clone(), adapter) {
+        log::warn!("a registration had opened a GPU device of its own already");
+    }
+    // Both plugins may be compiled out.
+    let _ = (device, queue, adapter);
 }

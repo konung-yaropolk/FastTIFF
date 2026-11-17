@@ -122,7 +122,11 @@ impl Headless {
         // As both hosts do before the first frame.
         install_chrome(&ctx);
         Headless {
-            app: ViewerApp::assemble(None, target, fast_tiff_viewer::plugins::Registry::new()),
+            app: ViewerApp::assemble(
+                None,
+                target,
+                fast_tiff_viewer::plugins::Registry::new(fasttiff_builtin_plugins::register),
+            ),
             ctx,
             frame: eframe::Frame::_new_kittest(),
             size: Vec2::new(800.0, 600.0),

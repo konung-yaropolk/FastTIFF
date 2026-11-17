@@ -9,8 +9,9 @@
 //! differently on each side.
 //!
 //! The oracle is exact. The example library's `Invert` is a copy of the
-//! viewer's built-in `Invert`, so running both over the same stack must produce
-//! *identical* results, down to the float bits and the result's name. A
+//! application's built-in `Invert` (`fasttiff-builtin-plugins`), so running
+//! both over the same stack must produce *identical* results, down to the
+//! float bits and the result's name. A
 //! comparison with no tolerance is only possible because the boundary is meant
 //! to be lossless, which is the property worth pinning.
 //!
@@ -185,7 +186,7 @@ fn the_library_registers_what_it_declares() {
 #[test]
 fn a_loaded_plugin_matches_the_built_in_it_was_copied_from() {
     let mut from_library = plugin("dev.fasttiff.example.invert");
-    let mut built_in = plugins::builtin::Invert;
+    let mut built_in = fasttiff_builtin_plugins::Invert;
 
     for (channels, frames, new_window) in [(1usize, 1usize, true), (3, 2, true), (3, 2, false)] {
         let s = stack(channels, frames);
@@ -552,7 +553,7 @@ fn an_error_raised_inside_the_library_keeps_its_message() {
 fn loaded_plugins_join_the_same_registry_as_the_built_ins() {
     let loaded = example();
 
-    let mut reg = Registry::new();
+    let mut reg = Registry::new(fasttiff_builtin_plugins::register);
     let built_ins = reg.len();
     for p in loaded.plugins {
         assert!(reg.add_loaded(p, Origin::Library));
@@ -997,7 +998,7 @@ fn a_library_in_the_plugin_folder_reaches_the_menu() {
         "the override should come first on the search path"
     );
 
-    let reg = Registry::with_installed();
+    let reg = Registry::with_installed(fasttiff_builtin_plugins::register);
     std::env::remove_var(plugins::PLUGIN_PATH_VAR);
 
     assert!(

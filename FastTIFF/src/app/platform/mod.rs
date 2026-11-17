@@ -33,8 +33,8 @@
 //! * in `render.rs`, eframe's per-target option hooks, which take
 //!   `NativeOptions` on the desktop and `WebOptions` in the browser — each
 //!   type exists on its own target only — and the device hand-over to the GPU
-//!   registrations (`fast_tiff_viewer::share_gpu_device`), whose GPU paths the
-//!   viewer has on the desktop alone;
+//!   registrations (`fasttiff_builtin_plugins::share_gpu_device`), whose GPU
+//!   paths the plugins have on the desktop alone;
 //! * in `native.rs`, the operating system's own: macOS's Apple Events, and the
 //!   file manager each system has.
 //!

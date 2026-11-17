@@ -52,3 +52,14 @@ fasttiff-plugin = { path = "../../fasttiff-plugin" }
 [dev-dependencies]
 fast-tiff-viewer = { path = "../../fast-tiff-viewer" }
 fasttiff-plugin-api = { path = "../../fasttiff-plugin-api" }
+# The built-in `Invert` the library's is checked against, and the built-ins a
+# registry holds beside a loaded library. With its default features, so that
+# the library is tested against the set the application ships: an id or a
+# file extension it clashed with would be a problem only the whole set shows.
+#
+# A test dependency only. The test binary links GPL-3.0 code through it: the
+# plugins crate itself, and with its defaults the registration crates its two
+# registration plugins bring (`suite2p-registration`, `turboreg-registration`,
+# `image-registration-support`), as it did through the GPL viewer before the
+# plugins left it. The plugin library this MPL example builds links none of it.
+fasttiff-builtin-plugins = { path = "../../fasttiff-builtin-plugins" }

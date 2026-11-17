@@ -7,11 +7,11 @@
 //! session: a list of points that grows click by click, an undo history, and
 //! marks drawn over the picture for as long as the window is open.
 //!
-//! Its code is with the other built-ins, in
-//! [`fast_tiff_viewer::plugins::builtin::point_counter`]: the model — groups,
-//! points, undo, the export as ImageJ point ROIs — and the gestures on the
-//! picture ([`Session::track`]), tested there without a window. This module is
-//! the egui side of it, which that crate has no toolkit for:
+//! Its model is in the viewer core, [`fast_tiff_viewer::point_counter`] —
+//! groups, points, undo, the export as ImageJ point ROIs — with the gestures on
+//! the picture ([`Session::track`]), tested there without a window; not with
+//! the built-in plugins, which cannot reach the document it needs. This module
+//! is the egui side of it, which that crate has no toolkit for:
 //!
 //! * the window: the table of groups and counts, and the buttons;
 //! * the canvas tool ([`CanvasTool`]): the pointer turned into a [`Gesture`],
@@ -47,8 +47,8 @@
 
 use egui::{Color32, Pos2, RichText, Stroke, Vec2};
 use fast_tiff_lib::PointRoi;
-use fast_tiff_viewer::plugins::builtin::point_counter::{CountedPoint, PointCounter};
-pub(super) use fast_tiff_viewer::plugins::builtin::point_counter::{Gesture, Session};
+use fast_tiff_viewer::point_counter::{CountedPoint, PointCounter};
+pub(super) use fast_tiff_viewer::point_counter::{Gesture, Session};
 use fast_tiff_viewer::Document;
 
 use super::canvas_tool::{

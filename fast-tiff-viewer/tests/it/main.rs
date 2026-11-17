@@ -11,6 +11,9 @@
 //! machinery (the band cache, residency planning, window assembly, plane
 //! addressing) is a unit test beside the code it tests, in `src/`.
 //!
+//! The built-in plugins' suites, which run them against this crate's host,
+//! are in `fasttiff-builtin-plugins`, with the plugins.
+//!
 //! Run one suite with `cargo test -p fast-tiff-viewer --test it <module>::`.
 
 mod auto_contrast;
@@ -21,8 +24,4 @@ mod histogram;
 mod open_failure;
 mod open_signal;
 mod palette_lut;
-mod plugin_parity;
-mod plugins;
-mod rgb_plugins;
 mod shift_sync;
-mod streamed_results;

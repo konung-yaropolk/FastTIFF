@@ -2,7 +2,7 @@
 //!
 //! Two plugins, chosen to cover the two halves of the contract:
 //!
-//! * [`Invert`] is a byte-for-byte copy of the viewer's built-in `Invert`. It
+//! * [`Invert`] is a byte-for-byte copy of the app's built-in `Invert`. It
 //!   is the **oracle** for the whole C boundary: the same arithmetic, reached
 //!   through `dlopen`, a function pointer table and two rounds of copying,
 //!   must produce exactly the bits the built-in produces. Anything wrong with
@@ -51,7 +51,7 @@ use std::path::Path;
 
 /// Invert whatever is loaded, about the sample type's range.
 ///
-/// Deliberately identical to `fast_tiff_viewer::plugins::builtin::Invert`,
+/// Deliberately identical to `fasttiff_builtin_plugins::Invert`,
 /// down to the NaN handling and the result's name. The test that compares them
 /// is only meaningful while that stays true — if you change one, change both.
 ///

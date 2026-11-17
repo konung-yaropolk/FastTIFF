@@ -10,7 +10,7 @@
 //! series where each section was placed on the slide by hand, a widefield
 //! recording where the stage rotated, a time-lapse across a objective change.
 //!
-//! [`stabilize`]: crate::plugins::builtin::stabilize
+//! [`stabilize`]: crate::stabilize
 //!
 //! # The algorithm is EPFL's
 //!

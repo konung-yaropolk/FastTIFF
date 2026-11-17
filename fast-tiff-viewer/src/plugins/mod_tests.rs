@@ -33,74 +33,71 @@ stub!(Alpha, "a.1", "Alpha", "Tools");
 stub!(Beta, "a.2", "Beta", "Tools");
 stub!(Top, "a.3", "Top", "");
 
-/// What holds for every configuration: whatever was compiled in registers, and
-/// registers cleanly. Which plugins those are is a build-time choice (the
-/// `plugin-*` features), so the identity assertions below are tied to the
-/// features that put them there rather than to a list this test keeps its own
-/// copy of — a copy would only ever go stale.
+/// The built-ins arrive by being handed to the registry: what `new`'s argument
+/// registers is installed, through the C boundary, as `BuiltIn` — and sorted
+/// into menu order, whatever order it was registered in.
 #[test]
-fn the_builtins_are_installed_and_uniquely_identified() {
-    let reg = Registry::new();
-    assert!(
-        reg.problems.is_empty(),
-        "a clean build registers cleanly: {:?}",
-        reg.problems
+fn what_the_application_hands_in_is_installed_as_built_in_and_sorted() {
+    use fasttiff_plugin::Registrar;
+    let reg = Registry::new(|r| {
+        r.plugin::<Top>();
+        r.plugin::<Beta>();
+        r.plugin::<Alpha>();
+        r.importer::<SameD1>();
+        r.exporter::<StubCsv>();
+    });
+    assert!(reg.problems.is_empty(), "{:?}", reg.problems);
+    let names: Vec<&str> = reg.entries().iter().map(|e| e.info.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Top", "Alpha", "Beta"],
+        "menu order: path, then name"
     );
-
-    let mut ids: Vec<&str> = reg.entries().iter().map(|e| e.info.id.as_str()).collect();
-    let before = ids.len();
-    ids.sort_unstable();
-    ids.dedup();
-    assert_eq!(ids.len(), before, "built-in ids must be unique");
     assert!(reg.entries().iter().all(|e| e.origin == Origin::BuiltIn));
-
-    #[cfg(feature = "builtin-plugins")]
-    assert!(
-        !reg.is_empty(),
-        "a build that asked for the built-in plugins must have them"
-    );
-    #[cfg(feature = "plugin-invert")]
-    assert!(reg.find("dev.fasttiff.invert").is_some());
-    #[cfg(feature = "plugin-zproject")]
-    assert!(reg.find("dev.fasttiff.zproject").is_some());
+    assert!(reg.entries().iter().all(|e| e.plugin.source().is_none()));
+    assert_eq!(reg.importers().len(), 1);
+    assert_eq!(reg.importers()[0].origin, Origin::BuiltIn);
+    assert!(reg.importers()[0].importer.source().is_none());
+    assert_eq!(reg.exporters().len(), 1);
+    assert_eq!(reg.exporters()[0].origin, Origin::BuiltIn);
 }
 
-/// The other half of the switch: a plugin left out is *gone*, not merely
-/// hidden. Without this, a feature could silently do nothing and every other
-/// test here would still pass.
+/// The registry knows no plugin by name: with nothing handed in, nothing is
+/// installed, and nothing is wrong.
 #[test]
-fn a_plugin_left_out_of_the_build_is_absent_from_the_registry() {
-    let reg = Registry::new();
-    for (feature_on, id) in [
-        (cfg!(feature = "plugin-invert"), "dev.fasttiff.invert"),
-        (cfg!(feature = "plugin-zproject"), "dev.fasttiff.zproject"),
-        (cfg!(feature = "plugin-plot-axis"), "dev.fasttiff.plot-axis"),
-        (
-            cfg!(feature = "plugin-stack-tools"),
-            "dev.fasttiff.stacktools.keeper",
-        ),
-        (
-            cfg!(feature = "plugin-suite2p-stabilize"),
-            "dev.fasttiff.stabilize",
-        ),
-        (
-            cfg!(feature = "plugin-deconvolve"),
-            "dev.fasttiff.deconvolve.run",
-        ),
-    ] {
-        assert_eq!(
-            reg.find(id).is_some(),
-            feature_on,
-            "{id} must be installed exactly when its feature is on"
-        );
-    }
+fn with_no_built_ins_handed_in_the_registry_is_empty() {
+    let reg = Registry::new(|_| {});
+    assert!(reg.is_empty());
+    assert!(reg.importers().is_empty() && reg.exporters().is_empty());
+    assert!(reg.problems.is_empty(), "{:?}", reg.problems);
+}
+
+/// A built-in the registry refuses is reported, and the others are still
+/// installed: each is registered on its own, so one bad one costs only itself.
+#[test]
+fn a_refused_built_in_is_reported_and_the_rest_installed() {
+    use fasttiff_plugin::Registrar;
+    let reg = Registry::new(|r| {
+        r.plugin::<First>();
+        r.plugin::<Second>();
+        r.plugin::<Alpha>();
+    });
+    assert_eq!(reg.len(), 2, "the duplicate is refused, the others kept");
+    assert!(reg.find("a.1").is_some());
+    assert!(
+        reg.problems
+            .iter()
+            .any(|p| p.contains("new.id") && p.contains("Second")),
+        "{:?}",
+        reg.problems
+    );
 }
 
 /// Which plugin runs must not depend on directory order, so a duplicate id is
 /// reported rather than resolved.
 #[test]
 fn a_duplicate_id_is_refused_and_reported() {
-    let mut reg = Registry::new();
+    let mut reg = Registry::empty();
     let n = reg.len();
     assert!(reg.add::<First>(Origin::Library));
     assert_eq!(reg.len(), n + 1);
@@ -118,14 +115,14 @@ fn a_duplicate_id_is_refused_and_reported() {
 
 #[test]
 fn a_plugin_without_an_id_is_refused() {
-    let mut reg = Registry::new();
+    let mut reg = Registry::empty();
     assert!(!reg.add::<Nameless>(Origin::Library));
     assert!(reg.problems.iter().any(|p| p.contains("Nameless")));
 }
 
 #[test]
 fn grouping_collects_each_menu_path_once_and_covers_everything() {
-    let mut reg = Registry::new();
+    let mut reg = Registry::empty();
     reg.add::<Alpha>(Origin::Library);
     reg.add::<Beta>(Origin::Library);
     reg.add::<Top>(Origin::Library);
@@ -196,30 +193,28 @@ stub_importer!(DupQ2, "dup.id", &["q2"], Confidence::Maybe);
 stub_importer!(SameD1, "d.1", &["same"], Confidence::Maybe);
 stub_importer!(SameD2, "d.2", &["same"], Confidence::Maybe);
 
-#[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
-#[test]
-fn the_builtin_importer_is_installed_and_offers_its_file_types() {
-    let reg = Registry::new();
-    assert!(reg.problems.is_empty(), "{:?}", reg.problems);
-    // OIR is the importer that ships, and the one this checks for.
-    assert!(
-        reg.importers()
-            .iter()
-            .any(|e| e.info.id == "dev.fasttiff.oir"),
-        "the OIR importer should be installed"
-    );
-    let types = reg.open_file_types();
-    assert!(
-        types
-            .iter()
-            .any(|t| t.extensions.contains(&"oir".to_string())),
-        "the Open dialog should learn about .oir: {types:?}"
-    );
+/// An exporter that only says what it writes.
+#[derive(Default)]
+struct StubCsv;
+impl fasttiff_plugin_api::Exporter for StubCsv {
+    fn info(&self) -> PluginInfo {
+        PluginInfo::new("s.csv", "Stub exporter")
+    }
+    fn file_types(&self) -> Vec<FileType> {
+        vec![FileType::new("Stub", &["csv"])]
+    }
+    fn export(
+        &mut self,
+        _r: &fasttiff_plugin_api::ExportRequest,
+        _h: &mut dyn HostContext,
+    ) -> Result<(), PluginError> {
+        Err(PluginError::failed("stub"))
+    }
 }
 
 #[test]
 fn importers_are_ranked_by_confidence_not_by_name() {
-    let mut reg = Registry::new();
+    let mut reg = Registry::empty();
     reg.add_importer::<MaybeZz>(Origin::Library);
     reg.add_importer::<CertainZz>(Origin::Library);
 
@@ -262,14 +257,14 @@ fn an_importer_declaring_no_file_types_is_refused() {
             Err(PluginError::failed("empty"))
         }
     }
-    let mut reg = Registry::new();
+    let mut reg = Registry::empty();
     assert!(!reg.add_importer::<Empty>(Origin::Library));
     assert!(reg.problems.iter().any(|p| p.contains("no file types")));
 }
 
 #[test]
 fn duplicate_importer_ids_are_refused() {
-    let mut reg = Registry::new();
+    let mut reg = Registry::empty();
     assert!(reg.add_importer::<DupQ1>(Origin::Library));
     assert!(!reg.add_importer::<DupQ2>(Origin::Library));
     assert!(reg.problems.iter().any(|p| p.contains("dup.id")));
@@ -278,7 +273,7 @@ fn duplicate_importer_ids_are_refused() {
 /// A file dialog must not show the same format twice.
 #[test]
 fn open_file_types_are_deduplicated() {
-    let mut reg = Registry::new();
+    let mut reg = Registry::empty();
     reg.add_importer::<SameD1>(Origin::Library);
     reg.add_importer::<SameD2>(Origin::Library);
     let types = reg.open_file_types();
@@ -296,65 +291,18 @@ fn reading_the_head_of_a_missing_file_yields_nothing() {
     assert!(Registry::read_head(Path::new("/definitely/not/here.zz")).is_empty());
 }
 
-/// The MRI readers, each present exactly when its feature is on and offering
-/// the extensions the Open dialog needs.
-///
-/// The extension list is the part worth asserting rather than the registration:
-/// a `.nii.gz` has `gz` for its extension and nothing finer can be declared, so
-/// if that one slipped out of the list the importer would still be installed
-/// and would simply never be offered the files it exists for.
-#[test]
-fn the_mri_importers_are_installed_exactly_when_their_features_are() {
-    let reg = Registry::new();
-    for (feature_on, id, exts) in [
-        (
-            cfg!(all(feature = "plugin-nifti", not(target_arch = "wasm32"))),
-            "dev.fasttiff.nifti",
-            &["nii", "gz"][..],
-        ),
-        (
-            cfg!(all(feature = "plugin-dicom", not(target_arch = "wasm32"))),
-            "dev.fasttiff.dicom",
-            &["dcm"][..],
-        ),
-    ] {
-        let entry = reg.importers().iter().find(|e| e.info.id == id);
-        assert_eq!(
-            entry.is_some(),
-            feature_on,
-            "{id} must be installed exactly when its feature is on"
-        );
-        if let Some(entry) = entry {
-            let declared: Vec<&str> = entry
-                .file_types
-                .iter()
-                .flat_map(|t| t.extensions.iter().map(String::as_str))
-                .collect();
-            for want in exts {
-                assert!(
-                    declared.contains(want),
-                    "{id} should offer .{want}: {declared:?}"
-                );
-            }
-            // And the Open dialog learns about them.
-            let dialog = reg.open_file_types();
-            assert!(
-                dialog
-                    .iter()
-                    .any(|t| exts.iter().any(|e| t.extensions.contains(&e.to_string()))),
-                "{id}'s types should reach the Open dialog"
-            );
-        }
-    }
-}
-
 /// The claimed extensions are what `claims_extension` decides by — each once,
 /// sorted — so a host holding the list while the registry is away decides the
 /// same way. A TIFF is never among them unless an importer asks for it.
 #[test]
 fn the_claimed_extensions_agree_with_claims_extension() {
-    let reg = Registry::new();
+    let mut reg = Registry::empty();
+    reg.add_importer::<MaybeZz>(Origin::Library);
+    reg.add_importer::<SameD1>(Origin::Library);
+    reg.add_importer::<SameD2>(Origin::Library);
+    reg.add_importer::<DupQ1>(Origin::Library);
     let claimed = reg.claimed_extensions();
+    assert_eq!(claimed, ["q1", "same", "zz"]);
     let mut sorted = claimed.clone();
     sorted.sort();
     sorted.dedup();

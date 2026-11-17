@@ -144,7 +144,7 @@ fn whole_and_streamed(
 #[test]
 fn a_streamed_stabilization_is_the_whole_one() {
     let s = wandering(64, &PATH);
-    let mut reg = Registry::new();
+    let mut reg = Registry::new(fasttiff_builtin_plugins::register);
     let index = installed(&mut reg, "dev.fasttiff.stabilize");
     let crop = edges(&reg, index, &s, "Crop to the common area");
     let dir = scratch("stabilize");
@@ -186,7 +186,7 @@ fn a_streamed_stabilization_is_the_whole_one() {
 fn a_streamed_registration_is_the_whole_one() {
     let path = [(0, 0), (2, -1), (-1, 2), (1, 1)];
     let s = wandering(64, &path);
-    let mut reg = Registry::new();
+    let mut reg = Registry::new(fasttiff_builtin_plugins::register);
     let index = installed(&mut reg, "dev.fasttiff.turboreg");
     let crop = edges(&reg, index, &s, "Crop to the common area");
     let dir = scratch("turboreg");
@@ -293,7 +293,7 @@ impl fast_tiff_viewer::plugins::deliver::Deliver for NoWindows {
 #[test]
 fn a_run_stopped_after_its_result_began_leaves_no_file() {
     let s = wandering(64, &[(0, 0), (2, -1), (-1, 2), (1, 1)]);
-    let mut reg = Registry::new();
+    let mut reg = Registry::new(fasttiff_builtin_plugins::register);
     let dir = scratch("stopped");
     for (id, noticed) in [
         ("dev.fasttiff.turboreg", true),

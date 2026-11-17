@@ -21,8 +21,9 @@ Needs a current browser with WebGPU or WebGL2 (Chrome/Edge 113+, Firefox 141+).
 
 ```text
   fast-tiff-lib      TIFF parsing + decode          ┐
-  scivis-render      GPU compositing + ray-marching ├─ shared with the desktop app
-  fast-tiff-viewer   the document, camera, GPU sync │
+  scivis-render      GPU compositing + ray-marching │
+  fast-tiff-viewer   the document, camera, GPU sync ├─ shared with the desktop app
+  fasttiff-builtin-plugins   the built-in plugins   │
   FastTIFF (lib)     the egui UI + eframe adapter   ┘
         │
   src/lib.rs         this crate: ~190 lines of browser host

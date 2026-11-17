@@ -33,7 +33,7 @@ use fasttiff_plugin_api::{
     PluginInfo,
 };
 
-use crate::plugins::builtin::shared::{in_new_window, target, Store, Stored};
+use crate::shared::{in_new_window, target, Store, Stored};
 
 /// Invert every plane of whatever is loaded, about the sample type's range.
 #[derive(Default)]
