@@ -69,7 +69,19 @@ wasm-bindgen-futures = { workspace = true }
 log = { workspace = true }
 console_log = "1"
 console_error_panic_hook = "0.1"
-web-sys = { workspace = true, features = ["HtmlCanvasElement", "Window", "Document", "Element"] }
+# The canvas eframe draws on, and the keydown listener that keeps the zoom
+# keys from the page (`keep_zoom_keys_from_page`), with the abort signal that
+# takes it off the page with eframe's own.
+web-sys = { workspace = true, features = [
+    "AbortController",
+    "AbortSignal",
+    "AddEventListenerOptions",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "KeyboardEvent",
+    "Window",
+] }
 
 # There is deliberately no `[package.metadata.wasm-pack.profile.release]`
 # `wasm-opt` block here, and it is worth saying why so that the next person

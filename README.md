@@ -447,14 +447,16 @@ beside a file. Details are in [`oir-reader/README.md`](oir-reader/README.md).
 
   The hotkey yields to whatever has keyboard focus, so Ctrl+C in a text box
   still copies the text.
-- Zoom (Ctrl+scroll) and pan (drag, or middle-drag) of the 2D image, with the window sized
-  to fit on open. A wheel notch **glides** to the next level over about a tenth
-  of a second, about the point under the cursor, rather than jumping — long
-  enough to see which way the picture moved, short enough that a second notch
-  never queues up behind the first. Turning the wheel again mid-glide advances
-  another rung rather than restarting the same one. **Pinch to zoom and two fingers to pan** on a touch screen,
-  in both the 2D and 3D views — a pinch zooms continuously rather than in
-  fixed steps, since a gesture is continuous.
+- Zoom (Ctrl+scroll, or Ctrl with Plus or Minus, and Cmd as well on a Mac) and
+  pan (drag, or middle-drag) of the 2D image, with the window sized to fit on
+  open. In a browser the zoom keys zoom the picture and not the page. A wheel
+  notch **glides** to the next level over about a tenth of a second, about the
+  point under the cursor, rather than jumping — long enough to see which way
+  the picture moved, short enough that a second notch never queues up behind
+  the first. Turning the wheel again mid-glide advances another rung rather
+  than restarting the same one. **Pinch to zoom and two fingers to pan** on a
+  touch screen, in both the 2D and 3D views — a pinch zooms continuously
+  rather than in fixed steps, since a gesture is continuous.
 - A **navigator** in the corner of the 2D view once the whole frame no longer
   fits: two nested rectangles, the frame and the part of it on screen, in the
   manner of ImageJ's. At 800% on a mosaic every screenful looks like every

@@ -25,13 +25,14 @@ Needs a current browser with WebGPU or WebGL2 (Chrome/Edge 113+, Firefox 141+).
   fast-tiff-viewer   the document, camera, GPU sync │
   FastTIFF (lib)     the egui UI + eframe adapter   ┘
         │
-  src/lib.rs         this crate: ~57 lines of browser host
+  src/lib.rs         this crate: ~190 lines of browser host
 ```
 
 **There is no UI code in this crate.** The interface is the *same*
 `fasttiff::ViewerApp` the desktop binary runs — `FastTIFF` is a lib + bin, and
 both hosts construct the same app. All this crate does is hand eframe a canvas
-instead of a window.
+instead of a window, and keep the browser's page zoom off the app's zoom keys
+(below).
 
 What actually differs between the two hosts is all about the *host* rather
 than the viewer, and it is behind one seam, `FastTIFF/src/app/platform/`: what
@@ -93,14 +94,32 @@ the enlarged scale while the text around it shrinks back.
 The toolbar and the panel's control row wrap to as many lines as they need,
 which is what keeps the enlarged chrome usable in a narrow window.
 
-Ctrl with Plus, Equals or Minus steps the picture's zoom on both hosts.
+## The zoom keys zoom the picture, not the page
+
+Ctrl or Cmd with Plus, Equals or Minus steps the picture's zoom on both
+hosts, as Ctrl or Cmd with the wheel does; on a Mac either key works.
 egui's own keyboard zoom, which would scale the whole interface on the same
 chords and put Ctrl+0 back at 100% rather than 125%, is off on both:
 `install_chrome` turns it off on either host, and eframe's web runner already
-has it off before the app is created. In the browser the same press also
-zooms the page, since eframe does not prevent those keys' default: one
-Ctrl+Plus steps the picture and enlarges the page around it. The page zoom
-changes the device pixel ratio, not the 125% the chrome is drawn at.
+has it off before the app is created.
+
+In a browser the same chords are the page zoom, and eframe does not prevent
+their default (it does for Ctrl+S, Ctrl+O and a few others, and has no
+option for more). So this crate does, in `keep_zoom_keys_from_page`: while
+the app has the focus, one Ctrl+Plus steps the picture and leaves the page as
+it was. It prevents nothing else. The press still reaches the app, which is
+what zooms the picture. The app's text fields type as they did: a chord with
+Alt in it is left alone, since a browser on Windows reports AltGr as Ctrl and
+Alt. And Ctrl+0 (Cmd+0 on a Mac), which the app does nothing with, still
+resets the page. A page zoom, from that or from the browser's menu, changes
+the device pixel ratio, not the 125% the chrome is drawn at.
+
+While the app has the focus these chords never zoom the page, whether or not
+there is a picture to zoom: on the empty viewport and in the 3D view they do
+nothing at all. The browser's menu still zooms the page, and so do the chords
+once the focus is elsewhere on the page. A browser's Cmd is the Meta key, so
+on Windows and Linux the Windows or Super key counts as Cmd here, for the
+keys as for the wheel.
 
 ## One interface, two hosts
 
@@ -139,7 +158,8 @@ Same as the desktop app, minus window management:
 | Drag | pan (when zoomed in) | left: orbit · middle/right: pan |
 | Scroll | scrub frames | fly along the view axis |
 | Shift+scroll | scrub ~10% of the stack | — |
-| Ctrl+scroll | zoom | — |
+| Ctrl+scroll or Cmd+scroll | zoom | — |
+| Ctrl or Cmd with `+`, `=` or `-` | zoom a step (not the page) | nothing (nor the page) |
 | ← → | — | orbit |
 | WASD / Space / Shift | — | fly (per nav mode) |
 

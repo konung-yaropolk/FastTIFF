@@ -2,7 +2,9 @@
 //! does with what arrives, in the order `command::FRAME` takes its steps —
 //! which no test of a helper the frame calls can see.
 
-use super::headless::{palette_stack, stack, Headless, Manager, TempFile, CTRL, DT};
+use super::headless::{
+    palette_stack, stack, Headless, Manager, TempFile, CTRL, DT, MAC_CMD, MAC_CTRL,
+};
 use super::platform::Target;
 use super::screen::Egui as _;
 use super::windows::WindowId;
@@ -443,6 +445,91 @@ fn the_zoom_keys_zoom_the_picture_and_not_the_interface() {
         h.key(Key::Num0, CTRL);
         assert_eq!(h.ctx.zoom_factor(), scale, "{target:?}: Ctrl+0");
         assert_eq!(zoom(&h), up, "{target:?}: and no zoom of the picture's");
+    }
+}
+
+/// Ctrl and Cmd as each platform reports them: Ctrl on Windows and Linux,
+/// and in a browser anywhere; a Mac's Cmd, natively or in a browser, which
+/// has no `ctrl`; a Mac's Ctrl, which has no `command`.
+const CTRL_OR_CMD: [(&str, Modifiers); 3] = [
+    ("Ctrl", CTRL),
+    ("a Mac's Cmd", MAC_CMD),
+    ("a Mac's Ctrl", MAC_CTRL),
+];
+
+/// The zoom keys take Ctrl or Cmd on every platform, and leave the interface
+/// at its scale with either. Before, they took `ctrl` alone, which a Mac's
+/// Cmd is not. Without either, Plus and Minus are characters, and zoom
+/// nothing.
+#[test]
+fn the_zoom_keys_take_ctrl_or_cmd_on_every_platform() {
+    for (held, modifiers) in CTRL_OR_CMD {
+        for target in [Target::Desktop, Target::Browser] {
+            let mut h = Headless::new(target)
+                .sized(vec2(800.0, 600.0), 1.0)
+                .maximized(true);
+            h.ctx.set_zoom_factor(target.ui_scale());
+            h.open_bytes(stack(320, 200, 2), "zoomed.tif");
+            h.settle();
+            let scale = h.ctx.zoom_factor();
+            let zoom = |h: &Headless| h.app.view.model.zoom_settled();
+            let opened = zoom(&h);
+
+            h.key(Key::Plus, modifiers);
+            let up = zoom(&h);
+            assert!(up > opened, "{held}, {target:?}: {opened} -> {up}");
+            h.key(Key::Minus, modifiers);
+            assert_eq!(zoom(&h), opened, "{held}, {target:?}: Minus");
+            h.key(Key::Equals, modifiers);
+            assert_eq!(zoom(&h), up, "{held}, {target:?}: Equals");
+            h.key(Key::Num0, modifiers);
+            assert_eq!(zoom(&h), up, "{held}, {target:?}: 0 is not a chord");
+            assert_eq!(h.ctx.zoom_factor(), scale, "{held}, {target:?}");
+
+            for typed in [Modifiers::NONE, Modifiers::SHIFT, Modifiers::ALT] {
+                h.key(Key::Plus, typed);
+                h.key(Key::Minus, typed);
+                assert_eq!(zoom(&h), up, "{held}, {target:?}: with {typed:?}");
+            }
+        }
+    }
+}
+
+/// The wheel with Ctrl or Cmd held zooms the picture a rung a notch and
+/// steps no frame, on every platform; without them a notch steps a frame and
+/// zooms nothing. On a Mac, Cmd+scroll did both: egui zooms on it, and the
+/// canvas, which left out of its scrubbing only a scroll with `ctrl`,
+/// scrubbed on it as well.
+#[test]
+fn the_wheel_with_ctrl_or_cmd_zooms_and_steps_no_frame() {
+    for (held, modifiers) in CTRL_OR_CMD {
+        for target in [Target::Desktop, Target::Browser] {
+            let mut h = Headless::new(target)
+                .sized(vec2(800.0, 600.0), 1.0)
+                .maximized(true);
+            h.open_bytes(stack(320, 200, 3), "wheeled.tif");
+            h.settle();
+            let at = on_picture(&h);
+            let zoom = |h: &Headless| h.app.view.model.zoom_settled();
+            let frame = |h: &Headless| h.app.core.document().unwrap().frame();
+            let opened = zoom(&h);
+
+            // A notch towards the user, on to the middle frame, so that a
+            // scrub either way would show.
+            h.wheel(at, -1.0);
+            h.settle();
+            assert_eq!((frame(&h), zoom(&h)), (1, opened), "{held}, {target:?}");
+
+            h.wheel_with(at, 1.0, modifiers);
+            h.settle();
+            let up = zoom(&h);
+            assert!(up > opened, "{held}, {target:?}: {opened} -> {up}");
+            assert_eq!(frame(&h), 1, "{held}, {target:?}: no frame back");
+            h.wheel_with(at, -1.0, modifiers);
+            h.settle();
+            assert_eq!(zoom(&h), opened, "{held}, {target:?}: a rung out");
+            assert_eq!(frame(&h), 1, "{held}, {target:?}: no frame on");
+        }
     }
 }
 

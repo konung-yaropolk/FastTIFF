@@ -449,8 +449,8 @@ impl ViewerApp {
             pannable,
         ));
 
-        // Scrub frames by scrolling over the image (Ctrl+scroll is zoom, so
-        // it's excluded). Two modes:
+        // Scrub frames by scrolling over the image (Ctrl+ or Cmd+scroll is
+        // zoom, so it's excluded: `scroll::zoom_held`). Two modes:
         //   • normal — discrete wheel *events*, so one mouse notch is exactly
         //     one frame (touchpad pixels accumulate to ~one notch);
         //   • Shift (fast-scroll) — ride the smoothed glide, advancing a

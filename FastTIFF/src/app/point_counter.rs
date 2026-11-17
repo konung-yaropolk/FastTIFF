@@ -26,7 +26,7 @@
 //! counter's, as it is a region tool's while one is armed: a click adds a
 //! point to the selected group on the frame in view, a press on a point drags
 //! it, and Alt+click on a point deletes it. Every other button still pans, the
-//! wheel still scrubs frames, and Ctrl+wheel still zooms. Ctrl/Cmd+Z takes
+//! wheel still scrubs frames, and Ctrl/Cmd+wheel still zooms. Ctrl/Cmd+Z takes
 //! back the last add, move or delete, from the main window or the counter's
 //! own.
 //!

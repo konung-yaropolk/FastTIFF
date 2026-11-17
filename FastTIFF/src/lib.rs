@@ -61,4 +61,4 @@ pub mod web_open;
 #[cfg(target_arch = "wasm32")]
 pub mod web_save;
 
-pub use app::{install_chrome, ViewerApp};
+pub use app::{install_chrome, zoom_key, ViewerApp};

@@ -109,14 +109,38 @@ pub fn install_chrome(ctx: &egui::Context) {
     ctx.set_theme(egui::ThemePreference::Dark);
     // Bigger on the web than on the desktop — see `scale`.
     ctx.set_zoom_factor(UI_SCALE);
-    // Ctrl with Plus, Equals or Minus steps the picture's zoom (`zoom_input`).
-    // egui's own keyboard zoom, on by default, takes the same chords (and
-    // Ctrl+0) to scale the whole interface, so one press zoomed both, and the
-    // chrome left the size it is drawn at, which the desktop's window sizing
-    // measures and `scale::unscaled` divides by. Off here on both hosts, as
-    // eframe's web runner already has it. In the browser the page zoom still
-    // takes those chords as well: eframe does not prevent their default.
+    // Ctrl or Cmd with Plus, Equals or Minus steps the picture's zoom
+    // (`zoom_key`). egui's own keyboard zoom, on by default, takes the same
+    // chords (and the same with 0) to scale the whole interface, so one press
+    // zoomed both, and the chrome left the size it is drawn at, which the
+    // desktop's window sizing measures and `scale::unscaled` divides by. Off
+    // here on both hosts, as eframe's web runner already has it. In the
+    // browser the page zoom takes those chords too, and eframe does not
+    // prevent their default; the web host does, for exactly the presses
+    // `zoom_key` takes (`keep_zoom_keys_from_page` in `FastTIFF-web`).
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
+}
+
+/// The rung a press of `key` with `modifiers` held steps the picture's zoom
+/// by: `1`, in, for Plus or Equals, and `-1`, out, for Minus, with Ctrl or Cmd
+/// held on any platform (the modifiers a scroll zooms with,
+/// `scroll::zoom_held`); `None` for any other press.
+///
+/// Equals as well as Plus because Plus is Shift and Equals on many layouts,
+/// and a browser takes both. Ctrl+0 is not one of them: the app does nothing
+/// with it, and in a browser it is left to reset the page's zoom.
+///
+/// Public for the web host, which keeps the browser from zooming the page on
+/// the presses this takes (`keep_zoom_keys_from_page` in `FastTIFF-web`).
+pub fn zoom_key(modifiers: egui::Modifiers, key: egui::Key) -> Option<i32> {
+    if !scroll::zoom_held(modifiers) {
+        return None;
+    }
+    match key {
+        egui::Key::Plus | egui::Key::Equals => Some(1),
+        egui::Key::Minus => Some(-1),
+        _ => None,
+    }
 }
 
 /// Turn a core LUT tint (raw RGB, or `None` for "plain grayscale — use the
@@ -2204,9 +2228,11 @@ impl ViewerApp {
     /// progress, which the canvas needs to know too.
     fn zoom_input(&mut self, ui: &egui::Ui) -> bool {
         // Collect zoom input before panels consume events.
-        // `zoom_delta()` is the correct API: egui routes Ctrl+scroll into
-        // `zoom_factor_delta` rather than `smooth_scroll_delta`, so checking
-        // smooth_delta while Ctrl is held would always be zero.
+        // `zoom_delta()` is the correct API: egui routes Ctrl+scroll and
+        // Cmd+scroll into `zoom_factor_delta` rather than
+        // `smooth_scroll_delta`, so checking smooth_delta while either is held
+        // would always be zero. The canvas leaves the same scrolls out of its
+        // frame scrubbing (`scroll::zoom_held`).
         let zoom_step: i32 = ui.input(|i| {
             let d = i.zoom_delta();
             let from_scroll = if d > 1.05 {
@@ -2216,16 +2242,22 @@ impl ViewerApp {
             } else {
                 0
             };
-            let from_keys = if i.modifiers.ctrl
-                && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
-            {
-                1
-            } else if i.modifiers.ctrl && i.key_pressed(egui::Key::Minus) {
-                -1
-            } else {
-                0
-            };
-            // If both trigger in the same frame, clamp to ±1.
+            // Each press judged by the modifiers it came with, as a shortcut
+            // is: the web host judges the browser's key event by the same.
+            let from_keys: i32 = i
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => zoom_key(*modifiers, *key),
+                    _ => None,
+                })
+                .sum();
+            // However many trigger in the same frame, clamp to ±1.
             (from_scroll + from_keys).clamp(-1, 1)
         });
 

@@ -52,12 +52,25 @@ const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Ctrl held, as egui-winit reports it on Windows and Linux: `command` is
 /// set with `ctrl` there, which is what a chord written for Cmd/Ctrl
-/// (`Modifiers::COMMAND`) is matched against.
+/// (`Modifiers::COMMAND`) is matched against. eframe's web runner reports
+/// Ctrl so on every platform.
 pub(super) const CTRL: Modifiers = Modifiers {
     ctrl: true,
     command: true,
     ..Modifiers::NONE
 };
+
+/// Cmd held on a Mac, as egui-winit reports it there (`mac_cmd`, and
+/// `command`, which is Cmd's on a Mac), and as eframe's web runner reports
+/// the Meta key.
+pub(super) const MAC_CMD: Modifiers = Modifiers {
+    mac_cmd: true,
+    command: true,
+    ..Modifiers::NONE
+};
+
+/// Ctrl held on a Mac, as egui-winit reports it there: `ctrl` alone.
+pub(super) const MAC_CTRL: Modifiers = Modifiers::CTRL;
 
 /// What the window manager does with a size the app asks its window for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -341,6 +354,13 @@ impl Headless {
     /// Turn the mouse wheel by `notches` over `at`, positive away from the
     /// user (egui's up), in one frame.
     pub(super) fn wheel(&mut self, at: Pos2, notches: f32) {
+        self.wheel_with(at, notches, Modifiers::NONE);
+    }
+
+    /// Turn the mouse wheel with `modifiers` held, in one frame, and let go
+    /// of them after it.
+    pub(super) fn wheel_with(&mut self, at: Pos2, notches: f32, modifiers: Modifiers) {
+        self.modifiers = modifiers;
         self.events.push(Event::PointerMoved(at));
         self.events.push(Event::MouseWheel {
             unit: egui::MouseWheelUnit::Line,
@@ -349,6 +369,7 @@ impl Headless {
             modifiers: self.modifiers,
         });
         self.frame();
+        self.modifiers = Modifiers::NONE;
     }
 
     fn button(&self, button: PointerButton, pos: Pos2, pressed: bool) -> Event {
