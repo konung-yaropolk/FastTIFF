@@ -3,7 +3,8 @@
 //!
 //! The crate is two interchangeable backends over one set of parameter types:
 //!   * [`wgpu_backend`] — DX12 / Vulkan / Metal / WebGPU (feature `backend-wgpu`)
-//!   * [`glow_backend`] — OpenGL / WebGL2 (feature `backend-glow`)
+//!   * [`glow_backend`] — desktop OpenGL 3.1 or later (feature `backend-glow`);
+//!     its shaders are GLSL 1.40, which WebGL2 (GLSL ES 3.00) does not take
 //!
 //! Both backends' `ImageRenderResources` implement the two traits of
 //! [`renderer`], [`ImageRenderer`] (the 2D composite) and [`VolumeRenderer`]

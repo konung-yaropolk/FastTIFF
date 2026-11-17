@@ -23,6 +23,31 @@
 //! The sources are put together once per pipeline, when a backend is made;
 //! nothing here runs per frame. They are public so that a host, or a test, can
 //! validate exactly what is compiled.
+//!
+//! # Why the GLSL is not written from the WGSL
+//!
+//! naga, in the tree through wgpu, can write it: GLSL 1.40 with each uniform
+//! struct as a `std140` block laid out as the WGSL's (and the Rust's), once
+//! the `#version 140 core` line it writes is replaced (profiles came with
+//! 1.50; glslang and Mesa refuse it). That was built and measured (Nov 2026,
+//! Quadro P620, OpenGL 3.3 core, driver 512.15): it drew what wgpu draws, but
+//! slower than this GLSL on the same bindings — the ray-march 1.3 to 1.9
+//! times (a MIP of a 256 x 256 x 128 x 6 volume at 1280 x 720, 35 ms a frame
+//! here, 60 there; a surface 9.5 ms, 18.5), and six 2048 x 2048 channels
+//! composited whole into a 1080p view a quarter (4.2 ms, 5.2). Not the WGSL's
+//! doing: on Vulkan, wgpu runs it within 5% of this (the MIP in 36 ms), but
+//! for the surface (11.4 ms). The driver compiles naga's
+//! GLSL worse: a branch on a uniform inside the march loop costs it even
+//! untaken (one added to this GLSL's sampling made its MIP a fifth slower),
+//! and naga writes a `for` loop as a `while` with a flag (the composite's
+//! 5.2 ms are 4.5 with its loops written back as `for`). Programs
+//! specialized per render and sampling mode (WGSL `override` constants, set
+//! by a build script) took the MIP and the alpha DVR from 35 and 33 ms to 26
+//! and 25, but left the cubic MIP and the surface slower than this (78 ms
+//! against 70, 11.3 against 9.5). And naga as a build-dependency adds some
+//! 27 s to a clean build of this crate. Those, measured on Mesa as well (the
+//! driver the glow build ships to, and one not measured here), are what to
+//! beat before the GLSL here goes.
 
 use crate::{VolumeInterp, VolumeRender, MAX_CHANNELS, SHADER_MAX_STEPS};
 use std::fmt::Write as _;
