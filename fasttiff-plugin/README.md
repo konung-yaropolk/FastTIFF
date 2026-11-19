@@ -245,6 +245,24 @@ first writable one.
 Native only: there is no `dlopen` in a browser, so the wasm build has no plugin
 interface at all rather than a disabled one.
 
+## Compiled into a host instead
+
+A set of plugins can also be built into an application rather than loaded
+from a library — FastTIFF's own built-ins are, from the
+`fasttiff-builtin-plugins` crate. Such a set has no query function for a host
+to look up, so it says what it has to a `Registrar` the host hands it, one type
+at a time, the same lists `export_plugin!` takes:
+
+```rust,ignore
+pub fn register(reg: &mut impl fasttiff_plugin::Registrar) {
+    reg.plugin::<Invert>();
+    reg.exporter::<Csv>();
+}
+```
+
+FastTIFF's registry installs each through the same C boundary a library's
+plugins cross, so a plugin written once runs the same either way.
+
 ## Licence
 
 MPL-2.0, deliberately — the same as `fasttiff-plugin-api` and

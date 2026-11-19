@@ -1,16 +1,23 @@
-//! [`Viewer`] — the frontend-agnostic viewer state: which stack is open, what
-//! it's showing, and everything the per-frame GPU sync needs.
+//! [`Viewer`] — the frontend-agnostic viewer state: which document is open, what
+//! it's showing, and everything the per-frame GPU sync keeps between frames.
 //!
 //! This is the state a *second* frontend would otherwise have to reinvent. It
 //! deliberately holds no window, panel, zoom or pointer state: those are the
 //! frontend's, and the eframe app keeps them in its own `ViewerApp` alongside a
 //! `Viewer`. The dividing line is "would a browser UI need this to show the
-//! right pixels?" — if yes it lives here.
+//! right pixels?" — if yes it lives here. What the frontend's view comes to
+//! each frame — the part of the image on screen, the size of the 3D view — is
+//! handed to [`Viewer::sync`] as [`FrameInputs`](crate::FrameInputs) rather
+//! than kept here.
 
-use crate::camera::CameraState;
+use crate::camera::{CameraState, VolumeNavPrefs};
 use crate::channels::refresh_pseudocolor;
-use crate::dimensions::{apply_dimension_override, compute_status};
-use crate::stack::Stack;
+use crate::dimensions::{apply_dimension_override, shape_note};
+use crate::document::{Document, DocumentMut};
+use crate::frame::Pose;
+use crate::notice::{Notice, NoticeKind, Notices};
+use crate::residency::Residency;
+use crate::roi::Roi;
 use scivis_render::{VolumeInterp, VolumeRender};
 use std::path::PathBuf;
 
@@ -27,7 +34,7 @@ pub enum ViewMode {
 }
 
 /// How per-frame decoding is split across CPU cores. The choice maps onto
-/// `fast-tiff-lib`'s parallel-decode hint each frame (see [`crate::sync`]).
+/// `fast-tiff-lib`'s parallel-decode hint each frame, in [`Viewer::sync`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum DecodeMode {
     /// Serial by default; switch to threaded automatically when real-time
@@ -63,32 +70,29 @@ impl DecodeMode {
 
 /// Looped-playback clock. Advances by real elapsed time so the movie runs at the
 /// file's fps regardless of render cadence.
+///
+/// A frontend starts and stops it, sets its rate and says when the scrubber is
+/// held; [`Viewer::tick_playback`] runs it.
 #[derive(Clone, Copy, Debug)]
 pub struct Playback {
-    pub playing: bool,
+    /// See [`playing`](Self::playing).
+    pub(crate) playing: bool,
     /// Playback rate (frames/second). Seeded from the file's `fps=` metadata (or
     /// [`DEFAULT_FPS`]) on every load.
-    pub fps: f64,
+    pub(crate) fps: f64,
     /// Frontend clock time (seconds) at the previous frame while playing.
     /// `None` when not playing.
-    pub last_time: Option<f64>,
+    pub(crate) last_time: Option<f64>,
     /// Fractional-frame carry so a non-integer frames-per-tick advance doesn't
     /// lose or gain time over a long playback.
-    pub accumulator: f64,
+    pub(crate) accumulator: f64,
     /// Smoothed "frames demanded per render" while playing: how many frames the
     /// elapsed real time wanted us to advance each tick. ~1 when keeping up; >1
     /// means renders are slower than the target fps (frames dropping — one core
     /// is saturated). Drives the `Auto` decode latch.
-    pub demand_ema: f32,
-    /// Set by the frontend while the scrubber is held.
-    ///
-    /// Playback is *suspended*, not stopped: [`playing`](Self::playing) stays
-    /// set so releasing resumes without the user pressing play again. Both the
-    /// clock and the scrubber write the frame index, so with the clock still
-    /// running a held scrubber and playback take turns — which is seen as the
-    /// picture flickering between the frame being scrubbed to and the next one
-    /// along.
-    pub scrubbing: bool,
+    pub(crate) demand_ema: f32,
+    /// See [`set_scrubbing`](Self::set_scrubbing).
+    pub(crate) scrubbing: bool,
 }
 
 impl Default for Playback {
@@ -105,19 +109,82 @@ impl Default for Playback {
 }
 
 impl Playback {
+    /// Whether the movie is playing. Still `true` while the scrubber is held:
+    /// a hold suspends playback rather than stopping it.
+    pub fn playing(&self) -> bool {
+        self.playing
+    }
+
+    /// Playback rate, in frames a second: the file's `fps=` (or
+    /// [`DEFAULT_FPS`]) when it was opened, until [`set_fps`](Self::set_fps).
+    pub fn fps(&self) -> f64 {
+        self.fps
+    }
+
+    /// Play at `fps` frames a second from now on.
+    pub fn set_fps(&mut self, fps: f64) {
+        self.fps = fps;
+    }
+
+    /// Start playing, or pause, from a clean clock: the first tick after
+    /// resuming does not jump by however long it was paused. A latched
+    /// parallel decode stays latched across a pause — if the stack needed it,
+    /// it still does.
+    pub fn toggle(&mut self) {
+        self.playing = !self.playing;
+        self.restart();
+    }
+
+    /// Start playing from a clean clock (see [`toggle`](Self::toggle)).
+    pub fn play(&mut self) {
+        self.playing = true;
+        self.restart();
+    }
+
+    /// Stop playing, for a view in which playback has no meaning.
+    pub fn stop(&mut self) {
+        self.playing = false;
+        self.last_time = None;
+    }
+
+    /// Say whether the scrubber is held, every frame before
+    /// [`Viewer::tick_playback`].
+    ///
+    /// While it is, playback is *suspended*, not stopped:
+    /// [`playing`](Self::playing) stays set so releasing resumes without the
+    /// user pressing play again. Both the clock and the scrubber write the
+    /// frame index, so with the clock still running a held scrubber and
+    /// playback take turns — which is seen as the picture flickering between
+    /// the frame being scrubbed to and the next one along.
+    pub fn set_scrubbing(&mut self, held: bool) {
+        self.scrubbing = held;
+    }
+
     /// Restart the clock, so the first tick after resuming doesn't jump by
     /// however long we were paused.
-    pub fn restart(&mut self) {
+    fn restart(&mut self) {
         self.last_time = None;
         self.accumulator = 0.0;
         self.demand_ema = 1.0;
     }
 }
 
-/// The 3D volume view's camera, appearance, and build tracking.
+/// The 3D volume view's camera, appearance and navigation preferences: how
+/// the user has set the view up.
+///
+/// What the renderer holds of the volume, and the builds asked for, are the
+/// viewer's residency instead (see [`Viewer::volume_built`]): they follow the
+/// document, not the user's choices. How large the view is this frame, how
+/// finely to render it and an animation's turn of it are the frontend's
+/// decisions for the frame, handed to [`Viewer::sync`] as
+/// [`VolumeInputs`](crate::frame::VolumeInputs).
 #[derive(Clone, Copy, Debug)]
-pub struct VolumeView {
+pub struct VolumeSettings {
     pub cam: CameraState,
+    /// How fast the camera moves for the user's input, how coarsely the view
+    /// renders while it does, and the guide drawn over it: the user's, kept
+    /// across files.
+    pub navigation: VolumeNavPrefs,
     /// Per-axis voxel scale (x, y, z) for the volume box. Seeded from the
     /// stack's pixel calibration + Z spacing on load (else 1:1:1).
     pub scale: [f32; 3],
@@ -139,75 +206,16 @@ pub struct VolumeView {
     pub volume_brightness: f32,
     /// Whether the volume render's gain follows the density automatically.
     ///
-    /// On by default. See [`crate::brightness::autolevel`] for what it
-    /// compensates and why the density slider otherwise changes the brightness
-    /// as much as the solidity.
+    /// On by default: without it the density slider changes the brightness as
+    /// much as the solidity, since a denser volume composites brighter.
     pub volume_autolevel: bool,
-    /// The volume viewport aspect ratio (width/height), set by the frontend each
-    /// frame so the ray-march projection matches the on-screen rect.
-    pub aspect: f32,
-    /// The volume viewport's size in physical pixels, set by the frontend each
-    /// frame beside [`aspect`](Self::aspect). What bounds the work of a frame
-    /// (see `scivis_render::max_steps`), and what the renderer renders at.
-    pub viewport_px: [u32; 2],
-    /// How many times smaller per axis to render the view than it is shown:
-    /// 1 renders every pixel. A frontend sets
-    /// [`scivis_render::MOVING_DOWNSCALE`] while the user is moving the view,
-    /// where a sharp frame is wasted, and 1 once it is still.
-    pub downscale: u32,
-    /// The longest side of the screen in physical pixels, set by the frontend
-    /// (0 when it cannot tell). A volume keeps at most about twice this many
-    /// voxels along any axis — more than that cannot be seen even zoomed in
-    /// twofold — however much GPU memory there is.
-    pub screen_px: u32,
-    /// The most bytes the volume may take after an upload ran out of GPU
-    /// memory: half the volume that failed, so the next one is smaller
-    /// whatever limited the last one's size. `None` for each new stack.
-    pub budget_cap: Option<usize>,
-    /// The GPU memory budget worked out for the current generation, so every
-    /// timepoint of a 4D stack is built at the same size.
-    pub planned_budget: Option<usize>,
-    /// Which timepoint the currently-uploaded volume holds (`Some(frame_index)`
-    /// in the 4D case, else `Some(0)`); `None` means no volume is uploaded yet,
-    /// so a frontend should show a loading state until the first build lands. A
-    /// mismatch with the current timepoint queues a rebuild — this is what makes
-    /// 4D playback advance the volume through time.
-    pub built_frame: Option<usize>,
-    /// Generation for background builds: bumped whenever the volume has to be
-    /// built again — a new file, a dimension-order swap, a smaller rebuild
-    /// after the GPU ran out of memory — so an in-flight build for the old one
-    /// is recognized as stale and ignored.
-    pub generation: u64,
-    /// Bumped with [`generation`](Self::generation) for a new file or a
-    /// dimension-order swap, and only then: a different volume, where
-    /// `generation` also moves for the same one rebuilt smaller. What a
-    /// frontend compares to tell that what it was showing has gone.
-    pub stack_generation: u64,
-    /// The [`generation`](Self::generation) of the volume last uploaded, to
-    /// tell whether an error the renderer reports late is about the volume
-    /// the view still wants.
-    pub uploaded_generation: Option<u64>,
-    /// The `(generation, time)` currently queued on the background builder, so
-    /// the request isn't re-sent on every polling frame.
-    pub requested: Option<(u64, usize)>,
-    /// A turn of the volume about the middle of the volume under the centre
-    /// of the view (see `VolumeCamera::pivot_distance`), on top
-    /// of the camera — row-major, in volume coordinates. Set by a frontend playing an animation, frame by
-    /// frame; `None` the rest of the time. See [`VolumeCamera::posed`].
-    ///
-    /// Separate from [`cam`](Self::cam) on purpose: the camera is what the user
-    /// set up and the animation is seen from, and leaving it untouched is what
-    /// lets a frontend tell that the user has taken the view back (it changed)
-    /// and put the view back exactly as it was when the animation ends.
-    ///
-    /// [`VolumeCamera::posed`]: crate::camera::VolumeCamera::posed
-    pub pose: Option<[[f32; 3]; 3]>,
 }
 
-impl Default for VolumeView {
+impl Default for VolumeSettings {
     fn default() -> Self {
-        VolumeView {
+        VolumeSettings {
             cam: CameraState::default(),
+            navigation: VolumeNavPrefs::default(),
             scale: [1.0, 1.0, 1.0],
             interp: VolumeInterp::Linear,
             render: VolumeRender::Mip,
@@ -216,33 +224,25 @@ impl Default for VolumeView {
             mip_brightness: crate::brightness::MIP_DEFAULT,
             volume_brightness: 1.0,
             volume_autolevel: true,
-            aspect: 1.0,
-            viewport_px: [1920, 1080],
-            downscale: 1,
-            screen_px: 0,
-            budget_cap: None,
-            planned_budget: None,
-            built_frame: None,
-            generation: 0,
-            stack_generation: 0,
-            uploaded_generation: None,
-            requested: None,
-            pose: None,
         }
     }
 }
 
-impl VolumeView {
+impl VolumeSettings {
     /// The camera the ray-march uses this frame, for a volume of `dims`
-    /// voxels: the user's, turned by [`pose`](Self::pose) when an animation
-    /// has set one.
+    /// voxels: the user's, turned by `pose` when an animation has set one
+    /// ([`VolumeInputs::pose`](crate::frame::VolumeInputs::pose)).
     ///
     /// The one place it is worked out, so the shader and anything drawn over
     /// the render — the coordinate box — cannot disagree about where the
     /// volume is.
-    pub fn camera(&self, dims: (u32, u32, u32)) -> crate::camera::VolumeCamera {
+    pub fn camera(
+        &self,
+        dims: (u32, u32, u32),
+        pose: Option<&Pose>,
+    ) -> crate::camera::VolumeCamera {
         let cam = crate::camera::volume_camera(&self.cam, self.scale, dims);
-        match &self.pose {
+        match pose {
             // About the middle of the volume under the centre of the picture,
             // so it turns in place in the middle of the frame however the user
             // has panned or zoomed (see `VolumeCamera::pivot_distance`).
@@ -251,66 +251,49 @@ impl VolumeView {
         }
     }
 
-    /// How many pixels tall a render of this view has to be to keep every
-    /// pixel of the stack in view, for a volume of `dims` voxels — see
+    /// The volume box's half-extents, for a volume of `dims` voxels: the box
+    /// the shader draws, which an orbit's re-pivot
+    /// ([`CameraState::repivot`]) and the wheel
+    /// ([`CameraState::wheel_fly`]) ray-cast against. A pose turns the
+    /// camera, not the box, so it takes none.
+    pub fn box_he(&self, dims: (u32, u32, u32)) -> [f32; 3] {
+        crate::camera::box_half_extents(self.scale, dims)
+    }
+
+    /// How many pixels tall a render of this view, turned by `pose`, has to
+    /// be to keep every pixel of the stack in view, for a volume of `dims`
+    /// voxels — see
     /// [`VolumeCamera::detail_height`](crate::camera::VolumeCamera::detail_height).
-    pub fn detail_height(&self, dims: (u32, u32, u32)) -> f32 {
-        let cam = self.camera(dims);
+    pub fn detail_height(&self, dims: (u32, u32, u32), pose: Option<&Pose>) -> f32 {
+        let cam = self.camera(dims, pose);
         cam.detail_height(cam.pivot_distance(), (dims.0, dims.1))
-    }
-
-    /// Invalidate the uploaded volume and any in-flight background build, so the
-    /// next 3D draw rebuilds. Call after anything that changes the volume's
-    /// shape (new file, dimension-order swap).
-    pub fn invalidate(&mut self) {
-        self.rebuild();
-        self.stack_generation = self.stack_generation.wrapping_add(1);
-    }
-
-    /// Build the same volume again, from a fresh plan (a smaller budget, say),
-    /// dropping any build in flight. Not a different volume: see
-    /// [`stack_generation`](Self::stack_generation).
-    pub fn rebuild(&mut self) {
-        self.built_frame = None;
-        self.generation = self.generation.wrapping_add(1);
-        self.requested = None;
-        self.planned_budget = None;
-    }
-
-    /// The most samples a ray of this view may take
-    /// (`VolumeParams::max_steps`): what keeps a frame of the whole viewport
-    /// within the frame budget (see `scivis_render::max_steps`).
-    ///
-    /// The whole viewport's even while the view renders reduced, so a reduced
-    /// frame takes as many steps along each ray as a sharp one and does a
-    /// fraction of the work, which is what reducing it is for. Worked out
-    /// from the reduced size, its rays could take up to sixteen times the
-    /// steps, and a large volume would move barely faster than it stands.
-    pub fn max_steps(&self, channels: usize) -> i32 {
-        let [w, h] = self.viewport_px;
-        scivis_render::max_steps(w as f64 * h as f64, channels, self.interp)
     }
 }
 
 /// The viewer's frontend-agnostic state.
 #[derive(Default)]
 pub struct Viewer {
-    pub stack: Option<Stack>,
-    /// A note about the stack's shape worth surfacing to the user (mislabeled
-    /// channel counts, the frozen-Z warning). `None` when there's nothing to say.
-    pub status: Option<String>,
+    /// The open document, if any: the file and how it is shown. Replaced only
+    /// by an open, which re-seeds everything per-document with it; see
+    /// [`document`](Self::document).
+    pub(crate) document: Option<Document>,
+    /// What there is to tell the user, one notice per kind: see
+    /// [`notices`](Self::notices). Set here (an open, an axis override) and by
+    /// the sync (a decode, a volume upload).
+    pub(crate) notices: Notices,
     pub view_mode: ViewMode,
     /// User preference (persists across files): tint a multi-channel *grayscale*
     /// stack with the standard channel palette (ch1 red, ch2 green, ch3 blue, …).
-    /// Has no effect on stacks that already carry colors.
-    pub apply_pseudocolor: bool,
+    /// Has no effect on stacks that already carry colors. See
+    /// [`pseudocolor`](Self::pseudocolor).
+    pub(crate) apply_pseudocolor: bool,
     /// User's decode-parallelism preference (persists across files).
     pub decode_mode: DecodeMode,
-    /// A file being opened on a worker thread, if one is. The previous stack
+    /// A file being opened on a worker thread, if one is. The previous document
     /// stays on screen and usable until it lands — an open replaces a picture
     /// rather than removing one and then providing another.
     #[cfg(feature = "threads")]
-    pub loading: Option<crate::loader::Loading>,
+    pub(crate) loading: Option<crate::loader::Loading>,
     /// Set when a load lands, cleared by [`poll_open`](Self::poll_open).
     ///
     /// The signal is the same whether the load ran on a worker or here on this
@@ -324,41 +307,16 @@ pub struct Viewer {
     /// across files). Only consulted for such frames; see
     /// [`crate::roi::LargeImageMode`].
     pub large_image_mode: crate::roi::LargeImageMode,
-    /// Latched once playback falls behind in `Auto` mode. Reset per stack.
-    pub decode_parallel: bool,
-    /// The visible UV sub-rect of the 2D image (`offset`, `scale`), computed by
-    /// the frontend from its zoom + pan and uploaded to the shader. The image is
-    /// always drawn into the on-screen visible rect with pan/zoom done via these
-    /// UVs — never via an oversized viewport, which a GPU backend would clamp to
-    /// the framebuffer (squashing the image instead of zooming).
-    pub uv_offset: [f32; 2],
-    pub uv_scale: [f32; 2],
-    /// Size in physical pixels of the area the image is drawn into.
-    ///
-    /// Set alongside [`uv_offset`](Self::uv_offset)/[`uv_scale`](Self::uv_scale)
-    /// — it is the other half of the same question. Those say *which* part of
-    /// the image is on screen; this says how much room there is to draw it, and
-    /// together they decide how finely the image needs to be sampled. Without
-    /// it a huge image is sampled as finely as the texture budget allows, which
-    /// can be a hundred times more detail than the display can show, paid for
-    /// on every zoom step.
-    ///
-    /// Zero means "unknown", and residency falls back to the texture budget.
-    pub viewport_px: [f32; 2],
-    /// Whether the view is still moving under an animation or gesture, so any
-    /// window started now would be planned against a zoom that has already
-    /// changed by the time it is decoded.
-    ///
-    /// Set by the frontend while it is gliding a zoom step out or a pinch is
-    /// live. Windows already finished are still taken — a better picture is
-    /// always worth having — but no new one is started until the view settles.
-    /// Without this an animated zoom decodes at every sampling level it passes
-    /// through on the way, which is work the user never sees: the view is only
-    /// at each of them for a few frames, and the level it is heading for is the
-    /// only one that will still be wanted.
-    pub view_moving: bool,
+    /// Latched once playback falls behind in `Auto` mode. Reset per document.
+    /// See [`decodes_in_parallel`](Self::decodes_in_parallel).
+    pub(crate) decode_parallel: bool,
     pub playback: Playback,
-    pub volume: VolumeView,
+    pub volume: VolumeSettings,
+    /// What the renderer holds of [`document`](Self::document), in 2D and 3D: one
+    /// view's side of the document, reconciled with its display model at the
+    /// top of every [`sync`](Self::sync) and replaced whenever the document
+    /// is. See `crate::residency`.
+    pub(crate) residency: Residency,
 }
 
 /// What to put after "Failed to open file:" — the error's own words, unless the
@@ -376,10 +334,18 @@ pub struct Viewer {
 /// *broken TIFF*, not an unsupported file, and flattening the two would throw
 /// away the part that tells the user whether to go and find a better copy.
 ///
-/// Keyed on [`NotTiff`] rather than on the message text, so rewording the
-/// library cannot silently turn this back into a passthrough.
+/// Keyed on the library's [`ErrorKind::NotTiff`] rather than on the message
+/// text, so rewording the library cannot silently turn this back into a
+/// passthrough. Every link of a library error carries the kind of the
+/// innermost, so the first one in the chain is the one to ask.
+///
+/// [`ErrorKind::NotTiff`]: fast_tiff_lib::ErrorKind::NotTiff
 fn open_failure(e: &anyhow::Error) -> String {
-    if e.chain().any(|c| c.is::<fast_tiff_lib::NotTiff>()) {
+    let kind = e
+        .chain()
+        .find_map(|c| c.downcast_ref::<fast_tiff_lib::Error>())
+        .map(fast_tiff_lib::Error::kind);
+    if kind == Some(fast_tiff_lib::ErrorKind::NotTiff) {
         return "file not supported".to_string();
     }
     format!("{e:#}")
@@ -387,27 +353,80 @@ fn open_failure(e: &anyhow::Error) -> String {
 
 impl Viewer {
     pub fn new() -> Self {
-        Viewer {
-            uv_scale: [1.0, 1.0],
-            ..Default::default()
-        }
+        Viewer::default()
+    }
+
+    /// The open document, if any. One arrives only through an open
+    /// ([`open`](Self::open), [`begin_open`](Self::begin_open),
+    /// [`load_bytes`](Self::load_bytes)), which re-seeds playback, the 3D
+    /// view and what the renderer holds along with it.
+    pub fn document(&self) -> Option<&Document> {
+        self.document.as_ref()
+    }
+
+    /// The open document, to change what can be changed of it in place: the
+    /// frame on screen, a channel's window, whether a channel is on, its
+    /// overlay. A [`DocumentMut`] rather than `&mut Document`, so it cannot
+    /// be replaced in place.
+    pub fn document_mut(&mut self) -> Option<DocumentMut<'_>> {
+        self.document.as_mut().map(DocumentMut::new)
+    }
+
+    /// Whether multi-channel grayscale stacks are tinted with the standard
+    /// channel palette: the user's preference, kept across files and set with
+    /// [`set_pseudocolor`](Self::set_pseudocolor).
+    pub fn pseudocolor(&self) -> bool {
+        self.apply_pseudocolor
+    }
+
+    /// Whether frames are being decoded across cores: always under
+    /// [`DecodeMode::Threaded`], never under [`DecodeMode::Serial`], and under
+    /// [`DecodeMode::Auto`] once playback of this document has fallen behind.
+    pub fn decodes_in_parallel(&self) -> bool {
+        self.decode_mode.parallel(self.decode_parallel)
+    }
+
+    /// What there is to tell the user about the view on screen, in
+    /// [`NoticeKind`] order: an open that failed, a frame that could not be
+    /// decoded, a volume that could not be shown as built, and the
+    /// document's shape.
+    ///
+    /// One per kind, each replaced only by its own kind and gone once it
+    /// stops applying (see [`Notice`]), so one never hides another. Only
+    /// those that apply to [`view_mode`](Self::view_mode)'s view: the note
+    /// that 2D shows the first Z-slice alone stands down over the 3D view,
+    /// which shows them all.
+    pub fn notices(&self) -> impl Iterator<Item = &Notice> + '_ {
+        let mode = self.view_mode;
+        self.notices.iter().filter(move |n| n.applies_to(mode))
+    }
+
+    /// Drop the notice of `kind`, for a frontend that has moved on.
+    ///
+    /// For the report of an attempt, [`NoticeKind::OpenFailed`]: once the
+    /// user has started other work, what the last open said is no longer
+    /// news, and left up beside that work it reads as a comment on it. The
+    /// rest describe the document on show, and come back only when the
+    /// viewer finds them again.
+    pub fn dismiss(&mut self, kind: NoticeKind) {
+        self.notices.clear(kind);
     }
 
     /// Open `path`, replacing whatever was loaded. On success every derived
-    /// per-stack default is re-seeded: playback rate from the file's `fps=`,
+    /// per-document default is re-seeded: playback rate from the file's `fps=`,
     /// voxel scale from its calibration, a fresh 3D camera, and the 2D movie
-    /// view. On failure the previous stack is dropped and `status` carries the
-    /// error, matching what the user sees.
+    /// view.
     ///
-    /// On failure the **previously loaded stack stays open** and only `status`
-    /// changes — dropping a corrupt file onto a window must not close the good
-    /// image the user was looking at.
+    /// On failure the **previously loaded document stays open** and only
+    /// a [`Notice::OpenFailed`] is added, carrying the error — dropping a
+    /// corrupt file onto a window must not close the good image the user was
+    /// looking at.
     ///
     /// Frontend-side chrome (window title, zoom, open pop-ups) is *not* touched
     /// — that's the frontend's to reset.
     #[cfg(feature = "mmap")]
     pub fn open(&mut self, path: PathBuf) -> anyhow::Result<()> {
-        let opened = Stack::open(path, self.apply_pseudocolor);
+        let opened = Document::open(path, self.apply_pseudocolor);
         self.adopt(opened)
     }
 
@@ -415,12 +434,14 @@ impl Viewer {
     ///
     /// Returns immediately. [`poll_open`](Self::poll_open) reports when it
     /// lands; until then [`load_stage`](Self::load_stage) says how far it has
-    /// got, and the previously open stack is still there to look at.
+    /// got, and the previously open document is still there to look at.
     ///
     /// Without threads to spawn — a browser, or a failed spawn — this falls
     /// back to loading here and now, which blocks exactly as it always did.
     /// Slower to respond is a great deal better than not opening the file.
     pub fn begin_open(&mut self, source: crate::loader::LoadSource) {
+        // A new attempt: what the last one said is spent.
+        self.notices.clear(NoticeKind::OpenFailed);
         #[cfg(feature = "threads")]
         let source = match crate::loader::Loading::spawn(source, self.apply_pseudocolor) {
             Ok(loading) => {
@@ -431,7 +452,8 @@ impl Viewer {
             // better than not opening the file.
             Err(Some(source)) => source,
             Err(None) => {
-                self.status = Some("Could not start the loader".to_owned());
+                self.notices
+                    .set(Notice::OpenFailed("could not start the loader".to_owned()));
                 self.load_landed = true;
                 return;
             }
@@ -443,7 +465,7 @@ impl Viewer {
 
     /// Take delivery of a finished load, if one has finished this frame.
     ///
-    /// Returns `true` when a stack was installed or an error recorded — the
+    /// Returns `true` when a document was installed or an error recorded — the
     /// signal for a frontend to reset whatever it had arranged around the
     /// previous file.
     pub fn poll_open(&mut self) -> bool {
@@ -483,115 +505,201 @@ impl Viewer {
         None
     }
 
-    /// Load a stack from bytes already in memory — the browser's entry point,
-    /// where `name` is just the picked file's name for display. Otherwise
-    /// identical to [`Viewer::open`], including every per-stack default it
-    /// re-seeds.
-    pub fn load_bytes(&mut self, bytes: Vec<u8>, name: PathBuf) -> anyhow::Result<()> {
-        let opened = Stack::from_bytes(bytes, name, self.apply_pseudocolor);
+    /// Load a document from bytes already in memory — the browser's entry
+    /// point, where `name` is just the picked file's name for display.
+    /// Otherwise identical to [`Viewer::open`], including every per-document
+    /// default it re-seeds.
+    pub fn load_bytes(
+        &mut self,
+        bytes: impl Into<fast_tiff_lib::Bytes>,
+        name: PathBuf,
+    ) -> anyhow::Result<()> {
+        let opened = Document::from_bytes(bytes, name, self.apply_pseudocolor);
         self.adopt(opened)
     }
 
-    /// Install a freshly opened stack (or record why it failed), re-seeding
-    /// every per-stack default. Shared so the two entry points can't drift.
-    fn adopt(&mut self, opened: anyhow::Result<Stack>) -> anyhow::Result<()> {
+    /// Install a freshly opened document (or record why it failed), re-seeding
+    /// every per-document default. Shared so the two entry points can't drift.
+    fn adopt(&mut self, opened: anyhow::Result<Document>) -> anyhow::Result<()> {
         match opened {
-            Ok(stack) => {
+            Ok(doc) => {
                 self.playback = Playback {
-                    fps: stack.tiff.meta.fps.unwrap_or(DEFAULT_FPS),
+                    fps: doc.tiff.meta.fps.unwrap_or(DEFAULT_FPS),
                     ..Default::default()
                 };
-                // 3D defaults for the new stack: per-axis voxel scale from the
-                // pixel calibration (X/YResolution) + Z spacing (else 1:1:1), a
-                // fresh orbit, and an invalidated volume so entering 3D uploads
-                // this stack's data.
-                self.volume.scale = stack.tiff.meta.voxel_scale();
+                // 3D defaults for the new document: per-axis voxel scale from the
+                // pixel calibration (X/YResolution) + Z spacing (else 1:1:1),
+                // and a fresh orbit.
+                self.volume.scale = doc.tiff.meta.voxel_scale();
                 self.volume.cam.reset();
-                // A fresh budget: what did not fit before may have been
-                // another stack's problem.
-                self.volume.budget_cap = None;
-                self.volume.invalidate();
+                // Nothing the renderer holds is of this document. A fresh
+                // residency says so: its first sync uploads this document's
+                // frame and LUTs, gives the last document's volume back, and
+                // starts from a fresh volume budget, since what did not fit
+                // before may have been the last document's problem.
+                self.residency = Residency::default();
                 // Always start a newly-opened file in the 2D movie view.
                 self.view_mode = ViewMode::Movie;
-                self.status = compute_status(
-                    stack.display.dims,
-                    stack.display.triple_axis_warning,
-                    stack.display.plane_mismatch,
-                );
-                // New stack: re-evaluate decode parallelism from scratch (its
+                // Nothing said of the last document's frame or volume is about
+                // this one, and the open that brought it succeeded.
+                self.notices.new_document();
+                self.notices.shape(shape_note(
+                    doc.display.dims(),
+                    doc.display.triple_axis_warning,
+                    doc.display.plane_mismatch,
+                ));
+                // New document: re-evaluate decode parallelism from scratch (its
                 // per-frame decode cost is different).
                 self.decode_parallel = false;
-                self.stack = Some(stack);
+                self.document = Some(doc);
                 Ok(())
             }
             Err(e) => {
-                self.status = Some(format!("Failed to open file: {}", open_failure(&e)));
+                // Beside whatever is said of the document still on show,
+                // which is still true of it.
+                self.notices.set(Notice::OpenFailed(open_failure(&e)));
                 Err(e)
             }
         }
     }
 
-    /// Reassign which axis counts mean channels / Z / time, then refresh
-    /// everything derived from that: LUTs, the status note, and the volume.
+    /// Reassign which axis counts mean channels / Z / time, then refresh what
+    /// is derived from that here: the LUTs and the note about the shape. What
+    /// the renderer holds — the frame, the volume — follows at the next sync,
+    /// which finds the display's channel layout moved.
+    ///
+    /// The counts are a reassignment of the axes in effect, so their product
+    /// is theirs: a triple that would address more or fewer planes (or none)
+    /// is ignored, as no reading of the file it describes.
+    ///
+    /// Ignored too on a stack whose channels are the sample planes of each
+    /// IFD ([`ChannelLayout::shown_as_rgb`](crate::ChannelLayout::shown_as_rgb):
+    /// RGB and CMYK). The file's format fixes those channels, and the axis
+    /// counts, which say one channel there, would rebuild the display around
+    /// that one: the red plane, alone. A palette stack's channels are IFDs of
+    /// their own, as an intensity stack's are, and are rebuilt as an open
+    /// with those counts builds them (each window pinned to the identity, and
+    /// each channel wearing the file's ColorMap, with no pseudocolor over it),
+    /// so it is reassigned like one.
     pub fn set_dimension_order(&mut self, channels: usize, slices: usize, frames: usize) {
-        if let Some(stack) = &mut self.stack {
-            apply_dimension_override(stack, channels, slices, frames);
+        if let Some(doc) = &mut self.document {
+            if doc.display.layout().shown_as_rgb() {
+                return;
+            }
+            let now = doc.display.dims();
+            let planes = |c: usize, z: usize, t: usize| c.checked_mul(z)?.checked_mul(t);
+            if planes(channels, slices, frames) != planes(now.channels, now.slices, now.frames) {
+                return;
+            }
+            apply_dimension_override(doc, channels, slices, frames);
             // The swap rebuilds channel_display from `mode`, so re-apply the
             // pseudocolor preference on top of the fresh LUTs.
-            refresh_pseudocolor(stack, self.apply_pseudocolor);
-            self.status = compute_status(
-                stack.display.dims,
-                stack.display.triple_axis_warning,
-                stack.display.plane_mismatch,
-            );
+            refresh_pseudocolor(doc, self.apply_pseudocolor);
+            self.notices.shape(shape_note(
+                doc.display.dims(),
+                doc.display.triple_axis_warning,
+                doc.display.plane_mismatch,
+            ));
         }
-        // The frame axis (volume depth) just changed.
-        self.volume.invalidate();
     }
 
-    /// Apply the pseudocolor preference to the current stack (and remember it
-    /// for stacks opened later).
+    /// Apply the pseudocolor preference to the current document (and remember
+    /// it for documents opened later).
     pub fn set_pseudocolor(&mut self, on: bool) {
         self.apply_pseudocolor = on;
-        if let Some(stack) = &mut self.stack {
-            refresh_pseudocolor(stack, on);
+        if let Some(doc) = &mut self.document {
+            refresh_pseudocolor(doc, on);
         }
     }
 
-    /// Whether the stack has enough depth to build a volume from.
-    /// Pick the single-channel LUT by selector index — index 0 is the file's
-    /// own "Built-in" map when it has one, then grayscale, the named channel
-    /// colours, and the perceptual colormaps (see
-    /// [`crate::channels::gray_lut_sel_lut`]).
+    /// Show the single-channel LUT selector's option `sel`
+    /// ([`GrayLuts`](crate::GrayLuts)): the file's own "Built-in" map first
+    /// when it has one, then grayscale, the named channel colours, and the
+    /// perceptual colormaps.
     ///
     /// Restoring "Built-in" works because opening a file never overwrites
     /// `tiff.meta`: the file's colours are still there to go back to. No-op
-    /// when no stack is open or the selector doesn't apply to it.
+    /// when no document is open, the selector doesn't apply to it
+    /// ([`Display::gray_luts`](crate::Display::gray_luts) is `None`), or `sel`
+    /// is not one of its options.
     pub fn set_gray_lut(&mut self, sel: usize) {
-        let Some(stack) = &mut self.stack else { return };
-        if !crate::channels::gray_lut_applicable(stack) {
-            return;
-        }
-        stack.display.gray_lut_sel = sel;
-        let lut = crate::channels::gray_lut_sel_lut(&stack.display, sel);
-        if stack.display.set_lut(0, lut) {
-            stack.luts_uploaded = false; // force a LUT re-upload on the next sync
+        if let Some(doc) = &mut self.document {
+            doc.display.select_gray_lut(sel);
         }
     }
 
-    pub fn can_show_volume(&self) -> bool {
-        self.stack
+    /// Subsampling applied to the 2D frame on its way to the GPU, as of the
+    /// last [`sync`](Self::sync): `1` when what is on screen is the file's own
+    /// resolution, higher when the view had to be coarsened to fit a texture.
+    ///
+    /// It changes what the user is looking at, and a viewer that quietly
+    /// showed a reduced image as if it were the data would be lying: a
+    /// frontend reads this to say so. On a frame bigger than one texture it
+    /// falls to 1 as you zoom in, which is the signal that you are now seeing
+    /// real pixels.
+    pub fn gpu_stride(&self) -> u32 {
+        self.residency.gpu_stride
+    }
+
+    /// Whether the frame on screen is past the device's per-axis texture
+    /// limit, and so can only be shown through a window at all, as of the
+    /// last [`sync`](Self::sync) (it depends on the device).
+    ///
+    /// A frontend reads it to decide whether the large-image controls are
+    /// worth showing — for every ordinary image they are not, and an option
+    /// that does nothing is worse than no option.
+    pub fn over_texture_limit(&self) -> bool {
+        self.residency.over_texture_limit
+    }
+
+    /// The window of the frame the 2D textures hold, in the frame's own
+    /// pixels and at its sampling stride; `None` before anything is uploaded.
+    /// The whole frame at stride 1 for anything that fits a texture.
+    pub fn resident_window(&self) -> Option<Roi> {
+        self.residency.roi
+    }
+
+    /// Whether a volume of the stack as it stands is on the GPU, for the 3D
+    /// view to draw: of some timepoint, the previous one's while 4D playback
+    /// builds the next. False until the first build lands — a frontend shows
+    /// a loading state meanwhile — and from the moment the axes are
+    /// reassigned, which makes it another volume.
+    pub fn volume_built(&self) -> bool {
+        self.document
             .as_ref()
-            .is_some_and(|s| s.display.dims.frames >= 2)
+            .is_some_and(|s| self.residency.volume.built_for(s.display.revision().layout))
+    }
+
+    /// Whether a volume build has been asked for and not yet landed.
+    pub fn volume_building(&self) -> bool {
+        self.residency.volume.requested.is_some()
+    }
+
+    /// Which volume the 3D view is of: moves when a new document is opened or its
+    /// axes are reassigned — when what is shown is a different volume — and
+    /// not when the same one is rebuilt smaller after the GPU ran out of
+    /// memory. What a frontend compares to tell that what it was showing has
+    /// gone. `0` with no document open.
+    pub fn volume_identity(&self) -> u64 {
+        self.document
+            .as_ref()
+            .map_or(0, |s| s.display.revision().layout)
+    }
+
+    /// Whether the stack has enough depth to build a volume from.
+    pub fn can_show_volume(&self) -> bool {
+        self.document
+            .as_ref()
+            .is_some_and(|s| s.display.dims().frames >= 2)
     }
 
     /// Whether the stack has a time axis *separate* from the volume's depth —
     /// i.e. playback still means something in the 3D view. False for an ordinary
     /// 3D stack, where the frame axis *is* the depth.
     pub fn is_4d(&self) -> bool {
-        self.stack
+        self.document
             .as_ref()
-            .is_some_and(|s| s.display.dims.slices > 1)
+            .is_some_and(|s| s.display.dims().slices > 1)
     }
 
     /// Advance looped playback to match `now` (the frontend's monotonic clock, in
@@ -612,12 +720,12 @@ impl Viewer {
             self.playback.accumulator = 0.0;
             return 0;
         }
-        let Some(stack) = &mut self.stack else {
+        let Some(doc) = &mut self.document else {
             self.playback.last_time = None;
             self.playback.accumulator = 0.0;
             return 0;
         };
-        let n = stack.frame_count();
+        let n = doc.frame_count();
         if !self.playback.playing || n <= 1 {
             self.playback.playing = self.playback.playing && n > 1;
             self.playback.last_time = None;
@@ -640,7 +748,7 @@ impl Viewer {
             if self.playback.accumulator >= 1.0 {
                 stepped = self.playback.accumulator.floor() as usize;
                 self.playback.accumulator -= stepped as f64;
-                stack.frame_index = (stack.frame_index + stepped) % n;
+                doc.set_frame((doc.frame() + stepped) % n);
             }
         }
         self.playback.last_time = Some(now);

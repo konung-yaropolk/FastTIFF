@@ -7,7 +7,7 @@
 //!
 //! # The camera is not touched
 //!
-//! A pose turns the *volume* (see `VolumeView::pose` in `fast-tiff-viewer`),
+//! A pose turns the *volume* (see `VolumeInputs::pose` in `fast-tiff-viewer`),
 //! and the user's camera stays exactly as they left it. That is what makes the
 //! stop rule cheap and exact: every way of moving the view — a drag, the wheel,
 //! the arrow and WASD keys, Reset, switching the navigation style — changes the
@@ -42,13 +42,17 @@
 //! On the desktop the frames go to a writer thread as they arrive, so a long
 //! recording is never held in memory whole; in the browser, which has no
 //! threads and no files, they are kept and the movie is downloaded at the end.
+//! Which is which follows from where the movie goes ([`Destination`]): a file
+//! is written by a thread, a download is built in memory — and only the
+//! desktop is ever given a file to write (see `Target::place`).
 
+use super::platform::{Current, Destination, Placement, Platform as _, Purpose, TARGET};
 use fast_tiff_lib::{Compression, SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::camera::{CameraState, NavMode, OrbitPoint};
+use fast_tiff_viewer::{ImageRenderer as _, VolumeRenderer};
 use fasttiff_plugin_api::{Animation, AnimationOutput, MovieResolution};
 use scivis_render::VolumeImage;
 use std::io::{Seek, Write};
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -66,7 +70,6 @@ pub(super) const MOVIE_MAX_SIDE: u32 = 8192;
 /// Frames the writer thread may have waiting before the next pose is held
 /// back. A large movie compresses more slowly than it renders, and frames
 /// queued without a limit would pile up in memory.
-#[cfg(not(target_arch = "wasm32"))]
 const WRITER_QUEUE: usize = 3;
 
 /// How long to wait for the writer to catch up before looking again, in
@@ -75,9 +78,7 @@ const WRITER_WAIT: f64 = 0.01;
 
 /// The user's camera, as it was when the animation started.
 ///
-/// Everything the user can change by moving the view, and nothing the host
-/// changes behind them: `box_he` is a cache the renderer refreshes every frame
-/// and is deliberately left out.
+/// Everything the user can change by moving the view: the whole camera.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct CameraMark {
     yaw: f32,
@@ -156,27 +157,6 @@ impl Ended {
     }
 }
 
-/// Where a recorded movie goes.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum Destination {
-    /// A file, written as the frames arrive. Desktop only.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    File(std::path::PathBuf),
-    /// A download, under this name. The browser's only filesystem.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    Download(String),
-}
-
-impl Destination {
-    /// The name to report the movie under.
-    pub(super) fn name(&self) -> String {
-        match self {
-            Destination::File(p) => p.display().to_string(),
-            Destination::Download(n) => n.clone(),
-        }
-    }
-}
-
 /// A recording in progress.
 pub(super) struct Recording {
     /// The pose whose render has been asked for and has not come back.
@@ -201,10 +181,11 @@ pub(super) struct Running {
     poses: Vec<[[f32; 3]; 3]>,
     fps: f32,
     mark: CameraMark,
-    /// The volume's stack generation when it started: a different number is a
-    /// different stack, or the same one with its axes reassigned. (Not the
-    /// builder's generation, which also moves when the same volume is rebuilt
-    /// smaller for want of GPU memory: that is waited out, like a first build.)
+    /// Which volume the view showed when it started
+    /// ([`Viewer::volume_identity`](fast_tiff_viewer::Viewer::volume_identity)):
+    /// a different number is a different stack, or the same one with its axes
+    /// reassigned. (Not a rebuild of the same volume, smaller for want of GPU
+    /// memory: that is waited out, like a first build.)
     generation: u64,
     /// The frontend clock when pose 0 was first shown. `None` until the volume
     /// is ready to be drawn, so a long first build does not eat into the cycle.
@@ -234,7 +215,8 @@ pub(super) struct Frame<'a> {
     /// The frontend clock, in seconds.
     pub(super) now: f64,
     pub(super) in_volume: bool,
-    /// The volume's stack generation (`VolumeView::stack_generation`).
+    /// Which volume the view shows
+    /// ([`Viewer::volume_identity`](fast_tiff_viewer::Viewer::volume_identity)).
     pub(super) generation: u64,
     pub(super) camera: &'a CameraState,
     /// Whether the pointer was pressed on the 3D view since the last frame.
@@ -380,7 +362,7 @@ impl Running {
 /// The size of a movie of the 3D view, in pixels: the shape of the view as it
 /// is on screen (`panel`, in pixels), as large as it takes for a pixel of the
 /// stack in view to be at least a pixel of the movie (`detail_height` — see
-/// `VolumeView::detail_height`), and never smaller than the view on screen.
+/// `VolumeSettings::detail_height`), and never smaller than the view on screen.
 ///
 /// Scaled down, keeping the shape, to `max_side`. `None` for a view with no
 /// size to copy.
@@ -417,7 +399,7 @@ pub(super) fn pose_index(elapsed: f64, fps: f32, n: usize) -> usize {
 /// The ray-march is opaque, so the alpha carries nothing.
 pub(super) fn rgb_of(image: &VolumeImage) -> Vec<u8> {
     let mut out = Vec::with_capacity(image.rgba.len() / 4 * 3);
-    for p in image.rgba.chunks_exact(4) {
+    for p in image.rgba.as_chunks::<4>().0.iter() {
         out.extend_from_slice(&p[..3]);
     }
     out
@@ -490,12 +472,12 @@ impl<W: Write + Seek> MovieWriter<W> {
 
 // ------------------------------------------------------------ where frames go
 
-/// The far end of a recording: a writer thread on the desktop, memory in the
-/// browser.
+/// The far end of a recording: a writer thread for a file, memory for a
+/// download — so in practice a thread on the desktop and memory in the
+/// browser, the only target that downloads and the one with no threads.
 pub(super) struct FrameSink(Sink);
 
 enum Sink {
-    #[cfg(not(target_arch = "wasm32"))]
     Thread {
         tx: Option<std::sync::mpsc::Sender<Msg>>,
         done: std::sync::mpsc::Receiver<Result<usize, String>>,
@@ -507,14 +489,12 @@ enum Sink {
         writer: Option<std::thread::JoinHandle<()>>,
     },
     // Boxed: the writer is large, and the other two are a few pointers.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Memory(Option<Box<MovieWriter<std::io::Cursor<Vec<u8>>>>>),
     /// The frames, handed straight to a test.
     #[cfg(test)]
     Test(std::sync::mpsc::Sender<Vec<u8>>, usize),
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 enum Msg {
     Frame(Vec<u8>, (usize, usize)),
     Finish,
@@ -527,9 +507,7 @@ pub(super) struct Saving {
 }
 
 enum Done {
-    #[cfg(not(target_arch = "wasm32"))]
     Thread(std::sync::mpsc::Receiver<Result<usize, String>>),
-    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
     Ready(Option<Result<usize, String>>),
 }
 
@@ -537,7 +515,6 @@ impl Saving {
     /// How the save went, once it is over: the frame count, or why not.
     pub(super) fn poll(&mut self) -> Option<Result<usize, String>> {
         match &mut self.done {
-            #[cfg(not(target_arch = "wasm32"))]
             Done::Thread(rx) => match rx.try_recv() {
                 Ok(r) => Some(r),
                 Err(std::sync::mpsc::TryRecvError::Empty) => None,
@@ -556,7 +533,10 @@ impl FrameSink {
     /// The file is created when the first frame arrives and removed again if
     /// the recording stops before the last: a half movie is not a movie, and
     /// one left behind under the name the user chose would be mistaken for one.
-    #[cfg(not(target_arch = "wasm32"))]
+    ///
+    /// A thread of its own rather than a job (`Platform::spawn_job`): it lives
+    /// for the whole recording, waiting on frames. Only ever asked for with a
+    /// file to write, which only the desktop has.
     pub(super) fn to_file(path: std::path::PathBuf, fps: f32) -> FrameSink {
         let (tx, rx) = std::sync::mpsc::channel::<Msg>();
         let (done_tx, done) = std::sync::mpsc::channel();
@@ -626,12 +606,20 @@ impl FrameSink {
     }
 
     /// Frames kept in memory, for a download at the end.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub(super) fn in_memory(fps: f32) -> FrameSink {
         FrameSink(Sink::Memory(Some(Box::new(MovieWriter::new(
             std::io::Cursor::new(Vec::new()),
             fps,
         )))))
+    }
+
+    /// Where the frames for `dest` go: a thread writing the file, or memory
+    /// for the download.
+    pub(super) fn for_destination(dest: &Destination, fps: f32) -> FrameSink {
+        match dest {
+            Destination::File(path) => FrameSink::to_file(path.clone(), fps),
+            Destination::Download(_) => FrameSink::in_memory(fps),
+        }
     }
 
     /// A sink whose frames arrive on the returned channel.
@@ -642,7 +630,7 @@ impl FrameSink {
     }
 
     /// Give up on the recording, and wait until whatever it wrote is gone.
-    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[cfg(test)]
     pub(super) fn abandon(self) {
         if let Sink::Thread { tx, writer, .. } = self.0 {
             drop(tx);
@@ -657,7 +645,6 @@ impl FrameSink {
     /// other sinks are done with a frame by the time `push` returns.
     pub(super) fn busy(&self) -> bool {
         match &self.0 {
-            #[cfg(not(target_arch = "wasm32"))]
             Sink::Thread { queued, .. } => queued.load(Ordering::Relaxed) >= WRITER_QUEUE,
             _ => false,
         }
@@ -665,7 +652,6 @@ impl FrameSink {
 
     pub(super) fn push(&mut self, rgb: Vec<u8>, size: (usize, usize)) -> Result<(), String> {
         match &mut self.0 {
-            #[cfg(not(target_arch = "wasm32"))]
             Sink::Thread { tx, queued, .. } => match tx {
                 Some(tx) => {
                     queued.fetch_add(1, Ordering::Relaxed);
@@ -690,7 +676,6 @@ impl FrameSink {
     /// Every frame is in: finish the movie, wherever it is going.
     pub(super) fn finish(self, dest: Destination) -> Saving {
         let done = match self.0 {
-            #[cfg(not(target_arch = "wasm32"))]
             Sink::Thread { tx, done, .. } => {
                 if let Some(tx) = tx {
                     let _ = tx.send(Msg::Finish);
@@ -712,21 +697,12 @@ impl FrameSink {
     }
 }
 
-/// Hand a movie built in memory to where it is going: the browser's downloads.
+/// Hand a movie built in memory to where it is going: the browser's downloads,
+/// in practice, since a file is written by its thread as the frames come.
 fn deliver(bytes: &[u8], dest: &Destination) -> Result<(), String> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        crate::web_save::download(bytes, &dest.name())
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        match dest {
-            Destination::File(p) => std::fs::write(p, bytes).map_err(|e| e.to_string()),
-            Destination::Download(_) => {
-                let _ = bytes;
-                Err("there is nowhere to download to outside a browser".into())
-            }
-        }
+    match dest {
+        Destination::File(p) => std::fs::write(p, bytes).map_err(|e| e.to_string()),
+        Destination::Download(name) => Current::download(bytes, name, "image/tiff"),
     }
 }
 
@@ -736,35 +712,38 @@ impl super::ViewerApp {
     /// Whether the plugin at `index` has an animation running — what its
     /// dialog's Play/Stop button reads.
     pub(super) fn animating_for(&self, index: usize) -> bool {
-        self.animation.as_ref().is_some_and(|a| a.plugin == index)
+        self.animation
+            .running
+            .as_ref()
+            .is_some_and(|a| a.plugin == index)
     }
 
     /// Carry out an animation the plugin at `plugin` (called `name`) returned.
     pub(super) fn start_animation(&mut self, plugin: usize, name: &str, animation: Animation) {
-        let Some(stack) = self.core.stack.as_ref() else {
-            self.core.status = Some("Open an image first".into());
+        let Some(stack) = self.core.document() else {
+            self.say("Open an image first".into());
             return;
         };
         // The plugin checks this too, but the rule is the host's: the 3D view
         // is what it is, and a plugin built against another idea of it should
         // hear why nothing happened.
         if !self.core.can_show_volume() {
-            self.core.status = Some(format!(
+            self.say(format!(
                 "{name}: this stack has no 3D view to animate — it needs at least two planes"
             ));
             return;
         }
         // Playing needs nothing the writer has; a second recording would
         // need the slot the first one's file is still being finished in.
-        if self.animation_saving.is_some() && !matches!(animation.output, AnimationOutput::Play) {
-            self.core.status = Some(format!("{name}: the last animation is still being written"));
+        if self.animation.saving.is_some() && !matches!(animation.output, AnimationOutput::Play) {
+            self.say(format!("{name}: the last animation is still being written"));
             return;
         }
         let recording = match &animation.output {
             AnimationOutput::Play => None,
             AnimationOutput::SaveTiff { path } => {
                 let stem = stack
-                    .path
+                    .path()
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "stack".to_string());
@@ -773,13 +752,13 @@ impl super::ViewerApp {
                     // The user closed the save dialog: they changed their mind,
                     // which is not a failure and not worth more than a word.
                     None => {
-                        self.core.status = Some(format!("{name}: not saved"));
+                        self.say(format!("{name}: not saved"));
                         return;
                     }
                 }
             }
             other => {
-                self.core.status = Some(format!(
+                self.say(format!(
                     "{name}: asked for its animation to go somewhere this version of \
                      FastTIFF does not know ({other:?})"
                 ));
@@ -788,7 +767,7 @@ impl super::ViewerApp {
         };
         // One view, one motion: whatever was running gives way, and puts the
         // view back first so the new one starts from what the user set up.
-        if let Some(previous) = self.animation.take() {
+        if let Some(previous) = self.animation.running.take() {
             self.end_animation(previous, Ended::Replaced);
         }
         let saving = recording.is_some();
@@ -797,27 +776,22 @@ impl super::ViewerApp {
         // time axis of its own. A recording stops it either way — one turn of
         // a volume that is changing underneath it is not one turn.
         if saving || !self.core.is_4d() {
-            self.core.playback.playing = false;
-            self.core.playback.last_time = None;
+            self.core.playback.stop();
         }
         let fps = animation.fps;
         let sink = recording.map(|dest| {
-            let sink = match &dest {
-                #[cfg(not(target_arch = "wasm32"))]
-                Destination::File(p) => FrameSink::to_file(p.clone(), fps),
-                _ => FrameSink::in_memory(fps),
-            };
+            let sink = FrameSink::for_destination(&dest, fps);
             (dest, sink)
         });
-        self.animation = Some(Running::new(
+        self.animation.running = Some(Running::new(
             plugin,
             animation,
             &self.core.volume.cam,
-            self.core.volume.stack_generation,
+            self.core.volume_identity(),
             sink,
         ));
         if saving {
-            self.core.status = Some(format!("{name}: recording…"));
+            self.say(format!("{name}: recording…"));
         }
         self.requery_dialog_of(plugin);
     }
@@ -826,18 +800,18 @@ impl super::ViewerApp {
     /// plugin's is not its to stop.
     pub(super) fn stop_animation_of(&mut self, plugin: usize) {
         if self.animating_for(plugin) {
-            let run = self.animation.take().expect("checked above");
+            let run = self.animation.running.take().expect("checked above");
             self.end_animation(run, Ended::Asked);
         }
     }
 
     /// Put the view back as it was, and say why a recording did not finish.
     fn end_animation(&mut self, run: Running, why: Ended) {
-        self.core.volume.pose = None;
+        self.sync_inputs.volume.pose = None;
         if run.recording.is_some() {
             // Dropping the recording drops its sink, and the writer removes
             // whatever part of the file it had written.
-            self.core.status = Some(why.recording_message());
+            self.say(why.recording_message());
         }
         self.requery_dialog_of(run.plugin);
     }
@@ -847,16 +821,14 @@ impl super::ViewerApp {
     /// view is drawn, so the pose it sets is the one this frame shows.
     pub(super) fn tick_animation(&mut self, ctx: &egui::Context) {
         // A save whose frames are all in, finishing.
-        if let Some(saving) = self.animation_saving.as_mut() {
+        if let Some(saving) = self.animation.saving.as_mut() {
             match saving.poll() {
                 Some(result) => {
                     let dest = saving.dest.name();
-                    self.animation_saving = None;
+                    self.animation.saving = None;
                     match result {
                         Ok(n) => self.report_done(format!("Saved a {n}-frame animation: {dest}")),
-                        Err(why) => {
-                            self.core.status = Some(format!("Could not save the animation: {why}"))
-                        }
+                        Err(why) => self.say(format!("Could not save the animation: {why}")),
                     }
                 }
                 None => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
@@ -866,29 +838,29 @@ impl super::ViewerApp {
         // whether or not a recording still wants it, so one that ended while
         // its last frame was on the way does not hold up the next.
         let (shot, max_side) = {
-            let mut shot = self.volume_capture.failed.take().map(Err);
+            let mut shot = self.animation.capture.failed.take().map(Err);
             let mut max_side = MOVIE_MAX_SIDE;
-            if let Ok(mut resources) = self.render.lock() {
-                if self.volume_capture.in_flight && shot.is_none() {
+            if let Some(Ok(mut resources)) = self.render.as_ref().map(|r| r.lock()) {
+                if self.animation.capture.in_flight && shot.is_none() {
                     shot = resources.take_volume_capture();
                 }
                 max_side = max_side.min(resources.max_2d_texture_size());
             }
             if shot.is_some() {
-                self.volume_capture.in_flight = false;
+                self.animation.capture.in_flight = false;
             }
             (shot, max_side)
         };
 
-        let pressed = std::mem::take(&mut self.volume_pressed);
-        let Some(run) = self.animation.as_mut() else {
+        let pressed = std::mem::take(&mut self.volume_ui.pressed);
+        let Some(run) = self.animation.running.as_mut() else {
             return;
         };
-        let ready = self.core.volume.built_frame.is_some()
-            && self.core.volume.requested.is_none()
-            && self.volume_rect.is_some();
+        let ready = self.core.volume_built()
+            && !self.core.volume_building()
+            && self.volume_ui.rect.is_some();
         let ppp = ctx.pixels_per_point();
-        let movie = match (self.volume_rect, self.core.stack.as_ref()) {
+        let movie = match (self.volume_ui.rect, self.core.document()) {
             (Some(rect), Some(stack)) => {
                 let (w, h) = stack.dimensions().unwrap_or((1, 1));
                 // At window resolution the movie is the view's own size,
@@ -900,7 +872,10 @@ impl super::ViewerApp {
                 let detail = if window {
                     0.0
                 } else {
-                    self.core.volume.detail_height((w, h, stack.volume_depth()))
+                    let pose = self.sync_inputs.volume.pose.as_ref();
+                    self.core
+                        .volume
+                        .detail_height((w, h, stack.volume_depth()), pose)
                 };
                 movie_size((rect.width() * ppp, rect.height() * ppp), detail, max_side)
             }
@@ -909,12 +884,12 @@ impl super::ViewerApp {
         let frame = Frame {
             now: ctx.input(|i| i.time),
             in_volume: self.core.view_mode == fast_tiff_viewer::ViewMode::Volume,
-            generation: self.core.volume.stack_generation,
+            generation: self.core.volume_identity(),
             camera: &self.core.volume.cam,
             pressed,
             ready,
             movie_size: movie,
-            capture_busy: self.volume_capture.in_flight,
+            capture_busy: self.animation.capture.in_flight,
             shot,
         };
         match run.step(frame) {
@@ -923,20 +898,21 @@ impl super::ViewerApp {
                 capture,
                 repaint_after,
             } => {
-                self.core.volume.pose = Some(pose);
+                self.sync_inputs.volume.pose = Some(pose);
                 // Rendered once this frame's pose has reached the GPU: see
                 // `capture_animation_frame`.
-                self.volume_capture.request = capture;
+                self.animation.capture.request = capture;
                 if let Some(rec) = &run.recording {
                     let size = rec
                         .size
                         .map(|(w, h)| format!(", {w} x {h}"))
                         .unwrap_or_default();
-                    self.core.status = Some(format!(
+                    let message = format!(
                         "Recording animation: {} of {} frames{size}",
                         rec.done,
                         run.total()
-                    ));
+                    );
+                    self.say(message);
                 }
                 if repaint_after > 0.0 {
                     ctx.request_repaint_after(std::time::Duration::from_secs_f64(repaint_after));
@@ -945,21 +921,36 @@ impl super::ViewerApp {
                 }
             }
             Step::End(why) => {
-                let run = self.animation.take().expect("running");
+                let run = self.animation.running.take().expect("running");
                 self.end_animation(run, why);
             }
             Step::Recorded => {
-                let run = self.animation.take().expect("running");
-                self.core.volume.pose = None;
+                let run = self.animation.running.take().expect("running");
+                self.sync_inputs.volume.pose = None;
                 let rec = run.recording.expect("a recording");
                 let dest = rec.dest.clone();
-                self.core.status = Some(format!("Writing animation: {}", dest.name()));
-                self.animation_saving = Some(rec.frames.finish(dest));
+                self.say(format!("Writing animation: {}", dest.name()));
+                self.animation.saving = Some(rec.frames.finish(dest));
                 self.requery_dialog_of(run.plugin);
                 ctx.request_repaint();
             }
         }
     }
+}
+
+/// The app's animation state: what is running, what is being written, and the
+/// off-screen render between the two.
+///
+/// Not reset when a document lands: an animation is of the 3D view rather than
+/// of a file, and ends by its own rules (see [`Ended`]).
+#[derive(Default)]
+pub(super) struct Animations {
+    /// A plugin's animation of the 3D view, playing or being recorded.
+    pub(super) running: Option<Running>,
+    /// A recorded animation whose frames are all in, being written.
+    pub(super) saving: Option<Saving>,
+    /// The off-screen render of a pose a recording asked for.
+    pub(super) capture: VolumeCapture,
 }
 
 /// The off-screen render a recording has asked for, and the one it is
@@ -979,40 +970,28 @@ impl super::ViewerApp {
     /// Render the pose a recording asked for, off screen. Called with the
     /// renderer just brought up to date with this frame, so the pose rendered
     /// is the one the view shows.
-    pub(super) fn capture_animation_frame(&mut self, resources: &mut fast_tiff_viewer::Renderer) {
-        let Some((w, h)) = self.volume_capture.request.take() else {
+    pub(super) fn capture_animation_frame(&mut self, resources: &mut impl VolumeRenderer) {
+        let Some((w, h)) = self.animation.capture.request.take() else {
             return;
         };
         match resources.capture_volume(w, h) {
-            Ok(()) => self.volume_capture.in_flight = true,
-            Err(why) => self.volume_capture.failed = Some(why),
+            Ok(()) => self.animation.capture.in_flight = true,
+            Err(why) => self.animation.capture.failed = Some(why),
         }
     }
 }
 
 /// Where a recorded animation goes: where the plugin said, or where the user
-/// says when asked. `None` when the user would not say.
+/// says when asked — or, in a browser, which cannot be asked for a place, a
+/// download under a name (see `Target::place`). `None` when the user would not
+/// say.
 fn destination(path: &str, stem: &str) -> Option<Destination> {
-    let suggested = format!("{stem}-animation.tif");
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        if !path.is_empty() {
-            return Some(Destination::File(path.into()));
+    match TARGET.place(path, format!("{stem}-animation.tif")) {
+        Placement::At(dest) => Some(dest),
+        Placement::Ask(name) => {
+            let tiff = [fasttiff_plugin_api::FileType::new("TIFF", &["tif", "tiff"])];
+            Current::ask_path(Purpose::Save, Some(&name), None, &tiff).map(Destination::File)
         }
-        rfd::FileDialog::new()
-            .add_filter("TIFF", &["tif", "tiff"])
-            .set_file_name(&suggested)
-            .save_file()
-            .map(Destination::File)
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        // A browser cannot be asked for a place, only given a name.
-        Some(Destination::Download(if path.is_empty() {
-            suggested
-        } else {
-            crate::web_save::name_from_path(path)
-        }))
     }
 }
 

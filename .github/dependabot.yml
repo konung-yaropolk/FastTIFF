@@ -6,6 +6,18 @@
 version: 2
 updates:
   - package-ecosystem: "cargo" # See documentation for possible values
-    directory: "/" # Location of package manifests
+    # The whole workspace, the web crate included, is one lock at the root.
+    directory: "/"
     schedule:
       interval: "quarterly"
+    # Crates that only work in lockstep, bumped in one PR each. eframe's
+    # renderer is built on one wgpu, and the registration crates take the
+    # renderer's own wgpu device, so a lone wgpu bump splits the build; naga
+    # is the compiler inside that wgpu. The wasm-bindgen family must agree
+    # with each other and with the wasm-bindgen CLI wasm-pack picks from the
+    # lock.
+    groups:
+      egui-wgpu:
+        patterns: ["eframe", "egui", "egui_extras", "wgpu", "naga"]
+      wasm-bindgen:
+        patterns: ["wasm-bindgen", "wasm-bindgen-futures", "js-sys", "web-sys"]

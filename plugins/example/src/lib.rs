@@ -2,7 +2,7 @@
 //!
 //! Two plugins, chosen to cover the two halves of the contract:
 //!
-//! * [`Invert`] is a byte-for-byte copy of the viewer's built-in `Invert`. It
+//! * [`Invert`] is a byte-for-byte copy of the app's built-in `Invert`. It
 //!   is the **oracle** for the whole C boundary: the same arithmetic, reached
 //!   through `dlopen`, a function pointer table and two rounds of copying,
 //!   must produce exactly the bits the built-in produces. Anything wrong with
@@ -51,7 +51,7 @@ use std::path::Path;
 
 /// Invert whatever is loaded, about the sample type's range.
 ///
-/// Deliberately identical to `fast_tiff_viewer::plugins::builtin::Invert`,
+/// Deliberately identical to `fasttiff_builtin_plugins::Invert`,
 /// down to the NaN handling and the result's name. The test that compares them
 /// is only meaningful while that stays true — if you change one, change both.
 ///
@@ -497,9 +497,10 @@ fn decode_plane(chunk: &[u8], ty: PixelType, le: bool) -> PlaneData {
         PixelType::U8 => PlaneData::U8(chunk.to_vec()),
         PixelType::F32 => PlaneData::F32(
             chunk
-                .chunks_exact(4)
-                .map(|b| {
-                    let a = [b[0], b[1], b[2], b[3]];
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&a| {
                     if le {
                         f32::from_le_bytes(a)
                     } else {
@@ -510,12 +511,14 @@ fn decode_plane(chunk: &[u8], ty: PixelType, le: bool) -> PlaneData {
         ),
         PixelType::I16 => PlaneData::U16(
             chunk
-                .chunks_exact(2)
-                .map(|b| {
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&b| {
                     let v = if le {
-                        i16::from_le_bytes([b[0], b[1]])
+                        i16::from_le_bytes(b)
                     } else {
-                        i16::from_be_bytes([b[0], b[1]])
+                        i16::from_be_bytes(b)
                     };
                     // Offset into unsigned rather than casting: the viewer
                     // shows u16, and a bare `as u16` would put the negative
@@ -526,12 +529,14 @@ fn decode_plane(chunk: &[u8], ty: PixelType, le: bool) -> PlaneData {
         ),
         PixelType::U16 => PlaneData::U16(
             chunk
-                .chunks_exact(2)
-                .map(|b| {
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&b| {
                     if le {
-                        u16::from_le_bytes([b[0], b[1]])
+                        u16::from_le_bytes(b)
                     } else {
-                        u16::from_be_bytes([b[0], b[1]])
+                        u16::from_be_bytes(b)
                     }
                 })
                 .collect(),

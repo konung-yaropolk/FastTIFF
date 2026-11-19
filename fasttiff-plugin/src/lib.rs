@@ -68,9 +68,11 @@ pub use fasttiff_plugin_api as api;
 
 mod host;
 pub mod marshal;
+mod registrar;
 
 pub use host::CHost;
 pub use marshal::{register_exporter, register_importer, register_plugin, registrar_of};
+pub use registrar::Registrar;
 
 /// Remember why the last call failed, for the host to ask about.
 ///

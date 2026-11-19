@@ -3,14 +3,22 @@
 //!
 //! The crate is two interchangeable backends over one set of parameter types:
 //!   * [`wgpu_backend`] — DX12 / Vulkan / Metal / WebGPU (feature `backend-wgpu`)
-//!   * [`glow_backend`] — OpenGL / WebGL2 (feature `backend-glow`)
+//!   * [`glow_backend`] — desktop OpenGL 3.1 or later (feature `backend-glow`);
+//!     its shaders are GLSL 1.40, which WebGL2 (GLSL ES 3.00) does not take
 //!
-//! Both expose the same inherent method set on their `ImageRenderResources`, so
-//! a host picks one with a `#[cfg]` re-export and writes its call sites once.
-//! There is deliberately **no** `dyn Renderer` trait: the two `paint` methods
-//! can't share a signature (a wgpu render pass vs. a live GL context), and the
-//! cfg-selected façade already gives static dispatch for free. Add a trait only
-//! if you ever need both backends live in one binary.
+//! Both backends' `ImageRenderResources` implement the two traits of
+//! [`renderer`], [`ImageRenderer`] (the 2D composite) and [`VolumeRenderer`]
+//! (the 3D view), so a host writes its per-frame code once, generic over them,
+//! and names a backend only where it constructs one and hands it to its
+//! drawing layer: the two `paint` methods cannot share a signature (a wgpu
+//! render pass vs. a live GL context), and they stay inherent. Generic, not
+//! `dyn`: the host's code is compiled for the backend it hands in. The
+//! backends are additive, so a host may build both.
+//!
+//! What both backends work out on the CPU — the composite's uniform block,
+//! the LUT texels, the volume's acceleration uniform — is in [`uniforms`],
+//! and how a device stores a volume is [`VolumeCaps`], so the backends differ
+//! only in what they hand the GPU.
 //!
 //! # What a host owns, and what this crate owns
 //!
@@ -22,6 +30,8 @@
 //! under a native eframe app and a browser canvas.
 //!
 //! ```ignore
+//! use scivis_render::ImageRenderer as _;
+//!
 //! // Once, at startup — from whatever created your device:
 //! let mut r = ImageRenderResources::new(device.clone(), queue.clone(), target_format);
 //!
@@ -36,19 +46,33 @@
 //! r.paint(&mut render_pass);
 //! ```
 //!
-//! Uploads take `&self` (they only queue GPU writes); anything that can
-//! reallocate or restage takes `&mut self`.
+//! Everything that changes what the renderer holds takes `&mut self`, the
+//! uploads included (see [`ImageRenderer`] for why).
 
+#[cfg(any(feature = "backend-wgpu", feature = "backend-glow"))]
+mod cpu_state;
 #[cfg(feature = "backend-glow")]
 pub mod glow_backend;
 pub mod pack;
+pub mod renderer;
+pub mod shaders;
+pub mod uniforms;
 #[cfg(feature = "backend-wgpu")]
 pub mod vram;
 #[cfg(feature = "backend-wgpu")]
 pub mod wgpu_backend;
 
+pub use renderer::{ImageRenderer, VolumeCaps, VolumeRenderer};
+
 /// Maximum number of display channels composited at once. Shared by both
-/// backends (texture/uniform array sizes) and by the host's channel state.
+/// backends (texture/uniform array sizes, written into their shaders by
+/// [`shaders`]) and by the host's channel state.
+///
+/// At most 7, which the build asserts: the 2D composite binds two textures a
+/// channel and the LUTs to one shader, of the 16 every GPU allows it, and
+/// the volume packs its channels four to a texture, in two. Within that, a
+/// change here reaches every array, LUT row and binding on its own; the
+/// shader tests then say which per-channel lines need writing out for it.
 pub const MAX_CHANNELS: usize = 6;
 
 /// A channel's display lookup table: 256 RGB entries, indexed by windowed
@@ -86,11 +110,43 @@ pub enum ChannelKind {
     Float,
 }
 
+impl ChannelKind {
+    /// Bytes one sample of this kind takes in its 2D texture.
+    pub const fn bytes_per_sample(self) -> usize {
+        match self {
+            ChannelKind::Int8 => 1,
+            ChannelKind::Int16 => 2,
+            ChannelKind::Float => 4,
+        }
+    }
+
+    /// How a channel of this kind is stored in the 3D volume, which mirrors
+    /// the 2D display.
+    pub const fn volume_kind(self) -> VolumeKind {
+        match self {
+            ChannelKind::Int8 => VolumeKind::U8,
+            ChannelKind::Int16 => VolumeKind::U16,
+            ChannelKind::Float => VolumeKind::F32,
+        }
+    }
+}
+
+impl From<ChannelKind> for VolumeKind {
+    fn from(kind: ChannelKind) -> Self {
+        kind.volume_kind()
+    }
+}
+
 /// How the 3D volume's scalar samples are stored in its GPU texture. Chosen
 /// from channel 0's `ChannelKind` so the volume mirrors the 2D display:
 ///   * `U8` — `R8` unorm (8-bit source)
 ///   * `U16` — `R16` unorm (16-bit source, or CPU-widened 8-bit/rescaled ints)
-///   * `F32` — `R32F` (32-bit float source, window/level in its own units)
+///   * `F32` — a float texture (32-bit float source): `R32F` on glow, and a
+///     half float on wgpu, where full float is not filterable without an
+///     optional feature ([`VolumeCaps`] says which a device has). A builder
+///     should normalize float samples to a span of about `0..=1` before
+///     packing them, as the viewer does, since a half float holds nothing
+///     past 65504.
 ///
 /// Unlike the 2D integer path (which uses `usampler`, NEAREST-only), the volume
 /// uses *normalized* textures so trilinear interpolation is available.
@@ -113,12 +169,16 @@ pub enum VolumeInterp {
 }
 
 impl VolumeInterp {
-    /// The `u_interp` value the fragment shader branches on (0 = point/linear via
-    /// the GL filter, 1 = in-shader tricubic). Only the glow backend consumes it.
-    pub fn shader_mode(self) -> i32 {
+    /// The code both backends' volume shaders branch on (`INTERP_NEAREST`,
+    /// `INTERP_LINEAR` and `INTERP_CUBIC` in their sources, written in by
+    /// [`shaders`]). The glow backend leaves nearest and linear to the GL
+    /// filter and branches only on cubic; the wgpu backend, with one linear
+    /// sampler for all three, snaps a nearest read to the texel itself.
+    pub const fn shader_mode(self) -> i32 {
         match self {
-            VolumeInterp::Nearest | VolumeInterp::Linear => 0,
-            VolumeInterp::Cubic => 1,
+            VolumeInterp::Nearest => 0,
+            VolumeInterp::Linear => 1,
+            VolumeInterp::Cubic => 2,
         }
     }
 }
@@ -140,8 +200,10 @@ pub enum VolumeRender {
 }
 
 impl VolumeRender {
-    /// The `u_mode` value the fragment shader branches on.
-    pub fn shader_mode(self) -> i32 {
+    /// The code both backends' volume shaders branch on (`MODE_MIP`,
+    /// `MODE_ALPHA` and `MODE_SURFACE` in their sources, written in by
+    /// [`shaders`]).
+    pub const fn shader_mode(self) -> i32 {
         match self {
             VolumeRender::Mip => 0,
             VolumeRender::Alpha => 1,
@@ -182,10 +244,9 @@ pub struct VolumeParams {
     /// [`brightest_lut_t`] computes the right value; `1.0` reproduces the old
     /// top-entry behaviour. Ignored by MIP and alpha DVR.
     pub albedo_t: [f32; MAX_CHANNELS],
-    /// Ray-march compositing mode (see [`VolumeRender::shader_mode`]): 0 = MIP,
-    /// 1 = alpha DVR, 2 = isosurface. The sample count is derived in-shader from
-    /// the voxel size.
-    pub render_mode: i32,
+    /// How the ray-march composites its samples. The sample count is derived
+    /// in-shader from the voxel size.
+    pub render_mode: VolumeRender,
     /// Alpha-DVR opacity scale (higher = more solid). Ignored by MIP/surface.
     pub density: f32,
     /// A gain applied to the composited colour, for MIP and alpha DVR.
@@ -210,7 +271,8 @@ pub struct VolumeParams {
     pub box_he: [f32; 3],
     /// The most samples one ray may take; see [`max_steps`]. Fewer than the
     /// ray would take at half-voxel spacing means a coarser spacing for that
-    /// ray. `0` or less means only the shaders' own ceiling of 4096 applies.
+    /// ray. `0` or less means only the shaders' own ceiling,
+    /// [`SHADER_MAX_STEPS`], applies.
     pub max_steps: i32,
 }
 
@@ -227,7 +289,13 @@ pub struct VolumeParams {
 /// it.
 pub const FRAME_SAMPLE_BUDGET: f64 = 1.5e9;
 
-/// The ceiling the shaders put on steps per ray, whatever `max_steps` says.
+/// The ceiling the shaders put on steps per ray, whatever `max_steps` says
+/// (`MAX_STEPS` in their sources, written in by [`shaders`]).
+///
+/// High enough that the largest volume the memory budget admits (a diagonal
+/// of some 1600 voxels) still gets half-voxel sampling. The march loops run
+/// as many steps as a ray needs, at most this many, so an ordinary volume
+/// never pays for the headroom.
 pub const SHADER_MAX_STEPS: i32 = 4096;
 
 /// The fewest steps [`max_steps`] allows, so a huge panel still shows a
@@ -351,7 +419,7 @@ pub struct VolumeImage {
 }
 
 /// One channel's window/level + on/off state, as the host produces it each
-/// frame. The backend maps it to whatever GPU representation it uses.
+/// frame. Both backends pack it into [`uniforms::CompositeParams`].
 #[derive(Clone, Copy, Debug)]
 pub struct ChannelUniform {
     pub min: f32,

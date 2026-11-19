@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.27.1"
+version = "1.28.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -13,6 +13,7 @@ dependencies = [
  "env_logger",
  "fast-tiff-lib",
  "fast-tiff-viewer",
+ "fasttiff-builtin-plugins",
  "fasttiff-plugin-api",
  "image",
  "js-sys",
@@ -217,15 +218,6 @@ name = "bit-set"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34ddef2995421ab6a5c779542c81ee77c115206f4ad9d5a8e05f4ff49716a3dd"
-dependencies = [
- "bit-vec",
-]
-
-[[package]]
-name = "bit-set"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09ec2f926cc3060f09db9ebc5b52823d85268d24bb917e472c0c4bea35780a7d"
 dependencies = [
  "bit-vec",
 ]
@@ -443,6 +435,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "console_log"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86919cef3e37b9356ccf54d4421208c17ecfda01beae61393e7ffd72916c0ef1"
+dependencies = [
+ "log",
+ "web-sys",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -631,7 +643,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "pollster 0.4.0",
+ "pollster",
  "profiling",
  "raw-window-handle",
  "static_assertions",
@@ -851,11 +863,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast-tiff-c-api-support"
+version = "0.28.0"
+
+[[package]]
 name = "fast-tiff-lib"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
- "anyhow",
  "bytemuck",
+ "fast-tiff-c-api-support",
  "flate2",
  "memmap2",
  "quick-xml 0.37.5",
@@ -866,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -874,14 +890,27 @@ dependencies = [
  "fasttiff-plugin",
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
- "flate2",
  "libloading 0.9.0",
+ "log",
+ "rayon",
+ "scivis-render",
+]
+
+[[package]]
+name = "fasttiff-builtin-plugins"
+version = "0.28.0"
+dependencies = [
+ "fast-tiff-lib",
+ "fast-tiff-viewer",
+ "fasttiff-plugin",
+ "fasttiff-plugin-api",
+ "flate2",
+ "image-registration-support",
  "log",
  "oir-reader",
  "png",
  "rayon",
  "rustfft",
- "scivis-render",
  "suite2p-registration",
  "turboreg-registration",
  "wgpu",
@@ -890,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin"
-version = "0.26.1"
+version = "0.28.0"
 dependencies = [
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
@@ -898,11 +927,11 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin-abi"
-version = "0.26.1"
+version = "0.28.0"
 
 [[package]]
 name = "fasttiff-plugin-api"
-version = "0.26.1"
+version = "0.28.0"
 
 [[package]]
 name = "fasttiff-plugin-derivatives"
@@ -911,6 +940,21 @@ dependencies = [
  "fast-tiff-viewer",
  "fasttiff-plugin",
  "fasttiff-plugin-api",
+]
+
+[[package]]
+name = "fasttiff-web-egui"
+version = "1.28.0"
+dependencies = [
+ "FastTIFF",
+ "console_error_panic_hook",
+ "console_log",
+ "eframe",
+ "egui",
+ "log",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -1069,6 +1113,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "glow"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1078,6 +1128,28 @@ dependencies = [
  "slotmap",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "glslang"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8fccba569493100739248dd04ec4b320967a5703237496b66bacfd4dff610ee"
+dependencies = [
+ "bitflags 2.13.0",
+ "glslang-sys",
+ "rustc-hash 2.1.2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "glslang-sys"
+version = "0.9.2+e1b562a"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ac997482faa54527938d8cc23eeef882d9a68cbce4a9d10bb3d6dbf0d2fbf0"
+dependencies = [
+ "cc",
+ "glob",
 ]
 
 [[package]]
@@ -1217,9 +1289,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-dependencies = [
- "foldhash 0.2.0",
-]
 
 [[package]]
 name = "hermit-abi"
@@ -1348,6 +1417,15 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+]
+
+[[package]]
+name = "image-registration-support"
+version = "0.28.0"
+dependencies = [
+ "pollster",
+ "rayon",
+ "wgpu",
 ]
 
 [[package]]
@@ -1648,7 +1726,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2bf919621e7975acb27d881bae2fb993e0d45c8e0446e85e6272971e00dc8df"
 dependencies = [
  "arrayvec",
- "bit-set 0.9.1",
+ "bit-set",
  "bitflags 2.13.0",
  "cfg-if",
  "cfg_aliases",
@@ -1665,43 +1743,6 @@ dependencies = [
  "spirv",
  "thiserror 2.0.18",
  "unicode-ident",
-]
-
-[[package]]
-name = "naga"
-version = "30.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a616d2fb8c89516ac2723a581f69d6c18576046bed761bd6b305e5618e6ae130"
-dependencies = [
- "arrayvec",
- "bit-set 0.10.0",
- "bitflags 2.13.0",
- "cfg-if",
- "cfg_aliases",
- "codespan-reporting",
- "half",
- "hashbrown 0.17.1",
- "indexmap",
- "libm",
- "log",
- "naga-types",
- "num-traits",
- "once_cell",
- "rustc-hash 1.1.0",
- "thiserror 2.0.18",
- "unicode-ident",
-]
-
-[[package]]
-name = "naga-types"
-version = "30.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "590afbf58a6f4f62873cd5cff4468061844bafa1cdf399cc954537c22d768d49"
-dependencies = [
- "hashbrown 0.17.1",
- "indexmap",
- "rustc-hash 1.1.0",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2102,9 +2143,10 @@ dependencies = [
 
 [[package]]
 name = "oir-reader"
-version = "0.26.3"
+version = "0.28.0"
 dependencies = [
  "bytemuck",
+ "fast-tiff-c-api-support",
  "memmap2",
  "quick-xml 0.37.5",
 ]
@@ -2252,12 +2294,6 @@ name = "pollster"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
-
-[[package]]
-name = "pollster"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc6355899e1c9462875b6757c79f3caa011a1fdae12bbb1a2e72dd1f234f8336"
 
 [[package]]
 name = "polycool"
@@ -2508,7 +2544,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "percent-encoding",
- "pollster 0.4.0",
+ "pollster",
  "raw-window-handle",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -2597,17 +2633,22 @@ dependencies = [
 
 [[package]]
 name = "scivis-render"
-version = "0.26.2"
+version = "0.28.0"
 dependencies = [
  "ash",
  "bytemuck",
  "glow",
+ "glslang",
  "half",
- "naga 30.0.1",
+ "khronos-egl",
+ "naga",
+ "pollster",
  "rayon",
+ "scivis-render",
  "wasm-bindgen-futures",
  "wgpu",
  "windows",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2824,11 +2865,12 @@ checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
 
 [[package]]
 name = "suite2p-registration"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "bytemuck",
- "pollster 1.0.1",
- "rayon",
+ "fast-tiff-c-api-support",
+ "image-registration-support",
+ "pollster",
  "rustfft",
  "wgpu",
 ]
@@ -2996,11 +3038,12 @@ dependencies = [
 
 [[package]]
 name = "turboreg-registration"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "bytemuck",
- "pollster 1.0.1",
- "rayon",
+ "fast-tiff-c-api-support",
+ "image-registration-support",
+ "pollster",
  "wgpu",
 ]
 
@@ -3365,7 +3408,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "js-sys",
  "log",
- "naga 29.0.4",
+ "naga",
  "parking_lot",
  "portable-atomic",
  "profiling",
@@ -3387,7 +3430,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02da3ad1b568337f25513b317870960ef87073ea0945502e44b864b67a8c77b7"
 dependencies = [
  "arrayvec",
- "bit-set 0.9.1",
+ "bit-set",
  "bit-vec",
  "bitflags 2.13.0",
  "bytemuck",
@@ -3396,7 +3439,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "indexmap",
  "log",
- "naga 29.0.4",
+ "naga",
  "once_cell",
  "parking_lot",
  "portable-atomic",
@@ -3459,7 +3502,7 @@ dependencies = [
  "android_system_properties",
  "arrayvec",
  "ash",
- "bit-set 0.9.1",
+ "bit-set",
  "bitflags 2.13.0",
  "block2 0.6.2",
  "bytemuck",
@@ -3475,7 +3518,7 @@ dependencies = [
  "libc",
  "libloading 0.8.9",
  "log",
- "naga 29.0.4",
+ "naga",
  "ndk-sys",
  "objc2 0.6.4",
  "objc2-core-foundation",
@@ -3510,7 +3553,7 @@ version = "29.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59c654c483f058800972c3645e95388a7eca31bf9fe1933bc20e036588a0be02"
 dependencies = [
- "naga 29.0.4",
+ "naga",
  "wgpu-types",
 ]
 

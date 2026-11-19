@@ -79,7 +79,7 @@ fn the_point_counter_is_listed_with_no_plugins() {
 /// exactly once, and every plugin is still there.
 #[test]
 fn every_plugin_is_still_listed_beside_the_counter() {
-    let registry = Registry::new();
+    let registry = Registry::new(fasttiff_builtin_plugins::register);
     let merged = with_app_tools(registry.grouped());
     let all: Vec<&Item> = merged.iter().flat_map(|(_, items)| items).collect();
     let counters = all

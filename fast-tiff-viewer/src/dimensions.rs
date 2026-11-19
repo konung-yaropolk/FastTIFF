@@ -1,10 +1,12 @@
 //! Stack-shape interpretation: applying resolved (or manually overridden)
 //! channel/Z/time roles to a loaded stack, RGB plane setup, and the derived
-//! status line. Split from `app.rs`.
+//! note about its shape. Split from `app.rs`.
 
 use crate::channels::build_channel_settings_reporting;
-use crate::display::Dims;
-use crate::stack::{ChannelSettings, Stack};
+use crate::display::{ChannelLayout, Dims};
+use crate::document::{ChannelSettings, Document};
+use crate::notice::ShapeNote;
+use crate::units::SampleUnits;
 use scivis_render::{ChannelKind, MAX_CHANNELS};
 
 /// Which IFD, and which sample plane inside it, holds channel `c` of slice `z`
@@ -27,7 +29,7 @@ use scivis_render::{ChannelKind, MAX_CHANNELS};
 /// No bounds checking: `dims` describes what the metadata claims, and whether
 /// the file actually has that plane is [`planes_addressed`]'s question (for the
 /// 2D axis) or the decoder's.
-pub fn plane_index(dims: Dims, rgb: bool, c: usize, z: usize, t: usize) -> (usize, usize) {
+pub(crate) fn plane_index(dims: Dims, rgb: bool, c: usize, z: usize, t: usize) -> (usize, usize) {
     let (channels, slices) = (dims.channels.max(1), dims.slices.max(1));
     if rgb {
         (t * slices + z, c)
@@ -44,7 +46,7 @@ pub fn plane_index(dims: Dims, rgb: bool, c: usize, z: usize, t: usize) -> (usiz
 /// second, independent formula here would be a second thing to get wrong.
 /// Chunky RGB addresses one IFD per frame (its channels are sample planes of
 /// that IFD); everything else gives each channel its own.
-pub fn planes_addressed(dims: Dims, rgb: bool) -> usize {
+pub(crate) fn planes_addressed(dims: Dims, rgb: bool) -> usize {
     let (c, z, f) = (dims.channels.max(1), dims.slices.max(1), dims.frames.max(1));
     if rgb {
         (f - 1).saturating_mul(z).saturating_add(1)
@@ -73,7 +75,11 @@ pub fn planes_addressed(dims: Dims, rgb: bool) -> usize {
 /// a single frame still does not fit — fewer IFDs in the whole file than there
 /// are channels — are the channels cut too, and Z never needs cutting because at
 /// one frame it drops out of the arithmetic entirely.
-pub fn clamp_to_available(dims: &mut Dims, rgb: bool, available: usize) -> Option<(usize, usize)> {
+pub(crate) fn clamp_to_available(
+    dims: &mut Dims,
+    rgb: bool,
+    available: usize,
+) -> Option<(usize, usize)> {
     let declared = planes_addressed(*dims, rgb);
     if available == 0 || declared <= available {
         return None;
@@ -102,40 +108,30 @@ pub fn clamp_to_available(dims: &mut Dims, rgb: bool, available: usize) -> Optio
     Some((declared, available))
 }
 
-/// The status note shown at the top of the window, derived from the
-/// stack's current (resolved) dimensions. Shared between the initial load
-/// and the manual dimension-order override so the two can't drift out of
-/// sync with each other.
-pub fn compute_status(
+/// The note about the stack's shape worth showing the user, derived from its
+/// current (resolved) dimensions; `None` when there is nothing to say. Shared
+/// between the initial load and the manual dimension-order override so the
+/// two can't drift out of sync with each other. Its words are its
+/// [`Display`](std::fmt::Display).
+pub(crate) fn shape_note(
     dims: Dims,
     triple_axis_warning: bool,
     plane_mismatch: Option<(usize, usize)>,
-) -> Option<String> {
+) -> Option<ShapeNote> {
     // Ahead of the others: those describe how the file has been *interpreted*,
     // this one says the file disagrees with itself. Whatever is on screen is
     // built from an arrangement the metadata does not actually back up, and the
     // reader should know that before anything else.
     if let Some((declared, available)) = plane_mismatch {
-        Some(format!(
-            "Warning: this file's metadata describes {declared} image plane(s) but the file \
-             contains {available}. Showing {} channel(s) × {} Z-slice(s) × {} frame(s), \
-             which is what fits — the rest may live in a companion file (a multi-file \
-             OME set gives every file the whole dataset's dimensions), or the file may \
-             be truncated.",
-            dims.channels, dims.slices, dims.frames
-        ))
+        Some(ShapeNote::PlaneMismatch {
+            declared,
+            available,
+            dims,
+        })
     } else if triple_axis_warning {
-        Some(format!(
-            "Warning: this file has channels, Z-slices, and time frames all present at once \
-             ({} channel(s) × {} Z-slice(s) × {} frame(s)). Z isn't shown as a separate axis here \
-             — only the first Z-slice is used; to see the whole picture, use 3D view.",
-            dims.channels, dims.slices, dims.frames
-        ))
+        Some(ShapeNote::FrozenZ(dims))
     } else if dims.channels > MAX_CHANNELS {
-        Some(format!(
-            "Note: stack has {} channels; showing the first {MAX_CHANNELS}.",
-            dims.channels
-        ))
+        Some(ShapeNote::TooManyChannels(dims.channels))
     } else {
         None
     }
@@ -145,17 +141,20 @@ pub fn compute_status(
 /// to a stack: updates the metadata, rebuilds channel_display +
 /// channel_settings to match the new channel count, and resets the scrub
 /// position. The one place that does this, so the manual channels/frames
-/// swap can't drift out of sync with `open_file` the way `self.status`
+/// swap can't drift out of sync with `open_file` the way the status note
 /// previously did.
-pub fn apply_resolved_dimensions(loaded: &mut Stack, resolved: fast_tiff_lib::ResolvedDimensions) {
+pub(crate) fn apply_resolved_dimensions(
+    loaded: &mut Document,
+    resolved: fast_tiff_lib::ResolvedDimensions,
+) {
     apply_resolved_dimensions_reporting(loaded, resolved, &mut |_, _| {});
 }
 
 /// [`apply_resolved_dimensions`], reporting the per-channel contrast scans as
 /// they finish — the slow part of opening a file, and the only part whose
 /// length is known ahead of time.
-pub fn apply_resolved_dimensions_reporting(
-    loaded: &mut Stack,
+pub(crate) fn apply_resolved_dimensions_reporting(
+    loaded: &mut Document,
     resolved: fast_tiff_lib::ResolvedDimensions,
     on_channel: &mut dyn FnMut(usize, usize),
 ) {
@@ -170,7 +169,7 @@ pub fn apply_resolved_dimensions_reporting(
     };
     // Chunky RGB and CMYK put their channels in one IFD's sample planes, which
     // changes how many IFDs a given shape addresses. Asked of the frame rather
-    // than of `display.rgb`, because on a fresh load `setup_rgb` has not run
+    // than of `display.layout()`, because on a fresh load `setup_rgb` has not run
     // yet — it runs after this.
     let shares_an_ifd = loaded
         .tiff
@@ -185,39 +184,35 @@ pub fn apply_resolved_dimensions_reporting(
         frames: dims.frames,
         ..resolved
     };
-    loaded.display.dims = dims;
+    // Both move the display's layout revision, which is what everything
+    // decoded under the old interpretation — the frame on the GPU, a frame
+    // read ahead, a window being built, the retained overview, the decoded
+    // bands, the volume — is checked against before it is used again: the
+    // viewer's residency at the top of its next sync, each worker and cache
+    // as it is asked. Nothing here has to know about any of them.
+    loaded.display.set_dims(dims);
     loaded.display.triple_axis_warning = resolved.triple_axis_warning;
     loaded.display.mode = loaded.tiff.meta.mode;
     let shown = crate::display::Display::shown_channels(resolved.channels);
     loaded.display.reseed_luts(&loaded.tiff.meta, shown);
-    loaded.display.settings =
-        build_channel_settings_reporting(&loaded.tiff, resolved.channels, on_channel);
-    loaded.frame_index = 0;
-    loaded.last_uploaded = None;
-    loaded.luts_uploaded = false;
-    // Which IFD each display channel reads just changed, and the decoded-band
-    // cache is keyed by *display channel*, not by IFD — so every band it holds
-    // now describes the wrong plane. Keeping them would splice pixels from the
-    // old interpretation into the next window, which is worse than the decode
-    // they save: a wrong picture rather than a slow one. Only ever non-empty
-    // for a frame too large to upload whole, so this costs nothing for an
-    // ordinary image.
-    loaded.bands.clear();
-    // Same argument for the retained overview: its planes were decoded through
-    // the old channel-to-IFD mapping. It is checked against `prefetch_gen` on
-    // every read as well, so this is belt and braces — but it returns the
-    // memory now rather than at the next sync.
-    loaded.overview = None;
+    loaded
+        .display
+        .set_settings(build_channel_settings_reporting(
+            &loaded.tiff,
+            resolved.channels,
+            on_channel,
+        ));
+    loaded.set_frame(0);
 }
 
 /// Which sample planes of an `spp`-sample RGB frame get a display channel, and
 /// which of those start enabled — one entry per channel, `true` = on. The whole
 /// policy `setup_rgb` applies, split out so it's testable without a
-/// file-and-GPU-backed `Stack`. See `setup_rgb` for the reasoning.
+/// file-and-GPU-backed `Document`. See `setup_rgb` for the reasoning.
 ///
 /// Beyond `MAX_CHANNELS` the shader has no slot to composite into, so further
 /// samples are dropped — no real file has 7+ samples/pixel.
-pub fn rgb_channel_plan(spp: usize) -> Vec<bool> {
+pub(crate) fn rgb_channel_plan(spp: usize) -> Vec<bool> {
     (0..spp.min(MAX_CHANNELS)).map(|c| c < 3).collect()
 }
 
@@ -226,7 +221,7 @@ pub fn rgb_channel_plan(spp: usize) -> Vec<bool> {
 /// colors show without any contrast tweaking). Additively blending the red,
 /// green and blue ramps in the composite shader reconstructs the original RGB
 /// pixel. Frame navigation still walks IFDs (one full-color image per IFD) —
-/// see `Stack::rgb`.
+/// see `Display::rgb`.
 ///
 /// Samples past the third (TIFF ExtraSamples — alpha, or anything else a writer
 /// packed in) get channels too, but **start disabled**. They're real data the
@@ -237,7 +232,7 @@ pub fn rgb_channel_plan(spp: usize) -> Vec<bool> {
 /// the additive shader would blend in as a solid color wash over the picture.
 /// Off-by-default is the only setting that's harmless for both: the channel row
 /// is visible, and one click shows it.
-pub fn setup_rgb(loaded: &mut Stack) {
+pub(crate) fn setup_rgb(loaded: &mut Document) {
     let spp = loaded
         .tiff
         .frames
@@ -246,38 +241,36 @@ pub fn setup_rgb(loaded: &mut Stack) {
         .unwrap_or(3);
     let plan = rgb_channel_plan(spp);
     let planes = plan.len();
-    loaded.display.rgb = true;
+    loaded.display.set_layout(ChannelLayout::Rgb);
     loaded.display.mode = fast_tiff_lib::DisplayMode::Color;
     // 0 = red, 1 = green, 2 = blue, then the composite palette for any extras.
-    loaded.display.luts = (0..planes)
-        .map(fast_tiff_lib::default_composite_lut)
-        .collect();
+    loaded.display.set_luts(
+        (0..planes)
+            .map(fast_tiff_lib::default_composite_lut)
+            .collect(),
+    );
     // Unsigned 8-bit RGB deinterleaves into raw u8 planes (`read_plane_u8`) and
     // rides the R8Uint path — half the texture memory + upload of widening each
     // plane to u16. Deeper or signed RGB still widens to u16 via `read_plane_u16`.
-    // The window stays in 0..65535 either way; `sync_gpu` rescales it to 0..255
-    // for an 8-bit (Int8) channel.
-    let kind = if loaded.tiff.frames.first().is_some_and(|f| {
+    // Either way each component opens on the whole of its type's range.
+    let first = loaded.tiff.frames.first();
+    let kind = if first.is_some_and(|f| {
         f.bits_per_sample == 8 && f.sample_format == fast_tiff_lib::SampleFormat::UnsignedInt
     }) {
         ChannelKind::Int8
     } else {
         ChannelKind::Int16
     };
-    loaded.display.settings = plan
-        .iter()
-        .map(|&enabled| ChannelSettings {
-            min: 0.0,
-            max: 65535.0,
-            enabled,
-            bounds: (0.0, 65535.0),
-            initial: (0.0, 65535.0),
-            kind,
-        })
-        .collect();
-    loaded.frame_index = 0;
-    loaded.last_uploaded = None;
-    loaded.luts_uploaded = false;
+    let units = SampleUnits::of(kind, first, None);
+    loaded.display.set_settings(
+        plan.iter()
+            .map(|&enabled| ChannelSettings {
+                enabled,
+                ..ChannelSettings::new(units.full_range(), units)
+            })
+            .collect(),
+    );
+    loaded.set_frame(0);
 }
 
 /// Reconfigures a freshly-loaded CMYK (Separated) stack: its four ink planes
@@ -296,56 +289,77 @@ pub fn setup_rgb(loaded: &mut Stack) {
 /// remain available from the library (`read_planes_u8`/`read_planes_u16` still
 /// return one plane per sample), so a future "show separations" mode has
 /// everything it needs.
-pub fn setup_cmyk(loaded: &mut Stack) {
-    // Both flags: `rgb` drives the plane-of-one-IFD decode addressing shared
-    // with real RGB, `cmyk` records that these channels are derived.
-    loaded.display.rgb = true;
-    loaded.display.cmyk = true;
+///
+/// Like [`setup_rgb`] and [`apply_resolved_dimensions`], this edits only the
+/// display model (and the frame index), so it is as safe to call on a stack
+/// already on screen as on one just opened: the display's revisions moving is
+/// what has a viewer drop everything it holds of the old mapping.
+pub(crate) fn setup_cmyk(loaded: &mut Document) {
+    // Addressed as RGB is (the channels are planes of one IFD), and told
+    // apart from it so the channels are known to be derived.
+    loaded.display.set_layout(ChannelLayout::Cmyk);
     loaded.display.mode = fast_tiff_lib::DisplayMode::Color;
-    loaded.display.luts = (0..3).map(fast_tiff_lib::default_composite_lut).collect(); // R, G, B
-                                                                                      // The conversion outputs in the source's own width: 8-bit inks give 8-bit
-                                                                                      // components (the zero-widening R8Uint upload), 16-bit gives 16.
-    let kind = if loaded
+    // R, G, B.
+    loaded
+        .display
+        .set_luts((0..3).map(fast_tiff_lib::default_composite_lut).collect());
+    // The conversion outputs in the source's own width: 8-bit inks give 8-bit
+    // components (the zero-widening R8Uint upload), 16-bit gives 16. The
+    // components are the conversion's output rather than the file's inks, so
+    // their units are that output's: raw bytes on the 8-bit path, the 16-bit
+    // scale itself otherwise. Each opens on the whole of it.
+    let units = if loaded
         .tiff
         .frames
         .first()
         .is_some_and(|f| f.bits_per_sample == 8)
     {
-        ChannelKind::Int8
+        SampleUnits::RAW8
     } else {
-        ChannelKind::Int16
+        SampleUnits::display(fast_tiff_lib::DisplayMap::Identity)
     };
-    loaded.display.settings = (0..3)
-        .map(|_| ChannelSettings {
-            min: 0.0,
-            max: 65535.0,
-            enabled: true,
-            bounds: (0.0, 65535.0),
-            initial: (0.0, 65535.0),
-            kind,
-        })
-        .collect();
-    loaded.frame_index = 0;
-    loaded.last_uploaded = None;
-    loaded.luts_uploaded = false;
+    loaded.display.set_settings(
+        (0..3)
+            .map(|_| ChannelSettings::new(units.full_range(), units))
+            .collect(),
+    );
+    loaded.set_frame(0);
 }
 
 /// Applies a manual dimension-order change from the dropdown: reassigns the
 /// channels / Z-slices / time-frames roles to the given counts (the product
-/// stays the stack's plane count — the selector only offers permutations).
+/// stays the one in effect — [`Viewer::set_dimension_order`](crate::Viewer::set_dimension_order)
+/// ignores any other).
 /// For stacks without a real Z axis the selector passes `slices` through
 /// unchanged, so it stays a plain channels/time swap. The triple-axis
 /// warning flag is carried over — it describes the file, not the current
 /// role assignment.
-pub fn apply_dimension_override(loaded: &mut Stack, channels: usize, slices: usize, frames: usize) {
+pub(crate) fn apply_dimension_override(
+    loaded: &mut Document,
+    channels: usize,
+    slices: usize,
+    frames: usize,
+) {
     let resolved = fast_tiff_lib::ResolvedDimensions {
         channels,
         slices,
         frames,
         triple_axis_warning: loaded.display.triple_axis_warning,
     };
+    // Moves the layout revision, so a frame read ahead or a window built under
+    // the old channel-to-IFD mapping is refused when it arrives.
     apply_resolved_dimensions(loaded, resolved);
-    // The channel->IFD mapping just changed, so invalidate any in-flight prefetch
-    // decoded under the old mapping.
-    loaded.prefetch_gen = loaded.prefetch_gen.wrapping_add(1);
 }
+
+#[cfg(test)]
+#[path = "plane_addressing_tests.rs"]
+mod addressing_tests;
+#[cfg(test)]
+#[path = "plane_clamp_tests.rs"]
+mod clamp_tests;
+#[cfg(test)]
+#[path = "cmyk_display_tests.rs"]
+mod cmyk_tests;
+#[cfg(test)]
+#[path = "dimensions_tests.rs"]
+mod tests;

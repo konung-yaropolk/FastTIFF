@@ -7,7 +7,7 @@ fn params(aspect: f32) -> VolumeParams {
         enabled: [0.0; MAX_CHANNELS],
         is_float: [0.0; MAX_CHANNELS],
         albedo_t: [1.0; MAX_CHANNELS],
-        render_mode: 0,
+        render_mode: VolumeRender::Mip,
         density: 1.0,
         brightness: 1.0,
         iso: 0.5,

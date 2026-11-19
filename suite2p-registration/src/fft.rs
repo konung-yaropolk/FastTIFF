@@ -26,8 +26,22 @@
 use rustfft::{num_complex::Complex32, Fft, FftPlanner};
 use std::sync::Arc;
 
-/// Cached forward and inverse plans for one plane size.
-pub struct Fft2 {
+/// Columns gathered and transformed together in the column pass. Eight
+/// `Complex32` are one 64-byte cache line, so each row of the plane is read a
+/// line at a time instead of a sample at a time.
+const COLUMN_TILE: usize = 8;
+
+/// Forward and inverse plans for one plane size: the expensive, shareable part
+/// of a transform.
+///
+/// Plans hold no state a transform writes to, and they are `Send + Sync`, so
+/// one set serves every worker of a run. Building them per worker — which
+/// bundling them with the scratch below forced — replanned a Bluestein size
+/// (1024 x 768, say) once per chunk, and made the multi-threaded path hand out
+/// work in chunks of at least eight frames, which on a short batch of large
+/// frames left most cores idle.
+#[derive(Clone)]
+pub struct FftPlans2 {
     /// Rows in the plane these plans are for.
     pub ly: usize,
     /// Columns in it.
@@ -36,25 +50,75 @@ pub struct Fft2 {
     fwd_col: Arc<dyn Fft<f32>>,
     inv_row: Arc<dyn Fft<f32>>,
     inv_col: Arc<dyn Fft<f32>>,
-    /// Scratch for the column pass, so a transform allocates nothing.
-    col: Vec<Complex32>,
 }
 
-impl Fft2 {
+impl FftPlans2 {
     /// Plan both transforms for an `ly * lx` plane. Expensive to build and
     /// cheap to reuse — a timelapse transforms the same size thousands of
-    /// times, so one of these is kept for the run.
+    /// times, so one set is kept for the run.
     pub fn new(ly: usize, lx: usize) -> Self {
         let mut planner = FftPlanner::<f32>::new();
-        Fft2 {
+        FftPlans2 {
             ly,
             lx,
             fwd_row: planner.plan_fft_forward(lx),
             fwd_col: planner.plan_fft_forward(ly),
             inv_row: planner.plan_fft_inverse(lx),
             inv_col: planner.plan_fft_inverse(ly),
-            col: vec![Complex32::new(0.0, 0.0); ly],
         }
+    }
+}
+
+/// Plans plus the scratch one worker transforms with — what a worker keeps.
+pub struct Fft2 {
+    /// Rows in the plane these plans are for.
+    pub ly: usize,
+    /// Columns in it.
+    pub lx: usize,
+    plans: FftPlans2,
+    /// Up to [`COLUMN_TILE`] columns, gathered one after another.
+    col: Vec<Complex32>,
+    /// What the plans need to run in place. Held rather than allocated per
+    /// call: `Fft::process` allocates its scratch every time it is called,
+    /// which in a row-by-row loop was one allocation per row of every frame.
+    scratch: Vec<Complex32>,
+}
+
+impl Fft2 {
+    /// Plan both transforms for an `ly * lx` plane, with scratch to run them.
+    /// See [`FftPlans2::new`]; workers sharing a run should share its plans
+    /// through [`with_plans`](Self::with_plans) instead.
+    pub fn new(ly: usize, lx: usize) -> Self {
+        Self::with_plans(&FftPlans2::new(ly, lx))
+    }
+
+    /// A transform over shared `plans`, with scratch of its own. Cheap: the
+    /// plans are reference-counted, and the scratch is a column tile and what
+    /// the plans ask for.
+    pub fn with_plans(plans: &FftPlans2) -> Self {
+        let scratch = [
+            &plans.fwd_row,
+            &plans.fwd_col,
+            &plans.inv_row,
+            &plans.inv_col,
+        ]
+        .iter()
+        .map(|p| p.get_inplace_scratch_len())
+        .max()
+        .unwrap_or(0);
+        let zero = Complex32::new(0.0, 0.0);
+        Fft2 {
+            ly: plans.ly,
+            lx: plans.lx,
+            plans: plans.clone(),
+            col: vec![zero; COLUMN_TILE * plans.ly],
+            scratch: vec![zero; scratch],
+        }
+    }
+
+    /// The plans this transform runs, to share with another worker.
+    pub fn plans(&self) -> &FftPlans2 {
+        &self.plans
     }
 
     /// Samples in a plane: `ly * lx`.
@@ -70,8 +134,12 @@ impl Fft2 {
     /// Forward transform, in place. `data` is row-major `ly * lx`.
     pub fn forward(&mut self, data: &mut [Complex32]) {
         debug_assert_eq!(data.len(), self.len());
-        for row in data.chunks_exact_mut(self.lx) {
-            self.fwd_row.process(row);
+        // Every row in one call: the plan transforms each `lx` run of the
+        // buffer in turn.
+        if !data.is_empty() {
+            self.plans
+                .fwd_row
+                .process_with_scratch(data, &mut self.scratch);
         }
         self.columns(data, true);
     }
@@ -79,8 +147,10 @@ impl Fft2 {
     /// Inverse transform, in place, scaled by `1/(ly*lx)`.
     pub fn inverse(&mut self, data: &mut [Complex32]) {
         debug_assert_eq!(data.len(), self.len());
-        for row in data.chunks_exact_mut(self.lx) {
-            self.inv_row.process(row);
+        if !data.is_empty() {
+            self.plans
+                .inv_row
+                .process_with_scratch(data, &mut self.scratch);
         }
         self.columns(data, false);
         let scale = 1.0 / self.len() as f32;
@@ -89,24 +159,39 @@ impl Fft2 {
         }
     }
 
-    /// The column pass: gather a column into scratch, transform, scatter back.
+    /// The column pass: gather a tile of columns into scratch, transform
+    /// them in one call, scatter them back.
     ///
     /// A strided transform rather than a transpose. Two transposes of a
     /// megapixel plane per frame is real time on a timelapse, and the gather is
-    /// the same memory traffic without the second copy.
+    /// the same memory traffic without the second copy. A tile of
+    /// [`COLUMN_TILE`] columns at a time reads each row a cache line at a time,
+    /// where one column at a time read a single sample from every line.
     fn columns(&mut self, data: &mut [Complex32], forward: bool) {
-        let lx = self.lx;
-        for x in 0..lx {
-            for (y, slot) in self.col.iter_mut().enumerate() {
-                *slot = data[y * lx + x];
+        let (ly, lx) = (self.ly, self.lx);
+        if ly == 0 || lx == 0 {
+            return;
+        }
+        let plan = if forward {
+            &self.plans.fwd_col
+        } else {
+            &self.plans.inv_col
+        };
+        for x0 in (0..lx).step_by(COLUMN_TILE) {
+            let tile = COLUMN_TILE.min(lx - x0);
+            let col = &mut self.col[..tile * ly];
+            for y in 0..ly {
+                let row = &data[y * lx + x0..y * lx + x0 + tile];
+                for (c, &v) in row.iter().enumerate() {
+                    col[c * ly + y] = v;
+                }
             }
-            if forward {
-                self.fwd_col.process(&mut self.col);
-            } else {
-                self.inv_col.process(&mut self.col);
-            }
-            for (y, slot) in self.col.iter().enumerate() {
-                data[y * lx + x] = *slot;
+            plan.process_with_scratch(col, &mut self.scratch);
+            for y in 0..ly {
+                let row = &mut data[y * lx + x0..y * lx + x0 + tile];
+                for (c, v) in row.iter_mut().enumerate() {
+                    *v = col[c * ly + y];
+                }
             }
         }
     }

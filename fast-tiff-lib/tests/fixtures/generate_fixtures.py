@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates the TIFF fixture matrix that tests/libtiff_fixtures.rs decodes.
+"""Generates the TIFF fixture matrix that tests/it/libtiff_fixtures.rs decodes.
 
 Two independent producers cross-validate fast-tiff-lib's reader:
 
@@ -12,7 +12,7 @@ Two independent producers cross-validate fast-tiff-lib's reader:
 
 Pixel values are pure functions of the flat sample index `g` (page-major,
 row-major, chunky-interleaved), so the Rust test recomputes the expected data
-without sidecar files. THE FORMULAS MUST MATCH tests/libtiff_fixtures.rs:
+without sidecar files. THE FORMULAS MUST MATCH tests/it/libtiff_fixtures.rs:
 
     u8 : (g*7 + 13) % 256
     i8 : that - 128
@@ -176,7 +176,7 @@ tff("tff_f32_spp1_p1_tiled-zip-pred3.tif", "f32", 1, tile=(16, 16),
 
 # --- 8a. Tiled files with a grid more than one tile deep, which the fixture
 # --- matrix above cannot express (its frames are 11 rows, shorter than a tile).
-# --- Verified by tests/tiled.rs instead; the `tld_` prefix is what tells
+# --- Verified by tests/it/tiled.rs instead; the `tld_` prefix is what tells
 # --- libtiff_fixtures.rs to leave them alone.
 TW, TH = 100, 70  # 7 x 5 tiles of 16, with both edges partial
 

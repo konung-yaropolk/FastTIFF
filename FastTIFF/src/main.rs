@@ -120,7 +120,7 @@ fn main() -> eframe::Result {
                 .first()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "result.tif".to_string());
-            read_piped_stack().map(|bytes| app::Opened::Bytes(bytes, name))
+            read_piped_stack().map(|bytes| app::Opened::Bytes(bytes.into(), name))
         }
         _ => {
             let files: Vec<std::path::PathBuf> =
@@ -131,7 +131,7 @@ fn main() -> eframe::Result {
 
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([320.0, 320.0])
-        // Keep in sync with `app::MIN_WINDOW` — the floor for both manual
+        // Keep in sync with `MIN_WINDOW` in `app/platform/native.rs` — the floor for both manual
         // resizing and zoom-out (which letterboxes below this size).
         .with_min_inner_size([256.0, 256.0])
         .with_title("FastTIFF");

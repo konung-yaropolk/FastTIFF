@@ -45,24 +45,19 @@ fn the_pose_follows_the_clock_and_loops() {
     assert_eq!(pose_index(5.0, 30.0, 0), 0);
 }
 
-/// Every way the user can move the view moves something this compares, and the
-/// renderer's own per-frame cache does not.
+/// Every way the user can move the view moves something this compares.
 #[test]
-fn every_camera_move_is_noticed_and_the_renderers_cache_is_not() {
+fn every_camera_move_is_noticed() {
     let cam = CameraState::default();
     let mark = CameraMark::of(&cam);
     assert!(!mark.moved(&cam));
-
-    let mut cache = cam;
-    cache.box_he = [0.1, 0.2, 0.3];
-    assert!(!mark.moved(&cache), "the box cache is not the user's");
 
     let moves: [fn(&mut CameraState); 7] = [
         |c| c.orbit(5.0, 0.0),
         |c| c.orbit(0.0, 5.0),
         |c| c.dolly(10.0),
         |c| c.pan(3.0, 0.0, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 0.01),
-        |c| c.wheel_fly(1.0, 1.0),
+        |c| c.wheel_fly(1.0, 1.0, [0.5; 3]),
         |c| c.nav = NavMode::Maya,
         |c| c.orbit_point = OrbitPoint::ScreenCenter,
     ];
@@ -369,7 +364,6 @@ fn a_movie_with_no_frames_is_refused() {
 
 /// On the desktop the frames go to a file as they come, the file is a movie
 /// when the recording finishes, and nothing is left behind when it does not.
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_recording_to_a_file_finishes_or_leaves_nothing() {
     let dir = std::env::temp_dir().join(format!("fasttiff-anim-{}", std::process::id()));

@@ -21,29 +21,38 @@ Needs a current browser with WebGPU or WebGL2 (Chrome/Edge 113+, Firefox 141+).
 
 ```text
   fast-tiff-lib      TIFF parsing + decode          ┐
-  scivis-render      GPU compositing + ray-marching ├─ shared with the desktop app
-  fast-tiff-viewer   stack model, camera, GPU sync  │
+  scivis-render      GPU compositing + ray-marching │
+  fast-tiff-viewer   the document, camera, GPU sync ├─ shared with the desktop app
+  fasttiff-builtin-plugins   the built-in plugins   │
   FastTIFF (lib)     the egui UI + eframe adapter   ┘
         │
-  src/lib.rs         this crate: ~57 lines of browser host
+  src/lib.rs         this crate: ~190 lines of browser host
 ```
 
 **There is no UI code in this crate.** The interface is the *same*
 `fasttiff::ViewerApp` the desktop binary runs — `FastTIFF` is a lib + bin, and
 both hosts construct the same app. All this crate does is hand eframe a canvas
-instead of a window.
+instead of a window, and keep the browser's page zoom off the app's zoom keys
+(below).
 
-What actually differs between the two hosts is 31 `#[cfg(target_arch = "wasm32")]`
-sites across ~3,100 lines of shared UI, and every one of them is about the
-*host* rather than the viewer:
+What actually differs between the two hosts is all about the *host* rather
+than the viewer, and it is behind one seam, `FastTIFF/src/app/platform/`: what
+each host *decides* is a `Target` value whose answers are tested for both on
+any machine, and what each host *does* is the `Platform` trait, implemented in
+`native.rs` and `web.rs` and picked by the one `cfg` in `mod.rs`. The rest of
+the UI never asks which target it is on.
 
 | | Desktop | Web |
 |---|---|---|
-| Window sizing, position, title | `ViewerApp::manage_window` | nothing — CSS sizes the canvas |
-| Opening a file | blocking dialog, argv, Apple Events → a path | async picker / drop → bytes |
+| Window sizing, position, title | `Platform::manage_window` | nothing — CSS sizes the canvas |
+| Opening a file | blocking dialog, argv, Apple Events → a path | async picker / drop → bytes, kept as egui's `Arc<[u8]>` rather than copied |
+| Saving, exporting | asks where, writes on a worker | downloads under a name, on the frame that asked |
+| Running a job | a worker thread | inline, on the frame that asked (`Platform::spawn_job`) |
+| A result's own window | a new process | a new tab |
+| Pop-ups | windows of their own | egui windows in the canvas |
 | GPU option hook | `render::tune_native_options` | `render::tune_web_options` |
 | Extra files at once | launched as sibling processes | n/a |
-| Interface scale | native (`app::scale::UI_SCALE` = 1.0) | **150%**, pop-ups excepted |
+| Interface scale | native (`Target::ui_scale` = 1.0) | **125%**, pop-ups excepted |
 | Empty-viewport prompt | drop/open + scroll hints | the same, plus the local-processing line |
 | Opening zoom | window resized to the image, at a fixed level | image fitted to the canvas, at whatever factor that takes |
 
@@ -59,14 +68,14 @@ is whatever the two aspect ratios happen to demand: 53.91%, say. Snapping that
 to the nearest fixed level would either crop a sliver off the image or leave a
 margin you did not ask for.
 
-The exact factor is then inserted into that image's zoom ladder
-(`app::zoom_ladder`) for as long as the file is open, so wheeling out returns to
+The exact factor is then inserted into that image's zoom ladder (which
+`fast_tiff_viewer::view2d::View2d` keeps) for as long as the file is open, so wheeling out returns to
 the fitted view rather than stepping past it to 50%. It is dropped on the next
 open, since it describes one picture in one canvas.
 
 ## Why the web build is drawn larger
 
-`install_chrome` sets egui's zoom factor to 1.5 here and 1.0 natively. The
+`install_chrome` sets egui's zoom factor to 1.25 here and 1.0 natively. The
 desktop window is sized to the image and read at arm's length; a canvas is one
 element on a page, competing with the browser's own furniture, and the same
 widgets come out noticeably small. Zoom factor scales `pixels_per_point`, so
@@ -83,25 +92,43 @@ that this scales the *style*, so anything a pop-up sizes in literal points has
 to be expressed relative to the text (see `PLOT_TEXT_HEIGHTS`) or it will keep
 the enlarged scale while the text around it shrinks back.
 
-The panel's control row wraps to as many lines as it needs, which is what keeps
-the enlarged chrome usable in a narrow window.
+The toolbar and the panel's control row wrap to as many lines as they need,
+which is what keeps the enlarged chrome usable in a narrow window.
 
-## Two web builds, one core
+## The zoom keys zoom the picture, not the page
 
-| | `FastTIFF-web-React-frontend-example/` | `FastTIFF-web/` (this, deployed) |
-|---|---|---|
-| UI | React + TypeScript, DOM widgets | egui, drawn on the canvas |
-| Bundle | 2.3 MB wasm + 219 kB JS | 6.6 MB wasm, no JS framework |
-| Toolchain | wasm-pack + npm + Vite | wasm-pack only |
-| UI code | reimplemented (~700 lines TSX) | **literally the desktop app's** |
-| Fixing a UI bug | fix it twice | fix it once |
-| Native-feeling DOM (a11y, text selection, mobile) | yes | limited |
+Ctrl or Cmd with Plus, Equals or Minus steps the picture's zoom on both
+hosts, as Ctrl or Cmd with the wheel does; on a Mac either key works.
+egui's own keyboard zoom, which would scale the whole interface on the same
+chords and put Ctrl+0 back at 100% rather than 125%, is off on both:
+`install_chrome` turns it off on either host, and eframe's web runner already
+has it off before the app is created.
 
-Both sit on the identical `fast-tiff-viewer` core and neither reimplements any
-stack, channel, contrast, dimension-order, playback or camera logic. The React
-build is kept as a worked example of driving the core from JavaScript — useful
-if you want a DOM UI — but it does duplicate the interface, which is why the
-egui build is the one deployed.
+In a browser the same chords are the page zoom, and eframe does not prevent
+their default (it does for Ctrl+S, Ctrl+O and a few others, and has no
+option for more). So this crate does, in `keep_zoom_keys_from_page`: while
+the app has the focus, one Ctrl+Plus steps the picture and leaves the page as
+it was. It prevents nothing else. The press still reaches the app, which is
+what zooms the picture. The app's text fields type as they did: a chord with
+Alt in it is left alone, since a browser on Windows reports AltGr as Ctrl and
+Alt. And Ctrl+0 (Cmd+0 on a Mac), which the app does nothing with, still
+resets the page. A page zoom, from that or from the browser's menu, changes
+the device pixel ratio, not the 125% the chrome is drawn at.
+
+While the app has the focus these chords never zoom the page, whether or not
+there is a picture to zoom: on the empty viewport and in the 3D view they do
+nothing at all. The browser's menu still zooms the page, and so do the chords
+once the focus is elsewhere on the page. A browser's Cmd is the Meta key, so
+on Windows and Linux the Windows or Super key counts as Cmd here, for the
+keys as for the wheel.
+
+## One interface, two hosts
+
+The UI code is **literally the desktop app's**: this crate is only the browser
+host around `FastTIFF`'s library, so a UI bug is fixed once, for both. An
+earlier React + TypeScript front end drove the same `fast-tiff-viewer` core
+from JavaScript but reimplemented the interface (about 700 lines of TSX). It
+was removed, and this is the one web build.
 
 ## Build
 
@@ -132,25 +159,37 @@ Same as the desktop app, minus window management:
 | Drag | pan (when zoomed in) | left: orbit · middle/right: pan |
 | Scroll | scrub frames | fly along the view axis |
 | Shift+scroll | scrub ~10% of the stack | — |
-| Ctrl+scroll | zoom | — |
+| Ctrl+scroll or Cmd+scroll | zoom | — |
+| Ctrl or Cmd with `+`, `=` or `-` | zoom a step (not the page) | nothing (nor the page) |
 | ← → | — | orbit |
 | WASD / Space / Shift | — | fly (per nav mode) |
 
 ## Notes on the wasm build
 
-Identical to the React build's constraints, and for the same reasons — no
-threads, no filesystem, no ZSTD. See
-[`../FastTIFF-web-React-frontend-example/README.md`](../FastTIFF-web-React-frontend-example/README.md#notes-on-the-wasm-build)
-for the detail; both crates depend on `fast-tiff-viewer` with
-`default-features = false`.
+A browser tab has no threads, no filesystem and no C compiler, so the core is
+built without the `threads`, `mmap` and `codec-zstd` features: the desktop
+crate asks for them only under `cfg(not(target_arch = "wasm32"))`, and this
+crate depends on it with `default-features = false`. Files arrive as bytes
+(the picker, a drop, or `?open=`), decoding runs on the one thread, and
+ZSTD-compressed TIFFs are not readable.
 
-One extra thing this build needs that the React one didn't:
+One more thing this build needs:
 `render::tune_web_options` replaces eframe's default device limits with the
 adapter's real ones. eframe otherwise requests `wgpu::Limits::default()`, which
 is smaller than this renderer needs (the composite pass binds 13 sampled
 textures; the volume pass allocates 3D textures). It's the web twin of the
 desktop adapter's `tune_native_options`.
 
-This crate is deliberately **not** a workspace member — Cargo unifies features
-across a workspace, and one build covering this and the desktop app would union
-`threads`/`mmap`/`codec-zstd` back in and break the wasm build.
+This crate is a workspace member, so it builds from the root `Cargo.lock` and
+into the root `target/`. Everything it depends on, and all of its source, is
+behind `cfg(target_arch = "wasm32")`: on the host it is an empty crate, which is
+what lets `cargo test --workspace` include it. The desktop-only features
+(`threads`, `mmap`, `codec-zstd`) do not leak into the wasm build, because the
+desktop crate asks for them under `cfg(not(target_arch = "wasm32"))` and
+resolver 2 does not add features from a target that is not being built.
+
+To check or lint it without building the bundle:
+
+```bash
+cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
+```

@@ -278,7 +278,10 @@ fn two_step_keeps_the_bidiphase_of_one_step() {
     let a = register(&movie, &one, &mut |_| true).expect("not cancelled");
     let b = register(&movie, &two, &mut |_| true).expect("not cancelled");
     assert_ne!(a.bidiphase, 0, "the comb was not found at all");
-    assert_eq!(b.bidiphase, a.bidiphase, "two-step measured a different comb");
+    assert_eq!(
+        b.bidiphase, a.bidiphase,
+        "two-step measured a different comb"
+    );
     let pairs = |r: &Registered| r.shifts.iter().map(|s| (s.dy, s.dx)).collect::<Vec<_>>();
     assert_eq!(pairs(&b), pairs(&a));
 }

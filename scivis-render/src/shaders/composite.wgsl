@@ -9,6 +9,11 @@
 // raw sample values — no contrast/color math happens on the CPU at all,
 // which is what makes scrubbing through huge stacks fast: changing frames
 // is just a texture upload, not a CPU-side image processing pass.
+//
+// Not a complete module on its own: the constants in capitals and the
+// per-channel textures `chN_tex` / `chN_ftex` are written in ahead of it by
+// `composite_wgsl` in `scivis-render/src/shaders.rs`, from the Rust values
+// the glow backend's copy (`composite.frag.glsl`) is given too.
 
 struct ChannelParams {
     min_max: vec2<f32>,
@@ -19,7 +24,7 @@ struct ChannelParams {
 };
 
 struct Params {
-    channels: array<ChannelParams, 6>,
+    channels: array<ChannelParams, MAX_CHANNELS>,
     // Maps the quad's 0..1 UV onto the visible sub-rectangle of the image:
     // sampled_uv = uv_offset + uv * uv_scale. With (0,0)/(1,1) the whole image
     // fills the quad; smaller values show a zoomed/panned sub-region.
@@ -31,22 +36,12 @@ struct Params {
     _pad2: u32,
 };
 
+// The numbers are `composite_bindings` in `shaders.rs`. Each channel's
+// integer texture (R8Uint/R16Uint) and float texture (R32F, read when
+// params.channels[c].is_float == 1) follow, declared there.
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var ch0_tex: texture_2d<u32>;
-@group(0) @binding(2) var ch1_tex: texture_2d<u32>;
-@group(0) @binding(3) var ch2_tex: texture_2d<u32>;
-@group(0) @binding(4) var ch3_tex: texture_2d<u32>;
-@group(0) @binding(5) var ch4_tex: texture_2d<u32>;
-@group(0) @binding(6) var ch5_tex: texture_2d<u32>;
-@group(0) @binding(7) var lut_tex: texture_2d_array<f32>;
-@group(0) @binding(8) var lut_sampler: sampler;
-// Per-channel float textures (R32F), used when params.channels[c].is_float == 1.
-@group(0) @binding(9) var ch0_ftex: texture_2d<f32>;
-@group(0) @binding(10) var ch1_ftex: texture_2d<f32>;
-@group(0) @binding(11) var ch2_ftex: texture_2d<f32>;
-@group(0) @binding(12) var ch3_ftex: texture_2d<f32>;
-@group(0) @binding(13) var ch4_ftex: texture_2d<f32>;
-@group(0) @binding(14) var ch5_ftex: texture_2d<f32>;
+@group(0) @binding(1) var lut_tex: texture_2d_array<f32>;
+@group(0) @binding(2) var lut_sampler: sampler;
 
 struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -88,7 +83,7 @@ fn load_texel(tex: texture_2d<u32>, uv: vec2<f32>, dims: vec2<f32>) -> f32 {
 fn sample_channel(tex: texture_2d<u32>, uv: vec2<f32>, footprint: vec2<f32>) -> f32 {
     let dims = vec2<f32>(textureDimensions(tex));
     let texels = footprint * dims; // source texels covered by this output pixel
-    let n = i32(clamp(ceil(max(texels.x, texels.y)), 1.0, 4.0));
+    let n = i32(clamp(ceil(max(texels.x, texels.y)), 1.0, MAX_MINIFY_TAPS));
     if (n <= 1) {
         return load_texel(tex, uv, dims);
     }
@@ -114,7 +109,7 @@ fn load_texel_f(tex: texture_2d<f32>, uv: vec2<f32>, dims: vec2<f32>) -> f32 {
 fn sample_channel_f(tex: texture_2d<f32>, uv: vec2<f32>, footprint: vec2<f32>) -> f32 {
     let dims = vec2<f32>(textureDimensions(tex));
     let texels = footprint * dims;
-    let n = i32(clamp(ceil(max(texels.x, texels.y)), 1.0, 4.0));
+    let n = i32(clamp(ceil(max(texels.x, texels.y)), 1.0, MAX_MINIFY_TAPS));
     if (n <= 1) {
         return load_texel_f(tex, uv, dims);
     }
@@ -127,6 +122,26 @@ fn sample_channel_f(tex: texture_2d<f32>, uv: vec2<f32>, footprint: vec2<f32>) -
         }
     }
     return sum / (fn_ * fn_);
+}
+
+// A channel's value at `uv`, read from the one of its two textures that holds
+// its data: the float one if `is_float`, else the integer one. The other is a
+// 1x1 dummy, and is not read.
+//
+// A branch, not a `select`, which reads both (the dummy's one texel too):
+// `is_float` comes from the uniform buffer, so every pixel of a draw takes
+// the same side, and reading only that side took 17 to 38% off the
+// composite's GPU time (six 2048 x 2048 channels into 1080p, on Vulkan and
+// DX12 alike). Nothing on either side needs uniform control flow (textureLoad
+// and textureDimensions take no derivatives), so WGSL's uniformity analysis
+// accepts the branch whatever it can prove of `is_float`; the LUT read that
+// does need it, `textureSample` in `apply_channel`, comes after the call has
+// returned.
+fn channel_value(itex: texture_2d<u32>, ftex: texture_2d<f32>, is_float: bool, uv: vec2<f32>, footprint: vec2<f32>) -> f32 {
+    if (is_float) {
+        return sample_channel_f(ftex, uv, footprint);
+    }
+    return sample_channel(itex, uv, footprint);
 }
 
 fn apply_channel(value: f32, channel_index: i32, cp: ChannelParams) -> vec3<f32> {
@@ -146,25 +161,27 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Computed in uniform control flow (derivatives must not be in a branch).
     let footprint = fwidth(uv);
 
-    // Per channel, sample the integer or the float texture depending on
-    // `is_float`. `select` computes both (the unused one reads a 1x1 dummy,
-    // which is cheap) and picks; textureLoad needs no derivatives, so this is
-    // safe in uniform control flow.
-    color += apply_channel(select(sample_channel(ch0_tex, uv, footprint), sample_channel_f(ch0_ftex, uv, footprint), params.channels[0].is_float > 0.5), 0, params.channels[0]);
+    // Per channel, its value from the texture its kind uses (`channel_value`),
+    // through its window and LUT row. Every `if` here is on a uniform, so each
+    // `apply_channel` call, and its textureSample, is in uniform control flow,
+    // as WGSL requires. Keep it so: naga does not check that in a fragment
+    // shader, so neither does `tests/it/wgsl.rs`, but a browser's Tint does,
+    // and refuses the module.
+    color += apply_channel(channel_value(ch0_tex, ch0_ftex, params.channels[0].is_float > 0.5, uv, footprint), 0, params.channels[0]);
     if (params.num_channels > 1u) {
-        color += apply_channel(select(sample_channel(ch1_tex, uv, footprint), sample_channel_f(ch1_ftex, uv, footprint), params.channels[1].is_float > 0.5), 1, params.channels[1]);
+        color += apply_channel(channel_value(ch1_tex, ch1_ftex, params.channels[1].is_float > 0.5, uv, footprint), 1, params.channels[1]);
     }
     if (params.num_channels > 2u) {
-        color += apply_channel(select(sample_channel(ch2_tex, uv, footprint), sample_channel_f(ch2_ftex, uv, footprint), params.channels[2].is_float > 0.5), 2, params.channels[2]);
+        color += apply_channel(channel_value(ch2_tex, ch2_ftex, params.channels[2].is_float > 0.5, uv, footprint), 2, params.channels[2]);
     }
     if (params.num_channels > 3u) {
-        color += apply_channel(select(sample_channel(ch3_tex, uv, footprint), sample_channel_f(ch3_ftex, uv, footprint), params.channels[3].is_float > 0.5), 3, params.channels[3]);
+        color += apply_channel(channel_value(ch3_tex, ch3_ftex, params.channels[3].is_float > 0.5, uv, footprint), 3, params.channels[3]);
     }
     if (params.num_channels > 4u) {
-        color += apply_channel(select(sample_channel(ch4_tex, uv, footprint), sample_channel_f(ch4_ftex, uv, footprint), params.channels[4].is_float > 0.5), 4, params.channels[4]);
+        color += apply_channel(channel_value(ch4_tex, ch4_ftex, params.channels[4].is_float > 0.5, uv, footprint), 4, params.channels[4]);
     }
     if (params.num_channels > 5u) {
-        color += apply_channel(select(sample_channel(ch5_tex, uv, footprint), sample_channel_f(ch5_ftex, uv, footprint), params.channels[5].is_float > 0.5), 5, params.channels[5]);
+        color += apply_channel(channel_value(ch5_tex, ch5_ftex, params.channels[5].is_float > 0.5, uv, footprint), 5, params.channels[5]);
     }
 
     return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);

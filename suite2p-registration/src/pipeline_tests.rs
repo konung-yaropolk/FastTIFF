@@ -141,7 +141,7 @@ fn apply_batch_matches_a_serial_loop() {
             ..Settings::default()
         };
         let mut got = planes.clone();
-        super::apply_batch(&mut got, ly, lx, &frame_of, &shifts, None, &settings);
+        super::apply_batch(&mut got, ly, lx, &frame_of, &shifts, None, 0, &settings);
         assert_eq!(got, expected, "{} disagreed", backend.label());
     }
 }
@@ -183,6 +183,7 @@ fn every_channel_of_a_frame_moves_together() {
         &frame_of,
         &shifts,
         None,
+        0,
         &Settings::default(),
     );
 
@@ -202,25 +203,72 @@ fn every_channel_of_a_frame_moves_together() {
     );
 }
 
-/// A plane with no measurement behind it is left alone rather than moved by
-/// somebody else's shift.
+/// A plane with no measurement behind it is refused, before any plane is
+/// moved. It used to be left as it was, among planes that were moved — which
+/// looks registered and is not — while `Registered::apply` moved the same
+/// plane by no shift at all: two answers to one mistake.
 #[test]
-fn a_plane_without_a_measurement_is_untouched() {
+#[should_panic(expected = "a plane of frame 9, which has no shift")]
+fn a_plane_without_a_measurement_is_refused() {
     let (ly, lx) = (4, 4);
     let original: Vec<f32> = (0..16).map(|i| i as f32).collect();
-    let mut planes = vec![original.clone()];
+    let mut planes = vec![original.clone(), original];
     super::apply_batch(
         &mut planes,
         ly,
         lx,
-        &[9],
+        &[0, 9],
         &[Shift {
             dy: 1,
             dx: 1,
             corr: 1.0,
         }],
         None,
+        0,
         &Settings::default(),
     );
-    assert_eq!(planes[0], original);
+}
+
+/// A plane per frame index, or the call is refused: zipped, the extra planes
+/// would quietly stay where they were.
+#[test]
+#[should_panic(expected = "one frame index per plane")]
+fn planes_and_their_frames_pair_up() {
+    let mut planes = vec![vec![0.0f32; 16]; 3];
+    let still = Shift {
+        dy: 0,
+        dx: 0,
+        corr: 1.0,
+    };
+    super::apply_batch(
+        &mut planes,
+        4,
+        4,
+        &[0, 0],
+        &[still],
+        None,
+        0,
+        &Settings::default(),
+    );
+}
+
+/// The planes are as recorded: the comb named is undone before the shift,
+/// as every apply in the crate does it.
+#[test]
+fn apply_batch_undoes_the_comb_first() {
+    let (ly, lx) = (6, 8);
+    let plane: Vec<f32> = (0..ly * lx).map(|i| (i * 5 % 17) as f32).collect();
+    let shift = Shift {
+        dy: 1,
+        dx: -2,
+        corr: 1.0,
+    };
+    let settings = Settings::default();
+    let mut got = vec![plane.clone()];
+    super::apply_batch(&mut got, ly, lx, &[0], &[shift], None, 2, &settings);
+    let mut combless = plane;
+    crate::bidiphase::shift(&mut combless, ly, lx, 2);
+    let want =
+        crate::rigid::shift_frame_bordered(&combless, ly, lx, shift.dy, shift.dx, settings.border);
+    assert_eq!(got[0], want);
 }

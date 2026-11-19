@@ -85,6 +85,13 @@
 //! the plugin is a separate library. So pixels are pulled one plane at a time
 //! into a buffer the plugin owns. See [`HostContext`].
 //!
+//! **Nor do results.** A stabilised copy of a 4 GB recording is another 4 GB,
+//! so a result that size is not returned at all: it is declared up front and
+//! pushed to the host one plane at a time while the run goes, through an
+//! [`ImageStream`], and the run ends with [`Outcome::Streamed`]. The host
+//! writes each plane into the result's file as it arrives. A small result —
+//! a projection, a plane — can still come back whole as an [`ImageResult`].
+//!
 //! **A run is one call that returns.** So a plugin that wants something to
 //! keep happening — a chart that follows the selection, a volume that turns —
 //! declares it and the host carries it out: a [`Plot`] the host re-asks for
@@ -110,6 +117,7 @@ pub mod params;
 pub mod plot;
 pub mod plugin;
 pub mod selection;
+pub mod stream;
 
 pub use animation::{Animation, AnimationOutput, MovieResolution, Pose};
 pub use export::{ExportRequest, Exporter};
@@ -121,8 +129,12 @@ pub use import::{Confidence, FileType, ImportHost, ImportRequest, ImportResult, 
 pub use meta::{DisplayMode, Spacing, StackInfo};
 pub use params::{ParamDecl, ParamKind, ParamValue, Params};
 pub use plot::{Plot, Selection, SelectionKind, Series};
-pub use plugin::{ImageResult, Outcome, PlaneData, Plugin, PluginError, PluginInfo};
+pub use plugin::{
+    ImageResult, ImageSpec, Outcome, PlaneData, PlaneRef, Plugin, PluginError, PluginInfo,
+    StreamTarget,
+};
 pub use selection::{Roi, Shape};
+pub use stream::ImageStream;
 
 /// The contract's version.
 ///
@@ -132,4 +144,7 @@ pub use selection::{Roi, Shape};
 /// symbol at load rather than two sides disagreeing about a struct layout after
 /// the call has already begun.
 pub const API_VERSION_MAJOR: u32 = 1;
-pub const API_VERSION_MINOR: u32 = 3;
+/// 4: results streamed during the run — [`ImageStream`], [`ImageSpec`],
+/// [`PlaneRef`], [`Outcome::Streamed`] and the four [`HostContext`] methods
+/// behind them. Carried by the C ABI's existing sink, so the ABI is unchanged.
+pub const API_VERSION_MINOR: u32 = 4;

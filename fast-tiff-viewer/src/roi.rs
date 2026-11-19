@@ -30,6 +30,8 @@
 //! as a texture the device rejects (fatal) or a seam at the edge of the view.
 //! In texel space each is exact.
 
+use crate::screen::PhysicalPx;
+
 /// Bytes of texture the resident window may occupy, summed across channels.
 ///
 /// A budget rather than an axis count because what matters is VRAM, and a
@@ -37,7 +39,7 @@
 /// ones differ fourfold for the same picture. Sized to be generous on any GPU
 /// that can open a file this large in the first place while leaving room for
 /// the rest of the app.
-pub const MAX_ROI_BYTES: usize = 512 << 20;
+pub(crate) const MAX_ROI_BYTES: usize = 512 << 20;
 
 /// How an over-large frame is kept on screen.
 ///
@@ -59,7 +61,7 @@ pub enum LargeImageMode {
     /// picks for the same view.
     ///
     /// Paid for in RAM: that level is held for as long as the file is open, up
-    /// to [`MAX_PRELOAD_BYTES`].
+    /// to a bound of its own (512 MiB natively, 96 MiB in a browser).
     Preload,
     /// Resolution follows the zoom continuously: every view gets a window at
     /// whatever sampling the display can actually resolve, and no more.
@@ -86,7 +88,7 @@ pub enum LargeImageMode {
 /// the texture limit and the per-texel cost jointly bound a window, and the
 /// mode decides which windows are allowed to be considered in the first place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Budget {
+pub(crate) struct Budget {
     /// The device's per-axis 2D texture limit.
     pub max_axis: u32,
     /// Summed per-texel cost of the resident channels, in bytes. A channel's
@@ -97,7 +99,7 @@ pub struct Budget {
 }
 
 impl Budget {
-    pub fn new(max_axis: u32, bytes_per_texel: usize, mode: LargeImageMode) -> Self {
+    pub(crate) fn new(max_axis: u32, bytes_per_texel: usize, mode: LargeImageMode) -> Self {
         Budget {
             max_axis,
             bytes_per_texel,
@@ -115,11 +117,11 @@ impl Budget {
 /// planner chooses but the retainer then refuses would be rebuilt on every
 /// frame, which is worse than either mode.
 #[cfg(not(target_arch = "wasm32"))]
-pub const MAX_PRELOAD_BYTES: usize = 512 << 20;
+pub(crate) const MAX_PRELOAD_BYTES: usize = 512 << 20;
 /// Smaller in a browser, where the whole file is already resident in a 32-bit
 /// address space and a half-gigabyte plane on top of it would abort the module.
 #[cfg(target_arch = "wasm32")]
-pub const MAX_PRELOAD_BYTES: usize = 96 << 20;
+pub(crate) const MAX_PRELOAD_BYTES: usize = 96 << 20;
 
 /// The sampling of the preloaded coarse level: the *finest* power-of-two
 /// sampling at which the whole frame fits both the device's texture limit and
@@ -132,7 +134,12 @@ pub const MAX_PRELOAD_BYTES: usize = 96 << 20;
 /// what the budget is for.
 ///
 /// Powers of two only, so the level is a clean 1/2, 1/4, 1/8 of the original.
-pub fn overview_stride(width: u32, height: u32, max_axis: u32, bytes_per_texel: usize) -> u32 {
+pub(crate) fn overview_stride(
+    width: u32,
+    height: u32,
+    max_axis: u32,
+    bytes_per_texel: usize,
+) -> u32 {
     let max_axis = max_axis.max(2);
     let bytes_per_texel = bytes_per_texel.max(1);
     let mut stride = 2;
@@ -170,7 +177,7 @@ const MARGIN: u32 = 2;
 /// gigapixel mosaics costs nothing on the images that do not need it. Only a
 /// frame past the per-axis texture limit, which cannot become a texture at all,
 /// is worth paying for a window.
-pub fn needs_window(width: u32, height: u32, max_axis: u32) -> bool {
+pub(crate) fn needs_window(width: u32, height: u32, max_axis: u32) -> bool {
     width > max_axis || height > max_axis
 }
 
@@ -194,7 +201,7 @@ pub struct Roi {
 /// uploading only the required rect leaves no margin at all. They are returned
 /// together, from one stride, so the two can never disagree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Residency {
+pub(crate) struct Plan {
     /// The window to upload: the visible region plus margin.
     pub resident: Roi,
     /// The least that would serve this view. A window already on the GPU that
@@ -209,13 +216,13 @@ pub struct Residency {
 /// and that gap is the entire point — it is what lets the picture stay up
 /// instead of the program stopping until the new window is ready.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Serving {
+pub(crate) struct Serving {
     /// The window to draw from.
     pub show: Roi,
     /// The window the view really wants. Equal to `show` when there is nothing
     /// better to prepare.
     pub want: Roi,
-    /// The least that would serve this view — [`Residency::required`], carried
+    /// The least that would serve this view — [`Plan::required`], carried
     /// through so the caller can ask "is this good enough?" rather than "is
     /// this identical?".
     ///
@@ -263,7 +270,7 @@ pub struct Serving {
 /// Pure, and separate from the GPU for that reason: which case applies decides
 /// whether zooming a gigapixel image stalls, and that should be checkable
 /// without a display.
-pub fn serve(current: Option<Roi>, overview: Option<Roi>, plan: &Residency) -> Serving {
+pub(crate) fn serve(current: Option<Roi>, overview: Option<Roi>, plan: &Plan) -> Serving {
     if let Some(show) = current {
         if show.serves(&plan.required) {
             return Serving {
@@ -303,7 +310,7 @@ pub fn serve(current: Option<Roi>, overview: Option<Roi>, plan: &Residency) -> S
 impl Roi {
     /// The whole frame at full resolution — what every frame small enough to
     /// upload outright uses.
-    pub fn full(width: u32, height: u32) -> Self {
+    pub(crate) fn full(width: u32, height: u32) -> Self {
         Roi {
             x: 0,
             y: 0,
@@ -314,7 +321,7 @@ impl Roi {
     }
 
     /// Texture dimensions this window uploads to.
-    pub fn texture_size(&self) -> (u32, u32) {
+    pub(crate) fn texture_size(&self) -> (u32, u32) {
         (
             self.w.div_ceil(self.stride).max(1),
             self.h.div_ceil(self.stride).max(1),
@@ -325,14 +332,40 @@ impl Roi {
     /// whole texels. Slightly larger than `w`/`h` when the stride does not
     /// divide them, and it is this span — not the rect — that the UV mapping
     /// has to divide by, or the picture drifts by up to one texel.
-    pub fn covered_span(&self) -> (u32, u32) {
+    pub(crate) fn covered_span(&self) -> (u32, u32) {
         let (tw, th) = self.texture_size();
         (tw * self.stride, th * self.stride)
     }
 
+    /// Whether this window is the entire `width` x `height` frame at full
+    /// resolution, in which case no view can leave it and nothing needs
+    /// re-cutting.
+    ///
+    /// Note the `stride == 1`: this is "the whole picture, every pixel", the
+    /// test for whether any windowing is needed at all. For "spans the whole
+    /// frame at whatever sampling", which is a different and weaker question,
+    /// see [`spans_whole_frame`](Self::spans_whole_frame).
+    pub(crate) fn covers_whole_frame(&self, width: u32, height: u32) -> bool {
+        self.spans_whole_frame(width, height) && self.stride == 1
+    }
+
+    /// Whether this window spans the whole `width` x `height` frame at *any*
+    /// sampling: whether what it holds is all of the picture, if perhaps not
+    /// at its own resolution.
+    ///
+    /// Deliberately not "covers the whole frame", which also demands
+    /// `stride == 1`. A fit-to-window view of a gigapixel mosaic spans the
+    /// frame at a stride of 16 or more and fails that test, so using it to
+    /// decide what is worth retaining as an overview would retain nothing at
+    /// all — and would do so silently, since every other test would still
+    /// pass.
+    pub fn spans_whole_frame(&self, width: u32, height: u32) -> bool {
+        self.x == 0 && self.y == 0 && self.w >= width && self.h >= height
+    }
+
     /// Whether this window can serve a view wanting `other`: same resolution,
     /// and covering all of it.
-    pub fn serves(&self, other: &Roi) -> bool {
+    pub(crate) fn serves(&self, other: &Roi) -> bool {
         self.stride == other.stride
             && self.x <= other.x
             && self.y <= other.y
@@ -348,7 +381,7 @@ impl Roi {
     /// better one is prepared" — a coarser window covering the same ground
     /// looks soft but is otherwise right, where one that does not cover it
     /// shows the edge of the data.
-    pub fn covers_area_of(&self, other: &Roi) -> bool {
+    pub(crate) fn covers_area_of(&self, other: &Roi) -> bool {
         self.x <= other.x
             && self.y <= other.y
             && self.x + self.w >= other.x + other.w
@@ -363,7 +396,7 @@ impl Roi {
     /// thinks in "which part of the picture am I showing", and a second
     /// frontend would have to learn about residency to do anything else. The
     /// translation belongs here, where residency is decided.
-    pub fn map_uv(
+    pub(crate) fn map_uv(
         &self,
         width: u32,
         height: u32,
@@ -384,18 +417,19 @@ impl Roi {
 }
 
 /// Plan residency for a view showing the image-normalised range
-/// `uv_offset .. uv_offset + uv_scale` of a `width` x `height` frame.
+/// `uv_offset .. uv_offset + uv_scale` of a `width` x `height` frame, drawn
+/// into `viewport` (see [`ImageInputs`](crate::frame::ImageInputs)).
 ///
 /// The result always fits everything [`Budget`] bounds and always covers the
 /// visible region.
-pub fn plan(
+pub(crate) fn plan(
     width: u32,
     height: u32,
     uv_offset: [f32; 2],
     uv_scale: [f32; 2],
-    viewport: [f32; 2],
+    viewport: PhysicalPx,
     budget: Budget,
-) -> Residency {
+) -> Plan {
     let Budget {
         max_axis,
         bytes_per_texel,
@@ -449,7 +483,7 @@ pub fn plan(
             // The escape is for a frame so large that even one texel per axis is
             // over budget; there is nothing coarser to fall back to.
             if bytes <= MAX_ROI_BYTES || (rx.1 <= 1 && ry.1 <= 1) {
-                return Residency {
+                return Plan {
                     resident: roi(rx, ry, stride, width, height),
                     required: roi(
                         axis_window(vx, vw, width, stride, max_axis, 1),
@@ -482,10 +516,10 @@ fn plan_preloaded(
     width: u32,
     height: u32,
     visible: (u32, u32, u32, u32),
-    viewport: [f32; 2],
+    viewport: PhysicalPx,
     max_axis: u32,
     bytes_per_texel: usize,
-) -> Residency {
+) -> Plan {
     let (vx, vy, vw, vh) = visible;
     let coarse = {
         let stride = overview_stride(width, height, max_axis, bytes_per_texel);
@@ -499,7 +533,7 @@ fn plan_preloaded(
             h: height,
             stride,
         };
-        Residency {
+        Plan {
             resident: r,
             required: r,
         }
@@ -524,7 +558,7 @@ fn plan_preloaded(
             let rx = axis_window(vx, vw, width, 1, max_axis, margin);
             let ry = axis_window(vy, vh, height, 1, max_axis, margin);
             if (rx.1 as usize) * (ry.1 as usize) * bytes_per_texel <= MAX_ROI_BYTES {
-                return Residency {
+                return Plan {
                     resident: roi(rx, ry, 1, width, height),
                     required,
                 };
@@ -554,14 +588,14 @@ fn needed_texels(v: u32, len: u32, stride: u32) -> u32 {
 /// free to take any value changes on nearly every zoom step, and each change
 /// re-decodes the window, which is precisely the stall this is meant to avoid.
 ///
-/// `viewport` of zero means the frontend has not said how large it is; the
-/// result is then 1 and residency falls back to being bounded by the texture
-/// budget alone, which is correct if wasteful.
-fn display_stride(vw: u32, vh: u32, viewport: [f32; 2]) -> u32 {
-    let (pw, ph) = (viewport[0], viewport[1]);
-    if !(pw.is_finite() && ph.is_finite()) || pw < 1.0 || ph < 1.0 {
+/// A `viewport` not [known](PhysicalPx::is_known) means the frontend has not
+/// said how large it is; the result is then 1 and residency falls back to
+/// being bounded by the texture budget alone, which is correct if wasteful.
+fn display_stride(vw: u32, vh: u32, viewport: PhysicalPx) -> u32 {
+    if !viewport.is_known() {
         return 1;
     }
+    let (pw, ph) = (viewport.width, viewport.height);
     // Source pixels per screen pixel, on the axis that needs the most.
     let ratio = (vw as f32 / pw).max(vh as f32 / ph);
     if !ratio.is_finite() || ratio < 2.0 {
@@ -656,7 +690,7 @@ fn axis_window(v: u32, len: u32, n: u32, stride: u32, max_texels: u32, margin: u
 /// the plane is shorter than its declared frame. Handing the GPU a buffer that
 /// does not match the texture is a validation failure, and validation failures
 /// here are fatal — the very thing this module exists to prevent.
-pub fn extract<T: Copy + Default>(src: &[T], width: u32, height: u32, roi: &Roi) -> Vec<T> {
+pub(crate) fn extract<T: Copy + Default>(src: &[T], width: u32, height: u32, roi: &Roi) -> Vec<T> {
     let (tw, th) = roi.texture_size();
     extract_sampled(
         src,
@@ -687,7 +721,7 @@ pub fn extract<T: Copy + Default>(src: &[T], width: u32, height: u32, roi: &Roi)
 /// reads as plausible image data with banding, and that is exactly the bug this
 /// type exists to make impossible to write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Sampling {
+pub(crate) struct Sampling {
     /// First column of `src` to read.
     pub x: u32,
     /// First row of `src` to read.
@@ -708,7 +742,7 @@ pub struct Sampling {
 /// Anything the source runs short of comes back as `T::default()`, so the result
 /// is always exactly `cols * rows` and every row starts at the same column — a
 /// short source leaves a black edge rather than a sheared picture.
-pub fn extract_sampled<T: Copy + Default>(
+pub(crate) fn extract_sampled<T: Copy + Default>(
     src: &[T],
     width: u32,
     height: u32,
@@ -741,3 +775,10 @@ pub fn extract_sampled<T: Copy + Default>(
     out.resize(want, T::default());
     out
 }
+
+#[cfg(test)]
+#[path = "roi_plan_tests.rs"]
+mod plan_tests;
+#[cfg(test)]
+#[path = "roi_preload_tests.rs"]
+mod preload_tests;

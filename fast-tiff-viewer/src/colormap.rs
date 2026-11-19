@@ -9,12 +9,12 @@
 //! 3.10.0 was used here).
 
 /// Colormap display names, in UI order (parallel to [`LUTS`]).
-pub const NAMES: [&str; 7] = [
+pub(crate) const NAMES: [&str; 7] = [
     "Magma", "Plasma", "Inferno", "Viridis", "Turbo", "Bone", "Summer",
 ];
 
 /// The baked 256-entry RGB lookup tables, in the same order as [`NAMES`].
-pub const LUTS: [[[u8; 3]; 256]; 7] = [MAGMA, PLASMA, INFERNO, VIRIDIS, TURBO, BONE, SUMMER];
+pub(crate) const LUTS: [[[u8; 3]; 256]; 7] = [MAGMA, PLASMA, INFERNO, VIRIDIS, TURBO, BONE, SUMMER];
 
 const MAGMA: [[u8; 3]; 256] = [
     [0, 0, 4],

@@ -81,7 +81,7 @@ pub fn search_paths() -> Vec<PathBuf> {
 }
 
 /// The per-user plugin directory, following each platform's convention.
-pub fn user_plugin_dir() -> Option<PathBuf> {
+pub(crate) fn user_plugin_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         // Roaming, so a plugin follows the user across machines on a domain —
@@ -113,7 +113,7 @@ pub fn user_plugin_dir() -> Option<PathBuf> {
 }
 
 /// System-wide plugin directories, for packaged installs.
-pub fn system_plugin_dirs() -> Vec<PathBuf> {
+pub(crate) fn system_plugin_dirs() -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         std::env::var_os("PROGRAMDATA")
@@ -160,7 +160,7 @@ pub const LIBRARY_EXT: &str = if cfg!(target_os = "windows") {
 };
 
 /// Whether a filename looks like a plugin library for this platform.
-pub fn is_library(path: &std::path::Path) -> bool {
+pub(crate) fn is_library(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case(LIBRARY_EXT))

@@ -504,6 +504,11 @@ pub struct FtImageInfo {
 }
 
 /// One displayed channel's contrast window.
+///
+/// `min` (shown black) and `max` (shown at full intensity) are in the
+/// channel's own sample units: the file's values, as `read_plane_f32` returns
+/// them — `0..=255` for 8-bit data, possibly negative for signed data, the
+/// data's own values for float. Not the `read_plane_u16` display scale.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FtChannelView {
@@ -583,6 +588,19 @@ pub struct FtRoi {
 /// A plugin must check `struct_size` before using any field: a host older than
 /// the plugin will have a shorter struct, and reading past it is exactly the
 /// kind of thing this prologue exists to prevent.
+///
+/// # Threads
+///
+/// Every callback here and in the [`FtSink`] (and [`FtParamSink`]) a call was
+/// handed is made from the thread the host called the plugin on, and one at a
+/// time: never two at once, never one from inside another. A plugin that
+/// works on several threads brings what they made back to that thread to
+/// read the next plane, report progress or push a plane. The host's context
+/// is one object behind both tables — a streaming host writes a pushed plane
+/// through the same state a read goes through — so two calls at once would be
+/// two writers of it. A host may refuse a call that arrives while another is
+/// in progress, with a failure status, and fail the run saying why; the
+/// FastTIFF host does.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FtHost {
@@ -770,6 +788,24 @@ pub const FT_STRING_CHANNEL_NAME: u32 = 2;
 
 /// Where a plugin puts its result. The host owns everything pushed here and
 /// copies it before the call returns, so no allocation crosses the boundary.
+///
+/// # Order
+///
+/// `begin_image` before the first `push_plane`, and may be repeated before
+/// it to restate the result; once a plane is pushed, another `begin_image`
+/// is a second result and is refused. `set_info`, `set_channel` and
+/// `set_channel_name` may come at any point up to `set_outcome`, before the
+/// planes or after them: a host that writes planes into a file as they
+/// arrive writes the description when it finishes the file. Each adds to or
+/// replaces what was said before — a colour or name for the same index
+/// replaces the earlier one, `set_info` replaces the earlier metadata — so
+/// what is said last is what the result says.
+///
+/// # Threads
+///
+/// The rule of [`FtHost`]: every call from the thread the plugin was called
+/// on, one at a time. A plane pushed from a second thread while the first
+/// is reading one through the host is two writers of the same host state.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FtSink {

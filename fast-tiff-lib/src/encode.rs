@@ -28,6 +28,7 @@
 //! strips per sample plane. An absent tag is chunky per TIFF6, so the default
 //! output carries no PlanarConfiguration entry at all.
 
+use crate::error::{bail, err, Context, ErrorKind, OptionContext, Result};
 use crate::ifd::TiffFlavor;
 use crate::index::{
     Compression, TAG_BITS_PER_SAMPLE, TAG_COMPRESSION, TAG_IMAGE_DESCRIPTION, TAG_IMAGE_LENGTH,
@@ -36,7 +37,6 @@ use crate::index::{
     TAG_STRIP_OFFSETS, TAG_X_RESOLUTION, TAG_Y_RESOLUTION,
 };
 use crate::metadata::{self, MetadataFormat, StackMetaWrite, WriteGeometry};
-use anyhow::{anyhow, bail, Result};
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::fs::File;
@@ -302,7 +302,7 @@ impl WriterOptions {
 ///
 /// ```no_run
 /// use fast_tiff_lib::{SampleType, TiffWriter, WriterOptions};
-/// # fn main() -> anyhow::Result<()> {
+/// # fn main() -> fast_tiff_lib::Result<()> {
 /// let opts = WriterOptions::new(256, 256, SampleType::U16);
 /// let mut writer = TiffWriter::create("stack.tif", opts)?;
 /// let frame = vec![0u16; 256 * 256];
@@ -390,12 +390,19 @@ struct FrameStrips {
     byte_counts: Vec<u64>,
 }
 
+/// The pixel size the resolution tags are written from: the metadata
+/// builder's, when it is a real size.
+fn pixel_size_of(meta: Option<&StackMetaWrite>) -> Option<(f64, f64)> {
+    meta.and_then(|m| m.pixel_width.zip(m.pixel_height))
+        .filter(|(w, h)| w.is_finite() && *w > 0.0 && h.is_finite() && *h > 0.0)
+}
+
 impl TiffWriter<BufWriter<File>> {
     /// Create `path` (truncating any existing file) and write a stack to it
     /// through a buffered writer.
     pub fn create(path: impl AsRef<Path>, options: WriterOptions) -> Result<Self> {
         let file = File::create(path.as_ref())
-            .map_err(|e| anyhow!("could not create {}: {e}", path.as_ref().display()))?;
+            .with_context(|| format!("could not create {}", path.as_ref().display()))?;
         Self::new(BufWriter::new(file), options)
     }
 }
@@ -423,23 +430,44 @@ impl<W: Write + Seek> TiffWriter<W> {
         } = options;
 
         if width == 0 || height == 0 {
-            bail!("frame dimensions must be non-zero (got {width}x{height})");
+            bail!(
+                InvalidInput,
+                "frame dimensions must be non-zero (got {width}x{height})"
+            );
         }
         if samples_per_pixel == 0 {
-            bail!("samples_per_pixel must be at least 1");
+            bail!(InvalidInput, "samples_per_pixel must be at least 1");
         }
         if let Compression::Other(code) = compression {
-            bail!("cannot write unsupported compression scheme {code} (use None/Lzw/PackBits/Deflate/Zstd)");
+            bail!(
+                Unsupported,
+                "cannot write unsupported compression scheme {code} (use None/Lzw/PackBits/Deflate/Zstd)"
+            );
+        }
+        // Refused here rather than at the first frame, so that a build without
+        // the codec says so before anything has been written.
+        if compression == Compression::Zstd && cfg!(not(feature = "codec-zstd")) {
+            bail!(
+                Unavailable,
+                "ZSTD output needs the `codec-zstd` feature (a C dependency, so it is \
+                 unavailable on wasm)"
+            );
         }
         // Reject a CMYK request the reader would not accept back, rather than
         // writing a file that opens but refuses to convert. These are the same
         // conditions `FrameInfo::is_cmyk` checks.
         if cmyk {
             if samples_per_pixel < 4 {
-                bail!("cmyk() needs at least 4 samples per pixel (C, M, Y, K); got {samples_per_pixel}");
+                bail!(
+                    InvalidInput,
+                    "cmyk() needs at least 4 samples per pixel (C, M, Y, K); got {samples_per_pixel}"
+                );
             }
             if !matches!(sample_type, SampleType::U8 | SampleType::U16) {
-                bail!("cmyk() is defined for unsigned 8- or 16-bit samples; got {sample_type:?}");
+                bail!(
+                    InvalidInput,
+                    "cmyk() is defined for unsigned 8- or 16-bit samples; got {sample_type:?}"
+                );
             }
         }
         // Predictor 2 for integers (any width), Predictor 3 for floats —
@@ -450,22 +478,24 @@ impl<W: Write + Seek> TiffWriter<W> {
             (true, _) => 2,
         };
         if metadata.is_some() && description.is_some() {
-            bail!("metadata(..) and description(..) are mutually exclusive (both write tag 270)");
+            bail!(
+                InvalidInput,
+                "metadata(..) and description(..) are mutually exclusive (both write tag 270)"
+            );
         }
         // ASCII fields are NUL-terminated, so an interior NUL would silently
         // truncate the text on read-back. Reject up front instead of writing a
         // broken file; the ImageJ dialect additionally forbids newlines / '='.
         if description.as_deref().is_some_and(|d| d.contains('\0')) {
-            bail!("description must not contain NUL bytes (TIFF ASCII fields are NUL-terminated)");
+            bail!(
+                InvalidInput,
+                "description must not contain NUL bytes (TIFF ASCII fields are NUL-terminated)"
+            );
         }
         if let Some(meta) = &metadata {
             meta.validate_text(metadata_format == MetadataFormat::ImageJ)?;
         }
-        // Pixel size for the resolution tags: taken from the metadata builder.
-        let pixel_size = metadata
-            .as_ref()
-            .and_then(|m| m.pixel_width.zip(m.pixel_height))
-            .filter(|(w, h)| w.is_finite() && *w > 0.0 && h.is_finite() && *h > 0.0);
+        let pixel_size = pixel_size_of(metadata.as_ref());
 
         let spp = samples_per_pixel as usize;
         // PlanarConfiguration is irrelevant for single-sample data (TIFF6), and
@@ -480,7 +510,7 @@ impl<W: Write + Seek> TiffWriter<W> {
         // a release build to some small size, every frame of that size would
         // be accepted, and the file left behind is one the reader refuses.
         let overflow = || {
-            anyhow!(
+            format!(
                 "frame geometry overflows address space: {width}x{height} x {spp} sample(s)/px x {} byte(s)/sample",
                 sample_type.bytes()
             )
@@ -488,9 +518,13 @@ impl<W: Write + Seek> TiffWriter<W> {
         let row_bytes = (width as usize)
             .checked_mul(spp / n_planes)
             .and_then(|v| v.checked_mul(sample_type.bytes()))
-            .ok_or_else(overflow)?;
-        let plane_bytes = row_bytes.checked_mul(height as usize).ok_or_else(overflow)?;
-        let frame_bytes = plane_bytes.checked_mul(n_planes).ok_or_else(overflow)?;
+            .with_context(ErrorKind::TooLarge, overflow)?;
+        let plane_bytes = row_bytes
+            .checked_mul(height as usize)
+            .with_context(ErrorKind::TooLarge, overflow)?;
+        let frame_bytes = plane_bytes
+            .checked_mul(n_planes)
+            .with_context(ErrorKind::TooLarge, overflow)?;
         let rows_per_strip = match rows_per_strip {
             Some(r) => r.clamp(1, height),
             // Uncompressed: one strip per frame — the reader's zero-copy fast
@@ -536,6 +570,42 @@ impl<W: Write + Seek> TiffWriter<W> {
     /// Number of frames (planes) written so far.
     pub fn frames_written(&self) -> usize {
         self.frames.len()
+    }
+
+    /// Replace the structured metadata — calibration, channel names and
+    /// LUTs, display mode, the trailing description — that
+    /// [`finish`](Self::finish) writes, at any point before it.
+    ///
+    /// Nothing of it is in the file until `finish`, so metadata need not be
+    /// settled before the first frame: a stream whose colours or calibration
+    /// are only known once some of the data has been seen can say so then.
+    /// Checked as [`WriterOptions::metadata`] is at construction. Replaces a
+    /// verbatim [`WriterOptions::description`] too, the two writing the same
+    /// tag.
+    pub fn set_metadata(&mut self, meta: StackMetaWrite) -> Result<()> {
+        meta.validate_text(self.metadata_format == MetadataFormat::ImageJ)?;
+        self.pixel_size = pixel_size_of(Some(&meta));
+        self.metadata = Some(meta);
+        self.description = None;
+        Ok(())
+    }
+
+    /// Replace what `finish` writes as the `ImageDescription` with this text,
+    /// verbatim — the late form of [`WriterOptions::description`], with the
+    /// same check. Replaces structured metadata set before, the two writing
+    /// the same tag.
+    pub fn set_description(&mut self, text: impl Into<String>) -> Result<()> {
+        let text = text.into();
+        if text.contains('\0') {
+            bail!(
+                InvalidInput,
+                "description must not contain NUL bytes (TIFF ASCII fields are NUL-terminated)"
+            );
+        }
+        self.metadata = None;
+        self.pixel_size = None;
+        self.description = Some(text);
+        Ok(())
     }
 
     /// Append one frame from raw **little-endian** sample bytes — the
@@ -668,6 +738,7 @@ impl<W: Write + Seek> TiffWriter<W> {
     fn check_frame_len(&self, data: &[u8]) -> Result<()> {
         if data.len() != self.frame_bytes {
             bail!(
+                InvalidInput,
                 "frame data is {} bytes but the configured frame layout ({}x{}, {} sample(s)/px, \
                  {}-bit) needs exactly {}",
                 data.len(),
@@ -723,7 +794,10 @@ impl<W: Write + Seek> TiffWriter<W> {
     /// back). The file is not a valid TIFF until this has run.
     pub fn finish(mut self) -> Result<W> {
         if self.frames.is_empty() {
-            bail!("no frames were written — a TIFF needs at least one image");
+            bail!(
+                InvalidInput,
+                "no frames were written — a TIFF needs at least one image"
+            );
         }
 
         // The ImageDescription for the first IFD: structured metadata rendered
@@ -845,6 +919,7 @@ impl<W: Write + Seek> TiffWriter<W> {
     fn expect_type(&self, wanted: SampleType, method: &str) -> Result<()> {
         if self.sample_type != wanted {
             bail!(
+                InvalidInput,
                 "{method} requires SampleType::{wanted:?} but the writer was configured with \
                  SampleType::{:?} (use write_frame_bytes for other layouts)",
                 self.sample_type
@@ -1298,7 +1373,7 @@ fn compress_strip(
                 .into_stream(&mut out)
                 .encode_all(strip)
                 .status
-                .map_err(|e| anyhow!("LZW encode failed: {e:?}"))?;
+                .map_err(|e| err!(Internal, "LZW encode failed: {e:?}"))?;
             Ok(out)
         }
         Compression::Deflate => {
@@ -1308,23 +1383,26 @@ fn compress_strip(
                 flate2::write::ZlibEncoder::new(Vec::with_capacity(strip.len() / 2), flate_level);
             encoder
                 .write_all(strip)
-                .map_err(|e| anyhow!("Deflate encode failed: {e}"))?;
+                .map_err(|e| err!(Internal, "Deflate encode failed: {e}"))?;
             encoder
                 .finish()
-                .map_err(|e| anyhow!("Deflate encode failed: {e}"))
+                .map_err(|e| err!(Internal, "Deflate encode failed: {e}"))
         }
         Compression::PackBits => Ok(packbits_encode(strip, row_bytes)),
         Compression::Zstd => {
             #[cfg(not(feature = "codec-zstd"))]
-            return Err(anyhow!(
+            bail!(
+                Unavailable,
                 "ZSTD output needs the `codec-zstd` feature (a C dependency, so it is \
                  unavailable on wasm)"
-            ));
+            );
             #[cfg(feature = "codec-zstd")]
             zstd::stream::encode_all(strip, level.unwrap_or(DEFAULT_ZSTD_LEVEL))
-                .map_err(|e| anyhow!("ZSTD encode failed: {e}"))
+                .map_err(|e| err!(Internal, "ZSTD encode failed: {e}"))
         }
-        Compression::Other(code) => bail!("unsupported TIFF compression scheme: {code}"),
+        Compression::Other(code) => {
+            bail!(Unsupported, "unsupported TIFF compression scheme: {code}")
+        }
     }
 }
 

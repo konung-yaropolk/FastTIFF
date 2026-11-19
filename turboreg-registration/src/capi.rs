@@ -29,25 +29,27 @@
 //! built with `panic = "unwind"` (the default, and this workspace's release
 //! profile).
 
+use fast_tiff_c_api_support::{status, Errors};
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CString};
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use crate::{register_stack, Backend, Border, Frames, Reference, Registered, Settings, Transformation};
+use crate::{
+    Backend, Batch, Border, Error, Reference, Registered, Session, Settings, Transformation,
+};
 
 /// The call did what it was asked.
-pub const TR_OK: c_int = 0;
+pub const TR_OK: c_int = status::OK;
 /// The progress callback asked to stop; nothing was produced.
-pub const TR_CANCELLED: c_int = 1;
+pub const TR_CANCELLED: c_int = status::CANCELLED;
 /// A pointer, size, index or setting the call cannot take.
-pub const TR_INVALID_ARGUMENT: c_int = 2;
+pub const TR_INVALID_ARGUMENT: c_int = status::INVALID_ARGUMENT;
 /// The backend asked for cannot run here: no GPU in this build or on this
 /// machine, a frame too large for the card's limits, or no threads in this
 /// build.
-pub const TR_UNAVAILABLE: c_int = 3;
+pub const TR_UNAVAILABLE: c_int = status::UNAVAILABLE;
 /// The registration itself failed: a panic inside it, or frames the GPU could
 /// not register for want of the device.
-pub const TR_FAILED: c_int = 4;
+pub const TR_FAILED: c_int = status::FAILED;
 
 /// [`Transformation::Translation`].
 pub const TR_TRANSFORMATION_TRANSLATION: c_int = 0;
@@ -143,7 +145,11 @@ impl TrSettings {
     /// cannot: an enumeration value out of range, a count of zero, and the
     /// one combination the registration itself refuses.
     fn to_settings(self) -> Result<(Settings, Border), String> {
-        let transformation = pick(&Transformation::all(), self.transformation, "TRANSFORMATION")?;
+        let transformation = pick(
+            &Transformation::all(),
+            self.transformation,
+            "TRANSFORMATION",
+        )?;
         let reference = pick(&Reference::all(), self.reference, "REFERENCE")?;
         let backend = backend_of(self.backend)?;
         let border = border_of(self.border)?;
@@ -176,7 +182,12 @@ fn pick<T: Copy>(all: &[T], index: c_int, what: &str) -> Result<T, String> {
     usize::try_from(index)
         .ok()
         .and_then(|i| all.get(i).copied())
-        .ok_or_else(|| format!("{} {index} is not one of the TR_{what}_* values", what.to_lowercase()))
+        .ok_or_else(|| {
+            format!(
+                "{} {index} is not one of the TR_{what}_* values",
+                what.to_lowercase()
+            )
+        })
 }
 
 fn backend_of(v: c_int) -> Result<Backend, String> {
@@ -205,36 +216,34 @@ thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
 }
 
-/// Held for the length of a GPU run; see [`tr_register`].
-#[cfg(feature = "gpu")]
-static GPU_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// This library's failure reporting: its own last-error slot above, the
+/// shared scaffolding in [`fast_tiff_c_api_support::Errors`].
+static ERRORS: Errors = Errors::new(
+    &LAST_ERROR,
+    TR_INVALID_ARGUMENT,
+    TR_FAILED,
+    "the registration",
+);
 
-/// Record why a call failed, for [`tr_last_error`], and return its status.
-///
-/// `try_with`, not `with`: a call made while the thread is being torn down —
-/// from a C++ `thread_local` destructor, say — finds the slot already gone,
-/// and `with` would panic there, which past `extern "C"` is an abort. The
-/// status still comes back; only the message is lost.
-fn fail(status: c_int, why: impl Into<String>) -> c_int {
-    let why = CString::new(why.into().replace('\0', " ")).unwrap_or_default();
-    let _ = LAST_ERROR.try_with(|e| *e.borrow_mut() = why);
-    status
-}
-
-/// Run `work`, turning a panic into [`TR_FAILED`] rather than letting it
-/// unwind into a caller that has no idea what one is.
-fn guarded(work: impl FnOnce() -> c_int) -> c_int {
-    match catch_unwind(AssertUnwindSafe(work)) {
-        Ok(status) => status,
-        Err(panic) => {
-            let why = panic
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "no message".to_string());
-            fail(TR_FAILED, format!("the registration panicked: {why}"))
+/// A run's [`Error`] as the status a C caller gets, its words in
+/// [`tr_last_error`].
+fn fail_with(e: Error) -> c_int {
+    let status = match e {
+        // `to_settings` refuses it first, in words that name the constants.
+        Error::Unchainable => TR_INVALID_ARGUMENT,
+        Error::Unavailable(_) => TR_UNAVAILABLE,
+        Error::Cancelled => {
+            return ERRORS.fail(TR_CANCELLED, "the progress callback asked to stop")
         }
-    }
+        // Frames the device failed are not fitted for want of the device, not
+        // because the data would not fit: a caller that asked for the GPU is
+        // told, rather than handed frames that will not move.
+        Error::Device { .. } => TR_FAILED,
+        // `tr_register` feeds the session what it asks for, so these would be
+        // this library's mistake, not the caller's.
+        Error::Batch(_) | Error::Unfinished => TR_FAILED,
+    };
+    ERRORS.fail(status, e.to_string())
 }
 
 /// The handle behind `r`, or the status to return for a null one.
@@ -244,7 +253,7 @@ fn guarded(work: impl FnOnce() -> c_int) -> c_int {
 /// `r` is null or came from [`tr_register`] and has not been freed.
 unsafe fn handle<'a>(r: *const TrRegistered) -> Result<&'a TrRegistered, c_int> {
     r.as_ref()
-        .ok_or_else(|| fail(TR_INVALID_ARGUMENT, "the result handle is NULL"))
+        .ok_or_else(|| ERRORS.fail(TR_INVALID_ARGUMENT, "the result handle is NULL"))
 }
 
 /// Why the last call on this thread that did not return `TR_OK` failed, as
@@ -254,9 +263,7 @@ unsafe fn handle<'a>(r: *const TrRegistered) -> Result<&'a TrRegistered, c_int> 
 /// the text to keep it. Empty, too, on a thread being torn down.
 #[no_mangle]
 pub extern "C" fn tr_last_error() -> *const c_char {
-    LAST_ERROR
-        .try_with(|e| e.borrow().as_ptr())
-        .unwrap_or(c"".as_ptr())
+    ERRORS.last_error()
 }
 
 /// The library's version, `"major.minor.patch"`, NUL-terminated and static.
@@ -275,9 +282,12 @@ pub extern "C" fn tr_version() -> *const c_char {
 #[no_mangle]
 pub unsafe extern "C" fn tr_settings_default(out: *mut TrSettings) -> c_int {
     if out.is_null() {
-        return fail(TR_INVALID_ARGUMENT, "out is NULL");
+        return ERRORS.fail(TR_INVALID_ARGUMENT, "out is NULL");
     }
-    out.write(TrSettings::from_settings(&Settings::default(), Border::default()));
+    out.write(TrSettings::from_settings(
+        &Settings::default(),
+        Border::default(),
+    ));
     TR_OK
 }
 
@@ -287,10 +297,10 @@ pub unsafe extern "C" fn tr_settings_default(out: *mut TrSettings) -> c_int {
 /// For `TR_BACKEND_GPU` this opens the device the first time it is asked.
 #[no_mangle]
 pub extern "C" fn tr_backend_available(backend: c_int, ly: usize, lx: usize) -> c_int {
-    guarded(|| match backend_of(backend) {
-        Err(why) => fail(TR_INVALID_ARGUMENT, why),
+    ERRORS.guarded(|| match backend_of(backend) {
+        Err(why) => ERRORS.fail(TR_INVALID_ARGUMENT, why),
         Ok(backend) => match backend.unavailable_reason(ly, lx) {
-            Some(why) => fail(TR_UNAVAILABLE, why),
+            Some(why) => ERRORS.fail(TR_UNAVAILABLE, why),
             None => TR_OK,
         },
     })
@@ -302,9 +312,13 @@ pub extern "C" fn tr_backend_available(backend: c_int, ly: usize, lx: usize) -> 
 /// NULL.
 ///
 /// `settings` may be NULL for the defaults. `progress` may be NULL; `user` is
-/// handed to it untouched. The frames are copied, so the caller's buffer is
-/// free again as soon as this returns. GPU runs started from several threads
-/// take turns; CPU runs do not.
+/// handed to it untouched. The frames are read where they are, a batch at a
+/// time, and not copied: beside them the run holds a batch's working memory —
+/// plus, with a moving average of `2h + 1` frames, a copy of the `2h` before
+/// each batch — not a second stack, unless the window is as wide as the
+/// stack. The buffer is the caller's again once this returns, and must not
+/// change while it runs. GPU runs started from several threads take turns on
+/// the device, a batch at a time; CPU runs do not.
 ///
 /// Frames the fit gave up on keep the identity and are reported by
 /// [`tr_registered_failed`], not refused — except under `TR_BACKEND_GPU`, where
@@ -326,13 +340,13 @@ pub unsafe extern "C" fn tr_register(
     user: *mut c_void,
     out: *mut *mut TrRegistered,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         if out.is_null() {
-            return fail(TR_INVALID_ARGUMENT, "out is NULL");
+            return ERRORS.fail(TR_INVALID_ARGUMENT, "out is NULL");
         }
         out.write(std::ptr::null_mut());
         if n_frames == 0 || ly == 0 || lx == 0 {
-            return fail(
+            return ERRORS.fail(
                 TR_INVALID_ARGUMENT,
                 format!("{n_frames} frame(s) of {lx} x {ly} is nothing to register"),
             );
@@ -342,66 +356,38 @@ pub unsafe extern "C" fn tr_register(
             .and_then(|v| v.checked_mul(lx))
             .filter(|&v| v <= isize::MAX as usize / std::mem::size_of::<f32>())
         else {
-            return fail(TR_INVALID_ARGUMENT, "the stack is larger than memory can address");
+            return ERRORS.fail(
+                TR_INVALID_ARGUMENT,
+                "the stack is larger than memory can address",
+            );
         };
         if frames.is_null() {
-            return fail(TR_INVALID_ARGUMENT, "frames is NULL");
+            return ERRORS.fail(TR_INVALID_ARGUMENT, "frames is NULL");
         }
         let (settings, border) = match settings.as_ref() {
             None => (Settings::default(), Border::default()),
             Some(s) => match s.to_settings() {
                 Ok(both) => both,
-                Err(why) => return fail(TR_INVALID_ARGUMENT, why),
+                Err(why) => return ERRORS.fail(TR_INVALID_ARGUMENT, why),
             },
         };
-        if let Some(why) = settings.backend.unavailable_reason(ly, lx) {
-            return fail(TR_UNAVAILABLE, why);
-        }
-
-        let movie: Vec<Vec<f32>> = std::slice::from_raw_parts(frames, len)
-            .chunks_exact(ly * lx)
-            .map(<[f32]>::to_vec)
-            .collect();
-        // GPU runs take turns. Whether the device failed part of a run is
-        // reported through one slot per process (`gpu::take_trouble`), so two
-        // at once could clear or take each other's report — a failed run
-        // coming back as OK. They share one device anyway.
-        #[cfg(feature = "gpu")]
-        let _turn = (settings.backend == Backend::Gpu)
-            .then(|| GPU_TURN.lock().unwrap_or_else(|e| e.into_inner()));
-        // An earlier run's trouble is not this one's.
-        #[cfg(feature = "gpu")]
-        let _ = crate::gpu::take_trouble();
+        let session = match Session::new(ly, lx, n_frames, &settings) {
+            Ok(session) => session,
+            Err(e) => return fail_with(e),
+        };
         let mut on_progress = |fraction: f32| match progress {
             Some(report) => report(fraction, user) != 0,
             None => true,
         };
-        let Some(mut inner) = register_stack(
-            &Frames {
-                ly,
-                lx,
-                frames: &movie,
-            },
-            &settings,
-            &mut on_progress,
-        ) else {
-            return fail(TR_CANCELLED, "the progress callback asked to stop");
+        // The caller's frames, read in place batch by batch: nothing of the
+        // stack is copied. The session holds a batch's working memory, takes
+        // the device's reasons for its own GPU batches and no other run's
+        // (`Error::Device`), and takes turns on the device with other runs.
+        let stack = std::slice::from_raw_parts(frames, len);
+        let mut inner = match session.run(Batch::Packed(stack), &mut on_progress) {
+            Ok(inner) => inner,
+            Err(e) => return fail_with(e),
         };
-        // Frames the device failed are not fitted for want of the device, not
-        // because the data would not fit: a caller that asked for the GPU is
-        // told, rather than handed frames that will not move.
-        #[cfg(feature = "gpu")]
-        if settings.backend == Backend::Gpu && !inner.failed.is_empty() {
-            if let Some(why) = crate::gpu::take_trouble() {
-                return fail(
-                    TR_FAILED,
-                    format!(
-                        "{} of {n_frames} frames could not be registered on the GPU: {why}",
-                        inner.failed.len()
-                    ),
-                );
-            }
-        }
         inner.border = border;
         out.write(Box::into_raw(Box::new(TrRegistered { inner, ly, lx })));
         TR_OK
@@ -443,16 +429,20 @@ pub unsafe extern "C" fn tr_registered_frames(r: *const TrRegistered) -> usize {
 ///
 /// `r` is null or a live result; `c` points to 8 writable doubles.
 #[no_mangle]
-pub unsafe extern "C" fn tr_registered_matrix(r: *const TrRegistered, t: usize, c: *mut f64) -> c_int {
+pub unsafe extern "C" fn tr_registered_matrix(
+    r: *const TrRegistered,
+    t: usize,
+    c: *mut f64,
+) -> c_int {
     let r = match handle(r) {
         Ok(r) => r,
         Err(status) => return status,
     };
     if c.is_null() {
-        return fail(TR_INVALID_ARGUMENT, "c is NULL");
+        return ERRORS.fail(TR_INVALID_ARGUMENT, "c is NULL");
     }
     let Some(m) = r.inner.matrices.get(t) else {
-        return fail(TR_INVALID_ARGUMENT, format!("frame {t} is past the end"));
+        return ERRORS.fail(TR_INVALID_ARGUMENT, format!("frame {t} is past the end"));
     };
     std::ptr::copy_nonoverlapping(m.c.as_ptr(), c, 8);
     TR_OK
@@ -465,16 +455,20 @@ pub unsafe extern "C" fn tr_registered_matrix(r: *const TrRegistered, t: usize, 
 ///
 /// `r` is null or a live result; `failed` points to one writable `bool`.
 #[no_mangle]
-pub unsafe extern "C" fn tr_registered_failed(r: *const TrRegistered, t: usize, failed: *mut bool) -> c_int {
+pub unsafe extern "C" fn tr_registered_failed(
+    r: *const TrRegistered,
+    t: usize,
+    failed: *mut bool,
+) -> c_int {
     let r = match handle(r) {
         Ok(r) => r,
         Err(status) => return status,
     };
     if failed.is_null() {
-        return fail(TR_INVALID_ARGUMENT, "failed is NULL");
+        return ERRORS.fail(TR_INVALID_ARGUMENT, "failed is NULL");
     }
     if t >= r.inner.matrices.len() {
-        return fail(TR_INVALID_ARGUMENT, format!("frame {t} is past the end"));
+        return ERRORS.fail(TR_INVALID_ARGUMENT, format!("frame {t} is past the end"));
     }
     failed.write(r.inner.failed.contains(&t));
     TR_OK
@@ -499,19 +493,23 @@ pub unsafe extern "C" fn tr_registered_has_reference(r: *const TrRegistered) -> 
 ///
 /// `r` is null or a live result; `out` points to `len` writable floats.
 #[no_mangle]
-pub unsafe extern "C" fn tr_registered_reference(r: *const TrRegistered, out: *mut f32, len: usize) -> c_int {
+pub unsafe extern "C" fn tr_registered_reference(
+    r: *const TrRegistered,
+    out: *mut f32,
+    len: usize,
+) -> c_int {
     let r = match handle(r) {
         Ok(r) => r,
         Err(status) => return status,
     };
     let Some(reference) = &r.inner.reference else {
-        return fail(
+        return ERRORS.fail(
             TR_INVALID_ARGUMENT,
             "this run has no single reference: TR_REFERENCE_PREVIOUS matches each frame to the one before it",
         );
     };
     if out.is_null() || len != r.ly * r.lx {
-        return fail(
+        return ERRORS.fail(
             TR_INVALID_ARGUMENT,
             format!("the reference needs {} floats, not {len}", r.ly * r.lx),
         );
@@ -529,14 +527,14 @@ pub unsafe extern "C" fn tr_registered_reference(r: *const TrRegistered, out: *m
 #[no_mangle]
 pub unsafe extern "C" fn tr_registered_set_border(r: *mut TrRegistered, border: c_int) -> c_int {
     let Some(r) = r.as_mut() else {
-        return fail(TR_INVALID_ARGUMENT, "the result handle is NULL");
+        return ERRORS.fail(TR_INVALID_ARGUMENT, "the result handle is NULL");
     };
     match border_of(border) {
         Ok(b) => {
             r.inner.border = b;
             TR_OK
         }
-        Err(why) => fail(TR_INVALID_ARGUMENT, why),
+        Err(why) => ERRORS.fail(TR_INVALID_ARGUMENT, why),
     }
 }
 
@@ -554,7 +552,7 @@ pub unsafe extern "C" fn tr_registered_output_size(
     ly: *mut usize,
     lx: *mut usize,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         let r = match handle(r) {
             Ok(r) => r,
             Err(status) => return status,
@@ -569,7 +567,7 @@ pub unsafe extern "C" fn tr_registered_output_size(
                 }
                 TR_OK
             }
-            Err(none) => fail(TR_NO_COMMON_AREA, none.to_string()),
+            Err(none) => ERRORS.fail(TR_NO_COMMON_AREA, none.to_string()),
         }
     })
 }
@@ -593,7 +591,7 @@ pub unsafe extern "C" fn tr_registered_common_area(
     width: *mut usize,
     angle: *mut f64,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         let r = match handle(r) {
             Ok(r) => r,
             Err(status) => return status,
@@ -612,7 +610,7 @@ pub unsafe extern "C" fn tr_registered_common_area(
                 }
                 TR_OK
             }
-            Err(none) => fail(TR_NO_COMMON_AREA, none.to_string()),
+            Err(none) => ERRORS.fail(TR_NO_COMMON_AREA, none.to_string()),
         }
     })
 }
@@ -639,22 +637,25 @@ pub unsafe extern "C" fn tr_registered_apply(
     t: usize,
     out: *mut f32,
 ) -> c_int {
-    guarded(|| {
+    ERRORS.guarded(|| {
         let r = match handle(r) {
             Ok(r) => r,
             Err(status) => return status,
         };
         if frame.is_null() || out.is_null() {
-            return fail(TR_INVALID_ARGUMENT, "frame or out is NULL");
+            return ERRORS.fail(TR_INVALID_ARGUMENT, "frame or out is NULL");
         }
         if t >= r.inner.matrices.len() {
-            return fail(TR_INVALID_ARGUMENT, format!("frame {t} is past the end"));
+            return ERRORS.fail(TR_INVALID_ARGUMENT, format!("frame {t} is past the end"));
         }
         let (ly, lx) = (r.ly, r.lx);
         // Read in full before anything is written, so `out` may be `frame`.
-        let moved = match r.inner.apply(std::slice::from_raw_parts(frame, ly * lx), ly, lx, t) {
+        let moved = match r
+            .inner
+            .apply(std::slice::from_raw_parts(frame, ly * lx), ly, lx, t)
+        {
             Ok(moved) => moved,
-            Err(none) => return fail(TR_NO_COMMON_AREA, none.to_string()),
+            Err(none) => return ERRORS.fail(TR_NO_COMMON_AREA, none.to_string()),
         };
         std::ptr::copy(moved.as_ptr(), out, moved.len());
         TR_OK

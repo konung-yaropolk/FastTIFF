@@ -4,7 +4,7 @@
 //! its own version of just this file.
 
 use super::*;
-use fast_tiff_viewer::camera::{CameraState, NavMode, FLY_UNITS_PER_SEC, KEY_ROT};
+use fast_tiff_viewer::camera::{CameraState, NavMode, VolumeNavPrefs, FLY_UNITS_PER_SEC, KEY_ROT};
 
 /// Vertical-drag units one whole pinch is worth.
 ///
@@ -16,8 +16,8 @@ const PINCH_DOLLY: f32 = 260.0;
 
 impl ViewerApp {
     /// Render the 3D view at reduced size (the user's choice,
-    /// `moving_downscale`) while the user moves it, and at full size again
-    /// [`super::VOLUME_SETTLE_S`] after they stop. Moving is the camera
+    /// [`VolumeNavPrefs::moving_downscale`]) while the user moves it, and at
+    /// full size again [`VolumeNavPrefs::SETTLE_S`] after they stop. Moving is the camera
     /// changing from one frame to the next — every gesture, key, wheel click
     /// and button that moves the view does that — and nothing else: an
     /// animation turns the volume, not the camera, and is watched at full
@@ -30,19 +30,21 @@ impl ViewerApp {
         // opened in 2D, or set up while the view was elsewhere, moved nothing
         // the user was watching.
         if self
-            .volume_last_camera
+            .volume_ui
+            .last_camera
             .is_some_and(|(last, at)| frame <= at + 1 && !last.same_pose(&mark))
         {
-            self.volume_moved_at = Some(now);
+            self.volume_ui.moved_at = Some(now);
         }
-        self.volume_last_camera = Some((mark, frame));
-        let since = self.volume_moved_at.map(|t| now - t);
-        self.core.volume.downscale = downscale_after(since, self.moving_downscale);
-        if let Some(s) = since.filter(|_| self.core.volume.downscale > 1) {
+        self.volume_ui.last_camera = Some((mark, frame));
+        let since = self.volume_ui.moved_at.map(|t| now - t);
+        let downscale = self.core.volume.navigation.downscale_after(since);
+        self.sync_inputs.volume.downscale = downscale;
+        if let Some(s) = since.filter(|_| downscale > 1) {
             // The sharp frame is due when the settle time runs out, input or
             // not.
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(
-                (super::VOLUME_SETTLE_S - s).max(0.0) + 0.001,
+                (VolumeNavPrefs::SETTLE_S - s).max(0.0) + 0.001,
             ));
         }
     }
@@ -63,7 +65,14 @@ impl ViewerApp {
         let pan_speed = self.core.volume.cam.pan_speed(panel_rect.height());
         let (_, right, up) = self.core.volume.cam.basis();
         // Snapshot the speed preferences before borrowing the camera mutably.
-        let (move_speed, scroll_speed) = (self.move_speed, self.scroll_speed);
+        let prefs = self.core.volume.navigation;
+        let (move_speed, scroll_speed) = (prefs.move_speed, prefs.scroll_speed);
+        // The box an orbit re-pivots on and the wheel flies towards: the one
+        // the shader draws (a cube until there is a stack to draw).
+        let box_he = self.core.document().map_or([0.5; 3], |loaded| {
+            let (w, h) = loaded.dimensions().unwrap_or((1, 1));
+            self.core.volume.box_he((w, h, loaded.volume_depth()))
+        });
 
         // Keyboard + wheel (wheel only while the pointer is over the canvas).
         let (alt, shift, wheel, wasd, space, arrows) = ui.input(|i| {
@@ -153,7 +162,7 @@ impl ViewerApp {
         match cam.nav {
             NavMode::Cad => {
                 if start_l {
-                    cam.repivot();
+                    cam.repivot(box_he);
                 }
                 if drag_l && moved {
                     cam.orbit_drag(d.x, d.y);
@@ -171,7 +180,7 @@ impl ViewerApp {
             }
             NavMode::Blender => {
                 if start_m && !shift {
-                    cam.repivot();
+                    cam.repivot(box_he);
                 }
                 if drag_m && moved {
                     if shift {
@@ -184,7 +193,7 @@ impl ViewerApp {
             }
             NavMode::Maya => {
                 if alt && start_l {
-                    cam.repivot();
+                    cam.repivot(box_he);
                 }
                 if alt && moved {
                     if drag_l {
@@ -209,7 +218,7 @@ impl ViewerApp {
                     // Right-drag orbits the free eye around the box-entry point.
                     // Fly is first-person, so it always uses the focal pivot
                     // (the orbit-point setting governs the orbit modes above).
-                    cam.repivot_to_focal();
+                    cam.repivot_to_focal(box_he);
                 }
                 if drag_r && moved {
                     cam.orbit_fly(d.x, d.y);
@@ -271,23 +280,9 @@ impl ViewerApp {
 
         // Wheel: a linear fly along the focal axis (not a zoom).
         if wheel.abs() > 0.01 {
-            cam.wheel_fly(wheel, scroll_speed);
+            cam.wheel_fly(wheel, scroll_speed, box_he);
         }
 
         animating
     }
 }
-
-/// How many times smaller to render the 3D view, `since` seconds after the
-/// user last moved it (`None`: never): `moving` until the settle time is up.
-pub(super) fn downscale_after(since: Option<f64>, moving: u32) -> u32 {
-    if since.is_some_and(|s| (0.0..super::VOLUME_SETTLE_S).contains(&s)) {
-        moving.max(1)
-    } else {
-        1
-    }
-}
-
-#[cfg(test)]
-#[path = "camera_tests.rs"]
-mod tests;

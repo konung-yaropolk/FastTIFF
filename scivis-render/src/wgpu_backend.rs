@@ -14,6 +14,10 @@
 //! pipeline (`volume.wgsl`), and its own uniform. Every format used is
 //! filterable, so linear/cubic sampling use the hardware sampler.
 //!
+//! What a host does with it each frame is the crate's [`ImageRenderer`] and
+//! [`VolumeRenderer`]; what is this type's own is making it, painting, and
+//! the volume's `prepare_volume`, which records into the host's encoder.
+//!
 //! # Host responsibilities
 //!
 //! The host creates the device and queue (both are cheap `Clone` handles, so we
@@ -25,41 +29,23 @@
 //! [`ImageRenderResources::set_volume_target`]), into a texture `paint_volume`
 //! then scales up.
 
-use crate::pack::{self, BrickMaxima, PackedVolume, TexelFormat, Visibility, VolumeLayout};
+use crate::cpu_state::{ChannelAllocation, VolumeState};
+use crate::pack::{PackedVolume, TexelFormat};
+use crate::renderer::{ImageRenderer, VolumeCaps, VolumeRenderer};
+use crate::shaders::{self, composite_bindings as binding};
+use crate::uniforms::{self, CompositeParams};
 use crate::{
     capture_tiles, tile_params, ChannelKind, ChannelUniform, Lut, VolumeImage, VolumeInterp,
-    VolumeKind, VolumeParams, VolumeUploadError, CAPTURE_TILE, MAX_CHANNELS,
+    VolumeParams, VolumeUploadError, CAPTURE_TILE, MAX_CHANNELS,
 };
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 
-const LUT_WIDTH: u32 = 256;
-/// Bind-group binding indices. Integer channel textures occupy `1..=MAX_CHANNELS`,
-/// then the LUT array, the sampler, and finally the float channel textures.
-const LUT_BINDING: u32 = MAX_CHANNELS as u32 + 1;
-const SAMPLER_BINDING: u32 = MAX_CHANNELS as u32 + 2;
-const FTEX_BINDING_BASE: u32 = MAX_CHANNELS as u32 + 3;
-
-/// Per-channel texture-allocation kind (which set is full-size + the integer
-/// format), tracked so `ensure_size` only rebuilds when something changes.
-const KIND_UNUSED: u8 = 0; // channel not present: both textures are 1x1 dummies
-const KIND_INT8: u8 = 1; // integer channel: R8Uint full-size, R32F dummy
-const KIND_INT16: u8 = 2; // integer channel: R16Uint full-size, R32F dummy
-const KIND_FLOAT: u8 = 3; // float channel: R32F full-size, int texture dummy
+/// The LUT texture's width, as wgpu sizes take it.
+const LUT_WIDTH: u32 = uniforms::LUT_WIDTH as u32;
 
 /// Short human-readable backend name, for a host that wants to show it.
 pub const BACKEND: &str = "wgpu";
-
-/// GPU bytes per volume sample on this backend, per channel and before the
-/// mip chain: 8-bit sources stay 8-bit, everything else is stored in 16 bits
-/// (unorm or half float). See [`ImageRenderResources::volume_texel_format`]
-/// for the exact format, which a volume builder should use instead.
-pub fn volume_gpu_bps(kind: VolumeKind) -> usize {
-    match kind {
-        VolumeKind::U8 => 1,
-        VolumeKind::U16 | VolumeKind::F32 => 2,
-    }
-}
 
 /// The optional device features this backend benefits from, intersected with
 /// what `adapter` actually offers — pass the result as `required_features` when
@@ -68,32 +54,22 @@ pub fn volume_gpu_bps(kind: VolumeKind) -> usize {
 /// Today that's `TEXTURE_FORMAT_16BIT_NORM` (nearly universal on desktop, often
 /// absent on WebGL): with it, 16-bit volume data keeps full precision in
 /// R16Unorm instead of rounding through f16's ~11 bits. Everything falls back
-/// cleanly when it's missing, so this is a quality knob, not a requirement.
+/// cleanly when it's missing, so this is a quality knob, not a requirement:
+/// [`VolumeCaps::unorm16`] says whether the device has it.
 pub fn optional_features(adapter: &wgpu::Adapter) -> wgpu::Features {
     adapter.features() & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct ChannelParamsGpu {
-    min_max: [f32; 2],
-    enabled: f32,
-    is_float: f32,
-}
+// The volume's uniform, as the shader lays it out. Each field matches the
+// member of the same name in the WGSL struct, at the same offset and of the
+// same size, which `wgpu_backend_tests.rs` checks against naga's layout of the
+// shader: a field added on one side only fails a test instead of a draw.
+// `Pod` rules out padding the compiler would add, so the padding the shader
+// has is named. The composite's uniform is the one the glow backend draws
+// with too, `uniforms::CompositeParams`, and is checked the same way.
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct ParamsGpu {
-    channels: [ChannelParamsGpu; MAX_CHANNELS],
-    /// UV sub-rect of the image to display: `sampled_uv = uv_offset + uv * uv_scale`.
-    uv_offset: [f32; 2],
-    uv_scale: [f32; 2],
-    num_channels: u32,
-    _pad: [u32; 3],
-}
-
-/// Volume uniform, matching `VolParams` in `volume.wgsl`. Every field is a vec4
-/// (or vec4-packed) so the std140-style uniform layout is unambiguous.
+/// The volume's uniform: `VolParams` in `volume.wgsl`. Every field is a vec4
+/// (or vec4-packed) so the uniform layout is unambiguous.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct VolParamsGpu {
@@ -129,10 +105,12 @@ pub struct ImageRenderResources {
     channel_ftextures: [wgpu::Texture; MAX_CHANNELS], // R32Float (float channels)
     lut_texture: wgpu::Texture,
     sampler: wgpu::Sampler,
-    /// Cached so we only rebuild textures + bind group when the frame size or the
-    /// per-channel int/float layout changes (e.g. opening a different stack).
-    current_size: (u32, u32),
-    current_kinds: [u8; MAX_CHANNELS],
+    /// What the channel textures are allocated for, so they and the bind group
+    /// are only rebuilt when the frame size or the per-channel int/float
+    /// layout changes (e.g. opening a different stack).
+    channels: ChannelAllocation,
+    /// The device's 2D-texture limit, asked once.
+    max_2d: u32,
 
     // --- 3D volume ---------------------------------------------------------
     volume_pipeline: wgpu::RenderPipeline,
@@ -145,11 +123,9 @@ pub struct ImageRenderResources {
     volume_textures: [wgpu::Texture; 2],
     /// One texel per brick of the volume: whether a ray must sample there.
     occupancy_texture: wgpu::Texture,
-    /// The uploaded volume's layout and brick maxima.
-    volume_layout: Option<VolumeLayout>,
-    volume_bricks: Option<BrickMaxima>,
-    /// What `occupancy_texture` was last worked out for.
-    occupancy_for: Option<Visibility>,
+    /// What is uploaded, the params it is drawn with, and the host's
+    /// switches; its `occupancy_for` is what `occupancy_texture` holds.
+    volume: VolumeState,
     /// Per volume texture, the device's answer to whether there was room for
     /// it, when that had not come by the time the upload returned: on WebGPU
     /// it comes through a promise. The volume is not drawn until both have
@@ -159,21 +135,12 @@ pub struct ImageRenderResources {
     /// An upload that returned `Ok` and was refused after all, with the bytes
     /// its volume took, for `take_late_upload_error`.
     volume_lost: Option<(VolumeUploadError, usize)>,
-    /// Whether the device has `TEXTURE_FORMAT_16BIT_NORM` (see `optional_features`).
-    volume_unorm16: bool,
-    /// `interp` for the shader: 0 = nearest, 1 = linear, 2 = cubic.
-    volume_interp_mode: i32,
-    /// Empty-space skipping and mip levels on (both, unless switched off with
-    /// `set_volume_acceleration`).
-    accel_skip: bool,
-    accel_lod: bool,
-    /// The camera/window params, stashed by `set_volume_params` and marshalled
-    /// into the uniform buffer by `prepare_volume`.
-    volume_params: Option<VolumeParams>,
-    /// The size the view is painted at, in pixels, and how much smaller to
-    /// render it (see `set_volume_target`).
+    /// What this device holds of a volume, asked once: its 3D limit, and
+    /// whether it has `TEXTURE_FORMAT_16BIT_NORM` (see `optional_features`).
+    caps: VolumeCaps,
+    /// The size the view is painted at, in pixels (see `set_volume_target`);
+    /// how much smaller to render it is `volume.downscale`.
     volume_target: (u32, u32),
-    volume_downscale: u32,
     /// The reduced-size render and what scales it up.
     lowres: Option<LowRes>,
     blit_pipeline: wgpu::RenderPipeline,
@@ -238,24 +205,21 @@ impl ImageRenderResources {
         let device = &gpu;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("FastTIFFcomposite shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/composite.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders::composite_wgsl().into()),
         });
 
         let mut layout_entries = vec![wgpu::BindGroupLayoutEntry {
-            binding: 0,
+            binding: binding::PARAMS,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: NonZeroU64::new(std::mem::size_of::<ParamsGpu>() as u64),
+                min_binding_size: NonZeroU64::new(std::mem::size_of::<CompositeParams>() as u64),
             },
             count: None,
         }];
-        for c in 0..MAX_CHANNELS as u32 {
-            layout_entries.push(int_texture_entry(c + 1));
-        }
         layout_entries.push(wgpu::BindGroupLayoutEntry {
-            binding: LUT_BINDING,
+            binding: binding::LUT,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -265,13 +229,16 @@ impl ImageRenderResources {
             count: None,
         });
         layout_entries.push(wgpu::BindGroupLayoutEntry {
-            binding: SAMPLER_BINDING,
+            binding: binding::SAMPLER,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count: None,
         });
         for c in 0..MAX_CHANNELS as u32 {
-            layout_entries.push(float_texture_entry(FTEX_BINDING_BASE + c));
+            layout_entries.push(int_texture_entry(binding::INT_TEXTURE + c));
+        }
+        for c in 0..MAX_CHANNELS as u32 {
+            layout_entries.push(float_texture_entry(binding::FLOAT_TEXTURE + c));
         }
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("FastTIFFbind group layout"),
@@ -308,7 +275,7 @@ impl ImageRenderResources {
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("FastTIFFparams"),
-            size: std::mem::size_of::<ParamsGpu>() as u64,
+            size: std::mem::size_of::<CompositeParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -348,9 +315,17 @@ impl ImageRenderResources {
 
         let volume = create_volume_resources(device, target_format, &lut_texture, &sampler);
         let (blit_pipeline, blit_bind_group_layout) = create_blit_pipeline(device, target_format);
-        let volume_unorm16 = device
-            .features()
-            .contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM);
+        let limits = device.limits();
+        let caps = VolumeCaps {
+            max_3d_size: limits.max_texture_dimension_3d,
+            unorm16: device
+                .features()
+                .contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM),
+            // Not asked for (see `optional_features`): FLOAT32_FILTERABLE is
+            // missing on many mobile GPUs and most browsers, and a half float
+            // holds a volume normalized to about 0..=1 well enough.
+            float32: false,
+        };
 
         Self {
             device: gpu.clone(),
@@ -363,26 +338,19 @@ impl ImageRenderResources {
             channel_ftextures,
             lut_texture,
             sampler,
-            current_size: (1, 1),
-            current_kinds: [KIND_UNUSED; MAX_CHANNELS],
+            channels: ChannelAllocation::default(),
+            max_2d: limits.max_texture_dimension_2d,
             volume_pipeline: volume.pipeline,
             volume_bind_group_layout: volume.layout,
             volume_bind_group: volume.bind_group,
             volume_uniform_buffer: volume.uniform_buffer,
             volume_textures: volume.textures,
             occupancy_texture: volume.occupancy,
-            volume_layout: None,
-            volume_bricks: None,
-            occupancy_for: None,
+            volume: VolumeState::default(),
             volume_checks: [None, None],
             volume_lost: None,
-            volume_unorm16,
-            volume_interp_mode: 1, // linear
-            accel_skip: true,
-            accel_lod: true,
-            volume_params: None,
+            caps,
             volume_target: (0, 0),
-            volume_downscale: 1,
             lowres: None,
             blit_pipeline,
             blit_bind_group_layout,
@@ -396,184 +364,12 @@ impl ImageRenderResources {
 
     // --- 3D volume ---------------------------------------------------------
 
-    /// Largest per-axis 3D-texture dimension the device supports; the app uses it
-    /// (with a memory cap) to decide whether the volume must be subsampled.
-    pub fn max_3d_texture_size(&self) -> u32 {
-        self.device.limits().max_texture_dimension_3d
-    }
-
     /// Hand over the adapter the device came from, so the renderer can ask
-    /// the driver how much GPU memory there is ([`volume_memory_available`]).
-    /// Optional: without it the answer is "unknown".
-    ///
-    /// [`volume_memory_available`]: Self::volume_memory_available
+    /// the driver how much GPU memory there is
+    /// ([`VolumeRenderer::volume_memory_available`]). Optional: without it
+    /// the answer is "unknown".
     pub fn set_adapter(&mut self, adapter: wgpu::Adapter) {
         self.adapter = Some(adapter);
-    }
-
-    /// GPU memory a new volume could take, in bytes: what the driver says is
-    /// left of this process's budget, plus what the current volume holds (a
-    /// new one replaces it). `None` when the driver will not say — no adapter
-    /// was handed over, or the backend has no way to ask (Metal, the browser).
-    /// A builder should take a share of this, not all of it.
-    pub fn volume_memory_available(&self) -> Option<u64> {
-        let budget = crate::vram::wgpu_budget(self.adapter.as_ref()?)?;
-        let current = self
-            .volume_layout
-            .as_ref()
-            .map_or(0, |l| l.total_bytes() as u64);
-        Some(budget.headroom() + current)
-    }
-
-    /// How this device stores a volume whose channels are `kind`: what a
-    /// builder should pack it as (see [`crate::pack`]). 8-bit stays 8-bit;
-    /// 16-bit is a 16-bit unorm when the device has the 16-bit-norm feature
-    /// and a half float when it has not; float is a half float (a full float
-    /// is not filterable without an optional feature).
-    pub fn volume_texel_format(&self, kind: VolumeKind) -> TexelFormat {
-        match kind {
-            VolumeKind::U8 => TexelFormat::Unorm8,
-            VolumeKind::U16 if self.volume_unorm16 => TexelFormat::Unorm16,
-            VolumeKind::U16 | VolumeKind::F32 => TexelFormat::Float16,
-        }
-    }
-
-    /// Upload a volume packed by [`crate::pack`], every level of every texture,
-    /// and the brick maxima the renderer skips empty space with. Textures whose
-    /// size and format are unchanged (a 4D timepoint step) are refilled in
-    /// place; the bind group is only rebuilt when one was recreated.
-    ///
-    /// Fails with [`VolumeUploadError::OutOfMemory`] when the GPU had no room,
-    /// leaving 1x1x1 placeholders and no volume: build a smaller one and try
-    /// again.
-    pub fn upload_packed_volume(&mut self, volume: &PackedVolume) -> Result<(), VolumeUploadError> {
-        volume.check().map_err(VolumeUploadError::Unsupported)?;
-        let layout = &volume.layout;
-        match layout.format {
-            TexelFormat::Float32 => {
-                return Err(VolumeUploadError::Unsupported(
-                    "this device stores float volumes as half floats; pack them as Float16".into(),
-                ))
-            }
-            TexelFormat::Unorm16 if !self.volume_unorm16 => {
-                return Err(VolumeUploadError::Unsupported(
-                    "this device has no 16-bit normalized textures; pack 16-bit volumes as Float16"
-                        .into(),
-                ))
-            }
-            _ => {}
-        }
-        let max = self.max_3d_texture_size();
-        let (w, h, d) = layout.dims;
-        if w > max || h > max || d > max {
-            return Err(VolumeUploadError::Unsupported(format!(
-                "a {w} x {h} x {d} volume is beyond this GPU's 3D texture limit of {max}"
-            )));
-        }
-
-        // Per texture, what it must be, and whether the one there is not that.
-        let specs: [_; 2] = std::array::from_fn(|t| {
-            let (size, format, levels) = match layout.textures.get(t) {
-                Some(tex) => (
-                    layout.dims,
-                    packed_format(layout.format, tex.components),
-                    layout.levels,
-                ),
-                None => ((1, 1, 1), wgpu::TextureFormat::R8Unorm, 1),
-            };
-            let current = &self.volume_textures[t];
-            let stale = current.size()
-                != wgpu::Extent3d {
-                    width: size.0,
-                    height: size.1,
-                    depth_or_array_layers: size.2,
-                }
-                || current.format() != format
-                || current.mip_level_count() != levels;
-            (size, format, levels, stale)
-        });
-        if specs.iter().any(|s| s.3) {
-            // Let go of the textures being replaced before asking for room for
-            // their successors, and wait until the GPU has: the old volume and
-            // the new are then never in memory together. A budget counts the
-            // old one as free (`volume_memory_available`), and holding both
-            // would spend the margin it leaves.
-            for (t, spec) in specs.iter().enumerate() {
-                if spec.3 {
-                    self.volume_textures[t].destroy();
-                }
-            }
-            let _ = self.device.poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            });
-        }
-
-        let mut rebind = false;
-        for (t, &(size, format, levels, stale)) in specs.iter().enumerate() {
-            if stale {
-                // Each texture made inside a scope of its own, and checked
-                // before anything is written to it: a texture the device had
-                // no room for comes back invalid, and writing to it would be a
-                // validation error nothing catches, which wgpu treats as fatal.
-                let scope = OutOfMemoryScope::push(&self.device);
-                let texture = create_volume_texture(
-                    &self.device,
-                    size,
-                    format,
-                    levels,
-                    if t == 0 {
-                        "FastTIFFvol a"
-                    } else {
-                        "FastTIFFvol b"
-                    },
-                );
-                match scope.pop() {
-                    Ok(check) => self.volume_checks[t] = check,
-                    Err(why) => {
-                        drop(texture);
-                        self.clear_volume();
-                        return Err(why);
-                    }
-                }
-                self.volume_textures[t] = texture;
-                rebind = true;
-                if layout.textures.get(t).is_none() {
-                    write_volume_region(
-                        &self.queue,
-                        &self.volume_textures[t],
-                        0,
-                        (1, 1),
-                        1,
-                        0,
-                        1,
-                        &[0],
-                    );
-                }
-            }
-            if layout.textures.get(t).is_some() {
-                let texel = layout.texel_bytes(t);
-                for (level, data) in volume.levels[t].iter().enumerate() {
-                    let dims = layout.level_dims(level as u32);
-                    write_volume_level(
-                        &self.queue,
-                        &self.volume_textures[t],
-                        level as u32,
-                        dims,
-                        texel,
-                        data,
-                    );
-                }
-            }
-        }
-        self.volume_layout = Some(layout.clone());
-        self.volume_bricks = Some(volume.bricks.clone());
-        self.occupancy_for = None;
-        self.refresh_occupancy();
-        if rebind {
-            self.rebuild_volume_bind_group();
-        }
-        Ok(())
     }
 
     /// Drop the volume: placeholders in its place and nothing bound that a
@@ -598,17 +394,15 @@ impl ImageRenderResources {
                 &[0],
             );
         }
-        self.volume_layout = None;
-        self.volume_bricks = None;
-        self.occupancy_for = None;
+        self.volume.forget();
         self.volume_checks = [None, None];
         self.rebuild_volume_bind_group();
     }
 
     /// Collect the answers of [`volume_checks`](Self::volume_checks) that have
     /// come. A refusal drops the volume, as a failed upload does, and is kept
-    /// for [`take_late_upload_error`](Self::take_late_upload_error). Returns
-    /// whether the volume may be drawn: every answer is in.
+    /// for `take_late_upload_error`. Returns whether the volume may be drawn:
+    /// every answer is in.
     fn settle_volume_checks(&mut self) -> bool {
         let mut refused = None;
         for check in &mut self.volume_checks {
@@ -622,53 +416,11 @@ impl ImageRenderResources {
             }
         }
         if let Some(why) = refused {
-            let bytes = self.volume_layout.as_ref().map_or(0, |l| l.total_bytes());
+            let bytes = self.volume.resident_bytes() as usize;
             self.clear_volume();
             self.volume_lost = Some((VolumeUploadError::OutOfMemory(why), bytes));
         }
         self.volume_checks.iter().all(Option::is_none)
-    }
-
-    /// An upload that returned `Ok` and was then refused for want of memory,
-    /// and the bytes its volume took. Only WebGPU does this: it says whether
-    /// there was room through a promise an upload cannot wait for. The volume
-    /// is gone, as after an upload that failed, and `None` is returned from
-    /// then on: build a smaller one. Ask once a frame; until the answer is in,
-    /// the volume is not drawn.
-    pub fn take_late_upload_error(&mut self) -> Option<(VolumeUploadError, usize)> {
-        self.settle_volume_checks();
-        self.volume_lost.take()
-    }
-
-    /// Whether the volume is waiting for the device to say there was room for
-    /// it (WebGPU only; see [`take_late_upload_error`]). It is not drawn until
-    /// then, and nothing but the host can ask for the frame that draws it:
-    /// keep frames coming while this is true.
-    ///
-    /// [`take_late_upload_error`]: Self::take_late_upload_error
-    pub fn volume_pending(&mut self) -> bool {
-        !self.settle_volume_checks()
-    }
-
-    /// (Re)upload the volume, one entry per channel: each `bytes` is `w*h*d`
-    /// samples in native `kind` format. Packs it here, on the calling thread —
-    /// a builder with a thread of its own should pack it there instead (see
-    /// [`crate::pack`]) and call [`upload_packed_volume`].
-    ///
-    /// [`upload_packed_volume`]: Self::upload_packed_volume
-    pub fn upload_volumes(
-        &mut self,
-        w: u32,
-        h: u32,
-        d: u32,
-        channels: &[(VolumeKind, Vec<u8>)],
-    ) -> Result<(), VolumeUploadError> {
-        let kinds: Vec<VolumeKind> = channels.iter().map(|(k, _)| *k).collect();
-        let format = self.volume_texel_format(pack::common_kind(&kinds));
-        let borrowed: Vec<(VolumeKind, &[u8])> =
-            channels.iter().map(|(k, b)| (*k, b.as_slice())).collect();
-        let packed = PackedVolume::from_channels((w, h, d), &borrowed, format);
-        self.upload_packed_volume(&packed)
     }
 
     /// Rebuild the volume bind group after a texture was recreated.
@@ -687,15 +439,10 @@ impl ImageRenderResources {
     /// Work out which bricks can be seen under the current params, if that
     /// changed, and upload it.
     fn refresh_occupancy(&mut self) {
-        let (Some(bricks), Some(params)) = (&self.volume_bricks, &self.volume_params) else {
+        let Some(occ) = self.volume.stale_occupancy() else {
             return;
         };
-        let vis = Visibility::of(params);
-        if self.occupancy_for == Some(vis) {
-            return;
-        }
-        let occ = pack::occupancy(bricks, &vis);
-        let (bx, by, bz) = bricks.dims;
+        let (bx, by, bz) = occ.dims;
         let want = wgpu::Extent3d {
             width: bx,
             height: by,
@@ -717,52 +464,9 @@ impl ImageRenderResources {
             0,
             (bx, by, bz),
             1,
-            &occ,
+            &occ.bytes,
         );
-        self.occupancy_for = Some(vis);
-    }
-
-    /// Switch the two accelerations on or off: skipping parts of the volume
-    /// that cannot be seen (exact: the picture is the same either way) and, in
-    /// the maximum projection, reading coarser mip levels where a voxel is
-    /// smaller than a pixel. Both are on unless switched off; off is for
-    /// comparing, measuring, or ruling them out.
-    pub fn set_volume_acceleration(&mut self, skip_empty: bool, mip_levels: bool) {
-        self.accel_skip = skip_empty;
-        self.accel_lod = mip_levels;
-    }
-
-    /// The size the 3D view is painted at, in pixels, and how many times
-    /// smaller per axis to render it: 1 renders every pixel, and more renders a
-    /// reduced picture that [`paint_volume`] scales up — for a view that is
-    /// moving, where a sharp frame is wasted (see [`crate::MOVING_DOWNSCALE`]).
-    /// Set every frame, before [`prepare_volume`]. Until it is set the size of
-    /// a pixel is unknown, so the view renders full size and reads no coarser
-    /// mip level than the finest.
-    ///
-    /// [`paint_volume`]: Self::paint_volume
-    /// [`prepare_volume`]: Self::prepare_volume
-    pub fn set_volume_target(&mut self, width: u32, height: u32, downscale: u32) {
-        self.volume_target = (width, height);
-        self.volume_downscale = downscale.max(1);
-    }
-
-    /// Store the sampling mode for the shader (0 = nearest, 1 = linear, 2 = cubic).
-    /// A single linear sampler serves all three (nearest snaps to texel centers,
-    /// cubic reconstructs in-shader), so no GPU state changes here.
-    pub fn set_volume_interp(&mut self, interp: VolumeInterp) {
-        self.volume_interp_mode = match interp {
-            VolumeInterp::Nearest => 0,
-            VolumeInterp::Linear => 1,
-            VolumeInterp::Cubic => 2,
-        };
-    }
-
-    /// Stash the ray-march params. They reach the GPU in `prepare_volume`,
-    /// which the host must call before `paint_volume`.
-    pub fn set_volume_params(&mut self, params: VolumeParams) {
-        self.volume_params = Some(params);
-        self.refresh_occupancy();
+        self.volume.occupancy_for = Some(occ.vis);
     }
 
     /// Marshal the stashed params into the volume uniform buffer for a
@@ -774,27 +478,26 @@ impl ImageRenderResources {
     pub fn write_volume_uniform(&mut self) {
         self.lowres_ready = false;
         self.settle_volume_checks();
-        if let Some(p) = self.volume_params {
+        if let Some(p) = self.volume.params {
             self.write_volume_uniform_with(&p, self.volume_target.1);
         }
     }
 
     /// Get the frame ready: marshal the params into the uniform buffer and,
-    /// when [`set_volume_target`] asked for a reduced render, record that
-    /// render into `encoder` (it then runs ahead of the host's own pass, which
+    /// when `set_volume_target` asked for a reduced render, record that render
+    /// into `encoder` (it then runs ahead of the host's own pass, which
     /// [`paint_volume`] scales it into). Under egui_wgpu this is the
     /// callback's `prepare`, with the encoder it is handed.
     ///
-    /// [`set_volume_target`]: Self::set_volume_target
     /// [`paint_volume`]: Self::paint_volume
     pub fn prepare_volume(&mut self, encoder: &mut wgpu::CommandEncoder) {
         self.lowres_ready = false;
         if !self.settle_volume_checks() {
             return;
         }
-        let Some(p) = self.volume_params else { return };
+        let Some(p) = self.volume.params else { return };
         let (w, h) = self.volume_target;
-        let f = self.volume_downscale;
+        let f = self.volume.downscale;
         if f <= 1 || w == 0 || h == 0 {
             self.write_volume_uniform_with(&p, h);
             return;
@@ -874,12 +577,7 @@ impl ImageRenderResources {
     /// Marshal `p` + the interp mode and the accelerations into the volume
     /// uniform buffer, for a render `height` pixels tall (0: not known, and
     /// then no coarser mip level is read).
-    ///
-    /// Empty space is skipped only where the occupancy was worked out for
-    /// `p`'s own windows: a capture renders the params it was asked for over
-    /// several frames, while the view's change underneath it.
     fn write_volume_uniform_with(&self, p: &VolumeParams, height: u32) {
-        let levels = self.volume_layout.as_ref().map_or(1, |l| l.levels);
         let mut gpu = VolParamsGpu {
             channels: [[0.0; 4]; MAX_CHANNELS],
             cam_eye: [p.eye[0], p.eye[1], p.eye[2], 0.0],
@@ -891,20 +589,11 @@ impl ImageRenderResources {
             gain: [p.brightness, 0.0, 0.0, 0.0],
             modes: [
                 p.num_channels,
-                p.render_mode,
-                self.volume_interp_mode,
+                p.render_mode.shader_mode(),
+                self.volume.interp.shader_mode(),
                 p.max_steps,
             ],
-            accel: accel_uniform(
-                p,
-                height,
-                if self.accel_lod && height > 0 {
-                    levels - 1
-                } else {
-                    0
-                },
-                self.accel_skip && self.occupancy_for == Some(Visibility::of(p)),
-            ),
+            accel: self.volume.accel(p, height),
         };
         for c in 0..MAX_CHANNELS {
             gpu.channels[c] = [
@@ -924,7 +613,7 @@ impl ImageRenderResources {
     pub fn paint_volume(&self, render_pass: &mut wgpu::RenderPass<'_>) {
         // Nothing until the device has said there was room for the volume
         // (see `volume_checks`), which `prepare_volume` waits for.
-        if self.volume_params.is_none() || self.volume_checks.iter().any(Option::is_some) {
+        if self.volume.params.is_none() || self.volume_checks.iter().any(Option::is_some) {
             return;
         }
         if let (true, Some(lowres)) = (self.lowres_ready, &self.lowres) {
@@ -936,129 +625,6 @@ impl ImageRenderResources {
         render_pass.set_pipeline(&self.volume_pipeline);
         render_pass.set_bind_group(0, &self.volume_bind_group, &[]);
         render_pass.draw(0..6, 0..1);
-    }
-
-    /// Render the volume off screen at `width` x `height` pixels, with the
-    /// params last given to `set_volume_params`, and read it back.
-    ///
-    /// The ray-march has no resolution of its own (every pixel is a ray), so
-    /// this is the view at any size: sharper than the window when larger, and
-    /// with nothing the host draws over the view in it. The aspect ratio is
-    /// taken from the size, not from the params.
-    ///
-    /// Rendered in tiles of [`CAPTURE_TILE`] pixels, one GPU job and one
-    /// readback each, so that no single job runs long enough for the system
-    /// to reset the GPU, and GPU memory holds one tile rather than the
-    /// picture. The first tile starts here; [`take_volume_capture`] collects
-    /// each as it lands and starts the next, and returns the picture once the
-    /// last is in. A readback cannot be waited for in a browser, so a capture
-    /// takes a frame or more a tile. One capture at a time.
-    ///
-    /// [`take_volume_capture`]: Self::take_volume_capture
-    pub fn capture_volume(&mut self, width: u32, height: u32) -> Result<(), String> {
-        let Some(params) = self.volume_params else {
-            return Err("there is no volume to render".into());
-        };
-        let max = self.max_2d_texture_size();
-        if width == 0 || height == 0 || width > max || height > max {
-            return Err(format!(
-                "a {width} x {height} picture is beyond what this GPU can render (up to {max} a side)"
-            ));
-        }
-        if swizzle(self.target_format).is_none() {
-            return Err(format!(
-                "cannot read back a render in {:?}",
-                self.target_format
-            ));
-        }
-        if self.capture.is_some() {
-            return Err("the last capture has not been taken yet".into());
-        }
-        if self.capture_target.is_none() {
-            self.capture_target = Some(self.create_capture_target());
-        }
-        self.capture = Some(CaptureJob {
-            width,
-            height,
-            params: VolumeParams {
-                aspect: width as f32 / height as f32,
-                ..params
-            },
-            tiles: capture_tiles(width, height),
-            next: 0,
-            rgba: vec![0; width as usize * height as usize * 4],
-            mapped: Arc::new(Mutex::new(None)),
-            started: false,
-        });
-        // Not before the device has said there was room for the volume:
-        // `take_volume_capture` starts it then.
-        if self.settle_volume_checks() {
-            self.submit_capture_tile();
-        }
-        Ok(())
-    }
-
-    /// The picture [`capture_volume`] asked for, once every tile of it has
-    /// arrived: `None` while it is still being rendered, or when none was
-    /// asked for. Call once a frame until it answers; each call collects the
-    /// tile that has landed and starts the next.
-    ///
-    /// [`capture_volume`]: Self::capture_volume
-    pub fn take_volume_capture(&mut self) -> Option<Result<VolumeImage, String>> {
-        if !self.capture.as_ref()?.started {
-            if !self.settle_volume_checks() {
-                return None;
-            }
-            if self.volume_layout.is_none() {
-                // Refused after its upload returned: gone, not black.
-                self.capture = None;
-                return Some(Err("the GPU had no room for the volume".into()));
-            }
-            self.submit_capture_tile();
-            return None;
-        }
-        // Drives the map callback on native; in a browser the browser does.
-        let _ = self.device.poll(wgpu::PollType::Poll);
-        let job = self.capture.as_mut().expect("checked above");
-        let result = job
-            .mapped
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()?;
-        if let Err(why) = result {
-            self.capture = None;
-            return Some(Err(format!("the render could not be read back: {why}")));
-        }
-        let target = self.capture_target.as_ref().expect("made with the job");
-        let order = swizzle(self.target_format).expect("checked when captured");
-        let (x, y, w, h) = job.tiles[job.next];
-        let stride = job.width as usize * 4;
-        {
-            let data = target.buffer.slice(..).get_mapped_range();
-            for (r, row) in data
-                .chunks(target.padded_row as usize)
-                .take(h as usize)
-                .enumerate()
-            {
-                let at = (y as usize + r) * stride + x as usize * 4;
-                let out = &mut job.rgba[at..at + w as usize * 4];
-                for (o, px) in out.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
-                    o.copy_from_slice(&[px[order[0]], px[order[1]], px[order[2]], 255]);
-                }
-            }
-        }
-        target.buffer.unmap();
-        job.next += 1;
-        if job.next < job.tiles.len() {
-            self.submit_capture_tile();
-            return None;
-        }
-        let job = self.capture.take().expect("checked above");
-        Some(Ok(VolumeImage {
-            width: job.width,
-            height: job.height,
-            rgba: job.rgba,
-        }))
     }
 
     /// Render the job's next tile into the tile texture, copy it to the
@@ -1166,56 +732,40 @@ impl ImageRenderResources {
         }
     }
 
-    /// (Re)allocate channel textures for the current frame size and per-channel
-    /// `kind`. An `Int8`/`Int16` channel gets a full-size R8Uint/R16Uint integer
-    /// texture (float texture a 1x1 dummy); a `Float` channel gets a full-size
-    /// R32F float texture (integer texture a 1x1 dummy); channels past
-    /// `kinds.len()` are unused (both 1x1). Rebuilds the bind group when anything
-    /// changed; no-op otherwise.
-    /// Largest per-axis 2D-texture dimension the device supports.
-    ///
-    /// Frames wider or taller than this cannot be uploaded at all — `wgpu`
-    /// rejects the texture and, since errors are fatal by default, takes the
-    /// process with it. The app subsamples to fit rather than letting that
-    /// happen; see `fast_tiff_viewer::sync::fit_stride`.
-    pub fn max_2d_texture_size(&self) -> u32 {
-        self.device.limits().max_texture_dimension_2d
+    /// Draw the composited image into the host's pass, which the host has
+    /// given the image's on-screen rect as its viewport.
+    pub fn paint(&self, render_pass: &mut wgpu::RenderPass<'_>) {
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.draw(0..6, 0..1);
+    }
+}
+
+impl ImageRenderer for ImageRenderResources {
+    fn max_2d_texture_size(&self) -> u32 {
+        self.max_2d
     }
 
-    pub fn ensure_size(&mut self, width: u32, height: u32, kinds: &[ChannelKind]) {
-        let mut want = [KIND_UNUSED; MAX_CHANNELS];
-        for (c, slot) in want.iter_mut().enumerate() {
-            *slot = match kinds.get(c) {
-                None => KIND_UNUSED,
-                Some(ChannelKind::Int8) => KIND_INT8,
-                Some(ChannelKind::Int16) => KIND_INT16,
-                Some(ChannelKind::Float) => KIND_FLOAT,
-            };
-        }
-        if self.current_size == (width, height) && self.current_kinds == want {
+    /// Rebuilds the bind group when anything changed.
+    fn ensure_size(&mut self, width: u32, height: u32, kinds: &[ChannelKind]) {
+        if !self.channels.update(width, height, kinds) {
             return;
         }
+        let want = self.channels.textures();
         let device = &self.device;
         self.channel_textures = std::array::from_fn(|c| {
-            let label = format!("FastTIFFchannel {c}");
-            // R8Uint or R16Uint at full size for an integer channel, else a 1x1
-            // R16Uint dummy. Both are sampled through the same `texture_2d<u32>`.
-            match want[c] {
-                KIND_INT8 => {
-                    create_int_texture(device, width, height, wgpu::TextureFormat::R8Uint, &label)
-                }
-                KIND_INT16 => {
-                    create_int_texture(device, width, height, wgpu::TextureFormat::R16Uint, &label)
-                }
-                _ => create_int_texture(device, 1, 1, wgpu::TextureFormat::R16Uint, &label),
-            }
+            // R8Uint or R16Uint, both sampled through the same
+            // `texture_2d<u32>`.
+            let (w, h) = want[c].int_size;
+            let format = if want[c].int_8bit {
+                wgpu::TextureFormat::R8Uint
+            } else {
+                wgpu::TextureFormat::R16Uint
+            };
+            create_int_texture(device, w, h, format, &format!("FastTIFFchannel {c}"))
         });
         self.channel_ftextures = std::array::from_fn(|c| {
-            let (w, h) = if want[c] == KIND_FLOAT {
-                (width, height)
-            } else {
-                (1, 1)
-            };
+            let (w, h) = want[c].float_size;
             create_float_texture(device, w, h, &format!("FastTIFFchannel-f {c}"))
         });
         self.bind_group = build_bind_group(
@@ -1227,101 +777,51 @@ impl ImageRenderResources {
             &self.lut_texture,
             &self.sampler,
         );
-        self.current_size = (width, height);
-        self.current_kinds = want;
     }
 
-    /// Upload one integer channel's raw 16-bit samples (R16Uint texture).
-    pub fn upload_channel_u16(&self, channel: usize, width: u32, height: u32, samples: &[u16]) {
+    fn upload_channel_u8(&mut self, channel: usize, width: u32, height: u32, samples: &[u8]) {
         if channel >= MAX_CHANNELS {
             return;
         }
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.channel_textures[channel],
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(samples),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 2),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-    }
-
-    /// Upload one integer channel's raw 8-bit samples (R8Uint texture). Skips
-    /// the CPU `0..255 -> 0..65535` widening; the window/level is scaled to
-    /// 0..255 units on the app side instead.
-    pub fn upload_channel_u8(&self, channel: usize, width: u32, height: u32, samples: &[u8]) {
-        if channel >= MAX_CHANNELS {
-            return;
-        }
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.channel_textures[channel],
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
+        write_channel(
+            &self.queue,
+            &self.channel_textures[channel],
+            (width, height),
+            1,
             samples,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
         );
     }
 
-    /// Upload one float channel's raw 32-bit float samples (R32F texture).
-    pub fn upload_channel_f32(&self, channel: usize, width: u32, height: u32, samples: &[f32]) {
+    fn upload_channel_u16(&mut self, channel: usize, width: u32, height: u32, samples: &[u16]) {
         if channel >= MAX_CHANNELS {
             return;
         }
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.channel_ftextures[channel],
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
+        write_channel(
+            &self.queue,
+            &self.channel_textures[channel],
+            (width, height),
+            2,
             bytemuck::cast_slice(samples),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
         );
     }
 
-    /// Upload one channel's LUT (256 RGB entries) into the LUT texture array.
-    pub fn upload_lut(&self, channel: usize, lut: &Lut) {
+    fn upload_channel_f32(&mut self, channel: usize, width: u32, height: u32, samples: &[f32]) {
         if channel >= MAX_CHANNELS {
             return;
         }
-        let mut rgba = vec![0u8; LUT_WIDTH as usize * 4];
-        for (i, px) in lut.iter().enumerate() {
-            rgba[i * 4] = px[0];
-            rgba[i * 4 + 1] = px[1];
-            rgba[i * 4 + 2] = px[2];
-            rgba[i * 4 + 3] = 255;
+        write_channel(
+            &self.queue,
+            &self.channel_ftextures[channel],
+            (width, height),
+            4,
+            bytemuck::cast_slice(samples),
+        );
+    }
+
+    /// Into layer `channel` of the LUT texture array.
+    fn upload_lut(&mut self, channel: usize, lut: &Lut) {
+        if channel >= MAX_CHANNELS {
+            return;
         }
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -1334,7 +834,7 @@ impl ImageRenderResources {
                 },
                 aspect: wgpu::TextureAspect::All,
             },
-            &rgba,
+            &uniforms::lut_rgba(lut),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(LUT_WIDTH * 4),
@@ -1348,43 +848,330 @@ impl ImageRenderResources {
         );
     }
 
-    /// Update per-channel window/level + enabled + is-float flags, the active
-    /// channel count, and the visible UV sub-rect (pan/zoom), in one uniform
-    /// write.
-    pub fn set_params(
+    /// In one write of the uniform buffer.
+    fn set_params(
         &mut self,
         channels: &[ChannelUniform],
         num_channels: u32,
         uv_offset: [f32; 2],
         uv_scale: [f32; 2],
     ) {
-        let mut gpu = ParamsGpu {
-            channels: [ChannelParamsGpu {
-                min_max: [0.0, 65535.0],
-                enabled: 0.0,
-                is_float: 0.0,
-            }; MAX_CHANNELS],
-            uv_offset,
-            uv_scale,
-            num_channels,
-            _pad: [0; 3],
-        };
-        for (i, c) in channels.iter().take(MAX_CHANNELS).enumerate() {
-            gpu.channels[i] = ChannelParamsGpu {
-                min_max: [c.min, c.max],
-                enabled: if c.enabled { 1.0 } else { 0.0 },
-                is_float: if c.is_float { 1.0 } else { 0.0 },
-            };
-        }
+        let block = CompositeParams::new(channels, num_channels, uv_offset, uv_scale);
         self.queue
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&gpu));
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&block));
+    }
+}
+
+impl VolumeRenderer for ImageRenderResources {
+    /// 8-bit as 8-bit; 16-bit as a 16-bit unorm when the device has
+    /// `TEXTURE_FORMAT_16BIT_NORM` (see [`optional_features`]) and as a half
+    /// float when it has not; float always as a half float.
+    fn volume_caps(&self) -> VolumeCaps {
+        self.caps
     }
 
-    pub fn paint(&self, render_pass: &mut wgpu::RenderPass<'_>) {
-        render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[]);
-        render_pass.draw(0..6, 0..1);
+    /// Asks `VK_EXT_memory_budget` on Vulkan and DXGI on DX12 (see
+    /// [`crate::vram`]), through the adapter handed over with
+    /// [`set_adapter`](ImageRenderResources::set_adapter): `None` without
+    /// one, on Metal and in the browser, which have no way to ask, and for an
+    /// integrated GPU.
+    fn volume_memory_available(&self) -> Option<u64> {
+        let budget = crate::vram::wgpu_budget(self.adapter.as_ref()?)?;
+        Some(budget.headroom() + self.volume.resident_bytes())
     }
+
+    /// Textures whose size and format are unchanged (a 4D timepoint step) are
+    /// refilled in place; the bind group is only rebuilt when one was
+    /// recreated. Each texture is made inside an out-of-memory error scope of
+    /// its own, checked before anything is written to it, and every 32 MB of
+    /// a level is submitted before the next is written.
+    fn upload_packed_volume(&mut self, volume: &PackedVolume) -> Result<(), VolumeUploadError> {
+        volume.check().map_err(VolumeUploadError::Unsupported)?;
+        let layout = &volume.layout;
+        self.caps.check(layout)?;
+
+        // Per texture, what it must be, and whether the one there is not that.
+        let specs: [_; 2] = std::array::from_fn(|t| {
+            let (size, format, levels) = match layout.textures.get(t) {
+                Some(tex) => (
+                    layout.dims,
+                    packed_format(layout.format, tex.components),
+                    layout.levels,
+                ),
+                None => ((1, 1, 1), wgpu::TextureFormat::R8Unorm, 1),
+            };
+            let current = &self.volume_textures[t];
+            let stale = current.size()
+                != wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: size.2,
+                }
+                || current.format() != format
+                || current.mip_level_count() != levels;
+            (size, format, levels, stale)
+        });
+        if specs.iter().any(|s| s.3) {
+            // Let go of the textures being replaced before asking for room for
+            // their successors, and wait until the GPU has: the old volume and
+            // the new are then never in memory together. A budget counts the
+            // old one as free (`volume_memory_available`), and holding both
+            // would spend the margin it leaves.
+            for (t, spec) in specs.iter().enumerate() {
+                if spec.3 {
+                    self.volume_textures[t].destroy();
+                }
+            }
+            let _ = self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+        }
+
+        let mut rebind = false;
+        for (t, &(size, format, levels, stale)) in specs.iter().enumerate() {
+            if stale {
+                // Each texture made inside a scope of its own, and checked
+                // before anything is written to it: a texture the device had
+                // no room for comes back invalid, and writing to it would be a
+                // validation error nothing catches, which wgpu treats as fatal.
+                let scope = OutOfMemoryScope::push(&self.device);
+                let texture = create_volume_texture(
+                    &self.device,
+                    size,
+                    format,
+                    levels,
+                    if t == 0 {
+                        "FastTIFFvol a"
+                    } else {
+                        "FastTIFFvol b"
+                    },
+                );
+                match scope.pop() {
+                    Ok(check) => self.volume_checks[t] = check,
+                    Err(why) => {
+                        drop(texture);
+                        self.clear_volume();
+                        return Err(why);
+                    }
+                }
+                self.volume_textures[t] = texture;
+                rebind = true;
+                if layout.textures.get(t).is_none() {
+                    write_volume_region(
+                        &self.queue,
+                        &self.volume_textures[t],
+                        0,
+                        (1, 1),
+                        1,
+                        0,
+                        1,
+                        &[0],
+                    );
+                }
+            }
+            if layout.textures.get(t).is_some() {
+                let texel = layout.texel_bytes(t);
+                for (level, data) in volume.levels[t].iter().enumerate() {
+                    let dims = layout.level_dims(level as u32);
+                    write_volume_level(
+                        &self.queue,
+                        &self.volume_textures[t],
+                        level as u32,
+                        dims,
+                        texel,
+                        data,
+                    );
+                }
+            }
+        }
+        self.volume.layout = Some(layout.clone());
+        self.volume.bricks = Some(volume.bricks.clone());
+        self.volume.occupancy_for = None;
+        self.refresh_occupancy();
+        if rebind {
+            self.rebuild_volume_bind_group();
+        }
+        Ok(())
+    }
+
+    fn release_volume(&mut self) {
+        self.clear_volume();
+    }
+
+    fn take_late_upload_error(&mut self) -> Option<(VolumeUploadError, usize)> {
+        self.settle_volume_checks();
+        self.volume_lost.take()
+    }
+
+    fn volume_pending(&mut self) -> bool {
+        !self.settle_volume_checks()
+    }
+
+    /// A single linear sampler serves all three (nearest snaps to texel
+    /// centres, cubic reconstructs in the shader), so no GPU state changes
+    /// here.
+    fn set_volume_interp(&mut self, interp: VolumeInterp) {
+        self.volume.interp = interp;
+    }
+
+    fn set_volume_acceleration(&mut self, skip_empty: bool, mip_levels: bool) {
+        self.volume.skip_empty = skip_empty;
+        self.volume.mip_levels = mip_levels;
+    }
+
+    /// Set before [`prepare_volume`](ImageRenderResources::prepare_volume).
+    /// Until it is set the size of a pixel is unknown, so the view renders
+    /// full size and reads no coarser mip level than the finest.
+    fn set_volume_target(&mut self, width: u32, height: u32, downscale: u32) {
+        self.volume_target = (width, height);
+        self.volume.downscale = downscale.max(1);
+    }
+
+    /// Stashed: they reach the GPU in
+    /// [`prepare_volume`](ImageRenderResources::prepare_volume), which the
+    /// host must call before
+    /// [`paint_volume`](ImageRenderResources::paint_volume).
+    fn set_volume_params(&mut self, params: VolumeParams) {
+        self.volume.params = Some(params);
+        self.refresh_occupancy();
+    }
+
+    /// The first tile starts here; [`take_volume_capture`] collects each as
+    /// it lands and starts the next. A readback cannot be waited for in a
+    /// browser, so a capture takes a frame or more a tile.
+    ///
+    /// [`take_volume_capture`]: VolumeRenderer::take_volume_capture
+    fn capture_volume(&mut self, width: u32, height: u32) -> Result<(), String> {
+        let params =
+            self.volume
+                .capture_params(width, height, self.max_2d, self.capture.is_some())?;
+        // After the shared checks, where it was before the busy one: the
+        // target format is fixed when the renderer is made, so no capture can
+        // be under way when it does not read back, and the order of the two
+        // never shows.
+        if swizzle(self.target_format).is_none() {
+            return Err(format!(
+                "cannot read back a render in {:?}",
+                self.target_format
+            ));
+        }
+        if self.capture_target.is_none() {
+            self.capture_target = Some(self.create_capture_target());
+        }
+        self.capture = Some(CaptureJob {
+            width,
+            height,
+            params: VolumeParams {
+                aspect: width as f32 / height as f32,
+                ..params
+            },
+            tiles: capture_tiles(width, height),
+            next: 0,
+            rgba: vec![0; width as usize * height as usize * 4],
+            mapped: Arc::new(Mutex::new(None)),
+            started: false,
+        });
+        // Not before the device has said there was room for the volume:
+        // `take_volume_capture` starts it then.
+        if self.settle_volume_checks() {
+            self.submit_capture_tile();
+        }
+        Ok(())
+    }
+
+    /// Each call collects the tile that has landed and starts the next.
+    fn take_volume_capture(&mut self) -> Option<Result<VolumeImage, String>> {
+        if !self.capture.as_ref()?.started {
+            if !self.settle_volume_checks() {
+                return None;
+            }
+            if self.volume.layout.is_none() {
+                // Refused after its upload returned: gone, not black.
+                self.capture = None;
+                return Some(Err("the GPU had no room for the volume".into()));
+            }
+            self.submit_capture_tile();
+            return None;
+        }
+        // Drives the map callback on native; in a browser the browser does.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        let job = self.capture.as_mut().expect("checked above");
+        let result = job
+            .mapped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()?;
+        if let Err(why) = result {
+            self.capture = None;
+            return Some(Err(format!("the render could not be read back: {why}")));
+        }
+        let target = self.capture_target.as_ref().expect("made with the job");
+        let order = swizzle(self.target_format).expect("checked when captured");
+        let (x, y, w, h) = job.tiles[job.next];
+        let stride = job.width as usize * 4;
+        {
+            let data = target.buffer.slice(..).get_mapped_range();
+            for (r, row) in data
+                .chunks(target.padded_row as usize)
+                .take(h as usize)
+                .enumerate()
+            {
+                let at = (y as usize + r) * stride + x as usize * 4;
+                let out = &mut job.rgba[at..at + w as usize * 4];
+                for (o, px) in out
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(row.as_chunks::<4>().0)
+                {
+                    o.copy_from_slice(&[px[order[0]], px[order[1]], px[order[2]], 255]);
+                }
+            }
+        }
+        target.buffer.unmap();
+        job.next += 1;
+        if job.next < job.tiles.len() {
+            self.submit_capture_tile();
+            return None;
+        }
+        let job = self.capture.take().expect("checked above");
+        Some(Ok(VolumeImage {
+            width: job.width,
+            height: job.height,
+            rgba: job.rgba,
+        }))
+    }
+}
+
+/// Write a whole 2D channel texture: `width * height` samples of `bytes`
+/// bytes each, row-major and tightly packed.
+fn write_channel(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    (width, height): (u32, u32),
+    bytes: u32,
+    samples: &[u8],
+) {
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        samples,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * bytes),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 fn int_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -1499,27 +1286,29 @@ fn build_bind_group(
         ..Default::default()
     });
 
-    let mut entries = vec![wgpu::BindGroupEntry {
-        binding: 0,
-        resource: uniform_buffer.as_entire_binding(),
-    }];
+    let mut entries = vec![
+        wgpu::BindGroupEntry {
+            binding: binding::PARAMS,
+            resource: uniform_buffer.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: binding::LUT,
+            resource: wgpu::BindingResource::TextureView(&lut_view),
+        },
+        wgpu::BindGroupEntry {
+            binding: binding::SAMPLER,
+            resource: wgpu::BindingResource::Sampler(sampler),
+        },
+    ];
     for (i, view) in channel_views.iter().enumerate() {
         entries.push(wgpu::BindGroupEntry {
-            binding: i as u32 + 1,
+            binding: binding::INT_TEXTURE + i as u32,
             resource: wgpu::BindingResource::TextureView(view),
         });
     }
-    entries.push(wgpu::BindGroupEntry {
-        binding: LUT_BINDING,
-        resource: wgpu::BindingResource::TextureView(&lut_view),
-    });
-    entries.push(wgpu::BindGroupEntry {
-        binding: SAMPLER_BINDING,
-        resource: wgpu::BindingResource::Sampler(sampler),
-    });
     for (i, view) in fchannel_views.iter().enumerate() {
         entries.push(wgpu::BindGroupEntry {
-            binding: FTEX_BINDING_BASE + i as u32,
+            binding: binding::FLOAT_TEXTURE + i as u32,
             resource: wgpu::BindingResource::TextureView(view),
         });
     }
@@ -1532,19 +1321,6 @@ fn build_bind_group(
 }
 
 // --- 3D volume helpers -----------------------------------------------------
-
-/// The `accel` uniform: the size of a pixel at unit distance for a render
-/// `height` pixels tall (a capture tile's narrowed params give the same value
-/// as the whole picture's), the highest mip level a MIP may read, the brick
-/// size, and whether to skip empty bricks.
-fn accel_uniform(p: &VolumeParams, height: u32, max_level: u32, skip: bool) -> [f32; 4] {
-    [
-        2.0 * p.tan_half_fov / height.max(1) as f32,
-        max_level as f32,
-        pack::BRICK as f32,
-        if skip { 1.0 } else { 0.0 },
-    ]
-}
 
 /// The texture format for a packed texture of `components` components stored
 /// as `format`. One or two components keep their own; three or four are RGBA.
@@ -1586,7 +1362,7 @@ fn create_volume_resources(
 ) -> VolumeResources {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("FastTIFFvolume shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/volume.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(shaders::volume_wgsl().into()),
     });
 
     let entries = [
@@ -1692,7 +1468,7 @@ fn create_blit_pipeline(
 ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("FastTIFFvolume blit shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(shaders::blit_wgsl().into()),
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("FastTIFFvolume blit bind group layout"),
@@ -1961,3 +1737,7 @@ fn swizzle(format: wgpu::TextureFormat) -> Option<[usize; 3]> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "wgpu_backend_tests.rs"]
+mod tests;

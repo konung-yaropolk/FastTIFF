@@ -160,9 +160,10 @@ pub enum Border {
     /// whose rows then run along it rather than along the frame's. The frames
     /// come back smaller, with the same pixel spacing. Which rectangle depends
     /// on the whole recording, so it is known once every frame is measured:
-    /// [`Registered::common_area`](crate::Registered::common_area), or
-    /// [`common_area`](crate::area::common_area) and
-    /// [`Cut`](crate::area::Cut) for a recording measured in batches.
+    /// [`Registered::common_area`](crate::Registered::common_area), which a
+    /// [`Session`](crate::Session) hands back as for an in-memory run, and
+    /// [`Registered::apply_batch`](crate::Registered::apply_batch) to cut the
+    /// planes.
     Crop,
 }
 
@@ -191,10 +192,8 @@ impl Border {
 }
 
 /// How far past the outermost sample a position may land and still count as
-/// on the frame: rounding, not motion. A fitted transformation that is the
-/// identity to within `1e-12` would otherwise blank the last row and column
-/// under [`Border::Constant`].
-pub(crate) const ON_FRAME: f64 = 1e-6;
+/// on the frame (see `image_registration_support::area::ON_FRAME`).
+pub(crate) use image_registration_support::area::ON_FRAME;
 
 /// Registration parameters.
 ///
@@ -210,7 +209,9 @@ pub struct Settings {
     pub align_by_chan2: bool,
 
     // --- the reference -------------------------------------------------
-    /// `nimg_init`: how many frames are sampled to build the reference.
+    /// `nimg_init`: how many frames are sampled to build the reference,
+    /// spread evenly over the recording as suite2p spreads them
+    /// ([`session::reference_sample`](crate::session::reference_sample)).
     pub nimg_init: usize,
     /// How many refinement passes build the reference. suite2p's `niter`, which
     /// its options do not expose — it is 8 in the source.
@@ -246,10 +247,18 @@ pub struct Settings {
     ///
     /// Only a memory and scheduling knob — the answer does not depend on it,
     /// except through `smooth_sigma_time`, which smooths *within* a batch.
+    /// No more frames than fit in [`BATCH_BUDGET`] go in one, at any frame
+    /// size and on every way into a registration
+    /// ([`pipeline::batch_len`]): 100 frames of 1024 square are 64.
+    ///
+    /// [`BATCH_BUDGET`]: crate::pipeline::BATCH_BUDGET
+    /// [`pipeline::batch_len`]: crate::pipeline::batch_len
     pub batch_size: usize,
 
     // --- bidirectional phase --------------------------------------------
-    /// `do_bidiphase`: measure and undo the resonant scanner's comb.
+    /// `do_bidiphase`: measure and undo the resonant scanner's comb. Measured
+    /// once, on the frames the reference is built from, as suite2p measures
+    /// it.
     pub do_bidiphase: bool,
     /// `bidiphase`: a known offset to apply instead of measuring one. A stated
     /// value wins over measuring, which is suite2p's rule.

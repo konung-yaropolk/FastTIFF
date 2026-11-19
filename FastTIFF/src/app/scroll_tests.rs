@@ -17,14 +17,46 @@ fn wheel(unit: egui::MouseWheelUnit, delta: egui::Vec2) -> egui::Event {
     }
 }
 
-fn ctrl_wheel(unit: egui::MouseWheelUnit, delta: egui::Vec2) -> egui::Event {
+fn wheel_with(
+    unit: egui::MouseWheelUnit,
+    delta: egui::Vec2,
+    modifiers: egui::Modifiers,
+) -> egui::Event {
     egui::Event::MouseWheel {
         unit,
         delta,
         phase: egui::TouchPhase::Move,
-        modifiers: egui::Modifiers::CTRL,
+        modifiers,
     }
 }
+
+fn ctrl_wheel(unit: egui::MouseWheelUnit, delta: egui::Vec2) -> egui::Event {
+    wheel_with(unit, delta, egui::Modifiers::CTRL)
+}
+
+/// Ctrl and Cmd as each platform reports them: Ctrl on Windows and Linux,
+/// and in a browser on any platform (`ctrl` and `command`); a Mac's Ctrl
+/// (`ctrl` alone); a Mac's Cmd, natively or in a browser (`mac_cmd` and
+/// `command`).
+const ZOOM_MODIFIERS: [(&str, egui::Modifiers); 3] = [
+    (
+        "Ctrl",
+        egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..egui::Modifiers::NONE
+        },
+    ),
+    ("a Mac's Ctrl", egui::Modifiers::CTRL),
+    (
+        "a Mac's Cmd",
+        egui::Modifiers {
+            mac_cmd: true,
+            command: true,
+            ..egui::Modifiers::NONE
+        },
+    ),
+];
 
 #[test]
 fn a_mouse_wheel_always_scrubs_frames() {
@@ -99,13 +131,52 @@ fn horizontal_trackpad_movement_pans_and_never_scrubs() {
 }
 
 #[test]
-fn ctrl_scroll_is_left_for_the_zoom_handler() {
-    for unit in [egui::MouseWheelUnit::Line, egui::MouseWheelUnit::Point] {
-        let out = classify(&[ctrl_wheel(unit, egui::vec2(0.0, -30.0))], true);
+fn ctrl_or_cmd_scroll_is_left_for_the_zoom_handler() {
+    for (held, modifiers) in ZOOM_MODIFIERS {
+        for unit in [egui::MouseWheelUnit::Line, egui::MouseWheelUnit::Point] {
+            let out = classify(&[wheel_with(unit, egui::vec2(0.0, -30.0), modifiers)], true);
+            assert_eq!(
+                out,
+                Wheel::default(),
+                "a scroll with {held} should be ignored here ({unit:?})"
+            );
+        }
+    }
+}
+
+/// Every combination of modifiers: a scroll that egui turns into a zoom
+/// (`zoom_delta`) is one `classify` leaves alone, and one egui leaves as a
+/// scroll is one it counts. On a Mac, where Cmd is not `ctrl`, testing
+/// `ctrl` alone counted Cmd+scroll, which egui zooms on, as frames too.
+#[test]
+fn what_egui_zooms_is_what_is_left_alone() {
+    for bits in 0..32u8 {
+        let modifiers = egui::Modifiers {
+            alt: bits & 1 != 0,
+            ctrl: bits & 2 != 0,
+            shift: bits & 4 != 0,
+            mac_cmd: bits & 8 != 0,
+            command: bits & 16 != 0,
+        };
+        // A small trackpad delta, which egui applies on the frame it arrives
+        // rather than smoothing it over the next few.
+        let event = wheel_with(egui::MouseWheelUnit::Point, egui::vec2(0.0, 5.0), modifiers);
+        let ctx = egui::Context::default();
+        let mut zoom = 1.0;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![event.clone()],
+                modifiers,
+                ..Default::default()
+            },
+            |ui| zoom = ui.input(|i| i.zoom_delta()),
+        );
+        let zoomed = zoom != 1.0;
+        assert_eq!(zoom_held(modifiers), zoomed, "{modifiers:?}: {zoom}");
         assert_eq!(
-            out,
-            Wheel::default(),
-            "ctrl+scroll should be ignored here ({unit:?})"
+            classify(&[event], true) == Wheel::default(),
+            zoomed,
+            "{modifiers:?}"
         );
     }
 }

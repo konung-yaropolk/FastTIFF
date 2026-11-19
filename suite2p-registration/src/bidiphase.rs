@@ -121,6 +121,72 @@ pub fn shift(frame: &mut [f32], ly: usize, lx: usize, offset: i32) {
     }
 }
 
+/// How many samples [`shift_keeping`] keeps from a frame: the `|offset|` that
+/// [`shift`] slides over at one end of each odd line.
+pub(crate) fn covered(ly: usize, lx: usize, offset: i32) -> usize {
+    let n = offset.unsigned_abs() as usize;
+    if offset == 0 || n >= lx {
+        0
+    } else {
+        ly / 2 * n
+    }
+}
+
+/// [`shift`], keeping what it slides over: the samples it overwrites are
+/// appended to `kept`, [`covered`] of them, for [`unshift`] to put back.
+///
+/// `shift` cannot be undone on its own — it copies a window and the samples
+/// it copies over are gone — but they are a few columns of every other line,
+/// so a caller that has to hand a frame back as it was can afford to keep
+/// them rather than a copy of the frame.
+pub(crate) fn shift_keeping(
+    frame: &mut [f32],
+    ly: usize,
+    lx: usize,
+    offset: i32,
+    kept: &mut Vec<f32>,
+) {
+    let n = offset.unsigned_abs() as usize;
+    if covered(ly, lx, offset) == 0 {
+        return;
+    }
+    let mut y = 1;
+    while y < ly {
+        let row = &mut frame[y * lx..(y + 1) * lx];
+        if offset > 0 {
+            kept.extend_from_slice(&row[lx - n..]);
+            row.copy_within(0..lx - n, n);
+        } else {
+            kept.extend_from_slice(&row[..n]);
+            row.copy_within(n..lx, 0);
+        }
+        y += 2;
+    }
+}
+
+/// Undo [`shift_keeping`] exactly: slide the odd lines back and put back what
+/// it kept, `kept` being that frame's [`covered`] samples.
+pub(crate) fn unshift(frame: &mut [f32], ly: usize, lx: usize, offset: i32, kept: &[f32]) {
+    let n = offset.unsigned_abs() as usize;
+    if covered(ly, lx, offset) == 0 {
+        return;
+    }
+    let mut kept = kept.chunks_exact(n);
+    let mut y = 1;
+    while y < ly {
+        let row = &mut frame[y * lx..(y + 1) * lx];
+        let back = kept.next().expect("the samples shift_keeping kept");
+        if offset > 0 {
+            row.copy_within(n..lx, 0);
+            row[lx - n..].copy_from_slice(back);
+        } else {
+            row.copy_within(0..lx - n, n);
+            row[..n].copy_from_slice(back);
+        }
+        y += 2;
+    }
+}
+
 #[cfg(test)]
 #[path = "bidiphase_tests.rs"]
 mod tests;

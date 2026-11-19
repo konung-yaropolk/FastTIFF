@@ -151,7 +151,10 @@ const RICH: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </OME>"#;
 
 fn attr<'a>(el: &'a XmlElement, key: &str) -> Option<&'a str> {
-    el.attributes.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    el.attributes
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
 }
 
 /// Everything is kept: elements in order, attributes decoded, text and CDATA.
@@ -160,7 +163,10 @@ fn the_whole_document_is_kept() {
     let root = xml_tree(RICH).expect("parses");
     assert_eq!(root.name, "OME");
     // Namespace declarations are not attributes of the image.
-    assert_eq!(root.attributes, vec![("Creator".to_string(), "scope & co".to_string())]);
+    assert_eq!(
+        root.attributes,
+        vec![("Creator".to_string(), "scope & co".to_string())]
+    );
     let names: Vec<&str> = root.children.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["Instrument", "Image", "StructuredAnnotations"]);
 
@@ -170,11 +176,17 @@ fn the_whole_document_is_kept() {
     let pixels = &image.children[1];
     assert_eq!(attr(pixels, "SizeC"), Some("2"));
     let kinds: Vec<&str> = pixels.children.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(kinds, ["Channel", "Channel", "TiffData", "Plane", "Plane", "Plane", "Plane"]);
+    assert_eq!(
+        kinds,
+        ["Channel", "Channel", "TiffData", "Plane", "Plane", "Plane", "Plane"]
+    );
     assert_eq!(attr(&pixels.children[6], "DeltaT"), Some("0.5"));
 
     let value = &root.children[2].children[0].children[0];
-    assert_eq!((value.name.as_str(), value.text.as_str()), ("Value", "a < b"));
+    assert_eq!(
+        (value.name.as_str(), value.text.as_str()),
+        ("Value", "a < b")
+    );
 }
 
 /// What the writer emits reads back as a tree too.
@@ -186,7 +198,12 @@ fn the_writers_own_document_is_a_tree() {
         samples_per_pixel: 1,
         ome_pixel_type: "uint16",
     };
-    let xml = serialize(2, &StackMetaWrite::new(1, 1).channel("GFP", [0, 255, 0]), &geom).unwrap();
+    let xml = serialize(
+        2,
+        &StackMetaWrite::new(1, 1).channel("GFP", [0, 255, 0]),
+        &geom,
+    )
+    .unwrap();
     let root = xml_tree(&xml).expect("parses");
     assert_eq!(root.name, "OME");
     assert!(root.children.iter().any(|c| c.name == "Image"));

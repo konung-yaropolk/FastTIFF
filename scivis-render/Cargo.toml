@@ -1,7 +1,8 @@
 [package]
 name = "scivis-render"
-version = "0.26.2"
+version = "0.28.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Scientific visualization on the GPU: per-channel window/level + LUT compositing of multi-channel image stacks in 2D, and volume ray-marching in 3D, on wgpu or OpenGL. No GUI toolkit, no file format — you bring the pixels."
 license = "MPL-2.0"
 readme = "README.md"
@@ -9,14 +10,14 @@ repository = "https://github.com/konung-yaropolk/FastTIFF"
 keywords = ["wgpu", "volume-rendering", "raymarching", "microscopy", "imaging"]
 categories = ["rendering", "visualization", "graphics", "science"]
 
-# The WGSL sources are `include_str!`d into the wgpu backend, so they must ship
+# The shader sources are `include_str!`d by `src/shaders.rs`, so they must ship
 # with the crate.
 include = [
     "src/**/*.rs",
     "src/**/*.wgsl",
-    # The shader-validation tests are this crate's only tests and need no
-    # fixtures, so ship them — a published crate you can't `cargo test` is
-    # strictly worse than a few KB larger.
+    "src/**/*.glsl",
+    # The tests need no fixtures, so ship them — a published crate you can't
+    # `cargo test` is strictly worse than a few KB larger.
     "tests/**/*.rs",
     "Cargo.toml",
     "README.md",
@@ -24,11 +25,12 @@ include = [
 ]
 
 # Backends are additive, not exclusive — nothing here forbids compiling both
-# (they're independent modules over independent GPU crates). A *host* that can
-# only drive one, like the eframe app, enforces that on its own side; a host
-# that wants runtime fallback can build both. Neither enabled leaves just the
-# shared parameter types, which is what a CPU-side caller (volume budgeting,
-# window/level math) needs.
+# (they're independent modules over independent GPU crates, implementing the
+# same two traits). A *host* that can only drive one, like the eframe app,
+# enforces that on its own side; a host that wants runtime fallback can build
+# both. Neither enabled leaves the shared parameter types and the renderer
+# traits, which is what a CPU-side caller (volume budgeting, window/level
+# math, code generic over a renderer, a test double) needs.
 [features]
 default = []
 backend-wgpu = ["dep:wgpu", "dep:bytemuck", "dep:windows", "dep:ash", "dep:wasm-bindgen-futures"]
@@ -44,12 +46,16 @@ rayon = ["dep:rayon"]
 # windowing layer uses — egui-wgpu 0.34 → wgpu 29, egui_glow 0.34 → glow 0.17.
 # Cargo unifies them automatically while the majors match; a host on a different
 # major would get a type mismatch at the `new()` call, not a subtle bug.
-wgpu = { version = "29", optional = true }
+wgpu = { workspace = true, optional = true }
 glow = { version = "0.17", optional = true }
 # f32 <-> f16 for half-float volume texels (`pack`); already in wgpu's tree.
 half = "2"
-rayon = { version = "1.10", optional = true }
-bytemuck = { version = "1.25", optional = true }
+rayon = { workspace = true, optional = true }
+# The uniform blocks both backends hand their shaders (`uniforms`) derive
+# `Pod`. `derive` is said here, where the derives are, rather than left to
+# wgpu's turning it on: a glow-only build has no wgpu. Its proc-macro is
+# already in the app's tree either way (through epaint).
+bytemuck = { workspace = true, features = ["derive"], optional = true }
 
 # Asking the driver how much GPU memory there is (`vram`), on the backends
 # wgpu uses there. Both are already in wgpu's tree at these versions, so they
@@ -67,10 +73,46 @@ ash = { version = "0.38", optional = true }
 # promise, which the upload waits for (`wgpu_backend`). Already in wgpu's
 # tree there, for its WebGPU backend.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen-futures = { version = "0.4", optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
 
 # WGSL is only validated by wgpu at runtime (shader-module creation), so this
 # lets `cargo test` catch shader errors offline, with no GPU and regardless of
 # which backend feature is on. naga is already in the tree via wgpu.
 [dev-dependencies]
-naga = { version = "30", features = ["wgsl-in"] }
+naga = { workspace = true, features = ["wgsl-in"] }
+# This crate itself, with both backends, so that every build of its tests has
+# both, whatever features the build was asked for: the tests check each
+# backend against its shaders and the two against each other. A dependency on
+# its own path is how a package turns features on for its tests alone. A
+# published copy drops it, so its test suites that drive a backend are gated
+# on that backend's feature (`tests/it/main.rs`): built with one backend, or
+# none, it still builds and runs the rest.
+scivis-render = { path = ".", features = ["backend-wgpu", "backend-glow"] }
+# Waiting on wgpu's adapter and device in the GPU tests. Already in the tree.
+pollster = { workspace = true }
+
+# glslang, Khronos' reference GLSL compiler, which compiles and links the glow
+# programs with no GPU and no driver (`tests/it/glsl.rs`): the one GLSL check
+# that runs on every CI machine. Its C++ is built by `cc`, no CMake, once per
+# target directory and profile: 12 s for a debug build and 35 s for a release
+# one on 16 threads (a CI runner has fewer). Not for the browser, where no
+# test runs.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+glslang = "0.9"
+
+# An OpenGL context with nothing on screen, for the tests that build and draw
+# with the glow programs on the machine's own driver and compare the
+# backends' pictures (`tests/it/headless.rs`): WGL through a hidden window on
+# Windows, EGL with no surface (Mesa's) on Linux. Both are already in the
+# tree, through eframe and wgpu; these add only declarations.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_OpenGL",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+khronos-egl = { version = "6", features = ["dynamic"] }

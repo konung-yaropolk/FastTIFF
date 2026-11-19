@@ -803,3 +803,48 @@ fn an_ome_file_carries_no_overlay() {
     let stack = crate::TiffStack::from_bytes(bytes).unwrap();
     assert!(stack.meta.overlay.is_empty());
 }
+
+/// Metadata set after the frames is the metadata the file has: nothing of it
+/// is written before `finish`, so a stream that only learns its colours or
+/// calibration part-way can still say so.
+#[test]
+fn metadata_set_after_the_frames_is_what_the_file_says() {
+    let mut magenta = [[0u8; 3]; 256];
+    for (i, px) in magenta.iter_mut().enumerate() {
+        *px = [i as u8, 0, i as u8];
+    }
+    let opts = WriterOptions::new(2, 1, SampleType::U16).description("placeholder");
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    let frame = le_bytes_u16(&[1, 2]);
+    w.write_frame_bytes(&frame).unwrap();
+    w.write_frame_bytes(&frame).unwrap();
+    // Checked as at construction.
+    assert!(w
+        .set_metadata(StackMetaWrite::new(1, 1).unit("a\nb"))
+        .is_err());
+    w.set_metadata(
+        StackMetaWrite::new(1, 1)
+            .unit("micron")
+            .pixel_size(0.5, 0.25)
+            .channel_lut(magenta),
+    )
+    .unwrap();
+    let bytes = w.finish().unwrap().into_inner();
+    let stack = crate::TiffStack::from_bytes(bytes).unwrap();
+    assert_eq!(stack.frames.len(), 2);
+    assert!(stack.meta.has_explicit_luts, "the late LUT is in the file");
+    assert_eq!(stack.meta.channel_display[0].lut[255], [255, 0, 255]);
+    assert_eq!(stack.meta.unit.as_deref(), Some("micron"));
+    assert_eq!(stack.meta.pixel_width, Some(0.5));
+    assert_eq!(stack.meta.pixel_height, Some(0.25));
+    assert_ne!(stack.description.as_deref(), Some("placeholder"));
+
+    // And the other way: structured metadata replaced by verbatim text.
+    let opts = WriterOptions::new(2, 1, SampleType::U16).metadata(StackMetaWrite::new(1, 1));
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    w.write_frame_bytes(&frame).unwrap();
+    assert!(w.set_description("a\0b").is_err());
+    w.set_description("said late").unwrap();
+    let stack = crate::TiffStack::from_bytes(w.finish().unwrap().into_inner()).unwrap();
+    assert_eq!(stack.description.as_deref(), Some("said late"));
+}

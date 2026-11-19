@@ -185,7 +185,17 @@ fn main() {
 
     let mut parallel = movie.clone();
     let at = Instant::now();
-    apply_batch(&mut parallel, LY, LX, &frame_of, &shifts, None, &settings);
+    // The fixture has no comb to undo.
+    apply_batch(
+        &mut parallel,
+        LY,
+        LX,
+        &frame_of,
+        &shifts,
+        None,
+        0,
+        &settings,
+    );
     let many = ms(at);
 
     println!("\n  applying the shifts to every plane:");

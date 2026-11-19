@@ -78,8 +78,9 @@
 //! the same card, and on a small card the two can overrun it. So nothing here
 //! fails the way wgpu fails by default, which is to panic: every allocation
 //! and every round runs inside error scopes, and a level the device has no
-//! room for fails its batch — its frames are reported as not fitted, and
-//! [`take_trouble`] says why.
+//! room for fails its batch: its frames are not fitted, and a registration
+//! fails as [`Error::Device`](crate::Error::Device), saying why
+//! ([`take_trouble`] has the reason for a pair registered directly).
 //!
 //! What a scope cannot do is keep the device. wgpu (29) survives running out
 //! of memory for a buffer or a texture, which is where nearly all of this
@@ -92,8 +93,6 @@
 use crate::optimize::{Prepared, Sums};
 use bytemuck::{Pod, Zeroable};
 use std::sync::Mutex;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Invocations per workgroup. Must match `WG` in `gpu.wgsl`.
@@ -108,13 +107,6 @@ const MOST_GROUPS_PER_LANE: usize = 64;
 /// already shared thinly enough that more lanes buy little, and the batch's
 /// coefficients have to fit next to the viewer's own textures.
 pub const MOST_LANES: usize = 32;
-
-/// How much device memory one batch's coefficient planes may take.
-const BATCH_MEMORY: u64 = 256 << 20;
-
-/// The most bytes of planes in one write: the staging memory an upload needs is
-/// two of these, whatever the frame size (see [`upload_planes`]).
-const UPLOAD_SLAB: usize = 32 << 20;
 
 /// Pyramid levels with fewer pixels than this are fitted on the CPU.
 ///
@@ -153,99 +145,20 @@ struct LaneGpu {
     dm: [f32; 64],
 }
 
-/// The device this crate runs on, and its adapter's name.
+/// The device, its use by the host and the scoped habits are shared with
+/// `suite2p-registration`: one device for every registration in the process.
+/// See [`image_registration_support::gpu`].
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone)]
-struct Shared {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    name: String,
-}
-
-/// The one device this crate uses: the host's, given with [`use_device`], or
-/// else one of its own, opened the first time it is needed.
-///
-/// One for the process rather than one per batch. Several devices opened side
-/// by side in one process, each driven from its own thread, hang on the drivers
-/// this workspace was measured against — `suite2p-registration` found that out
-/// first — and a registration only ever needs one anyway.
-///
-/// `None`, remembered, when there is no usable adapter.
-///
-/// Not in a browser build, where there is never a device to keep (see
-/// [`shared_device`]) and wgpu's browser objects cannot sit in a `static`.
-#[cfg(not(target_arch = "wasm32"))]
-static DEVICE: OnceLock<Option<Shared>> = OnceLock::new();
-
-/// Run on `device` instead of opening a device of this crate's own: the
-/// host's, typically the one its renderer draws with, which then carries the
-/// registration's work between its own frames. See the module docs for why a
-/// host that has one should.
-///
-/// Takes effect only before the first GPU run (or [`available`] call), and
-/// says whether it did. A software adapter counts as no device, as it would
-/// for one this crate opened. The device should have the adapter's own limits
-/// (`required_limits: adapter.limits()`): the batch size is derived from them.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn use_device(device: wgpu::Device, queue: wgpu::Queue, adapter: &wgpu::AdapterInfo) -> bool {
-    let shared = (adapter.device_type != wgpu::DeviceType::Cpu).then(|| Shared {
-        device,
-        queue,
-        name: adapter.name.clone(),
-    });
-    DEVICE.set(shared).is_ok()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn shared() -> Option<Shared> {
-    DEVICE
-        .get_or_init(|| {
-            let instance = wgpu::Instance::default();
-            let adapter =
-                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    ..Default::default()
-                }))
-                .ok()?;
-            let info = adapter.get_info();
-            if info.device_type == wgpu::DeviceType::Cpu {
-                return None;
-            }
-            // Whatever the adapter can do: the batch size is derived from
-            // these, and the defaults would cap it well below the card.
-            let (device, queue) =
-                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                    label: Some("turboreg-registration"),
-                    required_limits: adapter.limits(),
-                    ..Default::default()
-                }))
-                .ok()?;
-            Some(Shared {
-                device,
-                queue,
-                name: info.name,
-            })
-        })
-        .clone()
-}
+pub use image_registration_support::gpu::use_device;
+use image_registration_support::gpu::{filled, scoped, Trouble, BATCH_MEMORY, UPLOAD_SLAB};
 
 fn shared_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    // Requesting an adapter is asynchronous, and in a browser it resolves
-    // through the page's event loop — which `block_on` would be blocking. So
-    // there is no device to offer there; the backend says so instead.
-    #[cfg(target_arch = "wasm32")]
-    {
-        None
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        shared().map(|s| (s.device, s.queue))
-    }
+    image_registration_support::gpu::device().map(|d| (d.device, d.queue))
 }
 
 /// Whether this machine has a device the GPU backend can use.
 pub fn available() -> bool {
-    shared_device().is_some()
+    image_registration_support::gpu::available()
 }
 
 /// The device's name, for a log line saying where a run went.
@@ -259,7 +172,7 @@ pub fn adapter_name() -> Option<String> {
         // Kept from when the device was opened or handed over, rather than
         // asked of a new instance: enumerating adapters again is opening
         // drivers again, which is the step that can deadlock (module docs).
-        shared().map(|s| s.name)
+        image_registration_support::gpu::device().map(|d| d.name)
     }
 }
 
@@ -334,40 +247,59 @@ fn pipeline(device: &wgpu::Device, n: usize) -> Option<wgpu::ComputePipeline> {
 static ROUND: Mutex<()> = Mutex::new(());
 
 /// Why the device last failed a batch, until [`take_trouble`] takes it.
-static TROUBLE: Mutex<Option<String>> = Mutex::new(None);
+static TROUBLE: Trouble = Trouble::new();
 
-fn note_trouble(why: String) {
-    *TROUBLE.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+pub(crate) fn note_trouble(why: String) {
+    TROUBLE.note(why);
 }
 
 /// Why the device failed a batch since this was last asked, if it did: no
 /// room on it for a level's planes, or a device that stopped answering. The
-/// batch's frames are reported as not fitted (`Registered::failed`); this is
-/// the sentence that says why. Ask after a run, and once before it to forget
-/// an earlier one's.
+/// batch's frames come back as not fitted; this is the sentence that says
+/// why.
+///
+/// For [`register_pair`](crate::register_pair) and
+/// [`optimize::register_pairs`](crate::optimize::register_pairs) called
+/// directly: ask after them, and once before to forget an earlier caller's. A
+/// [`Session`](crate::Session) — and so `register_stack`, the C interface and
+/// the viewer — takes its own batches' reasons and fails as
+/// [`Error::Device`](crate::Error::Device), and those batches take turns to
+/// keep each reason with its batch. A direct call does not take a turn, so
+/// one made while sessions run elsewhere in the process may find their
+/// reasons, or lose its own to them.
 pub fn take_trouble() -> Option<String> {
-    TROUBLE.lock().unwrap_or_else(|e| e.into_inner()).take()
+    TROUBLE.take()
 }
 
-/// Run `work` with the device's out-of-memory and validation errors caught,
-/// and say which was raised, if one was.
+/// Held by each batch a session sends to the device, from emptying the
+/// trouble slot to taking what the batch put there; see [`attributed`].
+pub(crate) static TURN: Mutex<()> = Mutex::new(());
+
+/// Run `work` — one batch of device work — and say why the device failed it,
+/// if it did.
 ///
-/// Without a scope wgpu hands an error to the device's handler, which by
-/// default panics — on a device shared with a renderer, taking the
-/// application with it for want of memory a registration could do without.
-/// Scopes are per thread in wgpu, so these catch this thread's errors only,
-/// never the renderer's.
-fn scoped<T>(device: &wgpu::Device, work: impl FnOnce() -> T) -> Result<T, String> {
-    let no_room = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-    let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
+/// The reason is noted in one slot per process, so two batches at once could
+/// take each other's: a failed run coming back clean, a clean one failing.
+/// Batches take turns here instead, and the slot is emptied first, so neither
+/// an earlier caller's reason nor a concurrent one's is this batch's. Taking
+/// turns also keeps one batch's levels on the card at a time, whoever's they
+/// are, which is what the budget of [`lanes_for`] assumes; the device runs one
+/// submission at a time regardless (`ROUND`).
+pub(crate) fn attributed<R>(work: impl FnOnce() -> R) -> (R, Option<String>) {
+    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = TROUBLE.take();
     let done = work();
-    // Innermost first.
-    let invalid = pollster::block_on(invalid.pop());
-    let no_room = pollster::block_on(no_room.pop());
-    match no_room.or(invalid) {
-        None => Ok(done),
-        Some(e) => Err(e.to_string()),
-    }
+    (done, TROUBLE.take())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: every level built on this thread fails as a full card fails
+    /// it, which no real card can be relied on to do on cue. A level is built
+    /// on the thread that called for the batch (the pairs of a batch are lanes
+    /// of one dispatch, never spread over threads), so a test can fail its own
+    /// batches and no other test's.
+    pub(crate) static NO_ROOM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Copy each slot's four planes into `coeffs`, [`UPLOAD_SLAB`] bytes a
@@ -378,33 +310,6 @@ fn scoped<T>(device: &wgpu::Device, work: impl FnOnce() -> T) -> Result<T, Strin
 /// asked for at the moment a card short of memory can least spare it, and a
 /// staging allocation that fails can lose the device. Two slabs in flight
 /// keep it to 64 MB at any size, and the waits are short: a slab is a copy.
-/// A buffer of `contents`, for inside a [`scoped`] call: made unmapped and
-/// filled by the queue. `create_buffer_init` maps the buffer at creation
-/// instead, and wgpu treats mapping a buffer that could not be made as fatal,
-/// past any scope; this way a buffer there was no room for is an error the
-/// scope returns.
-fn filled(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    label: &str,
-    contents: &[u8],
-    usage: wgpu::BufferUsages,
-) -> wgpu::Buffer {
-    let size = (contents.len() as u64)
-        .next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
-        .max(4);
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some(label),
-        size,
-        usage: usage | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let mut padded = contents.to_vec();
-    padded.resize(size as usize, 0);
-    queue.write_buffer(&buffer, 0, &padded);
-    buffer
-}
-
 fn upload_planes(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -491,6 +396,13 @@ impl GpuLevel {
         let pixels = w * h;
         let slots = planes.len();
         if pixels == 0 || slots == 0 {
+            return None;
+        }
+        #[cfg(test)]
+        if NO_ROOM.with(|no_room| no_room.get()) {
+            note_trouble(format!(
+                "the GPU had no room for a {w} x {h} level of {slots} frame(s) (a test's)"
+            ));
             return None;
         }
         let limits = device.limits();

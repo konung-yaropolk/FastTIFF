@@ -32,7 +32,7 @@
 ///
 /// 0.78 rather than a round number because it is the point at which a 16-bit
 /// MRI with its ordinary auto-contrast window stops clipping its highlights.
-pub const MIP_DEFAULT: f32 = 0.78;
+pub(crate) const MIP_DEFAULT: f32 = 0.78;
 
 /// Checked here rather than in a test because both sides are constants: a test
 /// would be asserting something the compiler already knows, and clippy says so.
@@ -50,7 +50,7 @@ const _: () = assert!(
 /// until the slider is moved: at the default density the gain is exactly 1, so
 /// a volume opens looking as it always has, and only dragging shows the
 /// difference.
-pub const DENSITY_DEFAULT: f32 = 100.0;
+pub(crate) const DENSITY_DEFAULT: f32 = 100.0;
 
 /// How far [`autolevel`] may move the brightness, in either direction.
 ///
@@ -125,7 +125,7 @@ const TYPICAL_THICKNESS: f32 = 0.2;
 /// compensation is partial — flatter than no compensation, not flat. Saying so
 /// is the honest version; measuring τ per volume would mean sampling it on the
 /// host every time the slider moved.
-pub fn autolevel(density: f32) -> f32 {
+pub(crate) fn autolevel(density: f32) -> f32 {
     if !density.is_finite() || density <= 0.0 {
         return 1.0;
     }

@@ -707,12 +707,12 @@ pub(crate) fn sample(frame: &[f32], ly: usize, lx: usize, y: f64, x: f64, border
 /// whole run and handed back here for every batch, pays that cost once instead
 /// of once per batch. `sets.len() == 1` is the single-threaded path, and takes
 /// the same route with one chunk.
-pub fn measure_blocks_batch(
+pub fn measure_blocks_batch<F: AsRef<[f32]> + Sync>(
     sets: &mut [Vec<BlockFilters>],
     ly: usize,
     lx: usize,
     blocks: &Blocks,
-    frames: &[Vec<f32>],
+    frames: &[F],
     shifts: &[Shift],
     search: &BlockSearch,
 ) -> Vec<Vec<BlockShift>> {
@@ -732,7 +732,7 @@ pub fn measure_blocks_batch(
                 .iter()
                 .zip(shifts)
                 .map(|(frame, s)| {
-                    let corrected = crate::rigid::shift_frame(frame, ly, lx, s.dy, s.dx);
+                    let corrected = crate::rigid::shift_frame(frame.as_ref(), ly, lx, s.dy, s.dx);
                     measure_blocks(filters, &corrected, lx, blocks, search)
                 })
                 .collect()

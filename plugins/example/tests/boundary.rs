@@ -9,8 +9,9 @@
 //! differently on each side.
 //!
 //! The oracle is exact. The example library's `Invert` is a copy of the
-//! viewer's built-in `Invert`, so running both over the same stack must produce
-//! *identical* results, down to the float bits and the result's name. A
+//! application's built-in `Invert` (`fasttiff-builtin-plugins`), so running
+//! both over the same stack must produce *identical* results, down to the
+//! float bits and the result's name. A
 //! comparison with no tolerance is only possible because the boundary is meant
 //! to be lossless, which is the property worth pinning.
 //!
@@ -89,7 +90,7 @@ fn volume() -> VolumeView {
 
 /// A small float stack whose planes are all different, so a mixed-up plane
 /// index cannot pass unnoticed.
-fn stack(channels: usize, frames: usize) -> fast_tiff_viewer::stack::Stack {
+fn stack(channels: usize, frames: usize) -> fast_tiff_viewer::Document {
     let (w, h) = (5u32, 4u32);
     let n = (w * h) as usize;
     let mut planes = Vec::new();
@@ -185,7 +186,7 @@ fn the_library_registers_what_it_declares() {
 #[test]
 fn a_loaded_plugin_matches_the_built_in_it_was_copied_from() {
     let mut from_library = plugin("dev.fasttiff.example.invert");
-    let mut built_in = plugins::builtin::Invert;
+    let mut built_in = fasttiff_builtin_plugins::Invert;
 
     for (channels, frames, new_window) in [(1usize, 1usize, true), (3, 2, true), (3, 2, false)] {
         let s = stack(channels, frames);
@@ -268,7 +269,7 @@ impl ImportHost for Silent {
 }
 
 fn tmp(name: &str, bytes: &[u8]) -> PathBuf {
-    let p = std::env::temp_dir().join(format!("fasttiff-boundary-{name}"));
+    let p = std::env::temp_dir().join(format!("fasttiff-boundary-{}-{name}", std::process::id()));
     std::fs::write(&p, bytes).expect("write fixture");
     p
 }
@@ -357,7 +358,10 @@ fn an_exporter_in_a_library_writes_a_file_end_to_end() {
     let view = plugins::describe_view(&s, 1, false, volume());
     let mut host = plugins::StackHost::new(&s, view);
 
-    let path = std::env::temp_dir().join("fasttiff-boundary-export.csv");
+    let path = std::env::temp_dir().join(format!(
+        "fasttiff-boundary-{}-export.csv",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&path);
     let mut params = Params::new();
     // Both non-default, so a value that failed to cross shows up as the
@@ -452,7 +456,10 @@ fn an_exporter_stops_when_the_host_says_to() {
         std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
     );
 
-    let path = std::env::temp_dir().join("fasttiff-boundary-cancelled.csv");
+    let path = std::env::temp_dir().join(format!(
+        "fasttiff-boundary-{}-cancelled.csv",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&path);
     let err = csv
         .export(
@@ -546,7 +553,7 @@ fn an_error_raised_inside_the_library_keeps_its_message() {
 fn loaded_plugins_join_the_same_registry_as_the_built_ins() {
     let loaded = example();
 
-    let mut reg = Registry::new();
+    let mut reg = Registry::new(fasttiff_builtin_plugins::register);
     let built_ins = reg.len();
     for p in loaded.plugins {
         assert!(reg.add_loaded(p, Origin::Library));
@@ -789,8 +796,11 @@ fn an_importers_metadata_reaches_the_document() {
         info.description
     );
     // The host fills these in, because it is the side that knows them.
-    // The importer names it from the file stem, which tmp() prefixes.
-    assert_eq!(info.name, "fasttiff-boundary-meta");
+    // The importer names it from the file stem (which tmp() prefixes).
+    assert_eq!(
+        Some(info.name.as_str()),
+        file.file_stem().and_then(|s| s.to_str())
+    );
     assert_eq!(info.path.as_deref(), Some(file.to_string_lossy().as_ref()));
 
     // And it survives being turned into a real document.
@@ -801,12 +811,12 @@ fn an_importers_metadata_reaches_the_document() {
     // boundary is what the exact assertion on `info` above already checked.
     let close = |got: Option<f64>, want: f64| got.is_some_and(|v| (v - want).abs() < 1e-9);
     assert!(
-        close(s.tiff.meta.pixel_width, 0.65) && close(s.tiff.meta.pixel_height, 0.65),
+        close(s.tiff().meta.pixel_width, 0.65) && close(s.tiff().meta.pixel_height, 0.65),
         "the spacing did not reach the written file: {:?} x {:?}",
-        s.tiff.meta.pixel_width,
-        s.tiff.meta.pixel_height
+        s.tiff().meta.pixel_width,
+        s.tiff().meta.pixel_height
     );
-    assert_eq!(s.tiff.meta.unit.as_deref(), Some("micron"));
+    assert_eq!(s.tiff().meta.unit.as_deref(), Some("micron"));
 
     let _ = std::fs::remove_file(file);
 }
@@ -982,14 +992,14 @@ fn a_library_in_the_plugin_folder_reaches_the_menu() {
     .unwrap();
     std::fs::write(dir.join("notes.txt"), b"not a plugin").unwrap();
 
-    std::env::set_var(plugins::discover::PLUGIN_PATH_VAR, &dir);
+    std::env::set_var(plugins::PLUGIN_PATH_VAR, &dir);
     assert!(
         plugins::search_paths().contains(&dir),
         "the override should come first on the search path"
     );
 
-    let reg = Registry::with_installed();
-    std::env::remove_var(plugins::discover::PLUGIN_PATH_VAR);
+    let reg = Registry::with_installed(fasttiff_builtin_plugins::register);
+    std::env::remove_var(plugins::PLUGIN_PATH_VAR);
 
     assert!(
         reg.find("dev.fasttiff.example.invert").is_some(),
@@ -1085,7 +1095,7 @@ fn expected_mean(t: usize, indices: &[usize]) -> f32 {
     (sum / indices.len() as f64) as f32
 }
 
-fn run_plot(s: &fast_tiff_viewer::stack::Stack, rois: Vec<Roi>) -> fasttiff_plugin_api::Plot {
+fn run_plot(s: &fast_tiff_viewer::Document, rois: Vec<Roi>) -> fasttiff_plugin_api::Plot {
     let mut from_library = plugin("dev.fasttiff.example.plotmean");
     let view = plugins::describe_view(s, 0, false, volume());
     let mut host = plugins::StackHost::new(s, view).with_selection(rois);

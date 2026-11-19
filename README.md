@@ -224,13 +224,12 @@ reader, and that takes a line of its own:
 cargo test -p oir-reader --no-default-features
 ```
 
-Two things sit outside the workspace on purpose and so are missed by the line
-above — both are worked examples rather than parts of the app, and both are
-kept building so they cannot quietly rot:
+One thing sits outside the workspace on purpose and so is missed by the line
+above: the example plugin, a worked example rather than part of the app. CI
+builds and tests it so it cannot quietly rot:
 
 ```sh
 cargo test --manifest-path plugins/example/Cargo.toml
-cargo test -p fast-tiff-viewer --features plugin-netpbm
 ```
 
 Lint:
@@ -241,7 +240,7 @@ cargo clippy --workspace --all-targets
 The web build is a different target and has its own `#[cfg]` paths, so lint it
 separately:
 ```sh
-cargo clippy --manifest-path FastTIFF-web/Cargo.toml --target wasm32-unknown-unknown --all-targets
+cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
 ```
 
 
@@ -269,10 +268,10 @@ one):
         │
   scivis-render     GPU pipelines, textures, ray-marching
         │
-  fast-tiff-viewer  stack model, channel settings, decode → GPU sync,
+  fast-tiff-viewer  document model, channel settings, decode → GPU sync,
         │           and the plugin host
-  FastTIFF          the egui UI (lib) + the native binary
-        │
+  FastTIFF          the egui UI (lib) + the native binary, which hands
+        │           the built-in plugins to the host
   FastTIFF-web      a browser host around the same UI
 ```
 
@@ -285,11 +284,25 @@ on to build a plugin, and which therefore depend on nothing of ours:
   fasttiff-plugin       the macro that generates the boundary from them
 ```
 
+And the plugins the app compiles in, written against those three and not
+against the viewer, beside the algorithm and format crates they use:
+
+```text
+  fasttiff-builtin-plugins     every built-in plugin, GPL-3.0
+  suite2p-registration         suite2p's registration, ported; GPL-3.0
+  turboreg-registration        TurboReg/StackReg; GPL-3.0
+  image-registration-support   what the two registrations share; GPL-3.0
+  oir-reader                   the Olympus OIR reader; MPL-2.0
+```
+
+The C APIs of `fast-tiff-lib`, `oir-reader` and the two registration crates
+share their scaffolding, `fast-tiff-c-api-support` (MPL-2.0); no plugin uses it.
+
 `FastTIFF` is a lib + bin: the library half holds the egui interface, and both
 the desktop binary and the web build construct the same `ViewerApp`. The UI is
-written once; what differs per host — window management, how a file is opened,
-the GPU option hook — is confined to a handful of `#[cfg(target_arch = "wasm32")]`
-sites.
+written once; what differs per host — window management, how a file is opened
+and saved, workers, new windows — is behind one seam, `FastTIFF/src/app/platform/`,
+which a single `cfg` points at the desktop or the browser implementation.
 
 - **`fast-tiff-lib/`** - pure parsing/decoding library, no GUI or GPU
   dependencies. IFD-chain walking, ImageJ metadata parsing, strip decoding
@@ -305,25 +318,38 @@ sites.
   compositing pipeline, per-channel textures and LUTs, and the volume
   ray-marcher. Never creates a device, a surface or a window — construction
   takes the host's device, painting takes the host's render pass. Two additive
-  backends (`backend-wgpu`, `backend-glow`). Its WGSL shaders are validated
+  backends (`backend-wgpu`, `backend-glow`), both implementing its
+  `ImageRenderer` and `VolumeRenderer` traits. Its WGSL shaders are validated
   offline with naga, so a broken shader fails `cargo test` instead of showing a
   blank canvas.
 - **`fast-tiff-viewer/`** — everything between "a TIFF on disk" and "pixels on the
-  GPU": the loaded-stack model, per-channel contrast/LUT derivation, c/z/t
+  GPU": the document model, per-channel contrast/LUT derivation, c/z/t
   interpretation, the display-channel → IFD mapping, 3D volume assembly,
   read-ahead, the camera, the playback clock, and the per-frame sync that drives
-  the renderer. A `threads` feature (on by default) can be turned off for a
-  single-threaded host such as `wasm32-unknown-unknown`.
+  the renderer, generic over those traits so it builds, and is tested, with no
+  backend. A `threads` feature (on by default) can be turned off for a
+  single-threaded host such as `wasm32-unknown-unknown`. It is also the plugin
+  host — the registry, the C boundary, the library loader — and names no
+  plugin itself: the application hands it the built-ins at start-up.
+  MPL-2.0.
+- **`fasttiff-builtin-plugins/`** — the built-in plugins, every one of them,
+  each a Cargo feature. Written against the plugin SDK and the algorithm and
+  format crates, with the viewer only as a test dependency, so a built-in can
+  do nothing a plugin library could not. GPL-3.0-only, because the two
+  registration plugins link the GPL-3.0 registration crates; keeping them all
+  here is what lets the viewer be MPL-2.0. An edit to a plugin rebuilds this
+  crate and the app, not the viewer core.
 - **`FastTIFF/`** — the GUI binary: eframe/egui for the window and controls.
-  It holds a `fast_tiff_viewer::Viewer` plus the things only a desktop window has
-  (zoom, pan, window sizing, which panels are open). `src/render.rs` is the sole
-  file bridging the renderer to eframe — a browser frontend writes its own
-  ~150-line equivalent and reuses everything else.
+  It holds a `fast_tiff_viewer::Viewer` and the 2D view it feeds input to (the
+  core's `fast_tiff_viewer::view2d::View2d`: zoom, pan, glides), plus the things
+  only a window has (its sizing, which panels are open, the canvas tools).
+  `src/render.rs` is the sole file bridging the renderer to eframe, for the
+  desktop and the browser both.
 - **`oir-reader/`** — the Olympus/Evident OIR reader behind the OIR importer:
   the container, split and unfinished recordings, and the acquisition record
   in FluoView's own export format. Memory-mapped where the platform allows, a
   bounded buffered reader elsewhere, and it builds for
-  `wasm32-unknown-unknown`. The importer in `fast-tiff-viewer` is the glue
+  `wasm32-unknown-unknown`. The importer in `fasttiff-builtin-plugins` is the glue
   around it. **Published on crates.io** under MPL-2.0 — see below.
 - **`fasttiff-plugin-abi/`**, **`fasttiff-plugin-api/`**,
   **`fasttiff-plugin/`** — the plugin contract, split by what may change.
@@ -357,7 +383,7 @@ cargo add fast-tiff-lib
 [![Crates.io](https://img.shields.io/crates/v/fast-tiff-lib?color=green)](https://crates.io/crates/fast-tiff-lib)
 [![Downloads](https://img.shields.io/crates/d/fast-tiff-lib)](https://crates.io/crates/fast-tiff-lib)
 [![License](https://img.shields.io/badge/License-MPL--2.0-green)](https://github.com/konung-yaropolk/FastTIFF/blob/main/fast-tiff-lib/LICENSE)
-[![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/release.yml)
+[![Tests](https://img.shields.io/github/actions/workflow/status/konung-yaropolk/FastTIFF/ci.yml?branch=main&label=tests)](https://github.com/konung-yaropolk/FastTIFF/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/docsrs/fast-tiff-lib?label=docs.rs)](https://docs.rs/fast-tiff-lib)
 
 It's a *specialized* engine for lazily scrubbing large scientific hyperstacks
@@ -371,8 +397,8 @@ automatic BigTIFF upgrade, and metadata in either dialect from one neutral
 builder. Full format coverage, a comparison against libtiff / the `tiff` crate /
 TinyTIFF, and benchmarks are in [`fast-tiff-lib/README.md`](fast-tiff-lib/README.md).
 
-Note the licenses differ: the viewer is GPLv3, but the crate is **MPL-2.0**, so
-it can be used in projects that couldn't take a GPL dependency.
+Note the licenses differ: the FastTIFF application is GPLv3, but the crate is
+**MPL-2.0**, so it can be used in projects that couldn't take a GPL dependency.
 
 ## The OIR reader is a standalone crate too
 
@@ -420,7 +446,14 @@ beside a file. Details are in [`oir-reader/README.md`](oir-reader/README.md).
   Unticking a channel takes its curve off the plot and greys out its slider, in
   both the panel and the window. Resizable — the plot takes whatever height the
   window is given. Log scaling is on by default: a 16-bit frame is mostly
-  background, and linear puts all of it in one bin at the edge.
+  background, and linear puts all of it in one bin at the edge. The curves are
+  binned from the decodes that already show the frame, so an open histogram
+  decodes again only what is not on screen: the channels you have unticked
+  (on an RGB frame, a second pass over the whole frame), and in 3D the 2D
+  frame. While a movie plays they are redrawn a few times a second. A frame
+  too large for one texture is binned from a coarse view of the whole of it,
+  and the window says so; zoomed in on such a frame after moving to another
+  one, there is no histogram until you zoom back out.
 - Z-slice selector when `slices > 1` (the scrubber itself always drives
   the time/frame axis).
 - **Copy the view as an image** — the toolbar's copy button, or **Ctrl+C**
@@ -430,22 +463,26 @@ beside a file. Details are in [`oir-reader/README.md`](oir-reader/README.md).
     every enabled channel through its own contrast window and LUT. Not a grab of
     what is on screen — that is at whatever zoom and pan you left it, and on a
     stack too large to upload whole it is only the window currently resident.
-    The frame is recomposed on the CPU for the copy, which is also why it does
-    not need a working GPU.
+    The frame is recomposed on the CPU for the copy, a band of rows at a time,
+    which is also why it does not need a working GPU. A frame of more pixels
+    than 8192 x 8192 (256 MB as an image) is refused with a message rather
+    than copied: crop it first to copy part of it.
   - In **3D** it is the *view*, because for a ray-march there is nothing else to
     copy: there is no original size, and the camera, projection and brightness
     are the picture. So it takes the 3D panel exactly as framed.
 
   The hotkey yields to whatever has keyboard focus, so Ctrl+C in a text box
   still copies the text.
-- Zoom (Ctrl+scroll) and pan (drag, or middle-drag) of the 2D image, with the window sized
-  to fit on open. A wheel notch **glides** to the next level over about a tenth
-  of a second, about the point under the cursor, rather than jumping — long
-  enough to see which way the picture moved, short enough that a second notch
-  never queues up behind the first. Turning the wheel again mid-glide advances
-  another rung rather than restarting the same one. **Pinch to zoom and two fingers to pan** on a touch screen,
-  in both the 2D and 3D views — a pinch zooms continuously rather than in
-  fixed steps, since a gesture is continuous.
+- Zoom (Ctrl+scroll, or Ctrl with Plus or Minus, and Cmd as well on a Mac) and
+  pan (drag, or middle-drag) of the 2D image, with the window sized to fit on
+  open. In a browser the zoom keys zoom the picture and not the page. A wheel
+  notch **glides** to the next level over about a tenth of a second, about the
+  point under the cursor, rather than jumping — long enough to see which way
+  the picture moved, short enough that a second notch never queues up behind
+  the first. Turning the wheel again mid-glide advances another rung rather
+  than restarting the same one. **Pinch to zoom and two fingers to pan** on a
+  touch screen, in both the 2D and 3D views — a pinch zooms continuously
+  rather than in fixed steps, since a gesture is continuous.
 - A **navigator** in the corner of the 2D view once the whole frame no longer
   fits: two nested rectangles, the frame and the part of it on screen, in the
   manner of ImageJ's. At 800% on a mosaic every screenful looks like every
@@ -705,14 +742,17 @@ cargo test --manifest-path plugins/example/Cargo.toml
 
 ### Built-in plugins, and choosing which get compiled in
 
-Some plugins ship *inside* the binary rather than as libraries: Crop, Invert, Z
+Some plugins ship *inside* the binary rather than as libraries, from the
+`fasttiff-builtin-plugins` crate: Crop, Invert, Z
 Project, Plot third axis, the three Slice tools, 3D animation, Generate PSF,
 Deconvolve,
 suite2p stabilization, TurboReg stabilization, the PNG importer/exporter, the
 Olympus OIR reader and the two MRI importers below.
-They are written against the same contract a `.dll` is, and installed through
-it: the app registers each one through the same C ABI a library is registered
-through, only in its own process. So being compiled in is a matter of where the
+They are written against the same contract a `.dll` is — the crate depends on
+the plugin SDK and not on the viewer, so it cannot do otherwise — and installed
+through it: the app hands them to the viewer's registry at start-up, which
+registers each one through the same C ABI a library is registered through,
+only in its own process. So being compiled in is a matter of where the
 code lives, not of how it is treated — a built-in is built fresh for each call,
 has its results checked, has its panics contained and is shown exactly what a
 library is, and a library can do everything a built-in can. A test runs every
@@ -738,9 +778,14 @@ of `plugin-oir`, whose `oir-reader` crate parses its XML and maps its files with
 the quick-xml and memmap2 that fast-tiff-lib already uses. (A plugin
 that reuses a dependency the library needs anyway cannot be dropped from the
 graph by turning the plugin off; `cargo tree --invert` shows who the real user
-is.) `plugin-suite2p-stabilize` is also the only
-GPL-3 code in the tree, which is why `fast-tiff-viewer` is licensed GPL-3 where
-the other library crates are MPL-2.0.
+is.) The two registration plugins also bring GPL-3 code with them: the
+registration crates that the `plugin-suite2p-stabilize` and
+`plugin-turboreg-stabilize` features compile in (`suite2p-registration`,
+`turboreg-registration`, and the `image-registration-support` they share) are
+GPL-3.0-only, which is why `fasttiff-builtin-plugins` is licensed GPL-3 where
+`fast-tiff-lib`, `scivis-render`, `oir-reader`, `fast-tiff-viewer` and the
+plugin SDK are MPL-2.0. All the built-ins are in that one crate, the GPL two
+and the rest, so that the viewer core links nothing copyleft.
 
 Because these features live in `default`, `--no-default-features` drops the
 plugins along with whatever it was really for — notably the glow renderer, which
@@ -749,16 +794,6 @@ names `builtin-plugins` again, and the application refuses to compile with no
 plugins at all unless `--features plugins-none` says that was deliberate, so a
 forgotten one stops the build rather than shipping a binary that quietly cannot
 do half of what it is for.
-
-A worked example lives among them:
-[`plugins/builtin/netpbm/`](fast-tiff-viewer/src/plugins/builtin/netpbm/mod.rs)
-reads PBM/PGM/PPM as a built-in importer. It is a demonstration rather than a
-format this viewer needs, so it is off by default and deliberately not part of
-`builtin-plugins`:
-
-```sh
-cargo test -p fast-tiff-viewer --features plugin-netpbm
-```
 
 The shared-library lane is native-only — there is no `dlopen` in a browser — so
 the web build gets the built-ins and no way to add to them.
@@ -928,7 +963,9 @@ former without disturbing the latter.
 For multi-channel/multi-slice stacks, the formula mapping (frame, slice,
 channel) to a position in the IFD chain assumes ImageJ's default `xyczt`
 plane order (channel varies fastest, then Z, then T) - see
-`build_jobs()` in `fast-tiff-viewer/src/sync.rs`. This is what ImageJ's TIFF writer
+`plane_index()` in `fast-tiff-viewer/src/dimensions.rs`, which the 2D read-ahead
+(`build_jobs()` in `fast-tiff-viewer/src/prefetch.rs`) and the 3D volume both
+address planes through. This is what ImageJ's TIFF writer
 uses by default. If a particular file was produced with reordered planes,
 this is the one-line formula to change.
 

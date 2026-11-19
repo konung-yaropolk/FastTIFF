@@ -828,7 +828,7 @@ fn register_pair_cpu(
 /// Register every frame of a stack against one reference.
 ///
 /// `frames` are `w * h` each. `reference` is the image every frame is matched
-/// against; building it is the caller's business (see [`crate::register_stack`]).
+/// against; building it is the caller's business (see [`crate::Session`]).
 ///
 /// A [`register_pairs`] in which every pair shares its reference.
 pub fn register_each(

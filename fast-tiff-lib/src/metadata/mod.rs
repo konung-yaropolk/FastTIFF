@@ -22,7 +22,7 @@ pub mod imagej;
 pub mod ome;
 pub mod roi;
 
-use anyhow::Result;
+use crate::error::{bail, Result};
 
 /// Which metadata dialect a file's `ImageDescription` was written in (read
 /// side), or should be written in (write side). `None` means no recognized
@@ -442,7 +442,8 @@ impl StackMetaWrite {
     pub(crate) fn derive_frames(&self, planes: usize) -> Result<usize> {
         let per_frame = self.channels * self.slices;
         if per_frame == 0 || !planes.is_multiple_of(per_frame) {
-            anyhow::bail!(
+            bail!(
+                InvalidInput,
                 "{planes} plane(s) written, which doesn't divide evenly into {} channel(s) x {} \
                  slice(s) — a hyperstack needs channels x slices planes per time frame",
                 self.channels,
@@ -459,21 +460,30 @@ impl StackMetaWrite {
     pub(crate) fn validate_text(&self, strict_lines: bool) -> Result<()> {
         let has_nul = |s: &str| s.contains('\0');
         if self.unit.as_deref().is_some_and(has_nul) {
-            anyhow::bail!("unit must not contain NUL bytes (TIFF ASCII fields are NUL-terminated)");
+            bail!(
+                InvalidInput,
+                "unit must not contain NUL bytes (TIFF ASCII fields are NUL-terminated)"
+            );
         }
         for ci in &self.channel_info {
             if ci.name.as_deref().is_some_and(has_nul) {
-                anyhow::bail!("channel name must not contain NUL bytes");
+                bail!(InvalidInput, "channel name must not contain NUL bytes");
             }
         }
         if strict_lines {
             let clean = |s: &str| !s.contains('\0') && !s.contains('\n');
             if !self.unit.as_deref().is_none_or(clean) {
-                anyhow::bail!("ImageJ unit must not contain NUL or newline characters");
+                bail!(
+                    InvalidInput,
+                    "ImageJ unit must not contain NUL or newline characters"
+                );
             }
             for (key, value) in &self.extra {
                 if !clean(key) || key.contains('=') || !clean(value) {
-                    anyhow::bail!("ImageJ extra key/value {key:?} must not contain NUL, newline, or '=' in the key");
+                    bail!(
+                        InvalidInput,
+                        "ImageJ extra key/value {key:?} must not contain NUL, newline, or '=' in the key"
+                    );
                 }
             }
         }
@@ -503,7 +513,7 @@ pub(crate) fn serialize_description(
     match format {
         MetadataFormat::ImageJ => imagej::serialize(planes, meta),
         MetadataFormat::Ome => ome::serialize(planes, meta, geom),
-        other => anyhow::bail!("cannot serialize metadata as {other:?}"),
+        other => bail!(InvalidInput, "cannot serialize metadata as {other:?}"),
     }
 }
 

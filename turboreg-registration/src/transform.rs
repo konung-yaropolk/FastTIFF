@@ -456,7 +456,10 @@ pub fn warp_area(
         for (col, o) in line.iter_mut().enumerate() {
             let (y, x) = area.at(row, col);
             let p = m.apply(Point::new(x, y));
-            let (px, py) = (p.x.clamp(0.0, (w - 1) as f64), p.y.clamp(0.0, (h - 1) as f64));
+            let (px, py) = (
+                p.x.clamp(0.0, (w - 1) as f64),
+                p.y.clamp(0.0, (h - 1) as f64),
+            );
             *o = crate::spline::interpolate(coeff, w, h, px, py) as f32;
         }
     });
@@ -502,7 +505,10 @@ fn resample(
             }
             // On the edge itself the spline is the edge sample, so clamping
             // the position repeats the edge outward.
-            let (px, py) = (p.x.clamp(0.0, (w - 1) as f64), p.y.clamp(0.0, (h - 1) as f64));
+            let (px, py) = (
+                p.x.clamp(0.0, (w - 1) as f64),
+                p.y.clamp(0.0, (h - 1) as f64),
+            );
             *o = crate::spline::interpolate(coeff, w, h, px, py) as f32;
         }
     });

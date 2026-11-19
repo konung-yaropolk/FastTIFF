@@ -127,3 +127,29 @@ fn an_empty_or_tiny_movie_reports_no_offset() {
     assert_eq!(compute(&[], 16, 16), 0);
     assert_eq!(compute(&[vec![0.0; 16]], 1, 16), 0);
 }
+
+/// `shift_keeping` is `shift`, and `unshift` takes the frame back exactly
+/// from what it kept: the frame is not lost to the correction, so a session
+/// can undo the comb in a feeder's own buffer and hand it back as recorded.
+/// Both directions, an odd number of lines, and offsets that `shift` ignores.
+#[test]
+fn a_kept_shift_can_be_undone() {
+    for (ly, lx) in [(5, 7), (6, 8), (1, 4)] {
+        let original: Vec<f32> = (0..ly * lx).map(|i| (i * 7 % 23) as f32).collect();
+        for offset in -9..=9 {
+            let mut plain = original.clone();
+            shift(&mut plain, ly, lx, offset);
+            let mut kept = vec![-1.0];
+            let mut f = original.clone();
+            shift_keeping(&mut f, ly, lx, offset, &mut kept);
+            assert_eq!(f, plain, "{ly}x{lx} by {offset}: not shift");
+            assert_eq!(
+                kept.len(),
+                1 + covered(ly, lx, offset),
+                "{ly}x{lx} by {offset}"
+            );
+            unshift(&mut f, ly, lx, offset, &kept[1..]);
+            assert_eq!(f, original, "{ly}x{lx} by {offset}: not undone");
+        }
+    }
+}

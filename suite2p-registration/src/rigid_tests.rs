@@ -192,3 +192,19 @@ fn shifting_by_the_frame_size_is_the_identity() {
         f
     );
 }
+
+/// Rolling in place puts every sample where `shift_frame` puts it, for every
+/// shift up to past the frame each way — the session and the reference rely
+/// on the two being interchangeable, bit for bit.
+#[test]
+fn rolling_in_place_is_shifting() {
+    let (ly, lx) = (5, 7);
+    let f: Vec<f32> = (0..ly * lx).map(|i| i as f32).collect();
+    for dy in -12..=12 {
+        for dx in -15..=15 {
+            let mut rolled = f.clone();
+            roll(&mut rolled, ly, lx, dy, dx);
+            assert_eq!(rolled, shift_frame(&f, ly, lx, dy, dx), "({dy}, {dx})");
+        }
+    }
+}
