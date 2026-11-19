@@ -643,7 +643,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "pollster",
+ "pollster 0.4.0",
  "profiling",
  "raw-window-handle",
  "static_assertions",
@@ -1423,7 +1423,7 @@ dependencies = [
 name = "image-registration-support"
 version = "0.28.0"
 dependencies = [
- "pollster",
+ "pollster 1.0.3",
  "rayon",
  "wgpu",
 ]
@@ -2296,6 +2296,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
 
 [[package]]
+name = "pollster"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e9b9cf600136f5b976fbc5727d58c26e1ecab8ee23088d44ef1c7af793550ab"
+
+[[package]]
 name = "polycool"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2544,7 +2550,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "percent-encoding",
- "pollster",
+ "pollster 0.4.0",
  "raw-window-handle",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -2642,7 +2648,7 @@ dependencies = [
  "half",
  "khronos-egl",
  "naga",
- "pollster",
+ "pollster 1.0.3",
  "rayon",
  "scivis-render",
  "wasm-bindgen-futures",
@@ -2870,7 +2876,7 @@ dependencies = [
  "bytemuck",
  "fast-tiff-c-api-support",
  "image-registration-support",
- "pollster",
+ "pollster 1.0.3",
  "rustfft",
  "wgpu",
 ]
@@ -3043,7 +3049,7 @@ dependencies = [
  "bytemuck",
  "fast-tiff-c-api-support",
  "image-registration-support",
- "pollster",
+ "pollster 1.0.3",
  "wgpu",
 ]
 
