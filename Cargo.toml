@@ -77,11 +77,11 @@ rust-version = "1.88"
 # for eframe and egui_extras everywhere, so a member names exactly the ones it
 # wants (each has a note on why).
 [workspace.dependencies]
-wgpu = "29"
-naga = { version = "29", features = ["wgsl-in"] }
-eframe = { version = "0.34", default-features = false }
-egui = "0.34"
-egui_extras = { version = "0.34", default-features = false }
+wgpu = "30"
+naga = { version = "30", features = ["wgsl-in"] }
+eframe = { version = "0.35", default-features = false }
+egui = "0.35"
+egui_extras = { version = "0.35", default-features = false }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
