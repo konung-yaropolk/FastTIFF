@@ -66,10 +66,10 @@ def main() -> None:
 //! {sns.__version__} was used here).
 
 /// Colormap display names, in UI order (parallel to [`LUTS`]).
-pub const NAMES: [&str; {len(COLORMAPS)}] = [{names}];
+pub (crate) const NAMES: [&str; {len(COLORMAPS)}] = [{names}];
 
 /// The baked 256-entry RGB lookup tables, in the same order as [`NAMES`].
-pub const LUTS: [[[u8; 3]; 256]; {len(COLORMAPS)}] = [{consts}];'''
+pub (crate) const LUTS: [[[u8; 3]; 256]; {len(COLORMAPS)}] = [{consts}];'''
 
     blocks = [header]
     for rust_name, mpl_name in COLORMAPS:
