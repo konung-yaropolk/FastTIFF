@@ -126,7 +126,7 @@ egui = { workspace = true }
 # OME `Plane` records need. Default features off: no image loaders.
 egui_extras = { workspace = true }
 anyhow = { workspace = true }
-rfd = "0.17"
+rfd = "0.18"
 # The plugin contract. Shared, like the plugin system itself now is: the
 # browser build runs the built-in plugins and so needs the dialog types.
 fasttiff-plugin-api = { path = "../fasttiff-plugin-api" }
