@@ -296,7 +296,7 @@ against the viewer, beside the algorithm and format crates they use:
 ```
 
 The C APIs of `fast-tiff-lib`, `oir-reader` and the two registration crates
-share their scaffolding, `c-api-support` (MPL-2.0); no plugin uses it.
+share their scaffolding, `fast-tiff-c-api-support` (MPL-2.0); no plugin uses it.
 
 `FastTIFF` is a lib + bin: the library half holds the egui interface, and both
 the desktop binary and the web build construct the same `ViewerApp`. The UI is

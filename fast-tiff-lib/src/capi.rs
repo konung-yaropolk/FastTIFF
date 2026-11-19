@@ -34,7 +34,7 @@
 //! decoders' `Vec`-based `*_into` forms cannot write to either. The fast path
 //! therefore costs a `memcpy` from the mapping and nothing more.
 
-use c_api_support::{status, Errors};
+use fast_tiff_c_api_support::{status, Errors};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -612,7 +612,7 @@ thread_local! {
 }
 
 /// This library's failure reporting: its own last-error slot above, the
-/// shared scaffolding in [`c_api_support::Errors`].
+/// shared scaffolding in [`fast_tiff_c_api_support::Errors`].
 static ERRORS: Errors = Errors::new(
     &LAST_ERROR,
     FTL_INVALID_ARGUMENT,
@@ -887,7 +887,7 @@ pub unsafe extern "C" fn ftl_metadata_unit(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    c_api_support::len_of(
+    fast_tiff_c_api_support::len_of(
         stack(s).map(|st| ERRORS.put_text(st.meta.unit.as_deref().unwrap_or(""), buf, cap)),
     )
 }
@@ -906,7 +906,7 @@ pub unsafe extern "C" fn ftl_description(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    c_api_support::len_of(
+    fast_tiff_c_api_support::len_of(
         stack(s).map(|st| ERRORS.put_text(st.description.as_deref().unwrap_or(""), buf, cap)),
     )
 }

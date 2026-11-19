@@ -19,7 +19,7 @@
 //! failures, not another's), and how its own error type maps onto statuses.
 //!
 //! ```
-//! use c_api_support::{status, Errors};
+//! use fast_tiff_c_api_support::{status, Errors};
 //! use std::cell::RefCell;
 //! use std::ffi::{c_int, CString};
 //!

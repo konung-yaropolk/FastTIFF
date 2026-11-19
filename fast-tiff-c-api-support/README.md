@@ -1,4 +1,4 @@
-# c-api-support
+# fast-tiff-c-api-support
 
 The scaffolding of the C APIs in [FastTIFF](https://github.com/konung-yaropolk/FastTIFF):
 `fast-tiff-lib`, `oir-reader`, `suite2p-registration` and `turboreg-registration`.

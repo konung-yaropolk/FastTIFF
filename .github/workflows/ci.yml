@@ -289,7 +289,7 @@ jobs:
         run: bash scripts/ci-local.sh glow-tests
 
       # Every published crate, packaged together as a release would publish
-      # it. The libraries depend on c-api-support and the registration crates
+      # it. The libraries depend on fast-tiff-c-api-support and the registration crates
       # on image-registration-support too, so `cargo package` of one alone
       # could not verify it before its dependency is on crates.io; packaged
       # together, each is built against the others as published.

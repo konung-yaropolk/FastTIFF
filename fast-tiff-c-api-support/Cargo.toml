@@ -1,5 +1,5 @@
 [package]
-name = "c-api-support"
+name = "fast-tiff-c-api-support"
 version = "0.28.0"
 edition = "2021"
 rust-version.workspace = true

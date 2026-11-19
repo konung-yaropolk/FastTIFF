@@ -34,7 +34,7 @@
 
 #![allow(unsafe_code)]
 
-use c_api_support::{status, Errors};
+use fast_tiff_c_api_support::{status, Errors};
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CString};
 
@@ -265,7 +265,7 @@ thread_local! {
 }
 
 /// This library's failure reporting: its own last-error slot above, the
-/// shared scaffolding in [`c_api_support::Errors`].
+/// shared scaffolding in [`fast_tiff_c_api_support::Errors`].
 static ERRORS: Errors = Errors::new(&LAST_ERROR, OIR_INVALID_ARGUMENT, OIR_FAILED, "the reader");
 
 /// The status for a reader error, and the reason with the part it was reading
@@ -801,7 +801,7 @@ pub unsafe extern "C" fn oir_record_string(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    c_api_support::len_of((|| {
+    fast_tiff_c_api_support::len_of((|| {
         let a = handle(a)?;
         let value = record_field(a.record(), field)
             .map_err(|why| ERRORS.fail(OIR_INVALID_ARGUMENT, why))?;
@@ -826,7 +826,7 @@ pub unsafe extern "C" fn oir_channel_string(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    c_api_support::len_of((|| {
+    fast_tiff_c_api_support::len_of((|| {
         let a = handle(a)?;
         let channel = ERRORS.index_in(a.record().channels(), index, "channel")?;
         let value =
@@ -849,7 +849,7 @@ pub unsafe extern "C" fn oir_event_name(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    c_api_support::len_of((|| {
+    fast_tiff_c_api_support::len_of((|| {
         let a = handle(a)?;
         let event = ERRORS.index_in(a.record().events(), index, "event")?;
         Ok(ERRORS.put_text(event.name(), buf, cap))
@@ -904,7 +904,7 @@ pub unsafe extern "C" fn oir_fluoview_text(
     cap: usize,
 ) -> isize {
     ERRORS.guarded_len(|| {
-        c_api_support::len_of((|| {
+        fast_tiff_c_api_support::len_of((|| {
             let a = handle(a)?;
             let name = ERRORS.text_arg(file_name, "file_name")?;
             let text = a.fluoview_text(name).unwrap_or_default();
@@ -977,7 +977,7 @@ pub unsafe extern "C" fn oir_part_path(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    c_api_support::len_of((|| {
+    fast_tiff_c_api_support::len_of((|| {
         let a = handle(a)?;
         let part = ERRORS.index_in(a.parts(), index, "part")?;
         let path = part.path().map(|p| p.to_string_lossy()).unwrap_or_default();
@@ -1001,7 +1001,7 @@ pub unsafe extern "C" fn oir_part_map_error(
     buf: *mut c_char,
     cap: usize,
 ) -> isize {
-    c_api_support::len_of((|| {
+    fast_tiff_c_api_support::len_of((|| {
         let a = handle(a)?;
         let part = ERRORS.index_in(a.parts(), index, "part")?;
         Ok(ERRORS.put_text(part.map_error().unwrap_or(""), buf, cap))
@@ -1064,7 +1064,7 @@ pub unsafe extern "C" fn oir_acquisition_part(
     cap: usize,
 ) -> isize {
     ERRORS.guarded_len(|| {
-        c_api_support::len_of((|| {
+        fast_tiff_c_api_support::len_of((|| {
             let parts = parts_of(path)?;
             let part = ERRORS.index_in(&parts, index, "part")?;
             Ok(ERRORS.put_text(&part.to_string_lossy(), buf, cap))

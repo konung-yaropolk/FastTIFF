@@ -255,7 +255,7 @@ step oir-no-default      -- env RUSTDOCFLAGS="-D warnings" cargo test -p oir-rea
 step oir-wasm            -- cargo check -p oir-reader --target wasm32-unknown-unknown --all-targets
 step oir-wasm-no-default -- cargo check -p oir-reader --target wasm32-unknown-unknown --no-default-features
 step oir-doc             -- env RUSTDOCFLAGS="-D warnings" cargo doc -p oir-reader --no-deps
-step published-package slow -- package -p c-api-support -p image-registration-support -p fast-tiff-lib -p oir-reader -p suite2p-registration -p turboreg-registration
+step published-package slow -- package -p fast-tiff-c-api-support -p image-registration-support -p fast-tiff-lib -p oir-reader -p suite2p-registration -p turboreg-registration
 step web-check           -- cargo clippy -p fasttiff-web-egui --target wasm32-unknown-unknown -- -D warnings
 step viewer-no-threads   -- cargo test -p fast-tiff-viewer --no-default-features
 step plugins-no-threads  -- cargo test -p fasttiff-builtin-plugins --no-default-features --features builtin-plugins

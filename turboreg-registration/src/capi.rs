@@ -29,7 +29,7 @@
 //! built with `panic = "unwind"` (the default, and this workspace's release
 //! profile).
 
-use c_api_support::{status, Errors};
+use fast_tiff_c_api_support::{status, Errors};
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CString};
 
@@ -217,7 +217,7 @@ thread_local! {
 }
 
 /// This library's failure reporting: its own last-error slot above, the
-/// shared scaffolding in [`c_api_support::Errors`].
+/// shared scaffolding in [`fast_tiff_c_api_support::Errors`].
 static ERRORS: Errors = Errors::new(
     &LAST_ERROR,
     TR_INVALID_ARGUMENT,
