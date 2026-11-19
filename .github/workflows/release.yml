@@ -563,7 +563,7 @@ jobs:
   # called "universal" with one slice in it, which is precisely what the check
   # below exists to prevent.
   build-macos-dmg:
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       # Both slices target what the Info.plist below claims
       # (LSMinimumSystemVersion 11.0). Without this each target takes rustc's
