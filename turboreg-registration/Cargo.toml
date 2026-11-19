@@ -26,7 +26,7 @@
 #   vol. 7, no. 1, pp. 27-41, January 1998.
 [package]
 name = "turboreg-registration"
-version = "0.27.0"
+version = "0.28.0"
 edition = "2021"
 rust-version.workspace = true
 description = """
@@ -46,7 +46,7 @@ categories = ["science", "algorithms", "multimedia::images"]
 # The C interface's scaffolding (last-error slot, panic guard), shared with this
 # repository's other C APIs; only with `capi`. With a version as well as the
 # path, as a published crate's dependency must be.
-c-api-support = { path = "../c-api-support", version = "0.1.0", optional = true }
+c-api-support = { path = "../c-api-support", version = "0.28.0", optional = true }
 # Parallel CPU registration. Frames are independent once the reference is
 # fixed, so a stack is an embarrassingly parallel map — `Reference::Previous`
 # included, whose fits are against the raw frame before and only compose in a
@@ -56,7 +56,7 @@ c-api-support = { path = "../c-api-support", version = "0.1.0", optional = true 
 #
 # A version as well as the path: this crate is published, and a published
 # crate's dependencies must be on crates.io too.
-image-registration-support = { path = "../image-registration-support", version = "0.1.0", default-features = false }
+image-registration-support = { path = "../image-registration-support", version = "0.28.0", default-features = false }
 
 # The GPU backend, behind a feature so the algorithm crate does not drag a
 # graphics stack into anything that only wants the CPU path. The same wgpu,
