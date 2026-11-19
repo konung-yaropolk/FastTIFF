@@ -89,7 +89,7 @@ web-sys = "0.3"
 rayon = "1.10"
 bytemuck = "1.25"
 # 0.4, the one eframe and rfd use, so the app carries one pollster, not two.
-pollster = "0.4"
+pollster = "1.0"
 quick-xml = "0.37"
 memmap2 = "0.9"
 flate2 = "1.1"
