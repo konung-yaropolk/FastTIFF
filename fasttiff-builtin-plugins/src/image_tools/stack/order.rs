@@ -18,8 +18,8 @@
 //! the difference between light and dark and the difference between first and
 //! last read as the same choice.
 
-use super::super::shared::{in_new_window, target, Store};
 use super::{axes, map_planes, result_spec, Axis};
+use crate::shared::{in_new_window, target, Store};
 use fasttiff_plugin_api::{
     HostContext, ImageStream, Outcome, ParamDecl, ParamKind, Params, Plugin, PluginError,
     PluginInfo,

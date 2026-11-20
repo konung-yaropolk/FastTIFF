@@ -279,7 +279,12 @@ fn import_with_plugin(
     // import is then held about once, not twice.
     let bytes = fast_tiff_viewer::plugins::into_tiff_bytes(imported.image, imported.info.as_ref())
         .map_err(|e| format!("{name}: {e:#}"))?;
-    Ok(Opened::Bytes(bytes.into(), imported_label(path, &fallback)))
+    let source =
+        fast_tiff_viewer::LoadSource::Bytes(bytes.into(), imported_label(path, &fallback).into());
+    Ok(Opened::Source(fast_tiff_viewer::LoadSource::Derived(
+        Box::new(source),
+        fast_tiff_viewer::plugins::Derived::imported(path.to_path_buf(), entry.info.id.clone()),
+    )))
 }
 
 /// The status line's two voices: amber for something to be aware of, green for
@@ -2040,6 +2045,62 @@ impl ViewerApp {
         }
     }
 
+    #[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
+    fn check_export_source(&mut self, index: usize) -> bool {
+        use fasttiff_builtin_plugins::OirMetadata;
+        if self
+            .plugins
+            .as_ref()
+            .and_then(|r| r.exporters().get(index))
+            .is_some_and(|e| e.info.id == OirMetadata::ID)
+        {
+            let doc = self.core.document();
+            if let Err(message) = OirMetadata::check_source(
+                doc.and_then(|d| d.importer_id()),
+                doc.and_then(|d| d.tiff().description.as_deref()),
+            ) {
+                self.say(message.into());
+                return false;
+            }
+        }
+        true
+    }
+
+    fn ask_export(&mut self, index: usize) {
+        #[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
+        if !self.check_export_source(index) {
+            return;
+        }
+        let Some(stack) = self.core.document() else {
+            return;
+        };
+        let Some(entry) = self.plugins.as_ref().and_then(|r| r.exporters().get(index)) else {
+            return;
+        };
+        let Some(ext) = entry.file_types.iter().flat_map(|t| &t.extensions).next() else {
+            return;
+        };
+        let original = stack.original();
+        let name = original
+            .as_deref()
+            .unwrap_or(stack.path())
+            .with_extension(ext);
+        let name = name.file_name().unwrap_or_default().to_string_lossy();
+        if let Some(path) = Current::ask_path(
+            Purpose::Save,
+            Some(&name),
+            stack.save_dir().as_deref(),
+            &entry.file_types,
+        ) {
+            let label = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            self.start_export(index, path, label);
+        }
+    }
+
     /// Hand the open stack to an exporter, on a worker.
     ///
     /// The registry goes with it, as an import's and a filter's do, which is
@@ -2048,6 +2109,10 @@ impl ViewerApp {
     /// An exporter writes to a path, so this is reached only with a file to
     /// write: the desktop's.
     fn start_export(&mut self, index: usize, path: std::path::PathBuf, name: String) {
+        #[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
+        if !self.check_export_source(index) {
+            return;
+        }
         let Some(loaded) = self.core.document() else {
             return;
         };

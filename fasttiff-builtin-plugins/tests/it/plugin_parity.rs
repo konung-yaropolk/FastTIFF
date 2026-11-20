@@ -217,7 +217,7 @@ fn every_built_in_filter_answers_the_same_through_the_boundary() {
     let s = stack();
     #[allow(unused_mut)]
     let mut covered: Vec<String> = Vec::new();
-    #[cfg(feature = "plugin-invert")]
+    #[cfg(feature = "plugin-image-tools")]
     covered.push(same_both_ways::<builtin::Invert>(&s));
     #[cfg(feature = "plugin-zproject")]
     covered.push(same_both_ways::<builtin::ZProject>(&s));
@@ -227,7 +227,7 @@ fn every_built_in_filter_answers_the_same_through_the_boundary() {
     covered.push(same_both_ways::<builtin::Stabilize>(&s));
     #[cfg(feature = "plugin-turboreg-stabilize")]
     covered.push(same_both_ways::<builtin::TurboReg>(&s));
-    #[cfg(feature = "plugin-stack-tools")]
+    #[cfg(feature = "plugin-image-tools")]
     {
         covered.push(same_both_ways::<builtin::SliceKeeper>(&s));
         covered.push(same_both_ways::<builtin::SliceRemover>(&s));
@@ -260,7 +260,7 @@ fn every_built_in_filter_answers_the_same_through_the_boundary() {
     }
 
     // Both halves: the run that asks for a rectangle, and the one that has it.
-    #[cfg(feature = "plugin-crop")]
+    #[cfg(feature = "plugin-image-tools")]
     {
         covered.push(same_both_ways::<builtin::Crop>(&s));
         crop_same_both_ways(&s);
@@ -281,7 +281,7 @@ fn every_built_in_filter_answers_the_same_through_the_boundary() {
 
 /// Crop with a rectangle drawn, both ways, and what it made: every channel,
 /// slice and frame kept, cut to the rectangle.
-#[cfg(feature = "plugin-crop")]
+#[cfg(feature = "plugin-image-tools")]
 fn crop_same_both_ways(s: &Document) {
     use fasttiff_plugin_api::{Roi, Shape};
     let roi = Roi {

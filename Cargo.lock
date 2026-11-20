@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.28.0"
+version = "1.28.1"
 dependencies = [
  "anyhow",
  "eframe",
@@ -864,11 +864,11 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-c-api-support"
-version = "0.28.0"
+version = "0.28.1"
 
 [[package]]
 name = "fast-tiff-lib"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "bytemuck",
  "fast-tiff-c-api-support",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -898,7 +898,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-builtin-plugins"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "fast-tiff-lib",
  "fast-tiff-viewer",
@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
@@ -927,11 +927,11 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin-abi"
-version = "0.28.0"
+version = "0.28.1"
 
 [[package]]
 name = "fasttiff-plugin-api"
-version = "0.28.0"
+version = "0.28.1"
 
 [[package]]
 name = "fasttiff-plugin-derivatives"
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "1.28.0"
+version = "1.28.1"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",
@@ -1421,7 +1421,7 @@ dependencies = [
 
 [[package]]
 name = "image-registration-support"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "pollster 1.0.3",
  "rayon",
@@ -2154,7 +2154,7 @@ dependencies = [
 
 [[package]]
 name = "oir-reader"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "bytemuck",
  "fast-tiff-c-api-support",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "scivis-render"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "ash",
  "bytemuck",
@@ -2883,7 +2883,7 @@ checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
 
 [[package]]
 name = "suite2p-registration"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "bytemuck",
  "fast-tiff-c-api-support",

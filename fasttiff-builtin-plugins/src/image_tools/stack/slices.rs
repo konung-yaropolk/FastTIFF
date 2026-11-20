@@ -19,8 +19,8 @@
 //! 1-based and converted exactly once, on the way in. Everything past that
 //! point is an index.
 
-use super::super::shared::{in_new_window, target, Store};
 use super::{axes, map_planes, result_spec, Axis};
+use crate::shared::{in_new_window, target, Store};
 use fasttiff_plugin_api::{
     HostContext, ImageInfo, ImageStream, Outcome, ParamDecl, ParamKind, Params, Plugin,
     PluginError, PluginInfo,

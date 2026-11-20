@@ -11,7 +11,7 @@
 # so the `panic = "abort"` this crate once set for itself changed nothing.
 [package]
 name = "fasttiff-web-egui"
-version = "1.28.0"
+version = "1.28.1"
 edition = "2021"
 description = "FastTIFF's egui interface, compiled to WebAssembly and drawn on a browser canvas."
 license = "GPL-3.0-only"
@@ -26,7 +26,7 @@ crate-type = ["cdylib", "rlib"]
 # `wasm-pack build` passes no feature flags, so `default` is what ships; to trim
 # the bundle, pass them through:
 #
-#     wasm-pack build --target web --release -- #         --no-default-features --features plugin-invert,plugin-zproject
+#     wasm-pack build --target web --release -- #         --no-default-features --features plugin-image-tools,plugin-zproject
 #
 # Worth doing only for the three that carry weight. `plugin-deconvolve` brings
 # an FFT, and `plugin-suite2p-stabilize` and `plugin-turboreg-stabilize` a
@@ -34,12 +34,10 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["builtin-plugins"]
 builtin-plugins = ["fasttiff/builtin-plugins"]
-plugin-invert = ["fasttiff/plugin-invert"]
+plugin-image-tools = ["fasttiff/plugin-image-tools"]
 plugin-zproject = ["fasttiff/plugin-zproject"]
 plugin-plot-axis = ["fasttiff/plugin-plot-axis"]
-plugin-stack-tools = ["fasttiff/plugin-stack-tools"]
 plugin-animation-3d = ["fasttiff/plugin-animation-3d"]
-plugin-crop = ["fasttiff/plugin-crop"]
 plugin-suite2p-stabilize = ["fasttiff/plugin-suite2p-stabilize"]
 plugin-turboreg-stabilize = ["fasttiff/plugin-turboreg-stabilize"]
 plugin-deconvolve = ["fasttiff/plugin-deconvolve"]

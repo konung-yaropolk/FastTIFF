@@ -6,7 +6,7 @@
 # travels with the algorithm whoever retypes it.
 [package]
 name = "suite2p-registration"
-version = "0.28.0"
+version = "0.28.1"
 edition = "2021"
 rust-version.workspace = true
 description = """
@@ -29,7 +29,7 @@ features = ["gpu", "capi"]
 # The C interface's scaffolding (last-error slot, panic guard), shared with this
 # repository's other C APIs; only with `capi`. With a version as well as the
 # path, as a published crate's dependency must be.
-fast-tiff-c-api-support = { path = "../fast-tiff-c-api-support", version = "0.28.0", optional = true }
+fast-tiff-c-api-support = { path = "../fast-tiff-c-api-support", version = "0.28.1", optional = true }
 # Phase correlation is FFT-based, so an FFT is not optional. `rustfft` is
 # MIT OR Apache-2.0, which combines into a GPL-3 work without friction, and it
 # handles non-power-of-two sizes (Bluestein) — which matters, because a
@@ -45,7 +45,7 @@ rustfft = { workspace = true }
 #
 # A version as well as the path: this crate is published, and a published
 # crate's dependencies must be on crates.io too.
-image-registration-support = { path = "../image-registration-support", version = "0.28.0", default-features = false }
+image-registration-support = { path = "../image-registration-support", version = "0.28.1", default-features = false }
 
 # The GPU backend, behind a feature so the algorithm crate does not drag a
 # graphics stack into anything that only wants the CPU path. Same wgpu the

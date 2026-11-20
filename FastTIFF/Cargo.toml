@@ -1,6 +1,6 @@
 [package]
 name = "FastTIFF"
-version = "1.28.0"
+version = "1.28.1"
 edition = "2021"
 description = "A lightning-fast multi-frame TIFF viewer with ImageJ-compatible rendering."
 license = "GPL-3.0-only"
@@ -43,7 +43,7 @@ renderer-glow = ["eframe/glow", "scivis-render/backend-glow"]
 # To leave one out, name the ones you want:
 #
 #     cargo build -p FastTIFF --no-default-features \
-#         --features renderer-wgpu,plugin-invert,plugin-zproject
+#         --features renderer-wgpu,plugin-image-tools,plugin-zproject
 #
 # **`--no-default-features` therefore drops the plugins too**, and that is the
 # trap this family has to be built around: it is also how the glow renderer is
@@ -52,12 +52,10 @@ renderer-glow = ["eframe/glow", "scivis-render/backend-glow"]
 # compile an application with no plugins at all unless `plugins-none` says it
 # was meant, so a forgotten one fails at the build rather than at the ship.
 builtin-plugins = [
-    "plugin-invert",
     "plugin-zproject",
     "plugin-plot-axis",
-    "plugin-stack-tools",
+    "plugin-image-tools",
     "plugin-animation-3d",
-    "plugin-crop",
     "plugin-suite2p-stabilize",
     "plugin-turboreg-stabilize",
     "plugin-deconvolve",
@@ -73,12 +71,10 @@ builtin-plugins = [
     # is one, and it is the only test run the Linux CI job has.
     "fasttiff-builtin-plugins/builtin-plugins",
 ]
-plugin-invert = ["fasttiff-builtin-plugins/plugin-invert", "_any-builtin"]
+plugin-image-tools = ["fasttiff-builtin-plugins/plugin-image-tools", "_any-builtin"]
 plugin-zproject = ["fasttiff-builtin-plugins/plugin-zproject", "_any-builtin"]
 plugin-plot-axis = ["fasttiff-builtin-plugins/plugin-plot-axis", "_any-builtin"]
-plugin-stack-tools = ["fasttiff-builtin-plugins/plugin-stack-tools", "_any-builtin"]
 plugin-animation-3d = ["fasttiff-builtin-plugins/plugin-animation-3d", "_any-builtin"]
-plugin-crop = ["fasttiff-builtin-plugins/plugin-crop", "_any-builtin"]
 plugin-suite2p-stabilize = ["fasttiff-builtin-plugins/plugin-suite2p-stabilize", "_any-builtin"]
 plugin-turboreg-stabilize = ["fasttiff-builtin-plugins/plugin-turboreg-stabilize", "_any-builtin"]
 plugin-deconvolve = ["fasttiff-builtin-plugins/plugin-deconvolve", "_any-builtin"]

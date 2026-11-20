@@ -68,6 +68,28 @@ fn choose(h: &mut Headless, path: &[&str]) {
     }
 }
 
+#[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
+#[test]
+fn exporting_oir_metadata_requires_an_open_oir() {
+    let mut h = Headless::new(Target::Desktop);
+    h.open_bytes(stack(64, 48, 1), "example.tif");
+    h.settle();
+    choose(&mut h, &[super::ICON_PLUGINS, "Export"]);
+    choose(&mut h, &["Export OIR metadata"]);
+    assert_eq!(
+        h.app.status.as_deref(),
+        Some("No OIR file is open. There is nothing to export.")
+    );
+
+    let mut empty = Headless::new(Target::Desktop);
+    empty.settle();
+    choose(
+        &mut empty,
+        &[super::ICON_PLUGINS, "Export", "Export OIR metadata"],
+    );
+    assert_eq!(empty.app.status, h.app.status);
+}
+
 /// A TIFF whose ImageDescription is OME-XML with `creator` on its root.
 fn ome_stack(creator: &str) -> Vec<u8> {
     use fast_tiff_lib::{SampleType, TiffWriter, WriterOptions};

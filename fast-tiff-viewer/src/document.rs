@@ -449,6 +449,11 @@ impl Document {
         (self.derived.is_none() && self.path.exists()).then_some(self.path.as_path())
     }
 
+    /// The importer that opened this document, if it was imported.
+    pub fn importer_id(&self) -> Option<&str> {
+        self.derived.as_ref()?.importer_id.as_deref()
+    }
+
     /// The file this document stands for: its own, or for a plugin's result
     /// the one it was made from — what a result made from *this* document is
     /// said to be made from in turn.
@@ -463,6 +468,7 @@ impl Document {
     /// stands for (see [`original`](Self::original)), when there is one.
     pub fn save_dir(&self) -> Option<PathBuf> {
         self.original()
+            .and_then(|p| std::path::absolute(p).ok())
             .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
             .filter(|d| d.is_dir())
     }

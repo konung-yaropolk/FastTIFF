@@ -41,7 +41,7 @@ fn the_builtins_are_installed_and_uniquely_identified() {
         !reg.is_empty(),
         "a build that asked for the built-in plugins must have them"
     );
-    #[cfg(feature = "plugin-invert")]
+    #[cfg(feature = "plugin-image-tools")]
     assert!(reg.find("dev.fasttiff.invert").is_some());
     #[cfg(feature = "plugin-zproject")]
     assert!(reg.find("dev.fasttiff.zproject").is_some());
@@ -54,11 +54,11 @@ fn the_builtins_are_installed_and_uniquely_identified() {
 fn a_plugin_left_out_of_the_build_is_absent_from_the_registry() {
     let reg = Registry::new(register);
     for (feature_on, id) in [
-        (cfg!(feature = "plugin-invert"), "dev.fasttiff.invert"),
+        (cfg!(feature = "plugin-image-tools"), "dev.fasttiff.invert"),
         (cfg!(feature = "plugin-zproject"), "dev.fasttiff.zproject"),
         (cfg!(feature = "plugin-plot-axis"), "dev.fasttiff.plot-axis"),
         (
-            cfg!(feature = "plugin-stack-tools"),
+            cfg!(feature = "plugin-image-tools"),
             "dev.fasttiff.stacktools.keeper",
         ),
         (

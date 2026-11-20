@@ -4,23 +4,6 @@
 //! agree between them: the "open in a new window" checkbox, the key it is read
 //! by, and how a result is stored.
 //!
-//! These lived in [`stack_tools`](super::stack_tools) while that was the module
-//! with three of the four users, on the grounds that a module of their own
-//! would have been ceremony. Two things changed. Deconvolution became a fourth
-//! user, so no one plugin is the obvious home any more; and each plugin is now
-//! a Cargo feature that can be compiled out, which made the old arrangement
-//! wrong rather than merely untidy — `plugin-deconvolve` would not build
-//! without `plugin-stack-tools`, for two functions and an enum that have
-//! nothing to do with slices.
-//!
-//! So this module is not feature-gated. It is a few hundred lines that cost
-//! nothing when no plugin uses them, and being here is what lets every
-//! `plugin-*` feature be chosen on its own.
-//!
-//! Note what is *not* here. `Axis` belongs to `stack_tools` and `plot_axis`
-//! has its own, deliberately: they offer different axis sets for different
-//! reasons, and merging them would couple two plugins to make one enum.
-
 // Each piece is compiled for the plugins that use it, so a build with only
 // some of them carries no unused code — and no warnings saying so.
 #[cfg(feature = "_shared-edges")]
@@ -203,7 +186,7 @@ impl Store {
     /// `Filters > Invert` is the only one that needs it, and can be compiled
     /// out — hence the conditional allow rather than a plain one, so that the
     /// method is still held to being used in the build that has its user.
-    #[cfg_attr(not(feature = "plugin-invert"), allow(dead_code))]
+    #[cfg_attr(not(feature = "plugin-image-tools"), allow(dead_code))]
     pub(crate) fn range(self) -> Option<(f32, f32)> {
         match self {
             Store::U8 => Some((0.0, 255.0)),
@@ -299,8 +282,7 @@ mod edges_tests;
 #[cfg(all(
     test,
     any(
-        feature = "plugin-invert",
-        feature = "plugin-stack-tools",
+        feature = "plugin-image-tools",
         feature = "plugin-deconvolve",
         feature = "plugin-turboreg-stabilize",
     )

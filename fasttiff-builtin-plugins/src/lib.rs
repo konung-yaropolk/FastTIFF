@@ -153,12 +153,9 @@ macro_rules! builtins {
             $(#[$doc])*
             #[cfg($cfg)]
             pub mod $module;
-            #[cfg($cfg)]
-            pub use $module::{
-                $($($plugin,)+)?
-                $($($importer,)+)?
-                $($($exporter,)+)?
-            };
+            $($(#[cfg($cfg)] pub use $module::$plugin;)+)?
+            $($(#[cfg($cfg)] pub use $module::$importer;)+)?
+            $($(#[cfg($cfg)] pub use $module::$exporter;)+)?
         )*
 
         /// Install every plugin compiled into this build.
@@ -205,7 +202,6 @@ macro_rules! builtins {
 
 builtins! {
     // ---- filters
-    invert if (feature = "plugin-invert") => plugins(Invert);
     zproject if (feature = "plugin-zproject") => plugins(ZProject);
     plot_axis if (feature = "plugin-plot-axis") => plugins(PlotAxis);
     stabilize if (feature = "plugin-suite2p-stabilize") => plugins(Stabilize);
@@ -227,19 +223,18 @@ builtins! {
     /// One thing to know before reaching for it in a browser: a plugin run on the
     /// web is synchronous, so a long registration will hold the tab.
     turboreg if (feature = "plugin-turboreg-stabilize") => plugins(TurboReg);
-    stack_tools if (feature = "plugin-stack-tools")
-        => plugins(SliceKeeper, SliceRemover, SliceOrderInvert, SplitChannels);
+    image_tools if (feature = "plugin-image-tools")
+        => plugins(Invert, Crop, SliceKeeper, SliceRemover, SliceOrderInvert, SplitChannels);
     /// Every target: it computes poses and the host plays them, so it needs
     /// nothing a browser lacks.
     animation_3d if (feature = "plugin-animation-3d") => plugins(Animation3d);
-    crop if (feature = "plugin-crop") => plugins(Crop);
     deconvolve if (feature = "plugin-deconvolve") => plugins(GeneratePsf, Deconvolve);
 
     // ---- importers, most specific first (see `register`)
     /// Desktop-only on top of its feature, for the reason [`dicom`] is. The reader
     /// itself is the `oir-reader` crate, which does build for wasm; only this
     /// importer around it is gated.
-    oir if (all(feature = "plugin-oir", not(target_arch = "wasm32"))) => importers(Oir);
+    oir if (all(feature = "plugin-oir", not(target_arch = "wasm32"))) => importers(Oir) exporters(OirMetadata);
     /// Desktop-only on top of its feature, as every importer is: an
     /// [`ImportRequest`](fasttiff_plugin_api::ImportRequest) carries a filesystem
     /// path, and a browser tab has none. See the module for what that costs and why

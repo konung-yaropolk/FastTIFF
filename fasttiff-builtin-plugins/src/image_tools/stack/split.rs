@@ -5,7 +5,7 @@
 //! every channel, retaining the source's geometry and calibration and writing
 //! that channel's actual 256-entry lookup table into its output TIFF.
 
-use super::super::shared::Store;
+use crate::shared::Store;
 use fasttiff_plugin_api::{
     DisplayMode, DocumentResult, HostContext, ImageResult, Outcome, Params, Plane, Plugin,
     PluginError, PluginInfo,
@@ -18,7 +18,7 @@ pub struct SplitChannels;
 impl Plugin for SplitChannels {
     fn info(&self) -> PluginInfo {
         PluginInfo::new("dev.fasttiff.stacktools.split-channels", "Split channels")
-            .menu_path("Stack")
+            .menu_path("Image")
             .version(env!("CARGO_PKG_VERSION"))
             .author("FastTIFF")
             .description(
@@ -27,7 +27,11 @@ impl Plugin for SplitChannels {
     }
 
     // No dialog: there is one unambiguous output per source channel.
-    fn run(&mut self, host: &mut dyn HostContext, _params: &Params) -> Result<Outcome, PluginError> {
+    fn run(
+        &mut self,
+        host: &mut dyn HostContext,
+        _params: &Params,
+    ) -> Result<Outcome, PluginError> {
         let info = host.image();
         let channels = info.channels.max(1);
         if channels <= 1 {
@@ -61,12 +65,7 @@ impl Plugin for SplitChannels {
             // It is now a one-channel image, where the source channel's LUT is
             // its display identity. The rest of its calibration survives.
             metadata.mode = DisplayMode::Color;
-            metadata.channel_names = metadata
-                .channel_names
-                .get(c)
-                .cloned()
-                .into_iter()
-                .collect();
+            metadata.channel_names = metadata.channel_names.get(c).cloned().into_iter().collect();
             // No table is a legitimate source state. In that case let the
             // output stay neutral rather than inventing a colour convention.
             let lut = host.view().luts.get(c).copied().unwrap_or_else(gray_lut);
@@ -90,7 +89,9 @@ impl Plugin for SplitChannels {
         }
 
         host.progress(1.0);
-        host.log(&format!("split {channels} channel(s) into separate documents"));
+        host.log(&format!(
+            "split {channels} channel(s) into separate documents"
+        ));
         Ok(Outcome::NewDocuments(documents))
     }
 }

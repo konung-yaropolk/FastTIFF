@@ -49,6 +49,7 @@ pub(super) enum UiCommand {
     OpenPluginFolder,
     /// Begin the plugin at this registry index: its dialog, or the run.
     StartPlugin(usize),
+    Export(usize),
     /// Open the point counter, or raise it.
     OpenPointCounter,
     /// Take back the last edit of the canvas tools that keep an undo history:
@@ -228,7 +229,7 @@ impl UiCommand {
             UiCommand::Save => (Toolbar, 1),
             UiCommand::Copy(Via::Button) => (Toolbar, 2),
             UiCommand::OpenPluginFolder => (Toolbar, 3),
-            UiCommand::StartPlugin(_) => (Toolbar, 4),
+            UiCommand::StartPlugin(_) | UiCommand::Export(_) => (Toolbar, 4),
             UiCommand::OpenPointCounter => (Toolbar, 5),
             // The chords, copy first, as the keys are read.
             UiCommand::Copy(Via::Hotkey) => (ToolWindows, 0),
@@ -345,6 +346,7 @@ impl super::ViewerApp {
             UiCommand::Save => self.save_as(),
             UiCommand::Copy(_) => self.copy_view(at.ctx),
             UiCommand::OpenPluginFolder => self.open_plugin_folder(),
+            UiCommand::Export(index) => self.ask_export(index),
             UiCommand::StartPlugin(index) => self.start_plugin(index),
             UiCommand::OpenPointCounter => self.open_point_counter(at.ctx),
             // Ctrl/Cmd+Z while the main window has the keyboard. The counter's

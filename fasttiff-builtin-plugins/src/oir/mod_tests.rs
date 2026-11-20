@@ -269,7 +269,8 @@ fn the_acquisition_record_reaches_tag_270_of_the_written_file() {
     assert_eq!(info.unit.as_deref(), Some("micron"));
 
     // Through the writer and back out again.
-    let stack = fast_tiff_viewer::plugins::to_stack(&r.image, r.info.as_ref(), false).expect("open");
+    let stack =
+        fast_tiff_viewer::plugins::to_stack(&r.image, r.info.as_ref(), false).expect("open");
     let written = stack
         .tiff()
         .description
@@ -279,6 +280,22 @@ fn the_acquisition_record_reaches_tag_270_of_the_written_file() {
         written.contains("XLUMPLFLN20XW") && written.contains("FVMPE-RS"),
         "the acquisition record did not reach tag 270: {written}"
     );
+    let importer = Oir.info().id;
+    assert!(super::OirMetadata::check_source(Some(&importer), Some(written)).is_ok());
+    assert!(super::OirMetadata::check_source(None, Some(written)).is_err());
+    assert!(super::OirMetadata::check_source(Some(&importer), None).is_err());
+    let (_, record) = written
+        .split_once("\n\nOIR metadata\n\n")
+        .expect("separated heading in tag 270");
+    let exported = super::acquisition_text(written)
+        .expect("exportable record")
+        .replace("\r\n", "\n");
+    assert_eq!(exported.trim_end(), record.trim_end());
+    assert_eq!(
+        super::acquisition_text(record),
+        super::acquisition_text(written)
+    );
+    assert!(super::acquisition_text("ImageJ=1.54\nframes=5").is_none());
     // …and the structured metadata still works, so it opens as an image rather
     // than as a blob with a long description.
     assert_eq!(stack.dimensions(), Some((8, 4)));

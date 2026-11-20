@@ -55,7 +55,8 @@ fasttiff_builtin_plugins::share_gpu_device(&device, &queue, &adapter_info);
 | Feature | Default | Effect |
 |---|---|---|
 | `builtin-plugins` | on | Every plugin that ships. |
-| `plugin-<name>` | via `builtin-plugins` | One plugin, with whatever it alone depends on: `plugin-invert`, `plugin-zproject`, `plugin-plot-axis`, `plugin-stack-tools`, `plugin-animation-3d`, `plugin-crop`, `plugin-suite2p-stabilize`, `plugin-turboreg-stabilize`, `plugin-deconvolve`, `plugin-png`, `plugin-oir`, `plugin-nifti`, `plugin-dicom`. A plugin left out has no module, no menu entry and no dependency of its own in the build. |
+| `plugin-image-tools` | via `builtin-plugins` | Invert, Crop, Slice Keeper, Slice Remover, Slice Order Invert and Split channels. |
+| `plugin-<name>` | via `builtin-plugins` | One plugin, with whatever it alone depends on: `plugin-zproject`, `plugin-plot-axis`, `plugin-animation-3d`, `plugin-suite2p-stabilize`, `plugin-turboreg-stabilize`, `plugin-deconvolve`, `plugin-png`, `plugin-oir`, `plugin-nifti`, `plugin-dicom`. A plugin left out has no module, no menu entry and no dependency of its own in the build. |
 | `gpu-registration` | off | The registrations' GPU paths, and `share_gpu_device`. Pulls in wgpu. |
 | `threads` | on | Deconvolution across threads; off for a single-threaded host such as `wasm32-unknown-unknown`. |
 | `mmap` | on | The OIR importer memory-maps the files it reads; off, it reads them through a bounded buffer. |

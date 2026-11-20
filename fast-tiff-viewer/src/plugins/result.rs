@@ -176,12 +176,23 @@ fn remove_scratch(path: &Path) -> bool {
 /// of it having gone first.
 #[derive(Debug, Default)]
 pub struct Derived {
+    pub(crate) importer_id: Option<String>,
     made_from: Option<PathBuf>,
     #[cfg(not(target_arch = "wasm32"))]
     scratch: Option<ScratchFile>,
 }
 
 impl Derived {
+    /// Provenance of an imported document whose converted TIFF lives in memory.
+    pub fn imported(path: PathBuf, importer_id: String) -> Self {
+        Self {
+            importer_id: Some(importer_id),
+            made_from: Some(path),
+            #[cfg(not(target_arch = "wasm32"))]
+            scratch: None,
+        }
+    }
+
     /// The file the result was made from, when it was made from one: where
     /// "Save as…" starts, rather than the folder of scratch files the result
     /// happens to be read from.
@@ -538,6 +549,7 @@ impl ResultTiff {
                 {
                     let from = crate::LoadSource::Path(f.path.clone());
                     let derived = Derived {
+                        importer_id: None,
                         made_from,
                         scratch: Some(f),
                     };
@@ -549,6 +561,7 @@ impl ResultTiff {
                     let bytes = std::fs::read(&f.path)?;
                     drop(f);
                     let derived = Derived {
+                        importer_id: None,
                         made_from,
                         scratch: None,
                     };
@@ -558,6 +571,7 @@ impl ResultTiff {
             ResultData::Memory(bytes) => (
                 crate::LoadSource::Bytes(bytes.into(), name),
                 Derived {
+                    importer_id: None,
                     made_from,
                     #[cfg(not(target_arch = "wasm32"))]
                     scratch: None,

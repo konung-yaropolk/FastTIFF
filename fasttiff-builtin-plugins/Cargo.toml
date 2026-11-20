@@ -1,6 +1,6 @@
 [package]
 name = "fasttiff-builtin-plugins"
-version = "0.28.0"
+version = "0.28.1"
 edition = "2021"
 rust-version.workspace = true
 description = "The plugins FastTIFF compiles in: filters, registration, deconvolution, and the PNG, OIR, NIfTI and DICOM importers, written against the FastTIFF plugin SDK alone."
@@ -56,12 +56,10 @@ default = ["threads", "mmap", "builtin-plugins"]
 # `src/lib.rs` — so that enabling one for a target it cannot serve is inert
 # rather than broken.
 builtin-plugins = [
-    "plugin-invert",
     "plugin-zproject",
     "plugin-plot-axis",
-    "plugin-stack-tools",
+    "plugin-image-tools",
     "plugin-animation-3d",
-    "plugin-crop",
     "plugin-suite2p-stabilize",
     "plugin-turboreg-stabilize",
     "plugin-deconvolve",
@@ -71,16 +69,13 @@ builtin-plugins = [
     "plugin-dicom",
 ]
 
-# The five that cost nothing but their own code.
-plugin-invert = ["_shared-deliver", "_shared-store"]
+# Tools with no external dependencies.
+plugin-image-tools = ["_shared-deliver", "_shared-store"]
 plugin-zproject = []
 plugin-plot-axis = []
-plugin-stack-tools = ["_shared-deliver", "_shared-store"]
 # The 3D animation is poses and nothing else: the host plays them, so the
 # plugin needs no renderer and no dependency of its own.
 plugin-animation-3d = []
-# Crop asks the host for a rectangle and cuts every plane to it.
-plugin-crop = ["_shared-store"]
 
 # And the ones that bring a dependency with them. Each names only what *it*
 # needs, so the dependency arrives with the plugin and leaves with it.

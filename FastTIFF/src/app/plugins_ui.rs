@@ -14,6 +14,7 @@ use fasttiff_plugin_api::{ParamDecl, ParamKind, ParamValue, Params, PluginInfo};
 pub(super) enum MenuAction {
     /// Run this plugin, showing its dialog first if it declared one.
     Run(usize),
+    Export(usize),
     /// Open the point counter, the app's own tool (see `point_counter`).
     PointCounter,
     /// Open the folder plugins are installed into, where there is one to
@@ -123,6 +124,26 @@ pub(super) fn plugins_menu(
                 ui.menu_button(path, |ui| list(ui, &group));
             }
         }
+        // Exporters run by registry index and require a filesystem destination.
+        // Their ABI descriptor carries the name and formats, but no menu path.
+        if TARGET.asks_for_paths() && !registry.exporters().is_empty() {
+            ui.menu_button("Export", |ui| {
+                for (index, entry) in registry.exporters().iter().enumerate() {
+                    let enabled = has_stack;
+                    #[cfg(all(feature = "plugin-oir", not(target_arch = "wasm32")))]
+                    let enabled =
+                        enabled || entry.info.id == fasttiff_builtin_plugins::OirMetadata::ID;
+                    if ui
+                        .add_enabled(enabled, egui::Button::new(entry.info.name.as_str()))
+                        .on_hover_text(&entry.info.description)
+                        .clicked()
+                    {
+                        action = MenuAction::Export(index);
+                        ui.close();
+                    }
+                }
+            });
+        }
         // Still said with the app's own tools listed above: they are not
         // plugins, and the menu should not suggest that something is installed.
         if registry.is_empty() {
@@ -152,10 +173,7 @@ pub(super) fn plugins_menu(
             }
         }
 
-        // Exporters are not menu entries either — they run from the Save-as
-        // dialog — and are listed for the same reason importers are: an
-        // installed plugin that silently failed to load looks exactly like one
-        // that is working and has not been triggered.
+        // Save As lists every exporter, including those without a menu shortcut.
         if !registry.exporters().is_empty() {
             ui.separator();
             ui.label(RichText::new("Exportable formats:").strong());

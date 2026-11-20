@@ -83,6 +83,7 @@ impl ViewerApp {
                     let has_stack = self.core.document().is_some();
                     let folder = TARGET.has_plugin_folder();
                     match plugins_ui::plugins_menu(ui, available, has_stack, folder) {
+                        plugins_ui::MenuAction::Export(i) => cmds.push(UiCommand::Export(i)),
                         plugins_ui::MenuAction::Run(i) => cmds.push(UiCommand::StartPlugin(i)),
                         plugins_ui::MenuAction::PointCounter => {
                             cmds.push(UiCommand::OpenPointCounter)

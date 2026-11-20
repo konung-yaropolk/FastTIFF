@@ -98,7 +98,7 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "fast-tiff-lib"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "bytemuck",
  "flate2",
@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-builtin-plugins"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "fast-tiff-lib",
  "fasttiff-plugin",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "fasttiff-plugin-abi",
  "fasttiff-plugin-api",
@@ -154,11 +154,11 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-plugin-abi"
-version = "0.28.0"
+version = "0.28.1"
 
 [[package]]
 name = "fasttiff-plugin-api"
-version = "0.28.0"
+version = "0.28.1"
 
 [[package]]
 name = "fasttiff-plugin-example"
@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "image-registration-support"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "rayon",
 ]
@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "oir-reader"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "bytemuck",
  "memmap2",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "scivis-render"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "half",
  "rayon",
@@ -451,7 +451,7 @@ checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
 
 [[package]]
 name = "suite2p-registration"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "image-registration-support",
  "rustfft",
@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "turboreg-registration"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "image-registration-support",
 ]

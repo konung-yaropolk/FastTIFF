@@ -22,9 +22,11 @@ use std::path::Path;
 #[derive(Default)]
 pub struct Oir;
 
+const IMPORTER_ID: &str = "dev.fasttiff.oir";
+
 impl Importer for Oir {
     fn info(&self) -> PluginInfo {
-        PluginInfo::new("dev.fasttiff.oir", "Olympus OIR")
+        PluginInfo::new(IMPORTER_ID, "Olympus OIR")
             .version(env!("CARGO_PKG_VERSION"))
             .author("FastTIFF")
             .description("Read an Olympus/Evident FluoView OIR acquisition.")
@@ -188,7 +190,7 @@ impl Oir {
                 .filter_map(|c| c.label())
                 .map(str::to_owned)
                 .collect(),
-            description,
+            description: description.map(|text| format!("\nOIR metadata\n\n{text}")),
             ..Default::default()
         };
 
@@ -238,6 +240,81 @@ fn plugin_error(e: oir_reader::Error) -> PluginError {
         }
         _ => PluginError::failed(text),
     }
+}
+
+/// Export the acquisition record carried in the open document's ImageDescription.
+#[derive(Default)]
+pub struct OirMetadata;
+
+impl OirMetadata {
+    /// Stable identifier used by the desktop export command.
+    pub const ID: &str = "dev.fasttiff.oir.metadata";
+
+    /// Check before prompting for a destination.
+    pub fn check_source(
+        importer: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<(), &'static str> {
+        if importer != Some(IMPORTER_ID) {
+            return Err("No OIR file is open. There is nothing to export.");
+        }
+        if !description.is_some_and(|d| d.lines().any(|l| l == "OIR metadata")) {
+            return Err("This OIR file contains no acquisition metadata to export.");
+        }
+        Ok(())
+    }
+}
+
+impl fasttiff_plugin_api::Exporter for OirMetadata {
+    fn info(&self) -> PluginInfo {
+        PluginInfo::new(Self::ID, "Export OIR metadata")
+            .description("Save the FluoView acquisition record as text.")
+    }
+
+    fn file_types(&self) -> Vec<FileType> {
+        vec![FileType::new("OIR metadata", &["txt"])]
+    }
+
+    fn export(
+        &mut self,
+        request: &fasttiff_plugin_api::ExportRequest,
+        host: &mut dyn fasttiff_plugin_api::HostContext,
+    ) -> Result<(), PluginError> {
+        let record = acquisition_text(host.stack_info().description.as_deref().unwrap_or_default())
+            .ok_or_else(|| PluginError::unsupported("This document has no OIR metadata."))?;
+        std::fs::write(&request.path, record)
+            .map_err(|e| PluginError::failed(format!("writing {}: {e}", request.path.display())))
+    }
+}
+
+fn acquisition_text(description: &str) -> Option<String> {
+    let normalized = description.replace("\r\n", "\n");
+    let record = if let Some((_, record)) = normalized.split_once("\nOIR metadata\n\n") {
+        record
+    } else {
+        // Imports written before the heading have the same FluoView preamble.
+        let start = normalized.find("\"[General]\"\t\"\"\n\"Name\"\t\"")?;
+        let record = &normalized[start..];
+        let filename = record
+            .lines()
+            .nth(1)?
+            .strip_prefix("\"Name\"\t\"")?
+            .strip_suffix('"')?;
+        if !filename.to_ascii_lowercase().ends_with(".oir") {
+            return None;
+        }
+        record
+    };
+    let record = record.trim_end_matches(['\0', '\n']);
+    if record.is_empty() {
+        return None;
+    }
+    let text = format!("{record}\n");
+    Some(if cfg!(windows) {
+        text.replace('\n', "\r\n")
+    } else {
+        text
+    })
 }
 
 #[cfg(test)]

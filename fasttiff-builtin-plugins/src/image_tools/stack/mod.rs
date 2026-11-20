@@ -38,7 +38,7 @@
 //!
 //! [`Store`], [`deliver`] and [`in_new_window`] used to live here, because
 //! `Filters > Invert` is built from them as well and this was where three of
-//! the four users were. They are in [`shared`](super::shared) now: deconvolution
+//! the four users were. They are in [`shared`](crate::shared) now: deconvolution
 //! became a fourth user, and each of these is a Cargo feature that can be
 //! compiled out on its own, which a plugin reaching into another plugin's module
 //! does not survive.
@@ -49,16 +49,16 @@
 //! to [`map_planes`] already in order — which is why that is the one place the
 //! ordering has to be right.
 
-use super::shared::{Store, Stored};
+use crate::shared::{Store, Stored};
 use fasttiff_plugin_api::{HostContext, ImageInfo, ImageSpec, ImageStream, PluginError};
 
 mod order;
-mod split;
 mod slices;
+mod split;
 
 pub use order::SliceOrderInvert;
-pub use split::SplitChannels;
 pub use slices::{SliceKeeper, SliceRemover};
+pub use split::SplitChannels;
 
 /// An axis planes can be taken along.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -767,7 +767,7 @@ of them. Every one is on by default. To leave some out, name the ones you want:
 
 ```sh
 cargo build --release -p FastTIFF --no-default-features \
-    --features renderer-wgpu,plugin-invert,plugin-zproject
+    --features renderer-wgpu,plugin-image-tools,plugin-zproject
 ```
 
 A plugin left out is *gone*: no module, no menu entry, and no dependency of its

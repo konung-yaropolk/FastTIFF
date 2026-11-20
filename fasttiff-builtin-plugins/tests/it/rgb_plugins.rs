@@ -4,7 +4,7 @@
 //! one IFD. That count used to reach plugins too, so Slice Order Invert (and
 //! every tool built the same way) read red alone and returned a one-channel
 //! grayscale stack.
-#![cfg(feature = "plugin-stack-tools")]
+#![cfg(feature = "plugin-image-tools")]
 
 use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
 use fast_tiff_viewer::plugins::{describe_view, Registry, ResultDest, StackHost};
