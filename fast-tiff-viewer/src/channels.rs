@@ -374,7 +374,7 @@ fn build_one(tiff: &TiffStack, c: usize, channels: usize) -> ChannelSettings {
         // t = (i + 0.5)/256 lands on texel i's center, so even a linearly
         // filtered LUT returns entry i with no blend into a neighbour. The
         // indices are the file's samples, so the window is in index space.
-        if frame.is_some_and(|f| f.is_palette()) {
+        if !tiff.meta.is_imagej_composite() && frame.is_some_and(|f| f.is_palette()) {
             return ChannelSettings::new(Window::new(-0.5, 255.5), SampleUnits::RAW8);
         }
         // 32- and 64-bit IEEE floats both go to the R32F GPU path (64-bit is

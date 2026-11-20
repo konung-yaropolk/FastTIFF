@@ -315,7 +315,8 @@ impl Document {
         // window is kept and its slider can be hidden. Ahead of the LUTs being
         // seeded for the channels, which gives every palette channel that map
         // (`Display::reseed_luts`).
-        let palette = stack.tiff.frames.first().is_some_and(|f| f.is_palette());
+        let palette = !stack.tiff.meta.is_imagej_composite()
+            && stack.tiff.frames.first().is_some_and(|f| f.is_palette());
         if palette {
             stack.display.set_layout(ChannelLayout::Palette);
         }

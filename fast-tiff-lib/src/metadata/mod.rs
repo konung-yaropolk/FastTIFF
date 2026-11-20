@@ -102,6 +102,14 @@ pub struct StackMeta {
 }
 
 impl StackMeta {
+    /// ImageJ composite stacks store channel intensities even when an 8-bit
+    /// plane also carries a TIFF ColorMap for ordinary indexed-image readers.
+    pub fn is_imagej_composite(&self) -> bool {
+        self.source_format == MetadataFormat::ImageJ
+            && self.channels > 1
+            && self.mode == DisplayMode::Composite
+    }
+
     /// A blank metadata record: one grayscale channel, no calibration, `frames`
     /// inferred from the IFD count. The starting point every dialect refines,
     /// and the whole result for a plain TIFF with no recognized description.

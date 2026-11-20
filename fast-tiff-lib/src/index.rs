@@ -1152,9 +1152,9 @@ impl TiffStack {
         //   - 16-/32-bit **grayscale** images (photometric=1) that ImageJ has
         //     colored with a Fire/Ice-style LUT: the map is applied through the
         //     normal contrast window (`min=`/`max=`), not as a direct index.
-        // This is orthogonal to the metadata dialect, so it's applied here after
-        // the parse, over the single (grayscale-default) channel it produced.
-        if frames[0].samples_per_pixel == 1 {
+        // An ImageJ composite already has its channel LUTs and display mode.
+        // Its first IFD's ColorMap describes just that page.
+        if frames[0].samples_per_pixel == 1 && !meta.is_imagej_composite() {
             if let Some(lut) = color_map.as_deref().and_then(metadata::colormap_to_lut) {
                 // A grayscale ramp is a visual no-op — apply it (harmless) but
                 // don't mark it "explicit", so the pseudocolor toggle stays

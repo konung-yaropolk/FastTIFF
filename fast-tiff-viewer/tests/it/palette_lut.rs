@@ -249,6 +249,31 @@ fn a_palette_stack_opened_as_channels_wears_its_colormap_on_each() {
 }
 
 #[test]
+fn imagej_composite_uses_channel_luts_and_adjustable_windows() {
+    let header = "ImageJ=1.54p\nimages=4\nchannels=2\nframes=2\nmode=composite\nmin=2\nmax=60\n";
+    let mut stack = open(palette_stack(16, 8, 87, 4, Some(header)));
+    assert!(stack.tiff().frames[0].is_palette());
+    assert_eq!(
+        stack.display().mode(),
+        fast_tiff_lib::DisplayMode::Composite
+    );
+    assert!(stack.display().layout().has_contrast());
+    for c in 0..2 {
+        assert_eq!(
+            stack.display().luts()[c],
+            fast_tiff_lib::default_composite_lut(c)
+        );
+        assert_eq!(
+            stack.display().window(c),
+            Some(fast_tiff_viewer::Window::new(2.0, 60.0))
+        );
+        assert!(stack
+            .display_mut()
+            .set_window(c, fast_tiff_viewer::Window::new(4.0, 55.0)));
+    }
+}
+
+#[test]
 fn switching_colormap_and_back_restores_the_file_ramp() {
     // The reported bug: pick a colormap, go back, and the image is left dark
     // with no way to recover.
