@@ -436,6 +436,8 @@ beside a file. Details are in [`oir-reader/README.md`](oir-reader/README.md).
   play button for looped playback (uses `fps=` from metadata, else 30 fps).
 - Per-channel enable/disable + a two-handle contrast range slider; the
   values shown are calibrated (`c0 + c1·raw`) when the file has calibration.
+  Integer sliders span the sample type's range. Float sliders span the
+  measured intensities. Both include the file's saved display window.
 - A **histogram** window (the bar-chart button in the panel) plotting the
   current frame's intensity distribution, one filled curve per channel in that
   channel's own LUT colour, all on a shared axis so a dim channel visibly sits
@@ -445,8 +447,8 @@ beside a file. Details are in [`oir-reader/README.md`](oir-reader/README.md).
   throws away are drawn faded, so you can see what a setting is costing you.
   Unticking a channel takes its curve off the plot and greys out its slider, in
   both the panel and the window. Resizable — the plot takes whatever height the
-  window is given. Log scaling is on by default: a 16-bit frame is mostly
-  background, and linear puts all of it in one bin at the edge. The curves are
+  window is given. Counts start on a linear scale. Enable log scaling to
+  see small populations alongside a tall background peak. The curves are
   binned from the decodes that already show the frame, so an open histogram
   decodes again only what is not on screen: the channels you have unticked
   (on an RGB frame, a second pass over the whole frame), and in 3D the 2D

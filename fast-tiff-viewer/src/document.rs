@@ -43,9 +43,8 @@ pub struct ChannelSettings {
     /// Whether the channel is composited. A disabled channel is not decoded
     /// for the frame on screen.
     pub enabled: bool,
-    /// The full track a contrast range-slider should span. Derived from the
-    /// channel's data range (and widened to include any metadata window) at
-    /// load time so both handles always sit somewhere on the track.
+    /// The slider track spans the integer sample type or the measured float
+    /// range, widened to include the opening window.
     pub bounds: Window,
     /// The window this channel started with — what the file asked for, or what
     /// was derived for it when no window was declared.

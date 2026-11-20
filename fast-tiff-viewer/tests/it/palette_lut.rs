@@ -260,6 +260,10 @@ fn imagej_composite_uses_channel_luts_and_adjustable_windows() {
     assert!(stack.display().layout().has_contrast());
     for c in 0..2 {
         assert_eq!(
+            stack.display().settings()[c].bounds,
+            fast_tiff_viewer::Window::new(0.0, 255.0)
+        );
+        assert_eq!(
             stack.display().luts()[c],
             fast_tiff_lib::default_composite_lut(c)
         );

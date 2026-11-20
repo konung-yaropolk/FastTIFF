@@ -193,10 +193,9 @@ fn the_file_windows_close_without_a_document() {
     assert!(!windows.is_open(WindowId::HISTOGRAM));
 }
 
-/// The histogram's log scale is on until the user turns it off.
 #[test]
-fn the_histogram_starts_on_a_log_scale() {
-    assert!(histogram::HistogramWindow::default().log);
+fn the_histogram_starts_on_a_linear_scale() {
+    assert!(!histogram::HistogramWindow::default().log);
 }
 
 /// Each window's id is the id its dialog has always been shown under, which

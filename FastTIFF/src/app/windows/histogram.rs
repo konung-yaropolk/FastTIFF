@@ -9,22 +9,11 @@ impl WindowId {
 }
 
 /// The window, and its one preference.
+#[derive(Default)]
 pub(super) struct HistogramWindow {
     /// Plot log(1 + count). A preference, so it outlives both the window being
     /// closed and the file being changed.
-    ///
-    /// On by default. A 16-bit microscopy frame is mostly background sitting in
-    /// the bottom percent of a 0..65535 track, so a linear plot is one spike at
-    /// the left edge and a flat line — which reads as a broken widget rather
-    /// than as data. Log shows the distribution that is actually there; the
-    /// checkbox is right under the plot for anyone who wants true counts.
     pub(super) log: bool,
-}
-
-impl Default for HistogramWindow {
-    fn default() -> Self {
-        HistogramWindow { log: true }
-    }
 }
 
 impl AppWindow for HistogramWindow {

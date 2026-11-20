@@ -55,31 +55,11 @@ fn drifting_u16_stack(bulks: &[u16], w: u32, h: u32, outliers: usize) -> Vec<u8>
     writer.finish().unwrap().into_inner()
 }
 
-/// A multi-channel, multi-timepoint stack: `per_frame[t][c]` is the flat value
-/// of channel `c` at timepoint `t`. Planes are written in ImageJ order, channel
-/// varying fastest, which is what the plane addressing expects.
-fn composite_u16_stack(per_frame: &[&[u16]], w: u32, h: u32) -> Vec<u8> {
+/// Float channels have data-dependent tracks. Each pair fills half a plane
+/// so a later frame can fall outside one or both ends of its opening track.
+fn split_f32_stack(per_frame: &[&[(f32, f32)]], w: u32, h: u32) -> Vec<u8> {
     let channels = per_frame[0].len();
-    let opts = WriterOptions::new(w, h, SampleType::U16)
-        .metadata(StackMetaWrite::new(channels, per_frame.len()));
-    let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
-    for frame in per_frame {
-        assert_eq!(frame.len(), channels, "every timepoint needs every channel");
-        for &v in *frame {
-            let bytes: Vec<u8> = (0..w * h).flat_map(|_| v.to_le_bytes()).collect();
-            writer.write_frame_bytes(&bytes).unwrap();
-        }
-    }
-    writer.finish().unwrap().into_inner()
-}
-
-/// Like [`composite_u16_stack`], but each plane is given as a pair of values
-/// filling half its pixels each. A channel whose distribution has two modes can
-/// straddle the end of its own track instead of sitting wholly inside or wholly
-/// outside it, which is the only way one clamp fires without the other.
-fn split_u16_stack(per_frame: &[&[(u16, u16)]], w: u32, h: u32) -> Vec<u8> {
-    let channels = per_frame[0].len();
-    let opts = WriterOptions::new(w, h, SampleType::U16)
+    let opts = WriterOptions::new(w, h, SampleType::F32)
         .metadata(StackMetaWrite::new(channels, per_frame.len()));
     let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
     let n = (w * h) as usize;
@@ -401,8 +381,11 @@ fn auto_fits_the_frame_on_screen_not_frame_zero() {
 /// channel back up rather than leaving it showing nothing.
 #[test]
 fn a_window_fitted_past_the_track_is_pulled_back_onto_it() {
-    let mut stack = load(composite_u16_stack(
-        &[&[1_000, 60_000], &[60_000, 60_000]],
+    let mut stack = load(split_f32_stack(
+        &[
+            &[(1000., 1001.), (60000., 60001.)],
+            &[(60000., 60000.), (60000., 60000.)],
+        ],
         W,
         H,
     ));
@@ -444,10 +427,10 @@ fn a_window_fitted_past_the_track_is_pulled_back_onto_it() {
 /// handle stays legitimately inside.
 #[test]
 fn the_low_handle_is_clamped_without_the_window_collapsing() {
-    let mut stack = load(split_u16_stack(
+    let mut stack = load(split_f32_stack(
         &[
-            &[(50_000, 60_000), (0, 65_535)],
-            &[(0, 55_000), (0, 65_535)],
+            &[(50_000., 60_000.), (0., 65_535.)],
+            &[(0., 55_000.), (0., 65_535.)],
         ],
         W,
         H,

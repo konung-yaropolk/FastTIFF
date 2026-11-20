@@ -218,14 +218,29 @@ pub fn shift_sync(settings: &mut [ChannelSettings], before: &[Window]) {
     }
 }
 
-/// The contrast range-slider's track bounds: the channel's data min/max
-/// (when known) unioned with the current display `window`, so both handles
-/// always land on the track and the user has a little headroom to widen the
-/// window past the metadata defaults. Falls back to the window alone when the
-/// data range is unknown, and pads a degenerate (zero-width) range so the
-/// slider stays usable. File units in, file units out.
-pub(crate) fn slider_bounds(window: Window, data: Option<Window>) -> Window {
-    let Window { mut lo, mut hi } = data.map_or(window, |d| window.union(d));
+/// Integer sliders span the stored sample type. Float sliders span the
+/// measured data. Include the opening window so its handles are reachable.
+fn slider_bounds(
+    window: Window,
+    data: Option<Window>,
+    frame: Option<&fast_tiff_lib::FrameInfo>,
+) -> Window {
+    let integer_range = frame.and_then(|f| {
+        let bits = f.bits_per_sample;
+        if !(1..=64).contains(&bits) {
+            return None;
+        }
+        let max = u64::MAX >> (64 - bits);
+        match f.sample_format {
+            fast_tiff_lib::SampleFormat::UnsignedInt => Some(Window::new(0.0, max as f32)),
+            fast_tiff_lib::SampleFormat::SignedInt => {
+                let hi = (max >> 1) as i64;
+                Some(Window::new((-1 - hi) as f32, hi as f32))
+            }
+            fast_tiff_lib::SampleFormat::Float => None,
+        }
+    });
+    let Window { mut lo, mut hi } = integer_range.or(data).map_or(window, |r| window.union(r));
     // Not `hi <= lo`: a NaN bound compares false both ways, and has to be
     // padded like an empty range rather than let through.
     if hi.partial_cmp(&lo) != Some(std::cmp::Ordering::Greater) {
@@ -428,7 +443,7 @@ fn build_one(tiff: &TiffStack, c: usize, channels: usize) -> ChannelSettings {
             .or(data)
             .unwrap_or_else(|| units.full_range());
         ChannelSettings {
-            bounds: slider_bounds(window, data),
+            bounds: slider_bounds(window, data, frame),
             ..ChannelSettings::new(window, units)
         }
     }
