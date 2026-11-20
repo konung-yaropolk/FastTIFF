@@ -8,35 +8,8 @@
 name: Deploy web viewer
 
 on:
-  push:
-    branches: [main]
-    # Only rebuild when something the bundle actually contains changes.
-    paths:
-      - "FastTIFF-web/**"
-      # The shared egui UI lives in the desktop crate's library half, so the
-      # deployed bundle changes when it does, and when anything under it does:
-      # the built-in plugins run in the browser too.
-      - "FastTIFF/**"
-      - "fast-tiff-lib/**"
-      - "fast-tiff-viewer/**"
-      - "fasttiff-builtin-plugins/**"
-      - "scivis-render/**"
-      - "fasttiff-plugin-api/**"
-      - "fasttiff-plugin-abi/**"
-      - "fasttiff-plugin/**"
-      - "suite2p-registration/**"
-      - "turboreg-registration/**"
-      - "image-registration-support/**"
-      # The web crate is a workspace member: the root lock is its lock, and the
-      # root manifest holds its profile and its dependency versions.
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      # And what builds it: the shared action and the script step it calls.
-      - ".github/actions/web-bundle/**"
-      - "scripts/ci-local.sh"
-      - ".github/workflows/deploy-web.yml"
-  workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: read

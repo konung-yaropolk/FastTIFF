@@ -2,7 +2,7 @@ name: Publish crates
 
 on:
   release:
-    types: [published]          # fires on each GitHub release (same trigger as your exe build)
+    types: [published]          # fires on each GitHub release
 
 jobs:
   publish-fast-tiff-lib:

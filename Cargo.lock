@@ -3056,7 +3056,7 @@ dependencies = [
 
 [[package]]
 name = "turboreg-registration"
-version = "0.28.0"
+version = "0.28.1"
 dependencies = [
  "bytemuck",
  "fast-tiff-c-api-support",
