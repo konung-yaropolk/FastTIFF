@@ -12,6 +12,9 @@
 # Runs from Git Bash on Windows, and on Linux and macOS. Every step runs even
 # when an earlier one fails; each one's output goes to target/ci-local/<step>.log
 # and the end prints a table and exits non-zero if anything failed.
+# After workspace-tests passes, the script repeats it just before the summary.
+# workspace-tests-warm measures wall time with the Cargo build cache populated,
+# including Cargo startup, test harnesses and doctests.
 #
 # Under CI (`CI` set, as GitHub sets it) each step's output is streamed in a
 # folded group instead of only going to its log.
@@ -63,6 +66,8 @@ NAMES=()
 RESULTS=()
 TIMES=()
 FAILED=0
+workspace_tests_passed=0
+workspace_tests=(cargo test --workspace)
 
 wanted() {
     [ ${#ONLY[@]} -eq 0 ] && return 0
@@ -84,6 +89,11 @@ step() {
         [ "$kind" = fuzz ] && [ $FUZZ -eq 0 ] && return
         [ "$kind" = explicit ] && return
     fi
+    run_step "$name" "$@"
+}
+
+run_step() {
+    local name=$1; shift
     local log="$LOGS/$name.log"
     local start=$SECONDS rc
     if [ -n "${CI:-}" ]; then
@@ -100,6 +110,7 @@ step() {
         rc=$?
     fi
     if [ "$rc" -eq 0 ]; then
+        if [ "$name" = workspace-tests ]; then workspace_tests_passed=1; fi
         RESULTS+=(PASS)
         echo "pass ($((SECONDS - start))s)"
     else
@@ -241,7 +252,7 @@ step doc-paths           -- doc_paths
 step example-build       -- cargo build --manifest-path plugins/example/Cargo.toml
 step example-test        -- cargo test --manifest-path plugins/example/Cargo.toml
 step example-lint        -- example_lint
-step workspace-tests     -- cargo test --workspace
+step workspace-tests     -- "${workspace_tests[@]}"
 step capi-tests          -- cargo test -p fast-tiff-lib -p oir-reader -p suite2p-registration -p turboreg-registration --features fast-tiff-lib/capi,oir-reader/capi,suite2p-registration/capi,suite2p-registration/gpu,turboreg-registration/capi,turboreg-registration/gpu
 step glow-build          -- cargo build -p FastTIFF --no-default-features --features renderer-glow,builtin-plugins
 step glow-tests          -- cargo test --workspace --no-default-features --features FastTIFF/renderer-glow,FastTIFF/builtin-plugins
@@ -268,6 +279,13 @@ step fuzz-open fuzz      -- fuzz tiff_open 120
 step fuzz-decode fuzz    -- fuzz tiff_decode 180
 
 [ $LIST -eq 1 ] && exit 0
+
+if [ "$workspace_tests_passed" -eq 1 ]; then
+    run_step workspace-tests-warm "${workspace_tests[@]}"
+    if grep -qE '^[[:space:]]*Compiling ' "$LOGS/workspace-tests-warm.log"; then
+        echo "Cargo rebuilt crates during workspace-tests-warm; its time includes compilation."
+    fi
+fi
 
 if [ $lock_was_clean -eq 1 ]; then
     git checkout -- "$EXAMPLE_LOCK" 2>/dev/null
