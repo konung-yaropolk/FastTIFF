@@ -1,7 +1,7 @@
 //! What a plugin is, and what it may hand back.
 
 use crate::host::HostContext;
-use crate::image::PixelType;
+use crate::image::{Lut, PixelType};
 use crate::meta::StackInfo;
 use crate::params::{ParamDecl, Params};
 
@@ -415,12 +415,26 @@ impl ImageResult {
     }
 }
 
-/// Where a streamed result goes: the three things a returned image can be
-/// asked to do, for an image the host already has.
+/// One document in a multi-document plugin result.
+///
+/// The LUTs sit beside the image rather than on [`ImageResult`]: ordinary
+/// results inherit the source view, while a channel split deliberately turns
+/// one source table into one output document.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocumentResult {
+    /// The pixels and metadata for this document.
+    pub image: ImageResult,
+    /// Per-channel 256-entry lookup tables. Empty inherits the source tables.
+    pub luts: Vec<Lut>,
+}
+
+/// Where a streamed result goes once the host has received it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StreamTarget {
     /// Open it in a new document. See [`Outcome::NewDocument`].
     NewDocument,
+    /// Open every streamed document separately.
+    NewDocuments,
     /// Put it in place of the document the plugin ran on. Destructive; see
     /// [`Outcome::ReplaceDocument`].
     ReplaceDocument,
@@ -437,6 +451,11 @@ pub enum Outcome {
     Message(String),
     /// Open the image in a new FastTIFF document.
     NewDocument(Box<ImageResult>),
+    /// Open each result as a separate document.
+    ///
+    /// Used by operations whose natural result is several stacks, such as
+    /// splitting a composite image into its channels.
+    NewDocuments(Vec<DocumentResult>),
     /// Replace the document the plugin was run on with this image.
     ///
     /// The other half of [`Outcome::NewDocument`], and the reason a tool can

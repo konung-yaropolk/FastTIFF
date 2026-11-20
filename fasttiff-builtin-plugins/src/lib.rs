@@ -228,7 +228,7 @@ builtins! {
     /// web is synchronous, so a long registration will hold the tab.
     turboreg if (feature = "plugin-turboreg-stabilize") => plugins(TurboReg);
     stack_tools if (feature = "plugin-stack-tools")
-        => plugins(SliceKeeper, SliceRemover, SliceOrderInvert);
+        => plugins(SliceKeeper, SliceRemover, SliceOrderInvert, SplitChannels);
     /// Every target: it computes poses and the host plays them, so it needs
     /// nothing a browser lacks.
     animation_3d if (feature = "plugin-animation-3d") => plugins(Animation3d);

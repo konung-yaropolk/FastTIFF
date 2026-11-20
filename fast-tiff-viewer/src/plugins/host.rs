@@ -6,7 +6,7 @@
 //! own state — and not in the app.
 
 use fasttiff_plugin_api::{
-    ChannelView, DisplayMode, HostContext, ImageInfo, ImageSpec, PixelType, Plane, PlaneRef,
+    ChannelView, DisplayMode, HostContext, ImageInfo, ImageSpec, Lut, PixelType, Plane, PlaneRef,
     PluginError, Spacing, StackInfo, ViewParams, VolumeMode, VolumeView,
 };
 
@@ -68,6 +68,13 @@ pub struct StackHost {
     /// The result being streamed, from the plugin's `begin_image` until the
     /// caller takes it. Dropping it unfinished deletes its file.
     streamed: Option<ResultWriter>,
+    /// Completed members of a multi-document streamed result. Kept apart from
+    /// `streamed` so beginning channel two cannot overwrite channel one.
+    completed: Vec<ResultTiff>,
+    /// Explicit tables for the result currently being declared. Normally a
+    /// result inherits `view.luts`; a channel split deliberately supplies one
+    /// source table for its one output channel.
+    result_luts: Option<Vec<Lut>>,
 }
 
 impl StackHost {
@@ -87,6 +94,8 @@ impl StackHost {
             progress: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             results: None,
             streamed: None,
+            completed: Vec::new(),
+            result_luts: None,
         }
     }
 
@@ -122,10 +131,47 @@ impl StackHost {
         self.streamed.take().map(ResultWriter::finish)
     }
 
+    /// Close the current streamed document and retain it for a multi-document
+    /// result. Called by the ABI sink between documents.
+    pub fn finish_document(&mut self) -> Result<(), PluginError> {
+        let Some(result) = self.take_result() else {
+            return Err(PluginError::failed(
+                "the plugin finished a document without declaring one",
+            ));
+        };
+        self.completed
+            .push(result.map_err(|e| PluginError::failed(format!("{e:#}")))?);
+        self.result_luts = None;
+        Ok(())
+    }
+
+    /// Use explicit lookup tables for the result currently being declared.
+    /// The ABI sink calls this before its first plane, so `begin_image` picks
+    /// them when it creates the writer.
+    pub fn set_result_luts(&mut self, luts: Vec<Lut>) -> Result<(), PluginError> {
+        if let Some(writer) = &mut self.streamed {
+            // The C sink may receive the tables after its first plane. TIFF's
+            // directory is still pending, so the writer can amend them.
+            writer
+                .set_luts(luts)
+                .map_err(|e| PluginError::failed(format!("{e:#}")))?;
+        } else {
+            self.result_luts = Some(luts);
+        }
+        Ok(())
+    }
+
+    /// Take all documents a multi-document result streamed.
+    pub fn take_documents(&mut self) -> Vec<ResultTiff> {
+        std::mem::take(&mut self.completed)
+    }
+
     /// Throw away whatever the plugin streamed: the run did not end with it.
     /// Its file goes with it.
     pub fn discard_result(&mut self) {
         self.streamed = None;
+        self.completed.clear();
+        self.result_luts = None;
     }
 
     /// Whether the user has asked this run to stop.
@@ -160,6 +206,12 @@ impl StackHost {
             self.discard_result();
             return Ok(outcome);
         };
+        if matches!(target, StreamTarget::NewDocuments) {
+            self.discard_result();
+            return Err(PluginError::unsupported(
+                "this host cannot collect multiple streamed documents",
+            ));
+        }
         let finished = self.take_result().ok_or_else(|| {
             PluginError::failed("the plugin said it streamed a result, and none arrived")
         })?;
@@ -169,6 +221,7 @@ impl StackHost {
         let image = Box::new(image);
         Ok(match target {
             StreamTarget::NewDocument => Outcome::NewDocument(image),
+            StreamTarget::NewDocuments => unreachable!("handled above"),
             StreamTarget::ReplaceDocument => Outcome::ReplaceDocument(image),
             StreamTarget::SaveToFile { path } => Outcome::SaveToFile { image, path },
         })
@@ -359,7 +412,8 @@ impl HostContext for StackHost {
         }
         // The restated one replaces the first, whose empty file goes with it.
         self.streamed = None;
-        let w = ResultWriter::begin(spec.clone(), &self.view.luts, dest)
+        let luts = self.result_luts.as_deref().unwrap_or(&self.view.luts);
+        let w = ResultWriter::begin(spec.clone(), luts, dest)
             .map_err(|e| PluginError::failed(format!("{e:#}")))?;
         self.streamed = Some(w);
         Ok(())
@@ -383,6 +437,14 @@ impl HostContext for StackHost {
         };
         w.push(plane)
             .map_err(|e| PluginError::failed(format!("{e:#}")))
+    }
+
+    fn set_result_luts(&mut self, luts: Vec<Lut>) -> Result<(), PluginError> {
+        StackHost::set_result_luts(self, luts)
+    }
+
+    fn finish_document(&mut self) -> Result<(), PluginError> {
+        StackHost::finish_document(self)
     }
 }
 

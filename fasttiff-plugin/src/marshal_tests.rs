@@ -43,6 +43,19 @@ unsafe extern "C" fn info(
     FtStatus::Ok
 }
 
+unsafe extern "C" fn channel_lut(
+    _c: *mut core::ffi::c_void,
+    _i: u64,
+    _data: *const u8,
+    _len: u64,
+) -> FtStatus {
+    FtStatus::Ok
+}
+
+unsafe extern "C" fn finish_document(_c: *mut core::ffi::c_void) -> FtStatus {
+    FtStatus::Ok
+}
+
 /// Counts the calls a newer host would receive, so "skipped" can be told from
 /// "called and ignored".
 static CHANNEL_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -187,6 +200,8 @@ fn sink(size: usize) -> FtSink {
         push_series,
         set_channel_name: channel_name,
         set_animation,
+        set_channel_lut: channel_lut,
+        finish_document,
     }
 }
 

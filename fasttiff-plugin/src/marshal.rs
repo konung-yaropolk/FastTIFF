@@ -219,6 +219,19 @@ unsafe extern "C" fn no_set_animation(
     FtStatus::Unsupported
 }
 
+unsafe extern "C" fn no_set_channel_lut(
+    _ctx: *mut core::ffi::c_void,
+    _index: u64,
+    _data: *const u8,
+    _len: u64,
+) -> FtStatus {
+    FtStatus::Unsupported
+}
+
+unsafe extern "C" fn no_finish_document(_ctx: *mut core::ffi::c_void) -> FtStatus {
+    FtStatus::Unsupported
+}
+
 /// The host's result sink, copied into a value this plugin may safely hold.
 ///
 /// The same dance as [`registrar_of`], and for the same reason — but this one
@@ -271,6 +284,12 @@ unsafe fn sink_of(sink: *const FtSink) -> Result<FtSink, FtStatus> {
     }
     if !crate::abi::ft_covers!(sink, FtSink, set_animation) {
         core::ptr::addr_of_mut!((*p).set_animation).write(no_set_animation);
+    }
+    if !crate::abi::ft_covers!(sink, FtSink, set_channel_lut) {
+        core::ptr::addr_of_mut!((*p).set_channel_lut).write(no_set_channel_lut);
+    }
+    if !crate::abi::ft_covers!(sink, FtSink, finish_document) {
+        core::ptr::addr_of_mut!((*p).finish_document).write(no_finish_document);
     }
     Ok(buf.assume_init())
 }
@@ -798,6 +817,7 @@ pub unsafe fn write_outcome(sink: &FtSink, outcome: Outcome) -> FtStatus {
             (sink.set_outcome)(sink.ctx, FtOutcomeKind::Message, FtStr::from_str(&m))
         }
         Outcome::NewDocument(img) => write_result(sink, *img, FtOutcomeKind::NewDocument, ""),
+        Outcome::NewDocuments(documents) => write_documents(sink, documents),
         Outcome::ReplaceDocument(img) => {
             write_result(sink, *img, FtOutcomeKind::ReplaceDocument, "")
         }
@@ -947,6 +967,36 @@ unsafe fn write_result(
     write_image(sink, img, info.as_ref(), kind, text)
 }
 
+/// Send several complete images. Each must be closed before the next begins:
+/// a streaming host can then release its file instead of holding every channel
+/// in memory while the plugin is still reading the source.
+unsafe fn write_documents(sink: &FtSink, documents: Vec<crate::api::DocumentResult>) -> FtStatus {
+    if documents.is_empty() {
+        crate::last_error::set("a multi-document result has no documents");
+        return FtStatus::BadArgument;
+    }
+    if !crate::abi::ft_covers!(sink as *const FtSink, FtSink, finish_document) {
+        crate::last_error::set(
+            "this plugin returned several documents, and this host is too old to open them; \
+             it needs a FastTIFF built against plugin ABI 1.7 or newer",
+        );
+        return FtStatus::Unsupported;
+    }
+    for document in documents {
+        let mut image = document.image;
+        let info = image.metadata.take();
+        let st = send_image(sink, image, info.as_ref(), &document.luts);
+        if st != FtStatus::Ok {
+            return st;
+        }
+        let st = (sink.finish_document)(sink.ctx);
+        if st != FtStatus::Ok {
+            return st;
+        }
+    }
+    (sink.set_outcome)(sink.ctx, FtOutcomeKind::NewDocuments, FtStr::EMPTY)
+}
+
 /// Declare a result's shape, push every plane, then say what to do with it.
 ///
 /// `info` is the metadata that travels with it: a filter's own, or what an
@@ -968,6 +1018,20 @@ unsafe fn write_image(
     // Validated on this side too, not only the host's: a plugin that miscounts
     // should learn about it from its own error rather than from the host
     // refusing something it cannot explain.
+    let st = send_image(sink, img, info, &[]);
+    if st != FtStatus::Ok {
+        return st;
+    }
+    (sink.set_outcome)(sink.ctx, kind, FtStr::from_str(text))
+}
+
+/// Declare and push an image, without deciding its final destination.
+unsafe fn send_image(
+    sink: &FtSink,
+    img: crate::api::ImageResult,
+    info: Option<&crate::api::StackInfo>,
+    luts: &[crate::api::Lut],
+) -> FtStatus {
     if let Err(e) = img.validate() {
         return status_of(&e);
     }
@@ -976,6 +1040,30 @@ unsafe fn write_image(
     if st != FtStatus::Ok {
         return st;
     }
+    if !luts.is_empty() {
+        if luts.len() != spec.channels.max(1) {
+            crate::last_error::set("the result supplied a different number of LUTs than channels");
+            return FtStatus::BadArgument;
+        }
+        if !crate::abi::ft_covers!(sink as *const FtSink, FtSink, set_channel_lut) {
+            crate::last_error::set(
+                "this plugin returned channel lookup tables, and this host is too old to use them; \
+                 it needs a FastTIFF built against plugin ABI 1.7 or newer",
+            );
+            return FtStatus::Unsupported;
+        }
+        for (i, lut) in luts.iter().enumerate() {
+            let st = (sink.set_channel_lut)(
+                sink.ctx,
+                i as u64,
+                lut.as_ptr().cast::<u8>(),
+                crate::abi::FT_LUT_BYTES,
+            );
+            if st != FtStatus::Ok {
+                return st;
+            }
+        }
+    }
     for p in planes {
         let st = push_plane(sink, p.as_plane_ref());
         if st != FtStatus::Ok {
@@ -983,7 +1071,7 @@ unsafe fn write_image(
         }
         // `p` drops here: the host has its copy.
     }
-    (sink.set_outcome)(sink.ctx, kind, FtStr::from_str(text))
+    FtStatus::Ok
 }
 
 /// Declare a result to the host: its metadata, its shape, and its channels'
@@ -1127,6 +1215,7 @@ pub(crate) unsafe fn push_plane(sink: &FtSink, plane: PlaneRef<'_>) -> FtStatus 
 fn stream_kind(target: &StreamTarget) -> (FtOutcomeKind, &str) {
     match target {
         StreamTarget::NewDocument => (FtOutcomeKind::NewDocument, ""),
+        StreamTarget::NewDocuments => (FtOutcomeKind::NewDocuments, ""),
         StreamTarget::ReplaceDocument => (FtOutcomeKind::ReplaceDocument, ""),
         StreamTarget::SaveToFile { path } => (FtOutcomeKind::SaveToFile, path),
     }

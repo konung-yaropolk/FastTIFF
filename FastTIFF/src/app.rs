@@ -1722,6 +1722,10 @@ impl ViewerApp {
             Ok(Product::NewWindow(what)) => {
                 self.report_done(format!("{name}: opened {what} in a new window"))
             }
+            Ok(Product::NewWindows(windows)) => self.report_done(format!(
+                "{name}: opened {} channel document(s) in new windows",
+                windows.len()
+            )),
             Ok(Product::Inline { result, why }) => {
                 self.say(format!(
                     "{name}: could not open a new window ({why}); showing it here"

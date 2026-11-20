@@ -358,6 +358,15 @@ impl ResultWriter {
         Ok(())
     }
 
+    /// Replace the result's display lookup tables before it is finished.
+    /// The IFD directory is written last, so this updates both a file-backed
+    /// and an in-memory writer without touching pixels already written.
+    pub(crate) fn set_luts(&mut self, luts: Vec<Lut>) -> anyhow::Result<()> {
+        self.luts = luts;
+        self.w.set_metadata(stack_meta(&self.spec, &self.luts))?;
+        Ok(())
+    }
+
     /// Write the next plane.
     pub(crate) fn push(&mut self, plane: PlaneRef<'_>) -> anyhow::Result<()> {
         let index = self.w.frames_written();

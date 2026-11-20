@@ -53,9 +53,11 @@ use super::shared::{Store, Stored};
 use fasttiff_plugin_api::{HostContext, ImageInfo, ImageSpec, ImageStream, PluginError};
 
 mod order;
+mod split;
 mod slices;
 
 pub use order::SliceOrderInvert;
+pub use split::SplitChannels;
 pub use slices::{SliceKeeper, SliceRemover};
 
 /// An axis planes can be taken along.

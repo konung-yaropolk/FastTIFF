@@ -187,6 +187,24 @@ pub trait HostContext {
             "this host takes a result only whole, not plane by plane",
         ))
     }
+
+    /// Give the streamed result explicit display tables. A multi-document
+    /// result uses this to carry one source channel's exact LUT into its own
+    /// output file. Ordinary results inherit the view's tables and never call
+    /// it.
+    fn set_result_luts(&mut self, _luts: Vec<crate::Lut>) -> Result<(), PluginError> {
+        Err(PluginError::unsupported(
+            "this host cannot set lookup tables on a streamed result",
+        ))
+    }
+
+    /// Close the current streamed image so the next `begin_image` starts a
+    /// second document. This is only used by [`Outcome::NewDocuments`](crate::Outcome::NewDocuments).
+    fn finish_document(&mut self) -> Result<(), PluginError> {
+        Err(PluginError::unsupported(
+            "this host cannot stream more than one result document",
+        ))
+    }
 }
 
 /// Convenience helpers, available on every `HostContext` and not part of what

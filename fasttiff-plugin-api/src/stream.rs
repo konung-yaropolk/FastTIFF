@@ -220,12 +220,18 @@ impl ImageStream {
         if self.pushed != self.planes {
             return Err(self.spec.count_mismatch(self.pushed));
         }
+        if matches!(target, StreamTarget::NewDocuments) {
+            return Err(PluginError::unsupported(
+                "one ImageStream is one document; return Outcome::NewDocuments instead",
+            ));
+        }
         let Some(planes) = self.kept else {
             return Ok(Outcome::Streamed { target });
         };
         let image = Box::new(self.spec.with_planes(planes));
         Ok(match target {
             StreamTarget::NewDocument => Outcome::NewDocument(image),
+            StreamTarget::NewDocuments => unreachable!("refused above"),
             StreamTarget::ReplaceDocument => Outcome::ReplaceDocument(image),
             StreamTarget::SaveToFile { path } => Outcome::SaveToFile { image, path },
         })

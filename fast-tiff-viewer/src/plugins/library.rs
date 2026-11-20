@@ -56,10 +56,11 @@ use std::path::{Path, PathBuf};
 
 use fasttiff_plugin_abi as abi;
 use fasttiff_plugin_api::{
-    Animation, AnimationOutput, Confidence, ExportRequest, Exporter, FileType, HostContext,
-    ImageSpec, ImportHost, ImportRequest, ImportResult, Importer, MovieResolution, Outcome,
-    ParamDecl, ParamKind, ParamValue, Params, PixelType, PlaneData, PlaneRef, Plot, Plugin,
-    PluginError, PluginInfo, Pose, SelectionKind, Series, StackInfo, StreamTarget,
+    Animation, AnimationOutput, Confidence, DocumentResult, ExportRequest, Exporter, FileType,
+    HostContext, ImageSpec, ImportHost, ImportRequest, ImportResult, Importer, Lut,
+    MovieResolution, Outcome, ParamDecl, ParamKind, ParamValue, Params, PixelType, PlaneData,
+    PlaneRef, Plot, Plugin, PluginError, PluginInfo, Pose, SelectionKind, Series, StackInfo,
+    StreamTarget,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1228,6 +1229,11 @@ struct ResultSink {
     colors: std::collections::BTreeMap<u64, [u8; 3]>,
     /// Per-channel names, by index, kept with `info` — see [`Self::take_info`].
     names: std::collections::BTreeMap<u64, String>,
+    /// Full tables supplied for result channels. Unlike `colors`, these retain
+    /// non-ramp tables such as Fire or a segmentation palette.
+    luts: std::collections::BTreeMap<u64, Lut>,
+    /// Completed non-streamed members of a multi-document outcome.
+    documents: Vec<DocumentResult>,
     /// The chart being declared, once `begin_plot` has been called.
     plot: Option<PlotSink>,
     /// The animation being declared, once `set_animation` has been called.
@@ -1527,6 +1533,50 @@ unsafe extern "C" fn sink_set_outcome(
     })
 }
 
+unsafe extern "C" fn sink_set_channel_lut(
+    ctx: *mut std::ffi::c_void,
+    index: u64,
+    data: *const u8,
+    len: u64,
+) -> abi::FtStatus {
+    host_guard(|| {
+        let Some(mut s) = enter::<ResultSink>(ctx) else {
+            return abi::FtStatus::BadArgument;
+        };
+        if index > 4096 {
+            return abi::FtStatus::OutOfRange;
+        }
+        if data.is_null() || len != abi::FT_LUT_BYTES {
+            s.problem = Some("the plugin supplied a lookup table of the wrong size".into());
+            return abi::FtStatus::BadArgument;
+        }
+        let data = std::slice::from_raw_parts(data, len as usize);
+        let (rgb, rest) = data.as_chunks::<3>();
+        debug_assert!(rest.is_empty());
+        let mut lut = [[0u8; 3]; 256];
+        for (out, rgb) in lut.iter_mut().zip(rgb) {
+            *out = [rgb[0], rgb[1], rgb[2]];
+        }
+        s.luts.insert(index, lut);
+        abi::FtStatus::Ok
+    })
+}
+
+unsafe extern "C" fn sink_finish_document(ctx: *mut std::ffi::c_void) -> abi::FtStatus {
+    host_guard(|| {
+        let Some(mut s) = enter::<ResultSink>(ctx) else {
+            return abi::FtStatus::BadArgument;
+        };
+        match s.finish_document() {
+            Ok(()) => abi::FtStatus::Ok,
+            Err(e) => {
+                s.problem = Some(e.to_string());
+                abi::FtStatus::BadArgument
+            }
+        }
+    })
+}
+
 unsafe extern "C" fn sink_set_info(
     ctx: *mut std::ffi::c_void,
     info: *const abi::FtStackInfo,
@@ -1700,10 +1750,71 @@ fn sink_table(sink: &Gated<ResultSink>) -> abi::FtSink {
         push_series: sink_push_series,
         set_channel_name: sink_set_channel_name,
         set_animation: sink_set_animation,
+        set_channel_lut: sink_set_channel_lut,
+        finish_document: sink_finish_document,
     }
 }
 
 impl ResultSink {
+    /// Dense tables up to the highest declared result channel.
+    fn result_luts(&self) -> Vec<Lut> {
+        match self.luts.keys().next_back() {
+            Some(&highest) => (0..=highest)
+                .map(|i| self.luts.get(&i).copied().unwrap_or([[0; 3]; 256]))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Forget one completed image's declaration so the next one starts clean.
+    fn clear_image(&mut self) {
+        self.width = 0;
+        self.height = 0;
+        self.channels = 0;
+        self.slices = 0;
+        self.frames = 0;
+        self.pixel_type = None;
+        self.name.clear();
+        self.planes.clear();
+        self.pushed = 0;
+        self.begun = false;
+        self.info = None;
+        self.colors.clear();
+        self.names.clear();
+        self.luts.clear();
+    }
+
+    /// Finish one member of a multi-document outcome. The writer is closed at
+    /// this boundary, so each channel owns an independent finished TIFF before
+    /// the plugin starts the next one.
+    fn finish_document(&mut self) -> Result<(), PluginError> {
+        let spec = self.spec();
+        spec.validate()?;
+        if Some(self.pushed) != spec.plane_count() {
+            return Err(spec.count_mismatch(self.pushed));
+        }
+        let luts = self.result_luts();
+        if !luts.is_empty() && luts.len() != spec.channels.max(1) {
+            return Err(PluginError::failed(
+                "the plugin supplied lookup tables for only some result channels",
+            ));
+        }
+        if let Some(cell) = self.stream {
+            // The sink holds the run's gated host cell, live for this call;
+            // entering it keeps the callback lane exclusive.
+            let Some(mut cell) = (unsafe { enter::<HostCell>(cell.as_ptr()) }) else {
+                return Err(PluginError::failed(CONCURRENT_CALLS));
+            };
+            cell.inner.set_result_luts(luts)?;
+            cell.inner.finish_document()?;
+        } else {
+            let image = spec.with_planes(std::mem::take(&mut self.planes));
+            image.validate()?;
+            self.documents.push(DocumentResult { image, luts });
+        }
+        self.clear_image();
+        Ok(())
+    }
     /// The result's metadata, with the channel names it was given.
     ///
     /// A name lives in `StackInfo::channel_names`, so it is kept only where
@@ -1810,6 +1921,24 @@ impl ResultSink {
             }
             abi::FtOutcomeKind::StopAnimation => Ok(Outcome::StopAnimation),
             abi::FtOutcomeKind::SelectRegion => Ok(Outcome::SelectRegion { prompt: self.text }),
+            abi::FtOutcomeKind::NewDocuments => {
+                if self.pushed != 0 || self.pixel_type.is_some() {
+                    return Err(PluginError::failed(
+                        "the plugin ended multiple documents without finishing the last one",
+                    ));
+                }
+                if self.stream.is_some() {
+                    return Ok(Outcome::Streamed {
+                        target: StreamTarget::NewDocuments,
+                    });
+                }
+                if self.documents.is_empty() {
+                    return Err(PluginError::failed(
+                        "the plugin asked to open several documents but supplied none",
+                    ));
+                }
+                Ok(Outcome::NewDocuments(self.documents))
+            }
             abi::FtOutcomeKind::NewDocument
             | abi::FtOutcomeKind::SaveToFile
             | abi::FtOutcomeKind::ReplaceDocument => {

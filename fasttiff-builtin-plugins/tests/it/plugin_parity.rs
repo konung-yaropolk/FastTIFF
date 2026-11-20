@@ -134,6 +134,12 @@ fn shown(r: Result<Outcome, PluginError>) -> String {
             normalised_image(&mut image);
             Outcome::SaveToFile { image, path }
         }
+        Outcome::NewDocuments(mut documents) => {
+            for document in &mut documents {
+                normalised_image(&mut document.image);
+            }
+            Outcome::NewDocuments(documents)
+        }
         other => other,
     });
     format!("{r:?}")
@@ -226,6 +232,7 @@ fn every_built_in_filter_answers_the_same_through_the_boundary() {
         covered.push(same_both_ways::<builtin::SliceKeeper>(&s));
         covered.push(same_both_ways::<builtin::SliceRemover>(&s));
         covered.push(same_both_ways::<builtin::SliceOrderInvert>(&s));
+        covered.push(same_both_ways::<builtin::SplitChannels>(&s));
     }
     #[cfg(feature = "plugin-deconvolve")]
     {

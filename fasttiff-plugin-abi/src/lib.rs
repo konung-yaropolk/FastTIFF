@@ -143,7 +143,11 @@ pub const ABI_MAJOR: u32 = 1;
 ///   [`FT_ANIMATION_SAVE_TIFF_WINDOW`], a movie saved at the size of the 3D
 ///   view rather than at full detail: two more new values, which an older
 ///   host draws as a label and refuses with a message respectively.
-pub const ABI_MINOR: u32 = 6;
+/// * **7** — multi-document results. [`FtSink::set_channel_lut`] carries a
+///   whole per-channel table, and [`FtSink::finish_document`] closes one
+///   result before the plugin starts the next; [`FtOutcomeKind::NewDocuments`]
+///   then asks the host to open them all.
+pub const ABI_MINOR: u32 = 7;
 
 /// The one symbol a plugin library must export, NUL-terminated for `dlsym`.
 ///
@@ -732,6 +736,9 @@ open_enum! {
         /// Ask the user to draw a rectangle, then run this plugin again with it
         /// as the selection. The text is the prompt to show while they do.
         SelectRegion = 8,
+        /// Open each completed result as its own document. Each one was ended
+        /// with [`FtSink::finish_document`] before this final outcome.
+        NewDocuments = 9,
     }
 }
 
@@ -924,6 +931,18 @@ pub struct FtSink {
         pose_count: u64,
         floats_per_pose: u64,
     ) -> FtStatus,
+
+    /// Set a whole 256-entry RGB lookup table for one result channel. `data`
+    /// points at exactly [`FT_LUT_BYTES`] bytes in RGB order; the host copies
+    /// them before returning.
+    pub set_channel_lut:
+        unsafe extern "C" fn(ctx: *mut c_void, index: u64, data: *const u8, len: u64) -> FtStatus,
+
+    /// Finish the image currently being pushed, retaining it as one member of
+    /// a later [`FtOutcomeKind::NewDocuments`] result. A new `begin_image` may
+    /// follow. This is separate from `set_outcome`: it cannot accidentally
+    /// turn a normal single-image result into several documents.
+    pub finish_document: unsafe extern "C" fn(ctx: *mut c_void) -> FtStatus,
 }
 
 /// The floats of a pose this minor defines: a 3×3 rotation, row-major. See
@@ -1248,7 +1267,7 @@ const _: () = {
     assert!(size_of::<FtImporterVtable>() == 8 + 4 * p);
     assert!(size_of::<FtExporterVtable>() == 8 + 3 * p);
     assert!(size_of::<FtParamSink>() == 8 + 2 * p);
-    assert!(size_of::<FtSink>() == 8 + 10 * p);
+    assert!(size_of::<FtSink>() == 8 + 12 * p);
     assert!(size_of::<FtHost>() == 8 + 18 * p);
 
     // The append rule, pinned. `CORE` is what an older host declares, so it
@@ -1266,7 +1285,9 @@ const _: () = {
     assert!(FtSink::CORE == offset_of!(FtSink, set_info));
     assert!(offset_of!(FtSink, push_series) + p == offset_of!(FtSink, set_channel_name));
     assert!(offset_of!(FtSink, set_channel_name) + p == offset_of!(FtSink, set_animation));
-    assert!(offset_of!(FtSink, set_animation) + p == size_of::<FtSink>());
+    assert!(offset_of!(FtSink, set_animation) + p == offset_of!(FtSink, set_channel_lut));
+    assert!(offset_of!(FtSink, set_channel_lut) + p == offset_of!(FtSink, finish_document));
+    assert!(offset_of!(FtSink, finish_document) + p == size_of::<FtSink>());
     assert!(FtHost::CORE == offset_of!(FtHost, stack_info));
     assert!(offset_of!(FtHost, param_value) + p == offset_of!(FtHost, channel_lut));
     assert!(offset_of!(FtHost, channel_lut) + p == offset_of!(FtHost, animating));
@@ -1328,6 +1349,7 @@ const _: () = {
     assert!(FtOutcomeKind::Animate.0 == 6);
     assert!(FtOutcomeKind::StopAnimation.0 == 7);
     assert!(FtOutcomeKind::SelectRegion.0 == 8);
+    assert!(FtOutcomeKind::NewDocuments.0 == 9);
 
     assert!(FT_POSE_FLOATS == 9);
     assert!(FT_ANIMATION_PLAY == 0);

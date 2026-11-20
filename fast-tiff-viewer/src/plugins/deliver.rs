@@ -19,7 +19,9 @@
 //! [`ResultWriter`]: super::ResultWriter
 
 use super::{write_result, ResultDest, ResultTiff, StackHost};
-use fasttiff_plugin_api::{Animation, HostContext, ImageResult, Outcome, Plot, StreamTarget};
+use fasttiff_plugin_api::{
+    Animation, DocumentResult, HostContext, ImageResult, Lut, Outcome, Plot, StreamTarget,
+};
 
 /// What a plugin's run came to, once everything that can be done off the
 /// interface thread has been done.
@@ -40,6 +42,8 @@ pub enum Product {
     /// came from, so a result opens in a window of its own unless the plugin
     /// was asked to replace.
     NewWindow(String),
+    /// Several independent result windows are already opening.
+    NewWindows(Vec<String>),
     /// It could not be handed to a window of its own — this is why — so it
     /// comes back to be shown in this one rather than lost.
     Inline {
@@ -112,15 +116,16 @@ pub fn finish(
 ) -> Result<Product, String> {
     let (result, target) = match outcome {
         Outcome::NewDocument(image) => (
-            write(image, host, to, "Encoding result")?,
+            write(image, host, to, "Encoding result", None)?,
             StreamTarget::NewDocument,
         ),
+        Outcome::NewDocuments(documents) => return deliver_documents(documents, host, to),
         Outcome::ReplaceDocument(image) => (
-            write(image, host, to, "Encoding result")?,
+            write(image, host, to, "Encoding result", None)?,
             StreamTarget::ReplaceDocument,
         ),
         Outcome::SaveToFile { image, path } => (
-            write(image, host, to, "Writing result")?,
+            write(image, host, to, "Writing result", None)?,
             StreamTarget::SaveToFile { path },
         ),
         // Written already, a plane at a time while the plugin ran; finishing
@@ -133,6 +138,15 @@ pub fn finish(
             // directory, and dropping it unfinished deletes its file.
             if host.cancelled() {
                 return Ok(without_result(host, Product::Cancelled));
+            }
+            if matches!(target, StreamTarget::NewDocuments) {
+                let results = host.take_documents();
+                if results.is_empty() {
+                    return Err(
+                        "the plugin said it streamed several documents, and none arrived".into(),
+                    );
+                }
+                return hand_over_all(results, to);
             }
             let result = host
                 .take_result()
@@ -156,6 +170,7 @@ pub fn finish(
         return Ok(Product::Cancelled);
     };
     Ok(match target {
+        StreamTarget::NewDocuments => unreachable!("handled before taking one result"),
         StreamTarget::ReplaceDocument if to.same_document() => Product::Replace(result),
         StreamTarget::NewDocument | StreamTarget::ReplaceDocument => {
             to.phase("Opening a new window");
@@ -175,6 +190,55 @@ pub fn finish(
     })
 }
 
+/// Write each returned document with its own LUTs, then hand them all over.
+fn deliver_documents(
+    documents: Vec<DocumentResult>,
+    host: &mut StackHost,
+    to: &mut dyn Deliver,
+) -> Result<Product, String> {
+    if documents.is_empty() {
+        return Err("the plugin returned no documents".into());
+    }
+    let mut results = Vec::with_capacity(documents.len());
+    for document in documents {
+        let Some(result) = write(
+            Box::new(document.image),
+            host,
+            to,
+            "Encoding result",
+            Some(&document.luts),
+        )?
+        else {
+            return Ok(without_result(host, Product::Cancelled));
+        };
+        results.push(result);
+    }
+    hand_over_all(results, to)
+}
+
+/// Start every result's window. A partial launch is reported honestly: the
+/// already opened channels stay open, while the refused one is never mistaken
+/// for success.
+fn hand_over_all(results: Vec<ResultTiff>, to: &mut dyn Deliver) -> Result<Product, String> {
+    to.phase("Opening new windows");
+    let mut names = Vec::with_capacity(results.len());
+    for result in results {
+        match to.open_in_new_window(result) {
+            Handover::Opened(name) => names.push(name),
+            Handover::Cancelled => return Ok(Product::Cancelled),
+            Handover::Refused(_, why) => {
+                let prefix = if names.is_empty() {
+                    String::new()
+                } else {
+                    format!(" after opening {} document(s)", names.len())
+                };
+                return Err(format!("could not open a result window ({why}){prefix}"));
+            }
+        }
+    }
+    Ok(Product::NewWindows(names))
+}
+
 /// An outcome that is not an image: whatever the plugin streamed is not what
 /// the run ended with, so it goes, and its file with it.
 fn without_result(host: &mut StackHost, product: Product) -> Product {
@@ -190,16 +254,15 @@ fn write(
     host: &mut StackHost,
     to: &mut dyn Deliver,
     label: &str,
+    luts: Option<&[Lut]>,
 ) -> Result<Option<ResultTiff>, String> {
     // A plugin that streamed a result and then returned another has its first
     // one thrown away, not left on disk.
     host.discard_result();
     to.phase(label);
     let dest = host.result_dest().cloned().unwrap_or(ResultDest::Memory);
-    write_result(*image, None, &host.view().luts, &dest, &mut |f| {
-        to.report(f)
-    })
-    .map_err(|e| format!("{e:#}"))
+    let luts = luts.unwrap_or(&host.view().luts);
+    write_result(*image, None, luts, &dest, &mut |f| to.report(f)).map_err(|e| format!("{e:#}"))
 }
 
 #[cfg(test)]

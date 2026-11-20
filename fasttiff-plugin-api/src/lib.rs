@@ -130,8 +130,8 @@ pub use meta::{DisplayMode, Spacing, StackInfo};
 pub use params::{ParamDecl, ParamKind, ParamValue, Params};
 pub use plot::{Plot, Selection, SelectionKind, Series};
 pub use plugin::{
-    ImageResult, ImageSpec, Outcome, PlaneData, PlaneRef, Plugin, PluginError, PluginInfo,
-    StreamTarget,
+    DocumentResult, ImageResult, ImageSpec, Outcome, PlaneData, PlaneRef, Plugin, PluginError,
+    PluginInfo, StreamTarget,
 };
 pub use selection::{Roi, Shape};
 pub use stream::ImageStream;
@@ -147,4 +147,6 @@ pub const API_VERSION_MAJOR: u32 = 1;
 /// 4: results streamed during the run — [`ImageStream`], [`ImageSpec`],
 /// [`PlaneRef`], [`Outcome::Streamed`] and the four [`HostContext`] methods
 /// behind them. Carried by the C ABI's existing sink, so the ABI is unchanged.
-pub const API_VERSION_MINOR: u32 = 4;
+/// 5: [`Outcome::NewDocuments`] lets a plugin return several independent
+/// images, with each image carrying its own display LUTs.
+pub const API_VERSION_MINOR: u32 = 5;
