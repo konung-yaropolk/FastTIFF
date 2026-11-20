@@ -211,6 +211,10 @@ pub fn indexes(x: f64, n: usize) -> [usize; 4] {
     // shift toward the left or top edge read the wrong pixel for the samples it
     // sent past that edge.
     let mut p = x.floor() as i64 + 2;
+    if p >= 3 && p < n as i64 {
+        let i = p as usize;
+        return [i, i - 1, i - 2, i - 3];
+    }
     let mut out = [0usize; 4];
     for slot in out.iter_mut() {
         let mut q = if p < 0 { -1 - p } else { p };
@@ -240,20 +244,41 @@ pub fn frac(x: f64) -> f64 {
 ///
 /// `coeff` is `w * h`, row-major, as [`prefilter_2d`] leaves it.
 pub fn interpolate(coeff: &[f32], w: usize, h: usize, x: f64, y: f64) -> f64 {
-    let xw = weights(frac(x));
-    let yw = weights(frac(y));
-    let xi = indexes(x, w);
-    let yi = indexes(y, h);
-    let mut sum = 0.0;
-    for (j, &wy) in yw.iter().enumerate() {
-        let row = yi[j] * w;
-        let mut acc = 0.0;
-        for (i, &wx) in xw.iter().enumerate() {
-            acc += wx * coeff[row + xi[i]] as f64;
+    Stencil::at(w, h, x, y).sample(coeff)
+}
+
+/// The four-by-four footprint at one position, shared by the intensity and
+/// both gradient images when the optimizer requests derivatives.
+pub(crate) struct Stencil {
+    cols: [usize; 4],
+    rows: [usize; 4],
+    xw: [f64; 4],
+    yw: [f64; 4],
+}
+
+impl Stencil {
+    #[inline]
+    pub(crate) fn at(w: usize, h: usize, x: f64, y: f64) -> Self {
+        Self {
+            cols: indexes(x, w),
+            rows: indexes(y, h).map(|row| row * w),
+            xw: weights(frac(x)),
+            yw: weights(frac(y)),
         }
-        sum += wy * acc;
     }
-    sum
+
+    #[inline]
+    pub(crate) fn sample(&self, coeff: &[f32]) -> f64 {
+        let mut sum = 0.0;
+        for (&row, &wy) in self.rows.iter().zip(&self.yw) {
+            let mut acc = 0.0;
+            for (&col, &wx) in self.cols.iter().zip(&self.xw) {
+                acc += wx * coeff[row + col] as f64;
+            }
+            sum += wy * acc;
+        }
+        sum
+    }
 }
 
 #[cfg(test)]

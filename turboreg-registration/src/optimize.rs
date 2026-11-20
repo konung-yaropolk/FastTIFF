@@ -130,17 +130,6 @@ impl Sampler {
         spline::prefilter_2d_with(&mut gy, w, h, &spline::POLES_3, parallel);
         Sampler { w, h, img, gx, gy }
     }
-
-    fn value(&self, p: Point) -> f64 {
-        spline::interpolate(&self.img, self.w, self.h, p.x, p.y)
-    }
-
-    fn grad(&self, p: Point) -> (f64, f64) {
-        (
-            spline::interpolate(&self.gx, self.w, self.h, p.x, p.y),
-            spline::interpolate(&self.gy, self.w, self.h, p.x, p.y),
-        )
-    }
 }
 
 /// One piece's share of the criterion and its derivatives.
@@ -308,13 +297,15 @@ pub(crate) fn accumulate(
             for x in 0..rw {
                 let p = Point::new(x as f64, y as f64);
                 let q = m.apply(p);
-                let diff = reference[y * rw + x] as f64 - sampler.value(q);
+                let stencil = spline::Stencil::at(sampler.w, sampler.h, q.x, q.y);
+                let diff = reference[y * rw + x] as f64 - stencil.sample(&sampler.img);
                 part.sum_sq += diff * diff;
                 part.counted += 1;
                 if !want_derivatives {
                     continue;
                 }
-                let (gx, gy) = sampler.grad(q);
+                let gx = stencil.sample(&sampler.gx);
+                let gy = stencil.sample(&sampler.gy);
                 // d(residual)/d(p_k), by the chain rule through the sampling
                 // position. The leading minus is the residual's own sign: the
                 // model enters through the sampled value, which is subtracted.
@@ -772,8 +763,8 @@ fn register_pair_cpu(
     // that run side by side. See `Backend::threaded`.
     let parallel = settings.backend.threaded();
     let depth = pyramid::depth_for(w, h, settings.max_pyramid_depth);
-    let ref_levels = pyramid::build(reference, w, h, depth);
-    let mov_levels = pyramid::build(moving, w, h, depth);
+    let ref_levels = pyramid::build_with(reference, w, h, depth, parallel);
+    let mov_levels = pyramid::build_with(moving, w, h, depth, parallel);
 
     // Landmarks are placed on the full-resolution image and scaled down to
     // whichever level is being worked on; `fixed` is where they sit in the
@@ -918,8 +909,8 @@ fn register_batch_gpu(
     // lanes uniform is what lets one driver serve every reference mode.
     let levels: Vec<(Vec<Level>, Vec<Level>)> = map_in_order(pairs, threaded, |&(r, m)| {
         (
-            pyramid::build(r, w, h, depth),
-            pyramid::build(m, w, h, depth),
+            pyramid::build_with(r, w, h, depth, threaded),
+            pyramid::build_with(m, w, h, depth, threaded),
         )
     });
     let full = transform::initial_landmarks(model, w, h);

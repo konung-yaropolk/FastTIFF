@@ -96,58 +96,50 @@ fn mirror(i: isize, n: usize) -> usize {
     (if q >= n { period - 1 - q } else { q }) as usize
 }
 
-/// Halve one line with the `(1, 4, 6, 4, 1)/16` kernel.
-///
-/// Output length is `n / 2`, so an odd input drops its last half-sample — which
-/// is the reference's behaviour and the reason a level's dimensions are integer
-/// halves rather than rounded up.
-fn reduce_1d(src: &[f64], out: &mut Vec<f64>) {
-    const H: [f64; 3] = [6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
-    let n = src.len();
-    out.clear();
-    if n < 2 {
-        out.extend_from_slice(src);
-        return;
-    }
-    for j in 0..n / 2 {
-        let centre = 2 * j as isize;
-        let mut acc = H[0] * src[mirror(centre, n)];
-        for k in 1..3 {
-            acc +=
-                H[k] * (src[mirror(centre - k as isize, n)] + src[mirror(centre + k as isize, n)]);
-        }
-        out.push(acc);
+// Both passes accumulate in f64 and round to f32 between axes.
+#[inline]
+fn half_sample(a: f32, b: f32, c: f32, d: f32, e: f32) -> f32 {
+    ((6.0 / 16.0) * c as f64
+        + (4.0 / 16.0) * (b as f64 + d as f64)
+        + (1.0 / 16.0) * (a as f64 + e as f64)) as f32
+}
+
+fn taps(centre: usize, n: usize) -> [usize; 5] {
+    if centre >= 2 && centre + 2 < n {
+        [centre - 2, centre - 1, centre, centre + 1, centre + 2]
+    } else {
+        [-2, -1, 0, 1, 2].map(|offset| mirror(centre as isize + offset, n))
     }
 }
 
 /// Halve an image in both axes: rows first, then the columns of that result.
 pub fn reduce_2d(img: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
+    reduce_with(img, w, h, false)
+}
+
+fn reduce_with(img: &[f32], w: usize, h: usize, parallel: bool) -> (Vec<f32>, usize, usize) {
     let (hw, hh) = (w / 2, h / 2);
     if hw == 0 || hh == 0 {
         return (img.to_vec(), w, h);
     }
-    // Rows.
-    let mut mid = vec![0.0f32; hw * h];
-    let mut line: Vec<f64> = Vec::with_capacity(w);
-    let mut out: Vec<f64> = Vec::with_capacity(hw);
-    for y in 0..h {
-        line.clear();
-        line.extend(img[y * w..(y + 1) * w].iter().map(|&v| v as f64));
-        reduce_1d(&line, &mut out);
-        for (x, &v) in out.iter().enumerate() {
-            mid[y * hw + x] = v as f32;
+    let parallel = parallel && hw * h >= 32 * 1024;
+    let mut mid = vec![0.0; hw * h];
+    crate::par::for_each_chunk_mut(&mut mid, hw, parallel, |y, out| {
+        let row = &img[y * w..(y + 1) * w];
+        for (x, pixel) in out.iter_mut().enumerate() {
+            let [a, b, c, d, e] = taps(2 * x, w);
+            *pixel = half_sample(row[a], row[b], row[c], row[d], row[e]);
         }
-    }
-    // Columns.
-    let mut dst = vec![0.0f32; hw * hh];
-    for x in 0..hw {
-        line.clear();
-        line.extend((0..h).map(|y| mid[y * hw + x] as f64));
-        reduce_1d(&line, &mut out);
-        for (y, &v) in out.iter().enumerate() {
-            dst[y * hw + x] = v as f32;
+    });
+    // Visit five contiguous rows together, including at mirrored edges.
+    // Gathering and scattering whole columns here strides through both images.
+    let mut dst = vec![0.0; hw * hh];
+    crate::par::for_each_chunk_mut(&mut dst, hw, parallel, |y, out| {
+        let [a, b, c, d, e] = taps(2 * y, h).map(|r| &mid[r * hw..(r + 1) * hw]);
+        for (x, pixel) in out.iter_mut().enumerate() {
+            *pixel = half_sample(a[x], b[x], c[x], d[x], e[x]);
         }
-    }
+    });
     (dst, hw, hh)
 }
 
@@ -156,6 +148,16 @@ pub fn reduce_2d(img: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
 /// Level 0 is the image as given. Each subsequent level is the one before it,
 /// halved. The search walks this list backwards.
 pub fn build(img: &[f32], w: usize, h: usize, depth: usize) -> Vec<Level> {
+    build_with(img, w, h, depth, false)
+}
+
+pub(crate) fn build_with(
+    img: &[f32],
+    w: usize,
+    h: usize,
+    depth: usize,
+    parallel: bool,
+) -> Vec<Level> {
     let mut levels = Vec::with_capacity(depth.max(1));
     levels.push(Level {
         w,
@@ -165,7 +167,7 @@ pub fn build(img: &[f32], w: usize, h: usize, depth: usize) -> Vec<Level> {
     });
     for octave in 1..depth.max(1) {
         let last = &levels[octave - 1];
-        let (img, w, h) = reduce_2d(&last.img, last.w, last.h);
+        let (img, w, h) = reduce_with(&last.img, last.w, last.h, parallel);
         levels.push(Level { w, h, img, octave });
     }
     levels
