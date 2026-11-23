@@ -135,8 +135,6 @@ pub(super) struct TileGrid {
     pub down: usize,
     pub tile_w: usize,
     pub tile_h: usize,
-    /// Bytes of one decompressed tile: full size, edge tiles included.
-    pub tile_bytes: usize,
     /// Bytes of one tile row.
     pub tile_row_bytes: usize,
 }
@@ -237,7 +235,6 @@ pub(super) fn guard_tiles(frame: &FrameInfo, sample_bytes: usize) -> Result<Tile
         down: down as usize,
         tile_w: tile_w as usize,
         tile_h: tile_h as usize,
-        tile_bytes,
         tile_row_bytes,
     })
 }

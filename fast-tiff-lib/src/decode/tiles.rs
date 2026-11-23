@@ -11,9 +11,11 @@
 //! Two details separate a working tiled reader from a subtly broken one:
 //!
 //! - **edge tiles are stored full-size.** TIFF6 pads the tiles hanging off the
-//!   right and bottom edges rather than trimming them, so a tile always
-//!   decompresses to `tile_w * tile_h` samples and only part of it is used.
-//!   Assume trimming and every row after the first tile column is shifted.
+//!   right and bottom edges rather than trimming them, so a tile row is always
+//!   `tile_w` samples wide and only part of it is used. Assume trimming and
+//!   every row after the first tile column is shifted. (The rows of a bottom
+//!   edge tile past the image are not decompressed at all: the codec stops at
+//!   the end of the rows that are used.)
 //! - **the predictor runs inside the tile**, over the tile's own width,
 //!   including that padding — so it has to be undone per tile, before the
 //!   conversion, not on the assembled frame. It is undone here through the
@@ -61,7 +63,6 @@ pub(super) fn for_tiles<T: Send>(
         down,
         tile_w,
         tile_h,
-        tile_bytes,
         tile_row_bytes,
     } = *grid;
     let parallel = info.compression != Compression::None
@@ -82,16 +83,21 @@ pub(super) fn for_tiles<T: Send>(
                         "tile {index} at offset {offset} (len {len}) out of file bounds"
                     )
                 })?;
-                let tile = sized(buf, tile_bytes)?;
-                // Zero first: a tile whose data runs short leaves the rest of its
-                // rectangle blank rather than showing the previous tile.
-                tile.fill(0);
-                if decompress_into(raw, info.compression, tile)? == 0 {
+                // Only the tile's rows that lie in the image: the rest of an
+                // edge tile is padding, which nothing reads, and a tile may
+                // claim far more rows than the image has (the codec stops at
+                // the end of the buffer, as it stops at a full tile).
+                let tile = sized(buf, rows * tile_row_bytes)?;
+                let n = decompress_into(raw, info.compression, tile)?;
+                if n == 0 {
                     bail!(
                         Malformed,
                         "tile {index} decoded to nothing ({len} bytes at offset {offset})"
                     );
                 }
+                // A tile whose data runs short leaves the rest of its rectangle
+                // blank rather than showing the previous tile.
+                tile[n..].fill(0);
                 if undo_pred && info.predictor != 1 {
                     undo_predictor_rows(
                         tile,
