@@ -92,8 +92,8 @@ that this scales the *style*, so anything a pop-up sizes in literal points has
 to be expressed relative to the text (see `PLOT_TEXT_HEIGHTS`) or it will keep
 the enlarged scale while the text around it shrinks back.
 
-The toolbar and the panel's control row wrap to as many lines as they need,
-which is what keeps the enlarged chrome usable in a narrow window.
+The toolbar keeps one row at every width. In a narrow window its trailing
+readouts are clipped, preserving the canvas height. The panel's control row wraps.
 
 ## The zoom keys zoom the picture, not the page
 

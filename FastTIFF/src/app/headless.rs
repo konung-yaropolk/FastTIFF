@@ -448,22 +448,6 @@ impl Headless {
         out
     }
 
-    /// The upright lines the last frame drew, separators among them, as the
-    /// `x` each is at and the span of `y` it covers.
-    pub(super) fn upright_lines(&self) -> Vec<(f32, egui::Rangef)> {
-        let mut out = Vec::new();
-        for clipped in &self.output.shapes {
-            walk(&clipped.shape, &mut |shape| {
-                if let egui::Shape::LineSegment { points: [a, b], .. } = shape {
-                    if a.x == b.x {
-                        out.push((a.x, egui::Rangef::new(a.y.min(b.y), a.y.max(b.y))));
-                    }
-                }
-            });
-        }
-        out
-    }
-
     /// The titles the app gave its window, oldest first.
     pub(super) fn titles(&self) -> Vec<&str> {
         self.sent

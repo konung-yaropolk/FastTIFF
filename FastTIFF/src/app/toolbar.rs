@@ -13,16 +13,8 @@ impl ViewerApp {
         let current_view_mode = self.core.view_mode;
         let can_show_volume = self.core.can_show_volume();
         egui::Panel::top("toolbar").show_inside(ui, |ui| {
-            // Wrapped, as the bottom bar's controls are (`scrub_bar`): a
-            // window as narrow as a small picture (a 320-pixel image opens a
-            // 320-point window), or a phone's page, has less room than the
-            // row needs, and its tail (the frame counter, the time) ran on
-            // past the right edge, out of sight. Each item moves down whole,
-            // a label included, rather than breaking mid-text. On the desktop
-            // the window is sized around the rows the toolbar wraps to at
-            // the window's width (see `manage_window`), so the picture keeps
-            // its size.
-            ui.horizontal_wrapped(|ui| {
+            // Keep the canvas height stable; readouts beyond the right edge are clipped.
+            ui.horizontal(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 if ui
                     .button(RichText::new(ICON_OPEN).size(ICON_SIZE))
@@ -266,37 +258,9 @@ impl ViewerApp {
     }
 }
 
-/// How wide a toolbar separator is, in points: egui's own default, given
-/// explicitly so that [`separated_label`] measures what it draws.
-const SEPARATOR_SPACING: f32 = 6.0;
-
-/// `text` as a label in the wrapping toolbar row, after a separator that is
-/// left out where the row breaks before the label, so that no row ends on a
-/// separator or starts with one. The label is laid out first, for its width;
-/// where it and the separator do not both fit, the row is ended there and
-/// the label starts the next.
-///
-/// Only the labels, which run from the zoom readout on: the few controls
-/// ahead of them fit on the first row of any window the desktop allows
-/// (`MIN_WINDOW`, 256 points), so their separators do not meet a break
-/// there.
 fn separated_label(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
-    let galley = text.into().into_galley(
-        ui,
-        Some(egui::TextWrapMode::Extend),
-        f32::INFINITY,
-        egui::FontSelection::Default,
-    );
-    // The separator, the gap after it, and half a point for the layout's
-    // rounding: a break where the pair would just have fitted costs nothing,
-    // and a separator left at a row's end is what this is for.
-    let separator = SEPARATOR_SPACING + ui.spacing().item_spacing.x + 0.5;
-    if ui.available_size_before_wrap().x >= separator + galley.size().x {
-        ui.add(egui::Separator::default().spacing(SEPARATOR_SPACING));
-    } else {
-        ui.end_row();
-    }
-    ui.label(galley)
+    ui.separator();
+    ui.label(text)
 }
 
 /// What the "1/N scale" badge says on hover, for a frame shown at one pixel

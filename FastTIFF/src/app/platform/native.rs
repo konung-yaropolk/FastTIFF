@@ -38,15 +38,8 @@ pub(crate) struct Desktop {
 /// around: the toolbar and the bottom bar as they were laid out on the frame
 /// that asked.
 ///
-/// The toolbar wraps at the window's width (as the open panel's control row
-/// does), so a resize that changes the width can change how many rows it
-/// takes, and the height asked for was the picture's plus the toolbar's rows
-/// at the old width. So once the window has the size, the chrome laid out at
-/// it is compared with this, and when they differ the window is sized once
-/// more, around the chrome as it now is. Only once: that second size has the
-/// same width (unless the monitor caps the height, in which case the picture
-/// overflows the window anyway), the rows follow the width, and so there is
-/// nothing left for a third to correct and nothing to loop on.
+/// The open panel's controls can wrap at the new width. If the chrome height
+/// changes after the resize lands, size the window once more to fit the picture.
 #[derive(Clone, Copy, Debug)]
 struct Resized {
     /// The inner size asked for, in points.
@@ -276,7 +269,7 @@ impl Platform for Desktop {
     /// opened file, or a zoom change — never every frame. That's what lets the
     /// window be freely resized and maximized without shaking or being
     /// snapped back. The one follow-up is the resize's own: once the window
-    /// has the size, a second one if the toolbar wrapped to other rows there
+    /// has the size, a second one if the chrome height changed there
     /// ([`Resized`]).
     fn manage_window(
         &mut self,
@@ -353,8 +346,7 @@ impl Platform for Desktop {
             }
 
             // The window took the size last asked for, and the chrome laid out
-            // at it is another height (the toolbar wrapped to other rows at
-            // its width): size it again, around the chrome as it is now. That
+            // at it is another height: size it again, around the chrome as it is now. That
             // second look is not watched in its turn (see `Resized`), unless
             // something else asked for a resize this frame too, which is.
             let second_look = chrome_moved && !view.resize_to_zoom;
