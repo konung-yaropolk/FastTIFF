@@ -49,9 +49,11 @@ pub mod decode;
 pub mod display;
 pub mod encode;
 mod error;
+mod frame;
 pub mod ifd;
 pub mod index;
 pub mod metadata;
+pub mod units;
 
 pub use decode::{
     frame_float_minmax, parallel_decode_enabled, parallel_decode_scope, preload_frames_f32,
@@ -68,6 +70,7 @@ pub use encode::{
     SampleType, TiffWriter, WriterOptions, DEFAULT_DEFLATE_LEVEL, DEFAULT_ZSTD_LEVEL,
 };
 pub use error::{Error, ErrorKind, Result};
+pub use frame::{Coverage, Crop, DecodeScratch, DisplayMaps, Frame, Pixels};
 pub use ifd::{ByteOrder, TiffFlavor};
 pub use index::{
     Bytes, Compression, FrameInfo, Region, RowBand, SampleFormat, SampledBand, Strips, TiffStack,
