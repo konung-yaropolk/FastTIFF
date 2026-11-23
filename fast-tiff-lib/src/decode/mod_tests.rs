@@ -734,3 +734,65 @@ fn parallel_decoding_is_chosen_per_thread() {
     assert!(parallel_decode_enabled(), "and did not decide for this one");
     set_thread_parallel_decode(None);
 }
+
+/// The strip stage checks a strip filled its rows *before* anything runs over
+/// them: a strip that decodes short is `Malformed`, and the predictor undo —
+/// which would otherwise treat whatever the destination held as data — never
+/// sees it.
+#[test]
+fn a_short_strip_fails_before_its_predictor_runs() {
+    use crate::decode::core::Src;
+    use crate::decode::pieces::{decode_strip, StripPlan};
+    use std::cell::Cell;
+
+    let (w, h) = (16u32, 9u32);
+    let mut frame = make_frame(w, h, 2);
+    frame.compression = Compression::Lzw;
+    frame.rows_per_strip = 3;
+    // Three LZW strips of three rows; the middle one cut short.
+    let mut file = Vec::new();
+    let (mut offsets, mut counts) = (Vec::new(), Vec::new());
+    for k in 0..3 {
+        let rows: Vec<u8> = (0..w * 3 * 2).map(|i| (i * 3 + k * 50) as u8).collect();
+        let mut packed = Vec::new();
+        weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+            .into_stream(&mut packed)
+            .encode_all(&rows[..])
+            .status
+            .unwrap();
+        if k == 1 {
+            packed.truncate(packed.len() / 3);
+        }
+        offsets.push(file.len() as u64);
+        counts.push(packed.len() as u64);
+        file.extend_from_slice(&packed);
+    }
+    frame.strip_offsets = offsets.into();
+    frame.strip_byte_counts = counts.into();
+    let src = Src::new(&file, &frame, ByteOrder::Little);
+    let plan = StripPlan::of(&frame);
+    let row_bytes = w as usize * 2;
+    for (k, short) in [(0usize, false), (1, true), (2, false)] {
+        let strip = plan.strip(0, k);
+        let mut dest = vec![0xA5u8; strip.rows * row_bytes];
+        let ran = Cell::new(false);
+        let r = decode_strip(&src, &strip, &mut dest, |_| {
+            ran.set(true);
+            Ok(())
+        });
+        if short {
+            assert_eq!(r.unwrap_err().kind(), crate::ErrorKind::Malformed);
+            assert!(!ran.get(), "the predictor ran over a short strip");
+        } else {
+            r.unwrap();
+            assert!(ran.get());
+        }
+    }
+    // And through every reader: the frame is refused, not decoded with a hole.
+    assert_eq!(
+        read_plane_u16(&file, &frame, ByteOrder::Little, None, 0)
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::Malformed
+    );
+}

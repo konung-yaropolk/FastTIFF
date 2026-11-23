@@ -1178,6 +1178,12 @@ fn compare_matrix(bits: u16, format: SampleFormat, order: ByteOrder) {
     assert!(!specs.is_empty());
     for (i, spec) in specs.iter().enumerate() {
         let (file, info) = build(spec);
+        // Every frame of the matrix is well formed: one the old decoder could
+        // not read would compare nothing but two errors.
+        assert!(
+            old::read_frame_u8(&file, &info, spec.order).is_ok(),
+            "{spec:?} does not decode"
+        );
         if i % 7 == 0 {
             compare_with_crops(&file, &info, spec.order, &format!("{spec:?}"));
         } else {
