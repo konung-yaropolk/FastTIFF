@@ -243,6 +243,30 @@ fn the_recorder_refuses_a_texture_past_the_limit_it_reports() {
 }
 
 #[test]
+fn changing_depth_uploads_and_bins_the_selected_slice_at_each_timepoint() {
+    let mut viewer = opened_as(SampleType::U16, 2, 3, 2);
+    let mut recorder = Recorder::default();
+    let inputs = FrameInputs {
+        histograms: true,
+        ..Default::default()
+    };
+    let mut version = 0;
+    for (t, z, first_plane) in [(0, 0, 0), (0, 2, 4), (1, 2, 10), (1, 0, 6)] {
+        let mut doc = viewer.document_mut().unwrap();
+        doc.set_frame(t);
+        doc.set_slice(z);
+        viewer.sync(&mut recorder, &inputs);
+        assert_eq!(
+            uploads(&recorder.take()),
+            [(0, sample(first_plane)), (1, sample(first_plane + 1))]
+        );
+        let new_version = viewer.document().unwrap().histograms().version();
+        assert!(new_version > version);
+        version = new_version;
+    }
+}
+
+#[test]
 fn a_first_sync_sizes_colours_and_fills_the_textures_then_sets_the_shader() {
     let mut viewer = opened();
     let mut r = Recorder::default();

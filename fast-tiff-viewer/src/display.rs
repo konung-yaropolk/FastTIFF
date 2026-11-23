@@ -245,10 +245,6 @@ pub struct Display {
     /// through [`set_layout`](Self::set_layout), which moves
     /// [`Revision::layout`].
     layout: ChannelLayout,
-    /// Set at load when the file genuinely has channels, Z *and* time all > 1.
-    /// Z is then frozen at its first slice. Describes the file, so it survives a
-    /// manual dimension-order change (which never touches Z).
-    pub(crate) triple_axis_warning: bool,
     /// Set when the file's metadata described more image planes than the file
     /// contains, as `(declared, available)`. The dimensions above have been cut
     /// down to what fits; this is what was claimed before that.
@@ -293,7 +289,6 @@ impl Display {
             luts: Vec::new(),
             builtin_lut: None,
             layout: ChannelLayout::default(),
-            triple_axis_warning: false,
             has_z_axis: false,
             gray_lut_sel: 0,
             masks: ChannelMasks::default(),

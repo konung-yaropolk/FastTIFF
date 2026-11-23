@@ -91,7 +91,7 @@ impl Viewer {
         // Everything below may take what is still recorded as current, and
         // what is to be sent first is what it returns.
         let residency = &mut self.residency;
-        let pending = residency.begin_sync(&loaded.display, loaded.frame());
+        let pending = residency.begin_sync(&loaded.display, loaded.plane_key(loaded.frame()));
         // A volume of another document, or of the axes before an override, is no
         // use to this one: its GPU memory goes back now, this being the first
         // call that has the renderer.
@@ -422,7 +422,7 @@ fn sync_movie<R: ImageRenderer>(
     let bin = current.histograms.inline;
     let mut result = Ok(());
     let mut shown = false;
-    let frame_index = loaded.frame();
+    let frame_index = loaded.plane_key(loaded.frame());
     let (fw, fh) = loaded
         .tiff
         .frames
@@ -437,7 +437,7 @@ fn sync_movie<R: ImageRenderer>(
     // leaves it. Both are [`Residency::needs_upload`].
     let partial = !roi.covers_whole_frame(fw, fh);
     if residency.needs_upload(&roi) {
-        let jobs = build_jobs(loaded, frame_index, enabled);
+        let jobs = build_jobs(loaded, loaded.frame(), enabled);
 
         let channels: Vec<usize> = jobs.iter().map(|j| j.channel).collect();
         // The window asked for is the overview already held, cut to exactly
@@ -595,7 +595,7 @@ fn sync_movie<R: ImageRenderer>(
             // two frames bins the one after the next.
             let binned = loaded.services.histograms.version() != histograms_before;
             let binning = (current.histograms.inline && !binned).then(|| Binning::of(loaded));
-            p.request(revision, next, next_jobs, binning);
+            p.request(revision, loaded.plane_key(next), next_jobs, binning);
         }
     }
 
@@ -606,8 +606,7 @@ fn sync_movie<R: ImageRenderer>(
     // neither taken nor counted as in flight.
     let mut pending = false;
     if !plan.ready && plan.want != plan.show {
-        let frame_index = loaded.frame();
-        let jobs = build_jobs(loaded, frame_index, enabled);
+        let jobs = build_jobs(loaded, loaded.frame(), enabled);
 
         // Started on first need: a thread is only worth it for a frame too
         // large to upload whole, which is a small minority of what gets
@@ -762,7 +761,10 @@ fn capture_overview(
     mode: roi::LargeImageMode,
     bin: bool,
 ) {
-    if bin && built.frame_index == loaded.frame() && built.roi.spans_whole_frame(fw, fh) {
+    if bin
+        && built.frame_index == loaded.plane_key(loaded.frame())
+        && built.roi.spans_whole_frame(fw, fh)
+    {
         histogram::bin_whole_view(loaded, &built);
     }
     let budget = window::overview_budget(mode);

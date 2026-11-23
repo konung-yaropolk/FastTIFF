@@ -120,6 +120,7 @@ pub struct Document {
     /// Below [`frame_count`](Self::frame_count): [`set_frame`](Self::set_frame)
     /// clamps, and reinterpreting the axes puts it back to 0.
     frame_index: usize,
+    slice_index: usize,
     /// How the viewer is *showing* this document: the c/z/t interpretation, the
     /// per-channel LUTs and contrast windows, and the layout facts derived at
     /// load. Everything mutable about the presentation lives here, so
@@ -303,6 +304,7 @@ impl Document {
             tiff: Arc::new(tiff),
             path,
             frame_index: 0,
+            slice_index: 0,
             display: Display::empty(),
             overlay,
             services: Services::default(),
@@ -414,6 +416,48 @@ impl Document {
         &self.services.histograms
     }
 
+    /// Number of complete Z slices available at the current timepoint.
+    pub fn slice_count(&self) -> usize {
+        self.slices_at(self.frame())
+    }
+
+    fn slices_at(&self, time: usize) -> usize {
+        let dims = self.display.dims();
+        let depth = dims.slices.max(1);
+        if depth == 1 {
+            return 1;
+        }
+        // A truncated last timepoint can still contain complete channel sets.
+        let channels = if self.display.layout().shown_as_rgb() {
+            1
+        } else {
+            dims.channels.max(1)
+        };
+        let full_slices = self.tiff.frames.len() / channels;
+        full_slices
+            .saturating_sub(time.saturating_mul(depth))
+            .clamp(1, depth)
+    }
+
+    pub(crate) fn slice_at(&self, time: usize) -> usize {
+        self.slice_index.min(self.slices_at(time) - 1)
+    }
+
+    /// A cache key for the displayed plane, shared by all of its channels.
+    pub(crate) fn plane_key(&self, time: usize) -> usize {
+        time * self.display.dims().slices.max(1) + self.slice_at(time)
+    }
+
+    /// The zero-based Z slice on screen in the 2D view.
+    pub fn slice(&self) -> usize {
+        self.slice_at(self.frame())
+    }
+
+    /// Select a Z slice independently of the playback position.
+    pub fn set_slice(&mut self, slice: usize) {
+        self.slice_index = slice.min(self.slice_count() - 1);
+    }
+
     /// Frame count on the scrub/time axis (at least 1).
     pub fn frame_count(&self) -> usize {
         self.display.dims().frames.max(1)
@@ -518,6 +562,11 @@ impl std::ops::Deref for DocumentMut<'_> {
 impl<'a> DocumentMut<'a> {
     pub(crate) fn new(doc: &'a mut Document) -> Self {
         DocumentMut { doc }
+    }
+
+    /// Select the Z slice shown at the current timepoint.
+    pub fn set_slice(&mut self, slice: usize) {
+        self.doc.set_slice(slice);
     }
 
     /// [`Document::set_frame`]: show frame `i`, or the last frame when `i` is

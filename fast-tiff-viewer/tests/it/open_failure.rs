@@ -8,7 +8,7 @@
 //! one sends you looking for a better copy of the file, the other for a
 //! different program. These tests hold that line in both directions.
 
-use fast_tiff_viewer::{Notice, NoticeKind, Viewer};
+use fast_tiff_viewer::{Notice, NoticeKind, ShapeNote, Viewer, MAX_CHANNELS};
 use std::path::PathBuf;
 
 /// Drive a failed open the way the browser entry point does, and return the
@@ -115,17 +115,16 @@ fn kinds(viewer: &Viewer) -> Vec<NoticeKind> {
 #[test]
 fn a_failed_open_is_said_beside_the_document_it_left_open() {
     let mut viewer = Viewer::new();
+    let channels = MAX_CHANNELS + 1;
     viewer
-        .load_bytes(stack_of(2, 2), PathBuf::from("czt.tif"))
+        .load_bytes(stack_of(channels, 2), PathBuf::from("czt.tif"))
         .expect("a hyperstack opens");
     assert_eq!(
-        kinds(&viewer),
-        [NoticeKind::Shape],
-        "channels, slices and frames at once: 2D shows the first slice"
+        viewer.notices().collect::<Vec<_>>(),
+        [&Notice::Shape(ShapeNote::TooManyChannels(channels))]
     );
-    // Which the 3D view does not: it shows them all.
     viewer.view_mode = fast_tiff_viewer::ViewMode::Volume;
-    assert_eq!(kinds(&viewer), []);
+    assert_eq!(kinds(&viewer), [NoticeKind::Shape]);
     viewer.view_mode = fast_tiff_viewer::ViewMode::Movie;
 
     assert!(viewer
@@ -140,11 +139,11 @@ fn a_failed_open_is_said_beside_the_document_it_left_open() {
         .load_bytes(b"not an image".to_vec(), PathBuf::from("bad.dat"))
         .is_err());
     viewer
-        .load_bytes(stack_of(2, 1), PathBuf::from("ct.tif"))
-        .expect("a movie of two channels opens");
+        .load_bytes(stack_of(2, 2), PathBuf::from("two-channel-czt.tif"))
+        .expect("a two-channel hyperstack opens");
     assert_eq!(
         kinds(&viewer),
         [],
-        "the open succeeded, and the new document has nothing to say"
+        "the open succeeded and a browsable Z axis needs no warning"
     );
 }

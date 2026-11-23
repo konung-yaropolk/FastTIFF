@@ -142,6 +142,11 @@ impl ViewerApp {
             };
             ui.add_space(4.0);
 
+            let dims = loaded.display().dims();
+            let z_row = (!view_is_volume && dims.slices > 1 && dims.frames > 1).then(|| {
+                ui.allocate_space(egui::vec2(ui.available_width(), ui.spacing().interact_size.y)).1
+            });
+            let mut time_track = None;
             ui.horizontal(|ui| {
                 let max_frame = loaded.display().dims().frames.saturating_sub(1);
                 let has_multiple_frames = loaded.display().dims().frames > 1;
@@ -216,6 +221,7 @@ impl ViewerApp {
                                     .show_value(false)
                                     .trailing_fill(true),
                             );
+                            time_track = Some(scrub.rect);
                             loaded.set_frame(frame);
                             // Held, not merely dragged: the frame under the
                             // pointer should hold still from the moment it is
@@ -242,10 +248,35 @@ impl ViewerApp {
                 });
             });
 
+            let mut z_focused = false;
+            if let (Some(row), Some(track)) = (z_row, time_track) {
+                // The transport buttons determine the time track's actual width.
+                // Reuse its horizontal bounds so both tracks align at every window size.
+                let rect = egui::Rect::from_x_y_ranges(track.x_range(), row.y_range());
+                let mut z_ui = ui.new_child(egui::UiBuilder::new().id_salt("z_scrubber")
+                    .max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                z_ui.spacing_mut().slider_width = rect.width();
+                let count = loaded.slice_count();
+                let mut z = loaded.slice() + 1;
+                let response = z_ui.add_enabled(count > 1,
+                    egui::Slider::new(&mut z, 1..=count).show_value(false).trailing_fill(true)
+                ).on_hover_text("Z slice at the current timepoint");
+                if response.changed() {
+                    loaded.set_slice(z - 1);
+                }
+                ui.painter().text(
+                    egui::pos2(track.left() - ui.spacing().item_spacing.x, row.center().y),
+                    egui::Align2::RIGHT_CENTER, format!("Z {z} / {count}"),
+                    egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color(),
+                );
+                scrubber_held |= response.is_pointer_button_down_on() || response.dragged();
+                z_focused = response.has_focus();
+            }
+
             // Not while a text field has the caret, where the arrows move it: a
             // group's name being edited in the point counter's window, which in
             // a browser shares this viewport's keyboard.
-            if !view_is_volume && !ui.ctx().text_edit_focused() {
+            if !view_is_volume && !z_focused && !ui.ctx().text_edit_focused() {
                 ui.input(|i| {
                     // Shift jumps ~5% of the stack at a time (min 1 frame) instead
                     // of 1, matching the Shift+wheel fast-scroll step.

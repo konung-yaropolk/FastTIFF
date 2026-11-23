@@ -129,7 +129,7 @@ impl HistogramKey {
     /// The key of `stack`'s histograms as it stands.
     pub(crate) fn of(stack: &Document) -> Self {
         HistogramKey {
-            frame: stack.frame(),
+            frame: stack.plane_key(stack.frame()),
             layout: stack.display.revision().layout,
             bounds: stack.display.settings().iter().map(|s| s.bounds).collect(),
         }
@@ -139,7 +139,7 @@ impl HistogramKey {
     /// same as `*self == HistogramKey::of(stack)`, without building one, as a
     /// sync asks on every repaint.
     pub(crate) fn describes(&self, stack: &Document) -> bool {
-        self.frame == stack.frame()
+        self.frame == stack.plane_key(stack.frame())
             && self.layout == stack.display.revision().layout
             && self
                 .bounds
@@ -437,8 +437,9 @@ pub(crate) fn complete(stack: &mut Document, residency: &Residency, start: bool)
 /// it, there is no such view, and the histograms are still the frame's.
 fn from_overview(stack: &mut Document, overview: Option<&Overview>) {
     let layout = stack.display.revision().layout;
-    let of_this_frame =
-        overview.filter(|o| o.built.frame_index == stack.frame() && o.revision.layout == layout);
+    let of_this_frame = overview.filter(|o| {
+        o.built.frame_index == stack.plane_key(stack.frame()) && o.revision.layout == layout
+    });
     let Some(overview) = of_this_frame else {
         // Nothing of this frame to bin. What is held is kept only while it
         // is still this frame's: another frame's would be the wrong picture,

@@ -393,9 +393,7 @@ impl Viewer {
     ///
     /// One per kind, each replaced only by its own kind and gone once it
     /// stops applying (see [`Notice`]), so one never hides another. Only
-    /// those that apply to [`view_mode`](Self::view_mode)'s view: the note
-    /// that 2D shows the first Z-slice alone stands down over the 3D view,
-    /// which shows them all.
+    /// those that apply to [`view_mode`](Self::view_mode)'s view: volume errors appear only in 3D.
     pub fn notices(&self) -> impl Iterator<Item = &Notice> + '_ {
         let mode = self.view_mode;
         self.notices.iter().filter(move |n| n.applies_to(mode))
@@ -543,11 +541,8 @@ impl Viewer {
                 // Nothing said of the last document's frame or volume is about
                 // this one, and the open that brought it succeeded.
                 self.notices.new_document();
-                self.notices.shape(shape_note(
-                    doc.display.dims(),
-                    doc.display.triple_axis_warning,
-                    doc.display.plane_mismatch,
-                ));
+                self.notices
+                    .shape(shape_note(doc.display.dims(), doc.display.plane_mismatch));
                 // New document: re-evaluate decode parallelism from scratch (its
                 // per-frame decode cost is different).
                 self.decode_parallel = false;
@@ -595,11 +590,8 @@ impl Viewer {
             // The swap rebuilds channel_display from `mode`, so re-apply the
             // pseudocolor preference on top of the fresh LUTs.
             refresh_pseudocolor(doc, self.apply_pseudocolor);
-            self.notices.shape(shape_note(
-                doc.display.dims(),
-                doc.display.triple_axis_warning,
-                doc.display.plane_mismatch,
-            ));
+            self.notices
+                .shape(shape_note(doc.display.dims(), doc.display.plane_mismatch));
         }
     }
 

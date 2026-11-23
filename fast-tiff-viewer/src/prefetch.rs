@@ -285,8 +285,7 @@ pub(crate) struct ChannelJob {
 /// Addressing itself lives in [`crate::dimensions::plane_index`], the single
 /// definition every reader of pixel data shares — including the ones that never
 /// touch a GPU. This function decides only *which* channels to fetch for the 2D
-/// view and at which timepoint; it asks for slice 0, because the 2D scrub axis
-/// is time and Z is a stride there.
+/// view, using the selected slice at the requested timepoint.
 pub(crate) fn build_jobs(
     loaded: &Document,
     frame_index: usize,
@@ -301,6 +300,7 @@ pub(crate) fn build_jobs(
     // gives the wrong stride and addresses planes past the end of the chain.
     let dims = loaded.display.dims();
     let rgb = loaded.display.layout().shown_as_rgb();
+    let z = loaded.slice_at(frame_index);
     loaded
         .display
         .settings()
@@ -308,11 +308,7 @@ pub(crate) fn build_jobs(
         .enumerate()
         .filter(|&(c, _)| enabled.get(c).copied().unwrap_or(false))
         .map(|(c, s)| {
-            // z = 0 explicitly: the 2D view's scrub axis is time, and Z acts
-            // only as a stride (see `planes_addressed`). Writing the zero here
-            // rather than folding it into the arithmetic is what keeps this
-            // from reading like a general plane lookup, which it is not.
-            let (ifd_idx, plane) = crate::dimensions::plane_index(dims, rgb, c, 0, frame_index);
+            let (ifd_idx, plane) = crate::dimensions::plane_index(dims, rgb, c, z, frame_index);
             ChannelJob {
                 channel: c,
                 ifd_idx,

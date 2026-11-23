@@ -12,16 +12,6 @@ use scivis_render::{ChannelKind, MAX_CHANNELS};
 /// Which IFD, and which sample plane inside it, holds channel `c` of slice `z`
 /// at timepoint `t`.
 ///
-/// **The single definition of plane addressing.** It was previously written out
-/// twice — once in [`crate::prefetch::build_jobs`] for the 2D view and once in
-/// `crate::volume` for the ray-marched one — and the 2D copy was the `z == 0`
-/// special case of the same arithmetic while its doc comment claimed to be the
-/// general rule. That is a trap for anything that addresses planes generally: a
-/// caller asking for `z = 3` through the 2D formula silently gets slice 0's
-/// pixels rather than an error. Both call sites now come here, and the 2D one
-/// passes `z = 0` explicitly, so what it can and cannot reach is stated rather
-/// than implied.
-///
 /// The layout is ImageJ's default `xyczt` plane order: channel fastest, then Z,
 /// then time. Chunky RGB is the exception — its channels are sample *planes* of
 /// one IFD, so the channel index selects the plane and does not advance the IFD.
@@ -38,8 +28,7 @@ pub(crate) fn plane_index(dims: Dims, rgb: bool, c: usize, z: usize, t: usize) -
     }
 }
 
-/// The number of IFDs `dims` addresses: one past the highest index
-/// [`crate::prefetch::build_jobs`] can produce for it.
+/// Minimum IFD count for every timepoint to have one complete slice.
 ///
 /// Mirrors that function's arithmetic deliberately — the whole purpose of
 /// knowing this is to stop it asking for a plane the file does not have, so a
@@ -113,11 +102,7 @@ pub(crate) fn clamp_to_available(
 /// between the initial load and the manual dimension-order override so the
 /// two can't drift out of sync with each other. Its words are its
 /// [`Display`](std::fmt::Display).
-pub(crate) fn shape_note(
-    dims: Dims,
-    triple_axis_warning: bool,
-    plane_mismatch: Option<(usize, usize)>,
-) -> Option<ShapeNote> {
+pub(crate) fn shape_note(dims: Dims, plane_mismatch: Option<(usize, usize)>) -> Option<ShapeNote> {
     // Ahead of the others: those describe how the file has been *interpreted*,
     // this one says the file disagrees with itself. Whatever is on screen is
     // built from an arrangement the metadata does not actually back up, and the
@@ -128,8 +113,6 @@ pub(crate) fn shape_note(
             available,
             dims,
         })
-    } else if triple_axis_warning {
-        Some(ShapeNote::FrozenZ(dims))
     } else if dims.channels > MAX_CHANNELS {
         Some(ShapeNote::TooManyChannels(dims.channels))
     } else {
@@ -191,7 +174,6 @@ pub(crate) fn apply_resolved_dimensions_reporting(
     // viewer's residency at the top of its next sync, each worker and cache
     // as it is asked. Nothing here has to know about any of them.
     loaded.display.set_dims(dims);
-    loaded.display.triple_axis_warning = resolved.triple_axis_warning;
     loaded.display.mode = loaded.tiff.meta.mode;
     let shown = crate::display::Display::shown_channels(resolved.channels);
     loaded.display.reseed_luts(&loaded.tiff.meta, shown);
@@ -203,6 +185,7 @@ pub(crate) fn apply_resolved_dimensions_reporting(
             on_channel,
         ));
     loaded.set_frame(0);
+    loaded.set_slice(0);
 }
 
 /// Which sample planes of an `spp`-sample RGB frame get a display channel, and
@@ -271,6 +254,7 @@ pub(crate) fn setup_rgb(loaded: &mut Document) {
             .collect(),
     );
     loaded.set_frame(0);
+    loaded.set_slice(0);
 }
 
 /// Reconfigures a freshly-loaded CMYK (Separated) stack: its four ink planes
@@ -324,6 +308,7 @@ pub(crate) fn setup_cmyk(loaded: &mut Document) {
             .collect(),
     );
     loaded.set_frame(0);
+    loaded.set_slice(0);
 }
 
 /// Applies a manual dimension-order change from the dropdown: reassigns the
@@ -331,9 +316,7 @@ pub(crate) fn setup_cmyk(loaded: &mut Document) {
 /// stays the one in effect — [`Viewer::set_dimension_order`](crate::Viewer::set_dimension_order)
 /// ignores any other).
 /// For stacks without a real Z axis the selector passes `slices` through
-/// unchanged, so it stays a plain channels/time swap. The triple-axis
-/// warning flag is carried over — it describes the file, not the current
-/// role assignment.
+/// unchanged, so it stays a plain channels/time swap.
 pub(crate) fn apply_dimension_override(
     loaded: &mut Document,
     channels: usize,
@@ -344,7 +327,7 @@ pub(crate) fn apply_dimension_override(
         channels,
         slices,
         frames,
-        triple_axis_warning: loaded.display.triple_axis_warning,
+        triple_axis_warning: channels > 1 && slices > 1 && frames > 1,
     };
     // Moves the layout revision, so a frame read ahead or a window built under
     // the old channel-to-IFD mapping is refused when it arrives.

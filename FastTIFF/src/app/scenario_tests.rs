@@ -623,6 +623,54 @@ fn the_desktop_window_grows_by_the_panel_it_opens() {
     assert_eq!(h.app.sync_inputs.image, image);
 }
 
+#[test]
+fn four_d_scrubbers_share_horizontal_bounds_and_move_independently() {
+    use fast_tiff_lib::{SampleType, StackMetaWrite, TiffWriter, WriterOptions};
+    let opts = WriterOptions::new(4, 4, SampleType::U8).metadata(StackMetaWrite::new(1, 3));
+    let mut writer = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+    for plane in 0..12 {
+        writer.write_frame_u8(&[plane; 16]).unwrap();
+    }
+    let mut h = Headless::new(Target::Desktop).maximized(true);
+    h.open_bytes(
+        writer.finish().unwrap().into_inner(),
+        "volume-over-time.tif",
+    );
+    h.settle();
+
+    let rail_at = |y: f32| {
+        h.output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(r)
+                    if (r.rect.center().y - y).abs() < 2.0
+                        && r.rect.height() < 10.0
+                        && r.rect.width() > 200.0 =>
+                {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .max_by(|a, b| a.width().total_cmp(&b.width()))
+            .expect("painted slider rail")
+    };
+    let z = rail_at(h.text_rect("Z 1 / 3").center().y);
+    let time = rail_at(h.text_rect("|<").center().y);
+    assert!(z.bottom() < time.top());
+    assert_eq!(z.x_range(), time.x_range());
+
+    h.click(z.right_center() - vec2(3.0, 0.0));
+    let doc = h.app.core.document().unwrap();
+    assert_eq!((doc.slice(), doc.frame()), (2, 0));
+    h.click(time.right_center() - vec2(3.0, 0.0));
+    let doc = h.app.core.document().unwrap();
+    assert_eq!((doc.slice(), doc.frame()), (2, 3));
+    h.open_bytes(stack(4, 4, 4), "movie.tif");
+    h.settle();
+    assert!(!h.shows("Z 1 /"));
+}
+
 /// A stack of several channels has a row each in the panel, which edits a
 /// copy of the channel settings and writes it back: a row's switch reaches
 /// its own channel and no other, and the others' windows are as they were.
