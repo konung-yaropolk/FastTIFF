@@ -388,7 +388,13 @@ impl<'s> Pool<'s> {
             .unwrap_or_default()
     }
 
+    /// Back into the pool, unless it never grew: an empty buffer is worth
+    /// nothing to the next read, and pushing it into a cold scratch's empty
+    /// list would be the one allocation a read that needs no buffer makes.
     pub fn give(&self, buf: Vec<u8>) {
+        if buf.capacity() == 0 {
+            return;
+        }
         self.bufs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -588,6 +594,25 @@ pub(super) fn parallel_strips(frame: &FrameInfo, n_pixels: usize) -> bool {
         && should_parallelize(n_pixels)
 }
 
+/// Copy a stored run into `dest` (the same length), a chunk at a time, `post`
+/// applied to each chunk while it is still in cache.
+///
+/// In chunks rather than in one call because of how a large copy is done: one
+/// `memcpy` of a whole 8 MiB frame streams it past the cache with
+/// non-temporal stores, where a quarter-megabyte copy stores through it — and
+/// the second is about 12% faster for a 2048x2048 `u16` frame on the machine
+/// this was measured on (the same file read as 32 strips copied one by one
+/// took 550 us against 624 for the single strip), because whatever reads the
+/// destination next finds much of it still there.
+fn copy_run(run: &[u8], dest: &mut [u8], post: &(dyn Fn(&mut [u8]) + Sync)) {
+    const CHUNK: usize = 256 * 1024;
+    debug_assert_eq!(run.len(), dest.len());
+    for (d, s) in dest.chunks_mut(CHUNK).zip(run.chunks(CHUNK)) {
+        d.copy_from_slice(s);
+        post(d);
+    }
+}
+
 /// Decode piece-planes `planes` of a stripped frame straight into `dest`, laid
 /// out as the file lays them out, every strip decompressed into its own rows,
 /// checked, its predictor undone (when `undo_pred`) and `post` applied while
@@ -605,6 +630,14 @@ pub(super) fn decode_planes_into(
     pool: &Pool<'_>,
 ) -> Result<()> {
     let info = src.info;
+    if let Some(run) = info.stored_run_planes(planes.clone()) {
+        // Uncompressed, predictor-free and back to back: the run already is
+        // the destination's bytes, whatever the strip table says about where
+        // one strip stops. See `copy_run`.
+        let run = src.bytes.piece(run.start, run.end - run.start)?;
+        copy_run(run, dest, post);
+        return Ok(());
+    }
     let plan = StripPlan::of(info);
     let width = info.width as usize;
     let row_bytes = width * per_px * sample_bytes;

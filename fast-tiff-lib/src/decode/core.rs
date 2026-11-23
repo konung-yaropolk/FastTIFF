@@ -166,12 +166,32 @@ fn convert_strips<T: Send>(
     conv: &Conv<'_, T>,
 ) -> Result<()> {
     let info = src.info;
+    let px_bytes = lay.px_bytes();
+    if let Some(run) = info.stored_run(piece) {
+        // Uncompressed, predictor-free and back to back: the whole
+        // piece-plane is one run of the source, converted as it stands — on
+        // several cores when the conversion is heavy and the frame big,
+        // otherwise a slice at a time, with none of the per-strip walk.
+        let native = src.bytes.piece(run.start, run.end - run.start)?;
+        let n = lay.n_pixels;
+        if heavy && should_parallelize(n) {
+            convert_parallel(native, outs, first, 0, n, elems, px_bytes, conv);
+        } else {
+            const CHUNK: usize = 1 << 16;
+            let mut at = 0;
+            while at < n {
+                let k = CHUNK.min(n - at);
+                conv(&native[at * px_bytes..(at + k) * px_bytes], outs, first, at, k);
+                at += k;
+            }
+        }
+        return Ok(());
+    }
     let plan = StripPlan::of(info);
     let width = lay.width;
-    let row_bytes = width * lay.px_bytes();
+    let row_bytes = width * px_bytes;
     let par_strips = parallel_strips(info, lay.n_pixels);
     let par_conv = !par_strips && heavy && should_parallelize(lay.n_pixels);
-    let px_bytes = lay.px_bytes();
     for_strips(
         &plan,
         piece,
@@ -238,13 +258,11 @@ fn convert_planes<T: Send>(
     pool: &Pool<'_>,
     conv: &Conv<'_, T>,
 ) -> Result<()> {
-    let planes: Vec<usize> = if lay.planar {
-        (first..first + outs.len()).collect()
-    } else {
-        vec![first]
-    };
+    // A planar frame's planes are walked one at a time; a chunky frame's are
+    // all in its one piece-plane, walked once.
+    let walks = if lay.planar { outs.len() } else { 1 };
     let mut rest: &mut [&mut [T]] = outs;
-    for &p in &planes {
+    for p in first..first + walks {
         let take = if lay.planar { 1 } else { rest.len() };
         let (these, tail) = std::mem::take(&mut rest).split_at_mut(take);
         rest = tail;
