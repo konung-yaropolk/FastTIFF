@@ -594,22 +594,46 @@ pub(super) fn parallel_strips(frame: &FrameInfo, n_pixels: usize) -> bool {
         && should_parallelize(n_pixels)
 }
 
-/// Copy a stored run into `dest` (the same length), a chunk at a time, `post`
-/// applied to each chunk while it is still in cache.
+/// What a direct decode does to the stored bytes once they are in the
+/// destination — a byte swap, a sign flip — or `None` when they already are
+/// what was asked for. `None` rather than a closure that does nothing, so a
+/// copy can be told there is nothing to come back for (see [`copy_run`]).
+pub(super) type Post<'p> = Option<&'p (dyn Fn(&mut [u8]) + Sync)>;
+
+/// Run `post`, if there is one, over bytes just written.
+pub(super) fn apply(post: Post<'_>, data: &mut [u8]) {
+    if let Some(post) = post {
+        post(data);
+    }
+}
+
+/// A run at most this long is copied a chunk at a time, and a longer one
+/// with nothing to do afterwards in one call. See [`copy_run`].
+const COPY_THROUGH_CACHE: usize = 8 << 20;
+
+/// Copy a stored run into `dest`, which is as long, then `post` it.
 ///
-/// In chunks rather than in one call because of how a large copy is done: one
-/// `memcpy` of a whole 8 MiB frame streams it past the cache with
-/// non-temporal stores, where a quarter-megabyte copy stores through it — and
-/// the second is about 12% faster for a 2048x2048 `u16` frame on the machine
-/// this was measured on (the same file read as 32 strips copied one by one
-/// took 550 us against 624 for the single strip), because whatever reads the
-/// destination next finds much of it still there.
-fn copy_run(run: &[u8], dest: &mut [u8], post: &(dyn Fn(&mut [u8]) + Sync)) {
+/// How a large copy is done decides what it costs. One `memcpy` of a run this
+/// big streams it past the cache with non-temporal stores; a quarter-megabyte
+/// one stores through the cache. Measured on an i9-9900 (16 MiB L3), copying
+/// 2048x2048 frames out of a mapping: an 8 MiB `u16` frame took 550 us in
+/// chunks against 600 in one call, because the destination fits beside the
+/// source and whatever reads it next finds it there; a 16 MiB `f32` frame
+/// took 1190 us in one call against 1340-1570 in chunks, because it does not
+/// fit and storing through the cache only adds the reads of every line
+/// stored to. So a run is chunked up to [`COPY_THROUGH_CACHE`], and above it
+/// too when `post` has to go over the bytes again — then while each chunk is
+/// still in cache.
+fn copy_run(run: &[u8], dest: &mut [u8], post: Post<'_>) {
     const CHUNK: usize = 256 * 1024;
     debug_assert_eq!(run.len(), dest.len());
+    if post.is_none() && dest.len() > COPY_THROUGH_CACHE {
+        dest.copy_from_slice(run);
+        return;
+    }
     for (d, s) in dest.chunks_mut(CHUNK).zip(run.chunks(CHUNK)) {
         d.copy_from_slice(s);
-        post(d);
+        apply(post, d);
     }
 }
 
@@ -626,7 +650,7 @@ pub(super) fn decode_planes_into(
     per_px: usize,
     dest: &mut [u8],
     undo_pred: bool,
-    post: &(dyn Fn(&mut [u8]) + Sync),
+    post: Post<'_>,
     pool: &Pool<'_>,
 ) -> Result<()> {
     let info = src.info;
@@ -660,7 +684,7 @@ pub(super) fn decode_planes_into(
                     if undo_pred {
                         undo(src, sample_bytes, d)?;
                     }
-                    post(d);
+                    apply(post, d);
                     Ok(())
                 })
             },

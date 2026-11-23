@@ -25,8 +25,8 @@
 use super::codecs::decompress_into;
 use super::convert::{self, MinMax};
 use super::pieces::{
-    bytes_for_bits, decode_planes_into, for_strips, guard_frame_size, guard_tiles, parallel_strips,
-    sized, strip_native, Pool, StripPlan, TileGrid, MAX_DECODED_EXPANSION,
+    apply, bytes_for_bits, decode_planes_into, for_strips, guard_frame_size, guard_tiles,
+    parallel_strips, sized, strip_native, Pool, Post, StripPlan, TileGrid, MAX_DECODED_EXPANSION,
 };
 use super::should_parallelize;
 use super::tiles::for_tiles;
@@ -181,7 +181,13 @@ fn convert_strips<T: Send>(
             let mut at = 0;
             while at < n {
                 let k = CHUNK.min(n - at);
-                conv(&native[at * px_bytes..(at + k) * px_bytes], outs, first, at, k);
+                conv(
+                    &native[at * px_bytes..(at + k) * px_bytes],
+                    outs,
+                    first,
+                    at,
+                    k,
+                );
                 at += k;
             }
         }
@@ -312,7 +318,7 @@ fn direct_planes<T: bytemuck::Pod + Send>(
     first: usize,
     outs: &mut [&mut [T]],
     pool: &Pool<'_>,
-    post: &(dyn Fn(&mut [u8]) + Sync),
+    post: Post<'_>,
 ) -> Result<()> {
     debug_assert_eq!(lay.per_px, 1);
     let sb = lay.sample_bytes;
@@ -325,7 +331,7 @@ fn direct_planes<T: bytemuck::Pod + Send>(
                 for part in parts.iter_mut() {
                     let d = plane_bytes(&mut part[at * elems..(at + n) * elems]);
                     d.copy_from_slice(&seg[..n * sb]);
-                    post(d);
+                    apply(post, d);
                 }
             };
             convert_planes(src, lay, grid, first, outs, elems, true, false, pool, &copy)
@@ -417,7 +423,8 @@ pub(crate) fn display(
             let map = DisplayMap::of(info, None).expect("8- and 16-bit frames have a fixed map");
             if sb == 2 && lay.per_px == 1 {
                 let post = |d: &mut [u8]| convert::display16_in_place(d, order, signed);
-                direct_planes(&src, &lay, grid.as_ref(), first, outs, &pool, &post)?;
+                let post: Post<'_> = (order != ByteOrder::host() || signed).then_some(&post);
+                direct_planes(&src, &lay, grid.as_ref(), first, outs, &pool, post)?;
             } else if fuse {
                 let width = lay.width;
                 let spp = lay.spp;
@@ -574,15 +581,7 @@ fn assemble<'n>(
         .checked_mul(lay.px_bytes())
         .context(ErrorKind::TooLarge, "frame size overflows")?;
     let dest = sized(native, plane_bytes)?;
-    assemble_into(
-        src,
-        lay,
-        grid,
-        piece..piece + 1,
-        dest,
-        pool,
-        &|_: &mut [u8]| {},
-    )?;
+    assemble_into(src, lay, grid, piece..piece + 1, dest, pool, None)?;
     Ok(&native[..plane_bytes])
 }
 
@@ -595,7 +594,7 @@ fn assemble_into(
     planes: std::ops::Range<usize>,
     dest: &mut [u8],
     pool: &Pool<'_>,
-    post: &(dyn Fn(&mut [u8]) + Sync),
+    post: Post<'_>,
 ) -> Result<()> {
     let sb = lay.sample_bytes;
     match grid {
@@ -607,7 +606,7 @@ fn assemble_into(
                 let copy = |seg: &[u8], parts: &mut [&mut [u8]], _: usize, at: usize, n: usize| {
                     let d = &mut parts[0][at * px..(at + n) * px];
                     d.copy_from_slice(&seg[..n * px]);
-                    post(d);
+                    apply(post, d);
                 };
                 for_tiles(src, grid, p, sb, px, 0, &mut [part], px, true, pool, &copy)?;
             }
@@ -654,13 +653,9 @@ pub(crate) fn file(
     let order = src.order;
     let (bits, format) = (info.bits_per_sample, info.sample_format);
     if lay.per_px == 1 && bits == 32 && format == SampleFormat::Float {
-        let swap = order != ByteOrder::host();
-        let post = |d: &mut [u8]| {
-            if swap {
-                convert::swap_samples(d, 4)
-            }
-        };
-        return direct_planes(&src, &lay, grid.as_ref(), first, outs, &pool, &post);
+        let swap = |d: &mut [u8]| convert::swap_samples(d, 4);
+        let post: Post<'_> = (order != ByteOrder::host()).then_some(&swap);
+        return direct_planes(&src, &lay, grid.as_ref(), first, outs, &pool, post);
     }
     let conv = |native: &[u8], parts: &mut [&mut [f32]], first: usize, at: usize, n: usize| {
         for (i, part) in parts.iter_mut().enumerate() {
@@ -724,12 +719,9 @@ pub(crate) fn stored(
     let pool = Pool::new(&mut scratch.pieces);
     let swap = sb > 1 && want != src.order;
     if lay.per_px == 1 {
-        let post = |d: &mut [u8]| {
-            if swap {
-                convert::swap_samples(d, sb)
-            }
-        };
-        return direct_planes(&src, &lay, grid.as_ref(), first, outs, &pool, &post);
+        let swap_samples = |d: &mut [u8]| convert::swap_samples(d, sb);
+        let post: Post<'_> = swap.then_some(&swap_samples);
+        return direct_planes(&src, &lay, grid.as_ref(), first, outs, &pool, post);
     }
     // Chunky: a gather per plane, or for 8-bit every plane in one pass.
     let (spp, width) = (lay.spp, lay.width);
@@ -913,12 +905,8 @@ pub(crate) fn stored_frame_into(
     let grid = guard(info, sb)?;
     let lay = Layout::of(info, sb)?;
     let pool = Pool::new(&mut scratch.pieces);
-    let swap = sb > 1 && want != src.order;
-    let post = |d: &mut [u8]| {
-        if swap {
-            convert::swap_samples(d, sb)
-        }
-    };
+    let swap = |d: &mut [u8]| convert::swap_samples(d, sb);
+    let post: Post<'_> = (sb > 1 && want != src.order).then_some(&swap);
     assemble_into(
         &src,
         &lay,
@@ -926,7 +914,7 @@ pub(crate) fn stored_frame_into(
         0..info.piece_planes(),
         out,
         &pool,
-        &post,
+        post,
     )
 }
 
@@ -981,7 +969,7 @@ pub(crate) fn value_range(
             0..info.piece_planes(),
             dest,
             &pool,
-            &|_: &mut [u8]| {},
+            None,
         )?;
         mm.fold_wide(&native[..total], 0, 1, total / sb, order, format, sb);
         return Ok(Some(mm.range()));
@@ -1133,15 +1121,7 @@ impl Inks<'_, '_, '_> {
                     .checked_mul(4)
                     .context(ErrorKind::TooLarge, "frame size overflows")?;
                 let dest = sized(native, total)?;
-                assemble_into(
-                    &src,
-                    &lay,
-                    grid.as_ref(),
-                    0..4,
-                    dest,
-                    &pool,
-                    &|_: &mut [u8]| {},
-                )?;
+                assemble_into(&src, &lay, grid.as_ref(), 0..4, dest, &pool, None)?;
                 &native[..total]
             }
         };
