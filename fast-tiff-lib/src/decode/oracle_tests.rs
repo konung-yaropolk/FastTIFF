@@ -1165,9 +1165,15 @@ fn matrix() -> Vec<Spec> {
     let codecs = codecs();
     let mut specs = Vec::new();
     let mut turn = 0usize;
+    // Shifts the rotation by one more for every group of layouts, so that
+    // which codec a layout meets does not repeat from group to group: with
+    // four codecs (no ZSTD) and a group's turns a multiple of four, the tiled
+    // layouts would otherwise never meet one of them.
+    let mut group = 0usize;
     for (bits, format) in formats {
         for order in [ByteOrder::Little, ByteOrder::Big] {
             for (spp, planar) in [(1u16, false), (3, false), (3, true), (4, false), (4, true)] {
+                group += 1;
                 let photometric = match spp {
                     1 => 1,
                     3 => 2,
@@ -1183,7 +1189,7 @@ fn matrix() -> Vec<Spec> {
                 for (li, &lay) in lays.iter().enumerate() {
                     for &predictor in predictors {
                         turn += 1;
-                        let compression = codecs[(turn + li) % codecs.len()];
+                        let compression = codecs[(turn + li + group) % codecs.len()];
                         let compression = match lay {
                             // A gap or padding only matters uncompressed half
                             // the time; a whole-frame strip is uncompressed.
