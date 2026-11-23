@@ -28,7 +28,8 @@ Note, the API is unstable yet so updates may include breaking changes.
 - **Decodes a plane to 16-bit or 32-bit-float samples** on demand (64-bit
   int/float are down-converted to these — see [Supported pixel
   formats](#supported-pixel-formats)). For the common case — uncompressed,
-  single strip, native byte order — decoding a 16-bit frame is a **zero-copy
+  native byte order, stored as one run (a single strip, or strips back to
+  back as libtiff writes them) — decoding a 16-bit frame is a **zero-copy
   reinterpret** of the mapped bytes (no allocation, no decode pass).
 - **Parses display metadata** from several dialects into one normalized
   `StackMeta`, picking the dialect by inspecting `ImageDescription` (tag 270):
@@ -227,7 +228,8 @@ check their current docs.</sub>
 ## Quick start
 
 ```rust
-use fast_tiff_lib::{read_frame_u16, TiffStack};
+use fast_tiff_lib::units::Display;
+use fast_tiff_lib::{DecodeScratch, TiffStack};
 
 let stack = TiffStack::open("movie.tif")?;
 println!(
@@ -238,10 +240,12 @@ println!(
     stack.frames[0].bits_per_sample,
 );
 
-// Decode the first plane to display-ready u16 samples (0..=65535).
-let frame = &stack.frames[0];
-let pixels = read_frame_u16(&stack.data, frame, stack.byte_order, None)?;
-assert_eq!(pixels.len(), (frame.width * frame.height) as usize);
+// Decode the first plane to display-ready u16 samples (0..=65535). `out` and
+// the scratch are kept across frames, so a stream of frames allocates nothing.
+let (mut out, mut scratch) = (Vec::new(), DecodeScratch::new());
+let frame = stack.frame(0)?;
+let (pixels, _maps) = frame.read(Display { range: None }, 0, &mut out, &mut scratch)?;
+assert_eq!(pixels.len(), (frame.info().width * frame.info().height) as usize);
 # Ok::<(), fast_tiff_lib::Error>(())
 ```
 
@@ -383,14 +387,45 @@ handle — see the CMYK note above for exactly what that requires.
 
 ### Decoding
 
-All decoders take the file's bytes (`&stack.data`), the `FrameInfo`, and the file's
-`ByteOrder`. They return owned data or a borrow of the mapping (`Cow`).
+Every decode goes through one core, reached from `stack.frame(i)`, a `Frame`,
+in one of two calls generic over the units the samples come back in:
+
+```rust
+// `units` is Display { range } (u16 display scale), File (f32 in the file's
+// own units), Stored(order) (the stored bytes, in that byte order), CmykRgb8 or
+// CmykRgb16. The sample type of `out` follows from it.
+//
+// Plane `plane` into `out`, or the source's own bytes when they already are
+// the answer (Pixels::Borrowed: an uncompressed plane stored as one run, in
+// the units' representation and byte order). `out` is resized only when its
+// length differs. The report is the DisplayMaps for Display, () otherwise.
+fn read(&self, units, plane, out: &mut Vec<_>, scratch: &mut DecodeScratch) -> Result<(Pixels, Report)>;
+// Planes first.. into exact slices, one per plane, from one pass over the
+// frame's strips: an RGB frame lands in three buffers from one decompression.
+fn read_into(&self, units, first, out: &mut [&mut [_]], scratch: &mut DecodeScratch) -> Result<Report>;
+// Also: plane_len, planes, borrows (the zero-copy predicate), crop (Crop::Rows,
+// Region or Sampled, with the Coverage it holds), stored_frame_into (the whole
+// frame as the file lays it out), value_range (32/64-bit min/max) and touch.
+```
+
+The `DecodeScratch` is the caller's: it holds what a decode needs between the
+file and the destination (a strip's worth of decompressed bytes per thread,
+or for a wide frame auto-ranged to `u16` the whole frame), so one kept across
+frames makes a warm decode allocate and zero-fill nothing. `Ok` means every
+element of the destination was written; an `Err` leaves it unspecified. A
+plane index past the last is `InvalidInput`.
+
+The functions below are the same core behind the readers this crate had
+before `Frame`, kept while callers move over and due to go. They take the
+file's bytes (`&stack.data`), the `FrameInfo`, and the file's `ByteOrder`, and
+return owned data or a borrow of the mapping (`Cow`). Each makes a scratch of
+its own per call, and a plane index past the last is clamped to the last.
 
 ```rust
 // 16-bit display path. 8-bit is upcast to 0..=65535; signed ints are offset
 // into unsigned display space; 32- and 64-bit (int/float) are linearly rescaled
 // into 0..=65535 using `float_range` (or the frame's own min/max when `None`).
-// Zero-copy (Cow::Borrowed) for uncompressed, single-strip, native-order 16-bit.
+// Zero-copy (Cow::Borrowed) for uncompressed native-order 16-bit stored as one run.
 // `DisplayMap::of(frame, float_range)` names that mapping, with exact
 // to_display / to_file conversions; the `_into` forms return the map they used.
 fn read_frame_u16(mmap, frame, order, float_range: Option<(f32, f32)>) -> Result<Cow<[u16]>>;
@@ -400,8 +435,8 @@ fn read_frame_u16(mmap, frame, order, float_range: Option<(f32, f32)>) -> Result
 fn read_plane_u16(mmap, frame, order, float_range: Option<(f32, f32)>, plane: usize) -> Result<Vec<u16>>;
 
 // Raw unsigned 8-bit bytes, *no* widening to 16-bit — for callers that scale to
-// 0..=255 themselves (e.g. on the GPU). Zero-copy for uncompressed, single-strip
-// 8-bit. Only valid for unsigned single-sample 8-bit frames.
+// 0..=255 themselves (e.g. on the GPU). Zero-copy for uncompressed 8-bit stored
+// as one run. Only valid for unsigned single-sample 8-bit frames.
 fn read_frame_u8(mmap, frame, order) -> Result<Cow<[u8]>>;
 
 // The deinterleaving sibling of read_frame_u8: one raw 8-bit sample plane of a
@@ -413,7 +448,7 @@ fn read_plane_u8(mmap, frame, order, plane: usize) -> Result<Vec<u8>>;
 // 16-bit -1 is -1.0, 4-bit palette indices are 0.0..=15.0, 64-bit is narrowed
 // to f32. No widening, offset or rescale — for measuring pixels, and for callers
 // that do window/level themselves (e.g. on the GPU). One pass from the file's
-// bytes; zero-copy for uncompressed, single-strip, native-order f32. 16-bit
+// bytes; zero-copy for uncompressed native-order f32 stored as one run. 16-bit
 // floats are refused.
 fn read_frame_f32(mmap, frame, order) -> Result<Cow<[f32]>>;
 fn read_plane_f32(mmap, frame, order, plane: usize) -> Result<Vec<f32>>;
@@ -445,10 +480,10 @@ each strip **straight from the mapping into the output** (a plain memcpy in
 the native-order case) with no intermediate assembly buffer at all; compressed
 strips likewise decompress directly into their row ranges, single-pass.
 
-`TiffStack::prefetch_frame(&frame)` is a performance hint that touches the
-frame's mapped pages so a subsequent decode doesn't stall on page faults —
-call it from a read-ahead thread for the *next* frame (first-touch faults are
-cheap on Linux but cost real time on Windows).
+`Frame::touch()` (also `TiffStack::prefetch_frame(&frame)`, its old name) is a
+performance hint that touches the frame's mapped pages so a subsequent decode
+doesn't stall on page faults — call it from a read-ahead thread for the *next*
+frame (first-touch faults are cheap on Linux but cost real time on Windows).
 
 ```rust
 
