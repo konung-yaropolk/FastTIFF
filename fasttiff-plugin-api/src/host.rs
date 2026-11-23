@@ -41,6 +41,12 @@ pub trait HostContext {
     /// The stack's shape, in file coordinates.
     fn image(&self) -> ImageInfo;
 
+    /// Whether the frame coordinate addresses the slices of a Z-only source.
+    /// Plane reads still use `t`; shape-preserving results can label it as Z.
+    fn frame_axis_is_z(&self) -> bool {
+        false
+    }
+
     /// The viewer's state when the run started.
     fn view(&self) -> &ViewParams;
 

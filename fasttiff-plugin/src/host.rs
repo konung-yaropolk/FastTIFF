@@ -167,6 +167,7 @@ pub unsafe fn host_of(host: *const FtHost) -> Result<FtHost, FtStatus> {
 pub struct CHost {
     host: FtHost,
     image: ImageInfo,
+    frame_axis_is_z: bool,
     view: ViewParams,
     info: StackInfo,
     /// Snapshotted with everything else, because that is what it is: the host
@@ -377,6 +378,7 @@ impl CHost {
         let animating = (h.animating)(h.ctx) != 0;
 
         Ok(CHost {
+            frame_axis_is_z: has_meta && si.present & FT_FRAME_AXIS_IS_Z != 0,
             pending,
             animating,
             sink: None,
@@ -440,6 +442,9 @@ impl CHost {
 }
 
 impl HostContext for CHost {
+    fn frame_axis_is_z(&self) -> bool {
+        self.frame_axis_is_z
+    }
     fn pending_params(&self) -> &Params {
         &self.pending
     }
@@ -552,6 +557,30 @@ impl HostContext for CHost {
         // SAFETY: as above.
         let st = unsafe { crate::marshal::describe_image(sink, spec) };
         sink_status(st, "take the result's description")
+    }
+
+    fn set_result_luts(&mut self, luts: Vec<crate::api::Lut>) -> Result<(), PluginError> {
+        let sink = self
+            .sink
+            .as_ref()
+            .ok_or_else(|| PluginError::unsupported("no result sink"))?;
+        // SAFETY: the run owns its sink and each LUT is borrowed for the call.
+        sink_status(
+            unsafe { crate::marshal::write_luts(sink, &luts) },
+            "take the result's LUTs",
+        )
+    }
+
+    fn finish_document(&mut self) -> Result<(), PluginError> {
+        let sink = self
+            .sink
+            .as_ref()
+            .ok_or_else(|| PluginError::unsupported("no result sink"))?;
+        // SAFETY: sink_of installed a valid Unsupported stub on older hosts.
+        sink_status(
+            unsafe { (sink.finish_document)(sink.ctx) },
+            "finish a result document",
+        )
     }
 }
 

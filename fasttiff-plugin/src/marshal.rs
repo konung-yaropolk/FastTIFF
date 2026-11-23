@@ -1040,36 +1040,41 @@ unsafe fn send_image(
     if st != FtStatus::Ok {
         return st;
     }
-    if !luts.is_empty() {
-        if luts.len() != spec.channels.max(1) {
-            crate::last_error::set("the result supplied a different number of LUTs than channels");
-            return FtStatus::BadArgument;
-        }
-        if !crate::abi::ft_covers!(sink as *const FtSink, FtSink, set_channel_lut) {
-            crate::last_error::set(
-                "this plugin returned channel lookup tables, and this host is too old to use them; \
-                 it needs a FastTIFF built against plugin ABI 1.7 or newer",
-            );
-            return FtStatus::Unsupported;
-        }
-        for (i, lut) in luts.iter().enumerate() {
-            let st = (sink.set_channel_lut)(
-                sink.ctx,
-                i as u64,
-                lut.as_ptr().cast::<u8>(),
-                crate::abi::FT_LUT_BYTES,
-            );
-            if st != FtStatus::Ok {
-                return st;
-            }
-        }
+    if !luts.is_empty() && luts.len() != spec.channels.max(1) {
+        crate::last_error::set("the result supplied a different number of LUTs than channels");
+        return FtStatus::BadArgument;
+    }
+    let st = write_luts(sink, luts);
+    if st != FtStatus::Ok {
+        return st;
     }
     for p in planes {
         let st = push_plane(sink, p.as_plane_ref());
         if st != FtStatus::Ok {
             return st;
         }
-        // `p` drops here: the host has its copy.
+    }
+    FtStatus::Ok
+}
+
+pub(crate) unsafe fn write_luts(sink: &FtSink, luts: &[crate::api::Lut]) -> FtStatus {
+    if !luts.is_empty() && !crate::abi::ft_covers!(sink as *const FtSink, FtSink, set_channel_lut) {
+        crate::last_error::set(
+            "this plugin returned channel lookup tables, and this host is too old to use them; \
+                 it needs a FastTIFF built against plugin ABI 1.7 or newer",
+        );
+        return FtStatus::Unsupported;
+    }
+    for (i, lut) in luts.iter().enumerate() {
+        let st = (sink.set_channel_lut)(
+            sink.ctx,
+            i as u64,
+            lut.as_ptr().cast::<u8>(),
+            crate::abi::FT_LUT_BYTES,
+        );
+        if st != FtStatus::Ok {
+            return st;
+        }
     }
     FtStatus::Ok
 }

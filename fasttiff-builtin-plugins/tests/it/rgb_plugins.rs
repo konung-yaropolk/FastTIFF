@@ -11,8 +11,8 @@ use fast_tiff_viewer::plugins::{describe_view, Registry, ResultDest, StackHost};
 use fast_tiff_viewer::Document;
 use fasttiff_builtin_plugins as builtin;
 use fasttiff_plugin_api::{
-    DisplayMode, HostContext, ImageResult, Outcome, Params, PixelType, Plane, PlaneData, Plugin,
-    PluginError, StreamTarget, VolumeMode, VolumeView,
+    DisplayMode, HostContext, ImageResult, Outcome, ParamKind, ParamValue, Params, PixelType,
+    Plane, PlaneData, Plugin, PluginError, StreamTarget, VolumeMode, VolumeView,
 };
 use std::io::Cursor;
 
@@ -192,6 +192,145 @@ fn split_channels_refuses_an_image_without_a_channel_dimension() {
             "this image has no channel dimension to split"
         ))
     );
+}
+
+/// Exercise the registry, both result TIFFs, and the source's original Z/T
+/// declarations (a Z-only stack is navigated through T in the viewer).
+#[test]
+fn split_stack_preserves_planes_axes_and_luts_in_both_files() {
+    for (channels, nz, nt, split_z, first) in [
+        (2, 1, 5, false, 2),
+        (2, 5, 1, true, 4),
+        (2, 4, 5, true, 3),
+        (7, 4, 5, false, 3),
+    ] {
+        let luts: Vec<_> = (0..channels)
+            .map(|c| std::array::from_fn(|i| [i as u8, (255 - i) as u8, (c + i / 3) as u8]))
+            .collect();
+        let mut meta = StackMetaWrite::new(channels, nz)
+            .mode(fast_tiff_lib::DisplayMode::Composite)
+            .unit("micron")
+            .spacing(2.5)
+            .pixel_size(0.25, 0.5)
+            .frame_interval_s(0.75)
+            .calibration(1.5, 2.0)
+            .trailing("Acquisition=blue".to_owned());
+        for lut in &luts {
+            meta = meta.channel_lut(*lut);
+        }
+        let opts = WriterOptions::new(2, 1, SampleType::U16).metadata(meta);
+        let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+        for i in 0..(channels * nz * nt) as u16 {
+            writer.write_frame_u16(&[i, 1000 + i]).unwrap();
+        }
+        let source = Document::from_bytes(
+            writer.finish().unwrap().into_inner(),
+            "cells.tif".into(),
+            false,
+        )
+        .unwrap();
+        let mut registry = Registry::new(builtin::register);
+        let index = registry
+            .find("dev.fasttiff.stacktools.split-stack")
+            .unwrap();
+        let plugin = &mut registry.get_mut(index).unwrap().plugin;
+        let mut params = Params::new();
+        let both = nz > 1 && nt > 1;
+        if both {
+            params.set("axis", ParamValue::Choice(usize::from(split_z)));
+        }
+        let dialog = plugin
+            .dialog(&host(&source).with_pending_params(params.clone()))
+            .unwrap();
+        assert_eq!(dialog.iter().any(|d| d.key == "axis"), both);
+        let position = dialog.iter().find(|d| d.key == "first").unwrap();
+        let n = if split_z { nz } else { nt } as i64;
+        assert_eq!(
+            position.label,
+            if split_z {
+                "First slice in second stack"
+            } else {
+                "First frame in second stack"
+            }
+        );
+        assert_eq!(
+            position.kind,
+            ParamKind::Int {
+                min: 2,
+                max: n - 1,
+                default: n / 2 + 1
+            }
+        );
+        params.set("first", ParamValue::Int(first as i64));
+        let mut streamed = host(&source).streaming_to(ResultDest::Memory);
+        assert_eq!(
+            plugin.run(&mut streamed, &params).unwrap(),
+            Outcome::Streamed {
+                target: StreamTarget::NewDocuments
+            }
+        );
+        let results = streamed.take_documents();
+        assert_eq!(results.len(), 2);
+        for (part, result) in results.iter().enumerate() {
+            assert_eq!(result.name(), format!("cells-part{}", part + 1));
+            let range = if part == 0 {
+                0..first - 1
+            } else {
+                first - 1..n as usize
+            };
+            let (times, slices) = if split_z {
+                (0..nt, range)
+            } else {
+                (range, 0..nz)
+            };
+            let out =
+                Document::from_bytes(result.bytes().unwrap().to_vec(), "out.tif".into(), false)
+                    .unwrap();
+            let m = &out.tiff().meta;
+            assert_eq!(
+                (m.channels, m.slices, m.frames),
+                (channels, slices.len(), times.len())
+            );
+            assert_eq!(m.spacing, Some(2.5));
+            assert_eq!(m.pixel_width, Some(0.25));
+            assert_eq!(m.pixel_height, Some(0.5));
+            assert_eq!(m.frame_interval_s, Some(0.75));
+            assert_eq!(m.calibration, Some((1.5, 2.0)));
+            assert_eq!(m.unit.as_deref(), Some("micron"));
+            assert!(out
+                .tiff()
+                .description
+                .as_ref()
+                .unwrap()
+                .contains("Acquisition=blue"));
+            assert_eq!(
+                m.channel_display.iter().map(|d| d.lut).collect::<Vec<_>>(),
+                luts
+            );
+            let image = result.to_image().unwrap();
+            let mut planes = image.planes.iter();
+            for t in times {
+                for z in slices.clone() {
+                    for c in 0..channels {
+                        let i = ((t * nz + z) * channels + c) as u16;
+                        assert_eq!(planes.next(), Some(&PlaneData::U16(vec![i, 1000 + i])));
+                    }
+                }
+            }
+            assert!(planes.next().is_none());
+        }
+    }
+}
+
+#[test]
+fn split_stack_refuses_cuts_outside_the_dialog_range() {
+    let source = rgb_stack();
+    let mut h = host(&source);
+    for first in [1, i64::from(FRAMES)] {
+        let mut params = Params::new();
+        params.set("first", ParamValue::Int(first));
+        assert!(builtin::SplitStack.run(&mut h, &params).is_err());
+    }
 }
 
 /// The real app uses the ABI registry and a streaming host. This makes sure a

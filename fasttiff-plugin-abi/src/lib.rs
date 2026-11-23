@@ -785,6 +785,8 @@ pub const FT_HAS_SPACING_Y: u32 = 1 << 1;
 pub const FT_HAS_SPACING_Z: u32 = 1 << 2;
 pub const FT_HAS_FRAME_INTERVAL: u32 = 1 << 3;
 pub const FT_HAS_CALIBRATION: u32 = 1 << 4;
+/// Input stack flag: the resolved frame axis addresses the file's Z slices.
+pub const FT_FRAME_AXIS_IS_Z: u32 = 1 << 5;
 
 /// Which string [`FtHost::stack_string`] should return.
 pub const FT_STRING_UNIT: u32 = 0;

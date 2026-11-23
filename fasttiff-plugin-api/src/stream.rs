@@ -212,6 +212,32 @@ impl ImageStream {
         self.planes - self.pushed
     }
 
+    /// Close one part of a multi-document result. A streaming host owns the
+    /// finished part; otherwise return it for inclusion in `Outcome::NewDocuments`.
+    pub fn finish_document(
+        self,
+        host: &mut dyn HostContext,
+        luts: Vec<crate::Lut>,
+    ) -> Result<Option<crate::DocumentResult>, PluginError> {
+        if self.pushed != self.planes {
+            return Err(self.spec.count_mismatch(self.pushed));
+        }
+        if !luts.is_empty() && luts.len() != self.spec.channels.max(1) {
+            return Err(PluginError::failed("expected one LUT per result channel"));
+        }
+        if let Some(planes) = self.kept {
+            return Ok(Some(crate::DocumentResult {
+                image: self.spec.with_planes(planes),
+                luts,
+            }));
+        }
+        if !luts.is_empty() {
+            host.set_result_luts(luts)?;
+        }
+        host.finish_document()?;
+        Ok(None)
+    }
+
     /// The run's outcome: the result is complete, and goes to `target`.
     ///
     /// Fails, with the same words a returned image that miscounted gets, when

@@ -233,6 +233,7 @@ fn every_built_in_filter_answers_the_same_through_the_boundary() {
         covered.push(same_both_ways::<builtin::SliceRemover>(&s));
         covered.push(same_both_ways::<builtin::SliceOrderInvert>(&s));
         covered.push(same_both_ways::<builtin::SplitChannels>(&s));
+        covered.push(same_both_ways::<builtin::SplitStack>(&s));
     }
     #[cfg(feature = "plugin-deconvolve")]
     {

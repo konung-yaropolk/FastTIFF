@@ -312,6 +312,15 @@ impl StackHost {
 }
 
 impl HostContext for StackHost {
+    fn frame_axis_is_z(&self) -> bool {
+        let meta = &self.tiff.meta;
+        self.dims.slices == 1
+            && self.dims.frames > 1
+            && meta.frames == 1
+            && meta.slices >= self.dims.frames
+            && meta.channels.max(1) == self.dims.channels
+    }
+
     fn image(&self) -> ImageInfo {
         self.image
     }
@@ -547,11 +556,19 @@ pub fn describe_view(
             enabled: s.enabled,
         })
         .collect();
+    let mut luts = stack.display.luts().to_vec();
+    // The renderer has a channel limit. A stack operation can still copy the
+    // other channels, including lookup tables that came from the file.
+    let source_channels = &stack.tiff.meta.channel_display;
+    let end = file_channels(stack).min(source_channels.len());
+    if let Some(extra) = source_channels.get(luts.len()..end) {
+        luts.extend(extra.iter().map(|channel| channel.lut));
+    }
     ViewParams {
         frame_index,
         volume_view,
         channels,
-        luts: stack.display.luts().to_vec(),
+        luts,
         volume,
     }
 }

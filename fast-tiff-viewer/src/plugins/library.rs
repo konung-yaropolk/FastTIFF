@@ -926,6 +926,7 @@ unsafe extern "C" fn cb_stack_info(
         flag(i.spacing.z.is_some(), abi::FT_HAS_SPACING_Z);
         flag(i.frame_interval_s.is_some(), abi::FT_HAS_FRAME_INTERVAL);
         flag(i.calibration.is_some(), abi::FT_HAS_CALIBRATION);
+        flag(c.inner.frame_axis_is_z(), abi::FT_FRAME_AXIS_IS_Z);
         let (c0, c1) = i.calibration.unwrap_or((0.0, 0.0));
         let filled = abi::FtStackInfo {
             struct_size: 0,
@@ -2491,6 +2492,9 @@ impl HostContext for ImportOnly<'_> {
 struct ReadOnly<'a>(&'a dyn HostContext);
 
 impl HostContext for ReadOnly<'_> {
+    fn frame_axis_is_z(&self) -> bool {
+        self.0.frame_axis_is_z()
+    }
     fn image(&self) -> fasttiff_plugin_api::ImageInfo {
         self.0.image()
     }

@@ -55,7 +55,7 @@ fasttiff_builtin_plugins::share_gpu_device(&device, &queue, &adapter_info);
 | Feature | Default | Effect |
 |---|---|---|
 | `builtin-plugins` | on | Every plugin that ships. |
-| `plugin-image-tools` | via `builtin-plugins` | Invert, Crop, Slice Keeper, Slice Remover, Slice Order Invert and Split channels. |
+| `plugin-image-tools` | via `builtin-plugins` | Invert, Crop, Slice Keeper, Slice Remover, Slice Order Invert, Split channels and Split Stack. |
 | `plugin-<name>` | via `builtin-plugins` | One plugin, with whatever it alone depends on: `plugin-zproject`, `plugin-plot-axis`, `plugin-animation-3d`, `plugin-suite2p-stabilize`, `plugin-turboreg-stabilize`, `plugin-deconvolve`, `plugin-png`, `plugin-oir`, `plugin-nifti`, `plugin-dicom`. A plugin left out has no module, no menu entry and no dependency of its own in the build. |
 | `gpu-registration` | off | The registrations' GPU paths, and `share_gpu_device`. Pulls in wgpu. |
 | `threads` | on | Deconvolution across threads; off for a single-threaded host such as `wasm32-unknown-unknown`. |

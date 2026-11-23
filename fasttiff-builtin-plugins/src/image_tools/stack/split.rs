@@ -96,7 +96,7 @@ impl Plugin for SplitChannels {
     }
 }
 
-fn gray_lut() -> fasttiff_plugin_api::Lut {
+pub(super) fn gray_lut() -> fasttiff_plugin_api::Lut {
     let mut lut = [[0; 3]; 256];
     for (i, rgb) in lut.iter_mut().enumerate() {
         *rgb = [i as u8; 3];

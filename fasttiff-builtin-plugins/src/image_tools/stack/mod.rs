@@ -1,19 +1,9 @@
 //! Stack Tools: the operations that change a stack's *shape* rather than its
 //! pixels' meaning.
 //!
-//! Three entries in the `Stack` menu, beside `Z Project` and `Plot third axis`.
 //! [`SliceKeeper`] and [`SliceRemover`] take planes out along an axis, and
-//! [`SliceOrderInvert`] reverses the order of the ones that are there. None of
-//! them changes a sample value; `Filters > Invert` is the one that does.
-//!
-//! # Every tool offers a window
-//!
-//! FastTIFF is one document per window, so a result either opens in a window of
-//! its own or takes the place of the one it came from. Only the user knows
-//! which they meant, so every tool here asks — see [`in_new_window`] — and
-//! defaults to a new window, because that is the answer that cannot lose
-//! anything. The unchecked case is [`Outcome::ReplaceDocument`], which is
-//! destructive by design.
+//! [`SliceOrderInvert`] reverses their order. [`SplitStack`] divides a stack
+//! along time or depth. It opens both parts in separate windows.
 //!
 //! # Axes, and what "a slice" means
 //!
@@ -55,10 +45,12 @@ use fasttiff_plugin_api::{HostContext, ImageInfo, ImageSpec, ImageStream, Plugin
 mod order;
 mod slices;
 mod split;
+mod split_stack;
 
 pub use order::SliceOrderInvert;
 pub use slices::{SliceKeeper, SliceRemover};
 pub use split::SplitChannels;
+pub use split_stack::SplitStack;
 
 /// An axis planes can be taken along.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

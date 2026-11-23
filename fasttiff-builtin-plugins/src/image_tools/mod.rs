@@ -5,4 +5,4 @@ pub use invert::Invert;
 pub mod crop;
 pub use crop::Crop;
 pub mod stack;
-pub use stack::{SliceKeeper, SliceOrderInvert, SliceRemover, SplitChannels};
+pub use stack::{SliceKeeper, SliceOrderInvert, SliceRemover, SplitChannels, SplitStack};

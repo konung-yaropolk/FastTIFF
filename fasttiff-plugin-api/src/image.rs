@@ -119,7 +119,8 @@ pub struct ViewParams {
     /// most `scivis_render::MAX_CHANNELS` entries — because it describes what is
     /// on screen. Use [`ImageInfo::channels`] to reach the rest of the file.
     pub channels: Vec<ChannelView>,
-    /// The LUT rendered for each displayed channel, same order as `channels`.
+    /// Lookup tables in channel order. Displayed channels use the rendered
+    /// tables; additional entries can carry file LUTs for undisplayed channels.
     pub luts: Vec<Lut>,
     /// 3D parameters, present whether or not the 3D view is currently showing,
     /// so a plugin can export a render without the user having switched to it.
