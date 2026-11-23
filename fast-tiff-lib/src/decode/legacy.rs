@@ -18,6 +18,8 @@ use crate::frame::FrameBytes;
 use crate::ifd::ByteOrder;
 use crate::index::{Compression, FrameInfo, SampleFormat, TiffStack};
 use crate::DecodeScratch;
+// Only the preloads use it, and only where there are threads to fork onto.
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::borrow::Cow;
 
