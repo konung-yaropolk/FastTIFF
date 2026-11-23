@@ -1,6 +1,6 @@
 //! The decode core against the decoder it replaced, bit for bit.
 //!
-//! [`old`] is `decode.rs` as it was at 3492148, kept verbatim (see its header)
+//! [`old`] is the decoder as it was at 3492148, kept verbatim (see its header)
 //! as scaffolding until the old readers go. Every frame here — every fixture,
 //! every fuzz regression and seed, and a synthetic matrix of depths, signs,
 //! byte orders, sample counts, interleavings, strip layouts, tiles,
@@ -43,12 +43,7 @@ fn outcome<T: Clone>(r: &Result<T>) -> std::result::Result<T, ErrorKind> {
 
 fn same<T: PartialEq + Debug + Clone>(label: &str, old: &Result<T>, new: &Result<T>) {
     let (o, n) = (outcome(old), outcome(new));
-    assert!(
-        o == n,
-        "{label}: old {:?} / new {:?}",
-        short(&o),
-        short(&n),
-    );
+    assert!(o == n, "{label}: old {:?} / new {:?}", short(&o), short(&n),);
 }
 
 /// Equal to the old reader, or — where the old fast path disagreed with the
@@ -321,7 +316,8 @@ fn compare_frame(file: &[u8], info: &FrameInfo, order: ByteOrder, label: &str) {
             &bits_r(super::read_plane_f32_into(file, info, order, p, &mut v).map(|()| v)),
         );
     }
-    let planes_bits = |r: Result<Vec<Vec<f32>>>| r.map(|v| v.iter().map(|p| bits(p)).collect::<Vec<_>>());
+    let planes_bits =
+        |r: Result<Vec<Vec<f32>>>| r.map(|v| v.iter().map(|p| bits(p)).collect::<Vec<_>>());
     same(
         &format!("{label} read_planes_f32"),
         &planes_bits(old::read_planes_f32(file, info, order)),
@@ -367,7 +363,13 @@ fn compare_frame(file: &[u8], info: &FrameInfo, order: ByteOrder, label: &str) {
 
 /// The [`Frame`] reads, every unit and plane, against the old readers of the
 /// same thing.
-fn compare_frame_api(frame: &Frame<'_>, file: &[u8], info: &FrameInfo, order: ByteOrder, label: &str) {
+fn compare_frame_api(
+    frame: &Frame<'_>,
+    file: &[u8],
+    info: &FrameInfo,
+    order: ByteOrder,
+    label: &str,
+) {
     let spp = spp_of(info);
     let mut scratch = DecodeScratch::new();
     // One scratch for every read of the frame, dirtied by each: what a warm
@@ -384,16 +386,18 @@ fn compare_frame_api(frame: &Frame<'_>, file: &[u8], info: &FrameInfo, order: By
             let old = old::read_plane_u16_into(file, info, order, range, p, &mut v)
                 .map(|m| (map_bits(m), v));
             let mut out = dirty(0xA5A5u16, 5);
-            let new = frame
-                .read(units, p, &mut out, &mut warm)
-                .map(|(px, maps)| {
-                    if px.is_source() {
-                        assert_borrowed_from(file, &px, &l);
-                    }
-                    (map_bits(maps.plane(0)), px.to_vec())
-                });
+            let new = frame.read(units, p, &mut out, &mut warm).map(|(px, maps)| {
+                if px.is_source() {
+                    assert_borrowed_from(file, &px, &l);
+                }
+                (map_bits(maps.plane(0)), px.to_vec())
+            });
             if p == spp {
-                assert_eq!(new.map(drop).unwrap_err().kind(), ErrorKind::InvalidInput, "{l} {p}");
+                assert_eq!(
+                    new.map(drop).unwrap_err().kind(),
+                    ErrorKind::InvalidInput,
+                    "{l} {p}"
+                );
                 continue;
             }
             same(&format!("{l} read {p}"), &old, &new);
@@ -476,13 +480,15 @@ fn compare_frame_api(frame: &Frame<'_>, file: &[u8], info: &FrameInfo, order: By
     };
     for want in [order, other] {
         let mut v = Vec::new();
-        let old_frame = old::read_frame_u8(file, info, order).map(|c| c.into_owned()).map(|f| {
-            if info.bits_per_sample == 4 || want == order {
-                f
-            } else {
-                swap_all(f, info.sample_bytes().unwrap_or(1))
-            }
-        });
+        let old_frame = old::read_frame_u8(file, info, order)
+            .map(|c| c.into_owned())
+            .map(|f| {
+                if info.bits_per_sample == 4 || want == order {
+                    f
+                } else {
+                    swap_all(f, info.sample_bytes().unwrap_or(1))
+                }
+            });
         let _ = old::read_frame_bytes_into(file, info, order, want, &mut v);
         for p in 0..spp {
             let old = old_frame.as_ref().map_err(|e| e.kind()).map(|f| {
@@ -599,7 +605,13 @@ fn compare_with_crops(file: &[u8], info: &FrameInfo, order: ByteOrder, label: &s
                 assert_eq!(cov.rows, band.rows, "{label} rows {r:?}");
                 assert_eq!(cov.cols, 0..info.width, "{label} rows {r:?}");
                 compare_frame(file, &band.frame, order, &format!("{label} rows {r:?}"));
-                compare_frame_api(&cropped, file, &band.frame, order, &format!("{label} Rows {r:?}"));
+                compare_frame_api(
+                    &cropped,
+                    file,
+                    &band.frame,
+                    order,
+                    &format!("{label} Rows {r:?}"),
+                );
             }
             (Err(a), Err(b)) => assert_eq!(a.kind(), b.kind(), "{label} rows {r:?}"),
             (a, b) => panic!("{label} rows {r:?}: {:?} / {:?}", a.is_ok(), b.is_ok()),
@@ -616,7 +628,11 @@ fn compare_with_crops(file: &[u8], info: &FrameInfo, order: ByteOrder, label: &s
         });
         match (old, new) {
             (Ok(region), Ok((cropped, cov))) => {
-                assert_eq!((cov.cols, cov.rows), (region.cols, region.rows), "{label} region");
+                assert_eq!(
+                    (cov.cols, cov.rows),
+                    (region.cols, region.rows),
+                    "{label} region"
+                );
                 compare_frame_api(
                     &cropped,
                     file,
@@ -626,7 +642,11 @@ fn compare_with_crops(file: &[u8], info: &FrameInfo, order: ByteOrder, label: &s
                 );
             }
             (Err(a), Err(b)) => assert_eq!(a.kind(), b.kind(), "{label} region {c:?} {r:?}"),
-            (a, b) => panic!("{label} region {c:?} {r:?}: {:?} / {:?}", a.is_ok(), b.is_ok()),
+            (a, b) => panic!(
+                "{label} region {c:?} {r:?}: {:?} / {:?}",
+                a.is_ok(),
+                b.is_ok()
+            ),
         }
     }
     #[allow(clippy::reversed_empty_ranges)]
@@ -664,7 +684,11 @@ fn compare_with_crops(file: &[u8], info: &FrameInfo, order: ByteOrder, label: &s
                     );
                 }
                 (Err(a), Err(b)) => assert_eq!(a.kind(), b.kind(), "{label} sampled"),
-                (a, b) => panic!("{label} sampled {r:?} {step}: {:?} / {:?}", a.is_ok(), b.is_ok()),
+                (a, b) => panic!(
+                    "{label} sampled {r:?} {step}: {:?} / {:?}",
+                    a.is_ok(),
+                    b.is_ok()
+                ),
             }
         }
     }
@@ -790,7 +814,11 @@ fn sample_bytes_of(spec: &Spec, i: usize) -> Vec<u8> {
     let mut x = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
     x ^= x >> 29;
     let smooth = (i % 97) as u64 * 3 + (i / 97) as u64;
-    let v = if i.is_multiple_of(5) { x } else { smooth.wrapping_mul(0x0101_0101_0101) };
+    let v = if i.is_multiple_of(5) {
+        x
+    } else {
+        smooth.wrapping_mul(0x0101_0101_0101)
+    };
     let le: Vec<u8> = match (spec.bits, spec.format) {
         (32, SampleFormat::Float) => {
             let f = match i % 23 {
@@ -857,7 +885,13 @@ fn difference(data: &mut [u8], row_samples: usize, stride: usize, sb: usize, ord
 
 /// TechNote 3 floating-point differencing: each row's values split into
 /// byte-significance planes, most significant first, then differenced.
-fn float_difference(data: &mut [u8], row_samples: usize, stride: usize, sb: usize, order: ByteOrder) {
+fn float_difference(
+    data: &mut [u8],
+    row_samples: usize,
+    stride: usize,
+    sb: usize,
+    order: ByteOrder,
+) {
     let row_bytes = row_samples * sb;
     let mut planes = vec![0u8; row_bytes];
     for row in data.chunks_exact_mut(row_bytes) {
@@ -1022,7 +1056,12 @@ fn build(spec: &Spec) -> (Vec<u8>, FrameInfo) {
                 for part in all.chunks_mut(row_bytes * h) {
                     predict(part, w);
                 }
-                push(&mut file, &compress(&all, spec.compression, row_bytes), 0, 0);
+                push(
+                    &mut file,
+                    &compress(&all, spec.compression, row_bytes),
+                    0,
+                    0,
+                );
             } else {
                 for data in &plane_data {
                     for (k, rows) in data.chunks(rps * row_bytes).enumerate() {
@@ -1237,13 +1276,24 @@ matrix_tests! {
 fn the_matrix_covers_what_it_claims() {
     let specs = matrix();
     assert!(specs.len() > 1000, "{} specs", specs.len());
-    for lay in [Lay::Gapped(4), Lay::Tiled(16, 16), Lay::Whole(3), Lay::Misaligned] {
-        assert!(specs.iter().any(|s| s.lay == lay && s.order == ByteOrder::Big));
+    for lay in [
+        Lay::Gapped(4),
+        Lay::Tiled(16, 16),
+        Lay::Whole(3),
+        Lay::Misaligned,
+    ] {
+        assert!(specs
+            .iter()
+            .any(|s| s.lay == lay && s.order == ByteOrder::Big));
     }
     for c in codecs() {
-        assert!(specs.iter().any(|s| s.compression == c && matches!(s.lay, Lay::Tiled(..))));
+        assert!(specs
+            .iter()
+            .any(|s| s.compression == c && matches!(s.lay, Lay::Tiled(..))));
         assert!(specs.iter().any(|s| s.compression == c && s.predictor == 3));
-        assert!(specs.iter().any(|s| s.compression == c && s.planar && s.predictor == 2));
+        assert!(specs
+            .iter()
+            .any(|s| s.compression == c && s.planar && s.predictor == 2));
     }
 }
 
@@ -1258,15 +1308,87 @@ fn compare_large(which: usize) {
         Compression::Lzw
     };
     let specs = [
-        (16, UnsignedInt, 1, false, Lay::Strips(64), 2, zstd_or_lzw, 1),
-        (16, SignedInt, 1, false, Lay::Strips(40), 1, Compression::Lzw, 1),
-        (32, Float, 1, false, Lay::Strips(64), 3, Compression::Deflate, 1),
+        (
+            16,
+            UnsignedInt,
+            1,
+            false,
+            Lay::Strips(64),
+            2,
+            zstd_or_lzw,
+            1,
+        ),
+        (
+            16,
+            SignedInt,
+            1,
+            false,
+            Lay::Strips(40),
+            1,
+            Compression::Lzw,
+            1,
+        ),
+        (
+            32,
+            Float,
+            1,
+            false,
+            Lay::Strips(64),
+            3,
+            Compression::Deflate,
+            1,
+        ),
         (32, UnsignedInt, 1, false, Lay::One, 1, Compression::None, 1),
-        (8, UnsignedInt, 3, false, Lay::Strips(32), 2, Compression::Lzw, 2),
-        (16, UnsignedInt, 3, true, Lay::Strips(50), 1, Compression::Deflate, 2),
-        (16, UnsignedInt, 1, false, Lay::Tiled(64, 64), 2, Compression::Deflate, 1),
-        (8, UnsignedInt, 4, false, Lay::Strips(64), 1, Compression::Lzw, 5),
-        (64, Float, 1, false, Lay::Strips(100), 1, Compression::PackBits, 1),
+        (
+            8,
+            UnsignedInt,
+            3,
+            false,
+            Lay::Strips(32),
+            2,
+            Compression::Lzw,
+            2,
+        ),
+        (
+            16,
+            UnsignedInt,
+            3,
+            true,
+            Lay::Strips(50),
+            1,
+            Compression::Deflate,
+            2,
+        ),
+        (
+            16,
+            UnsignedInt,
+            1,
+            false,
+            Lay::Tiled(64, 64),
+            2,
+            Compression::Deflate,
+            1,
+        ),
+        (
+            8,
+            UnsignedInt,
+            4,
+            false,
+            Lay::Strips(64),
+            1,
+            Compression::Lzw,
+            5,
+        ),
+        (
+            64,
+            Float,
+            1,
+            false,
+            Lay::Strips(100),
+            1,
+            Compression::PackBits,
+            1,
+        ),
     ];
     for (depth, format, spp, planar, lay, predictor, compression, photometric) in
         specs.into_iter().skip(which).take(1)
@@ -1313,8 +1435,9 @@ fn compare_large(which: usize) {
             let old = old::read_frame_bytes_into(&file, &info, spec.order, ByteOrder::Big, &mut v)
                 .map(|()| v);
             let mut v = vec![1u8; 3];
-            let new = super::read_frame_bytes_into(&file, &info, spec.order, ByteOrder::Big, &mut v)
-                .map(|()| v);
+            let new =
+                super::read_frame_bytes_into(&file, &info, spec.order, ByteOrder::Big, &mut v)
+                    .map(|()| v);
             same(&format!("{label} stored frame"), &old, &new);
             same(
                 &format!("{label} value_range"),
@@ -1368,7 +1491,12 @@ fn a_frame_far_into_the_file_decodes_as_one_at_its_start() {
             let n = f.plane_len(Display { range: None })?;
             let mut planes = vec![vec![0u16; n]; spp_of(f.info())];
             let mut s: Vec<&mut [u16]> = planes.iter_mut().map(|v| &mut v[..]).collect();
-            f.read_into(Display { range: None }, 0, &mut s, &mut DecodeScratch::new())?;
+            f.read_into(
+                Display { range: None },
+                0,
+                &mut s,
+                &mut DecodeScratch::new(),
+            )?;
             Ok(planes)
         };
         same(&format!("{spec:?} at 2^33"), &read(&near), &read(&frame));
@@ -1377,7 +1505,11 @@ fn a_frame_far_into_the_file_decodes_as_one_at_its_start() {
             f.stored_frame_into(ByteOrder::Little, &mut out, &mut DecodeScratch::new())?;
             Ok(out)
         };
-        same(&format!("{spec:?} stored at 2^33"), &stored(&near), &stored(&frame));
+        same(
+            &format!("{spec:?} stored at 2^33"),
+            &stored(&near),
+            &stored(&frame),
+        );
         assert_eq!(
             near.borrows(Stored(spec.order), 0),
             frame.borrows(Stored(spec.order), 0)

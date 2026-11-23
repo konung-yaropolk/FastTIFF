@@ -30,8 +30,7 @@ pub use legacy::{
     read_frame_u16_into, read_frame_u8, read_frame_u8_into, read_plane_f32, read_plane_f32_into,
     read_plane_rgb_u16, read_plane_rgb_u8, read_plane_u16, read_plane_u16_into, read_plane_u8,
     read_plane_u8_into, read_planes_f32, read_planes_f32_into, read_planes_rgb_u16,
-    read_planes_rgb_u8, read_planes_u16, read_planes_u16_into, read_planes_u8,
-    read_planes_u8_into,
+    read_planes_rgb_u8, read_planes_u16, read_planes_u16_into, read_planes_u8, read_planes_u8_into,
 };
 
 /// Floor on frame size (pixels) below which a decode is never split across

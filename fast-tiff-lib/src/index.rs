@@ -742,8 +742,8 @@ impl FrameInfo {
 
     /// Bytes one sample occupies at this frame's bit depth, or an error for a
     /// depth this crate can't decode. 4-bit is *not* included: its samples are
-    /// sub-byte and take a dedicated unpacking path
-    /// (`decode::read_frame_u8`), never the byte-oriented one this feeds.
+    /// sub-byte and take a dedicated unpacking path (`decode/core.rs`'s 4-bit
+    /// reader), never the byte-oriented one this feeds.
     pub fn sample_bytes(&self) -> Result<usize> {
         match self.bits_per_sample {
             8 => Ok(1),
@@ -841,8 +841,8 @@ impl FrameInfo {
     /// bounds the image regardless of codec — no compression-ratio guesswork,
     /// and no false positives, because a well-formed frame always declares
     /// enough strips to cover its own rows (that is what makes it decodable).
-    /// Mirrors `decode::strip_dest_lens`'s row geometry, including the planar
-    /// case where a "row" is one sample plane's worth.
+    /// Mirrors the strip plan's row geometry (`decode/pieces.rs`), including
+    /// the planar case where a "row" is one sample plane's worth.
     pub(crate) fn strip_coverable_bytes(&self) -> Result<u64> {
         let sample_bytes = self.sample_bytes()? as u64;
         let per_row_samples = if self.is_planar() {

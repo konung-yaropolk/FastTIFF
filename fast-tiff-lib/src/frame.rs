@@ -304,13 +304,7 @@ impl<'a> Frame<'a> {
                 .map_err(|_| err!(TooLarge, "cannot allocate {n} samples for a plane"))?;
             out.resize(n, U::Sample::default());
         }
-        let report = units.read_into(
-            self,
-            plane,
-            &mut [&mut out[..]],
-            scratch,
-            sealed::Private,
-        )?;
+        let report = units.read_into(self, plane, &mut [&mut out[..]], scratch, sealed::Private)?;
         Ok((Pixels::Decoded(&out[..]), report))
     }
 
@@ -600,7 +594,8 @@ impl FrameInfo {
             // One strip holding the whole frame, the planes one after another.
             let plane_bytes = (self.decoded_len().ok()? / self.piece_planes()) as u64;
             return Some(
-                offset + planes.start as u64 * plane_bytes..offset + planes.end as u64 * plane_bytes,
+                offset + planes.start as u64 * plane_bytes
+                    ..offset + planes.end as u64 * plane_bytes,
             );
         }
         let sb = self.sample_bytes().ok()?;

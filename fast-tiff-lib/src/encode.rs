@@ -1260,9 +1260,10 @@ fn resolution_rational(pixel_size: f64) -> (u32, u32) {
 }
 
 /// Apply TIFF Predictor 2 (horizontal differencing) in place — the exact
-/// inverse of `decode::undo_predictor`, in little-endian (the only order this
-/// writer emits). Per row, per sample plane; iterates right-to-left so each
-/// difference reads the original (not already-differenced) left neighbor.
+/// inverse of the decoder's predictor undo (`decode/codecs.rs`), in
+/// little-endian (the only order this writer emits). Per row, per sample
+/// plane; iterates right-to-left so each difference reads the original (not
+/// already-differenced) left neighbor.
 fn apply_predictor(data: &mut [u8], row_bytes: usize, stride: usize, sample_bytes: usize) {
     let row_samples = row_bytes / sample_bytes;
     match sample_bytes {
@@ -1320,8 +1321,9 @@ fn apply_predictor(data: &mut [u8], row_bytes: usize, stride: usize, sample_byte
 }
 
 /// Apply TIFF Predictor 3 (TechNote 3 floating-point differencing) in place —
-/// the exact inverse of `decode::undo_float_predictor`. Per row: split each
-/// float into the row's `sample_bytes` byte-significance planes (MSB plane
+/// the exact inverse of the decoder's `undo_float_predictor`
+/// (`decode/codecs.rs`). Per row: split each float into the row's
+/// `sample_bytes` byte-significance planes (MSB plane
 /// first, as the spec requires regardless of file byte order), then difference
 /// the plane bytes horizontally with stride = samples per pixel, mirroring
 /// libtiff's `fpDiff`. Handles f32 (`sample_bytes == 4`) and f64 (`== 8`).
@@ -1350,8 +1352,9 @@ fn apply_float_predictor(data: &mut [u8], row_bytes: usize, stride: usize, sampl
 pub const DEFAULT_DEFLATE_LEVEL: i32 = 6;
 pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
 
-/// Compress one strip. Mirrors `decode::decompress` codec-for-codec so
-/// everything written here reads back with the sibling decoder (and libtiff,
+/// Compress one strip. Mirrors the decoder's `decompress_into`
+/// (`decode/codecs.rs`) codec-for-codec so everything written here reads back
+/// with the sibling decoder (and libtiff,
 /// ImageJ, etc.). `level` is the optional effort knob for the codecs that have
 /// one (Deflate 0..=9 clamped, Zstd 1..=22); `None` = the lib default
 /// (`DEFAULT_DEFLATE_LEVEL` / `DEFAULT_ZSTD_LEVEL`).

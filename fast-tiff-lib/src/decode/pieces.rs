@@ -214,7 +214,13 @@ pub(super) fn guard_tiles(frame: &FrameInfo, sample_bytes: usize) -> Result<Tile
         let coverable = (frame.strip_offsets.len() as u64)
             .saturating_mul(rows)
             .saturating_mul(row_bytes);
-        guard_sizes(total_len, coverable, frame.strip_bytes_total(), frame, tile_h)
+        guard_sizes(
+            total_len,
+            coverable,
+            frame.strip_bytes_total(),
+            frame,
+            tile_h,
+        )
     };
     padded().map_err(|e| {
         crate::error::Error::new(
@@ -386,7 +392,10 @@ impl<'s> Pool<'s> {
     }
 
     pub fn give(&self, buf: Vec<u8>) {
-        self.bufs.lock().unwrap_or_else(|e| e.into_inner()).push(buf);
+        self.bufs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(buf);
     }
 }
 

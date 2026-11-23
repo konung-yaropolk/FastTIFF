@@ -165,7 +165,12 @@ fn a_warm_converting_read_allocates_nothing_big() {
     let read = |planes: &mut [Vec<u8>], scratch: &mut DecodeScratch| {
         let [r, g, b] = planes else { unreachable!() };
         frame
-            .read_into(Stored(order), 0, &mut [&mut r[..], &mut g[..], &mut b[..]], scratch)
+            .read_into(
+                Stored(order),
+                0,
+                &mut [&mut r[..], &mut g[..], &mut b[..]],
+                scratch,
+            )
             .unwrap();
     };
     read(&mut planes, &mut scratch);

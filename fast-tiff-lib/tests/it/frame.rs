@@ -53,7 +53,10 @@ fn a_contiguous_multi_strip_frame_is_borrowed_from_the_source() {
     let (px, maps) = frame.read(units, 0, &mut out, &mut scratch).unwrap();
     assert!(matches!(px, Pixels::Borrowed(_)) && px.is_source());
     let file = stack.data.as_ptr_range();
-    assert!(file.contains(&(px.as_ptr() as *const u8)), "inside the mapping");
+    assert!(
+        file.contains(&(px.as_ptr() as *const u8)),
+        "inside the mapping"
+    );
     assert_eq!(&*px, &pixels[..]);
     assert_eq!(maps, DisplayMaps::One(DisplayMap::Identity));
     assert!(out.is_empty(), "a borrowed read leaves `out` as it was");
@@ -201,7 +204,12 @@ fn a_dirty_destination_comes_back_fully_written() {
         for fill in [0u16, 0xFFFF, 0xA5A5] {
             let mut out = vec![fill; pixels.len()];
             frame
-                .read_into(Display { range: None }, 0, &mut [&mut out[..]], &mut scratch)
+                .read_into(
+                    Display { range: None },
+                    0,
+                    &mut [&mut out[..]],
+                    &mut scratch,
+                )
                 .unwrap();
             assert_eq!(out, pixels, "{compression:?}, filled with {fill:#x}");
             let mut f = vec![f32::NAN; pixels.len()];
@@ -231,7 +239,10 @@ fn a_cropped_frame_holds_the_rows_its_coverage_names() {
             cols: 3..9,
             rows: 20..40,
         },
-        Crop::Sampled { rows: 0..40, step: 3 },
+        Crop::Sampled {
+            rows: 0..40,
+            step: 3,
+        },
     ] {
         let (band, cov) = frame.crop(crop.clone()).unwrap();
         let mut out = Vec::new();

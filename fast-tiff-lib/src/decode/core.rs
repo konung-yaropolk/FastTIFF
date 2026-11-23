@@ -25,8 +25,8 @@
 use super::codecs::decompress_into;
 use super::convert::{self, MinMax};
 use super::pieces::{
-    bytes_for_bits, decode_planes_into, for_strips, guard_frame_size, guard_tiles,
-    parallel_strips, sized, strip_native, Pool, StripPlan, TileGrid, MAX_DECODED_EXPANSION,
+    bytes_for_bits, decode_planes_into, for_strips, guard_frame_size, guard_tiles, parallel_strips,
+    sized, strip_native, Pool, StripPlan, TileGrid, MAX_DECODED_EXPANSION,
 };
 use super::should_parallelize;
 use super::tiles::for_tiles;
@@ -403,56 +403,81 @@ pub(crate) fn display(
             } else if fuse {
                 let width = lay.width;
                 let spp = lay.spp;
-                let conv = |native: &[u8], parts: &mut [&mut [u16]], first: usize, at: usize, n: usize| {
-                    for (i, part) in parts.iter_mut().enumerate() {
-                        convert::display_fused_pred2(
-                            native,
-                            sb,
-                            first + i,
-                            spp,
-                            width,
-                            order,
-                            signed,
-                            &mut part[at..at + n],
-                        );
-                    }
-                };
+                let conv =
+                    |native: &[u8], parts: &mut [&mut [u16]], first: usize, at: usize, n: usize| {
+                        for (i, part) in parts.iter_mut().enumerate() {
+                            convert::display_fused_pred2(
+                                native,
+                                sb,
+                                first + i,
+                                spp,
+                                width,
+                                order,
+                                signed,
+                                &mut part[at..at + n],
+                            );
+                        }
+                    };
                 convert_planes(&src, &lay, None, first, outs, 1, false, false, &pool, &conv)?;
             } else {
-                let conv = |native: &[u8], parts: &mut [&mut [u16]], first: usize, at: usize, n: usize| {
-                    for (i, part) in parts.iter_mut().enumerate() {
-                        let (base, stride) = lay.locate(first + i);
-                        let d = &mut part[at..at + n];
-                        if sb == 2 {
-                            convert::display16(native, base, stride, order, signed, d);
-                        } else {
-                            convert::display8(native, base, stride, signed, d);
+                let conv =
+                    |native: &[u8], parts: &mut [&mut [u16]], first: usize, at: usize, n: usize| {
+                        for (i, part) in parts.iter_mut().enumerate() {
+                            let (base, stride) = lay.locate(first + i);
+                            let d = &mut part[at..at + n];
+                            if sb == 2 {
+                                convert::display16(native, base, stride, order, signed, d);
+                            } else {
+                                convert::display8(native, base, stride, signed, d);
+                            }
                         }
-                    }
-                };
-                convert_planes(&src, &lay, grid.as_ref(), first, outs, 1, true, false, &pool, &conv)?;
+                    };
+                convert_planes(
+                    &src,
+                    &lay,
+                    grid.as_ref(),
+                    first,
+                    outs,
+                    1,
+                    true,
+                    false,
+                    &pool,
+                    &conv,
+                )?;
             }
             Ok(DisplayMaps::One(map))
         }
         _ => {
             let format = info.sample_format;
             if let Some(range) = range {
-                let conv = |native: &[u8], parts: &mut [&mut [u16]], first: usize, at: usize, n: usize| {
-                    for (i, part) in parts.iter_mut().enumerate() {
-                        let (base, stride) = lay.locate(first + i);
-                        convert::display_wide(
-                            native,
-                            base,
-                            stride,
-                            order,
-                            format,
-                            sb,
-                            range,
-                            &mut part[at..at + n],
-                        );
-                    }
-                };
-                convert_planes(&src, &lay, grid.as_ref(), first, outs, 1, true, true, &pool, &conv)?;
+                let conv =
+                    |native: &[u8], parts: &mut [&mut [u16]], first: usize, at: usize, n: usize| {
+                        for (i, part) in parts.iter_mut().enumerate() {
+                            let (base, stride) = lay.locate(first + i);
+                            convert::display_wide(
+                                native,
+                                base,
+                                stride,
+                                order,
+                                format,
+                                sb,
+                                range,
+                                &mut part[at..at + n],
+                            );
+                        }
+                    };
+                convert_planes(
+                    &src,
+                    &lay,
+                    grid.as_ref(),
+                    first,
+                    outs,
+                    1,
+                    true,
+                    true,
+                    &pool,
+                    &conv,
+                )?;
                 return Ok(DisplayMaps::One(DisplayMap::Linear {
                     lo: range.0,
                     hi: range.1,
@@ -461,7 +486,15 @@ pub(crate) fn display(
             // No range: each plane is ranged to its own values, which have to
             // be known before any of it is converted. A chunky frame is
             // assembled once for all its planes, a planar one plane by plane.
-            let mut maps = Vec::with_capacity(outs.len());
+            // One plane, one map: kept out of a `Vec` so a single-plane read
+            // allocates nothing.
+            let mut one = None;
+            let mut maps = Vec::new();
+            let mut record = |map: DisplayMap| match one.replace(map) {
+                None => {}
+                Some(earlier) if maps.is_empty() => maps.extend([earlier, map]),
+                Some(_) => maps.push(map),
+            };
             let auto = |bytes: &[u8], base: usize, stride: usize, out: &mut [u16]| {
                 let mut mm = MinMax::new();
                 mm.fold_wide(bytes, base, stride, lay.n_pixels, order, format, sb);
@@ -485,19 +518,18 @@ pub(crate) fn display(
             if lay.planar {
                 for (i, out) in outs.iter_mut().enumerate() {
                     let bytes = assemble(&src, &lay, grid.as_ref(), first + i, native, &pool)?;
-                    maps.push(auto(bytes, 0, 1, out));
+                    record(auto(bytes, 0, 1, out));
                 }
             } else {
                 let bytes = assemble(&src, &lay, grid.as_ref(), 0, native, &pool)?;
                 for (i, out) in outs.iter_mut().enumerate() {
                     let (base, stride) = lay.locate(first + i);
-                    maps.push(auto(bytes, base, stride, out));
+                    record(auto(bytes, base, stride, out));
                 }
             }
-            Ok(if maps.len() == 1 {
-                DisplayMaps::One(maps[0])
-            } else {
-                DisplayMaps::PerPlane(maps)
+            Ok(match (one, maps.is_empty()) {
+                (Some(map), true) => DisplayMaps::One(map),
+                _ => DisplayMaps::PerPlane(maps),
             })
         }
     }
@@ -524,7 +556,15 @@ fn assemble<'n>(
         .checked_mul(lay.px_bytes())
         .context(ErrorKind::TooLarge, "frame size overflows")?;
     let dest = sized(native, plane_bytes)?;
-    assemble_into(src, lay, grid, piece..piece + 1, dest, pool, &|_: &mut [u8]| {})?;
+    assemble_into(
+        src,
+        lay,
+        grid,
+        piece..piece + 1,
+        dest,
+        pool,
+        &|_: &mut [u8]| {},
+    )?;
     Ok(&native[..plane_bytes])
 }
 
@@ -607,10 +647,29 @@ pub(crate) fn file(
     let conv = |native: &[u8], parts: &mut [&mut [f32]], first: usize, at: usize, n: usize| {
         for (i, part) in parts.iter_mut().enumerate() {
             let (base, stride) = lay.locate(first + i);
-            convert::file_f32(native, base, stride, bits, format, order, &mut part[at..at + n]);
+            convert::file_f32(
+                native,
+                base,
+                stride,
+                bits,
+                format,
+                order,
+                &mut part[at..at + n],
+            );
         }
     };
-    convert_planes(&src, &lay, grid.as_ref(), first, outs, 1, true, true, &pool, &conv)
+    convert_planes(
+        &src,
+        &lay,
+        grid.as_ref(),
+        first,
+        outs,
+        1,
+        true,
+        true,
+        &pool,
+        &conv,
+    )
 }
 
 /// Bytes a [`Stored`](crate::units::Stored) plane holds.
@@ -686,7 +745,18 @@ pub(crate) fn stored(
             );
         }
     };
-    convert_planes(&src, &lay, grid.as_ref(), first, outs, sb, true, false, &pool, &conv)
+    convert_planes(
+        &src,
+        &lay,
+        grid.as_ref(),
+        first,
+        outs,
+        sb,
+        true,
+        false,
+        &pool,
+        &conv,
+    )
 }
 
 /// The checks the 4-bit reader runs before it sizes anything: geometry that
@@ -967,7 +1037,11 @@ pub(crate) fn borrow_file<'a>(src: Src<'a, '_>, plane: usize) -> Option<&'a [f32
 
 /// A [`Stored`](crate::units::Stored)`(want)` plane borrowed: any whole-byte
 /// depth, in the byte order it is stored in.
-pub(crate) fn borrow_stored<'a>(src: Src<'a, '_>, want: ByteOrder, plane: usize) -> Option<&'a [u8]> {
+pub(crate) fn borrow_stored<'a>(
+    src: Src<'a, '_>,
+    want: ByteOrder,
+    plane: usize,
+) -> Option<&'a [u8]> {
     let sb = bytes_for_bits(src.info.bits_per_sample).ok()?;
     if sb > 1 && want != src.order {
         return None;
@@ -1001,15 +1075,16 @@ impl Inks<'_, '_, '_> {
         let pool = Pool::new(pieces);
         if !lay.planar {
             let spp = lay.spp;
-            let conv = |native: &[u8], parts: &mut [&mut [T]], first: usize, at: usize, n: usize| {
-                for (j, px) in native.chunks_exact(spp * sb).take(n).enumerate() {
-                    let k = ink(&px[3 * sb..4 * sb]);
-                    for (i, part) in parts.iter_mut().enumerate() {
-                        let c = first + i;
-                        part[at + j] = comp(ink(&px[c * sb..(c + 1) * sb]), k);
+            let conv =
+                |native: &[u8], parts: &mut [&mut [T]], first: usize, at: usize, n: usize| {
+                    for (j, px) in native.chunks_exact(spp * sb).take(n).enumerate() {
+                        let k = ink(&px[3 * sb..4 * sb]);
+                        for (i, part) in parts.iter_mut().enumerate() {
+                            let c = first + i;
+                            part[at + j] = comp(ink(&px[c * sb..(c + 1) * sb]), k);
+                        }
                     }
-                }
-            };
+                };
             // `convert_planes` takes chunky planes from `first` on; the ink
             // offsets above are absolute, so start the walk at plane 0 and let
             // `conv` see the real first plane through the closure argument.
@@ -1040,7 +1115,15 @@ impl Inks<'_, '_, '_> {
                     .checked_mul(4)
                     .context(ErrorKind::TooLarge, "frame size overflows")?;
                 let dest = sized(native, total)?;
-                assemble_into(&src, &lay, grid.as_ref(), 0..4, dest, &pool, &|_: &mut [u8]| {})?;
+                assemble_into(
+                    &src,
+                    &lay,
+                    grid.as_ref(),
+                    0..4,
+                    dest,
+                    &pool,
+                    &|_: &mut [u8]| {},
+                )?;
                 &native[..total]
             }
         };

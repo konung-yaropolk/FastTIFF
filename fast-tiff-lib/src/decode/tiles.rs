@@ -70,54 +70,55 @@ pub(super) fn for_tiles<T: Send>(
 
     // `parts` hold the band's rows from image row `base_row` on: the whole
     // planes when bands run one after another, a band each when in parallel.
-    let band = |ty: usize, buf: &mut Vec<u8>, parts: &mut [&mut [T]], base_row: usize| -> Result<()> {
-        let rows = tile_h.min(height - ty * tile_h);
-        for tx in 0..across {
-            let index = plane * (across * down) + ty * across + tx;
-            let (offset, len) = (info.strip_offsets[index], info.strip_byte_counts[index]);
-            let raw = src.bytes.piece(offset, len).map_err(|_| {
-                crate::error::err!(
-                    Malformed,
-                    "tile {index} at offset {offset} (len {len}) out of file bounds"
-                )
-            })?;
-            let tile = sized(buf, tile_bytes)?;
-            // Zero first: a tile whose data runs short leaves the rest of its
-            // rectangle blank rather than showing the previous tile.
-            tile.fill(0);
-            if decompress_into(raw, info.compression, tile)? == 0 {
-                bail!(
-                    Malformed,
-                    "tile {index} decoded to nothing ({len} bytes at offset {offset})"
-                );
+    let band =
+        |ty: usize, buf: &mut Vec<u8>, parts: &mut [&mut [T]], base_row: usize| -> Result<()> {
+            let rows = tile_h.min(height - ty * tile_h);
+            for tx in 0..across {
+                let index = plane * (across * down) + ty * across + tx;
+                let (offset, len) = (info.strip_offsets[index], info.strip_byte_counts[index]);
+                let raw = src.bytes.piece(offset, len).map_err(|_| {
+                    crate::error::err!(
+                        Malformed,
+                        "tile {index} at offset {offset} (len {len}) out of file bounds"
+                    )
+                })?;
+                let tile = sized(buf, tile_bytes)?;
+                // Zero first: a tile whose data runs short leaves the rest of its
+                // rectangle blank rather than showing the previous tile.
+                tile.fill(0);
+                if decompress_into(raw, info.compression, tile)? == 0 {
+                    bail!(
+                        Malformed,
+                        "tile {index} decoded to nothing ({len} bytes at offset {offset})"
+                    );
+                }
+                if undo_pred && info.predictor != 1 {
+                    undo_predictor_rows(
+                        tile,
+                        tile_w,
+                        spp,
+                        planar,
+                        info.predictor,
+                        sample_bytes,
+                        src.order,
+                    )?;
+                }
+                // The part of the tile that lies inside the image.
+                let x0 = tx * tile_w;
+                let keep = tile_w.min(width - x0);
+                for r in 0..rows {
+                    let at = r * tile_row_bytes;
+                    seg(
+                        &tile[at..at + keep * px_bytes],
+                        parts,
+                        first,
+                        (ty * tile_h + r - base_row) * width + x0,
+                        keep,
+                    );
+                }
             }
-            if undo_pred && info.predictor != 1 {
-                undo_predictor_rows(
-                    tile,
-                    tile_w,
-                    spp,
-                    planar,
-                    info.predictor,
-                    sample_bytes,
-                    src.order,
-                )?;
-            }
-            // The part of the tile that lies inside the image.
-            let x0 = tx * tile_w;
-            let keep = tile_w.min(width - x0);
-            for r in 0..rows {
-                let at = r * tile_row_bytes;
-                seg(
-                    &tile[at..at + keep * px_bytes],
-                    parts,
-                    first,
-                    (ty * tile_h + r - base_row) * width + x0,
-                    keep,
-                );
-            }
-        }
-        Ok(())
-    };
+            Ok(())
+        };
 
     if !parallel || down <= 1 {
         let mut buf = pool.take();

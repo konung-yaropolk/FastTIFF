@@ -10,7 +10,7 @@ This looks at the comments of source files and manifests, and at the whole of
 Markdown files. It collects every token that looks like a path to a file in the
 repository, and reports the ones that resolve to nothing. A reference resolves
 if it names a tracked file or directory relative to the file it is in, to that
-file's crate, or to the repository root. A bare file name (`decode.rs`)
+file's crate, or to the repository root. A bare file name (`encode.rs`)
 resolves if any tracked file has that name.
 
 Standard library only, so it runs wherever CI has a Python 3.

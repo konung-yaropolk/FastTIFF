@@ -468,4 +468,3 @@ fn undo_float_predictor(
         }
     });
 }
-
