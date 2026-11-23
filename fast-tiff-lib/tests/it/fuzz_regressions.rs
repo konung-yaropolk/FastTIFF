@@ -120,6 +120,94 @@ fn exercise(data: &[u8]) {
             }
         }
     }
+
+    // The Frame API over the same frame: every unit, plane and crop, through
+    // ONE scratch kept dirty across all of them and into destinations that
+    // already hold something, so a decode that read a buffer before writing
+    // it, or trusted what a warm scratch held, would show up here.
+    frame_reads(&stack);
+}
+
+/// Every [`fast_tiff_lib::Frame`] read of frame 0 and of its crops.
+fn frame_reads(stack: &fast_tiff_lib::TiffStack) {
+    use fast_tiff_lib::units::{CmykRgb16, CmykRgb8, Display, File, Stored};
+    use fast_tiff_lib::{ByteOrder, Crop, DecodeScratch, Frame};
+
+    fn all<U: fast_tiff_lib::units::Units>(f: &Frame<'_>, units: U, s: &mut DecodeScratch) {
+        for plane in [0usize, 1, 3, 7] {
+            let mut out = vec![U::Sample::default(); 3];
+            let _ = f.read(units, plane, &mut out, s);
+        }
+        let Ok(n) = f.plane_len(units) else { return };
+        let planes = f.planes(units).min(4);
+        let mut bufs = vec![vec![U::Sample::default(); n]; planes];
+        let mut slices: Vec<&mut [U::Sample]> = bufs.iter_mut().map(|v| &mut v[..]).collect();
+        let _ = f.read_into(units, 0, &mut slices, s);
+        if planes > 1 {
+            let _ = f.read_into(units, 1, &mut slices[1..], s);
+        }
+    }
+    fn every_unit(f: &Frame<'_>, s: &mut DecodeScratch) {
+        all(f, Display { range: None }, s);
+        all(
+            f,
+            Display {
+                range: Some((-3.0, 70000.0)),
+            },
+            s,
+        );
+        all(f, File, s);
+        all(f, Stored(ByteOrder::Little), s);
+        all(f, Stored(ByteOrder::Big), s);
+        all(f, CmykRgb8, s);
+        all(f, CmykRgb16, s);
+        let _ = f.value_range(s);
+        if let Ok(n) = f.stored_frame_len() {
+            let mut out = vec![0xA5u8; n];
+            let _ = f.stored_frame_into(ByteOrder::Big, &mut out, s);
+        }
+        f.touch();
+    }
+
+    let Ok(frame) = stack.frame(0) else { return };
+    let mut scratch = DecodeScratch::new();
+    every_unit(&frame, &mut scratch);
+    let max = u32::MAX;
+    let backwards = std::ops::Range {
+        start: 7u32,
+        end: 2,
+    };
+    for crop in [
+        Crop::Rows(0..1),
+        Crop::Rows(3..9),
+        Crop::Rows(max - 1..max),
+        Crop::Rows(backwards.clone()),
+        Crop::Region {
+            cols: 2..9,
+            rows: 3..7,
+        },
+        Crop::Region {
+            cols: 0..max,
+            rows: backwards.clone(),
+        },
+        Crop::Sampled {
+            rows: 0..max,
+            step: 2,
+        },
+        Crop::Sampled {
+            rows: backwards,
+            step: max,
+        },
+    ] {
+        if let Ok((band, coverage)) = frame.crop(crop) {
+            every_unit(&band, &mut scratch);
+            for probe in [0u32, 1, coverage.first_row, max] {
+                if let Some(row) = coverage.decoded_row_of(probe) {
+                    assert!(row < band.info().height, "decoded_row_of({probe}) = {row}");
+                }
+            }
+        }
+    }
 }
 
 #[test]

@@ -1291,28 +1291,12 @@ impl TiffStack {
     /// which is cheap on Linux but costs real time on Windows; calling this
     /// from a background thread (e.g. a decode-ahead worker) for the *next*
     /// frame absorbs those faults off the latency-critical path. Purely a
-    /// performance hint — safe to skip, safe to repeat.
+    /// performance hint — safe to skip, safe to repeat. [`Frame::touch`] by
+    /// another name.
+    ///
+    /// [`Frame::touch`]: crate::Frame::touch
     pub fn prefetch_frame(&self, frame: &FrameInfo) {
-        const PAGE: usize = 4096;
-        for (&off, &len) in frame
-            .strip_offsets
-            .iter()
-            .zip(frame.strip_byte_counts.iter())
-        {
-            let start = off as usize;
-            let end = start.saturating_add(len as usize).min(self.data.len());
-            let Some(strip) = self.data.get(start..end) else {
-                continue;
-            };
-            let mut i = 0;
-            while i < strip.len() {
-                std::hint::black_box(strip[i]);
-                i += PAGE;
-            }
-            if let Some(&last) = strip.last() {
-                std::hint::black_box(last);
-            }
-        }
+        crate::Frame::new(&self.data, frame, self.byte_order).touch();
     }
 }
 
