@@ -56,7 +56,6 @@ fn a_contiguous_multi_strip_frame_is_borrowed_from_the_source() {
     assert!(file.contains(&(px.as_ptr() as *const u8)), "inside the mapping");
     assert_eq!(&*px, &pixels[..]);
     assert_eq!(maps, DisplayMaps::One(DisplayMap::Identity));
-    drop(px);
     assert!(out.is_empty(), "a borrowed read leaves `out` as it was");
     assert_eq!(scratch.held_bytes(), 0, "and needs no scratch");
     // The stored bytes borrow too, in the file's byte order.

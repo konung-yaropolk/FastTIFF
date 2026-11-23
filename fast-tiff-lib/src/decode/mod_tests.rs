@@ -796,3 +796,28 @@ fn a_short_strip_fails_before_its_predictor_runs() {
         crate::ErrorKind::Malformed
     );
 }
+
+/// The conversions round with `x + 0.5` in `f64`, truncated, instead of
+/// calling `roundf`: the same answer for every value they meet (checked
+/// exhaustively over every `f32` in `0.0..=65535.0` when it was written), here
+/// at and either side of every half.
+#[test]
+fn the_rounding_shortcut_is_round_exactly() {
+    use super::convert::{round_u16, round_u8};
+    for i in 0..=131_070u32 {
+        let half = i as f32 * 0.5;
+        for x in [half.next_down(), half, half.next_up()] {
+            if x < 0.0 || x > 65535.0 {
+                continue;
+            }
+            assert_eq!(round_u16(x), x.round() as u16, "{x:?}");
+            if x <= 255.0 {
+                assert_eq!(round_u8(x), x.round() as u8, "{x:?}");
+            }
+        }
+    }
+    for x in [-0.0f32, f32::NAN] {
+        assert_eq!(round_u16(x), x.round() as u16);
+        assert_eq!(round_u8(x), x.round() as u8);
+    }
+}

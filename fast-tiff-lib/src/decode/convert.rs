@@ -164,24 +164,6 @@ pub(super) fn sample_f32_64(chunk: &[u8], file_order: ByteOrder, format: SampleF
     }
 }
 
-/// Reads one wide (32- or 64-bit) sample as `f32`, dispatching on `sample_bytes`
-/// (4 or 8). The width is loop-invariant at every call site, so the branch is
-/// free in practice; keeping the two readers separate leaves the 32-bit hot
-/// loops byte-for-byte unchanged.
-#[inline]
-pub(super) fn wide_sample_f32(
-    chunk: &[u8],
-    file_order: ByteOrder,
-    format: SampleFormat,
-    sample_bytes: usize,
-) -> f32 {
-    if sample_bytes == 8 {
-        sample_f32_64(chunk, file_order, format)
-    } else {
-        sample_f32(chunk, file_order, format)
-    }
-}
-
 /// Smallest and largest finite values, folded in order. `(0, 1)` when there
 /// is no usable range — empty, all-NaN or constant data — so nothing
 /// downstream divides by a zero-width window.
@@ -219,17 +201,48 @@ impl MinMax {
         format: SampleFormat,
         sample_bytes: usize,
     ) {
-        if stride == 1 {
-            for chunk in src[base * sample_bytes..(base + n) * sample_bytes].chunks_exact(sample_bytes)
-            {
-                self.push(wide_sample_f32(chunk, order, format, sample_bytes));
-            }
-        } else {
-            for i in 0..n {
-                let off = (base + i * stride) * sample_bytes;
-                self.push(wide_sample_f32(&src[off..], order, format, sample_bytes));
+        struct Fold<'s, 'm> {
+            src: &'s [u8],
+            base: usize,
+            stride: usize,
+            n: usize,
+            mm: &'m mut MinMax,
+        }
+        impl WideKernel for Fold<'_, '_> {
+            type Out = ();
+            #[inline(always)]
+            fn run<const N: usize>(self, read: impl Fn(&[u8; N]) -> f32 + Copy) {
+                let Fold {
+                    src,
+                    base,
+                    stride,
+                    n,
+                    mm,
+                } = self;
+                if stride == 1 {
+                    for c in src[base * N..(base + n) * N].as_chunks::<N>().0 {
+                        mm.push(read(c));
+                    }
+                } else {
+                    for i in 0..n {
+                        let off = (base + i * stride) * N;
+                        mm.push(read(src[off..off + N].try_into().unwrap()));
+                    }
+                }
             }
         }
+        with_wide(
+            sample_bytes,
+            format,
+            order,
+            Fold {
+                src,
+                base,
+                stride,
+                n,
+                mm: self,
+            },
+        )
     }
 
     pub fn range(self) -> (f32, f32) {
@@ -251,6 +264,59 @@ pub(super) fn minmax_f32(values: &[f32]) -> (f32, f32) {
     m.range()
 }
 
+/// A conversion over wide samples, run with a reader of one sample that
+/// [`with_wide`] has specialised for the width, format and byte order: the
+/// choice made once per piece rather than once per sample, as
+/// [`contiguous_to_f32`] makes it.
+pub(super) trait WideKernel {
+    type Out;
+    fn run<const N: usize>(self, read: impl Fn(&[u8; N]) -> f32 + Copy) -> Self::Out;
+}
+
+/// Run `kernel` with the reader for `sample_bytes`-wide samples of `format` in
+/// `order` — exactly [`sample_f32`] and [`sample_f32_64`]'s reading, one arm each.
+#[inline(always)]
+pub(super) fn with_wide<K: WideKernel>(
+    sample_bytes: usize,
+    format: SampleFormat,
+    order: ByteOrder,
+    kernel: K,
+) -> K::Out {
+    use ByteOrder::{Big, Little};
+    use SampleFormat::{Float, SignedInt, UnsignedInt};
+    match (sample_bytes, format, order) {
+        (8, Float, Little) => kernel.run::<8>(|c| f64::from_le_bytes(*c) as f32),
+        (8, Float, Big) => kernel.run::<8>(|c| f64::from_be_bytes(*c) as f32),
+        (8, SignedInt, Little) => kernel.run::<8>(|c| i64::from_le_bytes(*c) as f32),
+        (8, SignedInt, Big) => kernel.run::<8>(|c| i64::from_be_bytes(*c) as f32),
+        (8, UnsignedInt, Little) => kernel.run::<8>(|c| u64::from_le_bytes(*c) as f32),
+        (8, UnsignedInt, Big) => kernel.run::<8>(|c| u64::from_be_bytes(*c) as f32),
+        (_, Float, Little) => kernel.run::<4>(|c| f32::from_le_bytes(*c)),
+        (_, Float, Big) => kernel.run::<4>(|c| f32::from_be_bytes(*c)),
+        (_, SignedInt, Little) => kernel.run::<4>(|c| i32::from_le_bytes(*c) as f32),
+        (_, SignedInt, Big) => kernel.run::<4>(|c| i32::from_be_bytes(*c) as f32),
+        (_, UnsignedInt, Little) => kernel.run::<4>(|c| u32::from_le_bytes(*c) as f32),
+        (_, UnsignedInt, Big) => kernel.run::<4>(|c| u32::from_be_bytes(*c) as f32),
+    }
+}
+
+/// `x.round() as u16` for an `x` in `0.0..=65535.0` (or NaN), without the
+/// call to `roundf` that costs more than the rest of a conversion.
+///
+/// Exact: `x` has at most 24 significant bits below 2^16, so `x + 0.5` is
+/// exact in `f64`, and truncating a non-negative value is `floor`, which is
+/// what round-half-away-from-zero is for one. NaN goes to 0 either way.
+#[inline(always)]
+pub(super) fn round_u16(x: f32) -> u16 {
+    (x as f64 + 0.5) as u16
+}
+
+/// [`round_u16`] for an `x` in `0.0..=255.0`.
+#[inline(always)]
+pub(super) fn round_u8(x: f32) -> u8 {
+    (x as f64 + 0.5) as u8
+}
+
 /// Display wide: each 32- or 64-bit sample read as `f32`, then rescaled
 /// linearly so `lo` maps to 0 and `hi` to 65535, clamped outside.
 #[allow(clippy::too_many_arguments)]
@@ -264,17 +330,60 @@ pub(super) fn display_wide(
     (lo, hi): (f32, f32),
     dst: &mut [u16],
 ) {
-    let span = (hi - lo).max(f32::EPSILON);
-    for (i, o) in dst.iter_mut().enumerate() {
-        let v = wide_sample_f32(
-            &src[(base + i * stride) * sample_bytes..],
-            order,
-            format,
-            sample_bytes,
-        );
-        let t = ((v - lo) / span).clamp(0.0, 1.0);
-        *o = (t * 65535.0).round() as u16;
+    struct Scale<'s, 'd> {
+        src: &'s [u8],
+        base: usize,
+        stride: usize,
+        lo: f32,
+        span: f32,
+        dst: &'d mut [u16],
     }
+    impl WideKernel for Scale<'_, '_> {
+        type Out = ();
+        #[inline(always)]
+        fn run<const N: usize>(self, read: impl Fn(&[u8; N]) -> f32 + Copy) {
+            let Scale {
+                src,
+                base,
+                stride,
+                lo,
+                span,
+                dst,
+            } = self;
+            let scale = |v: f32| {
+                let t = ((v - lo) / span).clamp(0.0, 1.0);
+                round_u16(t * 65535.0)
+            };
+            if stride == 1 {
+                let n = dst.len();
+                for (o, c) in dst
+                    .iter_mut()
+                    .zip(src[base * N..(base + n) * N].as_chunks::<N>().0)
+                {
+                    *o = scale(read(c));
+                }
+            } else {
+                for (i, o) in dst.iter_mut().enumerate() {
+                    let off = (base + i * stride) * N;
+                    *o = scale(read(src[off..off + N].try_into().unwrap()));
+                }
+            }
+        }
+    }
+    let span = (hi - lo).max(f32::EPSILON);
+    with_wide(
+        sample_bytes,
+        format,
+        order,
+        Scale {
+            src,
+            base,
+            stride,
+            lo,
+            span,
+            dst,
+        },
+    )
 }
 
 /// Convert a run of contiguous native samples to `f32` file units. `src`

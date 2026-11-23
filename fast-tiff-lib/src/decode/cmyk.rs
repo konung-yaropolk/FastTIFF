@@ -28,6 +28,7 @@
 //! [`Stored`]: crate::units::Stored
 //! [`Display`]: crate::units::Display
 
+use super::convert::{round_u16, round_u8};
 use super::core::{Inks, Src};
 use crate::error::{bail, Result};
 use crate::index::FrameInfo;
@@ -75,7 +76,7 @@ pub(crate) fn rgb8(
     }
     Inks { src, scratch }.convert(first, outs, &|b| b[0] as u32, &|ink, black| {
         let black = black as f32 / 255.0;
-        (ink_to_component(ink as f32 / 255.0, black) * 255.0).round() as u8
+        round_u8(ink_to_component(ink as f32 / 255.0, black) * 255.0)
     })
 }
 
@@ -99,6 +100,6 @@ pub(crate) fn rgb16(
     };
     Inks { src, scratch }.convert(first, outs, ink, &|ink, black| {
         let black = black as f32 / FULL;
-        (ink_to_component(ink as f32 / FULL, black) * FULL).round() as u16
+        round_u16(ink_to_component(ink as f32 / FULL, black) * FULL)
     })
 }

@@ -35,7 +35,10 @@ use std::path::Path;
 
 /// What a result is, for comparing: the value, or the kind of error.
 fn outcome<T: Clone>(r: &Result<T>) -> std::result::Result<T, ErrorKind> {
-    r.as_ref().map(Clone::clone).map_err(|e| e.kind())
+    match r {
+        Ok(v) => Ok(v.clone()),
+        Err(e) => Err(e.kind()),
+    }
 }
 
 fn same<T: PartialEq + Debug + Clone>(label: &str, old: &Result<T>, new: &Result<T>) {
@@ -396,7 +399,7 @@ fn compare_frame_api(frame: &Frame<'_>, file: &[u8], info: &FrameInfo, order: By
             same(&format!("{l} read {p}"), &old, &new);
             assert_eq!(
                 frame.borrows(units, p),
-                matches!(new, Ok(_)) && {
+                new.is_ok() && {
                     let mut o = Vec::new();
                     frame
                         .read(units, p, &mut o, &mut scratch)
@@ -588,7 +591,7 @@ fn compare_with_crops(file: &[u8], info: &FrameInfo, order: ByteOrder, label: &s
     let max = u32::MAX;
     #[allow(clippy::reversed_empty_ranges)]
     let rows: [std::ops::Range<u32>; 6] = [0..1, 0..max, 3..9, max - 1..max, 7..2, max..0];
-    for r in rows.iter().cloned() {
+    for r in rows.clone() {
         let old = info.crop_rows(r.clone());
         let new = frame.crop(Crop::Rows(r.clone()));
         match (old, new) {
@@ -605,7 +608,7 @@ fn compare_with_crops(file: &[u8], info: &FrameInfo, order: ByteOrder, label: &s
     #[allow(clippy::reversed_empty_ranges)]
     let regions: [(std::ops::Range<u32>, std::ops::Range<u32>); 4] =
         [(0..1, 0..1), (0..max, 0..max), (2..9, 3..7), (9..2, 7..3)];
-    for (c, r) in regions.iter().cloned() {
+    for (c, r) in regions.clone() {
         let old = info.crop(c.clone(), r.clone());
         let new = frame.crop(Crop::Region {
             cols: c.clone(),
@@ -628,7 +631,7 @@ fn compare_with_crops(file: &[u8], info: &FrameInfo, order: ByteOrder, label: &s
     }
     #[allow(clippy::reversed_empty_ranges)]
     let sampled: [std::ops::Range<u32>; 4] = [0..1, 0..max, 3..9, 6..1];
-    for r in sampled.iter().cloned() {
+    for r in sampled.clone() {
         for step in [0u32, 1, 2, 7, max] {
             let old = info.crop_rows_step(r.clone(), step);
             let new = frame.crop(Crop::Sampled {
@@ -787,7 +790,7 @@ fn sample_bytes_of(spec: &Spec, i: usize) -> Vec<u8> {
     let mut x = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
     x ^= x >> 29;
     let smooth = (i % 97) as u64 * 3 + (i / 97) as u64;
-    let v = if i % 5 == 0 { x } else { smooth.wrapping_mul(0x0101_0101_0101) };
+    let v = if i.is_multiple_of(5) { x } else { smooth.wrapping_mul(0x0101_0101_0101) };
     let le: Vec<u8> = match (spec.bits, spec.format) {
         (32, SampleFormat::Float) => {
             let f = match i % 23 {
@@ -992,7 +995,7 @@ fn build(spec: &Spec) -> (Vec<u8>, FrameInfo) {
                         predict(&mut tile, tw);
                         let packed = compress(&tile, spec.compression, tile_row);
                         // Align so borrows can be tested; tiles are never borrowed.
-                        while file.len() % 8 != 0 {
+                        while !file.len().is_multiple_of(8) {
                             file.push(0);
                         }
                         push(&mut file, &packed, 0, 0);
@@ -1028,7 +1031,7 @@ fn build(spec: &Spec) -> (Vec<u8>, FrameInfo) {
                         let packed = compress(&strip, spec.compression, row_bytes);
                         let gap = if k > 0 { gap } else { 0 };
                         if lay != Lay::Misaligned {
-                            while file.len() % 8 != 0 && gap == 0 && extra == 0 {
+                            while !file.len().is_multiple_of(8) && gap == 0 && extra == 0 {
                                 file.push(0);
                             }
                         }
