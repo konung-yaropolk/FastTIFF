@@ -708,6 +708,11 @@ fn tifs_in(dir: &Path) -> Vec<std::path::PathBuf> {
     files
 }
 
+/// Regressions the old decoder is too slow on to sweep: a tile claiming
+/// 393232 rows over a 36-row image, which it decompressed, zero-filled and
+/// un-predicted in full for every read.
+const SLOW_FOR_THE_OLD_DECODER: &[&str] = &["slow-tall-tile.tif"];
+
 /// Every checked-in TIFF in `dir`: each frame (the first two) read every way
 /// and through every crop, and the whole-stack readers. Parallel decoding is
 /// tried both ways on a frame big enough for it to matter.
@@ -720,6 +725,23 @@ fn compare_fixtures(dir: &str) -> usize {
             continue;
         };
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if SLOW_FOR_THE_OLD_DECODER.contains(&name.as_str()) {
+            // The old decoder takes seconds a read here in a debug build, so
+            // only the readers that reach its tiles, once each.
+            let (b, f, o) = (&stack.data[..], &stack.frames[0], stack.byte_order);
+            same(
+                &format!("{name} read_planes_u8"),
+                &old::read_planes_u8(b, f, o),
+                &super::read_planes_u8(b, f, o),
+            );
+            same(
+                &format!("{name} read_planes_u16"),
+                &old::read_planes_u16(b, f, o, None),
+                &super::read_planes_u16(b, f, o, None),
+            );
+            seen += 1;
+            continue;
+        }
         for (i, info) in stack.frames.iter().enumerate().take(2) {
             let big = info.pixel_count().is_ok_and(|n| n >= PARALLEL_MIN_PIXELS);
             for parallel in [false, true] {
