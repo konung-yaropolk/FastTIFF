@@ -70,43 +70,7 @@ mod work {
     pub(super) const WARP: f64 = 6.0;
 }
 
-/// The measurement image for timepoint `t` into `out`: one channel's plane, or
-/// the mean of all of them. `scratch` and `sum` are the mean's working space,
-/// kept by the caller so that a batch after the first allocates nothing.
-fn measurement(
-    host: &mut dyn HostContext,
-    channel: Option<usize>,
-    channels: usize,
-    t: usize,
-    out: &mut Vec<f32>,
-    scratch: &mut Vec<f32>,
-    sum: &mut Vec<f64>,
-) -> Result<(), PluginError> {
-    match channel {
-        Some(c) => host.read_plane_f32(Plane::new(c, 0, t), out),
-        // The mean of one channel is the channel.
-        None if channels <= 1 => host.read_plane_f32(Plane::new(0, 0, t), out),
-        None => {
-            // The mean across channels. Accumulated in f64 so a 16-bit stack
-            // with many channels cannot lose its low bits to repeated rounding.
-            for c in 0..channels {
-                host.read_plane_f32(Plane::new(c, 0, t), scratch)?;
-                if c == 0 {
-                    sum.clear();
-                    sum.extend(scratch.iter().map(|&v| v as f64));
-                } else {
-                    for (a, &v) in sum.iter_mut().zip(scratch.iter()) {
-                        *a += v as f64;
-                    }
-                }
-            }
-            let n = channels as f64;
-            out.clear();
-            out.extend(sum.iter().map(|&v| (v / n) as f32));
-            Ok(())
-        }
-    }
-}
+use crate::shared::measurement::measurement;
 
 /// A registration that could not start, or could not finish, as the run's
 /// error.
@@ -191,7 +155,7 @@ impl Plugin for TurboReg {
         // frames of its target first where it builds one, then the stack.
         // Only a batch is ever held; the buffers are the next batch's too.
         let mut batch: Vec<Vec<f32>> = Vec::new();
-        let (mut scratch, mut sum) = (Vec::new(), Vec::new());
+        let (mut scratch, mut sum) = (Vec::new(), Default::default());
         let mut done = 0.0;
         while let Some(Wanted { frames, pass }) = session.wanted() {
             let count = frames.len();

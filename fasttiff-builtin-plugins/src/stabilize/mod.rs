@@ -23,14 +23,9 @@
 //! ran the second pass of a two-step registration and never counted a bad
 //! frame.
 //!
-//! # Reference by one channel, applied to all
-//!
-//! A two-channel recording is one movie photographed twice at once, so both
-//! channels move together. The shifts are measured on the channel the dialog
-//! names — usually the structural one, which is brighter and steadier — and
-//! applied to every channel, exactly as suite2p's `align_by_chan` does. Aligning
-//! each channel independently would move them relative to each other, which is
-//! the one thing a two-channel recording must not do.
+//! The reference and frame shifts are measured at Z=0 on the channel selected
+//! in the dialog or on the pixelwise mean of all channels. Each timepoint's
+//! correction is applied to its original planes across all channels and slices.
 
 mod params;
 
@@ -172,10 +167,10 @@ impl Plugin for Stabilize {
         if let Some(why) = settings.backend.unavailable_reason(ly, lx) {
             return Err(PluginError::unsupported(why));
         }
-        // suite2p's `align_by_chan2` is 1-based `align_by_chan` under the hood;
-        // here it is a switch, because a recording has one or two channels and
-        // "the other one" is the only choice anyone makes.
-        let align_by = usize::from(settings.align_by_chan2).min(info.channels.saturating_sub(1));
+        let channels = info.channels.max(1);
+        let align_by = settings.measure_on.map(|c| c.min(channels - 1));
+        let mut scratch = Vec::new();
+        let mut mean = Default::default();
 
         let mut session = Session::new(ly, lx, info.frames, &settings);
         // The batch is bounded by memory in the crate, for every caller alike;
@@ -191,7 +186,7 @@ impl Plugin for Stabilize {
         // the reference (most of the run) and the rest to the pass over the
         // recording, so it raced, froze for seconds, and raced again.
         let slices = info.slices.max(1);
-        let channels = info.channels.max(1);
+        let measure_read = work::READ * align_by.map_or(channels, |_| 1) as f64;
         let planes_per_frame = channels * slices;
         // A single-plane recording's measurement plane is the one corrected,
         // so it is not read a second time. See the pass below. A crop reads
@@ -204,12 +199,12 @@ impl Plugin for Stabilize {
             work::SHIFT
         } + if reread { work::READ } else { 0.0 };
         let sample_len = session.reference_frames().len();
-        let reading = sample_len as f64 * work::READ;
+        let reading = sample_len as f64 * measure_read;
         let referencing = work::reference(sample_len, settings.reference_iterations);
         let frames = info.frames as f64;
         // Every pass reads the sample, builds a reference and measures every
         // frame; the last also measures the deformation and moves the planes.
-        let per_pass = reading + referencing + frames * (work::READ + work::CORRELATION);
+        let per_pass = reading + referencing + frames * (measure_read + work::CORRELATION);
         let blocks = if settings.nonrigid { work::BLOCKS } else { 0.0 };
         let last_pass = frames * (blocks + planes_per_frame as f64 * plane_work);
         let total = (passes as f64 * per_pass + last_pass).max(f64::MIN_POSITIVE);
@@ -293,9 +288,17 @@ impl Plugin for Stabilize {
                     return Ok(Outcome::Cancelled);
                 }
                 let mut plane = Vec::new();
-                host.read_plane_f32(Plane::new(align_by, 0, t), &mut plane)?;
+                crate::shared::measurement::measurement(
+                    host,
+                    align_by,
+                    channels,
+                    t,
+                    &mut plane,
+                    &mut scratch,
+                    &mut mean,
+                )?;
                 sample.push(plane);
-                done += work::READ;
+                done += measure_read;
             }
             let base = done;
             let built = session.build_reference(sample, &mut |f| {
@@ -314,9 +317,17 @@ impl Plugin for Stabilize {
                 }
                 batch_frames.resize_with(batch.len(), Vec::new);
                 for (buf, t) in batch_frames.iter_mut().zip(batch.clone()) {
-                    host.read_plane_f32(Plane::new(align_by, 0, t), buf)?;
+                    crate::shared::measurement::measurement(
+                        host,
+                        align_by,
+                        channels,
+                        t,
+                        buf,
+                        &mut scratch,
+                        &mut mean,
+                    )?;
                 }
-                done += frames_here * work::READ;
+                done += frames_here * measure_read;
                 host.progress(at(done));
 
                 // In place: these buffers are the plugin's own, so the session
@@ -430,7 +441,7 @@ impl Plugin for Stabilize {
 
 /// What the run did, in a line: how much moved, and how much of the
 /// recording looks bad — counted, never dropped, which the dialog promises.
-fn summary(registered: &Registered, align_by: usize, passes: usize) -> String {
+fn summary(registered: &Registered, align_by: Option<usize>, passes: usize) -> String {
     let shifts = &registered.shifts;
     let moved = shifts.iter().filter(|s| s.dy != 0 || s.dx != 0).count();
     let worst = shifts
@@ -440,10 +451,13 @@ fn summary(registered: &Registered, align_by: usize, passes: usize) -> String {
         .unwrap_or(0);
     let bad = registered.bad_frames.iter().filter(|&&b| b).count();
     format!(
-        "registered {} frames on channel {}{}{}; {moved} moved, largest shift {worst} px{}; \
+        "registered {} frames on {}{}{}; {moved} moved, largest shift {worst} px{}; \
          {bad} flagged as bad (kept)",
         shifts.len(),
-        align_by + 1,
+        align_by.map_or_else(
+            || "the channel mean".into(),
+            |c| format!("channel {}", c + 1)
+        ),
         if passes > 1 { ", in two passes" } else { "" },
         match &registered.nonrigid {
             Some(nr) => format!(", non-rigid over {} blocks", nr.blocks.blocks.len()),

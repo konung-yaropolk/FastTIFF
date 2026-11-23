@@ -320,7 +320,8 @@ pub fn pick_initial_reference_reporting(
         }
     }
 
-    // Average that frame's `top` closest partners.
+    // Rank on centred data, but average raw intensities: the reference's
+    // percentiles will also be used to clip the raw measurement frames.
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
         cc[best.0 * n + b]
@@ -329,7 +330,7 @@ pub fn pick_initial_reference_reporting(
     });
     let mut out = vec![0.0f64; ly * lx];
     for &i in order.iter().take(top) {
-        for (o, v) in out.iter_mut().zip(&centred[i]) {
+        for (o, v) in out.iter_mut().zip(&frames[i]) {
             *o += *v as f64;
         }
     }
@@ -680,6 +681,58 @@ pub fn register(
     settings: &Settings,
     on_progress: &mut dyn FnMut(f32) -> bool,
 ) -> Option<Registered> {
+    register_measurements(movie, &[], settings, on_progress)
+}
+
+/// Register synchronized channel movies using [`Settings::measure_on`].
+/// The default measures the pixelwise channel mean. Pass the returned
+/// [`Registered`] to [`Registered::apply`] for every original channel.
+/// Means are materialized only for the reference sample or current batch.
+///
+/// # Panics
+///
+/// Requires at least one channel, equal dimensions and frame counts, and
+/// exactly `ly * lx` samples per frame. A selected channel must exist.
+pub fn register_channels(
+    channels: &[Frames<'_>],
+    settings: &Settings,
+    on_progress: &mut dyn FnMut(f32) -> bool,
+) -> Option<Registered> {
+    let first = channels.first().expect("expected at least one channel");
+    for ch in channels {
+        assert_eq!(
+            (ch.ly, ch.lx, ch.frames.len()),
+            (first.ly, first.lx, first.frames.len()),
+            "channel dimensions differ"
+        );
+        assert!(
+            ch.frames.iter().all(|f| f.len() == first.ly * first.lx),
+            "wrong channel plane size"
+        );
+    }
+    if let Some(c) = settings.measure_on {
+        return register(&channels[c], settings, on_progress);
+    }
+    if channels.len() == 1 {
+        return register(first, settings, on_progress);
+    }
+    register_measurements(first, channels, settings, on_progress)
+}
+
+fn register_measurements(
+    movie: &Frames<'_>,
+    mean_channels: &[Frames<'_>],
+    settings: &Settings,
+    on_progress: &mut dyn FnMut(f32) -> bool,
+) -> Option<Registered> {
+    let mut mean = image_registration_support::ChannelMean::default();
+    let mut read_mean = |t: usize, out: &mut Vec<f32>| {
+        for ch in mean_channels {
+            mean.push(&ch.frames[t]);
+        }
+        mean.finish_into(out);
+    };
+    let mut batch_means = Vec::new();
     let n = movie.frames.len();
     let mut session = Session::new(movie.ly, movie.lx, n, settings);
     // The caller moves frames once this returns, so every frame's field
@@ -701,7 +754,15 @@ pub fn register(
         let sample = session
             .reference_frames()
             .iter()
-            .map(|&t| movie.frames[t].clone())
+            .map(|&t| {
+                if mean_channels.is_empty() {
+                    movie.frames[t].clone()
+                } else {
+                    let mut plane = Vec::new();
+                    read_mean(t, &mut plane);
+                    plane
+                }
+            })
             .collect();
         let base = done;
         session.build_reference(sample, &mut |f| {
@@ -713,7 +774,15 @@ pub fn register(
                 return None;
             }
             let frames = batch.len() as f64;
-            let measured = session.measure(&movie.frames[batch]);
+            let measured = if mean_channels.is_empty() {
+                session.measure(&movie.frames[batch])
+            } else {
+                batch_means.resize_with(batch.len(), Vec::new);
+                for (out, t) in batch_means.iter_mut().zip(batch) {
+                    read_mean(t, out);
+                }
+                session.measure_in_place(&mut batch_means)
+            };
             done += frames * work::CORRELATION
                 + if measured.is_final() {
                     frames * blocks

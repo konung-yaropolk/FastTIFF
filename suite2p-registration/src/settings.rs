@@ -203,10 +203,9 @@ pub(crate) use image_registration_support::area::ON_FRAME;
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Settings {
     // --- what is registered -------------------------------------------
-    /// `align_by_chan2`: measure the shifts on the second channel rather than
-    /// the first. Applied to every channel either way — a two-channel recording
-    /// is one field photographed twice, and the channels must not drift apart.
-    pub align_by_chan2: bool,
+    /// Measurement source for multi-channel registration: a zero-based channel,
+    /// or the pixelwise mean of all channels (default).
+    pub measure_on: Option<usize>,
 
     // --- the reference -------------------------------------------------
     /// `nimg_init`: how many frames are sampled to build the reference,
@@ -300,7 +299,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            align_by_chan2: false,
+            measure_on: None,
             nimg_init: 300,
             reference_iterations: 8,
             maxregshift: 0.1,

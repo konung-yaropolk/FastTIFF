@@ -65,23 +65,6 @@ fn chosen_reference(chosen: &Params, model: Transformation) -> Reference {
         .unwrap_or(&d.reference)
 }
 
-/// How many channels the measurement selector should offer, and their labels.
-///
-/// With one channel there is exactly one thing the measurement can be, and
-/// "mean of one channel" and "channel 1" are the same arithmetic. So a
-/// single-channel stack gets a single option — which the host draws greyed out,
-/// because a choice of one is not a choice. Offering "Mean" and "Channel 1"
-/// separately there would be two names for one behaviour and an invitation to
-/// wonder which is which.
-fn channel_options(channels: usize) -> Vec<String> {
-    if channels <= 1 {
-        return vec!["Mean (only channel)".to_string()];
-    }
-    let mut v = vec!["Mean of all channels".to_string()];
-    v.extend((1..=channels).map(|c| format!("Channel {c}")));
-    v
-}
-
 /// Build the dialog for a stack of this shape, and for what has been chosen in
 /// it so far.
 ///
@@ -134,25 +117,7 @@ pub(super) fn declare(info: &ImageInfo, chosen: &Params) -> Vec<ParamDecl> {
          included",
     ));
 
-    // Which channel is measured. Always offered, so the answer to "what was
-    // this measured on" is always on screen; a single-channel stack gets one
-    // option and the host greys it.
-    decls.push(
-        ParamDecl::new(
-            "ref_channel",
-            "Measure on",
-            ParamKind::Choice {
-                default: 0,
-                options: channel_options(info.channels.max(1)),
-            },
-        )
-        .help(
-            "Which channel the transformation is measured on. It is applied to every channel, \
-             because the channels are one specimen photographed at once and must stay registered \
-             to each other. The mean is the default: averaging the channels raises what the \
-             search is matching.",
-        ),
-    );
+    decls.push(crate::shared::measurement::param(info.channels));
 
     // The time axis. A stack with one timepoint has nothing to align in time.
     if info.frames > 1 {

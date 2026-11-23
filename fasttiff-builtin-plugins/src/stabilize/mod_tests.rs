@@ -113,18 +113,23 @@ fn the_dialog_offers_every_backend() {
     }
 }
 
-/// `align_by_chan2` only makes sense with a second channel to align by.
 #[test]
-fn the_channel_switch_appears_only_for_a_multichannel_stack() {
-    assert!(
-        decls_for(&info(1, 1, 10))
-            .iter()
-            .all(|d| d.key != "align_by_chan2"),
-        "one channel is not a choice"
+fn measure_on_offers_the_mean_and_each_channel() {
+    let ds = decls_for(&info(3, 1, 10));
+    let d = ds.iter().find(|d| d.key == "ref_channel").unwrap();
+    let ParamKind::Choice { options, default } = &d.kind else {
+        panic!("expected choice")
+    };
+    assert_eq!(*default, 0);
+    assert_eq!(
+        options,
+        &[
+            "Mean of all channels",
+            "Channel 1",
+            "Channel 2",
+            "Channel 3"
+        ]
     );
-    assert!(decls_for(&info(2, 1, 10))
-        .iter()
-        .any(|d| d.key == "align_by_chan2"));
 }
 
 /// An untouched dialog reads back as suite2p's defaults exactly — but for the
@@ -594,7 +599,10 @@ fn the_built_in_registers_as_the_library_does() {
                 params.set(k, v);
             }
             let settings = super::params::settings_from(&params);
-            assert_eq!(settings.border == suite2p_registration::Border::Crop, cropped);
+            assert_eq!(
+                settings.border == suite2p_registration::Border::Crop,
+                cropped
+            );
 
             let library = suite2p_registration::register(
                 &suite2p_registration::Frames {
@@ -634,7 +642,7 @@ fn the_built_in_registers_as_the_library_does() {
 }
 
 /// The same for the path a single-plane recording skips: two channels,
-/// measured on the second (`align_by_chan2`), with a comb. Every plane is then
+/// measured on the second channel, with a comb. Every plane is then
 /// read again as recorded and moved by the session, which undoes the comb
 /// itself — where the built-in once undid it by hand at each read site. The
 /// first channel holds still, so a run that measured it instead would move
@@ -659,7 +667,7 @@ fn every_channel_registers_as_the_library_moves_it() {
             for (k, v) in [
                 ("spatial_taper", ParamValue::Float(5.0)),
                 ("maxregshift", ParamValue::Float(0.3)),
-                ("align_by_chan2", ParamValue::Bool(true)),
+                ("ref_channel", ParamValue::Choice(2)),
                 ("do_bidiphase", ParamValue::Bool(true)),
                 ("batch_size", ParamValue::Int(3)),
                 ("nonrigid", ParamValue::Bool(nonrigid)),
@@ -669,7 +677,7 @@ fn every_channel_registers_as_the_library_moves_it() {
                 params.set(k, v);
             }
             let settings = super::params::settings_from(&params);
-            assert!(settings.align_by_chan2);
+            assert_eq!(settings.measure_on, Some(1));
             let library = suite2p_registration::register(
                 &suite2p_registration::Frames {
                     ly,
@@ -696,9 +704,55 @@ fn every_channel_registers_as_the_library_moves_it() {
                 }
             }
             assert!(
-                log.iter().any(|m| m.starts_with("registered 7 frames on channel 2")),
+                log.iter()
+                    .any(|m| m.starts_with("registered 7 frames on channel 2")),
                 "{log:?}"
             );
+        }
+    }
+}
+
+#[test]
+fn mean_and_third_channel_match_independent_measurement_movies() {
+    use suite2p_registration::{register, register_channels, Frames};
+
+    let (ly, lx) = (48, 48);
+    let path = [(0, 0), (2, -1), (-3, 2), (1, 3), (-2, 0), (3, 3), (0, -2)];
+    let moving = recording(ly, lx, &path, &[0; 7]);
+    let still = recording(ly, lx, &[(0, 0); 7], &[0; 7]);
+    let movies = [&moving, &moving, &still];
+    let channels = movies.map(|frames| Frames { ly, lx, frames });
+    let mut planes = Vec::new();
+    let mut mean = Vec::new();
+    for t in 0..path.len() {
+        planes.extend(movies.iter().map(|movie| movie[t].clone()));
+        mean.push(
+            (0..ly * lx)
+                .map(|i| ((2.0 * f64::from(moving[t][i]) + f64::from(still[t][i])) / 3.0) as f32)
+                .collect(),
+        );
+    }
+    let doc = document(&planes, ly, lx, 3);
+    for (choice, frames) in [(0, &mean), (3, &still)] {
+        let mut params = Params::new();
+        if choice != 0 {
+            params.set("ref_channel", ParamValue::Choice(choice));
+        }
+        params.set("batch_size", ParamValue::Int(3));
+        params.set("spatial_taper", ParamValue::Float(5.0));
+        params.set("two_step_registration", ParamValue::Bool(true));
+        let settings = super::params::settings_from(&params);
+        let oracle = register(&Frames { ly, lx, frames }, &settings, &mut |_| true).unwrap();
+        let from_channels = register_channels(&channels, &settings, &mut |_| true).unwrap();
+        assert_eq!(from_channels.reference, oracle.reference);
+        assert_eq!(from_channels.shifts, oracle.shifts);
+        assert_eq!(
+            oracle.shifts.iter().any(|s| s.dx != 0 || s.dy != 0),
+            choice == 0
+        );
+        let (out, _) = run_on(&doc, &params);
+        for (i, plane) in planes.iter().enumerate() {
+            assert_eq!(out[i], oracle.apply(plane, ly, lx, i / 3).unwrap());
         }
     }
 }

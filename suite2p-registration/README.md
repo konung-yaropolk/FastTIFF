@@ -31,9 +31,13 @@ suite2p-registration = "0.19"
 
 ## Using it
 
-Measure the shifts, then apply them. They are separate because a two-colour
-recording is registered *once* — measured on one channel and applied to both,
-or the channels drift apart.
+For a multi-channel recording, pass one `Frames` per channel to
+`register_channels(&channels, &settings, on_progress)`. By default the reference
+and shifts are measured on the pixelwise arithmetic mean of the raw channels.
+Set `Settings::measure_on` to `Some(2)` to measure on the third channel.
+Apply the returned correction to each original plane to keep the channels aligned.
+
+For a single movie or an already prepared measurement channel, use `register`:
 
 ```rust
 use suite2p_registration::{register, Frames, Settings};

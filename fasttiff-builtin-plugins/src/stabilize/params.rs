@@ -104,21 +104,7 @@ pub(super) fn declare(info: &ImageInfo, chosen: &Params) -> Vec<ParamDecl> {
     // ---- what is registered, and how far it may move -----------------------
 
     decls.push(section("h_align", "Alignment"));
-    if info.channels > 1 {
-        decls.push(
-            ParamDecl::new(
-                "align_by_chan2",
-                "Align by channel 2",
-                ParamKind::Bool {
-                    default: d.align_by_chan2,
-                },
-            )
-            .help(
-                "Measure the shifts on the second channel — usually the structural \
-                 one — rather than the first. Applied to every channel either way.",
-            ),
-        );
-    }
+    decls.push(crate::shared::measurement::param(info.channels));
     decls.push(
         ParamDecl::new(
             "maxregshift",
@@ -365,8 +351,12 @@ pub(super) fn declare(info: &ImageInfo, chosen: &Params) -> Vec<ParamDecl> {
 pub(super) fn settings_from(params: &Params) -> Settings {
     let d = Settings::default();
     let block = params.int("block_size", d.block_size[0] as i64).max(1) as usize;
+    // Older saved parameters used a checkbox for the first or second channel.
+    let legacy = params
+        .get("align_by_chan2")
+        .map_or(0, |_| 1 + usize::from(params.bool("align_by_chan2", false)));
     Settings {
-        align_by_chan2: params.bool("align_by_chan2", d.align_by_chan2),
+        measure_on: params.choice("ref_channel", legacy).checked_sub(1),
         nimg_init: params.int("nimg_init", d.nimg_init as i64).max(2) as usize,
         maxregshift: params.float("maxregshift", d.maxregshift),
         smooth_sigma: params.float("smooth_sigma", d.smooth_sigma),

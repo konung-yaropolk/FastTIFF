@@ -32,7 +32,7 @@ fn suite2ps_defaults_are_the_defaults() {
     // Read off suite2p's `default_ops`; a drift here is a drift away from the
     // numbers published results were produced with.
     let s = Settings::default();
-    assert!(!s.align_by_chan2);
+    assert_eq!(s.measure_on, None);
     assert_eq!(s.nimg_init, 300);
     assert_eq!(s.maxregshift, 0.1);
     assert!(!s.do_bidiphase);
@@ -76,16 +76,7 @@ fn the_initial_reference_resembles_a_still_movie() {
     let frames: Vec<Vec<f32>> = (0..12).map(|_| base.clone()).collect();
     let r = pick_initial_reference(&frames, ly, lx, &Settings::default());
 
-    // Mean-subtracted, so compare shape rather than level: the brightest pixel
-    // of the reference must be where the brightest blob is.
-    let arg_max = |v: &[f32]| {
-        v.iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .unwrap()
-            .0
-    };
-    assert_eq!(arg_max(&r), arg_max(&base));
+    assert_eq!(r, base);
 }
 
 #[test]

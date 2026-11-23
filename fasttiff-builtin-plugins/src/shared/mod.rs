@@ -4,6 +4,12 @@
 //! agree between them: the "open in a new window" checkbox, the key it is read
 //! by, and how a result is stored.
 //!
+#[cfg(any(
+    feature = "plugin-suite2p-stabilize",
+    feature = "plugin-turboreg-stabilize"
+))]
+pub(crate) mod measurement;
+
 // Each piece is compiled for the plugins that use it, so a build with only
 // some of them carries no unused code — and no warnings saying so.
 #[cfg(feature = "_shared-edges")]

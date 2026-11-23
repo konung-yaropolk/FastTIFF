@@ -79,7 +79,7 @@ pub const S2P_NO_COMMON_AREA: c_int = 5;
 ///
 /// Fill it with [`s2p_settings_default`] and change what differs — a
 /// structure built field by field would break the first time one is added.
-/// `align_by_chan2` is not here: which channel to measure on is the caller's
+/// `measure_on` is not here: which channel to measure on is the caller's
 /// choice of what to pass.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
