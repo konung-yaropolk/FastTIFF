@@ -13,9 +13,10 @@ use super::cmyk::require_cmyk;
 use super::core::{self, refuse_4bit_for_display, require_f32_samples, Src};
 use super::pieces::bytes_for_bits;
 use crate::display::DisplayMap;
-use crate::error::{bail, Result};
+use crate::error::{bail, err, ErrorKind, OptionContext, Result};
+use crate::frame::FrameBytes;
 use crate::ifd::ByteOrder;
-use crate::index::{FrameInfo, TiffStack};
+use crate::index::{Compression, FrameInfo, SampleFormat, TiffStack};
 use crate::DecodeScratch;
 use rayon::prelude::*;
 use std::borrow::Cow;
@@ -46,6 +47,32 @@ fn sized_out<T: Copy + Default>(
     Ok(())
 }
 
+/// The `n * sample_bytes` bytes at the frame's one strip when it is a single
+/// uncompressed, predictor-free strip: the zero-copy read the single-sample
+/// readers always offered, which trusts the frame's size over the strip's byte
+/// count. `Err` when the file does not hold that many bytes there.
+fn single_strip<'a>(
+    mmap: &'a [u8],
+    frame: &FrameInfo,
+    n: usize,
+    sample_bytes: usize,
+) -> Result<Option<&'a [u8]>> {
+    if frame.is_tiled()
+        || frame.compression != Compression::None
+        || frame.predictor != 1
+        || frame.strip_offsets.len() != 1
+    {
+        return Ok(None);
+    }
+    let len = n
+        .checked_mul(sample_bytes)
+        .with_context(ErrorKind::TooLarge, || "frame size overflows".to_string())?;
+    let slice = FrameBytes::whole(mmap)
+        .piece(frame.strip_offsets[0], len as u64)
+        .map_err(|_| err!(Malformed, "strip data out of file bounds"))?;
+    Ok(Some(slice))
+}
+
 /// Every destination of `out`, as slices.
 fn slices<T>(out: &mut [Vec<T>]) -> Vec<&mut [T]> {
     out.iter_mut().map(|v| &mut v[..]).collect()
@@ -71,7 +98,21 @@ pub fn read_frame_u16<'a>(
     file_order: ByteOrder,
     float_range: Option<(f32, f32)>,
 ) -> Result<Cow<'a, [u16]>> {
-    frame.sample_count()?;
+    let n_samples = frame.sample_count()?;
+    // A single uncompressed strip is borrowed for the frame's size whatever
+    // its byte count says, as this reader always has: the playback path of a
+    // viewer reads files whose StripByteCounts undersell the strip.
+    if frame.bits_per_sample == 16
+        && frame.samples_per_pixel == 1
+        && frame.sample_format != SampleFormat::SignedInt
+        && file_order == ByteOrder::host()
+    {
+        if let Some(slice) = single_strip(mmap, frame, n_samples, 2)? {
+            if let Ok(samples) = bytemuck::try_cast_slice::<u8, u16>(slice) {
+                return Ok(Cow::Borrowed(samples));
+            }
+        }
+    }
     if let Some(borrowed) = core::borrow_display(Src::new(mmap, frame, file_order), 0) {
         return Ok(Cow::Borrowed(borrowed));
     }
@@ -366,7 +407,19 @@ pub fn read_frame_f32<'a>(
     frame: &FrameInfo,
     file_order: ByteOrder,
 ) -> Result<Cow<'a, [f32]>> {
-    frame.pixel_count()?;
+    let n_pixels = frame.pixel_count()?;
+    // The same single-strip borrow as `read_frame_u16`'s.
+    if frame.bits_per_sample == 32
+        && frame.sample_format == SampleFormat::Float
+        && frame.samples_per_pixel == 1
+        && file_order == ByteOrder::host()
+    {
+        if let Some(slice) = single_strip(mmap, frame, n_pixels, 4)? {
+            if let Ok(samples) = bytemuck::try_cast_slice::<u8, f32>(slice) {
+                return Ok(Cow::Borrowed(samples));
+            }
+        }
+    }
     if let Some(borrowed) = core::borrow_file(Src::new(mmap, frame, file_order), 0) {
         return Ok(Cow::Borrowed(borrowed));
     }

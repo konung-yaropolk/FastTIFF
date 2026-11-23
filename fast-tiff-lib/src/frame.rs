@@ -249,8 +249,14 @@ impl<'a> Frame<'a> {
     }
 
     /// The length one plane's destination must have: `U::Sample` elements.
+    ///
+    /// The frame's size guards run first, so a header claiming more than its
+    /// strips can hold is an error here, before a caller sizes anything from
+    /// it — a few hundred hostile bytes must not be able to demand gigabytes.
     pub fn plane_len<U: Units>(&self, units: U) -> Result<usize> {
-        units.plane_len(&self.info, sealed::Private)
+        let n = units.plane_len(&self.info, sealed::Private)?;
+        core::vet(self.src())?;
+        Ok(n)
     }
 
     /// Whether [`read`](Self::read) of `plane` in `units` hands back the
@@ -292,8 +298,7 @@ impl<'a> Frame<'a> {
         }
         // Vetted before `out` is sized from the header: a hostile frame must
         // not be able to demand gigabytes before it is found out.
-        core::vet(self.src())?;
-        let n = units.plane_len(self.info(), sealed::Private)?;
+        let n = self.plane_len(units)?;
         if out.len() != n {
             out.try_reserve_exact(n.saturating_sub(out.len()))
                 .map_err(|_| err!(TooLarge, "cannot allocate {n} samples for a plane"))?;
@@ -343,8 +348,12 @@ impl<'a> Frame<'a> {
 
     /// Bytes [`stored_frame_into`](Self::stored_frame_into) writes: the whole
     /// frame, every sample, at its stored width (4-bit indices one per byte).
+    ///
+    /// Vetted like [`plane_len`](Self::plane_len).
     pub fn stored_frame_len(&self) -> Result<usize> {
-        core::stored_frame_len(self.info())
+        let n = core::stored_frame_len(self.info())?;
+        core::vet(self.src())?;
+        Ok(n)
     }
 
     /// The whole frame's samples exactly as the file stores them —
