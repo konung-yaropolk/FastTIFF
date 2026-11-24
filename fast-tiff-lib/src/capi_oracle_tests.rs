@@ -50,7 +50,6 @@ const MAX_BUFFER: usize = 256 << 20;
 /// buffer — given here as the slice it was, and returning the status.
 mod old {
     use super::*;
-    use crate::error::Context;
     use crate::{
         frame_float_minmax, read_frame_f32, read_frame_u16, read_frame_u8, read_planes_f32,
         read_planes_rgb_u16, read_planes_rgb_u8, read_planes_u16, read_planes_u8,

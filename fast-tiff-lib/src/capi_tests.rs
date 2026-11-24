@@ -3,7 +3,8 @@
 //! refusal a status with a reason rather than a crash.
 
 use super::*;
-use crate::{read_frame_u8, StackMetaWrite, TiffWriter, WriterOptions};
+use crate::units::{CmykRgb16, CmykRgb8, Display, File as FileUnits, Stored, Units};
+use crate::{DecodeScratch, Frame, StackMetaWrite, TiffWriter, WriterOptions};
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
@@ -83,10 +84,6 @@ fn open_rust(path: &Path) -> TiffStack {
     TiffStack::from_bytes(std::fs::read(path).unwrap()).unwrap()
 }
 
-fn flat<T: Clone>(planes: Vec<Vec<T>>) -> Vec<T> {
-    planes.concat()
-}
-
 fn description(s: *const FtlStack) -> String {
     let n = unsafe { ftl_description(s, null_mut(), 0) };
     assert!(n >= 0, "{n}: {}", last_error());
@@ -150,6 +147,18 @@ fn same_metadata(a: &FtlMetadata, b: &FtlMetadata) {
     );
 }
 
+/// Every plane of `frame` in `units`, one after another, through the Rust
+/// API: what the C reader in those units writes.
+fn rust_planes<U: Units>(frame: &Frame<'_>, units: U) -> Result<Vec<U::Sample>> {
+    let (mut all, mut buf) = (Vec::new(), Vec::new());
+    let mut scratch = DecodeScratch::new();
+    for plane in 0..frame.planes(units) {
+        let (pixels, _) = frame.read(units, plane, &mut buf, &mut scratch)?;
+        all.extend_from_slice(&pixels);
+    }
+    Ok(all)
+}
+
 /// What `read` writes for frame `i`, or its status.
 fn read_c<T: Copy + Default>(
     read: impl Fn(*mut T, usize) -> c_int,
@@ -162,9 +171,10 @@ fn read_c<T: Copy + Default>(
     }
 }
 
-/// Every reader on every frame of every fixture: what C hands back is what
-/// the Rust readers do, and where Rust refuses, so does C, with a reason and
-/// the status of the Rust error's kind.
+/// Every reader on every frame of every fixture — LZW, Deflate and PackBits,
+/// tiled, planar, CMYK, 4- to 32-bit, both byte orders: what C hands back is
+/// what [`Frame`]'s reads give, and where Rust refuses, so does C, with a
+/// reason and the status of the Rust error's kind.
 #[test]
 fn every_fixture_reads_through_c_as_through_rust() {
     for path in fixtures() {
@@ -207,31 +217,21 @@ fn every_fixture_reads_through_c_as_through_rust() {
                 let mut n = 0;
                 assert_eq!(unsafe { ftl_sample_count(s, i, &mut n) }, FTL_OK);
                 assert_eq!(n, f.sample_count().unwrap());
-                let (data, order) = (&rust.data[..], rust.byte_order);
+                let frame = rust.frame(i).unwrap();
 
                 // u16, from each plane's own range.
                 let got = read_c(|o, l| unsafe { ftl_read_u16(s, i, null(), o, l) }, n);
-                match read_planes_u16(data, f, order, None) {
-                    Ok(want) => assert_eq!(got.as_deref(), Ok(&flat(want)[..]), "{what}"),
+                match rust_planes(&frame, Display { range: None }) {
+                    Ok(want) => assert_eq!(got.as_deref(), Ok(&want[..]), "{what}"),
                     Err(e) => refused(got.clone().unwrap_err(), status_of(&e)),
-                }
-                if f.samples_per_pixel == 1 {
-                    if let Ok(want) = read_frame_u16(data, f, order, None) {
-                        assert_eq!(got.as_deref(), Ok(&want[..]), "{what}");
-                    }
                 }
 
                 // u8: 8-bit (and 4-bit) only.
                 let got = read_c(|o, l| unsafe { ftl_read_u8(s, i, o, l) }, n);
                 match f.bits_per_sample {
-                    8 => assert_eq!(
+                    4 | 8 => assert_eq!(
                         got.as_deref(),
-                        Ok(&flat(read_planes_u8(data, f, order).unwrap())[..]),
-                        "{what}"
-                    ),
-                    4 => assert_eq!(
-                        got.as_deref(),
-                        Ok(&read_frame_u8(data, f, order).unwrap()[..]),
+                        Ok(&rust_planes(&frame, Stored(rust.byte_order)).unwrap()[..]),
                         "{what}"
                     ),
                     // A depth this reader does not take: the call's mistake,
@@ -241,10 +241,10 @@ fn every_fixture_reads_through_c_as_through_rust() {
 
                 // f32: 32- and 64-bit only. Compared bit for bit, NaN and all.
                 let got = read_c(|o, l| unsafe { ftl_read_f32(s, i, o, l) }, n);
-                match read_planes_f32(data, f, order) {
+                match rust_planes(&frame, FileUnits) {
                     Ok(want) => {
                         let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-                        assert_eq!(bits(&got.unwrap()), bits(&flat(want)), "{what}");
+                        assert_eq!(bits(&got.unwrap()), bits(&want), "{what}");
                     }
                     Err(e) => refused(got.unwrap_err(), status_of(&e)),
                 }
@@ -253,12 +253,12 @@ fn every_fixture_reads_through_c_as_through_rust() {
                 let three = 3 * f.pixel_count().unwrap();
                 let got8 = read_c(|o, l| unsafe { ftl_read_rgb_u8(s, i, o, l) }, three);
                 let got16 = read_c(|o, l| unsafe { ftl_read_rgb_u16(s, i, o, l) }, three);
-                match read_planes_rgb_u8(data, f, order) {
-                    Ok(want) => assert_eq!(got8.as_deref(), Ok(&flat(want)[..]), "{what}"),
+                match rust_planes(&frame, CmykRgb8) {
+                    Ok(want) => assert_eq!(got8.as_deref(), Ok(&want[..]), "{what}"),
                     Err(e) => refused(got8.clone().unwrap_err(), status_of(&e)),
                 }
-                match read_planes_rgb_u16(data, f, order) {
-                    Ok(want) => assert_eq!(got16.as_deref(), Ok(&flat(want)[..]), "{what}"),
+                match rust_planes(&frame, CmykRgb16) {
+                    Ok(want) => assert_eq!(got16.as_deref(), Ok(&want[..]), "{what}"),
                     Err(e) => refused(got16.clone().unwrap_err(), status_of(&e)),
                 }
                 if f.is_cmyk() {
@@ -273,7 +273,7 @@ fn every_fixture_reads_through_c_as_through_rust() {
 
                 let (mut lo, mut hi) = (0.0f32, 0.0f32);
                 assert_eq!(unsafe { ftl_float_minmax(s, i, &mut lo, &mut hi) }, FTL_OK);
-                match frame_float_minmax(data, f, order).unwrap() {
+                match frame.value_range(&mut DecodeScratch::new()).unwrap() {
                     Some(want) => assert_eq!((lo, hi), want, "{what}"),
                     None => assert!(lo.is_nan() && hi.is_nan(), "{what}"),
                 }
@@ -290,9 +290,11 @@ fn a_given_range_scales_as_in_rust() {
     let rust = open_rust(&path);
     let s = open_c(&path);
     let range = [-1.0f32, 3.5];
-    for (i, f) in rust.frames.iter().enumerate() {
-        let want =
-            read_frame_u16(&rust.data, f, rust.byte_order, Some((range[0], range[1]))).unwrap();
+    for i in 0..rust.frame_count() {
+        let units = Display {
+            range: Some((range[0], range[1])),
+        };
+        let want = rust_planes(&rust.frame(i).unwrap(), units).unwrap();
         let got = read_c(
             |o, l| unsafe { ftl_read_u16(s, i, range.as_ptr(), o, l) },
             want.len(),
@@ -689,7 +691,7 @@ fn every_layout_and_type_matches_rust() {
     let got = read_c(|o, l| unsafe { ftl_read_rgb_u8(s, 0, o, l) }, 3 * n).unwrap();
     assert_eq!(
         got,
-        flat(read_planes_rgb_u8(&rust.data, &rust.frames[0], rust.byte_order).unwrap())
+        rust_planes(&rust.frame(0).unwrap(), CmykRgb8).unwrap()
     );
     unsafe { ftl_stack_free(s) };
 
@@ -720,7 +722,7 @@ fn every_layout_and_type_matches_rust() {
     let s = open_c(&pc);
     let rust = open_rust(&pc);
     let got = read_c(|o, l| unsafe { ftl_read_u16(s, 0, null(), o, l) }, n);
-    let want = read_frame_u16(&rust.data, &rust.frames[0], rust.byte_order, None).unwrap();
+    let want = rust_planes(&rust.frame(0).unwrap(), Display { range: None }).unwrap();
     assert_eq!(got.as_deref(), Ok(&want[..]));
     unsafe { ftl_stack_free(s) };
 
@@ -1462,13 +1464,10 @@ fn a_4_bit_frame_through_the_16_bit_reader_is_the_wrong_reader() {
         "{}",
         last_error()
     );
-    // The Rust readers say the same, by kind.
-    for e in [
-        read_frame_u16(&st.data, f, st.byte_order, None).unwrap_err(),
-        read_planes_u16(&st.data, f, st.byte_order, None).unwrap_err(),
-    ] {
-        assert_eq!(e.kind(), ErrorKind::InvalidInput, "{e:#}");
-    }
+    // The Rust read says the same, by kind.
+    let frame = st.frame(0).unwrap();
+    let e = rust_planes(&frame, Display { range: None }).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::InvalidInput, "{e:#}");
     unsafe { ftl_stack_free(s) };
 }
 

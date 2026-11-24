@@ -35,19 +35,18 @@
 //! therefore costs a `memcpy` from the mapping and nothing more.
 
 use fast_tiff_c_api_support::{status, Errors};
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::fs::File;
 use std::io::BufWriter;
+use std::sync::{Mutex, PoisonError};
 
 use crate::error::{bail, Context, OptionContext};
+use crate::units::{CmykRgb16, CmykRgb8, Display, File as FileUnits, Stored, Units};
 use crate::{
-    frame_float_minmax, read_frame_f32, read_frame_u16, read_frame_u8, read_planes_f32,
-    read_planes_rgb_u16, read_planes_rgb_u8, read_planes_u16, read_planes_u8, resolve_dimensions,
-    ByteOrder, Compression, DisplayMode, Error, ErrorKind, FrameInfo, MetadataFormat,
-    ResolvedDimensions, Result, SampleFormat, SampleType, StackMeta, StackMetaWrite, TiffFlavor,
-    TiffStack, TiffWriter, WriterOptions,
+    resolve_dimensions, ByteOrder, Compression, DecodeScratch, DisplayMode, Error, ErrorKind,
+    FrameInfo, MetadataFormat, ResolvedDimensions, Result, SampleFormat, SampleType, StackMeta,
+    StackMetaWrite, TiffFlavor, TiffStack, TiffWriter, WriterOptions,
 };
 
 // Statuses 0 to 4 mean the same in all four of this repository's C APIs
@@ -597,9 +596,42 @@ impl FtlWriterOptions {
     }
 }
 
-/// An open stack behind a handle: [`TiffStack`].
+/// An open stack behind a handle: [`TiffStack`], and the scratch its readers
+/// decode through.
 pub struct FtlStack {
     inner: TiffStack,
+    /// What a decode needs between the file and the caller's buffer (a strip's
+    /// worth of decompressed bytes, for a few reads a whole frame), kept from
+    /// call to call so that reading frame after frame allocates nothing
+    /// frame-sized once warm. A pool, because a stack is readable from several
+    /// threads at once: a call takes one, or makes one when every one is in
+    /// use, and gives it back when it is done. So the pool holds as many as
+    /// calls were ever in flight on the stack at once, until it is freed — the
+    /// most the decodes needed at any one time, which before the pool they
+    /// allocated afresh on every call.
+    scratch: Mutex<Vec<DecodeScratch>>,
+}
+
+impl FtlStack {
+    fn new(inner: TiffStack) -> Self {
+        FtlStack {
+            inner,
+            scratch: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// `f` with a scratch of its own, from the pool. The lock is held only to
+    /// take one and to give it back, never across a decode; a poisoned lock is
+    /// taken anyway, since a `Vec` of scratch has no invariant a panic could
+    /// break. A scratch is lost, not returned, when `f` panics, which the
+    /// caller's panic guard turns into `FTL_FAILED`.
+    fn with_scratch<R>(&self, f: impl FnOnce(&mut DecodeScratch) -> R) -> R {
+        let pool = || self.scratch.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut scratch = pool().pop().unwrap_or_default();
+        let result = f(&mut scratch);
+        pool().push(scratch);
+        result
+    }
 }
 
 /// A writer behind a handle: [`TiffWriter`] on a buffered file.
@@ -640,35 +672,43 @@ fn fail_with(e: &Error) -> c_int {
     ERRORS.fail(status_of(e), format!("{e:#}"))
 }
 
-/// The stack behind `s`, or the status to return for a null one.
+/// The handle `s`, or the status to return for a null one.
 ///
 /// # Safety
 ///
 /// `s` is null or came from [`ftl_open`] or [`ftl_open_bytes`] and has not
 /// been freed.
-unsafe fn stack<'a>(s: *const FtlStack) -> Result<&'a TiffStack, c_int> {
+unsafe fn handle<'a>(s: *const FtlStack) -> Result<&'a FtlStack, c_int> {
     s.as_ref()
-        .map(|s| &s.inner)
         .ok_or_else(|| ERRORS.fail(FTL_INVALID_ARGUMENT, "the stack handle is NULL"))
 }
 
-/// The stack behind `s` and its frame `index`, or the status to return.
+/// The stack behind `s`, or the status to return for a null one.
 ///
 /// # Safety
 ///
-/// As for [`stack`].
+/// As for [`handle`].
+unsafe fn stack<'a>(s: *const FtlStack) -> Result<&'a TiffStack, c_int> {
+    handle(s).map(|s| &s.inner)
+}
+
+/// The handle `s` and its stack's frame `index`, or the status to return.
+///
+/// # Safety
+///
+/// As for [`handle`].
 unsafe fn frame_at<'a>(
     s: *const FtlStack,
     index: usize,
-) -> Result<(&'a TiffStack, &'a FrameInfo), c_int> {
-    let st = stack(s)?;
-    match st.frames.get(index) {
-        Some(f) => Ok((st, f)),
+) -> Result<(&'a FtlStack, &'a FrameInfo), c_int> {
+    let h = handle(s)?;
+    match h.inner.frames.get(index) {
+        Some(f) => Ok((h, f)),
         None => Err(ERRORS.fail(
             FTL_INVALID_ARGUMENT,
             format!(
                 "frame {index} is past the end of {} frame(s)",
-                st.frames.len()
+                h.inner.frames.len()
             ),
         )),
     }
@@ -734,7 +774,7 @@ pub unsafe extern "C" fn ftl_open(path: *const c_char, out: *mut *mut FtlStack) 
         {
             match TiffStack::open(path) {
                 Ok(inner) => {
-                    out.write(Box::into_raw(Box::new(FtlStack { inner })));
+                    out.write(Box::into_raw(Box::new(FtlStack::new(inner))));
                     FTL_OK
                 }
                 Err(e) => fail_with(&e),
@@ -775,7 +815,7 @@ pub unsafe extern "C" fn ftl_open_bytes(
         let bytes = std::slice::from_raw_parts(data.cast::<u8>(), len).to_vec();
         match TiffStack::from_bytes(bytes) {
             Ok(inner) => {
-                out.write(Box::into_raw(Box::new(FtlStack { inner })));
+                out.write(Box::into_raw(Box::new(FtlStack::new(inner))));
                 FTL_OK
             }
             Err(e) => fail_with(&e),
@@ -1038,13 +1078,12 @@ pub unsafe extern "C" fn ftl_sample_count(
     }
 }
 
-/// A decoder as the readers below drive it: the frame's planes, in sample
-/// order, borrowed from the mapping where the Rust API can.
-type Decode<T> =
-    for<'a> fn(&'a TiffStack, &'a FrameInfo, Option<(f32, f32)>) -> Result<Vec<Cow<'a, [T]>>>;
-
 /// Values a reader writes: one plane per sample, or three for the RGB ones.
 type Count = fn(&FrameInfo) -> Result<usize>;
+
+/// A reader's own refusal of a frame it does not take, before anything is
+/// decoded, in the C interface's words.
+type Takes = fn(&FrameInfo) -> Result<()>;
 
 fn all_samples(f: &FrameInfo) -> Result<usize> {
     f.sample_count()
@@ -1057,15 +1096,7 @@ fn three_planes(f: &FrameInfo) -> Result<usize> {
     )
 }
 
-fn owned<T: Clone>(planes: Vec<Vec<T>>) -> Vec<Cow<'static, [T]>> {
-    planes.into_iter().map(Cow::Owned).collect()
-}
-
-fn decode_u8<'a>(
-    st: &'a TiffStack,
-    f: &'a FrameInfo,
-    _: Option<(f32, f32)>,
-) -> Result<Vec<Cow<'a, [u8]>>> {
+fn takes_u8(f: &FrameInfo) -> Result<()> {
     if !matches!(f.bits_per_sample, 4 | 8) {
         bail!(
             InvalidInput,
@@ -1074,18 +1105,10 @@ fn decode_u8<'a>(
             f.bits_per_sample
         );
     }
-    if f.samples_per_pixel <= 1 {
-        Ok(vec![read_frame_u8(&st.data, f, st.byte_order)?])
-    } else {
-        Ok(owned(read_planes_u8(&st.data, f, st.byte_order)?))
-    }
+    Ok(())
 }
 
-fn decode_u16<'a>(
-    st: &'a TiffStack,
-    f: &'a FrameInfo,
-    range: Option<(f32, f32)>,
-) -> Result<Vec<Cow<'a, [u16]>>> {
+fn takes_u16(f: &FrameInfo) -> Result<()> {
     if f.bits_per_sample == 4 && f.samples_per_pixel <= 1 {
         bail!(
             InvalidInput,
@@ -1093,64 +1116,101 @@ fn decode_u16<'a>(
              ftl_read_u16 has no widening for them"
         );
     }
-    if f.samples_per_pixel <= 1 {
-        Ok(vec![read_frame_u16(&st.data, f, st.byte_order, range)?])
+    Ok(())
+}
+
+fn takes_any(_: &FrameInfo) -> Result<()> {
+    Ok(())
+}
+
+fn takes_cmyk(f: &FrameInfo) -> Result<()> {
+    if !f.is_cmyk() {
+        bail!(
+            InvalidInput,
+            "the frame is not CMYK (FtlFrameInfo.cmyk: photometric {}, ink set {}, {} {}-bit \
+             sample(s) a pixel); only CMYK converts to RGB, and an RGB frame's planes are \
+             already red, green and blue",
+            f.photometric,
+            f.ink_set,
+            f.samples_per_pixel,
+            f.bits_per_sample
+        );
+    }
+    Ok(())
+}
+
+fn takes_cmyk_u8(f: &FrameInfo) -> Result<()> {
+    takes_cmyk(f)?;
+    if f.bits_per_sample != 8 {
+        bail!(
+            InvalidInput,
+            "the frame's inks are {}-bit; ftl_read_rgb_u8 takes 8-bit CMYK, ftl_read_rgb_u16 \
+             8- and 16-bit",
+            f.bits_per_sample
+        );
+    }
+    Ok(())
+}
+
+/// `f` over `out` cut into `planes` destinations of `n` values each, held on
+/// the stack for the few planes nearly every frame has, so that cutting
+/// allocates nothing.
+fn with_planes<T, R>(
+    out: &mut [T],
+    n: usize,
+    planes: usize,
+    f: impl FnOnce(&mut [&mut [T]]) -> R,
+) -> R {
+    const ON_STACK: usize = 4;
+    // `n` is never 0 for a frame the index let through (it refuses an empty
+    // image), but a cut of 0 would panic: then `out` is empty and every
+    // destination is too.
+    let mut cut = out.chunks_exact_mut(n.max(1));
+    let mut next = || cut.next().unwrap_or_default();
+    if planes <= ON_STACK {
+        let mut parts: [&mut [T]; ON_STACK] = std::array::from_fn(|_| next());
+        f(&mut parts[..planes])
     } else {
-        Ok(owned(read_planes_u16(&st.data, f, st.byte_order, range)?))
+        let mut parts: Vec<&mut [T]> = (0..planes).map(|_| next()).collect();
+        f(&mut parts)
     }
 }
 
-fn decode_f32<'a>(
-    st: &'a TiffStack,
-    f: &'a FrameInfo,
-    _: Option<(f32, f32)>,
-) -> Result<Vec<Cow<'a, [f32]>>> {
-    if f.samples_per_pixel <= 1 {
-        Ok(vec![read_frame_f32(&st.data, f, st.byte_order)?])
-    } else {
-        Ok(owned(read_planes_f32(&st.data, f, st.byte_order)?))
-    }
-}
-
-fn decode_rgb_u8<'a>(
-    st: &'a TiffStack,
-    f: &'a FrameInfo,
-    _: Option<(f32, f32)>,
-) -> Result<Vec<Cow<'a, [u8]>>> {
-    Ok(owned(read_planes_rgb_u8(&st.data, f, st.byte_order)?))
-}
-
-fn decode_rgb_u16<'a>(
-    st: &'a TiffStack,
-    f: &'a FrameInfo,
-    _: Option<(f32, f32)>,
-) -> Result<Vec<Cow<'a, [u16]>>> {
-    Ok(owned(read_planes_rgb_u16(&st.data, f, st.byte_order)?))
-}
-
-/// Decode frame `index` with `decode` and copy its planes, one after another,
-/// into the `len` values at `out` — after checking `len` against `count`.
+/// Decode frame `index` in `units`, every plane one after another, straight
+/// into the `len` values at `out`: after checking `out`, `len` against
+/// `count`, and the frame against `takes`, in that order, so a call refused
+/// writes nothing. A decode that fails part of the way leaves `out` holding
+/// whatever it had reached.
 ///
 /// # Safety
 ///
 /// `s` is null or a live stack; `out` is null or points to `len` writable
 /// values.
-unsafe fn read_into<T: Copy>(
+unsafe fn read_into<U: Units>(
     s: *const FtlStack,
     index: usize,
-    range: Option<(f32, f32)>,
-    out: *mut T,
+    units: U,
+    out: *mut U::Sample,
     len: usize,
     count: Count,
-    decode: Decode<T>,
+    takes: Takes,
 ) -> c_int {
     ERRORS.guarded(|| {
-        let (st, f) = match frame_at(s, index) {
+        let (h, f) = match frame_at(s, index) {
             Ok(v) => v,
             Err(status) => return status,
         };
         if out.is_null() {
             return ERRORS.fail(FTL_INVALID_ARGUMENT, "out is NULL");
+        }
+        if !out.is_aligned() {
+            return ERRORS.fail(
+                FTL_INVALID_ARGUMENT,
+                format!(
+                    "out is not aligned for its {}-byte values",
+                    std::mem::align_of::<U::Sample>()
+                ),
+            );
         }
         let needed = match count(f) {
             Ok(n) => n,
@@ -1162,34 +1222,51 @@ unsafe fn read_into<T: Copy>(
                 format!("out holds {len} values; frame {index} decodes to {needed}"),
             );
         }
-        // Reading ZSTD without the codec comes back as the build's limit, not
-        // the file's fault: the decoder says `Unavailable`, the status writing
-        // it gets.
-        let planes = match decode(st, f, range).with_context(|| format!("frame {index}")) {
-            Ok(p) => p,
+        if let Err(e) = takes(f) {
+            return fail_with(&e);
+        }
+        let frame = match h.inner.frame(index) {
+            Ok(frame) => frame,
             Err(e) => return fail_with(&e),
         };
-        let total: usize = planes.iter().map(|p| p.len()).sum();
-        if total != needed {
+        // Vetted, so a frame claiming more than its strips hold is refused
+        // here, before a byte of `out` is written. Reading ZSTD without the
+        // codec comes back as the build's limit, not the file's fault: the
+        // decoder says `Unavailable`, the status writing it gets.
+        let per_plane = match frame
+            .plane_len(units)
+            .with_context(|| format!("frame {index}"))
+        {
+            Ok(n) => n,
+            Err(e) => return fail_with(&e),
+        };
+        let planes = frame.planes(units);
+        if per_plane.checked_mul(planes) != Some(needed) {
             return ERRORS.fail(
                 FTL_FAILED,
-                format!("frame {index} decoded to {total} values, not the {needed} expected"),
+                format!(
+                    "frame {index} decodes to {planes} plane(s) of {per_plane} values, not the \
+                     {needed} values expected"
+                ),
             );
         }
-        let mut at = 0;
-        for p in &planes {
-            std::ptr::copy_nonoverlapping(p.as_ptr(), out.add(at), p.len());
-            at += p.len();
+        let out = std::slice::from_raw_parts_mut(out, needed);
+        let read = h.with_scratch(|scratch| {
+            with_planes(out, per_plane, planes, |parts| {
+                frame.read_into(units, 0, parts, scratch).map(drop)
+            })
+        });
+        match read.with_context(|| format!("frame {index}")) {
+            Ok(()) => FTL_OK,
+            Err(e) => fail_with(&e),
         }
-        FTL_OK
     })
 }
 
 /// Frame `index` as raw 8-bit samples, every sample plane one after another
-/// ([`read_frame_u8`], [`read_planes_u8`]): 8-bit frames, and 4-bit palette
-/// indices as one byte each; anything wider is `FTL_INVALID_ARGUMENT`, the
-/// frame being one this reader does not take. `out` holds `len` bytes, at
-/// least [`ftl_sample_count`].
+/// ([`Stored`]): 8-bit frames, and 4-bit palette indices as one byte each;
+/// anything wider is `FTL_INVALID_ARGUMENT`, the frame being one this reader
+/// does not take. `out` holds `len` bytes, at least [`ftl_sample_count`].
 ///
 /// # Safety
 ///
@@ -1202,16 +1279,17 @@ pub unsafe extern "C" fn ftl_read_u8(
     out: *mut u8,
     len: usize,
 ) -> c_int {
-    read_into(s, index, None, out, len, all_samples, decode_u8)
+    // One byte a sample, so no byte order to choose.
+    read_into(s, index, Stored(ByteOrder::host()), out, len, all_samples, takes_u8)
 }
 
 /// Frame `index` as 16-bit display samples, every sample plane one after
-/// another ([`read_frame_u16`], [`read_planes_u16`]): 16-bit as it is, 8-bit
-/// widened onto 0..=65535, signed offset into unsigned, 32- and 64-bit
-/// rescaled from `range[0]..range[1]` — or from each plane's own minimum and
-/// maximum when `range` is NULL. A 4-bit frame is `FTL_INVALID_ARGUMENT`:
-/// [`ftl_read_u8`] and [`ftl_read_f32`] read it. `out` holds `len` values, at
-/// least [`ftl_sample_count`].
+/// another ([`Display`]): 16-bit as it is, 8-bit widened onto 0..=65535,
+/// signed offset into unsigned, 32- and 64-bit rescaled from
+/// `range[0]..range[1]` — or from each plane's own minimum and maximum when
+/// `range` is NULL. A 4-bit frame is `FTL_INVALID_ARGUMENT`: [`ftl_read_u8`]
+/// and [`ftl_read_f32`] read it. `out` holds `len` values, at least
+/// [`ftl_sample_count`].
 ///
 /// # Safety
 ///
@@ -1237,14 +1315,14 @@ pub unsafe extern "C" fn ftl_read_u16(
         }
         Some((lo, hi))
     };
-    read_into(s, index, range, out, len, all_samples, decode_u16)
+    read_into(s, index, Display { range }, out, len, all_samples, takes_u16)
 }
 
 /// Frame `index` as floats in the file's own units, every sample plane one
-/// after another ([`read_frame_f32`], [`read_planes_f32`]): any depth, integer
-/// or float, with no widening, offset or rescale (an 8-bit 200 is 200.0, a
-/// signed 16-bit -1 is -1.0); 16-bit floating point is `FTL_FORMAT`. `out`
-/// holds `len` values, at least [`ftl_sample_count`].
+/// after another ([`File`](crate::units::File)): any depth, integer or float, with no widening,
+/// offset or rescale (an 8-bit 200 is 200.0, a signed 16-bit -1 is -1.0);
+/// 16-bit floating point is `FTL_FORMAT`. `out` holds `len` values, at least
+/// [`ftl_sample_count`].
 ///
 /// # Safety
 ///
@@ -1257,11 +1335,11 @@ pub unsafe extern "C" fn ftl_read_f32(
     out: *mut f32,
     len: usize,
 ) -> c_int {
-    read_into(s, index, None, out, len, all_samples, decode_f32)
+    read_into(s, index, FileUnits, out, len, all_samples, takes_any)
 }
 
 /// An 8-bit CMYK frame (`FtlFrameInfo.cmyk`) converted to red, green and
-/// blue planes, one after another ([`read_planes_rgb_u8`]); anything else is
+/// blue planes, one after another ([`CmykRgb8`]); anything else is
 /// `FTL_INVALID_ARGUMENT`. An RGB frame needs no conversion: [`ftl_read_u8`]
 /// gives its planes. `out` holds `len` bytes, at least `3 * width * height`.
 ///
@@ -1276,11 +1354,11 @@ pub unsafe extern "C" fn ftl_read_rgb_u8(
     out: *mut u8,
     len: usize,
 ) -> c_int {
-    read_into(s, index, None, out, len, three_planes, decode_rgb_u8)
+    read_into(s, index, CmykRgb8, out, len, three_planes, takes_cmyk_u8)
 }
 
-/// [`ftl_read_rgb_u8`] as 16-bit samples ([`read_planes_rgb_u16`]), for 8-
-/// and 16-bit CMYK frames alike.
+/// [`ftl_read_rgb_u8`] as 16-bit samples ([`CmykRgb16`]), for 8- and 16-bit
+/// CMYK frames alike.
 ///
 /// # Safety
 ///
@@ -1293,16 +1371,16 @@ pub unsafe extern "C" fn ftl_read_rgb_u16(
     out: *mut u16,
     len: usize,
 ) -> c_int {
-    read_into(s, index, None, out, len, three_planes, decode_rgb_u16)
+    read_into(s, index, CmykRgb16, out, len, three_planes, takes_cmyk)
 }
 
 /// The smallest and largest finite value across a whole 32- or 64-bit frame,
-/// every plane of it ([`frame_float_minmax`]); `0` and `1` when the frame is
-/// constant or has no finite value. Not what [`ftl_read_u16`] uses when given
-/// no range — that scales each plane by its own — but what to give it to put
-/// every plane, or several frames, on one scale. NaN and NaN for an 8- or
-/// 16-bit frame, whose own integer range is the one to use. Either output may
-/// be NULL.
+/// every plane of it ([`Frame::value_range`](crate::Frame::value_range)); `0`
+/// and `1` when the frame is constant or has no finite value. Not what
+/// [`ftl_read_u16`] uses when given no range — that scales each plane by its
+/// own — but what to give it to put every plane, or several frames, on one
+/// scale. NaN and NaN for an 8- or 16-bit frame, whose own integer range is
+/// the one to use. Either output may be NULL.
 ///
 /// # Safety
 ///
@@ -1315,13 +1393,16 @@ pub unsafe extern "C" fn ftl_float_minmax(
     max: *mut f32,
 ) -> c_int {
     ERRORS.guarded(|| {
-        let (st, f) = match frame_at(s, index) {
+        let (h, _) = match frame_at(s, index) {
             Ok(v) => v,
             Err(status) => return status,
         };
-        match frame_float_minmax(&st.data, f, st.byte_order)
-            .with_context(|| format!("frame {index}"))
-        {
+        let range = h
+            .inner
+            .frame(index)
+            .and_then(|frame| h.with_scratch(|scratch| frame.value_range(scratch)))
+            .with_context(|| format!("frame {index}"));
+        match range {
             Ok(r) => {
                 let (lo, hi) = r.unwrap_or((f32::NAN, f32::NAN));
                 if !min.is_null() {
