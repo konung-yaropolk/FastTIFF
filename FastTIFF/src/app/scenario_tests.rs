@@ -103,6 +103,45 @@ fn ome_stack(creator: &str) -> Vec<u8> {
 
 // ------------------------------------------------------------- opening
 
+#[cfg(all(feature = "plugin-hdf5", not(target_arch = "wasm32")))]
+#[test]
+fn hdf5_picker_waits_for_selection_and_cancel_keeps_the_document() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fasttiff-builtin-plugins/tests/fixtures/hdf5-selection.h5");
+    let file = TempFile::new("cells.custom", &std::fs::read(path).unwrap());
+    let mut h = Headless::new(Target::Desktop).maximized(true);
+    h.open_bytes(stack(64, 48, 1), "original.tif");
+    let original = h.app.document_generation();
+    for button in ["Cancel", "Import"] {
+        h.open(super::Opened::Path(file.path().to_owned()));
+        h.run_until("the dataset picker", |app| app.import_prompt.is_some());
+        h.frames(3);
+        assert_eq!(h.app.document_generation(), original);
+        if button == "Import" {
+            h.click_text("/images/bytes   (embedded TIFF)");
+            h.frames(2);
+            h.click_text("/images/color   [2, 3, 3] (YXC)");
+            h.frames(2);
+        }
+        h.click_text(button);
+        h.run_until("the importer to return", |app| {
+            app.job.is_none() && app.plugins.is_some()
+        });
+        if button == "Cancel" {
+            assert_eq!(h.app.document_generation(), original);
+        }
+    }
+    h.run_until("the chosen RGB image", |app| {
+        app.document_generation() != original
+    });
+    let doc = h.app.core.document().unwrap();
+    assert_eq!(
+        (doc.tiff().frames[0].width, doc.tiff().frames[0].height),
+        (3, 2)
+    );
+    assert_eq!(doc.tiff().meta.channels, 3);
+}
+
 /// A file dropped on the desktop's window opens in it: the window is titled
 /// after it once, sized around the picture at 100%, and the first frame is
 /// planned for exactly the picture, in the device's pixels.

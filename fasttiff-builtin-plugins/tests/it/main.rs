@@ -9,6 +9,7 @@
 //!
 //! Run one suite with `cargo test -p fasttiff-builtin-plugins --test it <module>::`.
 
+mod hdf5;
 mod plugin_parity;
 mod plugins;
 mod registry;

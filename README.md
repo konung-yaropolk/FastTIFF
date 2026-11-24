@@ -899,6 +899,25 @@ EPFL relicensed TurboReg/StackReg itself to GPL-3-or-later in April 2023. It
 does not claim bit-parity with StackReg; see the crate's README for exactly
 where it differs and why.
 
+### HDF5 images and stacks
+
+Open an HDF5 container on the desktop and select a dataset by its full path.
+When two or more single-frame images share a width, height and channel count,
+the picker also offers to import them as a stack. Groups appear first, largest
+frame count first. Each dataset contributes one frame in dataset-path order.
+Individual images and existing stacks remain available below the groups.
+The picker shows each numeric image's shape and axis order. It also recognizes
+embedded TIFF and BigTIFF byte arrays. Open the same file again to select
+another dataset. Common extensions include `.h5`, `.hdf5`, `.hdf`, `.he5`,
+`.nxs` and `.ims`. HDF4 files require a different reader.
+
+The importer reads numeric arrays with two through five dimensions. It uses
+a string `axes` attribute when present. For unlabelled arrays it assumes YX,
+ZYX, TZYX or TCZYX. A trailing dimension of 1, 3 or 4 is interpreted as a
+channel axis for unlabelled arrays of rank three or higher. Wider integers
+and double-precision samples are converted to the viewer's 32-bit float
+format. The desktop feature flag is `plugin-hdf5`.
+
 ### MRI: NIfTI and DICOM
 
 Two built-in importers read the formats MRI comes in. Both map the scan onto the

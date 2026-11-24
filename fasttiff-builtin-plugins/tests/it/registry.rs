@@ -118,7 +118,7 @@ fn the_builtin_importer_is_installed_and_offers_its_file_types() {
     );
 }
 
-/// The MRI readers, each present exactly when its feature is on and offering
+/// The native image importers, each present exactly when its feature is on and offering
 /// the extensions the Open dialog needs.
 ///
 /// The extension list is the part worth asserting rather than the registration:
@@ -126,9 +126,14 @@ fn the_builtin_importer_is_installed_and_offers_its_file_types() {
 /// if that one slipped out of the list the importer would still be installed
 /// and would simply never be offered the files it exists for.
 #[test]
-fn the_mri_importers_are_installed_exactly_when_their_features_are() {
+fn the_native_importers_are_installed_exactly_when_their_features_are() {
     let reg = Registry::new(register);
     for (feature_on, id, exts) in [
+        (
+            cfg!(all(feature = "plugin-hdf5", not(target_arch = "wasm32"))),
+            "dev.fasttiff.hdf5",
+            &["h5", "hdf5", "hdf", "he5"][..],
+        ),
         (
             cfg!(all(feature = "plugin-nifti", not(target_arch = "wasm32"))),
             "dev.fasttiff.nifti",

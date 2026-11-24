@@ -66,6 +66,7 @@ builtin-plugins = [
     "plugin-png",
     "plugin-oir",
     "plugin-nifti",
+    "plugin-hdf5",
     "plugin-dicom",
 ]
 
@@ -107,6 +108,7 @@ plugin-oir = ["dep:oir-reader"]
 # read from its own bytes — and `plugin-nifti` brings only gzip, which
 # fast-tiff-lib's Deflate codec already puts in the tree, so neither adds a
 # crate to the build.
+plugin-hdf5 = ["dep:hdf5-reader", "dep:fast-tiff-lib"]
 plugin-nifti = ["dep:flate2"]
 # `zune-jpeg` decodes the baseline (DCT) transfer syntax. The *lossless* one is
 # hand-rolled in `dicom/lossless.rs` — no crate on crates.io decodes it, zune
@@ -204,6 +206,7 @@ rayon = { workspace = true, optional = true }
 # Desktop-only, target-gated rather than put behind a feature, for the reasons
 # each gives.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+hdf5-reader = { version = "0.13", default-features = false, optional = true }
 # Threads for the registration crates, on every target that has them. Target-
 # gated rather than tied to this crate's own `threads` feature, and that is
 # deliberate: `threads` can be switched off on a native host, where rayon builds

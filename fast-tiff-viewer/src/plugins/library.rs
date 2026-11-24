@@ -2045,9 +2045,16 @@ unsafe extern "C" fn decl_push(
                 default: d.b_default != 0,
             },
             abi::FtParamKind::Choice | abi::FtParamKind::Radio => {
-                if d.option_count > 1024 {
+                // A container can offer thousands of dataset paths in a dropdown.
+                // Radio buttons are all drawn at once and keep their smaller limit.
+                let limit = if d.kind == abi::FtParamKind::Choice {
+                    65_536
+                } else {
+                    1024
+                };
+                if d.option_count > limit {
                     return s.refuse(format!(
-                        "the choice \"{key}\" offers more than 1024 options"
+                        "the choice \"{key}\" offers more than {limit} options"
                     ));
                 }
                 let mut options = Vec::new();

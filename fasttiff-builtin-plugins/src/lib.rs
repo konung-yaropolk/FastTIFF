@@ -242,6 +242,7 @@ builtins! {
     dicom if (all(feature = "plugin-dicom", not(target_arch = "wasm32"))) => importers(Dicom);
     /// Desktop-only on top of its feature, for the reason [`dicom`] is.
     nifti if (all(feature = "plugin-nifti", not(target_arch = "wasm32"))) => importers(Nifti);
+    hdf5 if (all(feature = "plugin-hdf5", not(target_arch = "wasm32"))) => importers(Hdf5);
     png if (feature = "plugin-png") => importers(PngImport) exporters(Png);
 }
 
