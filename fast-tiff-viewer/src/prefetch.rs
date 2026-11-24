@@ -316,8 +316,9 @@ macro_rules! with_units {
 /// of a CMYK frame is one of the red, green and blue its inks convert to;
 /// one of an RGB frame is its sample plane, as bytes or on the display scale;
 /// and any other is the frame's first plane, likewise. An 8-bit RGB channel
-/// is refused for a frame that is not 8-bit, as the reader it replaced
-/// refused it: its bytes would be another depth's.
+/// is refused for a frame that is not 8-bit (or 4-bit, whose indices are
+/// bytes too), as the reader it replaced refused it: its bytes would be
+/// another depth's.
 fn reading(job: &ChannelJob, frame: &Frame<'_>) -> anyhow::Result<(Reading, usize)> {
     let info = frame.info();
     let cmyk = info.is_cmyk();
@@ -326,7 +327,7 @@ fn reading(job: &ChannelJob, frame: &Frame<'_>) -> anyhow::Result<(Reading, usiz
         ChannelKind::Int8 if cmyk => (Reading::CmykRgb8, job.plane),
         ChannelKind::Int8 if job.rgb => {
             anyhow::ensure!(
-                info.bits_per_sample == 8,
+                matches!(info.bits_per_sample, 4 | 8),
                 "an 8-bit RGB channel needs 8-bit samples, got {}",
                 info.bits_per_sample
             );
@@ -873,3 +874,7 @@ impl Prefetcher {
 #[cfg(test)]
 #[path = "prefetch_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "decode_oracle_tests.rs"]
+mod oracle_tests;
