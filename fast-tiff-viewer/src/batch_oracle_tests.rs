@@ -175,8 +175,9 @@ fn synthetic() -> Vec<(String, Vec<u8>)> {
         SampleType::U32,
         SampleType::F32,
     ];
-    // (samples per pixel, planar, (channels, slices, planes), label)
-    let shapes: [(u16, bool, (usize, usize, usize), &str); 5] = [
+    // Samples per pixel, planar, (channels, slices, planes), and a label.
+    type Shape = (u16, bool, (usize, usize, usize), &'static str);
+    let shapes: [Shape; 5] = [
         (1, false, (1, 1, 5), "movie"),
         (1, false, (2, 1, 6), "2ch"),
         (1, false, (2, 2, 8), "2ch 4D"),

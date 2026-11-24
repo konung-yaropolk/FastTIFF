@@ -305,7 +305,7 @@ pub(crate) fn build_volume(
     let result = {
         let idle = std::sync::Mutex::new(Vec::new());
         tasks.into_par_iter().try_for_each_init(
-            || Lent::from(&idle, &new_work),
+            || Lent::from(&idle, new_work),
             |work, task| slice(work, task),
         )
     };
