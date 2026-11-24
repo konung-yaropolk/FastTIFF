@@ -4,7 +4,8 @@
 //! The decode core is held to the old readers bit for bit by the oracle in
 //! `src/decode/oracle_tests.rs`. These are the promises that are new: a
 //! multi-strip uncompressed frame borrowed straight from the mapping, and a
-//! whole stored frame of any samples per pixel; a planar plane read without
+//! whole stored frame of any samples per pixel; `borrowed` handing back what
+//! a borrowing read would, for as long as the source; a planar plane read without
 //! touching the others; a short strip failing before its predictor runs; an
 //! undersold single strip read whole by every reader; a wrapping offset
 //! refused, not followed; the plane index checked rather than clamped; the
@@ -67,6 +68,46 @@ fn a_contiguous_multi_strip_frame_is_borrowed_from_the_source() {
     assert!(frame.borrows(Stored(stack.byte_order), 0));
     drop(stack);
     let _ = std::fs::remove_file(path);
+}
+
+/// `borrowed` is what `read` hands back when it borrows, and nothing when it
+/// would decode: the same predicate, with samples that live as long as the
+/// source rather than as a borrow of `out`, so a caller reading several
+/// planes can keep them beside the buffers it decodes the others into.
+#[test]
+fn borrowed_is_the_read_that_borrows() {
+    let (w, h) = (32u32, 24u32);
+    let pixels = ramp((w * h) as usize);
+    let units = Display { range: None };
+    for compression in [Compression::None, Compression::Lzw] {
+        let opts = WriterOptions::new(w, h, SampleType::U16)
+            .rows_per_strip(5)
+            .compression(compression);
+        let stack = TiffStack::from_bytes(write_u16(opts, &[&pixels])).unwrap();
+        let frame = stack.frame(0).unwrap();
+        let mut out = Vec::new();
+        let mut scratch = DecodeScratch::new();
+        let borrowed = frame.borrowed(units, 0);
+        assert_eq!(
+            borrowed.is_some(),
+            frame.borrows(units, 0),
+            "{compression:?}"
+        );
+        let (read, _) = frame.read(units, 0, &mut out, &mut scratch).unwrap();
+        match borrowed {
+            Some(b) => {
+                assert!(b.is_source() && read.is_source());
+                assert_eq!(b.as_ptr(), read.as_ptr(), "the same bytes of the source");
+            }
+            None => {
+                assert_eq!(compression, Compression::Lzw);
+                assert!(!read.is_source());
+            }
+        }
+        assert_eq!(&*read, &pixels[..]);
+        // Past the last plane there is nothing to borrow.
+        assert!(frame.borrowed(units, 1).is_none());
+    }
 }
 
 /// A planar frame's plane decodes from its own strips only: a plane whose

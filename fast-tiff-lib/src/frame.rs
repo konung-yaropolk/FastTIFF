@@ -295,7 +295,9 @@ impl<'a> Frame<'a> {
     /// each, some borrowed and some decoded — can keep the borrowed ones
     /// beside its buffers rather than inside them.
     pub fn borrowed<U: Units>(&self, units: U, plane: usize) -> Option<Pixels<'a, U::Sample>> {
-        units.borrow(self, plane, sealed::Private).map(Pixels::Borrowed)
+        units
+            .borrow(self, plane, sealed::Private)
+            .map(Pixels::Borrowed)
     }
 
     /// Plane `plane` in `units`: the source's own bytes when they are the

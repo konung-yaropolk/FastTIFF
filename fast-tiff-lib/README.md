@@ -404,11 +404,13 @@ fn read(&self, units, plane, out: &mut Vec<_>, scratch: &mut DecodeScratch) -> R
 // Planes first.. into exact slices, one per plane, from one pass over the
 // frame's strips: an RGB frame lands in three buffers from one decompression.
 fn read_into(&self, units, first, out: &mut [&mut [_]], scratch: &mut DecodeScratch) -> Result<Report>;
-// Also: plane_len, planes, borrows (the zero-copy predicate), crop (Crop::Rows,
-// Region or Sampled, with the Coverage it holds), stored_frame_into (the whole
-// frame as the file lays it out) and stored_frame (the same, borrowed when the
-// frame is one uncompressed run, at any samples per pixel), value_range
-// (32/64-bit min/max) and touch.
+// Also: plane_len, planes, borrows (the zero-copy predicate), borrowed (the
+// source's own samples when it holds, living as long as the source rather than
+// as a borrow of `out`, for a caller reading several planes at once), crop
+// (Crop::Rows, Region or Sampled, with the Coverage it holds), stored_frame_into
+// (the whole frame as the file lays it out) and stored_frame (the same,
+// borrowed when the frame is one uncompressed run, at any samples per pixel),
+// value_range (32/64-bit min/max) and touch.
 ```
 
 The `DecodeScratch` is the caller's: it holds what a decode needs between the
