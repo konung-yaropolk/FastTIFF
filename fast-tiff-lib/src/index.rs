@@ -1127,6 +1127,8 @@ impl TiffStack {
             }
         }
 
+        repair_undersold_strips(&mut frames, mmap.len());
+
         // Everything above trusted the file's own numbers. Vet them once, here,
         // so every `FrameInfo` a caller can reach carries the invariants the
         // decoders rely on: a non-empty image, geometry that fits in `usize`,
@@ -1193,6 +1195,43 @@ impl TiffStack {
 /// readers legitimately open such files without ever decoding pixels — so
 /// rejecting them at `open` would be a regression. Their geometry is checked
 /// only if the depth is one we can actually decode.
+/// Give a lone uncompressed strip whose StripByteCounts undersells its frame
+/// the length the frame needs, when the file holds that many bytes from the
+/// strip's offset on.
+///
+/// Writers do get this wrong — a zero from one that did not know the count,
+/// one row's bytes from one that wrote the first row's — and libtiff reads
+/// such files: for a stripped, uncompressed frame of one strip whose count is
+/// short of its rows, it ignores the count and works the length out from the
+/// image ("Bogus StripByteCounts field, ignoring and calculating from
+/// imagelength"). So does this, once, here, so that every read of the frame
+/// agrees; before, the single-strip borrow alone trusted the frame over the
+/// count, and every other reader refused the frame as short. A strip whose
+/// bytes the file does not hold is left as it is, and fails as short.
+fn repair_undersold_strips(frames: &mut [FrameInfo], file_len: usize) {
+    for f in frames.iter_mut() {
+        if f.is_tiled()
+            || f.compression != Compression::None
+            || f.strip_offsets.len() != 1
+            || f.strip_byte_counts.len() != 1
+        {
+            continue;
+        }
+        let Ok(need) = f.decoded_len() else { continue };
+        let (offset, count) = (f.strip_offsets[0], f.strip_byte_counts[0]);
+        let need = need as u64;
+        if count >= need || offset == 0 {
+            continue;
+        }
+        if offset
+            .checked_add(need)
+            .is_some_and(|end| end <= file_len as u64)
+        {
+            f.strip_byte_counts = Strips::One(need);
+        }
+    }
+}
+
 fn validate_frames(frames: &[FrameInfo], file_len: usize) -> Result<()> {
     for (i, f) in frames.iter().enumerate() {
         if f.width == 0 || f.height == 0 {

@@ -15,7 +15,11 @@ use crate::ifd::ByteOrder;
 use crate::index::SampleFormat;
 
 /// Display 16-bit: the sample, sign-bit flipped when signed, from the file's
-/// byte order.
+/// byte order — one plane of a chunky frame, gathered.
+///
+/// Only ever strided. A plane of one sample per pixel (a single-sample frame,
+/// a planar plane) is the stored plane up to a swap or a flip, so it decodes
+/// straight into its destination and [`display16_in_place`] finishes it.
 pub(super) fn display16(
     src: &[u8],
     base: usize,
@@ -24,32 +28,11 @@ pub(super) fn display16(
     signed: bool,
     dst: &mut [u16],
 ) {
-    let n = dst.len();
-    if stride == 1 {
-        // Contiguous samples — the per-frame hot path for compressed 16-bit
-        // playback (and every planar plane). Bulk-convert with the byte-order
-        // branch hoisted out of the loop and no strided indexing (the sign-bit
-        // flip folds in branchlessly: xor with 0 is a no-op).
-        let flip = if signed { 0x8000 } else { 0 };
-        let pairs = src[base * 2..(base + n) * 2].as_chunks::<2>().0;
-        match order {
-            ByteOrder::Little => {
-                for (o, c) in dst.iter_mut().zip(pairs) {
-                    *o = u16::from_le_bytes([c[0], c[1]]) ^ flip;
-                }
-            }
-            ByteOrder::Big => {
-                for (o, c) in dst.iter_mut().zip(pairs) {
-                    *o = u16::from_be_bytes([c[0], c[1]]) ^ flip;
-                }
-            }
-        }
-    } else {
-        for (i, o) in dst.iter_mut().enumerate() {
-            let off = (base + i * stride) * 2;
-            let v = order.u16(&src[off..off + 2]);
-            *o = if signed { v ^ 0x8000 } else { v };
-        }
+    debug_assert!(stride > 1, "a one-sample plane takes the direct route");
+    for (i, o) in dst.iter_mut().enumerate() {
+        let off = (base + i * stride) * 2;
+        let v = order.u16(&src[off..off + 2]);
+        *o = if signed { v ^ 0x8000 } else { v };
     }
 }
 

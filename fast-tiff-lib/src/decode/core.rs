@@ -25,8 +25,9 @@
 use super::codecs::decompress_into;
 use super::convert::{self, MinMax};
 use super::pieces::{
-    apply, bytes_for_bits, decode_planes_into, for_strips, guard_frame_size, guard_tiles,
-    parallel_strips, sized, strip_native, Pool, Post, StripPlan, TileGrid, MAX_DECODED_EXPANSION,
+    apply, bytes_for_bits, decode_planes_into, each_plane, for_strips, guard_frame_size,
+    guard_tiles, parallel_strips, sized, strip_native, Pool, Post, StripPlan, TileGrid,
+    MAX_DECODED_EXPANSION,
 };
 use super::should_parallelize;
 use super::tiles::for_tiles;
@@ -219,8 +220,8 @@ fn convert_strips<T: Send>(
     )
 }
 
-/// One piece's conversion over several cores: in chunks of pixels when it
-/// fills one destination, a destination per task when it fills several.
+/// One piece's conversion over several cores, in chunks of pixels: each task
+/// converts its stretch of the source into every destination.
 #[allow(clippy::too_many_arguments)]
 fn convert_parallel<T: Send>(
     native: &[u8],
@@ -241,16 +242,49 @@ fn convert_parallel<T: Send>(
                 let len = d.len() / elems;
                 conv(s, &mut [d], first, 0, len)
             });
-    } else {
-        parts.par_iter_mut().enumerate().for_each(|(i, p)| {
-            conv(native, std::slice::from_mut(p), first + i, at, n);
-        });
+        return;
     }
+    // Several destinations: a task per chunk of pixels, holding that chunk of
+    // every destination, so each core reads its stretch of the source once
+    // for all of them. A task per destination instead was three tasks for
+    // RGB, each a whole plane on one core. As many tasks as a strip decode
+    // makes, so the list of pieces stays a few hundred pointers long however
+    // big the frame.
+    let tasks = n
+        .div_ceil(CHUNK)
+        .min(rayon::current_num_threads().max(1) * 4)
+        .max(1);
+    let per = n.div_ceil(tasks).max(1);
+    let k = parts.len();
+    let mut cut: Vec<&mut [T]> = Vec::with_capacity(tasks * k);
+    {
+        let mut columns: Vec<std::slice::ChunksMut<'_, T>> = parts
+            .iter_mut()
+            .map(|p| p[at * elems..(at + n) * elems].chunks_mut(per * elems))
+            .collect();
+        for _ in 0..n.div_ceil(per) {
+            for column in columns.iter_mut() {
+                cut.push(column.next().unwrap_or_default());
+            }
+        }
+    }
+    cut.par_chunks_mut(k).enumerate().for_each(|(t, chunk)| {
+        let start = t * per;
+        let len = per.min(n - start);
+        conv(
+            &native[start * px_bytes..(start + len) * px_bytes],
+            chunk,
+            first,
+            0,
+            len,
+        );
+    });
 }
 
 /// Every piece of sample planes `first..first + outs.len()`, converted by
 /// `conv`: tiles through the tile reader, a chunky frame's strips in one pass
-/// for all its planes, a planar frame's plane by plane.
+/// for all its planes, a planar frame's plane by plane — side by side when
+/// its pieces decompress on several cores (see [`each_plane`]).
 #[allow(clippy::too_many_arguments)]
 fn convert_planes<T: Send>(
     src: &Src<'_, '_>,
@@ -264,14 +298,8 @@ fn convert_planes<T: Send>(
     pool: &Pool<'_>,
     conv: &Conv<'_, T>,
 ) -> Result<()> {
-    // A planar frame's planes are walked one at a time; a chunky frame's are
-    // all in its one piece-plane, walked once.
-    let walks = if lay.planar { outs.len() } else { 1 };
-    let mut rest: &mut [&mut [T]] = outs;
-    for p in first..first + walks {
-        let take = if lay.planar { 1 } else { rest.len() };
-        let (these, tail) = std::mem::take(&mut rest).split_at_mut(take);
-        rest = tail;
+    // Sample planes `p..p + these.len()`, all in piece-plane `piece_plane(p)`.
+    let walk = |p: usize, these: &mut [&mut [T]]| -> Result<()> {
         match grid {
             Some(grid) => for_tiles(
                 src,
@@ -285,7 +313,7 @@ fn convert_planes<T: Send>(
                 undo_pred,
                 pool,
                 conv,
-            )?,
+            ),
             None => convert_strips(
                 src,
                 lay,
@@ -297,10 +325,15 @@ fn convert_planes<T: Send>(
                 heavy,
                 pool,
                 conv,
-            )?,
+            ),
         }
+    };
+    if lay.planar {
+        each_plane(outs, first, parallel_strips(src.info, lay.n_pixels), &walk)
+    } else {
+        // A chunky frame's planes are all in its one piece-plane: one walk.
+        walk(first, outs)
     }
-    Ok(())
 }
 
 /// Plane `p`'s destination as the bytes a direct decode writes.
@@ -337,20 +370,20 @@ fn direct_planes<T: bytemuck::Pod + Send>(
             convert_planes(src, lay, grid, first, outs, elems, true, false, pool, &copy)
         }
         None => {
-            for (i, out) in outs.iter_mut().enumerate() {
-                let piece = lay.piece_plane(first + i);
+            let one = |p: usize, these: &mut [&mut [T]]| {
+                let piece = lay.piece_plane(p);
                 decode_planes_into(
                     src,
                     piece..piece + 1,
                     sb,
                     1,
-                    plane_bytes(out),
+                    plane_bytes(&mut these[0]),
                     true,
                     post,
                     pool,
-                )?;
-            }
-            Ok(())
+                )
+            };
+            each_plane(outs, first, parallel_strips(src.info, lay.n_pixels), &one)
         }
     }
 }
@@ -540,7 +573,33 @@ pub(crate) fn display(
                     hi: range.1,
                 }
             };
-            if lay.planar {
+            let k = outs.len();
+            let runs = (first..first + k).all(|p| info.stored_run(p).is_some());
+            if lay.planar && k > 1 && !runs {
+                // Every plane read, decoded in one pass (its planes side by
+                // side on several cores, as one strip per plane needs), then
+                // each ranged and converted.
+                let plane = lay
+                    .n_pixels
+                    .checked_mul(lay.px_bytes())
+                    .context(ErrorKind::TooLarge, "frame size overflows")?;
+                let total = plane
+                    .checked_mul(k)
+                    .context(ErrorKind::TooLarge, "frame size overflows")?;
+                let dest = sized(native, total)?;
+                assemble_into(
+                    &src,
+                    &lay,
+                    grid.as_ref(),
+                    first..first + k,
+                    dest,
+                    &pool,
+                    None,
+                )?;
+                for (out, bytes) in outs.iter_mut().zip(native[..total].chunks_exact(plane)) {
+                    record(auto(bytes, 0, 1, out));
+                }
+            } else if lay.planar {
                 for (i, out) in outs.iter_mut().enumerate() {
                     let bytes = assemble(&src, &lay, grid.as_ref(), first + i, native, &pool)?;
                     record(auto(bytes, 0, 1, out));
@@ -602,15 +661,24 @@ fn assemble_into(
         Some(grid) => {
             let px = lay.px_bytes();
             let plane_bytes = lay.n_pixels * px;
-            for (p, part) in planes.zip(dest.chunks_mut(plane_bytes.max(1))) {
-                let copy = |seg: &[u8], parts: &mut [&mut [u8]], _: usize, at: usize, n: usize| {
-                    let d = &mut parts[0][at * px..(at + n) * px];
-                    d.copy_from_slice(&seg[..n * px]);
-                    apply(post, d);
-                };
-                for_tiles(src, grid, p, sb, px, 0, &mut [part], px, true, pool, &copy)?;
+            let copy = |seg: &[u8], parts: &mut [&mut [u8]], _: usize, at: usize, n: usize| {
+                let d = &mut parts[0][at * px..(at + n) * px];
+                d.copy_from_slice(&seg[..n * px]);
+                apply(post, d);
+            };
+            let one = |p: usize, part: &mut [u8]| {
+                for_tiles(src, grid, p, sb, px, 0, &mut [part], px, true, pool, &copy)
+            };
+            if planes.len() > 1 && parallel_strips(src.info, lay.n_pixels) {
+                // The planes side by side, as `decode_planes_into` runs them.
+                dest.par_chunks_mut(plane_bytes.max(1))
+                    .zip(planes.into_par_iter())
+                    .try_for_each(|(part, p)| one(p, part))
+            } else {
+                planes
+                    .zip(dest.chunks_mut(plane_bytes.max(1)))
+                    .try_for_each(|(p, part)| one(p, part))
             }
-            Ok(())
         }
     }
 }
@@ -770,8 +838,8 @@ pub(crate) fn stored(
 }
 
 /// The checks the 4-bit reader runs before it sizes anything: geometry that
-/// fits, and strips that can cover and supply it, in 4-bit's packed units.
-/// Returns `(packed bytes per row, pixels)`.
+/// fits, and strips (or tiles) that can cover and supply it, in 4-bit's packed
+/// units. Returns `(packed bytes per row, pixels)`.
 ///
 /// 4-bit geometry is *not* covered by `FrameInfo::decoded_len` (a 4-bit sample
 /// has no whole byte size), so this does its own arithmetic and must guard it
@@ -779,9 +847,6 @@ pub(crate) fn stored(
 pub(crate) fn guard_4bit(frame: &FrameInfo) -> Result<(usize, usize)> {
     if frame.samples_per_pixel > 1 {
         bail!(Unsupported, "4-bit multi-sample images are not supported");
-    }
-    if frame.is_tiled() {
-        bail!(Unsupported, "4-bit tiled images are not supported");
     }
     let width = frame.width as usize;
     let height = frame.height as usize;
@@ -794,17 +859,46 @@ pub(crate) fn guard_4bit(frame: &FrameInfo) -> Result<(usize, usize)> {
     let out_len = width
         .checked_mul(height)
         .with_context(ErrorKind::TooLarge, overflow)?;
-    // Both bounds from `guard_frame_size`, in 4-bit's packed units: what the
-    // strips can structurally cover, and what they actually supply.
-    let coverable = (frame.strip_offsets.len() as u64)
-        .saturating_mul((rows_per_strip as u64).min(height as u64))
-        .saturating_mul(packed_row as u64);
     let available = frame.strip_bytes_total();
     let supply = if frame.compression == Compression::None {
         available
     } else {
         available.saturating_mul(MAX_DECODED_EXPANSION)
     };
+    if let Some((across, down, tile_w, _)) = frame.tile_grid() {
+        // A table that describes the grid, and the packed bytes the tiles'
+        // in-image rows hold — what is decompressed — within what the tiles
+        // supply. Tile width is its own tag: a narrow image may claim tiles
+        // millions of pixels wide, so the image's size bounds nothing here.
+        let want = (across as usize).saturating_mul(down as usize);
+        if frame.strip_offsets.len() < want || frame.strip_byte_counts.len() < want {
+            bail!(
+                Malformed,
+                "4-bit tile table has {} offsets / {} byte counts, need {want} for \
+                 {across}x{down} tiles",
+                frame.strip_offsets.len(),
+                frame.strip_byte_counts.len()
+            );
+        }
+        let rows_held = (tile_w as usize)
+            .div_ceil(2)
+            .checked_mul(across as usize)
+            .and_then(|row| row.checked_mul(height))
+            .with_context(ErrorKind::TooLarge, overflow)?;
+        if rows_held as u64 > supply {
+            bail!(
+                Malformed,
+                "4-bit frame's {tile_w}-pixel-wide tiles hold {rows_held} packed bytes in its \
+                 rows, but supply only {available} — refusing to allocate"
+            );
+        }
+        return Ok((packed_row, out_len));
+    }
+    // Both bounds from `guard_frame_size`, in 4-bit's packed units: what the
+    // strips can structurally cover, and what they actually supply.
+    let coverable = (frame.strip_offsets.len() as u64)
+        .saturating_mul((rows_per_strip as u64).min(height as u64))
+        .saturating_mul(packed_row as u64);
     if packed_len as u64 > coverable.min(supply) {
         bail!(
             Malformed,
@@ -822,9 +916,15 @@ pub(crate) fn guard_4bit(frame: &FrameInfo) -> Result<(usize, usize)> {
 /// rows — so an odd width leaves the last nibble of its final byte unused.
 ///
 /// Used for palette-color TIFFs whose ColorMap is indexed by a 4-bit value.
-/// A strip whose data runs short leaves the rest of its rows at index 0, as
-/// this reader always has, and a predictor tag is ignored, as it always has
-/// been.
+/// A strip or tile whose data runs short leaves the rest of its rows at index
+/// 0, as this reader always has, and a predictor tag is ignored, as it always
+/// has been.
+///
+/// Tiles are read as tiles: each row of one is its own `tile_w.div_ceil(2)`
+/// bytes, high nibble first, and only the part of it inside the image is
+/// unpacked. (The decoder this replaced walked a tiled frame's tiles as if
+/// they were strips, which was right only for a single column of tiles as
+/// wide as the image, and scrambled anything else.)
 fn four_bit<T: Copy>(
     src: Src<'_, '_>,
     outs: &mut [&mut [T]],
@@ -838,45 +938,80 @@ fn four_bit<T: Copy>(
     };
     let width = info.width as usize;
     let height = info.height as usize;
-    let rows_per_strip = (info.rows_per_strip as usize).max(1);
     let pool = Pool::new(&mut scratch.pieces);
     let mut buf = pool.take();
-    let mut rows_done = 0usize;
-    let result = (|| -> Result<()> {
-        for (&off, &len) in info.strip_offsets.iter().zip(info.strip_byte_counts.iter()) {
-            if rows_done >= height {
-                break;
+    let result = match info.tile_grid() {
+        Some((across, down, tile_w, tile_h)) => (|| -> Result<()> {
+            let (across, tile_w, tile_h) = (across as usize, tile_w as usize, tile_h as usize);
+            let tile_row = tile_w.div_ceil(2);
+            for ty in 0..down as usize {
+                let rows = tile_h.min(height - ty * tile_h);
+                for tx in 0..across {
+                    let index = ty * across + tx;
+                    let (off, len) = (info.strip_offsets[index], info.strip_byte_counts[index]);
+                    let packed = packed_4bit(&src, off, len, rows * tile_row, &mut buf)?;
+                    let x0 = tx * tile_w;
+                    let keep = tile_w.min(width - x0);
+                    for (r, prow) in packed.chunks_exact(tile_row).enumerate() {
+                        let at = (ty * tile_h + r) * width + x0;
+                        convert::unpack4(prow, &mut out[at..at + keep], &conv);
+                    }
+                }
             }
-            let rows = rows_per_strip.min(height - rows_done);
-            let need = rows * packed_row;
-            let raw = src.bytes.piece_clamped(off, len)?;
-            let packed: &[u8] = if info.compression == Compression::None && raw.len() >= need {
-                &raw[..need]
-            } else {
-                let dst = sized(&mut buf, need)?;
-                dst.fill(0);
-                decompress_into(raw, info.compression, dst)?;
-                &buf[..need]
-            };
-            let dst = &mut out[rows_done * width..(rows_done + rows) * width];
-            for (prow, orow) in packed
-                .chunks_exact(packed_row.max(1))
-                .zip(dst.chunks_exact_mut(width.max(1)))
-            {
-                convert::unpack4(prow, orow, &conv);
+            Ok(())
+        })(),
+        None => (|| -> Result<()> {
+            let rows_per_strip = (info.rows_per_strip as usize).max(1);
+            let mut rows_done = 0usize;
+            for (&off, &len) in info.strip_offsets.iter().zip(info.strip_byte_counts.iter()) {
+                if rows_done >= height {
+                    break;
+                }
+                let rows = rows_per_strip.min(height - rows_done);
+                let packed = packed_4bit(&src, off, len, rows * packed_row, &mut buf)?;
+                let dst = &mut out[rows_done * width..(rows_done + rows) * width];
+                for (prow, orow) in packed
+                    .chunks_exact(packed_row.max(1))
+                    .zip(dst.chunks_exact_mut(width.max(1)))
+                {
+                    convert::unpack4(prow, orow, &conv);
+                }
+                rows_done += rows;
             }
-            rows_done += rows;
-        }
-        if rows_done < height {
-            bail!(
-                Malformed,
-                "4-bit strips cover only {rows_done} of {height} rows"
-            );
-        }
-        Ok(())
-    })();
+            if rows_done < height {
+                bail!(
+                    Malformed,
+                    "4-bit strips cover only {rows_done} of {height} rows"
+                );
+            }
+            Ok(())
+        })(),
+    };
     pool.give(buf);
     result
+}
+
+/// A 4-bit strip's or tile's first `need` packed bytes: the file's own when
+/// it holds them uncompressed, otherwise decompressed into `buf`, with what
+/// the codec did not write left at index 0. That fill comes after the codec,
+/// not before: a codec may write past the length it reports (ZSTD does), and
+/// those bytes are not data. A piece that runs off the end of the file is cut
+/// short there, as this reader has always done.
+fn packed_4bit<'b>(
+    src: &Src<'b, '_>,
+    off: u64,
+    len: u64,
+    need: usize,
+    buf: &'b mut Vec<u8>,
+) -> Result<&'b [u8]> {
+    let raw = src.bytes.piece_clamped(off, len)?;
+    if src.info.compression == Compression::None && raw.len() >= need {
+        return Ok(&raw[..need]);
+    }
+    let dst = sized(buf, need)?;
+    let n = decompress_into(raw, src.info.compression, dst)?;
+    dst[n..].fill(0);
+    Ok(&buf[..need])
 }
 
 /// What [`stored_frame_into`] writes, in bytes.

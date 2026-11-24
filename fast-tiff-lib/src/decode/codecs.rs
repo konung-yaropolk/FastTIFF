@@ -64,21 +64,77 @@ fn zstd_into(raw: &[u8], dest: &mut [u8]) -> Result<usize> {
         static ZSTD: std::cell::RefCell<zstd::bulk::Decompressor<'static>> =
             std::cell::RefCell::new(zstd::bulk::Decompressor::new().expect("ZSTD context"));
     }
-    ZSTD.with(|cell| {
-        let mut d = cell.borrow_mut();
-        match d.decompress_to_buffer(raw, dest) {
-            Ok(n) => Ok(n),
-            // One-shot decompression fails rather than truncating when the
-            // frame declares more than `dest` holds — which a padded strip
-            // legitimately does. Fall back to the streaming decoder, which
-            // stops at the cap. Rare enough that redoing the work costs less
-            // than never taking the fast path.
-            Err(_) => {
-                let dec = zstd::stream::read::Decoder::new(raw)
-                    .map_err(|e| err!(Malformed, "ZSTD decode failed: {e}"))?;
-                read_all_into(dec, dest).map_err(|e| err!(Malformed, "ZSTD decode failed: {e}"))
-            }
+    // One-shot decompression fails rather than truncating when the frame
+    // declares more than `dest` holds — which a padded strip legitimately
+    // does, and so does every tile hanging off the bottom of the image, whose
+    // rows past it are not decompressed. Those go to the streaming decoder,
+    // which stops at the cap; a frame header that says so up front costs a
+    // parse, not a doomed decode first.
+    let too_big = matches!(
+        zstd::zstd_safe::get_frame_content_size(raw),
+        Ok(Some(size)) if size > dest.len() as u64
+    );
+    if !too_big {
+        if let Ok(n) = ZSTD.with(|cell| cell.borrow_mut().decompress_to_buffer(raw, dest)) {
+            return Ok(n);
         }
+    }
+    zstd_stream_into(raw, dest).map_err(|e| err!(Malformed, "ZSTD decode failed: {e}"))
+}
+
+/// Stream-decompress one ZSTD strip into `dest`, stopping when it is full,
+/// with a context kept across calls: a fresh `zstd::stream::read::Decoder`
+/// per piece was a context and a 128 KiB input buffer allocated for every
+/// edge tile of every frame.
+///
+/// It does exactly what reading that decoder to the cap did — the input fed
+/// in the same chunks its buffered reader took, concatenated frames decoded
+/// one after another, a frame the input ends inside of an error unless `dest`
+/// filled first — so a piece decodes to the same bytes, or fails, as before.
+#[cfg(feature = "codec-zstd")]
+pub(super) fn zstd_stream_into(raw: &[u8], dest: &mut [u8]) -> std::io::Result<usize> {
+    use zstd::stream::raw::{Decoder, InBuffer, Operation, OutBuffer};
+    thread_local! {
+        static STREAM: std::cell::RefCell<Option<Decoder<'static>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    STREAM.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let d = match &mut *slot {
+            Some(d) => d,
+            None => slot.insert(Decoder::new()?),
+        };
+        d.reinit()?;
+        let chunk = zstd::zstd_safe::DCtx::in_size().max(1);
+        let (mut pos, mut window_end, mut filled) = (0usize, 0usize, 0usize);
+        let mut finished_frame = false;
+        while filled < dest.len() {
+            if pos == window_end {
+                window_end = (pos + chunk).min(raw.len());
+            }
+            let input = &raw[pos..window_end];
+            if input.is_empty() {
+                if finished_frame {
+                    break;
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "incomplete frame",
+                ));
+            }
+            if finished_frame {
+                d.reinit()?;
+                finished_frame = false;
+            }
+            let mut src = InBuffer::around(input);
+            let mut out = OutBuffer::around(&mut dest[filled..]);
+            if d.run(&mut src, &mut out)? == 0 {
+                finished_frame = true;
+            }
+            pos += src.pos();
+            filled += out.pos();
+        }
+        Ok(filled)
     })
 }
 
@@ -145,25 +201,6 @@ pub(crate) fn decompress_into(
             bail!(Unsupported, "unsupported TIFF compression scheme: {code}")
         }
     }
-}
-
-/// Read from `r` until `dest` is full or the stream ends; returns bytes read.
-///
-/// Only the ZSTD fallback still streams: Deflate now inflates through a reused
-/// state (see [`inflate_into`]), so without this gate the wasm build — which
-/// has no `codec-zstd` — warns that the function is dead.
-#[cfg(feature = "codec-zstd")]
-fn read_all_into(mut r: impl std::io::Read, dest: &mut [u8]) -> std::io::Result<usize> {
-    let mut filled = 0;
-    while filled < dest.len() {
-        match r.read(&mut dest[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(filled)
 }
 
 /// PackBits-decode into a fixed destination slice; returns bytes written.

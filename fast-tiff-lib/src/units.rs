@@ -188,7 +188,9 @@ impl Units for CmykRgb8 {
         3
     }
     fn plane_len(self, info: &FrameInfo, _: sealed::Private) -> Result<usize> {
-        core::cmyk_plane_len(info, "a CmykRgb8 read")
+        let n = core::cmyk_plane_len(info, "a CmykRgb8 read")?;
+        crate::decode::cmyk::require_8bit_inks(info)?;
+        Ok(n)
     }
     fn borrow<'a>(self, _: &Frame<'a>, _: usize, _: sealed::Private) -> Option<&'a [u8]> {
         None

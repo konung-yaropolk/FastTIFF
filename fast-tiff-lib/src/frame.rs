@@ -14,9 +14,11 @@
 //!
 //! Both take a [`DecodeScratch`], the caller's, which holds whatever a decode
 //! needs between the file and the destination (a strip's worth of decompressed
-//! bytes, or for an auto-ranged wide frame the whole frame). A caller that
-//! keeps one across frames decodes with no allocation and no zero-fill once it
-//! is warm; nothing is kept in a thread-local behind its back.
+//! bytes, or for the few reads that need it the whole frame). A caller that
+//! keeps one across frames decodes with no frame-sized allocation and no
+//! zero-fill once it is warm — serially with no allocation at all; a read
+//! split across cores still makes a few pointer-sized lists for the split —
+//! and nothing frame-sized is kept in a thread-local behind its back.
 //!
 //! The contract every read keeps:
 //!
@@ -44,10 +46,22 @@ use std::ops::Range;
 /// [`piece`](Self::piece), in checked `u64` arithmetic — so a strip offset past
 /// 4 GiB means the same on wasm32, where `usize` is 32 bits, as on a 64-bit
 /// host, rather than wrapping into the wrong bytes.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub(crate) enum FrameBytes<'a> {
     /// `bytes[0]` is the file's byte `base`.
     Slice { base: u64, bytes: &'a [u8] },
+}
+
+/// The span, not the bytes: a frame's bytes are the whole file, and
+/// formatting a mapping of gigabytes is a stall, not a diagnostic.
+impl std::fmt::Debug for FrameBytes<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let FrameBytes::Slice { base, bytes } = *self;
+        f.debug_struct("Slice")
+            .field("base", &base)
+            .field("len", &bytes.len())
+            .finish()
+    }
 }
 
 impl<'a> FrameBytes<'a> {
@@ -298,12 +312,7 @@ impl<'a> Frame<'a> {
         }
         // Vetted before `out` is sized from the header: a hostile frame must
         // not be able to demand gigabytes before it is found out.
-        let n = self.plane_len(units)?;
-        if out.len() != n {
-            out.try_reserve_exact(n.saturating_sub(out.len()))
-                .map_err(|_| err!(TooLarge, "cannot allocate {n} samples for a plane"))?;
-            out.resize(n, U::Sample::default());
-        }
+        fit(out, self.plane_len(units)?)?;
         let report = units.read_into(self, plane, &mut [&mut out[..]], scratch, sealed::Private)?;
         Ok((Pixels::Decoded(&out[..]), report))
     }
@@ -376,6 +385,32 @@ impl<'a> Frame<'a> {
         core::stored_frame_into(self.src(), order, out, scratch)
     }
 
+    /// The whole frame as [`stored_frame_into`](Self::stored_frame_into)
+    /// gives it, borrowed from the source when the source already is it — an
+    /// uncompressed, predictor-free frame stored as one run, every plane of it,
+    /// in `order` (8-bit samples are in every order) — and otherwise decoded
+    /// into `out`, which is resized only if its length is not the frame's.
+    ///
+    /// What [`read`](Self::read) is to one plane, for the whole frame: the
+    /// call for writing a frame back out, which wants no copy when the file
+    /// allows it, whatever its samples per pixel.
+    pub fn stored_frame<'s>(
+        &self,
+        order: ByteOrder,
+        out: &'s mut Vec<u8>,
+        scratch: &mut DecodeScratch,
+    ) -> Result<Pixels<'s, u8>>
+    where
+        'a: 's,
+    {
+        if let Some(borrowed) = core::borrow_stored_frame(self.src(), order) {
+            return Ok(Pixels::Borrowed(borrowed));
+        }
+        fit(out, self.stored_frame_len()?)?;
+        core::stored_frame_into(self.src(), order, out, scratch)?;
+        Ok(Pixels::Decoded(&out[..]))
+    }
+
     /// The smallest and largest finite values of a 32- or 64-bit frame,
     /// integer or float, over every sample — the range ImageJ auto-contrasts a
     /// 32-bit image to. `(0, 1)` when there is no usable range (no finite
@@ -407,6 +442,17 @@ impl<'a> Frame<'a> {
             }
         }
     }
+}
+
+/// Size `out` to `n`, fallibly, when it is not that already; what it held is
+/// left for the decode to overwrite.
+fn fit<T: Default + Clone>(out: &mut Vec<T>, n: usize) -> Result<()> {
+    if out.len() != n {
+        out.try_reserve_exact(n.saturating_sub(out.len()))
+            .map_err(|_| err!(TooLarge, "cannot allocate {n} samples for a read"))?;
+        out.resize(n, T::default());
+    }
+    Ok(())
 }
 
 pub(crate) fn plane_past_end(plane: usize, planes: usize) -> Error {
@@ -535,14 +581,19 @@ impl DisplayMaps {
 }
 
 /// What a decode needs between the file and the destination, kept by the
-/// caller so that a warm one costs no allocation and no zero-fill.
+/// caller so that a warm one costs no frame-sized allocation and no
+/// zero-fill.
 ///
 /// A read holds at most one decompressed piece (a strip or tile) per thread
-/// it runs on, and only an auto-ranged wide frame ever needs the whole frame
-/// assembled first. A buffer here grows when a frame needs more than it has,
-/// and is zero-filled only then; [`release`](Self::release) gives it all back
-/// (on a document change, say, or after a one-off windowed read).
-#[derive(Default, Debug)]
+/// it runs on. A few need a whole frame (or plane) assembled first: a wide
+/// frame shown as `u16` with no range, whose values have to be known before
+/// any is converted; [`value_range`](Frame::value_range) of a tiled frame, or
+/// of one whose strips decompress on several cores; and a planar CMYK frame,
+/// whose four inks are needed at once. A buffer here grows when a frame needs
+/// more than it has, and is zero-filled only then;
+/// [`release`](Self::release) gives it all back (on a document change, say,
+/// or after a one-off windowed read).
+#[derive(Default)]
 pub struct DecodeScratch {
     /// A whole frame's (or plane's) decoded bytes, for the reads that need
     /// them all before converting any.
@@ -565,6 +616,16 @@ impl DecodeScratch {
     /// Give back everything it holds.
     pub fn release(&mut self) {
         *self = Self::default();
+    }
+}
+
+/// What it holds, not the bytes: they are whatever the last decode left.
+impl std::fmt::Debug for DecodeScratch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecodeScratch")
+            .field("held_bytes", &self.held_bytes())
+            .field("pieces", &self.pieces.len())
+            .finish()
     }
 }
 
@@ -592,11 +653,12 @@ impl FrameInfo {
         }
         if let Some(offset) = self.whole_strip() {
             // One strip holding the whole frame, the planes one after another.
+            // Checked like every other offset sum (`whole_strip` refuses a
+            // strip whose end would overflow, but a `FrameInfo` is anyone's to
+            // build): a wrapped offset would be someone else's bytes.
             let plane_bytes = (self.decoded_len().ok()? / self.piece_planes()) as u64;
-            return Some(
-                offset + planes.start as u64 * plane_bytes
-                    ..offset + planes.end as u64 * plane_bytes,
-            );
+            let at = |p: usize| offset.checked_add((p as u64).checked_mul(plane_bytes)?);
+            return Some(at(planes.start)?..at(planes.end)?);
         }
         let sb = self.sample_bytes().ok()?;
         self.decoded_len().ok()?;

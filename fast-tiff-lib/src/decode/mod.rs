@@ -135,6 +135,8 @@ pub(crate) fn should_parallelize(n_pixels: usize) -> bool {
 use crate::ifd::ByteOrder;
 #[cfg(test)]
 use crate::index::{Compression, FrameInfo, SampleFormat};
+#[cfg(all(test, feature = "codec-zstd"))]
+use codecs::zstd_stream_into;
 #[cfg(test)]
 use codecs::{packbits_decode, undo_predictor};
 #[cfg(test)]

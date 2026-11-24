@@ -58,6 +58,21 @@ pub(crate) fn require_cmyk(frame: &FrameInfo, method: &str) -> Result<()> {
     );
 }
 
+/// What a [`CmykRgb8`](crate::units::CmykRgb8) read says to inks that are not
+/// 8-bit: before anything is decoded or sized, since no frame of another
+/// depth is one it reads.
+pub(crate) fn require_8bit_inks(frame: &FrameInfo) -> Result<()> {
+    if frame.bits_per_sample != 8 {
+        bail!(
+            InvalidInput,
+            "a CmykRgb8 read takes 8-bit inks, and this frame's are {}-bit (read them as \
+             CmykRgb16)",
+            frame.bits_per_sample
+        );
+    }
+    Ok(())
+}
+
 /// [`CmykRgb8`](crate::units::CmykRgb8) planes `first..`.
 pub(crate) fn rgb8(
     src: Src<'_, '_>,
@@ -66,14 +81,7 @@ pub(crate) fn rgb8(
     scratch: &mut DecodeScratch,
 ) -> Result<()> {
     require_cmyk(src.info, "a CmykRgb8 read")?;
-    if src.info.bits_per_sample != 8 {
-        bail!(
-            InvalidInput,
-            "a CmykRgb8 read takes 8-bit inks, and this frame's are {}-bit (read them as \
-             CmykRgb16)",
-            src.info.bits_per_sample
-        );
-    }
+    require_8bit_inks(src.info)?;
     Inks { src, scratch }.convert(first, outs, &|b| b[0] as u32, &|ink, black| {
         let black = black as f32 / 255.0;
         round_u8(ink_to_component(ink as f32 / 255.0, black) * 255.0)

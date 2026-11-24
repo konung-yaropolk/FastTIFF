@@ -821,3 +821,79 @@ fn the_rounding_shortcut_is_round_exactly() {
         assert_eq!(round_u8(x), x.round() as u8);
     }
 }
+
+/// ZSTD's fallback for a frame bigger than its piece — a padded strip, a tile
+/// hanging off the bottom of the image — streams with a context kept across
+/// calls instead of a `zstd::stream::read::Decoder` made per piece. It has to
+/// stop where that reader stopped, with the same bytes, and fail where it
+/// failed: here over frames longer than the reader's 128 KiB input chunk,
+/// concatenated frames, trailing junk, truncations and corruptions, into
+/// destinations short of, equal to and past the content.
+#[cfg(feature = "codec-zstd")]
+#[test]
+fn the_zstd_stream_fallback_reads_as_the_stream_reader_did() {
+    use std::io::Read;
+    fn reader(raw: &[u8], dest: &mut [u8]) -> std::io::Result<usize> {
+        let mut r = zstd::stream::read::Decoder::new(raw)?;
+        let mut filled = 0;
+        while filled < dest.len() {
+            match r.read(&mut dest[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(filled)
+    }
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    let noise: Vec<u8> = (0..400_000)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect();
+    let smooth: Vec<u8> = (0..300_000u32).map(|i| (i / 300) as u8).collect();
+    let a = zstd::stream::encode_all(&noise[..], 3).unwrap();
+    let b = zstd::stream::encode_all(&smooth[..], 3).unwrap();
+    assert!(a.len() > zstd::zstd_safe::DCtx::in_size());
+    let both = [a.clone(), b.clone()].concat();
+    let mut inputs = vec![
+        a.clone(),
+        b.clone(),
+        both.clone(),
+        [&a[..], &[1, 2, 3, 4, 5][..]].concat(),
+    ];
+    for raw in [&a, &b, &both] {
+        for cut in [0, 3, raw.len() / 3, raw.len() / 2, raw.len() - 1] {
+            inputs.push(raw[..cut].to_vec());
+        }
+        let mut bad = raw.clone();
+        let at = bad.len() / 2;
+        bad[at] ^= 0x5A;
+        bad[at + 1] ^= 0xFF;
+        inputs.push(bad);
+    }
+    for (i, raw) in inputs.iter().enumerate() {
+        for len in [
+            0, 1, 1000, 100_000, 300_000, 300_010, 400_000, 700_000, 900_000,
+        ] {
+            let mut old = vec![0u8; len];
+            let mut new = vec![0u8; len];
+            match (reader(raw, &mut old), zstd_stream_into(raw, &mut new)) {
+                (Ok(n), Ok(m)) => {
+                    assert_eq!(n, m, "input {i}, {len}-byte destination");
+                    assert!(old[..n] == new[..n], "input {i}, {len}-byte destination");
+                }
+                (Err(_), Err(_)) => {}
+                (o, n) => panic!(
+                    "input {i}, {len}-byte destination: reader {:?} / fallback {:?}",
+                    o.map_err(|e| e.kind()),
+                    n.map_err(|e| e.kind())
+                ),
+            }
+        }
+    }
+}

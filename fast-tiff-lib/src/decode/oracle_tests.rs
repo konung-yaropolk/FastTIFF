@@ -550,7 +550,19 @@ fn compare_frame_api(
         frame.read_into(CmykRgb8, 0, &mut slices, &mut warm)?;
         Ok(planes)
     });
-    same(&format!("{label} CmykRgb8"), &old8, &new8);
+    if info.is_cmyk() && info.bits_per_sample != 8 {
+        // The unit takes 8-bit inks and says so before decoding anything; the
+        // old reader decoded first, so a frame malformed as well failed as
+        // that.
+        assert_eq!(
+            new8.map(drop).unwrap_err().kind(),
+            ErrorKind::InvalidInput,
+            "{label} CmykRgb8 of {}-bit inks",
+            info.bits_per_sample
+        );
+    } else {
+        same(&format!("{label} CmykRgb8"), &old8, &new8);
+    }
     let old16 = old::read_planes_rgb_u16(file, info, order);
     let new16 = frame.plane_len(CmykRgb16).and_then(|n| {
         let mut planes = vec![vec![0x4242u16; n]; 3];
@@ -1031,7 +1043,12 @@ fn build(spec: &Spec) -> (Vec<u8>, FrameInfo) {
             tile_size = Some((tw, th));
             rows_per_strip = th;
             let (tw, th) = (tw as usize, th as usize);
-            let tile_row = tw * per_px * sb;
+            // A 4-bit tile row is its own whole bytes, high nibble first.
+            let tile_row = if four {
+                tw.div_ceil(2)
+            } else {
+                tw * per_px * sb
+            };
             for data in &plane_data {
                 for ty in 0..h.div_ceil(th) {
                     for tx in 0..w.div_ceil(tw) {
@@ -1044,8 +1061,13 @@ fn build(spec: &Spec) -> (Vec<u8>, FrameInfo) {
                                 continue;
                             }
                             let x0 = tx * tw;
-                            let keep = tw.min(w - x0) * per_px * sb;
-                            let src = &data[y * row_bytes + x0 * per_px * sb..][..keep];
+                            let (from, keep) = if four {
+                                assert!(x0.is_multiple_of(2), "4-bit tiles start on a byte");
+                                (x0 / 2, tw.min(w - x0).div_ceil(2))
+                            } else {
+                                (x0 * per_px * sb, tw.min(w - x0) * per_px * sb)
+                            };
+                            let src = &data[y * row_bytes + from..][..keep];
                             tile[r * tile_row..r * tile_row + keep].copy_from_slice(src);
                         }
                         predict(&mut tile, tw);
@@ -1214,9 +1236,12 @@ fn matrix() -> Vec<Spec> {
             }
         }
     }
-    // 4-bit palette frames, an odd width so a row ends mid-byte.
+    // 4-bit palette frames, an odd width so a row ends mid-byte. Tiled only as
+    // one column of tiles exactly as wide as the image, the one tiling the
+    // old decoder read right; the others are held to the same image in strips
+    // (`four_bit_tiles_read_as_the_same_image_in_strips`).
     for order in [ByteOrder::Little, ByteOrder::Big] {
-        for lay in [Lay::One, Lay::Strips(4), Lay::Gapped(5)] {
+        for lay in [Lay::One, Lay::Strips(4), Lay::Gapped(5), Lay::Tiled(33, 8)] {
             for compression in codecs.iter().copied() {
                 specs.push(Spec {
                     w: 33,
@@ -1417,6 +1442,22 @@ fn compare_large(which: usize) {
             Compression::PackBits,
             1,
         ),
+        // A chunky run read in place, its heavy conversions cut into chunks
+        // of pixels across every destination.
+        (16, UnsignedInt, 3, false, Lay::One, 1, Compression::None, 2),
+        // One strip per plane: the planes decode side by side or not at all.
+        (16, UnsignedInt, 3, true, Lay::One, 2, Compression::Lzw, 2),
+        (32, Float, 3, true, Lay::One, 3, Compression::Deflate, 2),
+        (
+            8,
+            UnsignedInt,
+            3,
+            true,
+            Lay::Tiled(512, 512),
+            1,
+            zstd_or_lzw,
+            2,
+        ),
     ];
     for (depth, format, spp, planar, lay, predictor, compression, photometric) in
         specs.into_iter().skip(which).take(1)
@@ -1449,6 +1490,36 @@ fn compare_large(which: usize) {
                     Ok(planes)
                 });
                 same(&format!("{label} Display {range:?}"), &old, &new);
+                if spp >= 3 {
+                    let old = (|| -> Result<Vec<Vec<u16>>> {
+                        Ok(vec![
+                            old::read_plane_u16(&file, &info, spec.order, range, 1)?,
+                            old::read_plane_u16(&file, &info, spec.order, range, 2)?,
+                        ])
+                    })();
+                    let new = frame.plane_len(Display { range }).and_then(|n| {
+                        let (mut a, mut b) = (vec![1u16; n], vec![2u16; n]);
+                        let mut s = DecodeScratch::new();
+                        frame.read_into(Display { range }, 1, &mut [&mut a, &mut b], &mut s)?;
+                        Ok(vec![a, b])
+                    });
+                    same(&format!("{label} Display {range:?} 1..3"), &old, &new);
+                }
+            }
+            if spp >= 3 {
+                let old = (|| -> Result<Vec<Vec<u32>>> {
+                    Ok(vec![
+                        bits(&old::read_plane_f32(&file, &info, spec.order, 1)?),
+                        bits(&old::read_plane_f32(&file, &info, spec.order, 2)?),
+                    ])
+                })();
+                let new = frame.plane_len(File).and_then(|n| {
+                    let (mut a, mut b) = (vec![f32::NAN; n], vec![-1.0f32; n]);
+                    let mut s = DecodeScratch::new();
+                    frame.read_into(File, 1, &mut [&mut a, &mut b], &mut s)?;
+                    Ok(vec![bits(&a), bits(&b)])
+                });
+                same(&format!("{label} File 1..3"), &old, &new);
             }
             let old = old::read_planes_f32(&file, &info, spec.order)
                 .map(|v| v.iter().map(|p| bits(p)).collect::<Vec<_>>());
@@ -1502,6 +1573,10 @@ large_tests! {
     large_tiled_u16_reads_as_before: 6;
     large_cmyk8_reads_as_before: 7;
     large_f64_packbits_reads_as_before: 8;
+    large_rgb16_uncompressed_reads_as_before: 9;
+    large_planar_rgb16_one_strip_a_plane_reads_as_before: 10;
+    large_planar_f32_one_strip_a_plane_reads_as_before: 11;
+    large_planar_tiled_rgb8_reads_as_before: 12;
 }
 
 /// A frame at file offset 2^33, read through a slice that starts there: the
@@ -1547,5 +1622,293 @@ fn a_frame_far_into_the_file_decodes_as_one_at_its_start() {
         before.strip_offsets = far.strip_offsets.iter().map(|o| o - BASE / 2).collect();
         let lost = Frame::with_bytes(FrameBytes::relative(BASE, &file), &before, spec.order);
         assert!(read(&lost).is_err(), "{spec:?}: an offset before the slice");
+    }
+}
+
+// ------------------------------------------------------ malformed frames
+
+/// Frames that are not well formed, every read of each through a scratch the
+/// reads before it dirtied: a strip or tile whose data stops short, and a
+/// file cut off inside its last piece. Where the old decoder gave samples —
+/// a short tile or 4-bit strip blank past its data, never the piece before
+/// it — the core must give the same; where it failed, the core must fail the
+/// same way.
+///
+/// The piece cut short is a middle strip, or a tile of the first band, whose
+/// rows all lie in the image: a bottom edge tile is decompressed only as far
+/// as the image goes, which can stop before a cut the old decoder ran into.
+/// In a planar frame it is that piece of every plane, and the file is cut
+/// inside plane 0's: the old decoder decoded every plane for any one, so a
+/// plane it failed for is one the core, which decodes only the plane asked
+/// for, could otherwise read.
+fn compare_malformed(bits: u16, format: SampleFormat) {
+    for (i, spec) in matrix()
+        .iter()
+        .filter(|s| s.bits == bits && s.format == format)
+        .enumerate()
+    {
+        if bits != 4 && i % 3 != 0 {
+            continue;
+        }
+        let (file, info) = build(spec);
+        let pieces = info.strip_offsets.len();
+        let planes = if info.is_planar() && pieces > 1 {
+            spp_of(&info)
+        } else {
+            1
+        };
+        let per_plane = pieces / planes;
+        let piece = usize::from(per_plane > 1);
+        let mut short = info.clone();
+        let mut counts = short.strip_byte_counts.to_vec();
+        for p in 0..planes {
+            counts[p * per_plane + piece] /= 2;
+        }
+        short.strip_byte_counts = counts.into();
+        compare_frame(
+            &file,
+            &short,
+            spec.order,
+            &format!("{spec:?} piece {piece} short"),
+        );
+        // Inside plane 0's bytes: of a whole-frame strip holding every plane,
+        // its first part.
+        let span = if planes == 1 && info.is_planar() && info.whole_strip().is_some() {
+            (info.decoded_len().unwrap() / spp_of(&info)) as u64
+        } else {
+            info.strip_byte_counts[piece]
+        };
+        let cut = (info.strip_offsets[piece] + span / 2) as usize;
+        compare_frame(
+            &file[..cut],
+            &info,
+            spec.order,
+            &format!("{spec:?} cut at {cut}"),
+        );
+    }
+}
+
+/// One depth and format a test, so the harness runs them side by side.
+macro_rules! malformed_tests {
+    ($($name:ident: $bits:expr, $format:ident;)*) => {$(
+        #[test]
+        fn $name() {
+            compare_malformed($bits, SampleFormat::$format);
+        }
+    )*};
+}
+
+malformed_tests! {
+    malformed_u4_reads_as_before: 4, UnsignedInt;
+    malformed_u8_reads_as_before: 8, UnsignedInt;
+    malformed_i8_reads_as_before: 8, SignedInt;
+    malformed_u16_reads_as_before: 16, UnsignedInt;
+    malformed_i16_reads_as_before: 16, SignedInt;
+    malformed_u32_reads_as_before: 32, UnsignedInt;
+    malformed_f32_reads_as_before: 32, Float;
+    malformed_f64_reads_as_before: 64, Float;
+}
+
+// ------------------------------------------------- where the old one erred
+
+/// 4-bit tiles are read as tiles. The old decoder walked them as strips,
+/// which is right only for one column of tiles exactly as wide as the image
+/// (the matrix holds that one to it bit for bit) and scrambled every other
+/// tiling. Here the answer is the same image stored in strips, as the old
+/// decoder read that.
+#[test]
+fn four_bit_tiles_read_as_the_same_image_in_strips() {
+    let w = 33usize;
+    for compression in codecs() {
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            for (tw, th) in [(16, 16), (32, 8), (48, 16), (16, 64)] {
+                let spec = Spec {
+                    w: w as u32,
+                    h: 17,
+                    bits: 4,
+                    format: SampleFormat::UnsignedInt,
+                    spp: 1,
+                    planar: false,
+                    order,
+                    lay: Lay::Tiled(tw, th),
+                    predictor: 1,
+                    compression,
+                    photometric: 3,
+                };
+                let l = format!("{spec:?}");
+                let (file, info) = build(&spec);
+                let (strips, strips_info) = build(&Spec {
+                    lay: Lay::Strips(4),
+                    ..spec
+                });
+                let want = old::read_frame_u8(&strips, &strips_info, order)
+                    .unwrap()
+                    .into_owned();
+                let want_f32: Vec<u32> = want.iter().map(|&v| f32::from(v).to_bits()).collect();
+
+                let cow = super::read_frame_u8(&file, &info, order).unwrap();
+                assert_eq!(&*cow, &want[..], "{l} read_frame_u8");
+                let mut v = dirty(0xA5u8, 3);
+                super::read_frame_u8_into(&file, &info, order, &mut v).unwrap();
+                assert_eq!(v, want, "{l} read_frame_u8_into");
+                for p in [0, 3] {
+                    let plane = super::read_plane_u8(&file, &info, order, p).unwrap();
+                    assert_eq!(plane, want, "{l} read_plane_u8 {p}");
+                    let plane = super::read_plane_f32(&file, &info, order, p).unwrap();
+                    assert_eq!(bits(&plane), want_f32, "{l} read_plane_f32 {p}");
+                }
+                // The all-planes 8-bit reader never took 4-bit samples.
+                same(
+                    &format!("{l} read_planes_u8"),
+                    &old::read_planes_u8(&strips, &strips_info, order),
+                    &super::read_planes_u8(&file, &info, order),
+                );
+                let planes = super::read_planes_f32(&file, &info, order).unwrap();
+                assert_eq!(bits(&planes[0]), want_f32, "{l} read_planes_f32");
+                let cow = super::read_frame_f32(&file, &info, order).unwrap();
+                assert_eq!(bits(&cow), want_f32, "{l} read_frame_f32");
+                for to in [ByteOrder::Little, ByteOrder::Big] {
+                    let mut v = dirty(1u8, 2);
+                    super::read_frame_bytes_into(&file, &info, order, to, &mut v).unwrap();
+                    assert_eq!(v, want, "{l} read_frame_bytes_into {to:?}");
+                }
+
+                let frame = Frame::new(&file, &info, order);
+                let mut warm = DecodeScratch::new();
+                warm.pieces = vec![vec![0xEE; 700]];
+                let mut out = dirty(0x3Cu8, 1);
+                let (px, ()) = frame.read(Stored(order), 0, &mut out, &mut warm).unwrap();
+                assert_eq!(&*px, &want[..], "{l} Stored");
+                let mut out = dirty(f32::NAN, 1);
+                let (px, ()) = frame.read(File, 0, &mut out, &mut warm).unwrap();
+                assert_eq!(bits(&px), want_f32, "{l} File");
+                let mut out = Vec::new();
+                let px = frame.stored_frame(order, &mut out, &mut warm).unwrap();
+                assert_eq!(&*px, &want[..], "{l} stored_frame");
+                // A region: the tiles covering it, which its coverage names.
+                let (cropped, cov) = frame
+                    .crop(Crop::Region {
+                        cols: 17..30,
+                        rows: 5..9,
+                    })
+                    .unwrap();
+                let mut out = Vec::new();
+                let (px, ()) = cropped.read(Stored(order), 0, &mut out, &mut warm).unwrap();
+                let cw = (cov.cols.end - cov.cols.start) as usize;
+                assert_eq!(
+                    px.len(),
+                    cw * (cov.rows.end - cov.rows.start) as usize,
+                    "{l} region"
+                );
+                for (k, row) in px.chunks_exact(cw).enumerate() {
+                    let at = (cov.rows.start as usize + k) * w + cov.cols.start as usize;
+                    assert_eq!(row, &want[at..at + cw], "{l} region row {k}");
+                }
+            }
+        }
+    }
+}
+
+/// A stored run is copied in one call when it is long and nothing follows
+/// the copy, and a chunk at a time when a swap or a sign flip has to follow —
+/// each chunk finished while it is in cache. Frames past that threshold, in
+/// both cases.
+#[test]
+fn a_long_run_is_swapped_and_flipped_however_it_is_copied() {
+    use SampleFormat::*;
+    for (depth, format, order, side) in [
+        (16, UnsignedInt, ByteOrder::Big, 2100),
+        (16, SignedInt, ByteOrder::Little, 2100),
+        (32, Float, ByteOrder::Big, 1500),
+    ] {
+        let spec = Spec {
+            w: side,
+            h: side,
+            bits: depth,
+            format,
+            spp: 1,
+            planar: false,
+            order,
+            lay: Lay::One,
+            predictor: 1,
+            compression: Compression::None,
+            photometric: 1,
+        };
+        let l = format!("{depth}-bit {format:?} {order:?}");
+        let (file, info) = build(&spec);
+        assert!(info.decoded_len().unwrap() > 8 << 20, "{l}");
+        let frame = Frame::new(&file, &info, order);
+        let mut scratch = DecodeScratch::new();
+        let mut out = Vec::new();
+        same(
+            &format!("{l} Display"),
+            &old::read_plane_u16(&file, &info, order, None, 0),
+            &frame
+                .read(Display { range: None }, 0, &mut out, &mut scratch)
+                .map(|(px, _)| px.to_vec()),
+        );
+        if format == Float {
+            let mut out = Vec::new();
+            same(
+                &format!("{l} File"),
+                &bits_r(old::read_plane_f32(&file, &info, order, 0)),
+                &frame
+                    .read(File, 0, &mut out, &mut scratch)
+                    .map(|(px, ())| bits(&px)),
+            );
+        }
+        for want in [ByteOrder::Little, ByteOrder::Big] {
+            let mut v = Vec::new();
+            let old = old::read_frame_bytes_into(&file, &info, order, want, &mut v).map(|()| v);
+            let mut out = vec![0x5Au8; info.decoded_len().unwrap()];
+            let new = frame
+                .stored_frame_into(want, &mut out, &mut scratch)
+                .map(|()| out);
+            same(&format!("{l} stored {want:?}"), &old, &new);
+        }
+    }
+}
+
+/// A lone uncompressed strip whose byte count undersells its frame: the old
+/// single-strip borrows read the frame's size from the strip's offset
+/// whatever the count said, and their wrappers still do for a `FrameInfo`
+/// built by hand. (The indexer repairs such a count when it opens a file, for
+/// every reader: `tests/it/frame.rs`.)
+#[test]
+fn an_undersold_single_strip_reads_as_the_old_borrow_read_it() {
+    use SampleFormat::*;
+    for (depth, format) in [(16, UnsignedInt), (32, Float)] {
+        let spec = Spec {
+            w: 8,
+            h: 4,
+            bits: depth,
+            format,
+            spp: 1,
+            planar: false,
+            order: ByteOrder::host(),
+            lay: Lay::One,
+            predictor: 1,
+            compression: Compression::None,
+            photometric: 1,
+        };
+        let (file, mut info) = build(&spec);
+        let need = info.decoded_len().unwrap() as u64;
+        for count in [0, 1, need - 2] {
+            info.strip_byte_counts = vec![count].into();
+            let l = format!("{depth}-bit, {count} of {need} bytes");
+            let order = spec.order;
+            if depth == 16 {
+                let old = old::read_frame_u16(&file, &info, order, None).map(|c| c.into_owned());
+                assert!(old.is_ok(), "{l}: the old borrow read it");
+                let new = super::read_frame_u16(&file, &info, order, None).map(|c| c.into_owned());
+                same(&format!("{l} read_frame_u16"), &old, &new);
+            } else {
+                let old = bits_r(old::read_frame_f32(&file, &info, order).map(|c| c.into_owned()));
+                assert!(old.is_ok(), "{l}: the old borrow read it");
+                let new =
+                    bits_r(super::read_frame_f32(&file, &info, order).map(|c| c.into_owned()));
+                same(&format!("{l} read_frame_f32"), &old, &new);
+            }
+        }
     }
 }

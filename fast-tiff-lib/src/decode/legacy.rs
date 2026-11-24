@@ -102,8 +102,10 @@ pub fn read_frame_u16<'a>(
 ) -> Result<Cow<'a, [u16]>> {
     let n_samples = frame.sample_count()?;
     // A single uncompressed strip is borrowed for the frame's size whatever
-    // its byte count says, as this reader always has: the playback path of a
-    // viewer reads files whose StripByteCounts undersell the strip.
+    // its byte count says, as this reader always has. A file opened through
+    // the indexer has such a count repaired already, for every reader (see
+    // `repair_undersold_strips`); this keeps the old answer for a `FrameInfo`
+    // built by hand.
     if frame.bits_per_sample == 16
         && frame.samples_per_pixel == 1
         && frame.sample_format != SampleFormat::SignedInt
@@ -320,6 +322,21 @@ fn require_8bit(frame: &FrameInfo) -> Result<()> {
     Ok(())
 }
 
+/// [`require_8bit`] where the old 8-bit readers refused: after decoding the
+/// frame, which they always did first — so a frame that is malformed as well
+/// is refused for that, in the decode's words. The decode is thrown away; the
+/// call fails either way. (A [`Frame`](crate::Frame) read in units that need
+/// 8-bit samples checks first, and decodes nothing to refuse.)
+fn require_8bit_after_decoding(src: Src<'_, '_>) -> Result<()> {
+    let frame = src.info;
+    if frame.bits_per_sample != 8 {
+        let mut native = Vec::new();
+        sized_out(src, &mut native, || core::stored_frame_len(frame))?;
+        core::stored_frame_into(src, src.order, &mut native, &mut DecodeScratch::new())?;
+    }
+    require_8bit(frame)
+}
+
 /// [`read_plane_u8`] into a caller-provided buffer, reusing its allocation.
 pub fn read_plane_u8_into(
     mmap: &[u8],
@@ -334,14 +351,10 @@ pub fn read_plane_u8_into(
         0
     } else {
         bytes_for_bits(frame.bits_per_sample)?;
+        require_8bit_after_decoding(src)?;
         clamp_plane(frame, plane)
     };
-    sized_out(src, out, || {
-        if frame.bits_per_sample != 4 {
-            require_8bit(frame)?;
-        }
-        core::stored_plane_len(frame)
-    })?;
+    sized_out(src, out, || core::stored_plane_len(frame))?;
     core::stored(
         src,
         file_order,
@@ -377,7 +390,7 @@ pub fn read_planes_u8_into(
     bytes_for_bits(frame.bits_per_sample)?;
     let src = Src::new(mmap, frame, file_order);
     core::vet(src)?;
-    require_8bit(frame)?;
+    require_8bit_after_decoding(src)?;
     let n = core::stored_plane_len(frame)?;
     out.resize_with(spp, Vec::new);
     for plane in out.iter_mut() {
@@ -649,9 +662,10 @@ fn rgb_u8(
     count: usize,
 ) -> Result<Vec<Vec<u8>>> {
     require_cmyk(frame, "read_planes_rgb_u8")?;
-    // What the ink reader beneath these always said to a 16-bit frame.
-    require_8bit(frame)?;
     let src = Src::new(mmap, frame, file_order);
+    // What the ink reader beneath these always said to a 16-bit frame, once
+    // it had decoded it.
+    require_8bit_after_decoding(src)?;
     core::vet(src)?;
     let n = frame.pixel_count()?;
     let mut rgb = vec![vec![0u8; n]; count];

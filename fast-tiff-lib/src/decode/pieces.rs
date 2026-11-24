@@ -306,6 +306,7 @@ impl<'f> StripPlan<'f> {
     /// checked is in the table.
     pub fn strip(&self, plane: usize, k: usize) -> Strip {
         if let Some((offset, plane_bytes)) = self.whole {
+            // Within the strip, whose end `whole_strip` proved is a `u64`.
             return Strip {
                 index: 0,
                 row: 0,
@@ -351,14 +352,20 @@ impl FrameInfo {
     /// RowsPerStrip says and however many planes a planar frame packs into the
     /// strip, and without the strip-table size guard — its bytes are the frame,
     /// and they lie in the file. Writers do produce it, and it stays readable.
+    ///
+    /// A strip whose end would overflow a `u64` is not one: every offset
+    /// inside it is then a sum that cannot wrap ([`StripPlan::strip`]), and
+    /// the frame is left to the strip table, whose every piece goes through
+    /// the checked [`FrameBytes::piece`](crate::frame::FrameBytes::piece).
     pub(crate) fn whole_strip(&self) -> Option<u64> {
         if self.is_tiled() || self.compression != Compression::None || self.strip_offsets.len() != 1
         {
             return None;
         }
         let total = self.decoded_len().ok()? as u64;
-        (self.strip_byte_counts.first().copied().unwrap_or(0) >= total)
-            .then(|| self.strip_offsets[0])
+        let offset = self.strip_offsets[0];
+        offset.checked_add(total)?;
+        (self.strip_byte_counts.first().copied().unwrap_or(0) >= total).then_some(offset)
     }
 }
 
@@ -668,7 +675,7 @@ pub(super) fn decode_planes_into(
     let plane_bytes = plan.height * row_bytes;
     debug_assert_eq!(dest.len(), plane_bytes * planes.len());
     let parallel = parallel_strips(info, info.pixel_count()?);
-    for (plane, part) in planes.zip(dest.chunks_mut(plane_bytes.max(1))) {
+    let each = |plane: usize, part: &mut [u8]| {
         for_strips(
             &plan,
             plane,
@@ -688,7 +695,40 @@ pub(super) fn decode_planes_into(
                     Ok(())
                 })
             },
-        )?;
+        )
+    };
+    if parallel && planes.len() > 1 {
+        // The planes side by side, as well as each plane's strips: a planar
+        // frame of one strip per plane is otherwise one core at a time, where
+        // the old decoder sent every strip of the frame to the pool at once.
+        dest.par_chunks_mut(plane_bytes.max(1))
+            .zip(planes.into_par_iter())
+            .try_for_each(|(part, plane)| each(plane, part))
+    } else {
+        planes
+            .zip(dest.chunks_mut(plane_bytes.max(1)))
+            .try_for_each(|(plane, part)| each(plane, part))
     }
-    Ok(())
+}
+
+/// Run `each` over planes `first..` of a read, one destination each, side by
+/// side when `parallel` and there is more than one: a planar frame's planes
+/// are separate runs of pieces, and decoding them one after another leaves
+/// all but one core idle whenever a plane has fewer pieces than there are
+/// cores (a plane in one strip, or one band of tiles).
+pub(super) fn each_plane<T: Send>(
+    outs: &mut [&mut [T]],
+    first: usize,
+    parallel: bool,
+    each: &(dyn Fn(usize, &mut [&mut [T]]) -> Result<()> + Sync),
+) -> Result<()> {
+    if parallel && outs.len() > 1 {
+        outs.par_iter_mut()
+            .enumerate()
+            .try_for_each(|(i, out)| each(first + i, std::slice::from_mut(out)))
+    } else {
+        outs.iter_mut()
+            .enumerate()
+            .try_for_each(|(i, out)| each(first + i, std::slice::from_mut(out)))
+    }
 }
