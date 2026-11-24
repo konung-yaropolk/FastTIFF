@@ -303,6 +303,75 @@ fn an_8_bit_tiff_is_not_widened_to_the_16_bit_range() {
     assert_eq!(psf.data, vec![0.0, 1.0, 128.0, 255.0]);
 }
 
+/// A little-endian TIFF of `slices` IFDs, each claiming `side` x `side` 8-bit
+/// pixels in a single strip that holds one byte. Built by hand because no
+/// writer will make one: only its header is large.
+fn claiming_tiff(side: u32, slices: u32) -> Vec<u8> {
+    const ENTRIES: u16 = 9;
+    let ifd_len = 2 + 12 * ENTRIES as u32 + 4;
+    let pixel = 8u32;
+    let mut out = b"II*\0".to_vec();
+    out.extend_from_slice(&12u32.to_le_bytes());
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    // The one byte every strip points at.
+    out[pixel as usize] = 7;
+    for s in 0..slices {
+        let at = 12 + s * ifd_len;
+        let next = if s + 1 < slices { at + ifd_len } else { 0 };
+        out.extend_from_slice(&ENTRIES.to_le_bytes());
+        let entry = |out: &mut Vec<u8>, tag: u16, kind: u16, value: u32| {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&kind.to_le_bytes());
+            out.extend_from_slice(&1u32.to_le_bytes());
+            out.extend_from_slice(&value.to_le_bytes());
+        };
+        let (short, long) = (3, 4);
+        entry(&mut out, 256, long, side); // ImageWidth
+        entry(&mut out, 257, long, side); // ImageLength
+        entry(&mut out, 258, short, 8); // BitsPerSample
+        entry(&mut out, 259, short, 1); // Compression: none
+        entry(&mut out, 262, short, 1); // Photometric: black is zero
+        entry(&mut out, 273, long, pixel); // StripOffsets
+        entry(&mut out, 277, short, 1); // SamplesPerPixel
+        entry(&mut out, 278, long, side); // RowsPerStrip
+        entry(&mut out, 279, long, 1); // StripByteCounts
+        out.extend_from_slice(&next.to_le_bytes());
+    }
+    out
+}
+
+/// A PSF whose voxel count overflows a `usize` is refused, not read as an
+/// empty one. Four slices of 2^31 x 2^31 are 2^64 voxels, which wraps to
+/// none: the size check passed it, the volume was allocated at that wrapped
+/// length, and the read loop over it found no slice to read — so nothing
+/// checked a slice against its strips, and a file of a few hundred bytes came
+/// back as a PSF whose data did not match its own shape, which the 2-D run
+/// then sliced past. Sixteen slices of 2^30 x 2^30 wrap the same way.
+#[test]
+fn a_psf_claiming_more_voxels_than_a_usize_holds_is_refused() {
+    for (side, slices) in [(1u32 << 31, 4u32), (1 << 30, 16)] {
+        let path = temp(&format!("claims-{side}x{side}x{slices}.tif"));
+        std::fs::write(&path, claiming_tiff(side, slices)).expect("write");
+        let path = path.display().to_string();
+        // The file itself opens: only its claim is out of reach.
+        let opened = fast_tiff_lib::TiffStack::from_bytes(std::fs::read(&path).unwrap());
+        assert_eq!(opened.map(|t| t.frames.len()).ok(), Some(slices as usize));
+        match load_psf(&path) {
+            Err(PluginError::Unsupported(msg)) => {
+                assert!(msg.contains("more than this can hold"), "{msg}")
+            }
+            Ok(psf) => panic!(
+                "{side}x{side}x{slices}: read as a PSF of {}x{}x{} holding {} samples",
+                psf.dims.x,
+                psf.dims.y,
+                psf.dims.z,
+                psf.data.len()
+            ),
+            Err(e) => panic!("{side}x{side}x{slices}: refused for the wrong reason: {e:?}"),
+        }
+    }
+}
+
 // ------------------------------------------------------- the PSF reader, oracle
 
 /// The PSF reader as it was before it decoded each slice straight into the

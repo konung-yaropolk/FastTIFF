@@ -135,21 +135,32 @@ pub(crate) fn load_psf(path: &str) -> Result<Psf, PluginError> {
             "the slices of {path} are not all the same size, so it cannot be one PSF"
         )));
     }
-    if dims.len() > MAX_VOXELS {
-        return Err(PluginError::unsupported(format!(
-            "that PSF is {}x{}x{} voxels, which is more than this can hold",
-            dims.x, dims.y, dims.z
-        )));
-    }
+    // Checked: four slices of 2^31 x 2^31 are 2^64 voxels, which an
+    // unchecked product wraps to none — past this limit, into a volume of no
+    // slices and a read loop with nothing to read, so not one slice would be
+    // checked against its strips.
+    let len = dims
+        .checked_len()
+        .filter(|&n| n <= MAX_VOXELS)
+        .ok_or_else(|| {
+            PluginError::unsupported(format!(
+                "that PSF is {}x{}x{} voxels, which is more than this can hold",
+                dims.x, dims.y, dims.z
+            ))
+        })?;
 
     // In the file's own units: a PSF is arithmetic, not a display, so it must
     // not see the display readers' widening or signed offset. Each slice is
     // decoded straight into its place in the volume, through one scratch for
-    // them all: no buffer per slice, and no copy out of one.
+    // them all: no buffer per slice, and no copy out of one. The loop runs
+    // over the file's slices, not the volume's: a slice it did not read would
+    // be zeros nothing had checked.
     let slice = dims.x * dims.y;
-    let mut data = vec![0.0f32; dims.len()];
+    let mut data = vec![0.0f32; len];
     let mut scratch = fast_tiff_lib::DecodeScratch::new();
-    for (i, dest) in data.chunks_exact_mut(slice).enumerate() {
+    let mut dests = data.chunks_exact_mut(slice);
+    for i in 0..tiff.frames.len() {
+        let dest = dests.next().expect("the volume holds one slice per IFD");
         tiff.frame(i)
             .and_then(|frame| {
                 frame.read_into(fast_tiff_lib::units::File, 0, &mut [dest], &mut scratch)

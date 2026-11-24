@@ -353,14 +353,19 @@ impl Plugin for GeneratePsf {
             params.int("height", 65).max(1) as usize,
             params.int("slices", 1).max(1) as usize,
         );
-        if dims.len() > MAX_VOXELS {
-            return Err(PluginError::unsupported(format!(
-                "{}x{}x{} is {} voxels, more than this will generate at once",
-                dims.x,
-                dims.y,
-                dims.z,
-                dims.len()
-            )));
+        // Checked: the dialog's own limits multiply to 2^35, which wraps a
+        // 32-bit `usize` (wasm) to 8 and would pass the limit.
+        match dims.checked_len() {
+            Some(n) if n <= MAX_VOXELS => {}
+            n => {
+                return Err(PluginError::unsupported(format!(
+                    "{}x{}x{} is {} voxels, more than this will generate at once",
+                    dims.x,
+                    dims.y,
+                    dims.z,
+                    n.map_or_else(|| "too many".to_string(), |n| n.to_string())
+                )));
+            }
         }
 
         // Said before the work rather than after, because it is the thing most

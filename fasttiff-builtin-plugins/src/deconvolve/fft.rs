@@ -60,8 +60,19 @@ impl Dims {
     }
 
     /// Voxels in the whole grid.
+    ///
+    /// Unchecked, for a grid already known to exist. A size read from a file
+    /// or typed into a dialog goes through [`checked_len`](Self::checked_len)
+    /// first: three axes that each fit can still multiply past a `usize`, and
+    /// a wrapped count passes any size limit.
     pub(crate) fn len(self) -> usize {
         self.x * self.y * self.z
+    }
+
+    /// Voxels in the whole grid, or `None` if that many do not fit in a
+    /// `usize`.
+    pub(crate) fn checked_len(self) -> Option<usize> {
+        self.x.checked_mul(self.y)?.checked_mul(self.z)
     }
 
     /// The flat index of `(x, y, z)`.

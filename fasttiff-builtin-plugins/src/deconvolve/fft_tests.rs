@@ -25,6 +25,18 @@ fn seeded(n: usize) -> Vec<Complex32> {
         .collect()
 }
 
+/// A grid's size from a file or a dialog is counted without wrapping: three
+/// axes that each fit can multiply past a `usize`, along any pair of them.
+#[test]
+fn a_grid_too_large_to_count_has_no_length() {
+    assert_eq!(Dims::new(4, 3, 2).checked_len(), Some(24));
+    let half = 1usize << (usize::BITS / 2);
+    assert_eq!(Dims::new(half, half, 1).checked_len(), None);
+    assert_eq!(Dims::new(1, half, half).checked_len(), None);
+    assert_eq!(Dims::new(half, 2, half / 2).checked_len(), None);
+    assert_eq!(Dims::new(half, half / 2, 1).checked_len(), Some(half * (half / 2)));
+}
+
 #[test]
 fn fast_lengths_are_the_smallest_smooth_ones() {
     assert_eq!(next_fast_len(0), 1);
