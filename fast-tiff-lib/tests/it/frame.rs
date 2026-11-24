@@ -3,10 +3,12 @@
 //!
 //! The decode core is held to the old readers bit for bit by the oracle in
 //! `src/decode/oracle_tests.rs`. These are the promises that are new: a
-//! multi-strip uncompressed frame borrowed straight from the mapping, a planar
-//! plane read without touching the others, a short strip failing before its
-//! predictor runs, the plane index checked rather than clamped, and the
-//! destination contract.
+//! multi-strip uncompressed frame borrowed straight from the mapping, and a
+//! whole stored frame of any samples per pixel; a planar plane read without
+//! touching the others; a short strip failing before its predictor runs; an
+//! undersold single strip read whole by every reader; a wrapping offset
+//! refused, not followed; the plane index checked rather than clamped; the
+//! destination contract; and a `Debug` that prints no pixels.
 
 use crate::common::open_tiff;
 use fast_tiff_lib::units::{Display, File, Stored};

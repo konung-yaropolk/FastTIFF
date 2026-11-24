@@ -241,7 +241,8 @@ println!(
 );
 
 // Decode the first plane to display-ready u16 samples (0..=65535). `out` and
-// the scratch are kept across frames, so a stream of frames allocates nothing.
+// the scratch are kept across frames, so a stream of frames allocates nothing
+// frame-sized and zero-fills nothing.
 let (mut out, mut scratch) = (Vec::new(), DecodeScratch::new());
 let frame = stack.frame(0)?;
 let (pixels, _maps) = frame.read(Display { range: None }, 0, &mut out, &mut scratch)?;
@@ -405,13 +406,18 @@ fn read(&self, units, plane, out: &mut Vec<_>, scratch: &mut DecodeScratch) -> R
 fn read_into(&self, units, first, out: &mut [&mut [_]], scratch: &mut DecodeScratch) -> Result<Report>;
 // Also: plane_len, planes, borrows (the zero-copy predicate), crop (Crop::Rows,
 // Region or Sampled, with the Coverage it holds), stored_frame_into (the whole
-// frame as the file lays it out), value_range (32/64-bit min/max) and touch.
+// frame as the file lays it out) and stored_frame (the same, borrowed when the
+// frame is one uncompressed run, at any samples per pixel), value_range
+// (32/64-bit min/max) and touch.
 ```
 
 The `DecodeScratch` is the caller's: it holds what a decode needs between the
-file and the destination (a strip's worth of decompressed bytes per thread,
-or for a wide frame auto-ranged to `u16` the whole frame), so one kept across
-frames makes a warm decode allocate and zero-fill nothing. `Ok` means every
+file and the destination (a strip's worth of decompressed bytes per thread, or
+the whole frame for the few reads that need it first: a wide frame
+auto-ranged to `u16`, `value_range` of a tiled frame or one decoded on several
+cores, a planar CMYK frame), so one kept across frames makes a warm decode
+allocate nothing frame-sized and zero-fill nothing (serially nothing at all; a
+read split across cores still makes a few pointer-sized lists). `Ok` means every
 element of the destination was written; an `Err` leaves it unspecified. A
 plane index past the last is `InvalidInput`.
 

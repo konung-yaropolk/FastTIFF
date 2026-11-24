@@ -17,6 +17,25 @@
 //! and refused a whole-frame strip whose RowsPerStrip undersold it, where its
 //! general path read both correctly. There the core must give what the old
 //! general path gave.
+//!
+//! The rest of what differs by design is held apart, each to an answer of its
+//! own rather than the old one:
+//!
+//! - 4-bit tiles, which the old decoder read as strips — right only for one
+//!   column of tiles as wide as the image, which the matrix holds to it —
+//!   are held to the same image stored in strips.
+//! - A plane of a planar frame decodes from its own pieces only, and a tile
+//!   only as far as the image goes, so a frame broken in another plane, or in
+//!   a tile's rows below the image, can now be read where the old decoder
+//!   failed. The malformed frames here are broken in every plane, and above
+//!   the bottom tiles, so that they fail as before.
+//! - A [`CmykRgb8`] read refuses inks that are not 8-bit before decoding
+//!   anything; the old reader decoded first and failed as whatever else was
+//!   wrong with the frame.
+//! - A short ZSTD tile or 4-bit strip is blank past what the codec reports
+//!   writing. The old decoder zero-filled before decompressing, and ZSTD can
+//!   write past that length, so there it could show a stray byte. No frame
+//!   here decodes short that way.
 
 #[path = "oracle_old.rs"]
 mod old;
