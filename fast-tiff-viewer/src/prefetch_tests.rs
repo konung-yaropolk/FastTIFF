@@ -218,7 +218,11 @@ fn the_read_ahead_decodes_ahead_only_what_the_file_does_not_hold() {
         ask(&strips(Compression::None), &strips_job()).is_none(),
         "contiguous uncompressed strips were decoded ahead"
     );
-    assert_eq!(handed_back(), 1, "a frame only touched took a frame's buffers");
+    assert_eq!(
+        handed_back(),
+        1,
+        "a frame only touched took a frame's buffers"
+    );
     let deflated = strips(Compression::Deflate);
     let got = ask(&deflated, &strips_job()).expect("a compressed frame is decoded ahead");
     assert_eq!(handed_back(), 0, "not decoded into the buffers handed back");
