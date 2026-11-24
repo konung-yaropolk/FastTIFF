@@ -41,7 +41,8 @@ fn a_cancelled_window_stops_at_the_next_band() {
 
     let mut bands = BandCache::default();
     let (token, asked) = CancelToken::after(1);
-    match assemble(&tiff, &mut bands, 1, &[job()], &roi, 0, &token) {
+    let scratch = &mut crate::prefetch::ReadScratch::default();
+    match assemble(&tiff, &mut bands, 1, &[job()], &roi, 0, &token, scratch) {
         Err(e) => assert!(e.is::<Cancelled>(), "{e:#}"),
         Ok(_) => panic!("a cancelled window came back built"),
     }
@@ -60,6 +61,7 @@ fn a_cancelled_window_stops_at_the_next_band() {
         &roi,
         0,
         &CancelToken::never(),
+        scratch,
     )
     .expect("not cancelled");
     match &planes[0] {

@@ -95,7 +95,7 @@ fn check(rows_per_strip: u32, roi: Roi) {
     let jobs = job(&stack);
     let mut bands = BandCache::default();
     let got =
-        window::assemble(&stack, &mut bands, 1, &jobs, &roi, 0, &CancelToken::never()).unwrap();
+        window::assemble(&stack, &mut bands, 1, &jobs, &roi, 0, &CancelToken::never(), &mut crate::prefetch::ReadScratch::default()).unwrap();
 
     let want = expected(&full[0], &roi);
     let got = u16s(&got[0]);
@@ -252,7 +252,7 @@ fn the_stepped_and_contiguous_paths_agree() {
         let jobs = job(&stack);
         let mut bands = BandCache::default();
         let got =
-            window::assemble(&stack, &mut bands, 1, &jobs, &roi, 0, &CancelToken::never()).unwrap();
+            window::assemble(&stack, &mut bands, 1, &jobs, &roi, 0, &CancelToken::never(), &mut crate::prefetch::ReadScratch::default()).unwrap();
         planes.push(u16s(&got[0]).to_vec());
     }
     assert_eq!(

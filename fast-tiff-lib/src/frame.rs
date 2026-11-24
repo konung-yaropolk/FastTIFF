@@ -282,7 +282,20 @@ impl<'a> Frame<'a> {
     /// The one zero-copy predicate. A viewer can ask it to choose between
     /// touching a frame's pages ahead and decoding it ahead.
     pub fn borrows<U: Units>(&self, units: U, plane: usize) -> bool {
-        units.borrow(self, plane, sealed::Private).is_some()
+        self.borrowed(units, plane).is_some()
+    }
+
+    /// The source's own samples of `plane` in `units`, when they are the
+    /// answer ([`borrows`](Self::borrows)): what [`read`](Self::read) would
+    /// hand back without decoding anything. `None` when a read would decode.
+    ///
+    /// A [`read`](Self::read)'s samples live only as long as its borrow of
+    /// `out`, which they may be in. These live as long as the frame's source,
+    /// so a caller reading several planes or frames at once — one destination
+    /// each, some borrowed and some decoded — can keep the borrowed ones
+    /// beside its buffers rather than inside them.
+    pub fn borrowed<U: Units>(&self, units: U, plane: usize) -> Option<Pixels<'a, U::Sample>> {
+        units.borrow(self, plane, sealed::Private).map(Pixels::Borrowed)
     }
 
     /// Plane `plane` in `units`: the source's own bytes when they are the

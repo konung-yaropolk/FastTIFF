@@ -8,7 +8,7 @@
 //! reference.
 
 use super::*;
-use crate::prefetch::{build_jobs, decode_jobs_borrowed};
+use crate::prefetch::build_jobs;
 use crate::roi::Roi;
 use crate::window::{self, Overview};
 use crate::worker::CancelToken;
@@ -62,7 +62,7 @@ fn rgb(frames: usize) -> Document {
 /// What a sync completes the histograms with for a frame that fits a texture,
 /// whose residency holds no overview.
 fn complete(stack: &mut Document, start: bool) -> usize {
-    super::complete(stack, &Residency::default(), start)
+    super::complete(stack, &mut Residency::default(), start)
 }
 
 /// What a sync does for the histograms when it decodes the frame for the
@@ -71,12 +71,7 @@ fn complete(stack: &mut Document, start: bool) -> usize {
 fn show(stack: &mut Document) -> usize {
     let missing = prepare(stack, HistogramSource::Frame);
     let jobs = build_jobs(stack, stack.frame(), stack.display.masks().enabled());
-    let decoded = decode_jobs_borrowed(
-        &stack.tiff.data,
-        &stack.tiff.frames,
-        stack.tiff.byte_order,
-        &jobs,
-    )
+    let decoded = crate::prefetch::decode_owned(&stack.tiff, &jobs)
     .expect("decode");
     let binned = bin_shown(
         stack,
@@ -132,12 +127,7 @@ fn histograms_kept_from_the_read_ahead_equal_a_whole_frame_decode() {
     // What the worker returns for the frame: its planes, and the histograms
     // of the first channel, as a request made before the second was binned.
     let jobs = build_jobs(&stack, 2, &[true, true]);
-    let planes = crate::prefetch::decode_jobs(
-        &stack.tiff.data,
-        &stack.tiff.frames,
-        stack.tiff.byte_order,
-        &jobs,
-    )
+    let planes = crate::prefetch::decode_owned(&stack.tiff, &jobs)
     .expect("decode");
     let binning = Binning::of(&stack);
     let worker = vec![binning.bin(0, planes[0].view()).expect("units")];
@@ -317,12 +307,7 @@ fn during_playback_complete_only_adds_to_what_showing_the_frame_started() {
     stack.set_frame(2);
     let missing = prepare(&mut stack, HistogramSource::Frame);
     let jobs = build_jobs(&stack, 2, stack.display.masks().enabled());
-    let decoded = decode_jobs_borrowed(
-        &stack.tiff.data,
-        &stack.tiff.frames,
-        stack.tiff.byte_order,
-        &jobs,
-    )
+    let decoded = crate::prefetch::decode_owned(&stack.tiff, &jobs)
     .expect("decode");
     let binned = bin_shown(
         &stack,
@@ -351,7 +336,7 @@ fn a_frame_past_the_texture_limit_is_binned_from_its_overview() {
     residency.over_texture_limit = true;
 
     // Nothing held for frame 0: no histogram, and nothing decoded for one.
-    assert_eq!(super::complete(&mut stack, &residency, true), 0);
+    assert_eq!(super::complete(&mut stack, &mut residency, true), 0);
     assert!(stack.histograms().shown(&stack).is_empty());
 
     // The overview a fit-to-window view keeps: the whole frame at stride 2.
@@ -372,6 +357,7 @@ fn a_frame_past_the_texture_limit_is_binned_from_its_overview() {
         &roi,
         0,
         &CancelToken::never(),
+        &mut crate::prefetch::ReadScratch::default(),
     )
     .expect("assemble");
     let built = window::Built {
@@ -383,7 +369,7 @@ fn a_frame_past_the_texture_limit_is_binned_from_its_overview() {
     residency.overview = Some(Overview::capture(built, W, H, revision, usize::MAX).expect("spans"));
 
     assert_eq!(
-        super::complete(&mut stack, &residency, true),
+        super::complete(&mut stack, &mut residency, true),
         0,
         "a frame this large was decoded"
     );
@@ -407,7 +393,7 @@ fn a_frame_past_the_texture_limit_is_binned_from_its_overview() {
 
     // Another frame, and the overview is of frame 0: no histograms.
     stack.set_frame(1);
-    assert_eq!(super::complete(&mut stack, &residency, true), 0);
+    assert_eq!(super::complete(&mut stack, &mut residency, true), 0);
     assert!(stack.histograms().shown(&stack).is_empty());
 }
 
@@ -437,6 +423,7 @@ fn a_whole_frame_view_too_large_to_keep_is_binned_as_it_is_built() {
         &roi,
         0,
         &CancelToken::never(),
+        &mut crate::prefetch::ReadScratch::default(),
     )
     .expect("assemble");
     let built = window::Built {
@@ -459,7 +446,7 @@ fn a_whole_frame_view_too_large_to_keep_is_binned_as_it_is_built() {
     assert!(Overview::capture(built, W, H, revision, 0).is_none());
     assert!(residency.overview.is_none());
     for _ in 0..2 {
-        assert_eq!(super::complete(&mut stack, &residency, true), 0);
+        assert_eq!(super::complete(&mut stack, &mut residency, true), 0);
         assert_eq!(
             stack.histograms().source(),
             Some(HistogramSource::Overview { stride: 2 })
@@ -469,7 +456,7 @@ fn a_whole_frame_view_too_large_to_keep_is_binned_as_it_is_built() {
 
     // Another frame, with no view of it: nothing, not frame 0's.
     stack.set_frame(1);
-    assert_eq!(super::complete(&mut stack, &residency, true), 0);
+    assert_eq!(super::complete(&mut stack, &mut residency, true), 0);
     assert!(stack.histograms().shown(&stack).is_empty());
 }
 

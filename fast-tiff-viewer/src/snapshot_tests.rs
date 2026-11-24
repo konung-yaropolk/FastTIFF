@@ -396,7 +396,7 @@ fn a_signed_window_composes_on_the_offset_texture() {
 /// channel decoded whole, blended into one frame-sized accumulator, then
 /// converted. Kept verbatim as the oracle the banded one must equal.
 fn whole_frame_oracle(stack: &Document) -> Snapshot {
-    use crate::prefetch::{decode_jobs, Decoded};
+    use crate::prefetch::Decoded;
     fn sample(data: &Decoded, i: usize) -> Option<f32> {
         match data {
             Decoded::U8(v) => v.get(i).map(|&s| s as f32),
@@ -408,12 +408,7 @@ fn whole_frame_oracle(stack: &Document) -> Snapshot {
     let settings = stack.display.settings();
     let masks = stack.display.masks();
     let jobs = build_jobs(stack, stack.frame(), masks.enabled());
-    let decoded = decode_jobs(
-        &stack.tiff.data,
-        &stack.tiff.frames,
-        stack.tiff.byte_order,
-        &jobs,
-    )
+    let decoded = crate::prefetch::decode_owned(&stack.tiff, &jobs)
     .expect("decode");
     let pixels = width as usize * height as usize;
     let mut acc = vec![[0.0f32; 3]; pixels];

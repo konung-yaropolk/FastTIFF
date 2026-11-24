@@ -97,6 +97,29 @@ pub(crate) struct Residency {
     pub(crate) pending_window: Option<(usize, Roi, Revision)>,
     /// The 3D volume.
     pub(crate) volume: VolumeResidency,
+    /// What this view's frames are decoded into on the interface thread.
+    pub(crate) decode: InlineDecode,
+}
+
+/// What the interface thread decodes the frame on screen into, kept from one
+/// frame to the next: a buffer per display channel, and the scratch a decode
+/// needs between the file and them.
+///
+/// Kept, not made per frame, because a compressed 2048 x 2048 16-bit channel
+/// is an 8 MiB buffer: allocated and zero-filled for every frame shown, it was
+/// thousands of fresh pages to fault in on Windows, every frame, per channel.
+/// Warm, a frame decodes straight into last frame's buffers. A channel the
+/// file already holds as its texture wants it is borrowed from the file and
+/// leaves its buffer as it is, so an uncompressed stack holds nothing here.
+///
+/// The sync's decode, the histograms' decode of the channels switched off
+/// ([`histogram::complete`](crate::histogram::complete)) and a window built
+/// on this thread all use it. One view's, like everything here, and gone
+/// with the residency when the document changes.
+#[derive(Default)]
+pub(crate) struct InlineDecode {
+    pub(crate) bufs: crate::prefetch::ChannelBufs,
+    pub(crate) scratch: crate::prefetch::ReadScratch,
 }
 
 impl Default for Residency {
@@ -113,6 +136,7 @@ impl Default for Residency {
             overview: None,
             pending_window: None,
             volume: VolumeResidency::default(),
+            decode: InlineDecode::default(),
         }
     }
 }

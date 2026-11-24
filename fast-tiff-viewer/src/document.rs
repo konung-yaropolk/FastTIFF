@@ -164,8 +164,9 @@ pub struct Document {
 /// without threads; the work is then done inline, the same path either way.
 #[derive(Default)]
 pub(crate) struct Services {
-    /// Background read-ahead: decode-ahead for compressed stacks, page-touch
-    /// for uncompressed ones. See [`crate::prefetch`].
+    /// Background read-ahead: decode-ahead for frames that need decoding,
+    /// page-touch for frames read straight from the file. See
+    /// [`crate::prefetch`].
     pub(crate) prefetch: Option<Prefetcher>,
     /// Builds windows of a frame too large for one texture, off the
     /// interface thread, so zooming does not stop the program while a finer
@@ -190,13 +191,16 @@ pub(crate) struct Services {
 
 impl Services {
     /// The read-ahead worker over `tiff`, started if it is not running.
+    ///
+    /// Whether it decodes a frame ahead or only touches its pages is not
+    /// decided here, once, from the compression tag: it asks of each frame it
+    /// is sent whether the channels asked for are read straight from the
+    /// file ([`prefetch::touch_suffices`](crate::prefetch::touch_suffices)),
+    /// which an uncompressed big-endian frame is not and an uncompressed
+    /// frame in many contiguous strips is.
     pub(crate) fn start_prefetch(&mut self, tiff: &Arc<TiffStack>) -> Option<&Prefetcher> {
         if self.prefetch.is_none() {
-            let compressed = tiff
-                .frames
-                .first()
-                .is_some_and(|f| f.compression != fast_tiff_lib::Compression::None);
-            self.prefetch = Prefetcher::new(Arc::clone(tiff), !compressed);
+            self.prefetch = Prefetcher::new(Arc::clone(tiff));
         }
         self.prefetch.as_ref()
     }

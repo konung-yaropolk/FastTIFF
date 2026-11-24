@@ -418,6 +418,7 @@ mod worker {
             &want,
             0,
             &CancelToken::never(),
+            &mut crate::prefetch::ReadScratch::default(),
         )
         .unwrap();
 

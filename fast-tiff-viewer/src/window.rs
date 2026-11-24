@@ -12,10 +12,10 @@
 
 use crate::bandcache::{self, BandCache};
 use crate::display::Revision;
-use crate::prefetch::{decode_jobs_region, decode_jobs_stepped, ChannelJob, Decoded, Samples};
+use crate::prefetch::{decode_jobs, ChannelBufs, ChannelJob, Decoded, ReadScratch, Samples};
 use crate::roi::{self, Roi};
 use crate::worker::{CancelToken, Cancelled, LatestWorker, Unclaimed};
-use fast_tiff_lib::{FrameInfo, TiffStack};
+use fast_tiff_lib::{Crop, FrameInfo, TiffStack};
 use scivis_render::ChannelKind;
 use std::sync::Arc;
 
@@ -53,11 +53,11 @@ pub(crate) fn cut(data: Samples<'_>, width: u32, height: u32, roi: &Roi) -> Deco
 
 /// [`cut`], for a buffer whose rows are spaced differently from its columns.
 /// See [`roi::Sampling`] for why that happens.
-fn cut_sampled(data: &Decoded, width: u32, height: u32, s: &roi::Sampling) -> Decoded {
+fn cut_sampled(data: Samples<'_>, width: u32, height: u32, s: &roi::Sampling) -> Decoded {
     match data {
-        Decoded::U8(v) => Decoded::U8(roi::extract_sampled(v, width, height, s)),
-        Decoded::U16(v) => Decoded::U16(roi::extract_sampled(v, width, height, s)),
-        Decoded::F32(v) => Decoded::F32(roi::extract_sampled(v, width, height, s)),
+        Samples::U8(v) => Decoded::U8(roi::extract_sampled(v, width, height, s)),
+        Samples::U16(v) => Decoded::U16(roi::extract_sampled(v, width, height, s)),
+        Samples::F32(v) => Decoded::F32(roi::extract_sampled(v, width, height, s)),
     }
 }
 
@@ -167,6 +167,13 @@ fn blit_band(
 /// `cancel` is asked before each band, and once it says stop the build ends
 /// with a [`Cancelled`] error (the bands already decoded stay cached). Inline
 /// callers pass [`CancelToken::never`].
+///
+/// `scratch` is the decoding thread's: the window worker's own, or on the
+/// interface thread its view's.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the window, its caches and the thread's scratch"
+)]
 pub(crate) fn assemble(
     tiff: &TiffStack,
     bands: &mut BandCache,
@@ -175,6 +182,7 @@ pub(crate) fn assemble(
     roi: &Roi,
     frame_index: usize,
     cancel: &CancelToken,
+    scratch: &mut ReadScratch,
 ) -> anyhow::Result<Vec<Decoded>> {
     bands.hold_layout(layout);
     let (frame_w, frame_h) = tiff.frames.first().map_or((0, 0), |f| (f.width, f.height));
@@ -204,7 +212,10 @@ pub(crate) fn assemble(
     // the intersecting tile columns; on a stripped one a strip cannot be split,
     // so the crop hands back the full width and this has no effect.
     let want_cols = roi.x..roi.x + roi.w;
-    let probe = tiff.frames.get(jobs.first().map_or(0, |j| j.ifd_idx));
+    let probe = tiff.frame(jobs.first().map_or(0, |j| j.ifd_idx)).ok();
+    // The sampled path's planes go no further than the texture, so they are
+    // decoded into the same buffers band after band.
+    let mut sampled_bufs = ChannelBufs::default();
 
     for band in grid {
         // The step a superseded window still costs: one band's decode.
@@ -225,12 +236,15 @@ pub(crate) fn assemble(
         // What the file will actually hand over — asked without decoding,
         // because the answer is the cache key. Keying on the *request* would
         // miss every time the window moved by a pixel.
-        let region = match probe {
-            Some(f) => f.crop(want_cols.clone(), rows.clone())?,
+        let (region, covered) = match &probe {
+            Some(f) => f.crop(Crop::Region {
+                cols: want_cols.clone(),
+                rows: rows.clone(),
+            })?,
             None => continue,
         };
-        let cols = (region.cols.start, region.cols.end);
-        let cut_w = region.frame.width;
+        let cols = (covered.cols.start, covered.cols.end);
+        let cut_w = region.info().width;
 
         // At a coarse stride most strips in the band hold nothing that will be
         // drawn. When the stride is a whole number of strips, take only the ones
@@ -241,15 +255,13 @@ pub(crate) fn assemble(
         // window covers the whole frame — at which point it stops moving, so
         // there is never a second read to serve.
         let first_sampled = roi.y + t0 * stride;
-        if let Some(step) = step_for(&region.frame, stride) {
-            let (band_planes, sampled) = decode_jobs_stepped(
-                &tiff.data,
-                &tiff.frames,
-                tiff.byte_order,
-                jobs,
-                first_sampled..rows.end,
+        if let Some(step) = step_for(region.info(), stride) {
+            let crop = Crop::Sampled {
+                rows: first_sampled..rows.end,
                 step,
-            )?;
+            };
+            let band_planes = decode_jobs(tiff, jobs, Some(&crop), &mut sampled_bufs, scratch)?;
+            let sampled = band_planes.coverage.clone().expect("a crop's coverage");
             // The two axes are now sampled at different rates, and this is the
             // only place in the viewer where that is true. Skipping strips
             // removed rows from the buffer, so what survives sits
@@ -265,17 +277,17 @@ pub(crate) fn assemble(
             let per = sampled.rows_per_piece.max(1);
             let off = first_sampled.saturating_sub(sampled.first_row);
             let sub = roi::Sampling {
-                x: roi.x.saturating_sub(region.cols.start),
+                x: roi.x.saturating_sub(covered.cols.start),
                 y: off,
                 cols: tw,
                 rows: t1 - t0,
                 x_step: stride,
                 y_step: per,
             };
-            for (plane, data) in planes.iter_mut().zip(&band_planes) {
+            for (plane, data) in planes.iter_mut().zip(band_planes.views(&sampled_bufs)) {
                 blit(
                     plane,
-                    &cut_sampled(data, cut_w, sampled.frame.height, &sub),
+                    &cut_sampled(data, cut_w, band_planes.height, &sub),
                     (t0 * tw) as usize,
                 );
             }
@@ -283,14 +295,17 @@ pub(crate) fn assemble(
         }
 
         if bands.get(frame_index, &channels, band, cols).is_none() {
-            let (decoded, got_cols, got_rows) = decode_jobs_region(
-                &tiff.data,
-                &tiff.frames,
-                tiff.byte_order,
-                jobs,
-                want_cols.clone(),
-                rows.clone(),
-            )?;
+            let crop = Crop::Region {
+                cols: want_cols.clone(),
+                rows: rows.clone(),
+            };
+            // Kept in the band cache, so owned, in buffers of its own.
+            let mut fresh = ChannelBufs::default();
+            let got = decode_jobs(tiff, jobs, Some(&crop), &mut fresh, scratch)?;
+            got.own(&mut fresh);
+            let covered = got.coverage.clone().expect("a crop's coverage");
+            let (got_cols, got_rows) = (covered.cols, covered.rows);
+            let decoded: Vec<Decoded> = jobs.iter().map(|j| fresh.take(j.channel)).collect();
             debug_assert_eq!(
                 (got_cols.start, got_cols.end),
                 cols,
@@ -309,7 +324,7 @@ pub(crate) fn assemble(
                     &trimmed,
                     roi,
                     cut_w,
-                    region.cols.start,
+                    cols.0,
                     &rows,
                     t0,
                     t1,
@@ -327,7 +342,7 @@ pub(crate) fn assemble(
             band_planes,
             roi,
             cut_w,
-            region.cols.start,
+            cols.0,
             &rows,
             t0,
             t1,
@@ -509,6 +524,8 @@ impl WindowWorker {
         // Nothing else can reach it, so it is `assemble` that empties it when
         // a request arrives under another channel layout.
         let mut bands = BandCache::default();
+        // And a scratch of its own, kept from window to window.
+        let mut scratch = ReadScratch::default();
         let build =
             move |(frame_index, roi, revision): &WindowKey, job: Job, cancel: &CancelToken| {
                 fast_tiff_lib::set_thread_parallel_decode(Some(job.parallel));
@@ -520,6 +537,7 @@ impl WindowWorker {
                     roi,
                     *frame_index,
                     cancel,
+                    &mut scratch,
                 ) {
                     Ok(planes) => Some(Built {
                         frame_index: *frame_index,

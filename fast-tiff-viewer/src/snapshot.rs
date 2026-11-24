@@ -27,7 +27,7 @@
 //! make that tractable:
 //!
 //! * The pixels come from `build_jobs` and the decoder the upload path uses
-//!   (`decode_jobs_rows` is that decode, a band of rows at a time), so the
+//!   (`decode_jobs` with a [`Crop::Rows`], a band of rows at a time), so the
 //!   sample values are byte-identical to the ones the textures hold —
 //!   including the widening and the RGB/CMYK plane addressing, which are easy
 //!   to get subtly wrong a second time.
@@ -68,9 +68,9 @@
 //! happened, and cropping the frame first gives a copy that is the image.
 
 use crate::document::Document;
-use crate::prefetch::{build_jobs, decode_jobs_rows, ChannelJob, DecodedRef, Samples};
+use crate::prefetch::{build_jobs, decode_jobs, ChannelBufs, ChannelJob, Planes, ReadScratch, Samples};
 use anyhow::{Context, Result};
-use fast_tiff_lib::PARALLEL_MIN_PIXELS;
+use fast_tiff_lib::{Crop, PARALLEL_MIN_PIXELS};
 use scivis_render::Lut;
 use std::ops::Range;
 
@@ -231,7 +231,8 @@ impl Layer<'_> {
     ) -> (Samples<'s>, usize) {
         let source = &sources[self.source];
         let first = (row - source.rows.start) as usize * width;
-        (source.planes[self.plane].view(), first)
+        let planes = source.planes.as_ref().expect("decoded before it is composed");
+        (planes.view(self.plane, &source.bufs), first)
     }
 }
 
@@ -243,7 +244,12 @@ impl Layer<'_> {
 /// single decompression pass.
 struct Source<'a> {
     jobs: Vec<ChannelJob>,
-    planes: Vec<DecodedRef<'a>>,
+    /// What its last band decoded, borrowed from the file where the file
+    /// holds a plane as it is, and otherwise in `bufs`; `None` before the
+    /// first band.
+    planes: Option<Planes<'a>>,
+    /// The buffers its bands are decoded into, one band after another.
+    bufs: ChannelBufs,
     /// The rows `planes` hold, whole strips of this IFD: empty before the
     /// first band.
     rows: Range<u32>,
@@ -309,7 +315,8 @@ fn compose(
             None => {
                 sources.push(Source {
                     jobs: Vec::new(),
-                    planes: Vec::new(),
+                    planes: None,
+                    bufs: ChannelBufs::default(),
                     rows: 0..0,
                 });
                 sources.len() - 1
@@ -350,6 +357,8 @@ fn compose(
         Vec::new()
     };
 
+    // One for the whole copy: the bands decode one after another.
+    let mut scratch = ReadScratch::default();
     let mut y = 0;
     while y < height {
         // Each IFD whose band ends at `y` decodes its next. The decode snaps
@@ -359,22 +368,24 @@ fn compose(
             if source.rows.end > y {
                 continue;
             }
-            // The last band goes first, so only one of each is ever held.
-            source.planes.clear();
+            // Into the buffers the last band was decoded into: only one band
+            // of each is ever held.
+            source.planes = None;
             let want = y..y.saturating_add(decode_rows).min(height);
-            let (planes, rows) = decode_jobs_rows(
-                &stack.tiff.data,
-                &stack.tiff.frames,
-                stack.tiff.byte_order,
+            let planes = decode_jobs(
+                &stack.tiff,
                 &source.jobs,
-                want,
+                Some(&Crop::Rows(want)),
+                &mut source.bufs,
+                &mut scratch,
             )
             .context("could not decode the frame on screen")?;
+            let rows = planes.coverage.as_ref().expect("a crop's coverage").rows.clone();
             anyhow::ensure!(
                 rows.start <= y && rows.end > y,
                 "rows {rows:?} were decoded for row {y}"
             );
-            source.planes = planes;
+            source.planes = Some(planes);
             source.rows = rows;
         }
         // Every channel has the rows from `y` to where the first band ends.

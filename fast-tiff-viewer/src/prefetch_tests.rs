@@ -35,28 +35,117 @@ fn job() -> ChannelJob {
 }
 
 /// An uncompressed plane comes back as a borrow of the file, so the upload is
-/// the only copy; a compressed one is decoded into a buffer of its own. Both
+/// the only copy; a compressed one is decoded into the channel's buffer. Both
 /// hold the same samples, and the owned decode agrees with them.
 #[test]
 fn an_uncompressed_plane_is_borrowed_from_the_file() {
     let want: Vec<u16> = (0..(W * H) as u16).map(|i| i * 300).collect();
     for (compression, borrowed) in [(Compression::None, true), (Compression::Deflate, false)] {
         let tiff = stack(compression);
-        let decoded =
-            decode_jobs_borrowed(&tiff.data, &tiff.frames, tiff.byte_order, &[job()]).unwrap();
-        match &decoded[0] {
-            DecodedRef::U16(Cow::Borrowed(v)) => {
-                assert!(borrowed, "{compression:?} should have been decoded");
-                assert_eq!(*v, &want[..]);
-            }
-            DecodedRef::U16(Cow::Owned(v)) => {
-                assert!(!borrowed, "{compression:?} should have been borrowed");
-                assert_eq!(v, &want);
-            }
-            _ => panic!("16-bit samples should decode as U16"),
+        let mut bufs = ChannelBufs::default();
+        let mut scratch = ReadScratch::default();
+        let planes = decode_jobs(&tiff, &[job()], None, &mut bufs, &mut scratch).unwrap();
+        assert_eq!(planes.is_file(0), borrowed, "{compression:?}");
+        assert!(
+            matches!(planes.view(0, &bufs), Samples::U16(v) if v == &want[..]),
+            "{compression:?}"
+        );
+        if borrowed {
+            assert!(
+                matches!(bufs.get(0), Decoded::U8(v) if v.is_empty()),
+                "a borrowed plane leaves its buffer alone"
+            );
         }
-        let owned = decode_jobs(&tiff.data, &tiff.frames, tiff.byte_order, &[job()]).unwrap();
+        let owned = decode_owned(&tiff, &[job()]).unwrap();
         assert!(matches!(&owned[0], Decoded::U16(v) if *v == want));
+    }
+}
+
+/// A frame decoded again into buffers the last decode left is decoded into
+/// the same allocations: what keeps the interface thread's decode of a
+/// compressed movie free of frame-sized allocations.
+#[test]
+fn a_warm_decode_fills_the_same_buffers() {
+    let tiff = stack(Compression::Deflate);
+    let mut bufs = ChannelBufs::default();
+    let mut scratch = ReadScratch::default();
+    decode_jobs(&tiff, &[job()], None, &mut bufs, &mut scratch).unwrap();
+    let Decoded::U16(first) = bufs.get(0) else {
+        panic!("16-bit samples should decode as U16");
+    };
+    let first = first.as_ptr();
+    decode_jobs(&tiff, &[job()], None, &mut bufs, &mut scratch).unwrap();
+    let Decoded::U16(again) = bufs.get(0) else {
+        panic!("16-bit samples should decode as U16");
+    };
+    assert_eq!(again.as_ptr(), first, "decoded into a fresh buffer");
+}
+
+/// The read-ahead touches a frame's pages only when every channel it is
+/// asked for is read straight from the file, and decodes it ahead otherwise
+/// — whatever the compression tag says. An uncompressed frame in many strips
+/// laid end to end is one run of the plane, and borrowed; an uncompressed
+/// big-endian one has to be byte-swapped on a little-endian host, so it is
+/// decoded, as a compressed one is. (Before, the mode was the compression
+/// tag's: the big-endian stack's frames were touched ahead and then swapped
+/// on the interface thread.)
+#[test]
+fn the_read_ahead_touches_only_frames_read_straight_from_the_file() {
+    let (w, h) = (16u32, 12u32);
+    let small = ChannelJob {
+        width: w,
+        height: h,
+        ..job()
+    };
+    let strips = |compression: Compression| {
+        let opts = WriterOptions::new(w, h, SampleType::U16)
+            .compression(compression)
+            .rows_per_strip(4);
+        let mut wr = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+        wr.write_frame_u16(&vec![7; (w * h) as usize]).unwrap();
+        TiffStack::from_bytes(wr.finish().unwrap().into_inner()).unwrap()
+    };
+    let contiguous = strips(Compression::None);
+    assert_eq!(contiguous.frames[0].strip_offsets.len(), 3, "several strips");
+    assert!(
+        touch_suffices(&contiguous, std::slice::from_ref(&small)),
+        "contiguous uncompressed strips are borrowed, so touched ahead"
+    );
+    assert!(
+        !touch_suffices(&strips(Compression::Deflate), std::slice::from_ref(&small)),
+        "a compressed frame is decoded ahead"
+    );
+    assert!(!touch_suffices(&contiguous, &[]), "nothing to read");
+
+    let fixture = |name: &str| {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()?
+            .join("fast-tiff-lib/tests/fixtures")
+            .join(name);
+        let bytes = std::fs::read(p).ok()?;
+        TiffStack::from_bytes(bytes).ok()
+    };
+    let (Some(be), Some(le)) = (
+        fixture("tff_u16_spp1_p2_none-be.tif"),
+        fixture("tff_u16_spp1_p2_none-le.tif"),
+    ) else {
+        eprintln!("skipping: the fast-tiff-lib fixtures are not here");
+        return;
+    };
+    for (tiff, host) in [(&be, ByteOrder::Big), (&le, ByteOrder::Little)] {
+        let f = &tiff.frames[0];
+        assert_eq!(f.compression, Compression::None);
+        let job = ChannelJob {
+            width: f.width,
+            height: f.height,
+            ..job()
+        };
+        assert_eq!(
+            touch_suffices(tiff, &[job]),
+            host == ByteOrder::host(),
+            "an uncompressed {host:?} frame on a {:?} host",
+            ByteOrder::host()
+        );
     }
 }
 
@@ -73,7 +162,7 @@ fn an_uncompressed_plane_is_borrowed_from_the_file() {
 fn the_read_ahead_answers_the_frame_asked_for_last() {
     use std::time::{Duration, Instant};
     let tiff = Arc::new(stack(Compression::Deflate));
-    let p = Prefetcher::new(tiff, false).expect("the thread should spawn");
+    let p = Prefetcher::new(tiff).expect("the thread should spawn");
     for frame in [3, 4, 5] {
         p.request(REV, frame, vec![job()], None);
     }
@@ -213,4 +302,49 @@ fn the_read_ahead_bins_the_frame_it_decodes() {
         .unwrap()
         .request(revision, 1, jobs, None);
     assert!(take(&stack, 1).histograms.is_empty());
+}
+
+/// A result handed back after it was shown is what the worker decodes the
+/// next frame into: the same allocation, frame after frame. Before, every
+/// frame read ahead was a fresh buffer, allocated and zero-filled.
+#[cfg(feature = "threads")]
+#[test]
+fn the_read_ahead_decodes_into_the_buffers_handed_back() {
+    use std::time::{Duration, Instant};
+    let p = Prefetcher::new(Arc::new(stack(Compression::Deflate))).expect("spawn");
+    let take = |frame: usize| {
+        let start = Instant::now();
+        loop {
+            if let Some(r) = p.take_matching(REV, frame) {
+                break r;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "the read-ahead never answered"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    let ptr = |r: &PrefetchResult| match &r.channels[..] {
+        [c] => match &c.data {
+            Decoded::U16(v) => v.as_ptr(),
+            _ => panic!("16-bit samples should decode as U16"),
+        },
+        _ => panic!("one channel asked for"),
+    };
+    p.request(REV, 0, vec![job()], None);
+    let first = take(0);
+    let at = ptr(&first);
+    p.recycle(first);
+    for frame in 1..4 {
+        p.request(REV, frame, vec![job()], None);
+        let next = take(frame);
+        assert_eq!(ptr(&next), at, "frame {frame} was decoded into a fresh buffer");
+        p.recycle(next);
+    }
+    // Not handed back, the next frame cannot be decoded into it.
+    p.request(REV, 9, vec![job()], None);
+    let kept = take(9);
+    p.request(REV, 10, vec![job()], None);
+    assert_ne!(ptr(&take(10)), ptr(&kept));
 }

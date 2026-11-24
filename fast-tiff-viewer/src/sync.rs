@@ -26,9 +26,7 @@ use crate::document::Document;
 use crate::frame::{FrameInputs, ImageInputs, VolumeInputs};
 use crate::histogram::{self, Binning, HistogramSource};
 use crate::notice::{Notice, Notices, VolumeNote};
-use crate::prefetch::{
-    build_jobs, decode_jobs_borrowed, ChannelJob, Decoded, PrefetchResult, Samples,
-};
+use crate::prefetch::{build_jobs, decode_jobs, ChannelJob, Decoded, PrefetchResult, Samples};
 use crate::residency::{Residency, VolumeResidency};
 use crate::roi::{self, Roi, Serving};
 use crate::viewer::{DecodeMode, ViewMode, Viewer, VolumeSettings};
@@ -473,7 +471,11 @@ fn sync_movie<R: ImageRenderer>(
                 &roi,
                 frame_index,
                 &CancelToken::never(),
+                &mut residency.decode.scratch,
             );
+            // A band's worth of scratch, for a frame nobody plays back: not
+            // worth holding until the next window.
+            residency.decode.scratch.release();
             match assembled {
                 Ok(planes) => {
                     let (tw, th) = roi.texture_size();
@@ -504,7 +506,7 @@ fn sync_movie<R: ImageRenderer>(
                 .prefetch
                 .as_ref()
                 .and_then(|p| p.take_matching(revision, frame_index));
-            if let Some(ready) = ready {
+            if let Some(mut ready) = ready {
                 if prefetch_matches(&ready, &jobs) {
                     for ch in &ready.channels {
                         upload(
@@ -521,8 +523,13 @@ fn sync_movie<R: ImageRenderer>(
                         // While it goes on reading ahead, a frame it did not
                         // bin is left to it: the next is asked for binned.
                         let bin_here = current.histograms.inline && !read_ahead;
-                        keep_read_ahead_histograms(loaded, ready, bin_here);
+                        keep_read_ahead_histograms(loaded, &mut ready, bin_here);
                     }
+                }
+                // Uploaded and binned, or of no use: either way its buffers
+                // are the worker's to decode a later frame into.
+                if let Some(p) = &loaded.services.prefetch {
+                    p.recycle(ready);
                 }
             }
             if !used_prefetch {
@@ -534,24 +541,21 @@ fn sync_movie<R: ImageRenderer>(
                     [false; MAX_CHANNELS]
                 };
                 // One call decodes every enabled channel; RGB planes share a
-                // single decompression pass. Borrowed: an uncompressed plane
+                // single decompression pass. Into this view's buffers, which
+                // last frame's decode left the right size; and borrowed where
+                // the file holds a plane as it is, so an uncompressed plane
                 // goes from the mapping straight into its texture.
-                match decode_jobs_borrowed(
-                    &loaded.tiff.data,
-                    &loaded.tiff.frames,
-                    loaded.tiff.byte_order,
+                let inline = &mut residency.decode;
+                match decode_jobs(
+                    &loaded.tiff,
                     &jobs,
+                    None,
+                    &mut inline.bufs,
+                    &mut inline.scratch,
                 ) {
-                    Ok(decoded) => {
-                        for (job, data) in jobs.iter().zip(&decoded) {
-                            upload(
-                                renderer,
-                                job.channel,
-                                job.width,
-                                job.height,
-                                &roi,
-                                data.view(),
-                            );
+                    Ok(planes) => {
+                        for (job, data) in jobs.iter().zip(planes.views(&inline.bufs)) {
+                            upload(renderer, job.channel, job.width, job.height, &roi, data);
                         }
                         // Binned from the planes just uploaded, which is all
                         // a histogram of them costs.
@@ -559,8 +563,8 @@ fn sync_movie<R: ImageRenderer>(
                             loaded,
                             &missing,
                             jobs.iter()
-                                .zip(&decoded)
-                                .map(|(job, data)| (job.channel, data.view())),
+                                .map(|job| job.channel)
+                                .zip(planes.views(&inline.bufs)),
                         );
                         loaded.services.histograms.put(binned);
                     }
@@ -674,7 +678,9 @@ fn sync_movie<R: ImageRenderer>(
                         &plan.want,
                         frame_index,
                         &CancelToken::never(),
+                        &mut residency.decode.scratch,
                     );
+                    residency.decode.scratch.release();
                     if let Ok(planes) = assembled {
                         let (tw, th) = plan.want.texture_size();
                         renderer.ensure_size(tw, th, kinds);
@@ -703,13 +709,11 @@ fn sync_movie<R: ImageRenderer>(
 
 /// Keep the histograms of a frame taken from the read-ahead: the ones its
 /// worker binned, and when this thread is to bin (`bin_here`), the channels
-/// it did not, from the planes the result holds.
-fn keep_read_ahead_histograms(loaded: &mut Document, ready: PrefetchResult, bin_here: bool) {
-    let PrefetchResult {
-        channels,
-        mut histograms,
-        ..
-    } = ready;
+/// it did not, from the planes the result holds. The planes stay in `ready`,
+/// to go back to the worker.
+fn keep_read_ahead_histograms(loaded: &mut Document, ready: &mut PrefetchResult, bin_here: bool) {
+    let mut histograms = std::mem::take(&mut ready.histograms);
+    let channels = &ready.channels;
     if histograms.is_empty() && !bin_here {
         return;
     }

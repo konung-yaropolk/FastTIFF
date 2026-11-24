@@ -6,9 +6,8 @@ use crate::display::Display;
 use crate::document::{ChannelSettings, Document};
 use crate::histogram::{auto_window, Histogram};
 use crate::units::{SampleUnits, Window};
-use fast_tiff_lib::{DisplayMap, TiffStack};
+use fast_tiff_lib::{DecodeScratch, DisplayMap, TiffStack};
 use scivis_render::{ChannelKind, Lut};
-use std::borrow::Cow;
 
 /// How many samples an auto-contrast scan looks at, at most. The scan runs once
 /// per channel while a file is opening — six of them for a 6-channel stack,
@@ -36,29 +35,19 @@ pub(crate) fn channel_minmax(
     channel: usize,
     step: usize,
 ) -> Option<(Window, DisplayMap)> {
+    // One buffer and one scratch for the whole scan: the probes are planes of
+    // one channel, of one size.
+    let mut owned = Vec::new();
+    let mut scratch = DecodeScratch::new();
     let one = |idx: usize| -> Option<((f32, f32), DisplayMap)> {
-        let frame = tiff.frames.get(idx)?;
-        // An 8- or 16-bit frame's map is fixed, and its plane can be borrowed
-        // straight from the file. A wide one is ranged on its own plane, and
-        // the reader that ranges it is the one that says what it picked.
-        let mut owned = Vec::new();
-        let (pixels, map) = match DisplayMap::of(frame, None) {
-            Some(map) => (
-                fast_tiff_lib::read_frame_u16(&tiff.data, frame, tiff.byte_order, None).ok()?,
-                map,
-            ),
-            None => {
-                let map = fast_tiff_lib::read_frame_u16_into(
-                    &tiff.data,
-                    frame,
-                    tiff.byte_order,
-                    None,
-                    &mut owned,
-                )
-                .ok()?;
-                (Cow::Borrowed(&owned[..]), map)
-            }
-        };
+        let frame = tiff.frame(idx).ok()?;
+        // Borrowed straight from the file when it holds the plane as it is.
+        // The map is the read's: fixed for an 8- or 16-bit frame, and for a
+        // wide one the range its plane was ranged on, which only the read
+        // knows, since it picks the range from the plane itself.
+        let units = fast_tiff_lib::units::Display { range: None };
+        let (pixels, maps) = frame.read(units, 0, &mut owned, &mut scratch).ok()?;
+        let map = maps.plane(0);
         let (mut lo, mut hi) = (u16::MAX, 0u16);
         // A prime-ish stride avoids landing on the same column of every row,
         // which a power-of-two stride would do on a power-of-two-wide image and
@@ -85,10 +74,9 @@ pub(crate) fn channel_float_minmax(
     channel: usize,
     step: usize,
 ) -> Option<Window> {
+    let mut scratch = DecodeScratch::new();
     let measure = |idx: usize| {
-        let frame = tiff.frames.get(idx)?;
-        let range =
-            fast_tiff_lib::frame_float_minmax(&tiff.data, frame, tiff.byte_order).ok()??;
+        let range = tiff.frame(idx).ok()?.value_range(&mut scratch).ok()??;
         Some((range, ()))
     };
     scan_for_contrast(tiff, channel, step, measure).map(|(range, ())| range.into())
@@ -151,7 +139,7 @@ fn scan_for_contrast<T: Copy>(
     tiff: &TiffStack,
     channel: usize,
     step: usize,
-    measure: impl Fn(usize) -> Option<((f32, f32), T)>,
+    mut measure: impl FnMut(usize) -> Option<((f32, f32), T)>,
 ) -> Option<((f32, f32), T)> {
     let step = step.max(1);
     let total = tiff.frames.len();

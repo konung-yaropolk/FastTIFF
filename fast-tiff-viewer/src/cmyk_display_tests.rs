@@ -44,12 +44,7 @@ fn open_stack(path: PathBuf) -> anyhow::Result<Document> {
 /// Decode `frame` with exactly the channels in `enabled` switched on.
 fn decode(stack: &Document, frame: usize, enabled: &[bool]) -> Vec<Decoded> {
     let jobs = crate::prefetch::build_jobs(stack, frame, enabled);
-    crate::prefetch::decode_jobs(
-        &stack.tiff.data,
-        &stack.tiff.frames,
-        stack.tiff.byte_order,
-        &jobs,
-    )
+    crate::prefetch::decode_owned(&stack.tiff, &jobs)
     .unwrap_or_else(|e| panic!("frame {frame} failed to decode: {e:#}"))
 }
 

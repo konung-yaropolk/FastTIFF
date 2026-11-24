@@ -57,8 +57,8 @@
 //! against, and what a caller without a renderer, and so without a sync, uses.
 
 use crate::document::Document;
-use crate::prefetch::{build_jobs, decode_jobs_borrowed, Decoded, Samples};
-use crate::residency::Residency;
+use crate::prefetch::{build_jobs, decode_jobs, Decoded, Samples};
+use crate::residency::{InlineDecode, Residency};
 use crate::units::{SampleUnits, Window};
 use crate::window::Overview;
 use scivis_render::{Lut, MAX_CHANNELS};
@@ -385,7 +385,7 @@ pub(crate) fn bin_shown<'a>(
 ///
 /// Returns how many channels it decoded. None after a channel toggle, since
 /// every channel is binned under a key a toggle does not move.
-pub(crate) fn complete(stack: &mut Document, residency: &Residency, start: bool) -> usize {
+pub(crate) fn complete(stack: &mut Document, residency: &mut Residency, start: bool) -> usize {
     if residency.over_texture_limit {
         from_overview(stack, residency.overview.as_ref());
         return 0;
@@ -403,20 +403,19 @@ pub(crate) fn complete(stack: &mut Document, residency: &Residency, start: bool)
         return 0;
     }
     let jobs = build_jobs(stack, stack.frame(), &missing);
-    // Borrowed, as for the screen: an uncompressed plane is binned straight
-    // out of the mapping, with no copy.
-    let binned = match decode_jobs_borrowed(
-        &stack.tiff.data,
-        &stack.tiff.frames,
-        stack.tiff.byte_order,
-        &jobs,
-    ) {
+    // Into the view's own buffers, as for the screen, each channel its own:
+    // a channel switched off keeps a buffer beside the shown ones', so
+    // neither is resized for the other. And borrowed where the file holds a
+    // plane as it is: an uncompressed plane is binned straight out of the
+    // mapping, with no copy.
+    let InlineDecode { bufs, scratch } = &mut residency.decode;
+    let binned = match decode_jobs(&stack.tiff, &jobs, None, bufs, scratch) {
         Ok(planes) => bin_shown(
             stack,
             &missing,
             jobs.iter()
-                .zip(&planes)
-                .map(|(job, data)| (job.channel, data.view())),
+                .map(|job| job.channel)
+                .zip(planes.views(bufs)),
         ),
         // A frame that does not decode has nothing to show; the image is
         // reporting it already.
@@ -495,18 +494,19 @@ pub fn frame_histograms(stack: &Document) -> Vec<Histogram> {
     // feel instant — and is why `HistogramKey` leaves the enabled set out.
     let every = [true; MAX_CHANNELS];
     let jobs = build_jobs(stack, stack.frame(), &every);
-    let Ok(decoded) = decode_jobs_borrowed(
-        &stack.tiff.data,
-        &stack.tiff.frames,
-        stack.tiff.byte_order,
-        &jobs,
-    ) else {
+    // A decode of its own, made for this call: it is not on any path that
+    // runs every frame.
+    let InlineDecode {
+        mut bufs,
+        mut scratch,
+    } = InlineDecode::default();
+    let Ok(planes) = decode_jobs(&stack.tiff, &jobs, None, &mut bufs, &mut scratch) else {
         return Vec::new();
     };
     let binning = Binning::of(stack);
     jobs.iter()
-        .zip(&decoded)
-        .filter_map(|(job, data)| binning.bin(job.channel, data.view()))
+        .zip(planes.views(&bufs))
+        .filter_map(|(job, data)| binning.bin(job.channel, data))
         .collect()
 }
 

@@ -30,7 +30,7 @@
 //! only on an exact `(generation, time)` match, so a stale build can cost work
 //! but never show wrong data.
 
-use crate::prefetch::{decode_jobs, ChannelJob, Decoded};
+use crate::prefetch::{decode_jobs, ChannelBufs, ChannelJob, Decoded, ReadScratch};
 use crate::units::SampleUnits;
 use crate::worker::{CancelToken, Cancelled, LatestWorker, Unclaimed};
 use fast_tiff_lib::TiffStack;
@@ -228,6 +228,9 @@ pub(crate) fn build_volume(
         // without a slice of sums per channel per thread.
         let direct = (sx, sy, sz) == (1, 1, 1);
         let mut boxes = SliceBoxes::new(if direct { 0 } else { n }, (w, h), (sx, sy), (ow, oh));
+        // One set of buffers per task, for every source slice it averages.
+        let mut bufs = ChannelBufs::default();
+        let mut scratch = ReadScratch::default();
         for k in z_from..z_to {
             // The step a superseded build still costs: one plane's decode per
             // task running. `try_for_each` stops handing out slices at the
@@ -265,8 +268,10 @@ pub(crate) fn build_volume(
                     }
                 })
                 .collect();
-            let decoded = decode_jobs(&tiff.data, &tiff.frames, tiff.byte_order, &jobs)?;
-            for (c, dec) in decoded.iter().enumerate() {
+            // Owned: a plane the file holds as it is is copied, as before.
+            decode_jobs(tiff, &jobs, None, &mut bufs, &mut scratch)?.own(&mut bufs);
+            for (c, job) in jobs.iter().enumerate() {
+                let dec = bufs.get(job.channel);
                 if direct {
                     encode_slice(&layout, &mut slabs, c, dec, affines[c]);
                 } else {
