@@ -298,9 +298,10 @@ pub(crate) fn build_volume(
         };
     // A `SliceWork` lent to each rayon split for every output slice it
     // builds and given back when it ends, so the build keeps one per thread
-    // running, however finely rayon splits the slices (a cheap build's, into
-    // ones); one in all without threads, where the same closure runs
-    // sequentially — identical output, just one core.
+    // running however finely rayon splits the slices — which for a cheap
+    // build is a split per slice, and so a `SliceWork` per slice if each
+    // split made its own. One in all without threads, where the same closure
+    // runs sequentially: identical output, just one core.
     #[cfg(feature = "threads")]
     let result = {
         let idle = std::sync::Mutex::new(Vec::new());
