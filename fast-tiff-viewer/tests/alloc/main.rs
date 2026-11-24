@@ -267,3 +267,110 @@ fn playing_through_the_read_ahead_allocates_nothing_frame_sized() {
         TIMEPOINTS - 4
     );
 }
+
+// ------------------------------------------------------------ batch readers
+
+/// Allocations of at least `at_least` bytes made while `f` runs, on every
+/// thread.
+fn allocations(at_least: usize, f: impl FnOnce()) -> usize {
+    COUNT.store(0, Ordering::SeqCst);
+    AT_LEAST.store(at_least, Ordering::SeqCst);
+    f();
+    AT_LEAST.store(usize::MAX, Ordering::SeqCst);
+    COUNT.load(Ordering::SeqCst)
+}
+
+/// `planes` frames of `w` x `h` unsigned 16-bit samples, uncompressed or
+/// compressed as asked, with no metadata: a movie.
+fn stack(w: u32, h: u32, planes: usize, compression: Compression) -> Vec<u8> {
+    let opts = WriterOptions::new(w, h, SampleType::U16).compression(compression);
+    let mut wr = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+    let n = (w * h) as usize;
+    for plane in 0..planes {
+        let px: Vec<u16> = (0..n)
+            .map(|i| ((i % 1021) * 3 + plane * 17) as u16)
+            .collect();
+        wr.write_frame_u16(&px).unwrap();
+    }
+    wr.finish().unwrap().into_inner()
+}
+
+/// Building the 3D volume of a 64-plane uncompressed stack reads every plane
+/// where it lies, in the file: it allocates nothing plane-sized beyond what
+/// the packed volume itself is — its level 0, its mip chain, its brick
+/// maxima — counted by packing an empty volume of the same layout. The build
+/// used to copy every plane out of the file into a buffer of its own first.
+#[test]
+fn building_a_volume_of_an_uncompressed_stack_copies_no_plane() {
+    use fast_tiff_viewer::scivis_render::VolumeCaps;
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    // Sides not a multiple of four, so no level of the mip chain is exactly
+    // a plane's size.
+    let (w, h, planes) = (255u32, 253u32, 64usize);
+    let plane = w as usize * h as usize * 2;
+    let doc = fast_tiff_viewer::Document::from_bytes(
+        stack(w, h, planes, Compression::None),
+        "volume.tif".into(),
+        false,
+    )
+    .expect("opens");
+    let caps = VolumeCaps {
+        max_3d_size: 2048,
+        unorm16: true,
+        float32: true,
+    };
+    let built = fast_tiff_viewer::testing::build_volume(&doc, caps, usize::MAX).expect("built");
+    assert_eq!(built.layout.dims, (w, h, planes as u32), "at full size");
+    let layout = built.layout.clone();
+    drop(built);
+    let packing = allocations(plane / 2, || {
+        let mut empty = PackedVolume::new(layout);
+        empty.finish();
+    });
+    let building = allocations(plane / 2, || {
+        fast_tiff_viewer::testing::build_volume(&doc, caps, usize::MAX);
+    });
+    assert_eq!(
+        building, packing,
+        "allocations of half a plane or more: {building} building, {packing} of them the volume's"
+    );
+}
+
+/// Saving a stack decodes each frame into a buffer it keeps from batch to
+/// batch, or hands the writer the file's own bytes, so once the first batch
+/// is written nothing frame-sized is allocated for a frame: for an LZW
+/// stack, whose frames are decoded, and for an uncompressed one, whose
+/// frames are not even copied.
+#[test]
+fn saving_allocates_nothing_frame_sized_after_the_first_batch() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    // A megabyte a frame, written by the save in Deflate strips of a quarter
+    // of that: nothing the encoder allocates is half a frame.
+    let (w, h, planes) = (1024u32, 512u32, 12usize);
+    let frame = w as usize * h as usize * 2;
+    for compression in [Compression::Lzw, Compression::None] {
+        let doc = fast_tiff_viewer::Document::from_bytes(
+            stack(w, h, planes, compression),
+            "save.tif".into(),
+            false,
+        )
+        .expect("opens");
+        let source = fast_tiff_viewer::save::SaveSource::of(&doc);
+        // Three frames a batch; counted from the first frame of the second.
+        COUNT.store(0, Ordering::SeqCst);
+        let mut progress = |done: f32| {
+            if (done * planes as f32).round() as usize == 3 {
+                AT_LEAST.store(frame / 2, Ordering::SeqCst);
+            }
+            true
+        };
+        let written = fast_tiff_viewer::testing::save_discarding(&source, frame * 3, &mut progress);
+        AT_LEAST.store(usize::MAX, Ordering::SeqCst);
+        let n = COUNT.load(Ordering::SeqCst);
+        assert!(written.expect("saved") > 0);
+        assert_eq!(
+            n, 0,
+            "{compression:?}: frame-sized allocations after the first batch"
+        );
+    }
+}

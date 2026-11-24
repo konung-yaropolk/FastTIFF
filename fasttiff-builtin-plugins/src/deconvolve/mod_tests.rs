@@ -658,6 +658,105 @@ fn the_psf_reader_reads_what_it_read_before() {
     );
 }
 
+/// Counts the allocations of at least a given size made on the threads that
+/// ask it to — this crate's unit tests run side by side, and only the one
+/// measuring should be counted.
+mod counting {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Allocations of at least this many bytes are counted, on this
+        /// thread; `usize::MAX` counts none.
+        static AT_LEAST: Cell<usize> = const { Cell::new(usize::MAX) };
+        static COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    struct Counting;
+
+    fn note(size: usize) {
+        // `try_with`: an allocation made while this thread's locals are torn
+        // down is simply not counted.
+        let _ = AT_LEAST.try_with(|at_least| {
+            if size >= at_least.get() {
+                let _ = COUNT.try_with(|n| n.set(n.get() + 1));
+            }
+        });
+    }
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            note(new_size);
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+
+    /// How many allocations of at least `at_least` bytes `f` made on this
+    /// thread.
+    pub(super) fn allocations(at_least: usize, f: impl FnOnce()) -> usize {
+        COUNT.with(|n| n.set(0));
+        AT_LEAST.with(|a| a.set(at_least));
+        f();
+        AT_LEAST.with(|a| a.set(usize::MAX));
+        COUNT.with(|n| n.get())
+    }
+}
+
+/// A PSF stored as LZW in two strips a slice decodes each slice straight into
+/// the volume, through one scratch for them all: what it allocates of half a
+/// strip or more — the file, the volume, one strip's worth of decoded samples
+/// — is the same for sixteen slices as for two. It was a strip's decode
+/// buffer per slice, besides a buffer each slice was decoded into first.
+#[test]
+fn a_compressed_psf_allocates_nothing_per_slice() {
+    use fast_tiff_lib::{Compression, SampleType, TiffWriter, WriterOptions};
+    // Two strips of 32 rows, 128 KiB each decompressed: counted from half of
+    // that, which is more than the 32 KiB of tables the LZW decoder makes
+    // for every strip it reads (a codec's cost, not a frame's).
+    let (w, h) = (2048u32, 64u32);
+    let strip = w as usize * 32 * 2;
+    let write = |slices: usize| {
+        let opts = WriterOptions::new(w, h, SampleType::U16)
+            .compression(Compression::Lzw)
+            .rows_per_strip(32);
+        let mut wr = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+        for z in 0..slices {
+            let px: Vec<u16> = (0..w * h).map(|i| (i % 509 + z as u32) as u16).collect();
+            wr.write_frame_u16(&px).unwrap();
+        }
+        let path = temp(&format!("lzw-psf-{slices}.tif"));
+        std::fs::write(&path, wr.finish().unwrap().into_inner()).unwrap();
+        path.display().to_string()
+    };
+    let (two, sixteen) = (write(2), write(16));
+    let mut psf = None;
+    let few = counting::allocations(strip / 2, || psf = Some(load_psf(&two)));
+    let psf = psf.unwrap().expect("two slices read");
+    assert_eq!(psf.dims.len(), (w * h) as usize * 2);
+    assert_eq!(psf.data[(w * h) as usize + 5], 6.0, "slice 1, sample 5");
+    let mut psf = None;
+    let many = counting::allocations(strip / 2, || psf = Some(load_psf(&sixteen)));
+    psf.unwrap().expect("sixteen slices read");
+    assert_eq!(
+        many, few,
+        "allocations of a strip or more: {few} for two slices, {many} for sixteen"
+    );
+}
+
 // ------------------------------------------------------------------ metadata
 
 /// A generated image describes itself and nothing else.

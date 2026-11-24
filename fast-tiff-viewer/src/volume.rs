@@ -296,11 +296,19 @@ pub(crate) fn build_volume(
             }
             Ok(())
         };
-    // One `SliceWork` per rayon split, kept for every output slice the split
-    // builds; one in all without threads, where the same closure runs
+    // A `SliceWork` lent to each rayon split for every output slice it
+    // builds and given back when it ends, so the build keeps one per thread
+    // running, however finely rayon splits the slices (a cheap build's, into
+    // ones); one in all without threads, where the same closure runs
     // sequentially — identical output, just one core.
     #[cfg(feature = "threads")]
-    let result = tasks.into_par_iter().try_for_each_init(new_work, slice);
+    let result = {
+        let idle = std::sync::Mutex::new(Vec::new());
+        tasks.into_par_iter().try_for_each_init(
+            || Lent::from(&idle, &new_work),
+            |work, task| slice(work, task),
+        )
+    };
     #[cfg(not(feature = "threads"))]
     let result = {
         let mut work = new_work();
@@ -374,6 +382,53 @@ struct SliceWork {
     boxes: SliceBoxes,
 }
 
+/// A [`SliceWork`] lent to one rayon split, out of the ones not lent now, and
+/// given back to them when the split ends.
+#[cfg(feature = "threads")]
+struct Lent<'p> {
+    work: Option<SliceWork>,
+    idle: &'p std::sync::Mutex<Vec<SliceWork>>,
+}
+
+#[cfg(feature = "threads")]
+impl<'p> Lent<'p> {
+    /// One of `idle`, or a new one when none is.
+    fn from(idle: &'p std::sync::Mutex<Vec<SliceWork>>, new: impl Fn() -> SliceWork) -> Self {
+        let work = idle.lock().unwrap_or_else(|e| e.into_inner()).pop();
+        Lent {
+            work: Some(work.unwrap_or_else(new)),
+            idle,
+        }
+    }
+}
+
+#[cfg(feature = "threads")]
+impl std::ops::Deref for Lent<'_> {
+    type Target = SliceWork;
+    fn deref(&self) -> &SliceWork {
+        self.work.as_ref().expect("lent until dropped")
+    }
+}
+
+#[cfg(feature = "threads")]
+impl std::ops::DerefMut for Lent<'_> {
+    fn deref_mut(&mut self) -> &mut SliceWork {
+        self.work.as_mut().expect("lent until dropped")
+    }
+}
+
+#[cfg(feature = "threads")]
+impl Drop for Lent<'_> {
+    fn drop(&mut self) {
+        if let Some(work) = self.work.take() {
+            self.idle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(work);
+        }
+    }
+}
+
 /// The sums an output slice averages, per channel: one per output pixel, over
 /// the `stride` box of source pixels behind it in every source slice added.
 struct SliceBoxes {
@@ -394,7 +449,12 @@ struct SliceBoxes {
 impl SliceBoxes {
     fn new(channels: usize, src: (u32, u32), stride: (u32, u32), out: (u32, u32)) -> Self {
         SliceBoxes {
-            sums: vec![vec![0.0; out.0 as usize * out.1 as usize]; channels],
+            // Not `vec![vec![..]; channels]`, which makes the inner one even
+            // for no channels at all — a slice's worth of sums, per task, at
+            // full size, where nothing is summed.
+            sums: (0..channels)
+                .map(|_| vec![0.0; out.0 as usize * out.1 as usize])
+                .collect(),
             counts: vec![None; channels],
             src,
             stride,

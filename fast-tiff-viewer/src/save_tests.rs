@@ -1060,3 +1060,167 @@ fn a_signed_8_bit_window_is_in_sample_units_both_ways() {
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
     assert_eq!(declared_range(bytes), ("-10".into(), "100".into()));
 }
+
+// ------------------------------------------------ the frames the writer gets
+
+/// A stack of `planes` planes of `W` x `H` samples, compressed as asked, in
+/// strips of `rows` rows.
+fn compressed_source(
+    sample: SampleType,
+    planes: usize,
+    compression: fast_tiff_lib::Compression,
+    predictor: bool,
+    rows: u32,
+) -> Vec<u8> {
+    let opts = WriterOptions::new(W, H, sample)
+        .compression(compression)
+        .predictor(predictor)
+        .rows_per_strip(rows);
+    let mut w = TiffWriter::new(Cursor::new(Vec::new()), opts).expect("writer");
+    let n = W as usize * H as usize * sample.bytes();
+    for p in 0..planes {
+        let bytes: Vec<u8> = (0..n)
+            .map(|i| (i as u8).wrapping_mul(13).wrapping_add(p as u8 * 31))
+            .map(|b| {
+                if sample == SampleType::F32 {
+                    b & 0x3f
+                } else {
+                    b
+                }
+            })
+            .collect();
+        w.write_frame_bytes(&bytes).expect("frame");
+    }
+    w.finish().expect("finish").into_inner()
+}
+
+/// Every frame of `tiff` as the file stores it, little-endian: what a save
+/// must write.
+fn stored_frames(tiff: &TiffStack) -> Vec<Vec<u8>> {
+    let mut scratch = fast_tiff_lib::DecodeScratch::new();
+    (0..tiff.frame_count())
+        .map(|i| {
+            let mut out = Vec::new();
+            let frame = tiff.frame(i).unwrap();
+            frame
+                .stored_frame(ByteOrder::Little, &mut out, &mut scratch)
+                .unwrap()
+                .to_vec()
+        })
+        .collect()
+}
+
+/// A compressed stack — LZW, with and without the predictor, in one strip a
+/// frame and in several — saves, in several batches, to a file holding its
+/// samples exactly.
+#[test]
+fn a_compressed_stack_saves_to_exactly_the_samples_it_holds() {
+    use fast_tiff_lib::Compression;
+    for sample in [
+        SampleType::U8,
+        SampleType::I8,
+        SampleType::U16,
+        SampleType::I16,
+        SampleType::F32,
+    ] {
+        for (predictor, rows) in [(false, H), (true, H), (false, 1), (true, 3)] {
+            let stack = open(compressed_source(
+                sample,
+                7,
+                Compression::Lzw,
+                predictor,
+                rows,
+            ));
+            let two_frames = W as usize * H as usize * sample.bytes() * 2;
+            let source = SaveSource::of(&stack);
+            let sink = write_all(&source, Cursor::new(Vec::new()), &mut |_| true, two_frames)
+                .expect("save");
+            let back = TiffStack::from_bytes(sink.into_inner()).expect("reopen");
+            assert_eq!(
+                stored_frames(&back),
+                stored_frames(&stack.tiff),
+                "{sample:?}, predictor {predictor}, {rows} rows a strip"
+            );
+        }
+    }
+}
+
+/// An uncompressed little-endian stack is handed to the writer as the file's
+/// own bytes — every frame of every batch borrowed where it lies, in one
+/// strip a frame or in strips laid end to end — and none is copied into a
+/// buffer first. One that has to be decoded (here, compressed) is decoded
+/// into buffers the save keeps from batch to batch: the second batch's
+/// frames are where the first batch's were.
+#[test]
+fn an_uncompressed_little_endian_stack_is_handed_over_where_it_lies() {
+    use fast_tiff_lib::Compression;
+    let sources = [
+        compressed_source(SampleType::U16, 6, Compression::None, false, H),
+        compressed_source(SampleType::U16, 6, Compression::None, false, 1),
+        compressed_source(SampleType::F32, 6, Compression::None, false, 3),
+    ];
+    for bytes in sources {
+        let tiff = TiffStack::from_bytes(bytes).unwrap();
+        let file = {
+            let mut scratch = fast_tiff_lib::DecodeScratch::new();
+            (0..tiff.frame_count())
+                .map(|i| {
+                    let mut unused = Vec::new();
+                    let got = tiff
+                        .frame(i)
+                        .unwrap()
+                        .stored_frame(ByteOrder::Little, &mut unused, &mut scratch)
+                        .unwrap();
+                    assert!(got.is_source(), "frame {i} is stored as it is read");
+                    got.as_ptr() as usize
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut handed = Vec::new();
+        write_frames(&tiff, 4, &mut |_| true, |frames, batch| {
+            assert_eq!(frames.len(), batch.len());
+            handed.extend(frames.iter().map(|f| f.as_ptr() as usize));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(handed, file, "every frame is the file's own bytes");
+    }
+
+    let tiff = TiffStack::from_bytes(compressed_source(
+        SampleType::U16,
+        6,
+        Compression::Lzw,
+        false,
+        H,
+    ))
+    .unwrap();
+    let mut batches: Vec<Vec<usize>> = Vec::new();
+    write_frames(&tiff, 3, &mut |_| true, |frames, _| {
+        batches.push(frames.iter().map(|f| f.as_ptr() as usize).collect());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(batches.len(), 2);
+    assert_eq!(
+        batches[0], batches[1],
+        "the second batch reuses the first's buffers"
+    );
+}
+
+/// A stack whose frame claims far more samples than its strips hold is an
+/// error, not a buffer sized from the claim: this fuzz regression's header
+/// says its frame is four billion rows tall, and the save sized its first
+/// batch from that before it read anything, and aborted the process.
+#[test]
+fn a_save_of_a_frame_claiming_more_than_its_strips_hold_fails() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fast-tiff-lib/tests/fuzz-regressions/overflow-tiled-crop-h4g-tile2g.tif");
+    let Ok(bytes) = std::fs::read(&path) else {
+        // The fixtures live in fast-tiff-lib and are not published.
+        return;
+    };
+    let stack = open(bytes);
+    let err = save_to_bytes(&SaveSource::of(&stack), &mut |_| true)
+        .expect_err("a frame that cannot be read cannot be saved");
+    assert!(format!("{err:#}").contains("frame 0"), "{err:#}");
+}
