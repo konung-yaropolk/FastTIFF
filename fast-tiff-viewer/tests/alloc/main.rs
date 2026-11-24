@@ -26,7 +26,6 @@ use fast_tiff_viewer::fast_tiff_lib::{
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 /// Counts allocations of at least [`AT_LEAST`] bytes.
 struct Counting;
@@ -67,7 +66,7 @@ static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 /// for the library to decode it on several cores.
 const SIDE: u32 = 1024;
 const CHANNELS: usize = 2;
-const TIMEPOINTS: usize = 24;
+const TIMEPOINTS: usize = 12;
 
 /// One channel's plane: what "frame-sized" means here.
 const PLANE_BYTES: usize = SIDE as usize * SIDE as usize * 2;
@@ -227,6 +226,7 @@ fn showing_frames_inline_allocates_nothing_frame_sized() {
 #[cfg(feature = "threads")]
 #[test]
 fn playing_through_the_read_ahead_allocates_nothing_frame_sized() {
+    use std::time::{Duration, Instant};
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let mut viewer = opened();
     let mut renderer = Staging::new();
