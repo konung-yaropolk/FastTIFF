@@ -166,6 +166,16 @@ fn frame_reads(stack: &fast_tiff_lib::TiffStack) {
             let mut out = vec![0xA5u8; n];
             let _ = f.stored_frame_into(ByteOrder::Big, &mut out, s);
         }
+        // Borrowed or decoded, the whole frame is the bytes the copying read
+        // writes.
+        let mut out = vec![0x5Au8; 3];
+        if let Ok(px) = f.stored_frame(ByteOrder::Little, &mut out, s) {
+            let px = px.to_vec();
+            let mut again = vec![0xC3u8; px.len()];
+            f.stored_frame_into(ByteOrder::Little, &mut again, s)
+                .expect("a frame stored_frame read is one stored_frame_into reads");
+            assert_eq!(px, again, "stored_frame against stored_frame_into");
+        }
         f.touch();
     }
 
