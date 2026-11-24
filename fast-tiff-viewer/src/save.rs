@@ -80,8 +80,8 @@ use crate::document::Document;
 use anyhow::{bail, Context, Result};
 use fast_tiff_lib::metadata::{self, MetadataFormat};
 use fast_tiff_lib::{
-    read_frame_bytes_into, ByteOrder, Compression, FrameInfo, SampleFormat, SampleType,
-    StackMetaWrite, TiffWriter, WriterOptions,
+    ByteOrder, Compression, DecodeScratch, FrameInfo, Pixels, SampleFormat, SampleType,
+    StackMetaWrite, TiffStack, TiffWriter, WriterOptions,
 };
 
 /// How files are compressed. See the module docs for why these.
@@ -385,51 +385,63 @@ pub(crate) fn write_all<W: std::io::Write + std::io::Seek>(
     };
     let mut writer = TiffWriter::new(sink, options).context("starting the TIFF")?;
 
-    let data = &stack.tiff.data;
-    let order = stack.tiff.byte_order;
     let per_batch = (batch_bytes / bytes_per_frame).max(1);
-    // Buffers reused from batch to batch; `filled` of them hold this batch.
-    let mut batch: Vec<Vec<u8>> = Vec::with_capacity(per_batch);
-    let mut filled = 0usize;
-    let mut first_in_batch = 0usize;
-
-    let total = stack.tiff.frames.len().max(1);
-    for (i, frame) in stack.tiff.frames.iter().enumerate() {
-        // Before the frame, not after: a stack of one frame should still show
-        // that the write started, and the `finish` below is the tail this can
-        // never account for.
-        if !on_progress(i as f32 / total as f32) {
-            bail!("cancelled");
-        }
-        if filled == batch.len() {
-            batch.push(Vec::with_capacity(bytes_per_frame));
-        }
-        // The file's own samples, in the writer's byte order, decoded straight
-        // into the batch: no display transform to undo, and no copy between.
-        read_frame_bytes_into(data, frame, order, ByteOrder::Little, &mut batch[filled])
-            .with_context(|| format!("writing frame {i}"))?;
-        filled += 1;
-        if filled == per_batch {
-            write_batch(&mut writer, &batch[..filled])
-                .with_context(|| format!("writing frames {first_in_batch}..={i}"))?;
-            filled = 0;
-            first_in_batch = i + 1;
-        }
-    }
-    if filled > 0 {
-        write_batch(&mut writer, &batch[..filled])
-            .with_context(|| format!("writing frames {first_in_batch} onwards"))?;
-    }
+    write_frames(&stack.tiff, per_batch, on_progress, |frames, batch| {
+        writer
+            .write_frames_bytes(frames)
+            .with_context(|| format!("writing frames {}..={}", batch.start, batch.end - 1))
+    })?;
     writer.finish().context("finishing the TIFF")
 }
 
-/// Hand a batch of frames to the writer, which compresses them together.
-fn write_batch(
-    writer: &mut TiffWriter<impl std::io::Write + std::io::Seek>,
-    frames: &[Vec<u8>],
+/// Every frame of `tiff` as the file stores it — its own samples, nothing
+/// widened or rescaled, laid out as the file lays them out — in little-endian
+/// byte order, the writer's, handed to `write` `per_batch` frames at a time
+/// with which frames they are. `on_progress` is asked before each frame, and
+/// stops the save when it says no.
+///
+/// A frame the file already holds that way — uncompressed, its strips one
+/// run, its samples little-endian or a byte wide — is handed over where it
+/// lies: the file's own bytes, in its mapping for a file on disk, copied
+/// nowhere on the way to the writer. Any other is decoded into a buffer kept
+/// from one batch to the next, through one decode scratch for the whole save,
+/// so after the first batch a save allocates nothing frame-sized.
+fn write_frames(
+    tiff: &TiffStack,
+    per_batch: usize,
+    on_progress: &mut dyn FnMut(f32) -> bool,
+    mut write: impl FnMut(&[&[u8]], std::ops::Range<usize>) -> Result<()>,
 ) -> Result<()> {
-    let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
-    Ok(writer.write_frames_bytes(&refs)?)
+    let total = tiff.frame_count();
+    let mut scratch = DecodeScratch::new();
+    // One per frame of a batch, reused from batch to batch; a frame handed
+    // over where it lies leaves its own empty.
+    let mut buffers: Vec<Vec<u8>> = Vec::new();
+    let mut first = 0;
+    while first < total {
+        let batch = first..first.saturating_add(per_batch).min(total);
+        if buffers.len() < batch.len() {
+            buffers.resize_with(batch.len(), Vec::new);
+        }
+        let mut frames: Vec<Pixels<'_, u8>> = Vec::with_capacity(batch.len());
+        for (i, buffer) in batch.clone().zip(buffers.iter_mut()) {
+            // Before the frame, not after: a stack of one frame should still
+            // show that the write started, and the `finish` after the last
+            // batch is the tail this can never account for.
+            if !on_progress(i as f32 / total as f32) {
+                bail!("cancelled");
+            }
+            let frame = tiff
+                .frame(i)
+                .and_then(|frame| frame.stored_frame(ByteOrder::Little, buffer, &mut scratch))
+                .with_context(|| format!("writing frame {i}"))?;
+            frames.push(frame);
+        }
+        let refs: Vec<&[u8]> = frames.iter().map(|frame| &**frame).collect();
+        write(&refs, batch.clone())?;
+        first = batch.end;
+    }
+    Ok(())
 }
 
 /// Whether `frames` frames of `bytes_per_frame` each fit a classic TIFF

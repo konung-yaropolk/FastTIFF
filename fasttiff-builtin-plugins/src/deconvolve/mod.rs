@@ -142,25 +142,21 @@ pub(crate) fn load_psf(path: &str) -> Result<Psf, PluginError> {
         )));
     }
 
-    let mut data = Vec::with_capacity(dims.len());
     // In the file's own units: a PSF is arithmetic, not a display, so it must
-    // not see the display readers' widening or signed offset.
-    let mut slice = Vec::new();
-    for (i, frame) in tiff.frames.iter().enumerate() {
-        fast_tiff_lib::read_plane_f32_into(&tiff.data, frame, tiff.byte_order, 0, &mut slice)
+    // not see the display readers' widening or signed offset. Each slice is
+    // decoded straight into its place in the volume, through one scratch for
+    // them all: no buffer per slice, and no copy out of one.
+    let slice = dims.x * dims.y;
+    let mut data = vec![0.0f32; dims.len()];
+    let mut scratch = fast_tiff_lib::DecodeScratch::new();
+    for (i, dest) in data.chunks_exact_mut(slice).enumerate() {
+        tiff.frame(i)
+            .and_then(|frame| {
+                frame.read_into(fast_tiff_lib::units::File, 0, &mut [dest], &mut scratch)
+            })
             .map_err(|e| {
                 PluginError::failed(format!("decoding slice {} of the PSF: {e:#}", i + 1))
             })?;
-        data.extend_from_slice(&slice);
-    }
-    if data.len() != dims.len() {
-        return Err(PluginError::failed(format!(
-            "the PSF decoded to {} samples, expected {}x{}x{}",
-            data.len(),
-            dims.x,
-            dims.y,
-            dims.z
-        )));
     }
     Ok(Psf { data, dims })
 }

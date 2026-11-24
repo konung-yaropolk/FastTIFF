@@ -14,7 +14,8 @@ use super::result::{ResultDest, ResultTiff, ResultWriter};
 use crate::dimensions::plane_index;
 use crate::display::Dims;
 use crate::document::Document;
-use fast_tiff_lib::{read_plane_u16_into, SampleFormat, TiffStack};
+use fast_tiff_lib::units::Display;
+use fast_tiff_lib::{DecodeScratch, SampleFormat, TiffStack};
 use std::sync::Arc;
 
 /// Everything a plugin can reach for one run.
@@ -40,13 +41,16 @@ pub struct StackHost {
     image: ImageInfo,
     view: ViewParams,
     info: StackInfo,
-    /// Reused between plane reads, so a run that reads a thousand planes does
-    /// not allocate a thousand buffers.
+    /// What a plane read needs between the file and the plugin's buffer — a
+    /// strip's worth of decompressed bytes — reused between reads, so a run
+    /// that reads a thousand planes of a compressed stack does not allocate a
+    /// thousand of them.
     ///
-    /// Only the paths that genuinely need an intermediate touch it. The common
-    /// case — an uncompressed, native-order, unsigned 16-bit frame, which is
-    /// what this library's own writer and ImageJ both produce — converts
-    /// straight from the memory map and leaves this empty.
+    /// Only the reads that genuinely need an intermediate touch it. The
+    /// common case — an uncompressed, native-order frame, which is what this
+    /// library's own writer and ImageJ both produce — is read straight from
+    /// the memory map into the plugin's buffer and leaves this empty.
+    scratch: DecodeScratch,
     /// The regions the user has drawn, if any. See
     /// [`HostContext::selection`](fasttiff_plugin_api::HostContext::selection).
     selection: Vec<fasttiff_plugin_api::Roi>,
@@ -86,6 +90,7 @@ impl StackHost {
             tiff: Arc::clone(&stack.tiff),
             dims: stack.display.dims(),
             rgb: stack.display.layout().shown_as_rgb(),
+            scratch: DecodeScratch::new(),
             selection: Vec::new(),
             pending: Default::default(),
             animating: false,
@@ -338,39 +343,31 @@ impl HostContext for StackHost {
 
     fn read_plane_u16(&mut self, plane: Plane, out: &mut Vec<u16>) -> Result<(), PluginError> {
         let (ifd, sample) = self.locate(plane)?;
-        let frame = &self.tiff.frames[ifd];
         // The contrast window is what a 32- or 64-bit plane is rescaled
         // through. It is in the channel's own units, which for such a plane are
         // the values being rescaled, so it can be handed to the decoder as it
         // is. A plugin wanting the raw values asks for f32 instead.
-        let range = self.view.channels.get(plane.c).map(|c| (c.min, c.max));
-        read_plane_u16_into(
-            &self.tiff.data,
-            frame,
-            self.tiff.byte_order,
-            range,
-            sample,
-            out,
-        )
-        .map(|_map| ())
-        .map_err(|e| {
-            PluginError::failed(format!(
-                "decoding (c{}, z{}, t{}): {e:#}",
-                plane.c, plane.z, plane.t
-            ))
-        })
+        let units = Display {
+            range: self.view.channels.get(plane.c).map(|c| (c.min, c.max)),
+        };
+        let read = self.tiff.frame(ifd).and_then(|frame| {
+            fit(out, frame.plane_len(units)?);
+            frame.read_into(units, sample, &mut [&mut out[..]], &mut self.scratch)
+        });
+        read.map(|_maps| ())
+            .map_err(|e| decoding_failed(plane, &anyhow::Error::from(e)))
     }
 
     fn read_plane_f32(&mut self, plane: Plane, out: &mut Vec<f32>) -> Result<(), PluginError> {
         let (ifd, sample) = self.locate(plane)?;
-        // Shared with `crate::measure`, so a plugin's mean and the app's own
-        // plot of the same pixels cannot disagree. See `crate::planes`.
-        crate::planes::plane_f32_into(&self.tiff, ifd, sample, out).map_err(|e| {
-            PluginError::failed(format!(
-                "decoding (c{}, z{}, t{}): {e:#}",
-                plane.c, plane.z, plane.t
-            ))
-        })
+        // One definition of a sample's value in the file's units, so a
+        // plugin's mean and anything else measuring the same pixels cannot
+        // disagree. See `crate::planes`.
+        let read = crate::planes::plane_len(&self.tiff, ifd).and_then(|n| {
+            fit(out, n);
+            crate::planes::plane_f32_into(&self.tiff, ifd, sample, out, &mut self.scratch)
+        });
+        read.map_err(|e| decoding_failed(plane, &e))
     }
 
     fn progress(&mut self, fraction: f32) -> bool {
@@ -446,6 +443,24 @@ impl HostContext for StackHost {
     fn finish_document(&mut self) -> Result<(), PluginError> {
         StackHost::finish_document(self)
     }
+}
+
+/// Make `out` `n` long, as the plugin contract's `Vec` reads promise: resized
+/// only when it is not that already, so a plugin reading plane after plane
+/// into one buffer pays for its allocation and zero-fill once. The decode
+/// writes every sample, so what it held before does not matter.
+fn fit<T: Copy + Default>(out: &mut Vec<T>, n: usize) {
+    if out.len() != n {
+        out.resize(n, T::default());
+    }
+}
+
+/// A plane read's error, saying which plane.
+fn decoding_failed(plane: Plane, e: &anyhow::Error) -> PluginError {
+    PluginError::failed(format!(
+        "decoding (c{}, z{}, t{}): {e:#}",
+        plane.c, plane.z, plane.t
+    ))
 }
 
 /// The stack's shape in file terms — see [`ImageInfo`] on why this is not the

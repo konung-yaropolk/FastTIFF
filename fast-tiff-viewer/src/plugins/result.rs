@@ -613,36 +613,46 @@ impl ResultTiff {
             ResultData::File(f) => fast_tiff_lib::TiffStack::from_bytes(std::fs::read(&f.path)?)?,
             ResultData::Memory(b) => fast_tiff_lib::TiffStack::from_bytes(b.clone())?,
         };
-        let mut planes = Vec::with_capacity(tiff.frames.len());
-        let mut raw = Vec::new();
-        for frame in &tiff.frames {
-            fast_tiff_lib::read_frame_bytes_into(
-                &tiff.data,
-                frame,
-                tiff.byte_order,
-                fast_tiff_lib::ByteOrder::Little,
-                &mut raw,
-            )?;
+        // Each plane decoded straight into the buffer it is handed back in,
+        // its samples in the host's byte order, so they are the values as
+        // they are: no byte buffer between, and no conversion pass.
+        let mut scratch = fast_tiff_lib::DecodeScratch::new();
+        let mut planes = Vec::with_capacity(tiff.frame_count());
+        for i in 0..tiff.frame_count() {
+            let frame = tiff.frame(i)?;
             planes.push(match self.spec.pixel_type {
-                PixelType::U8 => PlaneData::U8(raw.clone()),
-                PixelType::U16 | PixelType::I16 => PlaneData::U16(
-                    raw.as_chunks::<2>()
-                        .0
-                        .iter()
-                        .map(|&b| u16::from_le_bytes(b))
-                        .collect(),
-                ),
-                PixelType::F32 => PlaneData::F32(
-                    raw.as_chunks::<4>()
-                        .0
-                        .iter()
-                        .map(|&b| f32::from_le_bytes(b))
-                        .collect(),
-                ),
+                PixelType::U8 => PlaneData::U8(stored_samples(&frame, &mut scratch)?),
+                PixelType::U16 | PixelType::I16 => {
+                    PlaneData::U16(stored_samples(&frame, &mut scratch)?)
+                }
+                PixelType::F32 => PlaneData::F32(stored_samples(&frame, &mut scratch)?),
             });
         }
         Ok(self.spec.clone().with_planes(planes))
     }
+}
+
+/// A frame's samples exactly as its file stores them, as `T`s: the bytes
+/// [`Frame::stored_frame_into`](fast_tiff_lib::Frame::stored_frame_into)
+/// gives in the host's byte order, decoded into the `Vec` that holds them.
+fn stored_samples<T: bytemuck::Pod + Default>(
+    frame: &fast_tiff_lib::Frame<'_>,
+    scratch: &mut fast_tiff_lib::DecodeScratch,
+) -> anyhow::Result<Vec<T>> {
+    let bytes = frame.stored_frame_len()?;
+    let size = std::mem::size_of::<T>();
+    anyhow::ensure!(
+        bytes % size == 0,
+        "a frame of this result stores {bytes} bytes, which is not a whole number of \
+         {size}-byte samples"
+    );
+    let mut samples = vec![T::default(); bytes / size];
+    frame.stored_frame_into(
+        fast_tiff_lib::ByteOrder::host(),
+        bytemuck::cast_slice_mut(&mut samples),
+        scratch,
+    )?;
+    Ok(samples)
 }
 
 /// A file name from a result's name, with anything a file system would object

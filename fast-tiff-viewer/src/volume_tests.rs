@@ -355,14 +355,8 @@ fn a_nan_is_left_out_of_an_average() {
     // among its NaNs, the right one nothing but NaN.
     let nan = f32::NAN;
     let mut boxes = SliceBoxes::new(1, (4, 2), (2, 2), (2, 1));
-    boxes.add(
-        0,
-        &Decoded::F32(vec![1.0, nan, nan, nan, 3.0, 5.0, nan, nan]),
-    );
-    boxes.add(
-        0,
-        &Decoded::F32(vec![nan, nan, nan, nan, nan, nan, nan, nan]),
-    );
+    boxes.add(0, Samples::F32(&[1.0, nan, nan, nan, 3.0, 5.0, nan, nan]));
+    boxes.add(0, Samples::F32(&[nan, nan, nan, nan, nan, nan, nan, nan]));
     let mut slab = vec![0u8; layout.slice_bytes(0)];
     boxes.write(&layout, &mut [&mut slab[..]], 2, &[(1.0, 0.0)]);
     let got: Vec<f32> = slab
@@ -379,7 +373,7 @@ fn a_nan_is_left_out_of_an_average() {
     let (inf, ninf) = (f32::INFINITY, f32::NEG_INFINITY);
     let layout = VolumeLayout::new((3, 1, 1), 1, format);
     let mut boxes = SliceBoxes::new(1, (6, 1), (2, 1), (3, 1));
-    boxes.add(0, &Decoded::F32(vec![2.0, ninf, inf, ninf, ninf, nan]));
+    boxes.add(0, Samples::F32(&[2.0, ninf, inf, ninf, ninf, nan]));
     let mut slab = vec![0u8; layout.slice_bytes(0)];
     boxes.write(&layout, &mut [&mut slab[..]], 1, &[(1.0, 0.0)]);
     let got: Vec<f32> = slab
@@ -397,7 +391,7 @@ fn a_nan_is_left_out_of_an_average() {
     // Integer channels are counted as before: every voxel of the box.
     let layout = VolumeLayout::new((1, 1, 1), 1, TexelFormat::Unorm16);
     let mut boxes = SliceBoxes::new(1, (2, 1), (2, 1), (1, 1));
-    boxes.add(0, &Decoded::U16(vec![0, 65535]));
+    boxes.add(0, Samples::U16(&[0, 65535]));
     let mut slab = vec![0u8; layout.slice_bytes(0)];
     let identity16 = SampleUnits::display(fast_tiff_lib::DisplayMap::Identity);
     boxes.write(
@@ -426,7 +420,7 @@ fn a_float_volume_past_the_half_float_range_stays_finite() {
         &layout,
         &mut [&mut slab[..]],
         0,
-        &Decoded::F32(values.clone()),
+        Samples::F32(&values),
         units.volume_affine(),
     );
     let got: Vec<f32> = slab

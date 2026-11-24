@@ -11,6 +11,13 @@
 //! texture, which are disjoint `chunks_mut` of the final buffers — no locking,
 //! no reassembly pass.
 //!
+//! A source plane the file already holds as its texture wants it — an
+//! uncompressed plane in the host's byte order — is read where it lies, in
+//! the file's mapping, and never copied. The rest are decoded into buffers
+//! each worker thread keeps from one slice to the next, with its decode
+//! scratch and a reduced slice's sums, so a build allocates per thread rather
+//! than per plane.
+//!
 //! # How a volume is made to fit
 //!
 //! A stack too large for the budget is reduced by a whole number of voxels per
@@ -30,7 +37,7 @@
 //! only on an exact `(generation, time)` match, so a stale build can cost work
 //! but never show wrong data.
 
-use crate::prefetch::{decode_jobs, ChannelBufs, ChannelJob, Decoded, ReadScratch};
+use crate::prefetch::{decode_jobs, ChannelBufs, ChannelJob, ReadScratch, Samples};
 use crate::units::SampleUnits;
 use crate::worker::{CancelToken, Cancelled, LatestWorker, Unclaimed};
 use fast_tiff_lib::TiffStack;
@@ -213,39 +220,43 @@ pub(crate) fn build_volume(
     }
     drop(slab_iters);
 
-    #[cfg(feature = "threads")]
-    let task_iter = tasks.into_par_iter();
-    // Without rayon the same closure runs sequentially — identical output, just
-    // one core. (`try_for_each` exists on both iterator kinds with the same
-    // signature, so only the iterator construction differs.)
-    #[cfg(not(feature = "threads"))]
-    let mut task_iter = tasks.into_iter();
-    let result = task_iter.try_for_each(|(oz, mut slabs)| -> anyhow::Result<()> {
-        // Every source slice this output slice averages over.
-        let z_from = oz * sz;
-        let z_to = (z_from + sz).min(depth);
-        // Nothing to average at full size: samples go straight into the slab,
-        // without a slice of sums per channel per thread.
-        let direct = (sx, sy, sz) == (1, 1, 1);
-        let mut boxes = SliceBoxes::new(if direct { 0 } else { n }, (w, h), (sx, sy), (ow, oh));
-        // One set of buffers per task, for every source slice it averages.
-        let mut bufs = ChannelBufs::default();
-        let mut scratch = ReadScratch::default();
-        for k in z_from..z_to {
-            // The step a superseded build still costs: one plane's decode per
-            // task running. `try_for_each` stops handing out slices at the
-            // first `Err`.
-            cancel.check()?;
-            // Depth index → (time, z): in 4D the depth is Z at the fixed
-            // timepoint; otherwise the depth index *is* the frame (time = k,
-            // z = 0). The IFD layout is time-major, then Z, then channel.
-            let (t, z) = if is_4d {
-                (time, k as usize)
-            } else {
-                (k as usize, 0)
-            };
-            let jobs: Vec<ChannelJob> = (0..n)
-                .map(|c| {
+    // Nothing to average at full size: samples go straight into the slab,
+    // without a slice of sums per channel.
+    let direct = (sx, sy, sz) == (1, 1, 1);
+    let summed = if direct { 0 } else { n };
+    let new_work = || SliceWork {
+        bufs: ChannelBufs::default(),
+        scratch: ReadScratch::default(),
+        jobs: Vec::with_capacity(n),
+        boxes: SliceBoxes::new(summed, (w, h), (sx, sy), (ow, oh)),
+    };
+    let slice =
+        |work: &mut SliceWork, (oz, mut slabs): (u32, Vec<&mut [u8]>)| -> anyhow::Result<()> {
+            // Every source slice this output slice averages over.
+            let z_from = oz * sz;
+            let z_to = (z_from + sz).min(depth);
+            let SliceWork {
+                bufs,
+                scratch,
+                jobs,
+                boxes,
+            } = work;
+            boxes.clear();
+            for k in z_from..z_to {
+                // The step a superseded build still costs: one plane's decode per
+                // task running. `try_for_each` stops handing out slices at the
+                // first `Err`.
+                cancel.check()?;
+                // Depth index → (time, z): in 4D the depth is Z at the fixed
+                // timepoint; otherwise the depth index *is* the frame (time = k,
+                // z = 0). The IFD layout is time-major, then Z, then channel.
+                let (t, z) = if is_4d {
+                    (time, k as usize)
+                } else {
+                    (k as usize, 0)
+                };
+                jobs.clear();
+                jobs.extend((0..n).map(|c| {
                     let (ifd_idx, plane) = crate::dimensions::plane_index(
                         crate::display::Dims {
                             channels,
@@ -266,24 +277,37 @@ pub(crate) fn build_volume(
                         width: w,
                         height: h,
                     }
-                })
-                .collect();
-            // Owned: a plane the file holds as it is is copied, as before.
-            decode_jobs(tiff, &jobs, None, &mut bufs, &mut scratch)?.own(&mut bufs);
-            for (c, job) in jobs.iter().enumerate() {
-                let dec = bufs.get(job.channel);
-                if direct {
-                    encode_slice(&layout, &mut slabs, c, dec, affines[c]);
-                } else {
-                    boxes.add(c, dec);
+                }));
+                // A plane the file already holds as its texture wants it is read
+                // where it lies — in the mapping, for a file on disk — and the
+                // rest are decoded into this worker's buffers, which the slices
+                // before left the right size.
+                let planes = decode_jobs(tiff, jobs, None, bufs, scratch)?;
+                for (c, samples) in planes.views(bufs).enumerate() {
+                    if direct {
+                        encode_slice(&layout, &mut slabs, c, samples, affines[c]);
+                    } else {
+                        boxes.add(c, samples);
+                    }
                 }
             }
-        }
-        if !direct {
-            boxes.write(&layout, &mut slabs, z_to - z_from, &affines);
-        }
-        Ok(())
-    });
+            if !direct {
+                boxes.write(&layout, &mut slabs, z_to - z_from, &affines);
+            }
+            Ok(())
+        };
+    // One `SliceWork` per rayon split, kept for every output slice the split
+    // builds; one in all without threads, where the same closure runs
+    // sequentially — identical output, just one core.
+    #[cfg(feature = "threads")]
+    let result = tasks.into_par_iter().try_for_each_init(new_work, slice);
+    #[cfg(not(feature = "threads"))]
+    let result = {
+        let mut work = new_work();
+        tasks
+            .into_iter()
+            .try_for_each(|task| slice(&mut work, task))
+    };
     if let Err(e) = result {
         if e.is::<Cancelled>() {
             return Err(Cancelled);
@@ -297,7 +321,7 @@ pub(crate) fn build_volume(
     Ok(Some(packed))
 }
 
-/// Store one decoded slice of channel `c`, at full size, into its slab of the
+/// Store one source slice of channel `c`, at full size, into its slab of the
 /// packed texture that holds it. A short decode leaves the rest zero.
 ///
 /// Samples go through the channel's `(scale, offset)`
@@ -308,7 +332,7 @@ fn encode_slice(
     layout: &VolumeLayout,
     slabs: &mut [&mut [u8]],
     c: usize,
-    dec: &Decoded,
+    samples: Samples<'_>,
     (scale, offset): (f32, f32),
 ) {
     let (t, k) = layout.place(c);
@@ -320,23 +344,34 @@ fn encode_slice(
         let at = i * texel + k * fb;
         layout.format.encode(v, &mut slab[at..at + fb]);
     };
-    match dec {
-        Decoded::U8(v) => v
+    match samples {
+        Samples::U8(v) => v
             .iter()
             .take(voxels)
             .enumerate()
             .for_each(|(i, &x)| put(i, x as f32 * scale + offset)),
-        Decoded::U16(v) => v
+        Samples::U16(v) => v
             .iter()
             .take(voxels)
             .enumerate()
             .for_each(|(i, &x)| put(i, x as f32 * scale + offset)),
-        Decoded::F32(v) => v
+        Samples::F32(v) => v
             .iter()
             .take(voxels)
             .enumerate()
             .for_each(|(i, &x)| put(i, x * scale + offset)),
     }
+}
+
+/// What one builder thread keeps from one output slice to the next, so that a
+/// build allocates per thread rather than per slice: the channels' decode
+/// buffers and scratch, the slice's job list, and — for a reduced volume —
+/// the sums its boxes average.
+struct SliceWork {
+    bufs: ChannelBufs,
+    scratch: ReadScratch,
+    jobs: Vec<ChannelJob>,
+    boxes: SliceBoxes,
 }
 
 /// The sums an output slice averages, per channel: one per output pixel, over
@@ -367,14 +402,26 @@ impl SliceBoxes {
         }
     }
 
-    /// Add one decoded source slice of channel `c`, in texture units. The
-    /// volume's normalization is applied to the average, in
-    /// [`write`](Self::write): it is affine, so it commutes with averaging.
-    fn add(&mut self, c: usize, dec: &Decoded) {
-        match dec {
-            Decoded::U8(v) => self.add_samples(c, v, |x| x as f32),
-            Decoded::U16(v) => self.add_samples(c, v, |x| x as f32),
-            Decoded::F32(v) => self.add_floats(c, v),
+    /// Back to no source slice added, keeping the allocations: for the next
+    /// output slice a worker builds.
+    fn clear(&mut self) {
+        for sums in &mut self.sums {
+            sums.fill(0.0);
+        }
+        for (counts, seen) in self.counts.iter_mut().flatten() {
+            counts.fill(0);
+            seen.fill(0);
+        }
+    }
+
+    /// Add one source slice of channel `c`, in texture units. The volume's
+    /// normalization is applied to the average, in [`write`](Self::write): it
+    /// is affine, so it commutes with averaging.
+    fn add(&mut self, c: usize, samples: Samples<'_>) {
+        match samples {
+            Samples::U8(v) => self.add_samples(c, v, |x| x as f32),
+            Samples::U16(v) => self.add_samples(c, v, |x| x as f32),
+            Samples::F32(v) => self.add_floats(c, v),
         }
     }
 
