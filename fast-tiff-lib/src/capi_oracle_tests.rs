@@ -240,7 +240,11 @@ fn read_case<T: bytemuck::Pod>(
         h.bytes(bytes_of(&fresh));
     }
     let mut dirty = vec![dirt; n + 3];
-    assert_eq!(c(dirty.as_mut_ptr(), n + 3), status, "{label}: a longer buffer");
+    assert_eq!(
+        c(dirty.as_mut_ptr(), n + 3),
+        status,
+        "{label}: a longer buffer"
+    );
     if status == FTL_OK {
         assert!(
             bytes_of(&dirty[..n]) == bytes_of(&fresh),
@@ -517,9 +521,15 @@ fn frame_bytes(shape: Shape, f: usize) -> Vec<u8> {
         .collect();
     if float && f == 1 && n >= 2 * sb {
         let (nan, inf) = if sb == 4 {
-            (f32::NAN.to_le_bytes().to_vec(), f32::INFINITY.to_le_bytes().to_vec())
+            (
+                f32::NAN.to_le_bytes().to_vec(),
+                f32::INFINITY.to_le_bytes().to_vec(),
+            )
         } else {
-            (f64::NAN.to_le_bytes().to_vec(), f64::INFINITY.to_le_bytes().to_vec())
+            (
+                f64::NAN.to_le_bytes().to_vec(),
+                f64::INFINITY.to_le_bytes().to_vec(),
+            )
         };
         bytes[..sb].copy_from_slice(&nan);
         bytes[sb..2 * sb].copy_from_slice(&inf);
@@ -632,7 +642,14 @@ fn synthetic() -> Vec<Group> {
     }
 
     // Large: the codec, predictor and strip height of each variant.
-    type Large = (SampleType, u16, bool, bool, &'static str, Vec<(Compression, bool, Option<u32>)>);
+    type Large = (
+        SampleType,
+        u16,
+        bool,
+        bool,
+        &'static str,
+        Vec<(Compression, bool, Option<u32>)>,
+    );
     let mut large: Vec<Large> = vec![
         (
             SampleType::U16,
@@ -829,10 +846,16 @@ const DIGESTS: &[(&str, u64)] = &[
     ("fixtures/pil_u8_spp1_p1_pb.tif", 0x74c21da736ef5382),
     ("fixtures/pil_u8_spp3_p1_zip.tif", 0x492cdadb9ab57042),
     ("fixtures/pil_u8_spp4_p1_cmyk-lzw.tif", 0x5f9c0fa544a44edd),
-    ("fixtures/tff_f32_spp1_p1_tiled-zip-pred3.tif", 0xeeaad186a4871ef0),
+    (
+        "fixtures/tff_f32_spp1_p1_tiled-zip-pred3.tif",
+        0xeeaad186a4871ef0,
+    ),
     ("fixtures/tff_f32_spp1_p2_lzw-pred3.tif", 0x6e77402d38f27c7c),
     ("fixtures/tff_f32_spp1_p2_none-le.tif", 0x6e77402d38f27c7c),
-    ("fixtures/tff_f32_spp1_p2_zip-pred3-be.tif", 0x6e77402d38f27c7c),
+    (
+        "fixtures/tff_f32_spp1_p2_zip-pred3-be.tif",
+        0x6e77402d38f27c7c,
+    ),
     ("fixtures/tff_f32_spp1_p2_zip-pred3.tif", 0x6e77402d38f27c7c),
     ("fixtures/tff_i16_spp1_p2_lzw-pred2.tif", 0x9e3c2e06177cc649),
     ("fixtures/tff_i16_spp1_p2_none-be.tif", 0x9e3c2e06177cc649),
@@ -840,8 +863,14 @@ const DIGESTS: &[(&str, u64)] = &[
     ("fixtures/tff_i32_spp1_p2_none-le.tif", 0x445fdc1b6caf6d28),
     ("fixtures/tff_i8_spp1_p2_none-le.tif", 0x4b0471c47c7f7ef9),
     ("fixtures/tff_u16_spp1_p1_tiled.tif", 0x675d1e852eb550ea),
-    ("fixtures/tff_u16_spp1_p2_lzw-pred2-be.tif", 0x70d5f14df394cbeb),
-    ("fixtures/tff_u16_spp1_p2_lzw-pred2-rps4.tif", 0x70d5f14df394cbeb),
+    (
+        "fixtures/tff_u16_spp1_p2_lzw-pred2-be.tif",
+        0x70d5f14df394cbeb,
+    ),
+    (
+        "fixtures/tff_u16_spp1_p2_lzw-pred2-rps4.tif",
+        0x70d5f14df394cbeb,
+    ),
     ("fixtures/tff_u16_spp1_p2_lzw-rps4.tif", 0x70d5f14df394cbeb),
     ("fixtures/tff_u16_spp1_p2_none-be.tif", 0x70d5f14df394cbeb),
     ("fixtures/tff_u16_spp1_p2_none-le.tif", 0x70d5f14df394cbeb),
@@ -849,26 +878,50 @@ const DIGESTS: &[(&str, u64)] = &[
     ("fixtures/tff_u16_spp1_p2_zip-pred2.tif", 0x70d5f14df394cbeb),
     ("fixtures/tff_u16_spp1_p2_zip-rps4.tif", 0x70d5f14df394cbeb),
     ("fixtures/tff_u16_spp3_p2_zip-pred2.tif", 0xe221f259a30bdc96),
-    ("fixtures/tff_u16_spp4_p1_cmyk-zip-pred2.tif", 0xf159d93fb5c6c1e8),
+    (
+        "fixtures/tff_u16_spp4_p1_cmyk-zip-pred2.tif",
+        0xf159d93fb5c6c1e8,
+    ),
     ("fixtures/tff_u16_spp4_p1_cmyk.tif", 0xf159d93fb5c6c1e8),
     ("fixtures/tff_u32_spp1_p2_none-le.tif", 0x8c49024260852275),
     ("fixtures/tff_u32_spp1_p2_zip-pred2.tif", 0x8c49024260852275),
     ("fixtures/tff_u8_spp1_p2_none-le.tif", 0xb56ee3820b4307a4),
     ("fixtures/tff_u8_spp1_p2_zip-pred2.tif", 0xb56ee3820b4307a4),
-    ("fixtures/tff_u8_spp3_p1_tiled-lzw-pred2.tif", 0x492cdadb9ab57042),
+    (
+        "fixtures/tff_u8_spp3_p1_tiled-lzw-pred2.tif",
+        0x492cdadb9ab57042,
+    ),
     ("fixtures/tff_u8_spp3_p2_lzw-pred2.tif", 0x62e0c69c7e623139),
     ("fixtures/tff_u8_spp3_p2_none.tif", 0x62e0c69c7e623139),
     ("fixtures/tff_u8_spp4_p1_cmyk-lzw.tif", 0x5f9c0fa544a44edd),
     ("fixtures/tff_u8_spp4_p1_cmyk.tif", 0x5f9c0fa544a44edd),
-    ("fixtures/tff_u8_spp4_p2_cmyk-planar.tif", 0x74fcd0bc557c5eee),
+    (
+        "fixtures/tff_u8_spp4_p2_cmyk-planar.tif",
+        0x74fcd0bc557c5eee,
+    ),
     ("fixtures/tld_u16_spp1_p1_grid-lzw.tif", 0xa681b33e7ef2455e),
     ("fixtures/tld_u16_spp1_p1_grid.tif", 0xa681b33e7ef2455e),
-    ("fixtures/tld_u8_spp3_p1_grid-planar.tif", 0x0d55567c3176c5ed),
+    (
+        "fixtures/tld_u8_spp3_p1_grid-planar.tif",
+        0x0d55567c3176c5ed,
+    ),
     ("fixtures/tld_u8_spp3_p1_grid-pred2.tif", 0xddc34b8a34b93486),
-    ("fuzz-regressions/overflow-crop-rows-height-u32max.tif", 0x56492ac2f8bbb1bd),
-    ("fuzz-regressions/overflow-strip-band-h4g-rps2g.tif", 0xe98d575fcbcc1798),
-    ("fuzz-regressions/overflow-tiled-crop-h4g-tile2g.tif", 0x443b1c4d2adf95a4),
-    ("fuzz-regressions/overflow-w2g-h2g-spp4.tif", 0x8795109a9bf4c124),
+    (
+        "fuzz-regressions/overflow-crop-rows-height-u32max.tif",
+        0x56492ac2f8bbb1bd,
+    ),
+    (
+        "fuzz-regressions/overflow-strip-band-h4g-rps2g.tif",
+        0xe98d575fcbcc1798,
+    ),
+    (
+        "fuzz-regressions/overflow-tiled-crop-h4g-tile2g.tif",
+        0x443b1c4d2adf95a4,
+    ),
+    (
+        "fuzz-regressions/overflow-w2g-h2g-spp4.tif",
+        0x8795109a9bf4c124,
+    ),
     ("fuzz-regressions/slow-tall-tile.tif", 0xb2bea938eff5337c),
     ("fuzz-regressions/slow-tile-grid.tif", 0xb2bea938eff5337c),
     ("seeds/bigtiff.tif", 0x3e439b39474c3bfa),

@@ -689,10 +689,7 @@ fn every_layout_and_type_matches_rust() {
         .collect();
     assert_eq!(got, planar, "interleaved in, planes out");
     let got = read_c(|o, l| unsafe { ftl_read_rgb_u8(s, 0, o, l) }, 3 * n).unwrap();
-    assert_eq!(
-        got,
-        rust_planes(&rust.frame(0).unwrap(), CmykRgb8).unwrap()
-    );
+    assert_eq!(got, rust_planes(&rust.frame(0).unwrap(), CmykRgb8).unwrap());
     unsafe { ftl_stack_free(s) };
 
     // Signed 16-bit, through raw bytes, ZSTD where this build has it.
@@ -1565,8 +1562,12 @@ fn lzw_stack(st: crate::encode::SampleType, side: u32, frames: usize) -> Vec<u8>
     for f in 0..frames {
         let value = |i: usize| ((i * 7 + f * 1013) % 4099 + (i / side as usize) % 17) as u32;
         let px: Vec<u8> = match st.bytes() {
-            2 => (0..n).flat_map(|i| (value(i) as u16).to_le_bytes()).collect(),
-            _ => (0..n).flat_map(|i| (value(i) * 1001).to_le_bytes()).collect(),
+            2 => (0..n)
+                .flat_map(|i| (value(i) as u16).to_le_bytes())
+                .collect(),
+            _ => (0..n)
+                .flat_map(|i| (value(i) * 1001).to_le_bytes())
+                .collect(),
         };
         w.write_frame_bytes(&px).unwrap();
     }
@@ -1624,7 +1625,10 @@ fn reads_one_at_a_time_keep_one_scratch() {
             unsafe { ftl_read_u16(s, i, null(), out.as_mut_ptr(), n) },
             FTL_OK
         );
-        assert_eq!(unsafe { ftl_read_f32(s, i, floats.as_mut_ptr(), n) }, FTL_OK);
+        assert_eq!(
+            unsafe { ftl_read_f32(s, i, floats.as_mut_ptr(), n) },
+            FTL_OK
+        );
         assert_eq!(
             unsafe { ftl_float_minmax(s, i, null_mut(), null_mut()) },
             FTL_OK
@@ -1662,7 +1666,10 @@ unsafe impl Sync for Shared {}
 /// have a range to find.
 #[test]
 fn four_threads_read_one_stack_at_once() {
-    for st in [crate::encode::SampleType::U16, crate::encode::SampleType::U32] {
+    for st in [
+        crate::encode::SampleType::U16,
+        crate::encode::SampleType::U32,
+    ] {
         four_threads_read(st);
     }
 }
@@ -1750,7 +1757,10 @@ fn with_no_values(mut bytes: Vec<u8>, tag: u16) -> Vec<u8> {
 fn a_strip_with_no_byte_count_reads_through_every_reader() {
     use crate::encode::SampleType;
     let words = [1u16, 2, 3, 4, 500, 600, 700, 65535];
-    let bytes = with_no_values(one_frame(SampleType::U16, |w| w.write_frame_u16(&words)), 279);
+    let bytes = with_no_values(
+        one_frame(SampleType::U16, |w| w.write_frame_u16(&words)),
+        279,
+    );
     let s = open_c_bytes(&bytes);
     let stack = unsafe { &(*s).inner };
     assert_eq!(&stack.frames[0].strip_byte_counts[..], &[16]);
@@ -1762,12 +1772,18 @@ fn a_strip_with_no_byte_count_reads_through_every_reader() {
     unsafe { ftl_stack_free(s) };
 
     let floats = [0.5f32, -1.0, 2.25, 1e6, 0.0, 3.0, -7.5, 9.0];
-    let bytes = with_no_values(one_frame(SampleType::F32, |w| w.write_frame_f32(&floats)), 279);
+    let bytes = with_no_values(
+        one_frame(SampleType::F32, |w| w.write_frame_f32(&floats)),
+        279,
+    );
     let s = open_c_bytes(&bytes);
     let got = read_c(|o, l| unsafe { ftl_read_f32(s, 0, o, l) }, 8);
     assert_eq!(got.as_deref(), Ok(&floats[..]));
     let range = [-7.5f32, 1e6];
-    let got = read_c(|o, l| unsafe { ftl_read_u16(s, 0, range.as_ptr(), o, l) }, 8);
+    let got = read_c(
+        |o, l| unsafe { ftl_read_u16(s, 0, range.as_ptr(), o, l) },
+        8,
+    );
     assert!(got.is_ok(), "refused before");
     let (mut lo, mut hi) = (0f32, 0f32);
     assert_eq!(unsafe { ftl_float_minmax(s, 0, &mut lo, &mut hi) }, FTL_OK);
@@ -1799,7 +1815,11 @@ fn a_depth_the_reader_does_not_take_is_refused_before_decoding() {
         unsafe { ftl_read_rgb_u8(s, 0, rgb.as_mut_ptr(), rgb.len()) },
         FTL_INVALID_ARGUMENT,
     );
-    assert!(last_error().contains("ftl_read_rgb_u16"), "{}", last_error());
+    assert!(
+        last_error().contains("ftl_read_rgb_u16"),
+        "{}",
+        last_error()
+    );
     assert!(rgb.iter().all(|&b| b == 0xa5), "a refused read wrote");
     let mut bytes8 = [0u8; 32];
     refused(

@@ -1294,7 +1294,15 @@ pub unsafe extern "C" fn ftl_read_u8(
     len: usize,
 ) -> c_int {
     // One byte a sample, so no byte order to choose.
-    read_into(s, index, Stored(ByteOrder::host()), out, len, all_samples, takes_u8)
+    read_into(
+        s,
+        index,
+        Stored(ByteOrder::host()),
+        out,
+        len,
+        all_samples,
+        takes_u8,
+    )
 }
 
 /// Frame `index` as 16-bit display samples, every sample plane one after
@@ -1330,7 +1338,15 @@ pub unsafe extern "C" fn ftl_read_u16(
         }
         Some((lo, hi))
     };
-    read_into(s, index, Display { range }, out, len, all_samples, takes_u16)
+    read_into(
+        s,
+        index,
+        Display { range },
+        out,
+        len,
+        all_samples,
+        takes_u16,
+    )
 }
 
 /// Frame `index` as floats in the file's own units, every sample plane one
