@@ -1552,3 +1552,177 @@ fn zstd_without_the_codec_is_unavailable() {
     );
     assert!(!path.exists(), "a refused writer left a file behind");
 }
+
+/// A stack written in memory by the Rust writer: `frames` frames of `side` x
+/// `side` 16- or 32-bit samples, every frame different, LZW in strips of 16
+/// rows so a frame is many strips.
+fn lzw_stack(st: crate::encode::SampleType, side: u32, frames: usize) -> Vec<u8> {
+    let opts = WriterOptions::new(side, side, st)
+        .compression(Compression::Lzw)
+        .rows_per_strip(16);
+    let mut w = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+    let n = (side * side) as usize;
+    for f in 0..frames {
+        let value = |i: usize| ((i * 7 + f * 1013) % 4099 + (i / side as usize) % 17) as u32;
+        let px: Vec<u8> = match st.bytes() {
+            2 => (0..n).flat_map(|i| (value(i) as u16).to_le_bytes()).collect(),
+            _ => (0..n).flat_map(|i| (value(i) * 1001).to_le_bytes()).collect(),
+        };
+        w.write_frame_bytes(&px).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
+/// The readers decode straight into the caller's buffer, so it has to be
+/// aligned for the values written into it. One that is not is refused, as a
+/// NULL one is, with nothing written; before, it was undefined behaviour.
+#[test]
+fn a_misaligned_buffer_is_refused_with_nothing_written() {
+    let bytes = lzw_stack(crate::encode::SampleType::U16, 8, 1);
+    let s = open_c_bytes(&bytes);
+    let n = 64;
+    let mut raw = vec![0xa5u8; 4 * n + 8];
+    let at = raw.as_mut_ptr().align_offset(4) + 1;
+    let base = unsafe { raw.as_mut_ptr().add(at) };
+    refused(
+        unsafe { ftl_read_u16(s, 0, null(), base.cast(), n) },
+        FTL_INVALID_ARGUMENT,
+    );
+    assert!(last_error().contains("aligned"), "{}", last_error());
+    refused(
+        unsafe { ftl_read_f32(s, 0, base.cast(), n) },
+        FTL_INVALID_ARGUMENT,
+    );
+    refused(
+        unsafe { ftl_read_rgb_u16(s, 0, base.cast(), 3 * n) },
+        FTL_INVALID_ARGUMENT,
+    );
+    assert!(raw.iter().all(|&b| b == 0xa5), "a refused read wrote");
+    // A byte buffer is aligned wherever it starts.
+    assert_eq!(unsafe { ftl_read_f32(s, 0, base.sub(1).cast(), n) }, FTL_OK);
+    unsafe { ftl_stack_free(s) };
+}
+
+/// Scratch a stack holds for its readers: how many, and how many bytes.
+fn pooled(s: *const FtlStack) -> (usize, usize) {
+    let pool = unsafe { (*s).scratch.lock().unwrap() };
+    (pool.len(), pool.iter().map(DecodeScratch::held_bytes).sum())
+}
+
+/// Reads one after another share one scratch, kept from call to call: a
+/// compressed frame read again decodes through what the last read left.
+#[test]
+fn reads_one_at_a_time_keep_one_scratch() {
+    let bytes = lzw_stack(crate::encode::SampleType::U32, 64, 3);
+    let s = open_c_bytes(&bytes);
+    assert_eq!(pooled(s), (0, 0), "nothing before the first read");
+    let n = 64 * 64;
+    let mut out = vec![0u16; n];
+    let mut floats = vec![0f32; n];
+    for i in 0..3 {
+        assert_eq!(
+            unsafe { ftl_read_u16(s, i, null(), out.as_mut_ptr(), n) },
+            FTL_OK
+        );
+        assert_eq!(unsafe { ftl_read_f32(s, i, floats.as_mut_ptr(), n) }, FTL_OK);
+        assert_eq!(
+            unsafe { ftl_float_minmax(s, i, null_mut(), null_mut()) },
+            FTL_OK
+        );
+    }
+    let (count, held) = pooled(s);
+    assert_eq!(count, 1, "one scratch for reads one at a time");
+    assert!(held > 0, "an LZW strip went through it");
+    // A refused read takes none from the pool, and a failed one gives its
+    // back.
+    refused(
+        unsafe { ftl_read_u16(s, 0, null(), out.as_mut_ptr(), n - 1) },
+        FTL_INVALID_ARGUMENT,
+    );
+    let mut bytes8 = vec![0u8; n];
+    refused(
+        unsafe { ftl_read_u8(s, 0, bytes8.as_mut_ptr(), n) },
+        FTL_INVALID_ARGUMENT,
+    );
+    assert_eq!(pooled(s).0, 1);
+    unsafe { ftl_stack_free(s) };
+}
+
+/// The send-able form of a stack handle, for a test's threads.
+#[derive(Clone, Copy)]
+struct Shared(*const FtlStack);
+unsafe impl Send for Shared {}
+unsafe impl Sync for Shared {}
+
+/// Four threads reading one stack at once, every reader and frame, two of
+/// them decoding across cores: each gets exactly what a read alone gets, and
+/// the stack ends up holding a scratch for each read that was in flight at
+/// once, never more. 16-bit samples decode straight into the buffer; 32-bit
+/// ones shown as `u16` with no range are assembled in the scratch first, and
+/// have a range to find.
+#[test]
+fn four_threads_read_one_stack_at_once() {
+    for st in [crate::encode::SampleType::U16, crate::encode::SampleType::U32] {
+        four_threads_read(st);
+    }
+}
+
+fn four_threads_read(st: crate::encode::SampleType) {
+    const FRAMES: usize = 4;
+    let side = 256u32;
+    let bytes = lzw_stack(st, side, FRAMES);
+    let s = open_c_bytes(&bytes);
+    let n = (side * side) as usize;
+    let want: Vec<(Vec<u16>, Vec<u32>, [u32; 2])> = (0..FRAMES)
+        .map(|i| {
+            let words = read_c(|o, l| unsafe { ftl_read_u16(s, i, null(), o, l) }, n).unwrap();
+            let floats = read_c(|o, l| unsafe { ftl_read_f32(s, i, o, l) }, n).unwrap();
+            let (mut lo, mut hi) = (0f32, 0f32);
+            assert_eq!(unsafe { ftl_float_minmax(s, i, &mut lo, &mut hi) }, FTL_OK);
+            let bits = floats.iter().map(|v| v.to_bits()).collect();
+            (words, bits, [lo.to_bits(), hi.to_bits()])
+        })
+        .collect();
+    let shared = Shared(s);
+    std::thread::scope(|scope| {
+        for t in 0..4 {
+            let want = &want;
+            scope.spawn(move || {
+                let s = shared;
+                let _parallel = crate::parallel_decode_scope(t % 2 == 1);
+                let (mut words, mut floats) = (vec![0u16; n], vec![0f32; n]);
+                for k in 0..24 {
+                    let i = (t + k) % FRAMES;
+                    let (w, f, range) = &want[i];
+                    words.fill(0xa5a5);
+                    assert_eq!(
+                        unsafe { ftl_read_u16(s.0, i, null(), words.as_mut_ptr(), n) },
+                        FTL_OK
+                    );
+                    assert!(words == *w, "{st:?}, thread {t}, frame {i}: u16");
+                    floats.fill(f32::NAN);
+                    assert_eq!(
+                        unsafe { ftl_read_f32(s.0, i, floats.as_mut_ptr(), n) },
+                        FTL_OK
+                    );
+                    assert!(
+                        floats.iter().map(|v| v.to_bits()).eq(f.iter().copied()),
+                        "{st:?}, thread {t}, frame {i}: f32"
+                    );
+                    let (mut lo, mut hi) = (0f32, 0f32);
+                    assert_eq!(
+                        unsafe { ftl_float_minmax(s.0, i, &mut lo, &mut hi) },
+                        FTL_OK
+                    );
+                    assert_eq!([lo.to_bits(), hi.to_bits()], *range);
+                }
+            });
+        }
+    });
+    let (count, _) = pooled(s);
+    assert!(
+        (1..=4).contains(&count),
+        "{st:?}: {count} scratches for four threads"
+    );
+    unsafe { ftl_stack_free(s) };
+}

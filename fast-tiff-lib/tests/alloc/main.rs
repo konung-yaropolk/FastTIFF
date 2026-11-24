@@ -298,3 +298,86 @@ fn a_warm_read_of_partial_zstd_tiles_allocates_nothing_big() {
         );
     }
 }
+
+/// The C readers decode through a scratch the stack keeps, straight into the
+/// caller's buffer, so a warm read allocates nothing frame-sized: not the
+/// output, which is the caller's, nor the strips' decompressed bytes. Before,
+/// each call decoded into planes of its own and copied them into the buffer:
+/// an 8 MiB plane for every compressed 2048x2048 u16 frame, two (the frame
+/// as stored, then as floats) for its f32 read, and a plane and a frame for
+/// a 32-bit frame shown as u16.
+#[cfg(feature = "capi")]
+#[test]
+fn a_warm_c_read_allocates_nothing_frame_sized() {
+    use fast_tiff_lib::capi::*;
+    use std::ptr::{null, null_mut};
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let open = |st: SampleType, compression: Compression| {
+        let opts = WriterOptions::new(2048, 2048, st)
+            .compression(compression)
+            .predictor(true)
+            .rows_per_strip(64);
+        let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+        let n = 2048 * 2048;
+        let bytes: Vec<u8> = (0..n * st.bytes())
+            .map(|i| ((i / st.bytes()) % 4093 + i % st.bytes() * 31) as u8)
+            .collect();
+        writer.write_frame_bytes(&bytes).unwrap();
+        let file = writer.finish().unwrap().into_inner();
+        let mut s = null_mut();
+        assert_eq!(
+            unsafe { ftl_open_bytes(file.as_ptr().cast(), file.len(), &mut s) },
+            FTL_OK
+        );
+        s
+    };
+    let n = 2048 * 2048;
+    let mut words = vec![0u16; n];
+    let mut floats = vec![0f32; n];
+    for compression in codecs() {
+        let s = open(SampleType::U16, compression);
+        for parallel in [false, true] {
+            let (big, allowed) = big_allocations_warm(parallel, || {
+                let status = unsafe { ftl_read_u16(s, 0, null(), words.as_mut_ptr(), n) };
+                assert_eq!(status, FTL_OK);
+            });
+            assert!(
+                big <= allowed,
+                "u16 {compression:?}, parallel {parallel}: {big} allocations of 64 KiB or more"
+            );
+            let (big, allowed) = big_allocations_warm(parallel, || {
+                let status = unsafe { ftl_read_f32(s, 0, floats.as_mut_ptr(), n) };
+                assert_eq!(status, FTL_OK);
+            });
+            assert!(
+                big <= allowed,
+                "u16 {compression:?} as f32, parallel {parallel}: {big} allocations of 64 KiB \
+                 or more"
+            );
+        }
+        unsafe { ftl_stack_free(s) };
+    }
+    // 32-bit samples shown as u16 with no range are assembled and ranged in
+    // the scratch, which a warm one already holds; finding the range alone
+    // folds over the strips as they come.
+    let s = open(SampleType::U32, Compression::Deflate);
+    for parallel in [false, true] {
+        let (big, allowed) = big_allocations_warm(parallel, || {
+            let status = unsafe { ftl_read_u16(s, 0, null(), words.as_mut_ptr(), n) };
+            assert_eq!(status, FTL_OK);
+        });
+        assert!(
+            big <= allowed,
+            "u32 Deflate as u16, parallel {parallel}: {big} allocations of 64 KiB or more"
+        );
+        let (big, allowed) = big_allocations_warm(parallel, || {
+            let status = unsafe { ftl_float_minmax(s, 0, null_mut(), null_mut()) };
+            assert_eq!(status, FTL_OK);
+        });
+        assert!(
+            big <= allowed,
+            "u32 Deflate's range, parallel {parallel}: {big} allocations of 64 KiB or more"
+        );
+    }
+    unsafe { ftl_stack_free(s) };
+}
