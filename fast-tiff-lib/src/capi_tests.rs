@@ -1726,3 +1726,91 @@ fn four_threads_read(st: crate::encode::SampleType) {
     );
     unsafe { ftl_stack_free(s) };
 }
+
+/// `bytes`, a little-endian classic TIFF, with the first IFD's entry for
+/// `tag` saying it holds no values: a tag that is there and says nothing.
+fn with_no_values(mut bytes: Vec<u8>, tag: u16) -> Vec<u8> {
+    let ifd = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let entries = u16::from_le_bytes(bytes[ifd..ifd + 2].try_into().unwrap()) as usize;
+    let e = (0..entries)
+        .map(|i| ifd + 2 + 12 * i)
+        .find(|&e| u16::from_le_bytes(bytes[e..e + 2].try_into().unwrap()) == tag)
+        .expect("the tag is in the first IFD");
+    bytes[e + 4..e + 8].copy_from_slice(&0u32.to_le_bytes());
+    bytes
+}
+
+/// A lone uncompressed strip with a StripByteCounts of no values: the
+/// indexer gives it the frame's length when the file holds it, as libtiff
+/// does, so every reader reads it. Before 25d only the reader whose units
+/// were the frame's own did — `ftl_read_u16` of 16-bit samples,
+/// `ftl_read_f32` of floats — through a borrow that trusted the frame's size
+/// over the count, and the others refused the frame as short.
+#[test]
+fn a_strip_with_no_byte_count_reads_through_every_reader() {
+    use crate::encode::SampleType;
+    let words = [1u16, 2, 3, 4, 500, 600, 700, 65535];
+    let bytes = with_no_values(one_frame(SampleType::U16, |w| w.write_frame_u16(&words)), 279);
+    let s = open_c_bytes(&bytes);
+    let stack = unsafe { &(*s).inner };
+    assert_eq!(&stack.frames[0].strip_byte_counts[..], &[16]);
+    let got = read_c(|o, l| unsafe { ftl_read_u16(s, 0, null(), o, l) }, 8);
+    assert_eq!(got.as_deref(), Ok(&words[..]));
+    let got = read_c(|o, l| unsafe { ftl_read_f32(s, 0, o, l) }, 8);
+    let floats = words.map(f32::from);
+    assert_eq!(got.as_deref(), Ok(&floats[..]), "refused before");
+    unsafe { ftl_stack_free(s) };
+
+    let floats = [0.5f32, -1.0, 2.25, 1e6, 0.0, 3.0, -7.5, 9.0];
+    let bytes = with_no_values(one_frame(SampleType::F32, |w| w.write_frame_f32(&floats)), 279);
+    let s = open_c_bytes(&bytes);
+    let got = read_c(|o, l| unsafe { ftl_read_f32(s, 0, o, l) }, 8);
+    assert_eq!(got.as_deref(), Ok(&floats[..]));
+    let range = [-7.5f32, 1e6];
+    let got = read_c(|o, l| unsafe { ftl_read_u16(s, 0, range.as_ptr(), o, l) }, 8);
+    assert!(got.is_ok(), "refused before");
+    let (mut lo, mut hi) = (0f32, 0f32);
+    assert_eq!(unsafe { ftl_float_minmax(s, 0, &mut lo, &mut hi) }, FTL_OK);
+    assert_eq!((lo, hi), (-7.5, 1e6));
+    unsafe { ftl_stack_free(s) };
+}
+
+/// A reader refuses a frame of a depth it does not take before decoding
+/// anything, damaged or not: the call is the mistake, whatever the file's
+/// state. `ftl_read_u8` always did; `ftl_read_rgb_u8`, handed 16-bit CMYK,
+/// used to decode the inks first and so said `FTL_FORMAT` of a damaged frame.
+#[test]
+fn a_depth_the_reader_does_not_take_is_refused_before_decoding() {
+    use crate::encode::SampleType;
+    let opts = WriterOptions::new(4, 2, SampleType::U16)
+        .samples_per_pixel(4)
+        .cmyk(true)
+        .compression(Compression::Lzw);
+    let mut w = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+    w.write_frame_u16(&[1000; 32]).unwrap();
+    let mut bytes = w.finish().unwrap().into_inner();
+    // Every byte of the strip 0xFF: codes past any table, which LZW refuses.
+    let f = TiffStack::from_bytes(bytes.clone()).unwrap().frames[0].clone();
+    let (at, len) = (f.strip_offsets[0] as usize, f.strip_byte_counts[0] as usize);
+    bytes[at..at + len].fill(0xff);
+    let s = open_c_bytes(&bytes);
+    let mut rgb = [0xa5u8; 24];
+    refused(
+        unsafe { ftl_read_rgb_u8(s, 0, rgb.as_mut_ptr(), rgb.len()) },
+        FTL_INVALID_ARGUMENT,
+    );
+    assert!(last_error().contains("ftl_read_rgb_u16"), "{}", last_error());
+    assert!(rgb.iter().all(|&b| b == 0xa5), "a refused read wrote");
+    let mut bytes8 = [0u8; 32];
+    refused(
+        unsafe { ftl_read_u8(s, 0, bytes8.as_mut_ptr(), bytes8.len()) },
+        FTL_INVALID_ARGUMENT,
+    );
+    // The reader that takes it finds the damage.
+    let mut words = [0u16; 24];
+    refused(
+        unsafe { ftl_read_rgb_u16(s, 0, words.as_mut_ptr(), words.len()) },
+        FTL_FORMAT,
+    );
+    unsafe { ftl_stack_free(s) };
+}

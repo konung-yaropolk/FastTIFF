@@ -1239,9 +1239,7 @@ unsafe fn read_into<U: Units>(
             Err(e) => return fail_with(&e),
         };
         // Vetted, so a frame claiming more than its strips hold is refused
-        // here, before a byte of `out` is written. Reading ZSTD without the
-        // codec comes back as the build's limit, not the file's fault: the
-        // decoder says `Unavailable`, the status writing it gets.
+        // here, before a byte of `out` is written.
         let per_plane = match frame
             .plane_len(units)
             .with_context(|| format!("frame {index}"))
@@ -1260,6 +1258,9 @@ unsafe fn read_into<U: Units>(
             );
         }
         let out = std::slice::from_raw_parts_mut(out, needed);
+        // Reading ZSTD without the codec comes back as the build's limit, not
+        // the file's fault: the decoder says `Unavailable`, the status writing
+        // it gets.
         let read = h.with_scratch(|scratch| {
             with_planes(out, per_plane, planes, |parts| {
                 frame.read_into(units, 0, parts, scratch).map(drop)

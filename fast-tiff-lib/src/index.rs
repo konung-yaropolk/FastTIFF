@@ -1200,8 +1200,8 @@ impl TiffStack {
 /// strip's offset on.
 ///
 /// Writers do get this wrong — a zero from one that did not know the count,
-/// one row's bytes from one that wrote the first row's — and libtiff reads
-/// such files: for a stripped, uncompressed frame of one strip whose count is
+/// or no value at all, one row's bytes from one that wrote the first row's —
+/// and libtiff reads such files: for a stripped, uncompressed frame of one strip whose count is
 /// short of its rows, it ignores the count and works the length out from the
 /// image ("Bogus StripByteCounts field, ignoring and calculating from
 /// imagelength"). So does this, once, here, so that every read of the frame
@@ -1213,12 +1213,14 @@ fn repair_undersold_strips(frames: &mut [FrameInfo], file_len: usize) {
         if f.is_tiled()
             || f.compression != Compression::None
             || f.strip_offsets.len() != 1
-            || f.strip_byte_counts.len() != 1
+            || f.strip_byte_counts.len() > 1
         {
             continue;
         }
         let Ok(need) = f.decoded_len() else { continue };
-        let (offset, count) = (f.strip_offsets[0], f.strip_byte_counts[0]);
+        // A StripByteCounts with no value counts as one of zero.
+        let count = f.strip_byte_counts.first().copied().unwrap_or(0);
+        let offset = f.strip_offsets[0];
         let need = need as u64;
         if count >= need || offset == 0 {
             continue;

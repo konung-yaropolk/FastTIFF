@@ -383,48 +383,63 @@ fn a_stored_frame_borrows_whatever_its_samples_when_it_is_one_run() {
     }
 }
 
-/// Overwrite the one-value StripOffsets (273) or StripByteCounts (279) entry
-/// of the writer's first IFD: a classic little-endian file, its value inline.
-fn patch_strip_tag(file: &mut [u8], tag: u16, value: u32) {
+/// The entry for `tag` in the writer's first IFD: a classic little-endian
+/// file.
+fn first_ifd_entry(file: &[u8], tag: u16) -> usize {
     assert_eq!(&file[..4], b"II*\0", "a classic little-endian file");
     let ifd = u32::from_le_bytes(file[4..8].try_into().unwrap()) as usize;
     let count = u16::from_le_bytes(file[ifd..ifd + 2].try_into().unwrap()) as usize;
-    for i in 0..count {
-        let e = ifd + 2 + i * 12;
-        if u16::from_le_bytes(file[e..e + 2].try_into().unwrap()) == tag {
-            match u16::from_le_bytes(file[e + 2..e + 4].try_into().unwrap()) {
-                3 => file[e + 8..e + 10].copy_from_slice(&(value as u16).to_le_bytes()),
-                4 => file[e + 8..e + 12].copy_from_slice(&value.to_le_bytes()),
-                other => panic!("tag {tag} has type {other}"),
-            }
-            return;
-        }
+    (0..count)
+        .map(|i| ifd + 2 + i * 12)
+        .find(|&e| u16::from_le_bytes(file[e..e + 2].try_into().unwrap()) == tag)
+        .unwrap_or_else(|| panic!("tag {tag} is not in the first IFD"))
+}
+
+/// Overwrite how many values the entry for `tag` in the writer's first IFD
+/// holds: with 0, a tag that is there and says nothing.
+fn patch_strip_count(file: &mut [u8], tag: u16, values: u32) {
+    let e = first_ifd_entry(file, tag);
+    file[e + 4..e + 8].copy_from_slice(&values.to_le_bytes());
+}
+
+/// Overwrite the one-value StripOffsets (273) or StripByteCounts (279) entry
+/// of the writer's first IFD: a classic little-endian file, its value inline.
+fn patch_strip_tag(file: &mut [u8], tag: u16, value: u32) {
+    let e = first_ifd_entry(file, tag);
+    match u16::from_le_bytes(file[e + 2..e + 4].try_into().unwrap()) {
+        3 => file[e + 8..e + 10].copy_from_slice(&(value as u16).to_le_bytes()),
+        4 => file[e + 8..e + 12].copy_from_slice(&value.to_le_bytes()),
+        other => panic!("tag {tag} has type {other}"),
     }
-    panic!("tag {tag} is not in the first IFD");
 }
 
 /// A lone uncompressed strip whose StripByteCounts undersells its frame — a
-/// zero, one row's bytes, two bytes short — is read for the frame's size when
-/// the file holds that much from the strip on, the way libtiff reads one, by
-/// every reader alike: the indexer repairs the count. Before, the old
-/// single-strip borrow read such a frame and every other reader refused it.
-/// A count the file cannot back stays as it is, and the frame is refused.
+/// zero, one row's bytes, two bytes short, or no count at all — is read for
+/// the frame's size when the file holds that much from the strip on, the way
+/// libtiff reads one, by every reader alike: the indexer repairs the count.
+/// Before, the old single-sample borrow read such a frame (and with it the C
+/// interface's `ftl_read_u16` or `ftl_read_f32`, whichever it was) and every
+/// other reader refused it. A count the file cannot back stays as it is, and
+/// the frame is refused.
 #[test]
 fn an_undersold_single_strip_reads_whole_when_the_file_holds_it() {
     let (w, h) = (8u32, 4u32);
     let pixels = ramp((w * h) as usize);
     let bytes = write_u16(WriterOptions::new(w, h, SampleType::U16), &[&pixels]);
     let units = Display { range: None };
-    for count in [0u32, 16, 62] {
+    for count in [None, Some(0u32), Some(16), Some(62)] {
         let mut file = bytes.clone();
-        patch_strip_tag(&mut file, 279, count);
+        match count {
+            Some(count) => patch_strip_tag(&mut file, 279, count),
+            None => patch_strip_count(&mut file, 279, 0),
+        }
         let stack = TiffStack::from_bytes(file).unwrap();
-        assert_eq!(&stack.frames[0].strip_byte_counts[..], &[64], "{count}");
+        assert_eq!(&stack.frames[0].strip_byte_counts[..], &[64], "{count:?}");
         let frame = stack.frame(0).unwrap();
-        assert!(frame.borrows(units, 0), "{count}");
+        assert!(frame.borrows(units, 0), "{count:?}");
         let (mut out, mut scratch) = (Vec::new(), DecodeScratch::new());
         let (px, _) = frame.read(units, 0, &mut out, &mut scratch).unwrap();
-        assert_eq!(&*px, &pixels[..], "{count}: Frame::read");
+        assert_eq!(&*px, &pixels[..], "{count:?}: Frame::read");
         let mut f = vec![f32::NAN; pixels.len()];
         frame
             .read_into(File, 0, &mut [&mut f[..]], &mut scratch)
@@ -434,7 +449,7 @@ fn an_undersold_single_strip_reads_whole_when_the_file_holds_it() {
         let plane = fast_tiff_lib::read_plane_u16(data, info, order, None, 0).unwrap();
         assert_eq!(
             plane, pixels,
-            "{count}: read_plane_u16, which refused it before"
+            "{count:?}: read_plane_u16, which refused it before"
         );
     }
     // The strip moved to where the file ends before the frame does.
@@ -451,6 +466,15 @@ fn an_undersold_single_strip_reads_whole_when_the_file_holds_it() {
     assert_eq!(e.kind(), ErrorKind::Malformed);
     let (data, info, order) = (&stack.data[..], &stack.frames[0], stack.byte_order);
     let e = fast_tiff_lib::read_frame_u16(data, info, order, None).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::Malformed);
+    // And with no count at all.
+    let mut file = bytes.clone();
+    patch_strip_tag(&mut file, 273, at);
+    patch_strip_count(&mut file, 279, 0);
+    let stack = TiffStack::from_bytes(file).unwrap();
+    assert!(stack.frames[0].strip_byte_counts.is_empty());
+    let frame = stack.frame(0).unwrap();
+    let e = frame.read(units, 0, &mut out, &mut scratch).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::Malformed);
 }
 

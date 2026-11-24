@@ -372,7 +372,21 @@ fn frame_cases(s: *const FtlStack, i: usize, full: bool, h: &mut Digest) -> usiz
         three,
         0xa5u8,
         |o, l| unsafe { ftl_read_rgb_u8(s, i, o, l) },
-        |out| old::read_into(st, i, None, out, old::three_planes, old::decode_rgb_u8),
+        |out| {
+            let was = old::read_into(st, i, None, out, old::three_planes, old::decode_rgb_u8);
+            // The old reader decoded a CMYK frame with inks of another depth
+            // before refusing it, so a damaged one was refused for the damage
+            // (FTL_FORMAT, FTL_TOO_LARGE); now its depth is refused first,
+            // decoding nothing, as ftl_read_u8 always refused a frame of a
+            // depth it does not take. Never a read, either way. No file whose
+            // digest is kept here meets it.
+            let f = &st.frames[i];
+            if was != FTL_INVALID_ARGUMENT && f.is_cmyk() && f.bits_per_sample != 8 {
+                assert_ne!(was, FTL_OK, "frame {i} rgb u8: read 16-bit inks as 8");
+                return FTL_INVALID_ARGUMENT;
+            }
+            was
+        },
         full,
         h,
     );
