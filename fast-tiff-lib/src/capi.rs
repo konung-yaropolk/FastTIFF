@@ -1602,3 +1602,7 @@ pub unsafe extern "C" fn ftl_writer_free(w: *mut FtlWriter) {
 #[cfg(test)]
 #[path = "capi_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "capi_oracle_tests.rs"]
+mod oracle_tests;
