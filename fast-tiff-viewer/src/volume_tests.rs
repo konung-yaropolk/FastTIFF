@@ -403,6 +403,63 @@ fn a_nan_is_left_out_of_an_average() {
     assert_eq!(TexelFormat::Unorm16.decode(&slab), 32768.0 / 65535.0);
 }
 
+/// A worker's box sums are reused from one output slice to the next, so a
+/// cleared one must forget all of the slice before: its sums, how many finite
+/// samples each held, and which infinities it saw. Otherwise a box of nothing
+/// but NaN comes out as the infinity an earlier slice saw there, or as zero
+/// over the earlier count, and a finite box averages in the earlier sums.
+#[test]
+fn cleared_box_sums_forget_the_slice_before() {
+    let decode = |format: TexelFormat, slab: &[u8]| -> Vec<f32> {
+        slab.chunks_exact(format.bytes())
+            .map(|b| format.decode(b))
+            .collect()
+    };
+    let format = TexelFormat::Float32;
+    let layout = VolumeLayout::new((3, 1, 1), 1, format);
+    let (inf, ninf, nan) = (f32::INFINITY, f32::NEG_INFINITY, f32::NAN);
+    let mut boxes = SliceBoxes::new(1, (6, 1), (2, 1), (3, 1));
+    let mut slab = vec![0u8; layout.slice_bytes(0)];
+    let mut slice = |boxes: &mut SliceBoxes, samples: &[f32]| {
+        boxes.clear();
+        boxes.add(0, Samples::F32(samples));
+        boxes.write(&layout, &mut [&mut slab[..]], 1, &[(1.0, 0.0)]);
+        decode(format, &slab)
+    };
+    assert_eq!(
+        slice(&mut boxes, &[inf, inf, ninf, ninf, 4.0, 4.0]),
+        vec![inf, ninf, 4.0]
+    );
+    let got = slice(&mut boxes, &[nan; 6]);
+    assert!(
+        got.iter().all(|v| v.is_nan()),
+        "nothing but NaN, after infinities and numbers: {got:?}"
+    );
+    assert_eq!(
+        slice(&mut boxes, &[1.0; 6]),
+        vec![1.0; 3],
+        "the sums before are gone"
+    );
+
+    // An integer channel's sums, counted by the box.
+    let format = TexelFormat::Unorm16;
+    let layout = VolumeLayout::new((1, 1, 1), 1, format);
+    let identity16 = SampleUnits::display(fast_tiff_lib::DisplayMap::Identity);
+    let mut boxes = SliceBoxes::new(1, (2, 1), (2, 1), (1, 1));
+    let mut slab = vec![0u8; layout.slice_bytes(0)];
+    for (samples, want) in [([65535u16, 65535], 1.0), ([0, 0], 0.0)] {
+        boxes.clear();
+        boxes.add(0, Samples::U16(&samples));
+        boxes.write(
+            &layout,
+            &mut [&mut slab[..]],
+            1,
+            &[identity16.volume_affine()],
+        );
+        assert_eq!(decode(format, &slab), vec![want], "{samples:?}");
+    }
+}
+
 /// A float volume is stored as half floats on wgpu, which hold nothing past
 /// 65504. Normalized over the channel's span first, a stack of photon counts
 /// in the hundreds of thousands stays finite and keeps its order, and the
