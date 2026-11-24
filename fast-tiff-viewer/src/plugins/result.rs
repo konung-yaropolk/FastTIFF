@@ -31,23 +31,12 @@
 //!
 //! # Whose file it is, and when it goes
 //!
-//! Every result gets a directory of its own under the results folder, named
-//! for the process and a counter so no two can meet, and inside it a file
-//! named after the result — so a window showing it is titled `cells-stabilized.tif`
-//! rather than after a scratch name. Then:
-//!
-//! * a run that stops, fails or is thrown away deletes it at once;
-//! * a result opened in this window (a replacement, or a new window that
-//!   could not be had) belongs to that document, which deletes it when it is
-//!   closed — see [`Derived`];
-//! * a result handed to a **new window's process** stays, because that process
-//!   is reading it and nothing tells this one when it stops. Those are what
-//!   [`sweep`] is for: every start of the app removes run directories more
-//!   than a day old. On Windows a file another window still has mapped cannot
-//!   be deleted, so the sweep cannot pull a result out from under a window
-//!   that is showing it; elsewhere it can unlink one, and the window keeps
-//!   its mapping regardless.
+//! The receiving document owns its temporary TIFF, including when it opens
+//! in another process. Closing or replacing it releases the file. A user save
+//! can promote that TIFF directly when its display metadata is still current.
 
+#[cfg(not(target_arch = "wasm32"))]
+mod scratch;
 use fast_tiff_lib::{
     DisplayMode as LibDisplayMode, SampleType, StackMetaWrite, TiffWriter, WriterOptions,
 };
@@ -65,20 +54,37 @@ pub(crate) const SECOND_RESULT: &str =
 /// Where a result is written while it arrives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResultDest {
-    /// A new directory of its own in this one, holding a file named after the
-    /// result.
-    ///
-    /// What the desktop uses. A directory the result cannot be created in is
-    /// not the end of the run: the result is held in memory instead, which is
-    /// what every result was before, and the log says so.
+    /// A scratch directory with no alternate volume.
     #[cfg(not(target_arch = "wasm32"))]
     Dir(PathBuf),
+    /// Try system temporary storage, then the source file's folder.
+    #[cfg(not(target_arch = "wasm32"))]
+    WithFallback { primary: PathBuf, fallback: PathBuf },
     /// A buffer in memory, sized for the result up front. A browser's only
     /// choice.
     Memory,
 }
 
 impl ResultDest {
+    /// Use the source directory as an alternate when the system disk is full.
+    pub fn for_source(source: Option<&Path>) -> Self {
+        let primary = Self::platform_default();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Self::Dir(root), Some(path)) =
+            (&primary, source.and_then(|p| std::path::absolute(p).ok()))
+        {
+            if let Some(dir) = path.parent() {
+                return Self::WithFallback {
+                    primary: root.clone(),
+                    fallback: dir.to_owned(),
+                };
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = source;
+        primary
+    }
+
     /// Where this platform keeps results: `fasttiff-plugin-results` under the
     /// system's temporary directory on the desktop, memory in a browser.
     pub fn platform_default() -> Self {
@@ -109,10 +115,56 @@ impl ResultDest {
 pub struct ScratchFile {
     path: PathBuf,
     keep: bool,
+    mapping: std::sync::OnceLock<std::sync::Weak<fast_tiff_lib::TiffStack>>,
+    #[cfg(unix)]
+    lease: Option<std::fs::File>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+static OWNED: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+#[cfg(not(target_arch = "wasm32"))]
 impl ScratchFile {
+    /// After the desktop event loop exits, wait for any remaining mappings
+    /// or retrying deletions. Only paths explicitly owned by this process
+    /// participate; a successful handoff removed the parent's registration.
+    pub fn cleanup_on_exit() {
+        // The UI has been dropped and the plugin workers joined. Any guards
+        // still living belong to a finishing load or to a deletion waiting
+        // for the read-ahead worker to release its mapping.
+        while !OWNED.lock().unwrap().is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    pub(crate) fn track_mapping(&self, tiff: &std::sync::Arc<fast_tiff_lib::TiffStack>) {
+        let _ = self.mapping.set(std::sync::Arc::downgrade(tiff));
+    }
+
+    pub(crate) fn own(path: PathBuf) -> std::io::Result<Self> {
+        let owner = Self {
+            path,
+            keep: false,
+            mapping: Default::default(),
+            #[cfg(unix)]
+            lease: None,
+        };
+        #[cfg(unix)]
+        let owner = {
+            let mut owner = owner;
+            // Lock the run directory, not the TIFF: network filesystems can
+            // enforce file locks against the writer's own pixel-data handle.
+            let lease = std::fs::File::open(owner.path.parent().expect("scratch directory"))?;
+            if rustix::fs::flock(&lease, rustix::fs::FlockOperation::LockShared).is_ok() {
+                owner.lease = Some(lease);
+            }
+            owner
+        };
+        OWNED.lock().unwrap().insert(owner.path.clone());
+        Ok(owner)
+    }
+
     /// The file.
     pub fn path(&self) -> &Path {
         &self.path
@@ -120,6 +172,7 @@ impl ScratchFile {
 
     /// Leave the file and its directory where they are, and say where.
     fn keep(mut self) -> PathBuf {
+        OWNED.lock().unwrap().remove(&self.path);
         self.keep = true;
         std::mem::take(&mut self.path)
     }
@@ -128,7 +181,11 @@ impl ScratchFile {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for ScratchFile {
     fn drop(&mut self) {
-        if self.keep || remove_scratch(&self.path) {
+        if self.keep {
+            return;
+        }
+        if remove_scratch(&self.path) {
+            OWNED.lock().unwrap().remove(&self.path);
             return;
         }
         // Still open somewhere. For a document that is closing, that is a
@@ -137,16 +194,31 @@ impl Drop for ScratchFile {
         // delete a mapped file. So try again for a few seconds, off this
         // thread; what is still there after that is the sweep's.
         let path = std::mem::take(&mut self.path);
-        let _ = std::thread::Builder::new()
+        let mapping = self.mapping.take();
+        let retry_path = path.clone();
+        let retry = std::thread::Builder::new()
             .name("fasttiff-scratch".to_owned())
             .spawn(move || {
-                for _ in 0..50 {
+                // A long plugin may still read the previous document after
+                // another file opens. Wait for our actual readers, however
+                // long they need, before counting retries for outside locks.
+                while mapping.as_ref().is_some_and(|m| m.strong_count() > 0) {
                     std::thread::sleep(std::time::Duration::from_millis(100));
-                    if remove_scratch(&path) {
+                }
+                for _ in 0..50 {
+                    if remove_scratch(&retry_path) {
+                        OWNED.lock().unwrap().remove(&retry_path);
                         return;
                     }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
+                log::warn!("could not delete temporary TIFF {}", retry_path.display());
+                OWNED.lock().unwrap().remove(&retry_path);
             });
+        if let Err(e) = retry {
+            log::warn!("could not schedule cleanup of {}: {e}", path.display());
+            OWNED.lock().unwrap().remove(&path);
+        }
     }
 }
 
@@ -176,10 +248,13 @@ fn remove_scratch(path: &Path) -> bool {
 /// of it having gone first.
 #[derive(Debug, Default)]
 pub struct Derived {
+    pub(crate) name: Option<PathBuf>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) initial_display: Option<Box<crate::display::Display>>,
     pub(crate) importer_id: Option<String>,
     made_from: Option<PathBuf>,
     #[cfg(not(target_arch = "wasm32"))]
-    scratch: Option<ScratchFile>,
+    pub(crate) scratch: Option<std::sync::Arc<ScratchFile>>,
 }
 
 impl Derived {
@@ -188,9 +263,61 @@ impl Derived {
         Self {
             importer_id: Some(importer_id),
             made_from: Some(path),
-            #[cfg(not(target_arch = "wasm32"))]
-            scratch: None,
+            ..Default::default()
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_file(mut self, file: ScratchFile, name: PathBuf) -> std::io::Result<crate::LoadSource> {
+        #[cfg(feature = "mmap")]
+        let from = {
+            let from = crate::LoadSource::Path(file.path.clone());
+            self.scratch = Some(std::sync::Arc::new(file));
+            from
+        };
+        #[cfg(not(feature = "mmap"))]
+        let from = crate::LoadSource::Bytes(std::fs::read(file.path())?.into(), name.clone());
+        self.name = Some(name);
+        Ok(crate::LoadSource::Derived(Box::new(from), self))
+    }
+
+    /// Take ownership only of a scratch result explicitly handed off by a parent viewer.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn handed_off(
+        path: PathBuf,
+        made_from: Option<PathBuf>,
+    ) -> std::io::Result<crate::LoadSource> {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix('.'))
+            .and_then(|n| n.strip_suffix(".temp"));
+        let run = path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix(RUN_PREFIX));
+        let valid_run = run.is_some_and(|s| {
+            let parts: Vec<_> = s.split('-').collect();
+            parts.len() == 3
+                && parts
+                    .iter()
+                    .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        });
+        let name = name
+            .filter(|n| n.ends_with(".tif") && valid_run)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid FastTIFF scratch path",
+                )
+            })?
+            .to_owned();
+        Self {
+            made_from,
+            ..Default::default()
+        }
+        .open_file(ScratchFile::own(path)?, name.into())
     }
 
     /// The file the result was made from, when it was made from one: where
@@ -204,7 +331,7 @@ impl Derived {
     /// is read from one.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn scratch(&self) -> Option<&Path> {
-        self.scratch.as_ref().map(ScratchFile::path)
+        self.scratch.as_deref().map(ScratchFile::path)
     }
 }
 
@@ -286,21 +413,10 @@ impl ResultWriter {
         let opts = writer_options(&spec, luts);
         #[cfg(not(target_arch = "wasm32"))]
         let (out, file) = match dest {
-            ResultDest::Dir(dir) => match create_file(dir, &file_stem(&spec.name)) {
-                Ok((f, path)) => (
-                    Out::File(std::io::BufWriter::new(f)),
-                    Some(ScratchFile { path, keep: false }),
-                ),
-                Err(e) => {
-                    let out = in_memory(&spec, planes)?;
-                    log::warn!(
-                        "no file for a plugin result in {}: {e}; holding the whole result in \
-                         memory instead",
-                        dir.display()
-                    );
-                    (out, None)
-                }
-            },
+            ResultDest::Dir(_) | ResultDest::WithFallback { .. } => {
+                let (f, scratch) = scratch::allocate(dest, &spec)?;
+                (Out::File(std::io::BufWriter::new(f)), Some(scratch))
+            }
             ResultDest::Memory => (in_memory(&spec, planes)?, None),
         };
         #[cfg(target_arch = "wasm32")]
@@ -504,9 +620,7 @@ impl ResultTiff {
     /// Hand the file on to whoever opens it next — a new window's process —
     /// and say where it is. A result held in memory comes back as it was.
     ///
-    /// The file is left behind deliberately: the process that could delete it
-    /// is the one reading it, and it cannot tell this one when it is done. The
-    /// [`sweep`] at the next start removes it once it is a day old.
+    /// The receiving process adopts the scratch file before loading it.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn into_kept_path(self) -> Result<PathBuf, Box<ResultTiff>> {
         match self.data {
@@ -542,42 +656,27 @@ impl ResultTiff {
     /// folder, and does not offer the scratch file to plugins as its source.
     pub fn into_document(self, made_from: Option<PathBuf>) -> std::io::Result<crate::LoadSource> {
         let name = self.document_name();
-        let (from, derived) = match self.data {
-            #[cfg(not(target_arch = "wasm32"))]
-            ResultData::File(f) => {
-                #[cfg(feature = "mmap")]
-                {
-                    let from = crate::LoadSource::Path(f.path.clone());
-                    let derived = Derived {
-                        importer_id: None,
-                        made_from,
-                        scratch: Some(f),
-                    };
-                    (from, derived)
-                }
-                #[cfg(not(feature = "mmap"))]
-                {
-                    // Read, and the file dropped — deleted — straight after.
-                    let bytes = std::fs::read(&f.path)?;
-                    drop(f);
-                    let derived = Derived {
-                        importer_id: None,
-                        made_from,
-                        scratch: None,
-                    };
-                    (crate::LoadSource::Bytes(bytes.into(), name), derived)
-                }
-            }
-            ResultData::Memory(bytes) => (
-                crate::LoadSource::Bytes(bytes.into(), name),
-                Derived {
-                    importer_id: None,
-                    made_from,
-                    #[cfg(not(target_arch = "wasm32"))]
-                    scratch: None,
-                },
-            ),
+        self.into_named_document(name, made_from, None)
+    }
+
+    /// Load a conversion under its display name, retaining importer provenance.
+    pub fn into_named_document(
+        self,
+        name: PathBuf,
+        made_from: Option<PathBuf>,
+        importer_id: Option<String>,
+    ) -> std::io::Result<crate::LoadSource> {
+        let mut derived = Derived {
+            importer_id,
+            made_from,
+            ..Default::default()
         };
+        let from = match self.data {
+            #[cfg(not(target_arch = "wasm32"))]
+            ResultData::File(file) => return derived.open_file(file, name),
+            ResultData::Memory(bytes) => crate::LoadSource::Bytes(bytes.into(), name.clone()),
+        };
+        derived.name = Some(name);
         Ok(crate::LoadSource::Derived(Box::new(from), derived))
     }
 
@@ -672,24 +771,10 @@ pub fn file_stem(name: &str) -> String {
 #[cfg(not(target_arch = "wasm32"))]
 const RUN_PREFIX: &str = "run-";
 
-/// A new file for a result, `<stem>.tif` in a directory of its own in `root`,
-/// and its path.
-///
-/// A directory per result rather than a name per result: a window already
-/// showing an earlier result **memory-maps that file for as long as it is
-/// open**, and Windows refuses to write to a file with a mapped section, so a
-/// second result can never take the first one's place — but the file keeps
-/// the result's own name, which is what the window that opens it is titled
-/// with and what "Save as…" suggests.
-///
-/// The directory is named for this process, a counter and the time, so no two
-/// results — of this process or of another window's — can meet, and is
-/// *created*, never reused: `create_dir` fails if it is there, which is the
-/// whole mechanism, and says the same on every platform. There is no limit on
-/// how many there are; the [`sweep`] and the documents that own them are what
-/// keep the folder small.
+/// Create a unique directory so simultaneous runs can write identically named
+/// scratch TIFFs and clean up independently.
 #[cfg(not(target_arch = "wasm32"))]
-fn create_file(root: &Path, stem: &str) -> std::io::Result<(std::fs::File, PathBuf)> {
+pub(crate) fn create_file(root: &Path, stem: &str) -> std::io::Result<(std::fs::File, PathBuf)> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     std::fs::create_dir_all(root)?;
@@ -709,7 +794,7 @@ fn create_file(root: &Path, stem: &str) -> std::io::Result<(std::fs::File, PathB
             Err(e) => return Err(e),
         }
     };
-    let path = dir.join(format!("{stem}.tif"));
+    let path = dir.join(format!(".{stem}.tif.temp"));
     match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -724,18 +809,8 @@ fn create_file(root: &Path, stem: &str) -> std::io::Result<(std::fs::File, PathB
     }
 }
 
-/// Delete what earlier runs left in `root` that is older than `age`: the
-/// results handed to new windows, which nothing else ever removes, and any
-/// that a crash or a still-mapped file kept from being deleted. Returns how
-/// many directories went.
-///
-/// Called once when the app starts. Every failure is ignored, and one is
-/// expected: on Windows a result another window still has mapped cannot be
-/// deleted, which is what makes it safe to sweep a folder other running
-/// windows are reading from. On other systems it can be unlinked; the window
-/// keeps its mapping, and so its pixels, regardless. This process's own
-/// directories are never touched, whatever their age.
-///
+/// Remove old crash remnants and legacy results in the system scratch folder.
+/// A live result is protected by its mapping on Windows and its lease on Unix.
 /// Age is that of the newest thing in a directory, so a result still being
 /// written — its file's time moves as it grows — is never taken for an old
 /// one. Files of the flat layout this replaced, one `<name>.tif` per result
@@ -777,6 +852,19 @@ pub fn sweep(root: &Path, age: std::time::Duration) -> usize {
         if newest.is_none_or(|t| t >= cutoff) {
             continue;
         }
+        #[cfg(unix)]
+        let _lease = {
+            let Ok(dir) = std::fs::File::open(&path) else {
+                continue;
+            };
+            if rustix::fs::flock(&dir, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+                .is_err()
+            {
+                // In use, or the filesystem cannot establish exclusivity.
+                continue;
+            }
+            dir
+        };
         for p in &inside {
             let _ = std::fs::remove_file(p);
         }

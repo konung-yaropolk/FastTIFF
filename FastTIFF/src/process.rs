@@ -7,6 +7,24 @@
 use std::path::Path;
 use std::process::Command;
 
+// A closing window cancels its job. Let its writer unwind and release its
+// scratch file before the OS tears down the process and its worker threads.
+static JOBS: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn spawn_job(work: impl FnOnce() + Send + 'static) {
+    let mut jobs = JOBS.lock().unwrap();
+    jobs.retain(|job| !job.is_finished());
+    jobs.push(std::thread::spawn(work));
+}
+
+pub fn finish_jobs() {
+    let jobs = std::mem::take(&mut *JOBS.lock().unwrap());
+    for job in jobs {
+        let _ = job.join();
+    }
+    fast_tiff_viewer::plugins::ScratchFile::cleanup_on_exit();
+}
+
 /// Launch a new instance of this executable to view `path`. The child is a fully
 /// independent process (we don't wait on it), so it keeps running if this one
 /// exits. Failures are logged and otherwise ignored — one extra file that won't
@@ -46,6 +64,18 @@ pub fn open_all(paths: &[std::path::PathBuf]) -> Option<&std::path::PathBuf> {
 /// as `.\--from-stdin` to be opened, and the alternative — a flag that could be
 /// mistaken for one — is worse.
 pub const FROM_STDIN: &str = "--from-stdin";
+
+/// Internal handoff, distinct from opening a user-owned TIFF by filename.
+pub const FROM_SCRATCH: &str = "--from-scratch";
+
+pub fn open_scratch_in_new_process(path: &Path, source: Option<&Path>) -> std::io::Result<()> {
+    let mut cmd = Command::new(std::env::current_exe()?);
+    cmd.arg(FROM_SCRATCH).arg(path);
+    if let Some(source) = source {
+        cmd.arg(source);
+    }
+    cmd.spawn().map(|_| ())
+}
 
 /// Hand `bytes` to a new viewer process without going through a file.
 ///

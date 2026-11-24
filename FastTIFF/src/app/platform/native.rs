@@ -63,14 +63,7 @@ impl Platform for Desktop {
         Registry::with_installed(fasttiff_builtin_plugins::register)
     }
 
-    /// On a thread of its own, so the window does not wait for it.
-    ///
-    /// What this removes is mostly results handed to new windows: those are
-    /// left behind on purpose, the window's process reading them for as long
-    /// as it is open, and nothing else ever deletes them. A result still on
-    /// show in another window survives it on Windows, where a mapped file
-    /// cannot be deleted; see `fast_tiff_viewer::plugins::sweep`. Failures are
-    /// ignored: the next start tries again.
+    /// Reclaim legacy and abandoned result files from the system temp folder.
     fn sweep_old_results() {
         // Not from a test: that is the user's own folder.
         #[cfg(not(test))]
@@ -184,9 +177,16 @@ impl Platform for Desktop {
     fn write_tiff(
         source: &SaveSource,
         path: &Path,
+        tx: &std::sync::mpsc::Sender<crate::app::Incoming>,
         report: &mut dyn FnMut(f32) -> bool,
     ) -> Result<(), String> {
-        fast_tiff_viewer::save::save_source(source, path, report).map_err(|e| format!("{e:#}"))
+        if let Some(saved) = source
+            .save_document(path, report)
+            .map_err(|e| format!("{e:#}"))?
+        {
+            let _ = tx.send(crate::app::Incoming::SavedScratch(Box::new(saved)));
+        }
+        Ok(())
     }
 
     fn write_result(result: ResultTiff, path: &Path) -> Result<(), String> {
@@ -194,7 +194,7 @@ impl Platform for Desktop {
     }
 
     fn spawn_job(work: impl FnOnce() + Send + 'static) {
-        std::thread::spawn(work);
+        crate::process::spawn_job(work);
     }
 
     fn wake_for_progress() {
@@ -215,6 +215,7 @@ impl Platform for Desktop {
     fn deliver_new_document(
         result: ResultTiff,
         name: String,
+        source: Option<&Path>,
         progress: &AtomicU32,
         cancel: &AtomicBool,
     ) -> Handover {
@@ -224,26 +225,16 @@ impl Platform for Desktop {
             crate::process::fits_in_memory,
         );
         match how {
-            // The file the result was written to as it arrived. The new window
-            // maps it like any file it opens, so the result is never copied
-            // into either process: the pages it needs are read in, and the OS
-            // may let go of the rest. It is left behind deliberately — the
-            // process that would delete it is the one still reading it, and it
-            // cannot say when it is done — and the sweep removes it at a later
-            // start, once it is a day old. Its file is named after the result,
-            // so that is what the new window is titled.
+            // Pass ownership together with the path. Opening it as an ordinary
+            // user file would leave neither window responsible for its cleanup.
             Delivery::MapFile => {
                 let Some(path) = result.path().map(Path::to_path_buf) else {
                     return Handover::Refused(Box::new(result), "the result has no file".into());
                 };
-                let shown = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or(name);
-                match crate::process::try_open_in_new_process(&path) {
+                match crate::process::open_scratch_in_new_process(&path, source) {
                     Ok(()) => {
                         let _ = result.into_kept_path();
-                        Handover::Opened(shown)
+                        Handover::Opened(name)
                     }
                     Err(e) => Handover::Refused(Box::new(result), e.to_string()),
                 }

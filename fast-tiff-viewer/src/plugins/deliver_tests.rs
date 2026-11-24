@@ -147,7 +147,7 @@ fn a_streamed_result_goes_to_a_new_window_as_the_file_it_was_written_to() {
     );
     assert_eq!(
         path.as_deref().and_then(|p| p.file_name()),
-        Some(std::ffi::OsStr::new("made.tif")),
+        Some(std::ffi::OsStr::new(".made.tif.temp")),
         "named as the result, in a directory of its own"
     );
     assert_eq!(image.planes[1], PlaneData::U16(vec![8; 12]));

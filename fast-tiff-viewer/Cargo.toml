@@ -87,3 +87,9 @@ fasttiff-plugin = { path = "../fasttiff-plugin" }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Opening a shared library. Native only: there is no `dlopen` in a browser.
 libloading = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }

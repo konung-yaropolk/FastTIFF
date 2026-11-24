@@ -115,6 +115,12 @@ fn main() -> eframe::Result {
         // Launched by a viewer that had a plugin result to hand over and had
         // room to do it in memory. The stack arrives down the pipe instead of
         // through a file; see `process::open_bytes_in_new_process`.
+        Some((flag, rest)) if flag == process::FROM_SCRATCH => rest.first().and_then(|path| {
+            fast_tiff_viewer::plugins::Derived::handed_off(path.into(), rest.get(1).map(Into::into))
+                .map_err(|e| log::error!("could not open scratch result: {e}"))
+                .ok()
+                .map(app::Opened::Source)
+        }),
         Some((flag, rest)) if flag == process::FROM_STDIN => {
             let name = rest
                 .first()
@@ -184,6 +190,8 @@ fn main() -> eframe::Result {
             Ok(Box::new(app::ViewerApp::new(initial, render)))
         }),
     );
+
+    process::finish_jobs();
 
     // `main` returning `Err` prints to stderr, which a windowed Windows process
     // does not have; say it where it can be seen.

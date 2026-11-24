@@ -160,6 +160,10 @@ impl Samples {
 pub struct SaveSource {
     tiff: std::sync::Arc<fast_tiff_lib::TiffStack>,
     display: crate::display::Display,
+    #[cfg(all(feature = "mmap", not(target_arch = "wasm32")))]
+    scratch: Option<std::sync::Arc<crate::plugins::ScratchFile>>,
+    #[cfg(all(feature = "mmap", not(target_arch = "wasm32")))]
+    reuse_scratch: bool,
     /// [`Document::overlay`], as it was when the snapshot was taken.
     overlay: Vec<fast_tiff_lib::PointRoi>,
 }
@@ -175,6 +179,20 @@ impl SaveSource {
             tiff: std::sync::Arc::clone(&stack.tiff),
             display: stack.display.snapshot(),
             overlay: stack.overlay.clone(),
+            #[cfg(all(feature = "mmap", not(target_arch = "wasm32")))]
+            scratch: stack.derived.as_ref().and_then(|d| d.scratch.clone()),
+            #[cfg(all(feature = "mmap", not(target_arch = "wasm32")))]
+            reuse_scratch: stack
+                .derived
+                .as_ref()
+                .and_then(|d| d.initial_display.as_ref())
+                .is_some_and(|initial| {
+                    initial.dims() == stack.display.dims()
+                        && initial.mode() == stack.display.mode()
+                        && initial.luts() == stack.display.luts()
+                        && initial.window(0) == stack.display.window(0)
+                        && stack.overlay == stack.tiff.meta.overlay
+                }),
         }
     }
 
@@ -182,6 +200,92 @@ impl SaveSource {
     pub fn frames(&self) -> usize {
         self.tiff.frames.len()
     }
+}
+
+/// A saved scratch document. The source identity prevents a late save from
+/// adopting the destination in a window that has since opened another stack.
+#[cfg(all(feature = "mmap", not(target_arch = "wasm32")))]
+pub struct SavedScratch {
+    pub(crate) original: std::sync::Arc<fast_tiff_lib::TiffStack>,
+    pub(crate) mapped: Option<fast_tiff_lib::TiffStack>,
+    pub(crate) path: std::path::PathBuf,
+}
+
+#[cfg(all(feature = "mmap", not(target_arch = "wasm32")))]
+impl SaveSource {
+    /// Promote an unchanged file in place. Across volumes copy its encoded
+    /// bytes once. Edited metadata still uses the regular TIFF encoder.
+    pub fn save_document(
+        &self,
+        path: &Path,
+        report: &mut dyn FnMut(f32) -> bool,
+    ) -> Result<Option<SavedScratch>> {
+        let Some(file) = &self.scratch else {
+            save_source(self, path, report)?;
+            return Ok(None);
+        };
+        if !report(0.0) {
+            anyhow::bail!("cancelled");
+        }
+        if path.parent().and_then(|p| p.canonicalize().ok())
+            == file.path().parent().and_then(|p| p.canonicalize().ok())
+        {
+            anyhow::bail!("Choose a destination outside the temporary result directory");
+        }
+        let mut mapped = None;
+        if self.reuse_scratch {
+            match std::fs::rename(file.path(), path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+                    copy_scratch(&self.tiff.data, path, report)?;
+                    mapped = Some(fast_tiff_lib::TiffStack::open(path)?);
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("moving the temporary TIFF to {}", path.display())
+                    })
+                }
+            }
+        } else {
+            save_source(self, path, report)?;
+            mapped = Some(fast_tiff_lib::TiffStack::open(path)?);
+        }
+        Ok(Some(SavedScratch {
+            original: self.tiff.clone(),
+            mapped,
+            path: path.into(),
+        }))
+    }
+}
+
+/// Stage on the destination volume so a failed or cancelled copy preserves
+/// both the open result and any existing destination.
+#[cfg(all(feature = "mmap", not(target_arch = "wasm32")))]
+fn copy_scratch(bytes: &[u8], path: &Path, report: &mut dyn FnMut(f32) -> bool) -> Result<()> {
+    use crate::plugins::{result::create_file, ScratchFile};
+    use std::io::Write;
+    let path = std::path::absolute(path)?;
+    let (file, stage) = create_file(
+        path.parent().context("missing destination directory")?,
+        "saving",
+    )?;
+    let stage = ScratchFile::own(stage)?;
+    let mut file = file; // Close before the scratch guard on a cancelled or failed copy.
+    let mut written = 0;
+    for chunk in bytes.chunks(8 << 20) {
+        if !report(written as f32 / bytes.len() as f32) {
+            anyhow::bail!("cancelled");
+        }
+        file.write_all(chunk)?;
+        written += chunk.len();
+    }
+    file.flush()?;
+    drop(file);
+    if !report(1.0) {
+        anyhow::bail!("cancelled");
+    }
+    std::fs::rename(stage.path(), path)?;
+    Ok(())
 }
 
 /// Write `stack` to `path` as a TIFF.

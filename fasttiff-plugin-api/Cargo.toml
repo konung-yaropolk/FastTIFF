@@ -11,7 +11,7 @@
 # crate be frozen while the app moves.
 [package]
 name = "fasttiff-plugin-api"
-version = "0.28.1"
+version = "0.28.2"
 edition = "2021"
 rust-version.workspace = true
 description = "The FastTIFF plugin contract: what a plugin declares, what the host hands it, and what it may return."

@@ -564,6 +564,30 @@ impl<'a> DocumentMut<'a> {
         DocumentMut { doc }
     }
 
+    /// Update the backing file after saving a temporary document. Keep the
+    /// current viewport, including changes made while the save was running.
+    #[cfg(all(feature = "mmap", not(target_arch = "wasm32")))]
+    pub fn finish_scratch_save(&mut self, saved: crate::save::SavedScratch) -> bool {
+        if !Arc::ptr_eq(&self.doc.tiff, &saved.original) {
+            return false;
+        }
+        if let Some(tiff) = saved.mapped {
+            self.doc.services = Services::default();
+            self.doc.tiff = Arc::new(tiff);
+        }
+        self.doc.path = saved.path;
+        drop(saved.original);
+        // Keep the importer identity for commands such as Export OIR metadata.
+        if self.doc.importer_id().is_some() {
+            let derived = self.doc.derived.as_mut().unwrap();
+            derived.scratch = None;
+            derived.initial_display = None;
+        } else {
+            self.doc.derived = None;
+        }
+        true
+    }
+
     /// Select the Z slice shown at the current timepoint.
     pub fn set_slice(&mut self, slice: usize) {
         self.doc.set_slice(slice);

@@ -117,6 +117,7 @@ impl Platform for Browser {
     fn write_tiff(
         _source: &SaveSource,
         path: &Path,
+        _tx: &std::sync::mpsc::Sender<crate::app::Incoming>,
         _report: &mut dyn FnMut(f32) -> bool,
     ) -> Result<(), String> {
         Err(format!(
@@ -147,6 +148,7 @@ impl Platform for Browser {
     fn deliver_new_document(
         result: ResultTiff,
         name: String,
+        _source: Option<&Path>,
         _progress: &AtomicU32,
         _cancel: &AtomicBool,
     ) -> Handover {

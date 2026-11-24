@@ -162,6 +162,7 @@ pub(super) trait Platform: Sized {
     fn write_tiff(
         source: &SaveSource,
         path: &Path,
+        tx: &std::sync::mpsc::Sender<crate::app::Incoming>,
         report: &mut dyn FnMut(f32) -> bool,
     ) -> Result<(), String>;
 
@@ -198,6 +199,7 @@ pub(super) trait Platform: Sized {
     fn deliver_new_document(
         result: ResultTiff,
         name: String,
+        source: Option<&Path>,
         progress: &AtomicU32,
         cancel: &AtomicBool,
     ) -> Handover;

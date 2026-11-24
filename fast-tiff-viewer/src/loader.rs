@@ -83,7 +83,9 @@ impl LoadSource {
             #[cfg(feature = "mmap")]
             LoadSource::Path(p) => p.clone(),
             LoadSource::Bytes(_, name) => name.clone(),
-            LoadSource::Derived(from, _) => from.name(),
+            LoadSource::Derived(from, derived) => {
+                derived.name.clone().unwrap_or_else(|| from.name())
+            }
         }
     }
 
@@ -105,6 +107,18 @@ impl LoadSource {
             // A load that fails drops `derived`, and the scratch file with it.
             LoadSource::Derived(from, derived) => {
                 let mut stack = from.load(apply_pseudocolor, on_stage)?;
+                #[cfg(not(target_arch = "wasm32"))]
+                let derived = {
+                    let mut d = derived;
+                    if let Some(file) = &d.scratch {
+                        file.track_mapping(&stack.tiff);
+                        d.initial_display = Some(Box::new(stack.display.snapshot()));
+                    }
+                    d
+                };
+                if let Some(name) = &derived.name {
+                    stack.path = name.clone();
+                }
                 stack.derived = Some(derived);
                 Ok(stack)
             }

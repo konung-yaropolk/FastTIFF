@@ -548,7 +548,7 @@ fn planes_are_checked_and_names_do_not_collide() {
                 .into()
         })
         .collect();
-    assert_eq!(names, ["result.tif", "result.tif"]);
+    assert_eq!(names, [".result.tif.temp", ".result.tif.temp"]);
     let dirs: Vec<_> = [&first, &second]
         .iter()
         .map(|w| w.path().unwrap().parent().unwrap().to_path_buf())
@@ -584,7 +584,7 @@ fn there_is_no_limit_on_results_kept_at_once() {
         })
         .collect();
     assert_eq!(files_in(&dir).len(), 150);
-    assert!(kept.iter().all(|p| p.ends_with("result.tif")));
+    assert!(kept.iter().all(|p| p.ends_with(".result.tif.temp")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -654,7 +654,7 @@ fn an_earlier_result_is_left_exactly_as_it_was() {
             w.push(p.as_plane_ref()).unwrap();
         }
         let kept = w.finish().unwrap().into_kept_path().unwrap();
-        assert!(kept.ends_with("result.tif"), "{}", kept.display());
+        assert!(kept.ends_with(".result.tif.temp"), "{}", kept.display());
         paths.push(kept);
     }
     paths.dedup();
@@ -672,26 +672,28 @@ fn an_earlier_result_is_left_exactly_as_it_was() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Somewhere that cannot hold a file — here, a path whose parent is a file —
-/// is not the end of the run: the result is held in memory, as every result
-/// was before, and still comes out right.
+/// A disk-backed run reports a full or unwritable destination before writing.
 #[test]
-fn nowhere_to_write_holds_the_result_in_memory() {
+fn nowhere_to_write_reports_the_required_space() {
     let dir = scratch("nowhere");
     std::fs::create_dir_all(&dir).unwrap();
     let blocker = dir.join("a-file");
     std::fs::write(&blocker, b"x").unwrap();
     let img = result(1, 1, 2, 3, 3);
-    let mut w =
-        ResultWriter::begin(img.spec(), &[], &ResultDest::Dir(blocker.join("inside"))).unwrap();
-    assert!(w.path().is_none(), "there was nowhere to put a file");
-    for p in &img.planes {
-        w.push(p.as_plane_ref()).unwrap();
-    }
-    let done = w.finish().unwrap();
-    assert!(done.path().is_none() && done.bytes().is_some());
-    assert_eq!(done.to_image().unwrap(), img);
-    let _ = std::fs::remove_dir_all(&dir);
+    let error =
+        ResultWriter::begin(img.spec(), &[], &ResultDest::Dir(blocker.join("inside"))).unwrap_err();
+    assert!(
+        error.to_string().contains("Temporary TIFF needs"),
+        "{error}"
+    );
+    let dest = ResultDest::WithFallback {
+        primary: blocker,
+        fallback: dir.clone(),
+    };
+    let w = ResultWriter::begin(img.spec(), &[], &dest).unwrap();
+    assert!(w.path().unwrap().starts_with(&dir));
+    drop(w);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -774,6 +776,151 @@ fn a_result_opened_here_belongs_to_its_document() {
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&source_dir);
+}
+
+#[cfg(feature = "mmap")]
+#[test]
+fn handed_off_result_moves_on_save_and_survives_document_close() {
+    let dir = scratch("handoff-save");
+    let img = result(1, 1, 2, 4, 4);
+    let out = write_result(img, None, &[], &ResultDest::Dir(dir.clone()), &mut |_| true)
+        .unwrap()
+        .unwrap();
+    let path = out.into_kept_path().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let source = dir.join("source.oir");
+    let mut doc = Derived::handed_off(path.clone(), Some(source.clone()))
+        .unwrap()
+        .load(false, &mut |_| {})
+        .unwrap();
+    assert_eq!(doc.original(), Some(source));
+    assert_eq!(doc.path(), Path::new("result.tif"));
+    let dest = dir.join("saved.tif");
+    let saved = crate::save::SaveSource::of(&doc)
+        .save_document(&dest, &mut |_| true)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !path.exists(),
+        "same-volume save must move the scratch file"
+    );
+    crate::document::DocumentMut::new(&mut doc).finish_scratch_save(saved);
+    assert_eq!(doc.source_path(), Some(dest.as_path()));
+    drop(doc);
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes);
+    assert!(!path.parent().unwrap().exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(feature = "mmap")]
+#[test]
+fn disk_backed_import_keeps_its_label_and_cleans_up_on_close() {
+    let dir = scratch("scratch-import");
+    let out = write_result(
+        result(1, 1, 2, 4, 4),
+        None,
+        &[],
+        &ResultDest::Dir(dir.clone()),
+        &mut |_| true,
+    )
+    .unwrap()
+    .unwrap();
+    let path = out.path().unwrap().to_owned();
+    let source = dir.join("source.oir");
+    let input = out
+        .into_named_document(
+            "source.oir - imported".into(),
+            Some(source.clone()),
+            Some("oir".into()),
+        )
+        .unwrap();
+    assert_eq!(input.name(), Path::new("source.oir - imported"));
+    let doc = input.load(false, &mut |_| {}).unwrap();
+    assert_eq!(doc.original(), Some(source));
+    assert_eq!(doc.importer_id(), Some("oir"));
+    assert!(path.exists());
+    drop(doc);
+    assert!(!path.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(feature = "mmap")]
+#[test]
+fn edited_scratch_save_keeps_contrast_and_releases_original() {
+    let dir = scratch("edited-save");
+    let result = write_result(
+        result(1, 1, 2, 4, 4),
+        None,
+        &[],
+        &ResultDest::Dir(dir.clone()),
+        &mut |_| true,
+    )
+    .unwrap()
+    .unwrap();
+    let temp = result.path().unwrap().to_owned();
+    let mut doc = result
+        .into_document(None)
+        .unwrap()
+        .load(false, &mut |_| {})
+        .unwrap();
+    doc.display_mut()
+        .set_window(0, crate::document::Window::new(-1., 10.));
+    let dest = dir.join("edited.tif");
+    let saved = crate::save::SaveSource::of(&doc)
+        .save_document(&dest, &mut |_| true)
+        .unwrap()
+        .unwrap();
+    crate::document::DocumentMut::new(&mut doc).finish_scratch_save(saved);
+    assert_eq!(doc.tiff.meta.channel_display[0].range, Some((-1., 10.)));
+    assert!(!temp.exists());
+    drop(doc);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A real second volume is needed to exercise the OS rename error.
+#[cfg(feature = "mmap")]
+#[test]
+#[ignore = "set FASTTIFF_TEST_SECOND_VOLUME to a writable directory on another volume"]
+fn cross_volume_scratch_save_preserves_destination_on_cancel() {
+    let second = std::env::var_os("FASTTIFF_TEST_SECOND_VOLUME").expect("second volume");
+    let dest_dir = PathBuf::from(second).join(format!("ft-save-test-{}", std::process::id()));
+    std::fs::create_dir(&dest_dir).unwrap();
+    let dest = dest_dir.join("saved.tif");
+    std::fs::write(&dest, b"prior contents").unwrap();
+    let dir = scratch("cross-volume");
+    let out = write_result(
+        result(1, 1, 2, 4, 4),
+        None,
+        &[],
+        &ResultDest::Dir(dir.clone()),
+        &mut |_| true,
+    )
+    .unwrap()
+    .unwrap();
+    let temp = out.path().unwrap().to_owned();
+    let bytes = std::fs::read(&temp).unwrap();
+    let mut doc = out
+        .into_document(None)
+        .unwrap()
+        .load(false, &mut |_| {})
+        .unwrap();
+    let snapshot = crate::save::SaveSource::of(&doc);
+    assert!(snapshot.save_document(&dest, &mut |f| f < 1.0).is_err());
+    assert_eq!(std::fs::read(&dest).unwrap(), b"prior contents");
+    assert_eq!(files_in(&dest_dir), std::slice::from_ref(&dest));
+    let saved = snapshot
+        .save_document(&dest, &mut |_| true)
+        .unwrap()
+        .unwrap();
+    drop(snapshot);
+    crate::document::DocumentMut::new(&mut doc).finish_scratch_save(saved);
+    assert!(!temp.exists());
+    assert_eq!(&*doc.tiff.data, bytes);
+    drop(doc);
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes);
+    std::fs::remove_file(dest).unwrap();
+    std::fs::remove_dir(dest_dir).unwrap();
+    std::fs::remove_dir(dir).unwrap();
 }
 
 /// The memory a result falls back to is asked for, not taken: one too big for

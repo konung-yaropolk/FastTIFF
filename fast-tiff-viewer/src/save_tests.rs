@@ -1060,3 +1060,15 @@ fn a_signed_8_bit_window_is_in_sample_units_both_ways() {
     let bytes = save_to_bytes(&SaveSource::of(&s), &mut |_| true).unwrap();
     assert_eq!(declared_range(bytes), ("-10".into(), "100".into()));
 }
+
+#[cfg(all(feature = "mmap", not(target_arch = "wasm32")))]
+#[test]
+fn scratch_copy_commits_only_after_the_last_chunk() {
+    let dest = temp("scratch-copy");
+    std::fs::write(&dest, b"previous").unwrap();
+    assert!(copy_scratch(b"replacement", &dest, &mut |f| f < 1.0).is_err());
+    assert_eq!(std::fs::read(&dest).unwrap(), b"previous");
+    copy_scratch(b"replacement", &dest, &mut |_| true).unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), b"replacement");
+    std::fs::remove_file(dest).unwrap();
+}

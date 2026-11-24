@@ -309,18 +309,38 @@ fn import_with_plugin(
         .unwrap_or_else(|| imported.image.name.clone());
     // The planes go into the encode, and each is freed once written: the
     // import is then held about once, not twice.
-    let bytes = fast_tiff_viewer::plugins::into_tiff_bytes(imported.image, imported.info.as_ref())
-        .map_err(|e| format!("{name}: {e:#}"))?;
     let label = if has_dialog && !fallback.is_empty() {
         format!("{fallback} - imported")
     } else {
         imported_label(path, &fallback)
     };
-    let source = fast_tiff_viewer::LoadSource::Bytes(bytes.into(), label.into());
-    Ok(Opened::Source(fast_tiff_viewer::LoadSource::Derived(
-        Box::new(source),
-        fast_tiff_viewer::plugins::Derived::imported(path.to_path_buf(), entry.info.id.clone()),
-    )))
+    use fast_tiff_viewer::plugins::{write_result, ResultDest};
+    #[cfg(not(target_arch = "wasm32"))]
+    let dest = {
+        let size = imported.image.planes.iter().fold(0usize, |sum, p| {
+            sum.saturating_add(p.len().saturating_mul(imported.image.pixel_type.bytes()))
+        });
+        if crate::process::fits_in_memory(size) {
+            ResultDest::Memory
+        } else {
+            ResultDest::for_source(Some(path))
+        }
+    };
+    #[cfg(target_arch = "wasm32")]
+    let dest = ResultDest::Memory;
+    let result = write_result(
+        imported.image,
+        imported.info.as_ref(),
+        &[],
+        &dest,
+        &mut |_| !cancel.load(std::sync::atomic::Ordering::Relaxed),
+    )
+    .map_err(|e| format!("{name}: {e:#}"))?
+    .ok_or("Import cancelled")?;
+    result
+        .into_named_document(label.into(), Some(path.into()), Some(entry.info.id.clone()))
+        .map(Opened::Source)
+        .map_err(|e| format!("{name}: {e}"))
 }
 
 /// The status line's two voices: amber for something to be aware of, green for
@@ -347,6 +367,8 @@ const ICON_SIZE: f32 = 14.0;
 /// somewhere other than this frame's user input, but for files, which come in
 /// through the platform ([`platform::Platform::take_incoming_files`]).
 enum Incoming {
+    #[cfg(not(target_arch = "wasm32"))]
+    SavedScratch(Box<fast_tiff_viewer::save::SavedScratch>),
     ImportPrompt(ImportPrompt),
     /// An import finished. The registry travels back with the result, because
     /// the worker was holding it — see [`ViewerApp::plugins`].
@@ -441,6 +463,7 @@ impl PluginRun {
 /// that last step is `fast_tiff_viewer::plugins::deliver`, shared with the
 /// browser build.
 struct AppDelivery<'a> {
+    source: Option<&'a std::path::Path>,
     label: &'a std::sync::Mutex<String>,
     progress: &'a std::sync::atomic::AtomicU32,
     cancel: &'a std::sync::atomic::AtomicBool,
@@ -473,7 +496,7 @@ impl fast_tiff_viewer::plugins::deliver::Deliver for AppDelivery<'_> {
             "{}.tif",
             fast_tiff_viewer::plugins::file_stem(result.name())
         );
-        Current::deliver_new_document(result, name, self.progress, self.cancel)
+        Current::deliver_new_document(result, name, self.source, self.progress, self.cancel)
     }
 
     /// Where the plugin said, on the desktop. In a browser the download
@@ -1348,6 +1371,15 @@ impl ViewerApp {
     fn drain_pending_open(&mut self) {
         while let Ok(message) = self.open_rx.try_recv() {
             match message {
+                #[cfg(not(target_arch = "wasm32"))]
+                Incoming::SavedScratch(saved) => {
+                    if let Some(mut doc) = self.core.document_mut() {
+                        if doc.finish_scratch_save(*saved) {
+                            self.document
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
                 Incoming::ImportPrompt(prompt) => self.import_prompt = Some(prompt),
                 Incoming::Imported(registry, result) => {
                     // The registry comes home first, so the app is usable again
@@ -1658,7 +1690,9 @@ impl ViewerApp {
             .with_selection(selection)
             .with_animating(self.animating_for(index))
             .with_cancel(job.cancel.clone(), job.progress.clone())
-            .streaming_to(fast_tiff_viewer::plugins::ResultDest::platform_default());
+            .streaming_to(fast_tiff_viewer::plugins::ResultDest::for_source(
+                made_from.as_deref(),
+            ));
         let (progress, cancel, label) = self.begin_job(job);
 
         let tx = self.open_tx.clone();
@@ -1689,6 +1723,7 @@ impl ViewerApp {
                     o,
                     &mut host,
                     &mut AppDelivery {
+                        source: made_from.as_deref(),
                         label: &label,
                         progress: &progress,
                         cancel: &cancel,
@@ -1965,7 +2000,7 @@ impl ViewerApp {
         let tx = self.open_tx.clone();
         Current::spawn_job(move || {
             let result = contained("the writer", || {
-                Current::write_tiff(&source, &path, &mut |f| {
+                Current::write_tiff(&source, &path, &tx, &mut |f| {
                     Job::report(&progress, f);
                     !cancel.load(std::sync::atomic::Ordering::Relaxed)
                 })
@@ -2615,6 +2650,14 @@ impl ViewerApp {
         };
         if outcome.needs_repaint {
             ui.ctx().request_repaint();
+        }
+    }
+}
+
+impl Drop for ViewerApp {
+    fn drop(&mut self) {
+        if let Some(job) = &self.job {
+            job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
