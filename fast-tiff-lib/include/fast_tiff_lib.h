@@ -189,7 +189,11 @@ typedef struct FtlWriterOptions {
     size_t named_channels;
 } FtlWriterOptions;
 
-/* An open stack. Opaque; free with ftl_stack_free(). Readable from several threads at once. */
+/*
+ * An open stack. Opaque; free with ftl_stack_free(). Readable from several threads at once. It
+ * keeps what its decodes need between the file and your buffer, one set for each read in flight on
+ * it, so reading frame after frame allocates nothing frame-sized once warm; freeing it frees that.
+ */
 typedef struct FtlStack FtlStack;
 
 /* A writer. Opaque; end with ftl_writer_finish() or ftl_writer_free(). One thread at a time. */
@@ -267,11 +271,18 @@ int ftl_sample_count(const FtlStack *s, size_t index, size_t *count);
 
 /*
  * Decode frame `index` into `out`, which holds `len` values: at least
- * ftl_sample_count(), or FTL_INVALID_ARGUMENT. Planes one after another.
- * FTL_FORMAT for a frame it cannot decode (damaged, or a codec, bit depth or
- * sample format it has no code for), FTL_TOO_LARGE for one too large to
- * decode here, FTL_UNAVAILABLE for ZSTD in a build without `codec-zstd`, and
- * FTL_INVALID_ARGUMENT for a frame the reader called does not take.
+ * ftl_sample_count(), or FTL_INVALID_ARGUMENT, and aligned for them (as a
+ * uint16_t or float array is), or FTL_INVALID_ARGUMENT. Planes one after
+ * another. FTL_FORMAT for a frame it cannot decode (damaged, or a codec, bit
+ * depth or sample format it has no code for), FTL_TOO_LARGE for one too large
+ * to decode here, FTL_UNAVAILABLE for ZSTD in a build without `codec-zstd`,
+ * and FTL_INVALID_ARGUMENT for a frame the reader called does not take.
+ *
+ * The frame is decoded straight into `out`, so after any status but FTL_OK
+ * what `out` holds is unspecified: a decode that fails part of the way leaves
+ * it part written. A call refused before decoding (a buffer too small, a
+ * frame the reader does not take) writes nothing. Values past the frame's
+ * are never written.
  *
  * ftl_read_u8:  8-bit frames as they are, 4-bit palette indices one per byte; wider is
  *               FTL_INVALID_ARGUMENT.

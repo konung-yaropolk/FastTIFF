@@ -29,10 +29,19 @@
 //! with `panic = "unwind"` (the default, and this workspace's release
 //! profile).
 //!
-//! Decoded planes are copied out of the library into the caller's buffer, once:
-//! a zero-copy borrow of the mapping cannot cross into C, whose buffer the
-//! decoders' `Vec`-based `*_into` forms cannot write to either. The fast path
-//! therefore costs a `memcpy` from the mapping and nothing more.
+//! A frame is decoded straight into the caller's buffer, cut into one
+//! destination per plane for [`Frame::read_into`](crate::Frame::read_into):
+//! strips decompress into it, on several cores for a big frame, and an
+//! uncompressed frame is one `memcpy` out of the mapping, since a zero-copy
+//! borrow of the mapping cannot cross into C. What a decode needs on the way
+//! (a strip's decompressed bytes, for a few reads a whole frame) is a
+//! [`DecodeScratch`] the stack keeps from call to call, one for each call in
+//! flight on it, so reading frame after frame allocates nothing frame-sized
+//! once warm. The price of writing into the caller's buffer directly is that
+//! a decode failing part of the way through leaves it part written: after any
+//! status but `FTL_OK` its contents are unspecified. A call refused before
+//! decoding (a buffer too small, a frame the reader does not take) writes
+//! nothing.
 
 use fast_tiff_c_api_support::{status, Errors};
 use std::cell::RefCell;
@@ -1268,6 +1277,10 @@ unsafe fn read_into<U: Units>(
 /// anything wider is `FTL_INVALID_ARGUMENT`, the frame being one this reader
 /// does not take. `out` holds `len` bytes, at least [`ftl_sample_count`].
 ///
+/// Like every reader here, it decodes straight into `out`, so after a status
+/// other than `FTL_OK` what `out` holds is unspecified (see the
+/// [module docs](crate::capi)).
+///
 /// # Safety
 ///
 /// `s` is null or a live stack; `out` is null or points to `len` writable
@@ -1289,7 +1302,8 @@ pub unsafe extern "C" fn ftl_read_u8(
 /// `range[0]..range[1]` — or from each plane's own minimum and maximum when
 /// `range` is NULL. A 4-bit frame is `FTL_INVALID_ARGUMENT`: [`ftl_read_u8`]
 /// and [`ftl_read_f32`] read it. `out` holds `len` values, at least
-/// [`ftl_sample_count`].
+/// [`ftl_sample_count`], and is aligned for them (`FTL_INVALID_ARGUMENT` if
+/// not).
 ///
 /// # Safety
 ///
@@ -1319,10 +1333,11 @@ pub unsafe extern "C" fn ftl_read_u16(
 }
 
 /// Frame `index` as floats in the file's own units, every sample plane one
-/// after another ([`File`](crate::units::File)): any depth, integer or float, with no widening,
-/// offset or rescale (an 8-bit 200 is 200.0, a signed 16-bit -1 is -1.0);
-/// 16-bit floating point is `FTL_FORMAT`. `out` holds `len` values, at least
-/// [`ftl_sample_count`].
+/// after another ([`File`](crate::units::File)): any depth, integer or
+/// float, with no widening, offset or rescale (an 8-bit 200 is 200.0, a
+/// signed 16-bit -1 is -1.0); 16-bit floating point is `FTL_FORMAT`. `out`
+/// holds `len` values, at least [`ftl_sample_count`], and is aligned for them
+/// (`FTL_INVALID_ARGUMENT` if not).
 ///
 /// # Safety
 ///
@@ -1358,7 +1373,7 @@ pub unsafe extern "C" fn ftl_read_rgb_u8(
 }
 
 /// [`ftl_read_rgb_u8`] as 16-bit samples ([`CmykRgb16`]), for 8- and 16-bit
-/// CMYK frames alike.
+/// CMYK frames alike, into an `out` aligned for them.
 ///
 /// # Safety
 ///

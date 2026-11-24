@@ -935,10 +935,13 @@ What a C caller should know:
   instead of unwinding into C, as long as the library is built with
   `panic = "unwind"`, the default.
 - **Buffers are the caller's.** `ftl_sample_count()` says how many values a
-  frame decodes to; a smaller buffer is refused. A frame comes back as its
-  sample planes one after another — an RGB frame as its red, green and blue
-  planes, whichever way the file interleaves them — and a writer with
-  `planar` set takes the same layout back.
+  frame decodes to; a smaller buffer is refused, as is one not aligned for
+  its values. A frame comes back as its sample planes one after another — an
+  RGB frame as its red, green and blue planes, whichever way the file
+  interleaves them — and a writer with `planar` set takes the same layout
+  back. A frame is decoded straight into the buffer, so after a status other
+  than `FTL_OK` what it holds is unspecified; a call refused before decoding
+  (a buffer too small, a frame the reader does not take) writes nothing.
 - **Pick the reader by what you want.** `ftl_read_f32` gives every depth in
   the file's own units; `ftl_read_u16` gives every depth but 4-bit as display
   values (8-bit widened, signed offset, 32/64-bit rescaled); `ftl_read_u8` is
@@ -948,13 +951,18 @@ What a C caller should know:
   buffer and its capacity in, the whole length back, so `NULL, 0` asks for
   the size. A number the file does not give is NaN.
 - **Copies.** `ftl_open` maps the file — it must not change while open —
-  and decoding copies each frame out of the mapping once, into your buffer;
-  `ftl_open_bytes` copies the bytes it is given.
+  and `ftl_open_bytes` copies the bytes it is given. A compressed frame
+  decompresses straight into your buffer, and an uncompressed one is copied
+  out of the mapping once. What a decode needs on the way, a stack keeps
+  from call to call, so reading frame after frame allocates nothing
+  frame-sized once warm.
 - **Finish the writer.** The file is not a TIFF until `ftl_writer_finish`
   returns `FTL_OK`; it frees the writer either way, and `ftl_writer_free`
   abandons one unfinished.
-- **Threads.** A stack can be read from several threads at once; a writer
-  is one thread's at a time. `ftl_last_error` is per thread.
+- **Threads.** A stack can be read from several threads at once, each read
+  decoding through scratch of its own, of which the stack keeps one for each
+  read that was ever in flight at once until it is freed; a writer is one
+  thread's at a time. `ftl_last_error` is per thread.
 - **Every symbol, everywhere.** A build without `mmap` still has `ftl_open`,
   which returns `FTL_UNAVAILABLE` (use `ftl_open_bytes`); so does
   `ftl_writer_create` on a target with no filesystem, and for ZSTD without
