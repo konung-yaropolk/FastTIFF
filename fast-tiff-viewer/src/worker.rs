@@ -318,6 +318,13 @@ mod threaded {
             }
             Some(out)
         }
+
+        /// Whether a finished result is waiting to be taken, whatever it is
+        /// for: for tests that have to wait for the worker rather than race
+        /// it.
+        pub(crate) fn holds_result(&self) -> bool {
+            self.shared.lock().done.is_some()
+        }
     }
 
     impl<K, Req, Out> Drop for LatestWorker<K, Req, Out> {
@@ -428,6 +435,10 @@ where
     }
 
     pub(crate) fn take_if(&self, _wanted: impl FnOnce(&K) -> bool) -> Option<Out> {
+        match self.never {}
+    }
+
+    pub(crate) fn holds_result(&self) -> bool {
         match self.never {}
     }
 }

@@ -854,6 +854,12 @@ impl Prefetcher {
         self.worker.take_if(|key| *key == (revision, frame_index))
     }
 
+    /// Whether a frame read ahead is waiting to be taken: for tests that have
+    /// to wait for the worker rather than race it.
+    pub(crate) fn ready(&self) -> bool {
+        self.worker.holds_result()
+    }
+
     /// Hand back a result taken from [`take_matching`](Self::take_matching)
     /// once its planes have been uploaded and binned, or found not to match,
     /// so the worker decodes a later frame into the same buffers rather than
