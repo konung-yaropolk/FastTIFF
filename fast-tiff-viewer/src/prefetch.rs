@@ -773,14 +773,21 @@ impl Prefetcher {
                 .unwrap_or_default();
             // The step is the frame: a decode overtaken while it runs finishes,
             // and the worker then drops it unpublished.
-            let planes = decode_jobs(&stack, &req.jobs, None, &mut bufs, &mut scratch).ok()?;
-            // A channel the file holds as it is (beside one that needed
-            // decoding) is copied: the result outlives this frame's borrow.
-            planes.own(&mut bufs);
-            drop(planes);
+            match decode_jobs(&stack, &req.jobs, None, &mut bufs, &mut scratch) {
+                // A channel the file holds as it is (beside one that needed
+                // decoding) is copied: the result outlives this frame's
+                // borrow.
+                Ok(planes) => planes.own(&mut bufs),
+                Err(_) => {
+                    give_back(&returned, bufs);
+                    return None;
+                }
+            }
             // Overtaken while it decoded: the worker would drop it unpublished,
-            // so there is nothing to bin it for.
+            // so there is nothing to bin it for, and its buffers are the next
+            // frame's.
             if cancel.is_cancelled() {
+                give_back(&returned, bufs);
                 return None;
             }
             // Binned here, while the planes are in hand, rather than by the
@@ -870,10 +877,16 @@ impl Prefetcher {
         for ch in result.channels {
             bufs.put(ch.channel, ch.data);
         }
-        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
-        if free.len() < FREE_FRAMES {
-            free.push(bufs);
-        }
+        give_back(&self.free, bufs);
+    }
+}
+
+/// Put a frame's buffers on the free list, unless it holds
+/// [`FREE_FRAMES`] already.
+fn give_back(free: &FreeList, bufs: ChannelBufs) {
+    let mut free = free.lock().unwrap_or_else(|e| e.into_inner());
+    if free.len() < FREE_FRAMES {
+        free.push(bufs);
     }
 }
 

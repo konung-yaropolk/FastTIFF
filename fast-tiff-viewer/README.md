@@ -36,8 +36,12 @@ widgets and input; it borrows everything else from here.
   and push the uniforms.
 - **Assembles 3D volumes**, subsampled to fit the GPU's 3D-texture limit and a
   memory budget, parallel across output slices, on a background thread.
-- **Reads ahead** while playback keeps up: decode-ahead for compressed stacks,
-  page-touch for uncompressed ones (where decoding is already zero-copy).
+- **Reads ahead** while playback keeps up: page-touch for frames the view
+  reads straight from the file (an uncompressed plane in the host's byte
+  order, in one strip or many laid end to end, where decoding is zero-copy),
+  decode-ahead for every other — into the buffers of frames already shown,
+  so a steady movie allocates no frame-sized buffer, as the frame decoded on
+  the interface thread does not either.
 - **Keeps the 2D view** — the zoom ladder and the fit that joins it, pan,
   the zoom and swipe glides, autoscroll, wheel travel — as plain arithmetic in
   logical points (`view2d`), and works out where that puts the image and the
