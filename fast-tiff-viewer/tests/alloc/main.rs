@@ -1,5 +1,7 @@
 //! What playing a compressed movie allocates: nothing frame-sized, once the
-//! first frames have been shown.
+//! first frames have been shown. And what the batch readers allocate: a 3D
+//! volume build no plane-sized buffer beyond the volume, and a save nothing
+//! frame-sized after its first batch.
 //!
 //! A test binary of its own because it replaces the global allocator with one
 //! that counts, which would count every other suite's allocations too. The
@@ -13,7 +15,8 @@
 //! buffer for every compressed one: four 2 MiB allocations a frame for the
 //! two-channel stack here. The interface thread now decodes into buffers its
 //! view keeps, and the worker into the buffers of the frames handed back to
-//! it after they were shown.
+//! it after they were shown. The volume build copied every plane out of the
+//! file before packing it, even one it could have read where it lay.
 
 use fast_tiff_viewer::fast_tiff_lib::{
     Compression, MetadataFormat, SampleType, StackMetaWrite, TiffWriter, WriterOptions,

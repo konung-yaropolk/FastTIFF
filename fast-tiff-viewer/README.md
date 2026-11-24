@@ -35,7 +35,10 @@ widgets and input; it borrows everything else from here.
   3D), rescale each contrast window into the units its texture actually holds,
   and push the uniforms.
 - **Assembles 3D volumes**, subsampled to fit the GPU's 3D-texture limit and a
-  memory budget, parallel across output slices, on a background thread.
+  memory budget, parallel across output slices, on a background thread. A
+  plane the file holds as its texture wants it is read where it lies, never
+  copied, and the rest are decoded into buffers each thread keeps, so a build
+  allocates per thread rather than per plane.
 - **Reads ahead** while playback keeps up: page-touch for frames the view
   reads straight from the file (an uncompressed plane in the host's byte
   order, in one strip or many laid end to end, where decoding is zero-copy),

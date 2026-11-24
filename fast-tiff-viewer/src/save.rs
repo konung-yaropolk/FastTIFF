@@ -16,7 +16,10 @@
 //!
 //! What it does *not* do is re-interpret the samples. A frame goes out in the
 //! type it came in as, its samples copied as the file's own bytes rather than
-//! through any of the decoders' display transforms.
+//! through any of the decoders' display transforms. A frame the file already
+//! stores as the writer wants it — uncompressed, little-endian — goes to the
+//! writer straight from the file, with no copy between (see
+//! `write_frames`).
 //!
 //! # Compressed: Deflate, level 1, no predictor
 //!
