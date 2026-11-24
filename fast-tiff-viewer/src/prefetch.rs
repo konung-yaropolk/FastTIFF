@@ -418,6 +418,11 @@ where
         if scratch.unwanted.len() < gaps {
             scratch.unwanted.resize_with(gaps, Decoded::empty);
         }
+        // Every channel of the pass has a buffer to be found below, even on
+        // the first read into a fresh set.
+        for &(job, _) in pass {
+            bufs.slot(channels[job]);
+        }
         let mut shown: Vec<(usize, &mut Vec<U::Sample>)> = bufs
             .0
             .iter_mut()
