@@ -1,7 +1,7 @@
 //! Turns a frame's bytes into pixels: the decode core behind [`Frame`].
 //!
-//! One core, four routes (see [`core`]): a plane that already is what was
-//! asked for is borrowed straight from the file — the memory map, for a
+//! One core, four routes (see `decode::core`): a plane that already is what
+//! was asked for is borrowed straight from the file — the memory map, for a
 //! stack opened from disk — with no decoding work at all; one that differs only
 //! by a byte swap or a sign flip is decompressed straight into the
 //! destination; anything that changes representation is converted a strip or
@@ -38,8 +38,9 @@ pub use legacy::{
 /// fast enough that they're never the playback bottleneck.
 ///
 /// Public for a caller that decodes a large frame a band at a time: a band is
-/// a cropped [`FrameInfo`] and so a frame of its own here, and one of fewer
-/// pixels than this is decoded on one core however the hint is set.
+/// a cropped [`FrameInfo`](crate::FrameInfo) and so a frame of its own here,
+/// and one of fewer pixels than this is decoded on one core however the hint
+/// is set.
 pub const PARALLEL_MIN_PIXELS: usize = 1024 * 1024;
 
 /// Process-wide hint: split large decodes across cores when `true`, run them

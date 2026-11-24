@@ -28,7 +28,8 @@
 //!   zero-fill first.
 //! - [`read`](Frame::read) resizes its `Vec` only when the length differs.
 //! - A plane index at or past [`planes`](Frame::planes) is
-//!   [`ErrorKind::InvalidInput`], as is a destination of the wrong length.
+//!   [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput), as is a
+//!   destination of the wrong length.
 
 use crate::decode::core::{self, Src};
 use crate::display::DisplayMap;
@@ -118,7 +119,9 @@ pub struct Frame<'a> {
 }
 
 impl TiffStack {
-    /// Frame `index`, ready to read. [`ErrorKind::InvalidInput`] past the end.
+    /// Frame `index`, ready to read.
+    /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) past the
+    /// end.
     pub fn frame(&self, index: usize) -> Result<Frame<'_>> {
         let info = self.frames.get(index).ok_or_else(|| {
             err!(
@@ -338,7 +341,8 @@ impl<'a> Frame<'a> {
     ///
     /// Every destination must be exactly [`plane_len`](Self::plane_len) long,
     /// and `first + out.len()` at most [`planes`](Self::planes); otherwise
-    /// [`ErrorKind::InvalidInput`] with nothing written.
+    /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) with
+    /// nothing written.
     pub fn read_into<U: Units>(
         &self,
         units: U,
