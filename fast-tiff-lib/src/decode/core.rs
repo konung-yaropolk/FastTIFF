@@ -377,7 +377,7 @@ fn direct_planes<T: bytemuck::Pod + Send>(
                     piece..piece + 1,
                     sb,
                     1,
-                    plane_bytes(&mut these[0]),
+                    plane_bytes(these[0]),
                     true,
                     post,
                     pool,

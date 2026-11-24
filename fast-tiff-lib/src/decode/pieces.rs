@@ -711,6 +711,10 @@ pub(super) fn decode_planes_into(
     }
 }
 
+/// What [`each_plane`] runs per plane: the plane's index in the read, and its
+/// destination.
+pub(super) type EachPlane<'c, T> = dyn Fn(usize, &mut [&mut [T]]) -> Result<()> + Sync + 'c;
+
 /// Run `each` over planes `first..` of a read, one destination each, side by
 /// side when `parallel` and there is more than one: a planar frame's planes
 /// are separate runs of pieces, and decoding them one after another leaves
@@ -720,7 +724,7 @@ pub(super) fn each_plane<T: Send>(
     outs: &mut [&mut [T]],
     first: usize,
     parallel: bool,
-    each: &(dyn Fn(usize, &mut [&mut [T]]) -> Result<()> + Sync),
+    each: &EachPlane<'_, T>,
 ) -> Result<()> {
     if parallel && outs.len() > 1 {
         outs.par_iter_mut()
