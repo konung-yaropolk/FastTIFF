@@ -106,7 +106,11 @@ fn the_read_ahead_touches_only_frames_read_straight_from_the_file() {
         TiffStack::from_bytes(wr.finish().unwrap().into_inner()).unwrap()
     };
     let contiguous = strips(Compression::None);
-    assert_eq!(contiguous.frames[0].strip_offsets.len(), 3, "several strips");
+    assert_eq!(
+        contiguous.frames[0].strip_offsets.len(),
+        3,
+        "several strips"
+    );
     assert!(
         touch_suffices(&contiguous, std::slice::from_ref(&small)),
         "contiguous uncompressed strips are borrowed, so touched ahead"
@@ -339,7 +343,11 @@ fn the_read_ahead_decodes_into_the_buffers_handed_back() {
     for frame in 1..4 {
         p.request(REV, frame, vec![job()], None);
         let next = take(frame);
-        assert_eq!(ptr(&next), at, "frame {frame} was decoded into a fresh buffer");
+        assert_eq!(
+            ptr(&next),
+            at,
+            "frame {frame} was decoded into a fresh buffer"
+        );
         p.recycle(next);
     }
     // Not handed back, the next frame cannot be decoded into it.

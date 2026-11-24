@@ -408,8 +408,7 @@ fn whole_frame_oracle(stack: &Document) -> Snapshot {
     let settings = stack.display.settings();
     let masks = stack.display.masks();
     let jobs = build_jobs(stack, stack.frame(), masks.enabled());
-    let decoded = crate::prefetch::decode_owned(&stack.tiff, &jobs)
-    .expect("decode");
+    let decoded = crate::prefetch::decode_owned(&stack.tiff, &jobs).expect("decode");
     let pixels = width as usize * height as usize;
     let mut acc = vec![[0.0f32; 3]; pixels];
     for (job, data) in jobs.iter().zip(&decoded) {

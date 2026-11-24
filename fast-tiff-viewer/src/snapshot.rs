@@ -68,7 +68,9 @@
 //! happened, and cropping the frame first gives a copy that is the image.
 
 use crate::document::Document;
-use crate::prefetch::{build_jobs, decode_jobs, ChannelBufs, ChannelJob, Planes, ReadScratch, Samples};
+use crate::prefetch::{
+    build_jobs, decode_jobs, ChannelBufs, ChannelJob, Planes, ReadScratch, Samples,
+};
 use anyhow::{Context, Result};
 use fast_tiff_lib::{Crop, PARALLEL_MIN_PIXELS};
 use scivis_render::Lut;
@@ -231,7 +233,10 @@ impl Layer<'_> {
     ) -> (Samples<'s>, usize) {
         let source = &sources[self.source];
         let first = (row - source.rows.start) as usize * width;
-        let planes = source.planes.as_ref().expect("decoded before it is composed");
+        let planes = source
+            .planes
+            .as_ref()
+            .expect("decoded before it is composed");
         (planes.view(self.plane, &source.bufs), first)
     }
 }
@@ -380,7 +385,12 @@ fn compose(
                 &mut scratch,
             )
             .context("could not decode the frame on screen")?;
-            let rows = planes.coverage.as_ref().expect("a crop's coverage").rows.clone();
+            let rows = planes
+                .coverage
+                .as_ref()
+                .expect("a crop's coverage")
+                .rows
+                .clone();
             anyhow::ensure!(
                 rows.start <= y && rows.end > y,
                 "rows {rows:?} were decoded for row {y}"

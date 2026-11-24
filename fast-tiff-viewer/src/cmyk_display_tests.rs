@@ -45,7 +45,7 @@ fn open_stack(path: PathBuf) -> anyhow::Result<Document> {
 fn decode(stack: &Document, frame: usize, enabled: &[bool]) -> Vec<Decoded> {
     let jobs = crate::prefetch::build_jobs(stack, frame, enabled);
     crate::prefetch::decode_owned(&stack.tiff, &jobs)
-    .unwrap_or_else(|e| panic!("frame {frame} failed to decode: {e:#}"))
+        .unwrap_or_else(|e| panic!("frame {frame} failed to decode: {e:#}"))
 }
 
 fn as_u8(d: &Decoded) -> &Vec<u8> {

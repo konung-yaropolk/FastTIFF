@@ -71,8 +71,7 @@ fn complete(stack: &mut Document, start: bool) -> usize {
 fn show(stack: &mut Document) -> usize {
     let missing = prepare(stack, HistogramSource::Frame);
     let jobs = build_jobs(stack, stack.frame(), stack.display.masks().enabled());
-    let decoded = crate::prefetch::decode_owned(&stack.tiff, &jobs)
-    .expect("decode");
+    let decoded = crate::prefetch::decode_owned(&stack.tiff, &jobs).expect("decode");
     let binned = bin_shown(
         stack,
         &missing,
@@ -127,8 +126,7 @@ fn histograms_kept_from_the_read_ahead_equal_a_whole_frame_decode() {
     // What the worker returns for the frame: its planes, and the histograms
     // of the first channel, as a request made before the second was binned.
     let jobs = build_jobs(&stack, 2, &[true, true]);
-    let planes = crate::prefetch::decode_owned(&stack.tiff, &jobs)
-    .expect("decode");
+    let planes = crate::prefetch::decode_owned(&stack.tiff, &jobs).expect("decode");
     let binning = Binning::of(&stack);
     let worker = vec![binning.bin(0, planes[0].view()).expect("units")];
 
@@ -307,8 +305,7 @@ fn during_playback_complete_only_adds_to_what_showing_the_frame_started() {
     stack.set_frame(2);
     let missing = prepare(&mut stack, HistogramSource::Frame);
     let jobs = build_jobs(&stack, 2, stack.display.masks().enabled());
-    let decoded = crate::prefetch::decode_owned(&stack.tiff, &jobs)
-    .expect("decode");
+    let decoded = crate::prefetch::decode_owned(&stack.tiff, &jobs).expect("decode");
     let binned = bin_shown(
         &stack,
         &missing,

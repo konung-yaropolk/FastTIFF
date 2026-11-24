@@ -413,9 +413,7 @@ pub(crate) fn complete(stack: &mut Document, residency: &mut Residency, start: b
         Ok(planes) => bin_shown(
             stack,
             &missing,
-            jobs.iter()
-                .map(|job| job.channel)
-                .zip(planes.views(bufs)),
+            jobs.iter().map(|job| job.channel).zip(planes.views(bufs)),
         ),
         // A frame that does not decode has nothing to show; the image is
         // reporting it already.

@@ -15,13 +15,15 @@
 //! view keeps, and the worker into the buffers of the frames handed back to
 //! it after they were shown.
 
+use fast_tiff_viewer::fast_tiff_lib::{
+    Compression, MetadataFormat, SampleType, StackMetaWrite, TiffWriter, WriterOptions,
+};
 use fast_tiff_viewer::scivis_render::pack::PackedVolume;
 use fast_tiff_viewer::scivis_render::{
     ChannelUniform, VolumeCaps, VolumeImage, VolumeInterp, VolumeParams, VolumeUploadError,
 };
-use fast_tiff_viewer::{ChannelKind, DecodeMode, FrameInputs, ImageRenderer, Lut, Viewer, VolumeRenderer};
-use fast_tiff_viewer::fast_tiff_lib::{
-    Compression, MetadataFormat, SampleType, StackMetaWrite, TiffWriter, WriterOptions,
+use fast_tiff_viewer::{
+    ChannelKind, DecodeMode, FrameInputs, ImageRenderer, Lut, Viewer, VolumeRenderer,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -143,7 +145,6 @@ impl VolumeRenderer for Staging {
     }
 }
 
-
 /// A two-channel movie, compressed with the predictor, in ImageJ's channel
 /// order: what a two-photon recording is. Written once for both tests.
 fn movie() -> Vec<u8> {
@@ -216,7 +217,12 @@ fn showing_frames_inline_allocates_nothing_frame_sized() {
             show(&mut viewer, &mut renderer, t);
         }
     });
-    assert_eq!(n, 0, "frame-sized allocations over {} frames", TIMEPOINTS - 2);
+    assert_eq!(
+        n,
+        0,
+        "frame-sized allocations over {} frames",
+        TIMEPOINTS - 2
+    );
 }
 
 /// Playing the movie, every frame decoded ahead by the read-ahead worker and
@@ -254,5 +260,10 @@ fn playing_through_the_read_ahead_allocates_nothing_frame_sized() {
             next(&mut viewer, &mut renderer, t);
         }
     });
-    assert_eq!(n, 0, "frame-sized allocations over {} frames", TIMEPOINTS - 4);
+    assert_eq!(
+        n,
+        0,
+        "frame-sized allocations over {} frames",
+        TIMEPOINTS - 4
+    );
 }

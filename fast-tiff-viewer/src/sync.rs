@@ -579,9 +579,9 @@ fn sync_movie<R: ImageRenderer>(
     }
 
     // Read-ahead: while playing and keeping up (serial regime), ask the worker
-    // to prepare the next frame — decode it (compressed) or touch its pages
-    // (uncompressed) — so reaching it costs only the upload. Skipped when
-    // behind (parallel decode handles that).
+    // to prepare the next frame — decode it, or touch its pages when the view
+    // reads it straight from the file — so reaching it costs only the upload.
+    // Skipped when behind (parallel decode handles that).
     let n = loaded.frame_count();
     if read_ahead && n > 1 {
         // Started on the first frame read ahead: a stack that is never played

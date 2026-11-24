@@ -334,8 +334,7 @@ mod old {
             let mut owned = Vec::new();
             let (pixels, map) = match DisplayMap::of(frame, None) {
                 Some(map) => (
-                    fast_tiff_lib::read_frame_u16(&tiff.data, frame, tiff.byte_order, None)
-                        .ok()?,
+                    fast_tiff_lib::read_frame_u16(&tiff.data, frame, tiff.byte_order, None).ok()?,
                     map,
                 ),
                 None => {
@@ -529,7 +528,14 @@ fn every_file() -> Vec<(String, TiffStack)> {
 
 // ------------------------------------------------------------------ cases
 
-fn job(tiff: &TiffStack, channel: usize, ifd: usize, plane: usize, kind: ChannelKind, rgb: bool) -> ChannelJob {
+fn job(
+    tiff: &TiffStack,
+    channel: usize,
+    ifd: usize,
+    plane: usize,
+    kind: ChannelKind,
+    rgb: bool,
+) -> ChannelJob {
     let (width, height) = tiff.frames.first().map_or((0, 0), |f| (f.width, f.height));
     ChannelJob {
         channel,
@@ -616,7 +622,10 @@ fn crops(tiff: &TiffStack) -> Vec<Option<Crop>> {
             cols: w / 4..(w / 2 + 1).min(w),
             rows: 1.min(h)..h.saturating_sub(1).max(1),
         }),
-        Some(Crop::Sampled { rows: 0..h, step: 2 }),
+        Some(Crop::Sampled {
+            rows: 0..h,
+            step: 2,
+        }),
         Some(Crop::Sampled {
             rows: 1.min(h)..h,
             step: 3,
@@ -758,9 +767,8 @@ fn old_decode(tiff: &TiffStack, jobs: &[ChannelJob], crop: &Option<Crop>) -> Out
         Some(Crop::Rows(rows)) => old::decode_jobs_rows(d, f, o, jobs, rows.clone())
             .map(|(r, rows)| read(r, rows_cover(&rows))),
         Some(Crop::Region { cols, rows }) => {
-            old::decode_jobs_region(d, f, o, jobs, cols.clone(), rows.clone()).map(
-                |(r, cols, rows)| owned(r, vec![cols.start, cols.end, rows.start, rows.end]),
-            )
+            old::decode_jobs_region(d, f, o, jobs, cols.clone(), rows.clone())
+                .map(|(r, cols, rows)| owned(r, vec![cols.start, cols.end, rows.start, rows.end]))
         }
         Some(Crop::Sampled { rows, step }) => {
             old::decode_jobs_stepped(d, f, o, jobs, rows.clone(), *step).map(|(r, band)| {
@@ -793,14 +801,19 @@ fn new_decode(
     let cover = match (crop, &planes.coverage) {
         (None, None) => Vec::new(),
         (Some(Crop::Rows(_)), Some(c)) => rows_cover(&c.rows),
-        (Some(Crop::Region { .. }), Some(c)) => vec![c.cols.start, c.cols.end, c.rows.start, c.rows.end],
-        (Some(Crop::Sampled { .. }), Some(Coverage {
-            first_row,
-            rows_per_piece,
-            pieces,
-            step,
-            ..
-        })) => vec![*first_row, *rows_per_piece, *pieces, *step, planes.height],
+        (Some(Crop::Region { .. }), Some(c)) => {
+            vec![c.cols.start, c.cols.end, c.rows.start, c.rows.end]
+        }
+        (
+            Some(Crop::Sampled { .. }),
+            Some(Coverage {
+                first_row,
+                rows_per_piece,
+                pieces,
+                step,
+                ..
+            }),
+        ) => vec![*first_row, *rows_per_piece, *pieces, *step, planes.height],
         (crop, cover) => panic!("a {crop:?} read came back covering {cover:?}"),
     };
     Outcome::Read {
@@ -897,10 +910,16 @@ const DIGESTS: &[(&str, u64)] = &[
     ("fixtures/pil_u8_spp1_p1_pb.tif", 0x66cce5e5f2efb0f3),
     ("fixtures/pil_u8_spp3_p1_zip.tif", 0x5713995c2549ebf0),
     ("fixtures/pil_u8_spp4_p1_cmyk-lzw.tif", 0xe2e797c7e9029951),
-    ("fixtures/tff_f32_spp1_p1_tiled-zip-pred3.tif", 0xd1127bf582974e41),
+    (
+        "fixtures/tff_f32_spp1_p1_tiled-zip-pred3.tif",
+        0xd1127bf582974e41,
+    ),
     ("fixtures/tff_f32_spp1_p2_lzw-pred3.tif", 0x8f94881d8ffabb12),
     ("fixtures/tff_f32_spp1_p2_none-le.tif", 0x8f94881d8ffabb12),
-    ("fixtures/tff_f32_spp1_p2_zip-pred3-be.tif", 0xd2845ae284f099b8),
+    (
+        "fixtures/tff_f32_spp1_p2_zip-pred3-be.tif",
+        0xd2845ae284f099b8,
+    ),
     ("fixtures/tff_f32_spp1_p2_zip-pred3.tif", 0x8f94881d8ffabb12),
     ("fixtures/tff_i16_spp1_p2_lzw-pred2.tif", 0x4ca328e94d7471d0),
     ("fixtures/tff_i16_spp1_p2_none-be.tif", 0xeece60d1c021e24c),
@@ -908,8 +927,14 @@ const DIGESTS: &[(&str, u64)] = &[
     ("fixtures/tff_i32_spp1_p2_none-le.tif", 0xfa4aea51c25a00ef),
     ("fixtures/tff_i8_spp1_p2_none-le.tif", 0x52ac9c800e42347d),
     ("fixtures/tff_u16_spp1_p1_tiled.tif", 0x7d7d54e7057a19e0),
-    ("fixtures/tff_u16_spp1_p2_lzw-pred2-be.tif", 0xc50e4717294705bb),
-    ("fixtures/tff_u16_spp1_p2_lzw-pred2-rps4.tif", 0xb6c12e11210d6ffd),
+    (
+        "fixtures/tff_u16_spp1_p2_lzw-pred2-be.tif",
+        0xc50e4717294705bb,
+    ),
+    (
+        "fixtures/tff_u16_spp1_p2_lzw-pred2-rps4.tif",
+        0xb6c12e11210d6ffd,
+    ),
     ("fixtures/tff_u16_spp1_p2_lzw-rps4.tif", 0xb6c12e11210d6ffd),
     ("fixtures/tff_u16_spp1_p2_none-be.tif", 0xc50e4717294705bb),
     ("fixtures/tff_u16_spp1_p2_none-le.tif", 0x68707d3deae8a86b),
@@ -917,26 +942,50 @@ const DIGESTS: &[(&str, u64)] = &[
     ("fixtures/tff_u16_spp1_p2_zip-pred2.tif", 0x68707d3deae8a86b),
     ("fixtures/tff_u16_spp1_p2_zip-rps4.tif", 0xb6c12e11210d6ffd),
     ("fixtures/tff_u16_spp3_p2_zip-pred2.tif", 0xec6078e1b2cad8f8),
-    ("fixtures/tff_u16_spp4_p1_cmyk-zip-pred2.tif", 0xedd20e8e6f3a6217),
+    (
+        "fixtures/tff_u16_spp4_p1_cmyk-zip-pred2.tif",
+        0xedd20e8e6f3a6217,
+    ),
     ("fixtures/tff_u16_spp4_p1_cmyk.tif", 0xedd20e8e6f3a6217),
     ("fixtures/tff_u32_spp1_p2_none-le.tif", 0x7554a8c7cdcc608d),
     ("fixtures/tff_u32_spp1_p2_zip-pred2.tif", 0x7554a8c7cdcc608d),
     ("fixtures/tff_u8_spp1_p2_none-le.tif", 0xcb9f6d0f8d1ad2aa),
     ("fixtures/tff_u8_spp1_p2_zip-pred2.tif", 0xcb9f6d0f8d1ad2aa),
-    ("fixtures/tff_u8_spp3_p1_tiled-lzw-pred2.tif", 0x96aed77af220fc29),
+    (
+        "fixtures/tff_u8_spp3_p1_tiled-lzw-pred2.tif",
+        0x96aed77af220fc29,
+    ),
     ("fixtures/tff_u8_spp3_p2_lzw-pred2.tif", 0x5f77ea311bc00d50),
     ("fixtures/tff_u8_spp3_p2_none.tif", 0x5f77ea311bc00d50),
     ("fixtures/tff_u8_spp4_p1_cmyk-lzw.tif", 0xe2e797c7e9029951),
     ("fixtures/tff_u8_spp4_p1_cmyk.tif", 0xe2e797c7e9029951),
-    ("fixtures/tff_u8_spp4_p2_cmyk-planar.tif", 0x6550a691cefeecad),
+    (
+        "fixtures/tff_u8_spp4_p2_cmyk-planar.tif",
+        0x6550a691cefeecad,
+    ),
     ("fixtures/tld_u16_spp1_p1_grid-lzw.tif", 0x78a9e2688535a025),
     ("fixtures/tld_u16_spp1_p1_grid.tif", 0x78a9e2688535a025),
-    ("fixtures/tld_u8_spp3_p1_grid-planar.tif", 0x195f3f4db6974836),
+    (
+        "fixtures/tld_u8_spp3_p1_grid-planar.tif",
+        0x195f3f4db6974836,
+    ),
     ("fixtures/tld_u8_spp3_p1_grid-pred2.tif", 0x39de3cb850c6f306),
-    ("fuzz-regressions/overflow-crop-rows-height-u32max.tif", 0xff0377e1732b483f),
-    ("fuzz-regressions/overflow-strip-band-h4g-rps2g.tif", 0xff0377e1732b483f),
-    ("fuzz-regressions/overflow-tiled-crop-h4g-tile2g.tif", 0xff0377e1732b483f),
-    ("fuzz-regressions/overflow-w2g-h2g-spp4.tif", 0xaeaa33db06881a27),
+    (
+        "fuzz-regressions/overflow-crop-rows-height-u32max.tif",
+        0xff0377e1732b483f,
+    ),
+    (
+        "fuzz-regressions/overflow-strip-band-h4g-rps2g.tif",
+        0xff0377e1732b483f,
+    ),
+    (
+        "fuzz-regressions/overflow-tiled-crop-h4g-tile2g.tif",
+        0xff0377e1732b483f,
+    ),
+    (
+        "fuzz-regressions/overflow-w2g-h2g-spp4.tif",
+        0xaeaa33db06881a27,
+    ),
     ("fuzz-regressions/slow-tall-tile.tif", 0xb0524d62fe0f1e45),
     ("fuzz-regressions/slow-tile-grid.tif", 0x9d983d98a33e25bf),
     ("seeds/bigtiff.tif", 0x74122662855bc4f1),
@@ -988,13 +1037,19 @@ const DIGESTS: &[(&str, u64)] = &[
     ("synthetic/U8 spp3 planar None rps3", 0x5c20a211ff5aca21),
     ("synthetic/U8 spp3 planar Lzw rps10", 0xb0b21ceb14fb69ae),
     ("synthetic/U8 spp3 planar Lzw rps3", 0x5c20a211ff5aca21),
-    ("synthetic/U8 spp3 planar Lzw+pred rps10", 0xb0b21ceb14fb69ae),
+    (
+        "synthetic/U8 spp3 planar Lzw+pred rps10",
+        0xb0b21ceb14fb69ae,
+    ),
     ("synthetic/U8 spp3 planar Lzw+pred rps3", 0x5c20a211ff5aca21),
     ("synthetic/U8 spp4 planar None rps10", 0x4b0c266b37019ec6),
     ("synthetic/U8 spp4 planar None rps3", 0x69be335d43eb79f5),
     ("synthetic/U8 spp4 planar Lzw rps10", 0x4b0c266b37019ec6),
     ("synthetic/U8 spp4 planar Lzw rps3", 0x69be335d43eb79f5),
-    ("synthetic/U8 spp4 planar Lzw+pred rps10", 0x4b0c266b37019ec6),
+    (
+        "synthetic/U8 spp4 planar Lzw+pred rps10",
+        0x4b0c266b37019ec6,
+    ),
     ("synthetic/U8 spp4 planar Lzw+pred rps3", 0x69be335d43eb79f5),
     ("synthetic/U16 spp1 None rps10", 0xbe7aae89d7c205cf),
     ("synthetic/U16 spp1 None rps3", 0x4c253e347f144ef7),
@@ -1018,14 +1073,26 @@ const DIGESTS: &[(&str, u64)] = &[
     ("synthetic/U16 spp3 planar None rps3", 0x3f88c9ac60537d8f),
     ("synthetic/U16 spp3 planar Lzw rps10", 0x9e980f903d4a00fb),
     ("synthetic/U16 spp3 planar Lzw rps3", 0x3f88c9ac60537d8f),
-    ("synthetic/U16 spp3 planar Lzw+pred rps10", 0x9e980f903d4a00fb),
-    ("synthetic/U16 spp3 planar Lzw+pred rps3", 0x3f88c9ac60537d8f),
+    (
+        "synthetic/U16 spp3 planar Lzw+pred rps10",
+        0x9e980f903d4a00fb,
+    ),
+    (
+        "synthetic/U16 spp3 planar Lzw+pred rps3",
+        0x3f88c9ac60537d8f,
+    ),
     ("synthetic/U16 spp4 planar None rps10", 0x9207f42e6a1dda13),
     ("synthetic/U16 spp4 planar None rps3", 0x683e9c72a511ff97),
     ("synthetic/U16 spp4 planar Lzw rps10", 0x9207f42e6a1dda13),
     ("synthetic/U16 spp4 planar Lzw rps3", 0x683e9c72a511ff97),
-    ("synthetic/U16 spp4 planar Lzw+pred rps10", 0x9207f42e6a1dda13),
-    ("synthetic/U16 spp4 planar Lzw+pred rps3", 0x683e9c72a511ff97),
+    (
+        "synthetic/U16 spp4 planar Lzw+pred rps10",
+        0x9207f42e6a1dda13,
+    ),
+    (
+        "synthetic/U16 spp4 planar Lzw+pred rps3",
+        0x683e9c72a511ff97,
+    ),
     ("synthetic/I16 spp1 None rps10", 0x71f13345a28a461e),
     ("synthetic/I16 spp1 None rps3", 0x3f7e9c3d5f7be799),
     ("synthetic/I16 spp1 Lzw rps10", 0x71f13345a28a461e),
@@ -1048,14 +1115,26 @@ const DIGESTS: &[(&str, u64)] = &[
     ("synthetic/I16 spp3 planar None rps3", 0xd2b3f8639e227761),
     ("synthetic/I16 spp3 planar Lzw rps10", 0xa356c461480a8072),
     ("synthetic/I16 spp3 planar Lzw rps3", 0xd2b3f8639e227761),
-    ("synthetic/I16 spp3 planar Lzw+pred rps10", 0xa356c461480a8072),
-    ("synthetic/I16 spp3 planar Lzw+pred rps3", 0xd2b3f8639e227761),
+    (
+        "synthetic/I16 spp3 planar Lzw+pred rps10",
+        0xa356c461480a8072,
+    ),
+    (
+        "synthetic/I16 spp3 planar Lzw+pred rps3",
+        0xd2b3f8639e227761,
+    ),
     ("synthetic/I16 spp4 planar None rps10", 0xcc4555641df36b96),
     ("synthetic/I16 spp4 planar None rps3", 0x0814d238a5fd5be1),
     ("synthetic/I16 spp4 planar Lzw rps10", 0xcc4555641df36b96),
     ("synthetic/I16 spp4 planar Lzw rps3", 0x0814d238a5fd5be1),
-    ("synthetic/I16 spp4 planar Lzw+pred rps10", 0xcc4555641df36b96),
-    ("synthetic/I16 spp4 planar Lzw+pred rps3", 0x0814d238a5fd5be1),
+    (
+        "synthetic/I16 spp4 planar Lzw+pred rps10",
+        0xcc4555641df36b96,
+    ),
+    (
+        "synthetic/I16 spp4 planar Lzw+pred rps3",
+        0x0814d238a5fd5be1,
+    ),
     ("synthetic/U32 spp1 None rps10", 0xacaa523cae91bc5d),
     ("synthetic/U32 spp1 None rps3", 0xf5e15709828e4bce),
     ("synthetic/U32 spp1 Lzw rps10", 0xacaa523cae91bc5d),
@@ -1078,14 +1157,26 @@ const DIGESTS: &[(&str, u64)] = &[
     ("synthetic/U32 spp3 planar None rps3", 0xc43ba7278e77a0b2),
     ("synthetic/U32 spp3 planar Lzw rps10", 0x2d8ba0f6880d4551),
     ("synthetic/U32 spp3 planar Lzw rps3", 0xc43ba7278e77a0b2),
-    ("synthetic/U32 spp3 planar Lzw+pred rps10", 0x2d8ba0f6880d4551),
-    ("synthetic/U32 spp3 planar Lzw+pred rps3", 0xc43ba7278e77a0b2),
+    (
+        "synthetic/U32 spp3 planar Lzw+pred rps10",
+        0x2d8ba0f6880d4551,
+    ),
+    (
+        "synthetic/U32 spp3 planar Lzw+pred rps3",
+        0xc43ba7278e77a0b2,
+    ),
     ("synthetic/U32 spp4 planar None rps10", 0x06ffb78fe8377d14),
     ("synthetic/U32 spp4 planar None rps3", 0x47a8220e2abac582),
     ("synthetic/U32 spp4 planar Lzw rps10", 0x06ffb78fe8377d14),
     ("synthetic/U32 spp4 planar Lzw rps3", 0x47a8220e2abac582),
-    ("synthetic/U32 spp4 planar Lzw+pred rps10", 0x06ffb78fe8377d14),
-    ("synthetic/U32 spp4 planar Lzw+pred rps3", 0x47a8220e2abac582),
+    (
+        "synthetic/U32 spp4 planar Lzw+pred rps10",
+        0x06ffb78fe8377d14,
+    ),
+    (
+        "synthetic/U32 spp4 planar Lzw+pred rps3",
+        0x47a8220e2abac582,
+    ),
     ("synthetic/F32 spp1 None rps10", 0xcd23fe2223b9fd9d),
     ("synthetic/F32 spp1 None rps3", 0x095d2e268c2e26bf),
     ("synthetic/F32 spp1 Lzw rps10", 0xcd23fe2223b9fd9d),
@@ -1108,14 +1199,26 @@ const DIGESTS: &[(&str, u64)] = &[
     ("synthetic/F32 spp3 planar None rps3", 0x29e36c0d935c0c32),
     ("synthetic/F32 spp3 planar Lzw rps10", 0xc274929e7c133c69),
     ("synthetic/F32 spp3 planar Lzw rps3", 0x29e36c0d935c0c32),
-    ("synthetic/F32 spp3 planar Lzw+pred rps10", 0xc274929e7c133c69),
-    ("synthetic/F32 spp3 planar Lzw+pred rps3", 0x29e36c0d935c0c32),
+    (
+        "synthetic/F32 spp3 planar Lzw+pred rps10",
+        0xc274929e7c133c69,
+    ),
+    (
+        "synthetic/F32 spp3 planar Lzw+pred rps3",
+        0x29e36c0d935c0c32,
+    ),
     ("synthetic/F32 spp4 planar None rps10", 0xa9be0a48f79a3716),
     ("synthetic/F32 spp4 planar None rps3", 0x4bbfe86be5cb7c7d),
     ("synthetic/F32 spp4 planar Lzw rps10", 0xa9be0a48f79a3716),
     ("synthetic/F32 spp4 planar Lzw rps3", 0x4bbfe86be5cb7c7d),
-    ("synthetic/F32 spp4 planar Lzw+pred rps10", 0xa9be0a48f79a3716),
-    ("synthetic/F32 spp4 planar Lzw+pred rps3", 0x4bbfe86be5cb7c7d),
+    (
+        "synthetic/F32 spp4 planar Lzw+pred rps10",
+        0xa9be0a48f79a3716,
+    ),
+    (
+        "synthetic/F32 spp4 planar Lzw+pred rps3",
+        0x4bbfe86be5cb7c7d,
+    ),
 ];
 
 /// Every case of one file: the old decode, the new one into fresh buffers,
@@ -1141,12 +1244,20 @@ fn check_file(name: &str, tiff: &TiffStack, warm: &mut (ChannelBufs, ReadScratch
                 &mut ChannelBufs::default(),
                 &mut ReadScratch::default(),
             );
-            assert!(old.same(&fresh), "{}\n old {old:?}\n new {fresh:?}", label());
+            assert!(
+                old.same(&fresh),
+                "{}\n old {old:?}\n new {fresh:?}",
+                label()
+            );
             if let (Outcome::Read { borrowed: o, .. }, Outcome::Read { borrowed: n, .. }) =
                 (&old, &fresh)
             {
                 for (i, (&o, &n)) in o.iter().zip(n).enumerate() {
-                    assert!(!o || n, "{}: job {i} was borrowed and is now copied", label());
+                    assert!(
+                        !o || n,
+                        "{}: job {i} was borrowed and is now copied",
+                        label()
+                    );
                 }
             }
             dirty(&mut warm.0, l * 5 + cases);
@@ -1201,7 +1312,10 @@ fn the_viewer_decode_equals_the_one_it_replaced() {
             .iter()
             .map(|(name, digest, _)| format!("    ({name:?}, {digest:#018x}),"))
             .collect();
-        println!("const DIGESTS: &[(&str, u64)] = &[\n{}\n];", rows.join("\n"));
+        println!(
+            "const DIGESTS: &[(&str, u64)] = &[\n{}\n];",
+            rows.join("\n")
+        );
     }
     for (name, digest, _) in &results {
         let want = DIGESTS.iter().find(|(n, _)| n == name).map(|&(_, d)| d);

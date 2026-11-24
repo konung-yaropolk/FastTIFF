@@ -112,10 +112,12 @@ pub(crate) struct Residency {
 /// file already holds as its texture wants it is borrowed from the file and
 /// leaves its buffer as it is, so an uncompressed stack holds nothing here.
 ///
-/// The sync's decode, the histograms' decode of the channels switched off
-/// ([`histogram::complete`](crate::histogram::complete)) and a window built
-/// on this thread all use it. One view's, like everything here, and gone
-/// with the residency when the document changes.
+/// The sync's decode and the histograms' decode of the channels switched off
+/// ([`histogram::complete`](crate::histogram::complete)) use all of it; a
+/// window built on this thread, when there is no window worker, uses the
+/// scratch, and gives it back afterwards, since a band's worth is not worth
+/// keeping for a frame nobody plays. One view's, like everything here, and
+/// gone with the residency when the document changes.
 #[derive(Default)]
 pub(crate) struct InlineDecode {
     pub(crate) bufs: crate::prefetch::ChannelBufs,

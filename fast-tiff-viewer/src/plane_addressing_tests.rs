@@ -84,7 +84,7 @@ fn every_frame_actually_decodes() {
     for frame in 0..stack.frame_count() {
         let jobs = crate::prefetch::build_jobs(&stack, frame, &enabled);
         let decoded = crate::prefetch::decode_owned(&stack.tiff, &jobs)
-        .unwrap_or_else(|e| panic!("frame {frame} failed to decode: {e:#}"));
+            .unwrap_or_else(|e| panic!("frame {frame} failed to decode: {e:#}"));
         match &decoded[0] {
             crate::prefetch::Decoded::U16(v) => first_pixels.push(v[0]),
             other => panic!(
