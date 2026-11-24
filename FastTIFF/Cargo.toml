@@ -62,6 +62,7 @@ builtin-plugins = [
     "plugin-png",
     "plugin-oir",
     "plugin-nifti",
+    "plugin-hdf5",
     "plugin-dicom",
     # And the plugins crate's own name for the same set. It adds no plugin to
     # the ones above, but the crate's integration suites — the run of every
@@ -80,6 +81,7 @@ plugin-turboreg-stabilize = ["fasttiff-builtin-plugins/plugin-turboreg-stabilize
 plugin-deconvolve = ["fasttiff-builtin-plugins/plugin-deconvolve", "_any-builtin"]
 plugin-png = ["fasttiff-builtin-plugins/plugin-png", "_any-builtin"]
 plugin-oir = ["fasttiff-builtin-plugins/plugin-oir", "_any-builtin"]
+plugin-hdf5 = ["fasttiff-builtin-plugins/plugin-hdf5", "_any-builtin"]
 plugin-nifti = ["fasttiff-builtin-plugins/plugin-nifti", "_any-builtin"]
 plugin-dicom = ["fasttiff-builtin-plugins/plugin-dicom", "_any-builtin"]
 # "Yes, really, no plugins." It enables nothing; it exists so that the guard in

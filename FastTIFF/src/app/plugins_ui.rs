@@ -157,39 +157,41 @@ pub(super) fn plugins_menu(
         // one that is working and simply has not been triggered.
         if !registry.importers().is_empty() {
             ui.separator();
-            ui.label(RichText::new("Importable formats:").strong());
-            for e in registry.importers() {
-                let exts: Vec<String> = e
-                    .file_types
-                    .iter()
-                    .flat_map(|t| t.extensions.iter().map(|x| format!(".{x}")))
-                    .collect();
-                ui.label(
-                    RichText::new(format!("{}  ({})", e.info.name, exts.join(" ")))
-                        .weak()
-                        .small(),
-                )
-                .on_hover_text(&e.info.description);
-            }
+            ui.menu_button("Importable formats", |ui| {
+                for e in registry.importers() {
+                    let exts: Vec<String> = e
+                        .file_types
+                        .iter()
+                        .flat_map(|t| t.extensions.iter().map(|x| format!(".{x}")))
+                        .collect();
+                    ui.label(
+                        RichText::new(format!("{}  ({})", e.info.name, exts.join(" ")))
+                            .weak()
+                            .small(),
+                    )
+                    .on_hover_text(&e.info.description);
+                }
+            });
         }
 
         // Save As lists every exporter, including those without a menu shortcut.
         if !registry.exporters().is_empty() {
             ui.separator();
-            ui.label(RichText::new("Exportable formats:").strong());
-            for e in registry.exporters() {
-                let exts: Vec<String> = e
-                    .file_types
-                    .iter()
-                    .flat_map(|t| t.extensions.iter().map(|x| format!(".{x}")))
-                    .collect();
-                ui.label(
-                    RichText::new(format!("{}  ({})", e.info.name, exts.join(" ")))
-                        .weak()
-                        .small(),
-                )
-                .on_hover_text(&e.info.description);
-            }
+            ui.menu_button("Exportable formats", |ui| {
+                for e in registry.exporters() {
+                    let exts: Vec<String> = e
+                        .file_types
+                        .iter()
+                        .flat_map(|t| t.extensions.iter().map(|x| format!(".{x}")))
+                        .collect();
+                    ui.label(
+                        RichText::new(format!("{}  ({})", e.info.name, exts.join(" ")))
+                            .weak()
+                            .small(),
+                    )
+                    .on_hover_text(&e.info.description);
+                }
+            });
         }
 
         // Desktop-only: there is no folder to open in a browser, and nothing
@@ -257,7 +259,7 @@ pub(super) fn dialog(
     if decls.iter().any(|d| matches!(d.kind, ParamKind::Action)) {
         return panel(ctx, title, decls, values, busy);
     }
-    form(ctx, title, decls, values).map(|run| {
+    form(ctx, title, decls, values, "Run").map(|run| {
         if run {
             DialogAnswer::Run
         } else {
@@ -381,11 +383,12 @@ fn column(ui: &mut egui::Ui, decls: &[ParamDecl], values: &mut Params) {
 
 /// A dialog without buttons of its own: a form with Run and Cancel. Returns
 /// `Some(true)` to run, `Some(false)` to cancel, `None` while it is still open.
-fn form(
+pub(super) fn form(
     ctx: &egui::Context,
     title: &str,
     decls: &[ParamDecl],
     values: &mut Params,
+    accept: &str,
 ) -> Option<bool> {
     let mut outcome = None;
     let mut open = true;
@@ -409,7 +412,7 @@ fn form(
                 .show(ui, |ui| groups(ui, decls, values));
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("Run").clicked() {
+                if ui.button(accept).clicked() {
                     outcome = Some(true);
                 }
                 if ui.button("Cancel").clicked() {

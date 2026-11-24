@@ -5,7 +5,7 @@
 The plugins [FastTIFF](https://github.com/konung-yaropolk/FastTIFF) compiles
 in: Crop, Invert, Z Project, Plot third axis, the three Slice tools, 3D
 animation, Generate PSF and Deconvolve, suite2p and TurboReg stabilization, the
-PNG importer and exporter, and the Olympus OIR, NIfTI and DICOM importers.
+PNG importer and exporter, and the Olympus OIR, HDF5, NIfTI and DICOM importers.
 
 ```text
   fasttiff-plugin-abi / -api / fasttiff-plugin   the plugin SDK
@@ -56,12 +56,12 @@ fasttiff_builtin_plugins::share_gpu_device(&device, &queue, &adapter_info);
 |---|---|---|
 | `builtin-plugins` | on | Every plugin that ships. |
 | `plugin-image-tools` | via `builtin-plugins` | Invert, Crop, Slice Keeper, Slice Remover, Slice Order Invert, Split channels and Split Stack. |
-| `plugin-<name>` | via `builtin-plugins` | One plugin, with whatever it alone depends on: `plugin-zproject`, `plugin-plot-axis`, `plugin-animation-3d`, `plugin-suite2p-stabilize`, `plugin-turboreg-stabilize`, `plugin-deconvolve`, `plugin-png`, `plugin-oir`, `plugin-nifti`, `plugin-dicom`. A plugin left out has no module, no menu entry and no dependency of its own in the build. |
+| `plugin-<name>` | via `builtin-plugins` | One plugin, with whatever it alone depends on: `plugin-zproject`, `plugin-plot-axis`, `plugin-animation-3d`, `plugin-suite2p-stabilize`, `plugin-turboreg-stabilize`, `plugin-deconvolve`, `plugin-png`, `plugin-oir`, `plugin-hdf5`, `plugin-nifti`, `plugin-dicom`. A plugin left out has no module, no menu entry and no dependency of its own in the build. |
 | `gpu-registration` | off | The registrations' GPU paths, and `share_gpu_device`. Pulls in wgpu. |
 | `threads` | on | Deconvolution across threads; off for a single-threaded host such as `wasm32-unknown-unknown`. |
 | `mmap` | on | The OIR importer memory-maps the files it reads; off, it reads them through a bounded buffer. |
 
-The OIR, NIfTI and DICOM importers are compiled for the desktop only, whatever
+The OIR, HDF5, NIfTI and DICOM importers are compiled for the desktop only, whatever
 the features say: an importer is handed a path, and a browser has none. The PNG
 importer is compiled for every target, in the module it shares with the PNG
 exporter, but a browser host opens TIFF alone and never calls it.

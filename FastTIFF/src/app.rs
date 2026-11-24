@@ -234,16 +234,18 @@ fn import_with_plugin(
     path: &std::path::Path,
     progress: &std::sync::atomic::AtomicU32,
     cancel: &std::sync::atomic::AtomicBool,
+    tx: &Sender<Incoming>,
 ) -> Result<Opened, String> {
     let head = fast_tiff_viewer::plugins::Registry::read_head(path);
-    let (index, _confidence) = *registry
-        .importers_for(path, &head)
-        .first()
-        .ok_or_else(|| format!("nothing here can read {}", path.display()))?;
-
-    let request = fasttiff_plugin_api::ImportRequest {
-        path: path.to_path_buf(),
-        params: fasttiff_plugin_api::Params::new(),
+    let candidates = registry.importers_for(path, &head);
+    let Some(&(index, _)) = candidates.first() else {
+        if registry.claims_extension(path) {
+            return Err(format!(
+                "No importer recognizes the contents of {}",
+                path.display()
+            ));
+        }
+        return Current::path_source(path.to_owned()).map(Opened::Source);
     };
 
     struct Host<'a>(
@@ -264,6 +266,36 @@ fn import_with_plugin(
         .importer_mut(index)
         .ok_or_else(|| "the importer went away".to_string())?;
     let name = entry.info.name.clone();
+    let decls = entry
+        .importer
+        .dialog(path)
+        .map_err(|e| format!("{name}: {e}"))?;
+    let has_dialog = !decls.is_empty();
+    let params = if !has_dialog {
+        fasttiff_plugin_api::Params::new()
+    } else {
+        let (reply, answer) = channel();
+        let prompt = ImportPrompt {
+            title: format!(
+                "Import {name} - {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            values: fasttiff_plugin_api::Params::defaults(&decls),
+            decls,
+            reply,
+        };
+        tx.send(Incoming::ImportPrompt(prompt))
+            .map_err(|_| "Import cancelled")?;
+        wake_ui();
+        answer.recv().map_err(|_| "Import cancelled")?
+    };
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Import cancelled".into());
+    }
+    let request = fasttiff_plugin_api::ImportRequest {
+        path: path.to_path_buf(),
+        params,
+    };
     let imported = entry
         .importer
         .import(&request, &mut Host(progress, cancel))
@@ -279,8 +311,12 @@ fn import_with_plugin(
     // import is then held about once, not twice.
     let bytes = fast_tiff_viewer::plugins::into_tiff_bytes(imported.image, imported.info.as_ref())
         .map_err(|e| format!("{name}: {e:#}"))?;
-    let source =
-        fast_tiff_viewer::LoadSource::Bytes(bytes.into(), imported_label(path, &fallback).into());
+    let label = if has_dialog && !fallback.is_empty() {
+        format!("{fallback} - imported")
+    } else {
+        imported_label(path, &fallback)
+    };
+    let source = fast_tiff_viewer::LoadSource::Bytes(bytes.into(), label.into());
     Ok(Opened::Source(fast_tiff_viewer::LoadSource::Derived(
         Box::new(source),
         fast_tiff_viewer::plugins::Derived::imported(path.to_path_buf(), entry.info.id.clone()),
@@ -311,6 +347,7 @@ const ICON_SIZE: f32 = 14.0;
 /// somewhere other than this frame's user input, but for files, which come in
 /// through the platform ([`platform::Platform::take_incoming_files`]).
 enum Incoming {
+    ImportPrompt(ImportPrompt),
     /// An import finished. The registry travels back with the result, because
     /// the worker was holding it — see [`ViewerApp::plugins`].
     Imported(
@@ -940,6 +977,7 @@ pub struct ViewerApp {
     document: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The plugin whose dialog is open, and the values entered so far.
     plugin_dialog: Option<PluginDialog>,
+    import_prompt: Option<ImportPrompt>,
     /// Where each job's result is sent once it is done ([`Incoming`]).
     /// Drained once a frame by [`drain_pending_open`](Self::drain_pending_open).
     /// Files come in through the platform instead, the browser's asynchronous
@@ -1062,6 +1100,13 @@ struct VolumeUi {
     moved_at: Option<f64>,
 }
 
+struct ImportPrompt {
+    title: String,
+    decls: Vec<fasttiff_plugin_api::ParamDecl>,
+    values: fasttiff_plugin_api::Params,
+    reply: Sender<fasttiff_plugin_api::Params>,
+}
+
 /// A plugin's dialog, while it is open.
 struct PluginDialog {
     /// Index into the registry's plugin list.
@@ -1132,6 +1177,7 @@ impl ViewerApp {
             claimed_extensions: plugins.claimed_extensions(),
             plugins: Some(plugins),
             plugin_dialog: None,
+            import_prompt: None,
             document: Default::default(),
             open_tx,
             open_rx,
@@ -1302,6 +1348,7 @@ impl ViewerApp {
     fn drain_pending_open(&mut self) {
         while let Ok(message) = self.open_rx.try_recv() {
             match message {
+                Incoming::ImportPrompt(prompt) => self.import_prompt = Some(prompt),
                 Incoming::Imported(registry, result) => {
                     // The registry comes home first, so the app is usable again
                     // whether the import worked or not.
@@ -1811,10 +1858,15 @@ impl ViewerApp {
             return Ok(());
         };
         self.claimed_extensions = registry.claimed_extensions();
-        // Cheap rejection first: no file is opened unless an extension matches,
-        // so the common case of a TIFF costs one string compare — and costs no
-        // thread.
-        if !registry.claims_extension(&path) {
+        // Keep the normal TIFF path cheap. Other suffixes can be application-
+        // specific (especially for HDF5), so give importers their signature
+        // probe on the worker before falling back to the ordinary reader.
+        let tiff_name = path.extension().and_then(|s| s.to_str()).is_some_and(|s| {
+            ["tif", "tiff", "tf8", "btf", "bigtiff"]
+                .iter()
+                .any(|e| s.eq_ignore_ascii_case(e))
+        });
+        if registry.importers().is_empty() || (tiff_name && !registry.claims_extension(&path)) {
             self.plugins = Some(registry);
             return Err(path);
         }
@@ -1824,7 +1876,7 @@ impl ViewerApp {
         Current::spawn_job(move || {
             let mut registry = registry;
             let result = contained("the importer", || {
-                import_with_plugin(&mut registry, &path, &progress, &cancel)
+                import_with_plugin(&mut registry, &path, &progress, &cancel, &tx)
             })
             .unwrap_or_else(Err);
             // If the send fails the window is gone, and so is anyone who wanted
@@ -2414,6 +2466,27 @@ impl ViewerApp {
     /// The tool windows: a plugin's dialog, its plot, the point counter. Each
     /// acts on its own buttons as it is drawn.
     fn tool_windows(&mut self, ctx: &egui::Context) {
+        if let Some(mut prompt) = self.import_prompt.take() {
+            if self
+                .job
+                .as_ref()
+                .is_some_and(|job| !job.cancel.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                match plugins_ui::form(
+                    ctx,
+                    &prompt.title,
+                    &prompt.decls,
+                    &mut prompt.values,
+                    "Import",
+                ) {
+                    Some(true) => {
+                        let _ = prompt.reply.send(prompt.values.clamp_to(&prompt.decls));
+                    }
+                    Some(false) => {}
+                    None => self.import_prompt = Some(prompt),
+                }
+            }
+        }
         self.poll_plugin_dialog(ctx);
         self.poll_plot(ctx);
         self.poll_point_counter(ctx);
