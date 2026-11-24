@@ -288,3 +288,222 @@ fn the_stored_frame_is_the_samples_in_the_order_asked_for() {
     let want: Vec<u8> = pixels.iter().flat_map(|v| v.to_be_bytes()).collect();
     assert_eq!(big, want);
 }
+
+/// The whole stored frame borrows the way a plane does, at any samples per
+/// pixel, chunky or planar, when it is one uncompressed run in the byte order
+/// asked for — what writing a frame back out wants — and is decoded into
+/// `out` otherwise. The old readers borrowed a whole frame only through
+/// `read_frame_u8`, which goes with the rest of them.
+#[test]
+fn a_stored_frame_borrows_whatever_its_samples_when_it_is_one_run() {
+    let (w, h) = (40u32, 12u32);
+    let n = (w * h) as usize;
+    for (st, planar, compression, rps) in [
+        (SampleType::U8, false, Compression::None, 12),
+        (SampleType::U8, false, Compression::None, 4),
+        (SampleType::U8, true, Compression::None, 3),
+        (SampleType::U16, true, Compression::None, 5),
+        (SampleType::U8, false, Compression::Lzw, 4),
+        (SampleType::U16, true, Compression::Deflate, 12),
+    ] {
+        let opts = WriterOptions::new(w, h, st)
+            .samples_per_pixel(3)
+            .planar(planar)
+            .compression(compression)
+            .rows_per_strip(rps);
+        let samples: Vec<u8> = (0..n * 3 * st.bytes())
+            .map(|i| (i * 5 % 251) as u8)
+            .collect();
+        let mut writer = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+        writer.write_frame_bytes(&samples).unwrap();
+        let stack = TiffStack::from_bytes(writer.finish().unwrap().into_inner()).unwrap();
+        let frame = stack.frame(0).unwrap();
+        let label = format!("{st:?} planar {planar} {compression:?} rps {rps}");
+        let mut scratch = DecodeScratch::new();
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            let mut want = vec![0u8; frame.stored_frame_len().unwrap()];
+            frame
+                .stored_frame_into(order, &mut want, &mut scratch)
+                .unwrap();
+            let mut out = Vec::new();
+            let px = frame.stored_frame(order, &mut out, &mut scratch).unwrap();
+            assert_eq!(&*px, &want[..], "{label}, {order:?}");
+            let one_run = compression == Compression::None
+                && (order == stack.byte_order || st == SampleType::U8);
+            assert_eq!(px.is_source(), one_run, "{label}, {order:?}");
+            if one_run {
+                let file = stack.data.as_ptr_range();
+                assert!(file.contains(&px.as_ptr()), "{label}: inside the file");
+                assert!(out.is_empty(), "{label}: `out` untouched");
+            }
+        }
+    }
+}
+
+/// Overwrite the one-value StripOffsets (273) or StripByteCounts (279) entry
+/// of the writer's first IFD: a classic little-endian file, its value inline.
+fn patch_strip_tag(file: &mut [u8], tag: u16, value: u32) {
+    assert_eq!(&file[..4], b"II*\0", "a classic little-endian file");
+    let ifd = u32::from_le_bytes(file[4..8].try_into().unwrap()) as usize;
+    let count = u16::from_le_bytes(file[ifd..ifd + 2].try_into().unwrap()) as usize;
+    for i in 0..count {
+        let e = ifd + 2 + i * 12;
+        if u16::from_le_bytes(file[e..e + 2].try_into().unwrap()) == tag {
+            match u16::from_le_bytes(file[e + 2..e + 4].try_into().unwrap()) {
+                3 => file[e + 8..e + 10].copy_from_slice(&(value as u16).to_le_bytes()),
+                4 => file[e + 8..e + 12].copy_from_slice(&value.to_le_bytes()),
+                other => panic!("tag {tag} has type {other}"),
+            }
+            return;
+        }
+    }
+    panic!("tag {tag} is not in the first IFD");
+}
+
+/// A lone uncompressed strip whose StripByteCounts undersells its frame — a
+/// zero, one row's bytes, two bytes short — is read for the frame's size when
+/// the file holds that much from the strip on, the way libtiff reads one, by
+/// every reader alike: the indexer repairs the count. Before, the old
+/// single-strip borrow read such a frame and every other reader refused it.
+/// A count the file cannot back stays as it is, and the frame is refused.
+#[test]
+fn an_undersold_single_strip_reads_whole_when_the_file_holds_it() {
+    let (w, h) = (8u32, 4u32);
+    let pixels = ramp((w * h) as usize);
+    let bytes = write_u16(WriterOptions::new(w, h, SampleType::U16), &[&pixels]);
+    let units = Display { range: None };
+    for count in [0u32, 16, 62] {
+        let mut file = bytes.clone();
+        patch_strip_tag(&mut file, 279, count);
+        let stack = TiffStack::from_bytes(file).unwrap();
+        assert_eq!(&stack.frames[0].strip_byte_counts[..], &[64], "{count}");
+        let frame = stack.frame(0).unwrap();
+        assert!(frame.borrows(units, 0), "{count}");
+        let (mut out, mut scratch) = (Vec::new(), DecodeScratch::new());
+        let (px, _) = frame.read(units, 0, &mut out, &mut scratch).unwrap();
+        assert_eq!(&*px, &pixels[..], "{count}: Frame::read");
+        let mut f = vec![f32::NAN; pixels.len()];
+        frame
+            .read_into(File, 0, &mut [&mut f[..]], &mut scratch)
+            .unwrap();
+        assert!(f.iter().zip(&pixels).all(|(&a, &b)| a == b as f32));
+        let (data, info, order) = (&stack.data[..], &stack.frames[0], stack.byte_order);
+        let plane = fast_tiff_lib::read_plane_u16(data, info, order, None, 0).unwrap();
+        assert_eq!(
+            plane, pixels,
+            "{count}: read_plane_u16, which refused it before"
+        );
+    }
+    // The strip moved to where the file ends before the frame does.
+    let mut file = bytes.clone();
+    let at = file.len() as u32 - 20;
+    patch_strip_tag(&mut file, 273, at);
+    patch_strip_tag(&mut file, 279, 16);
+    let stack = TiffStack::from_bytes(file).unwrap();
+    assert_eq!(&stack.frames[0].strip_byte_counts[..], &[16]);
+    let frame = stack.frame(0).unwrap();
+    assert!(!frame.borrows(units, 0));
+    let (mut out, mut scratch) = (Vec::new(), DecodeScratch::new());
+    let e = frame.read(units, 0, &mut out, &mut scratch).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::Malformed);
+    let (data, info, order) = (&stack.data[..], &stack.frames[0], stack.byte_order);
+    let e = fast_tiff_lib::read_frame_u16(data, info, order, None).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::Malformed);
+}
+
+/// A strip whose end would be past the top of `u64` is no strip of any file.
+/// Every read refuses it as malformed — through a `FrameInfo` built by hand,
+/// which nothing has vetted — and none panics on the sum or wraps it round:
+/// here plane 1 of a planar frame in one strip would start at file byte 16.
+#[test]
+fn a_strip_whose_end_would_wrap_past_u64_is_malformed() {
+    use fast_tiff_lib::{FrameInfo, SampleFormat, Strips};
+    let file = vec![0x11u8; 4096];
+    for predictor in [1, 2] {
+        let info = FrameInfo {
+            width: 8,
+            height: 4,
+            bits_per_sample: 16,
+            samples_per_pixel: 2,
+            sample_format: SampleFormat::UnsignedInt,
+            compression: Compression::None,
+            predictor,
+            photometric: 1,
+            planar_config: 2,
+            tile_size: None,
+            ink_set: 1,
+            // 64 bytes a plane: plane 1 starts at 2^64 + 16.
+            strip_offsets: Strips::One(u64::MAX - 63 + 16),
+            strip_byte_counts: Strips::One(128),
+            rows_per_strip: 4,
+        };
+        let frame = fast_tiff_lib::Frame::new(&file, &info, ByteOrder::Little);
+        let mut scratch = DecodeScratch::new();
+        let malformed = |r: fast_tiff_lib::Result<()>, what: &str| {
+            assert_eq!(
+                r.unwrap_err().kind(),
+                ErrorKind::Malformed,
+                "predictor {predictor}: {what}"
+            );
+        };
+        for plane in [0, 1] {
+            assert!(!frame.borrows(Display { range: None }, plane));
+            let mut out = Vec::new();
+            malformed(
+                frame
+                    .read(Display { range: None }, plane, &mut out, &mut scratch)
+                    .map(drop),
+                "Display",
+            );
+            let mut out = Vec::new();
+            malformed(
+                frame
+                    .read(Stored(ByteOrder::Little), plane, &mut out, &mut scratch)
+                    .map(drop),
+                "Stored",
+            );
+            malformed(
+                fast_tiff_lib::read_plane_u16(&file, &info, ByteOrder::Little, None, plane)
+                    .map(drop),
+                "read_plane_u16",
+            );
+        }
+        let mut out = vec![0u8; 128];
+        malformed(
+            frame.stored_frame_into(ByteOrder::Little, &mut out, &mut scratch),
+            "stored_frame_into",
+        );
+        let mut out = Vec::new();
+        malformed(
+            frame
+                .stored_frame(ByteOrder::Little, &mut out, &mut scratch)
+                .map(drop),
+            "stored_frame",
+        );
+    }
+}
+
+/// `{:?}` of a frame or a scratch says what it is, not what it holds: a
+/// frame borrows the whole file, and printing a mapping of gigabytes from a
+/// `dbg!` is a stall, not a diagnostic.
+#[test]
+fn debug_formatting_prints_no_pixels() {
+    let pixels = ramp(256 * 256);
+    let opts = WriterOptions::new(256, 256, SampleType::U16)
+        .compression(Compression::Lzw)
+        .rows_per_strip(64);
+    let stack = TiffStack::from_bytes(write_u16(opts, &[&pixels])).unwrap();
+    let frame = stack.frame(0).unwrap();
+    let text = format!("{frame:?}");
+    assert!(text.len() < 2000, "{} characters", text.len());
+    assert!(
+        text.contains(&format!("len: {}", stack.data.len())),
+        "{text}"
+    );
+    let mut scratch = DecodeScratch::new();
+    let mut out = Vec::new();
+    frame.read(File, 0, &mut out, &mut scratch).unwrap();
+    assert!(scratch.held_bytes() >= 256 * 64 * 2);
+    let text = format!("{scratch:?}");
+    assert!(text.len() < 200, "{text}");
+}

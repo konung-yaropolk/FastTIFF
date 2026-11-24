@@ -121,6 +121,29 @@ fn a_warm_compressed_u16_read_allocates_nothing_big() {
     }
 }
 
+/// Allocations of 64 KiB or more over `reads` warm reads, after two to warm
+/// up: none when serial. In parallel a piece buffer is one per worker that
+/// ran a group, and which workers do is the scheduler's to say, so a warm
+/// scratch can still meet a worker it has not seen; it can do that once per
+/// worker at most, where losing its buffers would cost a few every read.
+fn big_allocations_warm(parallel: bool, mut read: impl FnMut()) -> (usize, usize) {
+    let _p = parallel_decode_scope(parallel);
+    read();
+    read();
+    let reads = if parallel {
+        2 * rayon::current_num_threads()
+    } else {
+        3
+    };
+    let big = allocations_of_at_least(64 << 10, || (0..reads).for_each(|_| read()));
+    let allowed = if parallel {
+        rayon::current_num_threads()
+    } else {
+        0
+    };
+    (big, allowed)
+}
+
 /// A conversion a piece at a time needs piece buffers, not a frame: once the
 /// scratch holds them, `u16` to `f32` and chunky RGB gathers allocate nothing
 /// big either.
@@ -130,22 +153,19 @@ fn a_warm_converting_read_allocates_nothing_big() {
     let lzw = stack(SampleType::U16, Compression::Lzw, false, 64);
     let frame = lzw.frame(0).unwrap();
     for parallel in [false, true] {
-        let _p = parallel_decode_scope(parallel);
         let mut out = vec![0f32; frame.plane_len(File).unwrap()];
         let mut scratch = DecodeScratch::new();
-        // Twice: a parallel decode's piece buffers are one per worker that ran
-        // a group, and which workers do is up to the scheduler.
-        for _ in 0..2 {
-            frame
-                .read_into(File, 0, &mut [&mut out[..]], &mut scratch)
-                .unwrap();
-        }
-        let big = allocations_of_at_least(1 << 20, || {
+        // The piece buffers are a strip each, 256 KiB: below what is counted
+        // they would go unseen.
+        let (big, allowed) = big_allocations_warm(parallel, || {
             frame
                 .read_into(File, 0, &mut [&mut out[..]], &mut scratch)
                 .unwrap();
         });
-        assert_eq!(big, 0, "u16 LZW to f32, parallel {parallel}");
+        assert!(
+            big <= allowed,
+            "u16 LZW to f32, parallel {parallel}: {big} allocations of 64 KiB or more"
+        );
     }
 
     let opts = WriterOptions::new(1024, 1024, SampleType::U8)
@@ -213,4 +233,68 @@ fn an_auto_ranged_u32_read_allocates_no_frame_of_f32() {
         frame.value_range(&mut scratch).unwrap();
     });
     assert_eq!(ranged, 0, "its value range, warm scratch");
+}
+
+/// A tiled ZSTD frame whose height is not a whole number of tiles: its bottom
+/// tiles are decompressed only as far as the image goes, which ZSTD's one-shot
+/// call refuses, so they stream. Through a context kept across reads that
+/// allocates nothing big once warm; a fresh streaming decoder per edge tile
+/// was a context and a 128 KiB input buffer for every one, every frame. (Only
+/// the buffer is the counter's to see: zstd takes its contexts from C's
+/// `malloc`.)
+#[cfg(feature = "codec-zstd")]
+#[test]
+fn a_warm_read_of_partial_zstd_tiles_allocates_nothing_big() {
+    use fast_tiff_lib::{ByteOrder, FrameInfo, SampleFormat};
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let (w, h, t) = (1024usize, 1000usize, 256usize);
+    let value = |x: usize, y: usize| ((x * 3 + y * 5) % 65536) as u16;
+    let mut file = vec![0u8; 16];
+    let (mut offsets, mut counts) = (Vec::new(), Vec::new());
+    for ty in 0..h.div_ceil(t) {
+        for tx in 0..w.div_ceil(t) {
+            let tile: Vec<u8> = (0..t * t)
+                .flat_map(|i| value(tx * t + i % t, ty * t + i / t).to_le_bytes())
+                .collect();
+            let packed = zstd::stream::encode_all(&tile[..], 3).unwrap();
+            offsets.push(file.len() as u64);
+            counts.push(packed.len() as u64);
+            file.extend_from_slice(&packed);
+        }
+    }
+    let info = FrameInfo {
+        width: w as u32,
+        height: h as u32,
+        bits_per_sample: 16,
+        samples_per_pixel: 1,
+        sample_format: SampleFormat::UnsignedInt,
+        compression: Compression::Zstd,
+        predictor: 1,
+        photometric: 1,
+        planar_config: 1,
+        tile_size: Some((t as u32, t as u32)),
+        ink_set: 1,
+        strip_offsets: offsets.into(),
+        strip_byte_counts: counts.into(),
+        rows_per_strip: t as u32,
+    };
+    let frame = Frame::new(&file, &info, ByteOrder::Little);
+    let units = Display { range: None };
+    for parallel in [false, true] {
+        let mut out = vec![0u16; w * h];
+        let mut scratch = DecodeScratch::new();
+        let (big, allowed) = big_allocations_warm(parallel, || {
+            frame
+                .read_into(units, 0, &mut [&mut out[..]], &mut scratch)
+                .unwrap();
+        });
+        assert!(
+            big <= allowed,
+            "parallel {parallel}: {big} allocations of 64 KiB or more"
+        );
+        assert!(
+            (0..w * h).all(|i| out[i] == value(i % w, i / w)),
+            "parallel {parallel}: the pixels"
+        );
+    }
 }
