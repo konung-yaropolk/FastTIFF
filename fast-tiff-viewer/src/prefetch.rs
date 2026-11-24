@@ -746,80 +746,9 @@ impl Prefetcher {
         let returned = Arc::clone(&free);
         // The worker's own, across every frame it reads ahead.
         let mut scratch = ReadScratch::default();
-        let job = move |&(revision, frame_index): &Key, req: Request, cancel: &CancelToken| {
+        let job = move |&key: &Key, req: Request, cancel: &CancelToken| {
             fast_tiff_lib::set_thread_parallel_decode(Some(req.parallel));
-            // Page-touch mode: absorb the next frame's soft page faults here
-            // and publish nothing — the UI thread's inline read is then
-            // fault-free (and stays zero-copy, which decoding ahead would have
-            // forfeited). A frame's channels are planes of their own, so a
-            // newer request stops it between them.
-            if touch_suffices(&stack, &req.jobs) {
-                for job in &req.jobs {
-                    if cancel.is_cancelled() {
-                        break;
-                    }
-                    if let Ok(frame) = stack.frame(job.ifd_idx) {
-                        frame.touch();
-                    }
-                }
-                return None;
-            }
-            // Into the buffers of a frame already shown, when one has come
-            // back: the same allocations, frame after frame.
-            let mut bufs = returned
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .pop()
-                .unwrap_or_default();
-            // The step is the frame: a decode overtaken while it runs finishes,
-            // and the worker then drops it unpublished.
-            match decode_jobs(&stack, &req.jobs, None, &mut bufs, &mut scratch) {
-                // A channel the file holds as it is (beside one that needed
-                // decoding) is copied: the result outlives this frame's
-                // borrow.
-                Ok(planes) => planes.own(&mut bufs),
-                Err(_) => {
-                    give_back(&returned, bufs);
-                    return None;
-                }
-            }
-            // Overtaken while it decoded: the worker would drop it unpublished,
-            // so there is nothing to bin it for, and its buffers are the next
-            // frame's.
-            if cancel.is_cancelled() {
-                give_back(&returned, bufs);
-                return None;
-            }
-            // Binned here, while the planes are in hand, rather than by the
-            // interface thread after it takes them. Not free: about 4 ms a
-            // channel of a million samples or more, which this frame is then
-            // published later by, so it is asked for once a throttle interval
-            // rather than every frame (see `histogram::PLAYBACK_INTERVAL`).
-            let histograms = match &req.binning {
-                Some(binning) => req
-                    .jobs
-                    .iter()
-                    .filter_map(|job| binning.bin(job.channel, bufs.view(job.channel)))
-                    .collect(),
-                None => Vec::new(),
-            };
-            let channels = req
-                .jobs
-                .iter()
-                .map(|job| DecodedChannel {
-                    channel: job.channel,
-                    width: job.width,
-                    height: job.height,
-                    kind: job.kind,
-                    data: bufs.take(job.channel),
-                })
-                .collect();
-            Some(PrefetchResult {
-                revision,
-                frame_index,
-                channels,
-                histograms,
-            })
+            read_ahead(&stack, key, &req, cancel, &mut scratch, &returned)
         };
         let worker = LatestWorker::spawn("fasttiff-prefetch", Unclaimed::Keep, job)?;
         Some(Prefetcher { worker, free })
@@ -879,6 +808,91 @@ impl Prefetcher {
         }
         give_back(&self.free, bufs);
     }
+}
+
+/// One read-ahead request as the worker runs it, in the mode its frame asks
+/// for (see the [module docs](self)): `None` when the frame was only touched,
+/// or its decode failed or was overtaken; otherwise the frame decoded, into
+/// the buffers of a frame handed back to `free` when one has come back, and
+/// binned when the request asks for it.
+fn read_ahead(
+    stack: &TiffStack,
+    (revision, frame_index): Key,
+    req: &Request,
+    cancel: &CancelToken,
+    scratch: &mut ReadScratch,
+    free: &FreeList,
+) -> Option<PrefetchResult> {
+    // Page-touch mode: absorb the next frame's soft page faults here and
+    // publish nothing — the UI thread's inline read is then fault-free (and
+    // stays zero-copy, which decoding ahead would have forfeited). A frame's
+    // channels are planes of their own, so a newer request stops it between
+    // them.
+    if touch_suffices(stack, &req.jobs) {
+        for job in &req.jobs {
+            if cancel.is_cancelled() {
+                break;
+            }
+            if let Ok(frame) = stack.frame(job.ifd_idx) {
+                frame.touch();
+            }
+        }
+        return None;
+    }
+    // Into the buffers of a frame already shown, when one has come back: the
+    // same allocations, frame after frame.
+    let mut bufs = free
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pop()
+        .unwrap_or_default();
+    // The step is the frame: a decode overtaken while it runs finishes, and
+    // the worker then drops it unpublished.
+    match decode_jobs(stack, &req.jobs, None, &mut bufs, scratch) {
+        // A channel the file holds as it is (beside one that needed
+        // decoding) is copied: the result outlives this frame's borrow.
+        Ok(planes) => planes.own(&mut bufs),
+        Err(_) => {
+            give_back(free, bufs);
+            return None;
+        }
+    }
+    // Overtaken while it decoded: the worker would drop it unpublished, so
+    // there is nothing to bin it for, and its buffers are the next frame's.
+    if cancel.is_cancelled() {
+        give_back(free, bufs);
+        return None;
+    }
+    // Binned here, while the planes are in hand, rather than by the interface
+    // thread after it takes them. Not free: about 4 ms a channel of a million
+    // samples or more, which this frame is then published later by, so it is
+    // asked for once a throttle interval rather than every frame (see
+    // `histogram::PLAYBACK_INTERVAL`).
+    let histograms = match &req.binning {
+        Some(binning) => req
+            .jobs
+            .iter()
+            .filter_map(|job| binning.bin(job.channel, bufs.view(job.channel)))
+            .collect(),
+        None => Vec::new(),
+    };
+    let channels = req
+        .jobs
+        .iter()
+        .map(|job| DecodedChannel {
+            channel: job.channel,
+            width: job.width,
+            height: job.height,
+            kind: job.kind,
+            data: bufs.take(job.channel),
+        })
+        .collect();
+    Some(PrefetchResult {
+        revision,
+        frame_index,
+        channels,
+        histograms,
+    })
 }
 
 /// Put a frame's buffers on the free list, unless it holds

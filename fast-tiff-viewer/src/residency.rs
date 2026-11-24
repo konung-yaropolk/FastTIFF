@@ -110,7 +110,9 @@ pub(crate) struct Residency {
 /// thousands of fresh pages to fault in on Windows, every frame, per channel.
 /// Warm, a frame decodes straight into last frame's buffers. A channel the
 /// file already holds as its texture wants it is borrowed from the file and
-/// leaves its buffer as it is, so an uncompressed stack holds nothing here.
+/// leaves its buffer as it is, so an uncompressed plane already in the
+/// texture's form (in the host's byte order, in one run) holds nothing here;
+/// a big-endian, 32-bit or interleaved one is decoded into it like any other.
 ///
 /// The sync's decode and the histograms' decode of the channels switched off
 /// ([`histogram::complete`](crate::histogram::complete)) use all of it; a

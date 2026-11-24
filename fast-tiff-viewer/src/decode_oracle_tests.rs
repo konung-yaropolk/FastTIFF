@@ -1321,6 +1321,20 @@ fn the_viewer_decode_equals_the_one_it_replaced() {
         let want = DIGESTS.iter().find(|(n, _)| n == name).map(|&(_, d)| d);
         assert_eq!(want, Some(*digest), "{name}: not what the old decode gave");
     }
+    // And every stored answer was checked, not only those of the files that
+    // opened: once the old decode is gone these are the oracle, and a file
+    // that stopped opening (which `files_in` passes over) must not quietly
+    // take its answer out of the comparison.
+    let unchecked: Vec<&str> = DIGESTS
+        .iter()
+        .map(|&(name, _)| name)
+        .filter(|name| !results.iter().any(|(n, _, _)| n == name))
+        .collect();
+    assert!(
+        unchecked.is_empty(),
+        "stored answers no file was checked against (missing, or no longer opening): \
+         {unchecked:?}"
+    );
     let cases: usize = results.iter().map(|r| r.2).sum();
     assert!(cases > 80_000, "only {cases} cases");
 }

@@ -232,10 +232,12 @@ pub(crate) fn setup_rgb(loaded: &mut Document) {
             .map(fast_tiff_lib::default_composite_lut)
             .collect(),
     );
-    // Unsigned 8-bit RGB deinterleaves into raw u8 planes (`read_plane_u8`) and
-    // rides the R8Uint path — half the texture memory + upload of widening each
-    // plane to u16. Deeper or signed RGB still widens to u16 via `read_plane_u16`.
-    // Either way each component opens on the whole of its type's range.
+    // Unsigned 8-bit RGB is read as its stored bytes, one plane per channel
+    // (`units::Stored`, through `prefetch::decode_jobs`), and rides the R8Uint
+    // path — half the texture memory + upload of widening each plane to u16.
+    // Deeper or signed RGB is read on the 16-bit display scale
+    // (`units::Display`). Either way each component opens on the whole of its
+    // type's range.
     let first = loaded.tiff.frames.first();
     let kind = if first.is_some_and(|f| {
         f.bits_per_sample == 8 && f.sample_format == fast_tiff_lib::SampleFormat::UnsignedInt
@@ -258,8 +260,10 @@ pub(crate) fn setup_rgb(loaded: &mut Document) {
 }
 
 /// Reconfigures a freshly-loaded CMYK (Separated) stack: its four ink planes
-/// become **three** red/green/blue display channels, converted on decode by
-/// [`fast_tiff_lib::read_planes_rgb_u8`] and friends.
+/// become **three** red/green/blue display channels, converted on decode: the
+/// display path reads such a frame in [`fast_tiff_lib::units::CmykRgb8`] or
+/// [`CmykRgb16`](fast_tiff_lib::units::CmykRgb16) (see
+/// [`decode_jobs`](crate::prefetch::decode_jobs)).
 ///
 /// Why convert rather than show four ink channels: the compositing shader is
 /// *additive* (`color += lut[value]` per channel), which is exactly right for
@@ -270,9 +274,9 @@ pub(crate) fn setup_rgb(loaded: &mut Document) {
 ///
 /// The trade is that the four ink measurements collapse to three display
 /// values and the K plate is no longer separately visible. The raw ink planes
-/// remain available from the library (`read_planes_u8`/`read_planes_u16` still
-/// return one plane per sample), so a future "show separations" mode has
-/// everything it needs.
+/// remain available from the library (a [`Frame`](fast_tiff_lib::Frame) read
+/// in `units::Stored` or `units::Display` still gives one plane per ink), so a
+/// future "show separations" mode has everything it needs.
 ///
 /// Like [`setup_rgb`] and [`apply_resolved_dimensions`], this edits only the
 /// display model (and the frame index), so it is as safe to call on a stack

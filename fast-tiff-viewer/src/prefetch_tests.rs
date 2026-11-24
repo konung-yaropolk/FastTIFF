@@ -8,7 +8,6 @@ const W: u32 = 6;
 const H: u32 = 4;
 
 /// Any one revision, for a worker driven without a display.
-#[cfg(feature = "threads")]
 const REV: Revision = Revision {
     layout: 1,
     enabled: 1,
@@ -81,6 +80,66 @@ fn a_warm_decode_fills_the_same_buffers() {
     assert_eq!(again.as_ptr(), first, "decoded into a fresh buffer");
 }
 
+/// A 16 x 12 frame of 7s in strips of 4 rows, `compression`ed.
+fn strips(compression: Compression) -> TiffStack {
+    let opts = WriterOptions::new(16, 12, SampleType::U16)
+        .compression(compression)
+        .rows_per_strip(4);
+    let mut wr = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+    wr.write_frame_u16(&[7; 16 * 12]).unwrap();
+    TiffStack::from_bytes(wr.finish().unwrap().into_inner()).unwrap()
+}
+
+/// [`job`] for a frame of [`strips`].
+fn strips_job() -> ChannelJob {
+    ChannelJob {
+        width: 16,
+        height: 12,
+        ..job()
+    }
+}
+
+/// One of fast-tiff-lib's fixtures, when the checkout has them.
+fn fixture(name: &str) -> Option<TiffStack> {
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .join("fast-tiff-lib/tests/fixtures")
+        .join(name);
+    TiffStack::from_bytes(std::fs::read(p).ok()?).ok()
+}
+
+/// The two uncompressed 16-bit fixtures, big- and little-endian, each with
+/// its byte order and a job for its first frame.
+fn byte_orders() -> Option<[(TiffStack, ByteOrder, ChannelJob); 2]> {
+    let with_job = |tiff: TiffStack, order| {
+        let f = &tiff.frames[0];
+        assert_eq!(f.compression, Compression::None);
+        let job = ChannelJob {
+            width: f.width,
+            height: f.height,
+            ..job()
+        };
+        (tiff, order, job)
+    };
+    Some([
+        with_job(fixture("tff_u16_spp1_p2_none-be.tif")?, ByteOrder::Big),
+        with_job(fixture("tff_u16_spp1_p2_none-le.tif")?, ByteOrder::Little),
+    ])
+}
+
+/// Whether two buffers hold the same samples, bit for bit.
+fn same(a: &Decoded, b: &Decoded) -> bool {
+    match (a.view(), b.view()) {
+        (Samples::U8(a), Samples::U8(b)) => a == b,
+        (Samples::U16(a), Samples::U16(b)) => a == b,
+        (Samples::F32(a), Samples::F32(b)) => a
+            .iter()
+            .map(|v| v.to_bits())
+            .eq(b.iter().map(|v| v.to_bits())),
+        _ => false,
+    }
+}
+
 /// The read-ahead touches a frame's pages only when every channel it is
 /// asked for is read straight from the file, and decodes it ahead otherwise
 /// — whatever the compression tag says. An uncompressed frame in many strips
@@ -91,20 +150,6 @@ fn a_warm_decode_fills_the_same_buffers() {
 /// on the interface thread.)
 #[test]
 fn the_read_ahead_touches_only_frames_read_straight_from_the_file() {
-    let (w, h) = (16u32, 12u32);
-    let small = ChannelJob {
-        width: w,
-        height: h,
-        ..job()
-    };
-    let strips = |compression: Compression| {
-        let opts = WriterOptions::new(w, h, SampleType::U16)
-            .compression(compression)
-            .rows_per_strip(4);
-        let mut wr = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
-        wr.write_frame_u16(&vec![7; (w * h) as usize]).unwrap();
-        TiffStack::from_bytes(wr.finish().unwrap().into_inner()).unwrap()
-    };
     let contiguous = strips(Compression::None);
     assert_eq!(
         contiguous.frames[0].strip_offsets.len(),
@@ -112,43 +157,180 @@ fn the_read_ahead_touches_only_frames_read_straight_from_the_file() {
         "several strips"
     );
     assert!(
-        touch_suffices(&contiguous, std::slice::from_ref(&small)),
+        touch_suffices(&contiguous, &[strips_job()]),
         "contiguous uncompressed strips are borrowed, so touched ahead"
     );
     assert!(
-        !touch_suffices(&strips(Compression::Deflate), std::slice::from_ref(&small)),
+        !touch_suffices(&strips(Compression::Deflate), &[strips_job()]),
         "a compressed frame is decoded ahead"
     );
     assert!(!touch_suffices(&contiguous, &[]), "nothing to read");
 
-    let fixture = |name: &str| {
-        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()?
-            .join("fast-tiff-lib/tests/fixtures")
-            .join(name);
-        let bytes = std::fs::read(p).ok()?;
-        TiffStack::from_bytes(bytes).ok()
-    };
-    let (Some(be), Some(le)) = (
-        fixture("tff_u16_spp1_p2_none-be.tif"),
-        fixture("tff_u16_spp1_p2_none-le.tif"),
-    ) else {
+    let Some(orders) = byte_orders() else {
         eprintln!("skipping: the fast-tiff-lib fixtures are not here");
         return;
     };
-    for (tiff, host) in [(&be, ByteOrder::Big), (&le, ByteOrder::Little)] {
-        let f = &tiff.frames[0];
-        assert_eq!(f.compression, Compression::None);
-        let job = ChannelJob {
-            width: f.width,
-            height: f.height,
-            ..job()
-        };
+    for (tiff, order, job) in orders {
         assert_eq!(
-            touch_suffices(tiff, &[job]),
-            host == ByteOrder::host(),
-            "an uncompressed {host:?} frame on a {:?} host",
+            touch_suffices(&tiff, &[job]),
+            order == ByteOrder::host(),
+            "an uncompressed {order:?} frame on a {:?} host",
             ByteOrder::host()
+        );
+    }
+}
+
+/// And the worker goes by it, request by request, run here as its thread
+/// runs it: a frame read straight from the file is touched, publishes
+/// nothing (so the interface thread's read of it stays a borrow) and leaves
+/// the buffers handed back for a frame that needs them; any other is decoded
+/// ahead, an uncompressed frame in the other byte order included, into those
+/// buffers and to what the inline decode gives. (Driven directly rather than
+/// through a [`Prefetcher`], whose thread shows no sign of a request it
+/// touched rather than skipped.)
+#[test]
+fn the_read_ahead_decodes_ahead_only_what_the_file_does_not_hold() {
+    let free = FreeList::default();
+    let mut scratch = ReadScratch::default();
+    let mut ask = |tiff: &TiffStack, job: &ChannelJob| {
+        let req = Request {
+            jobs: vec![job.clone()],
+            parallel: false,
+            binning: None,
+        };
+        read_ahead(
+            tiff,
+            (REV, 0),
+            &req,
+            &CancelToken::never(),
+            &mut scratch,
+            &free,
+        )
+    };
+    let handed_back = || free.lock().unwrap().len();
+    let decoded_as_inline = |tiff: &TiffStack, job: &ChannelJob, got: PrefetchResult| {
+        let want = decode_owned(tiff, std::slice::from_ref(job)).unwrap();
+        assert!(matches!(&got.channels[..], [c] if same(&c.data, &want[0])));
+    };
+
+    give_back(&free, ChannelBufs::default());
+    assert!(
+        ask(&strips(Compression::None), &strips_job()).is_none(),
+        "contiguous uncompressed strips were decoded ahead"
+    );
+    assert_eq!(handed_back(), 1, "a frame only touched took a frame's buffers");
+    let deflated = strips(Compression::Deflate);
+    let got = ask(&deflated, &strips_job()).expect("a compressed frame is decoded ahead");
+    assert_eq!(handed_back(), 0, "not decoded into the buffers handed back");
+    decoded_as_inline(&deflated, &strips_job(), got);
+
+    let Some(orders) = byte_orders() else {
+        eprintln!("skipping: the fast-tiff-lib fixtures are not here");
+        return;
+    };
+    for (tiff, order, job) in orders {
+        match ask(&tiff, &job) {
+            None => assert_eq!(order, ByteOrder::host(), "{order:?} was not decoded ahead"),
+            Some(got) => {
+                assert_ne!(order, ByteOrder::host(), "{order:?} was decoded ahead");
+                decoded_as_inline(&tiff, &job, got);
+            }
+        }
+    }
+}
+
+/// Through the worker's thread, the answer that matters: an uncompressed
+/// frame in the other byte order is published decoded, where the mode chosen
+/// once from the compression tag only touched it and left the byte swap to
+/// the interface thread.
+#[cfg(feature = "threads")]
+#[test]
+fn an_uncompressed_frame_in_the_other_byte_order_is_published_ahead() {
+    use std::time::{Duration, Instant};
+    let Some(orders) = byte_orders() else {
+        eprintln!("skipping: the fast-tiff-lib fixtures are not here");
+        return;
+    };
+    let (tiff, _, job) = orders
+        .into_iter()
+        .find(|(_, order, _)| *order != ByteOrder::host())
+        .expect("one of the two is in the other byte order");
+    let job = ChannelJob { ifd_idx: 1, ..job };
+    let want = decode_owned(&tiff, std::slice::from_ref(&job)).unwrap();
+    let p = Prefetcher::new(Arc::new(tiff)).expect("the thread should spawn");
+    p.request(REV, 1, vec![job], None);
+    let start = Instant::now();
+    let got = loop {
+        if let Some(r) = p.take_matching(REV, 1) {
+            break r;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the frame was not read ahead"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(matches!(&got.channels[..], [c] if same(&c.data, &want[0])));
+}
+
+/// A planar frame's planes are strips of their own, so a channel switched off
+/// is not decoded at all: with the green plane's strips made garbage, red and
+/// blue still read, and as the clean file has them, while asking for green
+/// too fails. (One pass over the span of planes asked for would decode green
+/// into a spare, and fail the lot.)
+#[test]
+fn a_planar_plane_nobody_shows_is_not_decoded() {
+    let (w, h) = (64u32, 64u32);
+    let n = (w * h) as usize;
+    for (st, kind) in [
+        (SampleType::U8, ChannelKind::Int8),
+        (SampleType::U16, ChannelKind::Int16),
+    ] {
+        let opts = WriterOptions::new(w, h, st)
+            .samples_per_pixel(3)
+            .planar(true)
+            .compression(Compression::Lzw)
+            .rows_per_strip(16);
+        let mut wr = TiffWriter::new(std::io::Cursor::new(Vec::new()), opts).unwrap();
+        if st == SampleType::U8 {
+            let px: Vec<u8> = (0..3 * n).map(|i| (i * 7) as u8).collect();
+            wr.write_frame_u8(&px).unwrap();
+        } else {
+            let px: Vec<u16> = (0..3 * n).map(|i| (i * 37) as u16).collect();
+            wr.write_frame_u16(&px).unwrap();
+        }
+        let mut bytes = wr.finish().unwrap().into_inner();
+        let clean = TiffStack::from_bytes(bytes.clone()).unwrap();
+        let f = &clean.frames[0];
+        let per_plane = f.strip_offsets.len() / 3;
+        assert_eq!(per_plane, 4, "{st:?}: four strips a plane");
+        for s in per_plane..2 * per_plane {
+            let at = f.strip_offsets[s] as usize;
+            bytes[at..at + f.strip_byte_counts[s] as usize].fill(0xFF);
+        }
+        let green_garbled = TiffStack::from_bytes(bytes).unwrap();
+        let rgb = |channel: usize| ChannelJob {
+            channel,
+            ifd_idx: 0,
+            plane: channel,
+            kind,
+            rgb: true,
+            width: w,
+            height: h,
+        };
+        let red_and_blue = [rgb(0), rgb(2)];
+        let got = decode_owned(&green_garbled, &red_and_blue)
+            .unwrap_or_else(|e| panic!("{st:?}: green, switched off, was decoded: {e}"));
+        let want = decode_owned(&clean, &red_and_blue).unwrap();
+        assert!(
+            got.iter().zip(&want).all(|(a, b)| same(a, b)),
+            "{st:?}: red and blue are not the clean file's"
+        );
+        let all = [rgb(0), rgb(1), rgb(2)];
+        assert!(decode_owned(&clean, &all).is_ok(), "{st:?}");
+        assert!(
+            decode_owned(&green_garbled, &all).is_err(),
+            "{st:?}: garbage in green should not decode"
         );
     }
 }

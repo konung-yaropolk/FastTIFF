@@ -287,7 +287,8 @@ impl<'a> Frame<'a> {
 
     /// The source's own samples of `plane` in `units`, when they are the
     /// answer ([`borrows`](Self::borrows)): what [`read`](Self::read) would
-    /// hand back without decoding anything. `None` when a read would decode.
+    /// hand back without decoding anything. `None` when a read would decode,
+    /// or would fail (a plane past the last).
     ///
     /// A [`read`](Self::read)'s samples live only as long as its borrow of
     /// `out`, which they may be in. These live as long as the frame's source,
