@@ -99,6 +99,10 @@
 // else is the crate's, and what a frontend needs of it is re-exported below.
 // An item is reachable by one path.
 mod bandcache;
+/// The batch readers — the volume build, the save, a plugin's plane reads —
+/// against what they gave before they moved onto the library's `Frame`.
+#[cfg(test)]
+mod batch_oracle_tests;
 mod brightness;
 pub mod camera;
 pub mod channels;

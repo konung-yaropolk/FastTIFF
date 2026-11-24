@@ -319,7 +319,7 @@ fn partial_path(path: &Path) -> std::path::PathBuf {
 ///
 /// `batch_bytes` is [`BATCH_BYTES`] outside of tests, which need several
 /// batches from a stack small enough to build in one.
-fn write_all<W: std::io::Write + std::io::Seek>(
+pub(crate) fn write_all<W: std::io::Write + std::io::Seek>(
     source: &SaveSource,
     sink: W,
     on_progress: &mut dyn FnMut(f32) -> bool,

@@ -303,6 +303,361 @@ fn an_8_bit_tiff_is_not_widened_to_the_16_bit_range() {
     assert_eq!(psf.data, vec![0.0, 1.0, 128.0, 255.0]);
 }
 
+// ------------------------------------------------------- the PSF reader, oracle
+
+/// The PSF reader as it was before it decoded each slice straight into the
+/// volume: one slice at a time into a buffer of its own, appended. The live
+/// half of [`the_psf_reader_reads_what_it_read_before`], kept while the
+/// library's old reader it calls exists; both go in item 25e, and
+/// [`PSF_DIGESTS`] stays.
+mod old {
+    use super::super::{Dims, Psf, MAX_VOXELS};
+    use fasttiff_plugin_api::PluginError;
+
+    pub(super) fn load_psf(path: &str) -> Result<Psf, PluginError> {
+        use fast_tiff_lib::TiffStack;
+        if path.trim().is_empty() {
+            return Err(PluginError::unsupported("no PSF file chosen"));
+        }
+        let bytes = std::fs::read(path).map_err(|e| PluginError::failed(format!("{e}")))?;
+        let tiff =
+            TiffStack::from_bytes(bytes).map_err(|e| PluginError::failed(format!("{e:#}")))?;
+        let first = tiff
+            .frames
+            .first()
+            .ok_or_else(|| PluginError::failed("no images"))?;
+        let dims = Dims::new(
+            first.width as usize,
+            first.height as usize,
+            tiff.frames.len(),
+        );
+        if dims.x == 0 || dims.y == 0 {
+            return Err(PluginError::failed("a zero dimension"));
+        }
+        if tiff
+            .frames
+            .iter()
+            .any(|f| f.width != first.width || f.height != first.height)
+        {
+            return Err(PluginError::failed("slices of different sizes"));
+        }
+        if dims.len() > MAX_VOXELS {
+            return Err(PluginError::unsupported("too many voxels"));
+        }
+        let mut data = Vec::with_capacity(dims.len());
+        let mut slice = Vec::new();
+        for frame in tiff.frames.iter() {
+            fast_tiff_lib::read_plane_f32_into(&tiff.data, frame, tiff.byte_order, 0, &mut slice)
+                .map_err(|e| PluginError::failed(format!("{e:#}")))?;
+            data.extend_from_slice(&slice);
+        }
+        if data.len() != dims.len() {
+            return Err(PluginError::failed("decoded to the wrong length"));
+        }
+        Ok(Psf { data, dims })
+    }
+}
+
+fn lib_dir(sub: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fast-tiff-lib")
+        .join(sub)
+}
+
+/// Every TIFF in the library's fixtures, fuzz regressions and fuzz seeds, by
+/// name and path; and a synthetic matrix written beside them: every depth a
+/// PSF is saved as, one sample or three, one strip a slice or several,
+/// uncompressed, LZW and LZW with the predictor.
+fn psf_files() -> Vec<(String, std::path::PathBuf)> {
+    use fast_tiff_lib::{Compression, SampleType, TiffWriter, WriterOptions};
+    let mut out = Vec::new();
+    for sub in ["tests/fixtures", "tests/fuzz-regressions", "fuzz/seeds"] {
+        let Ok(entries) = std::fs::read_dir(lib_dir(sub)) else {
+            continue;
+        };
+        let mut paths: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "tif" || x == "tiff"))
+            .collect();
+        paths.sort();
+        for p in paths {
+            let name = format!("{sub}/{}", p.file_name().unwrap().to_string_lossy());
+            out.push((name, p));
+        }
+    }
+    let types = [
+        SampleType::U8,
+        SampleType::I8,
+        SampleType::U16,
+        SampleType::I16,
+        SampleType::U32,
+        SampleType::F32,
+    ];
+    let codecs = [
+        (Compression::None, false),
+        (Compression::Lzw, false),
+        (Compression::Lzw, true),
+    ];
+    for st in types {
+        for spp in [1u16, 3] {
+            for (compression, predictor) in codecs {
+                for rps in [None, Some(4)] {
+                    let (w, h) = (11u32, 7u32);
+                    let mut opts = WriterOptions::new(w, h, st)
+                        .samples_per_pixel(spp)
+                        .compression(compression)
+                        .predictor(predictor);
+                    if let Some(rows) = rps {
+                        opts = opts.rows_per_strip(rows);
+                    }
+                    let mut wr = TiffWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+                    let n = (w * h) as usize * spp as usize * st.bytes();
+                    for z in 0..5u8 {
+                        let bytes: Vec<u8> = (0..n)
+                            .map(|i| (i as u8).wrapping_mul(29).wrapping_add(z.wrapping_mul(71)))
+                            .map(|b| if st == SampleType::F32 { b & 0x3f } else { b })
+                            .collect();
+                        wr.write_frame_bytes(&bytes).unwrap();
+                    }
+                    let name = format!(
+                        "synthetic/{st:?} spp{spp} {compression:?}{} {}",
+                        if predictor { "+pred" } else { "" },
+                        rps.map_or("one strip".to_string(), |r| format!("rps{r}"))
+                    );
+                    let file = format!("oracle-{}.tif", name.replace(['/', ' ', '+'], "_"));
+                    let path = temp(&file);
+                    std::fs::write(&path, wr.finish().unwrap().into_inner()).unwrap();
+                    out.push((name, path));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What a read came to, digested (64-bit FNV-1a): the shape and every
+/// sample's bits, or the kind of error.
+fn psf_digest(got: &Result<Psf, PluginError>) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut put = |bytes: &[u8]| {
+        for &b in bytes {
+            h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    match got {
+        Ok(psf) => {
+            put(&[1]);
+            for v in [psf.dims.x, psf.dims.y, psf.dims.z, psf.data.len()] {
+                put(&(v as u64).to_le_bytes());
+            }
+            for v in &psf.data {
+                put(&v.to_bits().to_le_bytes());
+            }
+        }
+        Err(PluginError::Unsupported(_)) => put(&[2]),
+        Err(PluginError::OutOfRange(_)) => put(&[3]),
+        Err(PluginError::Failed(_)) => put(&[4]),
+    }
+    h
+}
+
+/// Printed by `FASTTIFF_PRINT_DIGESTS=1 cargo test -p fasttiff-builtin-plugins
+/// --lib psf_reader_reads -- --nocapture`, from the reader before it decoded
+/// straight into the volume.
+const PSF_DIGESTS: &[(&str, u64)] = &[
+    ("tests/fixtures/ij_u16_spp1_p6_hyperstack.tif", 0x12fc2dc074be8617),
+    ("tests/fixtures/pil_u16_spp1_p1_lzw.tif", 0xa3cdb1fdd1a002b8),
+    ("tests/fixtures/pil_u8_spp1_p1_lzw.tif", 0xffd1996e00c2ef42),
+    ("tests/fixtures/pil_u8_spp1_p1_pb.tif", 0xffd1996e00c2ef42),
+    ("tests/fixtures/pil_u8_spp3_p1_zip.tif", 0x552d874222a8d359),
+    ("tests/fixtures/pil_u8_spp4_p1_cmyk-lzw.tif", 0xd83f0ed01ce2cb10),
+    ("tests/fixtures/tff_f32_spp1_p1_tiled-zip-pred3.tif", 0x689792952411694b),
+    ("tests/fixtures/tff_f32_spp1_p2_lzw-pred3.tif", 0xa655f9e237a77625),
+    ("tests/fixtures/tff_f32_spp1_p2_none-le.tif", 0xa655f9e237a77625),
+    ("tests/fixtures/tff_f32_spp1_p2_zip-pred3-be.tif", 0xa655f9e237a77625),
+    ("tests/fixtures/tff_f32_spp1_p2_zip-pred3.tif", 0xa655f9e237a77625),
+    ("tests/fixtures/tff_i16_spp1_p2_lzw-pred2.tif", 0xaa2b276fac163801),
+    ("tests/fixtures/tff_i16_spp1_p2_none-be.tif", 0xaa2b276fac163801),
+    ("tests/fixtures/tff_i16_spp1_p2_none-le.tif", 0xaa2b276fac163801),
+    ("tests/fixtures/tff_i32_spp1_p2_none-le.tif", 0x5182e690f3b93133),
+    ("tests/fixtures/tff_i8_spp1_p2_none-le.tif", 0xb687b4dbf04dea89),
+    ("tests/fixtures/tff_u16_spp1_p1_tiled.tif", 0xa3cdb1fdd1a002b8),
+    ("tests/fixtures/tff_u16_spp1_p2_lzw-pred2-be.tif", 0x45df94f074f05f0b),
+    ("tests/fixtures/tff_u16_spp1_p2_lzw-pred2-rps4.tif", 0x45df94f074f05f0b),
+    ("tests/fixtures/tff_u16_spp1_p2_lzw-rps4.tif", 0x45df94f074f05f0b),
+    ("tests/fixtures/tff_u16_spp1_p2_none-be.tif", 0x45df94f074f05f0b),
+    ("tests/fixtures/tff_u16_spp1_p2_none-le.tif", 0x45df94f074f05f0b),
+    ("tests/fixtures/tff_u16_spp1_p2_pb-rps4.tif", 0x45df94f074f05f0b),
+    ("tests/fixtures/tff_u16_spp1_p2_zip-pred2.tif", 0x45df94f074f05f0b),
+    ("tests/fixtures/tff_u16_spp1_p2_zip-rps4.tif", 0x45df94f074f05f0b),
+    ("tests/fixtures/tff_u16_spp3_p2_zip-pred2.tif", 0x98aae04f83572170),
+    ("tests/fixtures/tff_u16_spp4_p1_cmyk-zip-pred2.tif", 0x0f590964b72437ed),
+    ("tests/fixtures/tff_u16_spp4_p1_cmyk.tif", 0x0f590964b72437ed),
+    ("tests/fixtures/tff_u32_spp1_p2_none-le.tif", 0xa5044ec239db1e8d),
+    ("tests/fixtures/tff_u32_spp1_p2_zip-pred2.tif", 0xa5044ec239db1e8d),
+    ("tests/fixtures/tff_u8_spp1_p2_none-le.tif", 0x935797a52975eced),
+    ("tests/fixtures/tff_u8_spp1_p2_zip-pred2.tif", 0x935797a52975eced),
+    ("tests/fixtures/tff_u8_spp3_p1_tiled-lzw-pred2.tif", 0x552d874222a8d359),
+    ("tests/fixtures/tff_u8_spp3_p2_lzw-pred2.tif", 0x0132df076ea81db8),
+    ("tests/fixtures/tff_u8_spp3_p2_none.tif", 0x0132df076ea81db8),
+    ("tests/fixtures/tff_u8_spp4_p1_cmyk-lzw.tif", 0xd83f0ed01ce2cb10),
+    ("tests/fixtures/tff_u8_spp4_p1_cmyk.tif", 0xd83f0ed01ce2cb10),
+    ("tests/fixtures/tff_u8_spp4_p2_cmyk-planar.tif", 0xb45692a6bb665190),
+    ("tests/fixtures/tld_u16_spp1_p1_grid-lzw.tif", 0xb411ed2a3f6092ae),
+    ("tests/fixtures/tld_u16_spp1_p1_grid.tif", 0xb411ed2a3f6092ae),
+    ("tests/fixtures/tld_u8_spp3_p1_grid-planar.tif", 0x76ce7e67fd2c52a4),
+    ("tests/fixtures/tld_u8_spp3_p1_grid-pred2.tif", 0x0873e70ce464a3e9),
+    ("tests/fuzz-regressions/overflow-crop-rows-height-u32max.tif", 0xaf63bf4c8601bb45),
+    ("tests/fuzz-regressions/overflow-strip-band-h4g-rps2g.tif", 0xaf63bf4c8601bb45),
+    ("tests/fuzz-regressions/overflow-tiled-crop-h4g-tile2g.tif", 0xaf63bf4c8601bb45),
+    ("tests/fuzz-regressions/overflow-w2g-h2g-spp4.tif", 0xaf63bf4c8601bb45),
+    ("tests/fuzz-regressions/slow-tall-tile.tif", 0xaf63b94c8601b113),
+    ("tests/fuzz-regressions/slow-tile-grid.tif", 0xaf63b94c8601b113),
+    ("fuzz/seeds/bigtiff.tif", 0x67692e6fee849655),
+    ("fuzz/seeds/cmyk16_lzw.tif", 0x117f380a21db0c99),
+    ("fuzz/seeds/cmyk_chunky.tif", 0x8b653f3d9a96ef63),
+    ("fuzz/seeds/cmyk_planar.tif", 0x39f5ffced4dea4ba),
+    ("fuzz/seeds/float32.tif", 0x55b8cdd670f2f50d),
+    ("fuzz/seeds/float32_zlib_pred.tif", 0x55b8cdd670f2f50d),
+    ("fuzz/seeds/gray16.tif", 0x67692e6fee849655),
+    ("fuzz/seeds/gray16_be.tif", 0x67692e6fee849655),
+    ("fuzz/seeds/gray16_lzw.tif", 0x67692e6fee849655),
+    ("fuzz/seeds/gray16_packbits.tif", 0x67692e6fee849655),
+    ("fuzz/seeds/gray16_strips.tif", 0x4cb3c26ed914ecc9),
+    ("fuzz/seeds/gray16_zlib.tif", 0x67692e6fee849655),
+    ("fuzz/seeds/gray16_zlib_pred.tif", 0x67692e6fee849655),
+    ("fuzz/seeds/gray8.tif", 0x42d127a231aac830),
+    ("fuzz/seeds/imagej_hyperstack.tif", 0x1677e1b41c728dbf),
+    ("fuzz/seeds/imagej_lut.tif", 0x67692e6fee849655),
+    ("fuzz/seeds/ome.tif", 0x1677e1b41c728dbf),
+    ("fuzz/seeds/palette4.tif", 0xb721659b720a4e2d),
+    ("fuzz/seeds/palette8.tif", 0x42d127a231aac830),
+    ("fuzz/seeds/regression-oom-huge-width.tif", 0xaf63bf4c8601bb45),
+    ("fuzz/seeds/rgb_chunky.tif", 0xcdca10de2fd25263),
+    ("fuzz/seeds/rgb_planar.tif", 0xcdca10de2fd25263),
+    ("fuzz/seeds/stack3.tif", 0xe769ed9ca6e8358e),
+    ("fuzz/seeds/tiled16.tif", 0x1c607d470b22ecb2),
+    ("fuzz/seeds/tiled16_lzw.tif", 0x1c607d470b22ecb2),
+    ("fuzz/seeds/tiled_planar.tif", 0x830bc07f852e88c9),
+    ("fuzz/seeds/tiled_rgb_pred.tif", 0x3f96e0e123b5d1d8),
+    ("synthetic/U8 spp1 None one strip", 0x64d17721c21d0d14),
+    ("synthetic/U8 spp1 None rps4", 0x64d17721c21d0d14),
+    ("synthetic/U8 spp1 Lzw one strip", 0x64d17721c21d0d14),
+    ("synthetic/U8 spp1 Lzw rps4", 0x64d17721c21d0d14),
+    ("synthetic/U8 spp1 Lzw+pred one strip", 0x64d17721c21d0d14),
+    ("synthetic/U8 spp1 Lzw+pred rps4", 0x64d17721c21d0d14),
+    ("synthetic/U8 spp3 None one strip", 0x64302f1586fb122c),
+    ("synthetic/U8 spp3 None rps4", 0x64302f1586fb122c),
+    ("synthetic/U8 spp3 Lzw one strip", 0x64302f1586fb122c),
+    ("synthetic/U8 spp3 Lzw rps4", 0x64302f1586fb122c),
+    ("synthetic/U8 spp3 Lzw+pred one strip", 0x64302f1586fb122c),
+    ("synthetic/U8 spp3 Lzw+pred rps4", 0x64302f1586fb122c),
+    ("synthetic/I8 spp1 None one strip", 0xac3831941a0710d7),
+    ("synthetic/I8 spp1 None rps4", 0xac3831941a0710d7),
+    ("synthetic/I8 spp1 Lzw one strip", 0xac3831941a0710d7),
+    ("synthetic/I8 spp1 Lzw rps4", 0xac3831941a0710d7),
+    ("synthetic/I8 spp1 Lzw+pred one strip", 0xac3831941a0710d7),
+    ("synthetic/I8 spp1 Lzw+pred rps4", 0xac3831941a0710d7),
+    ("synthetic/I8 spp3 None one strip", 0x92614ff48bbcf916),
+    ("synthetic/I8 spp3 None rps4", 0x92614ff48bbcf916),
+    ("synthetic/I8 spp3 Lzw one strip", 0x92614ff48bbcf916),
+    ("synthetic/I8 spp3 Lzw rps4", 0x92614ff48bbcf916),
+    ("synthetic/I8 spp3 Lzw+pred one strip", 0x92614ff48bbcf916),
+    ("synthetic/I8 spp3 Lzw+pred rps4", 0x92614ff48bbcf916),
+    ("synthetic/U16 spp1 None one strip", 0x026745c54a520e8c),
+    ("synthetic/U16 spp1 None rps4", 0x026745c54a520e8c),
+    ("synthetic/U16 spp1 Lzw one strip", 0x026745c54a520e8c),
+    ("synthetic/U16 spp1 Lzw rps4", 0x026745c54a520e8c),
+    ("synthetic/U16 spp1 Lzw+pred one strip", 0x026745c54a520e8c),
+    ("synthetic/U16 spp1 Lzw+pred rps4", 0x026745c54a520e8c),
+    ("synthetic/U16 spp3 None one strip", 0x614fd2ebe0cfbda1),
+    ("synthetic/U16 spp3 None rps4", 0x614fd2ebe0cfbda1),
+    ("synthetic/U16 spp3 Lzw one strip", 0x614fd2ebe0cfbda1),
+    ("synthetic/U16 spp3 Lzw rps4", 0x614fd2ebe0cfbda1),
+    ("synthetic/U16 spp3 Lzw+pred one strip", 0x614fd2ebe0cfbda1),
+    ("synthetic/U16 spp3 Lzw+pred rps4", 0x614fd2ebe0cfbda1),
+    ("synthetic/I16 spp1 None one strip", 0xf4856d0c3af763fb),
+    ("synthetic/I16 spp1 None rps4", 0xf4856d0c3af763fb),
+    ("synthetic/I16 spp1 Lzw one strip", 0xf4856d0c3af763fb),
+    ("synthetic/I16 spp1 Lzw rps4", 0xf4856d0c3af763fb),
+    ("synthetic/I16 spp1 Lzw+pred one strip", 0xf4856d0c3af763fb),
+    ("synthetic/I16 spp1 Lzw+pred rps4", 0xf4856d0c3af763fb),
+    ("synthetic/I16 spp3 None one strip", 0x477c9b27a627c1fc),
+    ("synthetic/I16 spp3 None rps4", 0x477c9b27a627c1fc),
+    ("synthetic/I16 spp3 Lzw one strip", 0x477c9b27a627c1fc),
+    ("synthetic/I16 spp3 Lzw rps4", 0x477c9b27a627c1fc),
+    ("synthetic/I16 spp3 Lzw+pred one strip", 0x477c9b27a627c1fc),
+    ("synthetic/I16 spp3 Lzw+pred rps4", 0x477c9b27a627c1fc),
+    ("synthetic/U32 spp1 None one strip", 0xf4acb50a444946e5),
+    ("synthetic/U32 spp1 None rps4", 0xf4acb50a444946e5),
+    ("synthetic/U32 spp1 Lzw one strip", 0xf4acb50a444946e5),
+    ("synthetic/U32 spp1 Lzw rps4", 0xf4acb50a444946e5),
+    ("synthetic/U32 spp1 Lzw+pred one strip", 0xf4acb50a444946e5),
+    ("synthetic/U32 spp1 Lzw+pred rps4", 0xf4acb50a444946e5),
+    ("synthetic/U32 spp3 None one strip", 0x5e84f45d7a612b60),
+    ("synthetic/U32 spp3 None rps4", 0x5e84f45d7a612b60),
+    ("synthetic/U32 spp3 Lzw one strip", 0x5e84f45d7a612b60),
+    ("synthetic/U32 spp3 Lzw rps4", 0x5e84f45d7a612b60),
+    ("synthetic/U32 spp3 Lzw+pred one strip", 0x5e84f45d7a612b60),
+    ("synthetic/U32 spp3 Lzw+pred rps4", 0x5e84f45d7a612b60),
+    ("synthetic/F32 spp1 None one strip", 0x607e8a951950b5b3),
+    ("synthetic/F32 spp1 None rps4", 0x607e8a951950b5b3),
+    ("synthetic/F32 spp1 Lzw one strip", 0x607e8a951950b5b3),
+    ("synthetic/F32 spp1 Lzw rps4", 0x607e8a951950b5b3),
+    ("synthetic/F32 spp1 Lzw+pred one strip", 0x607e8a951950b5b3),
+    ("synthetic/F32 spp1 Lzw+pred rps4", 0x607e8a951950b5b3),
+    ("synthetic/F32 spp3 None one strip", 0x8fc9666d0453e313),
+    ("synthetic/F32 spp3 None rps4", 0x8fc9666d0453e313),
+    ("synthetic/F32 spp3 Lzw one strip", 0x8fc9666d0453e313),
+    ("synthetic/F32 spp3 Lzw rps4", 0x8fc9666d0453e313),
+    ("synthetic/F32 spp3 Lzw+pred one strip", 0x8fc9666d0453e313),
+    ("synthetic/F32 spp3 Lzw+pred rps4", 0x8fc9666d0453e313),
+];
+
+/// Every file read as a PSF gives the volume it gave before, sample for
+/// sample, or fails where it failed: against the old reader, live, and
+/// against the digests of what it gave.
+#[test]
+fn the_psf_reader_reads_what_it_read_before() {
+    let files = psf_files();
+    assert!(
+        files.len() > 100,
+        "only {} files: the fixtures are missing",
+        files.len()
+    );
+    let print = std::env::var_os("FASTTIFF_PRINT_DIGESTS").is_some();
+    let mut rows = Vec::new();
+    for (name, path) in &files {
+        let path = path.display().to_string();
+        let digest = psf_digest(&load_psf(&path));
+        assert_eq!(
+            digest,
+            psf_digest(&old::load_psf(&path)),
+            "{name}: not what the old reader gave"
+        );
+        rows.push(format!("    ({name:?}, {digest:#018x}),"));
+        let want = PSF_DIGESTS.iter().find(|(n, _)| n == name).map(|&(_, d)| d);
+        if !print {
+            assert_eq!(want, Some(digest), "{name}: not what it read before");
+        }
+    }
+    if print {
+        println!(
+            "const PSF_DIGESTS: &[(&str, u64)] = &[\n{}\n];",
+            rows.join("\n")
+        );
+    }
+    let unchecked: Vec<&str> = PSF_DIGESTS
+        .iter()
+        .map(|&(n, _)| n)
+        .filter(|n| !files.iter().any(|(f, _)| f == n))
+        .collect();
+    assert!(
+        unchecked.is_empty(),
+        "stored answers no file was checked against: {unchecked:?}"
+    );
+}
+
 // ------------------------------------------------------------------ metadata
 
 /// A generated image describes itself and nothing else.
