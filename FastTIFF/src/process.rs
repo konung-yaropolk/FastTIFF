@@ -65,18 +65,6 @@ pub fn open_all(paths: &[std::path::PathBuf]) -> Option<&std::path::PathBuf> {
 /// mistaken for one — is worse.
 pub const FROM_STDIN: &str = "--from-stdin";
 
-/// Internal handoff, distinct from opening a user-owned TIFF by filename.
-pub const FROM_SCRATCH: &str = "--from-scratch";
-
-pub fn open_scratch_in_new_process(path: &Path, source: Option<&Path>) -> std::io::Result<()> {
-    let mut cmd = Command::new(std::env::current_exe()?);
-    cmd.arg(FROM_SCRATCH).arg(path);
-    if let Some(source) = source {
-        cmd.arg(source);
-    }
-    cmd.spawn().map(|_| ())
-}
-
 /// Hand `bytes` to a new viewer process without going through a file.
 ///
 /// The child reads its whole stack from standard input, so a plugin result

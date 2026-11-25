@@ -141,14 +141,14 @@ fn a_streamed_result_goes_to_a_new_window_as_the_file_it_was_written_to() {
     );
     let (path, image) = &to.opened[0];
     assert_eq!(
-        path.as_deref().and_then(|p| p.parent()?.parent()),
+        path.as_deref().and_then(|p| p.parent()),
         Some(dir.as_path()),
         "handed over as the file it was streamed into"
     );
     assert_eq!(
-        path.as_deref().and_then(|p| p.file_name()),
-        Some(std::ffi::OsStr::new(".made.tif.temp")),
-        "named as the result, in a directory of its own"
+        path.as_deref()
+            .and_then(crate::plugins::result::scratch_name),
+        Some("made.tif"),
     );
     assert_eq!(image.planes[1], PlaneData::U16(vec![8; 12]));
     let _ = std::fs::remove_dir_all(&dir);

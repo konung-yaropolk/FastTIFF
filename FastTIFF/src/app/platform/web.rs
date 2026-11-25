@@ -148,7 +148,6 @@ impl Platform for Browser {
     fn deliver_new_document(
         result: ResultTiff,
         name: String,
-        _source: Option<&Path>,
         _progress: &AtomicU32,
         _cancel: &AtomicBool,
     ) -> Handover {

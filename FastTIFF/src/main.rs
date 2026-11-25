@@ -86,7 +86,22 @@ fn read_piped_stack() -> Option<Vec<u8>> {
 }
 
 fn main() -> eframe::Result {
+    use fast_tiff_viewer::plugins::ScratchFile;
     env_logger::init();
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if let Some((flag, rest)) = args.split_first() {
+        if flag == ScratchFile::GUARD {
+            if let [path, name, source @ ..] = rest {
+                if let Err(e) =
+                    ScratchFile::supervise(path.as_ref(), name, source.first().map(AsRef::as_ref))
+                {
+                    log::error!("scratch supervisor: {e}");
+                }
+            }
+            return Ok(());
+        }
+    }
+    ScratchFile::enable_supervision();
 
     // macOS delivers "Open With" / double-clicked files as an Apple Event, not
     // argv. Register the launch observer that hooks the open-documents event
@@ -110,17 +125,18 @@ fn main() -> eframe::Result {
     // dragged onto the .exe / its shortcut. Selecting several files at once
     // passes them all to a single invocation — open the first here and launch
     // each of the rest in its own process so they all appear side by side.
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let initial = match args.split_first() {
-        // Launched by a viewer that had a plugin result to hand over and had
-        // room to do it in memory. The stack arrives down the pipe instead of
-        // through a file; see `process::open_bytes_in_new_process`.
-        Some((flag, rest)) if flag == process::FROM_SCRATCH => rest.first().and_then(|path| {
-            fast_tiff_viewer::plugins::Derived::handed_off(path.into(), rest.get(1).map(Into::into))
-                .map_err(|e| log::error!("could not open scratch result: {e}"))
-                .ok()
-                .map(app::Opened::Source)
-        }),
+        Some((flag, [path, name, source @ ..])) if flag == ScratchFile::OPEN => {
+            fast_tiff_viewer::plugins::Derived::handed_off(
+                path.into(),
+                name.into(),
+                source.first().map(Into::into),
+            )
+            .map_err(|e| log::error!("could not open scratch result: {e}"))
+            .ok()
+            .map(app::Opened::Source)
+        }
+        // An in-memory result arrives through the pipe.
         Some((flag, rest)) if flag == process::FROM_STDIN => {
             let name = rest
                 .first()

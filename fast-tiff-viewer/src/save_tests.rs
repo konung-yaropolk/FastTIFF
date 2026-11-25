@@ -477,7 +477,9 @@ fn a_stopped_save_leaves_an_existing_file_untouched() {
 /// Nor may either failure leave the scratch file lying about next to it.
 #[test]
 fn no_part_file_is_left_behind() {
-    let path = temp("partfile");
+    let dir = std::env::temp_dir().join(format!("fasttiff-save-partfile-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("output.tif");
     let stack = open(source(SampleType::U16, 1, 1, 4));
     let mut calls = 0;
     save_source(&SaveSource::of(&stack), &path, &mut |_| {
@@ -486,12 +488,8 @@ fn no_part_file_is_left_behind() {
     })
     .expect_err("stopped");
 
-    let leftovers: Vec<_> = std::fs::read_dir(path.parent().expect("a directory"))
-        .expect("read the directory")
-        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().to_string()))
-        .filter(|n| n.starts_with("fasttiff-save-partfile") && n.contains("fasttiff-part"))
-        .collect();
-    assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    std::fs::remove_dir(dir).unwrap();
 }
 
 // ------------------------------------------------------------- compression
@@ -542,7 +540,14 @@ fn a_save_in_several_batches_keeps_every_frame_in_order() {
         let stack = open(source(sample, 2, 3, 4));
         let path = temp(&format!("batches-{sample:?}"));
         let five_frames = W as usize * H as usize * width * 5;
-        write_to_path(&SaveSource::of(&stack), &path, &mut |_| true, five_frames).expect("save");
+        write_to_file(
+            &SaveSource::of(&stack),
+            std::fs::File::create(&path).unwrap(),
+            &path,
+            &mut |_| true,
+            five_frames,
+        )
+        .expect("save");
 
         let back = reopen(&path);
         assert_eq!(back.frames.len(), 24, "{sample:?}: frames lost or invented");

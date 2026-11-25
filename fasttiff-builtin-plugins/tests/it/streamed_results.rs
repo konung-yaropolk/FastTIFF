@@ -167,9 +167,12 @@ fn a_streamed_stabilization_is_the_whole_one() {
             "{what}: declared differently"
         );
         assert!(streamed.planes == whole.planes, "{what}: the pixels differ");
-        assert_eq!(
-            path.file_name().unwrap(),
-            ".moving-stabilized.tif.temp",
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with("-moving-stabilized.tif.temp"),
             "{what}: the file is not named as the result"
         );
     }

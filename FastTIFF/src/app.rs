@@ -463,7 +463,6 @@ impl PluginRun {
 /// that last step is `fast_tiff_viewer::plugins::deliver`, shared with the
 /// browser build.
 struct AppDelivery<'a> {
-    source: Option<&'a std::path::Path>,
     label: &'a std::sync::Mutex<String>,
     progress: &'a std::sync::atomic::AtomicU32,
     cancel: &'a std::sync::atomic::AtomicBool,
@@ -496,7 +495,7 @@ impl fast_tiff_viewer::plugins::deliver::Deliver for AppDelivery<'_> {
             "{}.tif",
             fast_tiff_viewer::plugins::file_stem(result.name())
         );
-        Current::deliver_new_document(result, name, self.source, self.progress, self.cancel)
+        Current::deliver_new_document(result, name, self.progress, self.cancel)
     }
 
     /// Where the plugin said, on the desktop. In a browser the download
@@ -1723,7 +1722,6 @@ impl ViewerApp {
                     o,
                     &mut host,
                     &mut AppDelivery {
-                        source: made_from.as_deref(),
                         label: &label,
                         progress: &progress,
                         cancel: &cancel,

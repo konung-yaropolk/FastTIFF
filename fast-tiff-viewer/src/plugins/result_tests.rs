@@ -521,8 +521,7 @@ fn an_unfinished_result_leaves_no_file() {
 }
 
 /// Each plane is checked against the declaration as it arrives, and a second
-/// result of the same name goes in a directory of its own rather than in the
-/// first one's place — keeping the clean name a window is titled with.
+/// result of the same name gets its own file in the same source directory.
 #[test]
 fn planes_are_checked_and_names_do_not_collide() {
     let dir = scratch("names");
@@ -537,30 +536,15 @@ fn planes_are_checked_and_names_do_not_collide() {
     assert!(e.contains("plane 0 is U16"), "{e}");
 
     let second = ResultWriter::begin(img.spec(), &[], &ResultDest::Dir(dir.clone())).unwrap();
-    let names: Vec<String> = [&first, &second]
-        .iter()
-        .map(|w| {
-            w.path()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into()
-        })
-        .collect();
-    assert_eq!(names, [".result.tif.temp", ".result.tif.temp"]);
-    let dirs: Vec<_> = [&first, &second]
-        .iter()
-        .map(|w| w.path().unwrap().parent().unwrap().to_path_buf())
-        .collect();
-    assert_ne!(dirs[0], dirs[1], "two results shared a directory");
-    for d in &dirs {
-        assert_eq!(d.parent(), Some(dir.as_path()));
+    assert_ne!(first.path(), second.path());
+    for path in [first.path().unwrap(), second.path().unwrap()] {
+        assert_eq!(scratch_name(path), Some("result.tif"));
+        assert_eq!(path.parent(), Some(dir.as_path()));
     }
     drop((first, second));
     assert!(
         files_in(&dir).is_empty(),
-        "a dropped writer left its directory: {:?}",
+        "a dropped writer left a file: {:?}",
         files_in(&dir)
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -584,7 +568,7 @@ fn there_is_no_limit_on_results_kept_at_once() {
         })
         .collect();
     assert_eq!(files_in(&dir).len(), 150);
-    assert!(kept.iter().all(|p| p.ends_with(".result.tif.temp")));
+    assert!(kept.iter().all(|p| scratch_name(p) == Some("result.tif")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -654,7 +638,11 @@ fn an_earlier_result_is_left_exactly_as_it_was() {
             w.push(p.as_plane_ref()).unwrap();
         }
         let kept = w.finish().unwrap().into_kept_path().unwrap();
-        assert!(kept.ends_with(".result.tif.temp"), "{}", kept.display());
+        assert!(
+            scratch_name(&kept) == Some("result.tif"),
+            "{}",
+            kept.display()
+        );
         paths.push(kept);
     }
     paths.dedup();
@@ -680,19 +668,22 @@ fn nowhere_to_write_reports_the_required_space() {
     let blocker = dir.join("a-file");
     std::fs::write(&blocker, b"x").unwrap();
     let img = result(1, 1, 2, 3, 3);
-    let error =
-        ResultWriter::begin(img.spec(), &[], &ResultDest::Dir(blocker.join("inside"))).unwrap_err();
+    let dest = ResultDest::for_source(Some(&blocker.join("recording.tif")));
+    let error = ResultWriter::begin(img.spec(), &[], &dest).unwrap_err();
     assert!(
-        error.to_string().contains("Temporary TIFF needs"),
+        error.to_string().contains(blocker.to_str().unwrap()),
         "{error}"
     );
-    let dest = ResultDest::WithFallback {
-        primary: blocker,
-        fallback: dir.clone(),
-    };
+    let dest = ResultDest::for_source(Some(&dir.join("source.oir")));
     let w = ResultWriter::begin(img.spec(), &[], &dest).unwrap();
-    assert!(w.path().unwrap().starts_with(&dir));
+    assert_eq!(w.path().unwrap().parent(), Some(dir.as_path()));
     drop(w);
+    let mut spec = img.spec();
+    spec.frames = usize::MAX / 1024;
+    let error = ResultWriter::begin(spec, &[], &dest).unwrap_err();
+    assert!(error.to_string().contains("bytes free"), "{error}");
+    assert_eq!(files_in(&dir), [blocker]);
+    assert_eq!(ResultDest::for_source(None), ResultDest::Memory);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -719,7 +710,7 @@ fn gone_soon(path: &std::path::Path) -> bool {
 /// A result opened in this window is the document's: named as the result, it
 /// says it was made from the document it came from — which is where "Save
 /// as…" starts and what a plugin is told — and not from its scratch file,
-/// and closing it deletes that file and its directory.
+/// and closing it deletes just its scratch TIFF.
 #[test]
 fn a_result_opened_here_belongs_to_its_document() {
     let dir = scratch("owned");
@@ -734,7 +725,7 @@ fn a_result_opened_here_belongs_to_its_document() {
         .unwrap()
         .unwrap();
     let file = written.path().unwrap().to_path_buf();
-    let run_dir = file.parent().unwrap().to_path_buf();
+    assert_eq!(file.parent(), Some(dir.as_path()));
 
     let stack = written
         .into_document(Some(source.clone()))
@@ -770,10 +761,7 @@ fn a_result_opened_here_belongs_to_its_document() {
         gone_soon(&file),
         "closing the document left its result file"
     );
-    assert!(
-        gone_soon(&run_dir),
-        "closing the document left its directory"
-    );
+    assert!(dir.is_dir());
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&source_dir);
 }
@@ -789,12 +777,14 @@ fn handed_off_result_moves_on_save_and_survives_document_close() {
     let path = out.into_kept_path().unwrap();
     let bytes = std::fs::read(&path).unwrap();
     let source = dir.join("source.oir");
-    let mut doc = Derived::handed_off(path.clone(), Some(source.clone()))
+    let mut doc = Derived::handed_off(path.clone(), "result.tif".into(), Some(source.clone()))
         .unwrap()
         .load(false, &mut |_| {})
         .unwrap();
     assert_eq!(doc.original(), Some(source));
     assert_eq!(doc.path(), Path::new("result.tif"));
+    let snapshot = crate::save::SaveSource::of(&doc);
+    assert!(snapshot.save_document(&path, &mut |_| true).is_err());
     let dest = dir.join("saved.tif");
     let saved = crate::save::SaveSource::of(&doc)
         .save_document(&dest, &mut |_| true)
@@ -808,7 +798,7 @@ fn handed_off_result_moves_on_save_and_survives_document_close() {
     assert_eq!(doc.source_path(), Some(dest.as_path()));
     drop(doc);
     assert_eq!(std::fs::read(&dest).unwrap(), bytes);
-    assert!(!path.parent().unwrap().exists());
+    assert!(path.parent().unwrap().is_dir());
     std::fs::remove_dir_all(dir).unwrap();
 }
 

@@ -227,11 +227,7 @@ impl SaveSource {
         if !report(0.0) {
             anyhow::bail!("cancelled");
         }
-        if path.parent().and_then(|p| p.canonicalize().ok())
-            == file.path().parent().and_then(|p| p.canonicalize().ok())
-        {
-            anyhow::bail!("Choose a destination outside the temporary result directory");
-        }
+        check_save_name(path)?;
         let mut mapped = None;
         if self.reuse_scratch {
             match std::fs::rename(file.path(), path) {
@@ -262,14 +258,14 @@ impl SaveSource {
 /// both the open result and any existing destination.
 #[cfg(all(feature = "mmap", not(target_arch = "wasm32")))]
 fn copy_scratch(bytes: &[u8], path: &Path, report: &mut dyn FnMut(f32) -> bool) -> Result<()> {
-    use crate::plugins::{result::create_file, ScratchFile};
+    use crate::plugins::result::create_file;
     use std::io::Write;
     let path = std::path::absolute(path)?;
     let (file, stage) = create_file(
         path.parent().context("missing destination directory")?,
         "saving",
+        None,
     )?;
-    let stage = ScratchFile::own(stage)?;
     let mut file = file; // Close before the scratch guard on a cancelled or failed copy.
     let mut written = 0;
     for chunk in bytes.chunks(8 << 20) {
@@ -329,22 +325,21 @@ pub fn save_source(
     path: &Path,
     on_progress: &mut dyn FnMut(f32) -> bool,
 ) -> Result<()> {
-    let temp = partial_path(path);
-    match write_to_path(source, &temp, on_progress, BATCH_BYTES) {
-        Ok(()) => std::fs::rename(&temp, path).with_context(|| {
-            // Best effort: leaving the part file behind after a failed rename
-            // would be a mystery file next to the one the user asked for.
-            let _ = std::fs::remove_file(&temp);
-            format!("could not put the finished file at {}", path.display())
-        }),
-        Err(e) => {
-            // Best effort: if the part file cannot be removed the error being
-            // reported is still the more useful one.
-            let _ = std::fs::remove_file(&temp);
-            Err(e)
-        }
-    }
+    check_save_name(path)?;
+    let dest = std::path::absolute(path)?;
+    let (file, stage) = crate::plugins::result::create_file(
+        dest.parent().context("missing destination directory")?,
+        "saving",
+        None,
+    )
+    .with_context(|| format!("could not create temporary TIFF for {}", path.display()))?;
+    write_to_file(source, file, path, on_progress, BATCH_BYTES)?;
+    std::fs::rename(stage.path(), path)
+        .with_context(|| format!("could not put the finished file at {}", path.display()))
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plugins::result::check_save_name;
 
 /// Encode a snapshot into memory, reporting progress and stopping when asked.
 ///
@@ -380,15 +375,14 @@ pub fn save_to_bytes(
 /// everything above this line is shared with the browser, and everything below
 /// it is the part that needs a filesystem.
 #[cfg(not(target_arch = "wasm32"))]
-fn write_to_path(
+fn write_to_file(
     source: &SaveSource,
+    file: std::fs::File,
     path: &Path,
     on_progress: &mut dyn FnMut(f32) -> bool,
     batch_bytes: usize,
 ) -> Result<()> {
     use std::io::Write;
-    let file = std::fs::File::create(path)
-        .with_context(|| format!("could not create {}", path.display()))?;
     let mut sink = write_all(
         source,
         std::io::BufWriter::new(file),
@@ -401,18 +395,6 @@ fn write_to_path(
     sink.flush()
         .with_context(|| format!("finishing {}", path.display()))?;
     Ok(())
-}
-
-/// Where the pixels go until the write has succeeded.
-///
-/// In the same directory as the target, because a rename across filesystems is
-/// a copy — and the temp directory is routinely on a different volume from the
-/// data drive a microscopy stack is being saved to.
-#[cfg(not(target_arch = "wasm32"))]
-fn partial_path(path: &Path) -> std::path::PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".fasttiff-part");
-    path.with_file_name(name)
 }
 
 /// The encode itself, into any sink, returning it.

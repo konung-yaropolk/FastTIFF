@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "FastTIFF"
-version = "1.28.2"
+version = "1.28.3"
 dependencies = [
  "anyhow",
  "eframe",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "fast-tiff-viewer"
-version = "0.28.1"
+version = "0.28.3"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -900,7 +900,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-builtin-plugins"
-version = "0.28.2"
+version = "0.28.3"
 dependencies = [
  "fast-tiff-lib",
  "fast-tiff-viewer",
@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "fasttiff-web-egui"
-version = "1.28.2"
+version = "1.28.3"
 dependencies = [
  "FastTIFF",
  "console_error_panic_hook",

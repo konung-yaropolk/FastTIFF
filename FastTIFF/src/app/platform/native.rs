@@ -67,9 +67,8 @@ impl Platform for Desktop {
     fn sweep_old_results() {
         // Not from a test: that is the user's own folder.
         #[cfg(not(test))]
-        if let fast_tiff_viewer::plugins::ResultDest::Dir(root) =
-            fast_tiff_viewer::plugins::ResultDest::platform_default()
         {
+            let root = std::env::temp_dir().join("fasttiff-plugin-results");
             const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
             let _ = std::thread::Builder::new()
                 .name("fasttiff-sweep".to_owned())
@@ -213,9 +212,8 @@ impl Platform for Desktop {
     /// how the app opens several files at once, and it needs no window manager
     /// of its own inside egui.
     fn deliver_new_document(
-        result: ResultTiff,
+        mut result: ResultTiff,
         name: String,
-        source: Option<&Path>,
         progress: &AtomicU32,
         cancel: &AtomicBool,
     ) -> Handover {
@@ -227,18 +225,10 @@ impl Platform for Desktop {
         match how {
             // Pass ownership together with the path. Opening it as an ordinary
             // user file would leave neither window responsible for its cleanup.
-            Delivery::MapFile => {
-                let Some(path) = result.path().map(Path::to_path_buf) else {
-                    return Handover::Refused(Box::new(result), "the result has no file".into());
-                };
-                match crate::process::open_scratch_in_new_process(&path, source) {
-                    Ok(()) => {
-                        let _ = result.into_kept_path();
-                        Handover::Opened(name)
-                    }
-                    Err(e) => Handover::Refused(Box::new(result), e.to_string()),
-                }
-            }
+            Delivery::MapFile => match result.open_in_new_window() {
+                Ok(()) => Handover::Opened(name),
+                Err(e) => Handover::Refused(Box::new(result), e.to_string()),
+            },
             // In memory, because no file could be made for it: through a pipe,
             // the machine having the room for the new window to hold it too.
             Delivery::SendBytes => {

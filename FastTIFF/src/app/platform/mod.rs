@@ -199,7 +199,6 @@ pub(super) trait Platform: Sized {
     fn deliver_new_document(
         result: ResultTiff,
         name: String,
-        source: Option<&Path>,
         progress: &AtomicU32,
         cancel: &AtomicBool,
     ) -> Handover;
