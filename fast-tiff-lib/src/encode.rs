@@ -567,6 +567,11 @@ impl<W: Write + Seek> TiffWriter<W> {
         })
     }
 
+    /// Borrow the output stream without changing its position or flushing it.
+    pub fn get_ref(&self) -> &W {
+        &self.w
+    }
+
     /// Number of frames (planes) written so far.
     pub fn frames_written(&self) -> usize {
         self.frames.len()

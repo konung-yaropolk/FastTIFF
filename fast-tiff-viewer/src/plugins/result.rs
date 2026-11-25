@@ -338,7 +338,7 @@ impl Derived {
 /// What the TIFF writer writes into.
 enum Out {
     #[cfg(not(target_arch = "wasm32"))]
-    File(std::io::BufWriter<std::fs::File>),
+    File(Box<std::io::BufWriter<scratch::DiskOutput>>),
     Memory(Cursor<Vec<u8>>),
 }
 
@@ -384,11 +384,7 @@ impl Seek for Out {
 /// until it is finished ([`redescribe`](Self::redescribe)): the file's
 /// description is written last, with its directory.
 pub(crate) struct ResultWriter {
-    // Declared before `file`, so it drops first: the handle is closed before
-    // the file it writes is deleted.
     w: TiffWriter<Out>,
-    #[cfg(not(target_arch = "wasm32"))]
-    file: Option<ScratchFile>,
     spec: ImageSpec,
     /// `spec.plane_count()`, which [`ImageSpec::validate`] has checked can be
     /// counted.
@@ -411,24 +407,16 @@ impl ResultWriter {
             .plane_count()
             .ok_or_else(|| anyhow::anyhow!("the plugin declared more planes than can exist"))?;
         let opts = writer_options(&spec, luts);
-        #[cfg(not(target_arch = "wasm32"))]
-        let (out, file) = match dest {
-            ResultDest::Dir(_) | ResultDest::WithFallback { .. } => {
-                let (f, scratch) = scratch::allocate(dest, &spec)?;
-                (Out::File(std::io::BufWriter::new(f)), Some(scratch))
-            }
-            ResultDest::Memory => (in_memory(&spec, planes)?, None),
-        };
-        #[cfg(target_arch = "wasm32")]
         let out = match dest {
+            #[cfg(not(target_arch = "wasm32"))]
+            ResultDest::Dir(_) | ResultDest::WithFallback { .. } => Out::File(Box::new(
+                std::io::BufWriter::new(scratch::allocate(dest, &spec)?),
+            )),
             ResultDest::Memory => in_memory(&spec, planes)?,
         };
-        // A failure here drops `file`, and the file with it.
         let w = TiffWriter::new(out, opts)?;
         Ok(ResultWriter {
             w,
-            #[cfg(not(target_arch = "wasm32"))]
-            file,
             spec,
             planes,
             luts: luts.to_vec(),
@@ -520,7 +508,10 @@ impl ResultWriter {
     /// The file it is being written to, if it is a file.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn path(&self) -> Option<&Path> {
-        self.file.as_ref().map(|f| f.path.as_path())
+        match self.w.get_ref() {
+            Out::File(f) => Some(f.get_ref().owner.path()),
+            Out::Memory(_) => None,
+        }
     }
 
     /// Write the directory that makes the planes a TIFF, and close it.
@@ -531,8 +522,6 @@ impl ResultWriter {
     pub(crate) fn finish(self) -> anyhow::Result<ResultTiff> {
         let ResultWriter {
             w,
-            #[cfg(not(target_arch = "wasm32"))]
-            file,
             spec,
             planes,
             luts: _,
@@ -548,8 +537,8 @@ impl ResultWriter {
             #[cfg(not(target_arch = "wasm32"))]
             Out::File(f) => {
                 // Flushed by `finish`; closed here, before anyone opens it.
-                drop(f.into_inner().map_err(|e| e.into_error())?);
-                ResultData::File(file.expect("a file writer has a file"))
+                let output = f.into_inner().map_err(|e| e.into_error())?;
+                ResultData::File(output.owner)
             }
             Out::Memory(c) => ResultData::Memory(c.into_inner()),
         };
